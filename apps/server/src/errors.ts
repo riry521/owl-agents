@@ -139,6 +139,8 @@ const HTTP_ERROR_TEXT: Partial<Record<ApiErrorCode, string>> = {
 };
 
 const HTTP_MESSAGE_TEXT: Readonly<Record<string, string>> = {
+  "backendUrlを指定してください。カスタムProviderには接続先のhttpまたはhttpsのURLが必要です。": "Specify backendUrl. A custom provider needs an http or https URL to connect to.",
+  "backendUrlはhttpまたはhttpsのURLを指定してください。": "backendUrl must be an http or https URL.",
   "フォルダは絶対パスで指定してください。": "Specify the folder as an absolute path.",
   "共有フォルダはgitで追跡される場所には指定できません。.gitignoreで除外された場所かリポジトリの外を指定してください。": "The shared folder cannot be in a location tracked by git. Choose a git-ignored location or a folder outside the repository.",
   "別サイトからの状態変更requestは受け付けません。Owl Web UIから操作してください。": "Changes from another site are not allowed. Use the Owl Web UI.",
