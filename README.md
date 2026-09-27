@@ -30,7 +30,7 @@ Agents run through the **Claude Code** or **Codex** CLI you already have install
 
 ## Features
 
-- **Just talk to it.** Discuss an idea with the Advisor in chat, and it turns the plan into a Work. You can also reach the Advisor from Slack or Discord.
+- **Just talk to it.** Discuss an idea with the Advisor in chat, and it turns the plan into a Work. You can also [reach the Advisor from Slack or Discord](#talk-to-owl-from-slack-or-discord), get notified there, and answer decisions with a button.
 - **A team of roles.** Separate agents plan, design, build, and review. Each Worker gets its own Git worktree, so tasks run in parallel without stepping on each other.
 - **You only handle decisions.** You get a question only when a choice is needed or a check fails. Decisions always sit at the top of the board.
 - **Use it from anywhere.** Install Tailscale and run `owl serve` once, and your phone opens Owl at your own `ts.net` URL. No port forwarding and no login, and only your own devices can reach it. See [Use it from your phone](#use-it-from-your-phone-or-another-computer-tailscale).
@@ -191,17 +191,39 @@ Only devices in your own Tailscale network (tailnet) can open this URL, so no lo
 Owl rejects requests that arrive through Tailscale Funnel, which would reach the public internet.
 If you share your tailnet with other people, they can use Owl too.
 
-## Connectors (optional)
+## Talk to Owl from Slack or Discord
 
-The server automatically starts configured Slack/Discord package connectors.
-Slack/Discord are optional; leaving both unconfigured is a normal state and does
-not produce a startup or doctor warning. Configure them through `owl setup`, the
-Settings screen, or the optional variables in `.env`. Each connector has a
-conversation channel (for inbound messages and Advisor replies) and a task
-notification channel (for task/decision/system notifications). They may be the
-same channel. Direct messages and other channels are ignored. Existing
-`SLACK_CHANNEL_ID` / `DISCORD_CHANNEL_ID` settings continue to be used for both
-roles.
+Connect Slack or Discord and you can work with Owl from the chat app you already use.
+
+- **Talk to the Advisor in a channel**, just like in the Web UI. Images and files you send are saved to the Advisor's shared folder, so "look at the screenshot I just sent" just works.
+- **Get notified** when a task finishes, fails, or needs a decision.
+- **Answer decisions with buttons** right in the notification.
+
+Each connection uses a conversation channel (your messages and the Advisor's replies) and a notification channel. They can be the same channel. Direct messages and other channels are ignored.
+Both are optional, and saving the settings connects right away without a restart.
+
+### Slack
+
+1. Open [api.slack.com/apps](https://api.slack.com/apps), choose **Create New App → From a manifest**, and paste [`docs/slack-manifest.yaml`](docs/slack-manifest.yaml). The Settings screen also has a button that copies it.
+2. Install the app to your workspace and copy the **Bot Token** (`xoxb-...`).
+3. Under **Basic Information → App-Level Tokens**, create a token with the `connections:write` scope and copy it (`xapp-...`).
+4. Invite the bot to the channels you want to use (`/invite @owl-agent`), and copy each channel ID from the bottom of the channel details.
+5. In Owl, open **Settings → Integrations → Slack**, enter the tokens and channel IDs, and save.
+
+### Discord
+
+1. Open the [Discord Developer Portal](https://discord.com/developers/applications), create an application, and copy the token from the **Bot** page. On the same page, turn on **Message Content Intent**.
+2. Under **OAuth2 → URL Generator**, choose the `bot` scope and the **Send Messages**, **Read Message History**, and **Embed Links** permissions. Open the generated URL to add the bot to your server.
+3. Turn on Developer Mode in Discord (**User Settings → Advanced**), then right-click each channel and choose **Copy Channel ID**.
+4. In Owl, open **Settings → Integrations → Discord**, enter the token and channel IDs, and save.
+
+You can also use `owl setup` or the variables in `.env` (see `.env.example`). Tokens are kept in `.env` with mode `600`.
+
+## Running connectors as a separate process (advanced)
+
+Owl starts configured connectors inside the server, so most setups need nothing here.
+Existing `SLACK_CHANNEL_ID` / `DISCORD_CHANNEL_ID` settings continue to be used
+for both the conversation and notification roles.
 The standalone `apps/connectors` command is also available when Slack or
 Discord should run as a separate process. It reuses the same full connector
 implementation as the server-managed path, including the configured

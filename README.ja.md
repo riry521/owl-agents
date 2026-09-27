@@ -30,7 +30,7 @@ AI の実行には、手元の **Claude Code** や **Codex** の CLI をその�
 
 ## 特長
 
-- **話すだけで仕事になる**：Advisor とチャットで相談すると、方針を整理してそのまま Work（仕事）として発行します。Web 画面のほか、Slack や Discord からも話しかけられます。
+- **話すだけで仕事になる**：Advisor とチャットで相談すると、方針を整理してそのまま Work（仕事）として発行します。Web 画面のほか、[Slack や Discord](#slack-や-discord-から話しかける) からも話しかけられ、通知や判断待ちへの回答もそこでできます。
 - **AI が役割分担して進める**：計画・設計・実装・レビューを別の AI が担当します。Worker はタスクごとに Git の worktree を分けて並行で作業します。
 - **人間は判断待ちだけ見ればいい**：方針の選択が必要なときや、テストが通らなかったときだけ質問が届きます。ボードでは判断待ちが一番上に並びます。
 - **外出先からスマホで使える**：Tailscale を入れて `owl serve` を1回実行するだけで、自分専用の `ts.net` の URL からスマホで Owl を開けます。ポート開放もログインも不要で、つながるのは自分の端末だけです。手順は[スマホや別の PC から使う](#スマホや別の-pc-から使うtailscale)を見てください。
@@ -191,16 +191,38 @@ OWL_BIND=0.0.0.0 OWL_API_TOKEN='use-a-long-random-value' owl start
 インターネット全体に公開する Tailscale Funnel 経由のアクセスは、Owl が拒否します。
 tailnet を他の人と共有している場合は、その人も Owl を操作できる点に注意してください。
 
-## Connectors（任意）
+## Slack や Discord から話しかける
 
-サーバーは、設定済みのSlack/Discord packageコネクタを自動的に起動します。
-Slack/Discordは任意であり、両方とも未設定のままにしておくのは通常の状態で、
-起動時やdoctorの警告にはなりません。`owl setup`、Settings画面、または`.env`の
-任意の変数からこれらを設定します。各connectorには会話チャンネル（受信メッセージと
-Advisorの返信用）とタスク通知チャンネル（task/decision/systemの通知用）があります。
-両者は同じチャンネルでもかまいません。ダイレクトメッセージや他のチャンネルは無視
-されます。既存の`SLACK_CHANNEL_ID` / `DISCORD_CHANNEL_ID`設定は、引き続き両方の役割に
-使用されます。
+Slack や Discord とつなぐと、ふだん使っているチャットアプリから Owl を使えます。
+
+- **チャンネルで Advisor に話しかけられる**：Web 画面と同じように相談できます。送った画像やファイルは Advisor の共有フォルダに入るので、「さっき送ったスクショを見て」がそのまま通じます。
+- **通知が届く**：タスクの完了・失敗や、判断待ちが発生したときに知らせます。
+- **ボタンで判断できる**：判断待ちの通知についているボタンを押すだけで答えられます。
+
+連携ごとに、会話用のチャンネル（あなたのメッセージと Advisor の返信）と、通知用のチャンネルを決めます。同じチャンネルにしてもかまいません。DM や他のチャンネルのメッセージは無視します。
+どちらの連携も任意で、設定を保存するとすぐにつながります。Owl の再起動は要りません。
+
+### Slack
+
+1. [api.slack.com/apps](https://api.slack.com/apps) で **Create New App → From a manifest** を選び、[`docs/slack-manifest.yaml`](docs/slack-manifest.yaml) の中身を貼り付けます。Owl の設定画面にもコピー用のボタンがあります。
+2. アプリをワークスペースにインストールし、**Bot Token**（`xoxb-...`）をコピーします。
+3. **Basic Information → App-Level Tokens** で、`connections:write` のスコープを付けたトークンを作ってコピーします（`xapp-...`）。
+4. 使うチャンネルに Bot を招待し（`/invite @owl-agent`）、チャンネル詳細の一番下にあるチャンネル ID をコピーします。
+5. Owl の **設定 → 連携 → Slack** に、トークンとチャンネル ID を入れて保存します。
+
+### Discord
+
+1. [Discord Developer Portal](https://discord.com/developers/applications) でアプリケーションを作り、**Bot** のページでトークンをコピーします。同じページで **Message Content Intent** をオンにします。
+2. **OAuth2 → URL Generator** で、スコープに `bot`、権限に **Send Messages**・**Read Message History**・**Embed Links** を選びます。できた URL を開いて、Bot を自分のサーバーに追加します。
+3. Discord の開発者モードをオンにし（**ユーザー設定 → 詳細設定**）、チャンネルを右クリックして **チャンネル ID をコピー** を選びます。
+4. Owl の **設定 → 連携 → Discord** に、トークンとチャンネル ID を入れて保存します。
+
+`owl setup` や `.env` の変数（`.env.example` を参照）でも設定できます。トークンは権限 `600` の `.env` に保存されます。
+
+## コネクタを別プロセスで動かす（上級者向け）
+
+設定済みのコネクタは Owl のサーバーの中で自動的に動くので、ふつうはこの節の設定は要りません。
+既存の`SLACK_CHANNEL_ID` / `DISCORD_CHANNEL_ID`設定は、引き続き会話用と通知用の両方に使われます。
 Slack/Discordを別プロセスとして動かしたい場合は、単体の`apps/connectors`コマンドも
 利用できます。これは同じ完全なconnector実装を再利用しており、設定済みの通知チャンネル、
 Advisorの返信、対話的なDecisionボタンを含みます。Owlサーバーが起動している必要があり、
