@@ -1,0 +1,182 @@
+import assert from "node:assert/strict";
+import { copyFile, mkdir, mkdtemp, readdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { test } from "node:test";
+
+import { DecisionService } from "../packages/core/dist/index.js";
+import { coreWorkDecisionBrief } from "../packages/core/dist/decision-brief.js";
+import { openDatabase } from "../packages/db/dist/index.js";
+import { formatDecisionText, answerGuideHint } from "../packages/plugin-sdk/dist/shared/index.js";
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const migrations = join(repoRoot, "packages/db/migrations");
+const now = "2026-09-24T09:27:21.477Z";
+
+async function databaseWithWork(migrationDir = migrations) {
+  const root = await mkdtemp(join(tmpdir(), "owl-decision-template-"));
+  const db = openDatabase(join(root, "owl.db"));
+  db.migrate(migrationDir);
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run("INSERT INTO owners (id, display_name, created_at, updated_at) VALUES (?, ?, ?, ?)", "owner:default", "Owner", now, now);
+    transaction.run(
+      `INSERT INTO works
+         (id, owner_id, title, summary, size, state, state_version, plan_revision,
+          rules_json, related_work_ids_json, created_at, updated_at)
+       VALUES ('W', 'owner:default', 'Archive', 'x', 'small', 'running', 0, 0, '{"schema_version":"1.0.0","rules":[]}', '[]', ?, ?)`,
+      now,
+      now,
+    );
+  });
+  return { root, db };
+}
+
+const complete = {
+  work_id: "W",
+  scope: "work",
+  blocked_task_ids: [],
+  reason: "The Work stopped.",
+  question: "Continue?",
+  tried: "Nothing yet.",
+  current_state: "Stopped.",
+  options: [{ key: "go", label: "Continue", description: "The Work resumes." }],
+  recommended: "go",
+  allow_free_text: false,
+  issuer_role: "manager",
+};
+
+test("a Decision that leaves a template field empty is rejected", async (t) => {
+  const { db } = await databaseWithWork();
+  t.after(() => db.close());
+  const service = new DecisionService(db);
+  const open = (payload, key) => service.open({ request_id: key, idempotency_key: key, expected_version: 0, payload });
+
+  await assert.rejects(open({ ...complete, question: " " }, "no-question"), /requires question/);
+  await assert.rejects(open({ ...complete, options: [{ key: "go", label: "Continue" }] }, "no-effect"), /requires description/);
+  await assert.rejects(open({ ...complete, recommended: "other" }, "bad-recommended"), /recommended option/);
+  const opened = await open(complete, "complete");
+  const listed = service.list("open").find((decision) => decision.id === opened.data.decision_id);
+  assert.equal(listed.question, "Continue?");
+  assert.equal(listed.current_state, "Stopped.");
+  assert.equal(listed.tried, "Nothing yet.");
+  assert.deepEqual(listed.options, complete.options);
+});
+
+test("an incomplete final verdict asks what to do about the missing points", () => {
+  const brief = coreWorkDecisionBrief({
+    kind: "final_manager_incomplete",
+    summary: "Migration numbers clash.",
+    missing: ["Renumber the migration.", " ", "Test reopening."],
+  }, "ja");
+  assert.match(brief.reason, /最終チェック/);
+  assert.match(brief.reason, /Migration numbers clash\./);
+  assert.match(brief.question, /追加のタスクで直しますか/);
+  assert.equal(brief.tried, "足りないと判定された点:\n- Renumber the migration.\n- Test reopening.");
+  assert.deepEqual(brief.options.map((option) => option.key), ["retry", "cancel"]);
+  assert.equal(brief.recommended, "retry");
+  for (const option of brief.options) assert.ok(option.description.length > 0);
+});
+
+test("structured missing points render with their reason and fix, in the Owner's language", () => {
+  const missing = [{ item: "Renumber the migration.", reason: "007 is taken.", fix: "Use 010." }];
+  const ja = coreWorkDecisionBrief({ kind: "final_manager_incomplete", summary: "Clash.", missing }, "ja");
+  assert.equal(ja.tried, "足りないと判定された点:\n- Renumber the migration.\n  理由: 007 is taken.\n  直し方: Use 010.");
+  const en = coreWorkDecisionBrief({ kind: "final_manager_incomplete", summary: "Clash.", missing }, "en");
+  assert.match(en.question, /^[\x00-\x7F]+$/, "the English brief has no Japanese text");
+  assert.match(en.tried, /- Renumber the migration\.\n  Why: 007 is taken\.\n  How to fix: Use 010\./);
+  for (const option of en.options) assert.match(`${option.label}${option.description}`, /^[\x00-\x7F]+$/);
+});
+
+test("a work cleanup alert appears in the Work Decision brief", () => {
+  const message = "Could not remove worktree /repo/.owl-workspaces/W/__work__: git reported busy.";
+  const brief = coreWorkDecisionBrief({ kind: "work_merge_branch_cleanup_failed", message }, "en");
+
+  assert.match(brief.reason, /Could not remove worktree \/repo\/\.owl-workspaces\/W\/__work__: git reported busy\./);
+});
+
+test("the migration rewrites Decisions opened before the template", async (t) => {
+  // Apply every migration before 009, store Decisions the old way, then migrate.
+  const before = await mkdtemp(join(tmpdir(), "owl-migrations-before-"));
+  await mkdir(before, { recursive: true });
+  for (const file of await readdir(migrations)) {
+    if (file < "009") await copyFile(join(migrations, file), join(before, file));
+  }
+  const { db } = await databaseWithWork(before);
+  t.after(() => db.close());
+  const legacyOptions = '[{"key":"retry","label":"再試行"},{"key":"cancel","label":"キャンセル"}]';
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run(
+      `INSERT INTO events (id, sequence, idempotency_key, type, work_id, payload_json, status, created_at)
+       VALUES ('E1', 1, 'alert', 'system.alert', 'W', ?, 'handled', ?)`,
+      JSON.stringify({ kind: "final_manager_incomplete", missing: ["Renumber the migration.", "Test reopening."] }),
+      now,
+    );
+    const insert = (id, scope, reason, tried, options) => transaction.run(
+      `INSERT INTO decisions
+         (id, work_id, scope, status, blocked_task_ids_json, reason, tried, current_state,
+          options_json, recommended, allow_free_text, issuer_role, state_version, created_at)
+       VALUES (?, 'W', ?, 'open', '[]', ?, ?, 'judgement_waiting', ?, NULL, 1, 'core', 0, ?)`,
+      id, scope, reason, tried, options, now,
+    );
+    insert("D1", "work", "Final Managerがincompleteと判定しました: Migration numbers clash.", "Core reconciliation/failure handling", legacyOptions);
+    insert("D2", "task", "Claudeの実行設定が不正です。", "Core reconciliation/failure handling", "[]");
+  });
+  db.migrate(migrations);
+
+  const rows = Object.fromEntries(db.all("SELECT id, reason, question, current_state, tried, options_json, recommended FROM decisions").map((row) => [row.id, row]));
+  assert.equal(rows.D1.reason, "最終チェックで「まだ完了していない」と判定され、Workが止まりました。\n判定の内容: Migration numbers clash.");
+  assert.match(rows.D1.question, /追加のタスクで直しますか/);
+  assert.equal(rows.D1.tried, "足りないと判定された点:\n- Renumber the migration.\n- Test reopening.");
+  assert.equal(rows.D1.recommended, "retry");
+  assert.equal(rows.D2.reason, "Claudeの実行設定が不正です。");
+  assert.equal(rows.D2.question, "このタスクをもう一度実行しますか？");
+  assert.equal(rows.D2.tried, "自動での復旧はできませんでした。");
+  for (const row of Object.values(rows)) {
+    assert.doesNotMatch(row.current_state, /judgement_waiting/);
+    const options = JSON.parse(row.options_json);
+    assert.deepEqual(options.map((option) => option.key), ["retry", "cancel"]);
+    for (const option of options) assert.ok(option.description.length > 0, JSON.stringify(option));
+  }
+});
+
+test("notifications render a Decision as the template, in order", () => {
+  const body = formatDecisionText({
+    reason: "The Work stopped.",
+    question: "Continue?",
+    options: [
+      { key: "go", label: "Continue", description: "The Work resumes." },
+      { key: "cancel", label: "Cancel" },
+    ],
+    recommended: "go",
+    current_state: "Stopped.",
+    tried: "",
+  });
+  assert.equal(body, [
+    "■ なぜ止まったか\nThe Work stopped.",
+    "■ 判断してほしいこと\nContinue?",
+    "■ 選択肢と、選ぶとどうなるか\nA. Continue（おすすめ） — The Work resumes.\nB. Cancel",
+    "■ 今の状態\nStopped.",
+  ].join("\n\n"));
+});
+
+test("notifications use English headings when the Decision carries language en", () => {
+  const body = formatDecisionText({
+    language: "en",
+    reason: "The Work stopped.",
+    question: "Continue?",
+    options: [{ key: "go", label: "Continue", description: "The Work resumes." }],
+    recommended: "go",
+    current_state: "Stopped.",
+    tried: "Nothing yet.",
+  });
+  assert.equal(body, [
+    "■ Why it stopped\nThe Work stopped.",
+    "■ What to decide\nContinue?",
+    "■ Options and what each one does\nA. Continue (recommended) — The Work resumes.",
+    "■ Current state\nStopped.",
+    "■ What happened so far\nNothing yet.",
+  ].join("\n\n"));
+  assert.match(answerGuideHint("01ABCDEFGHJKMNPQRSTVWXYZ00", "en"), /"answer WXYZ00: your answer"/);
+  assert.match(answerGuideHint("01ABCDEFGHJKMNPQRSTVWXYZ00", "en", true), /buttons above/);
+});

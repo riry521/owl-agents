@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/common.json",
+  "title": "Owl API v1 common types",
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false,
+  "$defs": {
+    "ULID": {
+      "type": "string",
+      "pattern": "^[0-9A-HJKMNP-TV-Z]{26}$"
+    },
+    "RequestId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "IdempotencyKey": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "RFC3339": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "Version": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "WorkState": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Known values include memo, ready, running, paused, judgement_waiting, completed, and cancelled. Future values are passed through by servers and must be handled safely by clients."
+    },
+    "WorkSize": {
+      "type": "string",
+      "enum": [
+        "small",
+        "normal",
+        "large"
+      ]
+    },
+    "TaskState": {
+      "type": "string",
+      "enum": [
+        "waiting",
+        "ready",
+        "running",
+        "paused",
+        "verifying",
+        "review_fix_waiting",
+        "failed",
+        "judgement_waiting",
+        "completed",
+        "cancelled"
+      ]
+    },
+    "MessageSource": {
+      "type": "string",
+      "enum": [
+        "slack",
+        "discord",
+        "web"
+      ]
+    },
+    "OpaqueObject": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  }
+}

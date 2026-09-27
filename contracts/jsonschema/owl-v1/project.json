@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/project.json",
+  "title": "Project",
+  "type": "object",
+  "required": [
+    "id",
+    "name",
+    "canonical_path",
+    "base_branch",
+    "allowed_roots",
+    "verification_plan"
+  ],
+  "properties": {
+    "id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "name": {
+      "type": "string"
+    },
+    "canonical_path": {
+      "type": "string"
+    },
+    "base_branch": {
+      "type": "string"
+    },
+    "allowed_roots": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "verification_plan": {
+      "type": "array",
+      "items": {
+        "$ref": "verification-command.json"
+      }
+    }
+  },
+  "additionalProperties": false
+}

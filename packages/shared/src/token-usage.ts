@@ -1,0 +1,87 @@
+import type { TokenUsage } from "./index.js";
+
+/**
+ * Token usage of one-shot agent CLI runs. Core and agent-runtime both read
+ * it from the provider's stdout, so the parsing lives here once.
+ * Nothing in this module throws: usage the provider did not report, or
+ * reported in an unknown shape, is null and never fails a run.
+ */
+
+const TOKEN_USAGE_KEYS = ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"] as const;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function tokenCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+/** Keep only non-negative integer counts of the TokenUsage keys; null when none is left. */
+export function tokenUsageOf(value: unknown): TokenUsage | null {
+  if (!isRecord(value)) return null;
+  const usage: Record<string, number> = {};
+  for (const key of TOKEN_USAGE_KEYS) {
+    const count = tokenCount(value[key]);
+    if (count !== undefined) usage[key] = count;
+  }
+  return Object.keys(usage).length > 0 ? usage as TokenUsage : null;
+}
+
+/**
+ * Usage of one finished `claude -p --output-format json` (the result
+ * wrapper's `usage`) or `codex exec --json` (the last `turn.completed`
+ * event's `usage`) process.
+ */
+export function cliTokenUsage(cli: "claude" | "codex", stdout: string): TokenUsage | null {
+  try {
+    if (cli === "claude") {
+      const wrapper: unknown = JSON.parse(stdout);
+      if (!isRecord(wrapper) || !isRecord(wrapper.usage)) return null;
+      return tokenUsageOf({
+        input_tokens: wrapper.usage.input_tokens,
+        output_tokens: wrapper.usage.output_tokens,
+        cache_read_tokens: wrapper.usage.cache_read_input_tokens,
+        cache_write_tokens: wrapper.usage.cache_creation_input_tokens,
+      });
+    }
+    let usage: Record<string, unknown> | null = null;
+    for (const line of stdout.split(/\r?\n/u)) {
+      if (line.trim().length === 0) continue;
+      let event: unknown;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (isRecord(event) && event.type === "turn.completed" && isRecord(event.usage)) usage = event.usage;
+    }
+    if (usage === null) return null;
+    return tokenUsageOf({
+      input_tokens: usage.input_tokens,
+      output_tokens: usage.output_tokens,
+      cache_read_tokens: usage.cached_input_tokens,
+      cache_write_tokens: usage.cache_write_input_tokens,
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** Sum two usages key by key; null only when both are null. */
+export function addTokenUsage(a: TokenUsage | null | undefined, b: TokenUsage | null | undefined): TokenUsage | null {
+  const left = tokenUsageOf(a);
+  const right = tokenUsageOf(b);
+  if (left === null || right === null) return left ?? right;
+  const sum: Record<string, number> = {};
+  for (const key of TOKEN_USAGE_KEYS) {
+    if (left[key] !== undefined || right[key] !== undefined) sum[key] = (left[key] ?? 0) + (right[key] ?? 0);
+  }
+  return sum as TokenUsage;
+}
+
+/** The agent_runs.usage_json value: a JSON object, or null when there is no usage. */
+export function usageJson(usage: unknown): string | null {
+  const normalized = tokenUsageOf(usage);
+  return normalized === null ? null : JSON.stringify(normalized);
+}

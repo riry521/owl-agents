@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/message.json",
+  "title": "Message",
+  "type": "object",
+  "required": [
+    "id",
+    "conversation_id",
+    "source",
+    "body",
+    "attachment_ids",
+    "created_at"
+  ],
+  "properties": {
+    "id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "conversation_id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "source": {
+      "$ref": "common.json#/$defs/MessageSource"
+    },
+    "body": {
+      "type": "string"
+    },
+    "attachment_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "common.json#/$defs/ULID"
+      }
+    },
+    "created_at": {
+      "$ref": "common.json#/$defs/RFC3339"
+    }
+  },
+  "additionalProperties": false
+}

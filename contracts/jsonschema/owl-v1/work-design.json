@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/work-design.json",
+  "title": "WorkDesign",
+  "type": "object",
+  "required": ["task_id", "title", "markdown", "updated_at"],
+  "properties": {
+    "task_id": { "$ref": "common.json#/$defs/ULID" },
+    "title": { "type": "string" },
+    "markdown": { "type": "string" },
+    "updated_at": { "$ref": "common.json#/$defs/RFC3339" }
+  },
+  "additionalProperties": false
+}

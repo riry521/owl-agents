@@ -1,0 +1,53 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Next.js
+.next/
+
+# System
+.DS_Store
+*.log
+
+# Local databases
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Owl runtime data (user-generated)
+data/*
+.owl-data/
+.owl-workspaces/
+
+# Knowledge and Rule Store (user-managed local state)
+knowledge/*
+skills/*
+rules/*
+!rules/system/
+rules/system/*
+!rules/system/defaults.yaml
+!rules/system/safety.yaml
+!rules/role/
+rules/role/*
+
+# Local design notes
+docs/designs/
+docs/superpowers/
+
+# Local tool and editor state
+.claude/
+.serena/
+.code-review-graph/
+.idea/
+.vscode/
+verification-screenshots/

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/work-design-list.json",
+  "title": "WorkDesignList",
+  "type": "object",
+  "required": ["designs"],
+  "properties": {
+    "designs": {
+      "type": "array",
+      "items": { "$ref": "work-design-summary.json" }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/agent-run.json",
+  "title": "AgentRun",
+  "type": "object",
+  "required": [
+    "id",
+    "work_id",
+    "task_id",
+    "role",
+    "provider",
+    "model",
+    "status",
+    "pid",
+    "started_at",
+    "ended_at",
+    "parent_agent_id",
+    "phase",
+    "subtask_count",
+    "label",
+    "origin"
+  ],
+  "properties": {
+    "id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "work_id": {
+      "anyOf": [
+        {
+          "$ref": "common.json#/$defs/ULID"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "task_id": {
+      "anyOf": [
+        {
+          "$ref": "common.json#/$defs/ULID"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "role": {
+      "type": "string"
+    },
+    "provider": {
+      "type": "string"
+    },
+    "model": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string"
+    },
+    "pid": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "started_at": {
+      "anyOf": [
+        {
+          "$ref": "common.json#/$defs/RFC3339"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ended_at": {
+      "anyOf": [
+        {
+          "$ref": "common.json#/$defs/RFC3339"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "parent_agent_id": {
+      "anyOf": [
+        {
+          "$ref": "common.json#/$defs/ULID"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "phase": {
+      "anyOf": [
+        {
+          "enum": [
+            "plan",
+            "executing",
+            "verdict"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "subtask_count": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "label": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "origin": {
+      "anyOf": [
+        {
+          "enum": [
+            "spawned",
+            "observed"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,33 @@
+{
+  "name": "@owl/root",
+  "version": "1.0.0",
+  "private": true,
+  "packageManager": "pnpm@10.15.0",
+  "engines": {
+    "node": ">=22.14.0 <23",
+    "pnpm": "10.15.0"
+  },
+  "scripts": {
+    "postinstall": "pnpm run build",
+    "build": "pnpm --filter @owl/shared build && pnpm --filter @owl/db build && pnpm --filter @owl/providers build && pnpm --filter @owl/plugin-sdk build && pnpm --filter @owl/connector-slack build && pnpm --filter @owl/connector-discord build && pnpm --filter @owl/core build && pnpm --filter @owl/agent-runtime build && pnpm --filter @owl/server build && pnpm --filter @owl-agent/connectors build && pnpm --filter @owl-agent/supervisor build && pnpm --filter web build",
+    "start": "node apps/server/dist/server.js",
+    "typecheck": "pnpm --filter @owl/shared typecheck && pnpm --filter @owl/db typecheck && pnpm --filter @owl/providers typecheck && pnpm --filter @owl/plugin-sdk typecheck && pnpm --filter @owl/connector-slack typecheck && pnpm --filter @owl/connector-discord typecheck && pnpm --filter @owl/core typecheck && pnpm --filter @owl/agent-runtime typecheck && pnpm --filter @owl/server typecheck && pnpm --filter @owl-agent/connectors typecheck && pnpm --filter @owl-agent/supervisor typecheck && pnpm --filter web typecheck",
+    "test": "node --test tests/*.test.mjs",
+    "audit": "pnpm audit --prod --audit-level high",
+    "typecheck:shared": "pnpm -w exec tsc --noEmit -p packages/shared"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.3",
+    "typescript": "5.9.2"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "better-sqlite3",
+      "sharp"
+    ],
+    "overrides": {
+      "postcss": "8.5.23",
+      "sharp": "0.35.4"
+    }
+  }
+}

@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "manifest_version": "1.0.0",
+  "contract_version": "1.0.0",
+  "artifacts": [
+    {
+      "path": "contracts/openapi/owl-api-v1.yaml",
+      "role": "rest_ws",
+      "version": "1.0.0",
+      "openapi_version": "3.1.0",
+      "sha256": "ee6a0efd787b2b2ae28eba8bc5cc0173a028f607ad76503f9cfa377e10381313"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/agent-run.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "2296af18f84aedd90241662d70227c1fd8791db91e41af528db6317d8d78e777"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/common.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "bebca33bf8ecf6594aa6b44099c42e04fc899c6bd2b80b017b541b173480dfe6"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/decision.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "b65289fe9994a8cf1707ea1be550bb169e026f5b8b2160afe5fdd3d3b2bc45e6"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/envelopes.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "0de89892f43026a51d16db2dfde93a6da895f64948bd4d06fa9444e8eb3e7cdf"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/error-response.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "bc0d2735a3b4397aacc368b8b20c41573b26cb072a9e12e0b8e94f20bb36650d"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/inbound-ack.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "e66e57913667a9e54fd8b6187164857c76c186982ad2c0c5bbcc979ba01efb1b"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/inbound-message.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "dae35d1bde3e655bf9454f0ed7f78a636e95623df72f389e92d97b372b4e429a"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/message.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "bc687ce9b0175a69a1ef009b4e653091cc2381e23897315dc64482aef9110699"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/project.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "6639f36e3b68d0840c9c781c81a143ea753f05582d213c9bfc7f7fd328358a0b"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/report-envelope.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "17348ca0165ed41533557d851f02dd0e32866542104369cb3796b1482fcea223"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/report.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "4703a60f5f50f7312fa4854deca1086394fb057d90521e24ba3ea570705ec6d0"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/task-detail.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "96fb78dee262ae098eb366295b8f89f2731fa4260a0ca4da6b28f4bb8396149d"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/task-summary.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "3ed38710373fb8211339b4cf6e1c3872583e27f4358e150065551f083d6e0647"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/upload-complete-request.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "11aff40869d2fa15559548277f44d979543d56a3860f9e674ec69c390c6f108c"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/upload-complete-result.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "d0fbbbd27fccd28fdb806bbb192bd20fec9858d68e0f4db14992addc0bfbcdef"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/upload-content-result.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "5d7d14873b4a75069ab90c8baa1ef9ebd19699f49b04a56530585b0c3b81ea50"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/upload-register.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "bf593fd75d550fa3a7e54efe36aa0c691df24839d74974414c55b08e67e53d01"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/upload-ticket.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "5ef2c028ad38771680fc372f95b8c0b52721cf4c2665617df1d45d51b1b896b4"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/verification-command.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "49c9761a6ed253615726a0ef22d2a8430f947ae7adc86a73dc164e1ef345708d"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/websocket-client-frame.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "e9741d9bc89523c605767e761fafce111600ca892dcb15b2d0b8d86935c307d4"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/websocket-server-frame.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "e0de2dd18a3e9bbb0b0a4e8a689929dc48403516f31d9f3106601ec34e219f29"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/work-detail.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "3aab844989edfcd3710c00c5c9744b5da39233770025688b5020d943cf2b4498"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/work-design.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "e20f1561268a93638282597b0f0f958d13ce1bbd6ddb09541102dcaf4d97cdc0"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/work-design-list.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "a5a3986accefa8de2fdb6423a9dca72595ded95cc69fe69e17b37393fd43d81d"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/work-design-summary.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "1a8c1f28d78a8ff88b0eebffedf6d502c898919fca276bfebd26110b3ef50754"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/work-summary.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+      "sha256": "599048fef13a9f8b124c5596bdeddfe9fc5f665030ee3b00487be7cef7f6744a"
+    }
+  ]
+}
