@@ -24,7 +24,7 @@
 Owl-Agent is a local orchestration tool where AI agents with different roles work together as a team.
 
 Tell the Advisor what you want. The Manager plans the work, Workers build it in parallel, a Reviewer checks the results, and the finished work is merged into your project.
-You are only asked when a decision is needed, such as choosing a direction or handling a failure.
+You are only asked when a decision is needed, such as choosing a direction or handling a failure, and you can answer from your phone.
 
 Agents run through the **Claude Code** or **Codex** CLI you already have installed.
 
@@ -33,6 +33,7 @@ Agents run through the **Claude Code** or **Codex** CLI you already have install
 - **Just talk to it.** Discuss an idea with the Advisor in chat, and it turns the plan into a Work. You can also reach the Advisor from Slack or Discord.
 - **A team of roles.** Separate agents plan, design, build, and review. Each Worker gets its own Git worktree, so tasks run in parallel without stepping on each other.
 - **You only handle decisions.** You get a question only when a choice is needed or a check fails. Decisions always sit at the top of the board.
+- **Use it from anywhere.** Install Tailscale and run `owl serve` once, and your phone opens Owl at your own `ts.net` URL. No port forwarding and no login, and only your own devices can reach it. See [Use it from your phone](#use-it-from-your-phone-or-another-computer-tailscale).
 - **Picks up where it left off.** All state lives in SQLite. If a process crashes or a provider hits its rate limit, the work resumes automatically.
 - **Gets better with use.** Procedures found during work become skills that the Curator keeps improving. Knowledge is stored as Obsidian-compatible Markdown, and project rules are added only after you approve them.
 - **Local and safe by default.** Only your own machine can reach Owl unless you opt in. Agent commands go through a permission hook.
@@ -80,7 +81,7 @@ flowchart LR
 
 <p align="center">
   <img src="docs/images/en/mobile-board.jpg" alt="The board on a phone" width="280"><br>
-  Check progress and make decisions from your phone
+  Check progress and make decisions from your phone, wherever you are, over Tailscale
 </p>
 
 ## Quick Start
