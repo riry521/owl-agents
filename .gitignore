@@ -7,9 +7,18 @@ coverage/
 # Next.js
 .next/
 
-# System
+# System and temporary files
 .DS_Store
 *.log
+*.tmp
+*.bak
+*.swp
+tmp/
+.turbo/
+
+# Test output
+test-results/
+playwright-report/
 
 # Local databases
 *.sqlite
@@ -21,8 +30,24 @@ coverage/
 
 # Environment
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+
+# Keys and credentials
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.keystore
+*.jks
+id_rsa*
+id_ed25519*
+id_ecdsa*
+credentials.json
+service-account*.json
+.npmrc
+.netrc
 
 # Owl runtime data (user-generated)
 data/*
