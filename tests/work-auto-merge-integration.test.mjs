@@ -309,6 +309,8 @@ test("Core skips Project merge for a Project-less Work while saving outputs and 
   assert.equal(git(project, "branch", "--list"), branchesBefore);
   assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type LIKE '%merge%'", workId).n, 0);
   assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND payload_json LIKE '%work_merge_%'", workId).n, 0);
-  assert.equal(await readFile(join(root, "data", "outputs", workId, "out", "result.txt"), "utf8"), "saved without a Project\n");
-  assert.equal(existsSync(join(root, ".owl-workspaces", workId)), false);
+  // Outputs are saved by the worktree reconciler after the Work completes.
+  const outputPath = join(root, "data", "outputs", workId, "out", "result.txt");
+  assert.ok(await waitFor(() => existsSync(outputPath) && !existsSync(join(root, ".owl-workspaces", workId))), "outputs saved and workspace removed");
+  assert.equal(await readFile(outputPath, "utf8"), "saved without a Project\n");
 });
