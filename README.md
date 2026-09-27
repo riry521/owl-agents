@@ -24,8 +24,6 @@ Owner (you)
 ```bash
 # Prerequisites: macOS 14+ or Linux, Node.js ≥ 22.14.0 and < 23, pnpm 10.15.0
 ./setup.sh
-# setup.sh adds bin/ to PATH in your shell rc (~/.zshrc, ~/.bash_profile or
-# ~/.bashrc, fish config, or ~/.profile). Open a new terminal to use `owl`.
 
 # Configure
 # setup.sh creates .env from .env.example when it is absent; edit that file.
@@ -35,13 +33,28 @@ Owner (you)
 # OWL_PROVIDER_ADAPTER=claude-cli/v1 or codex-cli/v1.
 # .env is loaded automatically; explicit process environment values win.
 
-# Start the server
-owl start
+# Open a new terminal, then start Owl and open the Web UI
+owl open
 
 # Check health
 owl status
 owl doctor
 ```
+
+`setup.sh` adds the repo's `bin/` directory to `PATH` in your shell startup file,
+so the `owl` command works from any directory:
+
+| Shell | File |
+|---|---|
+| zsh | `~/.zshrc` |
+| bash | `~/.bash_profile` (macOS) or `~/.bashrc` (Linux) |
+| fish | `~/.config/fish/config.fish` |
+| other | `~/.profile` |
+
+It adds one line ending in `# owl-agent` and skips this step when the line is
+already there. Open a new terminal (or `source` that file) before using `owl`.
+If you move the repo, run `./setup.sh` again. Until then, `./bin/owl` works
+from the repo root.
 
 Set `OWL_LANG=ja` or `OWL_LANG=en` for CLI and setup messages. If unset,
 `LC_ALL`, then `LC_MESSAGES`, then `LANG` determines the language.
@@ -67,9 +80,8 @@ The server decomposes the Work into Tasks, dispatches Workers, runs Reviews, and
 ## Web UI
 
 ```bash
-cd apps/web
-pnpm dev
-# Open http://localhost:3000
+owl open
+# Starts Owl if needed and opens http://127.0.0.1:3787/owl/ in your browser
 ```
 
 Pages: Board (work overview), Archive, Work detail, Settings (model config and presets), Projects, Advisor (chat).
@@ -78,6 +90,7 @@ Pages: Board (work overview), Archive, Work detail, Settings (model config and p
 
 ```bash
 owl start          # Start server (background)
+owl open           # Open the Web UI in your browser (starts Owl if needed)
 owl stop           # Stop Owl and its project-managed helper processes
 owl restart        # Restart server
 owl status         # Show server status

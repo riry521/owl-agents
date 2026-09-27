@@ -24,8 +24,6 @@ Owner (you)
 ```bash
 # 前提条件: macOS 14+ または Linux、Node.js ≥ 22.14.0 かつ < 23、pnpm 10.15.0
 ./setup.sh
-# setup.shはシェルのrc（~/.zshrc、~/.bash_profile / ~/.bashrc、fishのconfig、~/.profile）に
-# bin/をPATHとして追加します。新しいターミナルを開くと`owl`が使えます。
 
 # 設定
 # setup.shは、.envが存在しない場合に.env.exampleから.envを作成します。編集してください。
@@ -35,13 +33,28 @@ Owner (you)
 # OWL_PROVIDER_ADAPTER=claude-cli/v1 または codex-cli/v1 で選択してください。
 # .envは自動的にロードされます。明示的なプロセス環境変数の値が優先されます。
 
-# サーバーを起動
-owl start
+# 新しいターミナルを開き、Owlを起動してWeb UIを開く
+owl open
 
 # ヘルスチェック
 owl status
 owl doctor
 ```
+
+`setup.sh`は、リポジトリの`bin/`をシェルの起動ファイルで`PATH`に追加します。
+これで、どのディレクトリからでも`owl`コマンドが使えます。
+
+| シェル | ファイル |
+|---|---|
+| zsh | `~/.zshrc` |
+| bash | `~/.bash_profile`（macOS）または`~/.bashrc`（Linux） |
+| fish | `~/.config/fish/config.fish` |
+| その他 | `~/.profile` |
+
+追加されるのは末尾が`# owl-agent`の1行だけです。すでにある場合は追加しません。
+`owl`を使う前に、新しいターミナルを開くか、そのファイルを`source`してください。
+リポジトリを移動した場合は、`./setup.sh`をもう一度実行してください。それまでは、
+リポジトリのルートで`./bin/owl`が使えます。
 
 CLIとセットアップの表示言語は`OWL_LANG=ja`または`OWL_LANG=en`で指定できます。
 未設定なら`LC_ALL`、`LC_MESSAGES`、`LANG`の順でOSロケールを参照します。
@@ -67,9 +80,8 @@ curl http://localhost:3787/api/v1/works
 ## Web UI
 
 ```bash
-cd apps/web
-pnpm dev
-# http://localhost:3000 を開く
+owl open
+# 必要ならOwlを起動し、ブラウザで http://127.0.0.1:3787/owl/ を開きます
 ```
 
 ページ: Board（work概要）、Archive、Work detail、Settings（モデル設定とプリセット）、Projects、Advisor（chat）。
@@ -78,6 +90,7 @@ pnpm dev
 
 ```bash
 owl start          # サーバーを起動（バックグラウンド）
+owl open           # ブラウザでWeb UIを開く（必要ならOwlを起動）
 owl stop           # Owlとそのプロジェクト管理下のヘルパープロセスを停止
 owl restart        # サーバーを再起動
 owl status         # サーバーステータスを表示

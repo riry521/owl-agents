@@ -631,6 +631,48 @@ async function runServe(argv: readonly string[]): Promise<Record<string, unknown
   return { command: "serve", status: "ok", url: ts.url ?? null };
 }
 
+async function runOpen(argv: readonly string[]): Promise<Record<string, unknown>> {
+  if (argv.length > 0) throw new CliError(2, cliText(`openのargvが契約と一致しません: ${argv[0]}`, `Invalid open arguments: ${argv[0]}`));
+  let state = await readState();
+  let started = false;
+  if (!state || !isAlive(state.pid)) {
+    await runStart(parseStartArgs([], true));
+    state = await readState();
+    started = true;
+    if (!state) throw new CliError(4, cliText('owl-coreを起動できませんでした。statusとserver.logを確認してください。', 'Could not start owl-core. Check status and server.log.'));
+  }
+  const url = `http://${connectionHost(state.bind)}:${state.port}/owl/`;
+  const opened = await openInBrowser(url);
+  const lines = [];
+  if (started) lines.push(cliText(HUMAN_MESSAGES.start.ja, HUMAN_MESSAGES.start.en));
+  lines.push(opened
+    ? cliText(`ブラウザで開きました: ${url}`, `Opened in your browser: ${url}`)
+    : cliText(`ブラウザを開けませんでした。次のURLを開いてください: ${url}`, `Could not open a browser. Open this URL: ${url}`));
+  return { command: "open", url, table: lines.join("\n") };
+}
+
+function openInBrowser(url: string): Promise<boolean> {
+  const [command, args] = process.platform === "darwin"
+    ? ["open", [url]]
+    : process.platform === "win32"
+      ? ["cmd", ["/c", "start", "", url]]
+      : ["xdg-open", [url]];
+  return new Promise((resolve) => {
+    let child: ChildProcess;
+    try {
+      child = spawn(command, args, { detached: true, stdio: "ignore" });
+    } catch {
+      resolve(false);
+      return;
+    }
+    child.once("error", () => resolve(false));
+    child.once("spawn", () => {
+      child.unref();
+      resolve(true);
+    });
+  });
+}
+
 interface DoctorCheckResult {
   check_id: string;
   severity: "required" | "optional";
@@ -1055,13 +1097,14 @@ const HUMAN_MESSAGES: Record<string, { ja: string; en: string }> = {
 const HELP_TEXT = `Owl-Agent v1 CLI
 
 Usage:
-  ./bin/owl start [--foreground] [--bind HOST] [--port PORT]
-  ./bin/owl stop [--force] [--timeout SECONDS]
-  ./bin/owl restart [--bind HOST] [--port PORT]
-  ./bin/owl status [--json]
-  ./bin/owl doctor [--json] [--strict]
-  ./bin/owl serve [--off]
-  ./bin/owl setup
+  owl start [--foreground] [--bind HOST] [--port PORT]
+  owl stop [--force] [--timeout SECONDS]
+  owl restart [--bind HOST] [--port PORT]
+  owl open
+  owl status [--json]
+  owl doctor [--json] [--strict]
+  owl serve [--off]
+  owl setup
 
 Configuration:
   OWL_BIND=127.0.0.1    loopback-only default (OWL_HOST is not supported)
@@ -1079,13 +1122,14 @@ Provider CLIs and Tailscale are never installed automatically.`;
 const HELP_TEXT_JA = `Owl-Agent v1 CLI
 
 使い方:
-  ./bin/owl start [--foreground] [--bind HOST] [--port PORT]
-  ./bin/owl stop [--force] [--timeout SECONDS]
-  ./bin/owl restart [--bind HOST] [--port PORT]
-  ./bin/owl status [--json]
-  ./bin/owl doctor [--json] [--strict]
-  ./bin/owl serve [--off]
-  ./bin/owl setup
+  owl start [--foreground] [--bind HOST] [--port PORT]
+  owl stop [--force] [--timeout SECONDS]
+  owl restart [--bind HOST] [--port PORT]
+  owl open
+  owl status [--json]
+  owl doctor [--json] [--strict]
+  owl serve [--off]
+  owl setup
 
 設定:
   OWL_BIND=127.0.0.1    ローカル接続のデフォルト（OWL_HOSTは非対応）
@@ -1125,7 +1169,7 @@ export async function runCli(argv: readonly string[] = process.argv.slice(2)): P
   if (!command) {
     throw new CliError(
       2,
-      cliText('コマンドを指定してください。--helpで使い方を表示できます。owl start|status|stop|restart|cleanup|doctor|serve|setup|advisorを使用してください。', 'Specify a command. Run --help for usage. Available commands: start, status, stop, restart, cleanup, doctor, serve, setup, advisor.'),
+      cliText('コマンドを指定してください。--helpで使い方を表示できます。owl start|open|status|stop|restart|cleanup|doctor|serve|setup|advisorを使用してください。', 'Specify a command. Run --help for usage. Available commands: start, open, status, stop, restart, cleanup, doctor, serve, setup, advisor.'),
     );
   }
   if (command === "doctor") {
@@ -1147,6 +1191,8 @@ export async function runCli(argv: readonly string[] = process.argv.slice(2)): P
     result = await runCleanup();
   } else if (command === "serve") {
     result = await runServe(rest);
+  } else if (command === "open") {
+    result = await runOpen(rest);
   } else if (command === "setup") {
     const { runSetup } = await import("./setup.js");
     result = await runSetup();
