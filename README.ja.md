@@ -1,28 +1,94 @@
-[English](README.md) | 日本語
+<p align="center">
+  <img src="apps/web/app/icon.png" alt="Owl-Agent" width="120">
+</p>
 
-# Owl-Agent
+<h1 align="center">Owl-Agent</h1>
 
-AIエージェントオーケストレーションシステム。DBが記憶し、Coreが進行し、AIが思考します。
+<p align="center">
+  <b>AIエージェントを「チーム」として動かす。あなたは判断するだけ。</b>
+</p>
 
-Owl-Agentは、目標をタスクに分解し、AIワーカーを配下に配置し、結果をレビューし、報告するという、複数ステップにわたるAI作業のライフサイクルを、永続的なAI会話を持たずに構造的に管理します。
+<p align="center">
+  <a href="https://github.com/riry521/owl-agents/actions/workflows/ci.yml"><img src="https://github.com/riry521/owl-agents/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <img src="https://img.shields.io/badge/node-%E2%89%A522.17-339933.svg" alt="Node.js 22.17+">
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg" alt="macOS | Linux">
+</p>
 
-## アーキテクチャ
+<p align="center">
+  <a href="README.md">English</a> | 日本語
+</p>
 
+![Owl-Agent のボード画面](docs/images/ja/board.jpg)
+
+Owl-Agent は、役割の違う AI エージェントがチームとして仕事を進める、ローカルで動くオーケストレーションツールです。
+
+やりたいことを Advisor に話すと、Manager が計画を立て、Worker が並行で実装し、Reviewer が検証して、完了したらプロジェクトにマージします。
+あなたが呼ばれるのは、方針を決めるときや問題が起きたときの「判断待ち」だけです。
+
+AI の実行には、手元の **Claude Code** や **Codex** の CLI をそのまま使います。
+
+## 特長
+
+- **話すだけで仕事になる**：Advisor とチャットで相談すると、方針を整理してそのまま Work（仕事）として発行します。Web 画面のほか、Slack や Discord からも話しかけられます。
+- **AI が役割分担して進める**：計画・実装・レビュー・デザインを別の AI が担当します。Worker はタスクごとに Git の worktree を分けて並行で作業します。
+- **人間は判断待ちだけ見ればいい**：方針の選択が必要なときや、テストが通らなかったときだけ質問が届きます。ボードでは判断待ちが一番上に並びます。
+- **止まっても続きから**：状態はすべて SQLite に保存します。プロセスが落ちても、レート制限で止まっても、あとから自動で再開します。
+- **使うほど育つ**：仕事で見つかった手順は「スキル」として残り、Curator が改善します。知識は Obsidian 互換の Markdown に、ルールは承認制で蓄積されます。
+- **ローカルで安全に**：既定では自分の PC からしかアクセスできません。エージェントのコマンドは権限フックでチェックします。
+
+## 仕組み
+
+「**DB が記憶し、Core が進行し、AI が思考する**」が Owl-Agent の設計の考え方です。
+AI に長い会話で状態を覚えさせるのではなく、状態は DB に、次に誰が何をするかはプログラム（Core）に任せます。
+AI には毎回、今のタスクに必要な情報だけを渡します。
+
+```mermaid
+flowchart LR
+  Owner([あなた]) -- 相談 --> Advisor
+  Advisor -- Work を発行 --> Manager
+  Manager -- タスクに分解 --> W1[Worker]
+  Manager --> W2[Worker]
+  W1 --> Reviewer
+  W2 --> Reviewer
+  Reviewer -- 検証結果 --> Manager
+  Manager -- 完了・マージ --> Project[(プロジェクト)]
+  Manager -. 判断待ち .-> Owner
 ```
-Owner (you)
-  → Core (Node.js + SQLite) manages state & workflow
-    → Manager decomposes Work into Tasks
-    → Workers execute Tasks (with optional Executor subprocesses)
-    → Reviewers verify results
-    → Manager delivers final verdict
-```
 
-**役割（Roles）**: Owner（人間）に加え、8つのAIロール — Advisor（戦略的助言）、Manager（計画・調整）、Designer / Lead Designer（ビジュアル/UX）、Worker（実装）、Reviewer（検証）、Librarian（知識のトリアージ）、Curator（知識の保守）
+| 役割 | やること |
+|---|---|
+| Advisor | あなたの相談相手。方針を整理して Work を発行する |
+| Manager | Work をタスクに分けて計画し、最後に完了を判定する |
+| Worker | タスクを実装する。複数の Worker が並行で動く |
+| Reviewer | Worker の結果を検証する |
+| Designer / Lead Designer | 見た目や UX を担当する |
+| Librarian / Curator | 仕事で得た知識やスキルを整理・改善する |
+
+## スクリーンショット
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/images/ja/advisor.jpg" alt="Advisor とのチャット"><br><b>Advisor</b>：相談すると、そのまま仕事として発行します</td>
+    <td width="50%"><img src="docs/images/ja/work-detail.jpg" alt="Work の詳細"><br><b>Work の詳細</b>：タスクの進み具合とレビューの結果</td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/images/ja/decision.jpg" alt="判断待ち"><br><b>判断待ち</b>：選択肢と、選ぶとどうなるかを示して質問します</td>
+    <td width="50%"><img src="docs/images/ja/skills.jpg" alt="スキル"><br><b>スキル</b>：仕事から育った手順を Curator が改善します</td>
+  </tr>
+</table>
+
+<p align="center">
+  <img src="docs/images/ja/mobile-board.jpg" alt="スマホでのボード画面" width="280"><br>
+  スマホからも確認・判断できます
+</p>
 
 ## クイックスタート
 
 ```bash
 # 前提条件: macOS 14+ または Linux、Node.js ≥ 22.17.0 かつ < 23、pnpm 10.15.0
+git clone https://github.com/riry521/owl-agents.git
+cd owl-agents
 ./setup.sh
 
 # 設定
