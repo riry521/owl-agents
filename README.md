@@ -162,13 +162,33 @@ owl restart        # Restart server
 owl status         # Show server status
 owl doctor         # Run health checks (--json, --strict)
 owl cleanup        # Remove stale workspaces
-owl serve           # Explicitly enable Tailscale Serve
-owl serve --off    # Explicitly disable Tailscale Serve
+owl serve          # Publish to your tailnet with Tailscale Serve
+owl serve --off    # Stop publishing with Tailscale Serve
 
-# Public/remote access is opt-in and requires a bearer token.
+# Exposing Owl directly on the network without Tailscale requires a bearer token.
 OWL_BIND=0.0.0.0 OWL_API_TOKEN='use-a-long-random-value' owl start
-# Or set OWL_TAILSCALE_SERVE=1 plus OWL_API_TOKEN in .env before owl start.
 ```
+
+## Use it from your phone or another computer (Tailscale)
+
+With [Tailscale](https://tailscale.com/), you can open Owl from your phone wherever you are.
+
+1. Install Tailscale on the computer running Owl and on each device you want to use, and sign in with the same account.
+2. With Owl running, run this once on the computer:
+
+   ```bash
+   owl serve
+   ```
+
+3. Open the printed `https://<machine>.<tailnet>.ts.net/owl/` URL in the device's browser.
+
+Tailscale keeps this setting, so after that `owl start` is enough and the same URL keeps working.
+To publish on every `owl start` regardless, set `OWL_TAILSCALE_SERVE=1` in `.env`.
+Run `owl serve --off` to stop publishing.
+
+Only devices in your own Tailscale network (tailnet) can open this URL, so no login or token is needed.
+Owl rejects requests that arrive through Tailscale Funnel, which would reach the public internet.
+If you share your tailnet with other people, they can use Owl too.
 
 ## Connectors (optional)
 

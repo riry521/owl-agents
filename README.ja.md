@@ -162,13 +162,33 @@ owl restart        # サーバーを再起動
 owl status         # サーバーステータスを表示
 owl doctor         # ヘルスチェックを実行 (--json, --strict)
 owl cleanup        # 古いworkspaceを削除
-owl serve           # Tailscale Serveを明示的に有効化
-owl serve --off    # Tailscale Serveを明示的に無効化
+owl serve          # Tailscale Serveで自分のtailnetに公開
+owl serve --off    # Tailscale Serveでの公開をやめる
 
-# 公開/リモートアクセスはopt-inであり、bearer tokenが必須です。
+# Tailscaleを使わずにネットワークへ直接公開する場合は、bearer tokenが必須です。
 OWL_BIND=0.0.0.0 OWL_API_TOKEN='use-a-long-random-value' owl start
-# または、owl start の前に .env に OWL_TAILSCALE_SERVE=1 と OWL_API_TOKEN を設定します。
 ```
+
+## スマホや別の PC から使う（Tailscale）
+
+[Tailscale](https://tailscale.com/) を使うと、外出先のスマホからでも Owl を開けます。
+
+1. Owl を動かす PC と、使いたい端末（スマホなど）の両方に Tailscale を入れて、同じアカウントでログインします。
+2. PC で Owl を起動した状態で、次を1回だけ実行します。
+
+   ```bash
+   owl serve
+   ```
+
+3. 表示された `https://<マシン名>.<tailnet名>.ts.net/owl/` を、端末のブラウザで開きます。
+
+設定は Tailscale 側に残るので、次からは `owl start` するだけで同じ URL で開けます。
+`owl start` のたびに確実に公開したい場合は、`.env` に `OWL_TAILSCALE_SERVE=1` を設定します。
+公開をやめるときは `owl serve --off` を実行します。
+
+この URL は、自分の Tailscale ネットワーク（tailnet）の端末からしか開けないので、ログインやトークンは要りません。
+インターネット全体に公開する Tailscale Funnel 経由のアクセスは、Owl が拒否します。
+tailnet を他の人と共有している場合は、その人も Owl を操作できる点に注意してください。
 
 ## Connectors（任意）
 

@@ -107,7 +107,7 @@ test("bind exposure policy fails closed and does not accept OWL_HOST", () => {
   assert.equal(isLoopbackBind("::1"), true);
   assert.equal(isExternalBind("0.0.0.0"), true);
   assert.match(serverExposureError("0.0.0.0"), /OWL_API_TOKEN/);
-  assert.match(serverExposureError("127.0.0.1", true), /OWL_API_TOKEN/);
+  assert.equal(serverExposureError("127.0.0.1"), null);
   const originalBind = process.env.OWL_BIND;
   const originalHost = process.env.OWL_HOST;
   delete process.env.OWL_BIND;
@@ -125,6 +125,15 @@ test("external requests require bearer token even with a UI cookie", () => {
   assert.equal(isOwnerRequestAuthorized(request("10.0.0.8", { authorization: "Bearer token" }), "token", true), true);
   assert.equal(isOwnerRequestAuthorized(request("127.0.0.1", { cookie: "owl_ui_session=valid-looking" }), "token", true), true);
   assert.equal(isOwnerRequestAuthorized(request("10.0.0.8"), undefined, false), false);
+});
+
+test("Tailscale Serve requests count as local, but Funnel requests never do", () => {
+  const serve = request("127.0.0.1", { "tailscale-user-login": "owner@example.com", "x-forwarded-for": "100.64.0.2" });
+  assert.equal(isOwnerRequestAuthorized(serve, undefined, false), true);
+  const funnel = request("127.0.0.1", { "tailscale-funnel-request": "?1", "x-forwarded-for": "203.0.113.9" });
+  assert.equal(isOwnerRequestAuthorized(funnel, undefined, false), false);
+  assert.equal(isOwnerRequestAuthorized(funnel, "token", true), false);
+  assert.equal(isOwnerRequestAuthorized({ ...funnel, headers: { ...funnel.headers, authorization: "Bearer token" } }, "token", false), true);
 });
 
 test("invalid stored provider selection is surfaced instead of silently switching to Claude", async () => {

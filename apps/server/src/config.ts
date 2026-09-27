@@ -41,12 +41,13 @@ export function tailscaleServeEnabled(): boolean {
   return process.env.OWL_TAILSCALE_SERVE?.trim() === "1";
 }
 
-/** Returns a user-safe configuration error without including any secret value. */
-export function serverExposureError(bind: string, tailscaleServe = false): string | null {
-  if ((isExternalBind(bind) || tailscaleServe) && !configuredApiToken()) {
-    return isExternalBind(bind)
-      ? cliText('非loopback bindではOWL_API_TOKENが必須です。OWL_API_TOKENを設定してから起動してください。例: OWL_BIND=127.0.0.1（ローカル限定）またはOWL_API_TOKEN=<long-random-token>', 'OWL_API_TOKEN is required for non-loopback binding. Set it before startup, or use OWL_BIND=127.0.0.1 for local access.')
-      : cliText('Tailscale Serveを有効にするにはOWL_API_TOKENが必須です。OWL_API_TOKENを設定してから公開してください。', 'OWL_API_TOKEN is required for Tailscale Serve. Set it before publishing.');
+/**
+ * Returns a user-safe configuration error without including any secret value.
+ * Tailscale Serve needs no token: only devices in the owner's tailnet can reach it.
+ */
+export function serverExposureError(bind: string): string | null {
+  if (isExternalBind(bind) && !configuredApiToken()) {
+    return cliText('非loopback bindではOWL_API_TOKENが必須です。OWL_API_TOKENを設定してから起動してください。例: OWL_BIND=127.0.0.1（ローカル限定）またはOWL_API_TOKEN=<long-random-token>', 'OWL_API_TOKEN is required for non-loopback binding. Set it before startup, or use OWL_BIND=127.0.0.1 for local access.');
   }
   return null;
 }

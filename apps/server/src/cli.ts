@@ -449,7 +449,7 @@ async function startBackground(options: ServerOptions): Promise<ServerState> {
 }
 
 async function runStart(options: ParsedStart): Promise<Record<string, unknown>> {
-  const exposureError = serverExposureError(options.bind, tailscaleServeEnabled());
+  const exposureError = serverExposureError(options.bind);
   if (exposureError) throw new CliError(3, exposureError);
   const owlRoot = resolveOwlRoot();
   const dataDir = resolveDataDir(owlRoot);
@@ -622,8 +622,6 @@ async function runServe(argv: readonly string[]): Promise<Record<string, unknown
   if (!state || !isAlive(state.pid)) {
     throw new CliError(4, cliText('owl-coreは起動していません。startを実行してからserveを実行してください。', 'owl-core is not running. Run start before serve.'));
   }
-  const exposureError = serverExposureError(state.bind, true);
-  if (exposureError) throw new CliError(3, exposureError);
   const ts = await setupTailscaleServe(state.port);
   if (!ts.ok) {
     throw new CliError(4, cliText('Tailscaleが利用できません。Tailscaleをインストールし、ログインしてください。', 'Tailscale is unavailable. Install it and sign in.'));
@@ -841,13 +839,13 @@ async function checkSecretStore(): Promise<DoctorCheckResult> {
 
 async function checkNetworkAuth(): Promise<DoctorCheckResult> {
   const bind = configuredBind();
-  const error = serverExposureError(bind, tailscaleServeEnabled());
+  const error = serverExposureError(bind);
   if (!error) {
     return {
       check_id: "network-auth",
       severity: "required",
       status: "pass",
-      message: tailscaleServeEnabled() ? cliText('Tailscale Serveと外部経路にはBearer tokenが必要です。', 'Tailscale Serve and external access require a Bearer token.') : "loopback-only access or a bearer token is configured.",
+      message: tailscaleServeEnabled() ? cliText('Tailscale Serveはtailnet内の端末だけに公開されます。', 'Tailscale Serve is reachable only from devices in your tailnet.') : "loopback-only access or a bearer token is configured.",
       remediation: null,
     };
   }
@@ -1109,7 +1107,7 @@ Usage:
 Configuration:
   OWL_BIND=127.0.0.1    loopback-only default (OWL_HOST is not supported)
   OWL_PORT=3787         local HTTP port
-  OWL_API_TOKEN=...     required for non-loopback bind or Tailscale Serve
+  OWL_API_TOKEN=...     required for non-loopback bind (not for Tailscale Serve)
   OWL_PROVIDER=stub     offline provider; real requires the selected CLI
   OWL_PROVIDER_ADAPTER=claude-cli/v1|codex-cli/v1
   OWL_TAILSCALE_SERVE=1 opt-in remote Serve setup
@@ -1134,7 +1132,7 @@ const HELP_TEXT_JA = `Owl-Agent v1 CLI
 設定:
   OWL_BIND=127.0.0.1    ローカル接続のデフォルト（OWL_HOSTは非対応）
   OWL_PORT=3787         ローカルHTTPポート
-  OWL_API_TOKEN=...     外部接続またはTailscale Serveに必要
+  OWL_API_TOKEN=...     外部接続に必要（Tailscale Serveには不要）
   OWL_PROVIDER=stub     オフラインProvider。realには選択したCLIが必要
   OWL_PROVIDER_ADAPTER=claude-cli/v1|codex-cli/v1
   OWL_TAILSCALE_SERVE=1 リモートServeの設定を有効化

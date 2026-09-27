@@ -21,9 +21,11 @@ location without overwriting either existing side. `OWL_PORT` defaults to `3787`
 and `OWL_BIND` defaults to `127.0.0.1`; `OWL_HOST` is not a supported alias.
 
 The project `.env` is loaded automatically, with explicit process environment values
-winning over `.env`. Non-loopback bind and Tailscale Serve require a non-empty
-`OWL_API_TOKEN` before listening. Tailscale is never configured by ordinary `owl
-start`; use `owl serve` or `OWL_TAILSCALE_SERVE=1` explicitly.
+winning over `.env`. A non-loopback bind requires a non-empty `OWL_API_TOKEN`
+before listening. Tailscale Serve needs no token, because only tailnet devices can
+reach it; requests through Tailscale Funnel are never treated as local. Tailscale
+is never configured by ordinary `owl start`; use `owl serve` or
+`OWL_TAILSCALE_SERVE=1` explicitly.
 
 The CLI accepts the frozen `start`, `status`, `stop`, and `restart` argv forms.
 `owl stop` stops the server-managed connectors and any standalone helper

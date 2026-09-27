@@ -15,7 +15,7 @@ import {
   validateContractArtifacts,
   type ContractManifest,
 } from "./contracts.js";
-import { agentTimeoutConfigurationError, configuredBind, configuredPort, providerMode, serverExposureError, tailscaleServeEnabled } from "./config.js";
+import { agentTimeoutConfigurationError, configuredBind, configuredPort, providerMode, serverExposureError } from "./config.js";
 import { createConfiguredCore } from "./core.js";
 import { ConnectorManager, formatConnectorFailure } from "./connector-manager.js";
 import { ApiError, ContractValidationError, humanUnexpectedMessage, newReferenceId } from "./errors.js";
@@ -183,7 +183,7 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
   const owlRoot = resolveOwlRoot();
   const dataDir = resolveDataDir(owlRoot);
   const webOut = resolveWebOut(owlRoot);
-  const exposureError = serverExposureError(options.bind, tailscaleServeEnabled());
+  const exposureError = serverExposureError(options.bind);
   if (exposureError) throw new ContractValidationError(exposureError);
   const timeoutError = agentTimeoutConfigurationError();
   if (timeoutError) throw new ContractValidationError(timeoutError);

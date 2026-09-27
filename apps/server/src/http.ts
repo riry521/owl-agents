@@ -226,6 +226,9 @@ function headerValue(request: IncomingMessage, name: string): string | undefined
 }
 
 function isLoopback(request: IncomingMessage): boolean {
+  // Tailscale Serve proxies tailnet devices through loopback, so they count as local.
+  // Funnel reaches the public internet, so its requests never do.
+  if (request.headers["tailscale-funnel-request"] !== undefined) return false;
   const address = request.socket.remoteAddress;
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 }
