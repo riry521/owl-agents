@@ -36,11 +36,11 @@ esac
 
 # --- Node.js ---
 if ! command -v node &>/dev/null; then
-  fail "$(msg 'Node.js が見つかりません。v22.14.0以上、v23未満をインストールしてください。' 'Node.js was not found. Install v22.14.0 or later, but below v23.')\n  https://nodejs.org/"
+  fail "$(msg 'Node.js が見つかりません。v22.17.0以上、v23未満をインストールしてください。' 'Node.js was not found. Install v22.17.0 or later, but below v23.')\n  https://nodejs.org/"
 fi
 
-if ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major === 22 && minor >= 14 ? 0 : 1)'; then
-  fail "$(msg "Node.js v22.14.0以上、v23未満が必要です (現在: $(node -v))" "Node.js v22.14.0 or later, but below v23, is required (found: $(node -v))")\n  https://nodejs.org/"
+if ! node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major === 22 && minor >= 17 ? 0 : 1)'; then
+  fail "$(msg "Node.js v22.17.0以上、v23未満が必要です (現在: $(node -v))" "Node.js v22.17.0 or later, but below v23, is required (found: $(node -v))")\n  https://nodejs.org/"
 fi
 info "Node.js $(node -v)"
 

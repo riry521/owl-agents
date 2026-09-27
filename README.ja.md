@@ -22,7 +22,7 @@ Owner (you)
 ## クイックスタート
 
 ```bash
-# 前提条件: macOS 14+ または Linux、Node.js ≥ 22.14.0 かつ < 23、pnpm 10.15.0
+# 前提条件: macOS 14+ または Linux、Node.js ≥ 22.17.0 かつ < 23、pnpm 10.15.0
 ./setup.sh
 
 # 設定

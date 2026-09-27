@@ -687,15 +687,15 @@ async function checkNode(): Promise<DoctorCheckResult> {
   const version = process.versions.node;
   const major = Number(version.split(".")[0]);
   const minor = Number(version.split(".")[1]);
-  if (Number.isInteger(major) && Number.isInteger(minor) && major === 22 && minor >= 14) {
+  if (Number.isInteger(major) && Number.isInteger(minor) && major === 22 && minor >= 17) {
     return { check_id: "node", severity: "required", status: "pass", remediation: null };
   }
   return {
     check_id: "node",
     severity: "required",
     status: "fail",
-    message: cliText(`Node.js ${version}が検出されました。Node.js 22.14以上22系が必要です。`, `Found Node.js ${version}; version 22.14 or later in the 22.x series is required.`),
-    remediation: cliText('Node.js 22.14〜22.xをインストールしてください（例: nvm install 22）。', 'Install Node.js 22.14 through 22.x (for example, nvm install 22).'),
+    message: cliText(`Node.js ${version}が検出されました。Node.js 22.17以上22系が必要です。`, `Found Node.js ${version}; version 22.17 or later in the 22.x series is required.`),
+    remediation: cliText('Node.js 22.17〜22.xをインストールしてください（例: nvm install 22）。', 'Install Node.js 22.17 through 22.x (for example, nvm install 22).'),
   };
 }
 

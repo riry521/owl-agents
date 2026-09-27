@@ -10,7 +10,7 @@ and its integrity hash is the repository root's `pnpm-lock.yaml`. Whenever
 
 | Dependency | Requirement | Purpose |
 | --- | --- | --- |
-| Node.js | `>=22.14.0 <23` | All runtime, TypeScript build, Next.js |
+| Node.js | `>=22.17.0 <23` | All runtime, TypeScript build, Next.js |
 | Corepack | Bundled with Node.js | Pins `pnpm@10.15.0` |
 | pnpm | `10.15.0` | Dependency management for the whole workspace |
 | Git | Executable must be on PATH | `owl`'s Git operations, workspace/ops |

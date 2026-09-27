@@ -22,7 +22,7 @@ Owner (you)
 ## Quick Start
 
 ```bash
-# Prerequisites: macOS 14+ or Linux, Node.js ≥ 22.14.0 and < 23, pnpm 10.15.0
+# Prerequisites: macOS 14+ or Linux, Node.js ≥ 22.17.0 and < 23, pnpm 10.15.0
 ./setup.sh
 
 # Configure
