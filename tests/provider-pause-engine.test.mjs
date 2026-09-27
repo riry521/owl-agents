@@ -485,7 +485,7 @@ test("a Manager replan rate limit is requeued and retried after persisted pause 
   assert.equal(JSON.parse(db.get("SELECT response_json FROM idempotency_keys WHERE key = ?", `manager-trigger:${taskId}`).response_json).status, "queued");
 
   t.mock.timers.tick(30_000);
-  await flush();
+  await flushUntil(() => db.get("SELECT status FROM tasks WHERE manager_task_id = 'REPLACEMENT'")?.status === "waiting", "requeued replan");
   assert.equal(managerCalls, 2, "the Work driver retries the queued replan when provider.resumed fires");
   assert.equal(db.get("SELECT status FROM tasks WHERE manager_task_id = 'REPLACEMENT'").status, "waiting");
   assert.equal(db.get("SELECT status FROM tasks WHERE id = ?", taskId).status, "cancelled");
