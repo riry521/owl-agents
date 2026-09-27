@@ -236,6 +236,7 @@ function renderAdvisorFolders(state, apiClientOverrides) {
       '@/lib/settings-errors': { humanizeError: () => 'ERROR' },
       '@/lib/model-presets': { presetMatchesSettings: () => false },
       '@/components/ModelPresetsBar': { ModelPresetsBar: () => null },
+      '@/components/FolderPickerDialog': { FolderPickerDialog: () => null },
     },
   });
   renderToStaticMarkup(React.createElement(module.AdvisorFoldersSection));

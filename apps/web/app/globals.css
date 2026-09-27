@@ -1922,6 +1922,7 @@ a.card:hover {
   min-height: 80px;
   margin-top: 10px;
   padding-right: 4px;
+  flex: 1;
 }
 
 .folder-picker__item {
@@ -1943,7 +1944,20 @@ a.card:hover {
   background: #fff;
 }
 
+.folder-picker__hidden-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
 @media (max-width: 520px) {
+  .folder-picker {
+    max-height: 70vh;
+  }
+
   .project-path-input {
     align-items: stretch;
     flex-direction: column;

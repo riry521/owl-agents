@@ -8,6 +8,7 @@ import { useLocale, type Locale } from '@/lib/i18n';
 import { humanizeError } from '@/lib/settings-errors';
 import { presetMatchesSettings } from '@/lib/model-presets';
 import { ModelPresetsBar } from '@/components/ModelPresetsBar';
+import { FolderPickerDialog } from '@/components/FolderPickerDialog';
 
 /** Fixed role order shown regardless of what the GET response returns them in. */
 const ROLE_ORDER: RoleModelSettingInput['role'][] = ['advisor', 'manager', 'designer', 'lead_designer', 'worker', 'reviewer', 'librarian', 'curator'];
@@ -608,6 +609,7 @@ export function AdvisorFoldersSection() {
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [picker, setPicker] = useState<{ field: 'shared' | 'screenshot'; initialPath: string } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -648,6 +650,12 @@ export function AdvisorFoldersSection() {
   }
 
   const changed = folders !== null && (sharedDir.trim() !== folders.shared_dir || screenshotDir.trim() !== folders.screenshot_dir);
+
+  function openPicker(field: 'shared' | 'screenshot') {
+    const draft = field === 'shared' ? sharedDir : screenshotDir;
+    const fallback = field === 'shared' ? folders?.defaults.shared_dir : folders?.defaults.screenshot_dir;
+    setPicker({ field, initialPath: draft.trim() || fallback || '' });
+  }
 
   return (
     <section className="panel advisor-persona-panel" aria-labelledby="sec-advisor-folders">
@@ -693,15 +701,20 @@ export function AdvisorFoldersSection() {
             <>
               <label className="form-field">
                 <span>{t('settings.advisorFoldersSharedLabel')}</span>
-                <input
-                  className="input"
-                  style={{ fontFamily: 'monospace' }}
-                  value={sharedDir}
-                  onChange={(ev) => setSharedDir(ev.target.value)}
-                  placeholder={folders?.defaults.shared_dir ?? ''}
-                  maxLength={4096}
-                  disabled={saving}
-                />
+                <div className="project-path-input">
+                  <input
+                    className="input"
+                    style={{ fontFamily: 'monospace' }}
+                    value={sharedDir}
+                    onChange={(ev) => setSharedDir(ev.target.value)}
+                    placeholder={folders?.defaults.shared_dir ?? ''}
+                    maxLength={4096}
+                    disabled={saving}
+                  />
+                  <button type="button" className="btn" onClick={() => openPicker('shared')} disabled={saving}>
+                    {t('settings.advisorFoldersChoose')}
+                  </button>
+                </div>
               </label>
               <p className="settings-disclosure__hint">{t('settings.advisorFoldersSharedHint')}</p>
               <div className="btn-row">
@@ -716,15 +729,20 @@ export function AdvisorFoldersSection() {
 
               <label className="form-field" style={{ marginTop: '16px' }}>
                 <span>{t('settings.advisorFoldersScreenshotLabel')}</span>
-                <input
-                  className="input"
-                  style={{ fontFamily: 'monospace' }}
-                  value={screenshotDir}
-                  onChange={(ev) => setScreenshotDir(ev.target.value)}
-                  placeholder={folders?.defaults.screenshot_dir ?? ''}
-                  maxLength={4096}
-                  disabled={saving}
-                />
+                <div className="project-path-input">
+                  <input
+                    className="input"
+                    style={{ fontFamily: 'monospace' }}
+                    value={screenshotDir}
+                    onChange={(ev) => setScreenshotDir(ev.target.value)}
+                    placeholder={folders?.defaults.screenshot_dir ?? ''}
+                    maxLength={4096}
+                    disabled={saving}
+                  />
+                  <button type="button" className="btn" onClick={() => openPicker('screenshot')} disabled={saving}>
+                    {t('settings.advisorFoldersChoose')}
+                  </button>
+                </div>
               </label>
               <p className="settings-disclosure__hint">{t('settings.advisorFoldersScreenshotHint')}</p>
               <div className="btn-row">
@@ -748,6 +766,16 @@ export function AdvisorFoldersSection() {
           {error && <div className="error" style={{ marginTop: '12px' }}>{error}</div>}
         </div>
       )}
+
+      <FolderPickerDialog
+        open={picker !== null}
+        initialPath={picker?.initialPath ?? ''}
+        onSelect={(path) => {
+          if (picker?.field === 'shared') setSharedDir(path);
+          else if (picker?.field === 'screenshot') setScreenshotDir(path);
+        }}
+        onClose={() => setPicker(null)}
+      />
     </section>
   );
 }

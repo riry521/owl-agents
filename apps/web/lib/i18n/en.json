@@ -408,6 +408,7 @@
     "advisorFoldersScreenshotHint": "Say \"look at the screenshot\" and the Advisor opens the newest image here.",
     "advisorFoldersDefaultBadge": "Default",
     "advisorFoldersReset": "Reset to default",
+    "advisorFoldersChoose": "Choose",
     "advisorFoldersSave": "Save folders",
     "advisorFoldersSaved": "Advisor folder settings saved.",
     "advisorFoldersError": "Could not load or save the Advisor folder settings.",
@@ -552,6 +553,20 @@
     "copiedManifest": "Copied!",
     "slackManifestHint": "Paste at api.slack.com → Create New App → From a manifest",
     "tokenSaved": "Current token saved (leave blank to keep)"
+  },
+  "folderPicker": {
+    "title": "Choose a folder",
+    "shortcutHome": "Home",
+    "shortcutDesktop": "Desktop",
+    "shortcutDocuments": "Documents",
+    "shortcutDownloads": "Downloads",
+    "shortcutOwlData": "Owl data",
+    "up": "Up",
+    "showHidden": "Show hidden folders",
+    "empty": "No subfolders",
+    "truncated": "Some folders are not shown",
+    "backHome": "Back to Home",
+    "useThisFolder": "Use this folder"
   },
   "rules": {
     "title": "Rules",

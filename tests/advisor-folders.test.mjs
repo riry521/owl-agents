@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +12,7 @@ import { AppSettingsStore } from "../apps/server/dist/app-settings-store.js";
 import { MemoryCore } from "../apps/server/dist/core.js";
 import { createOwlHttpServer } from "../apps/server/dist/http.js";
 import { errorBody } from "../apps/server/dist/errors.js";
+import { listHostDirectories } from "../apps/server/dist/fs-directories.js";
 import { Core } from "../packages/core/dist/index.js";
 import { createUlid, openDatabase } from "../packages/db/dist/index.js";
 
@@ -42,6 +43,36 @@ test("folder validation messages follow the Owner language", () => {
   const error = { code: "validation_error", details: {}, message: "フォルダは絶対パスで指定してください。" };
   assert.equal(errorBody("test", error, "en").error.message, "Specify the folder as an absolute path.");
   assert.equal(errorBody("test", error, "ja").error.message, error.message);
+  for (const [japanese, english, code] of [
+    ["フォルダが見つかりません。", "The folder was not found.", "not_found"],
+    ["フォルダではありません。", "This is not a folder.", "validation_error"],
+    ["このフォルダを開く権限がありません。", "You do not have permission to open this folder.", "forbidden"],
+  ]) {
+    assert.equal(errorBody("test", { code, details: {}, message: japanese }, "en").error.message, english);
+  }
+});
+
+test("directory listing filters, sorts, validates, and preserves symbolic link paths", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "owl-fs-list-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const name of ["folder10", "folder2", ".secret"]) await mkdir(join(root, name));
+  await writeFile(join(root, "file.txt"), "file");
+  await symlink(join(root, "folder2"), join(root, "link"));
+  await symlink(join(root, "file.txt"), join(root, "file-link"));
+  const listed = await listHostDirectories(root, false, root);
+  assert.equal(listed.path, root);
+  assert.equal(listed.parent, dirname(root));
+  assert.deepEqual(listed.entries, ["folder2", "folder10", "link"].map((name) => ({ name, path: join(root, name) })));
+  assert.equal(listed.truncated, false);
+  assert.deepEqual((await listHostDirectories(root, true, root)).entries.map((entry) => entry.name), [".secret", "folder2", "folder10", "link"]);
+  assert.ok(listed.shortcuts.some((shortcut) => shortcut.key === "owl_data" && shortcut.path === root));
+  assert.equal((await listHostDirectories("/", false, root)).parent, null);
+  assert.equal((await listHostDirectories(undefined, false, root)).path, homedir());
+  await assert.rejects(() => listHostDirectories("relative", false, root), { status: 422, code: "validation_error" });
+  await assert.rejects(() => listHostDirectories("/tmp/\0bad", false, root), { status: 422, code: "validation_error" });
+  await assert.rejects(() => listHostDirectories("x".repeat(1025), false, root), { status: 422, code: "validation_error" });
+  await assert.rejects(() => listHostDirectories(join(root, "missing"), false, root), { status: 404, code: "not_found" });
+  await assert.rejects(() => listHostDirectories(join(root, "file.txt"), false, root), { status: 422, code: "validation_error" });
 });
 
 test("folder settings persist and an empty value remains a default marker", async (t) => {
@@ -96,6 +127,54 @@ test("Advisor folder API returns defaults, saves values, and rejects tracked pat
   assert.deepEqual((await get()).custom, { shared_dir: true, screenshot_dir: true });
   const invalid = await put({ shared_dir: join(root, "tracked"), screenshot_dir: "" });
   assert.equal(invalid.status, 422);
+});
+
+test("directory picker lists sorted folders, hidden folders, and path errors", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "owl-fs-directories-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const name of ["folder10", "folder2", ".secret"]) await mkdir(join(root, name));
+  await writeFile(join(root, "file.txt"), "file");
+  await symlink(join(root, "folder2"), join(root, "linked-folder"));
+  await symlink(join(root, "file.txt"), join(root, "linked-file"));
+  const core = new MemoryCore({ version: "test", owlRoot: root, dataDir: root });
+  const http = createOwlHttpServer({ core, webOut: root, bind: "127.0.0.1", port: 0,
+    contract: { contract_version: "1.0.0" }, owlRoot: root, dataDir: root });
+  try { await http.listen(); } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") { t.skip("localhost listen is not permitted"); return; }
+    throw error;
+  }
+  t.after(() => http.close());
+  const base = `http://127.0.0.1:${http.server.address().port}/api/v1/fs/directories`;
+  const get = async (path, showHidden) => {
+    const url = new URL(base);
+    if (path !== undefined) url.searchParams.set("path", path);
+    if (showHidden !== undefined) url.searchParams.set("show_hidden", showHidden);
+    const response = await fetch(url);
+    return { status: response.status, body: await response.json() };
+  };
+  const listed = await get(root);
+  assert.equal(listed.status, 200);
+  assert.deepEqual(Object.keys(listed.body), ["request_id", "data", "version"]);
+  assert.equal(listed.body.version, 0);
+  assert.deepEqual({ ...listed.body.data, shortcuts: undefined }, {
+    path: root, parent: dirname(root), entries: ["folder2", "folder10", "linked-folder"].map((name) => ({ name, path: join(root, name) })),
+    truncated: false, shortcuts: undefined,
+  });
+  assert.ok(listed.body.data.shortcuts.some((shortcut) => shortcut.key === "home" && shortcut.path === homedir()));
+  assert.ok(listed.body.data.shortcuts.some((shortcut) => shortcut.key === "owl_data" && shortcut.path === root));
+  const hidden = await get(root, "1");
+  assert.deepEqual(hidden.body.data.entries.map((entry) => entry.name), [".secret", "folder2", "folder10", "linked-folder"]);
+  const relative = await get("relative/path");
+  assert.equal(relative.status, 422);
+  assert.equal(relative.body.error.code, "validation_error");
+  const missing = await get(join(root, "missing"));
+  assert.equal(missing.status, 404);
+  assert.equal(missing.body.error.code, "not_found");
+  const file = await get(join(root, "file.txt"));
+  assert.equal(file.status, 422);
+  assert.equal(file.body.error.code, "validation_error");
+  assert.equal((await get()).body.data.path, homedir());
+  assert.equal((await get("/")).body.data.parent, null);
 });
 
 test("Advisor prompt contains both configured folders", async (t) => {

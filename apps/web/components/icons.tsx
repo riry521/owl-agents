@@ -34,6 +34,14 @@ export function RestoreIcon({ className }: IconProps = {}) {
   );
 }
 
+export function FolderIcon({ className }: IconProps = {}) {
+  return (
+    <svg className={className} width="16" height="16" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M2.5 5a1 1 0 0 1 1-1h3.3l1.3 1.6h6.4a1 1 0 0 1 1 1v6.4a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z" />
+    </svg>
+  );
+}
+
 export function SendIcon({ className }: IconProps = {}) {
   return (
     <svg className={className} width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

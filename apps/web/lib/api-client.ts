@@ -51,6 +51,7 @@ import type {
   AdvisorSessionInfo,
   AdvisorFolders,
   AdvisorFoldersInput,
+  DirectoryListing,
   SkillActivity,
   SkillListFilter,
   SkillListItem,
@@ -1122,6 +1123,18 @@ export async function getAdvisorFolders(): Promise<AdvisorFolders> {
 
 export async function putAdvisorFolders(input: AdvisorFoldersInput): Promise<AdvisorFolders> {
   const response = await command<AdvisorFolders>('/settings/advisor-folders', input, 0, 'PUT');
+  return response.data;
+}
+
+// ---- Filesystem Browsing (folder-picker dialog) ----------------------------
+
+/** Browse folders on the Owl host; path omitted lists the home folder. */
+export async function listDirectories(path?: string, showHidden?: boolean): Promise<DirectoryListing> {
+  const params: Record<string, string> = {};
+  if (path) params.path = path;
+  if (showHidden !== undefined) params.show_hidden = showHidden ? '1' : '0';
+  const qs = new URLSearchParams(params).toString();
+  const response = await requestJson<ApiEnvelope<DirectoryListing>>(`/fs/directories${qs ? `?${qs}` : ''}`);
   return response.data;
 }
 

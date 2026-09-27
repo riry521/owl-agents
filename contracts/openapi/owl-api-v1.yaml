@@ -2075,6 +2075,61 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/fs/directories:
+    get:
+      operationId: listHostDirectories
+      summary: List folders on the Owl host
+      security:
+        - ownerBearer: []
+      parameters:
+        - in: query
+          name: path
+          required: false
+          schema:
+            type: string
+            maxLength: 1024
+          description: Absolute folder path, optionally starting with ~. Defaults to the home directory.
+        - in: query
+          name: show_hidden
+          required: false
+          schema:
+            type: string
+            enum: ['0', '1']
+            default: '0'
+      responses:
+        '200':
+          description: Folders in the requested directory.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DirectoryListingResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden or directory access denied.
+          x-error-codes: [forbidden]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Folder not found.
+          x-error-codes: [not_found]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid path or non-directory.
+          x-error-codes: [validation_error]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/settings/advisor-folders:
     get:
       operationId: getAdvisorFolders
@@ -5164,6 +5219,50 @@ components:
           properties:
             data:
               $ref: '#/components/schemas/ProcessSkillsSettingsData'
+    DirectoryEntry:
+      type: object
+      required: [name, path]
+      properties:
+        name: { type: string }
+        path: { type: string }
+      additionalProperties: false
+    DirectoryShortcut:
+      type: object
+      required: [key, path]
+      properties:
+        key:
+          type: string
+          enum: [home, desktop, documents, downloads, owl_data]
+        path: { type: string }
+      additionalProperties: false
+    DirectoryListingData:
+      type: object
+      required: [path, parent, entries, truncated, shortcuts]
+      properties:
+        path: { type: string }
+        parent:
+          anyOf:
+            - type: string
+            - type: 'null'
+        entries:
+          type: array
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/DirectoryEntry'
+        truncated: { type: boolean }
+        shortcuts:
+          type: array
+          items:
+            $ref: '#/components/schemas/DirectoryShortcut'
+      additionalProperties: false
+    DirectoryListingResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          required: [request_id, data, version]
+          properties:
+            data:
+              $ref: '#/components/schemas/DirectoryListingData'
     AdvisorFoldersData:
       type: object
       required:

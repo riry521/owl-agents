@@ -338,6 +338,25 @@ export interface ProjectFolderBrowserResult {
   folders: Array<{ name: string; path: string }>;
 }
 
+/** GET /api/v1/fs/directories, used by the folder-picker dialog. */
+export interface DirectoryEntry {
+  name: string;
+  path: string;
+}
+
+export interface DirectoryShortcut {
+  key: 'home' | 'desktop' | 'documents' | 'downloads' | 'owl_data';
+  path: string;
+}
+
+export interface DirectoryListing {
+  path: string;
+  parent: string | null;
+  entries: DirectoryEntry[];
+  truncated: boolean;
+  shortcuts: DirectoryShortcut[];
+}
+
 export interface ProjectSetupInput {
   mode: 'existing' | 'new' | 'initialize_existing';
   name: string;

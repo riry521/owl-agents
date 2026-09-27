@@ -6,6 +6,7 @@ import type { Socket } from "node:net";
 
 import { ApiError, errorBody, humanUnexpectedMessage, newReferenceId } from "./errors.js";
 import { AdvisorFolderError } from "./advisor-folders.js";
+import { listHostDirectories } from "./fs-directories.js";
 import { createUlid, isUlid } from "./ids.js";
 import { resolveDataDir, type ContractManifest } from "./contracts.js";
 import { configuredApiToken } from "./config.js";
@@ -2277,6 +2278,17 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   }
 
   // ---- Advisor Persona ------------------------------------------------------
+
+  if (pathname === `${API_PREFIX}/fs/directories` && method === "GET") {
+    requireOwner(request);
+    const showHidden = url.searchParams.get("show_hidden") ?? "0";
+    if (showHidden !== "0" && showHidden !== "1") {
+      throw new ApiError(422, "validation_error", "show_hiddenは0または1で指定してください。");
+    }
+    sendJson(response, 200, { request_id: requestIdValue,
+      data: await listHostDirectories(url.searchParams.get("path") ?? undefined, showHidden === "1", context.dataDir), version: 0 });
+    return;
+  }
 
   if (pathname === `${API_PREFIX}/settings/advisor-folders` && method === "GET") {
     requireOwner(request);
