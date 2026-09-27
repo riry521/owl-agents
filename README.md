@@ -31,7 +31,7 @@ Agents run through the **Claude Code** or **Codex** CLI you already have install
 ## Features
 
 - **Just talk to it.** Discuss an idea with the Advisor in chat, and it turns the plan into a Work. You can also reach the Advisor from Slack or Discord.
-- **A team of roles.** Separate agents plan, build, review, and design. Each Worker gets its own Git worktree, so tasks run in parallel without stepping on each other.
+- **A team of roles.** Separate agents plan, design, build, and review. Each Worker gets its own Git worktree, so tasks run in parallel without stepping on each other.
 - **You only handle decisions.** You get a question only when a choice is needed or a check fails. Decisions always sit at the top of the board.
 - **Picks up where it left off.** All state lives in SQLite. If a process crashes or a provider hits its rate limit, the work resumes automatically.
 - **Gets better with use.** Procedures found during work become skills that the Curator keeps improving. Knowledge is stored as Obsidian-compatible Markdown, and project rules are added only after you approve them.
@@ -62,7 +62,7 @@ flowchart LR
 | Manager | Splits a Work into tasks, coordinates them, and makes the final call |
 | Worker | Implements tasks. Several Workers run in parallel |
 | Reviewer | Verifies each Worker's result |
-| Designer / Lead Designer | Handles visuals and UX |
+| Designer / Lead Designer | Designs the work: architecture, data model, API, and implementation approach |
 | Librarian / Curator | Organizes and improves knowledge and skills learned from work |
 
 ## Screenshots
