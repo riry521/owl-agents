@@ -24,6 +24,8 @@ Owner (you)
 ```bash
 # Prerequisites: macOS 14+ or Linux, Node.js ≥ 22.14.0 and < 23, pnpm 10.15.0
 ./setup.sh
+# setup.sh adds bin/ to PATH in your shell rc (~/.zshrc, ~/.bash_profile or
+# ~/.bashrc, fish config, or ~/.profile). Open a new terminal to use `owl`.
 
 # Configure
 # setup.sh creates .env from .env.example when it is absent; edit that file.
@@ -34,11 +36,11 @@ Owner (you)
 # .env is loaded automatically; explicit process environment values win.
 
 # Start the server
-./bin/owl start
+owl start
 
 # Check health
-./bin/owl status
-./bin/owl doctor
+owl status
+owl doctor
 ```
 
 Set `OWL_LANG=ja` or `OWL_LANG=en` for CLI and setup messages. If unset,
@@ -75,18 +77,18 @@ Pages: Board (work overview), Archive, Work detail, Settings (model config and p
 ## CLI Commands
 
 ```bash
-./bin/owl start          # Start server (background)
-./bin/owl stop           # Stop Owl and its project-managed helper processes
-./bin/owl restart        # Restart server
-./bin/owl status         # Show server status
-./bin/owl doctor         # Run health checks (--json, --strict)
-./bin/owl cleanup        # Remove stale workspaces
-./bin/owl serve           # Explicitly enable Tailscale Serve
-./bin/owl serve --off    # Explicitly disable Tailscale Serve
+owl start          # Start server (background)
+owl stop           # Stop Owl and its project-managed helper processes
+owl restart        # Restart server
+owl status         # Show server status
+owl doctor         # Run health checks (--json, --strict)
+owl cleanup        # Remove stale workspaces
+owl serve           # Explicitly enable Tailscale Serve
+owl serve --off    # Explicitly disable Tailscale Serve
 
 # Public/remote access is opt-in and requires a bearer token.
-OWL_BIND=0.0.0.0 OWL_API_TOKEN='use-a-long-random-value' ./bin/owl start
-# Or set OWL_TAILSCALE_SERVE=1 plus OWL_API_TOKEN in .env before ./bin/owl start.
+OWL_BIND=0.0.0.0 OWL_API_TOKEN='use-a-long-random-value' owl start
+# Or set OWL_TAILSCALE_SERVE=1 plus OWL_API_TOKEN in .env before owl start.
 ```
 
 ## Connectors (optional)

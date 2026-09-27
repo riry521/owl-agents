@@ -24,6 +24,8 @@ Owner (you)
 ```bash
 # 前提条件: macOS 14+ または Linux、Node.js ≥ 22.14.0 かつ < 23、pnpm 10.15.0
 ./setup.sh
+# setup.shはシェルのrc（~/.zshrc、~/.bash_profile / ~/.bashrc、fishのconfig、~/.profile）に
+# bin/をPATHとして追加します。新しいターミナルを開くと`owl`が使えます。
 
 # 設定
 # setup.shは、.envが存在しない場合に.env.exampleから.envを作成します。編集してください。
@@ -34,11 +36,11 @@ Owner (you)
 # .envは自動的にロードされます。明示的なプロセス環境変数の値が優先されます。
 
 # サーバーを起動
-./bin/owl start
+owl start
 
 # ヘルスチェック
-./bin/owl status
-./bin/owl doctor
+owl status
+owl doctor
 ```
 
 CLIとセットアップの表示言語は`OWL_LANG=ja`または`OWL_LANG=en`で指定できます。
@@ -75,18 +77,18 @@ pnpm dev
 ## CLIコマンド
 
 ```bash
-./bin/owl start          # サーバーを起動（バックグラウンド）
-./bin/owl stop           # Owlとそのプロジェクト管理下のヘルパープロセスを停止
-./bin/owl restart        # サーバーを再起動
-./bin/owl status         # サーバーステータスを表示
-./bin/owl doctor         # ヘルスチェックを実行 (--json, --strict)
-./bin/owl cleanup        # 古いworkspaceを削除
-./bin/owl serve           # Tailscale Serveを明示的に有効化
-./bin/owl serve --off    # Tailscale Serveを明示的に無効化
+owl start          # サーバーを起動（バックグラウンド）
+owl stop           # Owlとそのプロジェクト管理下のヘルパープロセスを停止
+owl restart        # サーバーを再起動
+owl status         # サーバーステータスを表示
+owl doctor         # ヘルスチェックを実行 (--json, --strict)
+owl cleanup        # 古いworkspaceを削除
+owl serve           # Tailscale Serveを明示的に有効化
+owl serve --off    # Tailscale Serveを明示的に無効化
 
 # 公開/リモートアクセスはopt-inであり、bearer tokenが必須です。
-OWL_BIND=0.0.0.0 OWL_API_TOKEN='use-a-long-random-value' ./bin/owl start
-# または、./bin/owl start の前に .env に OWL_TAILSCALE_SERVE=1 と OWL_API_TOKEN を設定します。
+OWL_BIND=0.0.0.0 OWL_API_TOKEN='use-a-long-random-value' owl start
+# または、owl start の前に .env に OWL_TAILSCALE_SERVE=1 と OWL_API_TOKEN を設定します。
 ```
 
 ## Connectors（任意）

@@ -192,10 +192,36 @@ else
   warn "$(msg 'doctorが要対応項目を報告しました。`./bin/owl doctor`でremediationを確認してください。provider CLIは自動インストールされません。' 'Doctor reported items requiring attention. Run ./bin/owl doctor for guidance. Provider CLIs are not installed automatically.')"
 fi
 
+# --- owl command on PATH ---
+# Put bin/ on PATH in the login shell's rc file so `owl` works from anywhere.
+# Idempotent: any existing line mentioning this bin directory is left alone.
+BIN_DIR="$(pwd)/bin"
+case "$(basename "${SHELL:-sh}")" in
+  zsh) RC_FILE="${ZDOTDIR:-$HOME}/.zshrc" ;;
+  bash)
+    if [ "$OS" = Darwin ]; then RC_FILE="$HOME/.bash_profile"; else RC_FILE="$HOME/.bashrc"; fi
+    ;;
+  fish) RC_FILE="$HOME/.config/fish/config.fish" ;;
+  *) RC_FILE="$HOME/.profile" ;;
+esac
+if [ -f "$RC_FILE" ] && grep -qF "$BIN_DIR" "$RC_FILE"; then
+  info "$(msg "owlコマンドは設定済みです ($RC_FILE)" "owl command already on PATH ($RC_FILE)")"
+else
+  mkdir -p "$(dirname "$RC_FILE")"
+  if [ "$(basename "$RC_FILE")" = config.fish ]; then
+    PATH_LINE="fish_add_path \"$BIN_DIR\"  # owl-agent"
+  else
+    PATH_LINE="export PATH=\"$BIN_DIR:\$PATH\"  # owl-agent"
+  fi
+  printf '\n%s\n' "$PATH_LINE" >> "$RC_FILE"
+  info "$(msg "owlコマンドをPATHに追加しました ($RC_FILE)" "Added the owl command to PATH ($RC_FILE)")"
+fi
+
 echo ""
 echo -e "${GREEN}$(msg '=== セットアップ完了 ===' '=== Setup Complete ===')${NC}"
 echo ""
-echo "$(msg 'サーバー起動:' 'Start the server:')"
-echo "  ./bin/owl start"
+echo "$(msg 'サーバー起動（新しいターミナルで）:' 'Start the server (in a new terminal):')"
+echo "  owl start"
+echo "$(msg "今のターミナルで使う場合: source $RC_FILE" "To use it in this terminal: source $RC_FILE")"
 echo ""
 echo "$(msg 'デフォルト: http://127.0.0.1:3787/owl/' 'Default: http://127.0.0.1:3787/owl/')"
