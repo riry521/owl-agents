@@ -49,6 +49,12 @@ async function flush() {
   for (let i = 0; i < 10; i += 1) await new Promise((resolvePromise) => setImmediate(resolvePromise));
 }
 
+// For tests with mocked setTimeout: yield to the event loop until the predicate holds.
+async function flushUntil(predicate, label) {
+  for (let i = 0; i < 500 && !predicate(); i += 1) await flush();
+  if (!predicate()) throw new Error(`timed out waiting for ${label}`);
+}
+
 async function waitUntil(predicate, label) {
   const deadline = Date.now() + 5_000;
   while (!predicate()) {
@@ -532,7 +538,7 @@ test("an initial Manager plan rate limit leaves the Work running and retries aft
   assert.equal(db.get("SELECT COUNT(*) AS count FROM decisions WHERE status = 'open'").count, 0);
 
   t.mock.timers.tick(30_000);
-  await flush();
+  await flushUntil(() => db.get("SELECT COUNT(*) AS count FROM tasks WHERE work_id = ?", workId).count === 1, "resumed Manager plan");
   assert.equal(managerCalls, 2);
   assert.equal(db.get("SELECT COUNT(*) AS count FROM tasks WHERE work_id = ?", workId).count, 1);
   assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "running");
