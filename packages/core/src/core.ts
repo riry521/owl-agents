@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { createHash as createFileHash } from "node:crypto";
-import { statSync } from "node:fs";
-import { lstat, mkdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { constants, existsSync, mkdirSync, statSync } from "node:fs";
+import { copyFile, lstat, mkdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { extname, isAbsolute, join, relative, resolve } from "node:path";
 import { createUlid, utcNow } from "../../db/dist/index.js";
 import { DecisionService, type OpenDecisionPayload } from "./decision";
 import { managerReplanFailureBrief, RESOLVE_CONFLICT_OPTION_KEY } from "./decision-brief";
@@ -3252,6 +3252,7 @@ export class Core {
         transaction.run("UPDATE inbound_uploads SET status = ?, artifact_id = ?, completed_at = ?, detected_mime = ? WHERE id = ?", quarantined ? "quarantined" : "stored", artifactId, now, payload.mime, uploadId);
         return { data: { upload_id: uploadId, artifact_id: artifactId, status: quarantined ? "quarantined" as const : "stored" as const, sha256: actualSha256, bytes: content.byteLength, mime: payload.mime }, version: 0 };
       });
+      if (!quarantined) await this.copyUploadToShared(uploadId, artifactId, upload.filename, finalPath);
       return result;
     } catch (error) {
       // The handoff is durable once the artifact row commits. If the DB
@@ -3264,6 +3265,34 @@ export class Core {
         });
       }
       throw error;
+    }
+  }
+
+  private async copyUploadToShared(uploadId: string, artifactId: string, filename: string, source: string): Promise<void> {
+    try {
+      const dir = this.options.getAdvisorSharedDir?.();
+      if (!dir) return;
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      const basenameOnly = filename.split(/[\\/]/u).at(-1) ?? "";
+      const sanitized = basenameOnly.replace(/[\\/\x00-\x1f\x7f]/gu, "").trim();
+      const clean = sanitized && sanitized !== "." && sanitized !== ".." ? sanitized : `upload-${artifactId}`;
+      const extension = extname(clean);
+      const stem = clean.slice(0, clean.length - extension.length);
+      for (let index = 1; ; index += 1) {
+        const target = join(dir, index === 1 ? clean : `${stem} (${index})${extension}`);
+        try {
+          await copyFile(source, target, constants.COPYFILE_EXCL);
+          await this.writeLane.transact((transaction) => {
+            transaction.run("UPDATE inbound_uploads SET shared_copy_path = ? WHERE id = ?", target, uploadId);
+          });
+          return;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+          throw error;
+        }
+      }
+    } catch (error) {
+      console.error(`[owl-core] Could not copy upload ${uploadId} to the Advisor shared folder`, error);
     }
   }
 
@@ -3284,8 +3313,8 @@ export class Core {
     const paths: string[] = [];
     const notes: string[] = [];
     for (const attachmentId of attachmentIds) {
-      const upload = this.db.get<{ filename: string; status: string; artifact_path: string | null }>(
-        `SELECT u.filename AS filename, u.status AS status, a.path AS artifact_path
+      const upload = this.db.get<{ filename: string; status: string; artifact_path: string | null; shared_copy_path: string | null }>(
+        `SELECT u.filename AS filename, u.status AS status, u.shared_copy_path AS shared_copy_path, a.path AS artifact_path
            FROM inbound_uploads u LEFT JOIN artifacts a ON a.id = u.artifact_id
           WHERE u.id = ?`,
         attachmentId,
@@ -3296,7 +3325,7 @@ export class Core {
         continue;
       }
       if (upload.status === "stored" && upload.artifact_path) {
-        paths.push(join(this.owlRoot, upload.artifact_path));
+        paths.push(upload.shared_copy_path && existsSync(upload.shared_copy_path) ? upload.shared_copy_path : join(this.owlRoot, upload.artifact_path));
       }
     }
     return { paths, notes };
@@ -3496,7 +3525,19 @@ export class Core {
       persona,
       "--- END OPERATOR PERSONA ---",
     ].join("\n");
-    return [base, rulesBlock, personaBlock].filter((part): part is string => part !== null).join("\n\n");
+    const folders = this.options.getAdvisorFolders?.();
+    if (folders) {
+      try { mkdirSync(folders.sharedDir, { recursive: true, mode: 0o700 }); } catch { /* keep the Advisor available */ }
+    }
+    const foldersBlock = folders ? [
+      "## Owner folders",
+      `- Shared folder: ${folders.sharedDir}`,
+      "  Files the Owner shares with you, including Slack/Discord attachments, are here. When the Owner mentions a file they put or shared without a full path, look here first. Save files meant for the Owner here, and tell the Owner the file name.",
+      "  This folder is not tracked by git; never copy its contents into a repository unless the Owner asks.",
+      `- Screenshot folder: ${folders.screenshotDir}`,
+      '  When the Owner asks you to look at a screenshot ("スクショ見て", "look at the screenshot") without a path, list the image files in this folder sorted by modification time and open the newest one. If they mention several ("the last 2 screenshots"), open that many, newest first. Do not modify or delete files here.',
+    ].join("\n") : null;
+    return [base, rulesBlock, personaBlock, foldersBlock].filter((part): part is string => part !== null).join("\n\n");
   }
 
   private advisorProcessSkillsLines(harness: "claude" | "codex"): string[] {

@@ -5,6 +5,7 @@ import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { Socket } from "node:net";
 
 import { ApiError, errorBody, humanUnexpectedMessage, newReferenceId } from "./errors.js";
+import { AdvisorFolderError } from "./advisor-folders.js";
 import { createUlid, isUlid } from "./ids.js";
 import { resolveDataDir, type ContractManifest } from "./contracts.js";
 import { configuredApiToken } from "./config.js";
@@ -2276,6 +2277,35 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   }
 
   // ---- Advisor Persona ------------------------------------------------------
+
+  if (pathname === `${API_PREFIX}/settings/advisor-folders` && method === "GET") {
+    requireOwner(request);
+    sendJson(response, 200, { request_id: requestIdValue, data: await context.core.getAdvisorFolders(), version: 0 });
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/settings/advisor-folders` && method === "PUT") {
+    requireOwner(request);
+    const cmd = commandEnvelope(await readRequestBody(request));
+    if (typeof cmd.payload.shared_dir !== "string" || typeof cmd.payload.screenshot_dir !== "string") {
+      throw new ApiError(400, "validation_error", "shared_dirとscreenshot_dirは文字列で指定してください。");
+    }
+    const result = await runCommand(context, pathname, cmd, 200, async () => {
+      try {
+        const saved = await context.core.setAdvisorFolders(cmd.payload.shared_dir as string, cmd.payload.screenshot_dir as string);
+        return { data: saved as unknown as JsonObject, version: 0 };
+      } catch (error) {
+        if (error instanceof AdvisorFolderError) {
+          throw new ApiError(422, "validation_error", error.reason === "tracked"
+            ? "共有フォルダはgitで追跡される場所には指定できません。.gitignoreで除外された場所かリポジトリの外を指定してください。"
+            : "フォルダは絶対パスで指定してください。");
+        }
+        throw error;
+      }
+    });
+    sendJson(response, 200, result);
+    return;
+  }
 
   if (pathname === `${API_PREFIX}/settings/advisor-persona` && method === "GET") {
     requireOwner(request);

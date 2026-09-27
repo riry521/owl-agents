@@ -27,6 +27,8 @@ interface StoredAppSettings {
   /** Empty, or an env:NAME reference; the key itself lives in the project .env. */
   typesafe_api_key: string;
   advisor_persona: string;
+  advisor_shared_dir: string;
+  advisor_screenshot_dir: string;
 }
 
 /** The .env variable that holds the Typesafe API key saved from the settings UI. */
@@ -65,6 +67,8 @@ const DEFAULTS: StoredAppSettings = {
   provider_models: { ...DEFAULT_PROVIDER_MODELS },
   typesafe_api_key: "",
   advisor_persona: "",
+  advisor_shared_dir: "",
+  advisor_screenshot_dir: "",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -324,7 +328,7 @@ export class AppSettingsStore {
 
   private load(): StoredAppSettings {
     if (!existsSync(this.filePath)) {
-      return { ...DEFAULTS, executor_config: { ...DEFAULTS.executor_config }, custom_providers: {}, provider_models: { ...DEFAULT_PROVIDER_MODELS }, typesafe_api_key: "", advisor_persona: "" };
+      return { ...DEFAULTS, executor_config: { ...DEFAULTS.executor_config }, custom_providers: {}, provider_models: { ...DEFAULT_PROVIDER_MODELS } };
     }
     try {
       const parsed = parseSettingsJson(readFileSync(this.filePath, "utf8"));
@@ -369,6 +373,8 @@ export class AppSettingsStore {
         : typeof parsed.advisor_persona === "string"
           ? parsed.advisor_persona
           : (() => { throw new Error("advisor_persona must be a string"); })();
+      const advisorSharedDir = parsed.advisor_shared_dir === undefined ? "" : typeof parsed.advisor_shared_dir === "string" ? parsed.advisor_shared_dir : (() => { throw new Error("advisor_shared_dir must be a string"); })();
+      const advisorScreenshotDir = parsed.advisor_screenshot_dir === undefined ? "" : typeof parsed.advisor_screenshot_dir === "string" ? parsed.advisor_screenshot_dir : (() => { throw new Error("advisor_screenshot_dir must be a string"); })();
       return {
         hybrid_mode: hybridMode,
         executor_config: { provider, model, effort, timeout_ms: timeoutMs },
@@ -376,6 +382,8 @@ export class AppSettingsStore {
         provider_models: this.mergeProviderModels(parseProviderModels(parsed.provider_models === undefined ? {} : parsed.provider_models)),
         typesafe_api_key: typesafeApiKey,
         advisor_persona: advisorPersona,
+        advisor_shared_dir: advisorSharedDir,
+        advisor_screenshot_dir: advisorScreenshotDir,
       };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -438,6 +446,17 @@ export class AppSettingsStore {
     this.settings.advisor_persona = persona;
     this.save();
     return persona;
+  }
+
+  getAdvisorSharedDir(): string { return this.settings.advisor_shared_dir; }
+  setAdvisorSharedDir(path: string): string { this.settings.advisor_shared_dir = path; this.save(); return path; }
+  getAdvisorScreenshotDir(): string { return this.settings.advisor_screenshot_dir; }
+  setAdvisorScreenshotDir(path: string): string { this.settings.advisor_screenshot_dir = path; this.save(); return path; }
+
+  setAdvisorFolders(sharedDir: string, screenshotDir: string): void {
+    this.settings.advisor_shared_dir = sharedDir;
+    this.settings.advisor_screenshot_dir = screenshotDir;
+    this.save();
   }
 
   getExecutorConfig(): ExecutorConfig {

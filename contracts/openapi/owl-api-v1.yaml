@@ -2075,6 +2075,73 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/settings/advisor-folders:
+    get:
+      operationId: getAdvisorFolders
+      summary: Get the Advisor folders
+      security:
+        - ownerBearer: []
+      responses:
+        '200':
+          description: Advisor folder settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdvisorFoldersResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    put:
+      operationId: updateAdvisorFolders
+      summary: Update the Advisor folders
+      security:
+        - ownerBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAdvisorFoldersCommand'
+      responses:
+        '200':
+          description: Advisor folders updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdvisorFoldersResponse'
+        '400':
+          description: Request validation failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid folder path or shared folder tracked by git.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/settings/integrations:
     get:
       operationId: getIntegrationSettings
@@ -5097,6 +5164,54 @@ components:
           properties:
             data:
               $ref: '#/components/schemas/ProcessSkillsSettingsData'
+    AdvisorFoldersData:
+      type: object
+      required:
+        - shared_dir
+        - screenshot_dir
+        - defaults
+        - custom
+      properties:
+        shared_dir:
+          type: string
+        screenshot_dir:
+          type: string
+        defaults:
+          type: object
+          required: [shared_dir, screenshot_dir]
+          properties:
+            shared_dir: { type: string }
+            screenshot_dir: { type: string }
+          additionalProperties: false
+        custom:
+          type: object
+          required: [shared_dir, screenshot_dir]
+          properties:
+            shared_dir: { type: boolean }
+            screenshot_dir: { type: boolean }
+          additionalProperties: false
+      additionalProperties: false
+    AdvisorFoldersResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/AdvisorFoldersData'
+    UpdateAdvisorFoldersPayload:
+      type: object
+      required: [shared_dir, screenshot_dir]
+      properties:
+        shared_dir: { type: string }
+        screenshot_dir: { type: string }
+      additionalProperties: false
+    UpdateAdvisorFoldersCommand:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+        - type: object
+          properties:
+            payload:
+              $ref: '#/components/schemas/UpdateAdvisorFoldersPayload'
     AdvisorPersonaData:
       type: object
       required:

@@ -455,6 +455,13 @@ export interface ProviderPauseView {
   readonly last_role: string | null;
 }
 
+export interface AdvisorFoldersSnapshot {
+  shared_dir: string;
+  screenshot_dir: string;
+  defaults: { shared_dir: string; screenshot_dir: string };
+  custom: { shared_dir: boolean; screenshot_dir: boolean };
+}
+
 export interface CorePort {
   readonly version: string;
   readonly ready: boolean;
@@ -595,6 +602,8 @@ export interface CorePort {
   setTypesafeApiKey(key: string): Promise<string>;
   getAdvisorPersona(): Promise<string>;
   setAdvisorPersona(persona: string): Promise<string>;
+  getAdvisorFolders(): Promise<AdvisorFoldersSnapshot>;
+  setAdvisorFolders(sharedDir: string, screenshotDir: string): Promise<AdvisorFoldersSnapshot>;
   clearConversation(conversationId: string): Promise<{ cleared: boolean }>;
   getActiveConversation(): Promise<{ conversation_id: string }>;
   listProviders(): Promise<DetectedProvider[]>;
@@ -638,6 +647,8 @@ export interface CreateCoreOptions {
   providerClient?: unknown;
   getTypesafeApiKey?: () => string;
   getAdvisorPersona?: () => string;
+  getAdvisorFolders?: () => { sharedDir: string; screenshotDir: string } | null;
+  getAdvisorSharedDir?: () => string | null;
   getProviderHarness?: (providerId: string) => "claude" | "codex" | undefined;
   /** Environment and CLI paths for Hybrid Executor processes, forwarded to @owl/core. */
   executorRuntime?: () => Promise<{

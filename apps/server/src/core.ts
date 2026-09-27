@@ -66,6 +66,7 @@ import type {
 
 import { IntegrationStore } from "./integration-store.js";
 import { AppSettingsStore, type CustomProviderConfig } from "./app-settings-store.js";
+import { AdvisorFolderError, advisorFolderDefaults, ensureAdvisorSharedDir, isGitIgnoredDirectory, normalizeAdvisorFolder } from "./advisor-folders.js";
 import { detectProcessSkillsPack } from "../../../packages/core/dist/process-skills-pack.js";
 import {
   DEFAULT_OWNER_LANGUAGE,
@@ -264,6 +265,8 @@ export class MemoryCore implements CorePort {
   private executorConfig: ExecutorSettingsConfig = { provider: "claude", model: DEFAULT_HARNESS_MODELS.claude, effort: "high", timeout_ms: DEFAULT_AGENT_WALL_TIMEOUT_MS };
   private processSkillsSettings: ProcessSkillsSettingsInput = { enabled: true, path: null };
   private advisorPersona = "";
+  private advisorSharedDir = "";
+  private advisorScreenshotDir = "";
   private modelSettings: { version: number; roles: RoleModelSetting[] } = {
     version: 0,
     roles: DEFAULT_MODEL_SETTINGS.map((role) => ({ ...role })),
@@ -888,6 +891,24 @@ export class MemoryCore implements CorePort {
     return persona;
   }
 
+  async getAdvisorFolders(): Promise<import("./types.js").AdvisorFoldersSnapshot> {
+    const defaults = advisorFolderDefaults(this.options.dataDir ?? resolveDataDir(this.options.owlRoot ?? process.cwd()));
+    return { shared_dir: this.advisorSharedDir || defaults.sharedDir, screenshot_dir: this.advisorScreenshotDir || defaults.screenshotDir,
+      defaults: { shared_dir: defaults.sharedDir, screenshot_dir: defaults.screenshotDir },
+      custom: { shared_dir: !!this.advisorSharedDir, screenshot_dir: !!this.advisorScreenshotDir } };
+  }
+
+  async setAdvisorFolders(sharedDir: string, screenshotDir: string): Promise<import("./types.js").AdvisorFoldersSnapshot> {
+    const shared = normalizeAdvisorFolder(sharedDir);
+    const screenshot = normalizeAdvisorFolder(screenshotDir);
+    const defaults = advisorFolderDefaults(this.options.dataDir ?? resolveDataDir(this.options.owlRoot ?? process.cwd()));
+    if (!isGitIgnoredDirectory(shared || defaults.sharedDir)) throw new AdvisorFolderError("tracked");
+    ensureAdvisorSharedDir(shared || defaults.sharedDir);
+    this.advisorSharedDir = shared;
+    this.advisorScreenshotDir = screenshot;
+    return this.getAdvisorFolders();
+  }
+
   async clearConversation(conversationId: string): Promise<{ cleared: boolean }> {
     const existed = this.conversationMessages.has(conversationId);
     if (existed) {
@@ -1395,7 +1416,7 @@ export class ExternalCoreAdapter implements CorePort {
     private readonly core: ExternalCore,
     private readonly db: unknown,
     owlRoot: string,
-    dataDir: string,
+    private readonly dataDir: string,
     appSettings?: AppSettingsStore,
     options: { detectProviderAvailability?: ProviderAvailabilityDetector } = {},
   ) {
@@ -2089,6 +2110,36 @@ export class ExternalCoreAdapter implements CorePort {
     return saved;
   }
 
+  async getAdvisorFolders(): Promise<import("./types.js").AdvisorFoldersSnapshot> {
+    const defaults = advisorFolderDefaults(this.dataDir);
+    const shared = this.appSettings.getAdvisorSharedDir();
+    const screenshot = this.appSettings.getAdvisorScreenshotDir();
+    return {
+      shared_dir: shared || defaults.sharedDir,
+      screenshot_dir: screenshot || defaults.screenshotDir,
+      defaults: { shared_dir: defaults.sharedDir, screenshot_dir: defaults.screenshotDir },
+      custom: { shared_dir: !!shared, screenshot_dir: !!screenshot },
+    };
+  }
+
+  async setAdvisorFolders(sharedDir: string, screenshotDir: string): Promise<import("./types.js").AdvisorFoldersSnapshot> {
+    const previous = await this.getAdvisorFolders();
+    const shared = normalizeAdvisorFolder(sharedDir);
+    const screenshot = normalizeAdvisorFolder(screenshotDir);
+    const defaults = advisorFolderDefaults(this.dataDir);
+    const effectiveShared = shared || defaults.sharedDir;
+    if (!isGitIgnoredDirectory(effectiveShared)) throw new AdvisorFolderError("tracked");
+    ensureAdvisorSharedDir(effectiveShared);
+    this.appSettings.setAdvisorFolders(shared, screenshot);
+    const saved = await this.getAdvisorFolders();
+    if ((saved.shared_dir !== previous.shared_dir || saved.screenshot_dir !== previous.screenshot_dir) && typeof this.core.restartAdvisorSession === "function") {
+      const ownerId = process.env.OWL_OWNER_ID?.trim() || "owner:default";
+      try { await this.core.restartAdvisorSession(ownerId); }
+      catch (error) { throw externalError(error, "restartAdvisorSession after folder update"); }
+    }
+    return saved;
+  }
+
   async clearConversation(conversationId: string): Promise<{ cleared: boolean }> {
     try {
       return await this.core.clearConversation(conversationId);
@@ -2446,6 +2497,13 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
     ...options,
     getTypesafeApiKey: () => appSettings.getTypesafeApiKey(),
     getAdvisorPersona: () => appSettings.getAdvisorPersona(),
+    getAdvisorFolders: () => {
+      const defaults = advisorFolderDefaults(options.dataDir ?? resolveDataDir(options.owlRoot ?? process.cwd()));
+      const sharedDir = appSettings.getAdvisorSharedDir() || defaults.sharedDir;
+      try { ensureAdvisorSharedDir(sharedDir); } catch { /* prompt construction remains available */ }
+      return { sharedDir, screenshotDir: appSettings.getAdvisorScreenshotDir() || defaults.screenshotDir };
+    },
+    getAdvisorSharedDir: () => appSettings.getAdvisorSharedDir() || advisorFolderDefaults(options.dataDir ?? resolveDataDir(options.owlRoot ?? process.cwd())).sharedDir,
     knownModels: (harness: "claude" | "codex"): ReadonlySet<string> | undefined =>
       harness === "codex" ? codexKnownModels() : undefined,
     getProviderHarness: (providerId: string): "claude" | "codex" | undefined => {

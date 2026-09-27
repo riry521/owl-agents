@@ -367,6 +367,19 @@ export interface AdvisorSessionInfo {
   resumed_count?: number;
 }
 
+/** GET/PUT /api/v1/settings/advisor-folders. */
+export interface AdvisorFolders {
+  shared_dir: string;
+  screenshot_dir: string;
+  defaults: { shared_dir: string; screenshot_dir: string };
+  custom: { shared_dir: boolean; screenshot_dir: boolean };
+}
+
+export interface AdvisorFoldersInput {
+  shared_dir: string;
+  screenshot_dir: string;
+}
+
 /** Hybrid Worker phase (set only on Hybrid Worker runs). */
 export type HybridPhase = 'plan' | 'executing' | 'verdict';
 

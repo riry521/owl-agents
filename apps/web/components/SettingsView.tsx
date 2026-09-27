@@ -1,8 +1,8 @@
 'use client';
 
 import { Fragment, type FormEvent, useEffect, useState } from 'react';
-import { getModelSettings, updateModelSettings, getIntegrations, saveIntegration, testIntegration, deleteIntegration, getHybridMode, setHybridMode, getExecutorConfig, setExecutorConfig, listProviders, createProvider, deleteProvider, testProvider, saveProvider, getProviderModels, setProviderModels as setProviderModelsApi, getTypesafeApiKey, setTypesafeApiKey, getAdvisorPersona, setAdvisorPersona, getOwnerLanguage, setOwnerLanguage } from '@/lib/api-client';
-import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ExecutorConfig, ProviderInfo, SaveProviderPayload } from '@/lib/types';
+import { getModelSettings, updateModelSettings, getIntegrations, saveIntegration, testIntegration, deleteIntegration, getHybridMode, setHybridMode, getExecutorConfig, setExecutorConfig, listProviders, createProvider, deleteProvider, testProvider, saveProvider, getProviderModels, setProviderModels as setProviderModelsApi, getTypesafeApiKey, setTypesafeApiKey, getAdvisorPersona, setAdvisorPersona, getAdvisorFolders, putAdvisorFolders, getOwnerLanguage, setOwnerLanguage, ApiRequestError } from '@/lib/api-client';
+import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ExecutorConfig, ProviderInfo, SaveProviderPayload, AdvisorFolders } from '@/lib/types';
 import { roleDisplayName } from '@/lib/format';
 import { useLocale, type Locale } from '@/lib/i18n';
 import { humanizeError } from '@/lib/settings-errors';
@@ -413,6 +413,7 @@ export function SettingsView() {
       </form>
       <OwnerLanguageSection />
       <AdvisorPersonaSection />
+      <AdvisorFoldersSection />
       <ProviderManagementSection providerModels={providerModels} onModelsUpdate={(id, models) => setProviderModels(prev => ({ ...prev, [id]: models }))} />
       <IntegrationsSection />
       <TypesafeSection />
@@ -584,6 +585,161 @@ function AdvisorPersonaSection() {
               <div className="btn-row">
                 <button type="button" className="btn btn--primary btn--small" onClick={handleSave} disabled={saving}>
                   {saving ? t('common.saving') : t('settings.advisorPersonaSave')}
+                </button>
+                {notice && <span className="note note--success">{notice}</span>}
+              </div>
+            </>
+          )}
+          {error && <div className="error" style={{ marginTop: '12px' }}>{error}</div>}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// Exported (unlike the other Section helpers in this file) so tests can render it in isolation.
+export function AdvisorFoldersSection() {
+  const { t } = useLocale();
+  const [open, setOpen] = useState(false);
+  const [folders, setFolders] = useState<AdvisorFolders | null>(null);
+  const [sharedDir, setSharedDir] = useState('');
+  const [screenshotDir, setScreenshotDir] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void getAdvisorFolders()
+      .then((value) => {
+        if (!alive) return;
+        setFolders(value);
+        setSharedDir(value.shared_dir);
+        setScreenshotDir(value.screenshot_dir);
+      })
+      .catch(() => {
+        if (alive) setError(t('settings.advisorFoldersError'));
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [t]);
+
+  async function handleSave() {
+    setSaving(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const saved = await putAdvisorFolders({ shared_dir: sharedDir.trim(), screenshot_dir: screenshotDir.trim() });
+      setFolders(saved);
+      setSharedDir(saved.shared_dir);
+      setScreenshotDir(saved.screenshot_dir);
+      setNotice(t('settings.advisorFoldersSaved'));
+    } catch (err) {
+      // The server already localizes validation messages (422); surface those verbatim.
+      setError(err instanceof ApiRequestError && err.code === 'validation_error' ? err.rawMessage : humanizeError(err, t));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const changed = folders !== null && (sharedDir.trim() !== folders.shared_dir || screenshotDir.trim() !== folders.screenshot_dir);
+
+  return (
+    <section className="panel advisor-persona-panel" aria-labelledby="sec-advisor-folders">
+      <button
+        type="button"
+        className="settings-disclosure"
+        aria-expanded={open}
+        aria-controls="advisor-folders-panel"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="settings-disclosure__info">
+          <span className="settings-disclosure__icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M22 19a2 2 0 01-2 2H4a2 2 0 01-2-2V5a2 2 0 012-2h5l2 3h9a2 2 0 012 2z" />
+            </svg>
+          </span>
+          <span className="settings-disclosure__copy">
+            <strong id="sec-advisor-folders">{t('settings.advisorFolders')}</strong>
+            <small>{t('settings.advisorFoldersDescription')}</small>
+          </span>
+        </span>
+        <span className="settings-disclosure__right">
+          <svg
+            className={`settings-disclosure__chevron ${open ? 'settings-disclosure__chevron--open' : ''}`}
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            aria-label={open ? t('settings.advisorFoldersClose') : t('settings.advisorFoldersOpen')}
+          >
+            <path d="M6 9l6 6 6-6" />
+          </svg>
+        </span>
+      </button>
+
+      {open && (
+        <div id="advisor-folders-panel" className="settings-disclosure__body" aria-busy={loading || saving}>
+          {loading ? (
+            <p className="empty">{t('common.loading')}</p>
+          ) : (
+            <>
+              <label className="form-field">
+                <span>{t('settings.advisorFoldersSharedLabel')}</span>
+                <input
+                  className="input"
+                  style={{ fontFamily: 'monospace' }}
+                  value={sharedDir}
+                  onChange={(ev) => setSharedDir(ev.target.value)}
+                  placeholder={folders?.defaults.shared_dir ?? ''}
+                  maxLength={4096}
+                  disabled={saving}
+                />
+              </label>
+              <p className="settings-disclosure__hint">{t('settings.advisorFoldersSharedHint')}</p>
+              <div className="btn-row">
+                {folders?.custom.shared_dir ? (
+                  <button type="button" className="btn btn--small" onClick={() => setSharedDir('')} disabled={saving}>
+                    {t('settings.advisorFoldersReset')}
+                  </button>
+                ) : (
+                  <span className="badge badge--gray">{t('settings.advisorFoldersDefaultBadge')}</span>
+                )}
+              </div>
+
+              <label className="form-field" style={{ marginTop: '16px' }}>
+                <span>{t('settings.advisorFoldersScreenshotLabel')}</span>
+                <input
+                  className="input"
+                  style={{ fontFamily: 'monospace' }}
+                  value={screenshotDir}
+                  onChange={(ev) => setScreenshotDir(ev.target.value)}
+                  placeholder={folders?.defaults.screenshot_dir ?? ''}
+                  maxLength={4096}
+                  disabled={saving}
+                />
+              </label>
+              <p className="settings-disclosure__hint">{t('settings.advisorFoldersScreenshotHint')}</p>
+              <div className="btn-row">
+                {folders?.custom.screenshot_dir ? (
+                  <button type="button" className="btn btn--small" onClick={() => setScreenshotDir('')} disabled={saving}>
+                    {t('settings.advisorFoldersReset')}
+                  </button>
+                ) : (
+                  <span className="badge badge--gray">{t('settings.advisorFoldersDefaultBadge')}</span>
+                )}
+              </div>
+
+              <div className="btn-row" style={{ marginTop: '16px' }}>
+                <button type="button" className="btn btn--primary btn--small" onClick={handleSave} disabled={saving || !changed}>
+                  {saving ? t('common.saving') : t('settings.advisorFoldersSave')}
                 </button>
                 {notice && <span className="note note--success">{notice}</span>}
               </div>

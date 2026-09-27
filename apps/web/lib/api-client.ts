@@ -49,6 +49,8 @@ import type {
   ProviderPauseView,
   SaveProviderPayload,
   AdvisorSessionInfo,
+  AdvisorFolders,
+  AdvisorFoldersInput,
   SkillActivity,
   SkillListFilter,
   SkillListItem,
@@ -1109,6 +1111,18 @@ export async function getAdvisorPersona(): Promise<string> {
 export async function setAdvisorPersona(persona: string): Promise<string> {
   const response = await command<{ advisor_persona: string }>('/settings/advisor-persona', { advisor_persona: persona }, 0, 'PUT');
   return response.data.advisor_persona;
+}
+
+// ---- Advisor Folders --------------------------------------------------------
+
+export async function getAdvisorFolders(): Promise<AdvisorFolders> {
+  const response = await requestJson<ApiEnvelope<AdvisorFolders>>('/settings/advisor-folders');
+  return response.data;
+}
+
+export async function putAdvisorFolders(input: AdvisorFoldersInput): Promise<AdvisorFolders> {
+  const response = await command<AdvisorFolders>('/settings/advisor-folders', input, 0, 'PUT');
+  return response.data;
 }
 
 // ---- Provider Management ----

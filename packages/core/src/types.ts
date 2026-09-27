@@ -573,6 +573,8 @@ export interface CoreOptions {
   }) => Promise<unknown>;
   /** Returns the operator-configured Advisor persona, or an empty string for the default. */
   readonly getAdvisorPersona?: () => string;
+  readonly getAdvisorFolders?: () => { sharedDir: string; screenshotDir: string } | null;
+  readonly getAdvisorSharedDir?: () => string | null;
   /** Resolves a configured provider id to its harness without guessing between harnesses. */
   readonly getProviderHarness?: (providerId: string) => "claude" | "codex" | undefined;
   /**
