@@ -22,6 +22,7 @@ import {
 } from "./types.js";
 import { buildHealthArgv, buildWorkArgv } from "./argv.js";
 import { ProviderError } from "./errors.js";
+import { agentUserInstructionEnv } from "@owl/shared";
 
 export interface ProviderExecutionBaseRequest {
   readonly adapter: AdapterId;
@@ -57,13 +58,19 @@ export async function executeResolvedProvider(
   request: Omit<ProviderWorkRequest, "adapter" | "lockPath" | "allowedExecutableRoot">,
 ): Promise<ProviderExecutionResult> {
   const role = request.role ?? "worker";
-  const argv = buildWorkArgv(provider, request.model, request.prompt, { role, owlRoot: request.env.OWL_ROOT ?? process.env.OWL_ROOT ?? process.cwd() });
+  const instructionAdapter = provider.adapter === "claude-cli/v1" ? "claude" : "codex";
+  const argv = buildWorkArgv(provider, request.model, request.prompt, {
+    role,
+    owlRoot: request.env.OWL_ROOT ?? process.env.OWL_ROOT ?? process.cwd(),
+    env: request.env,
+  });
   const processResult = await spawnProvider({
     adapter: provider.adapter,
     argv,
     cwd: request.cwd,
     env: {
       ...request.env,
+      ...agentUserInstructionEnv(instructionAdapter, request.env),
       OWL_AGENT_ROLE: role,
       OWL_AGENT_RUN_ID: request.invocationId,
       OWL_AGENT_CWD: request.cwd,

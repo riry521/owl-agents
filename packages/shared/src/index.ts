@@ -22,7 +22,7 @@ export {
 export { WORK_SUMMARY_SECTIONS, workSummaryInstruction, workSummaryLabel, workSummarySkeleton, type WorkSummarySection } from "./work-summary.js";
 export { GUARD_COMMAND_KEYS, GUARD_CONTENT_KEYS, GUARD_NAMED_TOOLS, GUARD_PATH_KEYS, guardChecksToolCall } from "./guard-inputs.js";
 export { GUARD_TOKEN_FILE_ENV, type GuardTokenAgent, type GuardTokenIssuer, type GuardTokenLease } from "./guard-token.js";
-export { buildAgentPermissionArgs, buildPreToolUseHookArgs, RESEARCH_CAPTURE_ROLES, type AgentPermissionAdapter, type AgentPermissionRole, type AgentGuardConfiguration } from "./permission-args.js";
+export { agentUserInstructionEnv, buildAgentPermissionArgs, buildPreToolUseHookArgs, RESEARCH_CAPTURE_ROLES, type AgentPermissionAdapter, type AgentPermissionRole, type AgentGuardConfiguration } from "./permission-args.js";
 export {
   extractWebResearchCapture,
   hasAuthPasswordForm,

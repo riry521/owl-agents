@@ -3,7 +3,7 @@
 // and start arguments. The drivers are exercised against fake harness
 // executables written to a temp dir; no real Codex or Claude process is started.
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -44,6 +44,7 @@ const fs = require("node:fs");
 const readline = require("node:readline");
 const log = process.env.FAKE_LOG;
 const scenario = process.env.FAKE_TURN ?? "items";
+if (process.env.FAKE_START_LOG) fs.writeFileSync(process.env.FAKE_START_LOG, JSON.stringify({ args: process.argv.slice(2), codexHome: process.env.CODEX_HOME ?? null }));
 let initializeAnswered = false;
 let initialized = false;
 let pendingTurn = null;
@@ -158,21 +159,37 @@ async function createCodexDriver(t, { env = {}, providerSessionId } = {}) {
   const root = await mkdtemp(join(tmpdir(), "owl-codex-protocol-"));
   const executable = await writeExecutable(root, "fake-codex", FAKE_CODEX_APP_SERVER);
   const log = join(root, "received.jsonl");
+  const startLog = join(root, "start.json");
+  const requestEnv = {
+    ...baseEnv,
+    FAKE_LOG: log,
+    FAKE_START_LOG: startLog,
+    CODEX_HOME: env.CODEX_HOME ?? join(root, "user-codex-home"),
+    ...env,
+  };
   const driver = await CodexSessionDriver.create({
     adapter: "codex",
     role: "advisor",
     model: "gpt-test",
     cwd: root,
-    env: { ...baseEnv, FAKE_LOG: log, ...env },
+    env: requestEnv,
     system_prompt: "advisor system prompt",
     ...(providerSessionId ? { provider_session_id: providerSessionId } : {}),
   }, executable);
   t.after(() => driver.stop("test", 1000));
-  return { driver, log };
+  return { driver, log, startLog, requestEnv };
+}
+
+async function assertCodexAppServerExclusions(startLog, requestEnv) {
+  const { args, codexHome } = JSON.parse(await readFile(startLog, "utf8"));
+  const configs = args.flatMap((arg, index) => arg === "--config" ? [args[index + 1]] : []);
+  assert.ok(configs.some((config) => config.startsWith("marketplaces.openai-bundled.source=")));
+  assert.notEqual(codexHome, requestEnv.CODEX_HOME);
 }
 
 test("Codex app-server driver sends initialize and initialized before thread/start", async (t) => {
-  const { driver, log } = await createCodexDriver(t);
+  const { driver, log, startLog, requestEnv } = await createCodexDriver(t);
+  await assertCodexAppServerExclusions(startLog, requestEnv);
   assert.equal(driver.provider_session_id, "thread-fresh");
   const [ready] = await collectEvents(driver, () => true);
   assert.deepEqual(ready, { type: "session.ready", provider_session_id: "thread-fresh", pid: driver.pid });
@@ -191,6 +208,7 @@ test("Codex app-server driver sends initialize and initialized before thread/sta
 
 test("Codex thread/resume carries sandbox and developerInstructions, and a server that rejects them fails as resume-unsupported", async (t) => {
   const accepted = await createCodexDriver(t, { providerSessionId: "thread-old" });
+  await assertCodexAppServerExclusions(accepted.startLog, accepted.requestEnv);
   assert.equal(accepted.driver.provider_session_id, "thread-old");
   const acceptedResume = (await readLog(accepted.log)).filter((message) => message.method === "thread/resume");
   assert.equal(acceptedResume.length, 1);
@@ -293,6 +311,11 @@ test("a Codex delta without itemId is a protocol error", async (t) => {
 const FAKE_CLAUDE = `#!/usr/bin/env node
 const readline = require("node:readline");
 if (process.env.FAKE_ARGV_LOG) require("node:fs").writeFileSync(process.env.FAKE_ARGV_LOG, JSON.stringify(process.argv.slice(2)));
+if (process.env.FAKE_START_LOG) require("node:fs").writeFileSync(process.env.FAKE_START_LOG, JSON.stringify({
+  args: process.argv.slice(2),
+  env: { HOME: process.env.HOME ?? null, CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? null },
+  cwd: process.cwd(),
+}));
 const turns = JSON.parse(process.env.FAKE_TURNS);
 let index = 0;
 readline.createInterface({ input: process.stdin }).on("line", () => {
@@ -304,20 +327,30 @@ readline.createInterface({ input: process.stdin }).on("line", () => {
 `;
 
 async function createClaudeDriver(t, turns, request = {}) {
+  const { env = {}, ...driverRequest } = request;
   const root = await mkdtemp(join(tmpdir(), "owl-claude-protocol-"));
   const executable = await writeExecutable(root, "fake-claude", FAKE_CLAUDE);
   const argvLog = join(root, "argv.json");
+  const startLog = join(root, "start.json");
   const driver = await AdvisorSessionDriver.create({
     adapter: "claude",
     role: "advisor",
     model: "claude-opus-5",
     cwd: root,
-    env: { ...baseEnv, FAKE_TURNS: JSON.stringify(turns), FAKE_ARGV_LOG: argvLog },
+    env: {
+      ...baseEnv,
+      FAKE_TURNS: JSON.stringify(turns),
+      FAKE_ARGV_LOG: argvLog,
+      FAKE_START_LOG: startLog,
+      ...env,
+    },
     system_prompt: "test",
-    ...request,
+    ...driverRequest,
   }, executable);
   t.after(() => driver.stop("test", 1000));
   driver.argvLog = argvLog;
+  driver.startLog = startLog;
+  driver.cwd = root;
   return driver;
 }
 
@@ -388,11 +421,60 @@ function optionValue(argv, flag) {
   return index === -1 ? undefined : argv[index + 1];
 }
 
+test("Claude Advisor excludes CLAUDE.md from the child config directory or child HOME", async (t) => {
+  const childHome = join(tmpdir(), "owl-claude-protocol-child-home");
+  const childConfigDir = join(tmpdir(), "owl-claude-protocol-child-config");
+  const cases = [
+    {
+      name: "uses the child's CLAUDE_CONFIG_DIR",
+      env: { HOME: childHome, CLAUDE_CONFIG_DIR: childConfigDir },
+      expectedPath: join(childConfigDir, "CLAUDE.md"),
+      loggedConfigDir: childConfigDir,
+    },
+    {
+      name: "falls back to the child's HOME",
+      env: { HOME: childHome },
+      expectedPath: join(childHome, ".claude", "CLAUDE.md"),
+      loggedConfigDir: null,
+    },
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async (subtest) => {
+      const driver = await createClaudeDriver(
+        subtest,
+        [[{ type: "result", subtype: "success", is_error: false, result: "ok" }]],
+        { env: scenario.env },
+      );
+      await driver.send({ turn_id: "turn-env", text: "hello" });
+      await collectEvents(driver, settled);
+      const start = JSON.parse(await readFile(driver.startLog, "utf8"));
+      const settings = JSON.parse(optionValue(start.args, "--settings"));
+
+      assert.equal(start.env.HOME, childHome);
+      assert.equal(start.env.CLAUDE_CONFIG_DIR, scenario.loggedConfigDir);
+      assert.equal(start.cwd, await realpath(driver.cwd));
+      assert.deepEqual(settings.claudeMdExcludes, [scenario.expectedPath]);
+      assert.equal(optionValue(start.args, "--input-format"), "stream-json");
+      assert.ok(optionValue(start.args, "--session-id"));
+      assert.equal(start.args.includes("--resume"), false);
+    });
+  }
+});
+
 test("Claude Advisor passes the configured model both on a fresh start and on resume", async (t) => {
   const fresh = await createClaudeDriver(t, [[{ type: "result", subtype: "success", is_error: false, result: "ok" }]]);
   await fresh.send({ turn_id: "turn-fresh", text: "hello" });
   await collectEvents(fresh, settled);
   const freshArgv = JSON.parse(await readFile(fresh.argvLog, "utf8"));
+  const freshSettings = freshArgv.flatMap((arg, index) => arg === "--settings" ? [freshArgv[index + 1]] : []);
+  assert.equal(freshSettings.length, 1);
+  const freshSettingsJson = JSON.parse(freshSettings[0]);
+  assert.deepEqual(freshSettingsJson.claudeMdExcludes, [join(baseEnv.HOME, ".claude", "CLAUDE.md")]);
+  assert.ok(freshSettingsJson.hooks.PreToolUse);
+  assert.equal(optionValue(freshArgv, "--input-format"), "stream-json");
+  assert.equal(optionValue(freshArgv, "--output-format"), "stream-json");
+  assert.equal(optionValue(freshArgv, "--append-system-prompt"), "test");
   assert.equal(optionValue(freshArgv, "--model"), "claude-opus-5");
   assert.ok(optionValue(freshArgv, "--session-id"));
   assert.equal(freshArgv.includes("--resume"), false);
@@ -405,6 +487,14 @@ test("Claude Advisor passes the configured model both on a fresh start and on re
   await resumed.send({ turn_id: "turn-resumed", text: "hello" });
   await collectEvents(resumed, settled);
   const resumedArgv = JSON.parse(await readFile(resumed.argvLog, "utf8"));
+  const resumedSettings = resumedArgv.flatMap((arg, index) => arg === "--settings" ? [resumedArgv[index + 1]] : []);
+  assert.equal(resumedSettings.length, 1);
+  const resumedSettingsJson = JSON.parse(resumedSettings[0]);
+  assert.deepEqual(resumedSettingsJson.claudeMdExcludes, [join(baseEnv.HOME, ".claude", "CLAUDE.md")]);
+  assert.ok(resumedSettingsJson.hooks.PreToolUse);
+  assert.equal(optionValue(resumedArgv, "--input-format"), "stream-json");
+  assert.equal(optionValue(resumedArgv, "--output-format"), "stream-json");
+  assert.equal(optionValue(resumedArgv, "--append-system-prompt"), "test");
   assert.equal(optionValue(resumedArgv, "--resume"), "saved-session");
   assert.equal(optionValue(resumedArgv, "--model"), "claude-sonnet-5");
   assert.equal(resumedArgv.includes("--session-id"), false);

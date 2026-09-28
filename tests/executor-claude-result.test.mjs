@@ -15,14 +15,16 @@ function executorTask(subtaskId, instruction, workspaceDir, task = {}) {
   };
 }
 
-async function fakeClaude(root, resultJson) {
+async function fakeClaude(root, resultJson, captureArgs = false) {
   const executable = join(root, "claude");
   await writeFile(executable, `#!/usr/bin/env node
 let prompt = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { prompt += chunk; });
 process.stdin.on("end", () => {
-  process.stdout.write(${JSON.stringify(JSON.stringify(resultJson))});
+  const result = ${JSON.stringify(resultJson)};
+  if (${captureArgs}) result.result = JSON.stringify({ result: result.result, args: process.argv.slice(2) });
+  process.stdout.write(JSON.stringify(result));
 });
 `);
   await chmod(executable, 0o755);
@@ -72,6 +74,28 @@ test("a normal Claude Executor result still succeeds", async () => {
     ));
   assert.equal(result.success, true);
   assert.equal(result.output, "all good");
+});
+
+test("Claude Executor keeps the hook settings and user instruction exclusions in one settings argument", async () => {
+  const root = await mkdtemp(join(tmpdir(), "owl-executor-claude-argv-"));
+  const executable = await fakeClaude(root, { type: "result", subtype: "success", result: "captured" }, true);
+  const runtimeEnv = {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    HOME: root,
+    CLAUDE_CONFIG_DIR: join(root, "claude-config"),
+  };
+  const result = await runExecutor(
+    executorTask("claude-argv", "inspect argv", root),
+    { provider: "claude", model: "claude-sonnet-5", timeout_ms: 1000 },
+    {},
+    { owlRoot: process.cwd(), env: runtimeEnv, executables: { claude: executable } },
+  );
+  assert.equal(result.success, true, result.output);
+  const captured = JSON.parse(result.output);
+  assert.equal(captured.result, "captured");
+  const settingsArgs = captured.args.flatMap((arg, index, args) => arg === "--settings" ? [args[index + 1]] : []);
+  assert.equal(settingsArgs.length, 1);
+  assert.ok(JSON.parse(settingsArgs[0]).claudeMdExcludes);
 });
 
 test("the Executor process receives its run id and subtask id as environment variables", async () => {

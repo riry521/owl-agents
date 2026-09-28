@@ -205,6 +205,7 @@ function buildStartArgv(
     "--verbose",
     ...buildAgentPermissionArgs("advisor", "claude", {
       owlRoot: request.env.OWL_ROOT ?? process.env.OWL_ROOT ?? process.cwd(),
+      env: request.env,
     }),
   ];
   if (request.provider_session_id) {

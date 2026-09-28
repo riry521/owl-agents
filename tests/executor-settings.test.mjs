@@ -6,9 +6,10 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { Core } from "../packages/core/dist/index.js";
-import { runExecutor } from "../packages/core/dist/executor.js";
+import { defaultExecutorRuntime, runExecutor } from "../packages/core/dist/executor.js";
 import { MINIMAL_CODE_RULES, WORKING_STYLE_RULES } from "../packages/shared/dist/index.js";
 import { createUlid, openDatabase } from "../packages/db/dist/index.js";
+import { buildWorkArgv } from "../packages/providers/dist/index.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -59,6 +60,76 @@ test("Executor accepts provider IDs from the Web UI and stores CLI harness IDs",
   }
 });
 
+test("default Executor runtime carries provider config roots into the child environment", () => {
+  const previous = {
+    CODEX_HOME: process.env.CODEX_HOME,
+    CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
+  };
+  process.env.CODEX_HOME = "/tmp/owl-test-codex-home";
+  process.env.CLAUDE_CONFIG_DIR = "/tmp/owl-test-claude-config";
+  try {
+    const env = defaultExecutorRuntime().env;
+    assert.equal(env.CODEX_HOME, process.env.CODEX_HOME);
+    assert.equal(env.CLAUDE_CONFIG_DIR, process.env.CLAUDE_CONFIG_DIR);
+  } finally {
+    if (previous.CODEX_HOME === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previous.CODEX_HOME;
+    if (previous.CLAUDE_CONFIG_DIR === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous.CLAUDE_CONFIG_DIR;
+  }
+});
+
+function provider(adapter) {
+  return {
+    adapter,
+    adapterVersion: "test-version",
+    logicalProvider: adapter === "claude-cli/v1" ? "claude" : "codex",
+    contractVersion: "1.0.0",
+    executablePath: "/usr/local/bin/agent",
+    executableSha256: "test-hash",
+    lockPath: "/tmp/provider-lock.json",
+  };
+}
+
+test("Claude provider argv keeps its hook and adds user instruction exclusions in one settings argument", () => {
+  const args = buildWorkArgv(provider("claude-cli/v1"), "claude-sonnet-5", "work", {
+    owlRoot: process.cwd(),
+    env: { HOME: "/tmp/owl-provider-home", CLAUDE_CONFIG_DIR: "/tmp/owl-provider-claude" },
+  });
+  const settingsArgs = args.flatMap((arg, index) => arg === "--settings" ? [args[index + 1]] : []);
+  assert.equal(settingsArgs.length, 1);
+  assert.ok(JSON.parse(settingsArgs[0]).claudeMdExcludes);
+});
+
+test("Codex provider argv adds the bundled marketplace exclusion config", () => {
+  const args = buildWorkArgv(provider("codex-cli/v1"), "gpt-6-sol", "work", {
+    owlRoot: process.cwd(),
+    env: { HOME: "/tmp/owl-provider-home", CODEX_HOME: "/tmp/owl-provider-codex" },
+  });
+  assert.ok(args.includes("--sandbox"));
+  assert.ok(args.some((arg) => arg.startsWith("marketplaces.openai-bundled.source=")));
+});
+
+test("Codex provider resume argv uses sandbox_mode config instead of --sandbox", () => {
+  const args = buildWorkArgv(provider("codex-cli/v1"), "gpt-6-sol", "Continue", {
+    owlRoot: process.cwd(),
+    env: { HOME: "/tmp/owl-provider-home", CODEX_HOME: "/tmp/owl-provider-codex" },
+    resume: true,
+    sessionId: "saved-codex-session",
+  });
+  assert.deepEqual(args.slice(1, 4), ["exec", "resume", "--json"]);
+  assert.deepEqual(args.slice(args.indexOf("saved-codex-session")), ["saved-codex-session", "--", "Continue"]);
+  assert.equal(args.includes("--sandbox"), false);
+  assert.ok(args.includes('sandbox_mode="danger-full-access"'));
+});
+
+test("Codex provider resume argv requires a session ID", () => {
+  assert.throws(() => buildWorkArgv(provider("codex-cli/v1"), "gpt-6-sol", "Continue", {
+    owlRoot: process.cwd(),
+    resume: true,
+  }), TypeError);
+});
+
 test("Codex Executor passes xhigh effort to the CLI", async () => {
   const root = await mkdtemp(join(tmpdir(), "owl-executor-effort-"));
   const executable = join(root, "codex");
@@ -90,6 +161,66 @@ process.stdin.on("end", () => {
     if (previousPath === undefined) delete process.env.PATH;
     else process.env.PATH = previousPath;
   }
+});
+
+async function captureExecutorInvocation(provider, runtimeEnv) {
+  const root = await mkdtemp(join(tmpdir(), `owl-executor-${provider}-argv-`));
+  const executable = join(root, provider);
+  await writeFile(executable, `#!/usr/bin/env node
+process.stdin.resume();
+process.stdin.on("end", () => {
+  const invocation = JSON.stringify({ args: process.argv.slice(2), codexHome: process.env.CODEX_HOME ?? null });
+  if (${JSON.stringify(provider)} === "codex") {
+    process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: invocation } }) + "\\n");
+  } else {
+    process.stdout.write(JSON.stringify({ type: "result", result: invocation }));
+  }
+});
+`);
+  await chmod(executable, 0o755);
+  const result = await runExecutor(
+    executorTask(`${provider}-argv`, "check arguments", root),
+    { provider, model: provider === "codex" ? "gpt-6-sol" : "claude-sonnet-5", timeout_ms: 1000 },
+    {},
+    {
+      owlRoot: repoRoot,
+      env: runtimeEnv,
+      executables: { [provider]: executable },
+    },
+  );
+  assert.equal(result.success, true, result.output);
+  return JSON.parse(result.output);
+}
+
+function assertSingleClaudeSettingsExclusion(args) {
+  const settingsArgs = args.flatMap((arg, index) => arg === "--settings" ? [args[index + 1]] : []);
+  assert.equal(settingsArgs.length, 1);
+  assert.ok(JSON.parse(settingsArgs[0]).claudeMdExcludes);
+}
+
+test("Claude Executor passes user instruction exclusions in its single settings argument", async () => {
+  const root = await mkdtemp(join(tmpdir(), "owl-executor-claude-exclusions-"));
+  const invocation = await captureExecutorInvocation("claude", {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    HOME: root,
+    CLAUDE_CONFIG_DIR: join(root, "claude-config"),
+  });
+  assertSingleClaudeSettingsExclusion(invocation.args);
+});
+
+test("Codex Executor passes user instruction exclusions and overlays CODEX_HOME for the child only", async () => {
+  const root = await mkdtemp(join(tmpdir(), "owl-executor-codex-exclusions-"));
+  const runtimeEnv = {
+    PATH: process.env.PATH ?? "/usr/bin:/bin",
+    HOME: root,
+    CODEX_HOME: join(root, "codex-home"),
+  };
+  const originalCodexHome = runtimeEnv.CODEX_HOME;
+  const invocation = await captureExecutorInvocation("codex", runtimeEnv);
+  assert.ok(invocation.args.some((arg) => arg.startsWith("marketplaces.openai-bundled.source=")));
+  assert.ok(invocation.codexHome);
+  assert.notEqual(invocation.codexHome, originalCodexHome);
+  assert.equal(runtimeEnv.CODEX_HOME, originalCodexHome);
 });
 
 async function capturedCodexPrompt(prefix, task) {

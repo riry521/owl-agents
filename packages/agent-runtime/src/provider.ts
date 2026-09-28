@@ -7,6 +7,7 @@ import { AdvisorSessionDriver } from "./advisor-session-driver.js";
 import { CodexSessionDriver } from "./codex-session-driver.js";
 import {
   AgentTimeoutSettingError,
+  agentUserInstructionEnv,
   agentIdleTimeoutMs,
   agentWallTimeoutMs,
   buildAgentPermissionArgs,
@@ -136,7 +137,7 @@ function buildArgv(request: ProviderExecutionRequest, outputSchemaPath?: string)
       ...(request.structured_output_schema
         ? ["--json-schema", JSON.stringify(request.structured_output_schema)]
         : []),
-      ...buildAgentPermissionArgs(request.role, "claude", { owlRoot }),
+      ...buildAgentPermissionArgs(request.role, "claude", { owlRoot, env: request.env }),
       "--model",
       request.model,
       ...(request.effort ? ["--effort", request.effort] : []),
@@ -154,7 +155,11 @@ function buildArgv(request: ProviderExecutionRequest, outputSchemaPath?: string)
       ...(request.provider_session_id ? ["resume"] : []),
       "--json",
       ...(outputSchemaPath ? ["--output-schema", outputSchemaPath] : []),
-      ...buildAgentPermissionArgs(request.role, "codex", { owlRoot, resume: Boolean(request.provider_session_id) }),
+      ...buildAgentPermissionArgs(request.role, "codex", {
+        owlRoot,
+        resume: Boolean(request.provider_session_id),
+        env: request.env,
+      }),
       "--skip-git-repo-check",
       "--model",
       request.model,
@@ -285,7 +290,10 @@ export function createCliProvider(options: AgentRunnerOptions): ProviderClient {
         }
         const timeouts = processTimeouts(executionEnv, requestAdapter);
         guardLease = issueGuardToken(options.guardToken, request.role, request.env.OWL_AGENT_RUN_ID || request.invocation_id);
-        const processEnv = guardLease ? { ...executionEnv, [GUARD_TOKEN_FILE_ENV]: guardLease.file } : executionEnv;
+        const agentEnv = isCodexAdapter(requestAdapter)
+          ? { ...executionEnv, ...agentUserInstructionEnv("codex", executionEnv) }
+          : executionEnv;
+        const processEnv = guardLease ? { ...agentEnv, [GUARD_TOKEN_FILE_ENV]: guardLease.file } : agentEnv;
         let child: ChildLike;
         try {
           child = spawn(argv[0], argv.slice(1), {

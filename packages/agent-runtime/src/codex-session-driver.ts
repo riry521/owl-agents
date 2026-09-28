@@ -13,7 +13,7 @@ import type {
   TokenUsage,
 } from "./types.js";
 import { classifyProviderFailure, formatProviderError } from "./provider-error.js";
-import { buildAgentPermissionArgs, ProviderResumeUnsupportedError } from "@owl/shared";
+import { agentUserInstructionEnv, buildAgentPermissionArgs, ProviderResumeUnsupportedError } from "@owl/shared";
 
 const STDERR_RING_BUFFER_BYTES = 8 * 1024;
 const DEFAULT_STOP_GRACE_MS = 5000;
@@ -289,11 +289,12 @@ export class CodexSessionDriver implements ProviderSession {
       child = spawn(executablePath, [
         ...buildAgentPermissionArgs("advisor", "codex", {
           owlRoot: request.env.OWL_ROOT ?? process.env.OWL_ROOT ?? process.cwd(),
+          env: request.env,
         }),
         "app-server",
       ], {
         cwd: request.cwd,
-        env: { ...request.env },
+        env: { ...request.env, ...agentUserInstructionEnv("codex", request.env) },
         shell: false,
         detached: true,
         stdio: ["pipe", "pipe", "pipe"],

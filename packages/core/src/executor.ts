@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   AGENT_IDLE_TIMEOUT_ENV,
   AgentTimeoutSettingError,
+  agentUserInstructionEnv,
   agentIdleTimeoutMs,
   buildAgentPermissionArgs,
   cliTokenUsage,
@@ -72,7 +73,7 @@ export interface ExecutorRuntime {
  */
 export function defaultExecutorRuntime(): ExecutorRuntime {
   const env: Record<string, string> = {};
-  for (const key of ["PATH", "HOME", AGENT_IDLE_TIMEOUT_ENV] as const) {
+  for (const key of ["PATH", "HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", AGENT_IDLE_TIMEOUT_ENV] as const) {
     const value = process.env[key];
     if (typeof value === "string") env[key] = value;
   }
@@ -84,9 +85,14 @@ function environment(
   runtime: ExecutorRuntime,
   guardLease: GuardTokenLease | undefined,
   runId: string | undefined,
+  provider: ExecutorConfig["provider"],
 ): Record<string, string> {
+  const instructionEnv = provider === "claude" || provider === "codex"
+    ? agentUserInstructionEnv(provider, runtime.env)
+    : {};
   return {
     ...runtime.env,
+    ...instructionEnv,
     OWL_AGENT_ROLE: "worker",
     OWL_AGENT_RUN_ID: runId ?? task.subtask_id,
     OWL_AGENT_SUBTASK_ID: task.subtask_id,
@@ -96,7 +102,7 @@ function environment(
 }
 
 function argv(config: ExecutorConfig, runtime: ExecutorRuntime): string[] {
-  const guard = { owlRoot: runtime.owlRoot, role: "worker" as const };
+  const guard = { owlRoot: runtime.owlRoot, role: "worker" as const, env: runtime.env };
   if (config.provider === "codex") {
     return [runtime.executables.codex ?? "codex", "exec", "--json", ...buildAgentPermissionArgs("worker", "codex", guard), "--skip-git-repo-check", "--model", config.model,
       ...(config.effort ? ["--config", `model_reasoning_effort=${config.effort}`] : []), "--", "-"];
@@ -385,7 +391,7 @@ async function runExecutorProcess(
     try {
       child = spawn(command[0], command.slice(1), {
         cwd: task.workspace_dir,
-        env: environment(task, runtime, guardLease, observer.agent_run_id),
+        env: environment(task, runtime, guardLease, observer.agent_run_id, config.provider),
         shell: false,
         stdio: ["pipe", "pipe", "pipe"] as ["pipe", "pipe", "pipe"],
         detached: true,

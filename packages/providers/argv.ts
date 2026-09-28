@@ -52,19 +52,24 @@ export function buildWorkArgv(
   provider: ResolvedProvider,
   model: string,
   prompt: string,
-  guard: { readonly role?: AgentPermissionRole; readonly owlRoot?: string } = {},
+  guard: { readonly role?: AgentPermissionRole; readonly owlRoot?: string; readonly env?: Readonly<Record<string, string | undefined>>; readonly resume?: boolean; readonly sessionId?: string } = {},
 ): string[] {
   assertValidatedExecutable(provider);
   if (model.length === 0 || prompt.length === 0) {
     throw new TypeError("Provider model and prompt must be non-empty strings.");
   }
+  const permissionConfig = {
+    owlRoot: guard.owlRoot ?? process.env.OWL_ROOT ?? process.cwd(),
+    env: guard.env ?? process.env,
+    resume: guard.resume,
+  };
   if (provider.adapter === "claude-cli/v1") {
     return [
       provider.executablePath,
       "-p",
       "--output-format",
       "json",
-      ...buildAgentPermissionArgs(guard.role ?? "worker", "claude", { owlRoot: guard.owlRoot ?? process.env.OWL_ROOT ?? process.cwd() }),
+      ...buildAgentPermissionArgs(guard.role ?? "worker", "claude", permissionConfig),
       "--model",
       model,
       "--",
@@ -72,14 +77,20 @@ export function buildWorkArgv(
     ];
   }
   if (provider.adapter === "codex-cli/v1") {
+    const sessionId = guard.sessionId;
+    if (guard.resume && (sessionId === undefined || sessionId.length === 0)) {
+      throw new TypeError("A Codex session ID is required when resuming.");
+    }
     return [
       provider.executablePath,
       "exec",
+      ...(guard.resume ? ["resume"] : []),
       "--json",
-      ...buildAgentPermissionArgs(guard.role ?? "worker", "codex", { owlRoot: guard.owlRoot ?? process.env.OWL_ROOT ?? process.cwd() }),
+      ...buildAgentPermissionArgs(guard.role ?? "worker", "codex", permissionConfig),
       "--skip-git-repo-check",
       "--model",
       model,
+      ...(guard.resume ? [sessionId!] : []),
       "--",
       prompt,
     ];

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { buildAgentPermissionArgs } from "../packages/shared/dist/index.js";
+import { agentUserInstructionEnv, buildAgentPermissionArgs } from "../packages/shared/dist/index.js";
 
 async function withPermissionHook(run) {
   const root = await mkdtemp(path.join(os.tmpdir(), "owl-permission-hook-"));
@@ -31,23 +31,100 @@ async function withResearchHook(run) {
   }
 }
 
+async function withTemporaryHome(run) {
+  const home = await mkdtemp(path.join(os.tmpdir(), "owl-test-home-"));
+  const previousHome = process.env.HOME;
+  process.env.HOME = home;
+  try {
+    return await run(home);
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME;
+    else process.env.HOME = previousHome;
+    await rm(home, { recursive: true, force: true });
+  }
+}
+
 test("Claude roles use bypassPermissions with the PreToolUse policy hook on every tool", async () => {
-  await withPermissionHook((root, hookPath) => {
-    const args = buildAgentPermissionArgs("advisor", "claude", { owlRoot: root });
-    assert.deepEqual(args.slice(0, 2), ["--permission-mode", "bypassPermissions"]);
-    const settings = JSON.parse(args[3]);
-    assert.equal(settings.hooks.PreToolUse[0].matcher, "*");
-    assert.ok(settings.hooks.PreToolUse[0].hooks[0].command.includes(hookPath));
-  });
+  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  delete process.env.CLAUDE_CONFIG_DIR;
+  try {
+    await withPermissionHook((root, hookPath) => {
+      const args = buildAgentPermissionArgs("advisor", "claude", { owlRoot: root });
+      assert.deepEqual(args.slice(0, 2), ["--permission-mode", "bypassPermissions"]);
+      assert.equal(args.filter((arg) => arg === "--settings").length, 1);
+      const settings = JSON.parse(args[3]);
+      assert.equal(settings.hooks.PreToolUse[0].matcher, "*");
+      assert.ok(settings.hooks.PreToolUse[0].hooks[0].command.includes(hookPath));
+      assert.deepEqual(settings.claudeMdExcludes, [path.join(os.homedir(), ".claude", "CLAUDE.md")]);
+    });
+  } finally {
+    if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+  }
+});
+
+test("Claude settings use CLAUDE_CONFIG_DIR from the child environment for the exclude path", async () => {
+  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = path.join(os.tmpdir(), "owl-process-claude-config");
+  try {
+    await withPermissionHook((root) => {
+      const configDir = path.join(os.tmpdir(), "owl-claude-config");
+      const args = buildAgentPermissionArgs("worker", "claude", {
+        owlRoot: root,
+        env: { CLAUDE_CONFIG_DIR: configDir },
+      });
+      const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
+
+      assert.deepEqual(settings.claudeMdExcludes, [path.join(configDir, "CLAUDE.md")]);
+      assert.ok(settings.hooks.PreToolUse);
+      assert.equal(args.filter((arg) => arg === "--settings").length, 1);
+    });
+  } finally {
+    if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+  }
+});
+
+test("Claude excludes the instruction file from the child environment, not the parent process", async () => {
+  const previousConfigDir = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = path.join(os.tmpdir(), "owl-parent-claude-config");
+  try {
+    await withPermissionHook((root) => {
+      const childHome = path.join(root, "agent-home");
+      const args = buildAgentPermissionArgs("advisor", "claude", {
+        owlRoot: root,
+        env: { HOME: childHome },
+      });
+      const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
+
+      assert.deepEqual(settings.claudeMdExcludes, [path.join(childHome, ".claude", "CLAUDE.md")]);
+      assert.ok(settings.hooks.PreToolUse);
+    });
+  } finally {
+    if (previousConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previousConfigDir;
+  }
 });
 
 test("Codex roles use full access with the PreToolUse policy hook on every tool", async () => {
-  await withPermissionHook((root) => {
-    const args = buildAgentPermissionArgs("worker", "codex", { owlRoot: root });
-    assert.deepEqual(args.slice(0, 5), ["--dangerously-bypass-hook-trust", "--sandbox", "danger-full-access", "--config", 'approval_policy="never"']);
-    assert.ok(args.includes("features.hooks=true"));
-    assert.ok(args.some((arg) => arg.includes("hooks.PreToolUse=[{matcher=\"*\",")));
-    assert.ok(args.some((arg) => arg.includes("permission-hook.js")));
+  await withPermissionHook(async (root) => {
+    const codexHome = await mkdtemp(path.join(os.tmpdir(), "owl-codex-home-"));
+    try {
+      const source = path.join(codexHome, ".tmp", "bundled-marketplaces", "openai-bundled");
+      await mkdir(source, { recursive: true });
+      await writeFile(path.join(codexHome, "config.toml"), `[marketplaces.openai-bundled]\nsource = ${JSON.stringify(source)}\n`, "utf8");
+      const args = buildAgentPermissionArgs("worker", "codex", {
+        owlRoot: root,
+        env: { CODEX_HOME: codexHome },
+      });
+      assert.deepEqual(args.slice(0, 5), ["--dangerously-bypass-hook-trust", "--sandbox", "danger-full-access", "--config", 'approval_policy="never"']);
+      assert.ok(args.some((arg) => arg === `marketplaces.openai-bundled.source=${JSON.stringify(source)}`));
+      assert.ok(args.includes("features.hooks=true"));
+      assert.ok(args.some((arg) => arg.includes("hooks.PreToolUse=[{matcher=\"*\",")));
+      assert.ok(args.some((arg) => arg.includes("permission-hook.js")));
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
   });
 });
 
@@ -87,6 +164,154 @@ test("agent startup fails closed when Owl's permission hook has not been built",
   }
 });
 
+test("Codex instruction environment overlays CODEX_HOME while preserving other entries and excluding AGENTS files", async () => {
+  await withTemporaryHome(async () => {
+    const codexHome = await mkdtemp(path.join(os.tmpdir(), "owl-codex-overlay-source-"));
+    let overlayHome;
+    try {
+      await writeFile(path.join(codexHome, "AGENTS.md"), "user instructions", "utf8");
+      await writeFile(path.join(codexHome, "AGENTS.override.md"), "override instructions", "utf8");
+      await writeFile(path.join(codexHome, "config.toml"), "[model]\nname = \"kept\"\n", "utf8");
+      await writeFile(path.join(codexHome, ".hidden-file"), "kept", "utf8");
+      await mkdir(path.join(codexHome, ".hidden-directory"));
+
+      const childEnv = agentUserInstructionEnv("codex", { CODEX_HOME: codexHome });
+      overlayHome = childEnv.CODEX_HOME;
+      assert.ok(overlayHome);
+      assert.ok(overlayHome.startsWith(path.join(os.homedir(), ".owl", "codex-home-overlays")));
+      assert.notEqual(overlayHome, codexHome);
+
+      let entries = await readdir(overlayHome);
+      assert.ok(entries.includes("config.toml"));
+      assert.ok(entries.includes(".hidden-file"));
+      assert.ok(entries.includes(".hidden-directory"));
+      assert.ok(!entries.includes("AGENTS.md"));
+      assert.ok(!entries.includes("AGENTS.override.md"));
+      for (const name of ["config.toml", ".hidden-file", ".hidden-directory"]) {
+        assert.ok((await lstat(path.join(overlayHome, name))).isSymbolicLink());
+        assert.equal(await readlink(path.join(overlayHome, name)), path.join(codexHome, name));
+      }
+      const configLinkBefore = await lstat(path.join(overlayHome, "config.toml"));
+
+      await unlink(path.join(codexHome, ".hidden-file"));
+      await writeFile(path.join(codexHome, "new-entry"), "new", "utf8");
+      assert.deepEqual(agentUserInstructionEnv("codex", { CODEX_HOME: codexHome }), { CODEX_HOME: overlayHome });
+      entries = await readdir(overlayHome);
+      assert.ok(!entries.includes(".hidden-file"));
+      assert.ok(entries.includes("new-entry"));
+      assert.ok(!entries.includes("AGENTS.md"));
+      const configLinkAfter = await lstat(path.join(overlayHome, "config.toml"));
+      assert.equal(configLinkAfter.ino, configLinkBefore.ino);
+
+      await unlink(path.join(overlayHome, "config.toml"));
+      await symlink(path.join(codexHome, "stale-config.toml"), path.join(overlayHome, "config.toml"));
+      agentUserInstructionEnv("codex", { CODEX_HOME: codexHome });
+      assert.equal(await readlink(path.join(overlayHome, "config.toml")), path.join(codexHome, "config.toml"));
+    } finally {
+      if (overlayHome) await rm(overlayHome, { recursive: true, force: true });
+      await rm(codexHome, { recursive: true, force: true });
+    }
+  });
+});
+
+test("Codex instruction overlay preserves auth and session files created inside it", async () => {
+  await withTemporaryHome(async () => {
+    const codexHome = await mkdtemp(path.join(os.tmpdir(), "owl-codex-overlay-materialized-"));
+    let overlayHome;
+    try {
+      overlayHome = agentUserInstructionEnv("codex", { CODEX_HOME: codexHome }).CODEX_HOME;
+      await writeFile(path.join(overlayHome, "auth.json"), "codex auth", "utf8");
+      await mkdir(path.join(overlayHome, "sessions"));
+      await writeFile(path.join(overlayHome, "sessions", "new-session.jsonl"), "session data", "utf8");
+
+      assert.deepEqual(agentUserInstructionEnv("codex", { CODEX_HOME: codexHome }), { CODEX_HOME: overlayHome });
+
+      assert.equal(await readFile(path.join(overlayHome, "auth.json"), "utf8"), "codex auth");
+      assert.equal(await readFile(path.join(overlayHome, "sessions", "new-session.jsonl"), "utf8"), "session data");
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
+  });
+});
+
+test("Codex instruction overlay removes stale AGENTS links and ignores AGENTS files added later", async () => {
+  await withTemporaryHome(async () => {
+    const codexHome = await mkdtemp(path.join(os.tmpdir(), "owl-codex-overlay-agents-"));
+    let overlayHome;
+    try {
+      await writeFile(path.join(codexHome, "AGENTS.override.md"), "override", "utf8");
+      overlayHome = agentUserInstructionEnv("codex", { CODEX_HOME: codexHome }).CODEX_HOME;
+      assert.deepEqual((await readdir(overlayHome)).filter((name) => name.startsWith("AGENTS")), []);
+
+      await writeFile(path.join(codexHome, "AGENTS.md"), "late instructions", "utf8");
+      await symlink(path.join(codexHome, "AGENTS.md"), path.join(overlayHome, "AGENTS.md"));
+      await symlink(path.join(codexHome, "AGENTS.override.md"), path.join(overlayHome, "AGENTS.override.md"));
+
+      agentUserInstructionEnv("codex", { CODEX_HOME: codexHome });
+
+      assert.deepEqual((await readdir(overlayHome)).filter((name) => name.startsWith("AGENTS")), []);
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
+  });
+});
+
+test("Codex overlay switches directories when real excluded files already exist", async () => {
+  await withTemporaryHome(async () => {
+    const codexHome = await mkdtemp(path.join(os.tmpdir(), "owl-codex-overlay-conflict-"));
+    try {
+      const originalOverlay = agentUserInstructionEnv("codex", { CODEX_HOME: codexHome }).CODEX_HOME;
+      await writeFile(path.join(originalOverlay, "AGENTS.md"), "preserve agents", "utf8");
+      await writeFile(path.join(originalOverlay, "AGENTS.override.md"), "preserve override", "utf8");
+
+      const { CODEX_HOME: cleanOverlay } = agentUserInstructionEnv("codex", { CODEX_HOME: codexHome });
+      assert.notEqual(cleanOverlay, originalOverlay);
+      assert.deepEqual((await readdir(cleanOverlay)).filter((name) => name.startsWith("AGENTS")), []);
+      assert.equal(await readFile(path.join(originalOverlay, "AGENTS.md"), "utf8"), "preserve agents");
+      assert.equal(await readFile(path.join(originalOverlay, "AGENTS.override.md"), "utf8"), "preserve override");
+      assert.deepEqual(agentUserInstructionEnv("codex", { CODEX_HOME: codexHome }), { CODEX_HOME: cleanOverlay });
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
+  });
+});
+
+test("Codex overlays are private and owned by the current user", async () => {
+  await withTemporaryHome(async () => {
+    const codexHome = await mkdtemp(path.join(os.tmpdir(), "owl-codex-overlay-permissions-"));
+    try {
+      const overlayHome = agentUserInstructionEnv("codex", { CODEX_HOME: codexHome }).CODEX_HOME;
+      const overlay = await lstat(overlayHome);
+      assert.ok(overlay.isDirectory());
+      assert.ok(!overlay.isSymbolicLink());
+      assert.equal(overlay.mode & 0o777, 0o700);
+      if (typeof process.getuid === "function") assert.equal(overlay.uid, process.getuid());
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
+  });
+});
+
+test("Codex overlays reject an existing directory with broad permissions", async () => {
+  await withTemporaryHome(async () => {
+    const codexHome = await mkdtemp(path.join(os.tmpdir(), "owl-codex-overlay-insecure-"));
+    try {
+      const overlayHome = agentUserInstructionEnv("codex", { CODEX_HOME: codexHome }).CODEX_HOME;
+      await chmod(overlayHome, 0o755);
+      assert.throws(
+        () => agentUserInstructionEnv("codex", { CODEX_HOME: codexHome }),
+        /unsafe.*Codex overlay directory/iu,
+      );
+    } finally {
+      await rm(codexHome, { recursive: true, force: true });
+    }
+  });
+});
+
+test("Claude instruction environment does not override the child environment", () => {
+  assert.deepEqual(agentUserInstructionEnv("claude", { CLAUDE_CONFIG_DIR: "/tmp/claude" }), {});
+});
+
 test("Claude Work roles install the optional Web research PostToolUse hook", async () => {
   await withResearchHook((root, researchHook) => {
     for (const role of ["manager", "designer", "worker", "reviewer"]) {
@@ -95,6 +320,7 @@ test("Claude Work roles install the optional Web research PostToolUse hook", asy
       assert.equal(settings.hooks.PostToolUse[0].matcher, "WebFetch|WebSearch", role);
       assert.ok(settings.hooks.PostToolUse[0].hooks[0].command.includes(researchHook), role);
       assert.equal(settings.hooks.PostToolUse[0].hooks[0].timeout, 10, role);
+      assert.deepEqual(settings.claudeMdExcludes, [path.join(os.homedir(), ".claude", "CLAUDE.md")], role);
     }
   });
 });

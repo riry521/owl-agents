@@ -401,63 +401,98 @@ test("a second Manager call for the same Work resumes its session", async () => 
   assert.match(calls[1].prompt, /^Continue as the Owl manager/u);
 });
 
-test("Codex resume argv uses its resume command, permissions, and session id", async () => {
-  const root = await mkdtemp(join(tmpdir(), "owl-codex-resume-"));
+async function captureOneShotProvider(t, adapter, providerSessionId) {
+  const root = await mkdtemp(join(tmpdir(), `owl-${adapter}-launch-`));
+  t.after(() => rm(root, { recursive: true, force: true }));
   const executable = join(root, "fake-codex");
   const capture = join(root, "argv.json");
   const hookPath = join(root, "apps", "server", "dist", "permission-hook.js");
-  try {
-    await mkdir(dirname(hookPath), { recursive: true });
-    await writeFile(hookPath, "", "utf8");
-    await writeFile(executable, `#!/usr/bin/env node
+  await mkdir(dirname(hookPath), { recursive: true });
+  await writeFile(hookPath, "", "utf8");
+  await writeFile(executable, `#!/usr/bin/env node
 const { writeFileSync } = require("node:fs");
 process.stdin.resume();
 process.stdin.on("end", () => {
-  writeFileSync(process.env.ARGV_CAPTURE, JSON.stringify(process.argv.slice(2)));
-  process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "thread-resume-1" }) + "\\n", () => process.exit(0));
+  writeFileSync(process.env.ARGV_CAPTURE, JSON.stringify({ args: process.argv.slice(2), codexHome: process.env.CODEX_HOME ?? null }));
+  process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "thread-test" }) + "\\n", () => process.exit(0));
 });
 `, "utf8");
-    await chmod(executable, 0o755);
+  await chmod(executable, 0o755);
 
-    const provider = createCliProvider({
-      adapter: "codex-cli/v1",
-      executablePath: executable,
-      model: "test-model",
-      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
-    });
-    const response = await provider.execute({
-      adapter: "codex-cli/v1",
-      role: "worker",
-      model: "test-model",
-      effort: "high",
-      prompt: "Continue the Task.",
-      invocation_id: "codex-resume-1",
-      provider_session_id: "thread-resume-1",
-      cwd: root,
-      env: {
-        PATH: process.env.PATH ?? "",
-        HOME: process.env.HOME ?? "",
-        ARGV_CAPTURE: capture,
-        OWL_ROOT: root,
-      },
-      structured_output_schema: { type: "object" },
-    });
-    const argv = JSON.parse(await readFile(capture, "utf8"));
+  const requestEnv = {
+    PATH: process.env.PATH ?? "",
+    HOME: process.env.HOME ?? "",
+    ARGV_CAPTURE: capture,
+    OWL_ROOT: root,
+    CODEX_HOME: join(root, "user-codex-home"),
+  };
+  const provider = createCliProvider({
+    adapter: adapter === "codex" ? "codex-cli/v1" : "claude-cli/v1",
+    executablePath: executable,
+    model: "test-model",
+    env: { PATH: requestEnv.PATH, HOME: requestEnv.HOME },
+  });
+  const response = await provider.execute({
+    adapter: adapter === "codex" ? "codex-cli/v1" : "claude-cli/v1",
+    role: "worker",
+    model: "test-model",
+    effort: "high",
+    prompt: "Continue the Task.",
+    invocation_id: `provider-${adapter}-test`,
+    ...(providerSessionId ? { provider_session_id: providerSessionId } : {}),
+    cwd: root,
+    env: requestEnv,
+    ...(adapter === "codex" ? { structured_output_schema: { type: "object" } } : {}),
+  });
+  const invocation = JSON.parse(await readFile(capture, "utf8"));
+  return { root, requestEnv, response, ...invocation };
+}
 
+function assertClaudeSettingsExclusion(args) {
+  const settings = args.flatMap((arg, index) => arg === "--settings" ? [args[index + 1]] : []);
+  assert.equal(settings.length, 1);
+  assert.ok(JSON.parse(settings[0]).claudeMdExcludes);
+}
+
+function assertCodexSourceOverride(args) {
+  const configs = args.flatMap((arg, index) => arg === "--config" ? [args[index + 1]] : []);
+  assert.ok(configs.some((config) => config.startsWith("marketplaces.openai-bundled.source=")));
+}
+
+test("Codex exec resume argv excludes user instructions and overlays CODEX_HOME", async (t) => {
+  const { root, requestEnv, response, args, codexHome } = await captureOneShotProvider(t, "codex", "thread-resume-1");
+  assert.equal(response.exit_code, 0);
+  assert.equal(response.provider_session_id, "thread-test");
+  assert.deepEqual(args.slice(0, 3), ["exec", "resume", "--json"]);
+  assert.ok(args.includes("--output-schema"));
+  assert.ok(args.includes("--dangerously-bypass-hook-trust"));
+  assert.ok(args.includes('sandbox_mode="danger-full-access"'));
+  assert.ok(!args.includes("--sandbox"));
+  assert.ok(args.includes("features.hooks=true"));
+  assert.ok(args.some((arg) => arg.includes("hooks.PreToolUse=[{matcher=\"*\",")));
+  assert.ok(args.includes("--skip-git-repo-check"));
+  assert.equal(args[args.indexOf("--model") + 1], "test-model");
+  assert.ok(args.includes("model_reasoning_effort=high"));
+  assertCodexSourceOverride(args);
+  assert.notEqual(codexHome, requestEnv.CODEX_HOME);
+  assert.equal(requestEnv.CODEX_HOME, join(root, "user-codex-home"));
+  assert.deepEqual(args.slice(-3), ["thread-resume-1", "--", "-"]);
+});
+
+test("Codex exec fresh argv excludes user instructions and overlays CODEX_HOME", async (t) => {
+  const { requestEnv, response, args, codexHome } = await captureOneShotProvider(t, "codex");
+  assert.equal(response.exit_code, 0);
+  assert.ok(!args.includes("resume"));
+  assertCodexSourceOverride(args);
+  assert.notEqual(codexHome, requestEnv.CODEX_HOME);
+});
+
+test("Claude provider argv excludes user instructions on fresh starts and resumes", async (t) => {
+  for (const providerSessionId of [undefined, "saved-claude-session"]) {
+    const { response, args } = await captureOneShotProvider(t, "claude", providerSessionId);
     assert.equal(response.exit_code, 0);
-    assert.equal(response.provider_session_id, "thread-resume-1");
-    assert.deepEqual(argv.slice(0, 3), ["exec", "resume", "--json"]);
-    assert.ok(argv.includes("--output-schema"));
-    assert.ok(argv.includes("--dangerously-bypass-hook-trust"));
-    assert.ok(argv.includes('sandbox_mode="danger-full-access"'));
-    assert.ok(!argv.includes("--sandbox"));
-    assert.ok(argv.includes("features.hooks=true"));
-    assert.ok(argv.some((arg) => arg.includes("hooks.PreToolUse=[{matcher=\"*\",")));
-    assert.ok(argv.includes("--skip-git-repo-check"));
-    assert.equal(argv[argv.indexOf("--model") + 1], "test-model");
-    assert.ok(argv.includes("model_reasoning_effort=high"));
-    assert.deepEqual(argv.slice(-3), ["thread-resume-1", "--", "-"]);
-  } finally {
-    await rm(root, { recursive: true, force: true });
+    assertClaudeSettingsExclusion(args);
+    assert.equal(args.includes("--resume"), providerSessionId !== undefined);
+    if (providerSessionId) assert.equal(args[args.indexOf("--resume") + 1], providerSessionId);
   }
 });
