@@ -690,9 +690,9 @@ export class GitWorktreeGateway implements GitGateway {
   }
 
   /**
-   * Merge a Work into its Project base branch. The merge commit is built in
-   * the integration worktree on top of the latest base (base as first
-   * parent), verified outside the repository lane, and the base is advanced
+   * Merge a Work into its Project base branch. The Work is squashed into one
+   * commit built in the integration worktree on top of the latest base,
+   * verified outside the repository lane, and the base is advanced
    * only if it has not moved and the Work is still running at the expected
    * state version.
    */
@@ -904,11 +904,12 @@ export class GitWorktreeGateway implements GitGateway {
     if (workExists.ok) {
       const validBase = await this.git(canonical, ["check-ref-format", baseRef]);
       if (!validBase.ok) return failure(validBase, `Could not resolve Project base branch ${project.base_branch}: ${validBase.message}`);
-      const workMerged = await this.git(canonical, ["merge-base", "--is-ancestor", workBranch, `${baseRef}^{commit}`]);
+      const workMerged = await this.branchContentMergedNow(canonical, workBranch, `${baseRef}^{commit}`);
       if (!workMerged.ok) {
-        return failure(workMerged, workMerged.exit_code === 1
-          ? `Branch ${workBranch} is not merged into ${project.base_branch}.`
-          : `Could not verify whether branch ${workBranch} is merged into ${project.base_branch}: ${workMerged.message}`);
+        return failure(workMerged.result, `Could not verify whether branch ${workBranch} is merged into ${project.base_branch}: ${workMerged.result.message}`);
+      }
+      if (!workMerged.merged) {
+        return failure({ ok: false, exit_code: 1, recorded: false, message: "" }, `Branch ${workBranch} is not merged into ${project.base_branch}.`);
       }
     }
 
@@ -958,9 +959,9 @@ export class GitWorktreeGateway implements GitGateway {
       if (!exists.ok && exists.exit_code === 1) continue;
       if (!exists.ok) throw new Error(`Could not inspect branch ${branch}: ${exists.message}`);
       existingBranches.push(branch);
-      const merged = await this.git(canonical, ["merge-base", "--is-ancestor", branch, base.message.trim()]);
-      if (!merged.ok && merged.exit_code === 1) return true;
-      if (!merged.ok) throw new Error(`Could not compare branch ${branch} with ${project.base_branch}: ${merged.message}`);
+      const merged = await this.branchContentMergedNow(canonical, branch, base.message.trim());
+      if (!merged.ok) throw new Error(`Could not compare branch ${branch} with ${project.base_branch}: ${merged.result.message}`);
+      if (!merged.merged) return true;
     }
 
     const worktrees = await this.git(canonical, ["worktree", "list", "--porcelain"]);
@@ -976,8 +977,48 @@ export class GitWorktreeGateway implements GitGateway {
   }
 
   /**
-   * Build the merge commit on top of the latest base in the integration
-   * worktree: detach at the base, then merge the Work branch with --no-ff.
+   * Whether everything `branch` changed is already in `baseCommit`: the
+   * branch is an ancestor of it, or merging the branch would leave its tree
+   * unchanged, as after a squash merge. A conflicting merge counts as not
+   * merged.
+   */
+  private async branchContentMergedNow(
+    canonical: string,
+    branch: string,
+    baseCommit: string,
+  ): Promise<{ readonly ok: true; readonly merged: boolean } | { readonly ok: false; readonly result: GitOperationResult }> {
+    const ancestor = await this.git(canonical, ["merge-base", "--is-ancestor", branch, baseCommit]);
+    if (ancestor.ok) return { ok: true, merged: true };
+    if (ancestor.exit_code !== 1) return { ok: false, result: ancestor };
+    const mergedTree = await this.git(canonical, ["merge-tree", "--write-tree", "--no-messages", baseCommit, branch]);
+    if (!mergedTree.ok) return mergedTree.exit_code === 1 ? { ok: true, merged: false } : { ok: false, result: mergedTree };
+    const baseTree = await this.git(canonical, ["rev-parse", "--verify", `${baseCommit}^{tree}`]);
+    if (!baseTree.ok) return { ok: false, result: baseTree };
+    return { ok: true, merged: mergedTree.message.split("\n")[0]?.trim() === baseTree.message.trim() };
+  }
+
+  /**
+   * The identity and message of the commit a Work lands as. The commit
+   * carries the Work title only, and the repository's configured author
+   * when there is one, so the base history holds no Owl bookkeeping.
+   */
+  private async workCommitArgs(integrationPath: string, workId: string): Promise<string[]> {
+    const title = this.db.get<{ title: string | null }>("SELECT title FROM works WHERE id = ?", workId)?.title ?? "";
+    const subject = title.split(/\r?\n/u).map((line) => line.trim()).find((line) => line.length > 0) ?? "Apply Work changes";
+    const name = await this.git(integrationPath, ["config", "--get", "user.name"]);
+    const email = await this.git(integrationPath, ["config", "--get", "user.email"]);
+    const configured = name.ok && email.ok && name.message.trim().length > 0 && email.message.trim().length > 0;
+    return [
+      ...(configured ? [] : ["-c", "user.name=Owl Agent", "-c", "user.email=owl-agent@localhost"]),
+      // The Work's content already passed the hooks when its Tasks were
+      // committed; like the merge commit it replaces, landing it skips them.
+      "commit", "--no-verify", "-m", subject,
+    ];
+  }
+
+  /**
+   * Build the Work's single commit on top of the latest base in the
+   * integration worktree: detach at the base, then squash the Work branch.
    */
   private async prepareWorkMergeNow(workId: string, project: ProjectRow, canonical: string): Promise<PreparedWorkMerge> {
     const workBranch = branchName("work", workId, null);
@@ -1022,8 +1063,9 @@ export class GitWorktreeGateway implements GitGateway {
     if (!workResult.ok) return stop(workMergeError(`Could not resolve ${workBranch}: ${workResult.message}`, workResult.exit_code, context));
     const workCommit = workResult.message.trim();
 
-    const alreadyMerged = await this.git(canonical, ["merge-base", "--is-ancestor", workCommit, oldBaseCommit]);
-    if (alreadyMerged.ok) {
+    const alreadyMerged = await this.branchContentMergedNow(canonical, workCommit, oldBaseCommit);
+    if (!alreadyMerged.ok) return stop(workMergeError(alreadyMerged.result.message, alreadyMerged.result.exit_code, context));
+    if (alreadyMerged.merged) {
       return stop({
         kind: "merged",
         ok: true,
@@ -1037,17 +1079,14 @@ export class GitWorktreeGateway implements GitGateway {
         verification_commands_run: [],
       });
     }
-    if (alreadyMerged.exit_code !== 1) return stop(workMergeError(alreadyMerged.message, alreadyMerged.exit_code, context));
 
     const detached = await this.git(integrationPath, ["checkout", "--detach", oldBaseCommit]);
     if (!detached.ok) {
       await this.restoreIntegrationWorktreeNow(integrationPath, workBranch);
       return stop(workMergeError(`Could not check out ${baseBranch} in the integration worktree: ${detached.message}`, detached.exit_code, context));
     }
-    const merged = await this.git(integrationPath, [
-      "-c", "user.name=Owl Agent", "-c", "user.email=owl-agent@localhost",
-      "merge", "--no-ff", "-m", `Merge ${workBranch} into ${baseBranch}`, workCommit,
-    ]);
+    const squashed = await this.git(integrationPath, ["merge", "--squash", workCommit]);
+    const merged = squashed.ok ? await this.git(integrationPath, await this.workCommitArgs(integrationPath, workId)) : squashed;
     if (!merged.ok) {
       const unresolved = await this.git(integrationPath, ["diff", "--name-only", "--diff-filter=U", "-z"]);
       const conflictingFiles = unresolved.ok && unresolved.message !== "git operation completed"
@@ -1072,11 +1111,11 @@ export class GitWorktreeGateway implements GitGateway {
       return stop(workMergeError(merged.message, merged.exit_code, context));
     }
 
-    const parents = await this.git(integrationPath, ["rev-parse", "HEAD^{commit}", "HEAD^1", "HEAD^2"]);
-    const [mergeCommit, firstParent, secondParent] = parents.ok ? parents.message.split("\n").map((line) => line.trim()) : [];
-    if (!mergeCommit || firstParent !== oldBaseCommit || secondParent !== workCommit) {
+    const parents = await this.git(integrationPath, ["rev-list", "--parents", "-n", "1", "HEAD"]);
+    const [mergeCommit, ...commitParents] = parents.ok ? parents.message.trim().split(" ") : [];
+    if (!mergeCommit || commitParents.length !== 1 || commitParents[0] !== oldBaseCommit) {
       await this.restoreIntegrationWorktreeNow(integrationPath, workBranch);
-      return stop(workMergeError("The merge commit does not have the base branch as its first parent.", 1, context));
+      return stop(workMergeError("The Work commit does not have the base branch as its only parent.", 1, context));
     }
     const cleaned = await this.cleanIntegrationWorktree(integrationPath);
     if (!cleaned.ok) {
@@ -1132,7 +1171,7 @@ export class GitWorktreeGateway implements GitGateway {
   }
 
   /**
-   * Advance the base to the verified merge commit: fast-forward the worktree
+   * Advance the base to the verified Work commit: fast-forward the worktree
    * that has the base checked out, or move the ref when none has. The
    * integration worktree is returned to the Work branch either way.
    */
@@ -1165,7 +1204,7 @@ export class GitWorktreeGateway implements GitGateway {
     const head = await this.git(integrationPath, ["rev-parse", "--verify", "HEAD^{commit}"]);
     const workRef = await this.git(canonical, ["rev-parse", "--verify", `refs/heads/${context.work_branch}^{commit}`]);
     if (!head.ok || head.message.trim() !== mergeCommit || !workRef.ok || workRef.message.trim() !== workCommit) {
-      return workMergeError("The Work branch or its merge commit changed while it was being verified.", 1, context);
+      return workMergeError("The Work branch or its commit on the base changed while it was being verified.", 1, context);
     }
 
     const work = this.db.get<{ state: string; state_version: number }>("SELECT state, state_version FROM works WHERE id = ?", request.work_id);

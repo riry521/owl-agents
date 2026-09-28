@@ -24,11 +24,12 @@ async function fixture(verificationPlan = []) {
   await writeFile(join(project, "README.md"), "base\n");
   git(project, "add", ".");
   git(project, "commit", "-m", "initial");
-  const work = { state: "running", state_version: 1 };
+  const work = { state: "running", state_version: 1, title: null };
   const db = {
     get(sql) {
       if (sql.includes("SELECT project_id FROM works")) return { project_id: "project-1" };
       if (sql.includes("SELECT state, state_version FROM works")) return { ...work };
+      if (sql.includes("SELECT title FROM works")) return { title: work.title };
       if (sql.includes("FROM projects")) {
         return {
           canonical_path: project,
@@ -57,15 +58,18 @@ function assertNoMergeHead(worktreePath) {
   assert.throws(() => git(worktreePath, "rev-parse", "-q", "--verify", "MERGE_HEAD"));
 }
 
-/** The base gained exactly one merge commit whose first parent is the old base and second parent the Work branch. */
+/**
+ * The base gained exactly one commit on top of the old base: the Work's
+ * content, by the repository's author, with no Owl branch or commit in it.
+ */
 function assertMergeCommitOnBase(project, result, oldBase, workBranch) {
   assert.equal(result.merge_commit, result.new_base_commit);
   assert.equal(git(project, "rev-parse", "refs/heads/main"), result.merge_commit);
-  assert.equal(git(project, "rev-parse", `${result.merge_commit}^1`), oldBase);
-  assert.equal(git(project, "rev-parse", `${result.merge_commit}^2`), git(project, "rev-parse", `refs/heads/${workBranch}`));
-  const firstParents = git(project, "log", "--first-parent", "--format=%H", "main").split("\n");
-  assert.equal(firstParents[0], result.merge_commit);
-  assert.equal(firstParents[1], oldBase);
+  assert.equal(git(project, "rev-list", "--parents", "-n", "1", result.merge_commit), `${result.merge_commit} ${oldBase}`);
+  assert.equal(git(project, "rev-parse", `${result.merge_commit}^{tree}`), git(project, "merge-tree", "--write-tree", oldBase, `refs/heads/${workBranch}`));
+  assert.equal(git(project, "log", "--format=%an <%ae>|%cn <%ce>", "-1", result.merge_commit), "Test <test@example.invalid>|Test <test@example.invalid>");
+  assert.doesNotMatch(git(project, "log", "--format=%B", "-1", result.merge_commit), /owl|\bW\b/iu);
+  assert.equal(git(project, "rev-list", "--count", `${oldBase}..main`), "1");
 }
 
 function assertIntegrationOnWorkBranch(owlRoot, workId = "W") {
@@ -294,4 +298,27 @@ test("mergeWorkIntoBase preserves canonical uncommitted changes when fast-forwar
   assert.equal(await readFile(join(project, "feature.txt"), "utf8"), "owner local change\n");
   assertNoMergeHead(project);
   assertNoMergeHead(join(owlRoot, ".owl-workspaces", "W", "__work__"));
+});
+
+test("mergeWorkIntoBase lands the Work as one commit titled by the Work and counts it merged afterwards", async () => {
+  const { project, work, gateway } = await fixture();
+  work.title = "Show model names in the activity log\nwith more detail below";
+  const workBranch = await addWorkChange(gateway);
+  const oldBase = git(project, "rev-parse", "refs/heads/main");
+
+  const result = await gateway.mergeWorkIntoBase({ work_id: "W" });
+  assert.equal(result.kind, "merged", result.message);
+  assertMergeCommitOnBase(project, result, oldBase, workBranch);
+  assert.equal(git(project, "log", "--format=%B", "-1", result.merge_commit), "Show model names in the activity log");
+
+  // The base moves on; the squashed Work still counts as merged.
+  git(project, "checkout", "main");
+  await writeFile(join(project, "later.txt"), "later\n");
+  git(project, "add", "later.txt");
+  git(project, "commit", "-m", "later change");
+  assert.equal(await gateway.workHasUnmergedChanges({ work_id: "W" }), false);
+  const again = await gateway.mergeWorkIntoBase({ work_id: "W" });
+  assert.equal(again.kind, "merged", again.message);
+  assert.equal(again.merge_commit, null);
+  assert.equal(git(project, "rev-parse", "refs/heads/main"), again.old_base_commit);
 });

@@ -173,10 +173,10 @@ test("Core auto-merges a completed Project Work into main and cleans its integra
   assert.deepEqual(mergeCalls, [workId]);
   assert.notEqual(git(project, "rev-parse", "refs/heads/main"), oldMain);
   assert.equal(git(project, "show", "main:feature.txt"), "feature from Core");
-  assert.match(git(project, "log", "main", "--format=%s"), /owl: complete task /u);
   const mergeCommit = git(project, "rev-parse", "refs/heads/main");
-  assert.deepEqual(git(project, "log", "--first-parent", "--format=%H", "-2", "main").split("\n"), [mergeCommit, oldMain]);
-  assert.equal(git(project, "rev-parse", "main^1"), oldMain);
+  assert.equal(git(project, "rev-list", "--parents", "-n", "1", "main"), `${mergeCommit} ${oldMain}`);
+  assert.equal(git(project, "log", "-1", "--format=%s", "main"), db.get("SELECT title FROM works WHERE id = ?", workId).title);
+  assert.doesNotMatch(git(project, "log", "main", "--format=%an %ae %B"), /owl|Owl Agent/u);
 
   const cleanupComplete = await waitFor(() =>
     !existsSync(integrationPath) && git(project, "branch", "--list", `owl/work/${workId}/work`) === "",

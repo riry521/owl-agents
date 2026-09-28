@@ -186,8 +186,8 @@ test("Work auto-push uses the installed pre-push guard and notifies on rejection
   const remoteAfterPush = git(remote, "rev-parse", "refs/heads/main");
   const canonicalMerge = git(canonical, "rev-parse", "refs/heads/main");
   assert.equal(remoteAfterPush, canonicalMerge, "the bare remote points at the canonical merge commit");
-  assert.equal(git(canonical, "rev-list", "--parents", "-n", "1", canonicalMerge).split(" ").length, 3,
-    "the pushed base commit is a two-parent merge commit");
+  assert.equal(git(canonical, "rev-list", "--parents", "-n", "1", canonicalMerge).split(" ").length, 2,
+    "the pushed base commit is the Work's single commit");
 
   await setAutoPush(false);
   const remoteBeforeDisabled = git(remote, "rev-parse", "refs/heads/main");
