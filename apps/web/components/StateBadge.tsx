@@ -159,7 +159,7 @@ export function AgentRunTree({
           <span className={childDotClass(run.status)} />
           <div className="run-tree__main">
             <div className="run-tree__title">
-              <span className="run-tree__label">{run.label || run.provider || run.id}</span>
+              <span className="run-tree__label">{agentModelLabel(run)}</span>
               {run.origin && (
                 <Badge tone="gray">{run.origin === 'observed' ? t('hybrid.originObserved') : t('hybrid.originSpawned')}</Badge>
               )}
@@ -170,8 +170,7 @@ export function AgentRunTree({
               )}
             </div>
             <div className="run-tree__sub">
-              <span className="mono">{agentModelLabel(run)}</span>
-              {' · '}
+              {run.label && <><span className="mono">{run.label}</span>{' · '}</>}
               {formatElapsed(run.started_at, run.ended_at, now, t)}
             </div>
           </div>

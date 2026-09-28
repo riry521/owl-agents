@@ -115,11 +115,15 @@ export function agentModelLabel(run: Pick<AgentRun, 'model' | 'effort'> & { prov
 }
 
 /**
- * - manager → plain "Manager" (no ordinal, no model)
+ * - manager → "Manager (model-effort)" (no ordinal)
  * - other roles → locale-aware format with role name, ordinal, and model-effort.
  */
 export function formatAgentLabel(run: AgentRun, ordinal: number, locale: Locale = 'ja'): string {
-  if (run.role === 'manager') return roleDisplayName(run.role, locale);
+  if (run.role === 'manager') {
+    return dicts[locale].format.managerLabelFormat
+      .replace('{{role}}', roleDisplayName(run.role, locale))
+      .replace('{{agent}}', agentModelLabel(run));
+  }
   if (run.role === 'executor' && typeof run.label === 'string' && run.label.length > 0) {
     return dicts[locale].format.executorLabelFormat
       .replace('{{role}}', roleDisplayName(run.role, locale))

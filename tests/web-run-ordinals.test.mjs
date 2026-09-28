@@ -156,9 +156,10 @@ test('runOrdinals and formatAgentLabel number the Designer role like any other r
   assert.equal(formatAgentLabel(secondDesigner, ordinals.get('01C-designer'), 'en'), 'Designer #2 (test-model)');
 });
 
-test('formatAgentLabel leaves Manager unnumbered', () => {
-  const manager = run('manager', 'manager', null, null);
-  assert.equal(formatAgentLabel(manager, 7, 'en'), 'Manager');
+test('formatAgentLabel leaves Manager unnumbered but shows its model', () => {
+  const manager = { ...run('manager', 'manager', null, null), model: 'claude-opus-5-5', effort: 'low' };
+  assert.equal(formatAgentLabel(manager, 7, 'en'), 'Manager (Opus5.5-low)');
+  assert.equal(formatAgentLabel(manager, 7, 'ja'), 'Manager（Opus5.5-low）');
 });
 
 test('runOrdinals handles missing Work and start times and assigns every run', () => {

@@ -793,6 +793,7 @@
     "dash": "—",
     "agentLabelFormat": "{{role}} #{{ordinal}} ({{agent}})",
     "roleExecutor": "Subagent",
+    "managerLabelFormat": "{{role}} ({{agent}})",
     "executorLabelFormat": "{{role}} {{label}} ({{agent}})"
   },
   "backlog": {
