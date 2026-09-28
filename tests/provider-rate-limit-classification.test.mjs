@@ -90,6 +90,27 @@ test("Codex usage-limit error and local try-again time are parsed", () => {
   assert.deepEqual(losAngelesReset, { resets_at: "2026-09-28T22:05:00.000Z", source: "text" });
 });
 
+test("a clock time that just passed is the reset still under way, not tomorrow's", () => {
+  const tokyo = { timeZone: "Asia/Tokyo" };
+  // 21:02:33 in Tokyo: the provider still reports the 21:02 reset a few seconds after it.
+  const justAfter = new Date("2026-09-28T12:02:33.000Z");
+  const retrySoon = { resets_at: "2026-09-28T12:03:33.000Z", source: "text" };
+  assert.deepEqual(
+    runtime.resolveRateLimitReset([{ kind: "text", text: "You've hit your usage limit. Try again at 9:02 PM." }], justAfter, { ...tokyo, harness: "codex" }),
+    retrySoon,
+  );
+  assert.deepEqual(
+    runtime.resolveRateLimitReset([{ kind: "text", text: "5-hour limit reached · resets 9:02pm (Asia/Tokyo)" }], justAfter, { harness: "claude" }),
+    retrySoon,
+  );
+
+  // 23:00 in Tokyo: 1:00 AM is tomorrow.
+  assert.deepEqual(
+    runtime.resolveRateLimitReset([{ kind: "text", text: "You've hit your usage limit. Try again at 1:00 AM." }], new Date("2026-09-28T14:00:00.000Z"), { ...tokyo, harness: "codex" }),
+    { resets_at: "2026-09-28T16:00:00.000Z", source: "text" },
+  );
+});
+
 test("Codex rate-limit snapshots and retry-after values resolve to UTC ISO strings", () => {
   const snapshot = {
     rate_limits: {

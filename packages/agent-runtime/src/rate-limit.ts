@@ -20,6 +20,7 @@ export interface TextResetParser {
 
 const DAY_MS = 24 * 60 * 60_000;
 const MAX_RESET_AHEAD_MS = 8 * DAY_MS;
+const RECENT_RESET_MS = 60 * 60_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -193,7 +194,9 @@ function parseLocalClock(text: string, now: Date, defaultTimeZone: string): Date
   const minute = Number(clock[2] ?? 0);
   if (hour === null || minute > 59) return null;
   let date = localDateTime(nowLocal.year, nowLocal.month, nowLocal.day, hour, minute, zone);
-  if (date !== null && date.getTime() <= now.getTime()) {
+  // Providers report whole minutes and can stay limited a little past them, so a
+  // time that passed within the hour is the reset still under way, not tomorrow's.
+  if (date !== null && date.getTime() <= now.getTime() - RECENT_RESET_MS) {
     const tomorrow = new Date(Date.UTC(nowLocal.year, nowLocal.month - 1, nowLocal.day + 1));
     date = localDateTime(tomorrow.getUTCFullYear(), tomorrow.getUTCMonth() + 1, tomorrow.getUTCDate(), hour, minute, zone);
   }
