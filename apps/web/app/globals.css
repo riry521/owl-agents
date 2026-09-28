@@ -824,7 +824,7 @@ a.card:hover {
   display: flex;
   flex-direction: column;
   height: calc(100vh - var(--nav-h) - 40px);
-  max-width: 820px;
+  max-width: 1080px;
   margin: 0 auto;
   padding: 0;
 }
