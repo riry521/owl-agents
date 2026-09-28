@@ -1342,11 +1342,13 @@ export async function checkRule(command: string): Promise<{ blocked: boolean; ru
 /** Newest-first page of the event log (order=desc), so the Activity Log shows the latest activity. */
 export async function listEvents(limit = 50): Promise<Array<{
   event_id: string; type: string; work_id?: string; task_id?: string;
-  agent_run_id?: string; payload: Record<string, unknown>; created_at: string;
+  agent_run_id?: string; agent_run?: { model: string | null; effort: string | null };
+  payload: Record<string, unknown>; created_at: string;
 }>> {
   const res = await requestJson<ApiEnvelope<{ events: Array<{
     event_id: string; type: string; work_id?: string; task_id?: string;
-    agent_run_id?: string; payload: Record<string, unknown>; created_at: string;
+    agent_run_id?: string; agent_run?: { model: string | null; effort: string | null };
+  payload: Record<string, unknown>; created_at: string;
   }> }>>(`/events?order=desc&limit=${limit}`);
   return res.data.events;
 }

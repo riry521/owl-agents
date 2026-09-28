@@ -363,6 +363,8 @@ export interface CoreEvent {
   work_id?: string | null;
   task_id?: string | null;
   agent_run_id?: string | null;
+  /** The event's AgentRun model and effort (Activity Log page only). */
+  agent_run?: { model: string | null; effort: string | null };
   created_at?: string;
   payload: JsonObject;
 }

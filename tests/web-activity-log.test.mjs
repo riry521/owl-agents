@@ -154,11 +154,16 @@ test("Activity Log shows an agent event's model and effort instead of its provid
   hookValues = [[
     { event_id: "deferred-1", type: "reviewer.deferred", payload: { provider: "anthropic", model: "claude-opus-5-5", effort: "low" }, created_at: new Date().toISOString() },
     { event_id: "deferred-2", type: "reviewer.deferred", payload: { provider: "openai", model: "gpt-5.4", effort: null }, created_at: new Date().toISOString() },
+    // Recorded before payloads carried model: the API attaches the AgentRun's model/effort.
+    { event_id: "deferred-3", type: "reviewer.deferred", agent_run_id: "run-3", agent_run: { model: "claude-sonnet-5", effort: "high" }, payload: { provider: "claude" }, created_at: new Date().toISOString() },
+    { event_id: "limited-4", type: "reviewer.rate_limited", agent_run_id: "run-4", agent_run: { model: "gpt-5.4", effort: "medium" }, payload: { provider: "codex" }, created_at: new Date().toISOString() },
   ], ""];
 
   const markup = renderToStaticMarkup(React.createElement(ActivityLog));
 
   assert.match(markup, /Opus5\.5-low/);
   assert.match(markup, /GPT-5\.4</);
-  assert.doesNotMatch(markup, /anthropic|openai/);
+  assert.match(markup, /Sonnet5-high/);
+  assert.match(markup, /GPT-5\.4-medium/);
+  assert.doesNotMatch(markup, /anthropic|openai|>claude<|>codex</);
 });

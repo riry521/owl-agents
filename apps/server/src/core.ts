@@ -2537,8 +2537,25 @@ export class ExternalCoreAdapter implements CorePort {
    * Newest-first page read from the durable Core. listEventsAfter is ascending
    * and filters internal lifecycle rows after its LIMIT, so read a bounded
    * window just below `before` and widen it until enough visible events exist.
+   * Agent events carry their AgentRun's model and effort so the Activity Log
+   * can label the agent instead of its provider.
    */
   eventsBefore(before: number | null, limit: number): CoreEvent[] {
+    return this.readEventsBefore(before, limit).map((event) => this.withAgentRun(event));
+  }
+
+  private withAgentRun(event: CoreEvent): CoreEvent {
+    const candidate = this.db as { get?: <T>(sql: string, ...params: unknown[]) => T | undefined } | null;
+    if (!event.agent_run_id || !candidate || typeof candidate.get !== "function") return event;
+    try {
+      const row = candidate.get<{ model: string | null; effort: string | null }>("SELECT model, effort FROM agent_runs WHERE id = ?", event.agent_run_id);
+      return row ? { ...event, agent_run: { model: row.model, effort: row.effort } } : event;
+    } catch {
+      return event;
+    }
+  }
+
+  private readEventsBefore(before: number | null, limit: number): CoreEvent[] {
     if (!Number.isSafeInteger(limit) || limit < 0) {
       throw new ApiError(400, "invalid_query", "イベント一覧のlimitが不正です。0以上の整数を指定してください。");
     }

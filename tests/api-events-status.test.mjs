@@ -215,3 +215,30 @@ test("integration.saved/deleted are process-local control signals and never coll
   assert.deepEqual(published.map((event) => [event.sequence, event.type]), [[8, "work.created"]]);
   assert.deepEqual(adapter.eventsAfter(7).map((event) => event.sequence), [8]);
 });
+
+test("GET /events?order=desc attaches the AgentRun's model and effort to agent events", async (t) => {
+  const previousToken = process.env.OWL_API_TOKEN;
+  delete process.env.OWL_API_TOKEN;
+  t.after(() => {
+    if (previousToken === undefined) delete process.env.OWL_API_TOKEN;
+    else process.env.OWL_API_TOKEN = previousToken;
+  });
+  const root = await mkdtemp(join(tmpdir(), "owl-api-events-agent-run-"));
+  const durable = durableCore(2);
+  durable.history[1] = { ...frame(2, "reviewer.rate_limited"), agent_run_id: "run-1", payload: { provider: "codex" } };
+  const db = {
+    get(sql, ...params) {
+      if (/MAX\(sequence\)/u.test(sql)) return { max_sequence: 2 };
+      assert.match(sql, /FROM agent_runs/u);
+      return params[0] === "run-1" ? { model: "gpt-5.4", effort: "high" } : undefined;
+    },
+  };
+  const adapter = new ExternalCoreAdapter(durable.core, db, root, join(root, "data"));
+  t.after(() => adapter.shutdown({ force: true, timeoutMs: 0 }).catch(() => undefined));
+  const server = await startServer(t, adapter);
+  if (!server) return;
+
+  const page = await (await fetch(`${server.base}/api/v1/events?order=desc&limit=5`)).json();
+  assert.deepEqual(page.data.events[0].agent_run, { model: "gpt-5.4", effort: "high" });
+  assert.equal(page.data.events[1].agent_run, undefined);
+});

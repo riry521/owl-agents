@@ -11,6 +11,7 @@ interface EventFrame {
   work_id?: string;
   task_id?: string;
   agent_run_id?: string;
+  agent_run?: { model: string | null; effort: string | null };
   payload: Record<string, unknown>;
   created_at: string;
 }
@@ -115,8 +116,11 @@ function eventDetail(ev: EventFrame, t: TFunction): string | null {
     return PHASE_LABEL_KEYS[phase] ? t(PHASE_LABEL_KEYS[phase]) : phase;
   }
   if (typeof label === 'string' && label.length > 0) return label;
-  if (typeof model === 'string' && model.length > 0) {
-    return agentModelLabel({ model, effort: typeof effort === 'string' && effort.length > 0 ? effort : null });
+  // Prefer the AgentRun's model/effort; older payloads only name the provider.
+  const runModel = ev.agent_run?.model || (typeof model === 'string' ? model : '');
+  if (runModel) {
+    const runEffort = ev.agent_run?.model ? ev.agent_run.effort : typeof effort === 'string' ? effort : null;
+    return agentModelLabel({ model: runModel, effort: runEffort || null });
   }
   if (typeof provider === 'string' && provider.length > 0) return provider;
   return null;
