@@ -789,6 +789,8 @@ export interface AgentRun extends JsonObject {
   readonly pid: number | null;
   readonly started_at: string | null;
   readonly ended_at: string | null;
+  /** When the run last produced output; null before its first output. */
+  readonly last_output_at: string | null;
   /** Executor runs: the AgentRun that started it (Hybrid Worker or the observed parent). */
   readonly parent_agent_id: string | null;
   /** Hybrid Worker runs: plan, executing or verdict. */

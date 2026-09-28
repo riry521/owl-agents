@@ -464,6 +464,8 @@ export interface AgentRun {
   pid: number | null;
   started_at: RFC3339 | null;
   ended_at: RFC3339 | null;
+  /** When the run last produced output; null before its first output. */
+  last_output_at: RFC3339 | null;
   /** For child (executor) runs: the AgentRun that launched it. */
   parent_agent_id: ULID | null;
   /** Hybrid Worker runs only: which Hybrid phase the Worker is in. */
@@ -559,11 +561,7 @@ export interface DecisionView {
   blocked_tasks: TaskSummary[];
 }
 
-/**
- * A run plus the liveness information the Agents screen needs.
- * `last_output_at` is the agent_runs.last_output_at column, which is not
- * part of the AgentRun DTO, so it is carried alongside.
- */
+/** A run plus the liveness information the Agents screen needs. */
 export interface AgentActivity {
   run: AgentRun;
   /** Per-role ordinal within the Work, used for "Worker #7" style labels. */

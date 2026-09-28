@@ -4114,6 +4114,7 @@ components:
         - pid
         - started_at
         - ended_at
+        - last_output_at
         - parent_agent_id
         - phase
         - subtask_count
@@ -4151,6 +4152,12 @@ components:
             - 'null'
           format: date-time
         ended_at:
+          type:
+            - string
+            - 'null'
+          format: date-time
+        last_output_at:
+          description: When the run last produced output; null before its first output.
           type:
             - string
             - 'null'

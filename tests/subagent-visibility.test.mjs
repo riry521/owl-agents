@@ -197,4 +197,7 @@ test("Hybrid records its phases and every Executor, and nested agent CLIs are de
   assert.equal(listedExecutor.origin, "spawned");
   assert.equal(listed.find((run) => run.id === finished.id).phase, "verdict");
   assert.equal(listed.find((run) => run.id === finished.id).subtask_count, 2);
+  const lastOutputAt = db.get("SELECT last_output_at FROM agent_runs WHERE id = ?", finished.id).last_output_at;
+  assert.ok(lastOutputAt);
+  assert.equal(listed.find((run) => run.id === finished.id).last_output_at, lastOutputAt);
 });

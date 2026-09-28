@@ -14,6 +14,7 @@
     "pid",
     "started_at",
     "ended_at",
+    "last_output_at",
     "parent_agent_id",
     "phase",
     "subtask_count",
@@ -73,6 +74,16 @@
       ]
     },
     "ended_at": {
+      "anyOf": [
+        {
+          "$ref": "common.json#/$defs/RFC3339"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "last_output_at": {
       "anyOf": [
         {
           "$ref": "common.json#/$defs/RFC3339"

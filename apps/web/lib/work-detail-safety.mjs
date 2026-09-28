@@ -121,6 +121,7 @@ function normalizeRuns(value, workId) {
     pid: typeof run.pid === 'number' && Number.isFinite(run.pid) ? run.pid : null,
     started_at: nullableString(run.started_at),
     ended_at: nullableString(run.ended_at),
+    last_output_at: nullableString(run.last_output_at),
     parent_agent_id: nullableString(run.parent_agent_id),
     phase: run.phase === 'plan' || run.phase === 'executing' || run.phase === 'verdict' ? run.phase : null,
     subtask_count: Number.isInteger(run.subtask_count) && run.subtask_count >= 0 ? run.subtask_count : null,

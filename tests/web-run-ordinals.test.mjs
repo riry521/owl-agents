@@ -201,6 +201,7 @@ test('getAgents numbers runs by their work_id with one request per list and show
   const archivedWorker = run('01B-archived-worker', 'worker', null, '2026-01-02T00:00:00.000Z', archivedWork.id);
   const archivedManager = run('01C-archived-manager', 'manager', null, null, archivedWork.id);
   const activeWorker = run('01D-active-worker', 'worker', null, '2026-01-03T00:00:00.000Z', activeWork.id);
+  activeWorker.last_output_at = '2026-01-03T00:10:00.000Z';
   const allRuns = [unassociatedWorker, archivedWorker, archivedManager, activeWorker];
   const requests = [];
   const originalFetch = globalThis.fetch;
@@ -243,6 +244,9 @@ test('getAgents numbers runs by their work_id with one request per list and show
     assert.equal(activity.get(activeWorker.id)?.project_name, 'Beta');
     assert.equal(activity.get(unassociatedWorker.id)?.ordinal, 1);
     assert.equal(activity.get(unassociatedWorker.id)?.work, null);
+    // Idle warnings count from the last output, not from the start.
+    assert.equal(activity.get(activeWorker.id)?.last_output_at, '2026-01-03T00:10:00.000Z');
+    assert.equal(activity.get(unassociatedWorker.id)?.last_output_at, null);
 
     // Work Detail numbers the Work's own run list; Agents must agree.
     const workDetailOrdinals = runOrdinals([archivedWorker, archivedManager], () => archivedWork.id);

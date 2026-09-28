@@ -295,6 +295,7 @@ interface AgentDbRow {
   pid: number | null;
   started_at: string | null;
   ended_at: string | null;
+  last_output_at: string | null;
   parent_agent_id: string | null;
   phase: string | null;
   subtask_count: number | null;
@@ -2270,7 +2271,7 @@ export class Core {
   public listAgentRuns(query: AgentListQuery = {}): ListResponse<AgentRun> {
     const limit = boundLimit(query.limit ?? 50);
     const rows = this.db.all<AgentDbRow>(
-      `SELECT id, work_id, task_id, role, design_tier, provider, model, status, pid, started_at, ended_at, parent_agent_id, phase, subtask_count, label, origin
+      `SELECT id, work_id, task_id, role, design_tier, provider, model, status, pid, started_at, ended_at, last_output_at, parent_agent_id, phase, subtask_count, label, origin
          FROM agent_runs
         WHERE (? IS NULL OR status = ?)
           AND (? IS NULL OR work_id = ?)
@@ -5897,6 +5898,7 @@ function toAgentRun(row: AgentDbRow): AgentRun {
     pid: row.pid,
     started_at: row.started_at,
     ended_at: row.ended_at,
+    last_output_at: row.last_output_at,
     parent_agent_id: row.parent_agent_id,
     phase: row.phase,
     subtask_count: row.subtask_count,

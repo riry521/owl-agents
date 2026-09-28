@@ -124,6 +124,7 @@ export interface AgentRun {
   pid: number | null;
   started_at: string | null;
   ended_at: string | null;
+  last_output_at: string | null;
   parent_agent_id: string | null;
   phase: "plan" | "executing" | "verdict" | null;
   subtask_count: number | null;

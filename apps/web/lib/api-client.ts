@@ -903,7 +903,7 @@ export async function getAgents(): Promise<AgentsView> {
     return {
       run,
       ordinal: ordinals.get(run.id) ?? 1,
-      last_output_at: null,
+      last_output_at: run.last_output_at,
       task,
       work,
       project_name: work?.project_id ? projectNames.get(work.project_id) ?? null : null,
@@ -932,6 +932,7 @@ function withRunLineage(run: AgentRun): AgentRun {
   return {
     ...run,
     work_id: typeof run.work_id === 'string' ? run.work_id : null,
+    last_output_at: typeof run.last_output_at === 'string' ? run.last_output_at : null,
     parent_agent_id: typeof run.parent_agent_id === 'string' ? run.parent_agent_id : null,
     phase,
     label: typeof run.label === 'string' ? run.label : null,
