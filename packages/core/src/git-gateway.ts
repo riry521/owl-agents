@@ -15,6 +15,8 @@ import type {
   GitIntegrationResult,
   GitOperationRequest,
   GitOperationResult,
+  GitPushRequest,
+  GitPushResult,
   TaskWorktreeDiscardResult,
   GitWorkMergeResult,
   VerificationCommand,
@@ -22,6 +24,7 @@ import type {
   WorkspaceEntry,
 } from "./types";
 import { GitLanes } from "./git-lane.js";
+import { basePushArgs, classifyPushFailure, parsePushPorcelain, PUSH_HOOK_WARNING_MARKER, redactCredentials, safeRemoteName } from "./git-push.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -36,6 +39,7 @@ interface ProjectRow {
   readonly canonical_path: string;
   readonly base_branch: string;
   readonly allowed_roots_json: string;
+  readonly auto_push?: number;
   readonly verification_plan_json?: string;
 }
 
@@ -714,6 +718,102 @@ export class GitWorktreeGateway implements GitGateway {
       return await this.inLane(canonical, () => this.advanceBaseNow(request, prepared, canonical));
     } catch (error) {
       return workMergeError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  public async pushBaseBranch(request: GitPushRequest): Promise<GitPushResult> {
+    let project: (ProjectRow & { readonly auto_push: number }) | undefined;
+    try {
+      const work = this.db.get<{ project_id: string | null }>("SELECT project_id FROM works WHERE id = ?", request.work_id);
+      if (!work?.project_id) return { ok: true, exit_code: 0, recorded: false, kind: "skipped_disabled", message: "No Project is attached; automatic push is disabled." };
+      project = this.db.get<ProjectRow & { readonly auto_push: number }>(
+        "SELECT canonical_path, base_branch, allowed_roots_json, auto_push FROM projects WHERE id = ?",
+        work.project_id,
+      );
+      if (!project || project.auto_push !== 1) return { ok: true, exit_code: 0, recorded: false, kind: "skipped_disabled", message: "Automatic push is disabled for this Project." };
+      const canonical = await this.validProjectPath(project.canonical_path, project.allowed_roots_json);
+      return await this.inLane(canonical, () => this.pushBaseBranchNow(project as ProjectRow & { readonly auto_push: number }, canonical));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        ok: false, exit_code: 1, recorded: false, kind: "failed", failure: "unknown", hook_side: null,
+        remote: null, base_branch: project?.base_branch ?? null, remote_ref: null, base_commit: null,
+        stderr_tail: "", message: `Could not push the Project base branch: ${message}`,
+      };
+    }
+  }
+
+  private async pushBaseBranchNow(project: ProjectRow & { readonly auto_push: number }, canonical: string): Promise<GitPushResult> {
+    const base = project.base_branch;
+    const failed = (
+      message: string,
+      details: { readonly remote?: string | null; readonly remote_ref?: string | null; readonly base_commit?: string | null } = {},
+    ): GitPushResult => ({
+      ok: false, exit_code: 1, recorded: false, kind: "failed", failure: "unknown", hook_side: null,
+      remote: details.remote ?? null, base_branch: base, remote_ref: details.remote_ref ?? null,
+      base_commit: details.base_commit ?? null, stderr_tail: "", message,
+    });
+    const baseRef = `refs/heads/${base}`;
+    const validBase = await this.git(canonical, ["check-ref-format", baseRef]);
+    if (!validBase.ok) return failed(`Could not resolve Project base branch ${base}: ${validBase.message}`);
+    const baseTip = await this.git(canonical, ["rev-parse", "--verify", "--quiet", `${baseRef}^{commit}`]);
+    if (!baseTip.ok) return failed(`Could not resolve Project base branch ${base}: ${baseTip.message}`);
+    const baseCommit = baseTip.message.trim();
+
+    const upstream = await this.git(canonical, [
+      "for-each-ref", "--format=%(upstream)%00%(upstream:remotename)%00%(upstream:remoteref)", baseRef,
+    ]);
+    if (!upstream.ok) return failed(`Could not resolve the upstream for ${base}: ${upstream.message}`, { base_commit: baseCommit });
+    const [trackingRef = "", remoteValue = "", remoteRefValue = ""] = upstream.message.split("\0");
+    const tracking = trackingRef.trim();
+    const remote = remoteValue.trim();
+    const remoteRef = remoteRefValue.trim();
+    if (!tracking || !remote || remote === "." || !remoteRef.startsWith("refs/heads/")) {
+      return { ok: true, exit_code: 0, recorded: false, kind: "skipped_no_upstream", base_branch: base, base_commit: baseCommit, message: `Base branch ${base} has no configured remote upstream.` };
+    }
+    if (!safeRemoteName(remote)) return failed("The configured upstream remote name is invalid.", { base_commit: baseCommit });
+    const validRemoteRef = await this.git(canonical, ["check-ref-format", remoteRef]);
+    if (!validRemoteRef.ok) return failed(`The configured remote branch for ${base} is invalid: ${validRemoteRef.message}`, { remote, remote_ref: remoteRef, base_commit: baseCommit });
+    const previous = await this.git(canonical, ["rev-parse", "--verify", "--quiet", `${tracking}^{commit}`]);
+    const previousTrackingCommit = previous.ok ? previous.message.trim() : null;
+
+    try {
+      const result = await execFileAsync("git", ["-C", canonical, ...basePushArgs(remote, base, remoteRef)], {
+        timeout: 120_000,
+        maxBuffer: 2 * 1024 * 1024,
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+      });
+      const stdout = String(result.stdout ?? "");
+      const stderr = redactCredentials(String(result.stderr ?? ""));
+      const porcelain = parsePushPorcelain(stdout);
+      const warnings = stderr.split(/\r?\n/u)
+        .filter((line) => line.startsWith(PUSH_HOOK_WARNING_MARKER))
+        .map((line) => line.slice(0, 300));
+      return {
+        ok: true, exit_code: 0, recorded: false, kind: "pushed", remote, base_branch: base, remote_ref: remoteRef,
+        previous_tracking_commit: previousTrackingCommit, new_remote_commit: baseCommit,
+        up_to_date: porcelain.some((line) => line.flag === "="), hook_warnings: warnings,
+        message: `Pushed ${base} to ${remote}/${remoteRef.slice("refs/heads/".length)}.${stderr ? ` ${stderr.slice(-500)}` : ""}`,
+      };
+    } catch (error) {
+      const failure = error as {
+        readonly code?: number | string;
+        readonly killed?: boolean;
+        readonly signal?: string | null;
+        readonly stdout?: string | Buffer;
+        readonly stderr?: string | Buffer;
+      };
+      const stdout = String(failure.stdout ?? "");
+      const stderr = String(failure.stderr ?? "");
+      const stderrTail = redactCredentials(stderr).slice(-2_000);
+      const timedOut = failure.killed === true && failure.signal === "SIGTERM";
+      const classification = classifyPushFailure({ stdout, stderr, timedOut, exitCode: typeof failure.code === "number" ? failure.code : 1 });
+      return {
+        ok: false, exit_code: typeof failure.code === "number" ? failure.code : 1, recorded: false, kind: "failed",
+        failure: classification.failure, hook_side: classification.hook_side, remote, base_branch: base,
+        remote_ref: remoteRef, base_commit: baseCommit, stderr_tail: stderrTail,
+        message: `git push failed (${classification.failure})${stderrTail ? `: ${stderrTail.slice(-500)}` : ""}`,
+      };
     }
   }
 

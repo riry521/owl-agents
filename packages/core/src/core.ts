@@ -49,6 +49,7 @@ import { slugifyKnowledgeContentName } from "./knowledge-naming.js";
 import { Librarian } from "./librarian.js";
 import { EXECUTOR_CONFIG_SETTINGS_KEY, HYBRID_MODE_SETTINGS_KEY } from "./types";
 import { GitWorktreeGateway } from "./git-gateway.js";
+import { redactCredentials } from "./git-push.js";
 import { recoverOrphanedState } from "./startup-recovery.js";
 import { cleanupWorkForDeletion, reconcileWorktrees, type WorktreeReconcileFailure } from "./worktree-reconciler.js";
 import { processIdentityMatches, readProcessIdentity } from "./process-identity.js";
@@ -157,8 +158,71 @@ import type {
   AdvisorRunResult,
   WorkflowSnapshot,
   GitGateway,
+  GitPushFailure,
+  GitPushResult,
   GitWorkMergeResult,
 } from "./types";
+
+type PushAlertKind = "work_push_failed" | "work_push_blocked_by_hook" | "work_push_skipped_no_upstream";
+
+function pushAlertText(
+  language: OwnerLanguage,
+  kind: PushAlertKind,
+  detail: { readonly base_branch: string; readonly remote: string | null; readonly remote_branch: string | null; readonly push_failure: GitPushFailure | null; readonly hook_side: "local" | "remote" | null },
+): { readonly message: string; readonly remediation: string } {
+  const base = detail.base_branch;
+  const target = `${detail.remote ?? "remote"}/${detail.remote_branch ?? "branch"}`;
+  if (language === "ja") {
+    if (kind === "work_push_skipped_no_upstream") return {
+      message: `ベースブランチ ${base} に上流ブランチが設定されていないため、自動pushをスキップしました。`,
+      remediation: `git branch --set-upstream-to=<remote>/<branch> ${base} で上流を設定するか、Projectの自動pushをオフにしてください。`,
+    };
+    if (kind === "work_push_blocked_by_hook") return detail.hook_side === "remote" ? {
+      message: `リモート側のフックがベースブランチ ${base} の ${target} へのpushを拒否しました。`,
+      remediation: "リモートのルールを確認し、該当コミットを直してから手動でpushしてください。",
+    } : {
+      message: `pushフックがベースブランチ ${base} の ${target} へのpushを拒否しました。`,
+      remediation: "非公開の語が含まれていないか確認し、該当コミットを直してから手動でpushしてください。詳細はターミナルで git push を実行すると表示されます。",
+    };
+    if (detail.push_failure === "non_fast_forward") return {
+      message: `ベースブランチ ${base} を ${target} にpushできませんでした。リモートに手元にないコミットがあり、fast-forwardできません。`,
+      remediation: "リモートの変更を取り込んでから手動でpushしてください。force pushは使わないでください。",
+    };
+    if (detail.push_failure === "network") return {
+      message: `ベースブランチ ${base} を ${target} にpushできませんでした。ネットワークまたはリモートに接続できません。`,
+      remediation: "接続を確認して手動でpushしてください。次のWork完了時にも自動でpushを試みます。",
+    };
+    if (detail.push_failure === "auth") return {
+      message: `ベースブランチ ${base} を ${target} にpushできませんでした。リモートの認証に失敗しました。`,
+      remediation: "Gitの認証情報（SSH鍵や資格情報ヘルパー）を確認してから手動でpushしてください。",
+    };
+    return { message: `ベースブランチ ${base} の自動pushに失敗しました。`, remediation: "Owlのログを確認し、必要なら手動でpushしてください。" };
+  }
+  if (kind === "work_push_skipped_no_upstream") return {
+    message: `Skipped automatic push: base branch ${base} has no upstream branch.`,
+    remediation: `Set one with git branch --set-upstream-to=<remote>/<branch> ${base}, or turn off automatic push for this Project.`,
+  };
+  if (kind === "work_push_blocked_by_hook") return detail.hook_side === "remote" ? {
+    message: `A remote hook rejected pushing base branch ${base} to ${target}.`,
+    remediation: "Check the remote's rules, fix the commits, then push manually.",
+  } : {
+    message: `A push hook rejected pushing base branch ${base} to ${target}.`,
+    remediation: "Check for private words, fix the commits, then push manually. Run git push in a terminal to see the details.",
+  };
+  if (detail.push_failure === "non_fast_forward") return {
+    message: `Could not push base branch ${base} to ${target}: the remote has commits that are not here, so it cannot fast-forward.`,
+    remediation: "Integrate the remote changes, then push manually. Do not force push.",
+  };
+  if (detail.push_failure === "network") return {
+    message: `Could not push base branch ${base} to ${target}: the remote could not be reached.`,
+    remediation: "Check the connection and push manually. Owl will try again when the next Work completes.",
+  };
+  if (detail.push_failure === "auth") return {
+    message: `Could not push base branch ${base} to ${target}: authentication with the remote failed.`,
+    remediation: "Check your Git credentials (SSH key or credential helper), then push manually.",
+  };
+  return { message: `Automatic push of base branch ${base} failed.`, remediation: "Check the Owl log and push manually if needed." };
+}
 
 /** Merge formatted lesson blocks by their text and optional rule scope. */
 export function mergeLessonBlocks(existingBody: string | null, newBlocks: readonly string[]): { body: string; added: number } {
@@ -308,6 +372,7 @@ interface ProjectDbRow {
   name: string;
   canonical_path: string;
   base_branch: string;
+  auto_push: number;
   allowed_roots_json: string;
   verification_plan_json: string;
 }
@@ -2291,7 +2356,7 @@ export class Core {
   public listProjects(query: ProjectListQuery = {}): ListResponse<Project> {
     const limit = boundLimit(query.limit ?? 50);
     const rows = this.db.all<ProjectDbRow>(
-      `SELECT id, name, canonical_path, base_branch, allowed_roots_json, verification_plan_json
+      `SELECT id, name, canonical_path, base_branch, auto_push, allowed_roots_json, verification_plan_json
          FROM projects
         WHERE (? IS NULL OR id > ?)
         ORDER BY id ASC LIMIT ?`,
@@ -2329,7 +2394,7 @@ export class Core {
       payload: { kind: "project_updated", schema_version: "1.0.0", project_id: projectId },
     }, (transaction) => {
       const row = transaction.get<ProjectDbRow>(
-        `SELECT id, name, canonical_path, base_branch, allowed_roots_json, verification_plan_json
+        `SELECT id, name, canonical_path, base_branch, auto_push, allowed_roots_json, verification_plan_json
            FROM projects WHERE id = ?`,
         projectId,
       );
@@ -2339,6 +2404,10 @@ export class Core {
       const hasName = Object.prototype.hasOwnProperty.call(payload, "name");
       const hasPath = Object.prototype.hasOwnProperty.call(payload, "canonical_path");
       const hasBaseBranch = Object.prototype.hasOwnProperty.call(payload, "base_branch");
+      const hasAutoPush = Object.prototype.hasOwnProperty.call(payload, "auto_push");
+      if (hasAutoPush && typeof payload.auto_push !== "boolean") {
+        throw validationError(ownerLanguage(transaction) === "ja" ? "自動pushはtrueかfalseで指定してください。" : "auto_push must be true or false.", { field: "auto_push" });
+      }
       if (hasPath !== hasBaseBranch) {
         throw validationError("canonical_path and base_branch must be provided together.", { fields: ["canonical_path", "base_branch"] });
       }
@@ -2355,6 +2424,8 @@ export class Core {
 
       let canonicalPath = row.canonical_path;
       let baseBranch = row.base_branch;
+      let autoPush = row.auto_push === 1;
+      if (hasAutoPush) autoPush = payload.auto_push as boolean;
       let allowedRoots = JSON.parse(row.allowed_roots_json) as string[];
       if (hasPath) {
         const candidate = payload.canonical_path;
@@ -2379,23 +2450,24 @@ export class Core {
         }
       }
 
-      if (name === row.name && canonicalPath === row.canonical_path) {
+      if (name === row.name && canonicalPath === row.canonical_path && autoPush === (row.auto_push === 1)) {
         return { data: toProject(row), version: 0 };
       }
       const now = utcNow();
       transaction.run(
         `UPDATE projects
-            SET name = ?, canonical_path = ?, base_branch = ?, allowed_roots_json = ?, updated_at = ?
+            SET name = ?, canonical_path = ?, base_branch = ?, auto_push = ?, allowed_roots_json = ?, updated_at = ?
           WHERE id = ?`,
         name,
         canonicalPath,
         baseBranch,
+        autoPush ? 1 : 0,
         JSON.stringify(allowedRoots),
         now,
         projectId,
       );
       return {
-        data: toProject({ ...row, name, canonical_path: canonicalPath, base_branch: baseBranch, allowed_roots_json: JSON.stringify(allowedRoots) }),
+        data: toProject({ ...row, name, canonical_path: canonicalPath, base_branch: baseBranch, auto_push: autoPush ? 1 : 0, allowed_roots_json: JSON.stringify(allowedRoots) }),
         version: 0,
       };
     });
@@ -4248,6 +4320,7 @@ export class Core {
                 const worktrees = await this.runWorktreeReconcile(workId, "work_completed");
                 if (workProject?.project_id !== null && workProject?.project_id !== undefined) {
                   await this.deleteMergedWorkBranches(workId, this.worktreeCleanupFailure(workId, worktrees));
+                  if (mergeRecord !== undefined) await this.pushCompletedWork(workId, workProject.project_id);
                 }
               }
             } else {
@@ -4626,6 +4699,110 @@ export class Core {
     });
     await this.announceCoreDecisions(workId);
     await this.dispatcher.replayPending();
+  }
+
+  private async pushCompletedWork(workId: string, projectId: string): Promise<void> {
+    const pushBaseBranch = this.git.pushBaseBranch;
+    if (!pushBaseBranch || !this.started) return;
+    try {
+      const project = this.db.get<{ auto_push: number; base_branch: string }>("SELECT auto_push, base_branch FROM projects WHERE id = ?", projectId);
+      if (!project || project.auto_push !== 1) return;
+      let result: GitPushResult;
+      try {
+        result = await pushBaseBranch.call(this.git, { work_id: workId });
+      } catch (error) {
+        const detail = redactCredentials(error instanceof Error ? error.message : String(error)).slice(-2_000);
+        let baseCommit: string | null = null;
+        const completed = this.db.get<{ payload_json: string }>(
+          "SELECT payload_json FROM events WHERE work_id = ? AND type = 'work.completed' ORDER BY sequence DESC LIMIT 1",
+          workId,
+        );
+        try {
+          const payload = completed ? JSON.parse(completed.payload_json) as { merge?: { new_base_commit?: string; merge_commit?: string | null } } : null;
+          baseCommit = payload?.merge?.new_base_commit ?? payload?.merge?.merge_commit ?? null;
+        } catch { /* The alert can still be recorded without the merge commit. */ }
+        result = {
+          ok: false, exit_code: 1, recorded: false, kind: "failed", failure: "unknown", hook_side: null,
+          remote: null, base_branch: project.base_branch, remote_ref: null, base_commit: baseCommit,
+          stderr_tail: detail, message: "Git push operation threw an exception.",
+        };
+      }
+
+      if (result.kind === "skipped_disabled") {
+        console.info(`[owl-core] Auto push for Work ${workId} was skipped: automatic push is disabled.`);
+        return;
+      }
+      console.warn(`[owl-core] Auto push for Work ${workId} ${result.kind === "failed" ? `failed (${result.failure})` : result.kind}.`);
+
+      if (result.kind === "pushed") {
+        try {
+          const idempotencyKey = `work-pushed:${workId}:${result.new_remote_commit}`;
+          if (this.db.get("SELECT id FROM events WHERE idempotency_key = ?", idempotencyKey)) return;
+          await this.writeLane.write({
+            mutateState: () => null,
+            event: {
+              id: createUlid(), idempotencyKey, type: "work.pushed", workId,
+              payload: {
+                work_id: workId, project_id: projectId, remote: result.remote, base_branch: result.base_branch,
+                remote_branch: result.remote_ref.slice("refs/heads/".length), remote_ref: result.remote_ref,
+                previous_tracking_commit: result.previous_tracking_commit, new_remote_commit: result.new_remote_commit,
+                up_to_date: result.up_to_date, hook_warnings: [...result.hook_warnings],
+              },
+            },
+            outbox: [{ provider: "websocket" }],
+          });
+        } catch (error) {
+          console.warn(`[owl-core] Could not record auto-push success for Work ${workId}`, error);
+        }
+        return;
+      }
+
+      const kind = result.kind === "skipped_no_upstream"
+        ? "work_push_skipped_no_upstream"
+        : result.failure === "hook_rejected"
+          ? "work_push_blocked_by_hook"
+          : "work_push_failed";
+      const failure = result.kind === "failed" ? result.failure : null;
+      const hookSide = result.kind === "failed" && result.failure === "hook_rejected" ? result.hook_side ?? "local" : null;
+      const baseBranch = result.kind === "skipped_no_upstream" ? result.base_branch : result.base_branch ?? project.base_branch;
+      const remote = result.kind === "failed" ? result.remote : null;
+      const remoteRef = result.kind === "failed" ? result.remote_ref : null;
+      const baseCommit = result.base_commit;
+      const stderrTail = result.kind === "failed" ? result.stderr_tail : "";
+      const detail = {
+        base_branch: baseBranch,
+        remote,
+        remote_branch: remoteRef?.startsWith("refs/heads/") ? remoteRef.slice("refs/heads/".length) : null,
+        push_failure: failure,
+        hook_side: hookSide,
+      };
+      const text = pushAlertText(ownerLanguage(this.db), kind, detail);
+      const resultMessage = redactCredentials(result.message);
+      const stderrMessage = stderrTail ? redactCredentials(stderrTail).slice(-500) : "";
+      const message = [text.message, resultMessage, stderrMessage].filter(Boolean).join("\n\n");
+      const idempotencyKey = `work-push-alert:${workId}:${baseCommit ?? "no-base-commit"}:${kind}:${failure ?? hookSide ?? "-"}`;
+      try {
+        if (this.db.get("SELECT id FROM events WHERE idempotency_key = ?", idempotencyKey)) return;
+        await this.writeLane.write({
+          mutateState: () => null,
+          event: {
+            id: createUlid(), idempotencyKey, type: "system.alert", workId,
+            payload: {
+              kind, message, remediation: text.remediation, base_branch: baseBranch, remote,
+              remote_branch: detail.remote_branch,
+              ...(failure && failure !== "hook_rejected" ? { push_failure: failure } : {}),
+              ...(hookSide ? { hook_side: hookSide } : {}),
+              ...(result.kind === "failed" ? { stderr_tail: redactCredentials(result.stderr_tail) } : {}),
+            },
+          },
+          outbox: [{ provider: "websocket" }],
+        });
+      } catch (error) {
+        console.warn(`[owl-core] Could not record auto-push alert for Work ${workId}`, error);
+      }
+    } catch (error) {
+      console.warn(`[owl-core] Could not process auto push for Work ${workId}`, error);
+    }
   }
 
   /** Branch cleanup happens after reconciliation removes all worktrees; it cannot undo completion. */
@@ -5913,6 +6090,7 @@ function toProject(row: ProjectDbRow): Project {
     name: row.name,
     canonical_path: row.canonical_path,
     base_branch: row.base_branch,
+    auto_push: row.auto_push === 1,
     allowed_roots: parseStringArray(row.allowed_roots_json, "allowed_roots", row.id, "Project"),
     verification_plan: parseArray(row.verification_plan_json, "verification_plan", row.id, "Project") as unknown as readonly VerificationCommand[],
   };
@@ -6358,6 +6536,7 @@ function createProjectInTransaction(transaction: CoreWriteLaneTransaction, paylo
     name,
     canonical_path: canonicalPath,
     base_branch: baseBranch,
+    auto_push: false,
     allowed_roots: allowedRoots as readonly string[],
     verification_plan: verificationPlan,
   };

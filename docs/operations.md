@@ -15,6 +15,15 @@ use, Owl copies only a missing known file into the selected data directory. It l
 the source untouched and never overwrites a destination file. Verify the destination
 with `./bin/owl doctor --json` before archiving the legacy directory.
 
+## Automatic push
+
+Automatic push is off by default for each Project. Turn it on in the Project settings
+after confirming the base branch has an upstream (`branch.<base>.remote` and
+`branch.<base>.merge`). When a Work completes, Owl pushes only that base branch to
+the configured upstream. Owl never force-pushes. A rejected push leaves the Work
+completed and creates an alert with the Git reason; integrate remote changes or
+resolve the hook or credential issue, then push manually as needed.
+
 ## Backup and restore
 
 1. Stop the server: `./bin/owl stop`.

@@ -192,6 +192,17 @@ else
   warn "$(msg 'doctorが要対応項目を報告しました。`./bin/owl doctor`でremediationを確認してください。provider CLIは自動インストールされません。' 'Doctor reported items requiring attention. Run ./bin/owl doctor for guidance. Provider CLIs are not installed automatically.')"
 fi
 
+# --- pre-push private word guard ---
+if [ -n "${OWL_PRIVATE_WORDS_FILE:-}" ] || [ -f data/private-words.txt ]; then
+  if sh scripts/git-hooks/install.sh; then
+    info "$(msg "pre-pushガードを導入しました。" "Installed the pre-push guard.")"
+  else
+    warn "$(msg "pre-pushガードを導入できませんでした。上のメッセージを確認し、sh scripts/git-hooks/install.sh を手動で実行してください。" "Could not install the pre-push guard. Check the message above and run sh scripts/git-hooks/install.sh manually.")"
+  fi
+else
+  info "$(msg "非公開語リスト（data/private-words.txt）が無いため、pre-pushガードは導入しません。導入するには、リストを作ってから sh scripts/git-hooks/install.sh を実行してください。" "No private word list (data/private-words.txt), so the pre-push guard was not installed. Create the list, then run sh scripts/git-hooks/install.sh.")"
+fi
+
 # --- owl command on PATH ---
 # Put bin/ on PATH in the login shell's rc file so `owl` works from anywhere.
 # Idempotent: any existing line mentioning this bin directory is left alone.

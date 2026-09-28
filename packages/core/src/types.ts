@@ -307,6 +307,47 @@ export type GitWorkMergeResult =
       readonly work_branch: string | null;
     };
 
+export type GitPushFailure = "non_fast_forward" | "hook_rejected" | "network" | "auth" | "unknown";
+
+export interface GitPushRequest {
+  readonly work_id: string;
+}
+
+interface GitPushResultBase {
+  readonly ok: boolean;
+  readonly exit_code: number;
+  readonly recorded: boolean;
+  readonly message: string;
+}
+
+export type GitPushResult =
+  | (GitPushResultBase & {
+      readonly kind: "pushed";
+      readonly remote: string;
+      readonly base_branch: string;
+      readonly remote_ref: string;
+      readonly previous_tracking_commit: string | null;
+      readonly new_remote_commit: string;
+      readonly up_to_date: boolean;
+      readonly hook_warnings: readonly string[];
+    })
+  | (GitPushResultBase & { readonly kind: "skipped_disabled" })
+  | (GitPushResultBase & {
+      readonly kind: "skipped_no_upstream";
+      readonly base_branch: string;
+      readonly base_commit: string | null;
+    })
+  | (GitPushResultBase & {
+      readonly kind: "failed";
+      readonly failure: GitPushFailure;
+      readonly hook_side: "local" | "remote" | null;
+      readonly remote: string | null;
+      readonly base_branch: string | null;
+      readonly remote_ref: string | null;
+      readonly base_commit: string | null;
+      readonly stderr_tail: string;
+    });
+
 /** Branches deleted after a completed Work was merged, as branch name -> commit SHA. */
 export interface GitBranchCleanupResult extends GitOperationResult {
   readonly deleted_branches: Readonly<Record<string, string>>;
@@ -378,6 +419,8 @@ export interface GitGateway {
    * running at expected_state_version.
    */
   mergeWorkIntoBase(request: { readonly work_id: string; readonly expected_state_version?: number }): Promise<GitWorkMergeResult>;
+  /** Push the Project base branch to its configured upstream without force; Git failures are returned. */
+  pushBaseBranch?(request: GitPushRequest): Promise<GitPushResult>;
   /** Abort an interrupted Work merge in its integration worktree, if present. */
   abortIntegrationMerge(request: { readonly work_id: string }): Promise<GitOperationResult>;
   /** Delete a merged Work's branch and every Task branch of the Work. */
@@ -466,6 +509,11 @@ export class NoopGitGateway implements GitGateway {
       merge_commit: null,
       verification_commands_run: [],
     };
+  }
+
+  public async pushBaseBranch(request: GitPushRequest): Promise<GitPushResult> {
+    const result = this.record("push_base_branch", { work_id: request.work_id, task_id: null });
+    return { ...result, kind: "skipped_disabled" };
   }
 
   public async abortIntegrationMerge(request: { readonly work_id: string }): Promise<GitOperationResult> {
@@ -948,6 +996,7 @@ export interface Project extends JsonObject {
   readonly name: string;
   readonly canonical_path: string;
   readonly base_branch: string;
+  readonly auto_push: boolean;
   readonly allowed_roots: readonly string[];
   readonly verification_plan: readonly VerificationCommand[];
 }
@@ -964,6 +1013,7 @@ export interface UpdateProjectPayload extends JsonObject {
   readonly name?: string;
   readonly canonical_path?: string;
   readonly base_branch?: string;
+  readonly auto_push?: boolean;
 }
 
 export interface DeleteProjectPayload extends JsonObject {

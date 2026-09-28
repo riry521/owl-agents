@@ -149,6 +149,7 @@ export interface Project {
   name: string;
   canonical_path: string;
   base_branch: string;
+  auto_push: boolean;
   allowed_roots: string[];
   verification_plan: VerificationCommand[];
 }
@@ -165,6 +166,7 @@ export interface UpdateProjectInput {
   name?: string;
   canonical_path?: string;
   base_branch?: string;
+  auto_push?: boolean;
 }
 
 export interface DeleteProjectInput {

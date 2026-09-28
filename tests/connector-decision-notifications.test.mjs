@@ -244,6 +244,56 @@ test("system.alert without a message (internal bookkeeping) is still not notifie
   assert.equal(posts.length, 0);
 });
 
+const automaticPushAlerts = [
+  {
+    kind: "work_push_failed",
+    message: "Push rejected: non-fast-forward on main.",
+    remediation: "Fetch and merge the remote changes, then retry.",
+  },
+  {
+    kind: "work_push_blocked_by_hook",
+    message: "Push rejected by pre-push hook: branch policy denied this update.",
+    remediation: "Review the hook output and satisfy the branch policy.",
+  },
+  {
+    kind: "work_push_skipped_no_upstream",
+    message: "Automatic push skipped: base branch main has no upstream.",
+    remediation: "Set an upstream for main or turn off automatic push.",
+  },
+].map((payload) => event("system.alert", payload, { work_id: WORK_ID }));
+
+test("Slack notifies automatic push alerts with their reason and remediation", async () => {
+  const { posts, client } = slackClient();
+  for (const alert of automaticPushAlerts) {
+    await sendSlackNotification(client, alert, [{ channelId: "C-NOTIFICATIONS" }]);
+  }
+
+  assert.equal(posts.length, automaticPushAlerts.length);
+  automaticPushAlerts.forEach((alert, index) => {
+    const post = posts[index];
+    assert.ok(post.text.includes(alert.payload.message));
+    const content = post.attachments[0].blocks
+      .map((block) => block.text?.text ?? "")
+      .join("\n");
+    assert.ok(content.includes(alert.payload.message));
+    assert.ok(content.includes(alert.payload.remediation));
+  });
+});
+
+test("Discord notifies automatic push alerts with their reason and remediation", async () => {
+  const { sends, client } = discordClient();
+  for (const alert of automaticPushAlerts) {
+    await sendDiscordNotification(client, alert, "D-NOTIFICATIONS");
+  }
+
+  assert.equal(sends.length, automaticPushAlerts.length);
+  automaticPushAlerts.forEach((alert, index) => {
+    const data = embedData(sends[index]);
+    assert.ok(data.description.includes(alert.payload.message));
+    assert.ok(data.fields.some((field) => field.name === "対処" && field.value.includes(alert.payload.remediation)));
+  });
+});
+
 // --- decision.resolved / decision.cancelled follow-up notifications --------
 
 function decisionResolved(overrides = {}) {

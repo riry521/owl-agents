@@ -432,6 +432,7 @@ export const CANONICAL_EVENT_REGISTRY = [
   "work.completed",
   "work.cancelled",
   "work.branches_deleted",
+  "work.pushed",
   // No work.failed: Core surfaces Work failures as work-scoped system.alert or a Decision.
   "task.ready",
   "task.started",

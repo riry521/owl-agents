@@ -129,6 +129,53 @@ CLIとセットアップの表示言語は`OWL_LANG=ja`または`OWL_LANG=en`で
 workspace packageやnative buildの要件、任意のprovider CLI、lockfileポリシーを含む
 完全な依存関係一覧は[`docs/dependencies.md`](docs/dependencies.md)にあります。
 
+## Git のpushガードと自動push
+
+pre-pushガードは、pushするコミットに非公開語が含まれていないか確認します。
+引数を省略すると、Owlのチェックアウトにガードを導入します。
+別のリポジトリを保護するには、Owlのチェックアウトで次を実行し、引数に保護したいリポジトリを指定します。
+`sh scripts/git-hooks/install.sh /path/to/target-repo`
+`OWL_PRIVATE_WORDS_FILE`が設定されているか、`data/private-words.txt`がある場合、
+`./setup.sh`もガードを導入します。導入に失敗しても警告を表示してセットアップを続けます。
+この節の例では、`/path/to/owl`はOwlのチェックアウト、`/path/to/target-repo`は保護したいリポジトリを指します。
+対象リポジトリの`core.hooksPath`がリポジトリ外の共有ディレクトリを指す場合は、Owlのチェックアウトで次を実行します。
+`--use-hooks-path`はその共有ディレクトリに導入する指定です。インストーラは`core.hooksPath`の設定を変更せず、
+`.git/hooks/pre-commit`など他のフックにも触れません。
+`sh scripts/git-hooks/install.sh --use-hooks-path /path/to/target-repo`
+
+既存の`pre-push`が導入対象のフックと内容が完全一致すれば、導入済みとして扱います。
+実行権限がない場合はインストーラが付与します。異なる既存フックは上書きせず、エラーにして
+手動でガードを連結する方法を表示します。連結する場合は入力を保存して両方に渡します。
+
+```sh
+input=$(mktemp) || exit 1
+cat >"$input"
+"/path/to/owl/scripts/git-hooks/pre-push" "$@" <"$input" || { rm -f "$input"; exit 1; }
+# 既存フックでは元の入力を "$input" から読みます。
+rm -f "$input"
+```
+
+語のリストは、保護するリポジトリの`data/private-words.txt`か、複数のリポジトリで
+共用する場合はOwlのチェックアウトの`data/private-words.txt`に置きます。
+別の場所に置く場合は`OWL_PRIVATE_WORDS_FILE`で指定します。自動pushでも使うには、
+Owlサーバーのプロセス環境にこの変数を設定してください。フックは環境変数のファイル、
+対象リポジトリの`data/private-words.txt`、Owlのチェックアウトの
+`data/private-words.txt`の順で探します。既定の`data/`はGitの対象外です。
+UTF-8のテキストで1行に1語または語句を書きます。空行と`#`で始まる行は無視します。
+照合は固定文字列の部分一致で、検出した語そのものは表示しません。有効なリストが
+見つからない場合は警告を出してpushを許可しますが、検査は行いません。
+
+```text
+# ローカルだけで使い、コミットしないでください。
+PRIVATE_WORD_EXAMPLE
+```
+
+自動pushはProjectごとのオプトイン設定です。Projects画面でProjectを編集し、
+**Work完了時に自動でpush**をオンにします。初期状態はオフです。有効にすると、Workを
+マージした後にベースブランチを設定済みの上流へpushします（例: `main`が`origin/main`を
+追跡）。ベースブランチに上流の設定が必要で、force pushは行いません。pushに失敗しても
+Workは完了のままになり、理由が通知されます。
+
 ## Workの作成
 
 ```bash

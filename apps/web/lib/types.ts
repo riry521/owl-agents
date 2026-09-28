@@ -311,6 +311,7 @@ export interface Project {
   id: string;
   name: string;
   canonical_path: string;
+  auto_push?: boolean;
   base_branch: string;
   allowed_roots: string[];
   verification_plan: unknown[];
@@ -320,6 +321,7 @@ export interface Project {
 export interface UpdateProjectInput {
   name?: string;
   canonical_path?: string;
+  auto_push?: boolean;
 }
 
 export type ProjectBlocker = 'running_works' | 'active_agents';

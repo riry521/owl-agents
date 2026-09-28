@@ -18,6 +18,7 @@ const EVENT_ICONS: Record<string, string> = {
   'work.created': '📋',
   'work.started': '▶️',
   'work.completed': '✅',
+  'work.pushed': '⬆️',
   'work.failed': '❌',
   'task.ready': '📝',
   'task.completed': '✔️',
@@ -45,6 +46,7 @@ const EVENT_LABEL_KEYS: Record<string, string> = {
   'work.created': 'activity.workCreated',
   'work.started': 'activity.workStarted',
   'work.completed': 'activity.workCompleted',
+  'work.pushed': 'activity.workPushed',
   'work.failed': 'activity.workFailed',
   'task.ready': 'activity.taskReady',
   'task.completed': 'activity.taskCompleted',
@@ -80,6 +82,9 @@ const ALERT_LABEL_KEYS: Record<string, string> = {
   design_documents_orphaned: 'activity.alertDesignDocumentsOrphaned',
   design_changes_discarded: 'activity.alertDesignChangesDiscarded',
   agent_cancel_signal_failed: 'activity.alertAgentCancelFailed',
+  work_push_failed: 'activity.alertWorkPushFailed',
+  work_push_blocked_by_hook: 'activity.alertWorkPushBlocked',
+  work_push_skipped_no_upstream: 'activity.alertWorkPushSkipped',
 };
 
 function eventLabelKey(ev: EventFrame): string {
@@ -99,6 +104,9 @@ function eventDetail(ev: EventFrame, t: TFunction): string | null {
   const payload: Record<string, unknown> = ev.payload && typeof ev.payload === 'object' ? ev.payload : {};
   const { phase, label, provider } = payload;
   if (ev.type === 'system.alert' && typeof payload.message === 'string') return payload.message;
+  if (ev.type === 'work.pushed' && typeof payload.remote === 'string' && typeof payload.remote_branch === 'string') {
+    return `${payload.remote}/${payload.remote_branch}`;
+  }
   if (ev.type === 'worker.phase_changed' && typeof phase === 'string') {
     return PHASE_LABEL_KEYS[phase] ? t(PHASE_LABEL_KEYS[phase]) : phase;
   }

@@ -1049,12 +1049,12 @@ async function assertProjectPathNotRegistered(core: CorePort, canonicalPath: str
 }
 
 function validateProjectUpdatePayload(payload: JsonObject): UpdateProjectInput {
-  const extra = Object.keys(payload).filter((key) => key !== "name" && key !== "canonical_path");
+  const extra = Object.keys(payload).filter((key) => key !== "name" && key !== "canonical_path" && key !== "auto_push");
   if (extra.length > 0) {
     throw new ApiError(400, "validation_error", "UpdateProject payloadの項目が契約と一致しません。必須項目と余分な項目を確認してください。", { missing: [], extra });
   }
-  if (!Object.prototype.hasOwnProperty.call(payload, "name") && !Object.prototype.hasOwnProperty.call(payload, "canonical_path")) {
-    throw new ApiError(400, "validation_error", "変更する項目（nameまたはcanonical_path）を1つ以上指定してください。");
+  if (!Object.prototype.hasOwnProperty.call(payload, "name") && !Object.prototype.hasOwnProperty.call(payload, "canonical_path") && !Object.prototype.hasOwnProperty.call(payload, "auto_push")) {
+    throw new ApiError(400, "validation_error", "変更する項目（name、canonical_path、auto_pushのいずれか）を1つ以上指定してください。");
   }
   const input: UpdateProjectInput = {};
   if (Object.prototype.hasOwnProperty.call(payload, "name")) {
@@ -1067,6 +1067,10 @@ function validateProjectUpdatePayload(payload: JsonObject): UpdateProjectInput {
     const canonicalPath = stringField(payload.canonical_path, "canonical_path", 1, 4096);
     if (!isAbsolute(canonicalPath)) throw new ApiError(400, "validation_error", "フォルダは絶対パスで指定してください。");
     input.canonical_path = canonicalPath;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "auto_push")) {
+    if (typeof payload.auto_push !== "boolean") throw new ApiError(400, "validation_error", "自動pushはtrueかfalseで指定してください。");
+    input.auto_push = payload.auto_push;
   }
   return input;
 }
@@ -1839,6 +1843,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       const current = await requireRegisteredProject(context.core, projectId);
       const update: UpdateProjectInput = {};
       if (input.name !== undefined) update.name = input.name;
+      if (input.auto_push !== undefined) update.auto_push = input.auto_push;
       if (input.canonical_path !== undefined && resolve(input.canonical_path) !== resolve(current.canonical_path)) {
         const inspection = await inspectProjectFolder(input.canonical_path).catch((error: unknown) => {
           if (error instanceof ApiError) throw error;

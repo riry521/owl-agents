@@ -130,6 +130,58 @@ The complete dependency inventory, including workspace packages, native build
 requirements, optional provider CLIs, and the lockfile policy, is in
 [`docs/dependencies.md`](docs/dependencies.md).
 
+## Git push protection and automatic push
+
+Owl's pre-push guard checks outgoing commits for private words. Run these
+commands from the Owl checkout. Here, `/path/to/owl` means the Owl checkout and
+`/path/to/target-repo` means the repository to protect. Install the guard in the
+Owl checkout with `sh scripts/git-hooks/install.sh`, or install it in another
+repository with `sh scripts/git-hooks/install.sh /path/to/target-repo`.
+`./setup.sh` installs the guard when `OWL_PRIVATE_WORDS_FILE` is set or
+`data/private-words.txt` exists; an installation failure produces a warning and
+does not stop setup. If the target repository already has a shared
+`core.hooksPath` outside the repository, install into that configured hooks
+directory with `sh scripts/git-hooks/install.sh --use-hooks-path /path/to/target-repo`.
+The installer reads the target repository's effective `core.hooksPath` and
+does not change that setting; it leaves other hooks such as `.git/hooks/pre-commit`
+alone.
+
+An existing `pre-push` with contents that exactly match the managed hook is
+treated as already installed; if it is not executable, the installer enables it.
+Any different existing hook is left unchanged;
+to chain it with the guard, preserve its input for both commands:
+
+```sh
+input=$(mktemp) || exit 1
+cat >"$input"
+"/path/to/owl/scripts/git-hooks/pre-push" "$@" <"$input" || { rm -f "$input"; exit 1; }
+# Read the original input from "$input" in the existing hook.
+rm -f "$input"
+```
+
+Put the private word list at `data/private-words.txt` in the repository being
+guarded, or in the Owl checkout to use one list across repositories. You can
+also set `OWL_PRIVATE_WORDS_FILE` to a list at another location; for automatic
+push, make it available in Owl's server process environment. The hook checks
+the environment path first, then the target repository's `data/private-words.txt`,
+then the Owl checkout's `data/private-words.txt`. The default `data/` location
+is ignored by Git. Use UTF-8 text with one word or phrase per line; blank lines
+and lines beginning with `#` are ignored. Matching uses literal substring
+search and does not print the matched word. If no usable list is found, the hook
+warns and allows the push without checking it.
+
+```text
+# Keep this local; do not commit it.
+PRIVATE_WORD_EXAMPLE
+```
+
+Automatic push is an opt-in setting for each Project. In the Projects view,
+edit a Project and enable **Push automatically when a Work completes**. Projects
+start with this setting off. When enabled, Owl pushes the base branch to its
+configured upstream (for example, `main` tracking `origin/main`) after a Work
+is merged. The base branch needs an upstream, and Owl never force pushes. A
+push failure leaves the Work completed and reports the reason.
+
 ## Creating Work
 
 ```bash

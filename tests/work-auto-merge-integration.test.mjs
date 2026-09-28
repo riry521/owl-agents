@@ -65,7 +65,7 @@ async function waitFor(read, timeoutMs = 15_000) {
   }
 }
 
-async function openFixture(t, { verificationPlan = [], beforeFinalize = async () => {}, onWorker = async () => {} } = {}) {
+async function openFixture(t, { verificationPlan = [], autoPush = false, beforeFinalize = async () => {}, onWorker = async () => {} } = {}) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "owl-work-auto-merge-")));
   const db = openDatabase(join(root, "owl.db"));
   db.migrate(join(repoRoot, "packages/db/migrations"));
@@ -107,6 +107,10 @@ async function openFixture(t, { verificationPlan = [], beforeFinalize = async ()
   await writeFile(join(project, "README.md"), "base version\n");
   git(project, "add", ".");
   git(project, "commit", "-m", "initial");
+  const remote = join(root, "remote.git");
+  git(root, "init", "--bare", "--initial-branch=main", remote);
+  git(project, "remote", "add", "origin", remote);
+  git(project, "push", "--porcelain", "-u", "origin", "main");
 
   const registered = await core.createProject(commandEnvelope({
     name: "Auto merge integration project",
@@ -115,6 +119,12 @@ async function openFixture(t, { verificationPlan = [], beforeFinalize = async ()
     allowed_roots: [root],
     verification_plan: verificationPlan,
   }, "project"));
+  if (autoPush) {
+    await db.createWriteLane().transact((tx) => {
+      tx.run("UPDATE projects SET auto_push = 1 WHERE id = ?", registered.data.id);
+      return null;
+    });
+  }
   const mergeCalls = [];
   const gateway = core.gitGateway();
   const mergeWorkIntoBase = gateway.mergeWorkIntoBase.bind(gateway);
@@ -122,7 +132,7 @@ async function openFixture(t, { verificationPlan = [], beforeFinalize = async ()
     mergeCalls.push(request.work_id);
     return mergeWorkIntoBase(request);
   };
-  return { root, project, db, core, projectId: registered.data.id, mergeCalls };
+  return { root, project, remote, db, core, projectId: registered.data.id, mergeCalls };
 }
 
 async function startSmallWork(core, projectId, suffix) {
@@ -313,4 +323,79 @@ test("Core skips Project merge for a Project-less Work while saving outputs and 
   const outputPath = join(root, "data", "outputs", workId, "out", "result.txt");
   assert.ok(await waitFor(() => existsSync(outputPath) && !existsSync(join(root, ".owl-workspaces", workId))), "outputs saved and workspace removed");
   assert.equal(await readFile(outputPath, "utf8"), "saved without a Project\n");
+});
+
+test("Core auto-pushes the merged base only when the Project option is enabled", async (t) => {
+  const enabled = await openFixture(t, {
+    autoPush: true,
+    onWorker: async (request) => writeFile(join(request.context.worktree, "feature.txt"), "feature\n"),
+  });
+  const workId = await startSmallWork(enabled.core, enabled.projectId, "auto-push-enabled");
+  assert.equal(await waitForTerminalDecision(enabled.db, workId), "completed");
+  const pushed = await waitFor(() => enabled.db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = 'work.pushed'", workId));
+  assert.ok(pushed);
+  const payload = JSON.parse(pushed.payload_json);
+  assert.equal(git(enabled.remote, "rev-parse", "refs/heads/main"), git(enabled.project, "rev-parse", "refs/heads/main"));
+  assert.equal(payload.new_remote_commit, git(enabled.remote, "rev-parse", "refs/heads/main"));
+
+  const disabled = await openFixture(t, {
+    onWorker: async (request) => writeFile(join(request.context.worktree, "feature.txt"), "feature\n"),
+  });
+  const originalRemote = git(disabled.remote, "rev-parse", "refs/heads/main");
+  const disabledWork = await startSmallWork(disabled.core, disabled.projectId, "auto-push-disabled");
+  assert.equal(await waitForTerminalDecision(disabled.db, disabledWork), "completed");
+  assert.ok(await waitFor(() => disabled.db.get("SELECT id FROM events WHERE work_id = ? AND type = 'work.branches_deleted'", disabledWork)));
+  assert.equal(git(disabled.remote, "rev-parse", "refs/heads/main"), originalRemote);
+  assert.equal(disabled.db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'work.pushed'", disabledWork).n, 0);
+});
+
+test("Core keeps completion and alerts when remote advances or the base has no upstream", async (t) => {
+  const advanced = await openFixture(t, {
+    autoPush: true,
+    onWorker: async (request) => writeFile(join(request.context.worktree, "feature.txt"), "feature\n"),
+  });
+  const other = join(advanced.root, "other");
+  git(advanced.root, "clone", advanced.remote, other);
+  git(other, "config", "user.name", "Other");
+  git(other, "config", "user.email", "other@example.invalid");
+  await writeFile(join(other, "remote.txt"), "remote advance\n");
+  git(other, "add", "remote.txt");
+  git(other, "commit", "-m", "remote advance");
+  git(other, "push", "origin", "main");
+  const remoteBefore = git(advanced.remote, "rev-parse", "refs/heads/main");
+  const workId = await startSmallWork(advanced.core, advanced.projectId, "push-rejected");
+  assert.equal(await waitForTerminalDecision(advanced.db, workId), "completed");
+  assert.equal(git(advanced.remote, "rev-parse", "refs/heads/main"), remoteBefore);
+  const failed = await waitFor(() => advanced.db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = 'system.alert' AND json_extract(payload_json, '$.kind') = 'work_push_failed'", workId));
+  assert.ok(failed);
+  assert.equal(JSON.parse(failed.payload_json).push_failure, "non_fast_forward");
+  assert.equal(advanced.db.get("SELECT state FROM works WHERE id = ?", workId).state, "completed");
+
+  const noUpstream = await openFixture(t, {
+    autoPush: true,
+    onWorker: async (request) => writeFile(join(request.context.worktree, "feature.txt"), "feature\n"),
+  });
+  git(noUpstream.project, "branch", "--unset-upstream");
+  const noUpstreamWork = await startSmallWork(noUpstream.core, noUpstream.projectId, "push-no-upstream");
+  assert.equal(await waitForTerminalDecision(noUpstream.db, noUpstreamWork), "completed");
+  const skipped = await waitFor(() => noUpstream.db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = 'system.alert' AND json_extract(payload_json, '$.kind') = 'work_push_skipped_no_upstream'", noUpstreamWork));
+  assert.ok(skipped);
+});
+
+test("Core includes the local pre-push hook's rejection reason in its alert", async (t) => {
+  const { project, db, core, projectId } = await openFixture(t, {
+    autoPush: true,
+    onWorker: async (request) => writeFile(join(request.context.worktree, "feature.txt"), "feature\n"),
+    beforeFinalize: async () => {},
+  });
+  const hook = join(project, ".git", "hooks", "pre-push");
+  await writeFile(hook, "#!/bin/sh\nprintf '%s\\n' 'owl-pre-push: blocked: policy review required' >&2\nexit 1\n");
+  await chmod(hook, 0o755);
+  const workId = await startSmallWork(core, projectId, "push-hook-blocked");
+  assert.equal(await waitForTerminalDecision(db, workId), "completed");
+  const blocked = await waitFor(() => db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = 'system.alert' AND json_extract(payload_json, '$.kind') = 'work_push_blocked_by_hook'", workId));
+  assert.ok(blocked);
+  const alert = JSON.parse(blocked.payload_json);
+  assert.match(alert.message, /owl-pre-push: blocked: policy review required/);
+  assert.match(alert.stderr_tail, /owl-pre-push: blocked: policy review required/);
 });

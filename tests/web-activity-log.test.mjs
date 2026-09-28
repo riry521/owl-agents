@@ -83,3 +83,40 @@ test("Activity Log falls back to a generic title for an alert kind it does not k
   assert.match(markup, /System alert/);
   assert.match(markup, /Something happened\./);
 });
+
+test("Activity Log labels automatic push alerts and shows their reasons", () => {
+  const pushAlertCases = [
+    ["work_push_failed", "activity.alertWorkPushFailed", "Push rejected: non-fast-forward."],
+    ["work_push_blocked_by_hook", "activity.alertWorkPushBlocked", "Push rejected by pre-push hook."],
+    ["work_push_skipped_no_upstream", "activity.alertWorkPushSkipped", "No upstream is configured."],
+  ];
+  const events = pushAlertCases.map(([kind, , message], index) => ({
+    event_id: `push-alert-${index}`,
+    type: "system.alert",
+    payload: { kind, message },
+    created_at: new Date().toISOString(),
+  }));
+  hookValues = [events, ""];
+
+  const markup = renderToStaticMarkup(React.createElement(ActivityLog));
+
+  for (const [, labelKey, message] of pushAlertCases) {
+    assert.ok(markup.includes(labelKey));
+    assert.ok(markup.includes(message));
+  }
+});
+
+test("Activity Log labels a successful push and shows its remote branch", () => {
+  hookValues = [[{
+    event_id: "push-event",
+    type: "work.pushed",
+    payload: { remote: "origin", remote_branch: "main" },
+    created_at: new Date().toISOString(),
+  }], ""];
+
+  const markup = renderToStaticMarkup(React.createElement(ActivityLog));
+
+  assert.match(markup, /activity\.workPushed/);
+  assert.match(markup, /⬆️/u);
+  assert.match(markup, /origin\/main/);
+});

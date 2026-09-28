@@ -8,6 +8,7 @@
     "name",
     "canonical_path",
     "base_branch",
+    "auto_push",
     "allowed_roots",
     "verification_plan"
   ],
@@ -23,6 +24,9 @@
     },
     "base_branch": {
       "type": "string"
+    },
+    "auto_push": {
+      "type": "boolean"
     },
     "allowed_roots": {
       "type": "array",

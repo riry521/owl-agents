@@ -8,6 +8,8 @@ export type { ProviderPauseResumeSource, ProviderPauseRow, ProviderPauseState, P
 export { createProviderPauseController } from "./provider-pause-controller";
 export type { ProviderPauseController, ProviderPauseControllerOptions, ProviderPauseEvent, ProviderPauseEventType } from "./provider-pause-controller";
 export { NoopGitGateway } from "./types";
+export { basePushArgs, classifyPushFailure, parsePushPorcelain, PUSH_HOOK_BLOCK_MARKER, PUSH_HOOK_WARNING_MARKER, redactCredentials, safeRemoteName } from "./git-push";
+export type { PushRefLine } from "./git-push";
 export {
   TASK_TRANSITION_TABLE,
   WORK_TRANSITION_TABLE,
@@ -102,6 +104,9 @@ export type {
   EventHandler,
   FailureClass,
   GitGateway,
+  GitPushFailure,
+  GitPushRequest,
+  GitPushResult,
   GitIntegrationResult,
   GitOperationRequest,
   GitOperationResult,

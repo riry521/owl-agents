@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -654,4 +654,99 @@ test("18. an ExternalCoreAdapter without the new methods returns core_not_ready 
   await assertApiError(await api.request(`/projects/${project.id}/deletion-impact`), 503, "core_not_ready");
   await assertApiError(await sendCommand(api, "DELETE", `/projects/${project.id}`, { confirmed_work_count: 0 }, "legacy-delete"), 503, "core_not_ready");
   assert.ok(projectRow(api, project.id));
+});
+
+test("19. auto_push defaults off, PATCH persists booleans, and non-booleans are rejected", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "auto-push-project");
+  if (!repo) return;
+  const existing = await createProject(api, "auto-push-existing", { path: repo });
+  assert.equal(existing.auto_push, false);
+  assert.equal((await listProjects(api)).find((project) => project.id === existing.id).auto_push, false);
+
+  const createPayload = {
+    name: "Auto push created",
+    canonical_path: join(api.root, "auto-push-created"),
+    base_branch: "main",
+    allowed_roots: [join(api.root, "auto-push-created")],
+    verification_plan: [],
+  };
+  await assertApiError(await sendCommand(api, "POST", "/projects", { ...createPayload, auto_push: true }, "auto-push-create-invalid"), 400, "validation_error");
+  const createdResponse = await sendCommand(api, "POST", "/projects", createPayload, "auto-push-create");
+  assert.equal(createdResponse.status, 201);
+  const created = (await createdResponse.json()).data;
+  assert.equal(created.auto_push, false);
+
+  const enabled = await sendCommand(api, "PATCH", `/projects/${existing.id}`, { auto_push: true }, "auto-push:true");
+  assert.equal(enabled.status, 200);
+  assert.equal((await enabled.json()).data.auto_push, true);
+  assert.equal((await listProjects(api)).find((project) => project.id === existing.id).auto_push, true);
+  const omitted = await sendCommand(api, "PATCH", `/projects/${existing.id}`, { name: "Auto push renamed" }, "auto-push-omitted");
+  assert.equal((await omitted.json()).data.auto_push, true);
+  const disabled = await sendCommand(api, "PATCH", `/projects/${existing.id}`, { auto_push: false }, "auto-push:false");
+  assert.equal(disabled.status, 200);
+  assert.equal((await disabled.json()).data.auto_push, false);
+  assert.equal((await listProjects(api)).find((project) => project.id === existing.id).auto_push, false);
+  for (const value of ["true", 1, null]) {
+    await assertApiError(await sendCommand(api, "PATCH", `/projects/${existing.id}`, { auto_push: value }, `auto-push-invalid:${String(value)}`), 400, "validation_error");
+  }
+
+  const memoryApi = await setup(t, { memory: true });
+  if (!memoryApi) return;
+  const memoryPath = join(memoryApi.root, "memory-auto-push");
+  await mkdir(memoryPath);
+  const memoryCreate = await sendCommand(memoryApi, "POST", "/projects", {
+    name: "Memory auto push",
+    canonical_path: memoryPath,
+    base_branch: "main",
+    allowed_roots: [memoryPath],
+    verification_plan: [],
+  }, "memory-auto-push-create");
+  assert.equal(memoryCreate.status, 201);
+  const memoryProject = (await memoryCreate.json()).data;
+  assert.equal(memoryProject.auto_push, false);
+  const memoryUpdate = await sendCommand(memoryApi, "PATCH", `/projects/${memoryProject.id}`, { auto_push: true }, "memory-auto-push-update");
+  assert.equal(memoryUpdate.status, 200);
+  assert.equal((await memoryUpdate.json()).data.auto_push, true);
+  assert.equal((await listProjects(memoryApi)).find((project) => project.id === memoryProject.id).auto_push, true);
+  const memoryDisable = await sendCommand(memoryApi, "PATCH", `/projects/${memoryProject.id}`, { auto_push: false }, "memory-auto-push-disable");
+  assert.equal((await memoryDisable.json()).data.auto_push, false);
+  assert.equal((await listProjects(memoryApi)).find((project) => project.id === memoryProject.id).auto_push, false);
+});
+
+test("an existing Project defaults to auto_push=false when the migration is applied", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "owl-project-auto-push-migration-"));
+  const oldMigrations = join(root, "old-migrations");
+  await mkdir(oldMigrations);
+  const migrationFiles = await readdir(migrations);
+  const autoPushMigration = migrationFiles.find((file) => file.endsWith("_project_auto_push.sql"));
+  assert.ok(autoPushMigration);
+  for (const filename of migrationFiles.filter((file) => file.endsWith(".sql") && file !== autoPushMigration)) {
+    await copyFile(join(migrations, filename), join(oldMigrations, filename));
+  }
+  const db = openDatabase(join(root, "owl.db"));
+  db.migrate(oldMigrations);
+  const core = new Core({
+    db,
+    agentRunner: {},
+    version: "api-project-auto-push-migration-test",
+    owlRoot: root,
+    dataDir: root,
+  });
+  t.after(async () => {
+    await core.stop({ force: true });
+    db.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  await core.createProject(command({
+    name: "Pre-migration Project",
+    canonical_path: root,
+    base_branch: "main",
+    allowed_roots: [root],
+    verification_plan: [],
+  }, "pre-migration-project"));
+
+  db.migrate(migrations);
+  assert.equal(core.listProjects().data[0].auto_push, false);
 });

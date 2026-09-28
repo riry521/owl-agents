@@ -5,7 +5,11 @@ import type {
   UpdateProjectInput,
 } from '@/lib/types';
 
-export type ProjectEditForm = { name: string; path: string };
+export type ProjectEditForm = { name: string; path: string; autoPush: boolean };
+
+export function isProjectAutoPushEnabled(project: Project): boolean {
+  return project.auto_push === true;
+}
 
 export function buildProjectUpdateInput(
   project: Project,
@@ -18,6 +22,8 @@ export function buildProjectUpdateInput(
   const input: UpdateProjectInput = {};
   if (name !== project.name) input.name = name;
   if (form.path !== project.canonical_path) input.canonical_path = form.path;
+  const autoPush = form.autoPush === true;
+  if (autoPush !== isProjectAutoPushEnabled(project)) input.auto_push = autoPush;
   return Object.keys(input).length ? input : null;
 }
 

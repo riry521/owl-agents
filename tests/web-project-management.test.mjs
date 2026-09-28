@@ -22,7 +22,7 @@ function loadProjectManagementModule() {
   return loaded.exports;
 }
 
-const { buildProjectUpdateInput, deletionDialogModel, impactFromError, projectErrorKey } = loadProjectManagementModule();
+const { buildProjectUpdateInput, deletionDialogModel, impactFromError, isProjectAutoPushEnabled, projectErrorKey } = loadProjectManagementModule();
 
 function project(overrides = {}) {
   return { id: 'project-id', name: 'Project', canonical_path: '/projects/project', ...overrides };
@@ -46,6 +46,12 @@ test('buildProjectUpdateInput returns null when nothing changed', () => {
   assert.equal(buildProjectUpdateInput(project(), { name: ' Project ', path: '/projects/project' }), null);
 });
 
+test('isProjectAutoPushEnabled displays only boolean true as on', () => {
+  assert.equal(isProjectAutoPushEnabled(project({ auto_push: true })), true);
+  assert.equal(isProjectAutoPushEnabled(project({ auto_push: false })), false);
+  assert.equal(isProjectAutoPushEnabled(project()), false);
+});
+
 test('buildProjectUpdateInput trims and includes only changed fields', () => {
   assert.deepEqual(buildProjectUpdateInput(project(), { name: '  New name  ', path: '/projects/project' }), { name: 'New name' });
   assert.deepEqual(buildProjectUpdateInput(project(), { name: 'Project', path: '/projects/other' }), { canonical_path: '/projects/other' });
@@ -53,6 +59,24 @@ test('buildProjectUpdateInput trims and includes only changed fields', () => {
     name: 'New name',
     canonical_path: '/projects/other',
   });
+});
+
+test('buildProjectUpdateInput includes a boolean auto_push only when the toggle changes', () => {
+  assert.deepEqual(buildProjectUpdateInput(project({ auto_push: false }), {
+    name: 'Project',
+    path: '/projects/project',
+    autoPush: true,
+  }), { auto_push: true });
+  assert.deepEqual(buildProjectUpdateInput(project({ auto_push: true }), {
+    name: 'Project',
+    path: '/projects/project',
+    autoPush: false,
+  }), { auto_push: false });
+  assert.equal(buildProjectUpdateInput(project({ auto_push: true }), {
+    name: 'Project',
+    path: '/projects/project',
+    autoPush: true,
+  }), null);
 });
 
 test('buildProjectUpdateInput rejects empty required fields', () => {

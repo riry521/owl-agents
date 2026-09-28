@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ApiRequestError, browseProjectFolders, deleteProject, getActiveConversation, getProjectDeletionImpact, inspectProjectFolder, listProjects, postMessage, setupProject, updateProject } from '@/lib/api-client';
 import type { DeleteProjectResult, Project, ProjectDeletionImpact, ProjectFolderBrowserResult, ProjectFolderInspection, ProjectRunningWork, ProjectSetupInput, UpdateProjectInput } from '@/lib/types';
-import { buildProjectUpdateInput, deletionDialogModel, impactFromError, projectErrorKey, type ProjectEditForm } from '@/lib/project-management';
+import { buildProjectUpdateInput, deletionDialogModel, impactFromError, isProjectAutoPushEnabled, projectErrorKey, type ProjectEditForm } from '@/lib/project-management';
 import { workStateLabels } from '@/lib/format';
 import { useLocale, type Locale, type TFunction } from '@/lib/i18n';
 
@@ -30,7 +30,7 @@ export function ProjectsView() {
   const [formError, setFormError] = useState<string | null>(null);
   const [formNotice, setFormNotice] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState<ProjectEditForm>({ name: '', path: '' });
+  const [editForm, setEditForm] = useState<ProjectEditForm>({ name: '', path: '', autoPush: false });
   const [editError, setEditError] = useState<string | null>(null);
   const [editBlockImpact, setEditBlockImpact] = useState<ProjectDeletionImpact | null>(null);
   const [busyProjectId, setBusyProjectId] = useState<string | null>(null);
@@ -169,7 +169,7 @@ export function ProjectsView() {
   function startEdit(project: Project) {
     if (busyProjectId !== null || editingId !== null || deleteTarget !== null) return;
     setEditingId(project.id);
-    setEditForm({ name: project.name, path: project.canonical_path });
+    setEditForm({ name: project.name, path: project.canonical_path, autoPush: isProjectAutoPushEnabled(project) });
     setEditError(null);
     setEditBlockImpact(null);
     setProjectNotice(null);
@@ -457,6 +457,19 @@ export function ProjectsView() {
                         </div>
                       </div>
                       <p className="note">{t('projects.editPathNote')}</p>
+                      <div className="form-row">
+                        <span id={`auto-push-label-${project.id}`}>{t('projects.autoPushLabel')}</span>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={editForm.autoPush}
+                          aria-labelledby={`auto-push-label-${project.id}`}
+                          className={`toggle-switch toggle-switch--${editForm.autoPush ? 'on' : 'off'}`}
+                          onClick={() => setEditForm((current) => ({ ...current, autoPush: !current.autoPush }))}
+                          disabled={busyProjectId !== null}
+                        />
+                        <p className="note">{t('projects.autoPushHelp')}</p>
+                      </div>
                       {editError && <div className="error" role="alert">{editError}</div>}
                       {editBlockImpact && <BlockingWorks impact={editBlockImpact} t={t} locale={locale} />}
                       <div className="btn-row">
@@ -471,7 +484,10 @@ export function ProjectsView() {
                   ) : (
                     <>
                       <div className="row__main">
-                        <div className="row__title">{project.name}</div>
+                        <div className="row__title">
+                          {project.name}
+                          {isProjectAutoPushEnabled(project) && <span className="badge badge--accent">{t('projects.autoPushOn')}</span>}
+                        </div>
                         <div className="row__sub mono">{project.canonical_path}</div>
                       </div>
                       <div className="row__end">

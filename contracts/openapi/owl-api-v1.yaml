@@ -1304,7 +1304,7 @@ paths:
           $ref: '#/components/schemas/ULID'
     patch:
       operationId: updateProject
-      summary: Update a project's name or folder
+      summary: Update a project's name, folder, or auto-push setting
       security:
         - ownerBearer: []
       requestBody:
@@ -4298,6 +4298,7 @@ components:
         - name
         - canonical_path
         - base_branch
+        - auto_push
         - allowed_roots
         - verification_plan
       properties:
@@ -4309,6 +4310,9 @@ components:
           type: string
         base_branch:
           type: string
+        auto_push:
+          type: boolean
+          description: Push the base branch to its upstream after a Work completes.
         allowed_roots:
           type: array
           items:
@@ -4490,6 +4494,8 @@ components:
           type: string
           minLength: 1
           maxLength: 4096
+        auto_push:
+          type: boolean
       additionalProperties: false
     UpdateProjectCommand:
       allOf:
