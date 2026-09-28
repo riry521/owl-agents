@@ -115,8 +115,10 @@ test("provider pause and resume events reach Slack and the provider pauses API",
   );
 
   assert.equal(posted.length, 1);
-  assert.match(posted[0].text, /^⏸ Anthropicが利用上限に達したため/u);
-  const dateToken = posted[0].text.match(/<!date\^(\d+)\^\{date_short_pretty\} \{time\}\|[^>]+>/u);
+  assert.match(posted[0].text, /^⏳ 利用上限で停止中: Anthropic/u);
+  assert.doesNotMatch(posted[0].text, /<!date\^/u, "the fallback stays plain text");
+  const body = posted[0].attachments[0].blocks.find((block) => block.type === "section").text.text;
+  const dateToken = body.match(/<!date\^(\d+)\^\{date_short_pretty\} \{time\}\|[^>]+>/u);
   assert.ok(dateToken, "the pause notification includes Slack's resume-time date token");
   assert.equal(Number(dateToken[1]), Date.parse(pause.resume_at) / 1_000);
 
@@ -133,7 +135,7 @@ test("provider pause and resume events reach Slack and the provider pauses API",
   assert.deepEqual(received.map((event) => event.type), ["provider.paused", "provider.resumed"]);
   assert.ok(received.every((event) => event.event_id && event.sequence > 0));
   assert.equal(posted.length, 2);
-  assert.equal(posted[1].text, "▶ Anthropicの利用上限が解除されたため、処理を再開しました。");
+  assert.equal(posted[1].text, "▶️ 処理を再開しました: Anthropic");
 
   const resumeOutbox = db.get(
     `SELECT outbox.provider, outbox.status

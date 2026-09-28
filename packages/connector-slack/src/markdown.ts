@@ -359,7 +359,7 @@ function formatLinkTarget(url: string): string {
 }
 
 function findExistingSlackToken(text: string, start: number): string | null {
-  const match = /^<(?:@[A-Z][A-Z0-9]*(?:\|[^<>]*)?|#[A-Z][A-Z0-9]*(?:\|[^<>]*)?|!(?:here|everyone|channel|subteam\^[A-Z0-9]+)(?:\|[^<>]*)?|(?:https?:\/\/|mailto:)[^<>\s|]+(?:\|[^<>]*)?|[^<>\s|]+\|[^<>]*)>/iu.exec(text.slice(start));
+  const match = /^<(?:!date\^\d+\^[^<>|]+\|[^<>]*|@[A-Z][A-Z0-9]*(?:\|[^<>]*)?|#[A-Z][A-Z0-9]*(?:\|[^<>]*)?|!(?:here|everyone|channel|subteam\^[A-Z0-9]+)(?:\|[^<>]*)?|(?:https?:\/\/|mailto:)[^<>\s|]+(?:\|[^<>]*)?|[^<>\s|]+\|[^<>]*)>/iu.exec(text.slice(start));
   return match?.[0] ?? null;
 }
 

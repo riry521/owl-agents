@@ -4,6 +4,7 @@ import { extractOwlActionsBlocks, markdownToMrkdwn } from "./markdown.js";
 type SlackPostMessageArgs = Parameters<WebClient["chat"]["postMessage"]>[0];
 
 const MAX_SLACK_TEXT_LENGTH = 40_000;
+const MAX_SLACK_SECTION_TEXT_LENGTH = 3_000;
 
 export async function postSlackMessage(
   client: Pick<WebClient, "chat">,
@@ -25,7 +26,10 @@ export async function postSlackMessage(
     const chunkMessage: Record<string, unknown> = { ...outbound, text };
     // Blocks describe the first post's rendered content. Repeating them for
     // every continuation would duplicate the same notification or reply.
-    if (index > 0) delete chunkMessage.blocks;
+    if (index > 0) {
+      delete chunkMessage.blocks;
+      delete chunkMessage.attachments;
+    }
     result = await client.chat.postMessage(chunkMessage as unknown as SlackPostMessageArgs);
   }
   return result;
@@ -45,7 +49,15 @@ function convertSlackMessage(message: SlackPostMessageArgs): Record<string, unkn
   if (Array.isArray(outbound.blocks)) {
     outbound.blocks = outbound.blocks.map(convertMrkdwnTextFields);
   }
+  if (Array.isArray(outbound.attachments)) {
+    outbound.attachments = outbound.attachments.map(convertMrkdwnTextFields);
+  }
   return outbound;
+}
+
+/** Apply the same outbound conversion as a post without splitting chat.update messages. */
+export function prepareSlackMessage(message: Record<string, unknown>): Record<string, unknown> {
+  return convertSlackMessage(message as unknown as SlackPostMessageArgs);
 }
 
 function convertMrkdwnTextFields(value: unknown): unknown {
@@ -57,9 +69,17 @@ function convertMrkdwnTextFields(value: unknown): unknown {
     Object.entries(record).map(([key, item]) => [key, convertMrkdwnTextFields(item)]),
   );
   if (record.type === "mrkdwn" && typeof record.text === "string") {
-    converted.text = markdownToMrkdwn(stripOwlActions(record.text));
+    converted.text = truncateSectionText(markdownToMrkdwn(stripOwlActions(record.text)));
   }
   return converted;
+}
+
+function truncateSectionText(text: string): string {
+  if (text.length <= MAX_SLACK_SECTION_TEXT_LENGTH) return text;
+  let end = MAX_SLACK_SECTION_TEXT_LENGTH - 1;
+  const lastIncludedCodeUnit = text.charCodeAt(end - 1);
+  if (lastIncludedCodeUnit >= 0xd800 && lastIncludedCodeUnit <= 0xdbff) end -= 1;
+  return `${text.slice(0, end)}…`;
 }
 
 function stripOwlActions(text: string): string {
@@ -68,7 +88,9 @@ function stripOwlActions(text: string): string {
 
 function hasBlocks(message: Record<string, unknown>): boolean {
   const blocks = message.blocks;
-  return Array.isArray(blocks) && blocks.length > 0;
+  if (Array.isArray(blocks) && blocks.length > 0) return true;
+  const attachments = message.attachments;
+  return Array.isArray(attachments) && attachments.length > 0;
 }
 
 interface TextRange {

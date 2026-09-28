@@ -60,7 +60,7 @@ test("Slack notifications are written in the language they are given", async () 
 
   posts.length = 0;
   await sendNotification(client, event("work.completed", { title: "Archive" }), [{ channelId: "C" }]);
-  assert.equal(posts[0].text, "完了しました: Archive", "without a language the old Japanese text is kept");
+  assert.equal(posts[0].text, "✅ 完了しました: Archive", "without a language the Japanese text is kept");
 });
 
 test("runtime and Provider failures are explained in the language", () => {

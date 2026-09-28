@@ -67,10 +67,11 @@ export class DiscordConnector {
     this.client.on(Events.MessageCreate, (message) => {
       if (message.author.bot) return;
       if (message.channel.isDMBased()) return;
-      if (!this.conversationChannelIds.includes(message.channelId) && !this.decisionForReply(message)) return;
-      void this.handleMessage(message).catch((err) =>
-        this.reportMessageError(message, err)
-      );
+      void (async () => {
+        const replyToDecisionId = await this.decisionForReply(message);
+        if (!this.conversationChannelIds.includes(message.channelId) && !replyToDecisionId) return;
+        await this.handleMessage(message, replyToDecisionId);
+      })().catch((err) => this.reportMessageError(message, err));
     });
 
     this.client.on(Events.InteractionCreate, (interaction) => {
@@ -89,7 +90,7 @@ export class DiscordConnector {
     // events (or as a Decision), which notifications.ts renders as failures.
     try {
       await this.core.subscribeEvents(
-        ["advisor.responded", "decision.opened", "decision.resolved", "decision.cancelled", "work.completed", "work.cancelled", "work.paused", "work.reopened", "system.alert"],
+        ["advisor.responded", "decision.opened", "decision.resolved", "decision.cancelled", "work.completed", "work.cancelled", "work.paused", "work.reopened", "provider.paused", "provider.resumed", "system.alert"],
         (event) => this.handleCoreEvent(event).catch((err) =>
           this.reportEventError(err)
         ),
@@ -110,13 +111,13 @@ export class DiscordConnector {
     console.log("[discord] Disconnected");
   }
 
-  private async handleMessage(message: Message): Promise<void> {
+  private async handleMessage(message: Message, routedDecisionId?: string | null): Promise<void> {
     const discordMsg: DiscordMessage = {
       userId: message.author.id,
       text: message.content,
       channelId: message.channelId,
       messageId: message.id,
-      replyToDecisionId: this.decisionForReply(message),
+      replyToDecisionId: routedDecisionId === undefined ? await this.decisionForReply(message) : routedDecisionId,
       attachments: [...message.attachments.values()].map((a) => ({
         id: a.id,
         name: a.name,
@@ -302,11 +303,22 @@ export class DiscordConnector {
   }
 
   /** Decision whose notification this message replies to, if known. */
-  private decisionForReply(message: Pick<Message, "reference">): string | null {
+  private async decisionForReply(message: Pick<Message, "reference" | "fetchReference">): Promise<string | null> {
     const referenced = message.reference?.messageId;
     if (!referenced) return null;
     for (const [decisionId, ref] of this.core.listDecisionMessages()) {
       if (ref.message_ref === referenced) return decisionId;
+    }
+    try {
+      const referencedMessage = await message.fetchReference();
+      if (!this.client.user?.id || referencedMessage.author.id !== this.client.user.id) return null;
+      const parentMessageId = referencedMessage.reference?.messageId;
+      if (!parentMessageId) return null;
+      for (const [decisionId, ref] of this.core.listDecisionMessages()) {
+        if (ref.message_ref === parentMessageId) return decisionId;
+      }
+    } catch {
+      // A deleted or inaccessible reply target cannot be used to route an answer.
     }
     return null;
   }

@@ -1742,7 +1742,11 @@ test("core Decision resolution rejects an option outside stored options", async 
       work_id: openedEvent.work_id,
       payload: JSON.parse(openedEvent.payload_json),
     });
-    const decisionButton = posts[0]?.blocks?.find((block) => block.type === "actions")?.elements?.[0];
+    const decisionBlocks = [
+      ...(posts[0]?.blocks ?? []),
+      ...(posts[0]?.attachments ?? []).flatMap((attachment) => attachment.blocks ?? []),
+    ];
+    const decisionButton = decisionBlocks.find((block) => block.type === "actions")?.elements?.[0];
     assert.equal(parseDecisionButtonId(decisionButton.action_id)?.decisionId, opened.data.decision_id);
 
     await assert.rejects(

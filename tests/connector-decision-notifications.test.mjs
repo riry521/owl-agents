@@ -46,7 +46,10 @@ function decisionOpened(overrides = {}) {
 
 function slackClient() {
   const posts = [];
-  return { posts, client: { chat: { postMessage: async (message) => posts.push(message) } } };
+  return { posts, client: { chat: { postMessage: async (message) => {
+    posts.push(message);
+    return { ok: true, ts: `1700000000.${String(posts.length).padStart(3, "0")}` };
+  } } } };
 }
 
 function discordClient() {
@@ -57,7 +60,10 @@ function discordClient() {
       channels: {
         fetch: async (channelId) => ({
           isTextBased: () => true,
-          send: async (message) => sends.push({ channelId, message }),
+          send: async (message) => {
+            sends.push({ channelId, message });
+            return { id: `M${sends.length}` };
+          },
         }),
       },
     },
@@ -96,18 +102,21 @@ test("Slack decision notification renders reason, tried and current_state from t
   const { posts, client } = slackClient();
   await sendSlackNotification(client, decisionOpened(), [{ channelId: "C-NOTIFICATIONS" }]);
 
-  assert.equal(posts.length, 1);
-  const text = posts[0].text;
-  assert.doesNotMatch(text, /詳細を確認してください/u);
-  assert.match(text, /DBマイグレーションを本番に適用してよいか判断が必要です/u);
-  assert.match(text, /ステージングで適用し、テストが通ることを確認しました/u);
-  assert.match(text, /マイグレーション待ちで停止中/u);
-  assert.match(text, /WORK1/u);
-  // No buttons, but free text allowed: the user must be told how to answer,
-  // including the short Decision id that works while several are open.
-  assert.match(text, /回答 DECIS1:/u);
-  assert.match(text, /ID DECIS1/u);
-  assert.equal(posts[0].blocks.some((block) => block.type === "actions"), false);
+  assert.equal(posts.length, 2);
+  const main = posts[0];
+  const mainBlocks = main.attachments[0].blocks;
+  const mainBody = mainBlocks.find((block) => block.type === "section").text.text;
+  assert.equal(main.attachments[0].color, "#F5A623");
+  assert.equal(main.attachments[0].fallback, main.text);
+  assert.match(mainBody, /❓ DBマイグレーションを本番に適用してよいか判断が必要です/u);
+  assert.doesNotMatch(mainBody, /ステージング|マイグレーション待ち|回答 DECIS1/u);
+  assert.match(mainBlocks.find((block) => block.type === "context").elements[0].text, /WORK1.*ID DECIS1/u);
+  assert.equal(mainBlocks.some((block) => block.type === "actions"), false);
+
+  assert.equal(posts[1].thread_ts, "1700000000.001");
+  assert.match(posts[1].text, /ステージングで適用し、テストが通ることを確認しました/u);
+  assert.match(posts[1].text, /マイグレーション待ちで停止中/u);
+  assert.match(posts[1].text, /回答 DECIS1:/u);
 });
 
 test("Slack decision notification falls back to legacy question and omits absent sections", async () => {
@@ -121,13 +130,12 @@ test("Slack decision notification falls back to legacy question and omits absent
     allow_free_text: false,
   }), [{ channelId: "C-NOTIFICATIONS" }]);
 
-  const text = posts[0].text;
-  assert.match(text, /どちらの案で進めますか/u);
-  assert.doesNotMatch(text, /試したこと|現状/u);
-  // The answer guide is shown unconditionally, even when free text is not allowed,
-  // since replying to the notice and the buttons remain valid answer methods.
-  assert.match(text, /回答 DECIS1:/u, "the answer guide is shown even when free text is not allowed");
-  const actions = posts[0].blocks.find((block) => block.type === "actions");
+  const mainBody = posts[0].attachments[0].blocks.find((block) => block.type === "section").text.text;
+  assert.match(mainBody, /❓ どちらの案で進めますか/u);
+  assert.match(mainBody, /• A案\n• B案/u);
+  assert.doesNotMatch(mainBody, /試したこと|現状|回答 DECIS1/u);
+  assert.match(posts[1].text, /回答 DECIS1:/u, "answer guidance is in the thread detail");
+  const actions = posts[0].attachments[0].blocks.find((block) => block.type === "actions");
   assert.equal(actions.elements.length, 2);
 });
 
@@ -135,14 +143,15 @@ test("Discord decision notification renders reason, tried and current_state from
   const { sends, client } = discordClient();
   await sendDiscordNotification(client, decisionOpened(), "D-NOTIFICATIONS");
 
-  assert.equal(sends.length, 1);
+  assert.equal(sends.length, 2);
   const data = embedData(sends[0]);
-  const rendered = [data.description ?? "", ...(data.fields ?? []).map((field) => `${field.name}\n${field.value}`)].join("\n");
-  assert.doesNotMatch(rendered, /詳細を確認してください/u);
-  assert.match(rendered, /DBマイグレーションを本番に適用してよいか判断が必要です/u);
-  assert.match(rendered, /ステージングで適用し、テストが通ることを確認しました/u);
-  assert.match(rendered, /マイグレーション待ちで停止中/u);
-  assert.match(rendered, /回答 DECIS1:/u);
+  assert.equal(data.title, "✋ 判断が必要です");
+  assert.equal(data.description, "❓ DBマイグレーションを本番に適用してよいか判断が必要です");
+  assert.doesNotMatch(data.description, /ステージングで適用|マイグレーション待ち|回答/u);
+  assert.match(embedData(sends[1]).description, /ステージングで適用し、テストが通ることを確認しました/u);
+  assert.match(embedData(sends[1]).description, /マイグレーション待ちで停止中/u);
+  assert.match(embedData(sends[1]).description, /回答 DECIS1:/u);
+  assert.equal(sends[1].message.reply.messageReference, "M1");
   assert.match(data.footer.text, /ID DECIS1/u);
   assert.equal(sends[0].message.components.length, 0, "no empty button row when there are no options");
 });
@@ -157,10 +166,13 @@ test("Discord decision notification falls back to legacy question", async () => 
     allow_free_text: false,
     options: [{ key: "a", label: "A案" }],
   }), "D-NOTIFICATIONS");
+  assert.equal(sends.length, 2);
   const data = embedData(sends[0]);
   assert.match(data.description, /どちらの案で進めますか/u);
-  // The answer guide is shown unconditionally, even when free text is not allowed.
-  assert.match(JSON.stringify(data), /回答 DECIS1:/u);
+  assert.match(data.description, /• A案/u);
+  assert.doesNotMatch(data.description, /回答 DECIS1/u);
+  assert.match(embedData(sends[1]).description, /回答 DECIS1:/u);
+  assert.equal(sends[1].message.reply.messageReference, "M1");
 });
 
 // --- Fix 3: failure notifications come from system.alert, not work.failed ---
@@ -183,6 +195,8 @@ test("Slack connector subscribes to events Core actually emits and notifies work
   connector.socket.disconnect = async () => {};
   await connector.start();
   assert.ok(subscribed.includes("system.alert"));
+  assert.ok(subscribed.includes("provider.paused"));
+  assert.ok(subscribed.includes("provider.resumed"));
   assert.equal(subscribed.includes("work.failed"), false, "Core never emits work.failed");
 
   const posts = [];
@@ -191,9 +205,10 @@ test("Slack connector subscribes to events Core actually emits and notifies work
   assert.equal(posts.length, 1);
   assert.equal(posts[0].channel, "C-NOTIFICATIONS");
   assert.match(posts[0].text, /問題が発生/u);
-  assert.match(posts[0].text, /自動駆動を停止しました/u);
-  assert.match(posts[0].text, /Coreログを確認/u, "remediation is shown");
-  assert.match(posts[0].text, /WORK1/u, "work id from the event frame is shown");
+  const blocks = posts[0].attachments[0].blocks;
+  assert.match(blocks.find((block) => block.type === "section").text.text, /自動駆動を停止しました/u);
+  assert.match(blocks.find((block) => block.type === "section" && block.text.text.includes("対処")).text.text, /Coreログを確認/u, "remediation is shown");
+  assert.match(blocks.find((block) => block.type === "context").elements[0].text, /WORK1/u, "work id from the event frame is shown");
   await connector.stop();
 });
 
@@ -212,9 +227,11 @@ test("Discord connector subscribes to events Core actually emits and notifies wo
   await connector.handleCoreEvent(tickFailure());
   assert.equal(sends.length, 1);
   const data = embedData(sends[0]);
-  assert.equal(data.title, "問題が発生");
+  assert.equal(data.title, "🚨 問題が発生");
+  assert.equal(data.color, 0xf44336);
   assert.match(data.description, /自動駆動を停止しました/u);
-  assert.match(data.description, /Coreログを確認/u);
+  assert.equal(data.fields[0].name, "対処");
+  assert.match(data.fields[0].value, /Coreログを確認/u);
   assert.match(data.footer.text, /WORK1/u);
   await connector.stop();
 });
@@ -252,9 +269,9 @@ test("Slack posts a follow-up for decision.resolved with the answer text", async
   await sendSlackNotification(client, decisionResolved(), [{ channelId: "C-NOTIFICATIONS" }]);
   assert.equal(posts.length, 1);
   assert.match(posts[0].text, /解決しました/u);
-  assert.match(posts[0].text, /DECIS1/u);
-  assert.match(posts[0].text, /B案で進めます/u);
-  assert.match(posts[0].text, /WORK1/u);
+  const blocks = posts[0].attachments[0].blocks;
+  assert.match(blocks.find((block) => block.type === "section").text.text, /B案で進めます/u);
+  assert.match(blocks.find((block) => block.type === "context").elements[0].text, /WORK1.*DECIS1/u);
 });
 
 test("Slack posts a follow-up for decision.cancelled naming the reason", async () => {
@@ -262,11 +279,11 @@ test("Slack posts a follow-up for decision.cancelled naming the reason", async (
   await sendSlackNotification(client, decisionCancelled(), [{ channelId: "C-NOTIFICATIONS" }]);
   assert.equal(posts.length, 1);
   assert.match(posts[0].text, /取り消されました/u);
-  assert.match(posts[0].text, /Workが中止されたため/u);
+  assert.match(posts[0].attachments[0].blocks.find((block) => block.type === "section").text.text, /Workが中止されたため/u);
 
   const { posts: posts2, client: client2 } = slackClient();
   await sendSlackNotification(client2, decisionCancelled({ reason: "task_superseded" }), [{ channelId: "C-NOTIFICATIONS" }]);
-  assert.match(posts2[0].text, /対象のTaskが置き換えられたため/u);
+  assert.match(posts2[0].attachments[0].blocks.find((block) => block.type === "section").text.text, /対象のTaskが置き換えられたため/u);
 });
 
 test("Discord posts a follow-up for decision.resolved and decision.cancelled", async () => {
@@ -276,13 +293,15 @@ test("Discord posts a follow-up for decision.resolved and decision.cancelled", a
   assert.equal(sends.length, 2);
 
   const resolved = embedData(sends[0]);
-  assert.equal(resolved.title, "解決しました");
-  assert.match(resolved.description, /B案で進めます/u);
+  assert.equal(resolved.title, "☑️ 解決しました");
+  assert.equal(resolved.fields[0].name, "回答");
+  assert.match(resolved.fields[0].value, /B案で進めます/u);
   assert.match(resolved.footer.text, /ID DECIS1/u);
 
   const cancelled = embedData(sends[1]);
-  assert.equal(cancelled.title, "取り消されました");
-  assert.match(cancelled.description, /Workが中止されたため/u);
+  assert.equal(cancelled.title, "🚫 取り消されました");
+  assert.equal(cancelled.fields[0].name, "理由");
+  assert.match(cancelled.fields[0].value, /Workが中止されたため/u);
 });
 
 test("Slack and Discord connectors subscribe to decision.resolved and decision.cancelled", async () => {
@@ -305,6 +324,8 @@ test("Slack and Discord connectors subscribe to decision.resolved and decision.c
   await discord.start();
   assert.ok(discordTypes.includes("decision.resolved"));
   assert.ok(discordTypes.includes("decision.cancelled"));
+  assert.ok(discordTypes.includes("provider.paused"));
+  assert.ok(discordTypes.includes("provider.resumed"));
   await discord.stop();
 });
 
@@ -322,7 +343,7 @@ test("Slack: a resolved Decision edits its original notification instead of post
   };
 
   await connector.handleCoreEvent(decisionOpened());
-  assert.equal(posts.length, 1);
+  assert.equal(posts.length, 2, "the opened Decision also gets its thread detail");
   assert.deepEqual(connector.core.decisionMessage(DECISION_ID), {
     channel_id: "C-NOTIFICATIONS",
     message_ref: "9.1",
@@ -330,12 +351,14 @@ test("Slack: a resolved Decision edits its original notification instead of post
   });
 
   await connector.handleCoreEvent(decisionResolved());
-  assert.equal(posts.length, 1, "no new message is posted for the resolved event");
+  assert.equal(posts.length, 2, "no new message is posted for the resolved event");
   assert.equal(updates.length, 1);
   assert.equal(updates[0].channel, "C-NOTIFICATIONS");
   assert.equal(updates[0].ts, "9.1");
   assert.match(updates[0].text, /解決しました/u);
   assert.match(updates[0].text, /B案で進めます/u);
+  assert.equal(updates[0].attachments[0].color, "#4CAF50");
+  assert.equal(updates[0].attachments[0].blocks.some((block) => block.type === "actions"), false);
   assert.equal(connector.core.decisionMessage(DECISION_ID), null, "the mapping is forgotten once the Decision closes");
 });
 
@@ -350,7 +373,7 @@ test("Discord: a cancelled Decision edits its original notification instead of s
   });
 
   await connector.handleCoreEvent(decisionOpened());
-  assert.equal(sends.length, 1);
+  assert.equal(sends.length, 2, "the main card and its decision detail are posted");
   assert.deepEqual(connector.core.decisionMessage(DECISION_ID), {
     channel_id: "D-NOTIFICATIONS",
     message_ref: "M1",
@@ -358,12 +381,12 @@ test("Discord: a cancelled Decision edits its original notification instead of s
   });
 
   await connector.handleCoreEvent(decisionCancelled());
-  assert.equal(sends.length, 1, "no new message is sent for the cancelled event");
+  assert.equal(sends.length, 2, "no new message is sent for the cancelled event");
   assert.equal(edits.length, 1);
   assert.equal(edits[0].id, "M1");
   const edited = edits[0].options.embeds[0];
   const data = typeof edited.toJSON === "function" ? edited.toJSON() : edited.data;
-  assert.equal(data.title, "取り消されました");
+  assert.equal(data.title, "🚫 取り消されました");
   assert.deepEqual(edits[0].options.components, []);
   assert.equal(connector.core.decisionMessage(DECISION_ID), null);
 });
@@ -375,11 +398,12 @@ test("work.completed without title falls back to the work id instead of a duplic
 
   const { posts, client } = slackClient();
   await sendSlackNotification(client, completed, [{ channelId: "C-NOTIFICATIONS" }]);
-  assert.equal(posts[0].text, "完了しました: Work 9WORK1");
+  assert.equal(posts[0].text, "✅ 完了しました: Work 9WORK1");
 
   const discord = discordClient();
   await sendDiscordNotification(discord.client, completed, "D-NOTIFICATIONS");
-  assert.equal(embedData(discord.sends[0]).description, "Work 9WORK1が完了しました。");
+  assert.equal(embedData(discord.sends[0]).title, "✅ 完了しました");
+  assert.equal(embedData(discord.sends[0]).description, "Work 9WORK1");
 });
 
 // --- work.paused / work.reopened notifications --------------------------------
@@ -396,20 +420,20 @@ test("Slack notifies work.paused and work.reopened, including the reason given",
   const { posts, client } = slackClient();
   await sendSlackNotification(client, workPaused(), [{ channelId: "C-NOTIFICATIONS" }]);
   assert.equal(posts.length, 1);
-  assert.match(posts[0].text, /一時停止しました: Work 9WORK1/u);
-  assert.match(posts[0].text, /理由: レビュー待ちのため/u);
+  assert.match(posts[0].text, /⏸️ 一時停止しました: Work 9WORK1/u);
+  assert.match(posts[0].attachments[0].blocks.find((block) => block.type === "section" && block.text.text.includes("理由")).text.text, /レビュー待ちのため/u);
 
   const { posts: posts2, client: client2 } = slackClient();
   await sendSlackNotification(client2, workReopened(), [{ channelId: "C-NOTIFICATIONS" }]);
   assert.equal(posts2.length, 1);
-  assert.match(posts2[0].text, /再オープンしました: Work 9WORK1/u);
-  assert.match(posts2[0].text, /理由: 追加対応が必要なため/u);
+  assert.match(posts2[0].text, /🔄 再オープンしました: Work 9WORK1/u);
+  assert.match(posts2[0].attachments[0].blocks.find((block) => block.type === "section" && block.text.text.includes("理由")).text.text, /追加対応が必要なため/u);
 });
 
 test("Slack notifies work.paused without a reason line when none was given", async () => {
   const { posts, client } = slackClient();
   await sendSlackNotification(client, workPaused({ reason: "" }), [{ channelId: "C-NOTIFICATIONS" }]);
-  assert.equal(posts[0].text, "一時停止しました: Work 9WORK1");
+  assert.equal(posts[0].text, "⏸️ 一時停止しました: Work 9WORK1");
 });
 
 test("Discord notifies work.paused and work.reopened, including the reason given", async () => {
@@ -419,14 +443,14 @@ test("Discord notifies work.paused and work.reopened, including the reason given
   assert.equal(sends.length, 2);
 
   const paused = embedData(sends[0]);
-  assert.equal(paused.title, "一時停止しました");
-  assert.match(paused.description, /Work 9WORK1を一時停止しました。/u);
-  assert.match(paused.description, /理由: レビュー待ちのため/u);
+  assert.equal(paused.title, "⏸️ 一時停止しました");
+  assert.equal(paused.description, "Work 9WORK1");
+  assert.match(paused.fields[0].value, /レビュー待ちのため/u);
 
   const reopened = embedData(sends[1]);
-  assert.equal(reopened.title, "再オープンしました");
-  assert.match(reopened.description, /Work 9WORK1を再オープンしました。/u);
-  assert.match(reopened.description, /理由: 追加対応が必要なため/u);
+  assert.equal(reopened.title, "🔄 再オープンしました");
+  assert.equal(reopened.description, "Work 9WORK1");
+  assert.match(reopened.fields[0].value, /追加対応が必要なため/u);
 });
 
 test("Slack and Discord connectors subscribe to work.paused and work.reopened, and route them to the notification channel", async () => {
@@ -457,6 +481,8 @@ test("Slack and Discord connectors subscribe to work.paused and work.reopened, a
   await discord.start();
   assert.ok(discordTypes.includes("work.paused"));
   assert.ok(discordTypes.includes("work.reopened"));
+  assert.ok(discordTypes.includes("provider.paused"));
+  assert.ok(discordTypes.includes("provider.resumed"));
 
   const { sends, client: fetchClient } = discordClient();
   discord.client.channels.fetch = fetchClient.channels.fetch;

@@ -51,6 +51,20 @@ export function decisionTitle(payload: Record<string, unknown>): string {
   return TEXT[decisionLanguage(payload)].title;
 }
 
+export interface DecisionHeadings {
+  readonly reason: string;
+  readonly question: string;
+  readonly options: string;
+  readonly currentState: string;
+  readonly tried: string;
+}
+
+/** Headings shared by detailed Decision notifications. */
+export function decisionHeadings(language: DecisionLanguage): DecisionHeadings {
+  const { reason, question, options, currentState, tried } = TEXT[language];
+  return { reason, question, options, currentState, tried };
+}
+
 function text(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }

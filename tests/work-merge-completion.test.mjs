@@ -182,6 +182,23 @@ test("a merged Project Work is completed, then its worktree and merged branches 
   const git = fakeGit([{ ...merged }]);
   const { db, core } = await openMergeCore(t, git);
   const { workId } = await seedFinishedWork(core, db, true);
+  const createdAt = "2020-01-02 03:04:05Z";
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((tx) => {
+    tx.run("UPDATE works SET created_at = ? WHERE id = ?", createdAt, workId);
+    for (const title of ["Superseded", "Cancelled"]) {
+      tx.run(
+        `INSERT INTO tasks
+           (id, work_id, title, type, status, priority, context, acceptance,
+            state_version, failure_count, same_error_count, review_round, worker_generation,
+            created_at, updated_at, retry_no, manager_task_id)
+         VALUES (?, ?, ?, 'code', 'cancelled', 'normal', '', 'Done.', 0, 0, 0, 0, 0, ?, ?, 0, 'T2')`,
+        createUlid(), workId, title, now, now,
+      );
+    }
+    return null;
+  });
+  const workBeforeCompletion = db.get("SELECT state_version, plan_revision FROM works WHERE id = ?", workId);
 
   await core.tick(workId);
 
@@ -192,6 +209,18 @@ test("a merged Project Work is completed, then its worktree and merged branches 
     "deleteMergedWorkBranches",
   ]);
   const completed = JSON.parse(db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = 'work.completed'", workId).payload_json);
+  assert.equal(completed.work_id, workId);
+  assert.equal(completed.manager_final_verdict, "complete");
+  assert.equal(completed.task_count, 1);
+  assert.equal(completed.started_at, "2020-01-02T03:04:05.000Z");
+  assert.equal(Number.isSafeInteger(completed.duration_ms), true);
+  assert.ok(completed.duration_ms >= 0);
+  assert.equal(completed.duration_ms, Math.round(Date.parse(completed.completed_at) - Date.parse(completed.started_at)));
+  assert.equal(db.get("SELECT completed_at FROM works WHERE id = ?", workId).completed_at, completed.completed_at);
+  assert.equal(
+    db.get("SELECT idempotency_key FROM events WHERE work_id = ? AND type = 'work.completed'", workId).idempotency_key,
+    `work-completed:${workId}:${workBeforeCompletion.state_version}:${workBeforeCompletion.plan_revision}`,
+  );
   assert.deepEqual(completed.merge, {
     base_branch: "main",
     work_branch: "owl/work/test/work",
@@ -352,6 +381,16 @@ test("a Project-less Work skips merge and still saves outputs and removes its wo
 
   assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "completed");
   assert.equal(git.calls.filter(([name]) => name === "mergeWorkIntoBase").length, 0);
+  const completed = JSON.parse(db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = 'work.completed'", workId).payload_json);
+  assert.equal(completed.work_id, workId);
+  assert.equal(completed.manager_final_verdict, "complete");
+  assert.equal(completed.task_count, 1);
+  assert.equal(new Date(completed.started_at).toISOString(), completed.started_at);
+  assert.equal(new Date(completed.completed_at).toISOString(), completed.completed_at);
+  assert.equal(Number.isSafeInteger(completed.duration_ms), true);
+  assert.ok(completed.duration_ms >= 0);
+  assert.equal(completed.duration_ms, Math.max(0, Math.round(Date.parse(completed.completed_at) - Date.parse(completed.started_at))));
+  assert.equal(Object.hasOwn(completed, "merge"), false);
   assert.equal(await readFile(join(root, "data", "outputs", workId, "result.txt"), "utf8"), "saved output\n");
   await assert.rejects(access(join(root, ".owl-workspaces", workId)));
 });

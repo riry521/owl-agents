@@ -154,11 +154,14 @@ test("Slack: a reply in a Decision notification thread answers that Decision", a
 
   const posts = [];
   let nextTs = 100;
-  connector.web = { chat: { postMessage: async (message) => { posts.push(message); return { ok: true, ts: `1700000000.${nextTs++}` }; } } };
+  connector.web = { chat: { postMessage: async (message) => {
+    posts.push(message);
+    return { ok: true, ts: message.thread_ts ?? `1700000000.${nextTs++}` };
+  } } };
   await connector.handleCoreEvent(decisionOpened(first));
   await connector.handleCoreEvent(decisionOpened(second));
-  assert.equal(posts.length, 2);
-  assert.match(posts[1].text, /ID BBBBB2/u);
+  assert.equal(posts.length, 4, "each Decision has one main card and one thread detail");
+  assert.match(posts[2].attachments[0].blocks.find((block) => block.type === "context").elements[0].text, /ID BBBBB2/u);
 
   connector.fetchPendingDecisions = async () => open;
   const requests = [];
@@ -211,8 +214,12 @@ test("Slack: Core default {key,label} options render as buttons and a click answ
   const posts = [];
   const client = { chat: { postMessage: async (message) => { posts.push(message); return { ok: true, ts: "1.1" }; } } };
   await sendSlackNotification(client, decisionOpened(first), [{ channelId: "C-NOTIFICATIONS" }]);
-  const actions = posts[0].blocks.find((block) => block.type === "actions");
+  const actions = posts[0].attachments[0].blocks.find((block) => block.type === "actions");
   assert.deepEqual(actions.elements.map((element) => [element.text.text, element.value]), [["再試行", "retry"], ["キャンセル", "cancel"]]);
+  assert.deepEqual(actions.elements.map((element) => element.action_id), [
+    createDecisionButtonId(first.id, 0),
+    createDecisionButtonId(first.id, 1),
+  ]);
 
   const connector = slackConnector();
   connector.fetchPendingDecisions = async () => open;
@@ -242,7 +249,7 @@ test("Discord: a reply to a Decision notification answers that Decision; default
   });
   await connector.handleCoreEvent(decisionOpened(first));
   await connector.handleCoreEvent(decisionOpened(second));
-  assert.equal(sends.length, 2);
+  assert.equal(sends.length, 4);
   const buttons = sends[0].message.components[0].toJSON().components;
   assert.deepEqual(buttons.map((button) => button.label), ["再試行", "キャンセル"]);
   assert.equal(buttons[0].custom_id, createDecisionButtonId(first.id, 0));
@@ -257,7 +264,7 @@ test("Discord: a reply to a Decision notification answers that Decision; default
     author: { id: "U1", bot: false },
     content: "キャンセル",
     channelId: "D-NOTIFICATIONS",
-    reference: { messageId: "M2" },
+    reference: { messageId: "M3" },
     attachments: new Map(),
     channel: { isDMBased: () => false, isTextBased: () => true, send: async (message) => replies.push(message) },
   };
@@ -320,7 +327,7 @@ test("Slack notification retries a transient post failure, then reports the fina
     retry: noSleep,
     onPosted: (ref) => posted.push(ref),
   });
-  assert.equal(calls, 2);
+  assert.equal(calls, 3, "two main post attempts are followed by one detail post");
   assert.deepEqual(posted, [{ channelId: "C-NOTIFICATIONS", ts: "2.2" }]);
 
   const connector = slackConnector();
@@ -373,6 +380,6 @@ test("Discord notification retries a transient send failure", async () => {
   } finally {
     console.warn = originalWarn;
   }
-  assert.equal(calls, 3);
+  assert.equal(calls, 4);
   assert.deepEqual(posted, [{ channelId: "D-NOTIFICATIONS", messageId: "M9" }]);
 });

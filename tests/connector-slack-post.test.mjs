@@ -55,9 +55,9 @@ test("Slack Advisor posting strips owl-actions and converts Markdown before post
   assert.doesNotMatch(posts[0].text, /\*\*raw action title\*\*/u);
 });
 
-test("Slack notification text and mrkdwn blocks are converted before posting", async () => {
+test("Slack notification renders a colored Block Kit card with plain fallback text", async () => {
   const posts = [];
-  const client = { chat: { postMessage: async (message) => posts.push(message) } };
+  const client = { chat: { postMessage: async (message) => { posts.push(message); return { ts: "1.1" }; } } };
   await sendNotification(client, {
     kind: "event",
     event_id: "event-slack-notification-test",
@@ -68,8 +68,89 @@ test("Slack notification text and mrkdwn blocks are converted before posting", a
     payload: { title: "**Finished** with a [guide](https://example.com/finish)" },
   }, [{ channelId: "C-NOTIFICATIONS" }]);
 
-  assert.equal(posts[0].text, "完了しました: *Finished* with a <https://example.com/finish|guide>");
-  assert.equal(posts[0].blocks[0].text.text, "完了しました: *Finished* with a <https://example.com/finish|guide>");
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].text, "✅ 完了しました: Finished with a guide");
+  assert.equal(posts[0].blocks.length, 1);
+  assert.equal(posts[0].blocks[0].text.text, "*✅ 完了しました*");
+  assert.equal(posts[0].attachments.length, 1);
+  assert.equal(posts[0].attachments[0].color, "#4CAF50");
+  assert.equal(posts[0].attachments[0].fallback, posts[0].text);
+  assert.equal(posts[0].attachments[0].blocks[0].text.text, "*Finished* with a <https://example.com/finish|guide>");
+});
+
+test("Slack notification sections stay within the Block Kit text limit after Markdown conversion", async () => {
+  const posts = [];
+  await sendNotification({ chat: { postMessage: async (message) => { posts.push(message); return { ts: "1.2" }; } } }, {
+    kind: "event",
+    event_id: "event-slack-section-limit-test",
+    sequence: 2,
+    cursor: "2",
+    type: "system.alert",
+    schema_version: "1.0.0",
+    payload: { message: "&".repeat(1_200), remediation: "Review the alert" },
+  }, [{ channelId: "C-NOTIFICATIONS" }]);
+
+  const attachmentBlocks = posts[0].attachments[0].blocks;
+  assert.ok(attachmentBlocks.length <= 50);
+  for (const block of [...posts[0].blocks, ...attachmentBlocks]) {
+    if (block.type === "section") assert.ok(block.text.text.length <= 3_000);
+  }
+});
+
+test("Slack decision detail retries independently after remembering the main message", async () => {
+  const messages = [];
+  const posted = [];
+  const order = [];
+  let mainAttempts = 0;
+  let detailAttempts = 0;
+  const client = { chat: { postMessage: async (message) => {
+    messages.push(message);
+    if (message.thread_ts) {
+      detailAttempts += 1;
+      order.push("detail");
+      throw Object.assign(new Error("temporary detail failure"), { code: "slack_webapi_request_error" });
+    }
+    mainAttempts += 1;
+    if (mainAttempts === 1) throw Object.assign(new Error("temporary main failure"), { code: "slack_webapi_request_error" });
+    return { ts: "1710000000.123" };
+  } } };
+  const originalWarn = console.warn;
+  const originalError = console.error;
+  console.warn = () => {};
+  console.error = () => {};
+  try {
+    await sendNotification(client, {
+      kind: "event",
+      event_id: "event-slack-decision-thread-test",
+      sequence: 9,
+      cursor: "9",
+      type: "decision.opened",
+      schema_version: "1.0.0",
+      payload: {
+        decision_id: "01ARZ3NDEKTSV4RRFFQ6DECIS1",
+        question: "Choose one",
+        reason: "Full background",
+        current_state: "Waiting",
+        tried: "Checked logs",
+        options: [{ key: "yes", label: "Yes" }],
+        recommended: "yes",
+        allow_free_text: true,
+      },
+    }, [{ channelId: "C-NOTIFICATIONS" }], {
+      retry: { attempts: 2, baseDelayMs: 0, sleep: async () => {} },
+      onPosted: (ref) => { posted.push(ref); order.push("onPosted"); },
+    });
+  } finally {
+    console.warn = originalWarn;
+    console.error = originalError;
+  }
+
+  assert.equal(mainAttempts, 2, "the main message retries its transient failure");
+  assert.equal(detailAttempts, 2, "the detail uses its own retry cycle");
+  assert.deepEqual(posted, [{ channelId: "C-NOTIFICATIONS", ts: "1710000000.123" }]);
+  assert.equal(messages[2].thread_ts, "1710000000.123");
+  assert.match(messages[2].text, /Full background/u);
+  assert.deepEqual(order, ["onPosted", "detail", "detail"]);
 });
 
 test("Slack posting converts before chunking and keeps code fences and links intact", async () => {

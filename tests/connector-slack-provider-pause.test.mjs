@@ -31,8 +31,11 @@ async function postText(type, payload, language = "ja") {
     { language },
   );
   assert.equal(posts.length, 1);
-  assert.equal(posts[0].blocks[0].text.text, posts[0].text);
-  return posts[0].text;
+  const attachment = posts[0].attachments[0];
+  assert.equal(attachment.color, type === "provider.paused" ? "#FFB300" : "#4CAF50");
+  assert.equal(attachment.fallback, posts[0].text);
+  assert.doesNotMatch(posts[0].text, /<!date\^/u, "the plain fallback uses no date token");
+  return attachment.blocks.find((block) => block.type === "section").text.text;
 }
 
 test("Slack notifies on provider pause and resume, but not internal pause transitions", () => {
@@ -47,19 +50,19 @@ test("Slack provider pause messages render the localized reason, label, and Slac
   const base = { provider: "anthropic", provider_label: "Anthropic", resume_at: RESUME_AT };
 
   assert.match(await postText("provider.paused", { ...base, resume_source: "reported" }),
-    new RegExp(`^⏸ Anthropicが利用上限に達したため、Anthropicを使う処理を止めています。${date}ごろ再開します。$`, "u"));
+    new RegExp(`^Anthropicが利用上限に達したため、Anthropicを使う処理を止めています。${date}ごろ再開します。$`, "u"));
   assert.match(await postText("provider.paused", { ...base, resume_source: "reported" }, "en"),
-    new RegExp(`^⏸ Anthropic hit its usage limit\\. Work that uses Anthropic is on hold until about ${date}\\.$`, "u"));
+    new RegExp(`^Anthropic hit its usage limit\\. Work that uses Anthropic is on hold until about ${date}\\.$`, "u"));
 
   assert.match(await postText("provider.paused", { ...base, resume_source: "backoff" }),
-    new RegExp(`^⏸ Anthropicが利用上限に達したため、Anthropicを使う処理を止めています。解除時刻が分からないため、${date}ごろに再開を試します。$`, "u"));
+    new RegExp(`^Anthropicが利用上限に達したため、Anthropicを使う処理を止めています。解除時刻が分からないため、${date}ごろに再開を試します。$`, "u"));
   assert.match(await postText("provider.paused", { ...base, resume_source: "backoff" }, "en"),
-    new RegExp(`^⏸ Anthropic hit its usage limit\\. The reset time is unknown; Owl will try again around ${date}\\.$`, "u"));
+    new RegExp(`^Anthropic hit its usage limit\\. The reset time is unknown; Owl will try again around ${date}\\.$`, "u"));
 
   assert.match(await postText("provider.paused", { ...base, repeat: true, resume_source: "reported" }),
-    new RegExp(`^⏸ Anthropicはまだ利用上限のままです。次は${date}ごろに再開を試します。$`, "u"));
+    new RegExp(`^Anthropicはまだ利用上限のままです。次は${date}ごろに再開を試します。$`, "u"));
   assert.match(await postText("provider.paused", { ...base, repeat: true, resume_source: "reported" }, "en"),
-    new RegExp(`^⏸ Anthropic is still at its usage limit\\. Owl will try again around ${date}\\.$`, "u"));
+    new RegExp(`^Anthropic is still at its usage limit\\. Owl will try again around ${date}\\.$`, "u"));
 
   const fallbackLabel = await postText("provider.paused", { provider: "openai", resume_source: "backoff", resume_at: RESUME_AT });
   assert.match(fallbackLabel, /openai/u);
@@ -78,8 +81,8 @@ test("Slack provider pause with a missing or invalid resume time does not throw 
 
 test("Slack provider resumed message is localized", async () => {
   const payload = { provider: "anthropic", provider_label: "Anthropic" };
-  assert.equal(await postText("provider.resumed", payload), "▶ Anthropicの利用上限が解除されたため、処理を再開しました。");
-  assert.equal(await postText("provider.resumed", payload, "en"), "▶ Anthropic's usage limit has reset. Work has resumed.");
+  assert.equal(await postText("provider.resumed", payload), "Anthropicの利用上限が解除されたため、処理を再開しました。");
+  assert.equal(await postText("provider.resumed", payload, "en"), "Anthropic's usage limit has reset. Work has resumed.");
 });
 
 test("Slack subscribes to provider pause and resume events", async () => {

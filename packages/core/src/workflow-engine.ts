@@ -968,22 +968,41 @@ export class WorkflowEngine {
     learnings?: WorkLearningInput,
   ): Promise<boolean> {
     const tasks = this.db.all<{ status: string }>("SELECT status FROM tasks WHERE work_id = ?", workId);
-    const work = this.db.get<{ plan_revision: number; state_version: number }>("SELECT plan_revision, state_version FROM works WHERE id = ?", workId);
+    const work = this.db.get<{ created_at: string; plan_revision: number; state_version: number }>(
+      "SELECT created_at, plan_revision, state_version FROM works WHERE id = ?",
+      workId,
+    );
     // "all_tasks_completed" below means every Task is terminal, including
     // superseded (cancelled) ones (see TASK_TERMINAL_STATES).
     const allTerminal = tasks.length > 0 && tasks.every((task) => isTerminalTaskState(task.status));
-    if (!allTerminal) {
+    if (!allTerminal || !work) {
       return false;
     }
     if (managerFinalVerdict !== "complete") {
       return false;
     }
+    const completedAt = utcNow();
+    const createdAtDate = new Date(work.created_at);
+    const startedAt = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(work.created_at) &&
+      Number.isFinite(createdAtDate.getTime())
+      ? work.created_at
+      : createdAtDate.toISOString();
+    const taskCount = tasks.filter((task) => task.status === "completed").length;
+    const durationMs = Math.max(0, Math.round(Date.parse(completedAt) - Date.parse(startedAt)));
+    const completionPayload: JsonObject = {
+      work_id: workId,
+      manager_final_verdict: managerFinalVerdict,
+      task_count: taskCount,
+      started_at: startedAt,
+      completed_at: completedAt,
+      duration_ms: durationMs,
+    };
     await this.writeLane.write({
       mutateState: (transaction: CoreWriteLaneTransaction) => {
         const result = reduceWorkInTransaction(transaction, workId, {
           event: "work.completed",
           expected_version: work?.state_version,
-          payload: { all_tasks_completed: true, manager_final_verdict: managerFinalVerdict },
+          payload: { all_tasks_completed: true, manager_final_verdict: managerFinalVerdict, now: completedAt },
         });
         if (learnings) {
           enqueueLearningJobInTransaction(transaction, {
@@ -1000,8 +1019,8 @@ export class WorkflowEngine {
         type: "work.completed",
         workId,
         payload: merge === undefined
-          ? { work_id: workId, manager_final_verdict: managerFinalVerdict }
-          : { work_id: workId, manager_final_verdict: managerFinalVerdict, merge },
+          ? completionPayload
+          : { ...completionPayload, merge },
       },
       outbox: [{ provider: "websocket" }],
     });
