@@ -77,7 +77,7 @@ test("016 backfills created-order numbers per project, including the NULL projec
     return null;
   });
 
-  assert.deepEqual(db.migrate(migrations).applied, ["016", "017", "018", "019", "020", "021", "022", "023", "024"]);
+  assert.deepEqual(db.migrate(migrations).applied, ["016", "017", "018", "019", "020", "021", "022", "023", "024", "025"]);
   const rows = db.all("SELECT id, project_id, created_at, display_number FROM works ORDER BY created_at, id");
   for (const projectId of [projectA, projectB, null]) {
     const group = rows.filter((row) => row.project_id === projectId);

@@ -466,6 +466,8 @@ export interface AgentRun {
   role: string;
   provider: string;
   model: string;
+  /** Reasoning effort the run was launched with; null when unset or unknown. */
+  effort?: string | null;
   status: AgentRunStatus;
   pid: number | null;
   started_at: RFC3339 | null;

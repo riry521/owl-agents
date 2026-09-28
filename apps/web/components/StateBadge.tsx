@@ -1,7 +1,7 @@
 'use client';
 
 import type { AgentRun, AgentRunStatus, TaskState, WorkState } from '@/lib/types';
-import { safeEnumLabel, workStateLabels, taskStateLabels, agentStatusLabels } from '@/lib/format';
+import { safeEnumLabel, workStateLabels, taskStateLabels, agentStatusLabels, agentModelLabel } from '@/lib/format';
 import { useLocale, type TFunction } from '@/lib/i18n';
 // Relative on purpose: the node component tests stub the `@/` modules.
 import { flattenRunTree, hybridProgress, isLiveRunStatus, type RunTree } from '../lib/agent-run-tree.mjs';
@@ -170,7 +170,7 @@ export function AgentRunTree({
               )}
             </div>
             <div className="run-tree__sub">
-              <span className="mono">{run.model ? `${run.provider}/${run.model}` : run.provider}</span>
+              <span className="mono">{agentModelLabel(run)}</span>
               {' · '}
               {formatElapsed(run.started_at, run.ended_at, now, t)}
             </div>

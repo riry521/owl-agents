@@ -40,7 +40,7 @@ function loadFormat() {
   return loaded.exports;
 }
 
-const { formatAgentLabel, runOrdinals } = loadFormat();
+const { formatAgentLabel, agentModelLabel, runOrdinals } = loadFormat();
 
 function loadApiClient() {
   const source = readFileSync(apiClientPath, 'utf8');
@@ -153,7 +153,7 @@ test('runOrdinals and formatAgentLabel number the Designer role like any other r
   assert.equal(ordinals.get('01C-designer'), 2);
 
   const secondDesigner = run('01C-designer', 'designer', 'task-b', '2026-01-03T00:00:00.000Z');
-  assert.equal(formatAgentLabel(secondDesigner, ordinals.get('01C-designer'), 'en'), 'Designer #2 (test)');
+  assert.equal(formatAgentLabel(secondDesigner, ordinals.get('01C-designer'), 'en'), 'Designer #2 (test-model)');
 });
 
 test('formatAgentLabel leaves Manager unnumbered', () => {
@@ -266,4 +266,28 @@ test('runOrdinals without a Work resolver keeps one group across all runs', () =
 
   assert.equal(ordinals.get('01A-earlier'), 1);
   assert.equal(ordinals.get('01B-later'), 2);
+});
+
+test('agentModelLabel shows the short model name and effort for Claude and OpenAI models', () => {
+  assert.equal(agentModelLabel({ model: 'claude-opus-5-5', effort: 'low' }), 'Opus5.5-low');
+  assert.equal(agentModelLabel({ model: 'claude-haiku-4-5-20251001', effort: 'high' }), 'Haiku4.5-high');
+  assert.equal(agentModelLabel({ model: 'claude-fable-5-1', effort: 'xhigh' }), 'Fable5.1-xhigh');
+  assert.equal(agentModelLabel({ model: 'claude-opus-5', effort: 'high' }), 'Opus5-high');
+  assert.equal(agentModelLabel({ model: 'gpt-5.4', effort: 'high' }), 'GPT-5.4-high');
+  assert.equal(agentModelLabel({ model: 'gpt-5.3-codex', effort: 'medium' }), 'GPT-5.3-Codex-medium');
+});
+
+test('agentModelLabel falls back to the model name alone when effort is unset or unknown', () => {
+  assert.equal(agentModelLabel({ model: 'claude-sonnet-5', effort: null }), 'Sonnet5');
+  assert.equal(agentModelLabel({ model: 'gpt-5.4' }), 'GPT-5.4');
+  assert.equal(agentModelLabel({ model: 'local-llama', effort: '' }), 'local-llama');
+  assert.equal(agentModelLabel({ model: '', provider: 'openai', effort: null }), 'openai');
+});
+
+test('formatAgentLabel shows the model and effort instead of the provider', () => {
+  const worker = { ...run('01A-worker', 'worker', 'task-a', null), provider: 'openai', model: 'gpt-5.4', effort: 'high' };
+  assert.equal(formatAgentLabel(worker, 1, 'en'), 'Worker #1 (GPT-5.4-high)');
+  assert.equal(formatAgentLabel(worker, 1, 'ja'), 'Worker #1（GPT-5.4-high）');
+  const executor = { ...run('01B-exec', 'executor', 'task-a', null), provider: 'claude', model: 'claude-opus-5-5', effort: 'low', label: 's1' };
+  assert.match(formatAgentLabel(executor, 1, 'en'), /s1 \(Opus5\.5-low\)$/);
 });

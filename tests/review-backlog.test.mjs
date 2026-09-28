@@ -130,7 +130,7 @@ test("backlog migration applies to a database that already ran earlier migration
   }
   existingDb.migrate(oldMigrations);
   const applied = existingDb.migrate(migrations).applied;
-  assert.deepEqual(applied, ["018", "019", "020", "021", "022", "023", "024"]);
+  assert.deepEqual(applied, ["018", "019", "020", "021", "022", "023", "024", "025"]);
   assert.ok(existingDb.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backlog_items'"));
   assert.deepEqual(existingDb.migrate(migrations).applied, []);
 });

@@ -120,6 +120,7 @@ export interface AgentRunRecordInput {
   readonly role?: string;
   readonly provider?: string;
   readonly model?: string;
+  readonly effort?: string | null;
   readonly invocation_id?: string;
   readonly design_tier?: "standard" | "lead" | null;
 }
@@ -1194,6 +1195,7 @@ export function reduceTaskInTransaction(
       role,
       provider,
       model,
+      effort: typeof payload.effort === "string" ? payload.effort : null,
       invocation_id: invocationId,
       design_tier: row.type === "design" ? (row.lead_designer_start_round == null ? "standard" : "lead") : null,
     },
@@ -1473,15 +1475,16 @@ function insertAgentRun(
   const id = input.id ?? createUlid();
   transaction.run(
     `INSERT INTO agent_runs
-       (id, work_id, task_id, role, provider, model, design_tier, status,
+       (id, work_id, task_id, role, provider, model, effort, design_tier, status,
         fencing_token, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'launch_pending', ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'launch_pending', ?, ?, ?)`,
     id,
     input.work_id,
     input.task_id,
     input.role ?? "worker",
     input.provider ?? "unknown",
     input.model ?? "unknown",
+    input.effort ?? null,
     input.design_tier ?? null,
     input.invocation_id ?? id,
     now,

@@ -99,8 +99,24 @@ export function roleDisplayName(role: string, locale: Locale = 'ja'): string {
 }
 
 /**
- * - manager → plain "Manager" (no ordinal, no provider)
- * - other roles → locale-aware format with role name, ordinal, and provider.
+ * Short model name plus reasoning effort, e.g. "Opus5.5-low" or "GPT-5.4-high".
+ * Falls back to the model name alone when effort is unset, and to the
+ * provider when the model is unknown.
+ */
+export function agentModelLabel(run: Pick<AgentRun, 'model' | 'effort'> & { provider?: string }): string {
+  const model = run.model ?? '';
+  const claude = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(model);
+  const name = claude
+    ? `${claude[1][0].toUpperCase()}${claude[1].slice(1)}${claude[2]}${claude[3] ? `.${claude[3]}` : ''}`
+    : model.startsWith('gpt-')
+      ? `GPT-${model.slice(4).replace(/-([a-z])/g, (_, c: string) => `-${c.toUpperCase()}`)}`
+      : model || run.provider || '—';
+  return run.effort ? `${name}-${run.effort}` : name;
+}
+
+/**
+ * - manager → plain "Manager" (no ordinal, no model)
+ * - other roles → locale-aware format with role name, ordinal, and model-effort.
  */
 export function formatAgentLabel(run: AgentRun, ordinal: number, locale: Locale = 'ja'): string {
   if (run.role === 'manager') return roleDisplayName(run.role, locale);
@@ -108,13 +124,13 @@ export function formatAgentLabel(run: AgentRun, ordinal: number, locale: Locale 
     return dicts[locale].format.executorLabelFormat
       .replace('{{role}}', roleDisplayName(run.role, locale))
       .replace('{{label}}', run.label)
-      .replace('{{provider}}', run.provider);
+      .replace('{{agent}}', agentModelLabel(run));
   }
   const template = dicts[locale].format.agentLabelFormat;
   return template
     .replace('{{role}}', roleDisplayName(run.role, locale))
     .replace('{{ordinal}}', String(ordinal))
-    .replace('{{provider}}', run.provider);
+    .replace('{{agent}}', agentModelLabel(run));
 }
 
 /**

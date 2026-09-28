@@ -924,6 +924,7 @@ export class WorkflowEngine {
                 role,
                 provider: roleProvider,
                 model: roleModel?.model ?? DEFAULT_HARNESS_MODELS.claude,
+                effort: roleModel?.effort ?? null,
                 invocation_id: agentRunId,
                 worktree_path: prepared.worktree_path ?? null,
               },
@@ -1458,15 +1459,16 @@ export class WorkflowEngine {
           const now = utcNow();
           transaction.run(
             `INSERT INTO agent_runs
-               (id, work_id, task_id, parent_agent_id, role, origin, provider, model, status, label,
+               (id, work_id, task_id, parent_agent_id, role, origin, provider, model, effort, status, label,
                 retry_of_run_id, started_at, last_output_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, 'executor', 'spawned', ?, ?, 'launch_pending', ?, ?, ?, ?, ?, ?)`,
+               VALUES (?, ?, ?, ?, 'executor', 'spawned', ?, ?, ?, 'launch_pending', ?, ?, ?, ?, ?, ?)`,
             runId,
             workId,
             taskId,
             workerRunId,
             config.provider,
             config.model,
+            config.effort ?? null,
             label,
             attempt > 1 ? previousRunId : null,
             now,
@@ -2616,13 +2618,14 @@ export class WorkflowEngine {
         clearPausedReviewerWait(transaction, taskId);
         transaction.run(
           `INSERT INTO agent_runs
-             (id, work_id, task_id, role, provider, model, status, started_at, created_at, updated_at)
-             VALUES (?, ?, ?, 'reviewer', ?, ?, 'running', ?, ?, ?)`,
+             (id, work_id, task_id, role, provider, model, effort, status, started_at, created_at, updated_at)
+             VALUES (?, ?, ?, 'reviewer', ?, ?, ?, 'running', ?, ?, ?)`,
           reviewerAgentRunId,
           workId,
           taskId,
           reviewerProvider,
           reviewerRoleModel?.model ?? DEFAULT_HARNESS_MODELS.claude,
+          reviewerRoleModel?.effort ?? null,
           now,
           now,
           now,

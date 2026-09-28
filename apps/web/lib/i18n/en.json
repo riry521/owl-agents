@@ -791,9 +791,9 @@
     "hoursAgo": "{{count}}h ago",
     "daysAgo": "{{count}}d ago",
     "dash": "—",
-    "agentLabelFormat": "{{role}} #{{ordinal}} ({{provider}})",
+    "agentLabelFormat": "{{role}} #{{ordinal}} ({{agent}})",
     "roleExecutor": "Subagent",
-    "executorLabelFormat": "{{role}} {{label}} ({{provider}})"
+    "executorLabelFormat": "{{role}} {{label}} ({{agent}})"
   },
   "backlog": {
     "title": "Backlog",

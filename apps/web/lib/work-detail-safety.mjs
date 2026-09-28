@@ -117,6 +117,7 @@ function normalizeRuns(value, workId) {
     role: stringOr(run.role, 'unknown'),
     provider: stringOr(run.provider),
     model: stringOr(run.model),
+    effort: nullableString(run.effort),
     status: stringOr(run.status, 'unknown'),
     pid: typeof run.pid === 'number' && Number.isFinite(run.pid) ? run.pid : null,
     started_at: nullableString(run.started_at),

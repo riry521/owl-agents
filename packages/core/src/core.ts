@@ -372,6 +372,7 @@ interface AgentDbRow {
   design_tier: "standard" | "lead" | null;
   provider: string;
   model: string;
+  effort: string | null;
   status: string;
   pid: number | null;
   started_at: string | null;
@@ -2387,7 +2388,7 @@ export class Core {
   public listAgentRuns(query: AgentListQuery = {}): ListResponse<AgentRun> {
     const limit = boundLimit(query.limit ?? 50);
     const rows = this.db.all<AgentDbRow>(
-      `SELECT id, work_id, task_id, role, design_tier, provider, model, status, pid, started_at, ended_at, last_output_at, parent_agent_id, phase, subtask_count, label, origin
+      `SELECT id, work_id, task_id, role, design_tier, provider, model, effort, status, pid, started_at, ended_at, last_output_at, parent_agent_id, phase, subtask_count, label, origin
          FROM agent_runs
         WHERE (? IS NULL OR status = ?)
           AND (? IS NULL OR work_id = ?)
@@ -5821,13 +5822,14 @@ export class Core {
         const now = utcNow();
         transaction.run(
           `INSERT INTO agent_runs
-             (id, work_id, task_id, role, provider, model, status, started_at, created_at, updated_at)
-           VALUES (?, ?, ?, 'manager', ?, ?, 'running', ?, ?, ?)`,
+             (id, work_id, task_id, role, provider, model, effort, status, started_at, created_at, updated_at)
+           VALUES (?, ?, ?, 'manager', ?, ?, ?, 'running', ?, ?, ?)`,
           agentRunId,
           workId,
           taskId,
           managerRoleModel?.provider ?? "anthropic",
           managerRoleModel?.model ?? DEFAULT_HARNESS_MODELS.claude,
+          managerRoleModel?.effort ?? null,
           now,
           now,
           now,
@@ -6243,6 +6245,7 @@ function toAgentRun(row: AgentDbRow): AgentRun {
     role: row.role === "designer" && row.design_tier === "lead" ? "lead_designer" : row.role,
     provider: row.provider,
     model: row.model,
+    effort: row.effort,
     status: row.status,
     pid: row.pid,
     started_at: row.started_at,

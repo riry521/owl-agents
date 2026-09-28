@@ -848,6 +848,8 @@ export interface AgentRun extends JsonObject {
   readonly role: string;
   readonly provider: string;
   readonly model: string;
+  /** Reasoning effort the run was launched with; null when unset or unknown. */
+  readonly effort: string | null;
   readonly status: string;
   readonly pid: number | null;
   readonly started_at: string | null;
