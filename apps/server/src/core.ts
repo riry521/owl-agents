@@ -74,6 +74,7 @@ import { IntegrationStore } from "./integration-store.js";
 import { AppSettingsStore, type CustomProviderConfig } from "./app-settings-store.js";
 import { AdvisorFolderError, advisorFolderDefaults, ensureAdvisorSharedDir, isGitIgnoredDirectory, normalizeAdvisorFolder } from "./advisor-folders.js";
 import { detectProcessSkillsPack } from "../../../packages/core/dist/process-skills-pack.js";
+import { resolveWorkspacesRoot } from "../../../packages/core/dist/workspace-layout.js";
 import {
   DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS,
   KnowledgeAutomationValidationError,
@@ -2699,6 +2700,7 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
   };
   const enrichedOptions = {
     ...options,
+    workspacesRoot: resolveWorkspacesRoot(process.env, homedir()),
     getTypesafeApiKey: () => appSettings.getTypesafeApiKey(),
     getAdvisorPersona: () => appSettings.getAdvisorPersona(),
     getAdvisorFolders: () => {

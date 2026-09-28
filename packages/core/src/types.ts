@@ -592,10 +592,12 @@ export interface CoreOptions {
   /** Cap on active non-Executor agent runs per Work. Unlimited unless set. */
   readonly max_parallel?: number;
   readonly dispatcher?: CoreDispatcherOptions;
-  /** Root directory for Work and Advisor worktrees (`<owlRoot>/.owl-workspaces`). Defaults to process.cwd(). */
+  /** Owl's own repository root, used to resolve `dataDir` and the legacy `<owlRoot>/.owl-workspaces` worktrees directory. Defaults to process.cwd(). */
   readonly owlRoot?: string;
   /** Durable runtime data directory. Defaults to `<owlRoot>/data`. */
   readonly dataDir?: string;
+  /** Root directory for Work and Advisor worktrees. Defaults to `<owlRoot>/.owl-workspaces` for backward compatibility. */
+  readonly workspacesRoot?: string;
   /** Optional process skills detection inputs, primarily for isolated runtimes. */
   readonly processSkillsDetection?: {
     readonly env: NodeJS.ProcessEnv;

@@ -9,12 +9,14 @@ import { access, appendFile, mkdir, readFile, rename, rm, stat } from "node:fs/p
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { createInterface } from "node:readline";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 import "./config.js";
 import { cliText } from "./cli-language.js";
 import { CliError, ContractValidationError, newReferenceId } from "./errors.js";
 import { resolveDataDir, resolveOwlRoot, serverPackageRoot } from "./contracts.js";
+import { LEGACY_WORKSPACES_DIRNAME, resolveWorkspacesRoot } from "../../../packages/core/dist/workspace-layout.js";
 import { stopManagedAuxiliaryProcesses } from "./lifecycle-stop.js";
 import { isProcessAlive } from "./process-state.js";
 import { startServer, type RunningServer, type ServerOptions } from "./server.js";
@@ -584,26 +586,31 @@ async function fetchTerminalWorkIds(bind: string, port: number, state: "complete
   return ids;
 }
 
-/** Manual Workspace cleanup: removes `.owl-workspaces/<work_id>` for every Work already in a terminal state (completed/cancelled). Running Works are left untouched. */
+/** Manual Workspace cleanup: removes `<work_id>` under both the legacy `.owl-workspaces` directory and the current workspaces root, for every Work already in a terminal state (completed/cancelled). Running Works are left untouched. */
 async function runCleanup(): Promise<Record<string, unknown>> {
   const state = await readState();
   if (!state || !isAlive(state.pid)) {
     throw new CliError(4, cliText('owl-coreは起動していません。startを実行してから再試行してください。', 'owl-core is not running. Run start and try again.'));
   }
   const owlRoot = resolveOwlRoot();
-  const workspacesBase = join(owlRoot, ".owl-workspaces");
+  const workspacesRoots = [join(owlRoot, LEGACY_WORKSPACES_DIRNAME), resolveWorkspacesRoot(process.env, homedir())];
   const completed = await fetchTerminalWorkIds(state.bind, state.port, "completed");
   const cancelled = await fetchTerminalWorkIds(state.bind, state.port, "cancelled");
   const terminalWorkIds = [...completed, ...cancelled];
   let removed = 0;
   for (const workId of terminalWorkIds) {
-    const dir = join(workspacesBase, workId.replace(/[^a-zA-Z0-9_:-]/g, "_"));
-    try {
-      await rm(dir, { recursive: true, force: true });
-      removed += 1;
-    } catch {
-      // Best-effort: one Workspace failing to delete must not abort the batch.
+    const name = workId.replace(/[^a-zA-Z0-9_:-]/g, "_");
+    let removedAny = false;
+    for (const workspacesBase of workspacesRoots) {
+      const dir = join(workspacesBase, name);
+      try {
+        await rm(dir, { recursive: true, force: true });
+        removedAny = true;
+      } catch {
+        // Best-effort: one Workspace failing to delete must not abort the batch.
+      }
     }
+    if (removedAny) removed += 1;
   }
   return { command: "cleanup", checked: terminalWorkIds.length, removed };
 }

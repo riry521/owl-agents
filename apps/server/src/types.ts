@@ -699,6 +699,8 @@ export interface CreateCoreOptions {
   owlRoot?: string;
   /** Durable runtime data directory; forwarded to @owl/core for uploads and artifacts. */
   dataDir?: string;
+  /** Root directory Task/Work/Advisor worktrees are created under; forwarded to @owl/core. Defaults to `<owlRoot>/.owl-workspaces`. */
+  workspacesRoot?: string;
   /** Provider client for persistent Advisor sessions (agent-runtime's ProviderClient), forwarded to @owl/core. */
   providerClient?: unknown;
   getTypesafeApiKey?: () => string;

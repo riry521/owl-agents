@@ -2,12 +2,14 @@ import { createHash, randomUUID } from "node:crypto";
 import { copyFile, lstat, mkdir, readdir, readFile, rename, rm } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import type { CoreDatabase } from "./types";
-import { safeSegment } from "./git-gateway.js";
+import { safeSegment, WorkspaceLayout } from "./workspace-layout.js";
 
 export interface OutputsStoreDeps {
   readonly db: CoreDatabase;
   readonly owlRoot: string;
   readonly dataDir: string;
+  /** Resolves Work workspace paths. Defaults to the legacy `<owlRoot>/.owl-workspaces` layout. */
+  readonly layout?: WorkspaceLayout;
 }
 
 /** Sentinel owner for a file that was already in the outputs folder before this pass. */
@@ -162,16 +164,17 @@ function claimOrKeepAlongside(
  */
 export async function saveProjectlessWorkOutputs(deps: OutputsStoreDeps, workId: string): Promise<boolean> {
   if (safeSegment(workId) !== workId || workId === "." || workId === "..") return false;
-  const workspaceDir = resolve(deps.owlRoot, ".owl-workspaces", safeSegment(workId));
+  const layout = deps.layout ?? WorkspaceLayout.legacyOnly(deps.owlRoot);
+  const workspaceDir = layout.workDir(workId);
   try {
-    const workspaceRoot = resolve(deps.owlRoot, ".owl-workspaces");
+    const workspaceRoot = layout.rootOf(workspaceDir) ?? layout.root;
     let rootInfo;
     try { rootInfo = await lstat(workspaceRoot); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
       throw error;
     }
-    if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) throw new Error(".owl-workspaces is not a plain directory.");
+    if (rootInfo.isSymbolicLink() || !rootInfo.isDirectory()) throw new Error("The Owl workspaces directory is not a plain directory.");
     let workspaceInfo;
     try { workspaceInfo = await lstat(workspaceDir); }
     catch (error) {

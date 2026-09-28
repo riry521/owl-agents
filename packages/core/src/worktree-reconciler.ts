@@ -1,9 +1,9 @@
 import { lstat, rm, rmdir } from "node:fs/promises";
-import { basename, dirname, resolve } from "node:path";
+import { basename, resolve } from "node:path";
 import type { WriteLane } from "../../db/dist/index.js";
 import { isTerminalTaskState, reduceTaskInTransaction } from "./state-reducer.js";
 import { saveProjectlessWorkOutputs } from "./outputs-store.js";
-import { safeSegment } from "./git-gateway.js";
+import { safeSegment, WorkspaceLayout } from "./workspace-layout.js";
 import type { CoreDatabase, CoreWriteLaneTransaction, GitGateway, WorktreeCleanupResult, WorkspaceEntry } from "./types";
 
 const ACTIVE_AGENT_RUN_STATUSES_SQL = "'launch_pending','spawned','running','cancel_requested'";
@@ -16,10 +16,16 @@ export interface WorktreeReconcilerDeps {
   readonly db: CoreDatabase;
   readonly writeLane: WriteLane;
   readonly git: GitGateway;
-  /** Root directory holding `.owl-workspaces`; required to save a Project-less Work's outputs. */
+  /** Root directory holding the legacy `.owl-workspaces`; required to save a Project-less Work's outputs. */
   readonly owlRoot: string;
   /** Root directory holding `outputs/`; required to save a Project-less Work's outputs. */
   readonly dataDir: string;
+  /** Resolves Work/Task/integration workspace paths. Defaults to the legacy `<owlRoot>/.owl-workspaces` layout. */
+  readonly layout?: WorkspaceLayout;
+}
+
+function layoutOf(deps: WorktreeReconcilerDeps): WorkspaceLayout {
+  return deps.layout ?? WorkspaceLayout.legacyOnly(deps.owlRoot);
 }
 
 export interface WorktreeReconcileScope {
@@ -48,13 +54,14 @@ export async function cleanupWorkForDeletion(
 ): Promise<WorktreeCleanupResult> {
   const work = deps.db.get<{ project_id: string | null }>("SELECT project_id FROM works WHERE id = ?", workId);
   if (!work) return { ok: false, message: `Work ${workId} was not found.`, details: { work_id: workId, stage: "work_lookup" } };
+  const workDir = layoutOf(deps).workDir(workId);
   if (work.project_id !== null) {
     try { return await deps.git.deleteWorkWorkspaces({ work_id: workId }); }
     catch (error) {
       return {
         ok: false,
         message: error instanceof Error ? error.message : String(error),
-        details: { path: resolve(deps.owlRoot, ".owl-workspaces", safeSegment(workId)), stage: "git_workspace_cleanup" },
+        details: { path: workDir, stage: "git_workspace_cleanup" },
       };
     }
   }
@@ -62,12 +69,12 @@ export async function cleanupWorkForDeletion(
     const saved = await saveProjectlessWorkOutputs(deps, workId);
     return saved
       ? { ok: true, message: "Project-less Work outputs were saved and the workspace was removed." }
-      : { ok: false, message: "Project-less Work outputs could not be saved and verified.", details: { path: resolve(deps.owlRoot, ".owl-workspaces", safeSegment(workId)), stage: "projectless_output_save" } };
+      : { ok: false, message: "Project-less Work outputs could not be saved and verified.", details: { path: workDir, stage: "projectless_output_save" } };
   } catch (error) {
     return {
       ok: false,
       message: error instanceof Error ? error.message : String(error),
-      details: { path: resolve(deps.owlRoot, ".owl-workspaces", safeSegment(workId)), stage: "projectless_output_save" },
+      details: { path: workDir, stage: "projectless_output_save" },
     };
   }
 }
@@ -197,14 +204,14 @@ async function recordDiscarded(
 }
 
 /**
- * Remove `.owl-workspaces/<workId>` once its Task and integration worktrees
- * are gone. Uses rmdir, which only ever removes an empty directory; ENOENT
+ * Remove the Work's directory once its Task and integration worktrees are
+ * gone. Uses rmdir, which only ever removes an empty directory; ENOENT
  * (already gone) and ENOTEMPTY (something still lives there) are both
- * expected outcomes, not failures. Never touches `.owl-workspaces/advisor`,
- * which this path does not resolve to.
+ * expected outcomes, not failures. Never touches the `advisor` directory
+ * under a workspaces root, which this path does not resolve to.
  */
-async function removeWorkDirectoryIfEmpty(owlRoot: string, workId: string): Promise<void> {
-  const path = resolve(owlRoot, ".owl-workspaces", safeSegment(workId));
+async function removeWorkDirectoryIfEmpty(layout: WorkspaceLayout, workId: string): Promise<void> {
+  const path = layout.workDir(workId);
   try {
     await rmdir(path);
   } catch (error) {
@@ -247,8 +254,8 @@ async function discardMergedWorkspaces(
   skipped: string[],
   failures: WorktreeReconcileFailure[],
 ): Promise<void> {
-  const workspacesRoot = resolve(deps.owlRoot, ".owl-workspaces");
-  const workRoot = resolve(workspacesRoot, safeSegment(workId));
+  const layout = layoutOf(deps);
+  const workRoot = layout.workDir(workId);
   // `present` marks a workspace that is listed or still on disk; only a Task
   // still holding its worktree, or whose workspace is present, is relabelled
   // discarded, so a Task whose worktree was merged normally keeps that state.
@@ -318,8 +325,8 @@ async function discardMergedWorkspaces(
   if (failures.length !== previousFailureCount) return;
   const refusal = !isCompletedMergedProjectWork(deps.db, workId)
     ? `Work ${workId} is no longer completed with a recorded merge.`
-    : dirname(workRoot) !== workspacesRoot || [".", "..", "advisor"].includes(basename(workRoot))
-      ? `${workRoot} is not a Work directory under ${workspacesRoot}.`
+    : layout.rootOf(workRoot) === null || [".", "..", "advisor"].includes(basename(workRoot))
+      ? `${workRoot} is not a Work directory under a workspaces root.`
       : null;
   if (refusal !== null) {
     skipped.push(workRoot);
@@ -378,7 +385,7 @@ export async function reconcileWorktrees(
     try {
       entries = await deps.git.listWorkspaces();
     } catch (error) {
-      const path = resolve(deps.owlRoot, ".owl-workspaces", safeSegment(scope.work_id));
+      const path = layoutOf(deps).workDir(scope.work_id);
       const message = error instanceof Error ? error.message : String(error);
       return reconcileResult(discarded, [path], [{ work_id: scope.work_id, path, message }]);
     }
@@ -408,7 +415,7 @@ export async function reconcileWorktrees(
           await discardWorkLeftovers(deps, scope.work_id, discarded, skipped);
         }
       }
-      await removeWorkDirectoryIfEmpty(deps.owlRoot, scope.work_id);
+      await removeWorkDirectoryIfEmpty(layoutOf(deps), scope.work_id);
     }
     return reconcileResult(discarded, skipped, failures);
   }
@@ -456,10 +463,10 @@ async function reconcileStartupWorkspaces(
   try {
     entries = await deps.git.listWorkspaces();
   } catch (error) {
-    console.warn("[owl-core] Worktree reconcile could not list .owl-workspaces", error);
+    console.warn("[owl-core] Worktree reconcile could not list the workspaces directories", error);
     const message = error instanceof Error ? error.message : String(error);
     for (const workId of completedMergedProjectWorkIds(deps.db)) {
-      const path = resolve(deps.owlRoot, ".owl-workspaces", safeSegment(workId));
+      const path = layoutOf(deps).workDir(workId);
       skipped.push(path);
       failures.push({ work_id: workId, path, message });
     }
@@ -556,6 +563,6 @@ async function reconcileStartupWorkspaces(
   for (const workId of workIds) {
     const work = deps.db.get<{ state: string }>("SELECT state FROM works WHERE id = ?", workId);
     if (!work || (work.state !== "cancelled" && work.state !== "completed")) continue;
-    await removeWorkDirectoryIfEmpty(deps.owlRoot, workId);
+    await removeWorkDirectoryIfEmpty(layoutOf(deps), workId);
   }
 }

@@ -25,15 +25,14 @@ import type {
 } from "./types";
 import { GitLanes } from "./git-lane.js";
 import { basePushArgs, classifyPushFailure, parsePushPorcelain, PUSH_HOOK_WARNING_MARKER, redactCredentials, safeRemoteName } from "./git-push.js";
+import { safeSegment, WorkspaceLayout } from "./workspace-layout.js";
+
+export { safeSegment } from "./workspace-layout.js";
 
 const execFileAsync = promisify(execFile);
 
 /** Lanes shared by every gateway in this process, keyed by repository path. */
 const processGitLanes = new GitLanes();
-
-export function safeSegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9._-]/g, "_");
-}
 
 interface ProjectRow {
   readonly canonical_path: string;
@@ -87,14 +86,6 @@ function inside(base: string, candidate: string): boolean {
 
 function branchName(prefix: string, workId: string, taskId: string | null): string {
   return `owl/${prefix}/${safeSegment(workId)}/${safeSegment(taskId ?? "work")}`;
-}
-
-function taskPathFor(owlRoot: string, workId: string, taskId: string): string {
-  return resolve(owlRoot, ".owl-workspaces", safeSegment(workId), safeSegment(taskId));
-}
-
-function integrationPathFor(owlRoot: string, workId: string): string {
-  return resolve(owlRoot, ".owl-workspaces", safeSegment(workId), "__work__");
 }
 
 interface WorkDeletionCandidate {
@@ -178,10 +169,6 @@ function cleanupFailure(path: string, stage: string, error: unknown): WorktreeCl
   };
 }
 
-function advisorPathFor(owlRoot: string, conversationId: string): string {
-  return resolve(owlRoot, ".owl-workspaces", "advisor", safeSegment(conversationId));
-}
-
 function advisorBranchFor(conversationId: string): string {
   return `owl/advisor/${safeSegment(conversationId)}`;
 }
@@ -197,11 +184,12 @@ export class GitWorktreeGateway implements GitGateway {
     private readonly owlRoot: string,
     private readonly lanes: GitLanes = processGitLanes,
     private readonly dataDir: string = join(owlRoot, "data"),
+    private readonly layout: WorkspaceLayout = WorkspaceLayout.legacyOnly(owlRoot),
   ) {}
 
   public async prepareWorktree(request: GitOperationRequest): Promise<GitOperationResult> {
     const project = this.projectFor(request.work_id);
-    const worktreePath = resolve(this.owlRoot, ".owl-workspaces", safeSegment(request.work_id), safeSegment(request.task_id ?? "manager"));
+    const worktreePath = this.layout.taskPath(request.work_id, request.task_id ?? "manager");
     if (!project) {
       await mkdir(worktreePath, { recursive: true });
       return { ok: true, exit_code: 0, recorded: false, worktree_path: worktreePath, message: "No Project is attached; using an isolated workspace." };
@@ -330,8 +318,10 @@ export class GitWorktreeGateway implements GitGateway {
     }
 
     const repositoryRoot = resolve(repositoryResult.message.trim().split(/\r?\n/u)[0] ?? sourceDirectory);
-    const worktreeRoot = await realpath(this.owlRoot);
-    const worktreePath = advisorPathFor(worktreeRoot, request.conversation_id);
+    const containerRoot = this.layout.rootOf(this.layout.advisorDir(request.conversation_id)) ?? this.layout.root;
+    await mkdir(containerRoot, { recursive: true });
+    const worktreeRoot = await realpath(containerRoot);
+    const worktreePath = resolve(worktreeRoot, "advisor", safeSegment(request.conversation_id));
     const branch = advisorBranchFor(request.conversation_id);
     const existingPath = await lstat(worktreePath).catch(() => null);
     if (existingPath) {
@@ -369,13 +359,14 @@ export class GitWorktreeGateway implements GitGateway {
   public async inspectAdvisorWorkspace(
     request: AdvisorWorkspaceInspectionRequest,
   ): Promise<AdvisorWorkspaceInspection> {
+    const containerRoot = this.layout.rootOf(this.layout.advisorDir(request.conversation_id)) ?? this.layout.root;
     let worktreeRoot: string;
     try {
-      worktreeRoot = await realpath(this.owlRoot);
+      worktreeRoot = await realpath(containerRoot);
     } catch (error) {
       return { ok: false, dirty: false, message: error instanceof Error ? error.message : "Owl root could not be resolved." };
     }
-    const expectedPath = advisorPathFor(worktreeRoot, request.conversation_id);
+    const expectedPath = resolve(worktreeRoot, "advisor", safeSegment(request.conversation_id));
     if (resolve(request.workspace_path) !== expectedPath || !inside(worktreeRoot, expectedPath)) {
       return { ok: false, dirty: false, message: "The requested path is not this conversation's Advisor workspace." };
     }
@@ -442,9 +433,8 @@ export class GitWorktreeGateway implements GitGateway {
     const removedWorkspaces: string[] = [];
     const removedBranches: string[] = [];
 
-    const worktreeRoot = await realpath(this.owlRoot).catch(() => null);
-    if (worktreeRoot !== null) {
-      const advisorRoot = resolve(worktreeRoot, ".owl-workspaces", "advisor");
+    for (const root of this.layout.roots()) {
+      const advisorRoot = resolve(root, "advisor");
       const entries = await readdir(advisorRoot, { withFileTypes: true }).catch(() => []);
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
@@ -635,7 +625,7 @@ export class GitWorktreeGateway implements GitGateway {
     const taskId = request.task_id as string;
     const taskBranch = request.task_branch ?? branchName("task", request.work_id, taskId);
     const workBranch = request.work_branch ?? branchName("work", request.work_id, null);
-    const taskPath = taskPathFor(this.owlRoot, request.work_id, taskId);
+    const taskPath = this.layout.taskPath(request.work_id, taskId);
     if (request.worktree_path && resolve(request.worktree_path) !== taskPath) {
       return integrationFailure(1, "The requested Task worktree does not match the Work/Task workspace.", true, null);
     }
@@ -662,7 +652,7 @@ export class GitWorktreeGateway implements GitGateway {
     // Integrate through a dedicated Work worktree. Checking out the Work
     // branch in canonical_path would mutate the owner's checkout and would
     // fail or overwrite unrelated local changes.
-    const integration = await this.ensureIntegrationWorktree(canonical, project.base_branch, integrationPathFor(this.owlRoot, request.work_id), workBranch);
+    const integration = await this.ensureIntegrationWorktree(canonical, project.base_branch, this.layout.integrationPath(request.work_id), workBranch);
     if (!integration.ok || !integration.worktree_path) {
       return integrationFailure(integration.exit_code, integration.message, true, null);
     }
@@ -834,7 +824,7 @@ export class GitWorktreeGateway implements GitGateway {
    * base merge left it detached, return it to the Work branch.
    */
   private async abortIntegrationMergeNow(workId: string): Promise<GitOperationResult> {
-    const path = integrationPathFor(this.owlRoot, workId);
+    const path = this.layout.integrationPath(workId);
     const existing = await lstat(path).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return null;
       throw error;
@@ -989,7 +979,7 @@ export class GitWorktreeGateway implements GitGateway {
    */
   private async prepareWorkMergeNow(workId: string, project: ProjectRow, canonical: string): Promise<PreparedWorkMerge> {
     const workBranch = branchName("work", workId, null);
-    const integrationPath = integrationPathFor(this.owlRoot, workId);
+    const integrationPath = this.layout.integrationPath(workId);
     const baseBranch = project.base_branch;
     const baseRef = `refs/heads/${baseBranch}`;
     const context = { worktree_path: integrationPath, base_branch: baseBranch, work_branch: workBranch };
@@ -1328,7 +1318,7 @@ export class GitWorktreeGateway implements GitGateway {
     if (!taskBranchExists.ok || !workBranchExists.ok) return null;
     const result = await this.git(canonical, ["merge-base", "--is-ancestor", taskBranch, workBranch]);
     if (!result.ok) return result.exit_code === 1 ? false : null;
-    const taskPath = taskPathFor(this.owlRoot, request.work_id, taskId);
+    const taskPath = this.layout.taskPath(request.work_id, taskId);
     const existing = await lstat(taskPath).catch(() => null);
     if (!existing) return true;
     const status = await this.git(taskPath, ["status", "--porcelain=v1", "--untracked-files=all"]);
@@ -1368,11 +1358,13 @@ export class GitWorktreeGateway implements GitGateway {
   private async removeWorktreeNow(request: GitOperationRequest): Promise<GitOperationResult> {
     const project = this.projectFor(request.work_id);
     const path = request.task_id
-      ? taskPathFor(this.owlRoot, request.work_id, request.task_id)
+      ? this.layout.taskPath(request.work_id, request.task_id)
       : request.worktree_path
         ? resolve(request.worktree_path)
-        : resolve(this.owlRoot, ".owl-workspaces", safeSegment(request.work_id));
-    if (!inside(this.owlRoot, path)) return { ok: false, exit_code: 1, recorded: false, message: "The worktree path is outside owl_root." };
+        : this.layout.workDir(request.work_id);
+    if (!this.layout.contains(path)) {
+      return { ok: false, exit_code: 1, recorded: false, message: "The worktree path is outside the Owl workspaces directory." };
+    }
     if (request.task_id && request.worktree_path && resolve(request.worktree_path) !== path) {
       return { ok: false, exit_code: 1, recorded: false, message: "The requested Task worktree does not match the Work/Task workspace." };
     }
@@ -1406,14 +1398,13 @@ export class GitWorktreeGateway implements GitGateway {
   }
 
   private async discardTaskWorktreeNow(request: GitOperationRequest, canonical: string): Promise<GitOperationResult> {
-    const workspacesRoot = resolve(this.owlRoot, ".owl-workspaces");
     const path = request.task_id
-      ? taskPathFor(this.owlRoot, request.work_id, request.task_id)
+      ? this.layout.taskPath(request.work_id, request.task_id)
       : request.worktree_path
         ? resolve(request.worktree_path)
-        : resolve(workspacesRoot, safeSegment(request.work_id));
-    if (!inside(workspacesRoot, path)) {
-      return { ok: false, exit_code: 1, recorded: false, message: "The worktree path is outside .owl-workspaces." };
+        : this.layout.workDir(request.work_id);
+    if (!this.layout.contains(path)) {
+      return { ok: false, exit_code: 1, recorded: false, message: "The worktree path is outside the Owl workspaces directory." };
     }
     if (request.task_id && request.worktree_path && resolve(request.worktree_path) !== path) {
       return { ok: false, exit_code: 1, recorded: false, message: "The requested Task worktree does not match the Work/Task workspace." };
@@ -1483,16 +1474,15 @@ export class GitWorktreeGateway implements GitGateway {
     if (!project) {
       return { ok: false, exit_code: 1, recorded: false, worktree_path: request.worktree_path ?? undefined, message: "A Project is required to discard a merged Work worktree." };
     }
-    const workspacesRoot = resolve(this.owlRoot, ".owl-workspaces");
     const path = request.worktree_path
       ? resolve(request.worktree_path)
       : request.task_id
-        ? taskPathFor(this.owlRoot, request.work_id, request.task_id)
-        : resolve(workspacesRoot, safeSegment(request.work_id));
-    if (!inside(workspacesRoot, path)) {
-      return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: `Worktree ${path} is outside .owl-workspaces.` };
+        ? this.layout.taskPath(request.work_id, request.task_id)
+        : this.layout.workDir(request.work_id);
+    if (!this.layout.contains(path)) {
+      return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: `Worktree ${path} is outside the Owl workspaces directory.` };
     }
-    if (request.task_id && request.worktree_path && resolve(request.worktree_path) !== taskPathFor(this.owlRoot, request.work_id, request.task_id)) {
+    if (request.task_id && request.worktree_path && resolve(request.worktree_path) !== this.layout.taskPath(request.work_id, request.task_id)) {
       return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: `Worktree ${path} does not match the Work/Task workspace.` };
     }
     const canonical = await this.validProjectPath(project.canonical_path, project.allowed_roots_json);
@@ -1506,7 +1496,7 @@ export class GitWorktreeGateway implements GitGateway {
       return { ok: false, exit_code: 1, recorded: false, message: "A Project is required to discard a merged Work integration worktree." };
     }
     const canonical = await this.validProjectPath(project.canonical_path, project.allowed_roots_json);
-    const path = integrationPathFor(this.owlRoot, request.work_id);
+    const path = this.layout.integrationPath(request.work_id);
     return this.inLane(canonical, () => this.removeMergedWorktreeNow(canonical, path));
   }
 
@@ -1570,7 +1560,7 @@ export class GitWorktreeGateway implements GitGateway {
   }
 
   private async removeIntegrationWorktreeNow(workId: string, canonical: string): Promise<GitOperationResult> {
-    const path = integrationPathFor(this.owlRoot, workId);
+    const path = this.layout.integrationPath(workId);
     const existing = await lstat(path).catch(() => null);
     if (!existing) return { ok: true, exit_code: 0, recorded: false, worktree_path: path, message: "Integration worktree was already absent." };
     const mergeHead = await this.git(path, ["rev-parse", "-q", "--verify", "MERGE_HEAD"]);
@@ -1590,31 +1580,32 @@ export class GitWorktreeGateway implements GitGateway {
   }
 
   /**
-   * Every Task/integration directory under `.owl-workspaces`, read directly
-   * from the filesystem without touching Git. Used to reconcile leftovers
-   * that have no (or a stale) database row.
+   * Every Task/integration directory under each workspaces root, read
+   * directly from the filesystem without touching Git. Used to reconcile
+   * leftovers that have no (or a stale) database row.
    */
   public async listWorkspaces(): Promise<readonly WorkspaceEntry[]> {
-    const root = resolve(this.owlRoot, ".owl-workspaces");
-    const workDirs = await readdir(root, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return [];
-      throw error;
-    });
     const entries: WorkspaceEntry[] = [];
-    for (const workDir of workDirs) {
-      if (!workDir.isDirectory() || workDir.name === "advisor") continue;
-      const workPath = resolve(root, workDir.name);
-      const children = await readdir(workPath, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+    for (const root of this.layout.roots()) {
+      const workDirs = await readdir(root, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return [];
         throw error;
       });
-      for (const child of children) {
-        if (!child.isDirectory()) continue;
-        entries.push({
-          work_id: workDir.name,
-          task_id: child.name === "__work__" || child.name === "manager" ? null : child.name,
-          path: resolve(workPath, child.name),
+      for (const workDir of workDirs) {
+        if (!workDir.isDirectory() || workDir.name === "advisor") continue;
+        const workPath = resolve(root, workDir.name);
+        const children = await readdir(workPath, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return [];
+          throw error;
         });
+        for (const child of children) {
+          if (!child.isDirectory()) continue;
+          entries.push({
+            work_id: workDir.name,
+            task_id: child.name === "__work__" || child.name === "manager" ? null : child.name,
+            path: resolve(workPath, child.name),
+          });
+        }
       }
     }
     return entries;
@@ -1636,23 +1627,37 @@ export class GitWorktreeGateway implements GitGateway {
       return {
         ok: false,
         message: error instanceof Error ? error.message : "The Work workspace cleanup failed.",
-        details: { path: resolve(this.owlRoot, ".owl-workspaces", safeSegment(request.work_id)), stage: "project_or_workspace_check" },
+        details: { path: this.layout.workDir(request.work_id), stage: "project_or_workspace_check" },
       };
     }
   }
 
   private async deleteWorkWorkspacesNow(workId: string, canonical: string): Promise<WorktreeCleanupResult> {
-    const owlRoot = await realpath(this.owlRoot);
-    const workspacesRoot = resolve(owlRoot, ".owl-workspaces");
-    const realWorkspacesRoot = await realpath(workspacesRoot).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null;
-      throw error;
-    });
-    if (realWorkspacesRoot === null) return { ok: true, message: "The Work workspace was already absent." };
-    if (!inside(owlRoot, realWorkspacesRoot)) {
-      return { ok: false, message: "The .owl-workspaces directory resolves outside owl_root.", details: { path: workspacesRoot, stage: "workspace_check" } };
+    const workRoot = this.layout.workDir(workId);
+    const legacy = this.layout.rootOf(workRoot) === this.layout.legacyRoot;
+    let realWorkspacesRoot: string;
+    if (legacy) {
+      // The legacy root is nested inside owlRoot, so a symlinked owlRoot must
+      // still resolve the workspaces directory to somewhere inside it.
+      const owlRoot = await realpath(this.owlRoot);
+      const resolvedLegacyRoot = await realpath(this.layout.legacyRoot).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (resolvedLegacyRoot === null) return { ok: true, message: "The Work workspace was already absent." };
+      if (!inside(owlRoot, resolvedLegacyRoot)) {
+        return { ok: false, message: "The .owl-workspaces directory resolves outside owl_root.", details: { path: this.layout.legacyRoot, stage: "workspace_check" } };
+      }
+      realWorkspacesRoot = resolvedLegacyRoot;
+    } else {
+      // The current root lives outside any repository; only its own realpath needs to resolve.
+      const resolvedRoot = await realpath(this.layout.root).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      });
+      if (resolvedRoot === null) return { ok: true, message: "The Work workspace was already absent." };
+      realWorkspacesRoot = resolvedRoot;
     }
-    const workRoot = resolve(this.owlRoot, ".owl-workspaces", safeSegment(workId));
     const rootInfo = await lstat(workRoot).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return null;
       throw error;
@@ -1871,7 +1876,7 @@ export class GitWorktreeGateway implements GitGateway {
     const project = this.projectFor(request.work_id);
     if (!project || !request.task_id) return null;
     const canonical = await this.validProjectPath(project.canonical_path, project.allowed_roots_json);
-    const taskPath = taskPathFor(this.owlRoot, request.work_id, request.task_id);
+    const taskPath = this.layout.taskPath(request.work_id, request.task_id);
     const workBranch = request.work_branch ?? branchName("work", request.work_id, null);
     const workBranchExists = await this.git(canonical, ["show-ref", "--verify", "--quiet", `refs/heads/${workBranch}`]);
     const base = workBranchExists.exit_code === 0 ? workBranch : project.base_branch;
@@ -1894,7 +1899,7 @@ export class GitWorktreeGateway implements GitGateway {
     if (!request.task_id) return { ok: false, message: "A Task id is required to discard Designer changes.", changed_paths: [] };
     if (!project) return { ok: false, message: "A Project-less Task workspace has no Git changes to discard.", changed_paths: [] };
     const canonical = await this.validProjectPath(project.canonical_path, project.allowed_roots_json);
-    const taskPath = taskPathFor(this.owlRoot, request.work_id, request.task_id);
+    const taskPath = this.layout.taskPath(request.work_id, request.task_id);
     if (request.worktree_path && resolve(request.worktree_path) !== taskPath) {
       return { ok: false, message: "The requested Task worktree does not match the Work/Task workspace.", changed_paths: [] };
     }

@@ -3,7 +3,7 @@ import { createHash as createFileHash } from "node:crypto";
 import { constants, existsSync, mkdirSync, statSync } from "node:fs";
 import { copyFile, lstat, mkdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { extname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { createUlid, utcNow } from "../../db/dist/index.js";
 import { DecisionService, type OpenDecisionPayload } from "./decision";
 import { managerReplanFailureBrief, RESOLVE_CONFLICT_OPTION_KEY } from "./decision-brief";
@@ -59,6 +59,7 @@ import {
 } from "@owl/shared";
 import { EXECUTOR_CONFIG_SETTINGS_KEY, HYBRID_MODE_SETTINGS_KEY } from "./types";
 import { GitWorktreeGateway } from "./git-gateway.js";
+import { WorkspaceLayout } from "./workspace-layout.js";
 import { redactCredentials } from "./git-push.js";
 import { recoverOrphanedState } from "./startup-recovery.js";
 import { cleanupWorkForDeletion, reconcileWorktrees, type WorktreeReconcileFailure } from "./worktree-reconciler.js";
@@ -436,6 +437,7 @@ export class Core {
   private readonly logger: Pick<Console, "warn"> = { warn: (message) => console.warn(message) };
   private readonly owlRoot: string;
   private readonly dataDir: string;
+  private readonly workspaceLayout: WorkspaceLayout;
   private readonly knownModels: KnownModels;
   public readonly knowledge: KnowledgeBase;
   private readonly knowledgeNotes: KnowledgeNotes;
@@ -493,7 +495,8 @@ export class Core {
     this.decisions = new DecisionService(options.db);
     this.owlRoot = options.owlRoot ?? process.cwd();
     this.dataDir = options.dataDir ?? join(this.owlRoot, "data");
-    this.git = options.git ?? new GitWorktreeGateway(options.db, this.owlRoot, undefined, this.dataDir);
+    this.workspaceLayout = new WorkspaceLayout(options.workspacesRoot ?? resolve(this.owlRoot, ".owl-workspaces"), resolve(this.owlRoot, ".owl-workspaces"));
+    this.git = options.git ?? new GitWorktreeGateway(options.db, this.owlRoot, undefined, this.dataDir, this.workspaceLayout);
     this.knowledge = new KnowledgeBase(this.owlRoot);
     this.researchRecorder = new ResearchRecorder({
       knowledge: this.knowledge,
@@ -1005,6 +1008,7 @@ export class Core {
       console.warn("[owl-core] Could not check saved models against known model lists", error);
     }
     this.started = true;
+    await this.checkWorkspacesRootInsideRepository();
     await this.knowledge.ensureDirectories();
     await this.ruleStore.ensureDirectories();
     try {
@@ -1222,6 +1226,51 @@ export class Core {
       });
     } catch (alertError) {
       console.error("[owl-core] Could not record the orphaned design documents alert", alertError);
+    }
+  }
+
+  /**
+   * When the workspaces root sits inside a repository, tools that walk up
+   * from a Task/Work worktree's cwd (serena's project.yml search, Claude
+   * Code's ancestor CLAUDE.md loading) resolve to that repository instead of
+   * the worktree itself. Checked once at startup and skipped for the legacy
+   * layout, which is deliberately nested inside Owl's own repository.
+   */
+  private async checkWorkspacesRootInsideRepository(): Promise<void> {
+    try {
+      const root = this.workspaceLayout.root;
+      if (root === this.workspaceLayout.legacyRoot) return;
+      const markers = [".git", join(".serena", "project.yml"), "CLAUDE.md", "AGENTS.md"];
+      const found: string[] = [];
+      let dir = dirname(root);
+      while (true) {
+        for (const marker of markers) {
+          const candidate = join(dir, marker);
+          if (existsSync(candidate)) found.push(candidate);
+        }
+        const parent = dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+      }
+      if (found.length === 0) return;
+      const language = ownerLanguage(this.db);
+      console.warn(`[owl-core] The workspaces root (${root}) is inside a repository: ${found.join(", ")}`);
+      const message = language === "en"
+        ? `The Owl workspaces directory (${root}) is inside a repository. Files found: ${found.join(", ")}. Tools that search upward from a Task/Work worktree (such as serena or Claude Code's CLAUDE.md loading) may resolve to that repository instead of the worktree.`
+        : `Owl のワークスペースディレクトリ（${root}）がリポジトリの中にあります。見つかったファイル: ${found.join(", ")}。Task/Work のワークツリーから上位ディレクトリを探索するツール（serena や Claude Code の CLAUDE.md 読み込みなど）が、そのワークツリーではなくこのリポジトリを参照してしまう可能性があります。`;
+      const remediation = language === "en"
+        ? "Set OWL_WORKSPACES_DIR to a directory outside of any repository."
+        : "OWL_WORKSPACES_DIR に、どのリポジトリにも含まれないディレクトリを設定してください。";
+      await this.emitRulesAlert({
+        kind: "workspaces_root_inside_repository",
+        schema_version: "1.0.0",
+        path: root,
+        found,
+        message,
+        remediation,
+      });
+    } catch (error) {
+      console.error("[owl-core] Could not check whether the workspaces root is inside a repository", error);
     }
   }
 
@@ -4180,7 +4229,7 @@ export class Core {
     const failures: WorktreeReconcileFailure[] = [];
     try {
       const result = await reconcileWorktrees(
-        { db: this.db, writeLane: this.writeLane, git: this.git, owlRoot: this.owlRoot, dataDir: this.dataDir },
+        { db: this.db, writeLane: this.writeLane, git: this.git, owlRoot: this.owlRoot, dataDir: this.dataDir, layout: this.workspaceLayout },
         { work_id: workId, reason },
       );
       failures.push(...(result.failures ?? []));
@@ -4208,7 +4257,7 @@ export class Core {
     const branch = `owl/work/${workId}/work`;
     const failure = worktrees.failures.find((item) => item.work_id === workId);
     if (!worktrees.verified) {
-      const path = failure?.path ?? resolve(this.owlRoot, ".owl-workspaces", workId);
+      const path = failure?.path ?? this.workspaceLayout.workDir(workId);
       const cause = failure?.message ?? worktrees.error_message ?? "Git worktree cleanup could not be verified.";
       return `Could not verify removal of worktree ${path} before deleting branch ${branch}: ${cause}`;
     }
