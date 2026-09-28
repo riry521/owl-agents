@@ -16,6 +16,7 @@ import {
   MINIMAL_CODE_RULES,
   PROCESS_SKILLS_PROMPT_FILES,
   renderProcessSkills,
+  renderWorkspaceToolsNote,
   WORKING_STYLE_RULES,
   type AgentTimeoutKind,
   type ExecutorConfig,
@@ -199,6 +200,7 @@ function compactExecutorOutput(report: string): string {
 export function buildExecutorPrompt(task: ExecutorTask, processSkills: readonly string[] | null = null): string {
   const { title, acceptance, context, rules, owner_guidance: guidance } = task.task;
   const writePaths = task.write_paths?.length ? task.write_paths : ["*"];
+  const workspaceTools = renderWorkspaceToolsNote(task.worktree);
   return [
     "Complete this subtask:",
     task.instruction,
@@ -220,6 +222,7 @@ export function buildExecutorPrompt(task: ExecutorTask, processSkills: readonly 
     "The Owner's answers to earlier Decisions for this Work, newest first. Follow them.",
     ...(guidance.length > 0 ? guidance.map((entry) => `- ${JSON.stringify(entry)}`) : ["None."]),
     ...(processSkills && processSkills.length > 0 ? ["", "## Process skills", ...processSkills] : []),
+    ...(workspaceTools ? ["", "## Workspace tools", ...workspaceTools] : []),
     "",
     ...WORKING_STYLE_RULES,
     "",

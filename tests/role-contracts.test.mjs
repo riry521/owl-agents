@@ -780,6 +780,47 @@ test("The Reviewer prompt carries changed_files: an instruction line, null by de
   );
 });
 
+test("Workspace tools: the block names the worktree for Worker, Designer, Hybrid phases and Reviewer, and is absent without one", async () => {
+  const calls = [];
+  const runner = runnerAnswering((template) => fillTemplate(template), calls);
+
+  await runner.runWorker(workerRequest());
+  await runner.runWorker(workerRequest({ worktree: "/tmp/worker-cwd" }));
+  await runner.runWorker(workerRequest({ hybrid_mode: true, hybrid_phase: "plan", worktree: "/tmp/hybrid-plan-cwd" }));
+  await runner.runWorker(workerRequest({ hybrid_mode: true, hybrid_phase: "verdict", executor_results: executorResults, worktree: "/tmp/hybrid-verdict-cwd" }));
+  await runner.runReviewer(reviewerRequest());
+  await runner.runReviewer(reviewerRequest({ worktree: "/tmp/reviewer-cwd" }));
+  await runner.runDesigner({
+    invocation_id: "designer-1",
+    work_id: "work-1",
+    task_id: "task-1",
+    attempt: 1,
+    context: { task: { ...task, type: "design" }, design_document_path: "/tmp/owl-data/designs/work-1/task-1.md", worktree: "/tmp/designer-cwd" },
+  });
+  const [
+    workerNoTree, workerWithTree, hybridPlan, hybridVerdict, reviewerNoTree, reviewerWithTree, designer,
+  ] = calls.map((call) => call.prompt);
+
+  for (const prompt of [workerNoTree, reviewerNoTree]) {
+    assert.equal(prompt.includes("## Workspace tools"), false);
+  }
+  for (const [prompt, cwd] of [
+    [workerWithTree, "/tmp/worker-cwd"],
+    [hybridPlan, "/tmp/hybrid-plan-cwd"],
+    [hybridVerdict, "/tmp/hybrid-verdict-cwd"],
+    [reviewerWithTree, "/tmp/reviewer-cwd"],
+    [designer, "/tmp/designer-cwd"],
+  ]) {
+    const at = prompt.indexOf("## Workspace tools\n");
+    assert.notEqual(at, -1, "prompt has a Workspace tools section");
+    assert.ok(at > prompt.indexOf("## Instructions\n"), "after Instructions");
+    assert.ok(at < prompt.indexOf(WORKING_STYLE_HEADING), "before Working style");
+    assert.match(prompt, new RegExp(`You are working in the git worktree ${cwd.replace(/\//g, "\\/")}\\.`));
+    assert.match(prompt, /prefer the semantic search, reference search and impact-analysis tools/);
+    assert.match(prompt, /Never treat empty results from an unbuilt index as evidence that something does not exist\./);
+  }
+});
+
 test("the skill index reaches each supported role prompt and is null when Core has none", async () => {
   const calls = [];
   const runner = runnerAnswering((template) => fillTemplate(template), calls);

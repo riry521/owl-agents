@@ -9,7 +9,7 @@
 
 import { resolve } from "node:path";
 import { createUlid, utcNow } from "../../db/dist/index.js";
-import { applyAdvisorInterfaceInstructions, isProviderResumeUnsupportedError, parseAdvisorResponse, parseSlackAdvisorResponse } from "@owl/shared";
+import { applyAdvisorInterfaceInstructions, isProviderResumeUnsupportedError, parseAdvisorResponse, parseSlackAdvisorResponse, renderWorkspaceToolsNote } from "@owl/shared";
 import type { AdvisorTurnRequest, CoreDatabase, CoreWriteLaneTransaction, GitGateway } from "./types";
 import type { AdvisorSession, AdvisorSessionManager } from "./advisor-session";
 import type { MemorySaver } from "./memory-saver";
@@ -470,7 +470,7 @@ export class AdvisorSessionRuntime {
         effort: settings.effort,
         cwd: workspacePath,
         env: this.buildChildEnv(session.id, workspacePath, settings.connectionEnv),
-        system_prompt: settings.systemPrompt,
+        system_prompt: this.systemPromptFor(settings, workspacePath),
       });
     } catch (error) {
       await this.config.sessionManager.endSession(session.id, "spawn_failed");
@@ -549,7 +549,7 @@ export class AdvisorSessionRuntime {
         effort: session.effort ?? settings.effort,
         cwd: workspacePath,
         env: this.buildChildEnv(session.id, workspacePath, settings.connectionEnv),
-        system_prompt: settings.systemPrompt,
+        system_prompt: this.systemPromptFor(settings, workspacePath),
         provider_session_id: session.provider_session_id ?? undefined,
       });
       await this.config.sessionManager.resumeSession(session.id, driver.pid, driver.provider_session_id);
@@ -596,6 +596,21 @@ export class AdvisorSessionRuntime {
       return resolve(prepared.worktree_path);
     }
     return resolveAdvisorWorkingDirectory(this.config.db, this.config.owlRoot, conversationId);
+  }
+
+  /**
+   * The system prompt actually sent to the provider for one session start:
+   * settings.systemPrompt plus a workspace-tools note, appended only when
+   * the workspace is a real Project git worktree (prepareAdvisorWorkspace
+   * configured), not the plain fallback directory. Kept separate from
+   * settings.systemPrompt itself so a workspace change alone never counts as
+   * the system-prompt drift that forces a session restart.
+   */
+  private systemPromptFor(settings: AdvisorSettingsSnapshot, workspacePath: string): string {
+    if (!this.config.git?.prepareAdvisorWorkspace) return settings.systemPrompt;
+    const note = renderWorkspaceToolsNote(workspacePath);
+    if (!note) return settings.systemPrompt;
+    return `${settings.systemPrompt}\n\n${["## Workspace tools", ...note].join("\n")}`;
   }
 
   private async includeWorkspaceNotice(conversationId: string, sessionId: string, reply: string): Promise<string> {

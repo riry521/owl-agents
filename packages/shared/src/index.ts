@@ -49,6 +49,7 @@ export {
   type KnowledgeAutomationSettings,
   type KnowledgeAutomationSnapshot,
 } from "./knowledge-automation.js";
+export { renderWorkspaceToolsNote } from "./workspace-tools-note.js";
 export { DEFAULT_ROLE_MODELS } from "./default-role-models.js";
 export {
   builtinProviderHarness,
@@ -215,7 +216,7 @@ export interface ExecutorTaskContext {
   readonly rules: string | null;
   readonly owner_guidance: readonly JsonObject[];
 }
-export interface ExecutorTask { readonly subtask_id: string; readonly instruction: string; readonly workspace_dir: string; readonly task: ExecutorTaskContext; /** Relative paths this Executor may edit; omitted means whole-workspace scope. */ readonly write_paths?: readonly string[]; readonly process_skills_dir?: string; /** Where process_skills_dir was detected; decides whether the Executor's own harness can invoke a skill natively. */ readonly process_skills_source?: "setting" | "claude" | "codex"; }
+export interface ExecutorTask { readonly subtask_id: string; readonly instruction: string; readonly workspace_dir: string; readonly task: ExecutorTaskContext; /** Relative paths this Executor may edit; omitted means whole-workspace scope. */ readonly write_paths?: readonly string[]; readonly process_skills_dir?: string; /** Where process_skills_dir was detected; decides whether the Executor's own harness can invoke a skill natively. */ readonly process_skills_source?: "setting" | "claude" | "codex"; /** The Task's git worktree, when workspace_dir is one; null/omitted when it is not (e.g. the Owl workspace fallback). */ readonly worktree?: string | null; }
 export interface ExecutorResult { readonly subtask_id: string; readonly success: boolean; readonly output: string; readonly exit_code: number; readonly duration_ms: number; }
 export interface ExecutorConfig { readonly provider: "claude" | "codex" | string; readonly model: string; readonly effort?: string; readonly timeout_ms: number; }
 export interface ProviderExecutionRequest {

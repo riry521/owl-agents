@@ -1295,6 +1295,7 @@ export class WorkflowEngine {
       // Executors must see the same tracked files as their Worker. Use the
       // Task worktree when one exists, otherwise the normal Owl workspace.
       workspace_dir: taskRow?.worktree_path ?? this.owlRoot,
+      worktree: taskRow?.worktree_path ?? null,
       task: {
         title: taskRow?.title ?? "",
         acceptance: taskRow?.acceptance ?? "",

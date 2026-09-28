@@ -1,6 +1,6 @@
 import { AgentRuntimeError, reviewInvalid } from "./errors";
 import { validateReportEnvelope } from "./protocol";
-import { DEFAULT_OWNER_LANGUAGE, type OwnerLanguage } from "@owl/shared";
+import { DEFAULT_OWNER_LANGUAGE, renderWorkspaceToolsNote, type OwnerLanguage } from "@owl/shared";
 import {
   extractRoleOutputObject,
   objectSchema,
@@ -85,6 +85,7 @@ export function buildReviewerPrompt(
         : "If the Worker added code, dependencies, abstractions, or files that the acceptance criteria and context did not call for, report it as a minor finding; it is not by itself a reason to fail.",
     ],
     processSkills,
+    workspaceTools: renderWorkspaceToolsNote(request.worktree),
     output: REVIEW_OUTPUT_SCHEMA,
     outputRules: ["Use ran=false and passed=failed=0 if no tests were executed."],
     language,

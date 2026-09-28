@@ -680,6 +680,7 @@ test("persistent Advisor actions create and start a Work through Core", async ()
     assert.match(sessionRequest.system_prompt, /Only bypass Work when the operator explicitly asks you to do the work directly/u);
     assert.match(sessionRequest.system_prompt, /For that explicit exception, do the work in your Advisor workspace and do not create a Work/u);
     assert.match(sessionRequest.system_prompt, /Before returning create_work, compare the full request and conversation context against the complete current Project catalog/u);
+    assert.match(sessionRequest.system_prompt, new RegExp(`## Workspace tools\\n- You are working in the git worktree ${sessionRequest.cwd.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\.`, "u"));
     assert.equal(execFileSync("git", ["-C", sessionRequest.cwd, "branch", "--show-current"], { encoding: "utf8" }).trim(), "owl/advisor/conversation_advisor-actions");
     assert.equal(await readFile(join(sessionRequest.cwd, "README.md"), "utf8"), "Advisor worktree fixture\n");
 
@@ -1140,12 +1141,17 @@ test("Core role handoffs map work, task, report, rules, and workspace once", asy
   assert.doesNotMatch(managerPrompt, /Manager plan for work-handoff/u);
   assert.equal(workerRequest.prompt.split("task-title-marker").length - 1, 1);
   assert.equal(workerRequest.prompt.split("worker-rule-marker").length - 1, 1);
-  assert.doesNotMatch(workerRequest.prompt, /worker-worktree-marker|hybrid_mode/u);
+  assert.doesNotMatch(workerRequest.prompt, /hybrid_mode/u);
+  // The worktree path is not dumped as a raw context key, but it does reach
+  // the prompt once, named in the Workspace tools section.
+  assert.match(workerRequest.prompt, /## Workspace tools\n- You are working in the git worktree \/tmp\/worker-worktree-marker\./u);
+  assert.equal(workerRequest.prompt.split("worker-worktree-marker").length - 1, 1);
   assert.equal(workerRequest.cwd, "/tmp/worker-worktree-marker");
   assert.equal(reviewerRequest.prompt.split("task-acceptance-marker").length - 1, 1);
   assert.equal(reviewerRequest.prompt.split("worker-report-marker").length - 1, 1);
   assert.equal(reviewerRequest.prompt.split("reviewer-rule-marker").length - 1, 1);
-  assert.doesNotMatch(reviewerRequest.prompt, /reviewer-worktree-marker/u);
+  assert.match(reviewerRequest.prompt, /## Workspace tools\n- You are working in the git worktree \/tmp\/reviewer-worktree-marker\./u);
+  assert.equal(reviewerRequest.prompt.split("reviewer-worktree-marker").length - 1, 1);
   assert.equal(reviewerRequest.cwd, "/tmp/reviewer-worktree-marker");
 });
 

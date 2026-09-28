@@ -281,6 +281,8 @@ export interface RolePromptSlots {
   readonly instructions: readonly string[];
   /** Process-specific procedure references for the installed role. */
   readonly processSkills?: readonly string[] | null;
+  /** Guidance for working in a known git worktree; see renderWorkspaceToolsNote. */
+  readonly workspaceTools?: readonly string[] | null;
   /** The one schema definition for this role and mode's output. */
   readonly output: RoleSchema;
   /** Semantic rules the schema cannot express. */
@@ -338,6 +340,9 @@ export function renderRolePrompt(slots: RolePromptSlots): string {
     ["## Instructions", ...slots.instructions].join("\n"),
     ...(slots.processSkills && slots.processSkills.length > 0
       ? [["## Process skills", ...slots.processSkills].join("\n")]
+      : []),
+    ...(slots.workspaceTools && slots.workspaceTools.length > 0
+      ? [["## Workspace tools", ...slots.workspaceTools].join("\n")]
       : []),
     [WORKING_STYLE_HEADING, ...WORKING_STYLE_RULES].join("\n"),
     [

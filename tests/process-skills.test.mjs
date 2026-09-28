@@ -632,6 +632,19 @@ test("prompts with no detected pack stay byte-identical", () => {
   }
 });
 
+test("buildExecutorPrompt adds the Workspace tools section only when the task carries a worktree", () => {
+  const baseTask = {
+    subtask_id: "s1", instruction: "Implement the migration.", workspace_dir: "/tmp/worktree",
+    task: { title: "Add archived_at column", acceptance: "Migration applies cleanly.", context: "", rules: null, owner_guidance: [] },
+  };
+  const withoutWorktree = buildExecutorPrompt(baseTask);
+  assert.equal(withoutWorktree.includes("## Workspace tools"), false);
+
+  const withWorktree = buildExecutorPrompt({ ...baseTask, worktree: "/tmp/worktree" });
+  assert.match(withWorktree, /## Workspace tools\n- You are working in the git worktree \/tmp\/worktree\./u);
+  assert.match(withWorktree, /prefer the semantic search, reference search and impact-analysis tools/u);
+});
+
 test("Designer process skills apply design principles without starting dialogue", () => {
   assert.equal(renderProcessSkills("designer", null, "codex"), null);
   const lines = renderProcessSkills("designer", {

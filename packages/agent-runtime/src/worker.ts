@@ -13,7 +13,7 @@ import {
   validateRoleOutput,
   type RoleSchema,
 } from "./role-contract";
-import { DEFAULT_OWNER_LANGUAGE, MINIMAL_CODE_RULES, WORKER_SUBAGENT_RULES, type OwnerLanguage } from "@owl/shared";
+import { DEFAULT_OWNER_LANGUAGE, MINIMAL_CODE_RULES, renderWorkspaceToolsNote, WORKER_SUBAGENT_RULES, type OwnerLanguage } from "@owl/shared";
 import {
   type ExecutorSubtaskPlan,
   type HybridWorkerReport,
@@ -174,6 +174,7 @@ export function buildWorkerPrompt(
       SKILL_FEEDBACK_INSTRUCTION,
     ],
     processSkills,
+    workspaceTools: renderWorkspaceToolsNote(request.context?.worktree),
     output: WORKER_REPORT_SCHEMA,
     outputRules: RESULT_RULES,
     language,
@@ -216,6 +217,7 @@ export function buildDesignerRolePrompt(
       SKILL_FEEDBACK_INSTRUCTION,
     ],
     processSkills,
+    workspaceTools: renderWorkspaceToolsNote(request.context?.worktree),
     output: WORKER_REPORT_SCHEMA,
     outputRules: RESULT_RULES,
     language,
@@ -291,6 +293,7 @@ export function buildHybridPlanPrompt(
       ...WORKER_CONTEXT_INSTRUCTIONS,
     ],
     processSkills,
+    workspaceTools: renderWorkspaceToolsNote(request.context?.worktree),
     output: HYBRID_PLAN_SCHEMA,
     outputRules: ["Do not do the task's work yet; only produce the subtask plan."],
     language,
@@ -346,6 +349,7 @@ export function buildHybridVerdictPrompt(
       SKILL_FEEDBACK_INSTRUCTION,
     ],
     processSkills,
+    workspaceTools: renderWorkspaceToolsNote(request.context?.worktree),
     output: HYBRID_REPORT_SCHEMA,
     outputRules: [
       ...RESULT_RULES.map((line) => line.replace("(files/changes created or modified as requested)", "(files/changes created or modified as requested by the Executors)")),
