@@ -106,6 +106,7 @@ test("a Task worktree that conflicts with the Work branch is reported without le
 
   const reused = await gateway.prepareWorktree({ work_id: "W", task_id: "T2" });
   assert.equal(reused.ok, false);
+  assert.equal(reused.failure_kind, "work_sync_conflict");
   assert.match(reused.message, /conflicts with the Work branch/);
 
   // The abort left no merge in progress and T2's own edit is intact.

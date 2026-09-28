@@ -358,13 +358,20 @@ function mergeConflictDetail(payload: JsonObject): string {
   return `The Task's changes could not be merged into the Work branch (Git merge conflict${files.length > 0 ? ` in ${files.join(", ")}` : ""}).`;
 }
 
+function workSyncConflictDetail(payload: JsonObject): string {
+  const files = Array.isArray(payload.merge_conflict_files)
+    ? payload.merge_conflict_files.filter((file): file is string => typeof file === "string")
+    : [];
+  return `The Task's worktree could not be brought up to date with the Work branch (Git merge conflict${files.length > 0 ? ` in ${files.join(", ")}` : ""}).`;
+}
+
 /** The readable cause of a Task's latest failure: kind plus human text, never a hash. */
 function taskFailure(db: ContextReader, taskId: string): { kind: FailureKind; detail: string } {
   const row = db.get<{ type: string; payload_json: string }>(
     `SELECT type, payload_json FROM events
       WHERE task_id = ? AND type IN (
         'task.failure.classified', 'agent.crashed', 'verification.completed',
-        'review.failed', 'review.passed', 'task.replan_requested'
+        'review.failed', 'review.passed', 'task.replan_requested', 'task.conflict'
       )
       ORDER BY sequence DESC LIMIT 1`,
     taskId,
@@ -407,6 +414,8 @@ function taskFailure(db: ContextReader, taskId: string): { kind: FailureKind; de
         return { kind: "merge_conflict", detail: mergeConflictDetail(payload) };
       }
       break;
+    case "task.conflict":
+      return { kind: "merge_conflict", detail: workSyncConflictDetail(payload) };
     case "review.failed": {
       if (!isRecord(payload.review)) {
         return { kind: "reviewer_failed", detail: text(payload.error) ?? "The Reviewer failed without a verdict." };

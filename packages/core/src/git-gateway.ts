@@ -261,8 +261,9 @@ export class GitWorktreeGateway implements GitGateway {
   /**
    * Bring a Task worktree up to date with the Work branch's current tip,
    * checkpointing any uncommitted edits first so nothing is lost. A conflict
-   * is aborted immediately, leaving no MERGE_HEAD behind, and reported so the
-   * Task can be routed to the Owner instead of repeating the same conflict.
+   * is aborted immediately, leaving no MERGE_HEAD behind, and reported as
+   * `work_sync_conflict` so only that Task fails for Manager replanning
+   * instead of repeating the same conflict.
    */
   private async syncTaskWorktreeWithWork(worktreePath: string, workBranch: string, taskId: string): Promise<GitOperationResult> {
     const workBranchExists = await this.git(worktreePath, ["show-ref", "--verify", "--quiet", `refs/heads/${workBranch}`]);
@@ -283,7 +284,7 @@ export class GitWorktreeGateway implements GitGateway {
     if (!aborted.ok) {
       return { ok: false, exit_code: 1, recorded: false, worktree_path: worktreePath, message: `Task worktree conflicts with the Work branch and the merge could not be aborted: ${merge.message}` };
     }
-    return { ok: false, exit_code: 1, recorded: false, worktree_path: worktreePath, message: `Task worktree conflicts with the Work branch: ${merge.message}` };
+    return { ok: false, exit_code: 1, recorded: false, worktree_path: worktreePath, failure_kind: "work_sync_conflict", message: `Task worktree conflicts with the Work branch: ${merge.message}` };
   }
 
   /**

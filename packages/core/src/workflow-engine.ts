@@ -842,6 +842,7 @@ export class WorkflowEngine {
       utcNow(),
     );
     const launched: string[] = [];
+    const conflicted: { taskId: string; reason: string }[] = [];
     let preparationFailure: Error | null = null;
     for (const { id: taskId, type } of launchable) {
       // Pause, cancel, a blocking Decision or engine shutdown can land while
@@ -861,6 +862,13 @@ export class WorkflowEngine {
       const current = await this.snapshot(workId);
       if (current.capacity <= 0) break;
       const prepared = await this.git.prepareWorktree({ work_id: workId, task_id: taskId });
+      if (!prepared.ok && prepared.failure_kind === "work_sync_conflict") {
+        // Retrying would hit the same conflict, and it concerns this Task
+        // alone: fail it for replanning and keep launching the others.
+        const reason = await this.recordWorkSyncConflict(workId, taskId, prepared.message);
+        if (reason !== null) conflicted.push({ taskId, reason });
+        continue;
+      }
       if (!prepared.ok) {
         preparationFailure = new Error(ownerLanguage(this.db) === "en"
           ? `Could not prepare the worktree for Task ${taskId}. Cause: ${prepared.message}`
@@ -944,10 +952,44 @@ export class WorkflowEngine {
       launched.push(taskId);
       this.startPipeline(workId, taskId, agentRunId, task.worker_generation);
     }
+    for (const { taskId, reason } of conflicted) {
+      await this.triggerManagerReplanIfNeeded(workId, taskId, reason);
+    }
     if (preparationFailure !== null) {
       throw preparationFailure;
     }
     return launched;
+  }
+
+  /**
+   * Fail a Task whose worktree conflicts with the Work branch (Task row 35)
+   * and return the reason to hand the Manager, or null when the Task left
+   * ready/review_fix_waiting meanwhile.
+   */
+  private async recordWorkSyncConflict(workId: string, taskId: string, message: string): Promise<string | null> {
+    const taskBranch = `owl/task/${workId}/${taskId}`;
+    const workBranch = `owl/work/${workId}/work`;
+    const files = mergeConflictPaths(message);
+    const payload: JsonObject = { task_id: taskId, task_branch: taskBranch, work_branch: workBranch, merge_conflict_files: files, message };
+    try {
+      await this.writeLane.write({
+        mutateState: (transaction: CoreWriteLaneTransaction) => reduceTaskInTransaction(transaction, taskId, { event: "task.conflict", payload }),
+        event: {
+          idempotencyKey: `task-conflict:${taskId}:${createUlid()}`,
+          type: "task.conflict",
+          workId,
+          taskId,
+          payload,
+        },
+        outbox: [{ provider: "websocket" }],
+      });
+    } catch (error) {
+      if (typeof error === "object" && error !== null && (error as { code?: unknown }).code === "invalid_state_transition") return null;
+      throw error;
+    }
+    return `Task ${taskId} could not be brought up to date with the Work branch ${workBranch} before its next attempt (Git merge conflict${
+      files.length > 0 ? ` in ${files.join(", ")}` : ""
+    }). Plan a replacement that builds on the Work branch as it is now.`;
   }
 
   /** Resolve dependencies, then launch ready work in one engine tick. */

@@ -89,6 +89,7 @@ export const TASK_TRANSITION_TABLE = [
   { row: 32, current: "running", guard: "Worker asked the Manager a question or requested replanning", event: "task.replan_requested", next: "failed" },
   { row: 33, current: "completed/failed/cancelled", guard: "no agent run is active on the worktree", event: "task.worktree.discarded", next: "same status" },
   { row: 34, current: "running", guard: "provider returned rate_limited", event: "task.rate_limited", next: "ready" },
+  { row: 35, current: "ready/review_fix_waiting", guard: "Task worktree conflicts with the Work branch before launch; merge aborted", event: "task.conflict", next: "failed" },
 ] as const;
 
 /**
@@ -502,6 +503,23 @@ export function reduceTask(row: TaskRow, command: TaskReducerCommand): Reduction
       next_attempt_at: null,
     };
     return taskResult(row, next, ["agent_run_required"]);
+  }
+
+  // Task row 35: the Task worktree could not catch up with the Work branch
+  // before its next attempt. Like a conflict at integration (row 16), only
+  // this Task fails, for Manager replanning; its worktree stays as it was.
+  if ((row.status === "ready" || row.status === "review_fix_waiting") && event === "task.conflict") {
+    const errorKey = `git_conflict:${requiredString(payload, "task_branch")}:${requiredString(payload, "work_branch")}`;
+    const next = {
+      ...withTaskVersion(row, "failed", now),
+      failure_count: row.failure_count + 1,
+      same_error_count: row.last_error_key === errorKey ? row.same_error_count + 1 : 1,
+      last_error_key: normalizeErrorKey(errorKey),
+      last_failure_class: "deterministic" as FailureClass,
+      last_error_generation: row.worker_generation,
+      next_attempt_at: null,
+    };
+    return taskResult(row, next, ["git_merge_aborted", "manager_trigger_required"], true);
   }
 
   // Task row 3: ready Task follows Work pause/cancel.

@@ -204,7 +204,8 @@ export interface GitOperationResult {
   readonly recorded: boolean;
   readonly message: string;
   readonly worktree_path?: string | null;
-  readonly failure_kind?: "commit_failure";
+  /** `work_sync_conflict`: the Task worktree conflicts with the Work branch; the merge was aborted. */
+  readonly failure_kind?: "commit_failure" | "work_sync_conflict";
   readonly stderr_tail?: string;
 }
 
