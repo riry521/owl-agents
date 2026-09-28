@@ -1776,7 +1776,7 @@ export class WorkflowEngine {
       if (artifactTask?.type === "design") {
         if (!await this.acceptDesignDocument(workId, taskId, agentRunId, artifactTask.worktree_path, designBaseline ?? null, usage)) return;
       } else {
-        await this.captureArtifacts(workId, taskId, artifactTask?.worktree_path ?? null);
+        await this.captureArtifacts(workId, taskId, agentRunId, artifactTask?.worktree_path ?? null);
       }
       if (this.stopping) return;
       await this.writeLane.write({
@@ -2189,7 +2189,7 @@ export class WorkflowEngine {
     }
   }
 
-  private async captureArtifacts(workId: string, taskId: string, worktreePath: string | null): Promise<void> {
+  private async captureArtifacts(workId: string, taskId: string, agentRunId: string, worktreePath: string | null): Promise<void> {
     if (!worktreePath) return;
     const root = resolve(worktreePath);
     const files: Array<{ path: string; sha256: string; bytes: number; mime: string; contents: Buffer; storage_path: string }> = [];
@@ -2303,7 +2303,9 @@ export class WorkflowEngine {
           return { work_id: workId, task_id: taskId, artifact_count: inserted };
         },
         event: {
-          idempotencyKey: `artifacts-captured:${taskId}:${files.map((file) => file.sha256).join(",")}`,
+          // One capture per Worker run: a fix round that leaves the files as
+          // they were captures the same contents again.
+          idempotencyKey: `artifacts-captured:${taskId}:${agentRunId}`,
           type: "artifact.created",
           workId,
           taskId,
