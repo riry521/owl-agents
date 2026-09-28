@@ -22,7 +22,7 @@ function loadProjectManagementModule() {
   return loaded.exports;
 }
 
-const { buildProjectUpdateInput, deletionDialogModel, impactFromError, isProjectAutoPushEnabled, projectErrorKey } = loadProjectManagementModule();
+const { buildProjectUpdateInput, deletionDialogModel, formatCommandLine, impactFromError, isProjectAutoPushEnabled, parseCommandLine, projectEditForm, projectErrorKey } = loadProjectManagementModule();
 
 function project(overrides = {}) {
   return { id: 'project-id', name: 'Project', canonical_path: '/projects/project', ...overrides };
@@ -82,6 +82,39 @@ test('buildProjectUpdateInput includes a boolean auto_push only when the toggle 
 test('buildProjectUpdateInput rejects empty required fields', () => {
   assert.deepEqual(buildProjectUpdateInput(project(), { name: '  ', path: '/projects/project' }), { error: 'nameRequired' });
   assert.deepEqual(buildProjectUpdateInput(project(), { name: 'Project', path: '  ' }), { error: 'pathRequired' });
+});
+
+test('parseCommandLine splits words and quotes without shell expansion', () => {
+  assert.deepEqual(parseCommandLine(''), []);
+  assert.deepEqual(parseCommandLine('   '), []);
+  assert.deepEqual(parseCommandLine('uvx code-review-graph build'), ['uvx', 'code-review-graph', 'build']);
+  assert.deepEqual(parseCommandLine(`sh -c 'echo "$HOME" | tee out'`), ['sh', '-c', 'echo "$HOME" | tee out']);
+  assert.deepEqual(parseCommandLine('printf "a \\"b\\" c" \'\''), ['printf', 'a "b" c', '']);
+  assert.deepEqual(parseCommandLine('path\\ with\\ spaces x'), ['path with spaces', 'x']);
+  assert.equal(parseCommandLine(`echo 'unterminated`), null);
+  assert.equal(parseCommandLine('echo "unterminated'), null);
+  assert.equal(parseCommandLine('trailing\\'), null);
+});
+
+test('formatCommandLine round-trips through parseCommandLine', () => {
+  for (const argv of [[], ['serena', 'project', 'index'], ['sh', '-c', `echo 'it''s' "$X"`], ['a b', ''], ['--flag=value', './bin/tool']]) {
+    assert.deepEqual(parseCommandLine(formatCommandLine(argv)), argv);
+  }
+  assert.equal(formatCommandLine(['uvx', 'code-review-graph', 'update']), 'uvx code-review-graph update');
+});
+
+test('buildProjectUpdateInput includes worktree commands only when they change', () => {
+  const base = project({ worktree_setup_command: ['make', 'deps'], worktree_refresh_command: [] });
+  const form = projectEditForm(base);
+  assert.equal(form.setupCommand, 'make deps');
+  assert.equal(form.refreshCommand, '');
+  assert.equal(buildProjectUpdateInput(base, form), null);
+  assert.deepEqual(buildProjectUpdateInput(base, { ...form, refreshCommand: `serena project index '.'` }), {
+    worktree_refresh_command: ['serena', 'project', 'index', '.'],
+  });
+  assert.deepEqual(buildProjectUpdateInput(base, { ...form, setupCommand: '  ' }), { worktree_setup_command: [] });
+  assert.deepEqual(buildProjectUpdateInput(base, { ...form, setupCommand: `make 'deps` }), { error: 'commandInvalid' });
+  assert.equal(buildProjectUpdateInput(project(), { name: 'Project', path: '/projects/project', setupCommand: '', refreshCommand: '' }), null);
 });
 
 test('deletionDialogModel distinguishes empty and with-Works projects', () => {
@@ -154,6 +187,7 @@ test('ja and en project translations contain the same §10.5 keys', () => {
     'deleteTitle', 'deleteConfirmEmpty', 'deleteConfirmWithWorks', 'deleteBacklogNote', 'deleteRenumberNote', 'deleteKeepsFiles',
     'deleteWithWorks', 'deleteConfirm', 'deleteBlocked', 'blockingWorksTitle', 'blockingWorksMore', 'blockingAgents',
     'deleteImpactChanged', 'deleteSuccess', 'deleteSuccessWithWorks', 'deleting', 'errorNotFound', 'errorCleanupFailed',
+    'worktreeSetupLabel', 'worktreeRefreshLabel', 'worktreeCommandPlaceholder', 'worktreeCommandsHelp', 'worktreeCommandInvalid',
   ];
   for (const key of keys) {
     assert.equal(typeof ja.projects[key], 'string', `ja projects.${key}`);

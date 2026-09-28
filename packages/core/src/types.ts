@@ -998,6 +998,10 @@ export interface Project extends JsonObject {
   readonly canonical_path: string;
   readonly base_branch: string;
   readonly auto_push: boolean;
+  /** Command (argv, no shell) run in each newly created worktree before its first agent. Empty when unset. */
+  readonly worktree_setup_command: readonly string[];
+  /** Command (argv, no shell) run in the worktree before every agent launch. Empty when unset. */
+  readonly worktree_refresh_command: readonly string[];
   readonly allowed_roots: readonly string[];
   readonly verification_plan: readonly VerificationCommand[];
 }
@@ -1015,6 +1019,8 @@ export interface UpdateProjectPayload extends JsonObject {
   readonly canonical_path?: string;
   readonly base_branch?: string;
   readonly auto_push?: boolean;
+  readonly worktree_setup_command?: readonly string[];
+  readonly worktree_refresh_command?: readonly string[];
 }
 
 export interface DeleteProjectPayload extends JsonObject {

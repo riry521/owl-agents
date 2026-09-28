@@ -722,7 +722,7 @@ test("an existing Project defaults to auto_push=false when the migration is appl
   const migrationFiles = await readdir(migrations);
   const autoPushMigration = migrationFiles.find((file) => file.endsWith("_project_auto_push.sql"));
   assert.ok(autoPushMigration);
-  for (const filename of migrationFiles.filter((file) => file.endsWith(".sql") && file !== autoPushMigration)) {
+  for (const filename of migrationFiles.filter((file) => file.endsWith(".sql") && file < autoPushMigration)) {
     await copyFile(join(migrations, filename), join(oldMigrations, filename));
   }
   const db = openDatabase(join(root, "owl.db"));
@@ -749,4 +749,50 @@ test("an existing Project defaults to auto_push=false when the migration is appl
 
   db.migrate(migrations);
   assert.equal(core.listProjects().data[0].auto_push, false);
+});
+
+test("worktree setup and refresh commands default empty, PATCH persists argv, and invalid values are rejected", async (t) => {
+  for (const memory of [false, true]) {
+    const api = await setup(t, memory ? { memory: true } : {});
+    if (!api) return;
+    let project;
+    if (memory) {
+      const path = join(api.root, "memory-worktree-commands");
+      await mkdir(path);
+      const created = await sendCommand(api, "POST", "/projects", {
+        name: "Memory worktree commands",
+        canonical_path: path,
+        base_branch: "main",
+        allowed_roots: [path],
+        verification_plan: [],
+      }, "worktree-commands-create");
+      project = (await created.json()).data;
+    } else {
+      const repo = await makeRepo(t, api.root, "worktree-commands-project");
+      if (!repo) return;
+      project = await createProject(api, "worktree-commands", { path: repo });
+    }
+    assert.deepEqual(project.worktree_setup_command, []);
+    assert.deepEqual(project.worktree_refresh_command, []);
+
+    const updated = await sendCommand(api, "PATCH", `/projects/${project.id}`, {
+      worktree_setup_command: ["make", "deps"],
+      worktree_refresh_command: ["serena", "project", "index", "."],
+    }, "worktree-commands-set");
+    assert.equal(updated.status, 200);
+    const data = (await updated.json()).data;
+    assert.deepEqual(data.worktree_setup_command, ["make", "deps"]);
+    assert.deepEqual(data.worktree_refresh_command, ["serena", "project", "index", "."]);
+    const listed = (await listProjects(api)).find((candidate) => candidate.id === project.id);
+    assert.deepEqual(listed.worktree_refresh_command, ["serena", "project", "index", "."]);
+
+    const cleared = await sendCommand(api, "PATCH", `/projects/${project.id}`, { worktree_setup_command: [] }, "worktree-commands-clear");
+    const clearedData = (await cleared.json()).data;
+    assert.deepEqual(clearedData.worktree_setup_command, []);
+    assert.deepEqual(clearedData.worktree_refresh_command, ["serena", "project", "index", "."]);
+
+    for (const [index, value] of ["make deps", [" ", "x"], [1], null, ["ok", "a\u0000b"]].entries()) {
+      await assertApiError(await sendCommand(api, "PATCH", `/projects/${project.id}`, { worktree_refresh_command: value }, `worktree-commands-invalid:${index}`), 400, "validation_error");
+    }
+  }
 });

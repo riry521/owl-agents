@@ -312,6 +312,8 @@ export interface Project {
   name: string;
   canonical_path: string;
   auto_push?: boolean;
+  worktree_setup_command?: string[];
+  worktree_refresh_command?: string[];
   base_branch: string;
   allowed_roots: string[];
   verification_plan: unknown[];
@@ -322,6 +324,8 @@ export interface UpdateProjectInput {
   name?: string;
   canonical_path?: string;
   auto_push?: boolean;
+  worktree_setup_command?: string[];
+  worktree_refresh_command?: string[];
 }
 
 export type ProjectBlocker = 'running_works' | 'active_agents';

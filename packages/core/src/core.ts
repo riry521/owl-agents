@@ -389,6 +389,8 @@ interface ProjectDbRow {
   auto_push: number;
   allowed_roots_json: string;
   verification_plan_json: string;
+  worktree_prepare_argv_json: string;
+  worktree_refresh_argv_json: string;
 }
 
 interface MessageDbRow {
@@ -2340,7 +2342,8 @@ export class Core {
   public listProjects(query: ProjectListQuery = {}): ListResponse<Project> {
     const limit = boundLimit(query.limit ?? 50);
     const rows = this.db.all<ProjectDbRow>(
-      `SELECT id, name, canonical_path, base_branch, auto_push, allowed_roots_json, verification_plan_json
+      `SELECT id, name, canonical_path, base_branch, auto_push, allowed_roots_json, verification_plan_json,
+                worktree_prepare_argv_json, worktree_refresh_argv_json
          FROM projects
         WHERE (? IS NULL OR id > ?)
         ORDER BY id ASC LIMIT ?`,
@@ -2378,7 +2381,8 @@ export class Core {
       payload: { kind: "project_updated", schema_version: "1.0.0", project_id: projectId },
     }, (transaction) => {
       const row = transaction.get<ProjectDbRow>(
-        `SELECT id, name, canonical_path, base_branch, auto_push, allowed_roots_json, verification_plan_json
+        `SELECT id, name, canonical_path, base_branch, auto_push, allowed_roots_json, verification_plan_json,
+                worktree_prepare_argv_json, worktree_refresh_argv_json
            FROM projects WHERE id = ?`,
         projectId,
       );
@@ -2395,6 +2399,12 @@ export class Core {
       if (hasPath !== hasBaseBranch) {
         throw validationError("canonical_path and base_branch must be provided together.", { fields: ["canonical_path", "base_branch"] });
       }
+      const setupCommand = Object.prototype.hasOwnProperty.call(payload, "worktree_setup_command")
+        ? validateWorktreeCommand(payload.worktree_setup_command, "worktree_setup_command", ownerLanguage(transaction))
+        : null;
+      const refreshCommand = Object.prototype.hasOwnProperty.call(payload, "worktree_refresh_command")
+        ? validateWorktreeCommand(payload.worktree_refresh_command, "worktree_refresh_command", ownerLanguage(transaction))
+        : null;
 
       let name = row.name;
       if (hasName) {
@@ -2434,24 +2444,44 @@ export class Core {
         }
       }
 
-      if (name === row.name && canonicalPath === row.canonical_path && autoPush === (row.auto_push === 1)) {
+      const setupJson = setupCommand === null ? row.worktree_prepare_argv_json : JSON.stringify(setupCommand);
+      const refreshJson = refreshCommand === null ? row.worktree_refresh_argv_json : JSON.stringify(refreshCommand);
+      if (
+        name === row.name
+        && canonicalPath === row.canonical_path
+        && autoPush === (row.auto_push === 1)
+        && setupJson === row.worktree_prepare_argv_json
+        && refreshJson === row.worktree_refresh_argv_json
+      ) {
         return { data: toProject(row), version: 0 };
       }
       const now = utcNow();
       transaction.run(
         `UPDATE projects
-            SET name = ?, canonical_path = ?, base_branch = ?, auto_push = ?, allowed_roots_json = ?, updated_at = ?
+            SET name = ?, canonical_path = ?, base_branch = ?, auto_push = ?, allowed_roots_json = ?,
+                worktree_prepare_argv_json = ?, worktree_refresh_argv_json = ?, updated_at = ?
           WHERE id = ?`,
         name,
         canonicalPath,
         baseBranch,
         autoPush ? 1 : 0,
         JSON.stringify(allowedRoots),
+        setupJson,
+        refreshJson,
         now,
         projectId,
       );
       return {
-        data: toProject({ ...row, name, canonical_path: canonicalPath, base_branch: baseBranch, auto_push: autoPush ? 1 : 0, allowed_roots_json: JSON.stringify(allowedRoots) }),
+        data: toProject({
+          ...row,
+          name,
+          canonical_path: canonicalPath,
+          base_branch: baseBranch,
+          auto_push: autoPush ? 1 : 0,
+          allowed_roots_json: JSON.stringify(allowedRoots),
+          worktree_prepare_argv_json: setupJson,
+          worktree_refresh_argv_json: refreshJson,
+        }),
         version: 0,
       };
     });
@@ -6168,6 +6198,8 @@ function toProject(row: ProjectDbRow): Project {
     canonical_path: row.canonical_path,
     base_branch: row.base_branch,
     auto_push: row.auto_push === 1,
+    worktree_setup_command: parseStringArray(row.worktree_prepare_argv_json, "worktree_setup_command", row.id, "Project"),
+    worktree_refresh_command: parseStringArray(row.worktree_refresh_argv_json, "worktree_refresh_command", row.id, "Project"),
     allowed_roots: parseStringArray(row.allowed_roots_json, "allowed_roots", row.id, "Project"),
     verification_plan: parseArray(row.verification_plan_json, "verification_plan", row.id, "Project") as unknown as readonly VerificationCommand[],
   };
@@ -6614,6 +6646,8 @@ function createProjectInTransaction(transaction: CoreWriteLaneTransaction, paylo
     canonical_path: canonicalPath,
     base_branch: baseBranch,
     auto_push: false,
+    worktree_setup_command: [],
+    worktree_refresh_command: [],
     allowed_roots: allowedRoots as readonly string[],
     verification_plan: verificationPlan,
   };
@@ -6768,6 +6802,25 @@ function parseArray(text: string, field: string, id: string, resource = "Decisio
     throw validationError(`Stored ${resource} field ${field} is not an array.`, { id, field });
   }
   return parsed;
+}
+
+const WORKTREE_COMMAND_MAX_ARGS = 64;
+const WORKTREE_COMMAND_MAX_ARG_LENGTH = 4096;
+
+function validateWorktreeCommand(value: unknown, field: string, language: "ja" | "en"): string[] {
+  const valid = Array.isArray(value)
+    && value.length <= WORKTREE_COMMAND_MAX_ARGS
+    && value.every((arg) => typeof arg === "string" && arg.length <= WORKTREE_COMMAND_MAX_ARG_LENGTH && !arg.includes("\0"))
+    && (value.length === 0 || (value[0] as string).trim().length > 0);
+  if (!valid) {
+    throw validationError(
+      language === "ja"
+        ? "コマンドは文字列の配列（先頭がコマンド名、空配列で未設定）で指定してください。"
+        : "Specify the command as an array of strings (command name first; an empty array clears it).",
+      { field },
+    );
+  }
+  return value as string[];
 }
 
 function parseStringArray(text: string, field: string, id: string, resource = "Decision"): string[] {

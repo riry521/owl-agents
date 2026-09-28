@@ -5,7 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ApiRequestError, browseProjectFolders, deleteProject, getActiveConversation, getProjectDeletionImpact, inspectProjectFolder, listProjects, postMessage, setupProject, updateProject } from '@/lib/api-client';
 import type { DeleteProjectResult, Project, ProjectDeletionImpact, ProjectFolderBrowserResult, ProjectFolderInspection, ProjectRunningWork, ProjectSetupInput, UpdateProjectInput } from '@/lib/types';
-import { buildProjectUpdateInput, deletionDialogModel, impactFromError, isProjectAutoPushEnabled, projectErrorKey, type ProjectEditForm } from '@/lib/project-management';
+import { buildProjectUpdateInput, deletionDialogModel, impactFromError, isProjectAutoPushEnabled, projectEditForm, projectErrorKey, type ProjectEditForm } from '@/lib/project-management';
 import { workStateLabels } from '@/lib/format';
 import { useLocale, type Locale, type TFunction } from '@/lib/i18n';
 
@@ -30,7 +30,7 @@ export function ProjectsView() {
   const [formError, setFormError] = useState<string | null>(null);
   const [formNotice, setFormNotice] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [editForm, setEditForm] = useState<ProjectEditForm>({ name: '', path: '', autoPush: false });
+  const [editForm, setEditForm] = useState<ProjectEditForm>({ name: '', path: '', autoPush: false, setupCommand: '', refreshCommand: '' });
   const [editError, setEditError] = useState<string | null>(null);
   const [editBlockImpact, setEditBlockImpact] = useState<ProjectDeletionImpact | null>(null);
   const [busyProjectId, setBusyProjectId] = useState<string | null>(null);
@@ -169,7 +169,7 @@ export function ProjectsView() {
   function startEdit(project: Project) {
     if (busyProjectId !== null || editingId !== null || deleteTarget !== null) return;
     setEditingId(project.id);
-    setEditForm({ name: project.name, path: project.canonical_path, autoPush: isProjectAutoPushEnabled(project) });
+    setEditForm(projectEditForm(project));
     setEditError(null);
     setEditBlockImpact(null);
     setProjectNotice(null);
@@ -185,14 +185,14 @@ export function ProjectsView() {
 
   async function saveEdit(ev: FormEvent<HTMLFormElement>, project: Project) {
     ev.preventDefault();
-    const input: UpdateProjectInput | null | { error: 'nameRequired' | 'pathRequired' } = buildProjectUpdateInput(project, editForm);
+    const input: UpdateProjectInput | null | { error: 'nameRequired' | 'pathRequired' | 'commandInvalid' } = buildProjectUpdateInput(project, editForm);
     setEditBlockImpact(null);
     if (input === null) {
       setEditError(t('projects.editNoChanges'));
       return;
     }
     if ('error' in input) {
-      setEditError(t('projects.allFieldsRequired'));
+      setEditError(t(input.error === 'commandInvalid' ? 'projects.worktreeCommandInvalid' : 'projects.allFieldsRequired'));
       return;
     }
 
@@ -470,6 +470,37 @@ export function ProjectsView() {
                         />
                         <p className="note">{t('projects.autoPushHelp')}</p>
                       </div>
+                      <div className="form-grid">
+                        <label className="form-field">
+                          <span>{t('projects.worktreeSetupLabel')}</span>
+                          <input
+                            className="input mono"
+                            value={editForm.setupCommand}
+                            onChange={(ev) => {
+                              setEditForm((current) => ({ ...current, setupCommand: ev.target.value }));
+                              setEditError(null);
+                            }}
+                            placeholder={t('projects.worktreeCommandPlaceholder')}
+                            maxLength={8192}
+                            disabled={busyProjectId !== null}
+                          />
+                        </label>
+                        <label className="form-field">
+                          <span>{t('projects.worktreeRefreshLabel')}</span>
+                          <input
+                            className="input mono"
+                            value={editForm.refreshCommand}
+                            onChange={(ev) => {
+                              setEditForm((current) => ({ ...current, refreshCommand: ev.target.value }));
+                              setEditError(null);
+                            }}
+                            placeholder={t('projects.worktreeCommandPlaceholder')}
+                            maxLength={8192}
+                            disabled={busyProjectId !== null}
+                          />
+                        </label>
+                      </div>
+                      <p className="note">{t('projects.worktreeCommandsHelp')}</p>
                       {editError && <div className="error" role="alert">{editError}</div>}
                       {editBlockImpact && <BlockingWorks impact={editBlockImpact} t={t} locale={locale} />}
                       <div className="btn-row">

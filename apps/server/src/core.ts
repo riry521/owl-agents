@@ -694,6 +694,8 @@ export class MemoryCore implements CorePort {
       canonical_path: input.canonical_path,
       base_branch: input.base_branch,
       auto_push: false,
+      worktree_setup_command: [],
+      worktree_refresh_command: [],
       allowed_roots: [...input.allowed_roots],
       verification_plan: input.verification_plan.map((command) => ({ ...command })),
     };
@@ -709,7 +711,15 @@ export class MemoryCore implements CorePort {
     const name = input.name?.trim() ?? project.name;
     const canonicalPath = input.canonical_path ?? project.canonical_path;
     const autoPush = input.auto_push ?? project.auto_push;
-    if (name === project.name && canonicalPath === project.canonical_path && autoPush === project.auto_push) return { data: project, version: 0 };
+    const setupCommand = input.worktree_setup_command ?? project.worktree_setup_command;
+    const refreshCommand = input.worktree_refresh_command ?? project.worktree_refresh_command;
+    if (
+      name === project.name
+      && canonicalPath === project.canonical_path
+      && autoPush === project.auto_push
+      && JSON.stringify(setupCommand) === JSON.stringify(project.worktree_setup_command)
+      && JSON.stringify(refreshCommand) === JSON.stringify(project.worktree_refresh_command)
+    ) return { data: project, version: 0 };
     for (const existing of this.projects.values()) {
       if (existing.id !== projectId && existing.canonical_path === canonicalPath) {
         throw new ApiError(400, "validation_error", "指定されたcanonical_pathには既にProjectが存在します。別のパスを指定してください。", { canonical_path: canonicalPath, project_id: existing.id });
@@ -724,6 +734,8 @@ export class MemoryCore implements CorePort {
       canonical_path: canonicalPath,
       base_branch: input.canonical_path === undefined ? project.base_branch : input.base_branch ?? project.base_branch,
       auto_push: autoPush,
+      worktree_setup_command: [...setupCommand],
+      worktree_refresh_command: [...refreshCommand],
       allowed_roots: allowedRoots,
     };
     this.projects.set(projectId, updated);

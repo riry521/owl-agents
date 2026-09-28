@@ -5,25 +5,90 @@ import type {
   UpdateProjectInput,
 } from '@/lib/types';
 
-export type ProjectEditForm = { name: string; path: string; autoPush: boolean };
+export type ProjectEditForm = { name: string; path: string; autoPush: boolean; setupCommand: string; refreshCommand: string };
 
 export function isProjectAutoPushEnabled(project: Project): boolean {
   return project.auto_push === true;
 }
 
+export function projectEditForm(project: Project): ProjectEditForm {
+  return {
+    name: project.name,
+    path: project.canonical_path,
+    autoPush: isProjectAutoPushEnabled(project),
+    setupCommand: formatCommandLine(project.worktree_setup_command ?? []),
+    refreshCommand: formatCommandLine(project.worktree_refresh_command ?? []),
+  };
+}
+
+/** Splits a command line into argv the way a POSIX shell would for plain words and quotes, without expansions. */
+export function parseCommandLine(text: string): string[] | null {
+  const args: string[] = [];
+  let current = '';
+  let inWord = false;
+  let quote: '"' | "'" | null = null;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (quote === "'") {
+      if (char === "'") quote = null;
+      else current += char;
+      continue;
+    }
+    if (quote === '"') {
+      if (char === '"') quote = null;
+      else if (char === '\\' && (text[index + 1] === '"' || text[index + 1] === '\\')) current += text[++index];
+      else current += char;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      inWord = true;
+    } else if (char === '\\') {
+      if (index + 1 >= text.length) return null;
+      current += text[++index];
+      inWord = true;
+    } else if (/\s/u.test(char)) {
+      if (inWord) args.push(current);
+      current = '';
+      inWord = false;
+    } else {
+      current += char;
+      inWord = true;
+    }
+  }
+  if (quote !== null) return null;
+  if (inWord) args.push(current);
+  return args;
+}
+
+export function formatCommandLine(argv: readonly string[]): string {
+  return argv
+    .map((arg) => (arg !== '' && /^[\w@%+=:,./-]+$/u.test(arg) ? arg : `'${arg.replaceAll("'", `'"'"'`)}'`))
+    .join(' ');
+}
+
+function sameArgv(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((arg, index) => arg === right[index]);
+}
+
 export function buildProjectUpdateInput(
   project: Project,
   form: ProjectEditForm,
-): UpdateProjectInput | null | { error: 'nameRequired' | 'pathRequired' } {
+): UpdateProjectInput | null | { error: 'nameRequired' | 'pathRequired' | 'commandInvalid' } {
   const name = form.name.trim();
   if (!name) return { error: 'nameRequired' };
   if (!form.path.trim()) return { error: 'pathRequired' };
+  const setupCommand = parseCommandLine(form.setupCommand ?? '');
+  const refreshCommand = parseCommandLine(form.refreshCommand ?? '');
+  if (setupCommand === null || refreshCommand === null) return { error: 'commandInvalid' };
 
   const input: UpdateProjectInput = {};
   if (name !== project.name) input.name = name;
   if (form.path !== project.canonical_path) input.canonical_path = form.path;
   const autoPush = form.autoPush === true;
   if (autoPush !== isProjectAutoPushEnabled(project)) input.auto_push = autoPush;
+  if (!sameArgv(setupCommand, project.worktree_setup_command ?? [])) input.worktree_setup_command = setupCommand;
+  if (!sameArgv(refreshCommand, project.worktree_refresh_command ?? [])) input.worktree_refresh_command = refreshCommand;
   return Object.keys(input).length ? input : null;
 }
 

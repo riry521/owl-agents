@@ -153,6 +153,8 @@ export interface Project {
   canonical_path: string;
   base_branch: string;
   auto_push: boolean;
+  worktree_setup_command: string[];
+  worktree_refresh_command: string[];
   allowed_roots: string[];
   verification_plan: VerificationCommand[];
 }
@@ -170,6 +172,8 @@ export interface UpdateProjectInput {
   canonical_path?: string;
   base_branch?: string;
   auto_push?: boolean;
+  worktree_setup_command?: string[];
+  worktree_refresh_command?: string[];
 }
 
 export interface DeleteProjectInput {
