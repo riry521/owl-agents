@@ -1,4 +1,4 @@
-import type { GuardTokenIssuer, RateLimitInfo } from "@owl/shared";
+import type { GuardTokenIssuer, RateLimitInfo, WebResearchCapture } from "@owl/shared";
 
 export const REPORT_SCHEMA_VERSION = "1.0.0" as const;
 
@@ -321,6 +321,7 @@ export interface TokenUsage {
 export type SessionEvent =
   | { type: "session.ready"; provider_session_id: string; pid: number }
   | { type: "turn.delta"; turn_id: string; text: string }
+  | { type: "tool.web_research"; turn_id: string; capture: WebResearchCapture }
   | { type: "turn.completed"; turn_id: string; reply: string; usage: TokenUsage | null }
   | { type: "turn.failed"; turn_id: string; error: string; rate_limit?: RateLimitInfo }
   | {

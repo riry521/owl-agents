@@ -1,8 +1,8 @@
 'use client';
 
 import { Fragment, type FormEvent, useEffect, useState } from 'react';
-import { getModelSettings, updateModelSettings, getIntegrations, saveIntegration, testIntegration, deleteIntegration, getHybridMode, setHybridMode, getExecutorConfig, setExecutorConfig, listProviders, createProvider, deleteProvider, testProvider, saveProvider, getProviderModels, setProviderModels as setProviderModelsApi, getTypesafeApiKey, setTypesafeApiKey, getAdvisorPersona, setAdvisorPersona, getAdvisorFolders, putAdvisorFolders, getOwnerLanguage, setOwnerLanguage, ApiRequestError } from '@/lib/api-client';
-import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ExecutorConfig, ProviderInfo, SaveProviderPayload, AdvisorFolders } from '@/lib/types';
+import { getModelSettings, updateModelSettings, getIntegrations, saveIntegration, testIntegration, deleteIntegration, getHybridMode, setHybridMode, getExecutorConfig, setExecutorConfig, listProviders, createProvider, deleteProvider, testProvider, saveProvider, getProviderModels, setProviderModels as setProviderModelsApi, getTypesafeApiKey, setTypesafeApiKey, getAdvisorPersona, setAdvisorPersona, getAdvisorFolders, putAdvisorFolders, getOwnerLanguage, setOwnerLanguage, getKnowledgeAutomationSettings, setKnowledgeAutomationSettings, ApiRequestError } from '@/lib/api-client';
+import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ExecutorConfig, ProviderInfo, SaveProviderPayload, AdvisorFolders, KnowledgeAutomationSettingsData, KnowledgeAutomationSettingsInput } from '@/lib/types';
 import { roleDisplayName } from '@/lib/format';
 import { useLocale, type Locale } from '@/lib/i18n';
 import { humanizeError } from '@/lib/settings-errors';
@@ -415,6 +415,7 @@ export function SettingsView() {
       <OwnerLanguageSection />
       <AdvisorPersonaSection />
       <AdvisorFoldersSection />
+      <KnowledgeAutomationSection />
       <ProviderManagementSection providerModels={providerModels} onModelsUpdate={(id, models) => setProviderModels(prev => ({ ...prev, [id]: models }))} />
       <IntegrationsSection />
       <TypesafeSection />
@@ -776,6 +777,141 @@ export function AdvisorFoldersSection() {
         }}
         onClose={() => setPicker(null)}
       />
+    </section>
+  );
+}
+
+export function KnowledgeAutomationSection() {
+  const { t } = useLocale();
+  const [settings, setSettings] = useState<KnowledgeAutomationSettingsData | null>(null);
+  const [librarianTimes, setLibrarianTimes] = useState<string[]>([]);
+  const [researchAutosave, setResearchAutosave] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void getKnowledgeAutomationSettings()
+      .then((value) => {
+        if (!alive) return;
+        setSettings(value);
+        setLibrarianTimes(value.librarian_times);
+        setResearchAutosave(value.research_autosave);
+      })
+      .catch((err) => {
+        console.error('[Owl] Knowledge automation settings load failed', err);
+        if (alive) setError(humanizeError(err, t));
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [t]);
+
+  const timesInvalid = librarianTimes.length > 24 || librarianTimes.some((time) => !/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(time));
+
+  function addTime() {
+    setLibrarianTimes((current) => {
+      if (current.length >= 24) return current;
+      const used = new Set(current);
+      for (let offset = 0; offset < 24; offset += 1) {
+        const hour = (12 + offset) % 24;
+        const time = `${String(hour).padStart(2, '0')}:00`;
+        if (!used.has(time)) return [...current, time];
+      }
+      return current;
+    });
+    setNotice(null);
+  }
+
+  async function handleSave() {
+    if (!settings || timesInvalid) return;
+    const input: KnowledgeAutomationSettingsInput = { librarian_times: librarianTimes, research_autosave: researchAutosave };
+    setSaving(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const saved = await setKnowledgeAutomationSettings(input);
+      setSettings(saved);
+      setLibrarianTimes(saved.librarian_times);
+      setResearchAutosave(saved.research_autosave);
+      setNotice(t('settings.knowledgeAutomationSaved'));
+    } catch (err) {
+      console.error('[Owl] Knowledge automation settings save failed', err);
+      setError(humanizeError(err, t));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="panel" aria-labelledby="sec-knowledge-automation" style={{ marginTop: '24px' }}>
+      <h2 className="panel__title" id="sec-knowledge-automation">{t('settings.knowledgeAutomationTitle')}</h2>
+      {loading ? (
+        <p className="empty">{t('common.loading')}</p>
+      ) : settings && (
+        <>
+          <div className="form-field" style={{ marginTop: '16px' }}>
+            <span>{t('settings.librarianTimesLabel')}</span>
+            {librarianTimes.map((time, index) => (
+              <div className="btn-row" key={index}>
+                <input
+                  className="input"
+                  type="time"
+                  step={60}
+                  value={time}
+                  aria-label={`${t('settings.librarianTimesLabel')} ${index + 1}`}
+                  disabled={saving}
+                  onChange={(ev) => setLibrarianTimes((current) => current.map((value, row) => row === index ? ev.target.value : value))}
+                  style={{ maxWidth: '180px' }}
+                />
+                <button
+                  type="button"
+                  className="btn btn--small"
+                  aria-label={t('settings.librarianTimeRemove')}
+                  disabled={saving}
+                  onClick={() => setLibrarianTimes((current) => current.filter((_, row) => row !== index))}
+                >
+                  {t('settings.librarianTimeRemove')}
+                </button>
+              </div>
+            ))}
+            <p className="settings-disclosure__hint">{t('settings.librarianTimesHint', { timeZone: settings.time_zone })}</p>
+            <div className="btn-row">
+              <button type="button" className="btn btn--small" onClick={addTime} disabled={saving || librarianTimes.length >= 24}>
+                {t('settings.librarianTimeAdd')}
+              </button>
+            </div>
+          </div>
+          {timesInvalid && <p className="error" style={{ marginTop: '8px' }}>{t('settings.librarianTimesInvalid')}</p>}
+          <p className="page__sub" style={{ margin: '12px 0' }}>
+            {settings.next_librarian_run_at
+              ? t('settings.librarianNextRun', { time: new Date(settings.next_librarian_run_at).toLocaleString() })
+              : t('settings.librarianNextRunNone')}
+          </p>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '16px' }}>
+            <input
+              type="checkbox"
+              checked={researchAutosave}
+              disabled={saving}
+              onChange={(ev) => setResearchAutosave(ev.target.checked)}
+            />
+            <span>{t('settings.researchAutosaveLabel')}</span>
+          </label>
+          <p className="settings-disclosure__hint">{t('settings.researchAutosaveHint')}</p>
+          <div className="btn-row">
+            <button type="button" className="btn btn--primary btn--small" onClick={handleSave} disabled={saving || timesInvalid}>
+              {saving ? t('common.saving') : t('common.save')}
+            </button>
+            {notice && <span className="note note--success">{notice}</span>}
+          </div>
+        </>
+      )}
+      {error && <div className="error" style={{ marginTop: '12px' }}>{error}</div>}
     </section>
   );
 }

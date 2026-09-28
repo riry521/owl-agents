@@ -12,10 +12,14 @@ import { resolveDataDir, type ContractManifest } from "./contracts.js";
 import { configuredApiToken } from "./config.js";
 import { KnowledgeBase } from "../../../packages/core/dist/knowledge-base.js";
 import { RuleStore } from "../../../packages/core/dist/rule-store.js";
+import { KnowledgeAutomationValidationError, validateKnowledgeAutomationSettings } from "../../../packages/shared/dist/knowledge-automation.js";
 import { isOwnerLanguage, type OwnerLanguage } from "../../../packages/shared/dist/owner-language.js";
 import { builtinProviderHarness, designDocumentPath, isRuleRole, RULE_ROLES } from "../../../packages/shared/dist/index.js";
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
+import { RESEARCH_CAPTURE_ROLES } from "../../../packages/shared/dist/permission-args.js";
+import { extractWebResearchCapture } from "../../../packages/shared/dist/web-research.js";
 import type { CoreEvent, CorePort, CreateProjectInput, DeleteProjectInput, InboundMessageInput, IntegrationConfigPatch, IntegrationProvider, JsonObject, PostMessageInput, Project, RoleModelSettingInput, ExecutorSettingsConfig, ProcessSkillsSettingsInput, RuntimeConfig, UpdateProjectInput, VerificationCommand } from "./types.js";
+import type { KnowledgeAutomationSettings } from "../../../packages/shared/dist/knowledge-automation.js";
 import { browseProjectFolders, initializeExistingProjectFolder, initializeNewProjectFolder, inspectProjectFolder } from "./project-registration.js";
 
 declare module "./types.js" {
@@ -436,13 +440,32 @@ async function readRawBody(request: IncomingMessage, limit: number): Promise<Buf
   return Buffer.concat(chunks);
 }
 
-function exactKeys(value: JsonObject, required: readonly string[], label: string): void {
-  const requiredSet = new Set(required);
+function exactKeys(value: JsonObject, required: readonly string[], label: string, optional: readonly string[] = []): void {
+  const acceptedSet = new Set([...required, ...optional]);
   const actual = Object.keys(value);
   const missing = required.filter((key) => !Object.prototype.hasOwnProperty.call(value, key));
-  const extra = actual.filter((key) => !requiredSet.has(key));
+  const extra = actual.filter((key) => !acceptedSet.has(key));
   if (missing.length > 0 || extra.length > 0) {
     throw new ApiError(400, "validation_error", `${label}の項目が契約と一致しません。必須項目と余分な項目を確認してください。`, { missing, extra });
+  }
+}
+
+function hostTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "local";
+  } catch {
+    return "local";
+  }
+}
+
+function validatedKnowledgeAutomationSettings(value: unknown): KnowledgeAutomationSettings {
+  try {
+    return validateKnowledgeAutomationSettings(value);
+  } catch (error) {
+    if (error instanceof KnowledgeAutomationValidationError) {
+      throw new ApiError(400, "validation_error", error.message, { field: error.field });
+    }
+    throw error;
   }
 }
 
@@ -685,8 +708,8 @@ function requireRuleProposalOwner(request: IncomingMessage): string {
 }
 
 /**
- * Agent guard tokens are accepted only on loopback and only for the guard
- * endpoint. Returns the agent the token belongs to, or null when the owner
+ * Agent guard tokens are accepted only on loopback and only for the guard and
+ * research capture endpoints. Returns the agent the token belongs to, or null when the owner
  * made the request. A bearer token that is neither a live guard token nor the
  * API token is refused, so a revoked token never falls back to owner access.
  */
@@ -1942,6 +1965,30 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
+  if (pathname === `${API_PREFIX}/settings/knowledge-automation` && method === "GET") {
+    requireOwner(request);
+    const settings = await context.core.getKnowledgeAutomationSettings();
+    sendJson(response, 200, {
+      request_id: requestIdValue,
+      data: { ...settings, time_zone: hostTimeZone() },
+      version: 0,
+    });
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/settings/knowledge-automation` && method === "PUT") {
+    requireOwner(request);
+    const command = commandEnvelope(await readRequestBody(request));
+    exactKeys(command.payload, ["librarian_times", "research_autosave"], "Knowledge automation settings payload");
+    const input = validatedKnowledgeAutomationSettings(command.payload);
+    const result = await runCommand(context, pathname, command, 200, async () => {
+      const settings = await context.core.setKnowledgeAutomationSettings(input);
+      return { data: { ...settings, time_zone: hostTimeZone() } as unknown as JsonObject, version: 0 };
+    });
+    sendJson(response, 200, result);
+    return;
+  }
+
   if (pathname === `${API_PREFIX}/settings/process-skills` && method === "PUT") {
     requireOwner(request);
     const command = commandEnvelope(await readRequestBody(request));
@@ -2977,6 +3024,38 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
         console.warn(`[owl-server] Could not record skill reads for Agent run ${agent.agent_run_id}`, error);
       }
     }
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/research/capture` && method === "POST") {
+    const agent = requireGuard(request, context.guardTokens);
+    if (!agent || !RESEARCH_CAPTURE_ROLES.has(agent.role)) {
+      throw new ApiError(403, "agent_scope_denied", "research capture はWorkエージェントのguard tokenでのみ受け付けます。");
+    }
+    const command = commandEnvelope(await readRequestBody(request));
+    if (command.expected_version !== 0) {
+      throw new ApiError(400, "validation_error", "expected_versionは0で指定してください。");
+    }
+    exactKeys(command.payload, ["tool_name", "tool_input", "tool_response"], "ResearchCapture payload", ["auth_form_detected"]);
+    const authFormDetected = Object.prototype.hasOwnProperty.call(command.payload, "auth_form_detected");
+    if (authFormDetected && command.payload.auth_form_detected !== true) {
+      throw new ApiError(400, "validation_error", "auth_form_detectedはtrueで指定してください。");
+    }
+    const toolName = stringField(command.payload.tool_name, "tool_name", 1, 64);
+    if (toolName !== "WebFetch" && toolName !== "WebSearch") {
+      throw new ApiError(400, "validation_error", "tool_nameはWebFetchまたはWebSearchで指定してください。");
+    }
+    if (!isObject(command.payload.tool_input)) {
+      throw new ApiError(400, "validation_error", "tool_inputはJSON objectで指定してください。");
+    }
+    const extractedCapture = extractWebResearchCapture(toolName, command.payload.tool_input, command.payload.tool_response);
+    const capture = extractedCapture && authFormDetected
+      ? { ...extractedCapture, auth_form_detected: true as const }
+      : extractedCapture;
+    const result = capture === null
+      ? { accepted: false, reason: "unsupported" }
+      : await context.core.recordAgentResearch(agent, capture);
+    sendJson(response, 202, { request_id: command.request_id, data: result });
     return;
   }
 

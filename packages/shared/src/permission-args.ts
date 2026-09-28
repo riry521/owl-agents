@@ -9,8 +9,18 @@ export interface AgentGuardConfiguration {
   readonly role: AgentPermissionRole;
 }
 
+/** Work roles whose Claude sessions may save WebFetch and WebSearch results. */
+export const RESEARCH_CAPTURE_ROLES: ReadonlySet<AgentPermissionRole> = new Set([
+  "manager",
+  "designer",
+  "worker",
+  "reviewer",
+]);
+
 /** Both CLIs read `*` as every tool, MCP and web tools included. */
 const ALL_TOOLS_MATCHER = "*";
+const RESEARCH_TOOLS_MATCHER = "WebFetch|WebSearch";
+const RESEARCH_HOOK_TIMEOUT_SECONDS = 10;
 
 /**
  * CLI arguments that install Owl's synchronous PreToolUse guard hook for
@@ -27,6 +37,10 @@ export function buildPreToolUseHookArgs(
   }
   const command = `${quoteShell(process.execPath)} ${quoteShell(hookPath)}`;
   if (adapter === "claude") {
+    const researchHookPath = resolve(configuration.owlRoot, "apps/server/dist/research-hook.js");
+    const researchHookExists = RESEARCH_CAPTURE_ROLES.has(configuration.role)
+      && existsSync(researchHookPath)
+      && statSync(researchHookPath).isFile();
     return [
       "--settings",
       JSON.stringify({
@@ -35,6 +49,16 @@ export function buildPreToolUseHookArgs(
             matcher: ALL_TOOLS_MATCHER,
             hooks: [{ type: "command", command }],
           }],
+          ...(researchHookExists ? {
+            PostToolUse: [{
+              matcher: RESEARCH_TOOLS_MATCHER,
+              hooks: [{
+                type: "command",
+                command: `${quoteShell(process.execPath)} ${quoteShell(researchHookPath)}`,
+                timeout: RESEARCH_HOOK_TIMEOUT_SECONDS,
+              }],
+            }],
+          } : {}),
         },
       }),
     ];

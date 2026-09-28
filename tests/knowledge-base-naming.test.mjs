@@ -182,6 +182,15 @@ test("concurrent create calls reserve the same filename exclusively", async (t) 
   assert.equal((await readdir(join(knowledge.knowledgeDir, "works"))).length, 1);
 });
 
+test("create accepts the research folder", async (t) => {
+  const knowledge = await newKnowledgeBase(t);
+
+  const entry = await knowledge.create({ folder: "research", filename: "example.md", tags: ["research"], body: "Source notes" });
+
+  assert.equal(entry.path, "research/example.md");
+  assert.equal((await knowledge.get(entry.path)).body.trim(), "Source notes");
+});
+
 test("upsertBySource keeps kind and no-kind conversation entries separate", async (t) => {
   const knowledge = await newKnowledgeBase(t);
   const source = { key: "conversation_id", value: "conversation-1" };

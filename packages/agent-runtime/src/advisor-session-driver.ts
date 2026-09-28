@@ -25,10 +25,11 @@ import type {
 } from "./types.js";
 import { classifyProviderFailure, formatProviderError } from "./provider-error.js";
 import { claudeRateLimitEvidence } from "./rate-limit.js";
-import { buildAgentPermissionArgs } from "@owl/shared";
+import { buildAgentPermissionArgs, extractWebResearchCapture, type WebResearchTool } from "@owl/shared";
 
 const STDERR_RING_BUFFER_BYTES = 8 * 1024;
 const DEFAULT_STOP_GRACE_MS = 5000;
+const MAX_PENDING_WEB_TOOLS = 64;
 
 function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
   const pid = child.pid;
@@ -50,6 +51,12 @@ function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
 interface ClaudeStreamMessageContentPart {
   readonly type?: string;
   readonly text?: string;
+  readonly id?: string;
+  readonly name?: string;
+  readonly input?: unknown;
+  readonly tool_use_id?: string;
+  readonly content?: unknown;
+  readonly is_error?: unknown;
 }
 
 interface ClaudeStreamMessage {
@@ -74,6 +81,7 @@ interface ClaudeStreamLine {
   readonly subtype?: string;
   readonly session_id?: string;
   readonly message?: ClaudeStreamMessage;
+  readonly tool_use_result?: unknown;
   readonly result?: unknown;
   readonly is_error?: unknown;
   readonly api_error_status?: unknown;
@@ -233,6 +241,7 @@ export class AdvisorSessionDriver implements ProviderSession {
   private _pid = 0;
   private currentTurnId: string | null = null;
   private turnTextParts: string[] = [];
+  private readonly pendingWebTools = new Map<string, { readonly name: WebResearchTool; readonly input: unknown }>();
   private lastRateLimitEvent: unknown = null;
   private startupError: string | null = null;
 
@@ -296,6 +305,7 @@ export class AdvisorSessionDriver implements ProviderSession {
     if (this.done) {
       throw new Error(this.startupError ?? "advisor session process has already exited; cannot send a turn");
     }
+    this.pendingWebTools.clear();
     this.currentTurnId = turn.turn_id;
     this.turnTextParts = [];
     this.lastRateLimitEvent = null;
@@ -412,6 +422,7 @@ export class AdvisorSessionDriver implements ProviderSession {
   }
 
   private handleExit(exitCode: number | null, signal: string | null, spawnError: Error | null): void {
+    this.pendingWebTools.clear();
     if (this.exitHandled) {
       return;
     }
@@ -582,6 +593,46 @@ export class AdvisorSessionDriver implements ProviderSession {
       return [];
     }
 
+    if (record.type === "user") {
+      try {
+        const turnId = this.currentTurnId;
+        if (!turnId) return [];
+        const content = isRecord(record.message) ? record.message.content : undefined;
+        if (!Array.isArray(content)) return [];
+
+        const toolResults = content.filter((part) => isRecord(part) && part.type === "tool_result");
+        const events: SessionEvent[] = [];
+        for (const part of toolResults) {
+          if (!isRecord(part) || typeof part.tool_use_id !== "string") continue;
+          const pending = this.pendingWebTools.get(part.tool_use_id);
+          if (!pending) continue;
+          this.pendingWebTools.delete(part.tool_use_id);
+
+          const resultContent = part.content;
+          const contentText = typeof resultContent === "string"
+            ? resultContent
+            : Array.isArray(resultContent)
+              ? resultContent
+                  .filter((item) => isRecord(item) && item.type === "text" && typeof item.text === "string")
+                  .map((item) => (item as { readonly text: string }).text)
+                  .join("\n")
+              : "";
+          const capture = extractWebResearchCapture(
+            pending.name,
+            pending.input,
+            toolResults.length === 1 ? record.tool_use_result : undefined,
+            { isError: part.is_error === true, contentText },
+          );
+          if (capture !== null) {
+            events.push({ type: "tool.web_research", turn_id: turnId, capture });
+          }
+        }
+        return events;
+      } catch {
+        return [];
+      }
+    }
+
     if (record.type === "assistant") {
       if (!this.currentTurnId) {
         return this.protocolFailureEvents();
@@ -589,6 +640,18 @@ export class AdvisorSessionDriver implements ProviderSession {
       const content = record.message?.content ?? [];
       const events: SessionEvent[] = [];
       for (const part of content) {
+        if (
+          part &&
+          part.type === "tool_use" &&
+          (part.name === "WebFetch" || part.name === "WebSearch") &&
+          typeof part.id === "string"
+        ) {
+          this.pendingWebTools.set(part.id, { name: part.name, input: part.input });
+          if (this.pendingWebTools.size > MAX_PENDING_WEB_TOOLS) {
+            const oldest = this.pendingWebTools.keys().next().value;
+            if (oldest !== undefined) this.pendingWebTools.delete(oldest);
+          }
+        }
         if (part && part.type === "text" && typeof part.text === "string") {
           this.turnTextParts.push(part.text);
           if (this.currentTurnId) {
@@ -600,6 +663,7 @@ export class AdvisorSessionDriver implements ProviderSession {
     }
 
     if (record.type === "result") {
+      this.pendingWebTools.clear();
       const turnId = this.currentTurnId;
       if (!turnId) {
         return this.protocolFailureEvents();

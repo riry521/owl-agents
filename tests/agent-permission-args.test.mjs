@@ -17,6 +17,20 @@ async function withPermissionHook(run) {
   }
 }
 
+async function withResearchHook(run) {
+  const root = await mkdtemp(path.join(os.tmpdir(), "owl-research-permission-hook-"));
+  const permissionHook = path.join(root, "apps", "server", "dist", "permission-hook.js");
+  const researchHook = path.join(root, "apps", "server", "dist", "research-hook.js");
+  await mkdir(path.dirname(permissionHook), { recursive: true });
+  await writeFile(permissionHook, "", "utf8");
+  await writeFile(researchHook, "", "utf8");
+  try {
+    return await run(root, researchHook);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 test("Claude roles use bypassPermissions with the PreToolUse policy hook on every tool", async () => {
   await withPermissionHook((root, hookPath) => {
     const args = buildAgentPermissionArgs("advisor", "claude", { owlRoot: root });
@@ -71,4 +85,42 @@ test("agent startup fails closed when Owl's permission hook has not been built",
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("Claude Work roles install the optional Web research PostToolUse hook", async () => {
+  await withResearchHook((root, researchHook) => {
+    for (const role of ["manager", "designer", "worker", "reviewer"]) {
+      const args = buildAgentPermissionArgs(role, "claude", { owlRoot: root });
+      const settings = JSON.parse(args[3]);
+      assert.equal(settings.hooks.PostToolUse[0].matcher, "WebFetch|WebSearch", role);
+      assert.ok(settings.hooks.PostToolUse[0].hooks[0].command.includes(researchHook), role);
+      assert.equal(settings.hooks.PostToolUse[0].hooks[0].timeout, 10, role);
+    }
+  });
+});
+
+test("Advisor and Curator Claude sessions do not install the research hook", async () => {
+  await withResearchHook((root) => {
+    for (const role of ["advisor", "curator"]) {
+      const args = buildAgentPermissionArgs(role, "claude", { owlRoot: root });
+      const settings = JSON.parse(args[3]);
+      assert.equal(settings.hooks.PostToolUse, undefined, role);
+    }
+  });
+});
+
+test("Codex keeps its existing hook configuration even when the research hook exists", async () => {
+  await withResearchHook((root) => {
+    const args = buildAgentPermissionArgs("worker", "codex", { owlRoot: root });
+    assert.ok(args.every((arg) => !arg.includes("PostToolUse")));
+    assert.ok(args.every((arg) => !arg.includes("research-hook.js")));
+  });
+});
+
+test("missing research hook fails open for Claude Work roles", async () => {
+  await withPermissionHook((root) => {
+    const args = buildAgentPermissionArgs("worker", "claude", { owlRoot: root });
+    const settings = JSON.parse(args[3]);
+    assert.equal(settings.hooks.PostToolUse, undefined);
+  });
 });

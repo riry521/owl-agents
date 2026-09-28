@@ -47,6 +47,16 @@ import { AdvisorSessionRuntime, type AdvisorSettingsSnapshot } from "./advisor-r
 import { MemorySaver } from "./memory-saver.js";
 import { slugifyKnowledgeContentName } from "./knowledge-naming.js";
 import { Librarian } from "./librarian.js";
+import { LibrarianScheduler } from "./librarian-scheduler.js";
+import {
+  DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS,
+  KNOWLEDGE_AUTOMATION_SETTINGS_KEY,
+  KnowledgeAutomationValidationError,
+  readKnowledgeAutomationSettings as parseKnowledgeAutomationSettings,
+  validateKnowledgeAutomationSettings,
+  type KnowledgeAutomationSettings,
+  type KnowledgeAutomationSnapshot,
+} from "@owl/shared";
 import { EXECUTOR_CONFIG_SETTINGS_KEY, HYBRID_MODE_SETTINGS_KEY } from "./types";
 import { GitWorktreeGateway } from "./git-gateway.js";
 import { redactCredentials } from "./git-push.js";
@@ -58,6 +68,8 @@ import { ADVISOR_TEXT } from "./advisor-text.js";
 import { ownerGuidance } from "./owner-guidance.js";
 import { failedTaskBrief } from "./task-context.js";
 import { detectProcessSkillsPack, type DetectedProcessSkillsPack } from "./process-skills-pack.js";
+import { ResearchRecorder, type ResearchAttributionRole } from "./research-recorder.js";
+import { RESEARCH_CAPTURE_ROLES } from "../../shared/dist/permission-args.js";
 import {
   BACKLOG_STATUSES,
   dismissBacklogItemsInTransaction,
@@ -87,6 +99,8 @@ import {
   usageJson,
   workSummaryInstruction,
   type ProcessSkillsSettings,
+  type GuardTokenAgent,
+  type WebResearchCapture,
 } from "@owl/shared";
 import { buildAdvisorProjectCatalogInstruction } from "./advisor-project-context";
 import { createProviderPauseStore, type ProviderPauseRow, type ProviderPauseStore } from "./provider-pause-store";
@@ -432,18 +446,16 @@ export class Core {
   public readonly advisorSessions: AdvisorSessionManager;
   public readonly memorySaver: MemorySaver;
   public readonly librarian: Librarian;
+  private readonly librarianScheduler: LibrarianScheduler;
+  private readonly researchRecorder: ResearchRecorder;
   private readonly learningJobs: LearningJobs;
   private readonly ruleProposals: RuleProposals;
   private readonly learningPipeline: LearningPipeline;
   private readonly learningPipelineDebounceMs: number;
   private readonly advisorRuntime: AdvisorSessionRuntime | null;
   private advisorIdleTimer: ReturnType<typeof setInterval> | null = null;
-  private triageTimer: ReturnType<typeof setInterval> | null = null;
   private skillTimer: ReturnType<typeof setInterval> | null = null;
   private learningTimer: ReturnType<typeof setInterval> | null = null;
-  private librarianDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-  private librarianRunRequested = false;
-  private librarianRunTask: Promise<void> | null = null;
   private learningTask: Promise<void> = Promise.resolve();
   private skillReconcilePromise: Promise<void> = Promise.resolve();
   private started = false;
@@ -481,6 +493,11 @@ export class Core {
     this.dataDir = options.dataDir ?? join(this.owlRoot, "data");
     this.git = options.git ?? new GitWorktreeGateway(options.db, this.owlRoot, undefined, this.dataDir);
     this.knowledge = new KnowledgeBase(this.owlRoot);
+    this.researchRecorder = new ResearchRecorder({
+      knowledge: this.knowledge,
+      isEnabled: () => this.readKnowledgeAutomationSettings().research_autosave,
+      language: () => ownerLanguage(this.db),
+    });
     this.knowledgeNotes = new KnowledgeNotes(this.knowledge, { now: options.now });
     this.knowledgeRetriever = new KnowledgeRetriever(this.knowledgeNotes, { now: options.now });
     this.ruleStore = new RuleStore(this.owlRoot);
@@ -530,6 +547,19 @@ export class Core {
           this.persistAdvisorReply(conversationId, reply, turnId, origin, suggestedActions),
         onError: (conversationId, errorMessage, turnId, origin) =>
           this.persistAdvisorError(conversationId, errorMessage, turnId, origin),
+        onWebResearch: (capture, context) => {
+          const conversation = this.db.get<{ work_id: string | null; work_title: string | null }>(
+            `SELECT conversations.work_id, works.title AS work_title
+               FROM conversations LEFT JOIN works ON works.id = conversations.work_id
+              WHERE conversations.id = ?`,
+            context.conversation_id,
+          );
+          void this.researchRecorder.record(capture, {
+            role: "advisor",
+            conversation_id: context.conversation_id,
+            ...(conversation?.work_id ? { work_id: conversation.work_id, work_title: conversation.work_title } : {}),
+          });
+        },
       });
     } else {
       this.advisorRuntime = null;
@@ -537,6 +567,7 @@ export class Core {
     this.librarian = new Librarian(this.knowledge, {
       getModelConfig: () => resolveRoleModelFromDb(this.db, "librarian"),
     });
+    this.librarianScheduler = new LibrarianScheduler({ run: () => this.librarian.run() });
     this.learningJobs = new LearningJobs({ db: this.db, writeLane: this.writeLane, now: options.now });
     this.ruleProposals = new RuleProposals({
       db: this.db,
@@ -552,7 +583,6 @@ export class Core {
       skillBox: this.skillBox,
       notes: this.knowledgeNotes,
       ruleProposals: this.ruleProposals,
-      onNotesChanged: () => this.scheduleLibrarianRun(),
       now: options.now,
       debounce_ms: this.learningPipelineDebounceMs,
     });
@@ -1033,12 +1063,6 @@ export class Core {
       void this.checkAdvisorIdle().catch((error) => console.error("[owl-core] Advisor idle check failed", error));
     }, 60_000);
     this.advisorIdleTimer.unref();
-    this.triageTimer = setInterval(() => {
-      const apiKey = this.options.getTypesafeApiKey?.() || undefined;
-      void this.librarian.triageConversations(this.db, apiKey).catch((error) =>
-        console.error("[owl-core] Conversation triage failed", error));
-    }, 300_000);
-    this.triageTimer.unref();
     this.skillTimer = setInterval(() => {
       this.refreshProcessSkillsPack();
       this.scheduleSkillReconciliation();
@@ -1060,6 +1084,7 @@ export class Core {
     this.workDriver.start(runningWorks.map((work) => work.id));
     this.providerPauseController.start();
     for (const provider of recovery.reviewerProvidersToResume) this.workflow.resumeProvider(provider);
+    this.librarianScheduler.start(this.readKnowledgeAutomationSettings().librarian_times);
   }
 
   private scheduleSkillReconciliation(): void {
@@ -1079,41 +1104,6 @@ export class Core {
 
   private scheduleLearningRun(source: string): void {
     this.trackLearningTask(this.learningPipeline.requestRun(), source);
-  }
-
-  private scheduleLibrarianRun(): void {
-    if (!this.started) return;
-    if (this.librarianDebounceTimer !== null) clearTimeout(this.librarianDebounceTimer);
-    this.librarianDebounceTimer = setTimeout(() => {
-      this.librarianDebounceTimer = null;
-      this.queueLibrarianRun();
-    }, this.learningPipelineDebounceMs);
-    this.librarianDebounceTimer.unref();
-  }
-
-  private queueLibrarianRun(): void {
-    if (!this.started) return;
-    this.librarianRunRequested = true;
-    if (this.librarianRunTask !== null) return;
-
-    const task = Promise.resolve().then(() => this.drainLibrarianRuns());
-    this.librarianRunTask = task;
-    void task.then(() => {
-      if (this.librarianRunTask === task) this.librarianRunTask = null;
-    });
-  }
-
-  private async drainLibrarianRuns(): Promise<void> {
-    while (this.librarianRunRequested && this.started) {
-      this.librarianRunRequested = false;
-      try {
-        await this.librarian.run();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logger.warn(`[owl-core] Librarian run after note changes failed: ${message}`);
-      }
-    }
-    this.librarianRunRequested = false;
   }
 
   private readProcessSkillsSettings(): ProcessSkillsSettings {
@@ -1251,24 +1241,18 @@ export class Core {
 
   public async stop(options: { force?: boolean } = {}): Promise<void> {
     this.providerPauseController.stop();
-    if (this.librarianDebounceTimer !== null) {
-      clearTimeout(this.librarianDebounceTimer);
-      this.librarianDebounceTimer = null;
-    }
     if (!this.started) {
+      await this.librarianScheduler.stop();
       this.skillCurator.stop();
       await this.learningTask;
-      await this.librarianRunTask;
+      await this.researchRecorder.idle();
       return;
     }
     this.started = false;
+    await this.librarianScheduler.stop();
     if (this.advisorIdleTimer !== null) {
       clearInterval(this.advisorIdleTimer);
       this.advisorIdleTimer = null;
-    }
-    if (this.triageTimer !== null) {
-      clearInterval(this.triageTimer);
-      this.triageTimer = null;
     }
     if (this.skillTimer !== null) {
       clearInterval(this.skillTimer);
@@ -1292,11 +1276,11 @@ export class Core {
     this.advisorRuntime?.stopImmediately();
     await this.workflow.stop();
     await this.learningTask;
-    await this.librarianRunTask;
     await this.dispatcher.stop();
     // These lanes contain only serialized SQLite mutations. Drain them so
     // already-queued state changes commit before the database connection closes.
     await this.writeLane.drain();
+    await this.researchRecorder.idle();
   }
 
   private async emitProviderPauseEvent(event: ProviderPauseEvent): Promise<void> {
@@ -2882,6 +2866,28 @@ export class Core {
       limit + 1,
     );
     return listResponse(query.request_id, rows.slice(0, limit).map(toMessage), rows.length > limit, limit);
+  }
+
+  public async recordAgentResearch(
+    agent: GuardTokenAgent,
+    capture: WebResearchCapture,
+  ): Promise<{ readonly accepted: boolean; readonly reason?: string }> {
+    if (!this.readKnowledgeAutomationSettings().research_autosave) return { accepted: false, reason: "disabled" };
+    if (!RESEARCH_CAPTURE_ROLES.has(agent.role)) return { accepted: false, reason: "role" };
+    const run = this.db.get<{ work_id: string | null; work_title: string | null; task_id: string | null }>(
+      `SELECT agent_runs.work_id, works.title AS work_title, agent_runs.task_id
+         FROM agent_runs LEFT JOIN works ON works.id = agent_runs.work_id
+        WHERE agent_runs.id = ?`,
+      agent.agent_run_id,
+    );
+    void this.researchRecorder.record(capture, {
+      role: agent.role as ResearchAttributionRole,
+      work_id: run?.work_id ?? null,
+      work_title: run?.work_title ?? null,
+      task_id: run?.task_id ?? null,
+      agent_run_id: agent.agent_run_id,
+    });
+    return { accepted: true };
   }
 
   public async ingestConversation(conversationId: string): Promise<{ path: string }> {
@@ -5609,6 +5615,77 @@ export class Core {
       console.warn("[owl-core] Could not read knowledge settings; using defaults", error);
       return DEFAULT_KNOWLEDGE_LIMITS;
     }
+  }
+
+  private readKnowledgeAutomationSettings(): KnowledgeAutomationSettings {
+    try {
+      const row = this.db.get<{ value_json: string }>(
+        "SELECT value_json FROM settings WHERE key = ?",
+        KNOWLEDGE_AUTOMATION_SETTINGS_KEY,
+      );
+      if (!row) return DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS;
+      return parseKnowledgeAutomationSettings(JSON.parse(row.value_json) as unknown, (message) => {
+        console.warn(`[owl-core] ${message}`);
+      });
+    } catch (error) {
+      console.warn("[owl-core] Could not read knowledge automation settings; using defaults", error);
+      return DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS;
+    }
+  }
+
+  public async getKnowledgeAutomationSettings(): Promise<KnowledgeAutomationSnapshot> {
+    const settings = this.readKnowledgeAutomationSettings();
+    let timeZone = "local";
+    try {
+      timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "local";
+    } catch {
+      // Some runtimes do not expose an IANA time zone.
+    }
+    return {
+      ...settings,
+      next_librarian_run_at: this.librarianScheduler.nextRunAt()?.toISOString() ?? null,
+      time_zone: timeZone,
+    };
+  }
+
+  public async setKnowledgeAutomationSettings(input: KnowledgeAutomationSettings): Promise<KnowledgeAutomationSnapshot> {
+    let normalized: KnowledgeAutomationSettings;
+    try {
+      normalized = validateKnowledgeAutomationSettings(input);
+    } catch (error) {
+      if (error instanceof KnowledgeAutomationValidationError) {
+        throw validationError(error.message, { field: error.field });
+      }
+      throw error;
+    }
+
+    await this.writeLane.write({
+      mutateState: (transaction) => {
+        const now = utcNow();
+        ensureOwner(transaction, DEFAULT_OWNER_ID, now);
+        transaction.run(
+          `INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at)
+           VALUES (?, ?, '1.0.0', ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
+          KNOWLEDGE_AUTOMATION_SETTINGS_KEY,
+          DEFAULT_OWNER_ID,
+          JSON.stringify(normalized),
+          now,
+        );
+        return normalized;
+      },
+      event: {
+        idempotencyKey: `settings-knowledge-automation:${createUlid()}`,
+        type: "settings.knowledge_automation_updated",
+        payload: {
+          librarian_times: [...normalized.librarian_times],
+          research_autosave: normalized.research_autosave,
+        },
+      },
+      outbox: [{ provider: "websocket" }],
+    });
+    this.librarianScheduler.reschedule(normalized.librarian_times);
+    return this.getKnowledgeAutomationSettings();
   }
 
   private async composeKnowledgeForWork(workId: string): Promise<string | null> {

@@ -67,11 +67,19 @@ import type {
   SaveProviderInput,
   AdvisorSessionsPort,
 } from "./types.js";
+import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
+import type { WebResearchCapture } from "../../../packages/shared/dist/web-research.js";
 
 import { IntegrationStore } from "./integration-store.js";
 import { AppSettingsStore, type CustomProviderConfig } from "./app-settings-store.js";
 import { AdvisorFolderError, advisorFolderDefaults, ensureAdvisorSharedDir, isGitIgnoredDirectory, normalizeAdvisorFolder } from "./advisor-folders.js";
 import { detectProcessSkillsPack } from "../../../packages/core/dist/process-skills-pack.js";
+import {
+  DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS,
+  KnowledgeAutomationValidationError,
+  validateKnowledgeAutomationSettings,
+} from "../../../packages/shared/dist/knowledge-automation.js";
+import type { KnowledgeAutomationSettings, KnowledgeAutomationSnapshot } from "../../../packages/shared/dist/knowledge-automation.js";
 import {
   DEFAULT_OWNER_LANGUAGE,
   ownerLanguageFromLocale,
@@ -236,6 +244,32 @@ function detectProcessSkillsSettings(
   };
 }
 
+function validateKnowledgeAutomationSettingsInput(value: unknown): KnowledgeAutomationSettings {
+  try {
+    return validateKnowledgeAutomationSettings(value);
+  } catch (error) {
+    if (error instanceof KnowledgeAutomationValidationError) {
+      throw new ApiError(400, "validation_error", error.message, { field: error.field });
+    }
+    throw error;
+  }
+}
+
+function knowledgeAutomationSnapshot(settings: KnowledgeAutomationSettings): KnowledgeAutomationSnapshot {
+  let timeZone = "local";
+  try {
+    timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "local";
+  } catch {
+    // Keep the design's fallback when the runtime cannot resolve the host zone.
+  }
+  return {
+    ...settings,
+    librarian_times: [...settings.librarian_times],
+    next_librarian_run_at: null,
+    time_zone: timeZone,
+  };
+}
+
 function builtinProviderToRecord(provider: BuiltinProviderInfo): ProviderConfigRecord {
   return {
     id: provider.id,
@@ -268,6 +302,10 @@ export class MemoryCore implements CorePort {
   private language: OwnerLanguage = DEFAULT_OWNER_LANGUAGE;
   private executorConfig: ExecutorSettingsConfig = { provider: "claude", model: DEFAULT_HARNESS_MODELS.claude, effort: "high", timeout_ms: DEFAULT_AGENT_WALL_TIMEOUT_MS };
   private processSkillsSettings: ProcessSkillsSettingsInput = { enabled: true, path: null };
+  private knowledgeAutomationSettings: KnowledgeAutomationSettings = {
+    ...DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS,
+    librarian_times: [...DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS.librarian_times],
+  };
   private advisorPersona = "";
   private advisorSharedDir = "";
   private advisorScreenshotDir = "";
@@ -915,6 +953,13 @@ export class MemoryCore implements CorePort {
     return language;
   }
 
+  async recordAgentResearch(
+    _agent: GuardTokenAgent,
+    _capture: WebResearchCapture,
+  ): Promise<{ readonly accepted: boolean; readonly reason?: string }> {
+    return { accepted: false, reason: "unavailable" };
+  }
+
   async getExecutorConfig(): Promise<ExecutorSettingsConfig> {
     return { ...this.executorConfig };
   }
@@ -932,6 +977,15 @@ export class MemoryCore implements CorePort {
     validateProcessSkillsSettings(input);
     this.processSkillsSettings = { enabled: input.enabled, path: input.path };
     return detectProcessSkillsSettings(this.processSkillsSettings);
+  }
+
+  async getKnowledgeAutomationSettings(): Promise<KnowledgeAutomationSnapshot> {
+    return knowledgeAutomationSnapshot(this.knowledgeAutomationSettings);
+  }
+
+  async setKnowledgeAutomationSettings(input: KnowledgeAutomationSettings): Promise<KnowledgeAutomationSnapshot> {
+    this.knowledgeAutomationSettings = validateKnowledgeAutomationSettingsInput(input);
+    return knowledgeAutomationSnapshot(this.knowledgeAutomationSettings);
   }
 
   async getTypesafeApiKey(): Promise<string> {
@@ -1154,6 +1208,7 @@ interface ExternalCommandResponse {
 
 interface ExternalCore {
   ruleStore?: unknown;
+  recordAgentResearch?(agent: GuardTokenAgent, capture: WebResearchCapture): Promise<{ readonly accepted: boolean; readonly reason?: string }>;
   advisorRespond?(conversationId: string, messageId: string, origin?: AdvisorOrigin): Promise<void>;
   advisorSessions?: AdvisorSessionsPort;
   restartAdvisorSession?(ownerId: string): Promise<void>;
@@ -1184,6 +1239,8 @@ interface ExternalCore {
   setExecutorConfig?(config: ExecutorSettingsConfig): Promise<ExecutorSettingsConfig>;
   getProcessSkillsSettings?(): Promise<ProcessSkillsSettingsSnapshot>;
   setProcessSkillsSettings?(input: ProcessSkillsSettingsInput): Promise<ProcessSkillsSettingsSnapshot>;
+  getKnowledgeAutomationSettings?(): Promise<KnowledgeAutomationSnapshot>;
+  setKnowledgeAutomationSettings?(input: KnowledgeAutomationSettings): Promise<KnowledgeAutomationSnapshot>;
   listProviderPauses?(): ProviderPauseView[];
   start(): Promise<void>;
   stop(options?: { force?: boolean; timeoutMs?: number }): Promise<void>;
@@ -1473,6 +1530,10 @@ export class ExternalCoreAdapter implements CorePort {
   private readonly integrationStore: IntegrationStore;
   private readonly appSettings: AppSettingsStore;
   private processSkillsSettings: ProcessSkillsSettingsInput = { enabled: true, path: null };
+  private knowledgeAutomationSettings: KnowledgeAutomationSettings = {
+    ...DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS,
+    librarian_times: [...DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS.librarian_times],
+  };
   private readonly detectProviderAvailability: ProviderAvailabilityDetector;
   private processSkillsInstallCommandList: ProcessSkillsInstallCommand[] | null = null;
   readonly ruleStore: unknown;
@@ -2113,6 +2174,18 @@ export class ExternalCoreAdapter implements CorePort {
     }
   }
 
+  async recordAgentResearch(
+    agent: GuardTokenAgent,
+    capture: WebResearchCapture,
+  ): Promise<{ readonly accepted: boolean; readonly reason?: string }> {
+    if (typeof this.core.recordAgentResearch !== "function") return { accepted: false, reason: "unavailable" };
+    try {
+      return await this.core.recordAgentResearch(agent, capture);
+    } catch (error) {
+      throw externalError(error, "recordAgentResearch");
+    }
+  }
+
   async setLanguage(language: OwnerLanguage): Promise<OwnerLanguage> {
     if (typeof this.core.setLanguage !== "function") {
       throw new ApiError(503, "core_not_ready", "このCoreは言語設定に対応していません。Coreを更新してください。");
@@ -2178,6 +2251,29 @@ export class ExternalCoreAdapter implements CorePort {
     validateProcessSkillsSettings(input);
     this.processSkillsSettings = { enabled: input.enabled, path: input.path };
     return detectProcessSkillsSettings(this.processSkillsSettings, this.processSkillsInstallCommands());
+  }
+
+  async getKnowledgeAutomationSettings(): Promise<KnowledgeAutomationSnapshot> {
+    if (typeof this.core.getKnowledgeAutomationSettings === "function") {
+      try {
+        return await this.core.getKnowledgeAutomationSettings();
+      } catch (error) {
+        throw externalError(error, "getKnowledgeAutomationSettings");
+      }
+    }
+    return knowledgeAutomationSnapshot(this.knowledgeAutomationSettings);
+  }
+
+  async setKnowledgeAutomationSettings(input: KnowledgeAutomationSettings): Promise<KnowledgeAutomationSnapshot> {
+    if (typeof this.core.setKnowledgeAutomationSettings === "function") {
+      try {
+        return await this.core.setKnowledgeAutomationSettings(input);
+      } catch (error) {
+        throw externalError(error, "setKnowledgeAutomationSettings");
+      }
+    }
+    this.knowledgeAutomationSettings = validateKnowledgeAutomationSettingsInput(input);
+    return knowledgeAutomationSnapshot(this.knowledgeAutomationSettings);
   }
 
   async getTypesafeApiKey(): Promise<string> {

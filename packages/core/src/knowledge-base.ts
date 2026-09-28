@@ -41,7 +41,7 @@ export interface KnowledgeUpdateInput {
   metadata?: Record<string, string>;
 }
 
-const KNOWLEDGE_SUBDIRS = ["global", "projects", "works", "policies", "notes"] as const;
+const KNOWLEDGE_SUBDIRS = ["global", "projects", "works", "policies", "notes", "research"] as const;
 const SNIPPET_LENGTH = 200;
 
 export class KnowledgeBase {

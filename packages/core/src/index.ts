@@ -26,6 +26,19 @@ export {
 export { WorkflowEngine } from "./workflow-engine";
 export { WorkDriver } from "./work-driver";
 export { KnowledgeBase } from "./knowledge-base";
+export { ResearchRecorder, extractResearchKeyPoints } from "./research-recorder.js";
+export type { ResearchAttribution, ResearchAttributionRole, ResearchRecordResult, ResearchRecorderOptions, ResearchSkipReason } from "./research-recorder.js";
+export {
+  classifyResearchTarget,
+  filterResearchLinks,
+  isAuthResearchUrl,
+  isPrivateResearchHost,
+  looksLikeLoginPage,
+  normalizeResearchQuery,
+  normalizeResearchUrl,
+  redactResearchText,
+} from "./research-filter.js";
+export type { ResearchTargetVerdict } from "./research-filter.js";
 export { migrateLegacyKnowledge } from "./knowledge-migration";
 export type { LegacyKnowledgeMigrationResult } from "./knowledge-migration";
 export { parseLessonBlocks } from "./final-verdict";
@@ -151,6 +164,4 @@ export type { AdvisorSession, AdvisorSessionStatus, AdvisorSessionEndReason } fr
 export type { AdvisorRuntimeConfig, AdvisorSettingsSnapshot } from "./advisor-runtime";
 export type { SessionSummary } from "./memory-saver";
 export type { CurationAction, CurationActionKind, CurationReport, LibrarianConfig, LibrarianCurationRequest, LibrarianModelConfig } from "./librarian";
-export { splitIntoPairs, triageConversation, buildTriagedDocument } from "./triage";
-export type { QAPair, TriageResult } from "./triage";
 export type { WorktreeReconcilerDeps, WorktreeReconcileScope, WorktreeReconcileResult } from "./worktree-reconciler";

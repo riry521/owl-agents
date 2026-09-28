@@ -72,6 +72,8 @@ import type {
   SkillSettings,
   SkillState,
   ProcessSkillsSettingsData,
+  KnowledgeAutomationSettingsInput,
+  KnowledgeAutomationSettingsData,
 } from '@/lib/types';
 import { runOrdinals } from '@/lib/format';
 import type { Locale } from '@/lib/i18n';
@@ -1536,6 +1538,20 @@ export async function setProcessSkillsSettings(input: {
   path: string | null;
 }): Promise<ProcessSkillsSettingsData> {
   const response = await command<ProcessSkillsSettingsData>('/settings/process-skills', input, 0, 'PUT');
+  return response.data;
+}
+
+/** GET /api/v1/settings/knowledge-automation. */
+export async function getKnowledgeAutomationSettings(): Promise<KnowledgeAutomationSettingsData> {
+  const response = await requestJson<ApiEnvelope<KnowledgeAutomationSettingsData>>('/settings/knowledge-automation');
+  return response.data;
+}
+
+/** PUT /api/v1/settings/knowledge-automation. The server does not version this setting (version is always 0). */
+export async function setKnowledgeAutomationSettings(
+  input: KnowledgeAutomationSettingsInput,
+): Promise<KnowledgeAutomationSettingsData> {
+  const response = await command<KnowledgeAutomationSettingsData>('/settings/knowledge-automation', input, 0, 'PUT');
   return response.data;
 }
 

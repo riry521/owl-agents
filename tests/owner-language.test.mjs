@@ -48,65 +48,6 @@ const idleRunner = {
   runAdvisor: async () => ({ reply: "" }),
 };
 
-test("notes changes debounce Librarian runs, serialize reruns, and warn on failure", async (t) => {
-  const { core } = await openCore(t, idleRunner, { skillCuratorDebounceMs: 10 });
-  await core.start();
-
-  let runCount = 0;
-  let activeRuns = 0;
-  let maxActiveRuns = 0;
-  let releaseFirstRun;
-  const warnings = [];
-  core.librarian.run = async () => {
-    runCount += 1;
-    activeRuns += 1;
-    maxActiveRuns = Math.max(maxActiveRuns, activeRuns);
-    try {
-      if (runCount === 1) {
-        await new Promise((resolve) => { releaseFirstRun = resolve; });
-        throw new Error("test Librarian failure");
-      }
-    } finally {
-      activeRuns -= 1;
-    }
-  };
-
-  const onNotesChanged = core.learningPipeline.onNotesChanged;
-  assert.equal(onNotesChanged(), undefined);
-  assert.equal(onNotesChanged(), undefined);
-  assert.equal(runCount, 0, "notifications return without running the Librarian");
-  core.logger.warn = (message) => warnings.push(message);
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  assert.equal(runCount, 1, "notifications in one debounce window produce one run");
-
-  onNotesChanged();
-  onNotesChanged();
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  assert.equal(runCount, 1, "a run already in progress is not overlapped");
-  releaseFirstRun();
-
-  const deadline = Date.now() + 1_000;
-  while (runCount < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
-  assert.equal(runCount, 2, "notifications during a run coalesce into one follow-up run");
-  assert.equal(maxActiveRuns, 1);
-  assert.equal(warnings.length, 1);
-  assert.match(warnings[0], /Librarian/);
-});
-
-test("Core stop clears and unreferences the pending Librarian debounce timer", async (t) => {
-  const { core } = await openCore(t, idleRunner, { skillCuratorDebounceMs: 25 });
-  await core.start();
-  let runCount = 0;
-  core.librarian.run = async () => { runCount += 1; };
-
-  core.learningPipeline.onNotesChanged();
-  assert.equal(core.librarianDebounceTimer.hasRef(), false);
-  await core.stop({ force: true });
-  assert.equal(core.librarianDebounceTimer, null);
-  await new Promise((resolve) => setTimeout(resolve, 40));
-  assert.equal(runCount, 0);
-});
-
 test("the OS locale only seeds the language; a stored choice is kept", async (t) => {
   assert.equal(ownerLanguageFromLocale("ja-JP"), "ja");
   assert.equal(ownerLanguageFromLocale("ja_JP.UTF-8"), "ja");

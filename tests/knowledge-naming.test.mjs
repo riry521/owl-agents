@@ -84,15 +84,15 @@ test("filename resolution separates matching conversations by kind", async (t) =
   await writeFile(join(dir, "advisor-chat.md"), "---\nconversation_id: conv-1\n---\nadvisor notes\n");
 
   const source = { key: "conversation_id", value: "conv-1" };
-  const triage = await resolveKnowledgeFilename(dir, "advisor-chat", { ...source, kind: "triage" });
-  assert.deepEqual(triage, { filename: "advisor-chat-2.md", existing: false });
-  await writeFile(join(dir, triage.filename), "---\nconversation_id: conv-1\nkind: triage\n---\ntriage notes\n");
+  const summary = await resolveKnowledgeFilename(dir, "advisor-chat", { ...source, kind: "summary" });
+  assert.deepEqual(summary, { filename: "advisor-chat-2.md", existing: false });
+  await writeFile(join(dir, summary.filename), "---\nconversation_id: conv-1\nkind: summary\n---\nsummary notes\n");
 
   assert.deepEqual(await resolveKnowledgeFilename(dir, "renamed-chat", source), {
     filename: "advisor-chat.md",
     existing: true,
   });
-  assert.deepEqual(await resolveKnowledgeFilename(dir, "renamed-chat", { ...source, kind: "triage" }), {
+  assert.deepEqual(await resolveKnowledgeFilename(dir, "renamed-chat", { ...source, kind: "summary" }), {
     filename: "advisor-chat-2.md",
     existing: true,
   });

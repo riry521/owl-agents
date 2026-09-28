@@ -30,6 +30,7 @@ import type {
   TokenUsage,
   AdvisorSuggestedAction,
   RateLimitInfo,
+  WebResearchCapture,
 } from "@owl/shared";
 
 /** Snapshot of the provider/harness/model/effort/system-prompt to (re)start an Advisor session with. */
@@ -54,6 +55,11 @@ export interface AdvisorRuntimeConfig {
   readonly isProviderPaused?: (provider: string) => boolean;
   readonly onProviderRateLimited?: (provider: string, rateLimit: RateLimitInfo) => Promise<{ readonly resume_at: string | null }>;
   readonly onProviderSucceeded?: (provider: string, runStartedAt: string) => Promise<void>;
+  /** Advisor WebFetch / WebSearch results; recording failures never affect the turn. */
+  readonly onWebResearch?: (
+    capture: WebResearchCapture,
+    context: { readonly conversation_id: string; readonly turn_id: string },
+  ) => void;
   /**
    * Resolves a user message's attachment_ids to absolute file paths (plus
    * any owner-language notes, e.g. for a quarantined attachment). Used to
@@ -916,6 +922,17 @@ export class AdvisorSessionRuntime {
           break;
 
         case "turn.delta":
+          break;
+
+        case "tool.web_research":
+          try {
+            this.config.onWebResearch?.(event.capture, {
+              conversation_id: turnRow.conversation_id,
+              turn_id: event.turn_id,
+            });
+          } catch {
+            // Research recording is fire-and-forget and cannot fail a turn.
+          }
           break;
 
         case "turn.completed": {

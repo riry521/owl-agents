@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { AdvisorSuggestedAction } from "./advisor-response.js";
 import type { OwnerLanguage } from "./owner-language.js";
+import type { WebResearchCapture } from "./web-research.js";
 import type { AgentFailureClass, RateLimitInfo } from "./rate-limit.js";
 
 export type { AgentFailureClass, RateLimitInfo, RateLimitSource } from "./rate-limit.js";
@@ -21,11 +22,33 @@ export {
 export { WORK_SUMMARY_SECTIONS, workSummaryInstruction, workSummaryLabel, workSummarySkeleton, type WorkSummarySection } from "./work-summary.js";
 export { GUARD_COMMAND_KEYS, GUARD_CONTENT_KEYS, GUARD_NAMED_TOOLS, GUARD_PATH_KEYS, guardChecksToolCall } from "./guard-inputs.js";
 export { GUARD_TOKEN_FILE_ENV, type GuardTokenAgent, type GuardTokenIssuer, type GuardTokenLease } from "./guard-token.js";
-export { buildAgentPermissionArgs, buildPreToolUseHookArgs, type AgentPermissionAdapter, type AgentPermissionRole, type AgentGuardConfiguration } from "./permission-args.js";
+export { buildAgentPermissionArgs, buildPreToolUseHookArgs, RESEARCH_CAPTURE_ROLES, type AgentPermissionAdapter, type AgentPermissionRole, type AgentGuardConfiguration } from "./permission-args.js";
+export {
+  extractWebResearchCapture,
+  hasAuthPasswordForm,
+  WEB_RESEARCH_MAX_CONTENT_CHARS,
+  WEB_RESEARCH_MAX_LINKS,
+  WEB_RESEARCH_TOOLS,
+  type WebResearchCapture,
+  type WebResearchLink,
+  type WebResearchTool,
+} from "./web-research.js";
 export { addTokenUsage, cliTokenUsage, tokenUsageOf, usageJson } from "./token-usage.js";
 export { MINIMAL_CODE_RULES, WORKER_SUBAGENT_RULES, WORKING_STYLE_RULES } from "./agent-rules.js";
 export { PROCESS_SKILLS_INSTALL_COMMANDS, PROCESS_SKILLS_PROMPT_FILES, PROCESS_SKILLS_SETTINGS_KEY, renderProcessSkills, type ProcessSkillsHarness, type ProcessSkillsInstallCommand, type ProcessSkillsPackForPrompt, type ProcessSkillsRole, type ProcessSkillsSettings } from "./process-skills.js";
 export { designDocumentPath } from "./design-documents.js";
+export {
+  DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS,
+  DEFAULT_LIBRARIAN_TIMES,
+  KNOWLEDGE_AUTOMATION_SETTINGS_KEY,
+  LIBRARIAN_TIME_PATTERN,
+  MAX_LIBRARIAN_TIMES,
+  KnowledgeAutomationValidationError,
+  readKnowledgeAutomationSettings,
+  validateKnowledgeAutomationSettings,
+  type KnowledgeAutomationSettings,
+  type KnowledgeAutomationSnapshot,
+} from "./knowledge-automation.js";
 export { DEFAULT_ROLE_MODELS } from "./default-role-models.js";
 export {
   builtinProviderHarness,
@@ -217,6 +240,7 @@ export interface TokenUsage { readonly input_tokens?: number; readonly output_to
 export type SessionEvent =
   | { type: "session.ready"; provider_session_id: string; pid: number }
   | { type: "turn.delta"; turn_id: string; text: string }
+  | { type: "tool.web_research"; turn_id: string; capture: WebResearchCapture }
   | { type: "turn.completed"; turn_id: string; reply: string; usage: TokenUsage | null }
   | { type: "turn.failed"; turn_id: string; error: string; rate_limit?: RateLimitInfo }
   | { type: "session.compacted"; cause: "auto" | "manual"; pre_tokens: number | null; summary: string | null; transcript_path: string | null }

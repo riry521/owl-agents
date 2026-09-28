@@ -833,6 +833,16 @@ export interface ProcessSkillsSettingsData {
   install_commands: ProcessSkillsInstallCommand[];
 }
 
+export interface KnowledgeAutomationSettingsInput {
+  librarian_times: string[];
+  research_autosave: boolean;
+}
+
+export interface KnowledgeAutomationSettingsData extends KnowledgeAutomationSettingsInput {
+  next_librarian_run_at: string | null;
+  time_zone: string;
+}
+
 // ---- Skill Box UI aggregate views ------------------------------------------
 
 /** Skill list screen filter, mirrored from the GET /skills query parameters. */

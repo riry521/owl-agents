@@ -1,11 +1,9 @@
-import { splitIntoPairs, triageConversation, buildTriagedDocument } from "./triage.js";
 import { randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import { basename, extname, join, resolve, sep } from "node:path";
 
 import { KnowledgeBase, type KnowledgeEntry } from "./knowledge-base.js";
 import { KnowledgeNotes, writeAtomic } from "./knowledge-notes.js";
-import { slugifyKnowledgeContentName } from "./knowledge-naming.js";
 
 const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
 const DEFAULT_HOT_MD_PATH = "hot.md";
@@ -162,6 +160,8 @@ interface HotKnowledgeEntry extends KnowledgeEntry {
  * methods, while the local detectors provide a useful deterministic baseline.
  */
 export class Librarian {
+  private activeRun: Promise<CurationReport> | null = null;
+
   private readonly knowledge: KnowledgeBase;
   private readonly notes: KnowledgeNotes;
   private readonly config: LibrarianConfig;
@@ -399,7 +399,16 @@ export class Librarian {
     return applied;
   }
 
-  public async run(): Promise<CurationReport> {
+  public run(): Promise<CurationReport> {
+    if (this.activeRun) return this.activeRun;
+    const task = this.runOnce().finally(() => {
+      if (this.activeRun === task) this.activeRun = null;
+    });
+    this.activeRun = task;
+    return task;
+  }
+
+  private async runOnce(): Promise<CurationReport> {
     const startedAt = new Date();
     const warnings: string[] = [];
     const runId = `librarian-${startedAt.getTime()}-${randomUUID()}`;
@@ -464,60 +473,6 @@ export class Librarian {
       actions_needing_approval: needingApproval,
       warnings,
     };
-  }
-
-  public async triageConversations(
-    db: { all: <T extends object>(sql: string, ...params: (string | number | bigint | Buffer | null)[]) => T[] },
-    apiKey?: string,
-  ): Promise<number> {
-    const key = apiKey || process.env.TYPESAFE_API_KEY;
-
-    const conversations = db.all<{ id: string }>(`
-      SELECT c.id FROM conversations c
-      WHERE c.triaged_at IS NULL
-      AND EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
-      ORDER BY c.created_at ASC LIMIT 5
-    `);
-
-    if (conversations.length === 0) return 0;
-
-    let processed = 0;
-    for (const conv of conversations) {
-      const messages = db.all<{ id: string; body: string; provider: string; created_at: string }>(`
-        SELECT id, body, provider, created_at FROM messages
-        WHERE conversation_id = ? ORDER BY created_at ASC
-      `, conv.id);
-
-      if (messages.length === 0) continue;
-
-      const pairs = splitIntoPairs(messages);
-      const results = await triageConversation(pairs, key);
-      const doc = buildTriagedDocument(pairs, results, conv.id);
-      const kept = results.filter((r) => r.action === "keep").length;
-
-      if (doc) {
-        const nameFallback = messages.map((message) => message.body).join("\n");
-        const title = slugifyKnowledgeContentName(nameFallback, "advisor");
-        const tags = ["advisor-conversation", "triaged"];
-        await this.knowledge.upsertBySource({
-          folder: "advisor/conversations",
-          title,
-          source: { key: "conversation_id", value: conv.id, kind: "triage" },
-          body: doc,
-          nameFallback,
-          tags,
-          metadata: { conversation_id: conv.id },
-        });
-      }
-
-      const now = new Date().toISOString();
-      db.all("UPDATE conversations SET triaged_at = ?, triage_kept_pairs = ?, triage_total_pairs = ? WHERE id = ?",
-        now, kept, pairs.length, conv.id);
-
-      processed++;
-    }
-
-    return processed;
   }
 
   private async readHotEntries(): Promise<HotKnowledgeEntry[]> {

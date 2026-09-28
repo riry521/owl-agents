@@ -1,5 +1,8 @@
 import type { OwnerLanguage } from "../../../packages/shared/dist/owner-language.js";
 import type { GuardTokenIssuer } from "../../../packages/shared/dist/guard-token.js";
+import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
+import type { KnowledgeAutomationSettings, KnowledgeAutomationSnapshot } from "../../../packages/shared/dist/knowledge-automation.js";
+import type { WebResearchCapture } from "../../../packages/shared/dist/web-research.js";
 export type JsonObject = Record<string, unknown>;
 
 export type WorkState =
@@ -513,6 +516,7 @@ export interface CorePort {
     mvp_scope: string;
     version: string;
   };
+  recordAgentResearch(agent: GuardTokenAgent, capture: WebResearchCapture): Promise<{ readonly accepted: boolean; readonly reason?: string }>;
   recordSkillReads?(input: {
     readonly agent_run_id: string;
     readonly tool_name: string;
@@ -644,6 +648,8 @@ export interface CorePort {
   setExecutorConfig(config: ExecutorSettingsConfig): Promise<ExecutorSettingsConfig>;
   getProcessSkillsSettings(): Promise<ProcessSkillsSettingsSnapshot>;
   setProcessSkillsSettings(input: ProcessSkillsSettingsInput): Promise<ProcessSkillsSettingsSnapshot>;
+  getKnowledgeAutomationSettings(): Promise<KnowledgeAutomationSnapshot>;
+  setKnowledgeAutomationSettings(input: KnowledgeAutomationSettings): Promise<KnowledgeAutomationSnapshot>;
   getTypesafeApiKey(): Promise<string>;
   setTypesafeApiKey(key: string): Promise<string>;
   getAdvisorPersona(): Promise<string>;
