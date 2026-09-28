@@ -69,6 +69,29 @@ test("Claude result wrapper status and usage-limit epoch provide a reset", () =>
   assert.equal(failure.rate_limit.source, "text");
 });
 
+test("Claude CLI 'You've hit your … limit' messages are rate limits with their reset", () => {
+  // 20:40 in Tokyo, read from a server in another zone.
+  const tokyoEvening = new Date("2026-09-28T11:40:00.000Z");
+  const classify = (fields) => runtime.classifyProviderFailure("claude-cli/v1", failed(fields), "en", tokyoEvening);
+  const cases = [
+    [{ harness_status: 429, error: "You've hit your session limit · resets 9pm (Asia/Tokyo)" }, "2026-09-28T12:00:00.000Z"],
+    [{ harness_status: 429, error: "You've hit your session limit · resets 9:30pm (Asia/Tokyo) · progress saved" }, "2026-09-28T12:30:00.000Z"],
+    [{ harness_status: 429, error: "You've hit your weekly limit · resets Oct 3, 9am (Asia/Tokyo)" }, "2026-10-03T00:00:00.000Z"],
+    [{ error: "You've hit your limit · resets 9pm (Asia/Tokyo)" }, "2026-09-28T12:00:00.000Z"],
+  ];
+  for (const [fields, resetsAt] of cases) {
+    const failure = classify(fields);
+    assert.equal(failure.failure_class, "rate_limited", fields.error);
+    assert.deepEqual(failure.rate_limit, { resets_at: resetsAt, source: "text" }, fields.error);
+  }
+
+  // A parenthesis elsewhere in the output is not taken for the zone.
+  assert.deepEqual(
+    runtime.resolveRateLimitReset([{ kind: "text", text: "spawn (os error 2)\nYou've hit your usage limit. Try again at 9:30 PM." }], tokyoEvening, { harness: "codex", timeZone: "Asia/Tokyo" }),
+    { resets_at: "2026-09-28T12:30:00.000Z", source: "text" },
+  );
+});
+
 test("Codex usage-limit error and local try-again time are parsed", () => {
   const error = {
     message: "You've hit your usage limit. Try again at Sep 28, 2026 3:05 PM",

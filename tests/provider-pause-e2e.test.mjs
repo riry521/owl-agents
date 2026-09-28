@@ -143,6 +143,61 @@ test("a reported rate limit preserves Task counters and completes automatically 
   assert.deepEqual(replans, []);
 });
 
+test("a Claude session limit pauses until its reset, waits out a late reset, then completes", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.parse(NOW) });
+  const temp = await temporaryDatabase(t);
+  const clock = fakeClock();
+  const { workId } = await seedWork(temp.db, clock);
+  // What `claude -p --output-format json` prints when the account is limited.
+  const limited = JSON.stringify({
+    type: "result",
+    subtype: "success",
+    is_error: true,
+    api_error_status: 429,
+    result: "You've hit your session limit · resets 4am (UTC)",
+  });
+  const claude = runtime.createAgentRunner({
+    adapter: "claude-cli/v1",
+    outputLogDir: null,
+    provider: {
+      execute: async (request) => ({ adapter: request.adapter, stdout: limited, stderr: "", exit_code: 1, signal: null, format: "provider-json" }),
+    },
+  });
+  const advance = async (milliseconds) => {
+    t.mock.timers.setTime(Date.parse(clock.now()) + milliseconds);
+    await clock.advance(milliseconds);
+  };
+  let attempts = 0;
+  const { workflow, store, events } = makeWorkflow(temp, clock, workId, {
+    runWorker: async (input) => {
+      attempts += 1;
+      return attempts <= 2 ? claude.runWorker(input) : success();
+    },
+  });
+  const taskId = temp.db.get("SELECT id FROM tasks WHERE manager_task_id = 'WORK'").id;
+
+  await workflow.resolveDependencies(workId);
+  await workflow.launchReady(workId);
+  await workflow.drainPipelines();
+  assert.equal(temp.db.get("SELECT status FROM tasks WHERE id = ?", taskId).status, "ready");
+  assert.equal(store.list()[0].provider, "anthropic");
+  assert.equal(store.list()[0].resume_at, "2030-01-02T04:00:30.000Z");
+
+  // The provider still refuses just after the reset it reported: retry in a minute, not tomorrow.
+  await advance(Date.parse("2030-01-02T04:00:30.000Z") - Date.parse(clock.now()));
+  await waitUntil(() => attempts === 2, "Claude retry at the reported reset");
+  await workflow.drainPipelines();
+  assert.equal(temp.db.get("SELECT status FROM tasks WHERE id = ?", taskId).status, "ready");
+  assert.equal(store.list()[0].resume_at, "2030-01-02T04:02:00.000Z");
+
+  await advance(90_000);
+  await waitUntil(() => attempts === 3, "Claude retry after the late reset");
+  await workflow.drainPipelines();
+  assert.equal(temp.db.get("SELECT status FROM tasks WHERE id = ?", taskId).status, "completed");
+  assert.deepEqual(store.list(), []);
+  assert.deepEqual(events, ["provider.paused", "provider.resumed", "provider.paused", "provider.resumed"]);
+});
+
 test("missing reset times back off by 15, 30, 60, then 60 minutes", async (t) => {
   const temp = await temporaryDatabase(t);
   const clock = fakeClock();

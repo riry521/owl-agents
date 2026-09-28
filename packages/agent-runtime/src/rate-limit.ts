@@ -163,8 +163,12 @@ function to24Hour(hour: number, suffix: string | undefined): number | null {
 }
 
 function parseLocalClock(text: string, now: Date, defaultTimeZone: string): Date | null {
-  const zone = text.match(/\(([^)]+)\)\s*$/u)?.[1]?.trim() || defaultTimeZone;
-  const source = text.replace(/\s*\([^)]+\)\s*$/u, "");
+  // The zone directly follows the time; a note may come after it ("· progress saved").
+  const zoneMatch = /(\d|[AP]M)\s*\(([A-Za-z][\w+-]*(?:\/[\w+-]+)*)\)/iu.exec(text);
+  const zone = zoneMatch?.[2] ?? defaultTimeZone;
+  const source = zoneMatch === null
+    ? text
+    : text.slice(0, zoneMatch.index + zoneMatch[1].length) + text.slice(zoneMatch.index + zoneMatch[0].length);
   const nowLocal = localParts(now, zone);
   if (nowLocal === null) return null;
   const monthPattern = "Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?";

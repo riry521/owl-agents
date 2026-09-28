@@ -84,7 +84,7 @@ function isPermissionFailure(text: string, status: number | null): boolean {
 }
 
 function isRateLimitFailure(text: string, status: number | null): boolean {
-  return status === 429 || /rate[ _-]?limit|too many requests|usage[ _-]?limit|limit reached|usageLimitExceeded|\b429\b/iu.test(text);
+  return status === 429 || /rate[ _-]?limit|too many requests|usage[ _-]?limit|limit reached|hit your [^\n]*?\blimit\b|usageLimitExceeded|\b429\b/iu.test(text);
 }
 
 function isOverloadedFailure(text: string, status: number | null): boolean {
