@@ -1960,6 +1960,17 @@ a.card:hover {
   min-width: 0;
 }
 
+.project-edit {
+  display: grid;
+  flex: 1;
+  gap: 10px;
+  min-width: 0;
+}
+
+.project-edit .form-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .project-file-preview {
   max-height: 12rem;
   overflow: auto;
@@ -2061,6 +2072,10 @@ a.card:hover {
   .project-path-input {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .project-edit .form-grid {
+    grid-template-columns: 1fr;
   }
 }
 

@@ -15,7 +15,7 @@ import { RuleStore } from "../../../packages/core/dist/rule-store.js";
 import { isOwnerLanguage, type OwnerLanguage } from "../../../packages/shared/dist/owner-language.js";
 import { builtinProviderHarness, designDocumentPath, isRuleRole, RULE_ROLES } from "../../../packages/shared/dist/index.js";
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
-import type { CoreEvent, CorePort, CreateProjectInput, InboundMessageInput, IntegrationConfigPatch, IntegrationProvider, JsonObject, PostMessageInput, RoleModelSettingInput, ExecutorSettingsConfig, ProcessSkillsSettingsInput, RuntimeConfig, VerificationCommand } from "./types.js";
+import type { CoreEvent, CorePort, CreateProjectInput, DeleteProjectInput, InboundMessageInput, IntegrationConfigPatch, IntegrationProvider, JsonObject, PostMessageInput, Project, RoleModelSettingInput, ExecutorSettingsConfig, ProcessSkillsSettingsInput, RuntimeConfig, UpdateProjectInput, VerificationCommand } from "./types.js";
 import { browseProjectFolders, initializeExistingProjectFolder, initializeNewProjectFolder, inspectProjectFolder } from "./project-registration.js";
 
 declare module "./types.js" {
@@ -1035,17 +1035,60 @@ function validateProjectSetupPayload(payload: JsonObject): { mode: "existing" | 
   };
 }
 
-async function assertProjectPathNotRegistered(core: CorePort, canonicalPath: string): Promise<void> {
+async function assertProjectPathNotRegistered(core: CorePort, canonicalPath: string, excludeProjectId?: string): Promise<void> {
   let cursor: string | null = null;
   do {
     const page = await core.listProjects({ limit: 200, cursor });
-    const conflict = page.data.find((project) => resolve(project.canonical_path) === resolve(canonicalPath));
+    const conflict = page.data.find((project) => project.id !== excludeProjectId && resolve(project.canonical_path) === resolve(canonicalPath));
     if (conflict) {
-      throw new ApiError(409, "project_path_conflict", "このフォルダはすでに登録されています。Project一覧から既存の登録を利用してください。", { canonical_path: canonicalPath, project_id: conflict.id });
+      throw new ApiError(excludeProjectId ? 400 : 409, excludeProjectId ? "validation_error" : "project_path_conflict", "このフォルダはすでに登録されています。Project一覧から既存の登録を利用してください。", { canonical_path: canonicalPath, project_id: conflict.id });
     }
     cursor = page.cursor;
     if (!page.has_more) return;
   } while (cursor !== null);
+}
+
+function validateProjectUpdatePayload(payload: JsonObject): UpdateProjectInput {
+  const extra = Object.keys(payload).filter((key) => key !== "name" && key !== "canonical_path");
+  if (extra.length > 0) {
+    throw new ApiError(400, "validation_error", "UpdateProject payloadの項目が契約と一致しません。必須項目と余分な項目を確認してください。", { missing: [], extra });
+  }
+  if (!Object.prototype.hasOwnProperty.call(payload, "name") && !Object.prototype.hasOwnProperty.call(payload, "canonical_path")) {
+    throw new ApiError(400, "validation_error", "変更する項目（nameまたはcanonical_path）を1つ以上指定してください。");
+  }
+  const input: UpdateProjectInput = {};
+  if (Object.prototype.hasOwnProperty.call(payload, "name")) {
+    if (typeof payload.name !== "string") throw new ApiError(400, "validation_error", "Project名は1〜200文字で指定してください。");
+    const name = payload.name.trim();
+    if (name.length < 1 || name.length > 200) throw new ApiError(400, "validation_error", "Project名は1〜200文字で指定してください。");
+    input.name = name;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "canonical_path")) {
+    const canonicalPath = stringField(payload.canonical_path, "canonical_path", 1, 4096);
+    if (!isAbsolute(canonicalPath)) throw new ApiError(400, "validation_error", "フォルダは絶対パスで指定してください。");
+    input.canonical_path = canonicalPath;
+  }
+  return input;
+}
+
+function validateDeleteProjectPayload(payload: JsonObject): DeleteProjectInput {
+  exactKeys(payload, ["confirmed_work_count"], "DeleteProject payload");
+  if (!Number.isSafeInteger(payload.confirmed_work_count) || Number(payload.confirmed_work_count) < 0) {
+    throw new ApiError(400, "validation_error", "confirmed_work_countが不正です。0以上の整数を指定してください。");
+  }
+  return { confirmed_work_count: Number(payload.confirmed_work_count) };
+}
+
+async function requireRegisteredProject(core: CorePort, projectId: string): Promise<Project> {
+  let cursor: string | null = null;
+  do {
+    const page = await core.listProjects({ limit: 200, cursor });
+    const project = page.data.find((item) => item.id === projectId);
+    if (project) return project;
+    cursor = page.cursor;
+    if (!page.has_more) break;
+  } while (cursor !== null);
+  throw new ApiError(404, "project_not_found", "指定されたProjectが見つかりません。Project一覧を再読み込みしてください。", { resource: "project", id: projectId });
 }
 
 function projectCreatePayload(name: string, repository: { canonical_path: string; base_branch: string }): CreateProjectInput {
@@ -1774,6 +1817,62 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       return { data: created.data as unknown as JsonObject, version: created.version };
     });
     sendJson(response, 201, result);
+    return;
+  }
+
+  const projectImpactMatch = pathname.match(new RegExp(`^${API_PREFIX}/projects/([^/]+)/deletion-impact$`));
+  const projectMatch = pathname.match(new RegExp(`^${API_PREFIX}/projects/([^/]+)$`));
+  if (projectImpactMatch && method === "GET") {
+    requireOwner(request);
+    const projectId = pathId(projectImpactMatch[1], "project_id");
+    const impact = await context.core.getProjectDeletionImpact(projectId);
+    sendJson(response, 200, { request_id: requestIdValue, data: impact });
+    return;
+  }
+
+  if (projectMatch && method === "PATCH") {
+    requireOwner(request);
+    const projectId = pathId(projectMatch[1], "project_id");
+    const command = commandEnvelope(await readRequestBody(request));
+    const input = validateProjectUpdatePayload(command.payload);
+    const result = await runCommand(context, pathname, command, 200, async () => {
+      const current = await requireRegisteredProject(context.core, projectId);
+      const update: UpdateProjectInput = {};
+      if (input.name !== undefined) update.name = input.name;
+      if (input.canonical_path !== undefined && resolve(input.canonical_path) !== resolve(current.canonical_path)) {
+        const inspection = await inspectProjectFolder(input.canonical_path).catch((error: unknown) => {
+          if (error instanceof ApiError) throw error;
+          throw new ApiError(400, "validation_error", error instanceof Error ? error.message : "このフォルダを確認できませんでした。");
+        });
+        if (inspection.kind === "missing" || inspection.kind === "not_directory") {
+          throw new ApiError(400, "validation_error", "選んだフォルダが見つかりません。場所を確認してください。");
+        }
+        if (inspection.kind !== "git_ready") {
+          throw new ApiError(400, "validation_error", "このフォルダにはまだ作業履歴がありません。先にProjectの追加画面でGitを準備してから、もう一度変更してください。", { inspection });
+        }
+        if (resolve(inspection.canonical_path) !== resolve(current.canonical_path)) {
+          await assertProjectPathNotRegistered(context.core, inspection.canonical_path, projectId);
+          update.canonical_path = inspection.canonical_path;
+          update.base_branch = inspection.base_branch;
+        }
+      }
+      const updated = await context.core.updateProject(projectId, update, command);
+      return { data: updated.data as unknown as JsonObject, version: updated.version };
+    });
+    sendJson(response, 200, result);
+    return;
+  }
+
+  if (projectMatch && method === "DELETE") {
+    requireOwner(request);
+    const projectId = pathId(projectMatch[1], "project_id");
+    const command = commandEnvelope(await readRequestBody(request));
+    const input = validateDeleteProjectPayload(command.payload);
+    const result = await runCommand(context, pathname, command, 200, async () => {
+      const deleted = await context.core.deleteProject(projectId, input, command);
+      return { data: deleted.data as unknown as JsonObject, version: deleted.version };
+    });
+    sendJson(response, 200, result);
     return;
   }
 

@@ -14,6 +14,7 @@ import type {
   BacklogStatus,
   BoardView,
   CreateProjectInput,
+  DeleteProjectResult,
   DeleteWorkResult,
   Decision,
   DecisionAnswerPayload,
@@ -21,9 +22,11 @@ import type {
   DecisionView,
   Message,
   Project,
+  ProjectDeletionImpact,
   ProjectFolderBrowserResult,
   ProjectFolderInspection,
   ProjectSetupInput,
+  UpdateProjectInput,
   Report,
   RoleModelSetting,
   RoleModelSettingInput,
@@ -802,6 +805,29 @@ export async function listProjects(): Promise<Project[]> {
 /** POST /api/v1/projects with the command envelope. */
 export async function createProject(input: CreateProjectInput): Promise<Project> {
   const response = await command<Project>('/projects', input, 0);
+  return response.data;
+}
+
+/** PATCH /api/v1/projects/{id} with the command envelope. */
+export async function updateProject(id: string, input: UpdateProjectInput): Promise<Project> {
+  const response = await command<Project>(`/projects/${encodeURIComponent(id)}`, input, 0, 'PATCH');
+  return response.data;
+}
+
+/** GET /api/v1/projects/{id}/deletion-impact. */
+export async function getProjectDeletionImpact(id: string): Promise<ProjectDeletionImpact> {
+  const response = await requestJson<{ request_id: string; data: ProjectDeletionImpact }>(`/projects/${id}/deletion-impact`);
+  return response.data;
+}
+
+/** DELETE /api/v1/projects/{id} with the command envelope. */
+export async function deleteProject(id: string, confirmedWorkCount: number): Promise<DeleteProjectResult> {
+  const response = await command<DeleteProjectResult>(
+    `/projects/${id}`,
+    { confirmed_work_count: confirmedWorkCount },
+    0,
+    'DELETE',
+  );
   return response.data;
 }
 

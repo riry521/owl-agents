@@ -160,6 +160,46 @@ export interface CreateProjectInput {
   verification_plan: VerificationCommand[];
 }
 
+export interface UpdateProjectInput {
+  name?: string;
+  canonical_path?: string;
+  base_branch?: string;
+}
+
+export interface DeleteProjectInput {
+  confirmed_work_count: number;
+}
+
+export type ProjectBlocker = "running_works" | "active_agents";
+
+export interface ProjectDeletionImpact {
+  project_id: string;
+  work_count: number;
+  running_work_count: number;
+  active_agent_count: number;
+  backlog_item_count: number;
+  running_works: Array<{
+    id: string;
+    display_number: number | null;
+    title: string;
+    state: "running" | "paused" | "judgement_waiting";
+  }>;
+  blockers: ProjectBlocker[];
+  deletable: boolean;
+}
+
+export interface DeleteProjectResult {
+  project_id: string;
+  deleted: true;
+  detached_work_count: number;
+  detached_backlog_item_count: number;
+  detached_works: Array<{
+    work_id: string;
+    previous_display_number: number | null;
+    display_number: number | null;
+  }>;
+}
+
 export type ActorRole = "advisor" | "manager" | "designer" | "lead_designer" | "worker" | "reviewer" | "librarian" | "curator";
 export type ModelEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
@@ -557,6 +597,9 @@ export interface CorePort {
   listProjects(query: { limit: number; cursor: string | null }): Promise<Page<Project>>;
   listArtifacts(workId: string): Array<{ id: string; work_id: string; task_id: string | null; path: string; kind: string; created_at: string }>;
   createProject(input: CreateProjectInput, command: CommandMeta): Promise<{ data: Project; version: number }>;
+  updateProject(projectId: string, input: UpdateProjectInput, command: CommandMeta): Promise<{ data: Project; version: number }>;
+  getProjectDeletionImpact(projectId: string): Promise<ProjectDeletionImpact>;
+  deleteProject(projectId: string, input: DeleteProjectInput, command: CommandMeta): Promise<{ data: DeleteProjectResult; version: number }>;
   getModelSettings(): Promise<{ version: number; roles: RoleModelSetting[] }>;
   updateModelSettings(
     input: { roles: RoleModelSettingInput[] },

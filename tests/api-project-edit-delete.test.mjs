@@ -1,0 +1,657 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { randomBytes, randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { test } from "node:test";
+
+import { ExternalCoreAdapter, MemoryCore } from "../apps/server/dist/core.js";
+import { createOwlHttpServer } from "../apps/server/dist/http.js";
+import { Core } from "../packages/core/dist/index.js";
+import { createUlid, openDatabase } from "../packages/db/dist/index.js";
+
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const migrations = join(repoRoot, "packages/db/migrations");
+
+function command(payload, suffix = randomUUID(), expectedVersion = 0) {
+  return {
+    request_id: randomUUID(),
+    idempotency_key: `api-project-edit-delete:${suffix}`,
+    expected_version: expectedVersion,
+    payload,
+  };
+}
+
+async function setup(t, { memory = false, legacyAdapter = false, coreOptions = {} } = {}) {
+  const root = await mkdtemp(join(tmpdir(), "owl-api-project-edit-delete-"));
+  const dataDir = join(root, "data");
+  await mkdir(dataDir, { recursive: true });
+  const db = openDatabase(join(dataDir, "owl.db"));
+  db.migrate(migrations);
+  const durableCore = new Core({
+    db,
+    agentRunner: {},
+    version: "api-project-edit-delete-test",
+    owlRoot: root,
+    dataDir,
+    dispatcher: { tick_interval_ms: 25 },
+    ...coreOptions,
+  });
+  let targetCore = durableCore;
+  if (legacyAdapter) {
+    targetCore = new Proxy(durableCore, {
+      get(target, property) {
+        if (["updateProject", "getProjectDeletionImpact", "deleteProject"].includes(property)) return undefined;
+        return Reflect.get(target, property, target);
+      },
+    });
+  }
+  const httpCore = memory ? new MemoryCore({ version: "api-project-edit-delete-memory" }) : new ExternalCoreAdapter(targetCore, db, root, dataDir);
+  const originalToken = process.env.OWL_API_TOKEN;
+  const token = randomBytes(32).toString("hex");
+  process.env.OWL_API_TOKEN = token;
+  const http = createOwlHttpServer({
+    core: httpCore,
+    db,
+    webOut: root,
+    bind: "127.0.0.1",
+    port: 0,
+    contract: { contract_version: "1.0.0" },
+    owlRoot: root,
+    dataDir,
+  });
+  t.after(async () => {
+    if (http.server.listening) await http.close();
+    await durableCore.stop({ force: true });
+    db.close();
+    await rm(root, { recursive: true, force: true });
+    if (originalToken === undefined) delete process.env.OWL_API_TOKEN;
+    else process.env.OWL_API_TOKEN = originalToken;
+  });
+  try {
+    await http.listen();
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") {
+      t.skip("localhost listen is not permitted in this environment");
+      return null;
+    }
+    throw error;
+  }
+
+  const base = `http://127.0.0.1:${http.server.address().port}/api/v1`;
+  const request = (path, { method = "GET", body } = {}) => fetch(`${base}${path}`, {
+    method,
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  return { root, dataDir, db, durableCore, httpCore, request };
+}
+
+function git(cwd, ...args) {
+  return execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+}
+
+function testGit(t, cwd, ...args) {
+  try {
+    return git(cwd, ...args);
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") {
+      t.skip("git execution is not permitted in this environment");
+      return null;
+    }
+    throw error;
+  }
+}
+
+async function makeRepo(t, parent, name, branch = "main") {
+  const path = join(parent, name);
+  await mkdir(path, { recursive: true });
+  await writeFile(join(path, "README.md"), "project files remain\n");
+  if (testGit(t, path, "init", `--initial-branch=${branch}`) === null) return null;
+  if (testGit(t, path, "add", "README.md") === null) return null;
+  if (testGit(t, path, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "initial") === null) return null;
+  return path;
+}
+
+async function createProject(api, suffix, { name = `Project ${suffix}`, path, branch = "main" } = {}) {
+  const canonicalPath = await realpath(path);
+  return (await api.durableCore.createProject(command({
+    name,
+    canonical_path: canonicalPath,
+    base_branch: branch,
+    allowed_roots: [canonicalPath],
+    verification_plan: [],
+  }, `create-project:${suffix}`))).data;
+}
+
+async function createMemoryProject(api, suffix, path) {
+  const canonicalPath = await realpath(path);
+  return (await api.httpCore.createProject({
+    name: `Project ${suffix}`,
+    canonical_path: canonicalPath,
+    base_branch: "main",
+    allowed_roots: [canonicalPath],
+    verification_plan: [],
+  }, { request_id: randomUUID(), idempotency_key: `memory-project:${suffix}`, expected_version: 0 })).data;
+}
+
+async function createWork(api, title, projectId, state = "memo") {
+  const workId = (await api.durableCore.createWork(command({
+    title,
+    summary: "",
+    size: "small",
+    project_id: projectId,
+  }, `create-work:${randomUUID()}`))).data.work_id;
+  if (state !== "memo") await setWorkState(api.db, workId, state);
+  return workId;
+}
+
+async function setWorkState(db, workId, state) {
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((transaction) => transaction.run(
+    `UPDATE works
+        SET state = ?, state_version = 1, updated_at = ?,
+            completed_at = CASE WHEN ? = 'completed' THEN ? ELSE NULL END,
+            cancelled_at = CASE WHEN ? = 'cancelled' THEN ? ELSE NULL END
+      WHERE id = ?`,
+    state, now, state, now, state, now, workId,
+  ));
+}
+
+async function archiveWork(api, workId) {
+  await api.durableCore.archiveWork(workId, command({}, `archive-work:${workId}`, 1));
+}
+
+async function insertAgentRun(db, workId, status = "running") {
+  const taskId = createUlid();
+  const runId = createUlid();
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run(
+      `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, created_at, updated_at)
+       VALUES (?, ?, 'Agent blocker task', 'code', 'ready', 'normal', '', '', ?, ?)`,
+      taskId, workId, now, now,
+    );
+    transaction.run(
+      `INSERT INTO agent_runs (id, work_id, task_id, role, provider, model, status, created_at, updated_at)
+       VALUES (?, ?, ?, 'worker', 'test', 'test-model', ?, ?, ?)`,
+      runId, workId, taskId, status, now, now,
+    );
+  });
+  return runId;
+}
+
+async function insertBacklogItem(db, projectId, workId) {
+  const taskId = createUlid();
+  const reviewId = createUlid();
+  const itemId = createUlid();
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run(
+      `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, created_at, updated_at)
+       VALUES (?, ?, 'Backlog source task', 'code', 'completed', 'normal', '', '', ?, ?)`,
+      taskId, workId, now, now,
+    );
+    transaction.run(
+      `INSERT INTO reviews (id, task_id, round, verdict, findings_json, verification_report_json, created_at)
+       VALUES (?, ?, 0, 'pass', '[]', '{}', ?)`,
+      reviewId, taskId, now,
+    );
+    transaction.run(
+      `INSERT INTO backlog_items
+         (id, work_id, task_id, project_id, review_id, review_round, file, line, problem, reason, suggestion, dedupe_key, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 0, 'src/example.ts', 1, 'Example issue', '', '', ?, ?, ?)`,
+      itemId, workId, taskId, projectId, reviewId, `backlog:${itemId}`, now, now,
+    );
+  });
+  return itemId;
+}
+
+function envelope(payload, key, expectedVersion = 0) {
+  return { request_id: randomUUID(), idempotency_key: key, expected_version: expectedVersion, payload };
+}
+
+function sendCommand(api, method, path, payload, key = randomUUID(), expectedVersion = 0) {
+  return api.request(path, { method, body: envelope(payload, `project-command:${key}`, expectedVersion) });
+}
+
+async function assertApiError(response, status, code) {
+  assert.equal(response.status, status);
+  const body = await response.json();
+  assert.equal(body.error.code, code);
+  return body;
+}
+
+async function listProjects(api) {
+  const response = await api.request("/projects");
+  assert.equal(response.status, 200);
+  return (await response.json()).data;
+}
+
+function projectRow(api, projectId) {
+  return api.db.get("SELECT id, name, canonical_path, base_branch, allowed_roots_json, updated_at FROM projects WHERE id = ?", projectId);
+}
+
+test("1. PATCH name trims the value, preserves path fields, and appears in GET /projects with running work", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "name-project");
+  if (!repo) return;
+  const project = await createProject(api, "name", { path: repo });
+  const workId = await createWork(api, "Name update running work", project.id, "running");
+  const before = projectRow(api, project.id);
+
+  const response = await sendCommand(api, "PATCH", `/projects/${project.id}`, { name: "  Renamed Project  " }, "patch-name");
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).data, { ...project, name: "Renamed Project" });
+  const listed = (await listProjects(api)).find((item) => item.id === project.id);
+  assert.equal(listed.name, "Renamed Project");
+  assert.equal(listed.canonical_path, before.canonical_path);
+  assert.equal(listed.base_branch, before.base_branch);
+  assert.equal(api.db.get("SELECT project_id FROM works WHERE id = ?", workId).project_id, project.id);
+});
+
+test("2. PATCH changes to a new Git repository and adopts its canonical path and branch", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const originalRepo = await makeRepo(t, api.root, "old-project");
+  const newRepo = await makeRepo(t, api.root, "new-project", "develop");
+  if (!originalRepo || !newRepo) return;
+  const project = await createProject(api, "path", { path: originalRepo });
+
+  const response = await sendCommand(api, "PATCH", `/projects/${project.id}`, { canonical_path: newRepo }, "patch-path");
+  assert.equal(response.status, 200);
+  const updated = (await response.json()).data;
+  assert.equal(updated.canonical_path, await realpath(newRepo));
+  assert.equal(updated.base_branch, "develop");
+  assert.deepEqual(updated.allowed_roots, [await realpath(newRepo)]);
+  const listed = (await listProjects(api)).find((item) => item.id === project.id);
+  assert.equal(listed.canonical_path, await realpath(newRepo));
+});
+
+test("3. PATCH of the same Git top-level path is a no-op even with running work", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "same-path-project");
+  if (!repo) return;
+  const project = await createProject(api, "same-path", { path: repo });
+  await createWork(api, "Same path running work", project.id, "running");
+  const before = projectRow(api, project.id);
+  const subdirectory = join(repo, "subfolder");
+  await mkdir(subdirectory);
+
+  const response = await sendCommand(api, "PATCH", `/projects/${project.id}`, { canonical_path: subdirectory }, "patch-same-path");
+  assert.equal(response.status, 200);
+  const updated = (await response.json()).data;
+  assert.equal(updated.canonical_path, before.canonical_path);
+  assert.equal(updated.base_branch, before.base_branch);
+  assert.equal(api.db.get("SELECT updated_at FROM projects WHERE id = ?", project.id).updated_at, before.updated_at);
+});
+
+test("4. PATCH rejects another registered Project path and identifies the conflicting Project", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const firstRepo = await makeRepo(t, api.root, "conflict-source");
+  const otherRepo = await makeRepo(t, api.root, "conflict-target");
+  if (!firstRepo || !otherRepo) return;
+  const first = await createProject(api, "conflict-source", { path: firstRepo });
+  const other = await createProject(api, "conflict-target", { path: otherRepo });
+  const before = projectRow(api, first.id);
+
+  const error = await assertApiError(await sendCommand(api, "PATCH", `/projects/${first.id}`, { canonical_path: otherRepo }, "patch-conflict"), 400, "validation_error");
+  assert.equal(error.error.details.canonical_path, await realpath(otherRepo));
+  assert.equal(error.error.details.project_id, other.id);
+  assert.deepEqual(projectRow(api, first.id), before);
+});
+
+test("5. PATCH validates payloads, missing paths, non-directories, non-Git paths, and unknown ids without DB changes", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "validation-project");
+  if (!repo) return;
+  const project = await createProject(api, "validation", { path: repo });
+  const before = projectRow(api, project.id);
+  const missing = join(api.root, "missing-directory");
+  const file = join(api.root, "not-a-directory");
+  const nonGit = join(api.root, "not-a-git-repository");
+  await writeFile(file, "file\n");
+  await mkdir(nonGit);
+
+  for (const [payload, status, code] of [
+    [{}, 400, "validation_error"],
+    [{ name: "Valid", extra: true }, 400, "validation_error"],
+    [{ name: "x".repeat(201) }, 400, "validation_error"],
+    [{ canonical_path: missing }, 400, "validation_error"],
+    [{ canonical_path: file }, 400, "validation_error"],
+    [{ canonical_path: nonGit }, 400, "validation_error"],
+  ]) {
+    const error = await assertApiError(await sendCommand(api, "PATCH", `/projects/${project.id}`, payload, `patch-invalid:${randomUUID()}`), status, code);
+    if (payload.canonical_path === nonGit) assert.equal(error.error.details.inspection.kind, "not_git");
+    assert.deepEqual(projectRow(api, project.id), before);
+  }
+  await assertApiError(await sendCommand(api, "PATCH", `/projects/${createUlid()}`, { name: "Missing" }, "patch-unknown"), 404, "project_not_found");
+  await assertApiError(await sendCommand(api, "PATCH", "/projects/not-a-ulid", { name: "Invalid id" }, "patch-bad-id"), 400, "validation_error");
+  assert.deepEqual(projectRow(api, project.id), before);
+});
+
+test("6. PATCH path changes are blocked by locking Works or active Agents, while allowed states pass", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const targetRepo = await makeRepo(t, api.root, "unlocked-target");
+  if (!targetRepo) return;
+  for (const state of ["running", "paused", "judgement_waiting"]) {
+    const repo = await makeRepo(t, api.root, `locked-${state}`);
+    if (!repo) return;
+    const project = await createProject(api, `locked-${state}`, { path: repo });
+    const workId = await createWork(api, `Locked ${state}`, project.id, state);
+    const before = projectRow(api, project.id);
+    const response = await sendCommand(api, "PATCH", `/projects/${project.id}`, { canonical_path: targetRepo }, `path-blocked:${state}`);
+    const error = await assertApiError(response, 409, "project_has_running_works");
+    assert.equal(error.error.details.operation, "path_change");
+    assert.deepEqual(error.error.details.impact.blockers, ["running_works"]);
+    assert.ok(error.error.message.length > 0, "the response includes a reason");
+    const deleteError = await assertApiError(await sendCommand(api, "DELETE", `/projects/${project.id}`, { confirmed_work_count: 1 }, `delete-blocked:${state}`), 409, "project_has_running_works");
+    assert.equal(deleteError.error.details.operation, "delete");
+    assert.deepEqual(deleteError.error.details.impact.blockers, ["running_works"]);
+    assert.equal(api.db.get("SELECT project_id FROM works WHERE id = ?", workId).project_id, project.id);
+    assert.deepEqual(projectRow(api, project.id), before);
+  }
+
+  const agentRepo = await makeRepo(t, api.root, "locked-agent");
+  if (!agentRepo) return;
+  const agentProject = await createProject(api, "locked-agent", { path: agentRepo });
+  const agentWork = await createWork(api, "Agent blocker", agentProject.id);
+  await insertAgentRun(api.db, agentWork);
+  for (const [method, payload, suffix] of [["PATCH", { canonical_path: targetRepo }, "path"], ["DELETE", { confirmed_work_count: 1 }, "delete"]]) {
+    const path = `/projects/${agentProject.id}`;
+    const error = await assertApiError(await sendCommand(api, method, path, payload, `agent-blocked:${suffix}`), 409, "project_has_running_works");
+    assert.equal(error.error.details.operation, method === "PATCH" ? "path_change" : "delete");
+    assert.deepEqual(error.error.details.impact.blockers, ["active_agents"]);
+    assert.equal(error.error.details.impact.active_agent_count, 1);
+    assert.ok(error.error.message.length > 0, "the response includes a reason");
+  }
+
+  const allowedRepo = await makeRepo(t, api.root, "unlocked-source");
+  const allowedTarget = await makeRepo(t, api.root, "unlocked-second-target", "develop");
+  if (!allowedRepo || !allowedTarget) return;
+  const allowedProject = await createProject(api, "unlocked", { path: allowedRepo });
+  for (const state of ["memo", "ready", "completed", "cancelled"]) await createWork(api, `Allowed ${state}`, allowedProject.id, state);
+  const allowed = await sendCommand(api, "PATCH", `/projects/${allowedProject.id}`, { canonical_path: allowedTarget }, "path-unlocked-states");
+  assert.equal(allowed.status, 200);
+});
+
+test("7. deletion-impact counts archived Works, blockers, active Agents, backlog, and the first 20 ordered running Works", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "impact-project");
+  if (!repo) return;
+  const project = await createProject(api, "impact", { path: repo });
+  const runningIds = [];
+  for (let index = 0; index < 22; index += 1) {
+    runningIds.push(await createWork(api, `Running ${index}`, project.id, "running"));
+  }
+  const archivedId = await createWork(api, "Archived completed", project.id, "completed");
+  await archiveWork(api, archivedId);
+  await insertAgentRun(api.db, runningIds[0]);
+  await insertBacklogItem(api.db, project.id, archivedId);
+
+  const response = await api.request(`/projects/${project.id}/deletion-impact`);
+  assert.equal(response.status, 200);
+  const impact = (await response.json()).data;
+  assert.equal(impact.project_id, project.id);
+  assert.equal(impact.work_count, 23);
+  assert.equal(impact.running_work_count, 22);
+  assert.equal(impact.active_agent_count, 1);
+  assert.equal(impact.backlog_item_count, 1);
+  assert.equal(impact.running_works.length, 20);
+  assert.deepEqual(impact.blockers, ["running_works", "active_agents"]);
+  assert.equal(impact.deletable, false);
+  const expected = api.db.all(
+    `SELECT id, display_number, title, state FROM works WHERE project_id = ? AND state IN ('running','paused','judgement_waiting')
+     ORDER BY display_number IS NULL, display_number, created_at, id LIMIT 20`,
+    project.id,
+  );
+  assert.deepEqual(impact.running_works, expected);
+  await assertApiError(await api.request(`/projects/not-a-ulid/deletion-impact`), 400, "validation_error");
+});
+
+test("8. deleting a Project without Works removes only its row and leaves its repository", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "empty-project");
+  if (!repo) return;
+  const project = await createProject(api, "empty", { path: repo });
+
+  const response = await sendCommand(api, "DELETE", `/projects/${project.id}`, { confirmed_work_count: 0 }, "delete-empty");
+  assert.equal(response.status, 200);
+  assert.deepEqual((await response.json()).data, {
+    project_id: project.id,
+    deleted: true,
+    detached_work_count: 0,
+    detached_backlog_item_count: 0,
+    detached_works: [],
+  });
+  assert.equal((await listProjects(api)).some((item) => item.id === project.id), false);
+  assert.equal(api.db.get("SELECT id FROM projects WHERE id = ?", project.id), undefined);
+  assert.equal(await readFile(join(repo, "README.md"), "utf8"), "project files remain\n");
+  assert.equal((await stat(repo)).isDirectory(), true);
+});
+
+test("9. confirmed deletion detaches Works and backlog, reassigns colliding numbers, and keeps versions", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "number-collision-project");
+  if (!repo) return;
+  const project = await createProject(api, "number-collision", { path: repo });
+  const projectless = [
+    await createWork(api, "Projectless one", null),
+    await createWork(api, "Projectless two", null),
+  ];
+  const attached = [
+    await createWork(api, "Attached one", project.id),
+    await createWork(api, "Attached two", project.id),
+    await createWork(api, "Attached archived", project.id, "completed"),
+  ];
+  await archiveWork(api, attached[2]);
+  const backlogId = await insertBacklogItem(api.db, project.id, attached[0]);
+  const versions = new Map(attached.map((id) => [id, api.db.get("SELECT state_version FROM works WHERE id = ?", id).state_version]));
+
+  const unconfirmed = await assertApiError(await sendCommand(api, "DELETE", `/projects/${project.id}`, { confirmed_work_count: 0 }, "delete-unconfirmed"), 409, "project_deletion_impact_changed");
+  assert.equal(unconfirmed.error.details.impact.work_count, 3);
+  const response = await sendCommand(api, "DELETE", `/projects/${project.id}`, { confirmed_work_count: 3 }, "delete-confirmed");
+  assert.equal(response.status, 200);
+  const result = (await response.json()).data;
+  assert.equal(result.detached_work_count, 3);
+  assert.equal(result.detached_backlog_item_count, 1);
+  assert.deepEqual(result.detached_works.map((work) => work.work_id), attached);
+  for (const [index, workId] of attached.entries()) {
+    const row = api.db.get("SELECT project_id, display_number, state_version FROM works WHERE id = ?", workId);
+    assert.equal(row.project_id, null);
+    assert.equal(row.display_number, index + 3);
+    assert.equal(row.state_version, versions.get(workId));
+  }
+  assert.equal(api.db.get("SELECT project_id FROM backlog_items WHERE id = ?", backlogId).project_id, null);
+  assert.equal(JSON.parse(api.db.get("SELECT value_json FROM settings WHERE key = 'work_next_display_number'").value_json), 6);
+  assert.equal(api.db.get("SELECT COUNT(*) AS count FROM events WHERE type = 'project.deleted' AND json_extract(payload_json, '$.project_id') = ?", project.id).count, 1);
+  assert.equal(api.db.get("SELECT id FROM projects WHERE id = ?", project.id), undefined);
+  assert.deepEqual(projectless.map((id) => api.db.get("SELECT display_number FROM works WHERE id = ?", id).display_number), [1, 2]);
+  const next = await createWork(api, "Projectless after deletion", null);
+  assert.equal(api.db.get("SELECT display_number FROM works WHERE id = ?", next).display_number, 6);
+});
+
+test("10. detachment starts after the projectless counter when it exceeds the remaining maximum", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const first = await createWork(api, "Projectless retained number", null);
+  const removed = await createWork(api, "Projectless deleted number", null);
+  await setWorkState(api.db, removed, "completed");
+  await archiveWork(api, removed);
+  await api.durableCore.deleteWork(removed, command({}, `delete-work:${removed}`, 1));
+  const repo = await makeRepo(t, api.root, "counter-project");
+  if (!repo) return;
+  const project = await createProject(api, "counter", { path: repo });
+  const attached = await createWork(api, "Attached number", project.id);
+
+  const response = await sendCommand(api, "DELETE", `/projects/${project.id}`, { confirmed_work_count: 1 }, "delete-counter");
+  assert.equal(response.status, 200);
+  assert.equal(api.db.get("SELECT display_number FROM works WHERE id = ?", first).display_number, 1);
+  assert.equal(api.db.get("SELECT display_number FROM works WHERE id = ?", attached).display_number, 3);
+});
+
+test("11. DELETE reports running blockers before a stale confirmed count and leaves the DB unchanged", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "delete-blocked-project");
+  if (!repo) return;
+  const project = await createProject(api, "delete-blocked", { path: repo });
+  const workId = await createWork(api, "Delete blocker", project.id, "running");
+  const beforeProject = projectRow(api, project.id);
+  const beforeWork = api.db.get("SELECT project_id, state, display_number, state_version FROM works WHERE id = ?", workId);
+
+  const error = await assertApiError(await sendCommand(api, "DELETE", `/projects/${project.id}`, { confirmed_work_count: 0 }, "delete-blocked"), 409, "project_has_running_works");
+  assert.equal(error.error.details.operation, "delete");
+  assert.deepEqual(error.error.details.impact.blockers, ["running_works"]);
+  assert.equal(error.error.details.impact.work_count, 1);
+  assert.ok(error.error.message.length > 0);
+  assert.deepEqual(projectRow(api, project.id), beforeProject);
+  assert.deepEqual(api.db.get("SELECT project_id, state, display_number, state_version FROM works WHERE id = ?", workId), beforeWork);
+});
+
+test("12. DELETE rejects a changed Work count, leaves rows intact, then accepts the current count", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "impact-changed-project");
+  if (!repo) return;
+  const project = await createProject(api, "impact-changed", { path: repo });
+  const workIds = [await createWork(api, "Count one", project.id), await createWork(api, "Count two", project.id)];
+  const before = projectRow(api, project.id);
+
+  const error = await assertApiError(await sendCommand(api, "DELETE", `/projects/${project.id}`, { confirmed_work_count: 0 }, "delete-count-stale"), 409, "project_deletion_impact_changed");
+  assert.equal(error.error.details.confirmed_work_count, 0);
+  assert.equal(error.error.details.impact.work_count, 2);
+  assert.deepEqual(projectRow(api, project.id), before);
+  assert.deepEqual(api.db.all("SELECT id, project_id FROM works WHERE id IN (?, ?) ORDER BY id", ...workIds).map((row) => row.project_id), [project.id, project.id]);
+
+  assert.equal((await sendCommand(api, "DELETE", `/projects/${project.id}`, { confirmed_work_count: 2 }, "delete-count-current")).status, 200);
+});
+
+test("13. DELETE replays the same idempotent response and rejects a changed payload for the same key", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "idempotent-project");
+  if (!repo) return;
+  const project = await createProject(api, "idempotent", { path: repo });
+  const path = `/projects/${project.id}`;
+  const key = "delete-idempotent-project";
+  const first = await sendCommand(api, "DELETE", path, { confirmed_work_count: 0 }, key);
+  assert.equal(first.status, 200);
+  const firstBody = await first.json();
+  const replay = await sendCommand(api, "DELETE", path, { confirmed_work_count: 0 }, key);
+  assert.equal(replay.status, 200);
+  assert.deepEqual(await replay.json(), firstBody);
+  await assertApiError(await sendCommand(api, "DELETE", path, { confirmed_work_count: 1 }, key), 409, "idempotency_conflict");
+});
+
+test("14. deleting a Project preserves its repository and workspace files", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "filesystem-project");
+  if (!repo) return;
+  const project = await createProject(api, "filesystem", { path: repo });
+  const workId = await createWork(api, "Workspace file holder", project.id, "completed");
+  const taskId = createUlid();
+  const task = await api.durableCore.gitGateway().prepareWorktree({ work_id: workId, task_id: taskId });
+  assert.equal(task.ok, true, task.message);
+  const workspaceFile = join(task.worktree_path, "keep.txt");
+  await writeFile(workspaceFile, "keep workspace data\n");
+
+  const response = await sendCommand(api, "DELETE", `/projects/${project.id}`, { confirmed_work_count: 1 }, "delete-preserve-files");
+  const body = await response.json();
+  assert.equal(response.status, 200, JSON.stringify(body));
+  assert.equal(await readFile(join(repo, "README.md"), "utf8"), "project files remain\n");
+  assert.equal(await readFile(workspaceFile, "utf8"), "keep workspace data\n");
+  assert.equal((await stat(task.worktree_path)).isDirectory(), true);
+  assert.equal((await stat(repo)).isDirectory(), true);
+});
+
+test("15. a worktree cleanup failure cannot block Project deletion or remove workspace files", async (t) => {
+  let cleanupCalls = 0;
+  const failingGit = {
+    deleteWorkWorkspaces: async () => {
+      cleanupCalls += 1;
+      return { ok: false, message: "test cleanup failure" };
+    },
+  };
+  const api = await setup(t, { coreOptions: { git: failingGit } });
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "cleanup-failure-project");
+  if (!repo) return;
+  const project = await createProject(api, "cleanup-failure", { path: repo });
+  const workId = await createWork(api, "Cleanup failure holder", project.id, "completed");
+  const workspace = join(api.root, ".owl-workspaces", workId, "task-files");
+  await mkdir(workspace, { recursive: true });
+  await writeFile(join(workspace, "draft.txt"), "keep for failed deletion\n");
+  const response = await sendCommand(api, "DELETE", `/projects/${project.id}`, { confirmed_work_count: 1 }, "delete-cleanup-failure");
+  assert.equal(response.status, 200, JSON.stringify(await response.json()));
+  assert.equal(cleanupCalls, 0);
+  assert.equal(projectRow(api, project.id), undefined);
+  assert.equal(api.db.get("SELECT project_id FROM works WHERE id = ?", workId).project_id, null);
+  assert.equal(await readFile(join(workspace, "draft.txt"), "utf8"), "keep for failed deletion\n");
+});
+
+test("16. the schema RESTRICT foreign key still rejects deleting a Project with attached Works directly", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "foreign-key-project");
+  if (!repo) return;
+  const project = await createProject(api, "foreign-key", { path: repo });
+  const workId = await createWork(api, "Foreign key Work", project.id);
+
+  await assert.rejects(
+    api.db.createWriteLane().transact((transaction) => transaction.run("DELETE FROM projects WHERE id = ?", project.id)),
+    /FOREIGN KEY constraint failed/u,
+  );
+  assert.ok(projectRow(api, project.id));
+  assert.equal(api.db.get("SELECT project_id FROM works WHERE id = ?", workId).project_id, project.id);
+});
+
+test("17. MemoryCore supports PATCH, impact, DELETE, path conflicts, and not-found responses", async (t) => {
+  const api = await setup(t, { memory: true });
+  if (!api) return;
+  const firstRepo = await makeRepo(t, api.root, "memory-project-one");
+  const secondRepo = await makeRepo(t, api.root, "memory-project-two");
+  if (!firstRepo || !secondRepo) return;
+  const first = await createMemoryProject(api, "memory-one", firstRepo);
+  const second = await createMemoryProject(api, "memory-two", secondRepo);
+  const beforeConflict = await listProjects(api);
+
+  const conflict = await assertApiError(await sendCommand(api, "PATCH", `/projects/${second.id}`, { canonical_path: firstRepo }, "memory-conflict"), 400, "validation_error");
+  assert.equal(conflict.error.details.project_id, first.id);
+  assert.deepEqual(await listProjects(api), beforeConflict);
+  const renamed = await sendCommand(api, "PATCH", `/projects/${first.id}`, { name: "Memory renamed" }, "memory-rename");
+  assert.equal(renamed.status, 200);
+  const impact = await api.request(`/projects/${first.id}/deletion-impact`);
+  assert.equal(impact.status, 200);
+  assert.equal((await impact.json()).data.work_count, 0);
+  assert.equal((await sendCommand(api, "DELETE", `/projects/${first.id}`, { confirmed_work_count: 0 }, "memory-delete")).status, 200);
+  assert.equal((await listProjects(api)).some((item) => item.id === second.id), true);
+  await assertApiError(await sendCommand(api, "PATCH", `/projects/${first.id}`, { name: "Gone" }, "memory-patch-missing"), 404, "project_not_found");
+  await assertApiError(await api.request(`/projects/${first.id}/deletion-impact`), 404, "project_not_found");
+  await assertApiError(await sendCommand(api, "DELETE", `/projects/${first.id}`, { confirmed_work_count: 0 }, "memory-delete-missing"), 404, "project_not_found");
+  await assertApiError(await api.request(`/projects/${createUlid()}/deletion-impact`), 404, "project_not_found");
+});
+
+test("18. an ExternalCoreAdapter without the new methods returns core_not_ready for all three routes", async (t) => {
+  const api = await setup(t, { legacyAdapter: true });
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "legacy-adapter-project");
+  if (!repo) return;
+  const project = await createProject(api, "legacy-adapter", { path: repo });
+
+  await assertApiError(await sendCommand(api, "PATCH", `/projects/${project.id}`, { name: "Updated" }, "legacy-patch"), 503, "core_not_ready");
+  await assertApiError(await api.request(`/projects/${project.id}/deletion-impact`), 503, "core_not_ready");
+  await assertApiError(await sendCommand(api, "DELETE", `/projects/${project.id}`, { confirmed_work_count: 0 }, "legacy-delete"), 503, "core_not_ready");
+  assert.ok(projectRow(api, project.id));
+});

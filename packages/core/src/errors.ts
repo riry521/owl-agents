@@ -1,3 +1,6 @@
+import type { OwnerLanguage } from "./owner-language";
+import type { ProjectDeletionImpact } from "./types";
+
 /**
  * Core-owned human-readable error.
  *
@@ -75,12 +78,65 @@ export function idempotencyConflict(key: string): HumanReadableError {
   });
 }
 
-export function projectPathConflict(canonicalPath: string): HumanReadableError {
+export function projectPathConflict(canonicalPath: string, projectId?: string): HumanReadableError {
+  const updatingProject = projectId !== undefined;
   return new HumanReadableError({
-    code: "project_path_conflict",
+    code: updatingProject ? "validation_error" : "project_path_conflict",
     message: `A Project already exists at canonical_path ${canonicalPath}.`,
-    remediation: "Use the existing Project or choose a different canonical_path.",
-    details: { canonical_path: canonicalPath },
+    remediation: updatingProject ? "Choose a different canonical_path." : "Use the existing Project or choose a different canonical_path.",
+    details: { canonical_path: canonicalPath, ...(projectId === undefined ? {} : { project_id: projectId }) },
+  });
+}
+
+export function projectNotFound(id: string, language: OwnerLanguage): HumanReadableError {
+  return new HumanReadableError({
+    code: "project_not_found",
+    message: language === "ja" ? "指定されたProjectが見つかりません。" : "The Project was not found.",
+    remediation: language === "ja" ? "Project一覧を再読み込みしてください。" : "Reload the Project list.",
+    details: { resource: "project", id },
+  });
+}
+
+export function projectHasRunningWorks(
+  projectId: string,
+  operation: "delete" | "path_change",
+  impact: ProjectDeletionImpact,
+  language: OwnerLanguage,
+): HumanReadableError {
+  const japanese = language === "ja";
+  const deleting = operation === "delete";
+  return new HumanReadableError({
+    code: "project_has_running_works",
+    message: japanese
+      ? deleting
+        ? "このProjectには実行中・一時停止中・判断待ちのWork、または動作中のAgentがあるため削除できません。"
+        : "このProjectには実行中・一時停止中・判断待ちのWork、または動作中のAgentがあるため、フォルダを変更できません。"
+      : deleting
+        ? "This Project has running, paused, or judgement-waiting Works, or active Agents, so it cannot be deleted."
+        : "This Project has running, paused, or judgement-waiting Works, or active Agents, so its folder cannot be changed.",
+    remediation: japanese
+      ? "該当するWorkを完了またはキャンセルしてから、もう一度お試しください。"
+      : "Complete or cancel those Works, then try again.",
+    details: { project_id: projectId, operation, impact },
+  });
+}
+
+export function projectDeletionImpactChanged(
+  projectId: string,
+  confirmedWorkCount: number,
+  impact: ProjectDeletionImpact,
+  language: OwnerLanguage,
+): HumanReadableError {
+  const japanese = language === "ja";
+  return new HumanReadableError({
+    code: "project_deletion_impact_changed",
+    message: japanese
+      ? `確認後にこのProjectのWork数が変わりました（確認時 ${confirmedWorkCount}件、現在 ${impact.work_count}件）。`
+      : `The number of Works in this Project changed after confirmation (confirmed ${confirmedWorkCount}, now ${impact.work_count}).`,
+    remediation: japanese
+      ? "最新の件数を確認してから、もう一度削除してください。"
+      : "Review the latest count and delete again.",
+    details: { project_id: projectId, confirmed_work_count: confirmedWorkCount, impact },
   });
 }
 

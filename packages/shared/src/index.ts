@@ -272,6 +272,13 @@ export enum WorkState {
   Cancelled = "cancelled"
 }
 
+/** Work states that keep a Project's worktrees and branches in use; they block Project deletion and folder changes. */
+export const PROJECT_LOCKING_WORK_STATES: readonly WorkState[] = [
+  WorkState.Running,
+  WorkState.Paused,
+  WorkState.JudgementWaiting,
+];
+
 /** The canonical Task state values. */
 export enum TaskState {
   Waiting = "waiting",

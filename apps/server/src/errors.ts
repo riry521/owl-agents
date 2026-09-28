@@ -12,6 +12,8 @@ export type ApiErrorCode =
   | "version_conflict"
   | "idempotency_conflict"
   | "project_not_found"
+  | "project_has_running_works"
+  | "project_deletion_impact_changed"
   | "model_preset_not_found"
   | "project_path_conflict"
   | "conversation_not_found"
@@ -105,6 +107,8 @@ const HTTP_ERROR_TEXT: Partial<Record<ApiErrorCode, string>> = {
   version_conflict: "The version has changed. Refresh and try again.",
   idempotency_conflict: "This idempotency key was used with different content. Use a new key.",
   project_not_found: "The Project was not found.",
+  project_has_running_works: "The Project has running Works or active Agents.",
+  project_deletion_impact_changed: "The Project's Works changed after confirmation.",
   model_preset_not_found: "The model preset was not found.",
   project_path_conflict: "This folder is already registered as a Project.",
   conversation_not_found: "The conversation was not found.",
@@ -142,6 +146,12 @@ const HTTP_MESSAGE_TEXT: Readonly<Record<string, string>> = {
   "backendUrlを指定してください。カスタムProviderには接続先のhttpまたはhttpsのURLが必要です。": "Specify backendUrl. A custom provider needs an http or https URL to connect to.",
   "backendUrlはhttpまたはhttpsのURLを指定してください。": "backendUrl must be an http or https URL.",
   "フォルダは絶対パスで指定してください。": "Specify the folder as an absolute path.",
+  "Project名は1〜200文字で指定してください。": "The Project name must be 1 to 200 characters.",
+  "変更する項目（nameまたはcanonical_path）を1つ以上指定してください。": "Specify at least one field to change (name or canonical_path).",
+  "このフォルダにはまだ作業履歴がありません。先にProjectの追加画面でGitを準備してから、もう一度変更してください。": "This folder has no Git history yet. Prepare Git from the Add project screen first, then change the folder again.",
+  "指定されたProjectが見つかりません。Project一覧を再読み込みしてください。": "The Project was not found. Reload the Project list.",
+  "指定されたProjectが見つかりません。 Project一覧を再読み込みしてください。": "The Project was not found. Reload the Project list.",
+  "confirmed_work_countが不正です。0以上の整数を指定してください。": "confirmed_work_count is invalid. Specify an integer of 0 or more.",
   "フォルダが見つかりません。": "The folder was not found.",
   "フォルダではありません。": "This is not a folder.",
   "このフォルダを開く権限がありません。": "You do not have permission to open this folder.",

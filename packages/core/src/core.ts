@@ -10,10 +10,11 @@ import { managerReplanFailureBrief, RESOLVE_CONFLICT_OPTION_KEY } from "./decisi
 import { isFinalLesson, isFinalMissingItem, lessonBlockKey, normalizeLesson, parseLessonBlocks, splitLessonBlocks, type FinalManagerVerdict } from "./final-verdict";
 import { DEFAULT_OWNER_LANGUAGE, OWNER_LANGUAGE_SETTINGS_KEY, ownerLanguage, storedOwnerLanguage, type OwnerLanguage } from "./owner-language";
 import { EventDispatcher } from "./event-dispatcher";
-import { HumanReadableError, dependencyUnavailable, idempotencyConflict, invalidStateTransition, notFound, projectPathConflict, validationError, versionConflict } from "./errors";
+import { HumanReadableError, dependencyUnavailable, idempotencyConflict, invalidStateTransition, notFound, projectDeletionImpactChanged, projectHasRunningWorks, projectNotFound, projectPathConflict, validationError, versionConflict } from "./errors";
 import {
   appendEventInTransaction,
   createWorkInTransaction,
+  detachProjectWorksInTransaction,
   ensureOwner,
   isDecisionCancelAnswer,
   isTerminalTaskState,
@@ -75,6 +76,7 @@ import {
   DEFAULT_AGENT_WALL_TIMEOUT_MS,
   DEFAULT_HARNESS_MODELS,
   DEFAULT_ROLE_MODELS,
+  PROJECT_LOCKING_WORK_STATES,
   designDocumentPath,
   isRuleRole,
   parseSlackAdvisorResponse,
@@ -106,6 +108,8 @@ import type {
   CoreStatus,
   CoreWriteLaneTransaction,
   CreateProjectPayload,
+  DeleteProjectPayload,
+  DeleteProjectResult,
   CreateModelPresetPayload,
   CreateWorkData,
   CreateWorkPayload,
@@ -127,7 +131,10 @@ import type {
   InboundUploadRegisterPayload,
   InboundUploadTicket,
   Project,
+  ProjectDeletionImpact,
   ProjectListQuery,
+  ProjectRunningWork,
+  UpdateProjectPayload,
   RoleModelSetting,
   RoleModelSettingInput,
   ProcessSkillsSettingsSnapshot,
@@ -2309,6 +2316,159 @@ export class Core {
       const project = createProjectInTransaction(transaction, request.payload);
       return { data: project, version: 0 };
     });
+  }
+
+  public async updateProject(
+    projectId: string,
+    request: CommandRequest<UpdateProjectPayload>,
+  ): Promise<CommandResponse<Project>> {
+    return this.runCommand(request, {
+      type: "project.updated",
+      resourceKey: projectId,
+      payload: { kind: "project_updated", schema_version: "1.0.0", project_id: projectId },
+    }, (transaction) => {
+      const row = transaction.get<ProjectDbRow>(
+        `SELECT id, name, canonical_path, base_branch, allowed_roots_json, verification_plan_json
+           FROM projects WHERE id = ?`,
+        projectId,
+      );
+      if (!row) throw projectNotFound(projectId, ownerLanguage(transaction));
+
+      const payload = request.payload;
+      const hasName = Object.prototype.hasOwnProperty.call(payload, "name");
+      const hasPath = Object.prototype.hasOwnProperty.call(payload, "canonical_path");
+      const hasBaseBranch = Object.prototype.hasOwnProperty.call(payload, "base_branch");
+      if (hasPath !== hasBaseBranch) {
+        throw validationError("canonical_path and base_branch must be provided together.", { fields: ["canonical_path", "base_branch"] });
+      }
+
+      let name = row.name;
+      if (hasName) {
+        const candidate = payload.name;
+        const trimmed = typeof candidate === "string" ? candidate.trim() : "";
+        if (trimmed.length < 1 || trimmed.length > 200) {
+          throw validationError(ownerLanguage(transaction) === "ja" ? "Project名は1〜200文字で指定してください。" : "The Project name must be 1 to 200 characters.", { field: "name" });
+        }
+        name = trimmed;
+      }
+
+      let canonicalPath = row.canonical_path;
+      let baseBranch = row.base_branch;
+      let allowedRoots = JSON.parse(row.allowed_roots_json) as string[];
+      if (hasPath) {
+        const candidate = payload.canonical_path;
+        if (typeof candidate !== "string" || candidate.length < 1 || candidate.length > 4096 || !isAbsolute(candidate)) {
+          throw validationError(ownerLanguage(transaction) === "ja" ? "フォルダは絶対パスで指定してください。" : "Specify the folder as an absolute path.", { field: "canonical_path" });
+        }
+        if (candidate !== row.canonical_path) {
+          const candidateBranch = payload.base_branch;
+          if (typeof candidateBranch !== "string" || candidateBranch.trim().length === 0) {
+            throw validationError("Project base_branch must be a non-empty string.", { field: "base_branch" });
+          }
+          const existing = transaction.get<{ id: string }>(
+            "SELECT id FROM projects WHERE canonical_path = ? AND id <> ?",
+            candidate,
+            projectId,
+          );
+          if (existing) throw projectPathConflict(candidate, existing.id);
+          assertProjectUnlocked(transaction, projectId, "path_change", ownerLanguage(transaction));
+          canonicalPath = candidate;
+          baseBranch = candidateBranch;
+          allowedRoots = [...new Set([candidate, ...allowedRoots.filter((root) => root !== row.canonical_path)])];
+        }
+      }
+
+      if (name === row.name && canonicalPath === row.canonical_path) {
+        return { data: toProject(row), version: 0 };
+      }
+      const now = utcNow();
+      transaction.run(
+        `UPDATE projects
+            SET name = ?, canonical_path = ?, base_branch = ?, allowed_roots_json = ?, updated_at = ?
+          WHERE id = ?`,
+        name,
+        canonicalPath,
+        baseBranch,
+        JSON.stringify(allowedRoots),
+        now,
+        projectId,
+      );
+      return {
+        data: toProject({ ...row, name, canonical_path: canonicalPath, base_branch: baseBranch, allowed_roots_json: JSON.stringify(allowedRoots) }),
+        version: 0,
+      };
+    });
+  }
+
+  public async getProjectDeletionImpact(projectId: string): Promise<ProjectDeletionImpact> {
+    const impact = computeProjectImpact(this.db, projectId);
+    if (!impact) throw projectNotFound(projectId, ownerLanguage(this.db));
+    return impact;
+  }
+
+  public async deleteProject(
+    projectId: string,
+    request: CommandRequest<DeleteProjectPayload>,
+  ): Promise<CommandResponse<DeleteProjectResult>> {
+    const event = {
+      type: "project.deleted",
+      resourceKey: projectId,
+      payload: { kind: "project_deleted", schema_version: "1.0.0", project_id: projectId },
+    };
+    const { scopedKey, requestHash } = this.commandScope(request, event);
+    const cached = this.db.get<StoredIdempotencyRow>(
+      "SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?",
+      scopedKey,
+    );
+    if (cached) {
+      if (cached.request_hash !== requestHash) throw idempotencyConflict(scopedKey);
+      return parseCommandResponse<DeleteProjectResult>(cached.response_json, scopedKey);
+    }
+    const confirmedWorkCount: unknown = request.payload.confirmed_work_count;
+    if (!Number.isSafeInteger(confirmedWorkCount) || (confirmedWorkCount as number) < 0) {
+      throw validationError(ownerLanguage(this.db) === "ja"
+        ? "confirmed_work_countが不正です。0以上の整数を指定してください。"
+        : "confirmed_work_count is invalid. Specify an integer of 0 or more.", { field: "confirmed_work_count" });
+    }
+    const project = this.db.get<{ id: string }>(
+      "SELECT id FROM projects WHERE id = ?",
+      projectId,
+    );
+    if (!project) throw projectNotFound(projectId, ownerLanguage(this.db));
+    const language = ownerLanguage(this.db);
+    const impact = assertProjectUnlocked(this.db, projectId, "delete", language);
+    if (impact.work_count !== confirmedWorkCount) {
+      throw projectDeletionImpactChanged(projectId, confirmedWorkCount as number, impact, language);
+    }
+
+    const response = await this.runCommand<DeleteProjectPayload, DeleteProjectResult>(request, event, (transaction) => {
+      const current = transaction.get<{ id: string; owner_id: string }>("SELECT id, owner_id FROM projects WHERE id = ?", projectId);
+      if (!current) throw projectNotFound(projectId, ownerLanguage(transaction));
+      const latestImpact = assertProjectUnlocked(transaction, projectId, "delete", ownerLanguage(transaction));
+      if (latestImpact.work_count !== confirmedWorkCount) {
+        throw projectDeletionImpactChanged(projectId, confirmedWorkCount as number, latestImpact, ownerLanguage(transaction));
+      }
+      const now = utcNow();
+      const detached = detachProjectWorksInTransaction(transaction, projectId, current.owner_id, now);
+      const backlogCount = transaction.run(
+        "UPDATE backlog_items SET project_id = NULL, updated_at = ? WHERE project_id = ?",
+        now,
+        projectId,
+      ).changes;
+      transaction.run("DELETE FROM projects WHERE id = ?", projectId);
+      return {
+        data: {
+          project_id: projectId,
+          deleted: true,
+          detached_work_count: detached.length,
+          detached_backlog_item_count: backlogCount,
+          detached_works: detached,
+        },
+        version: 0,
+      };
+    });
+
+    return response;
   }
 
   /**
@@ -5495,11 +5655,10 @@ export class Core {
     return result;
   }
 
-  private async runCommand<P extends JsonObject, D extends JsonObject>(
+  private commandScope<P extends JsonObject>(
     request: CommandRequest<P>,
-    event: { id?: string; type: string; workId?: string; taskId?: string; agentRunId?: string; resourceKey?: string; payload: JsonObject },
-    mutation: (transaction: CoreWriteLaneTransaction) => CommandMutation<D>,
-  ): Promise<CommandResponse<D>> {
+    event: { type: string; workId?: string; taskId?: string; agentRunId?: string; resourceKey?: string },
+  ): { scopedKey: string; requestHash: string } {
     const scopedKey = [
       event.type,
       event.workId ?? "-",
@@ -5517,6 +5676,15 @@ export class Core {
       expected_version: request.expected_version,
       payload: request.payload,
     });
+    return { scopedKey, requestHash };
+  }
+
+  private async runCommand<P extends JsonObject, D extends JsonObject>(
+    request: CommandRequest<P>,
+    event: { id?: string; type: string; workId?: string; taskId?: string; agentRunId?: string; resourceKey?: string; payload: JsonObject },
+    mutation: (transaction: CoreWriteLaneTransaction) => CommandMutation<D>,
+  ): Promise<CommandResponse<D>> {
+    const { scopedKey, requestHash } = this.commandScope(request, event);
     const cached = this.db.get<StoredIdempotencyRow>(
       "SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?",
       scopedKey,
@@ -5746,6 +5914,64 @@ function toProject(row: ProjectDbRow): Project {
     allowed_roots: parseStringArray(row.allowed_roots_json, "allowed_roots", row.id, "Project"),
     verification_plan: parseArray(row.verification_plan_json, "verification_plan", row.id, "Project") as unknown as readonly VerificationCommand[],
   };
+}
+
+const PROJECT_LOCKING_WORK_STATES_SQL = PROJECT_LOCKING_WORK_STATES.map(() => "?").join(", ");
+const ACTIVE_AGENT_RUN_STATUSES_SQL = "'launch_pending', 'spawned', 'running', 'cancel_requested'";
+
+function computeProjectImpact(
+  reader: Pick<CoreDatabase, "get" | "all">,
+  projectId: string,
+): ProjectDeletionImpact | undefined {
+  if (!reader.get<{ id: string }>("SELECT id FROM projects WHERE id = ?", projectId)) return undefined;
+  const workCount = reader.get<{ count: number }>("SELECT COUNT(*) AS count FROM works WHERE project_id = ?", projectId)?.count ?? 0;
+  const runningWorkCount = reader.get<{ count: number }>(
+    `SELECT COUNT(*) AS count FROM works WHERE project_id = ? AND state IN (${PROJECT_LOCKING_WORK_STATES_SQL})`,
+    projectId,
+    ...PROJECT_LOCKING_WORK_STATES,
+  )?.count ?? 0;
+  const runningWorks = reader.all<ProjectRunningWork>(
+    `SELECT id, display_number, title, state FROM works
+      WHERE project_id = ? AND state IN (${PROJECT_LOCKING_WORK_STATES_SQL})
+      ORDER BY display_number IS NULL, display_number, created_at, id LIMIT 20`,
+    projectId,
+    ...PROJECT_LOCKING_WORK_STATES,
+  );
+  const activeAgentCount = reader.get<{ count: number }>(
+    `SELECT COUNT(*) AS count FROM agent_runs
+       JOIN works ON works.id = agent_runs.work_id
+      WHERE works.project_id = ? AND agent_runs.status IN (${ACTIVE_AGENT_RUN_STATUSES_SQL})`,
+    projectId,
+  )?.count ?? 0;
+  const backlogItemCount = reader.get<{ count: number }>(
+    "SELECT COUNT(*) AS count FROM backlog_items WHERE project_id = ?",
+    projectId,
+  )?.count ?? 0;
+  const blockers: Array<ProjectDeletionImpact["blockers"][number]> = [];
+  if (runningWorkCount > 0) blockers.push("running_works");
+  if (activeAgentCount > 0) blockers.push("active_agents");
+  return {
+    project_id: projectId,
+    work_count: workCount,
+    running_work_count: runningWorkCount,
+    active_agent_count: activeAgentCount,
+    backlog_item_count: backlogItemCount,
+    running_works: runningWorks,
+    blockers,
+    deletable: blockers.length === 0,
+  };
+}
+
+function assertProjectUnlocked(
+  reader: Pick<CoreDatabase, "get" | "all">,
+  projectId: string,
+  operation: "delete" | "path_change",
+  language: OwnerLanguage,
+): ProjectDeletionImpact {
+  const impact = computeProjectImpact(reader, projectId);
+  if (!impact) throw projectNotFound(projectId, language);
+  if (impact.blockers.length > 0) throw projectHasRunningWorks(projectId, operation, impact, language);
+  return impact;
 }
 
 function toMessage(row: MessageDbRow): Message {

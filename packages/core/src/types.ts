@@ -958,6 +958,50 @@ export interface CreateProjectPayload extends JsonObject {
   readonly verification_plan: readonly VerificationCommand[];
 }
 
+export interface UpdateProjectPayload extends JsonObject {
+  readonly name?: string;
+  readonly canonical_path?: string;
+  readonly base_branch?: string;
+}
+
+export interface DeleteProjectPayload extends JsonObject {
+  readonly confirmed_work_count: number;
+}
+
+export type ProjectBlocker = "running_works" | "active_agents";
+
+export interface ProjectRunningWork extends JsonObject {
+  readonly id: string;
+  readonly display_number: number | null;
+  readonly title: string;
+  readonly state: "running" | "paused" | "judgement_waiting";
+}
+
+export interface ProjectDeletionImpact extends JsonObject {
+  readonly project_id: string;
+  readonly work_count: number;
+  readonly running_work_count: number;
+  readonly active_agent_count: number;
+  readonly backlog_item_count: number;
+  readonly running_works: readonly ProjectRunningWork[];
+  readonly blockers: readonly ProjectBlocker[];
+  readonly deletable: boolean;
+}
+
+export interface DetachedWork extends JsonObject {
+  readonly work_id: string;
+  readonly previous_display_number: number | null;
+  readonly display_number: number | null;
+}
+
+export interface DeleteProjectResult extends JsonObject {
+  readonly project_id: string;
+  readonly deleted: true;
+  readonly detached_work_count: number;
+  readonly detached_backlog_item_count: number;
+  readonly detached_works: readonly DetachedWork[];
+}
+
 export interface ProjectListQuery extends ListQuery {}
 
 export type ActorRole = "advisor" | "manager" | "designer" | "lead_designer" | "worker" | "reviewer" | "librarian" | "curator";

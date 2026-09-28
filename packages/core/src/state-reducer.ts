@@ -14,6 +14,7 @@ import { findDependencyCycle, type ReplanPlan } from "./replan-plan";
 import type {
   CoreWriteLaneTransaction,
   CreateWorkPayload,
+  DetachedWork,
   FailureClass,
   JsonObject,
   ReductionResult,
@@ -1473,6 +1474,37 @@ function insertAgentRun(
 
 const WORK_NEXT_DISPLAY_NUMBER_SETTINGS_KEY = "work_next_display_number";
 
+function readProjectlessNextNumber(transaction: CoreWriteLaneTransaction): number {
+  const stored = transaction.get<{ value_json: string }>(
+    "SELECT value_json FROM settings WHERE key = ?",
+    WORK_NEXT_DISPLAY_NUMBER_SETTINGS_KEY,
+  );
+  let parsed: number;
+  try {
+    parsed = stored === undefined ? 1 : Number(JSON.parse(stored.value_json));
+  } catch {
+    parsed = 1;
+  }
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 1;
+}
+
+function writeProjectlessNextNumber(
+  transaction: CoreWriteLaneTransaction,
+  ownerId: string,
+  next: number,
+  now: string,
+): void {
+  transaction.run(
+    `INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at)
+     VALUES (?, ?, '1.0.0', ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
+    WORK_NEXT_DISPLAY_NUMBER_SETTINGS_KEY,
+    ownerId,
+    JSON.stringify(next),
+    now,
+  );
+}
+
 /** Take the next Work number for a Project (or for Project-less Works); numbers are never reused. */
 function allocateWorkDisplayNumber(
   transaction: CoreWriteLaneTransaction,
@@ -1488,22 +1520,44 @@ function allocateWorkDisplayNumber(
     transaction.run("UPDATE projects SET next_work_number = ? WHERE id = ?", next + 1, projectId);
     return next;
   }
-  const stored = transaction.get<{ value_json: string }>(
-    "SELECT value_json FROM settings WHERE key = ?",
-    WORK_NEXT_DISPLAY_NUMBER_SETTINGS_KEY,
-  );
-  const parsed = stored === undefined ? 1 : Number(JSON.parse(stored.value_json));
-  const next = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 1;
-  transaction.run(
-    `INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at)
-     VALUES (?, ?, '1.0.0', ?, ?)
-     ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
-    WORK_NEXT_DISPLAY_NUMBER_SETTINGS_KEY,
-    ownerId,
-    JSON.stringify(next + 1),
-    now,
-  );
+  const next = readProjectlessNextNumber(transaction);
+  writeProjectlessNextNumber(transaction, ownerId, next + 1, now);
   return next;
+}
+
+/** Move a Project's Works into the Project-less display-number group without violating its unique index. */
+export function detachProjectWorksInTransaction(
+  transaction: CoreWriteLaneTransaction,
+  projectId: string,
+  ownerId: string,
+  now: string,
+): DetachedWork[] {
+  const rows = transaction.all<{ id: string; display_number: number | null }>(
+    `SELECT id, display_number FROM works WHERE project_id = ?
+      ORDER BY display_number IS NULL, display_number, created_at, id`,
+    projectId,
+  );
+  if (rows.length === 0) return [];
+
+  const counter = readProjectlessNextNumber(transaction);
+  const maxRow = transaction.get<{ max: number | null }>(
+    "SELECT MAX(display_number) AS max FROM works WHERE project_id IS NULL AND display_number IS NOT NULL",
+  );
+  let next = Math.max(counter, (maxRow?.max ?? 0) + 1);
+  const detached: DetachedWork[] = [];
+  for (const row of rows) {
+    const displayNumber = row.display_number === null ? null : next++;
+    if (displayNumber === null) {
+      transaction.run("UPDATE works SET project_id = NULL, updated_at = ? WHERE id = ?", now, row.id);
+    } else {
+      transaction.run("UPDATE works SET project_id = NULL, display_number = ?, updated_at = ? WHERE id = ?", displayNumber, now, row.id);
+    }
+    detached.push({ work_id: row.id, previous_display_number: row.display_number, display_number: displayNumber });
+  }
+  if (detached.some((work) => work.previous_display_number !== null)) {
+    writeProjectlessNextNumber(transaction, ownerId, next, now);
+  }
+  return detached;
 }
 
 export function createWorkInTransaction(

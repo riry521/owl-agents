@@ -20,6 +20,8 @@ import type {
   CorePort,
   CreateCoreOptions,
   CreateProjectInput,
+  DeleteProjectInput,
+  DeleteProjectResult,
   Decision,
   JsonObject,
   Message,
@@ -34,12 +36,14 @@ import type {
   InboundUploadRegisterInput,
   InboundUploadTicket,
   Project,
+  ProjectDeletionImpact,
   Report,
   RoleModelSetting,
   RoleModelSettingInput,
   ModelPreset,
   TaskDetail,
   TaskSummary,
+  UpdateProjectInput,
   WorkState,
   WorkCreateInput,
   IntegrationConfig,
@@ -659,6 +663,59 @@ export class MemoryCore implements CorePort {
     return { data: project, version: 0 };
   }
 
+  async updateProject(projectId: string, input: UpdateProjectInput, _command: CommandMeta): Promise<{ data: Project; version: number }> {
+    this.assertWritable();
+    const project = this.projects.get(projectId);
+    if (!project) throw new ApiError(404, "project_not_found", "指定されたProjectが見つかりません。Project一覧を再読み込みしてください。", { resource: "project", id: projectId });
+    const name = input.name?.trim() ?? project.name;
+    const canonicalPath = input.canonical_path ?? project.canonical_path;
+    if (name === project.name && canonicalPath === project.canonical_path) return { data: project, version: 0 };
+    for (const existing of this.projects.values()) {
+      if (existing.id !== projectId && existing.canonical_path === canonicalPath) {
+        throw new ApiError(400, "validation_error", "指定されたcanonical_pathには既にProjectが存在します。別のパスを指定してください。", { canonical_path: canonicalPath, project_id: existing.id });
+      }
+    }
+    const allowedRoots = input.canonical_path === undefined
+      ? project.allowed_roots
+      : [...new Set([canonicalPath, ...project.allowed_roots.filter((path) => path !== project.canonical_path)])];
+    const updated: Project = {
+      ...project,
+      name,
+      canonical_path: canonicalPath,
+      base_branch: input.canonical_path === undefined ? project.base_branch : input.base_branch ?? project.base_branch,
+      allowed_roots: allowedRoots,
+    };
+    this.projects.set(projectId, updated);
+    this.emit("project.updated", { project_id: projectId });
+    return { data: updated, version: 0 };
+  }
+
+  async getProjectDeletionImpact(projectId: string): Promise<ProjectDeletionImpact> {
+    if (!this.projects.has(projectId)) throw new ApiError(404, "project_not_found", "指定されたProjectが見つかりません。Project一覧を再読み込みしてください。", { resource: "project", id: projectId });
+    return {
+      project_id: projectId,
+      work_count: 0,
+      running_work_count: 0,
+      active_agent_count: 0,
+      backlog_item_count: 0,
+      running_works: [],
+      blockers: [],
+      deletable: true,
+    };
+  }
+
+  async deleteProject(projectId: string, input: DeleteProjectInput, _command: CommandMeta): Promise<{ data: DeleteProjectResult; version: number }> {
+    this.assertWritable();
+    if (!this.projects.has(projectId)) throw new ApiError(404, "project_not_found", "指定されたProjectが見つかりません。Project一覧を再読み込みしてください。", { resource: "project", id: projectId });
+    const impact = await this.getProjectDeletionImpact(projectId);
+    if (input.confirmed_work_count !== impact.work_count) {
+      throw new ApiError(409, "project_deletion_impact_changed", "確認後にこのProjectのWork数が変わりました。", { project_id: projectId, confirmed_work_count: input.confirmed_work_count, impact });
+    }
+    this.projects.delete(projectId);
+    this.emit("project.deleted", { project_id: projectId });
+    return { data: { project_id: projectId, deleted: true, detached_work_count: 0, detached_backlog_item_count: 0, detached_works: [] }, version: 0 };
+  }
+
   async getModelSettings(): Promise<{ version: number; roles: RoleModelSetting[] }> {
     return { version: this.modelSettings.version, roles: this.modelSettings.roles.map((role) => ({ ...role })) };
   }
@@ -1153,6 +1210,9 @@ interface ExternalCore {
   listArtifacts(workId: string): Array<{ id: string; work_id: string; task_id: string | null; path: string; kind: string; created_at: string }>;
   listProjects(query?: JsonObject): { data: readonly Project[]; cursor: string | null; has_more: boolean };
   createProject(request: JsonObject): Promise<ExternalCommandResponse>;
+  updateProject?(projectId: string, request: JsonObject): Promise<ExternalCommandResponse>;
+  getProjectDeletionImpact?(projectId: string): ProjectDeletionImpact | Promise<ProjectDeletionImpact>;
+  deleteProject?(projectId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   getModelSettings(): { version: number; roles: readonly RoleModelSetting[] };
   updateModelSettings(request: JsonObject): Promise<ExternalCommandResponse>;
   getModelPresets(): { version: number; presets: readonly ModelPreset[] };
@@ -1363,6 +1423,8 @@ function externalError(error: unknown, operation: string): ApiError {
       "decision_not_found",
       "decision_already_resolved",
       "project_not_found",
+      "project_has_running_works",
+      "project_deletion_impact_changed",
       "model_preset_not_found",
       "project_path_conflict",
       "conversation_not_found",
@@ -1669,6 +1731,37 @@ export class ExternalCoreAdapter implements CorePort {
       return { data: data as unknown as Project, version: response.version };
     } catch (error) {
       throw externalError(error, "createProject");
+    }
+  }
+
+  async updateProject(projectId: string, input: UpdateProjectInput, command: CommandMeta): Promise<{ data: Project; version: number }> {
+    try {
+      if (!this.core.updateProject) throw new ApiError(503, "core_not_ready", "The loaded Core does not support updateProject.");
+      const response = await this.core.updateProject(projectId, { ...command, payload: input });
+      const { version: _version, ...data } = response.data;
+      return { data: data as unknown as Project, version: response.version };
+    } catch (error) {
+      throw externalError(error, "updateProject");
+    }
+  }
+
+  async getProjectDeletionImpact(projectId: string): Promise<ProjectDeletionImpact> {
+    try {
+      if (!this.core.getProjectDeletionImpact) throw new ApiError(503, "core_not_ready", "The loaded Core does not support getProjectDeletionImpact.");
+      return await this.core.getProjectDeletionImpact(projectId);
+    } catch (error) {
+      throw externalError(error, "getProjectDeletionImpact");
+    }
+  }
+
+  async deleteProject(projectId: string, input: DeleteProjectInput, command: CommandMeta): Promise<{ data: DeleteProjectResult; version: number }> {
+    try {
+      if (!this.core.deleteProject) throw new ApiError(503, "core_not_ready", "The loaded Core does not support deleteProject.");
+      const response = await this.core.deleteProject(projectId, { ...command, payload: input });
+      const { version: _version, ...data } = response.data;
+      return { data: data as unknown as DeleteProjectResult, version: response.version };
+    } catch (error) {
+      throw externalError(error, "deleteProject");
     }
   }
 

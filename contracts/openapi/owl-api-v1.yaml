@@ -1246,6 +1246,177 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/projects/{project_id}/deletion-impact:
+    parameters:
+      - in: path
+        name: project_id
+        required: true
+        schema:
+          $ref: '#/components/schemas/ULID'
+    get:
+      operationId: getProjectDeletionImpact
+      summary: Get project deletion impact
+      security:
+        - ownerBearer: []
+      responses:
+        '200':
+          description: Work and backlog items that would be detached by deleting the Project.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectDeletionImpactResponse'
+        '400':
+          description: Invalid project ID.
+          x-error-codes:
+            - validation_error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: project_not_found
+          x-error-codes:
+            - project_not_found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: core_not_ready
+          x-error-codes:
+            - core_not_ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/projects/{project_id}:
+    parameters:
+      - in: path
+        name: project_id
+        required: true
+        schema:
+          $ref: '#/components/schemas/ULID'
+    patch:
+      operationId: updateProject
+      summary: Update a project's name or folder
+      security:
+        - ownerBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProjectCommand'
+      responses:
+        '200':
+          description: Project updated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UpdateProjectResponse'
+        '400':
+          description: Invalid command envelope, payload, folder, or duplicate Project path.
+          x-error-codes:
+            - validation_error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: project_not_found
+          x-error-codes:
+            - project_not_found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Active work or idempotency conflict.
+          x-error-codes:
+            - project_has_running_works
+            - idempotency_conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: core_not_ready
+          x-error-codes:
+            - core_not_ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      operationId: deleteProject
+      summary: Delete a Project and detach its Works
+      security:
+        - ownerBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteProjectCommand'
+      responses:
+        '200':
+          description: Project deleted and related Works detached.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteProjectResponse'
+        '400':
+          description: Invalid command envelope or payload.
+          x-error-codes:
+            - validation_error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: project_not_found
+          x-error-codes:
+            - project_not_found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Project has blockers or the confirmed impact changed.
+          x-error-codes:
+            - project_has_running_works
+            - project_deletion_impact_changed
+            - idempotency_conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Core is unavailable.
+          x-error-codes:
+            - core_not_ready
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/skills:
     get:
       operationId: listSkills
@@ -4300,6 +4471,143 @@ components:
           properties:
             data:
               $ref: '#/components/schemas/Project'
+    UpdateProjectPayload:
+      type: object
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        canonical_path:
+          type: string
+          minLength: 1
+          maxLength: 4096
+      additionalProperties: false
+    UpdateProjectCommand:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+        - type: object
+          properties:
+            payload:
+              $ref: '#/components/schemas/UpdateProjectPayload'
+    DeleteProjectPayload:
+      type: object
+      required:
+        - confirmed_work_count
+      properties:
+        confirmed_work_count:
+          type: integer
+          minimum: 0
+          maximum: 9007199254740991
+      additionalProperties: false
+    DeleteProjectCommand:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+        - type: object
+          properties:
+            payload:
+              $ref: '#/components/schemas/DeleteProjectPayload'
+    ProjectDeletionImpact:
+      type: object
+      required:
+        - project_id
+        - work_count
+        - running_work_count
+        - active_agent_count
+        - backlog_item_count
+        - running_works
+        - blockers
+        - deletable
+      properties:
+        project_id:
+          $ref: '#/components/schemas/ULID'
+        work_count:
+          type: integer
+          minimum: 0
+        running_work_count:
+          type: integer
+          minimum: 0
+        active_agent_count:
+          type: integer
+          minimum: 0
+        backlog_item_count:
+          type: integer
+          minimum: 0
+        running_works:
+          type: array
+          maxItems: 20
+          items:
+            type: object
+            required: [id, display_number, title, state]
+            properties:
+              id:
+                $ref: '#/components/schemas/ULID'
+              display_number:
+                type: [integer, 'null']
+              title:
+                type: string
+              state:
+                type: string
+                enum: [running, paused, judgement_waiting]
+            additionalProperties: false
+        blockers:
+          type: array
+          items:
+            type: string
+            enum: [running_works, active_agents]
+        deletable:
+          type: boolean
+      additionalProperties: false
+    ProjectDeletionImpactResponse:
+      type: object
+      required: [request_id, data]
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        data:
+          $ref: '#/components/schemas/ProjectDeletionImpact'
+      additionalProperties: false
+    UpdateProjectResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/Project'
+    DeleteProjectResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [project_id, deleted, detached_work_count, detached_backlog_item_count, detached_works]
+              properties:
+                project_id:
+                  $ref: '#/components/schemas/ULID'
+                deleted:
+                  const: true
+                detached_work_count:
+                  type: integer
+                  minimum: 0
+                detached_backlog_item_count:
+                  type: integer
+                  minimum: 0
+                detached_works:
+                  type: array
+                  items:
+                    type: object
+                    required: [work_id, previous_display_number, display_number]
+                    properties:
+                      work_id:
+                        $ref: '#/components/schemas/ULID'
+                      previous_display_number:
+                        type: [integer, 'null']
+                      display_number:
+                        type: [integer, 'null']
+                    additionalProperties: false
+              additionalProperties: false
     ModelRole:
       type: object
       required:

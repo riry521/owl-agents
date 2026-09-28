@@ -135,3 +135,37 @@ test("OpenAPI documents provider pause listing", () => {
   assert.doesNotMatch(view, /waiting_tasks|deferred_reviews/u);
   assert.match(yamlBlock(openapi, "    ProviderPauseListResponse:"), /ProviderPauseView/u);
 });
+
+test("OpenAPI project edit and deletion routes match the server handlers", () => {
+  const impact = yamlBlock(openapi, "  /api/v1/projects/{project_id}/deletion-impact:");
+  const project = yamlBlock(openapi, "  /api/v1/projects/{project_id}:");
+  assert.match(impact, /operationId: getProjectDeletionImpact/u);
+  assert.match(impact, /ProjectDeletionImpactResponse/u);
+  assert.match(impact, /project_not_found/u);
+  assert.match(project, /operationId: updateProject/u);
+  assert.match(project, /UpdateProjectCommand/u);
+  assert.match(project, /project_has_running_works/u);
+  const update = project.match(/\n    patch:\n([\s\S]*?)(?=\n    delete:)/u)?.[1] ?? "";
+  assert.match(update, /'400':[\s\S]*validation_error/u);
+  assert.doesNotMatch(update, /project_path_conflict/u);
+  assert.match(project, /operationId: deleteProject/u);
+  assert.match(project, /DeleteProjectCommand/u);
+  assert.match(project, /project_deletion_impact_changed/u);
+
+  const updatePayload = yamlBlock(openapi, "    UpdateProjectPayload:");
+  for (const field of ["name", "canonical_path"]) {
+    assert.match(updatePayload, new RegExp(`\\n        ${field}:\\n`, "u"), field);
+  }
+  assert.match(updatePayload, /additionalProperties: false/u);
+  assert.match(yamlBlock(openapi, "    DeleteProjectPayload:"), /confirmed_work_count/u);
+  const impactSchema = yamlBlock(openapi, "    ProjectDeletionImpact:");
+  for (const field of ["project_id", "work_count", "running_work_count", "active_agent_count", "backlog_item_count", "running_works", "blockers", "deletable"]) {
+    assert.match(impactSchema, new RegExp(`\\n        - ${field}\\n`, "u"), field);
+  }
+  assert.match(http, /projectImpactMatch && method === "GET"/u);
+  assert.match(http, /projectMatch && method === "PATCH"/u);
+  assert.match(http, /projectMatch && method === "DELETE"/u);
+  assert.match(http, /getProjectDeletionImpact\(projectId\)/u);
+  assert.match(http, /updateProject\(projectId,/u);
+  assert.match(http, /deleteProject\(projectId,/u);
+});

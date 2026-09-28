@@ -1,16 +1,20 @@
 'use client';
 
-import { type FormEvent, useCallback, useEffect, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { browseProjectFolders, getActiveConversation, inspectProjectFolder, listProjects, postMessage, setupProject } from '@/lib/api-client';
-import type { Project, ProjectFolderBrowserResult, ProjectFolderInspection, ProjectSetupInput } from '@/lib/types';
-import { useLocale } from '@/lib/i18n';
+import { ApiRequestError, browseProjectFolders, deleteProject, getActiveConversation, getProjectDeletionImpact, inspectProjectFolder, listProjects, postMessage, setupProject, updateProject } from '@/lib/api-client';
+import type { DeleteProjectResult, Project, ProjectDeletionImpact, ProjectFolderBrowserResult, ProjectFolderInspection, ProjectRunningWork, ProjectSetupInput, UpdateProjectInput } from '@/lib/types';
+import { buildProjectUpdateInput, deletionDialogModel, impactFromError, projectErrorKey, type ProjectEditForm } from '@/lib/project-management';
+import { workStateLabels } from '@/lib/format';
+import { useLocale, type Locale, type TFunction } from '@/lib/i18n';
 
 type RegistrationMode = 'existing' | 'new';
+type PickerTarget = 'register' | 'edit';
 const EMPTY_FORM = { name: '', path: '' };
 
 export function ProjectsView() {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const router = useRouter();
   const [projects, setProjects] = useState<Project[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -25,6 +29,19 @@ export function ProjectsView() {
   const [browseData, setBrowseData] = useState<ProjectFolderBrowserResult | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [formNotice, setFormNotice] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editForm, setEditForm] = useState<ProjectEditForm>({ name: '', path: '' });
+  const [editError, setEditError] = useState<string | null>(null);
+  const [editBlockImpact, setEditBlockImpact] = useState<ProjectDeletionImpact | null>(null);
+  const [busyProjectId, setBusyProjectId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Project | null>(null);
+  const [deleteImpact, setDeleteImpact] = useState<ProjectDeletionImpact | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [pickerTarget, setPickerTarget] = useState<PickerTarget>('register');
+  const [projectNotice, setProjectNotice] = useState<string | null>(null);
+  const [projectNoticeError, setProjectNoticeError] = useState(false);
+  const deleteCancelRef = useRef<HTMLButtonElement>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -33,7 +50,7 @@ export function ProjectsView() {
       setLoadError(null);
     } catch (error) {
       console.error('[Owl] Projects load failed', error);
-      setLoadError(humanizeError(error, t));
+      setLoadError(t(projectErrorKey(error, 'load')));
     }
   }, [t]);
 
@@ -67,7 +84,7 @@ export function ProjectsView() {
       setInspection(await inspectProjectFolder(form.path.trim()));
     } catch (error) {
       console.error('[Owl] Project folder inspection failed', error);
-      setFormError(humanizeError(error, t));
+      setFormError(t(projectErrorKey(error, 'load')));
     } finally {
       setBusy(false);
     }
@@ -91,7 +108,7 @@ export function ProjectsView() {
       await refresh();
     } catch (error) {
       console.error('[Owl] Project creation failed', error);
-      setFormError(humanizeError(error, t));
+      setFormError(t(projectErrorKey(error, 'load')));
     } finally {
       setBusy(false);
     }
@@ -137,20 +154,161 @@ export function ProjectsView() {
       setBrowseData(await browseProjectFolders(path));
     } catch (error) {
       console.error('[Owl] Project folder browser failed', error);
-      setBrowseError(humanizeError(error, t));
+      setBrowseError(t(projectErrorKey(error, 'load')));
     } finally {
       setBrowseBusy(false);
     }
   }
 
-  function openFolderBrowser() {
+  function openFolderBrowser(target: PickerTarget) {
+    setPickerTarget(target);
     setBrowseOpen(true);
-    void loadFolderBrowser();
+    void loadFolderBrowser(target === 'edit' ? editForm.path : undefined);
   }
+
+  function startEdit(project: Project) {
+    if (busyProjectId !== null || editingId !== null || deleteTarget !== null) return;
+    setEditingId(project.id);
+    setEditForm({ name: project.name, path: project.canonical_path });
+    setEditError(null);
+    setEditBlockImpact(null);
+    setProjectNotice(null);
+    setProjectNoticeError(false);
+  }
+
+  function cancelEdit() {
+    if (busyProjectId !== null) return;
+    setEditingId(null);
+    setEditError(null);
+    setEditBlockImpact(null);
+  }
+
+  async function saveEdit(ev: FormEvent<HTMLFormElement>, project: Project) {
+    ev.preventDefault();
+    const input: UpdateProjectInput | null | { error: 'nameRequired' | 'pathRequired' } = buildProjectUpdateInput(project, editForm);
+    setEditBlockImpact(null);
+    if (input === null) {
+      setEditError(t('projects.editNoChanges'));
+      return;
+    }
+    if ('error' in input) {
+      setEditError(t('projects.allFieldsRequired'));
+      return;
+    }
+
+    setBusyProjectId(project.id);
+    setEditError(null);
+    setProjectNotice(null);
+    setProjectNoticeError(false);
+    try {
+      await updateProject(project.id, input);
+      setEditingId(null);
+      setProjectNotice(t('projects.editSuccess'));
+      setProjectNoticeError(false);
+      await refresh();
+    } catch (error) {
+      console.error('[Owl] Project update failed', error);
+      setEditBlockImpact(impactFromError(error));
+      setEditError(t(projectErrorKey(error, 'edit')));
+    } finally {
+      setBusyProjectId(null);
+    }
+  }
+
+  async function openDelete(project: Project) {
+    if (busyProjectId !== null || editingId !== null || deleteTarget !== null) return;
+    setBusyProjectId(project.id);
+    setDeleteError(null);
+    setDeleteTarget(null);
+    setDeleteImpact(null);
+    setProjectNotice(null);
+    setProjectNoticeError(false);
+    try {
+      const impact = await getProjectDeletionImpact(project.id);
+      setDeleteTarget(project);
+      setDeleteImpact(impact);
+    } catch (error) {
+      console.error('[Owl] Project deletion impact load failed', error);
+      if (isProjectError(error, 'project_not_found')) {
+        setProjectNotice(t('projects.errorNotFound'));
+        setProjectNoticeError(true);
+        await refresh();
+      } else {
+        setProjectNotice(t(projectErrorKey(error, 'delete')));
+        setProjectNoticeError(true);
+      }
+    } finally {
+      setBusyProjectId(null);
+    }
+  }
+
+  const closeDelete = useCallback(() => {
+    if (deleteBusy) return;
+    setDeleteTarget(null);
+    setDeleteImpact(null);
+    setDeleteError(null);
+  }, [deleteBusy]);
+
+  async function confirmDelete() {
+    if (!deleteTarget || !deleteImpact || deleteBusy) return;
+    const project = deleteTarget;
+    setDeleteBusy(true);
+    setBusyProjectId(project.id);
+    setDeleteError(null);
+    setProjectNotice(null);
+    setProjectNoticeError(false);
+    try {
+      const result: DeleteProjectResult = await deleteProject(project.id, deleteImpact.work_count);
+      setDeleteTarget(null);
+      setDeleteImpact(null);
+      setProjectNotice(deleteImpact.work_count > 0
+        ? t('projects.deleteSuccessWithWorks', { count: String(result.detached_work_count) })
+        : t('projects.deleteSuccess'));
+      setProjectNoticeError(false);
+      await refresh();
+    } catch (error) {
+      console.error('[Owl] Project deletion failed', error);
+      if (isProjectError(error, 'project_not_found')) {
+        setDeleteTarget(null);
+        setDeleteImpact(null);
+        setDeleteError(null);
+        setProjectNotice(t('projects.errorNotFound'));
+        setProjectNoticeError(true);
+        await refresh();
+      } else {
+        const latestImpact = impactFromError(error);
+        if (latestImpact) setDeleteImpact(latestImpact);
+        setDeleteError(t(projectErrorKey(error, 'delete')));
+      }
+    } finally {
+      setDeleteBusy(false);
+      setBusyProjectId(null);
+    }
+  }
+
+  useEffect(() => {
+    if (!deleteTarget) return;
+    deleteCancelRef.current?.focus();
+  }, [deleteTarget]);
+
+  useEffect(() => {
+    if (!deleteTarget) return;
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape' && !deleteBusy) {
+        event.preventDefault();
+        closeDelete();
+      }
+    }
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [deleteTarget, deleteBusy, closeDelete]);
 
   const isGitSetupAvailable = inspection &&
     (inspection.kind === 'not_git' || inspection.kind === 'git_needs_initial_commit') &&
     !inspection.truncated;
+  const projectActionsDisabled = busyProjectId !== null || editingId !== null || deleteTarget !== null;
+  const registerBusy = busy || projectActionsDisabled;
+  const deletionModel = deleteImpact ? deletionDialogModel(deleteImpact) : null;
 
   return (
     <>
@@ -160,15 +318,16 @@ export function ProjectsView() {
           <p className="page__sub">{t('projects.subtitle')}</p>
         </div>
       </div>
+      {projectNotice && <div className={`${projectNoticeError ? 'error' : 'note note--success'} mt-10`} role={projectNoticeError ? 'alert' : 'status'}>{projectNotice}</div>}
       {loadError && <div className="error mt-10">{loadError}</div>}
 
       <section className="panel" aria-labelledby="sec-create-project">
         <h2 className="panel__title" id="sec-create-project">{t('projects.addProject')}</h2>
         <div className="btn-row mt-10" role="group" aria-label={t('projects.registrationMode')}>
-          <button type="button" className={`btn${mode === 'existing' ? ' btn--primary' : ''}`} aria-pressed={mode === 'existing'} onClick={() => changeMode('existing')} disabled={busy}>
+          <button type="button" className={`btn${mode === 'existing' ? ' btn--primary' : ''}`} aria-pressed={mode === 'existing'} onClick={() => changeMode('existing')} disabled={registerBusy}>
             {t('projects.useExisting')}
           </button>
-          <button type="button" className={`btn${mode === 'new' ? ' btn--primary' : ''}`} aria-pressed={mode === 'new'} onClick={() => changeMode('new')} disabled={busy}>
+          <button type="button" className={`btn${mode === 'new' ? ' btn--primary' : ''}`} aria-pressed={mode === 'new'} onClick={() => changeMode('new')} disabled={registerBusy}>
             {t('projects.makeNew')}
           </button>
         </div>
@@ -183,7 +342,7 @@ export function ProjectsView() {
                 placeholder={t('projects.namePlaceholder')}
                 maxLength={200}
                 required
-                disabled={busy}
+                disabled={registerBusy}
               />
             </label>
             <div className="form-field">
@@ -197,9 +356,9 @@ export function ProjectsView() {
                 placeholder={mode === 'new' ? t('projects.newFolderPlaceholder') : t('projects.existingFolderPlaceholder')}
                 maxLength={4096}
                 required
-                disabled={busy}
+                disabled={registerBusy}
               />
-                <button type="button" className="btn" onClick={openFolderBrowser} disabled={busy || browseBusy}>
+                <button type="button" className="btn" onClick={() => openFolderBrowser('register')} disabled={registerBusy || browseBusy}>
                   {t('projects.browseFolders')}
                 </button>
               </div>
@@ -207,7 +366,7 @@ export function ProjectsView() {
           </div>
           {mode === 'new' && <p className="note mt-10">{t('projects.newProjectGitNote')}</p>}
           <div className="btn-row mt-10">
-            <button type="submit" className="btn btn--primary" disabled={busy || (mode === 'existing' && inspection !== null && inspection.kind !== 'git_ready')}>
+            <button type="submit" className="btn btn--primary" disabled={registerBusy || (mode === 'existing' && inspection !== null && inspection.kind !== 'git_ready')}>
               {busy
                 ? t('common.creating')
                 : mode === 'new'
@@ -230,13 +389,13 @@ export function ProjectsView() {
             <p className="note">{t('projects.gitAdvisorLocalOnly')}</p>
             <FilePreview inspection={inspection} t={t} />
             <div className="btn-row mt-10">
-              <button type="button" className="btn" disabled={busy || advisorBusy} onClick={() => void askAdvisorAboutGit()}>
+              <button type="button" className="btn" disabled={registerBusy || advisorBusy} onClick={() => void askAdvisorAboutGit()}>
                 {advisorBusy ? t('common.loading') : t('projects.askAdvisor')}
               </button>
-              <button type="button" className="btn btn--primary" disabled={busy || inspection.truncated} onClick={() => void register('initialize_existing')}>
+              <button type="button" className="btn btn--primary" disabled={registerBusy || inspection.truncated} onClick={() => void register('initialize_existing')}>
                 {t('projects.gitSetupAndRegister')}
               </button>
-              <button type="button" className="btn" disabled={busy} onClick={() => { setInspection(null); setFormError(null); }}>
+              <button type="button" className="btn" disabled={registerBusy} onClick={() => { setInspection(null); setFormError(null); }}>
                 {t('projects.decideLater')}
               </button>
             </div>
@@ -259,10 +418,72 @@ export function ProjectsView() {
             <div className="list">
               {projects.map((project) => (
                 <div className="row" key={project.id}>
-                  <div className="row__main">
-                    <div className="row__title">{project.name}</div>
-                    <div className="row__sub mono">{project.canonical_path}</div>
-                  </div>
+                  {editingId === project.id ? (
+                    <form className="project-edit" onSubmit={(ev) => void saveEdit(ev, project)}>
+                      <div className="form-grid">
+                        <label className="form-field">
+                          <span>{t('projects.nameLabel')}</span>
+                          <input
+                            className="input"
+                            value={editForm.name}
+                            onChange={(ev) => {
+                              setEditForm((current) => ({ ...current, name: ev.target.value }));
+                              setEditError(null);
+                              setEditBlockImpact(null);
+                            }}
+                            maxLength={200}
+                            disabled={busyProjectId !== null}
+                          />
+                        </label>
+                        <div className="form-field">
+                          <label htmlFor={`project-edit-path-${project.id}`}>{t('projects.folderLabel')}</label>
+                          <div className="project-path-input">
+                            <input
+                              id={`project-edit-path-${project.id}`}
+                              className="input mono"
+                              value={editForm.path}
+                              onChange={(ev) => {
+                                setEditForm((current) => ({ ...current, path: ev.target.value }));
+                                setEditError(null);
+                                setEditBlockImpact(null);
+                              }}
+                              maxLength={4096}
+                              disabled={busyProjectId !== null}
+                            />
+                            <button type="button" className="btn" onClick={() => openFolderBrowser('edit')} disabled={busyProjectId !== null || browseBusy}>
+                              {t('projects.browseFolders')}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                      <p className="note">{t('projects.editPathNote')}</p>
+                      {editError && <div className="error" role="alert">{editError}</div>}
+                      {editBlockImpact && <BlockingWorks impact={editBlockImpact} t={t} locale={locale} />}
+                      <div className="btn-row">
+                        <button type="submit" className="btn btn--primary" disabled={busyProjectId !== null}>
+                          {busyProjectId === project.id ? t('common.saving') : t('common.save')}
+                        </button>
+                        <button type="button" className="btn" onClick={cancelEdit} disabled={busyProjectId !== null}>
+                          {t('common.cancel')}
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <>
+                      <div className="row__main">
+                        <div className="row__title">{project.name}</div>
+                        <div className="row__sub mono">{project.canonical_path}</div>
+                      </div>
+                      <div className="row__end">
+                        <button type="button" className="btn btn--small" onClick={() => startEdit(project)} disabled={projectActionsDisabled} aria-label={t('projects.editAria', { name: project.name })}>
+                          {t('common.edit')}
+                        </button>
+                        <button type="button" className="btn btn--small btn--danger" onClick={() => void openDelete(project)} disabled={projectActionsDisabled} aria-label={t('projects.deleteAria', { name: project.name })}>
+                          {busyProjectId === project.id ? t('common.loading') : t('common.delete')}
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </div>
               ))}
             </div>
@@ -302,15 +523,64 @@ export function ProjectsView() {
                     type="button"
                     className="btn btn--primary"
                     onClick={() => {
-                      changePath(browseData.current_path);
+                      if (pickerTarget === 'edit') {
+                        setEditForm((current) => ({ ...current, path: browseData.current_path }));
+                        setEditError(null);
+                        setEditBlockImpact(null);
+                      } else {
+                        changePath(browseData.current_path);
+                      }
                       setBrowseOpen(false);
                     }}
                   >
-                    {mode === 'new' ? t('projects.chooseParentFolder') : t('projects.chooseProjectFolder')}
+                    {pickerTarget === 'register' && mode === 'new' ? t('projects.chooseParentFolder') : t('projects.chooseProjectFolder')}
                   </button>
                 </div>
               </>
             ) : null}
+          </section>
+        </div>
+      )}
+
+      {deleteTarget && deleteImpact && deletionModel && (
+        <div className="folder-picker-backdrop" role="presentation" onMouseDown={(ev) => { if (ev.target === ev.currentTarget) closeDelete(); }}>
+          <section className="folder-picker panel" role="dialog" aria-modal="true" aria-labelledby="project-delete-title">
+            <h2 className="panel__title" id="project-delete-title">{t('projects.deleteTitle')}</h2>
+            {deleteError && <div className="error mt-10" role="alert">{deleteError}</div>}
+            {deletionModel.variant === 'empty' && (
+              <>
+                <p className="mt-10">{t('projects.deleteConfirmEmpty', { name: deleteTarget.name })}</p>
+                <p className="note mt-10">{t('projects.deleteKeepsFiles')}</p>
+              </>
+            )}
+            {deletionModel.variant === 'withWorks' && (
+              <>
+                <p className="mt-10">{t('projects.deleteConfirmWithWorks', { name: deleteTarget.name, count: String(deletionModel.workCount) })}</p>
+                {deletionModel.backlogCount > 0 && <p className="note mt-10">{t('projects.deleteBacklogNote', { count: String(deletionModel.backlogCount) })}</p>}
+                <p className="note mt-10">{t('projects.deleteRenumberNote')}</p>
+                <p className="note mt-10">{t('projects.deleteKeepsFiles')}</p>
+              </>
+            )}
+            {deletionModel.variant === 'blocked' && (
+              <>
+                {!deleteError && <p className="error mt-10">{t('projects.deleteBlocked')}</p>}
+                <BlockingWorks impact={deleteImpact} t={t} locale={locale} />
+              </>
+            )}
+            <div className="btn-row btn-row--spaced">
+              <button type="button" className="btn" onClick={closeDelete} disabled={deleteBusy} ref={deleteCancelRef}>
+                {deletionModel.variant === 'blocked' ? t('common.close') : t('common.cancel')}
+              </button>
+              {deletionModel.variant !== 'blocked' && (
+                <button type="button" className="btn btn--danger" onClick={() => void confirmDelete()} disabled={deleteBusy}>
+                  {deleteBusy
+                    ? t('projects.deleting')
+                    : deletionModel.variant === 'withWorks'
+                      ? t('projects.deleteWithWorks', { count: String(deletionModel.workCount) })
+                      : t('projects.deleteConfirm')}
+                </button>
+              )}
+            </div>
           </section>
         </div>
       )}
@@ -360,20 +630,44 @@ function FilePreview({ inspection, t }: { inspection: Extract<ProjectFolderInspe
   );
 }
 
-function humanizeError(error: unknown, t: (key: string) => string): string {
-  const code = error instanceof Error ? error.message : '';
-  switch (code) {
-    case 'validation_error':
-      return t('projects.errorValidation');
-    case 'project_path_conflict':
-      return t('projects.errorDuplicate');
-    case 'network_error':
-    case 'runtime_config_unavailable':
-      return t('projects.errorNetwork');
-    case 'invalid_runtime_config':
-    case 'invalid_response':
-      return t('projects.errorInvalidResponse');
-    default:
-      return t('projects.errorDefault');
-  }
+function BlockingWorks({
+  impact,
+  t,
+  locale,
+}: {
+  impact: ProjectDeletionImpact;
+  t: TFunction;
+  locale: Locale;
+}) {
+  const model = deletionDialogModel(impact);
+  if (model.variant !== 'blocked') return null;
+  const labels = workStateLabels(locale);
+
+  return (
+    <div className="mt-10">
+      <h3 className="panel__title">{t('projects.blockingWorksTitle')}</h3>
+      {model.runningWorks.length > 0 && (
+        <div className="list mt-10">
+          {model.runningWorks.map((work: ProjectRunningWork) => (
+            <div className="row" key={work.id}>
+              <div className="row__main">
+                <Link href={`/works/${work.id}`} className="row__title row__title--wrap">
+                  {work.display_number === null ? '' : `#${work.display_number} `}{work.title}
+                </Link>
+              </div>
+              <span className="note">{labels[work.state]}</span>
+            </div>
+          ))}
+        </div>
+      )}
+      {model.hiddenRunningCount > 0 && <p className="note mt-10">{t('projects.blockingWorksMore', { count: String(model.hiddenRunningCount) })}</p>}
+      {model.activeAgentCount > 0 && <p className="note mt-10">{t('projects.blockingAgents', { count: String(model.activeAgentCount) })}</p>}
+    </div>
+  );
+}
+
+function isProjectError(error: unknown, code: string): boolean {
+  return error instanceof ApiRequestError
+    ? error.code === code
+    : error instanceof Error && error.message === code;
 }

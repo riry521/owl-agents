@@ -316,6 +316,48 @@ export interface Project {
   verification_plan: unknown[];
 }
 
+/** PATCH /api/v1/projects/:id payload. */
+export interface UpdateProjectInput {
+  name?: string;
+  canonical_path?: string;
+}
+
+export type ProjectBlocker = 'running_works' | 'active_agents';
+
+export interface ProjectRunningWork {
+  id: string;
+  display_number: number | null;
+  title: string;
+  state: 'running' | 'paused' | 'judgement_waiting';
+}
+
+/** GET /api/v1/projects/:id/deletion-impact response data. */
+export interface ProjectDeletionImpact {
+  project_id: string;
+  work_count: number;
+  running_work_count: number;
+  active_agent_count: number;
+  backlog_item_count: number;
+  running_works: ProjectRunningWork[];
+  blockers: ProjectBlocker[];
+  deletable: boolean;
+}
+
+export interface DetachedWork {
+  work_id: string;
+  previous_display_number: number | null;
+  display_number: number | null;
+}
+
+/** DELETE /api/v1/projects/:id response data. */
+export interface DeleteProjectResult {
+  project_id: string;
+  deleted: true;
+  detached_work_count: number;
+  detached_backlog_item_count: number;
+  detached_works: DetachedWork[];
+}
+
 /** POST /api/v1/projects payload. */
 export interface CreateProjectInput {
   name: string;
