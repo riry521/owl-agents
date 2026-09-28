@@ -67,6 +67,21 @@ export { AdvisorSessionRuntime } from "./advisor-runtime";
 export { MemorySaver, slugify } from "./memory-saver";
 export { Librarian } from "./librarian";
 export { reconcileWorktrees } from "./worktree-reconciler";
+export { WorkspaceTooling, commitExcludePathspecs, copyWorktreeIncludes, describeServers, listUntrackedEntries, newEntries, runCommand } from "./workspace-tooling";
+export type {
+  CommandResult,
+  CommandRunner,
+  CopyWorktreeIncludesResult,
+  Harness,
+  PrepareWorkspaceInput,
+  PrepareWorkspaceOutcome,
+  RehearsalReport,
+  ToolingProblem,
+  WorkspaceSetupCommands,
+  WorkspaceToolingDeps,
+} from "./workspace-tooling";
+export { parseClaudeMcpList, parseCodexMcpList, probeHttpServer, probeStdioServer } from "./mcp-probe";
+export type { CodexMcpServer, HttpServerTarget, McpServerStatus, ProbeResult, ProbeStatus, StdioServerTarget } from "./mcp-probe";
 export {
   BACKLOG_STATUSES,
   backlogDedupeKey,
