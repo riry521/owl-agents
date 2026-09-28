@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { listEvents } from '@/lib/api-client';
 import { useLocale, type TFunction } from '@/lib/i18n';
+import { agentModelLabel } from '@/lib/format';
 
 interface EventFrame {
   event_id: string;
@@ -105,7 +106,7 @@ const PHASE_LABEL_KEYS: Record<string, string> = {
 /** Short payload detail for Hybrid / subagent events (phase name or run label). */
 function eventDetail(ev: EventFrame, t: TFunction): string | null {
   const payload: Record<string, unknown> = ev.payload && typeof ev.payload === 'object' ? ev.payload : {};
-  const { phase, label, provider } = payload;
+  const { phase, label, provider, model, effort } = payload;
   if (ev.type === 'system.alert' && typeof payload.message === 'string') return payload.message;
   if (ev.type === 'work.pushed' && typeof payload.remote === 'string' && typeof payload.remote_branch === 'string') {
     return `${payload.remote}/${payload.remote_branch}`;
@@ -114,6 +115,9 @@ function eventDetail(ev: EventFrame, t: TFunction): string | null {
     return PHASE_LABEL_KEYS[phase] ? t(PHASE_LABEL_KEYS[phase]) : phase;
   }
   if (typeof label === 'string' && label.length > 0) return label;
+  if (typeof model === 'string' && model.length > 0) {
+    return agentModelLabel({ model, effort: typeof effort === 'string' && effort.length > 0 ? effort : null });
+  }
   if (typeof provider === 'string' && provider.length > 0) return provider;
   return null;
 }

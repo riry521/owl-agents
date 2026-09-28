@@ -22,6 +22,34 @@ const componentReact = {
   useRef(initial) { return { current: initial }; },
 };
 
+function compileFormat() {
+  const modulePath = join(repoRoot, "apps/web/lib/format.ts");
+  const { outputText } = ts.transpileModule(readFileSync(modulePath, "utf8"), {
+    compilerOptions: { esModuleInterop: true, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  });
+  const loaded = new Module(modulePath);
+  loaded.filename = modulePath;
+  loaded.paths = Module._nodeModulePaths(dirname(modulePath));
+  const stubs = {
+    "@/lib/i18n/ja.json": JSON.parse(readFileSync(join(repoRoot, "apps/web/lib/i18n/ja.json"), "utf8")),
+    "@/lib/i18n/en.json": JSON.parse(readFileSync(join(repoRoot, "apps/web/lib/i18n/en.json"), "utf8")),
+    "@/lib/work-detail-safety.mjs": {},
+  };
+  const originalLoad = Module._load;
+  Module._load = function (request, parent, isMain) {
+    if (Object.hasOwn(stubs, request)) return stubs[request];
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  try {
+    loaded._compile(outputText, modulePath);
+  } finally {
+    Module._load = originalLoad;
+  }
+  return loaded.exports;
+}
+
+const formatModule = compileFormat();
+
 function compileActivityLog() {
   const modulePath = join(repoRoot, "apps/web/components/ActivityLog.tsx");
   const source = readFileSync(modulePath, "utf8");
@@ -39,6 +67,7 @@ function compileActivityLog() {
   const originalLoad = Module._load;
   Module._load = function (request, parent, isMain) {
     if (request === "react") return componentReact;
+    if (request === "@/lib/format") return formatModule;
     if (request === "@/lib/api-client") return { listEvents: async () => [] };
     if (request === "@/lib/i18n") return { useLocale: () => ({ t: (key) => ({ "activity.systemAlert": "System alert", "activity.alertBranchCleanupFailed": "Branch cleanup failed" }[key] ?? key) }) };
     return originalLoad.call(this, request, parent, isMain);
@@ -119,4 +148,17 @@ test("Activity Log labels a successful push and shows its remote branch", () => 
   assert.match(markup, /activity\.workPushed/);
   assert.match(markup, /⬆️/u);
   assert.match(markup, /origin\/main/);
+});
+
+test("Activity Log shows an agent event's model and effort instead of its provider", () => {
+  hookValues = [[
+    { event_id: "deferred-1", type: "reviewer.deferred", payload: { provider: "anthropic", model: "claude-opus-5-5", effort: "low" }, created_at: new Date().toISOString() },
+    { event_id: "deferred-2", type: "reviewer.deferred", payload: { provider: "openai", model: "gpt-5.4", effort: null }, created_at: new Date().toISOString() },
+  ], ""];
+
+  const markup = renderToStaticMarkup(React.createElement(ActivityLog));
+
+  assert.match(markup, /Opus5\.5-low/);
+  assert.match(markup, /GPT-5\.4</);
+  assert.doesNotMatch(markup, /anthropic|openai/);
 });

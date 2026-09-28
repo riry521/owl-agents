@@ -2657,7 +2657,13 @@ export class WorkflowEngine {
           workId,
           taskId,
           agentRunId: reviewerAgentRunId,
-          payload: { task_id: taskId, agent_run_id: reviewerAgentRunId, provider: reviewerProvider },
+          payload: {
+            task_id: taskId,
+            agent_run_id: reviewerAgentRunId,
+            provider: reviewerProvider,
+            model: reviewerRoleModel?.model ?? DEFAULT_HARNESS_MODELS.claude,
+            effort: reviewerRoleModel?.effort ?? null,
+          },
         },
         outbox: [{ provider: "websocket" }],
       });
