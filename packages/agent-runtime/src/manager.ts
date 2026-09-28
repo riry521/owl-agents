@@ -26,7 +26,7 @@ const MANAGER_TASK_SCHEMA: RoleSchema = objectSchema({
   id: { type: "string", minLength: 1, description: "Task id such as T1" },
   title: { type: "string", minLength: 1, description: "short Task title" },
   type: { type: "string", enum: TASK_TYPE_VALUES, description: "kind of work" },
-  acceptance: { type: "string", minLength: 1, description: "success criteria the Worker must meet" },
+  acceptance: { type: "string", minLength: 1, description: "checkable success criteria the Worker must meet; a criterion over every occurrence names its concrete scope" },
   depends_on: {
     type: "array",
     items: { type: "string", minLength: 1 },
@@ -215,6 +215,9 @@ const MODE_INSTRUCTIONS: Readonly<Record<"plan" | "replan", readonly string[]>> 
   ],
 };
 
+const ACCEPTANCE_GUIDANCE =
+  "Write acceptance criteria a Reviewer can check in one pass. When a criterion covers every occurrence of something (\"all\", \"every\", \"each\"), name its concrete scope: the directories or files, the identifiers, event types or UI surfaces it includes, and what it excludes, such as historical data or tests.";
+
 const DESIGN_TASK_GUIDANCE: readonly string[] = [
   "Use type design for a Task whose deliverable is a design: architecture, data model, API, UX, or implementation approach. The Designer writes an external design document and changes no repository files.",
   "When the Work asks for a design or design document, plan design Tasks and research Tasks if useful.",
@@ -262,7 +265,7 @@ export function buildManagerPrompt(
   }
   return renderRolePrompt({
     role: "You are the Owl Manager.",
-    instructions: [...MODE_INSTRUCTIONS[mode], ...DESIGN_TASK_GUIDANCE, SKILL_CONTEXT_INSTRUCTION, KNOWLEDGE_CONTEXT_INSTRUCTION, SKILL_USAGE_INSTRUCTION],
+    instructions: [...MODE_INSTRUCTIONS[mode], ACCEPTANCE_GUIDANCE, ...DESIGN_TASK_GUIDANCE, SKILL_CONTEXT_INSTRUCTION, KNOWLEDGE_CONTEXT_INSTRUCTION, SKILL_USAGE_INSTRUCTION],
     processSkills,
     output: managerOutputSchema({ mode }),
     outputRules: [],

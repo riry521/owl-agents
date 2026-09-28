@@ -44,7 +44,7 @@ const WORKER_REPORT_PROPERTIES: Readonly<Record<string, RoleSchema>> = {
     passed: { type: "boolean", example: true, description: "see the verification rule below" },
     method: {
       type: "string",
-      description: "one short sentence naming the checks and result, or why it could not be checked; no command output",
+      description: "one short sentence naming the checks and result, or why it could not be checked; no command output. When the acceptance criteria cover every occurrence of something, also name the search that enumerated them and how many it found",
     },
   }),
   remaining_issues: {
@@ -146,6 +146,10 @@ const WORKER_CONTEXT_INSTRUCTIONS: readonly string[] = [
   "If context.owner_guidance is non-empty, the Owner answered earlier Decisions for this Work (newest first). Follow that guidance.",
 ];
 
+/** Acceptance criteria over "every occurrence" are met by enumeration, not by spot fixes. */
+const ENUMERATION_INSTRUCTION =
+  "When the acceptance criteria cover every occurrence of something (all call sites, every label, each event type), first enumerate the targets with a search (grep, or the semantic and impact-analysis tools when available) before changing anything, then handle every hit. In verification.method, name that search and how many targets it found, so the Reviewer can re-run it.";
+
 const SKILL_FEEDBACK_INSTRUCTION =
 "List each skill you actually used in skills_used, with helpful, misleading, or irrelevant and a short note. Propose a skill only when you solved a multi-step procedure that can be reused, found a reusable fix after an error or dead end, learned a lasting approach from Owner or Reviewer feedback, or found a mistake or gap in an existing skill. Leave skill_proposals empty otherwise.";
 
@@ -171,6 +175,7 @@ export function buildWorkerPrompt(
       ...MINIMAL_CODE_RULES,
       ...WORKER_CONTEXT_INSTRUCTIONS,
       "If context.retry_subtasks is non-empty, an earlier attempt completed everything except the listed parts. Do only those parts and do not redo work that already succeeded.",
+      ENUMERATION_INSTRUCTION,
       SKILL_FEEDBACK_INSTRUCTION,
     ],
     processSkills,
@@ -290,6 +295,7 @@ export function buildHybridPlanPrompt(
       "Subtasks must not depend on another subtask's output, decision, or in-progress edits. If steps depend on each other, combine them into one subtask. Give each a short, stable subtask_id (e.g. \"s1\", \"s2\") and a self-contained instruction with enough context for an independent Executor to complete it without seeing the rest of this conversation. You will NOT do any implementation work yourself in this phase.",
       "If context.retry_subtasks is non-empty, the previous attempt already completed every other part of this Task. Plan subtasks only for the listed retry instructions and do not plan or redo work that already succeeded.",
       "Plan the fewest subtasks that satisfy the acceptance criteria; do not add setup, refactoring, or extra tests the Task did not ask for. Tell each Executor to write the least code that is correct.",
+      "When the acceptance criteria cover every occurrence of something, enumerate the targets with a search before planning, and give each subtask the exact targets it owns so that together the subtasks cover every hit.",
       ...WORKER_CONTEXT_INSTRUCTIONS,
     ],
     processSkills,
@@ -346,6 +352,7 @@ export function buildHybridVerdictPrompt(
       ].join("\n"),
       "If context.retry_subtasks is non-empty, this attempt only re-ran those previously failed parts; the rest of the Task was completed by the earlier attempt. Judge completeness against the retried parts and never list already-completed work in retry_subtasks.",
       ...WORKER_CONTEXT_INSTRUCTIONS,
+      ENUMERATION_INSTRUCTION,
       SKILL_FEEDBACK_INSTRUCTION,
     ],
     processSkills,

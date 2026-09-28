@@ -619,12 +619,12 @@ test("prompts with no detected pack stay byte-identical", () => {
     executor: buildExecutorPrompt(executorTask),
   };
   const expected = {
-    manager_plan: "0a8e1389986fc0f30b566e2aee881cd3af1dc67cb5a7b0ba4472a04df8272b05",
+    manager_plan: "9c1f53e43c7bdacc343a7d1df859d9a3c84d898ddd6a04fdf16b552602a28238",
     manager_finalize: "3b270f12558d2c794aa5ea42888855394c0571a67bc383ed10382ae0c386a75e",
-    worker: "d93d36878f70c51def5291cccafbddb8ea1f7c4cb0e3b073d0f015b6da57cabb",
-    hybrid_plan: "c6d57fac9641734dcdaed6320db2f583de0ebff3e79acedd64bfa150d5071718",
-    hybrid_verdict: "2f9075dd967a182848dc8b425d6eaf229332c380462e543e1b72eb122bf18e6d",
-    reviewer: "bd475d6123591a8570eb14ded7a0ce8d982ad2df25c07088488e3e6109c06e1c",
+    worker: "fdee63b66cd73562eabf954bae7ca46756ca1a391fb615be3a06cfe54a0569ef",
+    hybrid_plan: "16f45ce3fbed785839852dd748b829b88465ae5214e338d3720b9d4d1b6bb1b1",
+    hybrid_verdict: "c20b696e505021f38824dd21cab1cf795cd00bb0f8d8f224b06e4ea0055ca1e2",
+    reviewer: "36e2caa07d6d3dadedcfcdf1907207dc5950fc0ff9552240e62a6b98a77db793",
     executor: "1cd18917943503c4ce363a4a9b916c358dc5ab8c99d208944935587ff56e9d57",
   };
   for (const [role, prompt] of Object.entries(prompts)) {

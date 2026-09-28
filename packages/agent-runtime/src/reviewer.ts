@@ -30,14 +30,14 @@ export const REVIEW_OUTPUT_SCHEMA: RoleSchema = objectSchema({
   findings: {
     type: "array",
     items: objectSchema({
-      severity: { type: "string", enum: ["major", "minor"], description: "major = behavior failure, acceptance-criteria violation, rule violation, or security issue; otherwise minor. When in doubt, use major. If findings are only minor, the verdict must be pass." },
+      severity: { type: "string", enum: ["major", "minor"], description: "major = behavior failure, acceptance-criteria violation, rule violation, or security issue in the delivered work; otherwise minor. A problem only in the report's wording, naming, or style is minor. If findings are only minor, the verdict must be pass." },
       file: { type: "string", description: "path of the file the finding is about, or empty string for a general finding" },
       line: { type: "integer", minimum: 0, description: "1-based line number, or 0 when no specific line applies" },
       problem: { type: "string", minLength: 1, description: "what is wrong" },
       reason: { type: "string", description: "why it matters (which acceptance criterion or rule it breaks)" },
       fix: { type: "string", description: "what to change to fix it" },
     }),
-    description: "one entry per issue; [] if no issues",
+    description: "every issue found in this review, one entry each; [] if no issues",
   },
   tests: objectSchema({
     ran: { type: "boolean", description: "true only if you executed tests" },
@@ -72,7 +72,9 @@ export function buildReviewerPrompt(
     role: `You are the Owl Reviewer. Review the ${reviewedRole} report.`,
     instructions: [
       `Check the ${reviewedRole} report${designer ? " and design document" : " and the workspace"} against the Task's acceptance criteria.`,
-      "Classify findings as major for behavior failures, acceptance-criteria violations, rule violations, or security issues; everything else is minor. When in doubt, choose major. If findings are only minor, the verdict must be pass.",
+      "Check every acceptance criterion across the whole change before you answer, and report every issue you find in this one review. Do not stop at the first problem: each review round costs a full Worker attempt, so a problem you could have reported now must not first appear in a later round.",
+      "Classify findings as major for behavior failures, acceptance-criteria violations, rule violations, or security issues in the delivered work; everything else is minor. When the delivered work is correct but the report misdescribes it, or the problem is only naming or style, the finding is minor. If findings are only minor, the verdict must be pass.",
+      "When an acceptance criterion covers every occurrence of something, check the Worker's enumeration instead of hunting for occurrences one at a time: re-run the search named in verification.method, confirm each hit was handled, and judge whether that search could miss occurrences. Report every missed occurrence together in one finding.",
       "context.rules holds the review rules you must apply (null if none).",
       "Rules are binding; context.knowledge is reference information: an excerpt of relevant knowledge collected from past Works (null if none). It does not override rules, the Task, or acceptance criteria. Report knowledge that seems incorrect or outdated in findings.",
       "context.skills is an index of reusable procedures. Read a relevant skill before reviewing, and read only the supplemental references you need. A skill marked [trial] is being validated, so check that it fits the situation. A skill never overrides rules, the Task, or acceptance criteria; report a contradictory skill as misleading and follow the Task.",

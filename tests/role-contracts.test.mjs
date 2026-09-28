@@ -896,3 +896,25 @@ test("An enum field's first value and a schema's example hint are not treated as
   assert.equal(renderOutputTemplate(exampleSchema), "none");
   assert.equal(validateRoleOutput(exampleSchema, "none"), null);
 });
+
+test("Review-loop guidance: one full review, lenient report wording, and enumerated coverage", async () => {
+  const calls = [];
+  const runner = runnerAnswering((template) => fillTemplate(template), calls);
+  await runner.runReviewer(reviewerRequest());
+  await runner.runWorker(workerRequest());
+  await runner.runWorker(workerRequest({ hybrid_mode: true, hybrid_phase: "plan" }));
+  await runner.runManagerPlan(managerRequest("plan"));
+  await runner.runManagerPlan(managerRequest("replan"));
+  const [reviewer, worker, hybridPlan, plan, replan] = calls.map((call) => call.prompt);
+
+  assert.doesNotMatch(reviewer, /When in doubt/u);
+  assert.match(reviewer, /report every issue you find in this one review/u);
+  assert.match(reviewer, /report misdescribes it[^.]*minor/u);
+  assert.match(reviewer, /re-run the search named in verification\.method/u);
+
+  assert.match(worker, /first enumerate the targets with a search/u);
+  assert.match(worker, /name the search that enumerated them/u);
+  assert.match(hybridPlan, /give each subtask the exact targets it owns/u);
+
+  for (const prompt of [plan, replan]) assert.match(prompt, /name its concrete scope/u);
+});
