@@ -67,7 +67,9 @@ export { AdvisorSessionRuntime } from "./advisor-runtime";
 export { MemorySaver, slugify } from "./memory-saver";
 export { Librarian } from "./librarian";
 export { reconcileWorktrees } from "./worktree-reconciler";
-export { WorkspaceTooling, commitExcludePathspecs, copyWorktreeIncludes, describeServers, listUntrackedEntries, newEntries, runCommand } from "./workspace-tooling";
+export { AgentWorkspacePreparer, withWorkspacePreparation, worktreeHarnesses } from "./agent-workspace-preparer";
+export type { AgentWorkspacePreparerDeps } from "./agent-workspace-preparer";
+export { WorkspaceTooling, commitExcludePathspecs, copyWorktreeIncludes, describeServers, listIgnoredEntries, listUntrackedEntries, newEntries, runCommand } from "./workspace-tooling";
 export type {
   CommandResult,
   CommandRunner,
@@ -75,6 +77,7 @@ export type {
   Harness,
   PrepareWorkspaceInput,
   PrepareWorkspaceOutcome,
+  RefreshOutcome,
   RehearsalReport,
   ToolingProblem,
   WorkspaceSetupCommands,

@@ -60,6 +60,8 @@ import {
 import { EXECUTOR_CONFIG_SETTINGS_KEY, HYBRID_MODE_SETTINGS_KEY } from "./types";
 import { GitWorktreeGateway } from "./git-gateway.js";
 import { WorkspaceLayout } from "./workspace-layout.js";
+import { WorkspaceTooling } from "./workspace-tooling.js";
+import { AgentWorkspacePreparer, withWorkspacePreparation, worktreeHarnesses } from "./agent-workspace-preparer.js";
 import { redactCredentials } from "./git-push.js";
 import { recoverOrphanedState } from "./startup-recovery.js";
 import { cleanupWorkForDeletion, reconcileWorktrees, type WorktreeReconcileFailure } from "./worktree-reconciler.js";
@@ -591,9 +593,23 @@ export class Core {
       now: options.now,
       debounce_ms: this.learningPipelineDebounceMs,
     });
+    const workspacePreparer = options.workspaceTooling
+      ? new AgentWorkspacePreparer({
+        db: this.db,
+        writeLane: this.writeLane,
+        tooling: new WorkspaceTooling({
+          env: options.workspaceTooling.env,
+          harnesses: () => worktreeHarnesses(this.db),
+          home: options.workspaceTooling.home,
+        }),
+        emitAlert: (payload) => this.emitRulesAlert(payload),
+        language: () => ownerLanguage(this.db),
+      })
+      : null;
     this.workflow = new WorkflowEngine({
       db: options.db,
-      agentRunner: options.agentRunner,
+      agentRunner: workspacePreparer ? withWorkspacePreparation(options.agentRunner, workspacePreparer) : options.agentRunner,
+      onWorktreeCreated: workspacePreparer ? (worktreePath) => workspacePreparer.markCreated(worktreePath) : undefined,
       git: this.git,
       maxParallel: options.max_parallel,
       globalMaxParallel: options.dispatcher?.global_max_parallel,

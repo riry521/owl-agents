@@ -197,6 +197,26 @@ export async function listUntrackedEntries(worktree: string, run: CommandRunner 
   return splitNul(result.stdout);
 }
 
+/**
+ * Ignored untracked paths in a worktree, with one `dir/` entry per wholly
+ * ignored directory. Tool output such as an index cache or `node_modules` is
+ * usually ignored, and still has to be attributed to the step that made it.
+ */
+export async function listIgnoredEntries(worktree: string, run: CommandRunner = runCommand): Promise<string[]> {
+  const result = await run("git", ["-C", worktree, "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"], {
+    cwd: worktree,
+    env: process.env,
+    timeout_ms: 30_000,
+  });
+  return splitNul(result.stdout);
+}
+
+/** Every path a step could have created: untracked entries plus ignored ones. */
+async function listCreatableEntries(worktree: string, run: CommandRunner): Promise<string[]> {
+  const [untracked, ignored] = await Promise.all([listUntrackedEntries(worktree, run), listIgnoredEntries(worktree, run)]);
+  return [...untracked, ...ignored];
+}
+
 /** Entries present in `after` but not `before`, sorted for stable output. */
 export function newEntries(before: readonly string[], after: readonly string[]): string[] {
   const beforeSet = new Set(before);
@@ -207,14 +227,16 @@ export function newEntries(before: readonly string[], after: readonly string[]):
  * `:(exclude)` pathspecs for a commit that should skip tool-created paths,
  * limited to paths not already tracked in HEAD (excluding a path git already
  * tracks would just make the commit silently drop real changes to it).
- * Pure: the caller supplies `trackedInHead` however it likes, e.g. by
- * checking `git ls-tree -r --name-only HEAD -- <path>`.
+ * A `dir/` entry is matched without its trailing slash. Pure: the caller
+ * supplies `trackedInHead` however it likes, e.g. by checking
+ * `git ls-tree -r --name-only HEAD -- <path>`.
  */
 export function commitExcludePathspecs(toolStatePaths: readonly string[], trackedInHead: (path: string) => boolean): string[] {
   const pathspecs: string[] = [];
-  for (const path of toolStatePaths) {
-    if (trackedInHead(path)) continue;
-    pathspecs.push(`:(exclude)${path}`);
+  for (const entry of toolStatePaths) {
+    const path = entry.replace(/\/+$/u, "");
+    if (path.length === 0 || trackedInHead(path)) continue;
+    pathspecs.push(`:(exclude,literal)${path}`);
   }
   return pathspecs;
 }
@@ -259,6 +281,11 @@ export interface RehearsalReport {
   readonly problems: readonly ToolingProblem[];
 }
 
+export interface RefreshOutcome {
+  readonly result: CommandResult;
+  readonly tool_state_paths: readonly string[];
+}
+
 export interface PrepareWorkspaceOutcome {
   readonly copied: readonly string[];
   readonly skipped: ReadonlyArray<{ path: string; reason: string }>;
@@ -266,6 +293,7 @@ export interface PrepareWorkspaceOutcome {
   readonly setup: CommandResult | null;
   /** null when this Project's fingerprint was already rehearsed in this process. */
   readonly rehearsal: RehearsalReport | null;
+  /** Untracked or ignored paths that the include copy, setup and rehearsal created. */
   readonly tool_state_paths: readonly string[];
   /** A failed/timed-out setup command, reported here only when no rehearsal ran this time (otherwise it is folded into rehearsal.problems). */
   readonly setup_problem?: ToolingProblem;
@@ -311,8 +339,8 @@ export class WorkspaceTooling {
   }
 
   public async prepareNewWorktree(input: PrepareWorkspaceInput): Promise<PrepareWorkspaceOutcome> {
+    const before = await listCreatableEntries(input.worktree, this.run);
     const { copied, skipped } = await copyWorktreeIncludes(input.sourceRoot, input.worktree, this.run);
-    const before = await listUntrackedEntries(input.worktree, this.run);
 
     let setup: CommandResult | null = null;
     let setupProblem: ToolingProblem | undefined;
@@ -337,7 +365,7 @@ export class WorkspaceTooling {
       if (setupProblem) rehearsal = { ...rehearsal, problems: [setupProblem, ...rehearsal.problems] };
     }
 
-    const after = await listUntrackedEntries(input.worktree, this.run);
+    const after = await listCreatableEntries(input.worktree, this.run);
     return {
       copied,
       skipped,
@@ -352,16 +380,20 @@ export class WorkspaceTooling {
    * Runs the Project's refresh command before an agent run, unless this
    * worktree was just prepared by `prepareNewWorktree` (its setup command
    * already covers a first run). Calls for the same worktree are serialized;
-   * different worktrees run concurrently.
+   * different worktrees run concurrently. `tool_state_paths` lists what the
+   * refresh command created, so it can be kept out of commits like setup output.
    */
-  public async refreshBeforeRun(input: { worktree: string; sourceRoot: string; commands: WorkspaceSetupCommands }): Promise<CommandResult | null> {
+  public async refreshBeforeRun(input: { worktree: string; sourceRoot: string; commands: WorkspaceSetupCommands }): Promise<RefreshOutcome | null> {
     return this.refreshLanes.run(input.worktree, async () => {
       if (this.freshWorktrees.has(input.worktree)) {
         this.freshWorktrees.delete(input.worktree);
         return null;
       }
       if (!input.commands.refresh || input.commands.refresh.length === 0) return null;
-      return this.runProjectCommand(input.commands.refresh, input.sourceRoot, input.worktree, 60_000);
+      const before = await listCreatableEntries(input.worktree, this.run);
+      const result = await this.runProjectCommand(input.commands.refresh, input.sourceRoot, input.worktree, 60_000);
+      const after = await listCreatableEntries(input.worktree, this.run);
+      return { result, tool_state_paths: newEntries(before, after) };
     });
   }
 

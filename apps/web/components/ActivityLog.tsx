@@ -85,6 +85,9 @@ const ALERT_LABEL_KEYS: Record<string, string> = {
   work_push_failed: 'activity.alertWorkPushFailed',
   work_push_blocked_by_hook: 'activity.alertWorkPushBlocked',
   work_push_skipped_no_upstream: 'activity.alertWorkPushSkipped',
+  agent_tooling_mismatch: 'activity.alertAgentToolingMismatch',
+  agent_tooling_recovered: 'activity.alertAgentToolingRecovered',
+  workspaces_root_inside_repository: 'activity.alertWorkspacesInsideRepository',
 };
 
 function eventLabelKey(ev: EventFrame): string {

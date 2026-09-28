@@ -75,6 +75,9 @@ import { AppSettingsStore, type CustomProviderConfig } from "./app-settings-stor
 import { AdvisorFolderError, advisorFolderDefaults, ensureAdvisorSharedDir, isGitIgnoredDirectory, normalizeAdvisorFolder } from "./advisor-folders.js";
 import { detectProcessSkillsPack } from "../../../packages/core/dist/process-skills-pack.js";
 import { resolveWorkspacesRoot } from "../../../packages/core/dist/workspace-layout.js";
+import { buildAgentEnv } from "./agent-env.js";
+import { customProviderApiKeyEnvNames } from "./agent-runner.js";
+import { providerSelection } from "./provider-selection.js";
 import {
   DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS,
   KnowledgeAutomationValidationError,
@@ -2698,9 +2701,19 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
     return Object.entries(appSettings.getCustomProviders())
       .find(([id]) => id.trim().toLowerCase() === normalized)?.[1];
   };
+  const coreOwlRoot = options.owlRoot ?? process.cwd();
   const enrichedOptions = {
     ...options,
     workspacesRoot: resolveWorkspacesRoot(process.env, homedir()),
+    // Stub agents never read MCP servers or indexes, so the setup and rehearsal only run with real agents.
+    ...(providerSelection(coreOwlRoot).mode === "real"
+      ? {
+        workspaceTooling: {
+          env: () => buildAgentEnv(process.env, { owlRoot: coreOwlRoot, deny: customProviderApiKeyEnvNames(coreOwlRoot) }),
+          home: homedir(),
+        },
+      }
+      : {}),
     getTypesafeApiKey: () => appSettings.getTypesafeApiKey(),
     getAdvisorPersona: () => appSettings.getAdvisorPersona(),
     getAdvisorFolders: () => {

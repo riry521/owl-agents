@@ -10,6 +10,7 @@ import {
   WorkspaceTooling,
   commitExcludePathspecs,
   copyWorktreeIncludes,
+  listIgnoredEntries,
   listUntrackedEntries,
   newEntries,
   runCommand,
@@ -116,13 +117,27 @@ test("listUntrackedEntries and newEntries: a new untracked directory shows as on
   assert.deepEqual(newEntries(before, after), ["newdir/"]);
 });
 
+test("listIgnoredEntries lists ignored paths that listUntrackedEntries leaves out", async () => {
+  const worktree = await tempDir("owl-ignored-");
+  await initRepo(worktree);
+  await writeFile(join(worktree, ".gitignore"), "ignored.txt\ncache/\n");
+  git(worktree, "add", ".gitignore");
+  git(worktree, "commit", "-m", "add gitignore");
+
+  await writeFile(join(worktree, "ignored.txt"), "skip me\n");
+  await mkdir(join(worktree, "cache"), { recursive: true });
+  await writeFile(join(worktree, "cache", "index.bin"), "x");
+
+  assert.deepEqual((await listIgnoredEntries(worktree)).sort(), ["cache/", "ignored.txt"]);
+});
+
 test("commitExcludePathspecs: excludes only paths not already tracked in HEAD", async () => {
   const tracked = new Set(["existing/tracked.txt"]);
   const pathspecs = commitExcludePathspecs(
     ["new/file.txt", "newdir/", "existing/tracked.txt"],
     (path) => tracked.has(path),
   );
-  assert.deepEqual(pathspecs, [":(exclude)new/file.txt", ":(exclude)newdir/"]);
+  assert.deepEqual(pathspecs, [":(exclude,literal)new/file.txt", ":(exclude,literal)newdir"]);
 });
 
 // ---------------------------------------------------------------------------
@@ -354,7 +369,7 @@ test("WorkspaceTooling.prepareNewWorktree: runs setup with the right cwd/env and
   assert.equal(refreshCalls.length, 0);
 
   const secondRefresh = await tooling.refreshBeforeRun({ worktree, sourceRoot, commands });
-  assert.ok(secondRefresh);
+  assert.equal(secondRefresh.result.exit_code, 0);
   assert.equal(refreshCalls.length, 1);
   assert.equal(refreshCalls[0].options.cwd, worktree);
 });
@@ -439,6 +454,35 @@ test("WorkspaceTooling.prepareNewWorktree: tool_state_paths captures a directory
 
   const outcome = await tooling.prepareNewWorktree({ projectKey: "toolstate-project", sourceRoot, worktree, commands: { setup: null, refresh: null } });
   assert.deepEqual(outcome.tool_state_paths, ["cache-dir/"]);
+});
+
+test("WorkspaceTooling: tool_state_paths includes ignored output from setup and from a later refresh", async () => {
+  const { sourceRoot, worktree } = await repoPair("ignored-state");
+  await writeFile(join(worktree, ".gitignore"), "node_modules/\n.index/\n");
+  git(worktree, "add", ".gitignore");
+  git(worktree, "commit", "-m", "add gitignore");
+  const { run } = fakeRun({
+    "run-setup": async (args, options) => {
+      await mkdir(join(options.cwd, "node_modules", "pkg"), { recursive: true });
+      await writeFile(join(options.cwd, "node_modules", "pkg", "index.js"), "");
+      return { exit_code: 0, stdout: "", stderr: "", timed_out: false };
+    },
+    "run-refresh": async (args, options) => {
+      await mkdir(join(options.cwd, ".index"), { recursive: true });
+      await writeFile(join(options.cwd, ".index", "db"), "");
+      return { exit_code: 0, stdout: "", stderr: "", timed_out: false };
+    },
+  });
+  const tooling = new WorkspaceTooling({ run, probeStdio: okProbe, probeHttp: okProbe, env: () => ({}), harnesses: () => [], home: tmpdir() });
+  const commands = { setup: ["run-setup"], refresh: ["run-refresh"] };
+
+  const outcome = await tooling.prepareNewWorktree({ projectKey: "ignored-state-project", sourceRoot, worktree, commands });
+  assert.deepEqual(outcome.tool_state_paths, ["node_modules/"]);
+
+  assert.equal(await tooling.refreshBeforeRun({ worktree, sourceRoot, commands }), null, "the first refresh after setup is skipped");
+  await writeFile(join(worktree, "agent-note.txt"), "written by the agent between runs\n");
+  const refreshed = await tooling.refreshBeforeRun({ worktree, sourceRoot, commands });
+  assert.deepEqual(refreshed.tool_state_paths, [".index/"]);
 });
 
 test("WorkspaceTooling.alertFor: dedupes an unchanged problem set and reports recovery once", () => {

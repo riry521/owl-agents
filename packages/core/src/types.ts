@@ -206,6 +206,8 @@ export interface GitOperationResult {
   readonly worktree_path?: string | null;
   /** `work_sync_conflict`: the Task worktree conflicts with the Work branch; the merge was aborted. */
   readonly failure_kind?: "commit_failure" | "work_sync_conflict";
+  /** prepareWorktree: true when this call created the worktree rather than reusing one. */
+  readonly created?: boolean;
   readonly stderr_tail?: string;
 }
 
@@ -598,6 +600,16 @@ export interface CoreOptions {
   readonly dataDir?: string;
   /** Root directory for Work and Advisor worktrees. Defaults to `<owlRoot>/.owl-workspaces` for backward compatibility. */
   readonly workspacesRoot?: string;
+  /**
+   * Runs each Project's worktree setup and refresh commands before Worker,
+   * Designer and Reviewer runs, and checks that their MCP servers start in the
+   * worktree. `env` is the environment agents run with; `home` is where the
+   * CLI configuration lives.
+   */
+  readonly workspaceTooling?: {
+    readonly env: () => NodeJS.ProcessEnv;
+    readonly home: string;
+  };
   /** Optional process skills detection inputs, primarily for isolated runtimes. */
   readonly processSkillsDetection?: {
     readonly env: NodeJS.ProcessEnv;

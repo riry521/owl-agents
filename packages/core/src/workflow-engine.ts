@@ -132,6 +132,8 @@ export interface WorkflowEngineOptions {
    * its next periodic tick.
    */
   readonly onTaskSettled?: (workId: string) => void;
+  /** Called when prepareWorktree created a new Task worktree, before its first agent run. */
+  readonly onWorktreeCreated?: (worktreePath: string) => void;
   readonly providerPauseController?: ProviderPauseController;
   /** Root directory Hybrid Mode Executor workspaces are created under. Defaults to process.cwd(). */
   readonly owlRoot?: string;
@@ -242,6 +244,7 @@ export class WorkflowEngine {
   private readonly globalMaxParallel: number | null;
   private readonly onManagerReplanNeeded?: (input: ManagerReplanNeededInput) => Promise<void>;
   private readonly onTaskSettled?: (workId: string) => void;
+  private readonly onWorktreeCreated?: (worktreePath: string) => void;
   private readonly providerPauseController?: ProviderPauseController;
   /** In-process Task pipelines, keyed by the Worker's agent_run_id. */
   private readonly pipelines = new Map<string, Promise<void>>();
@@ -284,6 +287,7 @@ export class WorkflowEngine {
     this.agentRunner = options.agentRunner;
     this.onManagerReplanNeeded = options.onManagerReplanNeeded;
     this.onTaskSettled = options.onTaskSettled;
+    this.onWorktreeCreated = options.onWorktreeCreated;
     this.providerPauseController = options.providerPauseController;
     this.owlRoot = options.owlRoot ?? process.cwd();
     this.dataDir = options.dataDir ?? join(this.owlRoot, "data");
@@ -875,6 +879,7 @@ export class WorkflowEngine {
           : `Task ${taskId}のWorktree準備に失敗しました。原因: ${prepared.message}`);
         break;
       }
+      if (prepared.created && prepared.worktree_path) this.onWorktreeCreated?.(prepared.worktree_path);
       if (prepared.worktree_path) {
         await this.materializeDependencyArtifacts(workId, taskId, prepared.worktree_path);
       }

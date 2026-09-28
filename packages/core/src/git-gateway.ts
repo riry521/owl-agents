@@ -26,6 +26,7 @@ import type {
 import { GitLanes } from "./git-lane.js";
 import { basePushArgs, classifyPushFailure, parsePushPorcelain, PUSH_HOOK_WARNING_MARKER, redactCredentials, safeRemoteName } from "./git-push.js";
 import { safeSegment, WorkspaceLayout } from "./workspace-layout.js";
+import { commitExcludePathspecs } from "./workspace-tooling.js";
 
 export { safeSegment } from "./workspace-layout.js";
 
@@ -40,6 +41,7 @@ interface ProjectRow {
   readonly allowed_roots_json: string;
   readonly auto_push?: number;
   readonly verification_plan_json?: string;
+  readonly worktree_tool_state_json?: string;
 }
 
 interface WorkMergeContext {
@@ -217,7 +219,7 @@ export class GitWorktreeGateway implements GitGateway {
       // The worktree survived a restart (or a Task returned to `ready`), so it
       // may have fallen behind other Tasks integrated into the Work branch in
       // the meantime; catch it up before it is handed back to a Worker.
-      const synced = await this.syncTaskWorktreeWithWork(worktreePath, workBranch, taskId);
+      const synced = await this.syncTaskWorktreeWithWork(worktreePath, workBranch, taskId, request.work_id);
       if (!synced.ok) return synced;
       return { ok: true, exit_code: 0, recorded: false, worktree_path: worktreePath, message: "Reusing the existing Task worktree." };
     }
@@ -240,10 +242,10 @@ export class GitWorktreeGateway implements GitGateway {
       // The Task branch already existed (a leftover from an earlier attempt);
       // it may predate Tasks that have since been integrated into the Work
       // branch, so it needs the same catch-up as a reused worktree.
-      const synced = await this.syncTaskWorktreeWithWork(worktreePath, workBranch, taskId);
+      const synced = await this.syncTaskWorktreeWithWork(worktreePath, workBranch, taskId, request.work_id);
       if (!synced.ok) return synced;
     }
-    return { ok: true, exit_code: 0, recorded: false, worktree_path: worktreePath, message: `Prepared ${taskBranch}.` };
+    return { ok: true, exit_code: 0, recorded: false, created: true, worktree_path: worktreePath, message: `Prepared ${taskBranch}.` };
   }
 
   /**
@@ -253,7 +255,7 @@ export class GitWorktreeGateway implements GitGateway {
    * `work_sync_conflict` so only that Task fails for Manager replanning
    * instead of repeating the same conflict.
    */
-  private async syncTaskWorktreeWithWork(worktreePath: string, workBranch: string, taskId: string): Promise<GitOperationResult> {
+  private async syncTaskWorktreeWithWork(worktreePath: string, workBranch: string, taskId: string, workId: string): Promise<GitOperationResult> {
     const workBranchExists = await this.git(worktreePath, ["show-ref", "--verify", "--quiet", `refs/heads/${workBranch}`]);
     if (workBranchExists.exit_code !== 0) {
       return { ok: true, exit_code: 0, recorded: false, worktree_path: worktreePath, message: "No Work branch to sync with yet." };
@@ -262,7 +264,7 @@ export class GitWorktreeGateway implements GitGateway {
     if (upToDate.ok) {
       return { ok: true, exit_code: 0, recorded: false, worktree_path: worktreePath, message: "Task worktree already includes the Work branch." };
     }
-    const committed = await this.commitTaskChanges(worktreePath, taskId, "checkpoint");
+    const committed = await this.commitTaskChanges(worktreePath, workId, taskId, "checkpoint");
     if (!committed.ok) return committed;
     const merge = await this.git(worktreePath, ["merge", "--no-edit", workBranch]);
     if (merge.ok) {
@@ -634,7 +636,7 @@ export class GitWorktreeGateway implements GitGateway {
     // isolated Task worktree, never the user's canonical checkout, before the
     // branch is integrated. If the Worker already committed, status is clean
     // and the existing Task branch is used unchanged.
-    const committed = await this.commitTaskChanges(taskPath, taskId);
+    const committed = await this.commitTaskChanges(taskPath, request.work_id, taskId);
     if (!committed.ok) {
       const stderrTail = committed.stderr_tail?.trim() || committed.message;
       return {
@@ -966,7 +968,7 @@ export class GitWorktreeGateway implements GitGateway {
     const ownedBranches = new Set(existingBranches);
     for (const entry of parseWorktrees(worktrees.message)) {
       if (entry.branch === null || !ownedBranches.has(entry.branch)) continue;
-      const status = await this.git(entry.path, ["--no-optional-locks", "status", "--porcelain=v1", "--untracked-files=all"]);
+      const status = await this.statusWithoutToolState(entry.path, workId, ["--no-optional-locks"]);
       if (!status.ok) throw new Error(`Could not inspect Work branch changes in ${entry.path}: ${status.message}`);
       if (status.message !== "git operation completed" && status.message.trim().length > 0) return true;
     }
@@ -1321,7 +1323,7 @@ export class GitWorktreeGateway implements GitGateway {
     const taskPath = this.layout.taskPath(request.work_id, taskId);
     const existing = await lstat(taskPath).catch(() => null);
     if (!existing) return true;
-    const status = await this.git(taskPath, ["status", "--porcelain=v1", "--untracked-files=all"]);
+    const status = await this.statusWithoutToolState(taskPath, request.work_id);
     if (!status.ok) return null;
     return status.message === "git operation completed" || status.message.trim().length === 0;
   }
@@ -1428,14 +1430,14 @@ export class GitWorktreeGateway implements GitGateway {
         const reset = await this.resetTaskWorktreeToForkPoint(canonical, path, request);
         if (!reset.ok) return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: reset.message };
       } else {
-        const committed = await this.commitTaskChanges(path, request.task_id ?? "worktree");
+        const committed = await this.commitTaskChanges(path, request.work_id, request.task_id ?? "worktree");
         if (!committed.ok) return committed;
       }
       const status = await this.git(path, ["status", "--porcelain=v1", "--ignored=matching", "--untracked-files=all", "-z"]);
       if (!status.ok) return status;
       const ignored = status.message === "git operation completed"
         ? []
-        : await ignoredContent(path, status.message.split("\0").filter((line) => line.startsWith("!! ")).map((line) => line.slice(3)));
+        : await ignoredContent(path, this.withoutToolState(request.work_id, status.message.split("\0").filter((line) => line.startsWith("!! ")).map((line) => line.slice(3))));
       if (ignored.length > 0) {
         return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: `Ignored contents remain: ${ignored.slice(0, 10).join(", ")}.` };
       }
@@ -1448,7 +1450,7 @@ export class GitWorktreeGateway implements GitGateway {
     catch (error) { return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: error instanceof Error ? error.message : String(error) }; }
     const ignored = await this.checkIgnoredPaths(canonical, scan.paths);
     if (!ignored.ok) return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: ignored.message };
-    const ignoredPaths = await ignoredContent(path, ignored.paths);
+    const ignoredPaths = await ignoredContent(path, this.withoutToolState(request.work_id, ignored.paths));
     if (ignoredPaths.length > 0) {
       return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: `Ignored contents remain: ${ignoredPaths.slice(0, 10).join(", ")}.` };
     }
@@ -1721,7 +1723,7 @@ export class GitWorktreeGateway implements GitGateway {
         }
         const ignored = await this.checkIgnoredPaths(canonical, scan.paths);
         if (!ignored.ok) return cleanupFailure(candidate.path, "ignored_check", ignored.message);
-        const ignoredPaths = await ignoredContent(candidate.path, ignored.paths);
+        const ignoredPaths = await ignoredContent(candidate.path, this.withoutToolState(workId, ignored.paths));
         if (ignoredPaths.length > 0) {
           ignoredWorktrees.push(ignoredWorktree(candidate.path, ignoredPaths));
         }
@@ -1742,7 +1744,7 @@ export class GitWorktreeGateway implements GitGateway {
       if (!status.ok) return cleanupFailure(candidate.path, "ignored_check", status.message);
       const ignoredPaths = status.message === "git operation completed"
         ? []
-        : await ignoredContent(candidate.path, status.message.split("\0").filter((line) => line.startsWith("!! ")).map((line) => line.slice(3)));
+        : await ignoredContent(candidate.path, this.withoutToolState(workId, status.message.split("\0").filter((line) => line.startsWith("!! ")).map((line) => line.slice(3))));
       if (ignoredPaths.length > 0) ignoredWorktrees.push(ignoredWorktree(candidate.path, ignoredPaths));
     }
 
@@ -1946,7 +1948,7 @@ export class GitWorktreeGateway implements GitGateway {
   private async preserveForDeletion(workId: string, candidate: WorkDeletionCandidate): Promise<GitOperationResult> {
     const committed = candidate.integration
       ? await this.commitIntegrationChanges(candidate.path, workId)
-      : await this.commitTaskChanges(candidate.path, candidate.task_id ?? "worktree");
+      : await this.commitTaskChanges(candidate.path, workId, candidate.task_id ?? "worktree");
     if (committed.ok || committed.failure_kind !== "commit_failure") return committed;
     const staged = await this.git(candidate.path, ["diff", "--cached", "--name-only", "--no-renames", "--diff-filter=d", "-z"]);
     if (!staged.ok) return staged;
@@ -1977,17 +1979,23 @@ export class GitWorktreeGateway implements GitGateway {
     };
   }
 
-  private async commitTaskChanges(taskPath: string, taskId: string, verb: "complete" | "checkpoint" = "complete"): Promise<GitOperationResult> {
-    return this.commitWorktreeChanges(taskPath, `owl: ${verb} task ${taskId}`);
+  private async commitTaskChanges(taskPath: string, workId: string, taskId: string, verb: "complete" | "checkpoint" = "complete"): Promise<GitOperationResult> {
+    return this.commitWorktreeChanges(taskPath, workId, `owl: ${verb} task ${taskId}`);
   }
 
-  private async commitWorktreeChanges(path: string, message: string): Promise<GitOperationResult> {
-    const status = await this.git(path, ["status", "--porcelain=v1", "--untracked-files=all"]);
+  /**
+   * Commits everything in the worktree except what the Project's setup and
+   * refresh commands created (indexes, caches, installed dependencies), so
+   * tool output never reaches the Task or Work branch.
+   */
+  private async commitWorktreeChanges(path: string, workId: string, message: string): Promise<GitOperationResult> {
+    const scope = await this.toolStateScope(path, workId);
+    const status = await this.git(path, ["status", "--porcelain=v1", "--untracked-files=all", ...scope]);
     if (!status.ok) return status;
     if (status.message === "git operation completed" || status.message.trim().length === 0) {
       return { ok: true, exit_code: 0, recorded: false, worktree_path: path, message: "Worktree is already clean." };
     }
-    const added = await this.git(path, ["add", "--all"]);
+    const added = await this.git(path, ["add", "--all", ...scope]);
     if (!added.ok) return added;
     const staged = await this.git(path, ["diff", "--cached", "--name-only"]);
     if (!staged.ok) return staged;
@@ -1999,7 +2007,52 @@ export class GitWorktreeGateway implements GitGateway {
   }
 
   private async commitIntegrationChanges(path: string, workId: string): Promise<GitOperationResult> {
-    return this.commitWorktreeChanges(path, `owl: preserve Work ${workId} before deletion`);
+    return this.commitWorktreeChanges(path, workId, `owl: preserve Work ${workId} before deletion`);
+  }
+
+  /** The Project's recorded tool-state paths for this Work, relative to a worktree root. */
+  private toolStatePaths(workId: string): string[] {
+    const raw = this.projectFor(workId)?.worktree_tool_state_json;
+    if (!raw) return [];
+    let parsed: unknown;
+    try { parsed = JSON.parse(raw); } catch { return []; }
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter((entry): entry is string => typeof entry === "string")
+      .map((entry) => entry.replace(/\/+$/u, ""))
+      .filter((entry) => entry.length > 0 && !isAbsolute(entry) && !entry.split("/").includes(".."));
+  }
+
+  /** Pathspecs limiting a status or add to everything but the Project's tool state; empty when there is none. */
+  private async toolStateScope(path: string, workId: string): Promise<string[]> {
+    const excludes = await this.toolStateExcludes(path, workId);
+    return excludes.length > 0 ? ["--", ".", ...excludes] : [];
+  }
+
+  /** Porcelain status of a worktree that ignores the Project's tool state, which never counts as a change. */
+  private async statusWithoutToolState(path: string, workId: string, gitOptions: readonly string[] = []): Promise<GitOperationResult> {
+    const scope = await this.toolStateScope(path, workId);
+    return this.git(path, [...gitOptions, "status", "--porcelain=v1", "--untracked-files=all", ...scope]);
+  }
+
+  private async toolStateExcludes(path: string, workId: string): Promise<string[]> {
+    const toolState = this.toolStatePaths(workId);
+    if (toolState.length === 0) return [];
+    const tracked = await this.git(path, ["ls-tree", "-r", "--name-only", "-z", "HEAD", "--", ...toolState.map((entry) => `:(literal)${entry}`)]);
+    // Without a reliable answer, commit everything rather than risk dropping tracked changes.
+    if (!tracked.ok) return [];
+    const trackedFiles = tracked.message === "git operation completed" ? [] : tracked.message.split("\0").filter((entry) => entry.length > 0);
+    return commitExcludePathspecs(toolState, (entry) => trackedFiles.some((file) => file === entry || file.startsWith(`${entry}/`)));
+  }
+
+  /** Drops ignored paths inside the Project's tool state: setup and refresh regenerate that content, so removing it loses nothing. */
+  private withoutToolState(workId: string, paths: readonly string[]): string[] {
+    const toolState = this.toolStatePaths(workId);
+    if (toolState.length === 0) return [...paths];
+    return paths.filter((path) => {
+      const bare = path.replace(/\/+$/u, "");
+      return !toolState.some((entry) => bare === entry || bare.startsWith(`${entry}/`));
+    });
   }
 
   private async ensureIntegrationWorktree(
@@ -2034,8 +2087,8 @@ export class GitWorktreeGateway implements GitGateway {
     if (!row?.project_id) return undefined;
     return this.db.get<ProjectRow>(
       includeVerificationPlan
-        ? "SELECT canonical_path, base_branch, allowed_roots_json, verification_plan_json FROM projects WHERE id = ?"
-        : "SELECT canonical_path, base_branch, allowed_roots_json FROM projects WHERE id = ?",
+        ? "SELECT canonical_path, base_branch, allowed_roots_json, verification_plan_json, worktree_tool_state_json FROM projects WHERE id = ?"
+        : "SELECT canonical_path, base_branch, allowed_roots_json, worktree_tool_state_json FROM projects WHERE id = ?",
       row.project_id,
     );
   }
