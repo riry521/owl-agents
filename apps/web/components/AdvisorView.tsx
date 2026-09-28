@@ -1,6 +1,8 @@
 'use client';
 
 import { type FormEvent, type KeyboardEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { clearAdvisorConversation, getActiveConversation, getAdvisorSession, ingestConversation, listMessages, postMessage } from '@/lib/api-client';
 import type { AdvisorSessionInfo, Message } from '@/lib/types';
 import { formatRelative, newUlid } from '@/lib/format';
@@ -317,7 +319,9 @@ function Turn({ message, now }: { message: Message; now: number }) {
           <span className="turn__name">{fromAdvisor ? t('advisor.nameAdvisor') : t('advisor.nameYou')}</span>
           <span className="turn__time">{formatRelative(message.created_at, now, locale)}</span>
         </div>
-        <div className="turn__body">{message.body}</div>
+        <div className={`turn__body${fromAdvisor ? '' : ' turn__body--plain'}`}>
+          {fromAdvisor ? <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>{message.body}</ReactMarkdown> : message.body}
+        </div>
       </div>
     </div>
   );
