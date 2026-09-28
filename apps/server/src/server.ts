@@ -15,9 +15,10 @@ import {
   validateContractArtifacts,
   type ContractManifest,
 } from "./contracts.js";
-import { agentTimeoutConfigurationError, configuredBind, configuredPort, providerMode, serverExposureError } from "./config.js";
+import { agentTimeoutConfigurationError, configuredApiToken, configuredBind, configuredPort, providerMode, serverExposureError } from "./config.js";
 import { createConfiguredCore } from "./core.js";
 import { ConnectorManager, formatConnectorFailure } from "./connector-manager.js";
+import { createPluginManagerFromEnv, type PluginManager } from "./plugin-manager.js";
 import { ApiError, ContractValidationError, humanUnexpectedMessage, newReferenceId } from "./errors.js";
 import { createOwlHttpServer, type OwlHttpServer } from "./http.js";
 import { GuardTokenRegistry } from "./guard-tokens.js";
@@ -320,6 +321,8 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
       }
     }
   }
+  let pluginManager: PluginManager | null = null;
+  const stopPlugins = (): Promise<void> | undefined => pluginManager?.stopAll();
   const connectorManager = integrationStore ? new ConnectorManager(owlRoot, integrationStore, options.port, () => core.getLanguage()) : null;
   if (connectorManager) {
     try {
@@ -332,6 +335,12 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
       } catch (cleanupError) {
         cleanupReferenceId = newReferenceId();
         await recordServerFailure(cleanupReferenceId, "connector cleanup after startup failure", cleanupError);
+      }
+      try {
+        await stopPlugins();
+      } catch (cleanupError) {
+        cleanupReferenceId ??= newReferenceId();
+        await recordServerFailure(cleanupReferenceId, "plugin cleanup after connector startup failure", cleanupError);
       }
       try {
         await core.shutdown({ force: true, timeoutMs: 0 });
@@ -351,6 +360,16 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
         { cause: error },
       );
     }
+  }
+  try {
+    pluginManager = createPluginManagerFromEnv(process.env, {
+      serverPort: options.port,
+      apiToken: configuredApiToken(),
+      dataDir,
+    });
+    await pluginManager?.startAll();
+  } catch (error) {
+    console.error(`[owl-server] plugins: ${error instanceof Error ? error.message : String(error)}`, error);
   }
   // Integration changes arrive on the process-local control channel, not the
   // durable event stream (they have no Core sequence of their own).
@@ -386,6 +405,13 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
         if (connectorManager) {
           void connectorManager.stopAll().catch((error) =>
             console.error("[owl-server] Connector disconnect failed during shutdown", error));
+        }
+        if (pluginManager) {
+          try {
+            await pluginManager.stopAll();
+          } catch (error) {
+            console.error("[owl-server] plugins: Could not stop plugins during shutdown.", error);
+          }
         }
         if (!coreRuleStore) ruleStore.stopWatching();
         // close() synchronously stops accepting requests and destroys open

@@ -249,6 +249,158 @@ node apps/connectors/dist/cli.js --all
 from this checkout before stopping the server. Processes from another Owl
 checkout are treated as a separate instance.
 
+## External plugins
+
+Owl can launch external plugins as child processes. Set `OWL_PLUGINS_FILE` to
+the absolute path of a JSON file; when it is unset, no external plugins are
+loaded.
+
+### Configuration
+
+The file has a top-level `plugins` array. For example, if `plugins.json` is
+in the repository root, this entry starts the sample plugin:
+
+```json
+{
+  "plugins": [
+    {
+      "name": "log-notify",
+      "command": "node",
+      "args": ["dist/index.js"],
+      "cwd": "examples/plugins/log-notify",
+      "enabled": true,
+      "env": {}
+    }
+  ]
+}
+```
+
+Unknown keys at the top level or in a plugin entry are errors. If validation
+fails, none of the plugins in that file start. Each entry follows these rules:
+
+- `name` must match `^[a-z0-9][a-z0-9-]{0,39}$` and be unique.
+- `command` must be a non-empty string.
+- `args` is an array of strings and defaults to `[]`.
+- `cwd` must name an existing directory. It may be absolute or relative to
+  the directory containing `OWL_PLUGINS_FILE`.
+- `enabled` must be a boolean and defaults to `true`.
+- Every `env` value must be a string. Keys must match
+  `^[A-Z_][A-Z0-9_]*$`; keys beginning with `OWL_` are reserved and rejected.
+
+If the configured file is missing or invalid, the server logs
+`[owl-server] plugins: ...` and continues starting without those plugins.
+
+### Child process environment
+
+The plugin process receives only these environment variables:
+
+- `PATH`, `HOME`, and `LANG`, copied from the server process when present.
+- The values in that plugin's `env` object.
+- Reserved values set by Owl: `OWL_API_BASE=http://127.0.0.1:<port>/api/v1`,
+  `OWL_API_TOKEN` when configured, `OWL_PLUGIN_NAME` (the entry's name), and
+  `OWL_PLUGIN_STATE_DIR=<dataDir>/plugins/<name>` (created before launch).
+
+Other variables from the server's `process.env` are not inherited. Read
+plugin-specific secrets in the plugin process from a `.env` file in its own
+`cwd`.
+
+### Lifecycle
+
+The server starts plugins after it begins listening, immediately after
+`connectorManager.startAll()`. Plugin stdout and stderr are forwarded to the
+server log one line at a time with a `[plugin:<name>]` prefix.
+
+After an unexpected exit, Owl retries after 1, 2, 4, 8, and 16 seconds, for at
+most five restarts. Ten minutes of stable runtime resets the retry count. Once
+the retry limit is reached, Owl logs an error and stops retrying. During server
+shutdown, plugins are stopped alongside the connectors: Owl sends SIGTERM,
+then sends SIGKILL if a plugin has not stopped within the default 5-second
+timeout. Plugins are not restarted while the server is stopping.
+
+### Using the plugin SDK
+
+`runPluginFromEnv` creates a `PluginConfig` from the environment and starts
+the plugin:
+
+```ts
+export async function runPluginFromEnv(factory: (config: PluginConfig) => OwlPlugin, env?: NodeJS.ProcessEnv): Promise<OwlPlugin>;
+```
+
+`OWL_API_BASE` is required and maps to `core_api_base`; if it is missing, the
+helper reports a clear error and exits with code 1. `OWL_API_TOKEN` maps to
+optional `api_token`, and `OWL_WS_URL` maps to optional `core_ws_url`.
+`OWL_PLUGIN_NAME` supplies `plugin_name`. When `OWL_PLUGIN_STATE_DIR` is
+set, the helper uses a `FileConnectorStateStore` at
+`<OWL_PLUGIN_STATE_DIR>/state.json`. After `start()`, SIGTERM or SIGINT calls
+`stop()` and exits with code 0.
+
+```ts
+import {
+  BasePlugin,
+  runPluginFromEnv,
+  type OwlEvent,
+  type PluginConfig,
+} from '@owl/plugin-sdk';
+
+class LogPlugin extends BasePlugin {
+  readonly name: string;
+
+  constructor(config: PluginConfig) {
+    super(config);
+    this.name = config.plugin_name;
+  }
+
+  async onEvent(event: OwlEvent): Promise<void> {
+    console.log(JSON.stringify(event));
+  }
+}
+
+void runPluginFromEnv((config) => new LogPlugin(config));
+```
+
+### Using the SDK from another repository
+
+For a private plugin repository named `my-private-plugins` alongside
+`owl-agents`, build the SDK in the Owl checkout first:
+
+```sh
+# In owl-agents
+pnpm --filter @owl/plugin-sdk build
+```
+
+Then reference the local SDK package from the plugin repository's
+`package.json` (the path is relative to that package):
+
+```json
+{
+  "dependencies": {
+    "@owl/plugin-sdk": "file:../owl-agents/packages/plugin-sdk"
+  }
+}
+```
+
+Install the dependency in that repository with `npm install` before building
+the plugin.
+
+### Building and starting the log-notify sample
+
+The sample is outside the pnpm workspace, so the root `pnpm install` and
+`pnpm build` do not install or build it. From the `owl-agents` repository
+root, build the SDK and then install and build the sample in its own directory:
+
+```sh
+pnpm --filter @owl/plugin-sdk build
+cd examples/plugins/log-notify
+npm install
+npm run build
+```
+
+Register the generated `dist/index.js` with `command: "node"`,
+`args: ["dist/index.js"]`, and `cwd: "examples/plugins/log-notify"` when
+the configuration file is in the repository root. Set `OWL_PLUGINS_FILE` to
+the absolute path of that file and start Owl; the server launches the plugin,
+which writes each received event as a single JSON line to stdout.
+
 ## Supervisor (optional)
 
 Process monitor that restarts the server on crash.

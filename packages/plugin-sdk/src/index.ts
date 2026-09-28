@@ -8,6 +8,7 @@ export type {
 export { CoreClient, CoreRequestError, commandEnvelope, commandEnvelopeFor, newRequestId, type CorePage } from "./client";
 export { formatIntegrationError } from "./error-display";
 export { BasePlugin } from "./base-plugin";
+export { runPluginFromEnv, type RunPluginOptions } from "./run";
 export {
   classifyIntent,
   isStatusQuery,

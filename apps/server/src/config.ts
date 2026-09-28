@@ -24,6 +24,11 @@ export function configuredApiToken(): string | undefined {
   return token && token.length > 0 ? token : undefined;
 }
 
+export function getPluginsFilePath(env: NodeJS.ProcessEnv = process.env): string | null {
+  const path = env.OWL_PLUGINS_FILE?.trim();
+  return path && path.length > 0 ? path : null;
+}
+
 export function isLoopbackBind(bind: string): boolean {
   const normalized = bind.trim().replace(/^\[|\]$/gu, "").toLowerCase();
   if (normalized === "localhost") return true;

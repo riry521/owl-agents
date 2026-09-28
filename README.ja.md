@@ -246,6 +246,151 @@ node apps/connectors/dist/cli.js --all
 connectorやsupervisorプロセスも停止します。別のOwlチェックアウトのプロセスは
 別インスタンスとして扱われます。
 
+## 外部プラグイン
+
+Owlは外部プラグインを子プロセスとして起動できます。`OWL_PLUGINS_FILE`に
+JSONファイルの絶対パスを指定します。未設定の場合、外部プラグインは読み込まれません。
+
+### 設定
+
+ファイルにはトップレベルの`plugins`配列を置きます。たとえば、
+`plugins.json`がリポジトリのルートにある場合、次の設定でサンプルを起動できます。
+
+```json
+{
+  "plugins": [
+    {
+      "name": "log-notify",
+      "command": "node",
+      "args": ["dist/index.js"],
+      "cwd": "examples/plugins/log-notify",
+      "enabled": true,
+      "env": {}
+    }
+  ]
+}
+```
+
+トップレベルまたはプラグイン項目に未知のキーがあるとエラーになります。
+検証に失敗すると、そのファイルのプラグインは1つも起動しません。各項目のルールは次のとおりです。
+
+- `name`は`^[a-z0-9][a-z0-9-]{0,39}$`に一致し、重複しないこと。
+- `command`は空でない文字列であること。
+- `args`は文字列の配列。省略時は`[]`です。
+- `cwd`は存在するディレクトリであること。絶対パス、または
+  `OWL_PLUGINS_FILE`があるディレクトリからの相対パスを指定できます。
+- `enabled`はboolean。省略時は`true`です。
+- `env`の値は文字列であること。キーは`^[A-Z_][A-Z0-9_]*$`に一致し、
+  `OWL_`で始まるキーは予約済みのため指定できません。
+
+設定ファイルが見つからない場合や無効な場合、サーバーは
+`[owl-server] plugins: ...`をログに出し、プラグインなしで起動を続けます。
+
+### 子プロセスの環境変数
+
+プラグインプロセスに渡される環境変数は次のものだけです。
+
+- サーバープロセスからコピーした`PATH`、`HOME`、`LANG`（存在する場合）。
+- そのプラグイン項目の`env`に指定した値。
+- Owlが設定する予約変数：`OWL_API_BASE=http://127.0.0.1:<port>/api/v1`、
+  設定されている場合の`OWL_API_TOKEN`、項目のnameを表す`OWL_PLUGIN_NAME`、
+  起動前に作られる`OWL_PLUGIN_STATE_DIR=<dataDir>/plugins/<name>`。
+
+サーバーの`process.env`にあるその他の変数は引き継ぎません。
+プラグイン固有の秘密は、プラグインプロセス自身が自分の`cwd`にある
+`.env`から読み込んでください。
+
+### 起動・再起動・停止
+
+サーバーのlisten後、`connectorManager.startAll()`の直後にプラグインを起動します。
+プラグインのstdoutとstderrは1行ずつ`[plugin:<name>]`を付けてサーバーログに流します。
+
+予期しない終了後は、1秒・2秒・4秒・8秒・16秒後に、最大5回まで再起動します。
+10分間安定して動いた場合は再起動回数を数え直します。上限に達すると
+エラーログを出して再起動をやめます。サーバー停止時はコネクタと同じタイミングで
+プラグインを停止し、SIGTERMを送ります。既定の5秒以内に停止しなければSIGKILLを送り、
+停止中は再起動しません。
+
+### plugin-sdkの利用
+
+`runPluginFromEnv`は環境変数から`PluginConfig`を作り、プラグインを起動します。
+
+```ts
+export async function runPluginFromEnv(factory: (config: PluginConfig) => OwlPlugin, env?: NodeJS.ProcessEnv): Promise<OwlPlugin>;
+```
+
+`OWL_API_BASE`は必須で、`core_api_base`になります。ない場合は分かりやすいエラーを出して
+終了コード1で終了します。`OWL_API_TOKEN`は任意の`api_token`、
+`OWL_WS_URL`は任意の`core_ws_url`になります。`OWL_PLUGIN_NAME`が`plugin_name`になります。
+`OWL_PLUGIN_STATE_DIR`が設定されていれば、
+`<OWL_PLUGIN_STATE_DIR>/state.json`を使う`FileConnectorStateStore`を設定します。
+`start()`の後にSIGTERMまたはSIGINTを受けると、`stop()`を呼んで終了コード0で終了します。
+
+```ts
+import {
+  BasePlugin,
+  runPluginFromEnv,
+  type OwlEvent,
+  type PluginConfig,
+} from '@owl/plugin-sdk';
+
+class LogPlugin extends BasePlugin {
+  readonly name: string;
+
+  constructor(config: PluginConfig) {
+    super(config);
+    this.name = config.plugin_name;
+  }
+
+  async onEvent(event: OwlEvent): Promise<void> {
+    console.log(JSON.stringify(event));
+  }
+}
+
+void runPluginFromEnv((config) => new LogPlugin(config));
+```
+
+### 別リポジトリからSDKを使う
+
+`owl-agents`と同じ親ディレクトリにある`my-private-plugins`から使う場合は、
+まずowl-agents側でSDKをビルドします。
+
+```sh
+# owl-agents内で実行
+pnpm --filter @owl/plugin-sdk build
+```
+
+次にプラグインリポジトリの`package.json`からローカルSDKを参照します
+（パスはそのpackageのディレクトリからの相対パスです）。
+
+```json
+{
+  "dependencies": {
+    "@owl/plugin-sdk": "file:../owl-agents/packages/plugin-sdk"
+  }
+}
+```
+
+プラグインをビルドする前に、そのリポジトリで`npm install`を実行します。
+
+### log-notifyサンプルのビルドと起動
+
+サンプルはpnpmワークスペース外にあるため、ルートの`pnpm install`や
+`pnpm build`には含まれません。`owl-agents`リポジトリのルートでSDKをビルドし、
+サンプルのディレクトリ内で依存関係のインストールとビルドを行います。
+
+```sh
+pnpm --filter @owl/plugin-sdk build
+cd examples/plugins/log-notify
+npm install
+npm run build
+```
+
+生成された`dist/index.js`は、設定ファイルがリポジトリのルートにある場合、
+`command: "node"`、`args: ["dist/index.js"]`、`cwd: "examples/plugins/log-notify"`
+として登録します。`OWL_PLUGINS_FILE`にそのファイルの絶対パスを指定してOwlを起動すると、
+サーバーがプラグインを起動し、受信したイベントを1行ずつJSONでstdoutに出力します。
+
 ## Supervisor（任意）
 
 クラッシュ時にサーバーを再起動するプロセスモニターです。
