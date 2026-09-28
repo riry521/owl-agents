@@ -98,7 +98,7 @@ test("Advisor uses a non-Git registered Project directory directly", async () =>
     get(sql) {
       if (sql.includes("SELECT work_id FROM conversations")) return { work_id: "work-advisor-non-git" };
       if (sql.includes("SELECT project_id FROM works")) return { project_id: "project-advisor-non-git" };
-      if (sql.includes("SELECT canonical_path, base_branch, allowed_roots_json FROM projects")) {
+      if (sql.includes("FROM projects")) {
         return { canonical_path: project, base_branch: "main", allowed_roots_json: JSON.stringify([parent]) };
       }
       return undefined;
