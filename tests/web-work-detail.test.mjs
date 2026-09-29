@@ -1254,6 +1254,34 @@ test('partially populated detail responses render required fields and derive mis
   }
 });
 
+test('Overview header places the number and state badges in the meta row and renders inline code only in the full summary', async () => {
+  const client = loadApiClient();
+  const originalFetch = globalThis.fetch;
+  const id = 'overview-layout';
+  const summary = '依頼: `npm test` を実行する\n\n受け入れ条件:\n- `done` になる';
+  const workData = { id, display_number: 5, title: 'Overview layout Work', summary, state: 'ready', size: 'normal' };
+  try {
+    globalThis.fetch = (input) => successfulApiFetch(input, { workData });
+    const board = renderBoardWorkLink({ id, title: workData.title, state: workData.state, updated_at: '2026-09-23T00:00:00.000Z' });
+    const screen = await renderDetailFromRoute(board.href, client);
+    const html = screen.html;
+    const meta = html.match(/<div class="work-head__meta">(.*?)<\/div>/s);
+    assert.ok(meta, 'the meta row should render');
+    assert.ok(meta[1].includes('Work #5'), 'the meta row should hold the Work number badge');
+    assert.ok(meta[1].includes('Ready'), 'the meta row should hold the state badge');
+    assert.ok(html.includes(`<h1 class="page__title panel__heading">${workData.title}</h1>`), 'the heading should hold only the title');
+    assert.ok(/<h2 class="panel__title" id="sec-overview">Overview<\/h2>/.test(html), 'the Overview heading should have no badge');
+    assert.ok(html.includes('<code class="wsum__code">npm test</code>'));
+    assert.ok(html.includes('<code class="wsum__code">done</code>'), 'acceptance items should render inline code');
+
+    const compact = renderToStaticMarkup(React.createElement(workSummaryBlockModule.WorkSummaryBlock, { summary, variant: 'compact' }));
+    assert.ok(compact.includes('wsum--compact'));
+    assert.ok(!compact.includes('wsum__code'), 'the compact variant should stay plain text');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('malformed detail envelopes and missing required Work fields show a visible error', async () => {
   const client = loadApiClient();
   const originalFetch = globalThis.fetch;

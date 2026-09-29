@@ -123,3 +123,22 @@ export function workSummarySkeleton(locale) {
     })
     .join('\n\n');
 }
+
+/**
+ * Splits text on backtick pairs into plain and code segments. An unmatched
+ * backtick stays in the surrounding plain text.
+ * @param {string} text
+ * @returns {{ code: boolean, text: string }[]}
+ */
+export function splitInlineCode(text) {
+  const parts = [];
+  const pattern = /(`+)([^`\n]+?)\1(?!`)/g;
+  let last = 0;
+  for (const match of text.matchAll(pattern)) {
+    if (match.index > last) parts.push({ code: false, text: text.slice(last, match.index) });
+    parts.push({ code: true, text: match[2] });
+    last = match.index + match[0].length;
+  }
+  if (last < text.length) parts.push({ code: false, text: text.slice(last) });
+  return parts;
+}

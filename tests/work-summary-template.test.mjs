@@ -5,6 +5,7 @@ import { WORK_SUMMARY_SECTIONS, workSummaryInstruction, workSummarySkeleton } fr
 import {
   WORK_SUMMARY_SECTIONS as WEB_SECTIONS,
   parseWorkSummary,
+  splitInlineCode,
   workSummarySkeleton as webSkeleton,
 } from "../apps/web/lib/work-summary.mjs";
 
@@ -47,4 +48,25 @@ test("English labels and leading text are kept; untemplated text stays whole", (
   assert.deepEqual(parseWorkSummary("Just fix it.\nPlease."), { templated: false, preamble: "Just fix it.\nPlease.", sections: [] });
   assert.deepEqual(parseWorkSummary(null), { templated: false, preamble: "", sections: [] });
   assert.equal(parseWorkSummary("依頼:\n\n背景: なし").sections.map((section) => section.key).join(), "background");
+});
+
+test("splitInlineCode splits backtick pairs and leaves unmatched backticks as text", () => {
+  assert.deepEqual(splitInlineCode("run `npm test` now"), [
+    { code: false, text: "run " },
+    { code: true, text: "npm test" },
+    { code: false, text: " now" },
+  ]);
+  assert.deepEqual(splitInlineCode("a ` b"), [{ code: false, text: "a ` b" }]);
+});
+
+test("splitInlineCode handles multi-backtick spans and degenerate input", () => {
+  assert.deepEqual(splitInlineCode("``"), [{ code: false, text: "``" }]);
+  assert.deepEqual(splitInlineCode("```"), [{ code: false, text: "```" }]);
+  assert.deepEqual(splitInlineCode("a `b\nc` d"), [{ code: false, text: "a `b\nc` d" }]);
+  assert.deepEqual(splitInlineCode("``x``"), [{ code: true, text: "x" }]);
+  assert.deepEqual(splitInlineCode("`a``b`"), [
+    { code: false, text: "`a`" },
+    { code: true, text: "b" },
+  ]);
+  assert.deepEqual(splitInlineCode("`````"), [{ code: false, text: "`````" }]);
 });

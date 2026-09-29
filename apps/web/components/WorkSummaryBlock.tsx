@@ -1,7 +1,24 @@
 'use client';
 
 import { useLocale } from '@/lib/i18n';
-import { parseWorkSummary } from '../lib/work-summary.mjs';
+import { parseWorkSummary, splitInlineCode } from '../lib/work-summary.mjs';
+
+/** Text with `backtick` spans shown as inline code. */
+function InlineText({ text }: { text: string }) {
+  return (
+    <>
+      {splitInlineCode(text).map((part, index) =>
+        part.code ? (
+          <code key={index} className="wsum__code">
+            {part.text}
+          </code>
+        ) : (
+          part.text
+        ),
+      )}
+    </>
+  );
+}
 
 /**
  * A Work summary laid out by the summary template (request / background /
@@ -14,7 +31,13 @@ export function WorkSummaryBlock({ summary, variant }: { summary: string | null 
   const parsed = parseWorkSummary(summary);
   if (!parsed.templated) {
     if (parsed.preamble.length === 0) return variant === 'full' ? <p className="wsum__text">—</p> : null;
-    return <p className={variant === 'full' ? 'wsum__text' : 'wsum__text wsum__text--clamp'}>{parsed.preamble}</p>;
+    return variant === 'full' ? (
+      <p className="wsum__text">
+        <InlineText text={parsed.preamble} />
+      </p>
+    ) : (
+      <p className="wsum__text wsum__text--clamp">{parsed.preamble}</p>
+    );
   }
 
   const request = parsed.sections.find((section) => section.key === 'request');
@@ -33,14 +56,20 @@ export function WorkSummaryBlock({ summary, variant }: { summary: string | null 
 
   return (
     <div className="wsum">
-      {parsed.preamble && <p className="wsum__text">{parsed.preamble}</p>}
+      {parsed.preamble && (
+        <p className="wsum__text">
+          <InlineText text={parsed.preamble} />
+        </p>
+      )}
       {parsed.sections.map((section) => {
         const label = locale === 'ja' ? section.label : section.label_en;
         if (section.key === 'request') {
           return (
             <section key={section.key} className="wsum__sec wsum__sec--request">
               <h3 className="wsum__label">{label}</h3>
-              <p className="wsum__lead">{section.text}</p>
+              <p className="wsum__lead">
+                <InlineText text={section.text} />
+              </p>
             </section>
           );
         }
@@ -50,11 +79,15 @@ export function WorkSummaryBlock({ summary, variant }: { summary: string | null 
             {section.kind === 'list' ? (
               <ul className="wsum__checks">
                 {section.items.map((item, index) => (
-                  <li key={index}>{item}</li>
+                  <li key={index}>
+                    <InlineText text={item} />
+                  </li>
                 ))}
               </ul>
             ) : (
-              <p className="wsum__text">{section.text}</p>
+              <p className="wsum__text">
+                <InlineText text={section.text} />
+              </p>
             )}
           </section>
         );

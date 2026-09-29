@@ -252,13 +252,14 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
           {/* Overview */}
           <section className="panel" aria-labelledby="sec-overview">
             <h2 className="panel__title" id="sec-overview">
-              {t('work.overview')} <WorkStateBadge state={work.state} /> {work.archived_at && <ArchivedBadge />}
+              {t('work.overview')}
             </h2>
-            <h1 className="page__title panel__heading">
+            <div className="work-head__meta">
               {displayNumber !== null && <span className="badge badge--gray">{t('work.numberLabel', { number: String(displayNumber) })}</span>}
-              {displayNumber !== null && ' '}
-              {work.title}
-            </h1>
+              <WorkStateBadge state={work.state} />
+              {work.archived_at && <ArchivedBadge />}
+            </div>
+            <h1 className="page__title panel__heading">{work.title}</h1>
             <WorkSummaryBlock summary={work.summary} variant="full" />
             <dl className="kv kv--spaced">
               <dt>{t('work.owner')}</dt>
