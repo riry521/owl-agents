@@ -774,7 +774,8 @@ test("role prompts keep unrelated existing failures outside Task verification", 
   assert.match(worker, /report it in remaining_issues as pre-existing; it does not make verification\.passed false/u);
   assert.match(hybrid, /Tell each Executor not to edit unrelated failing tests/u);
   assert.match(reviewer, /report it as one minor finding that says so, never as major/u);
-  assert.match(reviewer, /even when an acceptance criterion says the whole test suite must pass/u);
+  assert.match(reviewer, /or an acceptance criterion names that test or check; a criterion that only says the whole test suite must pass does not name it/u);
+  assert.match(reviewer, /Never stash, reset or check out anything in the Task's workspace/u);
 });
 
 test("The Reviewer prompt carries changed_files: an instruction line, null by default, and the given list when known", async () => {
