@@ -761,6 +761,22 @@ test("Only the Worker prompt carries the minimal-code rules; the Hybrid plan and
   assert.ok(instructionsSection(reviewer).includes("report it as a minor finding; it is not by itself a reason to fail."));
 });
 
+test("role prompts keep unrelated existing failures outside Task verification", async () => {
+  const calls = [];
+  const runner = runnerAnswering((template) => fillTemplate(template), calls);
+  await runner.runManagerPlan(managerRequest("plan"));
+  await runner.runWorker(workerRequest());
+  await runner.runWorker(workerRequest({ hybrid_mode: true, hybrid_phase: "plan" }));
+  await runner.runReviewer(reviewerRequest());
+  const [manager, worker, hybrid, reviewer] = calls.map((call) => instructionsSection(call.prompt));
+  assert.match(manager, /require instead that the Task adds no new failures/u);
+  assert.match(manager, /Reviewer sends such failures to the backlog/u);
+  assert.match(worker, /report it in remaining_issues as pre-existing; it does not make verification\.passed false/u);
+  assert.match(hybrid, /Tell each Executor not to edit unrelated failing tests/u);
+  assert.match(reviewer, /report it as one minor finding that says so, never as major/u);
+  assert.match(reviewer, /even when an acceptance criterion says the whole test suite must pass/u);
+});
+
 test("The Reviewer prompt carries changed_files: an instruction line, null by default, and the given list when known", async () => {
   const calls = [];
   const runner = runnerAnswering((template) => fillTemplate(template), calls);
