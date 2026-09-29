@@ -23,3 +23,14 @@ export function addAdvisorReplyTargetInstruction(prompt: string, replyTarget: st
   if (replyTarget.trim().toLowerCase() !== "slack") return prompt;
   return `${buildSlackFormatInstruction()}\n\n${prompt}`;
 }
+
+/**
+ * How the Advisor must answer the three tidy-up requests. Core runs the
+ * curation itself and appends its summary, so guessing the outcome here would
+ * show the operator numbers that were never recorded.
+ */
+export const ADVISOR_CURATION_INSTRUCTION = [
+  "Tidy-up requests: when the operator asks to tidy the knowledge (\"ナレッジ整理して\"), emit exactly one owl-actions entry {type:\"run_librarian\",description,payload:{}} in that same turn. Answer \"スキル整理して\" with {type:\"run_skill_curation\",description,payload:{}} and \"ルール整理して\" with {type:\"run_rule_curation\",description,payload:{}}.",
+  "Always emit the matching action in the same turn, and never answer a tidy-up request with create_work: Core executes the curation, records the run and appends that run's summary (counts and main items) to your reply, so do not guess or describe the result yourself.",
+  "run_rule_curation never rewrites rules: it only reports the rule proposals that are waiting for the Owner's approval and the findings about the current rules. Tell the operator that changing a rule needs the Owner's approval.",
+].join(" ");

@@ -1,6 +1,7 @@
 import { createUlid, utcNow } from "../../db/dist/index.js";
 import type { KnowledgeNotes, NoteClaim } from "./knowledge-notes.js";
 import { fingerprint, lessonFingerprint } from "./learning-fingerprint.js";
+import { MIN_KEYWORDS, sanitizeKeywords } from "./knowledge-tags.js";
 import type { NormalizedLesson } from "./final-verdict.js";
 import type { RuleRole } from "./rule-store.js";
 import type { CoreDatabase, CoreWriteLaneTransaction } from "./types.js";
@@ -320,6 +321,9 @@ export class LearningPipeline {
               ? `${lesson.lesson.trim()}。理由: ${lesson.basis.trim()}`
               : `${lesson.lesson.trim()} Reason: ${lesson.basis.trim()}`
             : lesson.lesson;
+          const tags = sanitizeKeywords(lesson.keywords ?? []);
+          // Lessons recorded before keyword tagging have no keywords field and are saved untagged.
+          if (lesson.keywords !== undefined && tags.length < MIN_KEYWORDS) throw new Error("keywords_insufficient");
           const textFingerprint = fingerprint(text);
           const existing = (await this.notes.list()).find((entry) => entry.claims.some((claim) => claim.fingerprint === textFingerprint));
           if (existing?.claims.some((claim) => claim.fingerprint === textFingerprint && claim.sources.includes(row.work_id))) {
@@ -331,7 +335,8 @@ export class LearningPipeline {
               text,
               work_id: row.work_id,
               project_id: row.project_id,
-              tags: words(lesson.applies_to),
+              tags,
+              ...(tags.length >= MIN_KEYWORDS ? { tags_source: "keywords" as const } : {}),
             });
             addUnique(result.note_ids, [note.note_id]);
             notesChanged = true;
@@ -491,10 +496,6 @@ function emptyPublicResult(): LearningJobResult {
 
 function addUnique(target: string[], values: readonly string[]): void {
   for (const value of values) if (!target.includes(value)) target.push(value);
-}
-
-function words(value: string): string[] {
-  return [...new Set((value.normalize("NFKC").toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter((word) => word.length > 1))];
 }
 
 function stringArray(value: unknown): string[] {

@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
 import { generateUlid, isValidUlid } from "@owl/shared";
 
 import type { KnowledgeBase } from "./knowledge-base.js";
 import { fingerprint } from "./learning-fingerprint.js";
+import { mergeTagSets, sanitizeKeywords } from "./knowledge-tags.js";
 import { resolveKnowledgeFilename, slugifyKnowledgeName } from "./knowledge-naming.js";
 
 export interface NoteClaim {
@@ -27,6 +28,8 @@ export interface NoteDocument {
   readonly title: string;
   readonly slug: string;
   readonly tags: readonly string[];
+  /** Set to "keywords" once the tags were built from AI-extracted keywords (frontmatter `tags_source`). */
+  readonly tags_source?: "keywords";
   readonly sources: readonly string[];
   readonly links: readonly string[];
   readonly project_ids: readonly string[];
@@ -96,6 +99,11 @@ export class KnowledgeNotes {
       .sort((left, right) => right.updated.localeCompare(left.updated) || left.id.localeCompare(right.id));
   }
 
+  /** Notes with their actual file names under notes/ (which may carry a de-duplication suffix). */
+  public async listWithFiles(): Promise<Array<{ note: NoteDocument; file: string }>> {
+    return (await this.readStoredNotes()).map(({ note, path }) => ({ note, file: path }));
+  }
+
   public async get(id: string): Promise<NoteDocument | null> {
     const entry = (await this.readStoredNotes()).find(({ note }) => note.id === id);
     return entry?.note ?? null;
@@ -112,6 +120,8 @@ export class KnowledgeNotes {
     work_id: string;
     project_id: string | null;
     tags: readonly string[];
+    /** Mark a newly created note as tagged from keywords. */
+    tags_source?: "keywords";
   }): Promise<{ note_id: string; created: boolean; added: boolean }> {
     const topic = input.topic.trim();
     const text = input.text.trim();
@@ -150,7 +160,8 @@ export class KnowledgeNotes {
       id,
       title: topic,
       slug: topicSlug,
-      tags: uniqueSorted([...input.tags, ...words(topic)]),
+      tags: sanitizeKeywords(input.tags).sort((a, b) => a.localeCompare(b)),
+      ...(input.tags_source ? { tags_source: input.tags_source } : {}),
       sources: [input.work_id],
       links: [],
       project_ids: input.project_id ? [input.project_id] : [],
@@ -209,7 +220,7 @@ export class KnowledgeNotes {
     }
     const updatedTarget: NoteDocument = {
       ...target.note,
-      tags: uniqueSorted([...target.note.tags, ...source.note.tags]),
+      tags: mergeTagSets(target.note.tags, source.note.tags),
       sources: uniqueSorted([...target.note.sources, ...source.note.sources, ...claims.flatMap((claim) => claim.sources)]),
       links: uniqueSorted([...target.note.links, sourceId]),
       project_ids: uniqueSorted([...target.note.project_ids, ...source.note.project_ids]),
@@ -226,6 +237,44 @@ export class KnowledgeNotes {
     return true;
   }
 
+  /** Move a merged source note out of knowledge/ and point other notes' links at the target. */
+  public async retireMergedNote(
+    sourceId: string,
+    targetId: string,
+    archiveDir: string,
+  ): Promise<{ archived_path: string; relinked: string[] }> {
+    const stored = await this.readStoredNotes();
+    const source = stored.find(({ note }) => note.id === sourceId);
+    if (!source || !stored.some(({ note }) => note.id === targetId)) throw new Error("note_not_found");
+
+    const relinked: string[] = [];
+    for (const { note, path } of stored) {
+      if (note.id === sourceId || !note.links.includes(sourceId)) continue;
+      const links = uniqueSorted(note.links.filter((id) => id !== sourceId).concat(note.id === targetId ? [] : [targetId]));
+      await this.writeNote(path, { ...note, links, updated: this.now() });
+      relinked.push(path);
+    }
+
+    const archiveNotes = join(archiveDir, "notes");
+    await mkdir(archiveNotes, { recursive: true });
+    const dot = source.path.lastIndexOf(".");
+    const stem = dot > 0 ? source.path.slice(0, dot) : source.path;
+    const ext = dot > 0 ? source.path.slice(dot) : "";
+    let archived = join(archiveNotes, source.path);
+    for (let n = 1; await readFile(archived).then(() => true, () => false); n += 1) {
+      archived = join(archiveNotes, `${stem}-${n}${ext}`);
+    }
+    const from = join(this.notesDir, source.path);
+    try {
+      await rename(from, archived);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
+      await copyFile(from, archived);
+      await unlink(from);
+    }
+    return { archived_path: archived, relinked };
+  }
+
   public async normalizeTags(noteId: string, from: string, to: string): Promise<boolean> {
     const stored = (await this.readStoredNotes()).find(({ note }) => note.id === noteId);
     if (!stored) throw new Error("note_not_found");
@@ -233,6 +282,13 @@ export class KnowledgeNotes {
     if (tags.join("\u0000") === [...stored.note.tags].sort((a, b) => a.localeCompare(b)).join("\u0000")) return false;
     await this.writeNote(stored.path, { ...stored.note, tags, updated: this.now() });
     return true;
+  }
+
+  /** Replace only the tags of a note; body and `updated` stay untouched. `keywords` marks the tags as keyword-built. */
+  public async setTags(noteId: string, tags: readonly string[], keywords = false): Promise<void> {
+    const stored = (await this.readStoredNotes()).find(({ note }) => note.id === noteId);
+    if (!stored) throw new Error("note_not_found");
+    await this.writeNote(stored.path, { ...stored.note, tags: uniqueSorted(tags), ...(keywords ? { tags_source: "keywords" as const } : {}) });
   }
 
   public async recordPromotion(noteId: string, entry: NotePromotion): Promise<void> {
@@ -269,6 +325,8 @@ export class KnowledgeNotes {
     const sources = readArray(fields, "sources");
     const links = readArray(fields, "links");
     const projectIds = readArray(fields, "project_ids");
+    const tagsSource = fields.has("tags_source") ? readScalar(fields, "tags_source") : null;
+    if (tagsSource !== null && tagsSource !== "keywords") throw new NoteParseError("invalid_tags_source");
     const created = readScalar(fields, "created");
     const updated = readScalar(fields, "updated");
     if (!isValidUlid(id)) throw new NoteParseError("invalid_note_id");
@@ -291,6 +349,7 @@ export class KnowledgeNotes {
       title,
       slug: slugifyKnowledgeName(title),
       tags,
+      ...(tagsSource ? { tags_source: "keywords" as const } : {}),
       sources,
       links,
       project_ids: projectIds,
@@ -309,6 +368,7 @@ export class KnowledgeNotes {
       `id: ${note.id}`,
       `title: ${renderScalar(note.title)}`,
       `tags: ${renderArray(note.tags)}`,
+      ...(note.tags_source ? [`tags_source: ${note.tags_source}`] : []),
       `sources: ${renderArray(note.sources)}`,
       `links: ${renderArray(note.links)}`,
       `project_ids: ${renderArray(note.project_ids)}`,
@@ -351,7 +411,7 @@ export class KnowledgeNotes {
       }];
     const note: NoteDocument = {
       ...target,
-      tags: uniqueSorted([...target.tags, ...input.tags, ...words(input.topic)]),
+      tags: mergeTagSets(target.tags, input.tags),
       sources: uniqueSorted([...target.sources, ...claims.flatMap((claim) => claim.sources), input.work_id]),
       project_ids: uniqueSorted([...target.project_ids, ...(input.project_id ? [input.project_id] : [])]),
       updated: this.now(),
@@ -624,7 +684,9 @@ function validateNote(note: NoteDocument): void {
 }
 
 function sameNote(left: NoteDocument, right: NoteDocument): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+  // tags_source is optional and may sit at a different key position, so compare it separately.
+  return left.tags_source === right.tags_source
+    && JSON.stringify({ ...left, tags_source: undefined }) === JSON.stringify({ ...right, tags_source: undefined });
 }
 
 function words(value: string): Set<string> {

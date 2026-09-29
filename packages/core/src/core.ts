@@ -3,7 +3,7 @@ import { createHash as createFileHash } from "node:crypto";
 import { constants, existsSync, mkdirSync, statSync } from "node:fs";
 import { copyFile, lstat, mkdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { createUlid, utcNow } from "../../db/dist/index.js";
 import { DecisionService, type OpenDecisionPayload } from "./decision";
 import { managerReplanFailureBrief, RESOLVE_CONFLICT_OPTION_KEY } from "./decision-brief";
@@ -33,21 +33,33 @@ import { isPlanRejection, validatePlan, validateReplan, type ReplanPlan, type Re
 import { KnowledgeBase } from "./knowledge-base";
 import { KnowledgeNotes } from "./knowledge-notes.js";
 import { migrateLegacyKnowledge as runLegacyKnowledgeMigration } from "./knowledge-migration.js";
+import { retagKnowledge, type KeywordExtractionItem, type KeywordExtractionResult } from "./knowledge-retag.js";
 import { DEFAULT_KNOWLEDGE_LIMITS, KnowledgeRetriever, normalizeKnowledgeLimits, type KnowledgeLimits } from "./knowledge-retrieval.js";
 import { ruleKeyFingerprint } from "./learning-fingerprint.js";
 import { LearningJobs, LearningPipeline, type LearningJobStatus } from "./learning-pipeline.js";
 import { RuleLoadError, RuleStore, parseWorkRules, type RuleReloadResult, type RuleRole } from "./rule-store";
+import type { RuleCurationResult } from "./rule-curation.js";
 import { RuleProposals, type RuleProposalCreateResult, type RuleProposalStatus } from "./rule-proposals.js";
 import { RuleWriter } from "./rule-writer.js";
 import { detectSkillReads, SkillBox, type SkillSettings, type SkillState } from "./skill-box";
 import { isValidSkillScope, validateSkillFilePath, validateSkillName } from "./skill-files";
-import { SKILL_CURATOR_DEBOUNCE_MS, SkillCurator } from "./skill-curator";
+import { SKILL_CURATOR_DEBOUNCE_MS, SkillCurator, type SkillCurationResult } from "./skill-curator";
 import { AdvisorSessionManager } from "./advisor-session.js";
 import { AdvisorSessionRuntime, type AdvisorSettingsSnapshot } from "./advisor-runtime.js";
 import { MemorySaver } from "./memory-saver.js";
 import { slugifyKnowledgeContentName } from "./knowledge-naming.js";
 import { Librarian } from "./librarian.js";
 import { LibrarianScheduler } from "./librarian-scheduler.js";
+import {
+  CurationRunStore,
+  type CurationActor,
+  type CurationKind,
+  type CurationListQuery,
+  type CurationRunSummaryView,
+  type CurationRunView,
+  type CurationTrigger,
+} from "./curation-runs.js";
+import { summarizeCurationReport } from "./curation-summary.js";
 import {
   DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS,
   KNOWLEDGE_AUTOMATION_SETTINGS_KEY,
@@ -93,7 +105,10 @@ import {
   type LinkBacklogItemsPayload,
 } from "./review-backlog.js";
 import {
+  ADVISOR_CURATION_ACTION_TYPES,
+  ADVISOR_CURATION_INSTRUCTION,
   addAdvisorReplyTargetInstruction,
+  advisorCurationKind,
   builtinProviderHarness,
   CODEX_BUILTIN_MODELS,
   DEFAULT_AGENT_WALL_TIMEOUT_MS,
@@ -463,6 +478,9 @@ export class Core {
   public readonly memorySaver: MemorySaver;
   public readonly librarian: Librarian;
   private readonly librarianScheduler: LibrarianScheduler;
+  private readonly curationRuns: CurationRunStore;
+  private readonly activeCurations = new Map<CurationKind, Promise<unknown>>();
+  private readonly pendingCurationKeys = new Map<string, Promise<CurationRunView>>();
   private readonly researchRecorder: ResearchRecorder;
   private readonly learningJobs: LearningJobs;
   private readonly ruleProposals: RuleProposals;
@@ -587,7 +605,10 @@ export class Core {
     this.librarian = new Librarian(this.knowledge, {
       getModelConfig: () => resolveRoleModelFromDb(this.db, "librarian"),
     });
-    this.librarianScheduler = new LibrarianScheduler({ run: () => this.librarian.run() });
+    this.librarianScheduler = new LibrarianScheduler({
+      run: () => this.runCuration({ kind: "librarian", trigger: "scheduled", actor: "system" }),
+    });
+    this.curationRuns = new CurationRunStore(this.db);
     this.learningJobs = new LearningJobs({ db: this.db, writeLane: this.writeLane, now: options.now });
     this.ruleProposals = new RuleProposals({
       db: this.db,
@@ -881,6 +902,54 @@ export class Core {
     });
   }
 
+  /**
+   * Rebuild note tags from AI-extracted keywords. `extract` defaults to the agent runner's
+   * `runKeywordExtraction`; it is required when the runner has none.
+   */
+  private retagRunning = false;
+
+  public async retagKnowledgeNotes(input: {
+    /** Directory named "knowledge" whose files are retagged (backups go to <its parent>/data/backups). Defaults to this Core's knowledge directory. */
+    knowledge_dir?: string;
+    dry_run: boolean;
+    /** Retag every note, including those already marked as keyword-tagged. */
+    force?: boolean;
+    extract?: (items: KeywordExtractionItem[]) => Promise<KeywordExtractionResult>;
+  }) {
+    if (!input || typeof input.dry_run !== "boolean") {
+      throw validationError("dry_run must be a boolean.", { field: "dry_run" });
+    }
+    if (input.force !== undefined && typeof input.force !== "boolean") {
+      throw validationError("force must be a boolean.", { field: "force" });
+    }
+    const knowledgeDir = input.knowledge_dir ?? this.knowledge.knowledgeDir;
+    if (typeof knowledgeDir !== "string" || !isAbsolute(knowledgeDir) || basename(knowledgeDir) !== "knowledge") {
+      throw validationError("knowledge_dir must be an absolute path to a directory named knowledge.", { field: "knowledge_dir" });
+    }
+    const knowledge = new KnowledgeBase(dirname(knowledgeDir));
+    const runner = this.options.agentRunner as {
+      runKeywordExtraction?: (request: { items: KeywordExtractionItem[]; language: string }) => Promise<KeywordExtractionResult>;
+    };
+    const language = ownerLanguage(this.db);
+    const extract = input.extract
+      ?? (runner.runKeywordExtraction ? (items: KeywordExtractionItem[]) => runner.runKeywordExtraction!({ items, language }) : null);
+    if (!extract) throw new Error("dependency_unavailable: keyword_extraction_unavailable");
+    if (this.retagRunning || this.activeCurations.has("librarian")) throw new Error("retag_in_progress");
+    this.retagRunning = true;
+    try {
+      return await retagKnowledge({
+        knowledge,
+        notes: new KnowledgeNotes(knowledge),
+        backupRoot: join(dirname(knowledgeDir), "data", "backups"),
+        extract,
+        dry_run: input.dry_run,
+        force: input.force,
+      });
+    } finally {
+      this.retagRunning = false;
+    }
+  }
+
   public async approveRuleProposal(proposalId: string) {
     return this.ruleProposals.approve(proposalId);
   }
@@ -988,6 +1057,14 @@ export class Core {
     return this.skillProposalCommandResult(proposalId);
   }
 
+  public curateSkills(): Promise<SkillCurationResult> {
+    return this.skillCurator.curate();
+  }
+
+  public curateRules(): RuleCurationResult {
+    return this.ruleProposals.curate();
+  }
+
   public async rejectSkillProposal(proposalId: string): Promise<SkillProposalCommandResult> {
     const proposal = this.db.get<{ status: string }>("SELECT status FROM skill_proposals WHERE id = ?", proposalId);
     if (!proposal) throw notFound("skill_proposal", proposalId);
@@ -1030,6 +1107,7 @@ export class Core {
     if (this.db.migrate) {
       this.db.migrate();
     }
+    await this.curationRuns.recoverInterrupted();
     this.refreshProcessSkillsPack();
     try {
       await this.warnUnknownSavedModels();
@@ -1122,6 +1200,71 @@ export class Core {
     for (const provider of recovery.reviewerProvidersToResume) this.workflow.resumeProvider(provider);
     this.retryWorkAfterRoleChange();
     this.librarianScheduler.start(this.readKnowledgeAutomationSettings().librarian_times);
+  }
+
+  /**
+   * Runs one curation and records it in curation_runs. Runs of the same kind
+   * are serialized; each request keeps its own record.
+   */
+  public async runCuration(input: {
+    kind: CurationKind;
+    trigger: CurationTrigger;
+    actor: CurationActor;
+    actor_ref?: string | null;
+    request_key?: string | null;
+  }): Promise<CurationRunView> {
+    const key = input.request_key ?? null;
+    if (key) {
+      const pending = this.pendingCurationKeys.get(key);
+      if (pending) return pending;
+      const existing = this.curationRuns.findByRequestKey(key);
+      if (existing) return existing;
+    }
+    const previous = this.activeCurations.get(input.kind);
+    const promise: Promise<CurationRunView> = (previous ?? Promise.resolve()).then(() => this.executeCuration(input));
+    // The tail never rejects: it only orders later runs and is awaited on stop.
+    const tail: Promise<unknown> = promise.then(() => undefined, () => undefined).then(() => {
+      if (this.activeCurations.get(input.kind) === tail) this.activeCurations.delete(input.kind);
+      if (key && this.pendingCurationKeys.get(key) === promise) this.pendingCurationKeys.delete(key);
+    });
+    this.activeCurations.set(input.kind, tail);
+    if (key) this.pendingCurationKeys.set(key, promise);
+    return promise;
+  }
+
+  private async executeCuration(input: {
+    kind: CurationKind;
+    trigger: CurationTrigger;
+    actor: CurationActor;
+    actor_ref?: string | null;
+    request_key?: string | null;
+  }): Promise<CurationRunView> {
+    const run = await this.curationRuns.start(input);
+    try {
+      if (input.kind === "librarian" && this.retagRunning) throw new Error("A knowledge retag is running. Try again after it finishes.");
+      const report = await this.executeCurationReport(input.kind, run.id);
+      return await this.curationRuns.finish(run.id, { ...summarizeCurationReport(input.kind, report, run.id, ownerLanguage(this.db)), report });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn("[owl-core] curation run failed", { kind: input.kind, run_id: run.id, message });
+      return this.curationRuns.fail(run.id, message);
+    }
+  }
+
+  /** Runs the curation behind one kind; the Librarian also records where its merged notes went. */
+  private async executeCurationReport(kind: CurationKind, runId: string): Promise<unknown> {
+    if (kind === "librarian") return this.librarian.run({ runId });
+    if (kind === "skill_curation") return this.curateSkills();
+    if (kind === "rule_curation") return this.curateRules();
+    throw new Error("curation_kind_not_implemented");
+  }
+
+  public listCurationRuns(query: CurationListQuery): { items: CurationRunSummaryView[]; next_cursor: string | null } {
+    return this.curationRuns.list(query);
+  }
+
+  public getCurationRun(id: string): CurationRunView | null {
+    return this.curationRuns.get(id);
   }
 
   private scheduleSkillReconciliation(): void {
@@ -1326,12 +1469,16 @@ export class Core {
     if (!this.started) {
       await this.librarianScheduler.stop();
       this.skillCurator.stop();
+      await Promise.allSettled([...this.activeCurations.values()]);
       await this.learningTask;
       await this.researchRecorder.idle();
       return;
     }
     this.started = false;
     await this.librarianScheduler.stop();
+    // Stopping the Curator releases a curation that is waiting on its provider.
+    this.skillCurator.stop();
+    await Promise.allSettled([...this.activeCurations.values()]);
     if (this.advisorKeepAliveTimer !== null) {
       clearInterval(this.advisorKeepAliveTimer);
       this.advisorKeepAliveTimer = null;
@@ -1344,9 +1491,6 @@ export class Core {
       clearInterval(this.learningTimer);
       this.learningTimer = null;
     }
-    // Stopping the Curator releases a run that is waiting on its provider, so
-    // this only waits for local skill bookkeeping.
-    this.skillCurator.stop();
     await this.skillReconcilePromise;
     this.ruleStore.stopWatching();
     // Shutdown ends the Owl system, not the Work itself. Stop scheduling,
@@ -3894,7 +4038,7 @@ export class Core {
       language === "en"
         ? "Owl's language setting is English: reply to the operator in English and write every Work title and summary in English, even when the operator writes in another language."
         : "Owl's language setting is Japanese: reply to the operator in Japanese (日本語) and write every Work title and summary in Japanese, even when the operator writes in another language. Code, commands, paths, and identifiers stay as they are.",
-    ].join(" ") + "\n\n" + workSummaryInstruction(language);
+    ].join(" ") + "\n\n" + workSummaryInstruction(language) + "\n\n" + ADVISOR_CURATION_INSTRUCTION;
     // No Work context here, so only Rule Store lines apply. A rule reload
     // changes this prompt, which the Advisor runtime detects as drift and
     // restarts the session with it before the next turn.
@@ -4136,6 +4280,7 @@ export class Core {
   ): Promise<{ notices: string[]; handledIndexes: Set<number> }> {
     const notices: string[] = [];
     const handledIndexes = new Set<number>();
+    const curatedKinds = new Set<CurationKind>();
     const t = ADVISOR_TEXT[ownerLanguage(this.db)];
     const inheritedProject = this.db.get<{ project_id: string | null }>(
       `SELECT work.project_id
@@ -4146,6 +4291,32 @@ export class Core {
     )?.project_id ?? null;
 
     for (const [index, action] of actions.entries()) {
+      // The action list is untrusted input: a Set membership test keeps
+      // inherited keys ("toString", "constructor", …) out of the curation
+      // path entirely, and advisorCurationKind only reads own properties.
+      if (ADVISOR_CURATION_ACTION_TYPES.has(action.type)) {
+        const kind = advisorCurationKind(action.type);
+        if (kind === null) continue;
+        handledIndexes.add(index);
+        // A reply that repeats a tidy-up must not run the same curation twice.
+        if (curatedKinds.has(kind)) continue;
+        curatedKinds.add(kind);
+        try {
+          const run = await this.runCuration({
+            kind,
+            trigger: "advisor_action",
+            actor: "advisor",
+            actor_ref: turnId,
+            request_key: `advisor-curation:${turnId}:${index}`,
+          });
+          notices.push(run.status === "succeeded"
+            ? t.curationSucceeded(run.summary)
+            : t.curationFailed(kind, run.error ?? t.unknownCause));
+        } catch (error) {
+          notices.push(t.curationFailed(kind, error instanceof Error ? error.message.slice(0, 300) : t.unknownCause));
+        }
+        continue;
+      }
       if (action.type !== "create_work") continue;
       handledIndexes.add(index);
       if (recoveredIndexes.has(index)) {

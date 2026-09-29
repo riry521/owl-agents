@@ -16,9 +16,16 @@ export interface AdvisorText {
   readonly createdNotStarted: (title: string, workId: string, detail: string) => string;
   readonly createFailed: (detail: string) => string;
   readonly createdRecovered: (title: string, workId: string) => string;
+  readonly curationSucceeded: (summary: string) => string;
+  readonly curationFailed: (kind: string, detail: string) => string;
   readonly dirtyWorkspace: (path: string) => string;
   readonly attachmentQuarantined: (filename: string) => string;
 }
+
+const CURATION_KIND_LABEL: Record<OwnerLanguage, Record<string, string>> = {
+  ja: { librarian: "ナレッジ", skill_curation: "スキル", rule_curation: "ルール" },
+  en: { librarian: "knowledge", skill_curation: "skill", rule_curation: "rule" },
+};
 
 export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
   ja: {
@@ -40,6 +47,8 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     createdNotStarted: (title, workId, detail) => `⚠ Work「${title}」は起票しました（ID: ${workId}）が、開始できませんでした。${detail}`,
     createFailed: (detail) => `⚠ Workの起票に失敗しました。${detail}`,
     createdRecovered: (title, workId) => `✓ Work「${title}」は前回の試行で起票済みだったため、開始しました（ID: ${workId}）。`,
+    curationSucceeded: (summary) => `✓ 整理を実行しました。\n${summary}`,
+    curationFailed: (kind, detail) => `⚠ ${CURATION_KIND_LABEL.ja[kind] ?? kind}の整理に失敗しました。${detail}`,
     dirtyWorkspace: (path) => `Advisor の作業用 worktree に未コミット、またはベースブランチ未統合の変更があります。変更は保持されており、自動では統合されません。\n${path}`,
     attachmentQuarantined: (filename) => `⚠ ${filename} は隔離されました。Advisorには渡していません。`,
   },
@@ -62,6 +71,8 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     createdNotStarted: (title, workId, detail) => `⚠ Created Work "${title}" (ID: ${workId}) but could not start it. ${detail}`,
     createFailed: (detail) => `⚠ Could not create the Work. ${detail}`,
     createdRecovered: (title, workId) => `✓ Work "${title}" was already created by an earlier attempt; started it now (ID: ${workId}).`,
+    curationSucceeded: (summary) => `✓ Ran the tidy-up.\n${summary}`,
+    curationFailed: (kind, detail) => `⚠ The ${CURATION_KIND_LABEL.en[kind] ?? kind} tidy-up failed. ${detail}`,
     dirtyWorkspace: (path) => `The Advisor's worktree has uncommitted changes, or changes not merged into the base branch. They are kept and will not be merged automatically.\n${path}`,
     attachmentQuarantined: (filename) => `⚠ ${filename} was quarantined and was not handed to the Advisor.`,
   },

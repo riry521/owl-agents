@@ -40,6 +40,9 @@ export {
 } from "./research-filter.js";
 export type { ResearchTargetVerdict } from "./research-filter.js";
 export { migrateLegacyKnowledge } from "./knowledge-migration";
+export { retagKnowledge } from "./knowledge-retag";
+export type { KeywordExtractionItem, KeywordExtractionResult, RetagReport } from "./knowledge-retag";
+export { MAX_NOTE_TAGS, isValidTag, mergeTagSets, sanitizeKeywords, tagProblem } from "./knowledge-tags";
 export type { LegacyKnowledgeMigrationResult } from "./knowledge-migration";
 export { parseLessonBlocks } from "./final-verdict";
 export type { FinalLesson, FinalManagerVerdict, LessonBlock, NormalizedLesson } from "./final-verdict";
@@ -66,6 +69,16 @@ export { AdvisorSessionManager } from "./advisor-session";
 export { AdvisorSessionRuntime } from "./advisor-runtime";
 export { MemorySaver, slugify } from "./memory-saver";
 export { Librarian } from "./librarian";
+export { CURATION_KINDS, CURATION_RUN_STATUSES, CurationRunStore } from "./curation-runs";
+export type {
+  CurationActor,
+  CurationKind,
+  CurationListQuery,
+  CurationRunStatus,
+  CurationRunSummaryView,
+  CurationRunView,
+  CurationTrigger,
+} from "./curation-runs";
 export { reconcileWorktrees } from "./worktree-reconciler";
 export { AgentWorkspacePreparer, withWorkspacePreparation, worktreeHarnesses } from "./agent-workspace-preparer";
 export type { AgentWorkspacePreparerDeps } from "./agent-workspace-preparer";

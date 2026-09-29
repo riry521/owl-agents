@@ -638,6 +638,7 @@ test("Manager finalize: lessons use the new structured contract; a bare string i
     procedure: "",
     rule_text: "Check the full migration series before reserving a number.",
     rule_scope: "worker",
+    keywords: [],
   };
   const missing = { item: "Renumber the migration.", reason: "007 is taken.", fix: "Use 010." };
   const calls = [];
@@ -649,7 +650,7 @@ test("Manager finalize: lessons use the new structured contract; a bare string i
 
   const lessonSchema = MANAGER_FINALIZE_OUTPUT_SCHEMA.properties.verdict.properties.lessons.items;
   assert.deepEqual(Object.keys(lessonSchema.properties), [
-    "lesson", "basis", "applies_to", "kind", "topic", "procedure", "rule_text", "rule_scope",
+    "lesson", "basis", "applies_to", "kind", "topic", "procedure", "rule_text", "rule_scope", "keywords",
   ]);
   assert.deepEqual(lessonSchema.properties.kind.enum, ["procedure", "fact", "decision", "pitfall", "rule_candidate"]);
   assert.deepEqual(lessonSchema.properties.rule_scope.enum, ["all", "manager", "designer", "worker", "reviewer", "advisor"]);

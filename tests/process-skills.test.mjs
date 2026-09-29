@@ -620,7 +620,7 @@ test("prompts with no detected pack stay byte-identical", () => {
   };
   const expected = {
     manager_plan: "62e42e4c6ad7ff1b5c016c78add6fceb1e121f574d8c8011527879f98ff72064",
-    manager_finalize: "dc137e92cc8c354e63bf11a2bd0234b6dd62ec9d158e7d87e0c4298f8a62a3a1",
+    manager_finalize: "a522b7a5dcaa1b6de24a5ca831a4fda606f44b95f1c01cd9b6a0572d94e17860",
     worker: "c09a75f96fd05821e1a4dfac1dd831da60c1172731c2385c2b79190b92a1c71c",
     hybrid_plan: "443a103fbc67de2f88b17d66cc30f9c3f75fd4f69e5931be242e2fbfe2a914f4",
     hybrid_verdict: "c72b9a1afa78c00a06571d8cdc63e692e9988900b6d4dc518db3706e8ca5d363",

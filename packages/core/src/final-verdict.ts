@@ -23,6 +23,7 @@ export interface FinalLesson {
   readonly procedure?: string;
   readonly rule_text?: string;
   readonly rule_scope?: FinalLessonRuleScope;
+  readonly keywords?: readonly string[];
 }
 
 export type FinalLessonKind = "procedure" | "fact" | "decision" | "pitfall" | "rule_candidate";
@@ -40,6 +41,8 @@ export interface NormalizedLesson {
   readonly procedure: string;
   readonly rule_text: string;
   readonly rule_scope: FinalLessonRuleScope;
+  /** Absent for lessons recorded before keyword tagging. */
+  readonly keywords?: readonly string[];
 }
 
 export interface LessonBlock {
@@ -73,6 +76,7 @@ export function isFinalMissingItem(value: unknown): value is FinalMissingItem {
 
 export function isFinalLesson(value: unknown): value is FinalLesson {
   if (!isRecord(value) || !hasStrings(value, ["lesson", "basis", "applies_to"])) return false;
+  if (value.keywords !== undefined && !(Array.isArray(value.keywords) && value.keywords.every((keyword) => typeof keyword === "string"))) return false;
   if (typeof value.proposes_rule === "boolean") return true;
   return (
     FINAL_LESSON_KINDS.includes(value.kind as FinalLessonKind) &&
@@ -99,6 +103,7 @@ export function normalizeLesson(lesson: FinalLesson): NormalizedLesson {
       procedure: lesson.procedure,
       rule_text: lesson.rule_text,
       rule_scope: lesson.rule_scope as FinalLessonRuleScope,
+      ...(lesson.keywords ? { keywords: lesson.keywords } : {}),
     };
   }
   const proposesRule = lesson.proposes_rule === true;
@@ -111,6 +116,7 @@ export function normalizeLesson(lesson: FinalLesson): NormalizedLesson {
     procedure: "",
     rule_text: proposesRule ? lesson.lesson : "",
     rule_scope: "all",
+    ...(lesson.keywords ? { keywords: lesson.keywords } : {}),
   };
 }
 

@@ -3,6 +3,7 @@ import { isRuleRole } from "@owl/shared";
 import { HumanReadableError, invalidStateTransition, notFound } from "./errors.js";
 import { fingerprint, ruleKeyFingerprint } from "./learning-fingerprint.js";
 import { parseRuleYaml, renderRuleFile, type PromptRule, type RuleRole, type RuleStore } from "./rule-store.js";
+import { curateRuleProposals, type RuleCurationResult } from "./rule-curation.js";
 import type { KnowledgeNotes, NotePromotion } from "./knowledge-notes.js";
 import type { RuleWriter } from "./rule-writer.js";
 import type { CoreDatabase, CoreWriteLaneTransaction } from "./types.js";
@@ -189,6 +190,12 @@ export class RuleProposals {
         decision: parseJson(row.decision_json),
       };
     });
+  }
+
+  /** Read-only: judge open proposals and the current rules; never writes rules or proposal rows. */
+  public curate(): RuleCurationResult {
+    const proposals = [...this.list("pending"), ...this.list("awaiting_approval")];
+    return curateRuleProposals({ proposals, rules: this.ruleStore.rules });
   }
 
   public approve(proposalId: string): Promise<RuleProposalCommandResult> {

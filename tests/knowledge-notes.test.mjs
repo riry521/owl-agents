@@ -148,3 +148,50 @@ test("note writes use one final markdown file and leave no temporary file", asyn
   assert.equal(notes.parse(saved).id, result.note_id);
   assert.doesNotMatch(files[0], /\.tmp/u);
 });
+
+test("a Japanese topic never produces sentence-fragment tags and merged tags stay within five", async (t) => {
+  const { notes } = await setup(t, { minTopicScore: 1, minTopicScoreGap: 0 });
+  const topic = "から起動するエージェントのコンテキストに反映する";
+  const first = await notes.mergeClaim({
+    topic, kind: "fact", text: "Agents read the context on start.", work_id: WORK_A, project_id: PROJECT,
+    tags: ["agent", "context", "から起動するエージェントのコンテキストに"],
+  });
+  assert.deepEqual((await notes.get(first.note_id)).tags, ["agent", "context"]);
+
+  const merged = await notes.mergeClaim({
+    topic, kind: "fact", text: "A second claim on the same topic.", work_id: WORK_B, project_id: PROJECT,
+    tags: ["t1", "t2", "t3", "t4", "t5"],
+  });
+  assert.equal(merged.note_id, first.note_id);
+  assert.ok((await notes.get(first.note_id)).tags.length <= 5);
+});
+
+test("mergeNotes keeps the union of tags at five or fewer", async (t) => {
+  const { notes } = await setup(t, { minTopicScore: 100 });
+  const a = await notes.mergeClaim({ topic: "Alpha topic", kind: "fact", text: "alpha claim", work_id: WORK_A, project_id: PROJECT, tags: ["a1", "a2", "a3", "shared"] });
+  const b = await notes.mergeClaim({ topic: "Beta topic", kind: "fact", text: "beta claim", work_id: WORK_B, project_id: PROJECT, tags: ["b1", "b2", "b3", "shared"] });
+  assert.notEqual(a.note_id, b.note_id);
+  await notes.mergeNotes(a.note_id, b.note_id);
+  const tags = (await notes.get(a.note_id)).tags;
+  assert.equal(tags.length, 5);
+  assert.ok(tags.includes("shared"));
+});
+
+test("the tags_source record is written for new keyword-tagged notes and survives update, merge and setTags", async (t) => {
+  const { root, notes } = await setup(t);
+  const a = await notes.mergeClaim({ topic: "Alpha topic", kind: "fact", text: "Alpha claim text.", work_id: WORK_A, project_id: null, tags: ["one", "two", "three"], tags_source: "keywords" });
+  const b = await notes.mergeClaim({ topic: "Beta subject", kind: "fact", text: "Beta claim text.", work_id: WORK_B, project_id: null, tags: ["four", "five", "six"] });
+  assert.match(await readFile(join(root, "knowledge", "notes", (await readdir(join(root, "knowledge", "notes"))).find((f) => f.startsWith("alpha"))), "utf8"), /^tags_source: keywords$/mu);
+  assert.equal((await notes.get(a.note_id)).tags_source, "keywords");
+  assert.equal((await notes.get(b.note_id)).tags_source, undefined);
+
+  await notes.mergeClaim({ topic: "Alpha topic", kind: "fact", text: "Second alpha claim.", work_id: WORK_C, project_id: null, tags: ["seven", "eight"] });
+  await notes.setTags(a.note_id, ["one", "two", "three"]);
+  assert.equal((await notes.get(a.note_id)).tags_source, "keywords");
+  await notes.mergeNotes(a.note_id, b.note_id);
+  const merged = await notes.get(a.note_id);
+  assert.equal(merged.tags_source, "keywords");
+  assert.ok(merged.tags.length <= 5);
+  await notes.setTags(b.note_id, ["four", "five", "six"], true);
+  assert.equal((await notes.get(b.note_id)).tags_source, "keywords");
+});

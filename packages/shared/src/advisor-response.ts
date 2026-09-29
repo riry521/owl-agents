@@ -291,3 +291,35 @@ function parseSuggestedActions(value: unknown): AdvisorSuggestedAction[] {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+export type AdvisorCurationKind = "librarian" | "skill_curation" | "rule_curation";
+
+/**
+ * Every owl-actions type that runs a curation, with the curation kind it maps
+ * to, in the order an Advisor reply is expected to mention them.
+ */
+const ADVISOR_CURATION_ACTION_ENTRIES: readonly (readonly [string, AdvisorCurationKind])[] = Object.freeze([
+  ["run_librarian", "librarian"],
+  ["run_skill_curation", "skill_curation"],
+  ["run_rule_curation", "rule_curation"],
+]);
+
+/**
+ * owl-actions type → curation kind. The null prototype and Object.hasOwn in
+ * `advisorCurationKind` keep Object.prototype members ("toString",
+ * "constructor", …) from ever being returned as a curation kind, no matter
+ * what an Advisor reply or an API caller sends as `type`.
+ */
+export const ADVISOR_CURATION_ACTIONS: Readonly<Record<string, AdvisorCurationKind>> = Object.freeze(
+  Object.assign(Object.create(null) as Record<string, AdvisorCurationKind>, Object.fromEntries(ADVISOR_CURATION_ACTION_ENTRIES)),
+);
+
+/** The same list as a Set, so a caller can test an untrusted `type` without indexing an object. */
+export const ADVISOR_CURATION_ACTION_TYPES: ReadonlySet<string> = new Set(
+  ADVISOR_CURATION_ACTION_ENTRIES.map(([type]) => type),
+);
+
+/** The curation kind an owl-actions type runs, or null when the type is not a curation action. */
+export function advisorCurationKind(type: string): AdvisorCurationKind | null {
+  return Object.hasOwn(ADVISOR_CURATION_ACTIONS, type) ? ADVISOR_CURATION_ACTIONS[type]! : null;
+}

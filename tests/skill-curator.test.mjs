@@ -574,3 +574,84 @@ test("stopping the Curator does not wait for an in-flight provider call and star
   assert.equal(calls, 1);
   assert.equal(db.get("SELECT status FROM skill_proposals WHERE id = ?", "proposal-stop").status, "pending");
 });
+
+test("curate() runs metabolism and pending proposals in one call and reports both", async (t) => {
+  const { root, db } = await curatorDatabase(t);
+  const skillBox = new SkillBox({ db, owlRoot: root });
+  await seedSkill(skillBox, "old-procedure");
+  await addPendingProposal(db, "proposal-batch", validProposal);
+  const future = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString();
+  const curator = new SkillCurator({
+    db,
+    skillBox,
+    now: () => future,
+    getTypesafeApiKey: () => "test-key",
+    typeSafeJudge: async () => reusableJudgement,
+    agentRunner: { runCurator: async () => ({ ok: true, results: [rejectedResult("proposal-batch")] }) },
+  });
+  const report = await curator.curate();
+  assert.equal(report.target.skills, 1);
+  assert.deepEqual(report.state_changes.map(({ skill, from, to }) => ({ skill, from, to })), [{ skill: "old-procedure", from: "active", to: "stale" }]);
+  assert.match(report.state_changes[0].reason, /No detected reads/u);
+  assert.equal(report.proposals.length, 1);
+  assert.deepEqual([report.proposals[0].id, report.proposals[0].from, report.proposals[0].to], ["proposal-batch", "pending", "rejected"]);
+  assert.equal(report.pending_remaining, 0);
+  assert.deepEqual(report.warnings, []);
+});
+
+test("curate() without a Curator still migrates skills and warns", async (t) => {
+  const { root, db } = await curatorDatabase(t);
+  const skillBox = new SkillBox({ db, owlRoot: root });
+  await addPendingProposal(db, "proposal-wait", validProposal);
+  const curator = new SkillCurator({ db, skillBox, agentRunner: {} });
+  const report = await curator.curate();
+  assert.deepEqual(report.warnings, ["curator_unavailable"]);
+  assert.equal(report.pending_remaining, 1);
+});
+
+test("curate() drains more than three batches of pending proposals in one call", async (t) => {
+  const { root, db } = await curatorDatabase(t);
+  const skillBox = new SkillBox({ db, owlRoot: root });
+  for (let i = 0; i < 16; i += 1) await addPendingProposal(db, `many-${String(i).padStart(2, "0")}`, { ...validProposal, summary: `Release procedure ${i}` });
+  const curator = new SkillCurator({
+    db,
+    skillBox,
+    getTypesafeApiKey: () => "test-key",
+    typeSafeJudge: async () => reusableJudgement,
+    agentRunner: { runCurator: async (request) => ({ ok: true, results: request.proposals.map((p) => rejectedResult(p.id)) }) },
+  });
+  const report = await curator.curate();
+  assert.equal(report.pending_remaining, 0);
+  assert.equal(report.proposals.length, 16);
+  assert.equal(db.get("SELECT COUNT(*) AS count FROM skill_proposals WHERE status = 'pending'").count, 0);
+  assert.deepEqual(report.warnings, []);
+});
+
+test("curate() reports proposals created during the run even when now() is in the past", async (t) => {
+  const { root, db } = await curatorDatabase(t);
+  const skillBox = new SkillBox({ db, owlRoot: root });
+  await addPendingProposal(db, "seed-proposal", validProposal);
+  let inserted = false;
+  const curator = new SkillCurator({
+    db,
+    skillBox,
+    now: () => "2020-01-01T00:00:00.000Z",
+    getTypesafeApiKey: () => "test-key",
+    typeSafeJudge: async () => reusableJudgement,
+    agentRunner: { runCurator: async (request) => {
+      if (!inserted) {
+        inserted = true;
+        await db.createWriteLane().transact((tx) => tx.run(
+          `INSERT INTO skill_proposals (id, kind, target_skill, payload_json, project_id, status, attempts, created_at, updated_at)
+           VALUES ('created-during-run', 'new', NULL, ?, NULL, 'pending', 0, '2020-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z')`,
+          JSON.stringify(validProposal),
+        ));
+      }
+      return { ok: true, results: request.proposals.map((p) => rejectedResult(p.id)) };
+    } },
+  });
+  const report = await curator.curate();
+  assert.deepEqual(report.automatic_proposals.map((p) => p.id), ["created-during-run"]);
+  assert.deepEqual(report.proposals.map((p) => [p.id, p.to]).sort(), [["created-during-run", "rejected"], ["seed-proposal", "rejected"]]);
+  assert.equal(report.pending_remaining, 0);
+});

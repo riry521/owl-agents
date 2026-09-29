@@ -17,6 +17,7 @@ import { extractProviderUsage, harnessFailureDetail, isRecord, parseSingleJsonOb
 import { extractRoleOutputObject, providerSchema, splitRolePrompt } from "./role-contract";
 import { resolveOutputLogDir, writeInvalidOutputLog } from "./output-log";
 import { createCliProvider } from "./provider";
+import { buildKeywordPrompt, keywordProviderSchema, parseKeywordResponse, type KeywordExtractionRequest, type KeywordExtractionRunResult } from "./keyword-extraction";
 import { buildCuratorPrompt, curatorProviderSchema, parseCuratorResponse } from "./curator";
 import {
   normalizeWorkerResponse,
@@ -1284,6 +1285,35 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     }
   };
 
+  const runKeywordExtraction = async (input: KeywordExtractionRequest): Promise<KeywordExtractionRunResult> => {
+    const invocationId = input.invocation_id ?? invocationIdFactory();
+    let directory: string | undefined;
+    try {
+      const overrides = resolveOverrides(input as unknown as Record<string, unknown>, options);
+      directory = await mkdtemp(join(tmpdir(), "owl-keywords-"));
+      const response = await provider.execute(requestForProvider(
+        "curator",
+        invocationId,
+        buildKeywordPrompt(input),
+        options,
+        undefined,
+        overrides.model,
+        overrides.adapter,
+        overrides.effort,
+        directory,
+        overrides.env,
+        keywordProviderSchema(),
+      ));
+      assertProviderCompleted(response);
+      const parsed = parseKeywordResponse(response);
+      return "error" in parsed ? { ok: false, error: parsed.error } : { ok: true, items: parsed.items };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : "keyword_extraction_failed" };
+    } finally {
+      if (directory) await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+    }
+  };
+
   return {
     runManagerPlan,
     runDesigner,
@@ -1291,6 +1321,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     runReviewer,
     runAdvisor,
     runCurator,
+    runKeywordExtraction,
     provider,
     cancelAgent: async (invocationId: string, force?: boolean) => {
       const active = activeControllers.get(invocationId);

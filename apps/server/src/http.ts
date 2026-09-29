@@ -14,7 +14,7 @@ import { KnowledgeBase } from "../../../packages/core/dist/knowledge-base.js";
 import { RuleStore } from "../../../packages/core/dist/rule-store.js";
 import { KnowledgeAutomationValidationError, validateKnowledgeAutomationSettings } from "../../../packages/shared/dist/knowledge-automation.js";
 import { isOwnerLanguage, type OwnerLanguage } from "../../../packages/shared/dist/owner-language.js";
-import { builtinProviderHarness, designDocumentPath, isRuleRole, RULE_ROLES } from "../../../packages/shared/dist/index.js";
+import { ADVISOR_CURATION_ACTION_TYPES, advisorCurationKind, builtinProviderHarness, designDocumentPath, isRuleRole, RULE_ROLES } from "../../../packages/shared/dist/index.js";
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
 import { RESEARCH_CAPTURE_ROLES } from "../../../packages/shared/dist/permission-args.js";
 import { extractWebResearchCapture } from "../../../packages/shared/dist/web-research.js";
@@ -167,13 +167,8 @@ interface MemorySaverApi {
   saveExplicitMemory(text: string, tags?: string[]): Promise<string>;
 }
 
-interface LibrarianApi {
-  run(): Promise<unknown>;
-}
-
 interface FeatureCorePort extends CorePort {
   readonly memorySaver: MemorySaverApi;
-  readonly librarian: LibrarianApi;
   listLearningJobs(status?: string): unknown[];
   retryLearningJob(jobId: string): Promise<void>;
 }
@@ -208,6 +203,16 @@ interface RuleProposalApiPort {
 
 interface KnowledgeMigrationApiPort {
   migrateLegacyKnowledge(input: { dry_run: boolean }): Promise<unknown>;
+}
+
+interface KnowledgeRetagApiPort {
+  retagKnowledgeNotes(input: { dry_run: boolean; force?: boolean }): Promise<unknown>;
+}
+
+interface CurationApiPort {
+  runCuration(input: JsonObject): Promise<{ id: string; status: string; summary: string; error: string | null; report: unknown }>;
+  listCurationRuns(query: JsonObject): { items: readonly unknown[]; next_cursor: string | null };
+  getCurationRun(id: string): unknown;
 }
 
 interface BacklogApiPort {
@@ -1327,6 +1332,26 @@ function requireKnowledgeMigrationApi(core: CorePort): KnowledgeMigrationApiPort
   return candidate;
 }
 
+function requireKnowledgeRetagApi(core: CorePort): KnowledgeRetagApiPort {
+  const wrapped = core as CorePort & { core?: unknown };
+  const has = (value: unknown): value is KnowledgeRetagApiPort => isObject(value) && typeof value.retagKnowledgeNotes === "function";
+  const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
+  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support knowledge retagging.");
+  return candidate;
+}
+
+function validateKnowledgeRetagPayload(payload: JsonObject): { dry_run: boolean; force?: boolean } {
+  const extra = Object.keys(payload).filter((key) => key !== "dry_run" && key !== "force");
+  if (extra.length > 0) throw new ApiError(400, "validation_error", "Retag payload has unsupported fields.", { extra });
+  if (typeof payload.dry_run !== "boolean") {
+    throw new ApiError(400, "validation_error", "dry_run must be a boolean.", { field: "dry_run" });
+  }
+  if (payload.force !== undefined && typeof payload.force !== "boolean") {
+    throw new ApiError(400, "validation_error", "force must be a boolean.", { field: "force" });
+  }
+  return payload.force === undefined ? { dry_run: payload.dry_run } : { dry_run: payload.dry_run, force: payload.force };
+}
+
 async function dispatchPendingCoreEvents(core: CorePort): Promise<void> {
   const wrapped = core as CorePort & { core?: unknown };
   const target = (isObject(wrapped.core) ? wrapped.core : core) as unknown as JsonObject;
@@ -1418,6 +1443,43 @@ function ruleProposalApiError(error: unknown): unknown {
     });
   }
   return error;
+}
+
+function requireCurationApi(core: CorePort): CurationApiPort {
+  const candidate = core as CorePort & Partial<CurationApiPort>;
+  const methods: Array<keyof CurationApiPort> = ["runCuration", "listCurationRuns", "getCurationRun"];
+  if (methods.some((method) => typeof candidate[method] !== "function")) {
+    throw new ApiError(503, "core_not_ready", "The loaded Core does not support the curation run API.");
+  }
+  return candidate as CurationApiPort;
+}
+
+const CURATION_KIND_VALUES = ["librarian", "skill_curation", "rule_curation"];
+const CURATION_STATUS_VALUES = ["running", "succeeded", "failed"];
+
+/**
+ * Every action type the /advisor/actions endpoint accepts. The curation types
+ * come from the shared list, and both the allowlist below and the dispatch
+ * branch use `Set.has`, which — unlike indexing a plain object — can never
+ * match an inherited Object.prototype member such as "constructor".
+ */
+const ADVISOR_ACTION_TYPES: ReadonlySet<string> = new Set([
+  "create_work",
+  "start_work",
+  "pause_work",
+  "reopen_work",
+  "cancel_work",
+  "answer_decision",
+  "send_file",
+  ...ADVISOR_CURATION_ACTION_TYPES,
+]);
+
+function curationEnumQuery(value: string | null, allowed: string[], name: string): string | undefined {
+  if (value === null || value === "") return undefined;
+  if (!allowed.includes(value)) {
+    throw new ApiError(400, "validation_error", `${name}が不正です。${allowed.join("、")}のいずれかを指定してください。`);
+  }
+  return value;
 }
 
 function requireBacklogApi(core: CorePort): BacklogApiPort {
@@ -1733,17 +1795,40 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     if (!Array.isArray(command.payload.actions)) throw new ApiError(400, "validation_error", "actionsは配列で指定してください。");
     const actions = command.payload.actions.map((value, index) => {
       if (!isObject(value)) throw new ApiError(400, "validation_error", `actions[${index}]はJSON objectで指定してください。`);
-      exactKeys(value, ["action_id", "sequence", "type", "payload", "expected_version"], `actions[${index}]`);
+      // A curation action takes no input beyond an optional reason, so its
+      // payload may be omitted or null; every other action still needs one.
+      // `has` (not an object lookup) keeps inherited keys such as "constructor"
+      // out of that decision.
+      const curation = typeof value.type === "string" && ADVISOR_CURATION_ACTION_TYPES.has(value.type)
+        ? advisorCurationKind(value.type)
+        : null;
+      exactKeys(
+        value,
+        curation === null
+          ? ["action_id", "sequence", "type", "payload", "expected_version"]
+          : ["action_id", "sequence", "type", "expected_version"],
+        `actions[${index}]`,
+        curation === null ? [] : ["payload"],
+      );
       const action_id = stringField(value.action_id, `actions[${index}].action_id`, 1, 200);
       if (!Number.isSafeInteger(value.sequence)) throw new ApiError(400, "validation_error", `actions[${index}].sequenceが不正です。`);
-      if (typeof value.type !== "string" || !["create_work", "start_work", "pause_work", "reopen_work", "cancel_work", "answer_decision", "send_file"].includes(value.type)) {
+      if (typeof value.type !== "string" || !ADVISOR_ACTION_TYPES.has(value.type)) {
         throw new ApiError(422, "action_rejected", `actions[${index}].typeは許可されたAdvisor actionではありません。`);
       }
-      if (!isObject(value.payload)) throw new ApiError(400, "validation_error", `actions[${index}].payloadが不正です。`);
+      if (curation === null) {
+        if (!isObject(value.payload)) throw new ApiError(400, "validation_error", `actions[${index}].payloadが不正です。`);
+      } else {
+        // Only an optional reason is accepted; anything else is a contract
+        // mismatch rather than something to pass through to the curation.
+        if (value.payload !== undefined && value.payload !== null && !isObject(value.payload)) {
+          throw new ApiError(400, "validation_error", `actions[${index}].payloadが不正です。`);
+        }
+        exactKeys(isObject(value.payload) ? value.payload : {}, [], `actions[${index}].payload`, ["reason"]);
+      }
       if (!Number.isInteger(value.expected_version) || Number(value.expected_version) < 0) {
         throw new ApiError(400, "validation_error", `actions[${index}].expected_versionが不正です。0以上の整数を指定してください。`);
       }
-      return { action_id, sequence: Number(value.sequence), type: value.type, payload: value.payload, expected_version: Number(value.expected_version) };
+      return { action_id, sequence: Number(value.sequence), type: value.type, payload: isObject(value.payload) ? value.payload : {}, expected_version: Number(value.expected_version) };
     }).sort((left, right) => left.sequence - right.sequence);
     const seenActionIds = new Set<string>();
     if (actions.some((action) => seenActionIds.has(action.action_id) || (seenActionIds.add(action.action_id), false))) {
@@ -1784,6 +1869,18 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
           const decisionWork = decisionWorkId(context, decisionId);
           const operation = () => context.core.answerDecision(decisionId, { answer, option_key, source: "advisor", source_message_id: null }, actionCommand);
           data = (await (decisionWork === undefined ? operation() : withWorkLock(context, decisionWork, operation))).data as unknown as JsonObject;
+        } else if (ADVISOR_CURATION_ACTION_TYPES.has(action.type)) {
+          const kind = advisorCurationKind(action.type);
+          if (kind === null) throw new ApiError(422, "action_rejected", `${action.type}は許可されたAdvisor actionではありません。`);
+          const run = await requireCurationApi(context.core).runCuration({
+            kind,
+            trigger: "advisor_action",
+            actor: "advisor",
+            actor_ref: command.request_id,
+            request_key: actionCommand.idempotency_key,
+          });
+          if (run.status === "failed") throw new ApiError(500, "curation_failed", run.error ?? "整理の実行に失敗しました。", { run_id: run.id });
+          data = { run_id: run.id, status: run.status, summary: run.summary };
         } else {
           throw new ApiError(422, "action_rejected", "send_fileは配送先Connectorが設定されている場合だけ実行できます。");
         }
@@ -2205,6 +2302,25 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       const migrated = await api.migrateLegacyKnowledge(payload);
       if (!payload.dry_run) await dispatchPendingCoreEvents(context.core);
       return { data: migrated as JsonObject, version: command.expected_version };
+    });
+    sendJson(response, 200, result);
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/knowledge/retag` && method === "POST") {
+    requireOwner(request);
+    const command = commandEnvelope(await readRequestBody(request));
+    const payload = validateKnowledgeRetagPayload(command.payload);
+    const api = requireKnowledgeRetagApi(context.core);
+    const result = await runCommand(context, pathname, command, 200, async () => {
+      try {
+        return { data: (await api.retagKnowledgeNotes(payload)) as JsonObject, version: command.expected_version };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        if (message === "retag_in_progress") throw new ApiError(409, "retag_in_progress", "ナレッジのタグ再生成はすでに実行中です。");
+        if (message.startsWith("dependency_unavailable")) throw new ApiError(503, "dependency_unavailable", message);
+        throw error;
+      }
     });
     sendJson(response, 200, result);
     return;
@@ -2972,11 +3088,52 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   if (pathname === `${API_PREFIX}/librarian/run` && method === "POST") {
     requireOwner(request);
     try {
-      const report = await featureCore.librarian.run();
-      sendJson(response, 200, { report });
+      const run = await requireCurationApi(context.core).runCuration({
+        kind: "librarian",
+        trigger: "manual_api",
+        actor: "owner",
+        actor_ref: requestIdValue,
+      });
+      if (run.status === "failed") {
+        throw new ApiError(500, "curation_failed", run.error ?? "Librarianの実行に失敗しました。", { run_id: run.id });
+      }
+      sendJson(response, 200, {
+        request_id: requestIdValue,
+        data: { run_id: run.id, status: run.status, summary: run.summary, report: run.report },
+      });
     } catch (error) {
       await sendApiError(response, requestIdValue, error, `${method} ${pathname}`, context.core);
     }
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/curation-runs` && method === "GET") {
+    requireOwner(request);
+    const limit = url.searchParams.get("limit");
+    if (limit !== null && limit !== "" && (!/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 100)) {
+      throw new ApiError(400, "validation_error", "limitが不正です。1〜100の整数を指定してください。");
+    }
+    const cursor = nullableQuery(url.searchParams.get("cursor"));
+    if (cursor !== null && cursor !== undefined && !isUlid(cursor)) {
+      throw new ApiError(400, "validation_error", "cursorが不正です。26文字の大文字ULIDを指定してください。");
+    }
+    const data = requireCurationApi(context.core).listCurationRuns({
+      ...(curationEnumQuery(url.searchParams.get("kind"), CURATION_KIND_VALUES, "kind") ? { kind: url.searchParams.get("kind")! } : {}),
+      ...(curationEnumQuery(url.searchParams.get("status"), CURATION_STATUS_VALUES, "status") ? { status: url.searchParams.get("status")! } : {}),
+      limit: limit ? Number(limit) : 20,
+      ...(cursor ? { cursor } : {}),
+    });
+    sendJson(response, 200, { request_id: requestIdValue, data });
+    return;
+  }
+
+  const curationRunMatch = pathname.match(new RegExp(`^${API_PREFIX}/curation-runs/([^/]+)$`));
+  if (curationRunMatch && method === "GET") {
+    requireOwner(request);
+    const id = pathId(curationRunMatch[1]!, "curation_run_id");
+    const run = requireCurationApi(context.core).getCurationRun(id);
+    if (!run) throw new ApiError(404, "not_found", "整理実行記録が見つかりません。IDを確認してください。");
+    sendJson(response, 200, { request_id: requestIdValue, data: run });
     return;
   }
 

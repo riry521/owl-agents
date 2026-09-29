@@ -80,7 +80,7 @@ async function fixture(t, { pipelineOptions = {}, skillHook, noteHook } = {}) {
         return { note_id: existing.id, created: false, added: false };
       }
       const id = createUlid();
-      this.records.push({ id, title: input.topic, claims: [{ fingerprint: claimFingerprint, sources: [input.work_id] }] });
+      this.records.push({ id, title: input.topic, tags: input.tags, tags_source: input.tags_source, claims: [{ fingerprint: claimFingerprint, sources: [input.work_id] }] });
       return { note_id: id, created: true, added: true };
     },
   };
@@ -327,4 +327,36 @@ test("(i) same Work, different lessons, and identical rule text share one propos
   assert.equal(f.db.get("SELECT COUNT(*) AS n FROM rule_proposals").n, 1);
   assert.equal(f.db.get("SELECT COUNT(*) AS n FROM rule_proposal_sources").n, 2);
   assert.equal(JSON.parse(f.row().result_json).rule_proposal_ids.length, 1);
+});
+
+test("a new note is tagged only with the lesson's keywords, never fragments of applies_to or the topic", async (t) => {
+  const f = await fixture(t);
+  const fact = lesson("fact", {
+    lesson: "Migration numbers clash across Works.",
+    applies_to: "から起動するエージェントのコンテキストに",
+    topic: "エージェント起動時の設定を確認する",
+    keywords: ["Canary", "レビュー", "sqlite-migration", "や設定を", "canary", "extra-one", "extra-two"],
+  });
+  await f.jobs.enqueue(f.workId, null, null, [fact]);
+  await f.pipeline.processPending();
+  assert.deepEqual(f.notes.records[0].tags, ["canary", "レビュー", "sqlite-migration", "extra-one", "extra-two"]);
+  assert.equal(f.notes.records[0].tags_source, "keywords", "a note tagged from 3+ keywords carries the processed record");
+  assert.ok(!f.notes.records[0].tags.includes("エージェント起動時の設定を確認する"));
+});
+
+test("a fact lesson whose valid keywords number fewer than 3 is not saved as a note", async (t) => {
+  const f = await fixture(t);
+  await f.jobs.enqueue(f.workId, null, null, [lesson("fact", { lesson: "Too few keywords.", keywords: ["canary", "や設定を", "起動時に使う設定"] })]);
+  await f.pipeline.processPending();
+  assert.equal(f.notes.records.length, 0);
+  assert.notEqual(f.row().status, "done");
+  assert.match(f.row().last_error ?? f.row().result_json ?? "", /keywords_insufficient/u);
+});
+
+test("a lesson without keywords (legacy job) still saves, with no tags", async (t) => {
+  const f = await fixture(t);
+  await f.jobs.enqueue(f.workId, null, null, [lesson("fact", { lesson: "Legacy fact.", applies_to: "future Work" })]);
+  await f.pipeline.processPending();
+  assert.deepEqual(f.notes.records[0].tags, []);
+  assert.equal(f.notes.records[0].tags_source, undefined, "an untagged legacy note gets no record");
 });

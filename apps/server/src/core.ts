@@ -1250,6 +1250,9 @@ interface ExternalCore {
   rejectSkillProposal?(proposalId: string): Promise<unknown>;
   listLearningJobs?(status?: string): readonly unknown[];
   retryLearningJob?(jobId: string): Promise<void>;
+  runCuration?(input: JsonObject): Promise<unknown>;
+  listCurationRuns?(query: JsonObject): { items: readonly unknown[]; next_cursor: string | null };
+  getCurationRun?(id: string): unknown;
   listBacklogItems?(filter: { status?: string; project_id?: string; work_id?: string; limit?: number; offset?: number }): { items: readonly unknown[]; next_offset: number | null };
   dismissBacklogItems?(request: JsonObject): Promise<ExternalCommandResponse>;
   issueBacklogWork?(request: JsonObject): Promise<ExternalCommandResponse>;
@@ -2139,6 +2142,21 @@ export class ExternalCoreAdapter implements CorePort {
     } catch (error) {
       throw externalError(error, "rejectSkillProposal");
     }
+  }
+
+  runCuration(input: JsonObject): Promise<unknown> {
+    if (typeof this.core.runCuration !== "function") throw skillApiUnavailable("Curation runs");
+    return this.core.runCuration(input);
+  }
+
+  listCurationRuns(query: JsonObject): { items: readonly unknown[]; next_cursor: string | null } {
+    if (typeof this.core.listCurationRuns !== "function") throw skillApiUnavailable("Curation run listing");
+    return this.core.listCurationRuns(query);
+  }
+
+  getCurationRun(id: string): unknown {
+    if (typeof this.core.getCurationRun !== "function") throw skillApiUnavailable("Curation run lookup");
+    return this.core.getCurationRun(id);
   }
 
   listBacklogItems(filter: { status?: string; project_id?: string; work_id?: string; limit?: number; offset?: number }): { items: unknown[]; next_offset: number | null } {

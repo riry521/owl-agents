@@ -82,12 +82,12 @@ function fakeCore(calls) {
       return { upload_id: uploadId, status: "stored" };
     },
     memorySaver: { saveManualSnapshot: async () => "", saveExplicitMemory: async () => "" },
-    librarian: {
-      run: async () => {
-        calls.push(["librarian.run"]);
-        return {};
-      },
+    runCuration: async () => {
+      calls.push(["librarian.run"]);
+      return { id: "run", status: "succeeded", summary: "", error: null, report: {} };
     },
+    listCurationRuns: () => ({ items: [], next_cursor: null }),
+    getCurationRun: () => null,
   };
 }
 

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
-import { basename, extname, join, resolve, sep } from "node:path";
+import { basename, dirname, extname, join, resolve, sep } from "node:path";
 
 import { KnowledgeBase, type KnowledgeEntry } from "./knowledge-base.js";
 import { KnowledgeNotes, writeAtomic } from "./knowledge-notes.js";
@@ -99,6 +99,37 @@ export type CurationAction =
   | NormalizeTagCurationAction
   | RefreshHotMdCurationAction;
 
+export interface DuplicateScores {
+  readonly title: number;
+  readonly body: number;
+  readonly shared_tags: number;
+  readonly total: number;
+}
+
+export interface MergedNoteRecord {
+  readonly target: string;
+  readonly source: string;
+  readonly archived_path: string;
+  readonly reason: "near_duplicate";
+  readonly scores: DuplicateScores;
+}
+
+export interface MergeSkippedRecord {
+  readonly paths: [string, string];
+  readonly titles: [string, string];
+  readonly reason:
+    | "below_merge_threshold"
+    | "no_content_overlap"
+    | "possible_contradiction"
+    | "merged_elsewhere"
+    | "cross_folder"
+    | "non_note_near_duplicate"
+    | "entry_limit"
+    | "merge_failed";
+  readonly detail: string;
+  readonly scores: DuplicateScores;
+}
+
 export interface CurationReport {
   readonly run_id: string;
   readonly started_at: string;
@@ -106,10 +137,21 @@ export interface CurationReport {
   readonly files_scanned: number;
   readonly actions_taken: CurationAction[];
   readonly actions_needing_approval: CurationAction[];
+  /** Near-duplicate notes merged in this run (source moved out of knowledge/). */
+  readonly merged: MergedNoteRecord[];
+  /** Duplicate candidates that were not merged, with the reason (highest score first, at most 50). */
+  readonly merge_skipped: MergeSkippedRecord[];
   readonly warnings: string[];
 }
 
+export const NEAR_DUPLICATE_TITLE_MIN = 0.6;
+export const NEAR_DUPLICATE_SCORE_MIN = 0.45;
+export const MERGE_CANDIDATE_REPORT_MIN = 0.3;
+export const NEAR_DUPLICATE_BODY_MIN = 0.1;
+const PROVENANCE_TAGS = new Set(["auto-saved", "work-lessons", "legacy-unknown"]);
+
 export interface LibrarianConfig {
+  readonly mergedArchiveDir?: string;
   readonly idleTriggerMinutes: number;
   readonly maxEntriesPerRun: number;
   readonly stalenessThresholdDays: number;
@@ -166,9 +208,12 @@ export class Librarian {
   private readonly notes: KnowledgeNotes;
   private readonly config: LibrarianConfig;
   private readonly modelConfigReader: () => LibrarianModelConfig | undefined;
+  private readonly mergedArchiveDir: string;
 
   public constructor(knowledge: KnowledgeBase, config: Partial<LibrarianConfig> = {}) {
     this.knowledge = knowledge;
+    this.mergedArchiveDir =
+      config.mergedArchiveDir ?? join(dirname(knowledge.knowledgeDir), "data", "backups", "knowledge-merged");
     this.notes = new KnowledgeNotes(knowledge);
     this.modelConfigReader = config.getModelConfig ?? (() => undefined);
     this.config = {
@@ -382,7 +427,125 @@ export class Librarian {
     return [];
   }
 
-  public async applyNonDestructive(actions: CurationAction[]): Promise<CurationAction[]> {
+  /**
+   * Score every pair of entries by title, claim text and shared tags. Notes in
+   * the same folder that clear the thresholds, share claim content and do not
+   * contradict each other are merged (best pair first); every other pair above
+   * the report floor is recorded as skipped with a reason.
+   */
+  public async mergeNearDuplicates(
+    entries: KnowledgeEntry[],
+    deferred: KnowledgeEntry[],
+    exactPaths: ReadonlySet<string>,
+    archiveDir: string,
+    warnings: string[],
+  ): Promise<{ merged: MergedNoteRecord[]; skipped: MergeSkippedRecord[] }> {
+    const deferredPaths = new Set(deferred.map((entry) => entry.path));
+    const candidates = [...entries, ...deferred].filter((entry) => !isIndexLike(entry.path) && !exactPaths.has(entry.path));
+    const texts = new Map<string, string>();
+    for (const entry of candidates) texts.set(entry.path, await this.claimText(entry));
+
+    const pairs: { a: KnowledgeEntry; b: KnowledgeEntry; scores: DuplicateScores }[] = [];
+    for (let i = 0; i < candidates.length; i += 1) {
+      for (let j = i + 1; j < candidates.length; j += 1) {
+        const scores = scoreDuplicate(candidates[i], candidates[j], texts.get(candidates[i].path)!, texts.get(candidates[j].path)!);
+        if (scores.total >= MERGE_CANDIDATE_REPORT_MIN) pairs.push({ a: candidates[i], b: candidates[j], scores });
+      }
+    }
+    pairs.sort((x, y) => y.scores.total - x.scores.total || x.a.path.localeCompare(y.a.path));
+
+    const merged: MergedNoteRecord[] = [];
+    const skipped: MergeSkippedRecord[] = [];
+    const retired = new Map<string, string>();
+    const skip = (a: KnowledgeEntry, b: KnowledgeEntry, scores: DuplicateScores, reason: MergeSkippedRecord["reason"], detail: string) =>
+      skipped.push({ paths: [a.path, b.path], titles: [a.title, b.title], reason, detail, scores });
+
+    for (const { a, b, scores } of pairs) {
+      const blocked = this.mergeBlocker(a, b, scores, texts, deferredPaths, retired);
+      if (blocked) {
+        skip(a, b, scores, blocked[0], blocked[1]);
+        continue;
+      }
+      try {
+        const noteA = this.notes.parse(await readFile(this.safeAbsolutePath(a.path), "utf8"));
+        const noteB = this.notes.parse(await readFile(this.safeAbsolutePath(b.path), "utf8"));
+        const aWins = noteA.claims.length !== noteB.claims.length
+          ? noteA.claims.length > noteB.claims.length
+          : noteA.created !== noteB.created ? noteA.created < noteB.created : a.path < b.path;
+        const [target, source, targetNote, sourceNote] = aWins ? [a, b, noteA, noteB] : [b, a, noteB, noteA];
+        await this.notes.mergeNotes(targetNote.id, sourceNote.id);
+        const { archived_path } = await this.notes.retireMergedNote(sourceNote.id, targetNote.id, archiveDir);
+        await this.relinkWiki(source.path, target.path);
+        retired.set(source.path, target.path);
+        merged.push({ target: target.path, source: source.path, archived_path, reason: "near_duplicate", scores });
+      } catch (error) {
+        warnings.push(`merge_failed: ${b.path}: ${errorMessage(error)}`);
+        skip(a, b, scores, "merge_failed", errorMessage(error));
+      }
+    }
+
+    return { merged, skipped };
+  }
+
+  /** Why a scored pair must not be merged automatically, or undefined when it may be. */
+  private mergeBlocker(
+    a: KnowledgeEntry,
+    b: KnowledgeEntry,
+    scores: DuplicateScores,
+    texts: ReadonlyMap<string, string>,
+    deferredPaths: ReadonlySet<string>,
+    retired: ReadonlyMap<string, string>,
+  ): [MergeSkippedRecord["reason"], string] | undefined {
+    const textA = texts.get(a.path)!;
+    const textB = texts.get(b.path)!;
+    const gone = [a, b].find((entry) => retired.has(entry.path));
+    if (deferredPaths.has(a.path) || deferredPaths.has(b.path)) return ["entry_limit", "not compared in this run because of the entry limit"];
+    if (gone) return ["merged_elsewhere", `${gone.path} was already merged into ${retired.get(gone.path)} in this run`];
+    if (dirname(a.path) !== dirname(b.path)) return ["cross_folder", `different folders: ${dirname(a.path)} / ${dirname(b.path)}`];
+    if (!a.path.startsWith("notes/")) return ["non_note_near_duplicate", "only notes/ entries are merged automatically"];
+    if (normalizeComparableText(textA) === normalizeComparableText(textB)) return undefined;
+    if (scores.title < NEAR_DUPLICATE_TITLE_MIN) return ["below_merge_threshold", `title ${scores.title} < ${NEAR_DUPLICATE_TITLE_MIN}`];
+    // Same title but no shared claim text is a more specific reason than a total pulled down by tags, so it is checked first.
+    if (scores.body < NEAR_DUPLICATE_BODY_MIN) return ["no_content_overlap", `claim text overlap ${scores.body} < ${NEAR_DUPLICATE_BODY_MIN}`];
+    if (scores.total < NEAR_DUPLICATE_SCORE_MIN) return ["below_merge_threshold", `total ${scores.total} < ${NEAR_DUPLICATE_SCORE_MIN}`];
+    const conflict = findContradiction(textA, textB);
+    if (conflict) return ["possible_contradiction", `similar statements differ in negation: "${conflict[0]}" / "${conflict[1]}"`];
+    return undefined;
+  }
+
+  /** Claim text of a note (summary and related-note sections excluded); the whole body for other entries. */
+  private async claimText(entry: KnowledgeEntry): Promise<string> {
+    if (!entry.path.startsWith("notes/")) return entry.body;
+    try {
+      const note = this.notes.parse(await readFile(this.safeAbsolutePath(entry.path), "utf8"));
+      return note.claims.map((claim) => claim.text).join("\n");
+    } catch {
+      return entry.body;
+    }
+  }
+
+  /** Point path-style wiki links to a retired note at its merge target. */
+  private async relinkWiki(sourcePath: string, targetPath: string): Promise<void> {
+    const stem = (path: string) => path.replace(/\.md$/i, "");
+    const from = new RegExp(`\\[\\[${stem(sourcePath).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?=[\\]|#])`, "g");
+    const to = `[[${stem(targetPath)}`;
+    for (const { path } of await this.knowledge.list()) {
+      if (!path.toLowerCase().endsWith(".md")) continue;
+      const absolute = this.safeAbsolutePath(path);
+      const content = await readFile(absolute, "utf8");
+      if (!from.test(content)) continue;
+      from.lastIndex = 0;
+      const seen = new Set<string>();
+      const lines = content.replace(from, to).split("\n").filter((line) => {
+        if (!line.includes(`${to}]]`) || seen.has(line)) return !seen.has(line);
+        seen.add(line);
+        return true;
+      });
+      await writeAtomic(absolute, lines.join("\n"));
+    }
+  }
+
+  public async applyNonDestructive(actions: CurationAction[], warnings?: string[]): Promise<CurationAction[]> {
     const applied: CurationAction[] = [];
 
     for (const action of actions) {
@@ -391,27 +554,28 @@ export class Librarian {
       try {
         const didApply = await this.applyAction(action);
         if (didApply) applied.push(action);
-      } catch {
+      } catch (error) {
         // A malformed or concurrently removed file must not make the whole run destructive.
+        warnings?.push(`apply_failed: ${action.kind}: ${errorMessage(error)}`);
       }
     }
 
     return applied;
   }
 
-  public run(): Promise<CurationReport> {
+  public run(options: { runId?: string } = {}): Promise<CurationReport> {
     if (this.activeRun) return this.activeRun;
-    const task = this.runOnce().finally(() => {
+    const task = this.runOnce(options.runId).finally(() => {
       if (this.activeRun === task) this.activeRun = null;
     });
     this.activeRun = task;
     return task;
   }
 
-  private async runOnce(): Promise<CurationReport> {
+  private async runOnce(givenRunId?: string): Promise<CurationReport> {
     const startedAt = new Date();
     const warnings: string[] = [];
-    const runId = `librarian-${startedAt.getTime()}-${randomUUID()}`;
+    const runId = givenRunId ?? `librarian-${startedAt.getTime()}-${randomUUID()}`;
     let changedFiles: string[] = [];
 
     try {
@@ -436,6 +600,32 @@ export class Librarian {
       }
     }
 
+    const deferred: KnowledgeEntry[] = [];
+    for (const path of curationFiles.slice(candidateFiles.length)) {
+      try {
+        deferred.push(await this.knowledge.get(path));
+      } catch (error) {
+        warnings.push(`Unable to read ${path}: ${errorMessage(error)}`);
+      }
+    }
+
+    // Merge first so that the hot page and the other actions see the merged state.
+    const exactPaths = new Set<string>(
+      this.detectDuplicates(entries).flatMap((action) => [
+        ...firstActionStrings(action, "sourcePaths", "sourcePath"),
+        firstActionString(action, "targetPath", "target") ?? "",
+      ]).filter((path) => !path.startsWith("notes/")),
+    );
+    const { merged, skipped } = await this.mergeNearDuplicates(
+      entries, deferred, exactPaths, join(this.mergedArchiveDir, runId), warnings,
+    );
+    const retiredPaths = new Set(merged.map((record) => record.source));
+    const mergedTargets = new Set(merged.map((record) => record.target));
+    for (const [index, entry] of entries.entries()) {
+      if (mergedTargets.has(entry.path) && !retiredPaths.has(entry.path)) entries[index] = await this.knowledge.get(entry.path);
+    }
+    const liveEntries = entries.filter((entry) => !retiredPaths.has(entry.path));
+
     let hotEntries: KnowledgeEntry[] = [];
     try {
       hotEntries = await this.readHotEntries();
@@ -444,10 +634,10 @@ export class Librarian {
     }
 
     const actions: CurationAction[] = [
-      ...this.detectDuplicates(entries),
-      ...this.detectStale(entries, this.config.stalenessThresholdDays),
-      ...this.detectOrphans(entries),
-      ...this.normalizeTagsAction(entries),
+      ...this.detectDuplicates(liveEntries).filter((action) => !firstActionString(action, "targetPath", "target")?.startsWith("notes/")),
+      ...this.detectStale(liveEntries, this.config.stalenessThresholdDays),
+      ...this.detectOrphans(liveEntries),
+      ...this.normalizeTagsAction(liveEntries),
       {
         kind: "refresh_hot_md",
         path: DEFAULT_HOT_MD_PATH,
@@ -461,7 +651,7 @@ export class Librarian {
     const needingApproval = uniqueActions.filter(
       (action) => action.requiresApproval === true || action.kind === "flag_contradiction",
     );
-    const actionsTaken = await this.applyNonDestructive(uniqueActions);
+    const actionsTaken = await this.applyNonDestructive(uniqueActions, warnings);
     const endedAt = new Date();
 
     return {
@@ -471,6 +661,8 @@ export class Librarian {
       files_scanned: changedFiles.length,
       actions_taken: actionsTaken,
       actions_needing_approval: needingApproval,
+      merged,
+      merge_skipped: skipped,
       warnings,
     };
   }
@@ -744,6 +936,59 @@ function firstActionStrings(action: CurationActionBase, ...keys: string[]): stri
     if (typeof value === "string" && value.trim()) return [value.trim()];
   }
   return [];
+}
+
+function similarityTokens(text: string): Set<string> {
+  const normalized = text.normalize("NFKC").toLocaleLowerCase();
+  const tokens = new Set(normalized.match(/[a-z0-9]+/g) ?? []);
+  for (const run of normalized.match(/[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}ー]+/gu) ?? []) {
+    const chars = [...run];
+    if (chars.length === 1) tokens.add(run);
+    for (let i = 0; i + 1 < chars.length; i += 1) tokens.add(chars[i] + chars[i + 1]);
+  }
+  return tokens;
+}
+
+function sentences(text: string): string[] {
+  return text.split(/[。.!?！？\n]+/).map((part) => part.trim()).filter((part) => part.length >= 6);
+}
+
+const NEGATION = /ない|ず(?:に)?|禁止|不要|\bnot\b|\bnever\b|n't|\bno\b|\bdon't\b/i;
+
+/** A pair of near-identical sentences of which only one is negated. */
+function findContradiction(textA: string, textB: string): [string, string] | undefined {
+  for (const x of sentences(textA)) {
+    const tokensX = similarityTokens(x);
+    for (const y of sentences(textB)) {
+      const tokensY = similarityTokens(y);
+      const dice = (2 * overlap(tokensX, tokensY)) / (tokensX.size + tokensY.size || 1);
+      if (dice >= 0.5 && NEGATION.test(x) !== NEGATION.test(y)) return [x, y];
+    }
+  }
+  return undefined;
+}
+
+function overlap(a: Set<string>, b: Set<string>): number {
+  let count = 0;
+  for (const token of a) if (b.has(token)) count += 1;
+  return count;
+}
+
+function scoreDuplicate(a: KnowledgeEntry, b: KnowledgeEntry, textA: string, textB: string): DuplicateScores {
+  const titleA = similarityTokens(a.title);
+  const titleB = similarityTokens(b.title);
+  const bodyA = similarityTokens(textA);
+  const bodyB = similarityTokens(textB);
+  const round = (n: number) => Math.round(n * 1000) / 1000;
+  const titleSize = titleA.size + titleB.size;
+  const title = titleSize === 0 ? 0 : (2 * overlap(titleA, titleB)) / titleSize;
+  const bodyShared = overlap(bodyA, bodyB);
+  const bodyUnion = bodyA.size + bodyB.size - bodyShared;
+  const body = bodyUnion === 0 ? 0 : bodyShared / bodyUnion;
+  const tagsB = new Set(b.tags.filter((tag) => !PROVENANCE_TAGS.has(tag)));
+  const sharedTags = new Set(a.tags.filter((tag) => tagsB.has(tag))).size;
+  const total = 0.5 * title + 0.3 * body + 0.2 * (Math.min(sharedTags, 2) / 2);
+  return { title: round(title), body: round(body), shared_tags: sharedTags, total: round(total) };
 }
 
 function normalizeComparableText(value: string): string {

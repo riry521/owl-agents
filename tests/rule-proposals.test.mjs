@@ -269,3 +269,51 @@ test("only awaiting proposals can be approved or rejected, and rejection suppres
   assert.equal(suppressed.status, "rejected");
   await assert.rejects(f2.proposals.approve(awaiting.proposal_id), (error) => error.code === "invalid_state_transition");
 });
+
+test("curate() lists awaiting proposals and rule overlaps without changing rules or proposals", async (t) => {
+  const promptRules = [
+    { id: "r1", level: "system", kind: "instruction", text: "Do not push directly to the main branch." },
+    { id: "r2", level: "system", kind: "instruction", text: "Push directly to the main branch when urgent." },
+    { id: "r3", level: "system", kind: "instruction", text: "Validate the release state before deployment!" },
+  ];
+  const files = [{ path: "rules/system/a.yaml", level: "system", rules: promptRules }];
+  let writes = 0;
+  const f = await setup(t, { promptRules, ruleWriter: { apply: async () => { writes += 1; return { path: "x", generation: 1 }; } } });
+  f.ruleStore.rules.files = files;
+  await f.proposals.create(input("policies/a.md#1", { text: "Always write tests for new code paths." }));
+  await f.proposals.create(input("policies/b.md#1", { text: "Never push directly to the main branch." }));
+  const rulesBefore = JSON.stringify(f.ruleStore.rules);
+  const rowsBefore = JSON.stringify(f.db.all("SELECT * FROM rule_proposals ORDER BY id"));
+  const report = f.proposals.curate();
+  assert.equal(JSON.stringify(f.ruleStore.rules), rulesBefore);
+  assert.equal(JSON.stringify(f.db.all("SELECT * FROM rule_proposals ORDER BY id")), rowsBefore);
+  assert.equal(writes, 0);
+  assert.equal(report.target.open_proposals, 2);
+  assert.equal(report.awaiting_approval.length, report.proposals.filter((p) => p.status === "awaiting_approval").length);
+  const verdicts = Object.fromEntries(report.proposals.map((p) => [p.text, p.verdict]));
+  assert.equal(verdicts["Always write tests for new code paths."], "approve_candidate");
+  assert.notEqual(verdicts["Never push directly to the main branch."], "approve_candidate");
+  assert.equal(report.rule_findings.some((x) => x.kind === "possible_conflict" && x.rules[0].path === "rules/system/a.yaml"), true);
+});
+
+test("curate() finds conflicts across system/role rules and leaves real rule files byte-identical", async (t) => {
+  const { RuleStore } = await import("../packages/core/dist/rule-store.js");
+  const { readFile } = await import("node:fs/promises");
+  const { writeFile, mkdir } = await import("node:fs/promises");
+  const root = await mkdtemp(join(tmpdir(), "owl-rule-curate-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, "rules/system"), { recursive: true });
+  await mkdir(join(root, "rules/role"), { recursive: true });
+  const sysFile = join(root, "rules/system/a.yaml");
+  const roleFile = join(root, "rules/role/worker.yaml");
+  await writeFile(sysFile, 'level: system\nrules:\n  - id: s1\n    kind: instruction\n    text: "Do not push directly to main."\n');
+  await writeFile(roleFile, 'level: role\nrole: worker\nrules:\n  - id: w1\n    kind: instruction\n    text: "Push directly to main."\n');
+  const store = new RuleStore(root);
+  await store.load();
+  const f = await setup(t);
+  f.proposals.ruleStore = store;
+  const before = [await readFile(sysFile, "utf8"), await readFile(roleFile, "utf8")];
+  const report = f.proposals.curate();
+  assert.deepEqual([await readFile(sysFile, "utf8"), await readFile(roleFile, "utf8")], before);
+  assert.equal(report.rule_findings.some((x) => x.kind === "possible_conflict" && x.rules.map((r) => r.id).sort().join() === "s1,w1"), true);
+});

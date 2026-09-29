@@ -115,6 +115,11 @@ export const MANAGER_FINALIZE_OUTPUT_SCHEMA: RoleSchema = objectSchema({
           enum: ["all", "manager", "designer", "worker", "reviewer", "advisor"],
           description: "scope for rule_candidate; all other lesson kinds use all",
         },
+        keywords: {
+          type: "array",
+          items: { type: "string", minLength: 1 },
+          description: "3-5 short noun keywords (topic words, product/tool names) for kind fact, decision or pitfall; [] for other kinds. No sentences, no particles or verb endings.",
+        },
       }),
       example: [],
       description: "lessons learned for future Work; may be []",

@@ -9,6 +9,7 @@ import { fingerprint } from "./learning-fingerprint.js";
 import type { KnowledgeBase } from "./knowledge-base.js";
 import type { KnowledgeNotes } from "./knowledge-notes.js";
 import { writeAtomic } from "./knowledge-notes.js";
+import { mergeTagSets, sanitizeKeywords } from "./knowledge-tags.js";
 import { slugifyKnowledgeName } from "./knowledge-naming.js";
 import type { OwnerLanguage } from "./owner-language.js";
 import type { RuleProposalCreateInput, RuleProposals } from "./rule-proposals.js";
@@ -317,7 +318,7 @@ function simulateMergeClaim(
         fingerprint: fingerprint(input.text), kind: input.kind, text: input.text,
       }];
     }
-    best.note.tags = [...new Set([...best.note.tags, ...input.tags, ...words(input.topic)])].sort((a, b) => a.localeCompare(b));
+    best.note.tags = mergeTagSets(best.note.tags, input.tags);
     return { note_id: best.note.id, created: false, added: existing === undefined };
   }
   const id = `virtual-note-${sequence}`;
@@ -325,7 +326,7 @@ function simulateMergeClaim(
     id,
     slug: topicSlug,
     title: input.topic,
-    tags: [...new Set([...input.tags, ...words(input.topic)])].sort((a, b) => a.localeCompare(b)),
+    tags: sanitizeKeywords(input.tags).sort((a, b) => a.localeCompare(b)),
     summary: input.text.slice(0, 200),
     updated: "9999-12-31T23:59:59.999Z",
     claims: [{ fingerprint: fingerprint(input.text), kind: input.kind, text: input.text }],

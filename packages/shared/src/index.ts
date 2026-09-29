@@ -8,8 +8,22 @@ import type { AgentFailureClass, RateLimitInfo } from "./rate-limit.js";
 export type { AgentFailureClass, RateLimitInfo, RateLimitSource } from "./rate-limit.js";
 
 export { loadOwlEnv, parseDotEnv, type DotEnvLoadOptions, type DotEnvLoadResult } from "./env.js";
-export { parseAdvisorResponse, parseSlackAdvisorResponse, type AdvisorSuggestedAction, type ParsedAdvisorResponse } from "./advisor-response.js";
-export { addAdvisorReplyTargetInstruction, applyAdvisorInterfaceInstructions, buildSlackFormatInstruction } from "./advisor-prompt.js";
+export {
+  ADVISOR_CURATION_ACTIONS,
+  ADVISOR_CURATION_ACTION_TYPES,
+  advisorCurationKind,
+  parseAdvisorResponse,
+  parseSlackAdvisorResponse,
+  type AdvisorCurationKind,
+  type AdvisorSuggestedAction,
+  type ParsedAdvisorResponse,
+} from "./advisor-response.js";
+export {
+  ADVISOR_CURATION_INSTRUCTION,
+  addAdvisorReplyTargetInstruction,
+  applyAdvisorInterfaceInstructions,
+  buildSlackFormatInstruction,
+} from "./advisor-prompt.js";
 export {
   DEFAULT_OWNER_LANGUAGE,
   OWNER_LANGUAGES,

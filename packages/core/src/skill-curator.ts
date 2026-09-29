@@ -11,6 +11,17 @@ import type { AgentRunner, CoreDatabase, CoreWriteLaneTransaction } from "./type
 import type { SkillBox, SkillRecord } from "./skill-box.js";
 import { hashSkillFiles, parseSkillMd, renderSkillMd, validateSkillFilePath, validateSkillName } from "./skill-files.js";
 
+export interface SkillCurationResult {
+  target: { skills: number; open_proposals: number };
+  state_changes: Array<{ skill: string; from: string; to: string; reason: string | null }>;
+  trial_results: Array<{ skill: string; result: "graduated" | "rolled_back" | "archived" | "continuing" }>;
+  proposals: Array<{ id: string; target: string | null; kind: string; from: string; to: string; reason: string | null; attempts: number }>;
+  automatic_proposals: Array<{ id: string; target: string | null; kind: string }>;
+  pending_remaining: number;
+  awaiting_approval: Array<{ id: string; target: string | null; kind: string }>;
+  warnings: string[];
+}
+
 export type SkillCuratorMode = "autonomous" | "conservative";
 export const SKILL_CURATOR_DEBOUNCE_MS = 5_000;
 export type JudgementRoute =
@@ -294,6 +305,97 @@ export class SkillCurator {
     })();
     this.inFlight = operation;
     return operation;
+  }
+
+  /** One batched pass: reconcile, evaluate trials and staleness, then drain pending proposals; returns what changed. */
+  public curate(options: { readonly maxBatches?: number } = {}): Promise<SkillCurationResult> {
+    return this.skillBox.enqueue(async () => {
+      const snapshot = () => new Map(this.skillBox.listSkills({ include_broken: true }).map((s) => [s.name, s]));
+      const openProposals = () => this.db.all<{ id: string; status: string; kind: string; target_skill: string | null; attempts: number; last_error: string | null; decision_json: string | null; created_at: string }>(
+        `SELECT id, status, kind, target_skill, attempts, last_error, decision_json, created_at
+           FROM skill_proposals WHERE status IN ('pending', 'awaiting_approval') ORDER BY created_at ASC, id ASC`,
+      );
+      const before = snapshot();
+      const openBefore = new Map(openProposals().map((p) => [p.id, p]));
+      const idsBefore = new Set(this.db.all<{ id: string }>("SELECT id FROM skill_proposals").map((r) => r.id));
+      const revisionsBefore = new Map([...before.keys()].map((name) => [name, this.db.get<{ r: number | null }>("SELECT MAX(revision) AS r FROM skill_revisions WHERE skill_name = ?", name)?.r ?? 0]));
+      const warnings: string[] = [];
+      try {
+        await this.skillBox.reconcileFiles();
+      } catch (error) {
+        warnings.push(`reconcile_failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      await this.evaluateLifecycleNow();
+      if (typeof this.agentRunner.runCurator !== "function") {
+        warnings.push("curator_unavailable");
+      } else {
+        // Drain every pending proposal (5 per batch), including ones created during the run. A failed one retries until its
+        // attempts run out, so the id:attempts signature stops changing and the loop ends.
+        const signature = () => openProposals().filter((p) => p.status === "pending").map((p) => `${p.id}:${p.attempts}`).join(",");
+        let batches = 0;
+        for (;;) {
+          const pendingBefore = signature();
+          if (pendingBefore === "") break;
+          if (options.maxBatches !== undefined && batches >= options.maxBatches) {
+            warnings.push(`max_batches_reached: stopped after ${batches} batches`);
+            break;
+          }
+          await this.processPendingNow();
+          batches += 1;
+          if (signature() === pendingBefore) {
+            warnings.push("no_progress: pending proposals did not change after a batch");
+            break;
+          }
+        }
+      }
+
+      const after = snapshot();
+      const state_changes: SkillCurationResult["state_changes"] = [];
+      const trial_results: SkillCurationResult["trial_results"] = [];
+      for (const [name, prev] of before) {
+        const next = after.get(name);
+        if (!next) continue;
+        if (next.state !== prev.state) {
+          const reason = this.db.get<{ reason: string }>(
+            "SELECT reason FROM skill_revisions WHERE skill_name = ? AND actor = 'curator' AND revision > ? ORDER BY revision DESC LIMIT 1",
+            name,
+            revisionsBefore.get(name) ?? 0,
+          )?.reason ?? null;
+          state_changes.push({ skill: name, from: prev.state, to: next.state, reason });
+        }
+        if (prev.trial === 1) {
+          const result = next.state === "archived" ? "archived"
+            : next.current_revision !== prev.current_revision && next.trial === 0 ? "rolled_back"
+            : next.trial === 0 ? "graduated"
+            : "continuing";
+          trial_results.push({ skill: name, result });
+        }
+      }
+      const openAfter = new Map(openProposals().map((p) => [p.id, p]));
+      const proposals: SkillCurationResult["proposals"] = [];
+      const createdDuring = this.db.all<{ id: string; status: string; kind: string; target_skill: string | null; attempts: number; last_error: string | null; decision_json: string | null; created_at: string }>(
+        "SELECT id, status, kind, target_skill, attempts, last_error, decision_json, created_at FROM skill_proposals ORDER BY created_at ASC, id ASC",
+      ).filter((p) => !idsBefore.has(p.id));
+      const touched = new Map([...openBefore, ...createdDuring.map((p) => [p.id, { ...p, status: "pending", attempts: 0, last_error: null }] as const)]);
+      for (const [id, prev] of touched) {
+        const created = !openBefore.has(id);
+        const now = openAfter.get(id);
+        if (!created && now?.status === prev.status && now.attempts === prev.attempts && now.last_error === prev.last_error) continue;
+        const row = now ?? this.db.get<typeof prev>("SELECT id, status, kind, target_skill, attempts, last_error, decision_json, created_at FROM skill_proposals WHERE id = ?", id) ?? prev;
+        proposals.push({ id, target: prev.target_skill, kind: prev.kind, from: created ? "created" : prev.status, to: row.status, reason: row.last_error ?? decisionReason(row.decision_json), attempts: row.attempts });
+      }
+      const brief = (p: { id: string; target_skill: string | null; kind: string }) => ({ id: p.id, target: p.target_skill, kind: p.kind });
+      return {
+        target: { skills: before.size, open_proposals: openBefore.size },
+        state_changes,
+        trial_results,
+        proposals,
+        automatic_proposals: createdDuring.map(brief),
+        pending_remaining: [...openAfter.values()].filter((p) => p.status === "pending").length,
+        awaiting_approval: [...openAfter.values()].filter((p) => p.status === "awaiting_approval").map(brief),
+        warnings,
+      };
+    });
   }
 
   private async processPendingNow(): Promise<void> {
@@ -1007,4 +1109,14 @@ function words(value: string): Set<string> {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function decisionReason(json: string | null): string | null {
+  if (!json) return null;
+  try {
+    const value: unknown = JSON.parse(json);
+    return isRecord(value) && typeof value.reason === "string" ? value.reason : null;
+  } catch {
+    return null;
+  }
 }

@@ -3,9 +3,11 @@ import type { OwnerLanguage } from "../../../packages/shared/dist/owner-language
 
 export type ApiErrorCode =
   | "core_not_ready"
+  | "curation_failed"
   | "validation_error"
   | "invalid_query"
   | "invalid_state_transition"
+  | "retag_in_progress"
   | "work_not_archived"
   | "work_has_active_agents"
   | "work_has_open_decisions"
@@ -139,10 +141,15 @@ const HTTP_ERROR_TEXT: Partial<Record<ApiErrorCode, string>> = {
   upload_quota_exceeded: "The upload quota has been exceeded.",
   action_rejected: "The action was rejected.",
   action_id_conflict: "The action ID is already in use.",
+  curation_failed: "The curation run failed.",
+  retag_in_progress: "A knowledge retag or Librarian run is already in progress.",
   server_error: "The server could not complete the request. Check the logs using the reference ID.",
 };
 
 const HTTP_MESSAGE_TEXT: Readonly<Record<string, string>> = {
+  "整理の実行に失敗しました。": "The curation run failed.",
+  "ナレッジのタグ再生成はすでに実行中です。": "A knowledge retag is already running.",
+  "Librarianの実行に失敗しました。": "The Librarian run failed.",
   "backendUrlを指定してください。カスタムProviderには接続先のhttpまたはhttpsのURLが必要です。": "Specify backendUrl. A custom provider needs an http or https URL to connect to.",
   "backendUrlはhttpまたはhttpsのURLを指定してください。": "backendUrl must be an http or https URL.",
   "フォルダは絶対パスで指定してください。": "Specify the folder as an absolute path.",

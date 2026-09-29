@@ -14,7 +14,9 @@ async function startServer(t) {
   process.env.OWL_API_TOKEN = token;
   const core = new MemoryCore({ version: "test" });
   const calls = [];
-  core.librarian = { run: async () => { calls.push("run"); return { ok: true }; } };
+  core.runCuration = async () => { calls.push("run"); return { id: "run-1", status: "succeeded", summary: "ok", error: null, report: { ok: true } }; };
+  core.listCurationRuns = () => ({ items: [], next_cursor: null });
+  core.getCurationRun = () => null;
   const http = createOwlHttpServer({
     core,
     webOut: root,
@@ -122,7 +124,7 @@ test("knowledge automation settings reject invalid payloads, require Owner and r
 
   const manual = await api.postLibrarian();
   assert.equal(manual.status, 200);
-  assert.deepEqual(await manual.json(), { report: { ok: true } });
+  assert.deepEqual((await manual.json()).data, { run_id: "run-1", status: "succeeded", summary: "ok", report: { ok: true } });
   assert.deepEqual(api.calls, ["run"]);
 });
 

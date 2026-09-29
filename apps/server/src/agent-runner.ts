@@ -253,6 +253,7 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
       runReviewer(request: unknown): Promise<unknown>;
       runAdvisor(request: unknown): Promise<unknown>;
       runCurator?(request: unknown): Promise<unknown>;
+      runKeywordExtraction?(request: unknown): Promise<unknown>;
       provider?: unknown;
       cancelAgent?: (invocationId: string, force?: boolean) => Promise<void>;
       setProcessObserver?: (observer: (invocationId: string, event: AgentProcessEvent) => void | Promise<void>) => void;
@@ -385,6 +386,11 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
         const delegateValue = await getDelegate();
         if (typeof delegateValue.runCurator !== "function") return { ok: false, error: "curator_unavailable" };
         return delegateValue.runCurator(request);
+      },
+      runKeywordExtraction: async (request: unknown) => {
+        const delegateValue = await getDelegate();
+        if (typeof delegateValue.runKeywordExtraction !== "function") return { ok: false, error: "keyword_extraction_unavailable" };
+        return delegateValue.runKeywordExtraction(request);
       },
       cancelAgent: async (invocationId: string, force?: boolean) => (await getDelegate()).cancelAgent?.(invocationId, force),
       setProcessObserver: (observer: (invocationId: string, event: AgentProcessEvent) => void | Promise<void>) => {
