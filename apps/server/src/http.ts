@@ -18,7 +18,7 @@ import { ADVISOR_CURATION_ACTION_TYPES, advisorCurationKind, builtinProviderHarn
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
 import { RESEARCH_CAPTURE_ROLES } from "../../../packages/shared/dist/permission-args.js";
 import { extractWebResearchCapture } from "../../../packages/shared/dist/web-research.js";
-import type { CoreEvent, CorePort, CreateProjectInput, DeleteProjectInput, InboundMessageInput, IntegrationConfigPatch, IntegrationProvider, JsonObject, PostMessageInput, Project, BacklogStatus, RoleModelSettingInput, ExecutorSettingsConfig, ProcessSkillsSettingsInput, RuntimeConfig, UpdateProjectInput, VerificationCommand } from "./types.js";
+import type { CoreEvent, CorePort, CreateProjectInput, DeleteProjectInput, InboundMessageInput, IntegrationConfigPatch, IntegrationProvider, JsonObject, PostMessageInput, Project, WorkInstructionInput, BacklogStatus, RoleModelSettingInput, ExecutorSettingsConfig, ProcessSkillsSettingsInput, RuntimeConfig, UpdateProjectInput, VerificationCommand } from "./types.js";
 import type { KnowledgeAutomationSettings } from "../../../packages/shared/dist/knowledge-automation.js";
 import { browseProjectFolders, initializeExistingProjectFolder, initializeNewProjectFolder, inspectProjectFolder } from "./project-registration.js";
 
@@ -853,6 +853,25 @@ function validateReopenPayload(payload: JsonObject): string {
     throw new ApiError(400, "validation_error", "reasonが不正です。1〜1000文字で指定してください。");
   }
   return reason;
+}
+
+function validateWorkInstructionPayload(payload: JsonObject): WorkInstructionInput {
+  const extra = Object.keys(payload).filter((key) => key !== "body" && key !== "attachment_ids" && key !== "reopen");
+  if (extra.length > 0) {
+    throw new ApiError(400, "validation_error", "Work指示のpayloadの項目が契約と一致しません。余分な項目を除いてください。", { missing: [], extra });
+  }
+  const body = stringField(payload.body, "body", 1, 100000);
+  if (body.trim().length === 0) {
+    throw new ApiError(400, "validation_error", "bodyが不正です。空白以外の文字を含めてください。");
+  }
+  const attachmentIds = payload.attachment_ids ?? [];
+  if (!Array.isArray(attachmentIds) || !attachmentIds.every((item) => typeof item === "string")) {
+    throw new ApiError(400, "validation_error", "attachment_idsが不正です。文字列の配列を指定してください。");
+  }
+  if (payload.reopen !== undefined && typeof payload.reopen !== "boolean") {
+    throw new ApiError(400, "validation_error", "reopenが不正です。trueまたはfalseを指定してください。");
+  }
+  return { body, attachment_ids: attachmentIds as string[], ...(payload.reopen === undefined ? {} : { reopen: payload.reopen }) };
 }
 
 function validateEmptyPayload(payload: JsonObject): void {
@@ -1736,6 +1755,18 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     }
     const result = await runCommand(context, pathname, command, 200, operation, workId);
     sendJson(response, 200, result);
+    return;
+  }
+
+  const workMessageMatch = pathname.match(new RegExp(`^${API_PREFIX}/works/([^/]+)/messages$`));
+  if (workMessageMatch && method === "POST") {
+    requireOwner(request);
+    const workId = pathId(workMessageMatch[1], "work_id");
+    const body = await readRequestBody(request);
+    const command = commandEnvelope(body);
+    const payload = validateWorkInstructionPayload(command.payload);
+    const result = await runCommand(context, pathname, command, 202, async () => context.core.postWorkInstruction(workId, payload, command), workId);
+    sendJson(response, 202, result);
     return;
   }
 

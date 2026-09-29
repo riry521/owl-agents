@@ -754,6 +754,7 @@ export interface WorkDetail extends WorkSummary {
   readonly design_mode: "auto" | "lead";
   readonly plan_revision: number;
   readonly progress: WorkProgress;
+  readonly conversation_id: string | null;
 }
 
 export interface WorkListQuery extends ListQuery {

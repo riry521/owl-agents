@@ -11,6 +11,8 @@ export type ApiErrorCode =
   | "work_not_archived"
   | "work_has_active_agents"
   | "work_has_open_decisions"
+  | "work_reopen_required"
+  | "work_cancelled"
   | "version_conflict"
   | "idempotency_conflict"
   | "project_not_found"
@@ -106,6 +108,8 @@ const HTTP_ERROR_TEXT: Partial<Record<ApiErrorCode, string>> = {
   work_not_archived: "Archive the Work before continuing.",
   work_has_active_agents: "The Work still has active agents.",
   work_has_open_decisions: "Resolve the open Decisions before continuing.",
+  work_reopen_required: "This Work is completed. Reopen it to send an instruction.",
+  work_cancelled: "This Work was cancelled and cannot take instructions.",
   version_conflict: "The version has changed. Refresh and try again.",
   idempotency_conflict: "This idempotency key was used with different content. Use a new key.",
   project_not_found: "The Project was not found.",

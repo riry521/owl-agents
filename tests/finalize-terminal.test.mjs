@@ -73,7 +73,7 @@ function providerRunner(handler, prompts, extra = {}) {
       execute: async (request) => {
         const prompt = String(request.prompt ?? request.input ?? JSON.stringify(request));
         prompts.push(prompt);
-        const out = handler(prompt, request);
+        const out = await handler(prompt, request);
         return {
           adapter: request.adapter,
           stdout: typeof out === "string" ? out : JSON.stringify(out),
@@ -472,6 +472,40 @@ test("a malformed final answer is retried once, then opens a final_manager_faile
   assert.equal(finalCalls, 3);
   assert.equal(prompts.some((prompt) => prompt.includes("This is a REPLAN")), false, "no Manager replan");
   assert.equal(prompts.some((prompt) => prompt.includes("final review judged the Work incomplete")), false);
+});
+
+test("an instruction posted during the final check is replanned before the Work completes", async (t) => {
+  const prompts = [];
+  let finalCalls = 0;
+  let core;
+  let workId;
+  const opened = await openCore(t, () => providerRunner(
+    async (prompt) => {
+      if (!prompt.includes(FINAL_REVIEW_MARKER)) return { tasks: [] };
+      finalCalls += 1;
+      if (finalCalls === 1) {
+        await core.postWorkInstruction(workId, commandEnvelope({ body: "Also add a changelog entry" }, "during-final", 1));
+      }
+      return completeVerdict;
+    },
+    prompts,
+  ));
+  core = opened.core;
+  const { db } = opened;
+  workId = await seedFinishedWork(core, db, [
+    { id: createUlid(), status: "completed", managerTaskId: "T1", title: "done", withReport: true },
+  ]);
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run("UPDATE works SET state_version = 1 WHERE id = ?", workId);
+  });
+  await core.start();
+  await core.tick(workId);
+  assert.equal(finalCalls, 1);
+  assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "running");
+  await core.tick(workId);
+  assert.ok(prompts.some((prompt) => prompt.includes("Also add a changelog entry")), "the Manager received the instruction");
+  assert.ok(await waitFor(() => db.get("SELECT state FROM works WHERE id = ?", workId).state === "completed"));
+  assert.equal(finalCalls, 2);
 });
 
 test("an incomplete final verdict enqueues proposed rules while waiting for Owner review", async (t) => {

@@ -554,6 +554,8 @@ export async function getWorkDetail(id: ULID): Promise<WorkDetailView | null> {
       listDecisions(),
     ]);
     const work = workDtoFromResponse(workResponse, id);
+    const conversationId = typeof work.conversation_id === 'string' ? work.conversation_id : null;
+    const messages = conversationId === null ? [] : await listMessages(conversationId);
     const initial = normalizeWorkDetailData({
       // The REST envelope and Work identity/title/state are required. Older
       // Cores may omit progress, so the frontend derives it from the Task pages.
@@ -562,11 +564,7 @@ export async function getWorkDetail(id: ULID): Promise<WorkDetailView | null> {
       runs,
       reports: [],
       decisions,
-      // WorkDetail has no conversation_id and the frozen contract exposes no
-      // work-to-conversation lookup. Do not invent an endpoint or fabricate
-      // messages; the aggregate remains contract-shaped until that mapping is
-      // added to the API artifact.
-      messages: [],
+      messages,
     }, id);
     const reports = await reportsForTasks(initial.tasks);
     return normalizeWorkDetailData({
@@ -680,6 +678,20 @@ export async function reopenWork(
     // reason is optional but must be non-blank when sent.
     reason.trim() ? { reason } : {},
     expectedVersion,
+  );
+  return response.data;
+}
+
+/** POST /api/v1/works/{work_id}/messages with the command envelope. */
+export async function sendWorkInstruction(
+  workId: ULID,
+  body: string,
+  options: { reopen?: boolean; expectedVersion?: number } = {},
+): Promise<{ work_id: ULID; conversation_id: ULID; message_id: ULID; status: 'queued' }> {
+  const response = await command<{ work_id: ULID; conversation_id: ULID; message_id: ULID; status: 'queued' }>(
+    `/works/${encodeURIComponent(workId)}/messages`,
+    { body, attachment_ids: [], ...(options.reopen ? { reopen: true } : {}) },
+    options.expectedVersion ?? 0,
   );
   return response.data;
 }

@@ -16,7 +16,8 @@
     "summary",
     "size",
     "plan_revision",
-    "progress"
+    "progress",
+    "conversation_id"
   ],
   "properties": {
     "id": {
@@ -72,6 +73,16 @@
     },
     "plan_revision": {
       "$ref": "common.json#/$defs/Version"
+    },
+    "conversation_id": {
+      "anyOf": [
+        {
+          "$ref": "common.json#/$defs/ULID"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "progress": {
       "type": "object",

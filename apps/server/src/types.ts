@@ -69,6 +69,7 @@ export interface WorkDetail extends WorkSummary {
   size: "small" | "normal" | "large";
   plan_revision: number;
   progress: WorkProgress;
+  conversation_id: string | null;
 }
 
 /** Whether a Work's branches hold content outside its Project base branch. */
@@ -262,6 +263,19 @@ export interface Message {
   body: string;
   attachment_ids: string[];
   created_at: string;
+}
+
+export interface WorkInstructionInput {
+  body: string;
+  attachment_ids?: string[];
+  reopen?: boolean;
+}
+
+export interface WorkInstructionResult extends JsonObject {
+  work_id: string;
+  conversation_id: string;
+  message_id: string;
+  status: "queued";
 }
 
 export interface PostMessageInput {
@@ -587,6 +601,7 @@ export interface CorePort {
     work_id: string;
     state: "running";
   }>>;
+  postWorkInstruction(workId: string, input: WorkInstructionInput, command: CommandMeta): Promise<CommandResult<WorkInstructionResult>>;
   archiveWork(workId: string, command: CommandMeta): Promise<CommandResult<{ work_id: string; archived_at: string | null }>>;
   unarchiveWork(workId: string, command: CommandMeta): Promise<CommandResult<{ work_id: string; archived_at: null }>>;
   deleteWork(workId: string, command: CommandMeta): Promise<CommandResult<{ work_id: string; deleted: true }>>;

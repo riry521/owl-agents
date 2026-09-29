@@ -10,7 +10,7 @@ import { managerReplanFailureBrief, RESOLVE_CONFLICT_OPTION_KEY } from "./decisi
 import { isFinalLesson, isFinalMissingItem, lessonBlockKey, normalizeLesson, parseLessonBlocks, splitLessonBlocks, type FinalManagerVerdict } from "./final-verdict";
 import { DEFAULT_OWNER_LANGUAGE, OWNER_LANGUAGE_SETTINGS_KEY, ownerLanguage, storedOwnerLanguage, type OwnerLanguage } from "./owner-language";
 import { EventDispatcher } from "./event-dispatcher";
-import { HumanReadableError, dependencyUnavailable, idempotencyConflict, invalidStateTransition, notFound, projectDeletionImpactChanged, projectHasRunningWorks, projectNotFound, projectPathConflict, validationError, versionConflict } from "./errors";
+import { HumanReadableError, dependencyUnavailable, idempotencyConflict, invalidStateTransition, notFound, projectDeletionImpactChanged, projectHasRunningWorks, projectNotFound, projectPathConflict, validationError, versionConflict, workCancelled, workReopenRequired } from "./errors";
 import {
   appendEventInTransaction,
   createWorkInTransaction,
@@ -353,6 +353,7 @@ interface WorkDbRow {
 interface WorkDetailDbRow extends WorkDbRow {
   total_tasks: number;
   completed_tasks: number;
+  conversation_id: string | null;
 }
 
 interface TaskDbRow {
@@ -1684,7 +1685,9 @@ export class Core {
               -- the Manager's replacements, so it no longer counts toward progress.
               (SELECT COUNT(*) FROM tasks WHERE work_id = works.id
                  AND (status <> 'cancelled' OR works.state = 'cancelled')) AS total_tasks,
-              (SELECT COUNT(*) FROM tasks WHERE work_id = works.id AND status = 'completed') AS completed_tasks
+              (SELECT COUNT(*) FROM tasks WHERE work_id = works.id AND status = 'completed') AS completed_tasks,
+              (SELECT id FROM conversations WHERE work_id = works.id AND channel = 'web'
+                 AND is_active = 1 AND archived_at IS NULL) AS conversation_id
          FROM works
         WHERE id = ?`,
       workId,
@@ -2225,6 +2228,102 @@ export class Core {
     return response;
   }
 
+  public async postWorkInstruction(
+    workId: string,
+    request: CommandRequest<{ body: string; attachment_ids?: string[]; reopen?: boolean }>,
+  ): Promise<CommandResponse<{ work_id: string; conversation_id: string; message_id: string; status: "queued" }>> {
+    const body = request.payload.body;
+    if (typeof body !== "string" || body.trim().length < 1 || body.length > 100000) {
+      throw validationError("Instruction body must contain between 1 and 100,000 characters.", { field: "body" });
+    }
+    const attachmentIds = request.payload.attachment_ids ?? [];
+    if (!Array.isArray(attachmentIds) || !attachmentIds.every((item): item is string => typeof item === "string")) {
+      throw validationError("Instruction attachment_ids must be an array of strings.", { field: "attachment_ids" });
+    }
+    const reopen = request.payload.reopen === true;
+    let reopened = false;
+    const response = await this.runConditionalWorkCommand(request, { type: "message.posted", workId }, (transaction) => {
+      const work = transaction.get<{ state: WorkState; archived_at: string | null; owner_id: string }>(
+        "SELECT state, archived_at, owner_id FROM works WHERE id = ?",
+        workId,
+      );
+      if (!work) throw notFound("work", workId);
+      if (work.state === "memo" || work.state === "ready") {
+        throw invalidStateTransition("Start the Work before sending an instruction.", { work_id: workId, state: work.state });
+      }
+      if (work.state === "cancelled") throw workCancelled(workId);
+      if (work.state === "completed" && !reopen) throw workReopenRequired(workId);
+      const now = utcNow();
+      const events: { type: string; payload: JsonObject; createdAt: string }[] = [];
+      let version = 0;
+      if (work.state === "completed") {
+        if (work.archived_at !== null) {
+          setWorkArchivedInTransaction(transaction, workId, request.expected_version, false, now);
+          events.push({ type: "work.unarchived", payload: { work_id: workId, archived_at: null }, createdAt: now });
+        }
+        const result = reduceWorkInTransaction(transaction, workId, {
+          event: "work.reopened",
+          expected_version: request.expected_version,
+          payload: { valid_reopen: true, now },
+        });
+        version = result.next.state_version;
+        events.push({ type: "work.reopened", payload: { work_id: workId, reason: body }, createdAt: now });
+        reopened = true;
+      }
+      ensureOwner(transaction, work.owner_id, now);
+      let conversation = transaction.get<{ id: string }>(
+        `SELECT id FROM conversations
+          WHERE work_id = ? AND channel = 'web' AND is_active = 1 AND archived_at IS NULL`,
+        workId,
+      );
+      if (!conversation) {
+        conversation = { id: createUlid() };
+        transaction.run(
+          `INSERT INTO conversations (id, owner_id, work_id, channel, is_active, created_at, updated_at)
+           VALUES (?, ?, ?, 'web', 1, ?, ?)`,
+          conversation.id, work.owner_id, workId, now, now,
+        );
+      }
+      let account = transaction.get<{ id: string }>(
+        "SELECT id FROM connector_accounts WHERE owner_id = ? AND provider = 'web'",
+        work.owner_id,
+      );
+      if (!account) {
+        account = { id: createUlid() };
+        transaction.run(
+          `INSERT INTO connector_accounts (id, owner_id, provider, external_account_id, created_at)
+           VALUES (?, ?, 'web', ?, ?)`,
+          account.id, work.owner_id, work.owner_id === DEFAULT_OWNER_ID ? "web-default" : `web-${work.owner_id}`, now,
+        );
+      }
+      const messageId = createUlid();
+      transaction.run(
+        `INSERT INTO messages
+           (id, conversation_id, provider, account_id, source_message_id, body,
+            attachment_ids_json, received_at, created_at)
+         VALUES (?, ?, 'web', ?, ?, ?, ?, ?, ?)`,
+        messageId,
+        conversation.id,
+        account.id,
+        `api:${conversation.id}:${request.idempotency_key}`,
+        body,
+        JSON.stringify(attachmentIds),
+        now,
+        now,
+      );
+      mergeOwnerReplanInTransaction(transaction, workId, { kind: "instruction", answer: body });
+      events.push({ type: "message.posted", payload: { kind: "message_posted", schema_version: "1.0.0" }, createdAt: now });
+      return {
+        data: { work_id: workId, conversation_id: conversation.id, message_id: messageId, status: "queued" as const },
+        version,
+        events,
+      };
+    });
+    if (reopened) this.workDriver.register(workId);
+    else this.workDriver.wake(workId);
+    return response;
+  }
+
   public async cancelAgent(
     agentRunId: string,
     request: CommandRequest<CancelAgentPayload>,
@@ -2465,7 +2564,7 @@ export class Core {
           sourceAlert?.kind === "final_manager_incomplete")
       ) {
         await this.writeLane.transact((transaction) =>
-          queueOwnerReplanInTransaction(transaction, resumedWork.work_id, { kind: "decision", answer: request.payload.answer }),
+          mergeOwnerReplanInTransaction(transaction, resumedWork.work_id, { kind: "decision", answer: request.payload.answer }),
         );
       }
       this.workDriver.register(resumedWork.work_id);
@@ -3206,7 +3305,7 @@ export class Core {
 
   public async getActiveConversation(): Promise<{ conversation_id: string }> {
     const existing = this.db.get<{ id: string }>(
-      "SELECT id FROM conversations WHERE owner_id = ? AND is_active = 1 AND archived_at IS NULL ORDER BY updated_at DESC LIMIT 1",
+      "SELECT id FROM conversations WHERE owner_id = ? AND is_active = 1 AND archived_at IS NULL AND (channel <> 'web' OR work_id IS NULL) ORDER BY updated_at DESC LIMIT 1",
       DEFAULT_OWNER_ID,
     );
     if (existing) return { conversation_id: existing.id };
@@ -3226,7 +3325,7 @@ export class Core {
           );
         }
         const raceCheck = transaction.get<{ id: string }>(
-          "SELECT id FROM conversations WHERE owner_id = ? AND is_active = 1 AND archived_at IS NULL ORDER BY updated_at DESC LIMIT 1",
+          "SELECT id FROM conversations WHERE owner_id = ? AND is_active = 1 AND archived_at IS NULL AND (channel <> 'web' OR work_id IS NULL) ORDER BY updated_at DESC LIMIT 1",
           DEFAULT_OWNER_ID,
         );
         if (raceCheck) return { conversation_id: raceCheck.id };
@@ -4487,7 +4586,7 @@ export class Core {
           ORDER BY session.created_at DESC LIMIT 1`,
       ) ?? this.db.get<{ owner_id: string; conversation_id: string }>(
         `SELECT owner_id, id AS conversation_id FROM conversations
-          WHERE ${conversationId ? "id = ?" : "is_active = 1 AND archived_at IS NULL"}
+          WHERE ${conversationId ? "id = ?" : "is_active = 1 AND archived_at IS NULL AND (channel <> 'web' OR work_id IS NULL)"}
           ORDER BY updated_at DESC LIMIT 1`,
         ...(conversationId ? [conversationId] : []),
       ) ?? { owner_id: DEFAULT_OWNER_ID, conversation_id: (await this.getActiveConversation()).conversation_id };
@@ -4650,6 +4749,8 @@ export class Core {
         const conflict = mergeConflictReason(latestAlert);
         const reason = ownerReplan.kind === "reopen"
           ? 'The Owner reopened the completed Work. Add the Tasks the Owner\'s request needs, or return {"tasks": []} if nothing is missing.'
+          : ownerReplan.kind === "instruction"
+            ? 'The Owner sent an instruction for the Work. Add the Tasks the Owner\'s instruction asks for, or return {"tasks": []} if nothing is missing.'
           : failedIds.length > 0
             ? "The Owner answered the Decision about failed Tasks. Retry or replace them following the Owner's answer."
             : conflict !== null
@@ -4675,6 +4776,12 @@ export class Core {
             if (!this.started || finalOutcome === null) return this.workflow.snapshot(workId);
             const { verdict, agent_run_id: agentRunId } = finalOutcome;
             if (verdict.verdict === "complete") {
+              // An instruction that arrived during the final check goes to the Manager first.
+              const pendingReplan = this.db.get<{ key: string }>(
+                "SELECT key FROM idempotency_keys WHERE key = ? AND json_extract(response_json, '$.status') = 'queued'",
+                ownerReplanKey(workId),
+              );
+              if (pendingReplan) return this.workflow.snapshot(workId);
               const workProject = this.db.get<{ project_id: string | null }>("SELECT project_id FROM works WHERE id = ?", workId);
               let mergeRecord: JsonObject | undefined;
               if (workProject?.project_id !== null && workProject?.project_id !== undefined) {
@@ -5493,7 +5600,7 @@ export class Core {
       try {
         const value = JSON.parse(row.response_json) as unknown;
         if (isRecord(value) && typeof value.answer === "string") {
-          return { kind: value.kind === "reopen" ? "reopen" : "decision", answer: value.answer };
+          return { kind: value.kind === "reopen" || value.kind === "instruction" ? value.kind : "decision", answer: value.answer };
         }
       } catch {
         // A malformed request is dropped; the normal terminal handling applies.
@@ -6491,6 +6598,7 @@ function toWorkDetail(row: WorkDetailDbRow): WorkDetail {
     design_mode: row.design_mode,
     plan_revision: row.plan_revision,
     progress,
+    conversation_id: row.conversation_id,
   };
 }
 
@@ -6926,6 +7034,7 @@ function resolveInboundConversation(
         AND ((thread_ref = ?) OR (thread_ref IS NULL AND ? IS NULL))
         AND ((dm_ref = ?) OR (dm_ref IS NULL AND ? IS NULL))
         AND archived_at IS NULL
+        AND (channel <> 'web' OR work_id IS NULL)
       ORDER BY updated_at DESC LIMIT 1`,
     ownerId,
     provider,
@@ -7530,7 +7639,7 @@ function policyDecisionIdempotencyKeyPrefix(workId: string): string {
 }
 
 interface OwnerReplanRequest {
-  readonly kind: "decision" | "reopen";
+  readonly kind: "decision" | "reopen" | "instruction";
   readonly answer: string;
 }
 
@@ -7556,6 +7665,31 @@ function queueOwnerReplanInTransaction(
     now,
     new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
   );
+}
+
+/** Queue a request, combining it with one that is still queued so neither is lost. */
+function mergeOwnerReplanInTransaction(
+  transaction: CoreWriteLaneTransaction,
+  workId: string,
+  request: OwnerReplanRequest,
+): void {
+  const pending = transaction.get<{ response_json: string }>(
+    "SELECT response_json FROM idempotency_keys WHERE key = ? AND json_extract(response_json, '$.status') = 'queued'",
+    ownerReplanKey(workId),
+  );
+  let merged = request;
+  try {
+    const value = pending ? JSON.parse(pending.response_json) as unknown : null;
+    if (isRecord(value) && typeof value.answer === "string" && value.answer.length > 0) {
+      merged = {
+        kind: value.kind === "instruction" || request.kind === "instruction" ? "instruction" : request.kind,
+        answer: `${value.answer}\n\n${request.answer}`,
+      };
+    }
+  } catch {
+    // A malformed pending request is replaced.
+  }
+  queueOwnerReplanInTransaction(transaction, workId, merged);
 }
 
 /** Undo `consumeOwnerReplan`: move an `attempted` marker back to `queued`. */

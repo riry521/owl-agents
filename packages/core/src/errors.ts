@@ -42,6 +42,24 @@ export function invalidStateTransition(message: string, details: Record<string, 
   });
 }
 
+export function workReopenRequired(workId: string): HumanReadableError {
+  return new HumanReadableError({
+    code: "work_reopen_required",
+    message: "このWorkは完了しています。指示を送るには再開してください。",
+    remediation: "Workを再開してから、もう一度指示を送ってください。",
+    details: { work_id: workId },
+  });
+}
+
+export function workCancelled(workId: string): HumanReadableError {
+  return new HumanReadableError({
+    code: "work_cancelled",
+    message: "このWorkはキャンセルされているため指示を送れません。",
+    remediation: "続けるには新しいWorkを作成してください。",
+    details: { work_id: workId },
+  });
+}
+
 export function notFound(resource: string, id: string): HumanReadableError {
   return new HumanReadableError({
     code: `${resource}_not_found`,

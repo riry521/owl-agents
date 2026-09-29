@@ -27,6 +27,8 @@ import type {
   Message,
   Page,
   PostMessageInput,
+  WorkInstructionInput,
+  WorkInstructionResult,
   InboundMessageInput,
   InboundMessageResult,
   AdvisorOrigin,
@@ -110,6 +112,7 @@ interface StoredWork {
   summary: string;
   size: "small" | "normal" | "large";
   plan_revision: number;
+  conversation_id: string | null;
   tasks: string[];
 }
 
@@ -365,6 +368,7 @@ export class MemoryCore implements CorePort {
       summary: input.summary,
       size: input.size,
       plan_revision: 0,
+      conversation_id: null,
       tasks: [],
     };
     this.works.set(id, work);
@@ -482,6 +486,23 @@ export class MemoryCore implements CorePort {
     work.updated_at = utcNow();
     this.emit("work.reopened", { work_id: workId, state: work.state });
     return { data: { work_id: workId, state: "running" }, version: work.state_version };
+  }
+
+  async postWorkInstruction(workId: string, input: WorkInstructionInput, command: CommandMeta): Promise<CommandResult<WorkInstructionResult>> {
+    this.assertWritable();
+    const work = this.requireWork(workId);
+    if (work.state === "memo" || work.state === "ready") {
+      throw new ApiError(409, "invalid_state_transition", "Workを開始してから指示を送ってください。", { state: work.state });
+    }
+    if (work.state === "cancelled") throw new ApiError(409, "work_cancelled", "このWorkはキャンセルされているため指示を送れません。", { state: work.state });
+    if (work.state === "completed") {
+      if (input.reopen !== true) throw new ApiError(409, "work_reopen_required", "このWorkは完了しています。指示を送るには再開してください。", { state: work.state });
+      await this.reopenWork(workId, input.body, command);
+    }
+    const conversationId = work.conversation_id ?? createUlid();
+    work.conversation_id = conversationId;
+    const posted = await this.postMessage(conversationId, { body: input.body, attachment_ids: input.attachment_ids ?? [] }, command);
+    return { data: { work_id: workId, conversation_id: conversationId, message_id: posted.data.message_id, status: "queued" }, version: posted.version };
   }
 
   async archiveWork(workId: string, command: CommandMeta): Promise<CommandResult<{ work_id: string; archived_at: string | null }>> {
@@ -1285,6 +1306,7 @@ interface ExternalCore {
   resumeWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   cancelWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   reopenWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
+  postWorkInstruction(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   archiveWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   unarchiveWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   deleteWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
@@ -1485,6 +1507,7 @@ function externalWorkDetail(response: unknown, workId: string, computedProgress:
     size,
     plan_revision: planRevision,
     progress: computedProgress,
+    conversation_id: data.conversation_id === null || isUlid(data.conversation_id) ? data.conversation_id : null,
   };
 }
 
@@ -1502,6 +1525,8 @@ function externalError(error: unknown, operation: string): ApiError {
       "work_not_archived",
       "work_has_active_agents",
       "work_has_open_decisions",
+      "work_reopen_required",
+      "work_cancelled",
       "version_conflict",
       "idempotency_conflict",
       "work_not_found",
@@ -1709,6 +1734,16 @@ export class ExternalCoreAdapter implements CorePort {
       return { data: data as { work_id: string; state: "running" }, version: response.version };
     } catch (error) {
       throw externalError(error, "reopenWork");
+    }
+  }
+
+  async postWorkInstruction(workId: string, input: WorkInstructionInput, command: CommandMeta): Promise<CommandResult<WorkInstructionResult>> {
+    try {
+      const response = await this.core.postWorkInstruction(workId, { ...command, payload: input });
+      const { version: _version, ...data } = response.data;
+      return { data: data as unknown as WorkInstructionResult, version: response.version };
+    } catch (error) {
+      throw externalError(error, "postWorkInstruction");
     }
   }
 

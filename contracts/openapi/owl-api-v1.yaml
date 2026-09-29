@@ -729,6 +729,59 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/works/{work_id}/messages:
+    parameters:
+      - $ref: '#/components/parameters/WorkId'
+    post:
+      operationId: postWorkInstruction
+      summary: Send an Owner instruction to a work and queue an Owner replan
+      security:
+        - ownerBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PostWorkInstructionCommand'
+      responses:
+        '202':
+          description: Instruction recorded and the replan queued.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PostWorkInstructionResponse'
+        '400':
+          description: validation_error (unknown payload keys, blank body, or invalid attachment_ids or reopen).
+          x-error-codes:
+            - validation_error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Work not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Work state, version, or idempotency conflict.
+          x-error-codes:
+            - invalid_state_transition
+            - work_reopen_required
+            - work_cancelled
+            - version_conflict
+            - idempotency_conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: A required dependency is unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/works/{work_id}/tasks:
     parameters:
       - $ref: '#/components/parameters/WorkId'
@@ -3433,6 +3486,7 @@ components:
         - design_mode
         - plan_revision
         - progress
+        - conversation_id
       properties:
         id:
           $ref: '#/components/schemas/ULID'
@@ -3470,6 +3524,10 @@ components:
           $ref: '#/components/schemas/Version'
         progress:
           $ref: '#/components/schemas/WorkProgress'
+        conversation_id:
+          anyOf:
+            - $ref: '#/components/schemas/ULID'
+            - type: 'null'
       additionalProperties: false
     WorkProgress:
       type: object
@@ -3789,6 +3847,55 @@ components:
                   $ref: '#/components/schemas/ULID'
                 state:
                   const: running
+              additionalProperties: false
+    PostWorkInstructionPayload:
+      type: object
+      required:
+        - body
+      properties:
+        body:
+          type: string
+          minLength: 1
+          maxLength: 100000
+          description: Must not be blank.
+        attachment_ids:
+          type: array
+          items:
+            type: string
+        reopen:
+          type: boolean
+          description: Required to send an instruction to a completed work; the work is reopened first.
+      additionalProperties: false
+    PostWorkInstructionCommand:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+        - type: object
+          properties:
+            payload:
+              $ref: '#/components/schemas/PostWorkInstructionPayload'
+    PostWorkInstructionResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          required:
+            - data
+          properties:
+            data:
+              type: object
+              required:
+                - work_id
+                - conversation_id
+                - message_id
+                - status
+              properties:
+                work_id:
+                  $ref: '#/components/schemas/ULID'
+                conversation_id:
+                  $ref: '#/components/schemas/ULID'
+                message_id:
+                  $ref: '#/components/schemas/ULID'
+                status:
+                  const: queued
               additionalProperties: false
     CancelWorkPayload:
       type: object

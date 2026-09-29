@@ -81,6 +81,7 @@ export interface WorkDetail extends Omit<WorkSummary, 'title' | 'state' | 'updat
   design_mode: 'auto' | 'lead' | null;
   plan_revision: number | null;
   progress: WorkProgress | null;
+  conversation_id?: ULID | null;
 }
 
 export interface WorkProgress {
@@ -572,6 +573,7 @@ export interface NormalizedWorkDetail extends WorkSummary {
   design_mode: 'auto' | 'lead';
   plan_revision: number;
   progress: WorkProgress;
+  conversation_id: ULID | null;
 }
 
 export interface DecisionView {

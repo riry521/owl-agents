@@ -4,11 +4,13 @@ import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import {
+  answerDecision,
   cancelWork,
   getWorkDetail,
   pauseWork,
   reopenWork,
   resumeWork,
+  sendWorkInstruction,
   startWork,
   subscribeToUpdates,
   type RealtimeStatus,
@@ -58,6 +60,9 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
   const [deleted, setDeleted] = useState(false);
   const [operationPending, setOperationPending] = useState(false);
   const [operationError, setOperationError] = useState<string | null>(null);
+  const [instruction, setInstruction] = useState('');
+  const [instructionSending, setInstructionSending] = useState(false);
+  const [instructionError, setInstructionError] = useState<string | null>(null);
   // Bumped whenever a Work detail refresh succeeds, so the design documents
   // section refetches its list alongside the rest of the Work's data.
   const [designsRefreshToken, setDesignsRefreshToken] = useState(0);
@@ -189,9 +194,48 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
   const displayNumber = workDisplayNumber(work.display_number);
   const canStart = work.state === 'memo' || work.state === 'ready';
   const canPause = work.state === 'running';
-  const canResume = work.state === 'paused';
+  // A Work stopped by an error waits on a Core Decision that offers a retry.
+  const retryDecision = work.state === 'judgement_waiting'
+    ? decisions.find((d) => d.status === 'open' && d.scope === 'work' && d.options.some((o) => o.key === 'retry'))
+    : undefined;
+  const canResume = work.state === 'paused' || retryDecision !== undefined;
   // judgement_waiting Works are blocked on the owner; cancelling them must stay possible.
   const canCancel = canPause || canResume || work.state === 'judgement_waiting';
+  const resumeWorkOrDecision = () => {
+    if (retryDecision === undefined) return resumeWork(work.id, work.state_version);
+    const option = retryDecision.options.find((o) => o.key === 'retry');
+    return answerDecision(retryDecision.id, {
+      answer: option?.label ?? 'retry',
+      option_key: 'retry',
+      source: 'web',
+      source_message_id: null,
+    });
+  };
+  const instructionBlockedNote = work.state === 'cancelled'
+    ? t('work.instructionCancelledNote')
+    : canStart
+      ? t('work.instructionNotStartedNote')
+      : null;
+  const sendInstruction = async () => {
+    const body = instruction.trim();
+    if (!body || instructionSending || instructionBlockedNote !== null) return;
+    const reopen = work.state === 'completed';
+    if (reopen && !(typeof window !== 'undefined' && window.confirm(t('work.instructionReopenConfirm')))) return;
+    setInstructionSending(true);
+    setInstructionError(null);
+    try {
+      await sendWorkInstruction(work.id, body, { reopen, expectedVersion: work.state_version });
+      setInstruction('');
+      retry();
+    } catch (error) {
+      const kind = typeof error === 'object' && error !== null && 'kind' in error && typeof error.kind === 'string'
+        ? error.kind
+        : '';
+      setInstructionError(kind === 'network_error' ? t('work.errorNetwork') : t('work.instructionError'));
+    } finally {
+      setInstructionSending(false);
+    }
+  };
   const canReopen = work.state === 'completed';
   const canArchive = work.state === 'completed' || work.state === 'cancelled';
   const hasActions = canStart || canCancel || canReopen || canArchive;
@@ -303,7 +347,7 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
                     type="button"
                     className="btn"
                     disabled={operationPending}
-                    onClick={() => void runWorkOperation(() => resumeWork(work.id, work.state_version))}
+                    onClick={() => void runWorkOperation(resumeWorkOrDecision)}
                   >
                     {t('work.resume')}
                   </button>
@@ -522,6 +566,36 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
                 ))}
               </div>
             )}
+            <div className="composer">
+              {instructionBlockedNote !== null && <p className="note">{instructionBlockedNote}</p>}
+              <textarea
+                className="textarea"
+                value={instruction}
+                onChange={(event) => setInstruction(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) {
+                    event.preventDefault();
+                    void sendInstruction();
+                  }
+                }}
+                placeholder={t('work.instructionPlaceholder')}
+                aria-label={t('work.instructionPlaceholder')}
+                maxLength={100000}
+                rows={3}
+                disabled={instructionSending || instructionBlockedNote !== null}
+              />
+              <div className="btn-row mt-10">
+                <button
+                  type="button"
+                  className="btn btn--primary"
+                  disabled={instructionSending || instructionBlockedNote !== null || instruction.trim().length === 0}
+                  onClick={() => void sendInstruction()}
+                >
+                  {instructionSending ? t('work.instructionSending') : t('work.instructionSend')}
+                </button>
+              </div>
+              {instructionError && <p className="error" role="alert">{instructionError}</p>}
+            </div>
           </section>
         </div>
 
