@@ -30,6 +30,7 @@ import { WorkArchiveActions } from '@/components/WorkArchiveActions';
 import { DesignDocumentsSection } from '@/components/DesignDocumentsSection';
 import { WorkBacklogSection } from '@/components/WorkBacklogSection';
 // Relative on purpose: the node component tests stub the `@/` modules.
+import { orderTasksByStage } from '../lib/task-stages.mjs';
 import { activeRunByTask, buildRunTree, isRunActive } from '../lib/agent-run-tree.mjs';
 import { workDeliverables } from '../lib/work-deliverables.mjs';
 import { useLocale, type TFunction, type Locale } from '@/lib/i18n';
@@ -377,7 +378,7 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
               <p className="empty">{t('work.noTasks')}</p>
             ) : (
               <div className="list">
-                {tasks.map((tk) => {
+                {orderTasksByStage(tasks).map(({ task: tk, label: stageLabel }) => {
                   const live = liveRunByTask.get(tk.id);
                   const rowClass = tk.status === 'completed' ? 'row row--done' : live ? 'row row--running' : 'row';
                   // A Task whose agents are still working must not read as idle (waiting).
@@ -394,7 +395,7 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
                     <div className={rowClass} key={tk.id}>
                       <span className={dotClass} />
                       <div className="row__main">
-                        <div className="row__title row__title--task">{tk.title}</div>
+                        <div className="row__title row__title--task">{stageLabel ? `${stageLabel}. ${tk.title}` : tk.title}</div>
                         <div className="row__sub">
                           {tk.type === 'design' ? <span className="badge badge--purple">{t('work.taskTypeDesign')}</span> : tk.type}
                           {live ? ` · ${label(live)} ${t('work.working')}` : ''}

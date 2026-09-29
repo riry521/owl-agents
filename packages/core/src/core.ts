@@ -348,6 +348,8 @@ interface TaskDbRow {
   type: string;
   state_version: number;
   updated_at: string;
+  created_at: string;
+  depends_on_json: string;
   parent_task_id: string | null;
   acceptance: string;
   review_round: number;
@@ -2186,7 +2188,8 @@ export class Core {
   public listTasks(workId: string, query: TaskListQuery = {}): ListResponse<TaskSummary> {
     const limit = boundLimit(query.limit ?? 50);
     const rows = this.db.all<TaskDbRow>(
-      `SELECT id, work_id, title, status, type, state_version, updated_at
+      `SELECT id, work_id, title, status, type, state_version, updated_at, created_at,
+              (SELECT json_group_array(depends_on_task_id) FROM task_dependencies WHERE task_id = tasks.id) AS depends_on_json
          FROM tasks
         WHERE work_id = ? AND (? IS NULL OR status = ?)
           AND (? IS NULL OR id > ?)
@@ -2203,7 +2206,8 @@ export class Core {
 
   public getTask(taskId: string, query: { request_id?: string; include_report?: boolean } = {}): CommandResponse<TaskDetail & { report?: JsonObject | null }> {
     const row = this.db.get<TaskDbRow>(
-      `SELECT id, work_id, title, status, type, state_version, updated_at,
+      `SELECT id, work_id, title, status, type, state_version, updated_at, created_at,
+              (SELECT json_group_array(depends_on_task_id) FROM task_dependencies WHERE task_id = tasks.id) AS depends_on_json,
               parent_task_id, acceptance, review_round, failure_count, worker_generation
          FROM tasks WHERE id = ?`,
       taskId,
@@ -6250,7 +6254,7 @@ function toWorkDetail(row: WorkDetailDbRow): WorkDetail {
 }
 
 function toTaskSummary(row: TaskDbRow): TaskSummary {
-  return { id: row.id, work_id: row.work_id, title: row.title, status: row.status, type: row.type, state_version: row.state_version, updated_at: row.updated_at };
+  return { id: row.id, work_id: row.work_id, title: row.title, status: row.status, type: row.type, state_version: row.state_version, updated_at: row.updated_at, created_at: row.created_at, depends_on: JSON.parse(row.depends_on_json) as string[] };
 }
 
 function toTaskDetail(row: TaskDbRow): TaskDetail {

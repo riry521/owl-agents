@@ -116,6 +116,8 @@ export interface TaskSummary {
   type: string;
   state_version: number;
   updated_at: RFC3339;
+  created_at: RFC3339;
+  depends_on: ULID[];
 }
 
 export interface TaskDetail extends TaskSummary {

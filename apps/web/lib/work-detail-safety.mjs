@@ -104,6 +104,8 @@ function normalizeTasks(value, workId) {
       type: stringOr(task.type),
       state_version: finiteNumberOr(task.state_version),
       updated_at: stringOr(task.updated_at),
+      created_at: stringOr(task.created_at),
+      depends_on: Array.isArray(task.depends_on) ? task.depends_on.filter((dep) => typeof dep === 'string') : [],
     };
   });
 }

@@ -788,6 +788,8 @@ export interface TaskSummary extends JsonObject {
   readonly type: string;
   readonly state_version: number;
   readonly updated_at: string;
+  readonly created_at: string;
+  readonly depends_on: readonly string[];
 }
 
 export interface TaskDetail extends TaskSummary {
