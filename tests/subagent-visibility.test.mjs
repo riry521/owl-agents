@@ -54,7 +54,7 @@ test("subagent labels and models never copy prompts or unsafe values", () => {
   assert.equal(modelFromArgs("gemini -m 'x y'"), null);
   assert.equal(modelFromArgs("claude -p"), null);
   assert.equal(subagentLabel("codex", "node /usr/bin/codex exec --json"), "codex exec");
-  assert.equal(subagentLabel("claude", "claude -p --output-format json"), "claude -p");
+  assert.equal(subagentLabel("claude", "claude -p --output-format stream-json --verbose"), "claude -p");
   assert.equal(subagentLabel("claude", "claude"), "claude");
 });
 
@@ -62,7 +62,7 @@ test("process tree reconciliation finds nested agent CLIs of any provider under 
   const processes = [
     { pid: 100, ppid: 1, args: "node /srv/owl/server.js" },
     // Worker run (Claude) → shell tool → Codex launcher → Codex native binary.
-    { pid: 200, ppid: 100, args: "claude -p --output-format json" },
+    { pid: 200, ppid: 100, args: "claude -p --output-format stream-json --verbose" },
     { pid: 210, ppid: 200, args: "/bin/zsh -c codex exec --model gpt-5.5 hi" },
     { pid: 220, ppid: 210, args: "node /opt/homebrew/bin/codex exec --model gpt-5.5" },
     { pid: 221, ppid: 220, args: "/opt/codex/vendor/bin/codex exec --model gpt-5.5" },
@@ -135,6 +135,7 @@ async function fakeAgentBin(root) {
     "cat >/dev/null",
     `"${join(bin, "codex")}" exec --model gpt-test &`,
     "wait",
+    `echo '{"type":"system","subtype":"init"}'`,
     `echo '{"type":"result","result":"subtask done"}'`,
     "",
   ].join("\n"));
@@ -158,7 +159,9 @@ test("Hybrid records its phases and every Executor, and nested agent CLIs are de
   });
 
   const phasesSeenByWorker = [];
+  let notifyOutput;
   const agentRunner = {
+    setOutputObserver: (observer) => { notifyOutput = observer; },
     runManagerPlan: async (request) => request.context?.mode === "plan"
       ? { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [{ id: "T1", title: "Hybrid", type: "research", acceptance: "Done.", depends_on: [], replaces: [] }] } }
       : { outcome: "failed", message: "unexpected" },
@@ -166,6 +169,7 @@ test("Hybrid records its phases and every Executor, and nested agent CLIs are de
       const phase = request.context.hybrid_phase;
       phasesSeenByWorker.push(db.get("SELECT phase FROM agent_runs WHERE id = ?", request.invocation_id)?.phase);
       if (phase === "plan") {
+        notifyOutput?.(request.invocation_id);
         return { outcome: "success", report_valid: true, report: { subtasks: [
           { subtask_id: "s1", title: "Write the notes", instruction: "Work in the current worktree. Do not read secrets.\nWrite the notes with details" },
           { subtask_id: "s2", title: "Check the notes", instruction: "Check the notes" },

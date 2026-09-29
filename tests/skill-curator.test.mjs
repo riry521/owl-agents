@@ -82,7 +82,7 @@ test("Claude and Codex receive the Curator schema through their structured outpu
       'fs.writeFileSync(capture, JSON.stringify({ flag, schema, cwd: process.cwd() }));',
       'process.stdin.resume();',
       'process.stdin.on("end", () => {',
-      'const response = args[0] === "exec" ? JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: output } }) + "\\n" : JSON.stringify({ type: "result", result: output });',
+      'const response = args[0] === "exec" ? JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: output } }) + "\\n" : JSON.stringify({ type: "system", subtype: "init" }) + "\\n" + JSON.stringify({ type: "result", result: output }) + "\\n";',
       'process.stdout.write(response);',
       '});',
       "",

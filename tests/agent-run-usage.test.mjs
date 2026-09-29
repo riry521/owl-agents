@@ -302,6 +302,7 @@ async function fakeClaudeBin(root) {
   await writeFile(join(bin, "claude"), [
     "#!/bin/sh",
     "cat >/dev/null",
+    `echo '{"type":"system","subtype":"init"}'`,
     `echo '{"type":"result","result":"subtask done","usage":{"input_tokens":7,"output_tokens":3}}'`,
     "",
   ].join("\n"));

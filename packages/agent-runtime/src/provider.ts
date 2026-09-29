@@ -12,6 +12,7 @@ import {
   agentWallTimeoutMs,
   buildAgentPermissionArgs,
   CodexProgressTracker,
+  ClaudeStreamReader,
   GUARD_TOKEN_FILE_ENV,
   type AgentTimeoutKind,
   type GuardTokenIssuer,
@@ -112,13 +113,11 @@ function killProcessGroup(child: ChildLike, signal: "SIGTERM" | "SIGKILL"): void
 
 /**
  * Limits for one provider process. The wall-clock limit applies to every run.
- * The no-output limit applies only to Codex, whose `--json` output streams
- * progress events; Claude's JSON output arrives in one piece at the end, so
- * silence there says nothing about progress.
+ * The no-output limit applies to both streaming one-shot CLIs.
  */
 function processTimeouts(env: Readonly<Record<string, string>>, adapter: string): { wallMs: number; idleMs: number } {
   try {
-    return { wallMs: agentWallTimeoutMs(env), idleMs: isCodexAdapter(adapter) ? agentIdleTimeoutMs(env) : 0 };
+    return { wallMs: agentWallTimeoutMs(env), idleMs: (isCodexAdapter(adapter) || isClaudeAdapter(adapter)) ? agentIdleTimeoutMs(env) : 0 };
   } catch (error) {
     if (error instanceof AgentTimeoutSettingError) throw providerConfigInvalid(`${error.setting.toLowerCase()}_invalid`);
     throw error;
@@ -132,7 +131,8 @@ function buildArgv(request: ProviderExecutionRequest, outputSchemaPath?: string)
       request.env.OWL_CLAUDE_EXECUTABLE ?? "",
       "-p",
       "--output-format",
-      "json",
+      "stream-json",
+      "--verbose",
       ...(request.provider_session_id ? ["--resume", request.provider_session_id] : []),
       ...(request.structured_output_schema
         ? ["--json-schema", JSON.stringify(request.structured_output_schema)]
@@ -333,7 +333,8 @@ export function createCliProvider(options: AgentRunnerOptions): ProviderClient {
             if (idleTimer !== undefined) clearTimeout(idleTimer);
             if (killTimer !== undefined) clearTimeout(killTimer);
             if (request.signal) request.signal.removeEventListener("abort", abort);
-            resolveResult({ stdout, stderr, code, signal, outputTooLarge, timedOut, cancelled });
+            if (claudeStream) stdout = claudeStream.output();
+            resolveResult({ stdout, stderr, code, signal, outputTooLarge: outputTooLarge || Buffer.byteLength(stderr) + (claudeStream ? claudeStream.retainedBytes() : Buffer.byteLength(stdout)) > MAX_CAPTURE_BYTES, timedOut, cancelled });
           };
           const fail = (error: unknown): void => {
             if (settled) return;
@@ -364,8 +365,14 @@ export function createCliProvider(options: AgentRunnerOptions): ProviderClient {
             idleTimer = setTimeout(() => timeOut("idle"), timeouts.idleMs);
             idleTimer.unref();
           };
+          const notifyProgress = (): void => {
+            armIdleTimer();
+            try { request.on_output?.(); } catch { /* telemetry must not break I/O */ }
+          };
           const progress = new CodexProgressTracker(armIdleTimer);
+          const claudeStream = isClaudeAdapter(requestAdapter) ? new ClaudeStreamReader(notifyProgress) : null;
           const append = (which: "stdout" | "stderr", chunk: unknown): void => {
+            if (which === "stdout" && claudeStream) { claudeStream.push(Buffer.isBuffer(chunk) ? chunk : String(chunk)); return; }
             try {
               request.on_output?.();
             } catch {

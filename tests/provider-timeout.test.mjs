@@ -1,5 +1,5 @@
 // Agent process time limits: the wall-clock limit for every run and the
-// no-output limit for runs whose output streams progress (Codex --json).
+// no-output limit for runs whose output streams progress (Codex --json and Claude stream-json).
 // Fake harness executables stand in for the real CLIs.
 import assert from "node:assert/strict";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -29,7 +29,7 @@ process.stdin.resume();
 process.stdin.on("end", () => {
   const mode = process.env.FAKE_MODE;
   const line = (value) => process.stdout.write(JSON.stringify(value) + "\\n");
-  if (mode === "progress") line({ type: "thread.started", thread_id: "t1" });
+  if (mode === "progress") line(process.argv.includes("exec") ? { type: "thread.started", thread_id: "t1" } : { type: "system", subtype: "init" });
   if (mode === "reconnect") setInterval(() => line({ type: "error", message: "Reconnecting... 1/5" }), 20);
   if (mode === "late-json") {
     setTimeout(() => {
@@ -116,25 +116,24 @@ test("a Codex run that stops making progress is stopped by the no-output limit",
 test("Codex reconnect errors do not count as progress", async (t) => {
   await withHarness(async (root, executable) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
-    const output = signal();
-    const run = execute(executable, "codex-cli/v1", root, { FAKE_MODE: "reconnect" }, output.fire).then(() => null, (caught) => caught);
-    await output.promise;
+    const spawned = signal();
+    const run = execute(executable, "codex-cli/v1", root, { FAKE_MODE: "reconnect" }, undefined, spawned.fire).then(() => null, (caught) => caught);
+    await spawned.promise;
     t.mock.timers.tick(DEFAULT_AGENT_IDLE_TIMEOUT_MS);
     const error = await run;
     assert.equal(error?.cause?.timeout_kind, "idle");
   });
 });
 
-test("a Claude JSON run that prints nothing until it finishes has no no-output limit", async (t) => {
+test("a Claude stream run with no progress reaches its no-output limit", async (t) => {
   await withHarness(async (root, executable) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
-    const spawned = signal();
-    const run = execute(executable, "claude-cli/v1", root, { FAKE_MODE: "late-json", FAKE_DELAY_MS: "300" }, undefined, spawned.fire);
-    await spawned.promise;
-    t.mock.timers.tick(DEFAULT_AGENT_IDLE_TIMEOUT_MS * 2);
-    const response = await run;
-    assert.equal(response.exit_code, 0);
-    assert.match(response.stdout, /"done"/);
+    const output = signal();
+    const run = execute(executable, "claude-cli/v1", root, { FAKE_MODE: "progress" }, output.fire);
+    await output.promise;
+    t.mock.timers.tick(DEFAULT_AGENT_IDLE_TIMEOUT_MS);
+    const error = await run.then(() => null, (caught) => caught);
+    assert.equal(error?.cause?.timeout_kind, "idle");
   });
 });
 
@@ -142,7 +141,7 @@ test("an explicit 0 removes the wall-clock limit", async (t) => {
   await withHarness(async (root, executable) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
     const spawned = signal();
-    const run = execute(executable, "claude-cli/v1", root, { FAKE_MODE: "late-json", FAKE_DELAY_MS: "300", OWL_PROVIDER_TIMEOUT_MS: "0" }, undefined, spawned.fire);
+    const run = execute(executable, "claude-cli/v1", root, { FAKE_MODE: "late-json", FAKE_DELAY_MS: "300", OWL_PROVIDER_TIMEOUT_MS: "0", OWL_PROVIDER_IDLE_TIMEOUT_MS: "0" }, undefined, spawned.fire);
     await spawned.promise;
     t.mock.timers.tick(MAX_AGENT_TIMEOUT_MS);
     assert.equal((await run).exit_code, 0);
@@ -194,20 +193,20 @@ test("a Codex Executor that stops making progress is stopped by the no-output li
   });
 });
 
-test("a Claude Executor that prints only at the end is not stopped for silence", async (t) => {
+test("a Claude Executor with no progress reaches its no-output limit", async (t) => {
   await withHarness(async (root, executable) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
-    const spawned = signal();
+    const output = signal();
     const run = runExecutor(
       executorTask(root),
       { provider: "claude", model: "claude-sonnet-5", timeout_ms: 0 },
-      { onSpawn: spawned.fire },
-      executorRuntime(root, executable, { FAKE_MODE: "late-json", FAKE_DELAY_MS: "300" }),
+      { onOutput: output.fire },
+      executorRuntime(root, executable, { FAKE_MODE: "progress" }),
     );
-    await spawned.promise;
-    t.mock.timers.tick(DEFAULT_AGENT_IDLE_TIMEOUT_MS * 2);
+    await output.promise;
+    t.mock.timers.tick(DEFAULT_AGENT_IDLE_TIMEOUT_MS);
     const result = await run;
-    assert.notEqual(result.exit_code, -1);
-    assert.doesNotMatch(result.output, /without progress|timed out/);
+    assert.equal(result.exit_code, -1);
+    assert.match(result.output, /進捗を出さなかったため停止しました/);
   });
 });

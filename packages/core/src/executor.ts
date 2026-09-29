@@ -10,6 +10,7 @@ import {
   buildAgentPermissionArgs,
   cliTokenUsage,
   CodexProgressTracker,
+  ClaudeStreamReader,
   DEFAULT_AGENT_WALL_TIMEOUT_MS,
   DEFAULT_HARNESS_MODELS,
   GUARD_TOKEN_FILE_ENV,
@@ -111,7 +112,7 @@ function argv(config: ExecutorConfig, runtime: ExecutorRuntime): string[] {
   if (config.provider !== "claude") {
     throw new Error(`Unsupported Executor provider: ${config.provider}`);
   }
-  return [runtime.executables.claude ?? "claude", "-p", "--output-format", "json", ...buildAgentPermissionArgs("worker", "claude", guard), "--model", config.model, ...(config.effort ? ["--effort", config.effort] : [])];
+  return [runtime.executables.claude ?? "claude", "-p", "--output-format", "stream-json", "--verbose", ...buildAgentPermissionArgs("worker", "claude", guard), "--model", config.model, ...(config.effort ? ["--effort", config.effort] : [])];
 }
 
 function codexFinalMessage(stdout: string): string | null {
@@ -345,11 +346,9 @@ async function runExecutorProcess(
       duration_ms: Date.now() - started,
     };
   }
-  // Codex `exec --json` streams progress events, so a long silence means the
-  // run is stuck. Claude's JSON output arrives only at the end and has no
-  // no-output limit.
+  // Both one-shot CLIs stream progress events; long silence means the run is stuck.
   let idleTimeoutMs = 0;
-  if (config.provider === "codex") {
+  if (config.provider === "codex" || config.provider === "claude") {
     try {
       idleTimeoutMs = agentIdleTimeoutMs(runtime.env);
     } catch (error) {
@@ -444,8 +443,11 @@ async function runExecutorProcess(
       idleTimer = setTimeout(() => timeOut("idle"), idleTimeoutMs);
       idleTimer.unref();
     };
+    const notifyProgress = (): void => { armIdleTimer(); observer.onOutput?.(); };
     const progress = new CodexProgressTracker(armIdleTimer);
+    const claudeStream = config.provider === "claude" ? new ClaudeStreamReader(notifyProgress) : null;
     const capture = (which: "stdout" | "stderr", chunk: Buffer): void => {
+      if (which === "stdout" && claudeStream) { claudeStream.push(chunk); return; }
       const current = which === "stdout" ? stdout : stderr;
       if (Buffer.byteLength(current, "utf8") + chunk.byteLength > OUTPUT_CAP_BYTES && !outputTooLarge) {
         outputTooLarge = true;
@@ -461,6 +463,7 @@ async function runExecutorProcess(
     };
     child.stdout!.on("data", (chunk: Buffer) => {
       capture("stdout", chunk);
+      if (claudeStream) return;
       if (idleTimeoutMs > 0) progress.push(chunk.toString("utf8"));
       observer.onOutput?.();
     });
@@ -478,6 +481,7 @@ async function runExecutorProcess(
       duration_ms: Date.now() - started,
     }));
     child.once("close", (code) => {
+      if (claudeStream) { stdout = claudeStream.output(); outputTooLarge ||= claudeStream.retainedBytes() + Buffer.byteLength(stderr) > OUTPUT_CAP_BYTES; }
       const processSucceeded = code === 0 && timedOut === null && !outputTooLarge;
       const report = processSucceeded ? executorFinalReport(config.provider, stdout) : null;
       const success = processSucceeded && report !== null && !report.is_error;

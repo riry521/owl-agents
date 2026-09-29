@@ -515,3 +515,5 @@ export type CanonicalEventAlias = keyof typeof CANONICAL_EVENT_ALIASES;
 export function isCanonicalEventType(value: string): value is CanonicalEventType {
   return (CANONICAL_EVENT_REGISTRY as readonly string[]).includes(value);
 }
+
+export { ClaudeStreamReader } from "./agent-stream.js";

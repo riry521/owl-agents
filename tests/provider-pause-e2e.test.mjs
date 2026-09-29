@@ -148,7 +148,7 @@ test("a Claude session limit pauses until its reset, waits out a late reset, the
   const temp = await temporaryDatabase(t);
   const clock = fakeClock();
   const { workId } = await seedWork(temp.db, clock);
-  // What `claude -p --output-format json` prints when the account is limited.
+  // The final result object from a limited Claude stream.
   const limited = JSON.stringify({
     type: "result",
     subtype: "success",

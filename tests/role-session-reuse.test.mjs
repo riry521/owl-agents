@@ -414,7 +414,10 @@ const { writeFileSync } = require("node:fs");
 process.stdin.resume();
 process.stdin.on("end", () => {
   writeFileSync(process.env.ARGV_CAPTURE, JSON.stringify({ args: process.argv.slice(2), codexHome: process.env.CODEX_HOME ?? null }));
-  process.stdout.write(JSON.stringify({ type: "thread.started", thread_id: "thread-test" }) + "\\n", () => process.exit(0));
+  const reply = process.argv.includes("exec")
+    ? JSON.stringify({ type: "thread.started", thread_id: "thread-test" }) + "\\n"
+    : JSON.stringify({ type: "system", subtype: "init" }) + "\\n" + JSON.stringify({ type: "result", result: "done", session_id: "session-test" }) + "\\n";
+  process.stdout.write(reply, () => process.exit(0));
 });
 `, "utf8");
   await chmod(executable, 0o755);
@@ -492,6 +495,8 @@ test("Claude provider argv excludes user instructions on fresh starts and resume
     const { response, args } = await captureOneShotProvider(t, "claude", providerSessionId);
     assert.equal(response.exit_code, 0);
     assertClaudeSettingsExclusion(args);
+    assert.equal(args[args.indexOf("--output-format") + 1], "stream-json");
+    assert.ok(args.includes("--verbose"));
     assert.equal(args.includes("--resume"), providerSessionId !== undefined);
     if (providerSessionId) assert.equal(args[args.indexOf("--resume") + 1], providerSessionId);
   }

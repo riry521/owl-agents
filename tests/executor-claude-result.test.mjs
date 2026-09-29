@@ -24,7 +24,7 @@ process.stdin.on("data", (chunk) => { prompt += chunk; });
 process.stdin.on("end", () => {
   const result = ${JSON.stringify(resultJson)};
   if (${captureArgs}) result.result = JSON.stringify({ result: result.result, args: process.argv.slice(2) });
-  process.stdout.write(JSON.stringify(result));
+  process.stdout.write(JSON.stringify({ type: "system", subtype: "init" }) + "\\n" + JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "working" }] } }) + "\\n" + JSON.stringify(result) + "\\n");
 });
 `);
   await chmod(executable, 0o755);
@@ -93,6 +93,8 @@ test("Claude Executor keeps the hook settings and user instruction exclusions in
   assert.equal(result.success, true, result.output);
   const captured = JSON.parse(result.output);
   assert.equal(captured.result, "captured");
+  assert.equal(captured.args[captured.args.indexOf("--output-format") + 1], "stream-json");
+  assert.ok(captured.args.includes("--verbose"));
   const settingsArgs = captured.args.flatMap((arg, index, args) => arg === "--settings" ? [args[index + 1]] : []);
   assert.equal(settingsArgs.length, 1);
   assert.ok(JSON.parse(settingsArgs[0]).claudeMdExcludes);
@@ -105,7 +107,7 @@ test("the Executor process receives its run id and subtask id as environment var
 process.stdin.resume();
 process.stdin.on("end", () => {
   const text = JSON.stringify({ runId: process.env.OWL_AGENT_RUN_ID ?? null, subtaskId: process.env.OWL_AGENT_SUBTASK_ID ?? null });
-  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", result: text }));
+  process.stdout.write(JSON.stringify({ type: "system", subtype: "init" }) + "\\n" + JSON.stringify({ type: "result", subtype: "success", result: text }) + "\\n");
 });
 `);
   await chmod(executable, 0o755);
@@ -125,4 +127,15 @@ process.stdin.on("end", () => {
     if (previousPath === undefined) delete process.env.PATH;
     else process.env.PATH = previousPath;
   }
+});
+
+test("Claude Executor reports streamed output to its run observer", async () => {
+  const root = await mkdtemp(join(tmpdir(), "owl-executor-progress-"));
+  let outputs = 0;
+  const result = await withClaudeOnPath(root, { type: "result", subtype: "success", result: "done" }, () =>
+    runExecutor(executorTask("progress", "inspect", root),
+      { provider: "claude", model: "claude-sonnet-5", timeout_ms: 1000 },
+      { onOutput: () => { outputs += 1; } }));
+  assert.equal(result.success, true);
+  assert.ok(outputs > 0);
 });

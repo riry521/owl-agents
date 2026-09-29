@@ -173,7 +173,7 @@ process.stdin.on("end", () => {
   if (${JSON.stringify(provider)} === "codex") {
     process.stdout.write(JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: invocation } }) + "\\n");
   } else {
-    process.stdout.write(JSON.stringify({ type: "result", result: invocation }));
+    process.stdout.write(JSON.stringify({ type: "system", subtype: "init" }) + "\\n" + JSON.stringify({ type: "result", result: invocation }) + "\\n");
   }
 });
 `);
@@ -206,6 +206,8 @@ test("Claude Executor passes user instruction exclusions in its single settings 
     CLAUDE_CONFIG_DIR: join(root, "claude-config"),
   });
   assertSingleClaudeSettingsExclusion(invocation.args);
+  assert.equal(invocation.args[invocation.args.indexOf("--output-format") + 1], "stream-json");
+  assert.ok(invocation.args.includes("--verbose"));
 });
 
 test("Codex Executor passes user instruction exclusions and overlays CODEX_HOME for the child only", async () => {
@@ -328,7 +330,7 @@ process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => { prompt += chunk; });
 process.stdin.on("end", () => {
   process.stderr.write("raw stderr tool log\\n");
-  process.stdout.write(JSON.stringify({ type: "result", result: "Claude completion report", prompt }));
+  process.stdout.write(JSON.stringify({ type: "system", subtype: "init" }) + "\\n" + JSON.stringify({ type: "result", result: "Claude completion report", prompt }) + "\\n");
 });
 `);
   await chmod(executable, 0o755);

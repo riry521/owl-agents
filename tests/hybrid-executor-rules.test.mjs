@@ -42,6 +42,7 @@ test("the Hybrid Executor receives the Task, the Worker's rules and the Owner gu
   await writeFile(join(bin, "claude"), [
     "#!/bin/sh",
     `cat > "${prompts}/$OWL_AGENT_RUN_ID.txt"`,
+    `echo '{"type":"system","subtype":"init"}'`,
     `echo '{"type":"result","result":"subtask done"}'`,
     "",
   ].join("\n"));
@@ -97,6 +98,8 @@ test("the Hybrid Executor receives the Task, the Worker's rules and the Owner gu
   });
   assert.ok(files, "the Executor ran");
   await waitFor(() => workerRules.length >= 2);
+  const childOutput = await waitFor(() => db.get("SELECT last_output_at FROM agent_runs WHERE origin = 'spawned'")?.last_output_at ?? null);
+  assert.ok(childOutput);
   const prompt = await readFile(join(prompts, files[0]), "utf8");
 
   assert.match(prompt, /^Complete this subtask:\nDo the subtask\n/);
