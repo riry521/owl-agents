@@ -78,13 +78,14 @@ function environmentSplitStringCommand(tokens: readonly string[]): string | null
   return null;
 }
 
-function tokenize(command: string, nestedSegments: string[][], depth: number): string[][] | null {
+function tokenize(command: string, nestedSegments: string[][], depth: number, allowHeredoc = true): string[][] | null {
   if (depth > 12) return null;
   const segments: string[][] = [];
   let segment: string[] = [];
   let current = "";
   let tokenStarted = false;
   let quote: "'" | '"' | null = null;
+  const pendingHeredocs: HeredocSpec[] = [];
 
   const pushToken = (): void => {
     if (tokenStarted) segment.push(current);
@@ -104,7 +105,9 @@ function tokenize(command: string, nestedSegments: string[][], depth: number): s
       if (character === "$" && command[index + 1] === "(") {
         const nested = readParenthesized(command, index + 1);
         if (nested === null) return null;
-        const nestedResult = tokenize(nested.content, nestedSegments, depth + 1);
+        // `$((...))` is arithmetic and cannot hold a here-document.
+        const arithmetic = nested.content.startsWith("(") && nested.content.endsWith(")");
+        const nestedResult = tokenize(nested.content, nestedSegments, depth + 1, !arithmetic);
         if (nestedResult === null) return null;
         nestedSegments.push(...nestedResult.filter((part) => part.length > 0));
         current += UNKNOWN_COMMAND_SUBSTITUTION;
@@ -160,16 +163,39 @@ function tokenize(command: string, nestedSegments: string[][], depth: number): s
     }
     if (character === "#" && !tokenStarted && (index === 0 || /\s/u.test(command[index - 1] ?? ""))) {
       while (index < command.length && command[index] !== "\n") index += 1;
-      if (index < command.length) pushSegment();
+      if (index < command.length) {
+        pushSegment();
+        const consumed = consumeHeredocBodies(command, index, pendingHeredocs, nestedSegments, depth);
+        if (consumed === null) return null;
+        index = consumed;
+      }
       continue;
     }
-    if (character === "\n" || character === ";") {
+    if (character === "\n") {
+      pushSegment();
+      const consumed = consumeHeredocBodies(command, index, pendingHeredocs, nestedSegments, depth);
+      if (consumed === null) return null;
+      index = consumed;
+      continue;
+    }
+    if (character === ";") {
       pushSegment();
       continue;
     }
     if (character === "&" || character === "|") {
       pushSegment();
       if (command[index + 1] === character) index += 1;
+      continue;
+    }
+    if (allowHeredoc && character === "<" && command[index + 1] === "<" && command[index + 2] !== "<") {
+      // `<<` may be a shift inside arithmetic and carriage returns become part of the delimiter word; deny instead of guessing.
+      if (command.includes("$[") || command.includes("((") || command.includes("\r")) return null;
+      pushToken();
+      const heredoc = readHeredocDelimiter(command, index + 2);
+      if (heredoc === null) return null;
+      segment.push("<<", heredoc.spec.delimiter);
+      pendingHeredocs.push(heredoc.spec);
+      index = heredoc.end;
       continue;
     }
     if (character === ">" || character === "<") {
@@ -193,6 +219,119 @@ function tokenize(command: string, nestedSegments: string[][], depth: number): s
   if (quote !== null) return null;
   pushSegment();
   return segments;
+}
+
+interface HeredocSpec {
+  readonly delimiter: string;
+  readonly quoted: boolean;
+  readonly stripTabs: boolean;
+}
+
+/** Read the delimiter word after `<<`; `end` is the index of its last character. */
+function readHeredocDelimiter(command: string, start: number): { spec: HeredocSpec; end: number } | null {
+  let index = start;
+  const stripTabs = command[index] === "-";
+  if (stripTabs) index += 1;
+  while (command[index] === " " || command[index] === "\t") index += 1;
+  let delimiter = "";
+  let quoted = false;
+  let started = false;
+  while (index < command.length) {
+    const character = command[index] ?? "";
+    if (character === "'") {
+      const close = command.indexOf(character, index + 1);
+      if (close < 0) return null;
+      delimiter += command.slice(index + 1, close);
+      quoted = true;
+      started = true;
+      index = close + 1;
+      continue;
+    }
+    if (character === '"') {
+      const close = command.indexOf(character, index + 1);
+      if (close < 0) return null;
+      const inner = command.slice(index + 1, close);
+      if (/[\\$`\n]/u.test(inner)) return null;
+      delimiter += inner;
+      quoted = true;
+      started = true;
+      index = close + 1;
+      continue;
+    }
+    if (character === "\\") {
+      const next = command[index + 1];
+      if (next === undefined) return null;
+      if (next !== "\n") {
+        delimiter += next;
+        quoted = true;
+        started = true;
+      }
+      index += 2;
+      continue;
+    }
+    if (/[\s;&|<>]/u.test(character)) break;
+    if (!/[A-Za-z0-9_.-]/u.test(character)) return null;
+    delimiter += character;
+    started = true;
+    index += 1;
+  }
+  if (!started) return null;
+  return { spec: { delimiter, quoted, stripTabs }, end: index - 1 };
+}
+
+/**
+ * Skip the bodies of pending here-documents that start after the newline at `newlineIndex`.
+ * Quoted bodies are literal; unquoted bodies still run command substitutions.
+ * Returns the index of the last consumed character.
+ */
+function consumeHeredocBodies(
+  command: string,
+  newlineIndex: number,
+  pending: HeredocSpec[],
+  nestedSegments: string[][],
+  depth: number,
+): number | null {
+  let position = newlineIndex + 1;
+  for (const spec of pending.splice(0)) {
+    let body = "";
+    while (position < command.length) {
+      const lineEnd = command.indexOf("\n", position);
+      const line = command.slice(position, lineEnd < 0 ? command.length : lineEnd);
+      position = lineEnd < 0 ? command.length : lineEnd + 1;
+      if ((spec.stripTabs ? line.replace(/^\t+/u, "") : line) === spec.delimiter) break;
+      body += `${line}\n`;
+    }
+    if (!spec.quoted && !collectHeredocSubstitutions(body, nestedSegments, depth)) return null;
+  }
+  return position - 1;
+}
+
+function collectHeredocSubstitutions(body: string, nestedSegments: string[][], depth: number): boolean {
+  for (let index = 0; index < body.length; index += 1) {
+    const character = body[index] ?? "";
+    if (character === "\\") {
+      index += 1;
+      continue;
+    }
+    let content: string;
+    if (character === "$" && body[index + 1] === "(") {
+      const nested = readParenthesized(body, index + 1);
+      if (nested === null) return false;
+      content = nested.content;
+      index = nested.end;
+    } else if (character === "`") {
+      const end = findUnescaped(body, "`", index + 1);
+      if (end < 0) return false;
+      content = body.slice(index + 1, end);
+      index = end;
+    } else {
+      continue;
+    }
+    const result = tokenize(content, nestedSegments, depth + 1);
+    if (result === null) return false;
+    nestedSegments.push(...result.filter((part) => part.length > 0));
+  }
+  return true;
 }
 
 function readParenthesized(value: string, openIndex: number): { content: string; end: number } | null {

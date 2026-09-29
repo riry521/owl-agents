@@ -136,3 +136,65 @@ test("path rules protect secrets and sqlite writes while allowing read-only sqli
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("here-document bodies are data while surrounding commands are still checked", async () => {
+  const store = new RuleStore(process.cwd());
+  await store.load();
+  const cwd = process.cwd();
+  const home = process.env.HOME;
+  const blocked = (command) => store.checkCommand(command, cwd, home).blocked;
+
+  for (const command of [
+    "apply_patch <<'PATCH'\n*** Begin Patch\n*** Update File: /abs/doc.md\n@@\n-old line with `code` in markdown\n+new line with `other code`\n*** End Patch\nPATCH\ngit status --short",
+    "cat > /tmp/notes.md <<'EOF'\nuse `git` and $(rm -rf /) here\nEOF",
+    "cat > /tmp/notes.md <<\"EOF\"\n`rm -rf /`\nEOF",
+    "cat > /tmp/notes.md <<\\EOF\n`rm -rf /`\nEOF",
+    "cat > /tmp/notes.md <<E'O'F\ngit push -f\nEOF",
+    "cat <<EOF\nhome is $HOME and $UNKNOWN_VAR\nEOF",
+    "cat <<-EOF\n\tgit push -f\n\tEOF\ngit status",
+    "cat <<A <<'B'\none `x`\nA\ntwo `y`\nB\ngit status",
+    "cat <<'EOF'\nunterminated `body` git push -f",
+    "cat <<< 'here string'",
+    "echo $((1<<2))",
+    "git commit -F - <<'EOF'\nmsg with `code`\nEOF",
+    "python3 - <<'PY'\nprint(`x`)\nPY",
+    "cat <<-'EOF'\n\t`x`\n\tEOF",
+    "cat <<EOF_1.x\nbody\nEOF_1.x\ngit status",
+  ]) {
+    assert.equal(blocked(command), false, command);
+  }
+
+  for (const command of [
+    "cat <<EOF\n$(rm -rf /)\nEOF",
+    "cat <<EOF\n`rm -rf /`\nEOF",
+    "cat <<'EOF'\nbody\nEOF\ngit push -f",
+    "cat <<-EOF\n\tbody\n\tEOF\ngit push -f",
+    "cat <<A <<'B'\nx\nA\ny\nB\ngit push -f",
+    "cat <<'EOF' && git push -f\nbody\nEOF",
+    "cat <<< $(git push -f)",
+    "((x=1<<2))\ngit push -f\n2",
+    "for ((i=0;i<<1;i++)); do :; done\ngit push -f\n1",
+    "echo $[1<<2]\ngit push -f\n2]",
+    "cat <<$'EOF'\nEOF\ngit push -f\n$EOF",
+    "cat <<$\"EOF\"\nEOF\ngit push -f\n$EOF",
+    "cat <<\"a\\\"b\"\na\"b\ngit push -f\n",
+    "cat <<$(x)\n$(x)\ngit push -f\n$",
+    "cat <<E\\\nOF\n$(git push -f)\nEOF",
+    "echo $[x[0]<<2 ]\ngit push -f\n2",
+    "cat <<EOF\r\nbody\r\nEOF\r\ngit push -f #\r\n",
+    "echo \"$[1]\"; cat <<'EOF'\n`x`\nEOF",
+  ]) {
+    assert.equal(blocked(command), true, command);
+  }
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "owl-heredoc-"));
+  try {
+    for (const command of ["cat > data/state.sqlite", "cat > data/state.sqlite <<'EOF'\nrows\nEOF"]) {
+      const result = store.checkGuard({ role: "worker", toolName: "Bash", toolInput: { command }, cwd: root });
+      assert.equal(result.allowed, false, command);
+      assert.equal(result.rule_id, "block-sqlite-file-writes", command);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
