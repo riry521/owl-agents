@@ -17,17 +17,9 @@ export interface PostedNotification {
   readonly messageId: string;
 }
 
-export interface PostedDecisionDetail {
-  readonly channelId: string;
-  readonly messageId: string;
-  readonly parentMessageId: string;
-}
-
 export interface SendNotificationOptions {
   /** Called for each channel's main post after Discord accepts it. */
   readonly onPosted?: (posted: PostedNotification) => void | Promise<void>;
-  /** Called after Discord accepts a detail reply to the main post. */
-  readonly onDetailPosted?: (posted: PostedDecisionDetail) => void | Promise<void>;
   readonly retry?: RetryOptions;
   /** The Owner language; decision.opened uses its payload language. */
   readonly language?: OwlLanguage;
@@ -95,7 +87,7 @@ export async function sendNotification(
 
     if (notificationChannel && parentMessageId && card.threadDetail) {
       try {
-        const detail = await retryTransient(() => notificationChannel!.send({
+        await retryTransient(() => notificationChannel!.send({
           ...renderDiscordDecisionDetail(card.threadDetail!, card.language),
           reply: { messageReference: parentMessageId!, failIfNotExists: false },
           allowedMentions: { parse: [], repliedUser: false },
@@ -105,9 +97,6 @@ export async function sendNotification(
             `[discord] Decision detail for event #${event.sequence} (${event.type}) to ${channelId} failed on attempt ${attempt}; retrying in ${delayMs}ms: ${formatIntegrationError("Discord", error, "en")}`,
           ),
         });
-        if (typeof detail.id === "string") {
-          await sendOptions.onDetailPosted?.({ channelId, messageId: detail.id, parentMessageId });
-        }
       } catch (error) {
         const attempts = (error as { attempts?: number }).attempts ?? 1;
         console.error(

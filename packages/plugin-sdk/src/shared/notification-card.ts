@@ -505,16 +505,14 @@ function buildProviderPausedCard(event: OwlEvent, ctx: CardRenderContext): Notif
   const resumeAt = text(payload.resume_at);
   const timestamp = resumeAt === null ? Number.NaN : Date.parse(resumeAt);
   const validTime = Number.isFinite(timestamp);
-  const clockTime = validTime ? formatClockTime(timestamp, language) : t.unknownTime;
   const time = validTime ? ctx.formatTime(timestamp) : t.unknownTime;
   const body = payload.repeat
     ? t.providerPausedAgain(label, time)
     : payload.resume_source === "reported"
       ? t.providerPaused(label, time)
       : t.providerPausedUnknown(label, time);
-  const fallbackTime = validTime ? formatClockTime(timestamp, language) : null;
   return makeCard("provider.paused", language, CARD_STYLES["provider.paused"], t.titles.providerPaused, body, [], null,
-    t.providerPausedSubject(label, fallbackTime));
+    t.providerPausedSubject(label, validTime ? formatClockTime(timestamp, language) : null));
 }
 
 function buildProviderResumedCard(event: OwlEvent, language: OwlLanguage): NotificationCard {

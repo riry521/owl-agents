@@ -150,7 +150,6 @@ test("decision main card stays short and posts detail as a reply after onPosted"
   });
   await sendNotification(client, opened(), "D-NOTIFICATIONS", {
     onPosted: ({ messageId }) => order.push(`main:${messageId}`),
-    onDetailPosted: ({ messageId, parentMessageId }) => order.push(`detail:${messageId}:${parentMessageId}`),
   });
 
   assert.equal(sends.length, 2);
@@ -173,7 +172,7 @@ test("decision main card stays short and posts detail as a reply after onPosted"
   assert.match(detailData.description, /Compared both routes/u);
   assert.match(detailData.description, /Waiting for a decision/u);
   assert.match(detailData.description, /この詳細メッセージに直接返信/u);
-  assert.deepEqual(order, ["main:M1", "detail:M2:M1"]);
+  assert.deepEqual(order, ["main:M1"]);
 });
 
 test("decision buttons use at most five rows of five", async () => {

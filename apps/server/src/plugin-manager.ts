@@ -5,6 +5,8 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
 
+import { getPluginsFilePath } from "./config.js";
+
 export interface PluginSpec {
   name: string;
   command: string;
@@ -276,7 +278,7 @@ export function createPluginManagerFromEnv(
   env: NodeJS.ProcessEnv,
   options: Omit<PluginManagerOptions, "specs">,
 ): PluginManager | null {
-  const filePath = env.OWL_PLUGINS_FILE?.trim();
+  const filePath = getPluginsFilePath(env);
   if (!filePath) return null;
   if (!isAbsolute(filePath)) throw new PluginConfigError("OWL_PLUGINS_FILE must be an absolute path.", "OWL_PLUGINS_FILE");
   return new PluginManager({ ...options, specs: loadPluginSpecs(filePath) });

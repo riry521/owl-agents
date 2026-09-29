@@ -376,5 +376,7 @@ test("createPluginManagerFromEnv requires an absolute configuration path", async
   assert.throws(() => createPluginManagerFromEnv({ OWL_PLUGINS_FILE: relative(process.cwd(), configPath) }, {
     serverPort: 4312,
     dataDir: directory,
-  }), (error) => error instanceof PluginConfigError && error.field === "OWL_PLUGINS_FILE");
+  }), (error) => error instanceof PluginConfigError
+    && error.field === "OWL_PLUGINS_FILE"
+    && error.message === "OWL_PLUGINS_FILE must be an absolute path.");
 });
