@@ -29,7 +29,7 @@ import { DEFAULT_KNOWLEDGE_LIMITS, KnowledgeRetriever, type KnowledgeLimits } fr
 import { ownerGuidance } from "./owner-guidance.js";
 import { dependencyContext, isTaskReviewRequired, loadFixContext, loadRetrySubtasks, reviewerTaskView, roleTaskView, taskDependencyIds } from "./task-context.js";
 import { registerReviewBacklogInTransaction, settleWorkBacklogOnCompletionInTransaction } from "./review-backlog.js";
-import { clearPausedReviewerWait, recordPausedReviewerWait } from "./provider-pause-reviewer-wait.js";
+import { clearPausedReviewerWait, readPausedReviewerWait, recordPausedReviewerWait } from "./provider-pause-reviewer-wait.js";
 import { agentCliNames, installedAgentCliMatches, listProcesses, planSubagentReconciliation } from "./subagent-watcher.js";
 import type {
   AgentRunResult,
@@ -246,6 +246,7 @@ export class WorkflowEngine {
   private readonly onTaskSettled?: (workId: string) => void;
   private readonly onWorktreeCreated?: (worktreePath: string) => void;
   private readonly providerPauseController?: ProviderPauseController;
+  private readonly reviewerRetriesInFlight = new Set<string>();
   /** In-process Task pipelines, keyed by the Worker's agent_run_id. */
   private readonly pipelines = new Map<string, Promise<void>>();
   private readonly owlRoot: string;
@@ -1937,10 +1938,33 @@ export class WorkflowEngine {
     if (run) await this.providerPauseController.noteProviderSucceeded(run.provider, run.started_at ?? run.created_at);
   }
 
-  /** Retry pending Reviews whose provider has just entered its probe window. */
+  /**
+   * Retry pending Reviews after a provider resumes. A Review that was waiting on
+   * `provider` is retried even when the Reviewer role has since moved to another
+   * provider, as long as the current Reviewer provider is not paused.
+   */
   public resumeProvider(provider: string): void {
-    const reviewerProvider = this.providerForRoleModel(resolveRoleModel(this.db, "reviewer"));
-    if (normalizeProviderId(reviewerProvider) !== normalizeProviderId(provider)) return;
+    const reviewerProvider = this.currentReviewerProvider();
+    if (this.providerPauseController?.isPaused(reviewerProvider)) return;
+    const matchesCurrent = normalizeProviderId(reviewerProvider) === normalizeProviderId(provider);
+    this.retryPendingReviews((taskId) => {
+      if (matchesCurrent) return true;
+      const wait = readPausedReviewerWait(this.db, taskId);
+      return wait !== undefined && normalizeProviderId(wait.provider) === normalizeProviderId(provider);
+    });
+  }
+
+  /** Retry Reviews parked behind a paused provider once the current Reviewer provider can run. */
+  public retryWaitingReviews(): void {
+    if (this.providerPauseController?.isPaused(this.currentReviewerProvider())) return;
+    this.retryPendingReviews((taskId) => readPausedReviewerWait(this.db, taskId) !== undefined);
+  }
+
+  private currentReviewerProvider(): string {
+    return this.providerForRoleModel(resolveRoleModel(this.db, "reviewer"));
+  }
+
+  private retryPendingReviews(include: (taskId: string) => boolean): void {
     const pending = this.db.all<{ id: string; work_id: string; review_round: number; worker_agent_run_id: string; payload_json: string }>(
       `SELECT tasks.id, tasks.work_id, tasks.review_round,
               worker.id AS worker_agent_run_id, reports.payload_json
@@ -1958,11 +1982,14 @@ export class WorkflowEngine {
           )`,
     );
     for (const task of pending) {
+      if (this.reviewerRetriesInFlight.has(task.id) || !include(task.id)) continue;
       let report: unknown;
       try { report = JSON.parse(task.payload_json) as unknown; } catch { continue; }
       if (!report || typeof report !== "object" || Array.isArray(report)) continue;
+      this.reviewerRetriesInFlight.add(task.id);
       void this.runReviewer(task.work_id, task.id, task.worker_agent_run_id, report as JsonObject, task.review_round)
-        .catch((error: unknown) => console.error(`[owl-core] Could not retry Reviewer for Task ${task.id}`, error));
+        .catch((error: unknown) => console.error(`[owl-core] Could not retry Reviewer for Task ${task.id}`, error))
+        .finally(() => this.reviewerRetriesInFlight.delete(task.id));
     }
   }
 

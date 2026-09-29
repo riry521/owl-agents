@@ -394,22 +394,41 @@ export class AdvisorSessionRuntime {
 
   /** Retry queued Advisor turns after their provider enters a probe window. */
   public async resumeProvider(provider: string): Promise<void> {
-    const aliases = providerAliases(provider);
+    if (this.config.isProviderPaused?.(provider)) return;
+    await this.restartQueuedTurns(providerAliases(provider), `for provider ${provider}`);
+  }
+
+  /** Retry queued Advisor turns on the currently configured model, e.g. after the Advisor role moved off a paused provider. */
+  public async retryQueuedTurns(): Promise<void> {
+    let providerId: string;
+    try {
+      providerId = this.config.getAdvisorSettings().providerId;
+    } catch (error) {
+      console.error("[owl-core] Could not read Advisor settings to retry queued turns", error);
+      return;
+    }
+    if (this.config.isProviderPaused?.(providerId)) return;
+    // A loop that is draining already picks up the current model; replacing the session now would cut the in-flight turn short.
+    if (this.turnLoopRunning) return;
+    await this.restartQueuedTurns(null, "after a model change");
+  }
+
+  private async restartQueuedTurns(providers: readonly string[] | null, label: string): Promise<void> {
     const session = this.config.db.get<{ id: string; owner_id: string; conversation_id: string }>(
       `SELECT session.id, conversation.owner_id, session.conversation_id
          FROM advisor_sessions AS session
          JOIN conversations AS conversation ON conversation.id = session.conversation_id
-        WHERE session.provider_id IN (${aliases.map(() => "?").join(",")}) AND session.status IN ('running', 'suspended')
+        WHERE ${providers ? `session.provider_id IN (${providers.map(() => "?").join(",")}) AND ` : ""}session.status IN ('running', 'suspended')
           AND EXISTS (SELECT 1 FROM advisor_turns WHERE session_id = session.id AND status = 'queued')
         ORDER BY session.created_at DESC LIMIT 1`,
-      ...aliases,
+      ...(providers ?? []),
     );
-    if (!session || this.config.isProviderPaused?.(provider)) return;
+    if (!session) return;
     try {
       const active = await this.ensureSession(session.owner_id, session.conversation_id);
       void this.startTurnLoop(active.id).catch((error) => console.error(`[owl-core] Advisor provider resume failed for ${active.id}`, error));
     } catch (error) {
-      console.error(`[owl-core] Could not resume queued Advisor turns for provider ${provider}`, error);
+      console.error(`[owl-core] Could not resume queued Advisor turns ${label}`, error);
     }
   }
 

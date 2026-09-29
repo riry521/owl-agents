@@ -1116,6 +1116,7 @@ export class Core {
     this.workDriver.start(runningWorks.map((work) => work.id));
     this.providerPauseController.start();
     for (const provider of recovery.reviewerProvidersToResume) this.workflow.resumeProvider(provider);
+    this.retryWorkAfterRoleChange();
     this.librarianScheduler.start(this.readKnowledgeAutomationSettings().librarian_times);
   }
 
@@ -2908,7 +2909,16 @@ export class Core {
         now,
       );
       return { data: { roles }, version: nextVersion };
+    }).then((response) => {
+      this.retryWorkAfterRoleChange();
+      return response;
     });
+  }
+
+  /** Restarts work that was parked behind a paused provider so it can continue on the currently configured models. */
+  private retryWorkAfterRoleChange(): void {
+    try { this.workflow.retryWaitingReviews(); } catch (error) { console.error("[owl-core] Could not retry waiting Reviews", error); }
+    void this.advisorRuntime?.retryQueuedTurns().catch((error) => console.error("[owl-core] Could not retry queued Advisor turns", error));
   }
 
   public getModelPresets(): { version: number; presets: readonly ModelPreset[] } {
