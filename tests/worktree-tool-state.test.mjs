@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -91,4 +91,30 @@ test("ignored content that is not tool state still stops the discard", async () 
   const discarded = await gateway.discardTaskWorktree({ work_id: "W", task_id: "T1", worktree_path: task.worktree_path, discard_changes: true });
   assert.equal(discarded.ok, false);
   assert.match(discarded.message, /Ignored contents remain/);
+});
+
+test("Task commits succeed when the tool state is ignored by .gitignore", async () => {
+  const { project, gateway } = await fixture([".index/", ".index/cache/"]);
+  const task = await gateway.prepareWorktree({ work_id: "W", task_id: "T1" });
+  assert.equal(task.ok, true, task.message);
+  await mkdir(join(task.worktree_path, ".index", "cache"), { recursive: true });
+  await writeFile(join(task.worktree_path, ".index", "cache", "db"), "index\n");
+  await writeFile(join(task.worktree_path, "feature.txt"), "feature\n");
+
+  const integrated = await gateway.integrateTask({ work_id: "W", task_id: "T1", worktree_path: task.worktree_path });
+  assert.equal(integrated.merged, true, integrated.message);
+  const files = git(project, "ls-tree", "-r", "--name-only", "owl/work/W/work").split("\n").sort();
+  assert.deepEqual(files, [".gitignore", "README.md", "feature.txt"]);
+});
+
+test("a leftover Task directory that Git no longer tracks as a worktree can be discarded", async () => {
+  const { project, gateway } = await fixture([]);
+  const task = await gateway.prepareWorktree({ work_id: "W", task_id: "T1" });
+  assert.equal(task.ok, true, task.message);
+  await writeFile(join(task.worktree_path, "feature.txt"), "feature\n");
+  await rm(join(task.worktree_path, ".git"));
+  git(project, "worktree", "prune");
+
+  const discarded = await gateway.discardTaskWorktree({ work_id: "W", task_id: "T1", worktree_path: task.worktree_path, discard_changes: true });
+  assert.equal(discarded.ok, true, discarded.message);
 });

@@ -1865,14 +1865,11 @@ export class GitWorktreeGateway implements GitGateway {
   }
 
   private async checkIgnoredPaths(canonical: string, paths: readonly string[]): Promise<{ ok: true; paths: string[] } | { ok: false; message: string }> {
-    const ignored: string[] = [];
-    for (let offset = 0; offset < paths.length; offset += 400) {
-      const batch = paths.slice(offset, offset + 400);
-      const result = await this.git(canonical, ["check-ignore", "-z", "--no-index", "--", ...batch]);
-      if (result.exit_code === 0) ignored.push(...result.message.split("\0").filter(Boolean));
-      else if (result.exit_code !== 1) return { ok: false, message: result.message };
-    }
-    return { ok: true, paths: [...new Set(ignored)] };
+    if (paths.length === 0) return { ok: true, paths: [] };
+    const result = await this.git(canonical, ["check-ignore", "-z", "--stdin", "--no-index"], `${paths.join("\0")}\0`);
+    if (result.exit_code === 1) return { ok: true, paths: [] };
+    if (result.exit_code !== 0) return { ok: false, message: result.message };
+    return { ok: true, paths: [...new Set(result.message.split("\0").filter(Boolean))] };
   }
 
   private async backupUnregisteredWorkspace(
@@ -2081,7 +2078,11 @@ export class GitWorktreeGateway implements GitGateway {
     // Without a reliable answer, commit everything rather than risk dropping tracked changes.
     if (!tracked.ok) return [];
     const trackedFiles = tracked.message === "git operation completed" ? [] : tracked.message.split("\0").filter((entry) => entry.length > 0);
-    return commitExcludePathspecs(toolState, (entry) => trackedFiles.some((file) => file === entry || file.startsWith(`${entry}/`)));
+    // git add refuses an exclude pathspec that names an ignored path, and it
+    // already skips ignored paths, so only unignored tool state is excluded.
+    const ignored = await this.checkIgnoredPaths(path, toolState);
+    const ignoredPaths = new Set(ignored.ok ? ignored.paths : []);
+    return commitExcludePathspecs(toolState.filter((entry) => !ignoredPaths.has(entry)), (entry) => trackedFiles.some((file) => file === entry || file.startsWith(`${entry}/`)));
   }
 
   /** Drops ignored paths inside the Project's tool state: setup and refresh regenerate that content, so removing it loses nothing. */
@@ -2147,9 +2148,11 @@ export class GitWorktreeGateway implements GitGateway {
     return canonical;
   }
 
-  private async git(cwd: string, args: readonly string[]): Promise<GitOperationResult> {
+  private async git(cwd: string, args: readonly string[], input?: string): Promise<GitOperationResult> {
     try {
-      const result = await execFileAsync("git", ["-C", cwd, ...args], { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 });
+      const pending = execFileAsync("git", ["-C", cwd, ...args], { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 });
+      if (input !== undefined) pending.child.stdin?.end(input);
+      const result = await pending;
       return { ok: true, exit_code: 0, recorded: false, message: `${result.stdout}${result.stderr}`.trim() || "git operation completed" };
     } catch (error) {
       const failure = error as { code?: number | string; stdout?: string; stderr?: string; message?: string };
