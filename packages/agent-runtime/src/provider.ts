@@ -11,6 +11,9 @@ import {
   agentIdleTimeoutMs,
   agentWallTimeoutMs,
   buildAgentPermissionArgs,
+  buildCodexCustomProviderArgs,
+  CODEX_PROVIDER_API_KEY_ENV,
+  CODEX_PROVIDER_BASE_URL_ENV,
   CodexProgressTracker,
   ClaudeStreamReader,
   GUARD_TOKEN_FILE_ENV,
@@ -57,7 +60,12 @@ function isCodexAdapter(adapter: string): boolean {
 const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 const AGENT_IDENTITY_ENV_NAMES = ["OWL_AGENT_ROLE", "OWL_AGENT_RUN_ID", "OWL_AGENT_CWD"] as const;
 /** A custom provider's endpoint/key for the harness the session's adapter selects. */
-const PROVIDER_CONNECTION_ENV_NAMES = ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_KEY"] as const;
+const PROVIDER_CONNECTION_ENV_NAMES = [
+  "ANTHROPIC_BASE_URL",
+  "ANTHROPIC_API_KEY",
+  CODEX_PROVIDER_BASE_URL_ENV,
+  CODEX_PROVIDER_API_KEY_ENV,
+] as const;
 
 /**
  * A guard token for one agent process, or undefined when the runner was
@@ -160,6 +168,7 @@ function buildArgv(request: ProviderExecutionRequest, outputSchemaPath?: string)
         resume: Boolean(request.provider_session_id),
         env: request.env,
       }),
+      ...buildCodexCustomProviderArgs(request.env),
       "--skip-git-repo-check",
       "--model",
       request.model,

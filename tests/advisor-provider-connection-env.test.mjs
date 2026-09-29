@@ -7,6 +7,8 @@ import { test } from "node:test";
 
 import { Core } from "../packages/core/dist/index.js";
 import { openDatabase, createUlid } from "../packages/db/dist/index.js";
+import { CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV } from "../packages/shared/dist/index.js";
+import { customProviderConnectionEnv } from "../apps/server/dist/core.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const ownerId = "owner:default";
@@ -155,6 +157,8 @@ test("a custom provider's endpoint and API key reach the Advisor's provider sess
       assert.equal(env.ANTHROPIC_API_KEY, "orca-secret-key");
       assert.equal(env.OPENAI_BASE_URL, undefined);
       assert.equal(env.OPENAI_API_KEY, undefined);
+      assert.equal(env[CODEX_PROVIDER_BASE_URL_ENV], undefined);
+      assert.equal(env[CODEX_PROVIDER_API_KEY_ENV], undefined);
     },
   );
 });
@@ -185,7 +189,7 @@ test("a built-in provider's Advisor session carries no extra connection env", as
 
       assert.equal(capturedRequests.length, 1);
       const env = capturedRequests[0].env ?? {};
-      for (const key of ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_KEY"]) {
+      for (const key of ["ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "OPENAI_BASE_URL", "OPENAI_API_KEY", CODEX_PROVIDER_BASE_URL_ENV, CODEX_PROVIDER_API_KEY_ENV]) {
         assert.equal(env[key], undefined, `built-in provider session must not carry ${key}`);
       }
       assert.equal(env.OWL_AGENT_ROLE, "advisor");
@@ -226,4 +230,25 @@ test("a custom provider without a backend URL fails the Advisor start instead of
       assert.match(errorMessage.body, /backend URL configured/u);
     },
   );
+});
+
+test("a custom provider's connection env uses the Codex variables for a codex harness and Anthropic's for claude", () => {
+  const source = { OWL_PROVIDER_ORCA_API_KEY: "orca-secret-key" };
+  const codex = { harnessId: "codex", backendUrl: "https://orca.example/v1", apiKeySource: "env:OWL_PROVIDER_ORCA_API_KEY" };
+  assert.deepEqual(customProviderConnectionEnv("orca", codex, source), {
+    [CODEX_PROVIDER_BASE_URL_ENV]: "https://orca.example/v1",
+    [CODEX_PROVIDER_API_KEY_ENV]: "orca-secret-key",
+  });
+  assert.deepEqual(customProviderConnectionEnv("orca", { ...codex, harnessId: "claude" }, source), {
+    ANTHROPIC_BASE_URL: "https://orca.example/v1",
+    ANTHROPIC_API_KEY: "orca-secret-key",
+  });
+  // No key source, or a source variable that is unset: the key is left out.
+  assert.deepEqual(customProviderConnectionEnv("orca", { ...codex, apiKeySource: undefined }, source), {
+    [CODEX_PROVIDER_BASE_URL_ENV]: "https://orca.example/v1",
+  });
+  assert.deepEqual(customProviderConnectionEnv("orca", codex, {}), {
+    [CODEX_PROVIDER_BASE_URL_ENV]: "https://orca.example/v1",
+  });
+  assert.throws(() => customProviderConnectionEnv("orca", { ...codex, backendUrl: undefined }, source), /no backend URL/);
 });

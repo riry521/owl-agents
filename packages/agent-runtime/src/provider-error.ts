@@ -34,6 +34,8 @@ export interface ProviderFailureClassification {
   readonly error_key: string;
   readonly retry_allowed: boolean;
   readonly message: string;
+  /** The harness's own first error line, for owner-facing task failures; never part of chat-visible `message`. */
+  readonly detail_message?: string;
   readonly rate_limit?: RateLimitInfo;
 }
 
@@ -276,6 +278,28 @@ export function formatProviderError(
   return t.other(label, statusText, exitText);
 }
 
+const PROVIDER_DETAIL_MAX_CHARS = 300;
+
+/**
+ * The first line of the message the harness itself reported, bounded and with
+ * the given secret values and key-like tokens masked, or null when there is none worth showing. Failures
+ * Owl observed itself (timeout, cancel, output limit, spawn) and rate limits
+ * already say everything the owner needs.
+ */
+function providerErrorDetail(cause: ProviderFailureCause, verdict: FailureVerdict, secrets: readonly string[]): string | null {
+  if (verdict.failure_class === "rate_limited") return null;
+  if (cause.kind === "timeout" || cause.kind === "cancelled" || cause.kind === "output_too_large" || cause.kind === "spawn_error") return null;
+  const line = errorText(cause.error).split(/\r?\n/u).map((part) => part.trim()).find((part) => part.length > 0);
+  if (line === undefined) return null;
+  const masked = secrets
+    .filter((secret) => secret.length > 0)
+    .reduce((text, secret) => text.split(secret).join("***"), line)
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/giu, "$1 ***")
+    .replace(/\b(?:sk|pk|rk|key)[-_][A-Za-z0-9_-]{8,}/giu, "***")
+    .replace(/\b[A-Za-z0-9_-]{32,}\b/gu, "***");
+  return masked.length > PROVIDER_DETAIL_MAX_CHARS ? `${masked.slice(0, PROVIDER_DETAIL_MAX_CHARS)}...` : masked;
+}
+
 /** Only the end of stderr is searched: the start is usually the harness banner and progress. */
 const CLASSIFIED_STDERR_CHARS = 4_096;
 
@@ -376,6 +400,13 @@ function retryAfterEvidence(text: string): RateLimitResetInput[] {
   return inputs;
 }
 
+/** The classified message followed by the harness's own error line, when there is one. */
+export function withProviderDetail(classification: ProviderFailureClassification, language: OwnerLanguage = "ja"): string {
+  const detail = classification.detail_message;
+  if (detail === undefined || classification.message.includes(detail)) return classification.message;
+  return `${classification.message}\n${language === "ja" ? "詳細" : "Detail"}: ${detail}`;
+}
+
 /**
  * Classification order: argument size, then how Owl saw the process end
  * (timeout, cancel, output limit, spawn failure), then the HTTP status the
@@ -387,6 +418,7 @@ export function classifyProviderFailure(
   cause: ProviderFailureCause,
   language: OwnerLanguage = "ja",
   now: Date = new Date(),
+  secrets: readonly string[] = [],
 ): ProviderFailureClassification {
   const text = classifiedText(cause);
   const verdict = structuredVerdict(cause) ?? fallbackVerdict(cause, text);
@@ -397,6 +429,7 @@ export function classifyProviderFailure(
         ...retryAfterEvidence(text),
       ], now, { harness: rateLimitHarness(harness) })
     : undefined;
+  const detail = providerErrorDetail(cause, verdict, secrets);
   return {
     failure_class: verdict.failure_class,
     error_key: `provider_failed:${verdict.key}`,
@@ -410,6 +443,7 @@ export function classifyProviderFailure(
       status: cause.harness_status ?? null,
       ...(rateLimit !== undefined ? { rateLimitInfo: rateLimit } : {}),
     }, language),
+    ...(detail !== null ? { detail_message: detail } : {}),
   };
 }
 

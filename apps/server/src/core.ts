@@ -89,7 +89,7 @@ import {
   ownerLanguageFromLocale,
   type OwnerLanguage,
 } from "../../../packages/shared/dist/owner-language.js";
-import { builtinProviderHarness, CODEX_BUILTIN_MODELS, DEFAULT_AGENT_WALL_TIMEOUT_MS, DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, PROCESS_SKILLS_INSTALL_COMMANDS } from "../../../packages/shared/dist/index.js";
+import { builtinProviderHarness, CODEX_BUILTIN_MODELS, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, DEFAULT_AGENT_WALL_TIMEOUT_MS, DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, PROCESS_SKILLS_INSTALL_COMMANDS } from "../../../packages/shared/dist/index.js";
 import { codexKnownModels, mergeOfficialModels } from "./model-catalog.js";
 import { detectProviders, type BuiltinHarnessInfo, type BuiltinProviderInfo } from "./provider-detection.js";
 
@@ -2698,6 +2698,31 @@ function latestEvents<T>(events: T[], limit?: number): T[] {
   return limit === 0 ? [] : events.slice(0, limit);
 }
 
+/**
+ * The endpoint/key variables one custom provider's harness reads: Codex gets
+ * its dedicated model provider variables, Claude the Anthropic ones. The key
+ * is only set when its source variable holds a value.
+ */
+export function customProviderConnectionEnv(
+  providerId: string,
+  custom: CustomProviderConfig,
+  source: NodeJS.ProcessEnv,
+): Record<string, string> {
+  if (!custom.backendUrl) {
+    throw new Error(`Custom provider '${providerId}' has no backend URL configured.`);
+  }
+  const useCodexVars = custom.harnessId === "codex";
+  const env: Record<string, string> = {
+    [useCodexVars ? CODEX_PROVIDER_BASE_URL_ENV : "ANTHROPIC_BASE_URL"]: custom.backendUrl,
+  };
+  const apiKeyEnv = custom.apiKeySource?.startsWith("env:") ? custom.apiKeySource.slice("env:".length) : undefined;
+  const apiKey = apiKeyEnv ? source[apiKeyEnv] : undefined;
+  if (apiKey) {
+    env[useCodexVars ? CODEX_PROVIDER_API_KEY_ENV : "ANTHROPIC_API_KEY"] = apiKey;
+  }
+  return env;
+}
+
 export async function createConfiguredCore(options: CreateCoreOptions): Promise<CorePort> {
   if (process.env.OWL_CORE_MODE === "standalone") {
     return createCore(options);
@@ -2785,19 +2810,7 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
       if (isBuiltinProviderId(normalized)) return {};
       const custom = findCustomProvider(providerId);
       if (!custom) return {};
-      if (!custom.backendUrl) {
-        throw new Error(`Custom provider '${providerId}' has no backend URL configured.`);
-      }
-      const useCodexVars = custom.harnessId === "codex";
-      const env: Record<string, string> = {
-        [useCodexVars ? "OPENAI_BASE_URL" : "ANTHROPIC_BASE_URL"]: custom.backendUrl,
-      };
-      const apiKeyEnv = custom.apiKeySource?.startsWith("env:") ? custom.apiKeySource.slice("env:".length) : undefined;
-      const apiKey = apiKeyEnv ? process.env[apiKeyEnv] : undefined;
-      if (apiKey) {
-        env[useCodexVars ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY"] = apiKey;
-      }
-      return env;
+      return customProviderConnectionEnv(providerId, custom, process.env);
     },
   };
   let external: ExternalCore;

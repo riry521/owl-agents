@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { AgentRuntimeError, providerConfigInvalid, providerFailed, reportInvalid } from "./errors";
 import {
   classifyProviderFailure,
+  withProviderDetail,
   formatProviderError,
   formatRuntimeError,
   providerFailureCause,
@@ -11,7 +12,7 @@ import {
 } from "./provider-error";
 import { asManagerRequest, buildManagerPrompt, managerOutputSchema, parseManagerPlanWithFeedback } from "./manager";
 import { statSync } from "node:fs";
-import { addTokenUsage, PROCESS_SKILLS_PROMPT_FILES, renderProcessSkills, type CuratorRequest, type CuratorRunResult, type ProcessSkillsRole } from "@owl/shared";
+import { addTokenUsage, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, PROCESS_SKILLS_PROMPT_FILES, renderProcessSkills, type CuratorRequest, type CuratorRunResult, type ProcessSkillsRole } from "@owl/shared";
 import { extractProviderUsage, harnessFailureDetail, isRecord, parseSingleJsonObject, unwrapClaudeCliResult, unwrapCodexCliResult } from "./protocol";
 import { extractRoleOutputObject, providerSchema, splitRolePrompt } from "./role-contract";
 import { resolveOutputLogDir, writeInvalidOutputLog } from "./output-log";
@@ -262,6 +263,11 @@ function processSkillsFor(role: ProcessSkillsRole, context: unknown, adapter: st
   return renderProcessSkills(role, { skills_dir: skillsDir, source, available_files: availableFiles }, isCodexAdapterId(adapter) ? "codex" : "claude");
 }
 
+/** The custom provider API key values the runner holds, so a provider error echoing one never reaches the owner. */
+function providerSecretValues(options: AgentRunnerOptions): string[] {
+  return Object.values(options.providerApiKeys ?? {}).filter((value) => value.length > 0);
+}
+
 function resolveOverrides(
   input: Record<string, unknown>,
   options: AgentRunnerOptions,
@@ -282,12 +288,13 @@ function resolveOverrides(
     throw providerConfigInvalid(`backend_url_missing:${normalizedProvider}`);
   }
   const env: Record<string, string> = {};
+  const codexHarness = isCodexAdapterId(resolvedAdapter);
   if (custom?.backend_url) {
-    env[isCodexAdapterId(resolvedAdapter) ? "OPENAI_BASE_URL" : "ANTHROPIC_BASE_URL"] = custom.backend_url;
+    env[codexHarness ? CODEX_PROVIDER_BASE_URL_ENV : "ANTHROPIC_BASE_URL"] = custom.backend_url;
   }
   const apiKey = custom?.api_key_env ? options.providerApiKeys?.[custom.api_key_env] : undefined;
   if (apiKey) {
-    env[isCodexAdapterId(resolvedAdapter) ? "OPENAI_API_KEY" : "ANTHROPIC_API_KEY"] = apiKey;
+    env[codexHarness ? CODEX_PROVIDER_API_KEY_ENV : "ANTHROPIC_API_KEY"] = apiKey;
   }
   return { model, adapter: resolvedAdapter, effort, env };
 }
@@ -341,8 +348,8 @@ function assertProviderCompleted(response: ProviderResponse): void {
 }
 
 /** Converts a classified provider failure into the Core AgentRunner contract instead of throwing. */
-function providerFailureAsCoreResult(cause: ProviderFailureCause, harness: string, language: OwnerLanguage): RuntimeAgentRunResult {
-  const classification = classifyProviderFailure(harness, cause, language);
+function providerFailureAsCoreResult(cause: ProviderFailureCause, harness: string, language: OwnerLanguage, secrets: readonly string[]): RuntimeAgentRunResult {
+  const classification = classifyProviderFailure(harness, cause, language, undefined, secrets);
   return {
     outcome: "failed",
     report_valid: false,
@@ -351,7 +358,7 @@ function providerFailureAsCoreResult(cause: ProviderFailureCause, harness: strin
     failure_class: classification.failure_class,
     error_key: classification.error_key,
     retry_allowed: classification.retry_allowed,
-    message: classification.message,
+    message: withProviderDetail(classification, language),
     ...(classification.rate_limit !== undefined ? { rate_limit: classification.rate_limit } : {}),
     skill_feedback: null,
   };
@@ -368,7 +375,7 @@ function isContractError(error: unknown): error is AgentRuntimeError {
  * kept when the provider finished but its answer broke the role contract (the
  * tokens were spent); a failed provider process reports none.
  */
-function runtimeFailureAsCoreResult(error: unknown, harness: string, outputLogPath: string | null, language: OwnerLanguage, usage: TokenUsage | null = null): RuntimeAgentRunResult {
+function runtimeFailureAsCoreResult(error: unknown, harness: string, outputLogPath: string | null, language: OwnerLanguage, usage: TokenUsage | null = null, secrets: readonly string[] = []): RuntimeAgentRunResult {
   if (error instanceof AgentRuntimeError && error.code !== "provider_failed") {
     const message = formatRuntimeError(error, formatProviderError(harness, error, {}, language), language);
     return {
@@ -391,7 +398,7 @@ function runtimeFailureAsCoreResult(error: unknown, harness: string, outputLogPa
     signal: null,
     error,
   };
-  return providerFailureAsCoreResult(cause, harness, language);
+  return providerFailureAsCoreResult(cause, harness, language, secrets);
 }
 
 function isCoreManagerRequest(
@@ -882,7 +889,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
         request.effort,
         request.cwd,
         request.env.ANTHROPIC_BASE_URL,
-        request.env.OPENAI_BASE_URL,
+        request.env[CODEX_PROVIDER_BASE_URL_ENV],
       ]);
       const prior = roleSessions.get(key);
       const snapshot = splitRolePrompt(request.prompt);
@@ -973,7 +980,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
         const parsed = parseManagerPlanWithFeedback(extractRoleOutputObject(response, "manager_stdout_not_single_json_object"), request);
         return managerAsCoreResult(parsed.result, extractProviderUsage(response), parsed.skill_feedback);
       } catch (error) {
-        return runtimeFailureAsCoreResult(error, adapter ?? options.adapter ?? "provider", recordInvalidOutput(error, response, invocationId, "manager"), requestLanguage(input), response ? extractProviderUsage(response) : null);
+        return runtimeFailureAsCoreResult(error, adapter ?? options.adapter ?? "provider", recordInvalidOutput(error, response, invocationId, "manager"), requestLanguage(input), response ? extractProviderUsage(response) : null, providerSecretValues(options));
       }
     }
     const inputRecord = input as unknown as Record<string, unknown>;
@@ -1059,7 +1066,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
         const normalized = normalizeWorkerResponseWithFeedback(response, invocationId);
         return reportAsCoreResult(normalized.report, response, extractProviderUsage(response), normalized.skill_feedback);
       } catch (error) {
-        return runtimeFailureAsCoreResult(error, adapter ?? options.adapter ?? "provider", recordInvalidOutput(error, response, invocationId, role), requestLanguage(input), response ? extractProviderUsage(response) : null);
+        return runtimeFailureAsCoreResult(error, adapter ?? options.adapter ?? "provider", recordInvalidOutput(error, response, invocationId, role), requestLanguage(input), response ? extractProviderUsage(response) : null, providerSecretValues(options));
       }
     }
     const request = requireWorkerRequest(input as WorkerInput);
@@ -1168,7 +1175,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
       return reportAsCoreResult(normalized.report, response, extractProviderUsage(response), normalized.skill_feedback);
     } catch (error) {
       const usage = addTokenUsage(earlierUsage, response ? extractProviderUsage(response) : null);
-      return runtimeFailureAsCoreResult(error, adapter ?? options.adapter ?? "provider", recordInvalidOutput(error, response, invocationId, "worker"), requestLanguage(input), usage);
+      return runtimeFailureAsCoreResult(error, adapter ?? options.adapter ?? "provider", recordInvalidOutput(error, response, invocationId, "worker"), requestLanguage(input), usage, providerSecretValues(options));
     }
   };
 
@@ -1204,7 +1211,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
         const parsed = parseReviewResultWithFeedback(response);
         return reviewAsCoreResult(parsed.review, extractProviderUsage(response), parsed.skill_feedback);
       } catch (error) {
-        return runtimeFailureAsCoreResult(error, adapter ?? options.adapter ?? "provider", recordInvalidOutput(error, response, input.invocation_id, "reviewer"), requestLanguage(input), response ? extractProviderUsage(response) : null);
+        return runtimeFailureAsCoreResult(error, adapter ?? options.adapter ?? "provider", recordInvalidOutput(error, response, input.invocation_id, "reviewer"), requestLanguage(input), response ? extractProviderUsage(response) : null, providerSecretValues(options));
       }
     }
     const request = input as ReviewerRequest;
