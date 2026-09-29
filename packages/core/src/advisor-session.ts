@@ -35,6 +35,7 @@ export interface AdvisorSession {
   compaction_count: number;
   last_compaction_at: string | null;
   last_usage_json: string | null;
+  system_prompt_sha256: string | null;
 }
 
 interface AdvisorSessionDbRow extends AdvisorSession {
@@ -71,7 +72,7 @@ const SESSION_SELECT_COLUMNS = `
   session.provider_id, session.harness_id, session.model, session.effort,
   session.provider_session_id, session.workspace_path, session.transcript_path,
   session.resumed_count, session.compaction_count, session.last_compaction_at,
-  session.last_usage_json,
+  session.last_usage_json, session.system_prompt_sha256,
   session.created_at, session.updated_at
 `;
 
@@ -134,6 +135,7 @@ export class AdvisorSessionManager {
       compaction_count: 0,
       last_compaction_at: null,
       last_usage_json: null,
+      system_prompt_sha256: null,
     };
 
     await this.enqueueMutation("started", session.id, (transaction) => {
@@ -217,7 +219,12 @@ export class AdvisorSessionManager {
    * Resume a suspended session: a new OS process attached to the same
    * logical session, driver.resume() having succeeded. Bumps resumed_count.
    */
-  public async resumeSession(sessionId: string, pid: number, providerSessionId?: string): Promise<void> {
+  public async resumeSession(
+    sessionId: string,
+    pid: number,
+    providerSessionId?: string,
+    systemPromptSha256?: string,
+  ): Promise<void> {
     if (!Number.isInteger(pid) || pid <= 0) {
       throw new RangeError("Advisor session pid must be a positive integer.");
     }
@@ -232,12 +239,14 @@ export class AdvisorSessionManager {
                 last_activity_at = ?,
                 provider_session_id = COALESCE(?, provider_session_id),
                 resumed_count = resumed_count + 1,
+                system_prompt_sha256 = COALESCE(?, system_prompt_sha256),
                 updated_at = ?
           WHERE id = ? AND status = 'suspended'`,
         pid,
         now,
         now,
         providerSessionId ?? null,
+        systemPromptSha256 ?? null,
         now,
         sessionId,
       );
@@ -339,18 +348,19 @@ export class AdvisorSessionManager {
    */
   public async setProviderConfig(
     sessionId: string,
-    config: { providerId: string; harnessId: string; model: string; effort?: string | null },
+    config: { providerId: string; harnessId: string; model: string; effort?: string | null; systemPromptSha256?: string | null },
   ): Promise<void> {
     const now = utcNow();
     await this.enqueueMutation("provider_config", sessionId, (transaction) => {
       transaction.run(
         `UPDATE advisor_sessions
-            SET provider_id = ?, harness_id = ?, model = ?, effort = ?, updated_at = ?
+            SET provider_id = ?, harness_id = ?, model = ?, effort = ?, system_prompt_sha256 = ?, updated_at = ?
           WHERE id = ?`,
         config.providerId,
         config.harnessId,
         config.model,
         config.effort ?? null,
+        config.systemPromptSha256 ?? null,
         now,
         sessionId,
       );
@@ -509,5 +519,6 @@ function toAdvisorSession(row: AdvisorSessionDbRow): AdvisorSession {
     compaction_count: row.compaction_count,
     last_compaction_at: row.last_compaction_at,
     last_usage_json: row.last_usage_json,
+    system_prompt_sha256: row.system_prompt_sha256,
   };
 }

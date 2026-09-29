@@ -130,7 +130,7 @@ test("backlog migration applies to a database that already ran earlier migration
   }
   existingDb.migrate(oldMigrations);
   const applied = existingDb.migrate(migrations).applied;
-  assert.deepEqual(applied, ["018", "019", "020", "021", "022", "023", "024", "025", "026", "027"]);
+  assert.deepEqual(applied, ["018", "019", "020", "021", "022", "023", "024", "025", "026", "027", "028"]);
   assert.ok(existingDb.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backlog_items'"));
   assert.deepEqual(existingDb.migrate(migrations).applied, []);
 });
@@ -550,7 +550,7 @@ test("backlog rows from before migration 026 keep status and issued_work_id", as
       );
     }
   });
-  assert.deepEqual(db.migrate(migrations).applied, ["026", "027"]);
+  assert.deepEqual(db.migrate(migrations).applied, ["026", "027", "028"]);
   const rows = Object.fromEntries(db.all("SELECT id, status, issued_work_id FROM backlog_items").map((row) => [row.id, row]));
   assert.deepEqual(rows["item-open"], { id: "item-open", status: "open", issued_work_id: null });
   assert.deepEqual(rows["item-dismissed"], { id: "item-dismissed", status: "dismissed", issued_work_id: null });

@@ -7,6 +7,7 @@
 // backing it (advisor_turns), and compaction capture (advisor_compactions).
 //
 
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { createUlid, utcNow } from "../../db/dist/index.js";
 import { applyAdvisorInterfaceInstructions, isProviderResumeUnsupportedError, parseAdvisorResponse, parseSlackAdvisorResponse, renderWorkspaceToolsNote } from "@owl/shared";
@@ -272,7 +273,13 @@ export class AdvisorSessionRuntime {
       active.model !== null &&
       (active.provider_id !== settings.providerId || active.model !== settings.model);
     const effortDrifted = active.effort !== (settings.effort ?? null);
-    const systemPromptDrifted = this.activeSystemPrompt !== null && this.activeSystemPrompt !== settings.systemPrompt;
+    // A suspended session (for example after a Core restart) has no in-memory
+    // prompt; its stored hash decides. A provider resume does not re-apply the
+    // system prompt, so a null or different hash means a fresh session.
+    const systemPromptDrifted =
+      active.status === "suspended"
+        ? active.system_prompt_sha256 !== hashSystemPrompt(settings.systemPrompt)
+        : this.activeSystemPrompt !== null && this.activeSystemPrompt !== settings.systemPrompt;
     if (
       !modelDrifted &&
       !effortDrifted &&
@@ -285,7 +292,7 @@ export class AdvisorSessionRuntime {
       return active;
     }
 
-    if (!modelDrifted && !effortDrifted && active.status === "suspended") {
+    if (!modelDrifted && !effortDrifted && !systemPromptDrifted && active.status === "suspended") {
       // AdvisorSession is owner-wide and shared by Web, Slack, Discord, and
       // terminal turns. Its workspace is selected when the session starts;
       // switching the source conversation must not fork its provider context
@@ -546,6 +553,7 @@ export class AdvisorSessionRuntime {
       harnessId: settings.harnessId,
       model: settings.model,
       effort: settings.effort ?? null,
+      systemPromptSha256: hashSystemPrompt(settings.systemPrompt),
     });
     await this.config.sessionManager.setWorkspace(session.id, workspacePath);
 
@@ -615,7 +623,12 @@ export class AdvisorSessionRuntime {
         this.terminateDriver(driver);
         throw new AdvisorRuntimeStoppedError();
       }
-      await this.config.sessionManager.resumeSession(session.id, driver.pid, driver.provider_session_id);
+      await this.config.sessionManager.resumeSession(
+        session.id,
+        driver.pid,
+        driver.provider_session_id,
+        hashSystemPrompt(settings.systemPrompt),
+      );
       await this.config.sessionManager.setWorkspace(session.id, workspacePath);
       this.activeDriver = driver;
       this.activeSessionId = session.id;
@@ -1293,4 +1306,8 @@ export class AdvisorSessionRuntime {
       })
       .then(() => undefined);
   }
+}
+
+function hashSystemPrompt(systemPrompt: string): string {
+  return createHash("sha256").update(systemPrompt).digest("hex");
 }

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -15,6 +16,8 @@ const settings = {
   model: "claude-opus-5-5",
   systemPrompt: "Advisor system prompt",
 };
+
+const settingsHash = createHash("sha256").update(settings.systemPrompt).digest("hex");
 
 function createRuntime({ session, providerClient = {}, sessionManager = {}, advisorSettings = settings }) {
   const db = {
@@ -69,6 +72,7 @@ test("Advisor resumes a shared session in its original workspace across interfac
     id: "advisor-session",
     conversation_id: "slack-conversation",
     status: "suspended",
+    system_prompt_sha256: settingsHash,
     provider_id: settings.providerId,
     harness_id: settings.harnessId,
     model: settings.model,
@@ -143,6 +147,7 @@ test("a resume the provider cannot apply ends the old session and starts a fresh
     owner_id: "owner",
     conversation_id: "slack-conversation",
     status: "suspended",
+    system_prompt_sha256: settingsHash,
     provider_id: settings.providerId,
     harness_id: "codex",
     model: settings.model,
@@ -181,6 +186,7 @@ test("any other resume failure still ends the session and is reported", async ()
     owner_id: "owner",
     conversation_id: "slack-conversation",
     status: "suspended",
+    system_prompt_sha256: settingsHash,
     provider_id: settings.providerId,
     harness_id: "codex",
     model: settings.model,
@@ -205,6 +211,76 @@ test("any other resume failure still ends the session and is reported", async ()
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 /** A controllable in-memory ProviderSession. `exited` flips like the real drivers' done flag. */
+for (const [label, hash] of [["a different prompt hash", "0".repeat(64)], ["no stored prompt hash", null]]) {
+  test(`a suspended session with ${label} is replaced and its queued turns move to the new session`, async () => {
+    const session = {
+      id: "advisor-session",
+      owner_id: "owner",
+      conversation_id: "slack-conversation",
+      status: "suspended",
+      system_prompt_sha256: hash,
+      provider_id: settings.providerId,
+      harness_id: settings.harnessId,
+      model: settings.model,
+      effort: null,
+      provider_session_id: "provider-session",
+      workspace_path: "/owl/.owl-workspaces/advisor/original-conversation",
+    };
+    const calls = [];
+    const runtime = createRuntime({
+      session,
+      providerClient: { createSession: async () => { throw new Error("must not resume"); } },
+    });
+    runtime.stopSession = async (id, reason) => { calls.push(["stop", id, reason]); };
+    runtime.createSession = async () => ({ id: "new-session" });
+    runtime.moveTurnsToSession = async (from, to) => { calls.push(["move", from, to]); };
+
+    const selected = await runtime.ensureSession("owner", "slack-conversation");
+
+    assert.equal(selected.id, "new-session");
+    assert.deepEqual(calls, [
+      ["stop", session.id, "owner_requested"],
+      ["move", session.id, "new-session"],
+    ]);
+  });
+}
+
+test("a suspended session with the same prompt hash is resumed", async () => {
+  const session = {
+    id: "advisor-session",
+    owner_id: "owner",
+    conversation_id: "slack-conversation",
+    status: "suspended",
+    system_prompt_sha256: settingsHash,
+    provider_id: settings.providerId,
+    harness_id: settings.harnessId,
+    model: settings.model,
+    effort: null,
+    provider_session_id: "provider-session",
+    workspace_path: "/owl/.owl-workspaces/advisor/original-conversation",
+  };
+  const resumed = [];
+  const runtime = createRuntime({
+    session,
+    sessionManager: {
+      resumeSession: async (...args) => { resumed.push(args); },
+      setWorkspace: async () => {},
+    },
+    providerClient: {
+      createSession: async () => ({
+        pid: 42,
+        provider_session_id: "provider-session",
+        events: () => ({ [Symbol.asyncIterator]: async function* () {} }),
+      }),
+    },
+  });
+
+  const selected = await runtime.ensureSession("owner", "slack-conversation");
+
+  assert.equal(selected.id, session.id);
+  assert.deepEqual(resumed, [[session.id, 42, "provider-session", settingsHash]]);
+});
+
 function fakeProviderSession(pid, { failSend = false, sendGate = null } = {}) {
   const queue = [];
   const waiters = [];
