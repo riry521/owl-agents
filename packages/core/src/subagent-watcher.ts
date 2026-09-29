@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { basename } from "node:path";
+import { accessSync, realpathSync, constants } from "node:fs";
+import { basename, delimiter, join } from "node:path";
 
 /**
  * Harness-independent subagent detection.
@@ -7,8 +8,8 @@ import { basename } from "node:path";
  * An agent may start another agent CLI on its own (a Claude Worker running
  * `codex exec` from its shell tool, a Codex Worker running `claude -p`, ...).
  * Owl did not spawn those processes, so the only signal that works for every
- * provider and harness is the OS process tree: any process below an active
- * AgentRun's pid whose executable is a known agent CLI is a subagent of the
+ * provider and harness is the OS process tree: a process below an active
+ * AgentRun's pid running a known, installed agent CLI is a subagent of the
  * nearest AgentRun above it.
  */
 
@@ -69,25 +70,61 @@ export function listProcesses(): readonly ProcessEntry[] | null {
 
 const INTERPRETERS = new Set(["node", "nodejs", "bun", "deno", "python", "python3", "ruby", "npx", "bunx", "pnpm", "sh", "bash", "zsh"]);
 
+export type InstalledAgentCliCheck = (name: string, path: string) => boolean;
+
+const installedCliPaths = new Map<string, string | null>();
+let installedCliPathEnv: string | undefined;
+let installedCliPathsAt = 0;
+
+/** Compare path-invoked CLIs with executable names found on PATH. */
+export function installedAgentCliMatches(name: string, path: string): boolean {
+  const pathEnv = process.env.PATH;
+  if (pathEnv !== installedCliPathEnv || Date.now() - installedCliPathsAt >= 60_000) {
+    installedCliPaths.clear();
+    installedCliPathEnv = pathEnv;
+    installedCliPathsAt = Date.now();
+  }
+  if (!installedCliPaths.has(name)) {
+    let installed: string | null = null;
+    for (const directory of (pathEnv ?? "").split(delimiter)) {
+      try {
+        const candidate = join(directory || ".", name);
+        accessSync(candidate, constants.X_OK);
+        installed = realpathSync(candidate);
+        break;
+      } catch {
+        // Continue to the next PATH entry.
+      }
+    }
+    installedCliPaths.set(name, installed);
+  }
+  try {
+    return installedCliPaths.get(name) !== null && installedCliPaths.get(name) === realpathSync(path);
+  } catch {
+    return false;
+  }
+}
+
 function executableName(token: string): string {
   return basename(token).replace(/\.(?:c|m)?js$|\.ts$|\.py$|\.exe$/u, "");
 }
 
 /**
  * The agent CLI a process is running, or null. Script launchers
- * (`node /usr/local/bin/codex ...`) are resolved to the script's name; a
- * shell running a CLI through `-c` is not itself a subagent.
+ * (`node /usr/local/bin/codex ...`) are resolved to the script's name and
+ * checked against PATH; a shell running a CLI through `-c` is not itself a
+ * subagent.
  */
-export function agentCliOf(args: string, names: ReadonlySet<string>): string | null {
+export function agentCliOf(args: string, names: ReadonlySet<string>, installedCliMatches: InstalledAgentCliCheck): string | null {
   const tokens = args.trim().split(/\s+/u);
   if (tokens.length === 0 || tokens[0].length === 0) return null;
   const first = executableName(tokens[0]);
-  if (names.has(first)) return first;
+  if (names.has(first)) return !tokens[0].includes("/") || installedCliMatches(first, tokens[0]) ? first : null;
   if (!INTERPRETERS.has(first)) return null;
   const script = tokens.slice(1).find((token) => !token.startsWith("-"));
   if (!script || tokens.includes("-c")) return null;
   const scriptName = executableName(script);
-  return names.has(scriptName) ? scriptName : null;
+  return names.has(scriptName) && (!script.includes("/") || installedCliMatches(scriptName, script)) ? scriptName : null;
 }
 
 const SAFE_TOKEN = /^[A-Za-z0-9._:/@-]{1,80}$/u;
@@ -151,6 +188,7 @@ export function planSubagentReconciliation(
   processes: readonly ProcessEntry[],
   runs: readonly ActiveRunRef[],
   names: ReadonlySet<string>,
+  installedCliMatches: InstalledAgentCliCheck,
 ): SubagentReconciliation {
   const byPid = new Map(processes.map((entry) => [entry.pid, entry]));
   const runByPid = new Map<number, ActiveRunRef>();
@@ -160,7 +198,7 @@ export function planSubagentReconciliation(
     .filter((run) => run.origin === "observed")
     .filter((run) => {
       const entry = run.pid === null ? undefined : byPid.get(run.pid);
-      return entry === undefined || agentCliOf(entry.args, names) === null;
+      return entry === undefined || agentCliOf(entry.args, names, installedCliMatches) === null;
     })
     .map((run) => run.id);
 
@@ -168,10 +206,10 @@ export function planSubagentReconciliation(
   if (runByPid.size === 0) return { detected, exited };
   for (const entry of processes) {
     if (runByPid.has(entry.pid)) continue;
-    const provider = agentCliOf(entry.args, names);
+    const provider = agentCliOf(entry.args, names, installedCliMatches);
     if (provider === null) continue;
     const parent = byPid.get(entry.ppid);
-    if (parent && agentCliOf(parent.args, names) === provider) continue;
+    if (parent && agentCliOf(parent.args, names, installedCliMatches) === provider) continue;
     const owner = nearestRun(entry, byPid, runByPid);
     if (!owner) continue;
     detected.push({

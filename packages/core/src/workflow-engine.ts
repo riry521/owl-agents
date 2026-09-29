@@ -30,7 +30,7 @@ import { ownerGuidance } from "./owner-guidance.js";
 import { dependencyContext, isTaskReviewRequired, loadFixContext, loadRetrySubtasks, reviewerTaskView, roleTaskView, taskDependencyIds } from "./task-context.js";
 import { registerReviewBacklogInTransaction } from "./review-backlog.js";
 import { clearPausedReviewerWait, recordPausedReviewerWait } from "./provider-pause-reviewer-wait.js";
-import { agentCliNames, listProcesses, planSubagentReconciliation } from "./subagent-watcher.js";
+import { agentCliNames, installedAgentCliMatches, listProcesses, planSubagentReconciliation } from "./subagent-watcher.js";
 import type {
   AgentRunResult,
   AgentRunner,
@@ -403,7 +403,7 @@ export class WorkflowEngine {
         "SELECT id, work_id, task_id, pid, origin FROM agent_runs WHERE status IN ('launch_pending','spawned','running','cancel_requested')",
       );
       if (runs.length === 0) return;
-      const plan = planSubagentReconciliation(processes, runs, agentCliNames());
+      const plan = planSubagentReconciliation(processes, runs, agentCliNames(), installedAgentCliMatches);
       const runById = new Map(runs.map((run) => [run.id, run]));
       for (const runId of plan.exited) {
         const run = runById.get(runId);

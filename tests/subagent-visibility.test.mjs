@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,6 +9,8 @@ import { Core } from "../packages/core/dist/index.js";
 import {
   agentCliOf,
   agentCliNames,
+  installedAgentCliMatches,
+  listProcesses,
   modelFromArgs,
   planSubagentReconciliation,
   subagentLabel,
@@ -33,10 +35,12 @@ async function waitFor(read, timeoutMs = 10_000) {
 }
 
 test("agent CLIs are recognised from any launcher, shells running -c are not", () => {
-  assert.equal(agentCliOf("node /opt/homebrew/bin/codex exec --json --model gpt-5", names), "codex");
-  assert.equal(agentCliOf("/opt/homebrew/lib/node_modules/@openai/codex/vendor/bin/codex exec --json", names), "codex");
+  const installed = (name, path) => name === "codex" && ["/opt/homebrew/bin/codex", "/opt/homebrew/lib/node_modules/@openai/codex/vendor/bin/codex"].includes(path);
+  assert.equal(agentCliOf("node /opt/homebrew/bin/codex exec --json --model gpt-5", names, installed), "codex");
+  assert.equal(agentCliOf("/opt/homebrew/lib/node_modules/@openai/codex/vendor/bin/codex exec --json", names, installed), "codex");
   assert.equal(agentCliOf("claude", names), "claude");
-  assert.equal(agentCliOf("/bin/sh /tmp/fake/claude -p --output-format json", names), "claude");
+  assert.equal(agentCliOf("node /tmp/x/claude -p", names, installed), null);
+  assert.equal(agentCliOf("/bin/sh /tmp/x/codex exec", names, installed), null);
   assert.equal(agentCliOf("gemini -m gemini-2.5-pro", names), "gemini");
   assert.equal(agentCliOf("/bin/zsh -c codex exec hi", names), null);
   assert.equal(agentCliOf("node /srv/app/server.js", names), null);
@@ -76,7 +80,7 @@ test("process tree reconciliation finds nested agent CLIs of any provider under 
     { id: "RUN_GONE", pid: 999, origin: "observed" },
     { id: "RUN_REUSED", pid: 100, origin: "observed" },
   ];
-  const plan = planSubagentReconciliation(processes, runs, names);
+  const plan = planSubagentReconciliation(processes, runs, names, (name, path) => name === "codex" && ["/opt/homebrew/bin/codex", "/opt/codex/vendor/bin/codex"].includes(path));
   assert.deepEqual(
     plan.detected.map((found) => [found.pid, found.parent_run_id, found.provider, found.model, found.label]),
     [
@@ -85,6 +89,41 @@ test("process tree reconciliation finds nested agent CLIs of any provider under 
     ],
   );
   assert.deepEqual([...plan.exited].sort(), ["RUN_GONE", "RUN_REUSED"]);
+});
+
+test("installed CLI paths and symlinks count while temporary scripts do not", async () => {
+  const root = await mkdtemp(join(tmpdir(), "owl-cli-paths-"));
+  const bin = join(root, "bin");
+  await mkdir(bin);
+  const installed = join(bin, "claude");
+  const alias = join(root, "claude");
+  const fake = join(root, "fake", "claude");
+  await mkdir(join(root, "fake"));
+  await writeFile(installed, "#!/bin/sh\n");
+  await chmod(installed, 0o755);
+  await symlink(installed, alias);
+  await writeFile(fake, "#!/bin/sh\n");
+  const originalPath = process.env.PATH;
+  process.env.PATH = bin;
+  try {
+    assert.equal(agentCliOf(`node ${installed} -p`, names, installedAgentCliMatches), "claude");
+    assert.equal(agentCliOf(`${alias} -p`, names, installedAgentCliMatches), "claude");
+    assert.equal(agentCliOf(`node ${fake} -p`, names, installedAgentCliMatches), null);
+    assert.equal(agentCliOf("claude -p", names, installedAgentCliMatches), "claude");
+    const processes = [
+      { pid: 10, ppid: 1, args: "codex exec" },
+      { pid: 11, ppid: 10, args: `node ${fake} -p` },
+      { pid: 12, ppid: 10, args: `${alias} -p` },
+    ];
+    const plan = planSubagentReconciliation(processes, [
+      { id: "worker", pid: 10, origin: null },
+      { id: "fake", pid: 11, origin: "observed" },
+    ], names, installedAgentCliMatches);
+    assert.deepEqual(plan.detected.map((entry) => entry.pid), [12]);
+    assert.deepEqual(plan.exited, ["fake"]);
+  } finally {
+    process.env.PATH = originalPath;
+  }
 });
 
 async function fakeAgentBin(root) {
@@ -105,7 +144,7 @@ async function fakeAgentBin(root) {
   return bin;
 }
 
-test("Hybrid records its phases and every Executor, and nested agent CLIs are detected", { skip: process.platform === "win32" }, async (t) => {
+test("Hybrid records its phases and every Executor, and nested agent CLIs are detected", { skip: process.platform === "win32" || listProcesses() === null }, async (t) => {
   const root = await mkdtemp(join(tmpdir(), "owl-subagents-"));
   const db = openDatabase(join(root, "owl.db"));
   db.migrate(join(repoRoot, "packages/db/migrations"));
