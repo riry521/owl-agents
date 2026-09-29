@@ -1865,11 +1865,14 @@ export class GitWorktreeGateway implements GitGateway {
   }
 
   private async checkIgnoredPaths(canonical: string, paths: readonly string[]): Promise<{ ok: true; paths: string[] } | { ok: false; message: string }> {
-    if (paths.length === 0) return { ok: true, paths: [] };
-    const result = await this.git(canonical, ["check-ignore", "-z", "--stdin", "--no-index"], `${paths.join("\0")}\0`);
-    if (result.exit_code === 1) return { ok: true, paths: [] };
-    if (result.exit_code !== 0) return { ok: false, message: result.message };
-    return { ok: true, paths: [...new Set(result.message.split("\0").filter(Boolean))] };
+    const ignored: string[] = [];
+    for (let offset = 0; offset < paths.length; offset += 400) {
+      const batch = paths.slice(offset, offset + 400);
+      const result = await this.git(canonical, ["check-ignore", "-z", "--stdin", "--no-index"], `${batch.join("\0")}\0`);
+      if (result.exit_code === 0) ignored.push(...result.message.split("\0").filter(Boolean));
+      else if (result.exit_code !== 1) return { ok: false, message: result.message };
+    }
+    return { ok: true, paths: [...new Set(ignored)] };
   }
 
   private async backupUnregisteredWorkspace(
@@ -2151,7 +2154,11 @@ export class GitWorktreeGateway implements GitGateway {
   private async git(cwd: string, args: readonly string[], input?: string): Promise<GitOperationResult> {
     try {
       const pending = execFileAsync("git", ["-C", cwd, ...args], { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 });
-      if (input !== undefined) pending.child.stdin?.end(input);
+      if (input !== undefined) {
+        // git may exit before reading all of stdin; the rejected promise reports that failure.
+        pending.child.stdin?.on("error", () => {});
+        pending.child.stdin?.end(input);
+      }
       const result = await pending;
       return { ok: true, exit_code: 0, recorded: false, message: `${result.stdout}${result.stderr}`.trim() || "git operation completed" };
     } catch (error) {
