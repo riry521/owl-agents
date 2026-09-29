@@ -1905,11 +1905,22 @@ export class Core {
           taskJson,
           taskJson,
         );
-        transaction.run(
-          "UPDATE backlog_items SET status = 'open', issued_work_id = NULL, updated_at = ? WHERE issued_work_id = ?",
-          now,
+        const issuedItems = transaction.all<{ id: string; work_id: string; project_id: string | null; dedupe_key: string }>(
+          "SELECT id, work_id, project_id, dedupe_key FROM backlog_items WHERE issued_work_id = ? ORDER BY id",
           workId,
         );
+        for (const item of issuedItems) {
+          const duplicate = item.project_id === null
+            ? transaction.get<{ id: string }>("SELECT id FROM backlog_items WHERE work_id = ? AND project_id IS NULL AND dedupe_key = ? AND status = 'open' AND id != ? LIMIT 1", item.work_id, item.dedupe_key, item.id)
+            : transaction.get<{ id: string }>("SELECT id FROM backlog_items WHERE project_id = ? AND dedupe_key = ? AND status = 'open' AND id != ? LIMIT 1", item.project_id, item.dedupe_key, item.id);
+          transaction.run(
+            duplicate
+              ? "UPDATE backlog_items SET status = 'dismissed', issued_work_id = NULL, updated_at = ? WHERE id = ?"
+              : "UPDATE backlog_items SET status = 'open', issued_work_id = NULL, updated_at = ? WHERE id = ?",
+            now,
+            item.id,
+          );
+        }
         transaction.run("DELETE FROM backlog_items WHERE work_id = ?", workId);
         transaction.run("DELETE FROM reviews WHERE task_id IN (SELECT value FROM json_each(?))", taskJson);
         transaction.run("DELETE FROM decision_answers WHERE decision_id IN (SELECT value FROM json_each(?))", decisionJson);

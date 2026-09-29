@@ -63,6 +63,7 @@ import {
   type ReportEnvelope,
   type ReviewResult,
   type ReviewerRequest,
+  type ReviewFinding,
   type TaskDetail,
   type TokenUsage,
   type WorkContext,
@@ -210,6 +211,7 @@ function stubReview(report: ReportEnvelope): ReviewResult {
       findings: [
         {
           severity: "major",
+          pre_existing: false,
           file: "report",
           line: 0,
           problem: "The Worker result is not success.",
@@ -545,6 +547,11 @@ function coreReviewerRequestAsLocal(input: CoreReviewerRunRequest): ReviewerRequ
     ...(isRecord(context.design_document) && typeof context.design_document.path === "string" && typeof context.design_document.markdown === "string"
       ? { design_document: { path: context.design_document.path, markdown: context.design_document.markdown } }
       : {}),
+    ...(Array.isArray(context.previous_minor_findings)
+      ? { previous_minor_findings: context.previous_minor_findings as unknown as ReviewFinding[] }
+      : context.previous_minor_findings === null
+        ? { previous_minor_findings: null }
+        : {}),
     ...(Array.isArray(context.changed_files)
       ? { changed_files: context.changed_files.filter((item): item is string => typeof item === "string") }
       : context.changed_files === null

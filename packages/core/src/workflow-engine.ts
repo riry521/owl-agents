@@ -972,6 +972,21 @@ export class WorkflowEngine {
    * and return the reason to hand the Manager, or null when the Task left
    * ready/review_fix_waiting meanwhile.
    */
+  private previousMinorFindings(taskId: string): JsonObject[] | null {
+    const row = this.db.get<{ findings_json: string }>(
+      "SELECT findings_json FROM reviews WHERE task_id = ? ORDER BY round DESC LIMIT 1",
+      taskId,
+    );
+    if (!row) return null;
+    try {
+      const findings = JSON.parse(row.findings_json) as unknown;
+      if (!Array.isArray(findings)) return null;
+      return findings.filter((finding): finding is JsonObject => typeof finding === "object" && finding !== null && (finding as JsonObject).severity === "minor");
+    } catch {
+      return null;
+    }
+  }
+
   private async recordWorkSyncConflict(workId: string, taskId: string, message: string): Promise<string | null> {
     const taskBranch = `owl/task/${workId}/${taskId}`;
     const workBranch = `owl/work/${workId}/work`;
@@ -2686,6 +2701,7 @@ export class WorkflowEngine {
         knowledge: await this.composeKnowledgeForTask(workId, taskId),
         ...(processSkillsPack ? { process_skills_dir: processSkillsPack.skills_dir, process_skills_source: processSkillsPack.source } : {}),
         changed_files: await this.git.changedPaths?.({ work_id: workId, task_id: taskId, worktree_path: task.worktree_path ?? undefined }) ?? null,
+        previous_minor_findings: this.previousMinorFindings(taskId),
         ...(designDocument ? { design_document: designDocument } : {}),
       },
       ...(reviewerRoleModel ? {

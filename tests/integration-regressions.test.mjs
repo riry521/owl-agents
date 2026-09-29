@@ -2160,7 +2160,7 @@ test("Core preserves valid Reviewer findings and sends them to the next Worker a
   const managerRequests = [];
   let reviewCount = 0;
   const finding = {
-    severity: "major",
+    severity: "major", pre_existing: false,
     file: "src/target.ts",
     line: 17,
     problem: "review-finding-handoff-marker is not handled.",

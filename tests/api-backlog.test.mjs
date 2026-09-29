@@ -125,11 +125,11 @@ test("backlog API lists and filters items, issues and dismisses them, and valida
   const workB = await createWork(api.durableCore, "b", projectB);
   const workC = await createWork(api.durableCore, "c", projectA);
   await registerFindings(api.db, workA, [
-    { severity: "minor", file: "src/a.ts", problem: "Issue A", reason: "Reason A", fix: "Fix A" },
-    { severity: "minor", file: "src/b.ts", problem: "Issue B" },
+    { severity: "minor", pre_existing: false, file: "src/a.ts", problem: "Issue A", reason: "Reason A", fix: "Fix A" },
+    { severity: "minor", pre_existing: false, file: "src/b.ts", problem: "Issue B" },
   ]);
-  await registerFindings(api.db, workB, [{ severity: "minor", file: "src/c.ts", problem: "Issue C" }]);
-  await registerFindings(api.db, workC, [{ severity: "minor", file: "src/d.ts", problem: "Issue D" }]);
+  await registerFindings(api.db, workB, [{ severity: "minor", pre_existing: false, file: "src/c.ts", problem: "Issue C" }]);
+  await registerFindings(api.db, workC, [{ severity: "minor", pre_existing: false, file: "src/d.ts", problem: "Issue D" }]);
 
   const allResponse = await api.get("/backlog");
   assert.equal(allResponse.status, 200);
@@ -212,9 +212,9 @@ test("work backlog API paginates items and validates pagination values", async (
   const project = await createProject(api.root, api.durableCore, "pagination");
   const work = await createWork(api.durableCore, "pagination", project);
   await registerFindings(api.db, work, [
-    { severity: "minor", file: "src/page-a.ts", problem: "Page A" },
-    { severity: "minor", file: "src/page-b.ts", problem: "Page B" },
-    { severity: "minor", file: "src/page-c.ts", problem: "Page C" },
+    { severity: "minor", pre_existing: false, file: "src/page-a.ts", problem: "Page A" },
+    { severity: "minor", pre_existing: false, file: "src/page-b.ts", problem: "Page B" },
+    { severity: "minor", pre_existing: false, file: "src/page-c.ts", problem: "Page C" },
   ]);
 
   const items = [];
@@ -244,8 +244,8 @@ test("all backlog routes require Owner authorization", async (t) => {
   const project = await createProject(api.root, api.durableCore, "auth");
   const work = await createWork(api.durableCore, "auth", project);
   await registerFindings(api.db, work, [
-    { severity: "minor", file: "src/auth-a.ts", problem: "Unauthorized dismiss target" },
-    { severity: "minor", file: "src/auth-b.ts", problem: "Unauthorized issue target" },
+    { severity: "minor", pre_existing: false, file: "src/auth-a.ts", problem: "Unauthorized dismiss target" },
+    { severity: "minor", pre_existing: false, file: "src/auth-b.ts", problem: "Unauthorized issue target" },
   ]);
   const items = (await (await api.get("/backlog")).json()).data;
   assert.equal(items.length, 2);

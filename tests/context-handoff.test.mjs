@@ -79,7 +79,7 @@ function review(verdict, problem = null) {
   return {
     verdict,
     summary: `review ${verdict}`,
-    findings: problem === null ? [] : [{ severity: "major", file: "out.txt", line: 1, problem, reason: "r", fix: "f" }],
+    findings: problem === null ? [] : [{ severity: "major", pre_existing: false, file: "out.txt", line: 1, problem, reason: "r", fix: "f" }],
     tests: { ran: false, command: "none", passed: 0, failed: 0 },
   };
 }

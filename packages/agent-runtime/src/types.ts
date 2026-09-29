@@ -211,6 +211,7 @@ export type WorkerInput = WorkerRequest | TaskDetail;
 
 export interface ReviewFinding {
   readonly severity: "minor" | "major";
+  readonly pre_existing: boolean;
   /** Path of the file the finding is about; "" for a general finding. */
   readonly file: string;
   /** 1-based line number; 0 when no specific line applies. */
@@ -249,6 +250,8 @@ export interface ReviewerRequest {
   readonly changed_files?: readonly string[] | null;
   /** A design Task's external document, which the Reviewer reads instead of changed files. */
   readonly design_document?: { readonly path: string; readonly markdown: string } | null;
+  /** The previous review round's minor findings; null on the first round. */
+  readonly previous_minor_findings?: readonly ReviewFinding[] | null;
 }
 
 export interface AdvisorRequest {

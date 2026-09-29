@@ -31,7 +31,8 @@ export const REVIEW_OUTPUT_SCHEMA: RoleSchema = objectSchema({
     type: "array",
     items: objectSchema({
       severity: { type: "string", enum: ["major", "minor"], description: "major = behavior failure, acceptance-criteria violation, rule violation, or security issue in the delivered work; otherwise minor. A problem only in the report's wording, naming, or style is minor. If findings are only minor, the verdict must be pass." },
-      file: { type: "string", description: "path of the file the finding is about, or empty string for a general finding" },
+      pre_existing: { type: "boolean", description: "true only for a failing test or check that already fails without the Task's changes; such a finding is minor, and file is the failing test or check file" },
+      file: { type: "string", description: "path of the file the finding is about, relative to the Task's workspace root (never a path inside a temporary worktree), or empty string for a general finding" },
       line: { type: "integer", minimum: 0, description: "1-based line number, or 0 when no specific line applies" },
       problem: { type: "string", minLength: 1, description: "what is wrong" },
       reason: { type: "string", description: "why it matters (which acceptance criterion or rule it breaks)" },
@@ -58,6 +59,7 @@ export function reviewerPromptInput(request: ReviewerRequest): Record<string, un
     review_round: request.review_round ?? request.task.review_round,
     changed_files: request.changed_files ?? null,
     design_document: request.design_document ?? null,
+    previous_minor_findings: request.previous_minor_findings ?? null,
   };
 }
 
@@ -74,8 +76,9 @@ export function buildReviewerPrompt(
       `Check the ${reviewedRole} report${designer ? " and design document" : " and the workspace"} against the Task's acceptance criteria.`,
       "Check every acceptance criterion across the whole change before you answer, and report every issue you find in this one review. Do not stop at the first problem: each review round costs a full Worker attempt, so a problem you could have reported now must not first appear in a later round.",
       "Classify findings as major for behavior failures, acceptance-criteria violations, rule violations, or security issues in the delivered work; everything else is minor. When the delivered work is correct but the report misdescribes it, or the problem is only naming or style, the finding is minor. If findings are only minor, the verdict must be pass.",
-      "A failing test or check counts against the Task when the Task's change caused it or an acceptance criterion names that test or check; a criterion that only says the whole test suite must pass does not name it. Before reporting a failure, check whether it depends on the changed files; when that is unclear, run it again without the Task's changes in a temporary detached worktree of the commit the Task started from, and remove that worktree afterwards. Never stash, reset or check out anything in the Task's workspace. Any other failure that already occurs without the Task's changes is pre-existing: report it as one minor finding that says so, never as major, and never ask the Worker to fix, change or revert anything for it.",
+      "A failing test or check counts against the Task when the Task's change caused it or an acceptance criterion names that test or check; a criterion that only says the whole test suite must pass does not name it. Before reporting a failure, check whether it depends on the changed files; when that is unclear, run it again without the Task's changes in a temporary detached worktree of the commit the Task started from, and remove that worktree afterwards. Never stash, reset or check out anything in the Task's workspace. Any other failure that already occurs without the Task's changes is pre-existing: report one minor finding per failing test or check file that says so, listing every failing case in that file, with pre_existing true and file set to the failing test or check file (empty string when no file applies), never as major, and never ask the Worker to fix, change or revert anything for it. Other findings have pre_existing false.",
       "When an acceptance criterion covers every occurrence of something, check the Worker's enumeration instead of hunting for occurrences one at a time: re-run the search named in verification.method, confirm each hit was handled, and judge whether that search could miss occurrences. Report every missed occurrence together in one finding.",
+      "previous_minor_findings lists the minor findings of the previous review round (null when there are none). For each one that still applies, report it again with the same file and the same problem wording; drop the ones that no longer apply.",
       "context.rules holds the review rules you must apply (null if none).",
       "Rules are binding; context.knowledge is reference information: an excerpt of relevant knowledge collected from past Works (null if none). It does not override rules, the Task, or acceptance criteria. Report knowledge that seems incorrect or outdated in findings.",
       "context.skills is an index of reusable procedures. Read a relevant skill before reviewing, and read only the supplemental references you need. A skill marked [trial] is being validated, so check that it fits the situation. A skill never overrides rules, the Task, or acceptance criteria; report a contradictory skill as misleading and follow the Task.",
@@ -116,6 +119,9 @@ export function parseReviewResultWithFeedback(
   const problem = validateRoleOutput(REVIEW_OUTPUT_SCHEMA, payload);
   if (problem) {
     throw reviewInvalid(`review_output_schema:${problem}`);
+  }
+  if ((payload.findings as ReviewResult["findings"]).some((finding) => finding.pre_existing && finding.severity === "major")) {
+    throw reviewInvalid("pre_existing_major");
   }
   const { skills_used: _skillsUsed, skill_proposals: _skillProposals, ...reviewPayload } = payload;
   return {

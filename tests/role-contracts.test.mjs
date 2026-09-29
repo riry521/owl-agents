@@ -461,6 +461,19 @@ test("Reviewer: the rendered template parses; a string line number or null file 
   await runnerAnswering((template) => fillTemplate(template), reviewKnowledgeCalls).runReviewer(reviewerRequest({ knowledge: "Relevant notes" }));
   assert.equal(renderedInput(reviewKnowledgeCalls[0].prompt, "Task and Worker report").context.knowledge, "Relevant notes");
   assert.equal(calls[0].structured_output_schema.properties.findings.items.properties.line.type, "integer");
+  assert.ok(calls[0].structured_output_schema.properties.findings.items.required.includes("pre_existing"));
+
+  const missingPreExisting = await runnerAnswering((template) => {
+    const filled = fillTemplate(template);
+    return { ...filled, findings: filled.findings.map(({ pre_existing, ...finding }) => finding) };
+  }).runReviewer(reviewerRequest());
+  assert.equal(missingPreExisting.error_key, "runtime:review_invalid:review_output_schema:findings[0].pre_existing:missing");
+
+  const majorPreExisting = await runnerAnswering((template) => {
+    const filled = fillTemplate(template);
+    return { ...filled, findings: [{ ...filled.findings[0], severity: "major", pre_existing: true }] };
+  }).runReviewer(reviewerRequest());
+  assert.equal(majorPreExisting.error_key, "runtime:review_invalid:pre_existing_major");
 
   const stringLine = await runnerAnswering((template) => {
     const filled = fillTemplate(template);
@@ -773,7 +786,8 @@ test("role prompts keep unrelated existing failures outside Task verification", 
   assert.match(manager, /Reviewer sends such failures to the backlog/u);
   assert.match(worker, /report it in remaining_issues as pre-existing; it does not make verification\.passed false/u);
   assert.match(hybrid, /Tell each Executor not to edit unrelated failing tests/u);
-  assert.match(reviewer, /report it as one minor finding that says so, never as major/u);
+  assert.match(reviewer, /report one minor finding per failing test or check file that says so, listing every failing case in that file, with pre_existing true and file set to the failing test or check file \(empty string when no file applies\), never as major/u);
+  assert.match(reviewer, /Other findings have pre_existing false/u);
   assert.match(reviewer, /or an acceptance criterion names that test or check; a criterion that only says the whole test suite must pass does not name it/u);
   assert.match(reviewer, /Never stash, reset or check out anything in the Task's workspace/u);
 });
@@ -789,6 +803,12 @@ test("The Reviewer prompt carries changed_files: an instruction line, null by de
   await runner.runReviewer(reviewerRequest({ changed_files: ["migrations/007.sql", "src/index.ts"] }));
   const withFiles = renderedInput(calls[1].prompt, "Task and Worker report");
   assert.deepEqual(withFiles.changed_files, ["migrations/007.sql", "src/index.ts"]);
+
+  assert.equal(withoutFiles.previous_minor_findings, null);
+  const previous = [{ severity: "minor", pre_existing: false, file: "a.ts", line: 1, problem: "Rename x.", reason: "r", fix: "f" }];
+  await runner.runReviewer(reviewerRequest({ previous_minor_findings: previous }));
+  assert.deepEqual(renderedInput(calls[2].prompt, "Task and Worker report").previous_minor_findings, previous);
+  assert.ok(instructionsSection(calls[2].prompt).includes("report it again with the same file and the same problem wording"));
 
   assert.ok(
     instructionsSection(calls[0].prompt).includes(

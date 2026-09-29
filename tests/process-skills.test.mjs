@@ -624,7 +624,7 @@ test("prompts with no detected pack stay byte-identical", () => {
     worker: "4794ef7dd5a2f58367e179c19978bc594ede13a4942d9c72c17eec11ad9d6bfc",
     hybrid_plan: "443a103fbc67de2f88b17d66cc30f9c3f75fd4f69e5931be242e2fbfe2a914f4",
     hybrid_verdict: "25dbef381d48f177fc56541c7b8c90ef3e28ec2ede0415f392072813808ccab9",
-    reviewer: "40c56190c12936ca12243f2b649c522ebfca3e99ceb876e2936cf60f7eda469d",
+    reviewer: "de6ea92aab62aae80282f59b554f2e375c7cdc5048bc999cba50cba75590b549",
     executor: "1cd18917943503c4ce363a4a9b916c358dc5ab8c99d208944935587ff56e9d57",
   };
   for (const [role, prompt] of Object.entries(prompts)) {

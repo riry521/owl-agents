@@ -51,7 +51,7 @@ function reviewResult(verdict) {
     : {
         verdict,
         summary: "The report needs the commands.",
-        findings: [{ severity: "major", file: "", problem: "The report leaves out the commands.", fix: "List them." }],
+        findings: [{ severity: "major", pre_existing: false, file: "", problem: "The report leaves out the commands.", fix: "List them." }],
         tests: { ran: false, command: "none", passed: 0, failed: 0 },
       };
   return { outcome: verdict === "pass" ? "success" : "failed", report_valid: true, report: review, review };

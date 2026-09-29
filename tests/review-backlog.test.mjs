@@ -98,7 +98,7 @@ async function register(db, taskId) {
 }
 
 function minor(file, problem, extras = {}) {
-  return { severity: "minor", file, problem, ...extras };
+  return { severity: "minor", pre_existing: false, file, problem, ...extras };
 }
 
 function errorCode(code) {
@@ -135,7 +135,7 @@ test("backlog migration applies to a database that already ran earlier migration
   assert.deepEqual(existingDb.migrate(migrations).applied, []);
 });
 
-test("registration keeps minor findings once per Task and retains the latest round", async (t) => {
+test("registration stores only the latest review round's minor findings", async (t) => {
   const { db, core } = await setup(t);
   const workId = await createWork(core, "dedupe");
   const { taskId, reviewIds } = await seedTaskAndReviews(db, workId, {
@@ -144,7 +144,7 @@ test("registration keeps minor findings once per Task and retains the latest rou
         minor("apps/a.ts", "Unused import X.", { line: 2, reason: "old reason", fix: "old fix" }),
         minor("apps/b.ts", "Different finding"),
         minor("apps/a.ts", "Another issue"),
-        { severity: "major", file: "apps/a.ts", problem: "Major finding" },
+        { severity: "major", pre_existing: false, file: "apps/a.ts", problem: "Major finding" },
       ] },
       { round: 1, findings: [
         minor("/repo/apps\\a.ts", "unused import x", { line: 20, reason: "new reason", fix: "new fix" }),
@@ -152,10 +152,10 @@ test("registration keeps minor findings once per Task and retains the latest rou
     ],
   });
 
-  assert.equal(await register(db, taskId), 3);
+  assert.equal(await register(db, taskId), 1);
   assert.equal(await register(db, taskId), 0, "reprocessing the Task is idempotent");
   const items = core.listBacklogItems({ work_id: workId }).items;
-  assert.equal(items.length, 3);
+  assert.equal(items.length, 1);
   const duplicate = items.find((item) => item.problem === "unused import x");
   assert.equal(duplicate.file, "apps/a.ts");
   assert.equal(duplicate.line, 20);
@@ -175,6 +175,46 @@ test("registration keeps minor findings once per Task and retains the latest rou
   assert.equal(core.listBacklogItems({ work_id: workId }).items.find((item) => item.id === duplicate.id).status, "dismissed");
 });
 
+test("pre-existing failures are deduplicated across Tasks in a Work despite different wording", async (t) => {
+  const { db, core } = await setup(t);
+  const workId = await createWork(core, "pre-existing-work");
+  const first = await seedTaskAndReviews(db, workId, { reviews: [{ round: 0, findings: [minor("/repo/tests/check.test.ts", "Check fails before this Task.", { pre_existing: true })] }] });
+  const second = await seedTaskAndReviews(db, workId, { reviews: [{ round: 0, findings: [minor("./tests\\check.test.ts", "This test was already failing.", { pre_existing: true })] }] });
+
+  assert.equal(await register(db, first.taskId), 1);
+  assert.equal(await register(db, second.taskId), 0);
+  assert.equal(core.listBacklogItems({ work_id: workId }).items.length, 1);
+});
+
+test("an open pre-existing failure is shared across Works in a Project and dismissal permits another report", async (t) => {
+  const { root, db, core } = await setup(t);
+  const projectId = await createProject(root, core, "pre-existing-project");
+  const firstWork = await createWork(core, "pre-existing-first", projectId);
+  const secondWork = await createWork(core, "pre-existing-second", projectId);
+  const first = await seedTaskAndReviews(db, firstWork, { reviews: [{ round: 0, findings: [minor("tests/check.test.ts", "Existing failure in check.", { pre_existing: true })] }] });
+  const second = await seedTaskAndReviews(db, secondWork, { reviews: [{ round: 0, findings: [minor("tests/check.test.ts", "Check failed before the change.", { pre_existing: true })] }] });
+
+  assert.equal(await register(db, first.taskId), 1);
+  assert.equal(await register(db, second.taskId), 0);
+  const [existing] = core.listBacklogItems({ project_id: projectId }).items;
+  await core.dismissBacklogItems(command({ item_ids: [existing.id] }, "dismiss-pre-existing"));
+  assert.equal(await register(db, second.taskId), 1);
+  assert.equal(core.listBacklogItems({ project_id: projectId }).items.length, 2);
+});
+
+test("normal and legacy minor findings with identical file and problem share an open Project item", async (t) => {
+  const { root, db, core } = await setup(t);
+  const projectId = await createProject(root, core, "normal-dedupe");
+  const firstWork = await createWork(core, "normal-first", projectId);
+  const secondWork = await createWork(core, "normal-second", projectId);
+  const first = await seedTaskAndReviews(db, firstWork, { reviews: [{ round: 0, findings: [minor("src/a.ts", "Unused import X.")] }] });
+  const second = await seedTaskAndReviews(db, secondWork, { reviews: [{ round: 0, findings: [minor("src/a.ts", "Unused import X.", { pre_existing: undefined })] }] });
+
+  assert.equal(await register(db, first.taskId), 1);
+  assert.equal(await register(db, second.taskId), 0);
+  assert.equal(core.listBacklogItems({ project_id: projectId }).items.length, 1);
+});
+
 test("registration includes design Tasks and skips malformed finding shapes without throwing", async (t) => {
   const { db, core } = await setup(t);
   const workId = await createWork(core, "invalid-findings");
@@ -187,8 +227,8 @@ test("registration includes design Tasks and skips malformed finding shapes with
 
   const malformed = await seedTaskAndReviews(db, workId, {
     reviews: [
-      { round: 0, findings: { severity: "minor", problem: "not an array" } },
-      { round: 1, findings: ["not an object", minor("a.ts", "   ")] },
+      { round: 0, findings: ["not an object", minor("a.ts", "   ")] },
+      { round: 1, findings: { severity: "minor", pre_existing: false, problem: "not an array" } },
     ],
   });
   const warnings = [];
@@ -256,9 +296,10 @@ test("a reviewed design Task completed by a minor-only pass stores its finding",
 });
 
 test("a retry after mixed fix_required findings receives only major findings while review JSON retains both", async (t) => {
-  const major = { severity: "major", file: "src/core.ts", line: 10, problem: "The required path still fails.", reason: "Acceptance is not met.", fix: "Handle the missing case." };
-  const minorFinding = { severity: "minor", file: "src/core.ts", line: 12, problem: "This name could be clearer.", reason: "It is only a readability concern.", fix: "Rename the local variable." };
+  const major = { severity: "major", pre_existing: false, file: "src/core.ts", line: 10, problem: "The required path still fails.", reason: "Acceptance is not met.", fix: "Handle the missing case." };
+  const minorFinding = { severity: "minor", pre_existing: false, file: "src/core.ts", line: 12, problem: "This name could be clearer.", reason: "It is only a readability concern.", fix: "Rename the local variable." };
   const workerContexts = [];
+  const reviewerPrevious = [];
   let reviewCalls = 0;
   const runner = {
     runManagerPlan: async (request) => (request.mode ?? request.context?.mode) === "plan"
@@ -279,8 +320,9 @@ test("a retry after mixed fix_required findings receives only major findings whi
         },
       };
     },
-    runReviewer: async () => {
+    runReviewer: async (request) => {
       reviewCalls += 1;
+      reviewerPrevious.push(request.context.previous_minor_findings);
       const review = reviewCalls === 1
         ? { verdict: "fix_required", summary: "One blocking issue and one minor concern.", findings: [major, minorFinding], tests: { ran: false, command: "none", passed: 0, failed: 0 } }
         : { verdict: "pass", summary: "The required path is correct.", findings: [], tests: { ran: false, command: "none", passed: 0, failed: 0 } };
@@ -307,6 +349,8 @@ test("a retry after mixed fix_required findings receives only major findings whi
   assert.equal(reviewCalls, 2);
   assert.equal(workerContexts.length, 2);
   assert.deepEqual(workerContexts[1].reviewer_findings, [major]);
+  assert.equal(reviewerPrevious[0], null);
+  assert.deepEqual(reviewerPrevious[1], [minorFinding]);
   const storedReview = db.get("SELECT verdict, findings_json FROM reviews WHERE task_id = (SELECT id FROM tasks WHERE work_id = ?)", workId);
   assert.equal(storedReview.verdict, "fix_required");
   assert.deepEqual(JSON.parse(storedReview.findings_json), [major, minorFinding]);
@@ -367,6 +411,24 @@ test("Core filters, dismisses, issues Work atomically, and handles missing or no
   const reopened = core.listBacklogItems({ work_id: workA }).items.find((item) => item.id === issuable.id);
   assert.equal(reopened.status, "open");
   assert.equal(reopened.issued_work_id, null);
+
+  // Deleting an issued Work dismisses (instead of reopening) an item whose key is already open in the project.
+  const dupWorkId = await createWork(core, "dup-key", projectA);
+  const dupTask = await seedTaskAndReviews(db, dupWorkId, { reviews: [{ round: 0, findings: [minor("d.ts", "Dup one")] }] });
+  await register(db, dupTask.taskId);
+  const dupItem = core.listBacklogItems({ work_id: dupWorkId }).items[0];
+  const dupIssued = await core.issueBacklogWork(command({ item_ids: [dupItem.id], title: "Dup issue", summary: "", size: "small" }, "issue-dup"));
+  const dupOther = await createWork(core, "dup-key-2", projectA);
+  const dupTask2 = await seedTaskAndReviews(db, dupOther, { reviews: [{ round: 0, findings: [minor("d.ts", "Dup one")] }] });
+  await register(db, dupTask2.taskId);
+  await db.createWriteLane().transact((tx) => tx.run(
+    "UPDATE works SET state = 'completed', state_version = state_version + 1, completed_at = ?, updated_at = ? WHERE id = ?",
+    "2026-09-27T02:30:00.000Z", "2026-09-27T02:30:00.000Z", dupIssued.data.work_id,
+  ));
+  const dupArchive = await core.archiveWork(dupIssued.data.work_id, command({}, "archive-dup", 1));
+  await core.deleteWork(dupIssued.data.work_id, command({}, "delete-dup", dupArchive.version));
+  assert.equal(core.listBacklogItems({ work_id: dupWorkId }).items.find((item) => item.id === dupItem.id).status, "dismissed");
+  assert.equal(core.listBacklogItems({ project_id: projectA, status: "open" }).items.filter((item) => item.file === "d.ts").length, 1);
 
   const sourceId = workA;
   await db.createWriteLane().transact((tx) => tx.run(

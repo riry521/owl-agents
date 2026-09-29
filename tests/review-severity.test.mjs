@@ -6,8 +6,8 @@ import { normalizeReviewerVerdict } from "../packages/core/dist/workflow-engine.
 
 test("Worker review findings include only major findings, treating missing severity as major", () => {
   const findings = [
-    { severity: "major", problem: "blocking" },
-    { severity: "minor", problem: "polish" },
+    { severity: "major", pre_existing: false, problem: "blocking" },
+    { severity: "minor", pre_existing: false, problem: "polish" },
     { problem: "legacy finding" },
     { severity: "unknown", problem: "unclassified" },
   ];

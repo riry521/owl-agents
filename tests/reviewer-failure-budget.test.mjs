@@ -95,7 +95,7 @@ function reviewResult(verdict) {
     : {
         verdict,
         summary: "One correction remains.",
-        findings: [{ severity: "major", file: "a.txt", problem: "Wrong value.", fix: "Use the right value." }],
+        findings: [{ severity: "major", pre_existing: false, file: "a.txt", problem: "Wrong value.", fix: "Use the right value." }],
         tests: { ran: false, command: "none", passed: 0, failed: 0 },
       };
   return { outcome: verdict === "pass" ? "success" : "failed", report_valid: true, report: review, review };

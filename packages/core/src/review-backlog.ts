@@ -136,40 +136,46 @@ export function registerReviewBacklogInTransaction(tx: CoreWriteLaneTransaction,
   );
   if (!context) return 0;
 
-  const reviews = tx.all<ReviewRow>("SELECT id, round, findings_json FROM reviews WHERE task_id = ? ORDER BY round DESC", taskId);
+  const review = tx.get<ReviewRow>("SELECT id, round, findings_json FROM reviews WHERE task_id = ? ORDER BY round DESC LIMIT 1", taskId);
+  if (!review) return 0;
   let inserted = 0;
-  for (const review of reviews) {
-    let findings: unknown;
-    try {
-      findings = JSON.parse(review.findings_json) as unknown;
-    } catch (error) {
-      console.warn(`[owl-core] Skipping malformed review findings for review ${review.id}.`, error);
-      continue;
-    }
-    if (!Array.isArray(findings)) {
-      console.warn(`[owl-core] Skipping malformed review findings for review ${review.id}.`);
-      continue;
-    }
-    for (const value of findings) {
-      if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
-      const finding = value as Record<string, unknown>;
-      if (finding.severity !== "minor" || typeof finding.problem !== "string" || finding.problem.trim().length === 0) continue;
-      const file = normalizeBacklogFile(finding.file, context.worktree_path);
-      const problem = finding.problem.trim();
-      const line = Number.isInteger(finding.line) && (finding.line as number) >= 0 ? finding.line as number : 0;
-      const reason = typeof finding.reason === "string" ? finding.reason.trim() : "";
-      const suggestion = typeof finding.fix === "string" ? finding.fix.trim() : "";
-      const result = tx.run(
-        `INSERT INTO backlog_items
-           (id, work_id, task_id, project_id, review_id, review_round, file, line, problem, reason, suggestion,
-            status, issued_work_id, dedupe_key, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', NULL, ?, ?, ?)
-         ON CONFLICT (task_id, dedupe_key) DO NOTHING`,
-        createUlid(), context.work_id, taskId, context.project_id, review.id, review.round,
-        file, line, problem, reason, suggestion, backlogDedupeKey(file, problem), now, now,
-      );
-      inserted += result.changes;
-    }
+  let findings: unknown;
+  try {
+    findings = JSON.parse(review.findings_json) as unknown;
+  } catch (error) {
+    console.warn(`[owl-core] Skipping malformed review findings for review ${review.id}.`, error);
+    return 0;
+  }
+  if (!Array.isArray(findings)) {
+    console.warn(`[owl-core] Skipping malformed review findings for review ${review.id}.`);
+    return 0;
+  }
+  for (const value of findings) {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
+    const finding = value as Record<string, unknown>;
+    if (finding.severity !== "minor" || typeof finding.problem !== "string" || finding.problem.trim().length === 0) continue;
+    const file = normalizeBacklogFile(finding.file, context.worktree_path);
+    const problem = finding.problem.trim();
+    const line = Number.isInteger(finding.line) && (finding.line as number) >= 0 ? finding.line as number : 0;
+    const reason = typeof finding.reason === "string" ? finding.reason.trim() : "";
+    const suggestion = typeof finding.fix === "string" ? finding.fix.trim() : "";
+    const dedupeKey = finding.pre_existing === true && file !== ""
+      ? createHash("sha256").update(`pre-existing\u0000${file}`, "utf8").digest("hex")
+      : backlogDedupeKey(file, problem);
+    const existing = context.project_id === null
+      ? tx.get<{ id: string }>("SELECT id FROM backlog_items WHERE work_id = ? AND project_id IS NULL AND dedupe_key = ? AND status = 'open' LIMIT 1", context.work_id, dedupeKey)
+      : tx.get<{ id: string }>("SELECT id FROM backlog_items WHERE project_id = ? AND dedupe_key = ? AND status = 'open' LIMIT 1", context.project_id, dedupeKey);
+    if (existing) continue;
+    const result = tx.run(
+      `INSERT INTO backlog_items
+         (id, work_id, task_id, project_id, review_id, review_round, file, line, problem, reason, suggestion,
+          status, issued_work_id, dedupe_key, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', NULL, ?, ?, ?)
+       ON CONFLICT (task_id, dedupe_key) DO NOTHING`,
+      createUlid(), context.work_id, taskId, context.project_id, review.id, review.round,
+      file, line, problem, reason, suggestion, dedupeKey, now, now,
+    );
+    inserted += result.changes;
   }
   return inserted;
 }
