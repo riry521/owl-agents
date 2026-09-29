@@ -186,6 +186,18 @@ export function formatDateTime(iso: RFC3339 | null, locale: Locale = 'ja'): stri
   }).format(new Date(timestamp));
 }
 
+/** A clock time (HH:MM) formatted for the locale; the dash when the timestamp is unusable. */
+export function formatClock(iso: RFC3339 | null, locale: Locale = 'ja'): string {
+  if (typeof iso !== 'string' || iso.length === 0) return dicts[locale].format.dash;
+  const timestamp = Date.parse(iso);
+  if (!Number.isFinite(timestamp)) return dicts[locale].format.dash;
+  return new Intl.DateTimeFormat(locale === 'ja' ? 'ja-JP' : 'en-US', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date(timestamp));
+}
+
 /** Seconds since the agent last produced output. */
 export function silentSeconds(
   lastOutputAt: RFC3339 | null,

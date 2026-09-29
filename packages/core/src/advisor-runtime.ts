@@ -163,6 +163,12 @@ export function parseAdvisorTurnReply(
   return parsed;
 }
 
+class AdvisorRuntimeStoppedError extends Error {
+  public constructor() {
+    super("The Advisor runtime is shutting down.");
+  }
+}
+
 /**
  * Orchestrates one persistent Advisor ProviderSession: (re)creating it via
  * AdvisorSessionManager + ProviderClient.createSession, running a FIFO queue
@@ -213,11 +219,44 @@ export class AdvisorSessionRuntime {
    *   - a suspended session is resumed via provider_session_id;
    *   - anything else unreusable (model drift, a DB-active session this
    *     process holds no live driver for, or a held driver whose process
-   *     already exited while idle) is ended and replaced, carrying forward a
-   *     context-bridge pointer to the old transcript/workspace.
+   *     already exited while idle) is ended and replaced by a fresh session.
    */
   public ensureSession(ownerId: string, conversationId: string): Promise<AdvisorSession> {
     return this.withSessionLock(() => this.ensureSessionUnlocked(ownerId, conversationId));
+  }
+
+  /**
+   * ensureSession followed by enqueueTurn as one step under the session lock,
+   * so a concurrent settings change cannot replace the session between the two
+   * and leave the turn on an ended session.
+   */
+  public ensureSessionAndEnqueue(
+    ownerId: string,
+    conversationId: string,
+    userMessageId: string,
+    turn: AdvisorTurnRequest,
+  ): Promise<{ session: AdvisorSession; turnId: string }> {
+    return this.withSessionLock(async () => {
+      const session = await this.ensureSessionUnlocked(ownerId, conversationId);
+      const turnId = await this.enqueueTurn(session.id, conversationId, userMessageId, turn);
+      return { session, turnId };
+    });
+  }
+
+  /**
+   * Brings the resident Advisor session up, or onto changed settings, without
+   * a turn to send. A no-op while the runtime is stopped, the Advisor provider
+   * is paused, or a turn loop is draining on a live process (its in-flight
+   * turn is never interrupted; the next call applies any pending change).
+   */
+  public ensureResident(ownerId: string, conversationId: string): Promise<void> {
+    return this.withSessionLock(async () => {
+      if (this.stopped) return;
+      if (this.turnLoopRunning && this.activeDriver !== null && this.activeDriver.exited !== true) return;
+      const settings = this.config.getAdvisorSettings();
+      if (this.config.isProviderPaused?.(settings.providerId)) return;
+      await this.ensureSessionUnlocked(ownerId, conversationId);
+    });
   }
 
   private async ensureSessionUnlocked(ownerId: string, conversationId: string): Promise<AdvisorSession> {
@@ -225,7 +264,7 @@ export class AdvisorSessionRuntime {
     const active = this.config.sessionManager.getActiveSession(ownerId);
 
     if (active === null) {
-      return this.createSession(ownerId, conversationId, settings, null);
+      return this.createSession(ownerId, conversationId, settings);
     }
 
     const modelDrifted =
@@ -262,14 +301,12 @@ export class AdvisorSessionRuntime {
     // observed session.exited for, or a driver that exited while idle; its
     // session.exited is only consumed while a turn is in flight). None is
     // reusable: stop what remains (stop() on an exited driver returns once
-    // its process is gone) and start fresh, bridging the prior
-    // transcript/workspace as context.
+    // its process is gone) and start fresh.
     await this.stopSession(
       active.id,
       modelDrifted ? "model_changed" : effortDrifted || systemPromptDrifted ? "owner_requested" : "crashed",
     );
-    const bridgeSource = active.transcript_path ?? active.workspace_path ?? null;
-    const replacement = await this.createSession(ownerId, conversationId, settings, bridgeSource);
+    const replacement = await this.createSession(ownerId, conversationId, settings);
     if (replacement.id !== active.id) {
       // Turns queued on the replaced session must move to the replacement, or
       // the turn loop (which follows activeSessionId) will never see them.
@@ -319,8 +356,7 @@ export class AdvisorSessionRuntime {
 
   /**
    * Stops the driver for `sessionId` (if this runtime currently holds it)
-   * and records the outcome on the session: "idle_timeout" suspends the
-   * logical session for a later resume, everything else ends it outright.
+   * and ends the logical session with `reason`.
    * The conversation-scoped workspace is independent and is never removed
    * here; pending changes are reported before an ended session is forgotten.
    */
@@ -332,12 +368,8 @@ export class AdvisorSessionRuntime {
       this.activeSystemPrompt = null;
       await driver.stop(reason);
     }
-    if (reason === "idle_timeout") {
-      await this.config.sessionManager.suspendSession(sessionId);
-    } else {
-      await this.config.sessionManager.endSession(sessionId, reason);
-      await this.notifyRetainedWorkspace(sessionId);
-    }
+    await this.config.sessionManager.endSession(sessionId, reason);
+    await this.notifyRetainedWorkspace(sessionId);
   }
 
   /**
@@ -368,8 +400,20 @@ export class AdvisorSessionRuntime {
 
       let sessionId: string;
       try {
-        const session = await this.ensureSession(conversation.owner_id, turn.conversation_id);
-        sessionId = session.id;
+        sessionId = await this.withSessionLock(async () => {
+          const session = await this.ensureSessionUnlocked(conversation.owner_id, turn.conversation_id);
+          await this.enqueueTurnMutation("requeued", { turn_id: turn.id }, (transaction) => {
+            transaction.run(
+              `UPDATE advisor_turns
+                  SET session_id = ?, status = 'queued', retry_count = retry_count + 1,
+                      started_at = NULL, completed_at = NULL, error = NULL
+                WHERE id = ? AND status = 'interrupted'`,
+              session.id,
+              turn.id,
+            );
+          });
+          return session.id;
+        });
       } catch (error) {
         const message = error instanceof Error && error.message.length > 0
           ? error.message
@@ -378,16 +422,6 @@ export class AdvisorSessionRuntime {
         continue;
       }
 
-      await this.enqueueTurnMutation("requeued", { turn_id: turn.id }, (transaction) => {
-        transaction.run(
-          `UPDATE advisor_turns
-              SET session_id = ?, status = 'queued', retry_count = retry_count + 1,
-                  started_at = NULL, completed_at = NULL, error = NULL
-            WHERE id = ? AND status = 'interrupted'`,
-          sessionId,
-          turn.id,
-        );
-      });
       void this.startTurnLoop(sessionId).catch((error) => console.error(`[owl-core] Advisor recovery loop failed for ${sessionId}`, error));
     }
   }
@@ -456,6 +490,10 @@ export class AdvisorSessionRuntime {
     this.activeDriver = null;
     this.activeSessionId = null;
     this.activeSystemPrompt = null;
+    this.terminateDriver(driver);
+  }
+
+  private terminateDriver(driver: ProviderSession): void {
     if (driver.terminateImmediately) {
       driver.terminateImmediately();
       return;
@@ -474,7 +512,6 @@ export class AdvisorSessionRuntime {
     ownerId: string,
     conversationId: string,
     settings: AdvisorSettingsSnapshot,
-    contextBridgeSource: string | null,
   ): Promise<AdvisorSession> {
     const createProviderSession = this.requireSessionSupport();
     const workspacePath = await this.buildWorkingDirectory(conversationId);
@@ -496,6 +533,13 @@ export class AdvisorSessionRuntime {
       throw error;
     }
 
+    if (this.stopped) {
+      // Shutdown landed while the process was starting; nothing else holds it.
+      this.terminateDriver(driver);
+      await this.config.sessionManager.endSession(session.id, "core_restart");
+      throw new AdvisorRuntimeStoppedError();
+    }
+
     await this.config.sessionManager.activateSession(session.id, driver.pid, driver.provider_session_id);
     await this.config.sessionManager.setProviderConfig(session.id, {
       providerId: settings.providerId,
@@ -504,9 +548,6 @@ export class AdvisorSessionRuntime {
       effort: settings.effort ?? null,
     });
     await this.config.sessionManager.setWorkspace(session.id, workspacePath);
-    if (contextBridgeSource !== null) {
-      await this.config.sessionManager.setContextBridge(session.id, contextBridgeSource);
-    }
 
     this.activeDriver = driver;
     this.activeSessionId = session.id;
@@ -524,7 +565,6 @@ export class AdvisorSessionRuntime {
       effort: settings.effort ?? null,
       provider_session_id: driver.provider_session_id,
       workspace_path: workspacePath,
-      context_bridge_source: contextBridgeSource,
     };
   }
 
@@ -571,6 +611,10 @@ export class AdvisorSessionRuntime {
         system_prompt: this.systemPromptFor(settings, workspacePath),
         provider_session_id: session.provider_session_id ?? undefined,
       });
+      if (this.stopped) {
+        this.terminateDriver(driver);
+        throw new AdvisorRuntimeStoppedError();
+      }
       await this.config.sessionManager.resumeSession(session.id, driver.pid, driver.provider_session_id);
       await this.config.sessionManager.setWorkspace(session.id, workspacePath);
       this.activeDriver = driver;
@@ -585,11 +629,13 @@ export class AdvisorSessionRuntime {
         workspace_path: workspacePath,
       };
     } catch (error) {
+      // The session stays suspended for the next start to resume.
+      if (error instanceof AdvisorRuntimeStoppedError) throw error;
       await this.config.sessionManager.endSession(session.id, "resume_failed");
       // The provider cannot resume with the current settings (e.g. a changed
-      // system prompt): start a fresh session that bridges the old transcript.
+      // system prompt): start a fresh session.
       if (isProviderResumeUnsupportedError(error)) {
-        return this.createSession(session.owner_id, session.conversation_id, settings, session.transcript_path ?? session.workspace_path ?? null);
+        return this.createSession(session.owner_id, session.conversation_id, settings);
       }
       throw error;
     }
@@ -822,7 +868,7 @@ export class AdvisorSessionRuntime {
   /**
    * A send failure means the held driver is dead or unusable (for example it
    * exited while idle). Discard it, obtain a replacement session through
-   * ensureSession (the crash path: end + context bridge + fresh driver) and
+   * ensureSession (the crash path: end + fresh driver) and
    * resend exactly once. The turn is failed when that also fails. Returns
    * the session the queue now lives on and, on success, the driver to
    * consume the turn's events from.

@@ -393,7 +393,7 @@ test("an Advisor rate limit replies with the reset time, pauses the provider and
   const replies = [];
   runtime = new AdvisorSessionRuntime({
     db,
-    sessionManager: new AdvisorSessionManager(db, { idleTimeoutMinutes: 30 }),
+    sessionManager: new AdvisorSessionManager(db),
     memorySaver: {},
     providerClient: { createSession: async () => providerSession },
     owlRoot: root,

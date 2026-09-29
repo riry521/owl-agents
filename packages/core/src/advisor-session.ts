@@ -34,12 +34,10 @@ export interface AdvisorSession {
   resumed_count: number;
   compaction_count: number;
   last_compaction_at: string | null;
-  context_bridge_source: string | null;
   last_usage_json: string | null;
 }
 
 interface AdvisorSessionDbRow extends AdvisorSession {
-  idle_timeout_seconds: number;
   ending_started_at: string | null;
   session_summary_id: string | null;
   created_at: string;
@@ -64,18 +62,16 @@ const END_REASONS: readonly AdvisorSessionEndReason[] = [
   "model_changed",
 ];
 
-const DEFAULT_IDLE_TIMEOUT_MINUTES = 120;
-
 const SESSION_SELECT_COLUMNS = `
   session.id, conversation.owner_id, session.conversation_id,
   session.status, session.end_reason, session.pid,
   session.started_at, session.ended_at, session.last_activity_at,
-  session.process_start_time, session.idle_timeout_seconds,
+  session.process_start_time,
   session.ending_started_at, session.session_summary_id,
   session.provider_id, session.harness_id, session.model, session.effort,
   session.provider_session_id, session.workspace_path, session.transcript_path,
   session.resumed_count, session.compaction_count, session.last_compaction_at,
-  session.context_bridge_source, session.last_usage_json,
+  session.last_usage_json,
   session.created_at, session.updated_at
 `;
 
@@ -90,17 +86,10 @@ const SESSION_SELECT_COLUMNS = `
 export class AdvisorSessionManager {
   private readonly db: CoreDatabase;
   private readonly writeLane: ReturnType<CoreDatabase["createWriteLane"]>;
-  private readonly idleTimeoutSeconds: number;
 
-  public constructor(db: CoreDatabase, options: { idleTimeoutMinutes?: number }) {
+  public constructor(db: CoreDatabase) {
     this.db = db;
     this.writeLane = db.createWriteLane();
-
-    const idleTimeoutMinutes = options.idleTimeoutMinutes ?? DEFAULT_IDLE_TIMEOUT_MINUTES;
-    if (!Number.isFinite(idleTimeoutMinutes) || idleTimeoutMinutes < 0) {
-      throw new RangeError("Advisor idle timeout must be a finite, non-negative number of minutes.");
-    }
-    this.idleTimeoutSeconds = Math.round(idleTimeoutMinutes * 60);
   }
 
   public getActiveSession(ownerId: string): AdvisorSession | null {
@@ -144,7 +133,6 @@ export class AdvisorSessionManager {
       resumed_count: 0,
       compaction_count: 0,
       last_compaction_at: null,
-      context_bridge_source: null,
       last_usage_json: null,
     };
 
@@ -173,15 +161,14 @@ export class AdvisorSessionManager {
       transaction.run(
         `INSERT INTO advisor_sessions
            (id, status, pid, process_start_time, conversation_id,
-            started_at, last_activity_at, idle_timeout_seconds,
+            started_at, last_activity_at,
             ending_started_at, ended_at, end_reason, session_summary_id,
             created_at, updated_at)
-         VALUES (?, 'starting', NULL, NULL, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)`,
+         VALUES (?, 'starting', NULL, NULL, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)`,
         session.id,
         session.conversation_id,
         session.started_at,
         session.last_activity_at,
-        this.idleTimeoutSeconds,
         now,
         now,
       );
@@ -278,8 +265,8 @@ export class AdvisorSessionManager {
 
   /**
    * The OS process is gone but the logical session (and its
-   * provider_session_id) is kept for a future resume. Used for idle timeout,
-   * server restart recovery, and clean process exit without an explicit end.
+   * provider_session_id) is kept for a future resume. Used for server restart
+   * recovery and a clean process exit without an explicit end.
    */
   public async suspendSession(sessionId: string): Promise<void> {
     const now = utcNow();
@@ -446,59 +433,6 @@ export class AdvisorSessionManager {
   }
 
   /**
-   * Records what context-bridge material (a compaction summary path, or a
-   * saved-messages snapshot path) was handed to a freshly (re)created
-   * session, so it is never silently mixed into the first turn.
-   */
-  public async setContextBridge(sessionId: string, sourcePath: string | null): Promise<void> {
-    const now = utcNow();
-    await this.enqueueMutation("context_bridge", sessionId, (transaction) => {
-      transaction.run(
-        `UPDATE advisor_sessions
-            SET context_bridge_source = ?, updated_at = ?
-          WHERE id = ?`,
-        sourcePath,
-        now,
-        sessionId,
-      );
-      return null;
-    });
-  }
-
-  public getStaleSession(now: Date): AdvisorSession | null {
-    if (Number.isNaN(now.getTime())) {
-      throw new RangeError("Stale-session checks require a valid Date.");
-    }
-
-    const rows = this.db.all<AdvisorSessionDbRow>(
-      `SELECT ${SESSION_SELECT_COLUMNS}
-         FROM advisor_sessions AS session
-         JOIN conversations AS conversation ON conversation.id = session.conversation_id
-        WHERE session.status = 'running'
-          -- A long turn does not refresh last_activity_at until it settles;
-          -- ending the session then would kill the turn mid-flight.
-          AND NOT EXISTS (
-            SELECT 1
-              FROM advisor_turns AS turn
-             WHERE turn.session_id = session.id
-               AND turn.status = 'running'
-          )
-        ORDER BY session.last_activity_at ASC`,
-    );
-    const nowMs = now.getTime();
-    for (const row of rows) {
-      const lastActivityMs = Date.parse(row.last_activity_at);
-      if (
-        Number.isFinite(lastActivityMs) &&
-        lastActivityMs + row.idle_timeout_seconds * 1000 < nowMs
-      ) {
-        return toAdvisorSession(row);
-      }
-    }
-    return null;
-  }
-
-  /**
    * On Core startup, any session still marked 'running' belongs to a process
    * this Core instance no longer owns (crash or restart). The session is not
    * ended: it is suspended, keeping provider_session_id so the next message
@@ -574,7 +508,6 @@ function toAdvisorSession(row: AdvisorSessionDbRow): AdvisorSession {
     resumed_count: row.resumed_count,
     compaction_count: row.compaction_count,
     last_compaction_at: row.last_compaction_at,
-    context_bridge_source: row.context_bridge_source,
     last_usage_json: row.last_usage_json,
   };
 }

@@ -677,12 +677,12 @@ test("Advisor create_work links and dismisses backlog items atomically, and reje
   assert.equal(worksTitled(), 1);
 });
 
-test("Advisor prompt shows the open backlog count and the GET /api/v1/backlog pointer, not the items", async (t) => {
+test("Advisor prompt has no open count and points to GET /api/v1/backlog, not the items", async (t) => {
   const { db, core } = await setup(t, advisorRunner);
   const workId = await createWork(core, "prompt");
   await seedOpenItem(db, workId, "secret finding text");
   const prompt = core.buildAdvisorSystemPrompt();
-  assert.match(prompt, /1 open item/u);
+  assert.doesNotMatch(prompt, /\d+ open item/u);
   assert.ok(prompt.includes("GET /api/v1/backlog"));
   assert.ok(prompt.includes("backlog_item_ids") && prompt.includes("dismiss_backlog_item_ids"));
   assert.ok(!prompt.includes("secret finding text"));

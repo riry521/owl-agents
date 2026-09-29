@@ -104,7 +104,7 @@ test("Advisor resumes a shared session in its original workspace across interfac
   assert.equal(selected.id, session.id);
 });
 
-test("a changed system prompt ends the live session and starts one with the new prompt, bridging the old transcript", async () => {
+test("a changed system prompt ends the live session and starts one with the new prompt", async () => {
   const session = {
     id: "advisor-session",
     owner_id: "owner",
@@ -123,8 +123,8 @@ test("a changed system prompt ends the live session and starts one with the new 
   runtime.activeSystemPrompt = settings.systemPrompt;
   const calls = [];
   runtime.stopSession = async (id, reason) => { calls.push(["stop", id, reason]); };
-  runtime.createSession = async (ownerId, conversationId, next, bridge) => {
-    calls.push(["create", ownerId, conversationId, next.systemPrompt, bridge]);
+  runtime.createSession = async (ownerId, conversationId, next) => {
+    calls.push(["create", ownerId, conversationId, next.systemPrompt]);
     return { id: "new-session" };
   };
 
@@ -133,7 +133,7 @@ test("a changed system prompt ends the live session and starts one with the new 
   assert.equal(selected.id, "new-session");
   assert.deepEqual(calls, [
     ["stop", session.id, "owner_requested"],
-    ["create", "owner", "web-conversation", updated.systemPrompt, session.transcript_path],
+    ["create", "owner", "web-conversation", updated.systemPrompt],
   ]);
 });
 
@@ -161,8 +161,8 @@ test("a resume the provider cannot apply ends the old session and starts a fresh
       createSession: async () => { throw new ProviderResumeUnsupportedError("codex", "Invalid params"); },
     },
   });
-  runtime.createSession = async (ownerId, conversationId, next, bridge) => {
-    calls.push(["create", ownerId, conversationId, next.systemPrompt, bridge]);
+  runtime.createSession = async (ownerId, conversationId, next) => {
+    calls.push(["create", ownerId, conversationId, next.systemPrompt]);
     return { id: "fresh-session" };
   };
 
@@ -171,7 +171,7 @@ test("a resume the provider cannot apply ends the old session and starts a fresh
   assert.equal(selected.id, "fresh-session");
   assert.deepEqual(calls, [
     ["end", session.id, "resume_failed"],
-    ["create", "owner", "slack-conversation", settings.systemPrompt, session.workspace_path],
+    ["create", "owner", "slack-conversation", settings.systemPrompt],
   ]);
 });
 
@@ -292,7 +292,7 @@ async function createLiveRuntime(t, providerSessions) {
   const createRequests = [];
   const runtime = new AdvisorSessionRuntime({
     db,
-    sessionManager: new AdvisorSessionManager(db, { idleTimeoutMinutes: 30 }),
+    sessionManager: new AdvisorSessionManager(db),
     memorySaver: {},
     providerClient: {
       execute: async () => { throw new Error("not used"); },
@@ -444,4 +444,142 @@ test("a session replaced while its turn is still sending does not orphan the rep
   assert.deepEqual(original.sent.map((sent) => sent.turn_id), [turnA]);
   assert.deepEqual(replacement.sent.map((sent) => sent.turn_id), [turnB]);
   assert.deepEqual(live.errors, []);
+});
+
+test("ensureResident brings a session up when none exists, and never stops an idle one", async (t) => {
+  const only = fakeProviderSession(601);
+  const live = await createLiveRuntime(t, [only]);
+
+  await live.runtime.ensureResident(live.ownerId, live.conversationId);
+  const row = live.db.get("SELECT id, status FROM advisor_sessions WHERE status = 'running'");
+  assert.equal(row.status, "running");
+  assert.equal(live.createRequests.length, 1);
+
+  await live.db.createWriteLane().transact((tx) =>
+    tx.run("UPDATE advisor_sessions SET last_activity_at = '2000-01-01T00:00:00.000Z' WHERE id = ?", row.id));
+  await live.runtime.ensureResident(live.ownerId, live.conversationId);
+  assert.equal(live.sessionRow(row.id).status, "running");
+  assert.equal(live.sessionRow(row.id).end_reason, null);
+  assert.deepEqual(only.stopReasons, []);
+  assert.equal(live.createRequests.length, 1);
+});
+
+test("keep-alive replaces a driver that died with a fresh session", async (t) => {
+  const first = fakeProviderSession(611);
+  const second = fakeProviderSession(612);
+  const live = await createLiveRuntime(t, [first, second]);
+  const one = await live.runtime.ensureSession(live.ownerId, live.conversationId);
+  first.exited = true;
+
+  await live.runtime.ensureResident(live.ownerId, live.conversationId);
+  const now = live.db.get("SELECT id FROM advisor_sessions WHERE status = 'running'");
+  assert.notEqual(now.id, one.id);
+  assert.equal(live.sessionRow(one.id).end_reason, "crashed");
+  assert.equal(live.createRequests.length, 2);
+});
+
+test("a settings change brings up a session on the new model", async (t) => {
+  const first = fakeProviderSession(621);
+  const second = fakeProviderSession(622);
+  const live = await createLiveRuntime(t, [first, second]);
+  await live.runtime.ensureResident(live.ownerId, live.conversationId);
+
+  live.runtime.config.getAdvisorSettings = () => ({ ...settings, model: "claude-opus-6" });
+  await live.runtime.ensureResident(live.ownerId, live.conversationId);
+  const running = live.db.get("SELECT model FROM advisor_sessions WHERE status = 'running'");
+  assert.equal(running.model, "claude-opus-6");
+  assert.equal(live.createRequests.length, 2);
+});
+
+test("a paused provider means the resident session is not started", async (t) => {
+  const unused = fakeProviderSession(631);
+  const live = await createLiveRuntime(t, [unused]);
+  live.runtime.config.isProviderPaused = () => true;
+
+  await live.runtime.ensureResident(live.ownerId, live.conversationId);
+  assert.equal(live.createRequests.length, 0);
+  assert.equal(live.db.get("SELECT COUNT(*) AS n FROM advisor_sessions").n, 0);
+});
+
+test("ending the session and calling ensureResident brings up a fresh one (clear)", async (t) => {
+  const first = fakeProviderSession(641);
+  const second = fakeProviderSession(642);
+  const live = await createLiveRuntime(t, [first, second]);
+  const one = await live.runtime.ensureSession(live.ownerId, live.conversationId);
+
+  await live.runtime.stopSession(one.id, "cleared");
+  await live.runtime.ensureResident(live.ownerId, live.conversationId);
+  const running = live.db.get("SELECT id, provider_session_id FROM advisor_sessions WHERE status = 'running'");
+  assert.notEqual(running.id, one.id);
+  assert.equal(live.sessionRow(one.id).end_reason, "cleared");
+  assert.equal(live.createRequests.length, 2);
+  assert.equal(live.createRequests[1].provider_session_id, undefined);
+});
+
+test("ensureResident leaves a running or queued turn alone when settings change", async (t) => {
+  let releaseSend;
+  const gate = new Promise((resolveGate) => { releaseSend = resolveGate; });
+  const first = fakeProviderSession(651, { sendGate: gate });
+  const live = await createLiveRuntime(t, [first, fakeProviderSession(652)]);
+  const one = await live.runtime.ensureSession(live.ownerId, live.conversationId);
+  await live.sendTurn(one.id, "running");
+  await waitFor(() => first.sent.length === 1, "the first send to reach the gate");
+  await live.sendTurn(one.id, "queued");
+
+  live.runtime.config.getAdvisorSettings = () => ({ ...settings, model: "claude-opus-6" });
+  await live.runtime.ensureResident(live.ownerId, live.conversationId);
+  assert.equal(live.createRequests.length, 1);
+  assert.equal(live.sessionRow(one.id).status, "running");
+
+  releaseSend();
+  await waitFor(() => live.replies.length === 2, "both turns to complete");
+  assert.deepEqual(live.errors, []);
+});
+
+test("a settings change racing a send does not fail the turn", async (t) => {
+  const first = fakeProviderSession(661);
+  const second = fakeProviderSession(662);
+  const live = await createLiveRuntime(t, [first, second]);
+  const messageId = createUlid();
+  const now = new Date().toISOString();
+  const account = live.db.get("SELECT id FROM connector_accounts LIMIT 1");
+  await live.db.createWriteLane().transact((tx) => tx.run(
+    `INSERT INTO messages (id, conversation_id, provider, account_id, source_message_id, body, attachment_ids_json, received_at, created_at)
+     VALUES (?, ?, 'web', ?, ?, 'q', '[]', ?, ?)`,
+    messageId, live.conversationId, account.id, `web-user:${messageId}`, now, now,
+  ));
+  await live.runtime.ensureResident(live.ownerId, live.conversationId);
+  await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+
+  live.runtime.config.getAdvisorSettings = () => ({ ...settings, model: "claude-opus-6" });
+  const [sent] = await Promise.all([
+    live.runtime.ensureSessionAndEnqueue(live.ownerId, live.conversationId, messageId, { turn_id: "", text: "q", origin: { channel: "web" } }),
+    live.runtime.ensureResident(live.ownerId, live.conversationId),
+  ]);
+  await waitFor(() => live.replies.length === 1, "the turn to complete");
+  assert.equal(live.turnRow(sent.turnId).status, "completed");
+  assert.equal(live.sessionRow(live.turnRow(sent.turnId).session_id).status, "running");
+  assert.deepEqual(live.errors, []);
+});
+
+test("shutdown during a slow resident spawn terminates the new driver", async (t) => {
+  const slow = fakeProviderSession(671);
+  slow.terminated = false;
+  slow.terminateImmediately = () => { slow.terminated = true; };
+  const live = await createLiveRuntime(t, []);
+  let releaseSpawn;
+  const spawnGate = new Promise((resolveGate) => { releaseSpawn = resolveGate; });
+  let spawning = false;
+  live.runtime.config.providerClient.createSession = async () => { spawning = true; await spawnGate; return slow; };
+
+  const resident = live.runtime.ensureResident(live.ownerId, live.conversationId);
+  const settled = resident.then(() => "ok", (error) => error.message);
+  await waitFor(() => spawning, "the spawn to start");
+  live.runtime.stopImmediately();
+  releaseSpawn();
+
+  assert.match(await settled, /shutting down/);
+  assert.equal(slow.terminated, true);
+  assert.equal(live.runtime.activeDriver, null);
+  assert.equal(live.db.get("SELECT COUNT(*) AS n FROM advisor_sessions WHERE status IN ('starting', 'running')").n, 0);
 });

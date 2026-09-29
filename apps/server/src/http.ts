@@ -2864,12 +2864,13 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       const database = advisorSessionDatabase(context.db);
       const sessionRow = database?.get<{
         provider_session_id: string | null;
+        provider_id: string | null;
         model: string | null;
         effort: string | null;
         created_at: string;
         resumed_count: number;
       }>(
-        `SELECT provider_session_id, model, effort, created_at, resumed_count
+        `SELECT provider_session_id, provider_id, model, effort, created_at, resumed_count
            FROM advisor_sessions
           WHERE id = ?`,
         session.id,
@@ -2880,11 +2881,33 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
           WHERE session_id = ?`,
         session.id,
       );
-      const queuedRow = database?.get<{ count: number }>(
-        `SELECT COUNT(*) AS count
-           FROM advisor_turns
-          WHERE session_id = ? AND status = 'queued'`,
-        session.id,
+      // The Web view is per conversation: with conversation_id, only that
+      // conversation's turns count, so another interface's turn is not shown as thinking here.
+      const turnConversationId = nullableQuery(requestUrl(request).searchParams.get("conversation_id"));
+      const turnCount = (status: "queued" | "running") =>
+        database?.get<{ count: number }>(
+          `SELECT COUNT(*) AS count
+             FROM advisor_turns
+            WHERE session_id = ? AND status = ?${turnConversationId ? " AND conversation_id = ?" : ""}`,
+          session.id,
+          status,
+          ...(turnConversationId ? [turnConversationId] : []),
+        );
+      const queuedRow = turnCount("queued");
+      const runningRow = turnCount("running");
+
+      // A session that has not recorded its provider yet runs on the Advisor role's configured one.
+      const advisorRole = sessionRow?.provider_id?.trim()
+        ? undefined
+        : (await context.core.getModelSettings()).roles.find((role) => role.role === "advisor");
+      const providerId = (sessionRow?.provider_id?.trim() || advisorRole?.provider?.trim() || "anthropic").toLowerCase();
+      const pauseAliases = providerId === "anthropic" || providerId === "claude"
+        ? ["anthropic", "claude"]
+        : providerId === "openai" || providerId === "codex" || providerId === "openai/codex"
+          ? ["openai", "codex", "openai/codex"]
+          : [providerId];
+      const pause = (await context.core.listProviderPauses()).find(
+        (entry) => entry.state === "paused" && pauseAliases.includes(entry.provider.toLowerCase()),
       );
 
       sendJson(response, 200, {
@@ -2895,6 +2918,8 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
         compaction_count: Number(database ? compactionRow?.count ?? 0 : session.compaction_count ?? 0),
         last_compaction_at: database ? compactionRow?.last_compaction_at ?? null : session.last_compaction_at ?? null,
         queued_turns: Number(database ? queuedRow?.count ?? 0 : 0),
+        running_turns: Number(database ? runningRow?.count ?? 0 : 0),
+        provider_paused_until: pause?.resume_at ?? null,
         created_at: sessionRow ? sessionRow.created_at : session.started_at ?? null,
         resumed_count: Number(sessionRow ? sessionRow.resumed_count : session.resumed_count ?? 0),
       });

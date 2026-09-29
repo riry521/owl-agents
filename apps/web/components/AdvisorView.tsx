@@ -5,14 +5,21 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { clearAdvisorConversation, getActiveConversation, getAdvisorSession, ingestConversation, listMessages, postMessage } from '@/lib/api-client';
 import type { AdvisorSessionInfo, Message } from '@/lib/types';
-import { formatRelative, newUlid } from '@/lib/format';
+import { formatClock, formatDateTime, formatRelative, newUlid } from '@/lib/format';
 import { useLocale } from '@/lib/i18n';
 import { SendIcon } from '@/components/icons';
 
 const POLL_INTERVAL_MS = 5_000;
+const PENDING_POLL_INTERVAL_MS = 1_500;
+const AWAITING_REPLY_TIMEOUT_MS = 60_000;
+
+interface AwaitingReply {
+  messageId: string;
+  seenPending: boolean;
+}
 
 export function AdvisorView() {
-  const { t } = useLocale();
+  const { t, locale } = useLocale();
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[] | null>(null);
   const [sessionInfo, setSessionInfo] = useState<AdvisorSessionInfo | null>(null);
@@ -32,6 +39,10 @@ export function AdvisorView() {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const composingRef = useRef(false);
   const clearRevisionRef = useRef(0);
+  const refreshSeqRef = useRef(0);
+  const appliedMessagesSeqRef = useRef(0);
+  const appliedSessionSeqRef = useRef(0);
+  const [awaitingReply, setAwaitingReply] = useState<AwaitingReply | null>(null);
 
   useEffect(() => {
     void getActiveConversation()
@@ -62,9 +73,11 @@ export function AdvisorView() {
 
   const refresh = useCallback(async (id: string) => {
     const revision = clearRevisionRef.current;
+    const seq = ++refreshSeqRef.current;
     try {
       const list = await listMessages(id);
-      if (revision !== clearRevisionRef.current) return;
+      if (revision !== clearRevisionRef.current || seq < appliedMessagesSeqRef.current) return;
+      appliedMessagesSeqRef.current = seq;
       setMessages([...list].sort((a, b) => a.created_at.localeCompare(b.created_at)));
       setNow(Date.now());
       setLoadError(null);
@@ -73,11 +86,42 @@ export function AdvisorView() {
       setLoadError(humanizeLoadError(error, t));
     }
     try {
-      setSessionInfo(await getAdvisorSession());
+      const info = await getAdvisorSession(id);
+      if (seq >= appliedSessionSeqRef.current) {
+        appliedSessionSeqRef.current = seq;
+        setSessionInfo(info);
+      }
     } catch (error) {
       console.warn('[Owl] Advisor session status load failed', error);
     }
   }, [t]);
+
+  const runningTurns = sessionInfo?.running_turns ?? 0;
+  const queuedTurns = sessionInfo?.queued_turns ?? 0;
+  const turnPending = runningTurns > 0 || queuedTurns > 0;
+  const showIndicator = sending || awaitingReply !== null || turnPending;
+
+  // The enqueue happens after the send request returns, so keep the indicator
+  // up until the reply arrives, the turn is seen to finish, or nothing shows up.
+  useEffect(() => {
+    if (!awaitingReply) return;
+    const sentIndex = messages?.findIndex((m) => m.id === awaitingReply.messageId) ?? -1;
+    if (messages && sentIndex >= 0 && messages.slice(sentIndex + 1).some((m) => m.source === 'advisor')) {
+      setAwaitingReply(null);
+    } else if (turnPending && !awaitingReply.seenPending) {
+      setAwaitingReply({ ...awaitingReply, seenPending: true });
+    } else if (!turnPending && awaitingReply.seenPending) {
+      setAwaitingReply(null);
+    }
+    // Evaluated once per refresh result.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages, sessionInfo]);
+
+  useEffect(() => {
+    if (!awaitingReply || awaitingReply.seenPending) return;
+    const timer = setTimeout(() => setAwaitingReply(null), AWAITING_REPLY_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [awaitingReply]);
 
   useEffect(() => {
     if (!conversationId) return;
@@ -85,12 +129,12 @@ export function AdvisorView() {
     void refresh(conversationId);
     const timer = setInterval(() => {
       if (alive) void refresh(conversationId);
-    }, POLL_INTERVAL_MS);
+    }, showIndicator ? PENDING_POLL_INTERVAL_MS : POLL_INTERVAL_MS);
     return () => {
       alive = false;
       clearInterval(timer);
     };
-  }, [conversationId, refresh]);
+  }, [conversationId, refresh, showIndicator]);
 
   useLayoutEffect(() => {
     const messagesElement = messagesRef.current;
@@ -128,7 +172,8 @@ export function AdvisorView() {
     setSending(true);
     setSendError(null);
     try {
-      await postMessage(conversationId, body);
+      const posted = await postMessage(conversationId, body);
+      setAwaitingReply({ messageId: posted.message_id, seenPending: false });
       setDraft('');
       await refresh(conversationId);
     } catch (error) {
@@ -178,12 +223,25 @@ export function AdvisorView() {
       await clearAdvisorConversation(conversationId);
       clearRevisionRef.current += 1;
       setMessages([]);
+      setAwaitingReply(null);
       await refresh(conversationId);
     } catch (error) {
       console.error('[Owl] Clear conversation failed', error);
       setClearError(t('advisor.errorClear'));
     }
   }
+
+  const pausedUntil = sessionInfo?.provider_paused_until ?? null;
+  const pausedClock = pausedUntil === null ? '—' : isToday(pausedUntil)
+    ? formatClock(pausedUntil, locale)
+    : formatDateTime(pausedUntil, locale);
+  const indicatorLabel = sending || runningTurns > 0 || queuedTurns === 0
+    ? t('advisor.thinking')
+    : pausedUntil
+      ? (pausedClock === '—'
+        ? t('advisor.providerPaused')
+        : t('advisor.providerPausedUntil', { time: pausedClock }))
+      : t('advisor.waitingInQueue');
 
   function onSubmit(ev: FormEvent<HTMLFormElement>) {
     ev.preventDefault();
@@ -259,7 +317,7 @@ export function AdvisorView() {
             <Turn key={m.id} message={m} now={now} />
           ))
         )}
-        {sending && (
+        {showIndicator && (
           <div className="turn turn--advisor">
             <div className="turn__content">
               <div className="turn__header">
@@ -268,6 +326,9 @@ export function AdvisorView() {
               </div>
               <div className="turn__typing">
                 <span /><span /><span />
+                <em className="turn__typing-label">
+                  {indicatorLabel}
+                </em>
               </div>
             </div>
           </div>
@@ -325,6 +386,12 @@ function Turn({ message, now }: { message: Message; now: number }) {
       </div>
     </div>
   );
+}
+
+/** Whether the timestamp falls on today's date in the viewer's local time. */
+function isToday(iso: string): boolean {
+  const timestamp = Date.parse(iso);
+  return Number.isFinite(timestamp) && new Date(timestamp).toDateString() === new Date().toDateString();
 }
 
 function sessionStatusLabel(status: AdvisorSessionInfo['status'], t: (key: string) => string): string {

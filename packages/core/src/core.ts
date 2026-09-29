@@ -469,7 +469,12 @@ export class Core {
   private readonly learningPipeline: LearningPipeline;
   private readonly learningPipelineDebounceMs: number;
   private readonly advisorRuntime: AdvisorSessionRuntime | null;
-  private advisorIdleTimer: ReturnType<typeof setInterval> | null = null;
+  private advisorKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
+  private lastAdvisorResidentError: string | null = null;
+  /** Consecutive failed keep-alive bring-ups, and the earliest time the next unforced one may run. */
+  private advisorResidentFailures = 0;
+  private advisorResidentRetryAt = 0;
+  private advisorResidentSession: { id: string; upAt: number } | null = null;
   private skillTimer: ReturnType<typeof setInterval> | null = null;
   private learningTimer: ReturnType<typeof setInterval> | null = null;
   private learningTask: Promise<void> = Promise.resolve();
@@ -535,9 +540,7 @@ export class Core {
       now: options.now,
       debounce_ms: options.skillCuratorDebounceMs,
     });
-    this.advisorSessions = new AdvisorSessionManager(this.db, {
-      idleTimeoutMinutes: options.advisorIdleTimeoutMinutes,
-    });
+    this.advisorSessions = new AdvisorSessionManager(this.db);
     this.memorySaver = new MemorySaver(this.knowledge, () => ownerLanguage(this.db));
     const providerClient = options.providerClient as ProviderClient | undefined;
     if (providerClient?.createSession) {
@@ -1078,6 +1081,7 @@ export class Core {
     }
     if (this.advisorRuntime) await this.advisorRuntime.recoverTurns();
     if (this.advisorRuntime) void this.advisorRuntime.sweepWorkspaces();
+    void this.keepAdvisorResident();
     const startupWorktrees = await this.runWorktreeReconcile(undefined, "startup");
     // Only Works whose merge into the base was recorded, and whose branches
     // were not deleted yet, are cleaned up.
@@ -1091,10 +1095,10 @@ export class Core {
     for (const work of completedProjectWorks) {
       await this.deleteMergedWorkBranches(work.id, this.worktreeCleanupFailure(work.id, startupWorktrees));
     }
-    this.advisorIdleTimer = setInterval(() => {
-      void this.checkAdvisorIdle().catch((error) => console.error("[owl-core] Advisor idle check failed", error));
+    this.advisorKeepAliveTimer = setInterval(() => {
+      void this.keepAdvisorResident();
     }, 60_000);
-    this.advisorIdleTimer.unref();
+    this.advisorKeepAliveTimer.unref();
     this.skillTimer = setInterval(() => {
       this.refreshProcessSkillsPack();
       this.scheduleSkillReconciliation();
@@ -1328,9 +1332,9 @@ export class Core {
     }
     this.started = false;
     await this.librarianScheduler.stop();
-    if (this.advisorIdleTimer !== null) {
-      clearInterval(this.advisorIdleTimer);
-      this.advisorIdleTimer = null;
+    if (this.advisorKeepAliveTimer !== null) {
+      clearInterval(this.advisorKeepAliveTimer);
+      this.advisorKeepAliveTimer = null;
     }
     if (this.skillTimer !== null) {
       clearInterval(this.skillTimer);
@@ -2918,7 +2922,9 @@ export class Core {
   /** Restarts work that was parked behind a paused provider so it can continue on the currently configured models. */
   private retryWorkAfterRoleChange(): void {
     try { this.workflow.retryWaitingReviews(); } catch (error) { console.error("[owl-core] Could not retry waiting Reviews", error); }
-    void this.advisorRuntime?.retryQueuedTurns().catch((error) => console.error("[owl-core] Could not retry queued Advisor turns", error));
+    void this.advisorRuntime?.retryQueuedTurns()
+      .catch((error) => console.error("[owl-core] Could not retry queued Advisor turns", error))
+      .then(() => this.keepAdvisorResident(undefined, true));
   }
 
   public getModelPresets(): { version: number; presets: readonly ModelPreset[] } {
@@ -3104,10 +3110,12 @@ export class Core {
     );
     if (!existing) return { cleared: false };
 
+    let clearedSession = false;
     if (this.advisorRuntime) {
       const activeSession = this.advisorSessions.getActiveSession(existing.owner_id);
-      if (activeSession && activeSession.conversation_id === conversationId) {
+      if (activeSession) {
         await this.advisorRuntime.stopSession(activeSession.id, "cleared");
+        clearedSession = true;
       }
     }
 
@@ -3131,6 +3139,9 @@ export class Core {
       },
       outbox: [],
     });
+    // Clearing resets the Advisor's context, not its presence: a fresh
+    // session comes up right away.
+    if (clearedSession) await this.keepAdvisorResident(conversationId, true);
     return result.state;
   }
 
@@ -3744,8 +3755,7 @@ export class Core {
         }
 
         const { paths: attachmentPaths, notes } = this.resolveAttachmentPaths(message.id);
-        const session = await this.advisorRuntime.ensureSession(conversation.owner_id, conversationId);
-        await this.advisorRuntime.enqueueTurn(session.id, conversationId, message.id, {
+        await this.advisorRuntime.ensureSessionAndEnqueue(conversation.owner_id, conversationId, message.id, {
           turn_id: createUlid(),
           text: notes.length > 0 ? `${message.body}\n\n${notes.join("\n")}` : message.body,
           origin: origin ?? { channel: "web" },
@@ -3811,8 +3821,7 @@ export class Core {
 
   /**
    * End the owner's current persistent Advisor session without deleting the
-   * conversation. The next message will create a fresh session and can bridge
-   * from the previous session's transcript or workspace.
+   * conversation. The next message will create a fresh session.
    */
   public async restartAdvisorSession(ownerId: string): Promise<void> {
     const session = this.advisorSessions.getActiveSession(ownerId);
@@ -3871,7 +3880,7 @@ export class Core {
       : "依頼: Correct the requested label.\\n\\n受け入れ条件:\\n- The label reads as requested.";
     const base = [
       "You are the Owl Advisor, the operator's front door to Owl. Answer questions and discuss ideas directly. By default, every concrete request to perform work (make, fix, change, investigate, or build something), regardless of size, must become an Owl Work that you dispatch; ordinary wording like 'please do this' does not authorize you to do it yourself. In Japanese, 'これやっといて' is a normal Work request; phrases like '直接やって', 'Workにせず直接', or 'Advisor自身で実装して' explicitly ask you to bypass Work. Only bypass Work when the operator explicitly asks you to do the work directly yourself or without creating a Work. For that explicit exception, do the work in your Advisor workspace and do not create a Work. Never claim you lack permission to create a Work.",
-      "When you issue a Work for a concrete request without an explicit direct-work instruction (the rules below decide when), append exactly one ```owl-actions``` fenced JSON array containing {type:\"create_work\", description, payload:{title,summary,size,project_id}}. Core will create the Work and start it. Use size \"small\" for a focused, lightweight change so it goes directly to the Worker; use \"normal\" or \"large\" for work that needs Manager planning. Before returning create_work, compare the full request and conversation context against the complete current Project catalog in context. Set the exact project_id when one Project matches, use null only when none matches, and ask which Project to use if multiple are plausible. Project registration is optional. Example: ```owl-actions\n[{\"type\":\"create_work\",\"description\":\"Fix the label\",\"payload\":{\"title\":\"Fix the label\",\"summary\":\"" + exampleSummary + "\",\"size\":\"small\",\"project_id\":null}}]\n```.",
+      "When you issue a Work for a concrete request without an explicit direct-work instruction (the rules below decide when), append exactly one ```owl-actions``` fenced JSON array containing {type:\"create_work\", description, payload:{title,summary,size,project_id}}. Core will create the Work and start it. Use size \"small\" for a focused, lightweight change so it goes directly to the Worker; use \"normal\" or \"large\" for work that needs Manager planning. Before returning create_work, compare the full request and conversation context against the complete current Project catalog in context. Set the exact project_id when one Project matches, use null only when none matches, and ask which Project to use if multiple are plausible. Project registration is optional. The payload may also carry the optional backlog_item_ids (IDs of open backlog items from GET /api/v1/backlog (status=open) to link to the new Work; they become in_progress) and dismiss_backlog_item_ids (backlog item IDs to dismiss); every ID must belong to the same Project as the Work. Example: ```owl-actions\n[{\"type\":\"create_work\",\"description\":\"Fix the label\",\"payload\":{\"title\":\"Fix the label\",\"summary\":\"" + exampleSummary + "\",\"size\":\"small\",\"project_id\":null}}]\n```.",
       "First classify every request as small, normal, or large.",
       "When the operator explicitly asks for the strongest or Lead Designer to handle the design from the start, set create_work payload.design_mode to \"lead\" and size to \"normal\" or \"large\" so Manager plans a design Task. Otherwise omit design_mode (automatic routing). Never infer this override merely from Work size.",
       "For a small request whose goal, target, and completion condition are unambiguous, you may emit create_work in that turn.",
@@ -3885,7 +3894,7 @@ export class Core {
       language === "en"
         ? "Owl's language setting is English: reply to the operator in English and write every Work title and summary in English, even when the operator writes in another language."
         : "Owl's language setting is Japanese: reply to the operator in Japanese (日本語) and write every Work title and summary in Japanese, even when the operator writes in another language. Code, commands, paths, and identifiers stay as they are.",
-    ].join(" ") + "\n\n" + workSummaryInstruction(language) + "\n\n" + this.advisorBacklogInstruction();
+    ].join(" ") + "\n\n" + workSummaryInstruction(language);
     // No Work context here, so only Rule Store lines apply. A rule reload
     // changes this prompt, which the Advisor runtime detects as drift and
     // restarts the session with it before the next turn.
@@ -3916,14 +3925,6 @@ export class Core {
       '  When the Owner asks you to look at a screenshot ("スクショ見て", "look at the screenshot") without a path, list the image files in this folder sorted by modification time and open the newest one. If they mention several ("the last 2 screenshots"), open that many, newest first. Do not modify or delete files here.',
     ].join("\n") : null;
     return [base, rulesBlock, personaBlock, foldersBlock].filter((part): part is string => part !== null).join("\n\n");
-  }
-
-  private advisorBacklogInstruction(): string {
-    const open = this.db.get<{ count: number }>("SELECT COUNT(*) AS count FROM backlog_items WHERE status = 'open'")?.count ?? 0;
-    return [
-      `Review backlog: ${open} open item(s) are waiting. Read their contents with GET /api/v1/backlog (status=open) when relevant; they are not listed here.`,
-      "create_work payload may include backlog_item_ids (array of backlog item IDs to link to the new Work; they become in_progress) and dismiss_backlog_item_ids (array of backlog item IDs to dismiss). Both are optional; every ID must be an open item of the same Project as the Work.",
-    ].join(" ");
   }
 
   private advisorProcessSkillsLines(harness: "claude" | "codex"): string[] {
@@ -4280,11 +4281,70 @@ export class Core {
     });
   }
 
-  private async checkAdvisorIdle(): Promise<void> {
-    const stale = this.advisorSessions.getStaleSession(new Date());
-    if (!stale) return;
-    if (this.advisorRuntime) await this.advisorRuntime.stopSession(stale.id, "idle_timeout");
-    else await this.advisorSessions.endSession(stale.id, "idle_timeout");
+  /**
+   * Keeps the owner-wide Advisor session resident: brings it up when no
+   * provider process is alive (first start, exit, crash) and moves it onto
+   * changed settings. It is anchored to the current session's conversation,
+   * else to `conversationId`, else to the newest active conversation; with
+   * none, the Web conversation is created the way the Web view creates it.
+   * Never throws: a paused, unconfigured, or failing provider is retried on
+   * the next tick, backing off exponentially (1m up to 30m) while bring-ups
+   * keep failing or the fresh process keeps dying; `force` (a settings change
+   * or a clear) skips and resets that backoff.
+   */
+  private async keepAdvisorResident(conversationId?: string, force = false): Promise<void> {
+    if (!this.advisorRuntime || !this.started) return;
+    if (force) {
+      this.advisorResidentFailures = 0;
+      this.advisorResidentRetryAt = 0;
+    } else if (Date.now() < this.advisorResidentRetryAt) {
+      return;
+    }
+    const currentSessionId = (): string | null =>
+      this.db.get<{ id: string }>(
+        `SELECT id FROM advisor_sessions WHERE status IN ('starting', 'running', 'ending', 'suspended')
+          ORDER BY created_at DESC LIMIT 1`,
+      )?.id ?? null;
+    const before = currentSessionId();
+    let failed = false;
+    try {
+      const anchor = this.db.get<{ owner_id: string; conversation_id: string }>(
+        `SELECT conversation.owner_id AS owner_id, conversation.id AS conversation_id
+           FROM advisor_sessions AS session
+           JOIN conversations AS conversation ON conversation.id = session.conversation_id
+          WHERE session.status IN ('starting', 'running', 'ending', 'suspended')
+          ORDER BY session.created_at DESC LIMIT 1`,
+      ) ?? this.db.get<{ owner_id: string; conversation_id: string }>(
+        `SELECT owner_id, id AS conversation_id FROM conversations
+          WHERE ${conversationId ? "id = ?" : "is_active = 1 AND archived_at IS NULL"}
+          ORDER BY updated_at DESC LIMIT 1`,
+        ...(conversationId ? [conversationId] : []),
+      ) ?? { owner_id: DEFAULT_OWNER_ID, conversation_id: (await this.getActiveConversation()).conversation_id };
+      await this.advisorRuntime.ensureResident(anchor.owner_id, anchor.conversation_id);
+      this.lastAdvisorResidentError = null;
+    } catch (error) {
+      failed = true;
+      const message = error instanceof Error ? error.message : String(error);
+      if (message !== this.lastAdvisorResidentError) {
+        this.lastAdvisorResidentError = message;
+        console.error("[owl-core] Could not keep the Advisor session resident", error);
+      }
+    }
+    const now = Date.now();
+    const after = currentSessionId();
+    const resident = this.advisorResidentSession;
+    // A session this loop brought up that is already replaced within minutes
+    // counts as a failed bring-up, like a spawn error does.
+    if (!failed && !force && resident !== null && before === resident.id && after !== before && now - resident.upAt < 5 * 60_000) {
+      failed = true;
+    }
+    if (after !== null && after !== resident?.id) this.advisorResidentSession = { id: after, upAt: now };
+    if (failed && !force) {
+      this.advisorResidentFailures += 1;
+      this.advisorResidentRetryAt = now + Math.min(30, 2 ** (this.advisorResidentFailures - 1)) * 60_000;
+    } else if (!failed) {
+      this.advisorResidentFailures = 0;
+    }
   }
 
   /** A Task pipeline settled: schedule its Work again right away. */

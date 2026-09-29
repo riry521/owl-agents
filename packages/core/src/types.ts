@@ -590,7 +590,6 @@ export interface CoreOptions {
   readonly agentRunner: AgentRunner;
   readonly git?: GitGateway;
   readonly version: string;
-  readonly advisorIdleTimeoutMinutes?: number;
   /** Cap on active non-Executor agent runs per Work. Unlimited unless set. */
   readonly max_parallel?: number;
   readonly dispatcher?: CoreDispatcherOptions;

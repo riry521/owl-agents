@@ -1268,8 +1268,9 @@ export async function getActiveConversation(): Promise<string> {
 }
 
 /** GET /api/v1/advisor/session. */
-export async function getAdvisorSession(): Promise<AdvisorSessionInfo> {
-  return requestJson<AdvisorSessionInfo>('/advisor/session');
+export async function getAdvisorSession(conversationId?: string): Promise<AdvisorSessionInfo> {
+  const query = conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}` : '';
+  return requestJson<AdvisorSessionInfo>(`/advisor/session${query}`);
 }
 
 export async function clearAdvisorConversation(conversationId: string): Promise<void> {

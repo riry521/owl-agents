@@ -439,6 +439,8 @@ export interface AdvisorSessionInfo {
   compaction_count?: number;
   last_compaction_at?: RFC3339 | null;
   queued_turns?: number;
+  running_turns?: number;
+  provider_paused_until?: RFC3339 | null;
   created_at?: RFC3339 | null;
   resumed_count?: number;
 }
