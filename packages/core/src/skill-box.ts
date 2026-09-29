@@ -577,7 +577,6 @@ export class SkillBox {
 
       const now = this.now();
       let recordedFeedback = 0;
-      let ignoredNames = feedback.skills_used.filter((entry) => entry && typeof entry.name === "string" && !validateSkillName(entry.name)).length;
       const usageByName = new Map<string, SkillFeedback["skills_used"][number]>();
       for (const entry of feedback.skills_used) {
         if (!entry || !validateSkillName(entry.name) || !["helpful", "misleading", "irrelevant"].includes(entry.verdict) || typeof entry.note !== "string") continue;
@@ -585,10 +584,8 @@ export class SkillBox {
       }
       for (const [name, entry] of usageByName) {
         const skill = transaction.get<{ current_revision: number }>("SELECT current_revision FROM skills WHERE name = ?", name);
-        if (!skill) {
-          ignoredNames += 1;
-          continue;
-        }
+        // Names outside the Skill Box (plugin or process skills) are expected; skip them quietly.
+        if (!skill) continue;
         const existing = transaction.get<{ read_detected: number; verdict: string | null }>(
           "SELECT read_detected, verdict FROM skill_usages WHERE agent_run_id = ? AND skill_name = ?",
           agentRunId,
@@ -623,7 +620,6 @@ export class SkillBox {
           name,
         );
       }
-      if (ignoredNames > 0) this.logger.warn(`[skill-box] Ignored ${ignoredNames} feedback entries for unknown skills from Agent run ${agentRunId}.`);
 
       const { inserted } = this.insertProposalRows(transaction, agentRunId, run.work_id, run.project_id, feedback.skill_proposals);
       return { insertedProposals: inserted, recordedFeedback };

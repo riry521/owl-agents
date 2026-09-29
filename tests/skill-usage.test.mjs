@@ -6,6 +6,8 @@ import { test } from "node:test";
 
 import { openDatabase } from "../packages/db/dist/index.js";
 import { detectSkillReads, SkillBox } from "../packages/core/dist/skill-box.js";
+import { Core } from "../packages/core/dist/index.js";
+import { ExternalCoreAdapter } from "../apps/server/dist/core.js";
 import { createOwlHttpServer } from "../apps/server/dist/http.js";
 
 const migrations = join(process.cwd(), "packages/db/migrations");
@@ -156,4 +158,46 @@ test("guard response is unchanged when read recording fails; owner checks and de
   assert.deepEqual((await deniedResponse.json()).data, decision);
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 0));
   assert.equal(recorded.length, 1, "a denied call is not recorded as a read");
+});
+
+test("ExternalCoreAdapter forwards skill reads so read_detected is recorded; writes and non-skill paths are ignored", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "owl-skill-adapter-"));
+  const db = openDatabase(join(root, "owl.db"));
+  db.migrate(migrations);
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((tx) => {
+    tx.run("INSERT INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Owner', ?, ?)", now, now);
+    tx.run("INSERT INTO works (id, owner_id, title, summary, size, state, rules_json, related_work_ids_json, created_at, updated_at) VALUES ('work-1', 'owner:default', 'Work', '', 'normal', 'ready', '[]', '[]', ?, ?)", now, now);
+    tx.run("INSERT INTO agent_runs (id, work_id, role, provider, model, status, created_at, updated_at) VALUES ('run-1', 'work-1', 'worker', 'test', 'test', 'running', ?, ?)", now, now);
+  });
+  const noRun = async () => ({ outcome: "failed" });
+  const durableCore = new Core({
+    db,
+    agentRunner: { runManagerPlan: noRun, runWorker: noRun, runReviewer: noRun, runAdvisor: async () => ({ reply: "" }), runCurator: async () => ({ ok: false, error: "curator_unavailable" }) },
+    version: "test",
+    owlRoot: root,
+    dataDir: root,
+  });
+  await durableCore.start();
+  t.after(async () => { await durableCore.stop?.(); db.close(); await rm(root, { recursive: true, force: true }); });
+  await durableCore.skillBox.applyRevision({
+    name: "release-procedure",
+    files: { "SKILL.md": "---\nname: release-procedure\ndescription: Release steps.\nscope: global\ntags: []\n---\n# Release\n" },
+    meta: { description: "Release steps.", tags: [], scope: "global" },
+    actor: "user",
+    action: "create",
+    reason: "initial",
+    trial: false,
+  });
+  const adapter = new ExternalCoreAdapter(durableCore, db, root, root);
+  const read = (tool_name, tool_input, normalized_segments = []) =>
+    adapter.recordSkillReads({ agent_run_id: "run-1", tool_name, tool_input, cwd: "/tmp/work", normalized_segments });
+  const count = () => db.get("SELECT COUNT(*) AS count FROM skill_usages WHERE read_detected = 1").count;
+
+  await read("Edit", { file_path: `${root}/skills/release-procedure/SKILL.md`, old_string: "a", new_string: "b" });
+  await read("Read", { file_path: `${root}/src/app.ts` });
+  assert.equal(count(), 0);
+  await read("Read", { file_path: `${root}/skills/release-procedure/SKILL.md` });
+  assert.equal(count(), 1);
+  assert.equal(db.get("SELECT read_detected FROM skill_usages WHERE agent_run_id = 'run-1'").read_detected, 1);
 });

@@ -1225,6 +1225,13 @@ interface ExternalCommandResponse {
 interface ExternalCore {
   ruleStore?: unknown;
   recordAgentResearch?(agent: GuardTokenAgent, capture: WebResearchCapture): Promise<{ readonly accepted: boolean; readonly reason?: string }>;
+  recordSkillReads?(input: {
+    readonly agent_run_id: string;
+    readonly tool_name: string;
+    readonly tool_input: Readonly<Record<string, unknown>>;
+    readonly cwd: string;
+    readonly normalized_segments?: readonly (readonly string[])[];
+  }): Promise<void>;
   advisorRespond?(conversationId: string, messageId: string, origin?: AdvisorOrigin): Promise<void>;
   advisorSessions?: AdvisorSessionsPort;
   restartAdvisorSession?(ownerId: string): Promise<void>;
@@ -2210,6 +2217,15 @@ export class ExternalCoreAdapter implements CorePort {
       return await this.core.recordAgentResearch(agent, capture);
     } catch (error) {
       throw externalError(error, "recordAgentResearch");
+    }
+  }
+
+  async recordSkillReads(input: Parameters<NonNullable<ExternalCore["recordSkillReads"]>>[0]): Promise<void> {
+    if (typeof this.core.recordSkillReads !== "function") return;
+    try {
+      await this.core.recordSkillReads(input);
+    } catch (error) {
+      throw externalError(error, "recordSkillReads");
     }
   }
 

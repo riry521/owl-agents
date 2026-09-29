@@ -152,7 +152,7 @@ const ENUMERATION_INSTRUCTION =
   "When the acceptance criteria cover every occurrence of something (all call sites, every label, each event type), first enumerate the targets with a search (grep, or the semantic and impact-analysis tools when available) before changing anything, then handle every hit. In verification.method, name that search and how many targets it found, so the Reviewer can re-run it.";
 
 const SKILL_FEEDBACK_INSTRUCTION =
-"List each skill you actually used in skills_used, with helpful, misleading, or irrelevant and a short note. Propose a skill only when you solved a multi-step procedure that can be reused, found a reusable fix after an error or dead end, learned a lasting approach from Owner or Reviewer feedback, or found a mistake or gap in an existing skill. Leave skill_proposals empty otherwise.";
+"List each skill you actually used in skills_used, with helpful, misleading, or irrelevant and a short note. Only list Skill Box skills that appear in the context.skills index; never list plugin or process skills (e.g. superpowers:*) there. Propose a skill only when you solved a multi-step procedure that can be reused, found a reusable fix after an error or dead end, learned a lasting approach from Owner or Reviewer feedback, or found a mistake or gap in an existing skill. Leave skill_proposals empty otherwise.";
 
 const RESULT_RULES: readonly string[] = [
   "Fill in result using these exact rules (do not guess or hedge):",

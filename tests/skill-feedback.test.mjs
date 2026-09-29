@@ -106,6 +106,19 @@ test("Worker and Reviewer skill output is returned separately from stored report
   assert.equal(Object.hasOwn(reviewer.report, "skills_used"), false);
 });
 
+test("skills_used instructions limit entries to Skill Box skills for every role", async () => {
+  const calls = [];
+  const runner = runnerWith(asFeedback, calls);
+  await runner.runWorker(coreWorkerRequest());
+  await runner.runReviewer(coreReviewerRequest());
+  await runner.runManagerPlan({
+    invocation_id: "manager-plan-run", work_id: "work-1", task_id: null, attempt: 1,
+    context: { mode: "plan", work: { id: "work-1", title: "Release" } },
+  });
+  assert.equal(calls.length, 3);
+  for (const call of calls) assert.match(call.prompt, /Only list Skill Box skills that appear in the context\.skills index; never list plugin or process skills/u);
+});
+
 test("Manager plan and final output return skill feedback separately", async () => {
   const calls = [];
   const runner = runnerWith(asFeedback, calls, "codex-cli/v1");
@@ -184,7 +197,8 @@ function skillFiles(revisionText) {
 
 test("feedback merges with reads in either order and keeps the first revision", async (t) => {
   const { root, db, now } = await openUsageDatabase(t);
-  const skillBox = new SkillBox({ db, owlRoot: root, logger: { warn() {}, error() {} } });
+  const warnings = [];
+  const skillBox = new SkillBox({ db, owlRoot: root, logger: { warn: (message) => warnings.push(message), error() {} } });
   await seedRun(db, now, "run-read-first");
   await seedRun(db, now, "run-feedback-first");
   const meta = { description: "Release steps.", tags: ["release"], scope: "global" };
@@ -194,6 +208,7 @@ test("feedback merges with reads in either order and keeps the first revision", 
     skills_used: [
       { name: "release-procedure", verdict: "helpful", note: "The ordering helped." },
       { name: "missing-skill", verdict: "helpful", note: "Unknown names are ignored." },
+      { name: "superpowers:writing-plans", verdict: "helpful", note: "Plugin skills are ignored." },
     ],
     skill_proposals: [proposals[0], { ...proposals[0], kind: "update", target: "release-procedure", summary: "Update release steps" }],
   };
@@ -209,6 +224,8 @@ test("feedback merges with reads in either order and keeps the first revision", 
 
   const first = db.get("SELECT * FROM skill_usages WHERE agent_run_id = 'run-read-first'");
   const second = db.get("SELECT * FROM skill_usages WHERE agent_run_id = 'run-feedback-first'");
+  assert.equal(db.all("SELECT skill_name FROM skill_usages WHERE agent_run_id = 'run-read-first'").length, 1);
+  assert.deepEqual(warnings, []);
   assert.equal(first.revision, 1);
   assert.equal(first.read_detected, 1);
   assert.equal(first.verdict, "helpful");
