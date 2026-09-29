@@ -1724,6 +1724,55 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/works/{work_id}/backlog/link:
+    parameters:
+      - $ref: '#/components/parameters/WorkId'
+    post:
+      operationId: linkBacklogItems
+      summary: Link open review backlog items to an existing Work
+      description: Items become done when the Work is completed, otherwise in_progress.
+      security:
+        - ownerBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LinkBacklogItemsCommand'
+      responses:
+        '200':
+          description: Backlog items linked to the Work.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LinkBacklogItemsResponse'
+        '400':
+          description: Invalid command, item IDs, or items from a different Project than the Work.
+          x-error-codes: [validation_error]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Work or backlog item not found.
+          x-error-codes: [work_not_found, backlog_item_not_found]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: An item is not open, or the Work is cancelled.
+          x-error-codes: [invalid_state_transition]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/backlog:
     get:
       operationId: listBacklogItems
@@ -1742,11 +1791,17 @@ paths:
           schema:
             $ref: '#/components/schemas/ULID'
         - in: query
+          name: issued_work_id
+          required: false
+          description: Only items linked to this Work (in_progress or done).
+          schema:
+            $ref: '#/components/schemas/ULID'
+        - in: query
           name: status
           required: false
           schema:
             type: string
-            enum: [open, done, dismissed]
+            enum: [open, in_progress, done, dismissed]
         - in: query
           name: limit
           required: false
@@ -1849,7 +1904,7 @@ paths:
               $ref: '#/components/schemas/IssueBacklogWorkCommand'
       responses:
         '201':
-          description: Work issued and backlog items marked done.
+          description: Work issued and backlog items marked in_progress.
           content:
             application/json:
               schema:
@@ -5268,7 +5323,7 @@ components:
           type: string
         status:
           type: string
-          enum: [open, done, dismissed]
+          enum: [open, in_progress, done, dismissed]
         issued_work_id:
           anyOf:
             - $ref: '#/components/schemas/ULID'
@@ -5335,6 +5390,32 @@ components:
                   items:
                     $ref: '#/components/schemas/BacklogItem'
               additionalProperties: false
+    LinkBacklogItemsCommand:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+        - type: object
+          properties:
+            payload:
+              $ref: '#/components/schemas/DismissBacklogItemsPayload'
+    LinkBacklogItemsResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [work_id, status, items]
+              properties:
+                work_id:
+                  $ref: '#/components/schemas/ULID'
+                status:
+                  type: string
+                  enum: [in_progress, done]
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/BacklogItem'
+              additionalProperties: false
     IssueBacklogWorkPayload:
       type: object
       required: [item_ids, title, summary, size]
@@ -5371,7 +5452,7 @@ components:
           properties:
             data:
               type: object
-              required: [work_id, display_number, state, state_version, project_id, item_ids]
+              required: [work_id, display_number, state, state_version, project_id, item_ids, status, items]
               properties:
                 work_id:
                   $ref: '#/components/schemas/ULID'
@@ -5393,6 +5474,13 @@ components:
                   type: array
                   items:
                     $ref: '#/components/schemas/ULID'
+                status:
+                  type: string
+                  const: in_progress
+                items:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/BacklogItem'
               additionalProperties: false
     ModelSettingsData:
       type: object

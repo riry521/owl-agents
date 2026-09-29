@@ -54,6 +54,8 @@ export interface FinalManagerVerdict {
   readonly verdict: "complete" | "incomplete";
   readonly summary: string;
   readonly missing: readonly FinalMissingItem[];
+  /** Backlog items the Manager judged not addressed; malformed entries are dropped. */
+  readonly unaddressed_backlog_items: readonly { readonly item_id: string; readonly reason: string }[];
   readonly lessons: readonly FinalLesson[];
 }
 

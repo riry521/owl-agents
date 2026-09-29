@@ -47,6 +47,7 @@ import type {
   IntegrationTestResult,
   IssueBacklogWorkInput,
   IssueBacklogWorkResult,
+  LinkBacklogItemsResult,
   ExecutorConfig,
   ProviderInfo,
   ProviderPauseView,
@@ -77,6 +78,7 @@ import type {
 } from '@/lib/types';
 import { runOrdinals } from '@/lib/format';
 import type { Locale } from '@/lib/i18n';
+import { linkableWorks } from './backlog-link.mjs';
 import { normalizeWorkDetailData } from '@/lib/work-detail-safety.mjs';
 
 type ApiEnvelope<T> = {
@@ -465,15 +467,22 @@ export async function getWorkDesign(id: ULID, taskId: ULID): Promise<WorkDesignD
 
 /** GET /api/v1/backlog. */
 export async function listBacklog(
-  filter: { status?: BacklogStatus; project_id?: string } = {},
+  filter: { status?: BacklogStatus; project_id?: string; issued_work_id?: string } = {},
 ): Promise<BacklogItem[]> {
   const params = new URLSearchParams();
   if (filter.status) params.set('status', filter.status);
   if (filter.project_id) params.set('project_id', filter.project_id);
+  if (filter.issued_work_id) params.set('issued_work_id', filter.issued_work_id);
   const queryString = params.toString();
   const query = queryString ? `?${queryString}` : '';
   const response = await requestJson<{ request_id: string; data: BacklogItem[] }>(`/backlog${query}`);
   return response.data;
+}
+
+/** GET /api/v1/works (archived included), narrowed to the Works that can take items of a project. */
+export async function listLinkableWorks(projectId: string | null): Promise<WorkSummary[]> {
+  const works = await listAll<WorkSummary>('/works', { archived: 'include' });
+  return linkableWorks(works.map(normalizeWorkSummary), projectId);
 }
 
 /** GET /api/v1/works/{work_id}/backlog. */
@@ -493,6 +502,17 @@ export async function dismissBacklogItems(itemIds: string[]): Promise<BacklogIte
     'POST',
   );
   return response.data.items;
+}
+
+/** POST /api/v1/works/{work_id}/backlog/link with the Owner command envelope. */
+export async function linkBacklogItems(workId: ULID, itemIds: string[]): Promise<LinkBacklogItemsResult> {
+  const response = await command<LinkBacklogItemsResult>(
+    `/works/${encodeURIComponent(workId)}/backlog/link`,
+    { item_ids: itemIds },
+    0,
+    'POST',
+  );
+  return response.data;
 }
 
 /** POST /api/v1/backlog/issue-work with the Owner command envelope. */

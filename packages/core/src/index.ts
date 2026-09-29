@@ -89,22 +89,31 @@ export { LEGACY_WORKSPACES_DIRNAME, resolveWorkspacesRoot, safeSegment, Workspac
 export {
   BACKLOG_STATUSES,
   backlogDedupeKey,
+  detachWorkBacklogOnDeleteInTransaction,
   dismissBacklogItemsInTransaction,
   issueBacklogWorkInTransaction,
+  linkBacklogItemsToWorkInTransaction,
   listBacklogItems,
   normalizeBacklogFile,
   normalizeBacklogProblem,
   registerReviewBacklogInTransaction,
+  releaseWorkBacklogInTransaction,
+  restoreBacklogItemInTransaction,
+  settleWorkBacklogOnCompletionInTransaction,
 } from "./review-backlog";
 export type {
   BacklogItem,
   BacklogListFilter,
   BacklogListResult,
+  BacklogRestoreTarget,
+  BacklogSettleResult,
   BacklogStatus,
   DismissBacklogItemsData,
   DismissBacklogItemsPayload,
   IssueBacklogWorkData,
   IssueBacklogWorkPayload,
+  LinkBacklogItemsData,
+  LinkBacklogItemsPayload,
 } from "./review-backlog";
 
 export type {

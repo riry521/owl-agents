@@ -18,7 +18,7 @@ import { builtinProviderHarness, designDocumentPath, isRuleRole, RULE_ROLES } fr
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
 import { RESEARCH_CAPTURE_ROLES } from "../../../packages/shared/dist/permission-args.js";
 import { extractWebResearchCapture } from "../../../packages/shared/dist/web-research.js";
-import type { CoreEvent, CorePort, CreateProjectInput, DeleteProjectInput, InboundMessageInput, IntegrationConfigPatch, IntegrationProvider, JsonObject, PostMessageInput, Project, RoleModelSettingInput, ExecutorSettingsConfig, ProcessSkillsSettingsInput, RuntimeConfig, UpdateProjectInput, VerificationCommand } from "./types.js";
+import type { CoreEvent, CorePort, CreateProjectInput, DeleteProjectInput, InboundMessageInput, IntegrationConfigPatch, IntegrationProvider, JsonObject, PostMessageInput, Project, BacklogStatus, RoleModelSettingInput, ExecutorSettingsConfig, ProcessSkillsSettingsInput, RuntimeConfig, UpdateProjectInput, VerificationCommand } from "./types.js";
 import type { KnowledgeAutomationSettings } from "../../../packages/shared/dist/knowledge-automation.js";
 import { browseProjectFolders, initializeExistingProjectFolder, initializeNewProjectFolder, inspectProjectFolder } from "./project-registration.js";
 
@@ -211,9 +211,10 @@ interface KnowledgeMigrationApiPort {
 }
 
 interface BacklogApiPort {
-  listBacklogItems(filter: { status?: string; project_id?: string; work_id?: string; limit: number; offset: number }): { items: unknown[]; next_offset: number | null };
+  listBacklogItems(filter: { status?: string; project_id?: string; work_id?: string; issued_work_id?: string; limit: number; offset: number }): { items: unknown[]; next_offset: number | null };
   dismissBacklogItems(request: JsonObject): Promise<SkillCommandResult>;
   issueBacklogWork(request: JsonObject): Promise<SkillCommandResult>;
+  linkBacklogItems(workId: string, request: JsonObject): Promise<SkillCommandResult>;
 }
 
 interface AdvisorSessionReadDatabase {
@@ -1421,7 +1422,7 @@ function ruleProposalApiError(error: unknown): unknown {
 
 function requireBacklogApi(core: CorePort): BacklogApiPort {
   const candidate = core as CorePort & Partial<BacklogApiPort>;
-  const methods: Array<keyof BacklogApiPort> = ["listBacklogItems", "dismissBacklogItems", "issueBacklogWork"];
+  const methods: Array<keyof BacklogApiPort> = ["listBacklogItems", "dismissBacklogItems", "issueBacklogWork", "linkBacklogItems"];
   if (methods.some((method) => typeof candidate[method] !== "function")) {
     throw new ApiError(503, "core_not_ready", "The loaded Core does not support the Review Backlog API.");
   }
@@ -1434,10 +1435,10 @@ function validateBacklogProjectId(value: string | null): string | undefined {
   return value;
 }
 
-function validateBacklogStatus(value: string | null): string | undefined {
+function validateBacklogStatus(value: string | null): BacklogStatus | undefined {
   if (value === null) return undefined;
-  if (value !== "open" && value !== "done" && value !== "dismissed") {
-    throw new ApiError(400, "validation_error", "statusはopen、done、dismissedのいずれかで指定してください。", { field: "status" });
+  if (value !== "open" && value !== "in_progress" && value !== "done" && value !== "dismissed") {
+    throw new ApiError(400, "validation_error", "statusはopen、in_progress、done、dismissedのいずれかで指定してください。", { field: "status" });
   }
   return value;
 }
@@ -1451,6 +1452,11 @@ function validateBacklogItemIds(value: unknown): string[] {
 
 function validateDismissBacklogPayload(payload: JsonObject): { item_ids: string[] } {
   exactKeys(payload, ["item_ids"], "DismissBacklogItems payload");
+  return { item_ids: validateBacklogItemIds(payload.item_ids) };
+}
+
+function validateLinkBacklogItemsPayload(payload: JsonObject): { item_ids: string[] } {
+  exactKeys(payload, ["item_ids"], "LinkBacklogItems payload");
   return { item_ids: validateBacklogItemIds(payload.item_ids) };
 }
 
@@ -1576,6 +1582,20 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       offset: parseBacklogOffset(url.searchParams.get("offset")),
     });
     sendJson(response, 200, { request_id: requestIdValue, data: result.items, next_offset: result.next_offset });
+    return;
+  }
+
+  const workBacklogLinkMatch = pathname.match(new RegExp(`^${API_PREFIX}/works/([^/]+)/backlog/link$`));
+  if (workBacklogLinkMatch && method === "POST") {
+    requireOwner(request);
+    const workId = pathId(workBacklogLinkMatch[1]!, "work_id");
+    const command = commandEnvelope(await readRequestBody(request));
+    const payload = validateLinkBacklogItemsPayload(command.payload);
+    const result = await runCommand(context, pathname, command, 200, async () => {
+      const linked = await requireBacklogApi(context.core).linkBacklogItems(workId, { ...command, payload });
+      return { data: linked.data, version: linked.version };
+    });
+    sendJson(response, 200, result);
     return;
   }
 
@@ -2286,10 +2306,13 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     const status = validateBacklogStatus(url.searchParams.get("status"));
     const workIdValue = url.searchParams.get("work_id");
     const workId = workIdValue === null ? undefined : pathId(workIdValue, "work_id");
+    const issuedWorkIdValue = url.searchParams.get("issued_work_id");
+    const issuedWorkId = issuedWorkIdValue === null ? undefined : pathId(issuedWorkIdValue, "issued_work_id");
     const result = requireBacklogApi(context.core).listBacklogItems({
       ...(projectId === undefined ? {} : { project_id: projectId }),
       ...(status === undefined ? {} : { status }),
       ...(workId === undefined ? {} : { work_id: workId }),
+      ...(issuedWorkId === undefined ? {} : { issued_work_id: issuedWorkId }),
       limit: parseBacklogLimit(url.searchParams.get("limit")),
       offset: parseBacklogOffset(url.searchParams.get("offset")),
     });

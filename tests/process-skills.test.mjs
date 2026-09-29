@@ -619,8 +619,8 @@ test("prompts with no detected pack stay byte-identical", () => {
     executor: buildExecutorPrompt(executorTask),
   };
   const expected = {
-    manager_plan: "3643af4bbc610d5680218f9bea7293b01a47bf0f9446fba1cc949f06eded3890",
-    manager_finalize: "3b270f12558d2c794aa5ea42888855394c0571a67bc383ed10382ae0c386a75e",
+    manager_plan: "dfbf5f66278ccdbc61d43030fc87690107a05ca6c5bc2c50d899ee5547141f78",
+    manager_finalize: "e0b7488a17803d22d6ea7b562e2baa6825c51eaa83d8bdf9b2b0e531fd39833a",
     worker: "4794ef7dd5a2f58367e179c19978bc594ede13a4942d9c72c17eec11ad9d6bfc",
     hybrid_plan: "443a103fbc67de2f88b17d66cc30f9c3f75fd4f69e5931be242e2fbfe2a914f4",
     hybrid_verdict: "25dbef381d48f177fc56541c7b8c90ef3e28ec2ede0415f392072813808ccab9",

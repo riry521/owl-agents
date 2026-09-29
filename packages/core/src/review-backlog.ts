@@ -9,8 +9,8 @@ import type {
   JsonObject,
 } from "./types";
 
-export type BacklogStatus = "open" | "done" | "dismissed";
-export const BACKLOG_STATUSES: readonly BacklogStatus[] = ["open", "done", "dismissed"];
+export type BacklogStatus = "open" | "in_progress" | "done" | "dismissed";
+export const BACKLOG_STATUSES: readonly BacklogStatus[] = ["open", "in_progress", "done", "dismissed"];
 export const BACKLOG_LIST_LIMIT = 500;
 export const BACKLOG_ITEM_IDS_MAX = 100;
 
@@ -18,6 +18,8 @@ export interface BacklogListFilter {
   readonly project_id?: string;
   readonly status?: BacklogStatus;
   readonly work_id?: string;
+  /** Items linked to this Work (in_progress or done). */
+  readonly issued_work_id?: string;
   readonly limit?: number;
   readonly offset?: number;
 }
@@ -73,6 +75,33 @@ export interface IssueBacklogWorkData extends JsonObject {
   readonly state_version: number;
   readonly project_id: string | null;
   readonly item_ids: string[];
+  readonly status: "in_progress";
+  readonly items: BacklogItem[];
+}
+
+export interface LinkBacklogItemsPayload extends JsonObject {
+  readonly item_ids: string[];
+}
+
+export interface LinkBacklogItemsData extends JsonObject {
+  readonly work_id: string;
+  readonly status: "in_progress" | "done";
+  readonly items: BacklogItem[];
+}
+
+export interface BacklogRestoreTarget {
+  readonly id: string;
+  readonly work_id: string;
+  readonly project_id: string | null;
+  readonly dedupe_key: string;
+}
+
+export interface BacklogSettleResult {
+  readonly done: string[];
+  readonly restored: string[];
+  readonly dismissed: string[];
+  /** Unaddressed ids that are not in_progress items of this Work. */
+  readonly ignored: string[];
 }
 
 type BacklogReader = Pick<CoreDatabase, "get" | "all">;
@@ -192,20 +221,32 @@ export function listBacklogItems(db: BacklogReader, filter: BacklogListFilter = 
   const status = filter.status ?? null;
   const projectId = filter.project_id ?? null;
   const workId = filter.work_id ?? null;
+  const issuedWorkId = filter.issued_work_id ?? null;
   const rows = db.all<BacklogItem>(
     `${BACKLOG_ITEMS_SELECT}
      WHERE (? IS NULL OR b.status = ?)
        AND (? IS NULL OR b.project_id = ?)
        AND (? IS NULL OR b.work_id = ?)
+       AND (? IS NULL OR b.issued_work_id = ?)
      ORDER BY b.created_at DESC, b.id DESC
      LIMIT ? OFFSET ?`,
-    status, status, projectId, projectId, workId, workId, limit + 1, offset,
+    status, status, projectId, projectId, workId, workId, issuedWorkId, issuedWorkId, limit + 1, offset,
   );
   const hasMore = rows.length > limit;
   return {
     items: hasMore ? rows.slice(0, limit) : rows,
     next_offset: hasMore ? offset + limit : null,
   };
+}
+
+/** The in_progress items issued to a Work, all of them (no list limit), oldest first. */
+export function listInProgressBacklogItemsOfWork(db: BacklogReader, workId: string): BacklogItem[] {
+  return db.all<BacklogItem>(
+    `${BACKLOG_ITEMS_SELECT}
+     WHERE b.issued_work_id = ? AND b.status = 'in_progress'
+     ORDER BY b.created_at, b.id`,
+    workId,
+  );
 }
 
 export function dismissBacklogItemsInTransaction(
@@ -260,7 +301,7 @@ export function issueBacklogWorkInTransaction(
     project_id: projectIds[0],
   }, ownerId);
   const update = tx.run(
-    `UPDATE backlog_items SET status = 'done', issued_work_id = ?, updated_at = ?
+    `UPDATE backlog_items SET status = 'in_progress', issued_work_id = ?, updated_at = ?
       WHERE id IN (${placeholders(ids.length)}) AND status = 'open'`,
     work.id,
     now,
@@ -276,7 +317,161 @@ export function issueBacklogWorkInTransaction(
     state_version: work.state_version,
     project_id: work.project_id,
     item_ids: ids,
+    status: "in_progress",
+    items: readBacklogItemsByIds(tx, ids),
   };
+}
+
+/**
+ * Advisor create_work: link `linkIds` to the just-created Work and dismiss `dismissIds`.
+ * Every item must be open and belong to the Work's Project. Returns the Work summary
+ * with the affected items appended (unchanged when both lists are empty).
+ */
+export function applyAdvisorBacklogInTransaction(
+  tx: CoreWriteLaneTransaction,
+  work: { readonly id: string; readonly project_id: string | null; readonly summary: string },
+  linkIds: readonly string[],
+  dismissIds: readonly string[],
+  now: string,
+): string {
+  if (linkIds.length === 0 && dismissIds.length === 0) return work.summary;
+  const overlap = linkIds.filter((id) => dismissIds.includes(id));
+  if (overlap.length > 0) {
+    throw validationError("A backlog item cannot be both linked and dismissed.", { field: "dismiss_backlog_item_ids", item_ids: overlap });
+  }
+  const linked = linkIds.length === 0 ? [] : linkBacklogItemsToWorkInTransaction(tx, work.id, linkIds, now).items;
+  let dismissed: BacklogItem[] = [];
+  if (dismissIds.length > 0) {
+    const ids = validateItemIds(dismissIds);
+    const rows = readBacklogStates(tx, ids);
+    assertFoundAndOpen(rows, ids);
+    const mismatched = rows.filter((row) => row.project_id !== work.project_id);
+    if (mismatched.length > 0) {
+      throw validationError("Backlog items must belong to the same Project as the Work.", {
+        field: "dismiss_backlog_item_ids",
+        work_project_id: work.project_id,
+        item_ids: mismatched.map((row) => row.id),
+      });
+    }
+    dismissed = dismissBacklogItemsInTransaction(tx, ids, now);
+  }
+  const line = (item: BacklogItem) => `- ${item.id}: ${item.file}:${item.line} ${item.problem}`;
+  const sections = [
+    linked.length > 0 ? `## Linked backlog items\n${linked.map(line).join("\n")}` : "",
+    dismissed.length > 0 ? `## Dismissed backlog items\n${dismissed.map(line).join("\n")}` : "",
+  ].filter(Boolean);
+  const summary = `${work.summary}\n\n${sections.join("\n\n")}`;
+  if (summary.length > 20000) {
+    throw validationError("Work summary with the backlog items appended is too long.", { field: "summary", max_length: 20000 });
+  }
+  tx.run("UPDATE works SET summary = ? WHERE id = ?", summary, work.id);
+  return summary;
+}
+
+/** Return a linked item to the backlog: open, or dismissed when the same finding is already open. */
+export function restoreBacklogItemInTransaction(
+  tx: CoreWriteLaneTransaction,
+  item: BacklogRestoreTarget,
+  now: string,
+): "open" | "dismissed" {
+  const duplicate = item.project_id === null
+    ? tx.get<{ id: string }>("SELECT id FROM backlog_items WHERE work_id = ? AND project_id IS NULL AND dedupe_key = ? AND status = 'open' AND id != ? LIMIT 1", item.work_id, item.dedupe_key, item.id)
+    : tx.get<{ id: string }>("SELECT id FROM backlog_items WHERE project_id = ? AND dedupe_key = ? AND status = 'open' AND id != ? LIMIT 1", item.project_id, item.dedupe_key, item.id);
+  const status = duplicate ? "dismissed" : "open";
+  tx.run("UPDATE backlog_items SET status = ?, issued_work_id = NULL, updated_at = ? WHERE id = ?", status, now, item.id);
+  return status;
+}
+
+/** Later link: open items -> in_progress (Work not completed) or done (Work completed). */
+export function linkBacklogItemsToWorkInTransaction(
+  tx: CoreWriteLaneTransaction,
+  workId: string,
+  itemIds: readonly string[],
+  now: string,
+): LinkBacklogItemsData {
+  const work = tx.get<{ state: string; project_id: string | null }>("SELECT state, project_id FROM works WHERE id = ?", workId);
+  if (!work) throw notFound("work", workId);
+  if (work.state === "cancelled") {
+    throw invalidStateTransition("Backlog items cannot be linked to a cancelled Work.", { work_id: workId, state: work.state });
+  }
+  const ids = validateItemIds(itemIds);
+  const rows = readBacklogStates(tx, ids);
+  assertFoundAndOpen(rows, ids);
+  const mismatched = rows.filter((row) => row.project_id !== work.project_id);
+  if (mismatched.length > 0) {
+    throw validationError("Backlog items must belong to the same Project as the Work.", {
+      field: "item_ids",
+      work_project_id: work.project_id,
+      item_ids: mismatched.map((row) => row.id),
+    });
+  }
+  const status = work.state === "completed" ? "done" : "in_progress";
+  const update = tx.run(
+    `UPDATE backlog_items SET status = ?, issued_work_id = ?, updated_at = ?
+      WHERE id IN (${placeholders(ids.length)}) AND status = 'open'`,
+    status,
+    workId,
+    now,
+    ...ids,
+  );
+  if (update.changes !== ids.length) {
+    throw invalidStateTransition("Some backlog items changed before they could be linked.", { item_ids: ids });
+  }
+  return { work_id: workId, status, items: readBacklogItemsByIds(tx, ids) };
+}
+
+function inProgressItemsOf(tx: CoreWriteLaneTransaction, workId: string): BacklogRestoreTarget[] {
+  return tx.all<BacklogRestoreTarget>(
+    "SELECT id, work_id, project_id, dedupe_key FROM backlog_items WHERE issued_work_id = ? AND status = 'in_progress' ORDER BY id",
+    workId,
+  );
+}
+
+/** work.completed: in_progress items of the Work -> done, except the unaddressed ones, which are restored. */
+export function settleWorkBacklogOnCompletionInTransaction(
+  tx: CoreWriteLaneTransaction,
+  workId: string,
+  unaddressedIds: readonly string[],
+  now: string,
+): BacklogSettleResult {
+  const result: BacklogSettleResult = { done: [], restored: [], dismissed: [], ignored: [] };
+  const items = inProgressItemsOf(tx, workId);
+  const found = new Set(items.map((item) => item.id));
+  result.ignored.push(...unaddressedIds.filter((id) => !found.has(id)));
+  const unaddressed = new Set(unaddressedIds);
+  for (const item of items) {
+    if (unaddressed.has(item.id)) {
+      (restoreBacklogItemInTransaction(tx, item, now) === "open" ? result.restored : result.dismissed).push(item.id);
+      continue;
+    }
+    tx.run("UPDATE backlog_items SET status = 'done', updated_at = ? WHERE id = ? AND status = 'in_progress'", now, item.id);
+    result.done.push(item.id);
+  }
+  return result;
+}
+
+/** work.cancelled / deleteWork: every in_progress item of the Work returns to open. */
+export function releaseWorkBacklogInTransaction(
+  tx: CoreWriteLaneTransaction,
+  workId: string,
+  now: string,
+): { readonly restored: string[] } {
+  const restored = inProgressItemsOf(tx, workId).map((item) => item.id);
+  tx.run(
+    "UPDATE backlog_items SET status = 'open', issued_work_id = NULL, updated_at = ? WHERE issued_work_id = ? AND status = 'in_progress'",
+    now,
+    workId,
+  );
+  return { restored };
+}
+
+/** deleteWork: restore every linked item, in_progress or done (dismissed when the finding is already open). */
+export function detachWorkBacklogOnDeleteInTransaction(tx: CoreWriteLaneTransaction, workId: string, now: string): void {
+  const items = tx.all<BacklogRestoreTarget>(
+    "SELECT id, work_id, project_id, dedupe_key FROM backlog_items WHERE issued_work_id = ? AND status IN ('in_progress', 'done') ORDER BY id",
+    workId,
+  );
+  for (const item of items) restoreBacklogItemInTransaction(tx, item, now);
 }
 
 function validateItemIds(value: unknown): string[] {

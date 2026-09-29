@@ -137,7 +137,7 @@ export interface Report {
 }
 
 /** Review backlog item lifecycle state. */
-export type BacklogStatus = 'open' | 'done' | 'dismissed';
+export type BacklogStatus = 'open' | 'in_progress' | 'done' | 'dismissed';
 
 /** GET /api/v1/backlog row and command result item. */
 export interface BacklogItem {
@@ -170,6 +170,13 @@ export interface IssueBacklogWorkInput {
   title: string;
   summary: string;
   size: 'small' | 'normal' | 'large';
+}
+
+/** POST /api/v1/works/{id}/backlog/link data. */
+export interface LinkBacklogItemsResult {
+  work_id: ULID;
+  status: 'in_progress' | 'done';
+  items: BacklogItem[];
 }
 
 /** POST /api/v1/backlog/issue-work data. */

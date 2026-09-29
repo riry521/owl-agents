@@ -798,7 +798,7 @@
   },
   "backlog": {
     "title": "バックログ",
-    "subtitle": "レビューで minor と判定された指摘です。選んだ項目から Work を発行するか、不要なら却下します。",
+    "subtitle": "レビューで minor と判定された指摘です。選んだ項目から Work を発行するか、既存の Work に紐付けるか、不要なら却下します。",
     "loading": "読み込み中…",
     "loadError": "バックログを読み込めませんでした。",
     "empty": "該当する項目はありません。",
@@ -810,7 +810,8 @@
     },
     "status": {
       "open": "未対応",
-      "done": "Work 発行済み",
+      "in_progress": "対応中",
+      "done": "対応済み",
       "dismissed": "却下"
     },
     "item": {
@@ -819,15 +820,16 @@
       "reason": "理由",
       "suggestion": "修正案",
       "source": "元",
-      "issuedWork": "発行先",
-      "select": "この項目を選択"
+      "select": "この項目を選択",
+      "linkedWork": "対応 Work"
     },
     "actions": {
       "selectedCount": "{{count}}件選択中",
       "issue": "選択した項目から Work を発行",
       "dismiss": "却下",
       "dismissSelected": "選択した項目を却下",
-      "clearSelection": "選択を解除"
+      "clearSelection": "選択を解除",
+      "link": "選択した項目を Work に紐付け"
     },
     "issue": {
       "formTitle": "Work を発行",
@@ -854,12 +856,26 @@
       "notFound": "項目が見つかりません。一覧を更新しました。",
       "validation": "入力内容を確認してください。",
       "network": "サーバーに接続できません。",
-      "default": "操作に失敗しました。"
+      "default": "操作に失敗しました。",
+      "workNotFound": "Work が見つかりません。一覧を更新しました。"
     },
     "workSection": {
       "title": "バックログ",
       "openAll": "バックログ一覧で開く",
-      "loadError": "バックログを読み込めませんでした。"
+      "loadError": "バックログを読み込めませんでした。",
+      "linkedTitle": "この Work で対応する項目"
+    },
+    "link": {
+      "formTitle": "既存の Work に紐付け",
+      "workLabel": "紐付け先の Work",
+      "workPlaceholder": "Work を選択",
+      "help": "紐付けた項目は「対応中」になり、その Work が完了すると「対応済み」になります。完了済みの Work に紐付けると、すぐ「対応済み」になります。",
+      "submit": "紐付ける",
+      "success": "{{count}}件を Work #{{number}} に紐付けました。",
+      "loadError": "Work の一覧を読み込めませんでした。",
+      "noCandidates": "このプロジェクトに紐付けられる Work がありません（キャンセル済みは選べません）。",
+      "mixedProjects": "異なるプロジェクトの項目は 1 つの Work に紐付けられません。プロジェクトで絞り込んでから選んでください。",
+      "cancel": "キャンセル"
     }
   },
   "skills": {

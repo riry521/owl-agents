@@ -6,11 +6,14 @@ import {
   ApiRequestError,
   dismissBacklogItems,
   issueBacklogWork,
+  linkBacklogItems,
   listBacklog,
+  listLinkableWorks,
   listProjects,
 } from '@/lib/api-client';
-import type { BacklogItem, BacklogStatus, Project } from '@/lib/types';
+import type { BacklogItem, BacklogStatus, Project, WorkSummary } from '@/lib/types';
 import { backlogLocation, backlogWorkDraft } from '@/lib/backlog-draft.mjs';
+import { backlogStatusBadge, showsLinkedWork } from '@/lib/backlog-link.mjs';
 import { useLocale } from '@/lib/i18n';
 
 export function BacklogView() {
@@ -26,6 +29,9 @@ export function BacklogView() {
   const [title, setTitle] = useState('');
   const [summary, setSummary] = useState('');
   const [size, setSize] = useState<'normal' | 'small'>('normal');
+  const [linkOpen, setLinkOpen] = useState(false);
+  const [linkWorks, setLinkWorks] = useState<WorkSummary[] | null>(null);
+  const [linkWorkId, setLinkWorkId] = useState('');
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [outcome, setOutcome] = useState<{ message: string; workId?: string } | null>(null);
@@ -76,6 +82,7 @@ export function BacklogView() {
     const code = error instanceof ApiRequestError ? error.code : '';
     const kind = error instanceof ApiRequestError ? error.kind : '';
     if (code === 'invalid_state_transition') return t('backlog.error.invalidState');
+    if (code === 'work_not_found') return t('backlog.error.workNotFound');
     if (code === 'backlog_item_not_found') return t('backlog.error.notFound');
     if (code === 'validation_error') return t('backlog.error.validation');
     if (kind === 'network_error') return t('backlog.error.network');
@@ -86,6 +93,7 @@ export function BacklogView() {
     setProjectId(value);
     setSelectedIds(new Set());
     setIssueOpen(false);
+    setLinkOpen(false);
     setActionError(null);
   }
 
@@ -93,11 +101,13 @@ export function BacklogView() {
     setStatus(value as BacklogStatus | '');
     setSelectedIds(new Set());
     setIssueOpen(false);
+    setLinkOpen(false);
     setActionError(null);
   }
 
   function toggleSelection(itemId: string) {
     setIssueOpen(false);
+    setLinkOpen(false);
     setSelectedIds((current) => {
       const next = new Set(current);
       if (next.has(itemId)) next.delete(itemId);
@@ -128,7 +138,56 @@ export function BacklogView() {
     }
   }
 
+  function openLinkForm() {
+    if (mixedProjects) {
+      setActionError(t('backlog.link.mixedProjects'));
+      return;
+    }
+    setIssueOpen(false);
+    setLinkOpen(true);
+    setLinkWorkId('');
+    setLinkWorks(null);
+    setActionError(null);
+    listLinkableWorks(selectedItems[0]?.project_id ?? null)
+      .then(setLinkWorks)
+      .catch((error) => {
+        console.error('[Owl] Backlog link works load failed', error);
+        setLinkWorks([]);
+        setActionError(t('backlog.link.loadError'));
+      });
+  }
+
+  async function submitLink(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (selectedItems.length === 0 || mixedProjects || !linkWorkId) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      const result = await linkBacklogItems(linkWorkId, selectedItems.map((item) => item.id));
+      const target = linkWorks?.find((work) => work.id === linkWorkId);
+      setOutcome({
+        message: t('backlog.link.success', { count: String(selectedItems.length), number: String(target?.display_number ?? '—') }),
+        workId: result.work_id,
+      });
+      setLinkOpen(false);
+      setSelectedIds(new Set());
+      setStatus(result.status);
+      retry();
+    } catch (error) {
+      setActionError(classifyError(error));
+      if (error instanceof ApiRequestError && ['invalid_state_transition', 'backlog_item_not_found', 'work_not_found', 'validation_error'].includes(error.code)) {
+        setSelectedIds(new Set());
+        setLinkOpen(false);
+        retry();
+      }
+      console.error('[Owl] Backlog link failed', error);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function openIssueForm() {
+    setLinkOpen(false);
     const draft = backlogWorkDraft(selectedItems, locale, t);
     setTitle(draft.title);
     setSummary(draft.summary);
@@ -155,7 +214,7 @@ export function BacklogView() {
       });
       setIssueOpen(false);
       setSelectedIds(new Set());
-      setStatus('done');
+      setStatus('in_progress');
       retry();
     } catch (error) {
       setActionError(classifyError(error));
@@ -206,6 +265,7 @@ export function BacklogView() {
             <span>{t('backlog.filter.status')}</span>
             <select className="select" value={status} onChange={(event) => changeStatus(event.target.value)}>
               <option value="open">{t('backlog.status.open')}</option>
+              <option value="in_progress">{t('backlog.status.in_progress')}</option>
               <option value="done">{t('backlog.status.done')}</option>
               <option value="dismissed">{t('backlog.status.dismissed')}</option>
               <option value="">{t('backlog.filter.allStatuses')}</option>
@@ -234,14 +294,39 @@ export function BacklogView() {
             <button type="button" className="btn btn--primary" disabled={busy || mixedProjects} onClick={openIssueForm}>
               {t('backlog.actions.issue')}
             </button>
+            <button type="button" className="btn" disabled={busy} onClick={openLinkForm}>
+              {t('backlog.actions.link')}
+            </button>
             <button type="button" className="btn" disabled={busy} onClick={() => void dismiss(selectedItems.map((item) => item.id))}>
               {t('backlog.actions.dismissSelected')}
             </button>
-            <button type="button" className="btn" disabled={busy} onClick={() => { setSelectedIds(new Set()); setIssueOpen(false); }}>
+            <button type="button" className="btn" disabled={busy} onClick={() => { setSelectedIds(new Set()); setIssueOpen(false); setLinkOpen(false); }}>
               {t('backlog.actions.clearSelection')}
             </button>
           </div>
           {mixedProjects && <p className="note">{t('backlog.issue.mixedProjects')}</p>}
+      {linkOpen && (
+        <form className="form-grid mt-10" onSubmit={(event) => void submitLink(event)}>
+          <h3 className="panel__title">{t('backlog.link.formTitle')}</h3>
+          <label className="form-field">
+            <span>{t('backlog.link.workLabel')}</span>
+            <select className="select" value={linkWorkId} onChange={(event) => setLinkWorkId(event.target.value)} disabled={busy || !linkWorks} required>
+              <option value="">{t('backlog.link.workPlaceholder')}</option>
+              {(linkWorks ?? []).map((work) => (
+                <option key={work.id} value={work.id}>
+                  #{work.display_number ?? '—'} {work.title}（{t(`format.workState.${work.state}`)}）
+                </option>
+              ))}
+            </select>
+            {linkWorks?.length === 0 && <span className="note">{t('backlog.link.noCandidates')}</span>}
+            <span className="note">{t('backlog.link.help')}</span>
+          </label>
+          <div className="btn-row">
+            <button type="button" className="btn" disabled={busy} onClick={() => setLinkOpen(false)}>{t('backlog.link.cancel')}</button>
+            <button type="submit" className="btn btn--primary" disabled={busy || !linkWorkId || !linkWorks?.length}>{t('backlog.link.submit')}</button>
+          </div>
+        </form>
+      )}
         </section>
       )}
 
@@ -287,7 +372,7 @@ export function BacklogView() {
                     aria-label={t('backlog.item.select')}
                   />
                 )}
-                <span className={`badge ${item.status === 'open' ? 'badge--blue' : item.status === 'done' ? 'badge--green' : 'badge--gray'}`}>
+                <span className={`badge ${backlogStatusBadge(item.status)}`}>
                   {t(`backlog.status.${item.status}`)}
                 </span>
                 <span className="skill-card__name mono">{backlogLocation(item, t)}</span>
@@ -303,13 +388,13 @@ export function BacklogView() {
                 </Link>
                 {' · '}Task {item.task_title}
               </div>
-              {item.status === 'done' && item.issued_work_id && (
+              {showsLinkedWork(item) && item.issued_work_id && (
                 <div className="row__sub">
-                  {t('backlog.item.issuedWork')}:{' '}
+                  {t('backlog.item.linkedWork')}:{' '}
                   <Link href={`/work?id=${encodeURIComponent(item.issued_work_id)}`}>
                     {item.issued_work_display_number === null
                       ? item.issued_work_title ?? item.issued_work_id
-                      : `Work #${item.issued_work_display_number} ${item.issued_work_title ?? ''}`}
+                      : `#${item.issued_work_display_number} ${item.issued_work_title ?? ''}`}
                   </Link>
                 </div>
               )}

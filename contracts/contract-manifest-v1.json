@@ -8,7 +8,7 @@
       "role": "rest_ws",
       "version": "1.0.0",
       "openapi_version": "3.1.0",
-      "sha256": "d9d8b9fa390e47afc1a9123d342783eac9c083cd008bbf1fc8bce22069e9a22c"
+      "sha256": "5a199a820a66d74d008060055fe6f9c24870728a5beffec956847bbdce4588b7"
     },
     {
       "path": "contracts/jsonschema/owl-v1/agent-run.json",

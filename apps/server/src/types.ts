@@ -5,6 +5,25 @@ import type { KnowledgeAutomationSettings, KnowledgeAutomationSnapshot } from ".
 import type { WebResearchCapture } from "../../../packages/shared/dist/web-research.js";
 export type JsonObject = Record<string, unknown>;
 
+export type BacklogStatus = "open" | "in_progress" | "done" | "dismissed";
+
+export interface LinkBacklogItemsResult {
+  work_id: string;
+  status: "in_progress" | "done";
+  items: Array<JsonObject & { id: string; status: BacklogStatus }>;
+}
+
+export interface IssueBacklogWorkResult {
+  work_id: string;
+  display_number: number | null;
+  state: "memo";
+  state_version: number;
+  project_id: string | null;
+  item_ids: string[];
+  status: "in_progress";
+  items: Array<JsonObject & { id: string; status: BacklogStatus }>;
+}
+
 export type WorkState =
   | "memo"
   | "ready"

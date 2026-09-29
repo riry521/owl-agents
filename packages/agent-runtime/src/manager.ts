@@ -87,6 +87,15 @@ export const MANAGER_FINALIZE_OUTPUT_SCHEMA: RoleSchema = objectSchema({
       example: [],
       description: "one entry per missing point; [] if complete",
     },
+    unaddressed_backlog_items: {
+      type: "array",
+      items: objectSchema({
+        item_id: { type: "string", minLength: 1, description: "id of an item in context.backlog_items" },
+        reason: { type: "string", description: "why the completed Tasks did not address it" },
+      }),
+      example: [],
+      description: "backlog items this Work did not address; [] if all were addressed or there are none",
+    },
     lessons: {
       type: "array",
       items: objectSchema({
@@ -141,6 +150,7 @@ export function managerPromptInput(request: ManagerPlanRequest): Record<string, 
       question: typeof context.question === "string" ? context.question : null,
       failed_tasks: Array.isArray(context.failed_tasks) ? context.failed_tasks : [],
       final_verdict: isRecord(context.final_verdict) ? context.final_verdict : null,
+      backlog_items: Array.isArray(context.backlog_items) ? context.backlog_items : [],
       rules: typeof context.rules === "string" ? context.rules : null,
       knowledge: typeof context.knowledge === "string" ? context.knowledge : null,
       skills: typeof context.skills === "string" ? context.skills : null,
@@ -239,6 +249,7 @@ function buildFinalizeManagerPrompt(request: ManagerPlanRequest, language: Owner
       "reports[].task_id links each report to a Task in tasks. Tasks with status cancelled were replaced by a replan or cancelled by the Owner and have no report; do not count their absence as missing work.",
       "Read the reports and judge whether the Work's goal was achieved by the completed Tasks.",
       "context.design_documents lists the design documents written by completed design Tasks as task_id, title and path ([] if none); a design Task's deliverable is that document, not repository changes.",
+      "context.backlog_items lists the backlog items (id, file, line, problem, suggestion) this Work was started to handle ([] if none). Put in unaddressed_backlog_items (item_id and reason) every item the completed Tasks did not actually address; those items return to the backlog. Use only ids from context.backlog_items; every other item is treated as done. This does not affect verdict.",
       SKILL_CONTEXT_INSTRUCTION,
       KNOWLEDGE_CONTEXT_INSTRUCTION,
       SKILL_USAGE_INSTRUCTION,
@@ -248,7 +259,7 @@ function buildFinalizeManagerPrompt(request: ManagerPlanRequest, language: Owner
     ],
     processSkills,
     output: MANAGER_FINALIZE_OUTPUT_SCHEMA,
-    outputRules: ["missing is [] exactly when verdict is complete."],
+    outputRules: ["missing is [] exactly when verdict is complete.", "Every item_id in unaddressed_backlog_items is an id from context.backlog_items."],
     language,
     inputs: [{ name: "Manager input", value: managerPromptInput({ ...request, mode: "finalize" }) }],
   });
@@ -289,6 +300,14 @@ export function parseManagerPlanWithFeedback(
   const schema = managerOutputSchema(request);
   const prepared = prepareLegacySkillOutput(schema, payload);
   payload = prepared.payload;
+  // Verdicts from before backlog items were tied to Works lack the field; malformed entries are ignored.
+  if (request.mode === "finalize" && isRecord(payload.verdict)) {
+    const raw = payload.verdict.unaddressed_backlog_items;
+    const items = raw === undefined ? [] : Array.isArray(raw)
+      ? raw.filter((entry) => isRecord(entry) && typeof entry.item_id === "string" && entry.item_id !== "" && typeof entry.reason === "string")
+      : raw;
+    payload = { ...payload, verdict: { ...payload.verdict, unaddressed_backlog_items: items } };
+  }
   const problem = validateRoleOutput(schema, payload);
   if (problem) {
     throw managerPlanInvalid(`manager_output_schema:${problem}`);

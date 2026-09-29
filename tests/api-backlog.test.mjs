@@ -184,11 +184,16 @@ test("backlog API lists and filters items, issues and dismisses them, and valida
   const issued = (await issueResponse.json()).data;
   assert.match(issued.work_id, /^[0-9A-HJKMNP-TV-Z]{26}$/u);
   assert.deepEqual(issued.item_ids, [issuedItem.id]);
+  assert.equal(issued.status, "in_progress");
+  assert.deepEqual(issued.items.map((item) => [item.id, item.status, item.issued_work_id]), [[issuedItem.id, "in_progress", issued.work_id]]);
   const afterIssue = await api.get(`/works/${workA}/backlog`);
   const doneItem = (await afterIssue.json()).data.find((item) => item.id === issuedItem.id);
-  assert.equal(doneItem.status, "done");
+  assert.equal(doneItem.status, "in_progress");
   assert.equal(doneItem.issued_work_id, issued.work_id);
-  const doneFilter = await api.get(`/backlog?project_id=${projectA}&status=done`);
+  const byIssuedWork = (await (await api.get(`/backlog?issued_work_id=${issued.work_id}`)).json()).data;
+  assert.deepEqual(byIssuedWork.map((entry) => entry.id), [issuedItem.id]);
+  assert.equal((await api.get("/backlog?issued_work_id=bad%")).status, 400);
+  const doneFilter = await api.get(`/backlog?project_id=${projectA}`);
   assert.equal((await doneFilter.json()).data.some((item) => item.id === issuedItem.id), true);
   const issueDoneAgain = await api.write("POST", "/backlog/issue-work", {
     item_ids: [issuedItem.id], title: "Issue again", summary: "", size: "small",
@@ -266,4 +271,69 @@ test("all backlog routes require Owner authorization", async (t) => {
 
   const stillOpen = (await (await api.get("/backlog?status=open")).json()).data;
   assert.deepEqual(stillOpen.map((item) => item.id).sort(), items.map((item) => item.id).sort());
+});
+
+test("link API sets in_progress or done by Work state, rejects invalid cases, and status=in_progress filters", async (t) => {
+  const api = await startServer(t);
+  const projectA = await createProject(api.root, api.durableCore, "link-a");
+  const projectB = await createProject(api.root, api.durableCore, "link-b");
+  const source = await createWork(api.durableCore, "link-source", projectA);
+  const otherSource = await createWork(api.durableCore, "link-other", projectB);
+  const running = await createWork(api.durableCore, "link-running", projectA);
+  const finished = await createWork(api.durableCore, "link-finished", projectA);
+  const cancelled = await createWork(api.durableCore, "link-cancelled", projectA);
+  const setState = (id, state) => api.db.createWriteLane().transact((tx) => {
+    tx.run("UPDATE works SET state = ? WHERE id = ?", state, id);
+  });
+  await setState(running, "running");
+  await setState(finished, "completed");
+  await setState(cancelled, "cancelled");
+  await registerFindings(api.db, source, ["a", "b", "c", "d"].map((name) => (
+    { severity: "minor", pre_existing: false, file: `src/${name}.ts`, problem: `Issue ${name}` }
+  )));
+  await registerFindings(api.db, otherSource, [{ severity: "minor", pre_existing: false, file: "src/x.ts", problem: "Issue x" }]);
+  const items = (await (await api.get(`/works/${source}/backlog`)).json()).data;
+  const [i1, i2, i3, i4] = items.map((item) => item.id);
+  const foreign = (await (await api.get(`/works/${otherSource}/backlog`)).json()).data[0].id;
+
+  const link = (workId, ids) => api.write("POST", `/works/${workId}/backlog/link`, { item_ids: ids });
+
+  const linkRunning = await link(running, [i1]);
+  assert.equal(linkRunning.status, 200);
+  const runningData = (await linkRunning.json()).data;
+  assert.equal(runningData.status, "in_progress");
+  assert.equal(runningData.items[0].status, "in_progress");
+  assert.equal(runningData.items[0].issued_work_id, running);
+
+  const linkFinished = await link(finished, [i2]);
+  assert.equal(linkFinished.status, 200);
+  const finishedData = (await linkFinished.json()).data;
+  assert.equal(finishedData.status, "done");
+  assert.equal(finishedData.items[0].status, "done");
+
+  const filtered = await api.get("/backlog?status=in_progress");
+  assert.equal(filtered.status, 200);
+  assert.deepEqual((await filtered.json()).data.map((item) => item.id), [i1]);
+
+  const notOpen = await link(running, [i1]);
+  assert.equal(notOpen.status, 409);
+  assert.equal((await notOpen.json()).error.code, "invalid_state_transition");
+  const toCancelled = await link(cancelled, [i3]);
+  assert.equal(toCancelled.status, 409);
+  assert.equal((await toCancelled.json()).error.code, "invalid_state_transition");
+  const otherProject = await link(running, [foreign]);
+  assert.equal(otherProject.status, 400);
+  assert.equal((await otherProject.json()).error.code, "validation_error");
+  const missingWork = await link(createUlid(), [i3]);
+  assert.equal(missingWork.status, 404);
+  assert.equal((await missingWork.json()).error.code, "work_not_found");
+  const missingItem = await link(running, [createUlid()]);
+  assert.equal(missingItem.status, 404);
+  assert.equal((await missingItem.json()).error.code, "backlog_item_not_found");
+  const empty = await link(running, []);
+  assert.equal(empty.status, 400);
+  const unauthorized = await api.write("POST", `/works/${running}/backlog/link`, { item_ids: [i4] }, { auth: false });
+  assert.equal(unauthorized.status, 401);
+  const invalidStatus = await api.get("/backlog?status=bogus");
+  assert.equal(invalidStatus.status, 400);
 });

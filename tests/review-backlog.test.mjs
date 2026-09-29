@@ -130,7 +130,7 @@ test("backlog migration applies to a database that already ran earlier migration
   }
   existingDb.migrate(oldMigrations);
   const applied = existingDb.migrate(migrations).applied;
-  assert.deepEqual(applied, ["018", "019", "020", "021", "022", "023", "024", "025"]);
+  assert.deepEqual(applied, ["018", "019", "020", "021", "022", "023", "024", "025", "026"]);
   assert.ok(existingDb.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'backlog_items'"));
   assert.deepEqual(existingDb.migrate(migrations).applied, []);
 });
@@ -396,7 +396,7 @@ test("Core filters, dismisses, issues Work atomically, and handles missing or no
   assert.equal(issuedWork.state, "memo");
   assert.equal(issuedWork.project_id, projectA);
   const done = core.listBacklogItems({ work_id: workA }).items.find((item) => item.id === issuable.id);
-  assert.equal(done.status, "done");
+  assert.equal(done.status, "in_progress");
   assert.equal(done.issued_work_id, issued.data.work_id);
   await assert.rejects(core.issueBacklogWork(command({ ...issuePayload, title: "Again" }, "issue-done")), errorCode("invalid_state_transition"));
   await assert.rejects(core.issueBacklogWork(command({ ...issuePayload, item_ids: [createUlid()] }, "issue-missing")), errorCode("backlog_item_not_found"));
@@ -429,6 +429,23 @@ test("Core filters, dismisses, issues Work atomically, and handles missing or no
   await core.deleteWork(dupIssued.data.work_id, command({}, "delete-dup", dupArchive.version));
   assert.equal(core.listBacklogItems({ work_id: dupWorkId }).items.find((item) => item.id === dupItem.id).status, "dismissed");
   assert.equal(core.listBacklogItems({ project_id: projectA, status: "open" }).items.filter((item) => item.file === "d.ts").length, 1);
+
+  // A done item (linked later to a completed Work) returns to open when that Work is deleted.
+  const doneSrc = await createWork(core, "done-src", projectA);
+  const doneTask = await seedTaskAndReviews(db, doneSrc, { reviews: [{ round: 0, findings: [minor("e.ts", "Done one")] }] });
+  await register(db, doneTask.taskId);
+  const doneItem = core.listBacklogItems({ work_id: doneSrc }).items[0];
+  const doneTarget = await createWork(core, "done-target", projectA);
+  await db.createWriteLane().transact((tx) => tx.run(
+    "UPDATE works SET state = 'completed', state_version = state_version + 1, completed_at = ?, updated_at = ? WHERE id = ?",
+    "2026-09-27T02:45:00.000Z", "2026-09-27T02:45:00.000Z", doneTarget,
+  ));
+  await core.linkBacklogItems(doneTarget, command({ item_ids: [doneItem.id] }, "link-done-delete"));
+  assert.equal(core.listBacklogItems({ work_id: doneSrc }).items[0].status, "done");
+  const doneArchive = await core.archiveWork(doneTarget, command({}, "archive-done-target", 1));
+  await core.deleteWork(doneTarget, command({}, "delete-done-target", doneArchive.version));
+  const backOpen = core.listBacklogItems({ work_id: doneSrc }).items[0];
+  assert.deepEqual([backOpen.status, backOpen.issued_work_id], ["open", null]);
 
   const sourceId = workA;
   await db.createWriteLane().transact((tx) => tx.run(
@@ -482,4 +499,191 @@ test("backlog pagination reaches every item without duplicates and keeps filters
   assert.equal(filteredItems.length, 5);
   assert.ok(filteredItems.every((item) => item.project_id === projectA && item.work_id === workA && item.status === "open"));
   assert.equal(core.listBacklogItems({ project_id: projectA, status: "dismissed", work_id: workA }).items.length, 1);
+});
+
+async function seedItem(db, core, workId, suffix) {
+  const task = await seedTaskAndReviews(db, workId, { reviews: [{ round: 0, findings: [minor(`${suffix}.ts`, `Problem ${suffix}`)] }] });
+  await register(db, task.taskId);
+  return core.listBacklogItems({ work_id: workId }).items.find((item) => item.file === `${suffix}.ts`);
+}
+
+function setWorkState(db, workId, state) {
+  return db.createWriteLane().transact((tx) => tx.run(
+    "UPDATE works SET state = ?, state_version = state_version + 1 WHERE id = ?", state, workId,
+  ));
+}
+
+test("backlog rows from before migration 026 keep status and issued_work_id", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "owl-backlog-026-"));
+  const oldMigrations = join(root, "old-migrations");
+  await mkdir(oldMigrations);
+  const db = openDatabase(join(root, "old.sqlite"));
+  t.after(async () => {
+    db.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  for (const filename of (await readdir(migrations)).filter((name) => name.endsWith(".sql") && Number(name.slice(0, 3)) < 26)) {
+    await copyFile(join(migrations, filename), join(oldMigrations, filename));
+  }
+  db.migrate(oldMigrations);
+  const source = createUlid();
+  const taskId = createUlid();
+  const reviewId = createUlid();
+  const now = "2026-09-27T00:00:00.000Z";
+  const workIds = { completed: createUlid(), running: createUlid(), cancelled: createUlid() };
+  await db.createWriteLane().transact((tx) => {
+    tx.run("INSERT OR IGNORE INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Owner', ?, ?)", now, now);
+    for (const [id, state] of [[source, "completed"], ...Object.entries(workIds).map(([state, id]) => [id, state])]) {
+      tx.run("INSERT INTO works (id, title, summary, size, state, state_version, owner_id, rules_json, related_work_ids_json, created_at, updated_at) VALUES (?, 'W', '', 'small', ?, 1, 'owner:default', '{}', '[]', ?, ?)", id, state, now, now);
+    }
+    tx.run("INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, created_at, updated_at) VALUES (?, ?, 'T', 'code', 'completed', 'normal', '', '', ?, ?)", taskId, source, now, now);
+    tx.run("INSERT INTO reviews (id, task_id, round, verdict, findings_json, verification_report_json, created_at) VALUES (?, ?, 0, 'pass', '[]', '{}', ?)", reviewId, taskId, now);
+    const rows = [
+      ["open", "open", null], ["dismissed", "dismissed", null],
+      ["done-completed", "done", workIds.completed], ["done-running", "done", workIds.running], ["done-cancelled", "done", workIds.cancelled],
+    ];
+    for (const [key, status, issued] of rows) {
+      tx.run(
+        `INSERT INTO backlog_items (id, work_id, task_id, project_id, review_id, review_round, file, line, problem, reason, suggestion, status, issued_work_id, dedupe_key, created_at, updated_at)
+         VALUES (?, ?, ?, NULL, ?, 0, 'f.ts', 0, 'p', '', '', ?, ?, ?, ?, ?)`,
+        `item-${key}`, source, taskId, reviewId, status, issued, key, now, now,
+      );
+    }
+  });
+  assert.deepEqual(db.migrate(migrations).applied, ["026"]);
+  const rows = Object.fromEntries(db.all("SELECT id, status, issued_work_id FROM backlog_items").map((row) => [row.id, row]));
+  assert.deepEqual(rows["item-open"], { id: "item-open", status: "open", issued_work_id: null });
+  assert.deepEqual(rows["item-dismissed"], { id: "item-dismissed", status: "dismissed", issued_work_id: null });
+  assert.deepEqual([rows["item-done-completed"].status, rows["item-done-completed"].issued_work_id], ["done", workIds.completed]);
+  assert.deepEqual([rows["item-done-running"].status, rows["item-done-running"].issued_work_id], ["done", workIds.running]);
+  assert.deepEqual([rows["item-done-cancelled"].status, rows["item-done-cancelled"].issued_work_id], ["done", workIds.cancelled]);
+  assert.equal(db.all("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'backlog_items' AND name LIKE 'backlog_items_%'").length, 4);
+});
+
+test("issue-work links in_progress, completion makes done, cancel returns open", async (t) => {
+  const { root, db, core } = await setup(t);
+  const project = await createProject(root, core, "lifecycle");
+  const source = await createWork(core, "source", project);
+  const doneItem = await seedItem(db, core, source, "a");
+  const cancelItem = await seedItem(db, core, source, "b");
+  const issue = async (item, suffix) => (await core.issueBacklogWork(command({ item_ids: [item.id], title: suffix, summary: "", size: "small" }, `issue-${suffix}`))).data.work_id;
+  const doneWork = await issue(doneItem, "done");
+  const cancelWork = await issue(cancelItem, "cancel");
+  assert.deepEqual(core.listBacklogItems({ status: "in_progress" }).items.map((item) => item.id).sort(), [doneItem.id, cancelItem.id].sort());
+  assert.equal(core.listBacklogItems({ issued_work_id: doneWork }).items.length, 1);
+
+  await db.createWriteLane().transact((tx) => tx.run(
+    "INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, created_at, updated_at) VALUES (?, ?, 'T', 'code', 'completed', 'normal', '', '', '2026-09-27T00:00:00.000Z', '2026-09-27T00:00:00.000Z')",
+    createUlid(), doneWork,
+  ));
+  await setWorkState(db, doneWork, "running");
+  assert.equal(await core.workflowEngine().completeWorkIfReady(doneWork, "complete"), true);
+  const completed = core.listBacklogItems({ issued_work_id: doneWork }).items[0];
+  assert.deepEqual([completed.status, completed.issued_work_id], ["done", doneWork]);
+
+  const other = await seedTaskAndReviews(db, source, { reviews: [{ round: 0, findings: [] }] });
+  await db.createWriteLane().transact((tx) => tx.run(
+    `INSERT INTO backlog_items (id, work_id, task_id, project_id, review_id, review_round, file, line, problem, reason, suggestion, status, issued_work_id, dedupe_key, created_at, updated_at)
+     SELECT 'dup-open', work_id, ?, project_id, ?, review_round, file, line, problem, reason, suggestion, 'open', NULL, dedupe_key, created_at, updated_at
+       FROM backlog_items WHERE id = ?`,
+    other.taskId, other.reviewIds[0], cancelItem.id,
+  ));
+  const version = db.get("SELECT state_version FROM works WHERE id = ?", cancelWork).state_version;
+  await core.cancelWork(cancelWork, command({ reason: "no longer needed" }, "cancel", version));
+  const returned = core.listBacklogItems({ work_id: source }).items.find((item) => item.id === cancelItem.id);
+  assert.deepEqual([returned.status, returned.issued_work_id], ["open", null]);
+});
+
+test("linking later: done for a completed Work, in_progress for a running one, rejects invalid targets", async (t) => {
+  const { root, db, core } = await setup(t);
+  const projectA = await createProject(root, core, "link-a");
+  const projectB = await createProject(root, core, "link-b");
+  const source = await createWork(core, "link-source", projectA);
+  const sourceB = await createWork(core, "link-source-b", projectB);
+  const items = [];
+  for (const key of ["a", "b", "c", "d", "e"]) items.push(await seedItem(db, core, source, key));
+  const itemB = await seedItem(db, core, sourceB, "z");
+  const link = (workId, ids, suffix) => core.linkBacklogItems(workId, command({ item_ids: ids }, `link-${suffix}`));
+
+  const finished = await createWork(core, "finished", projectA);
+  await setWorkState(db, finished, "completed");
+  const linkedDone = await link(finished, [items[0].id], "done");
+  assert.equal(linkedDone.data.status, "done");
+  assert.deepEqual(linkedDone.data.items.map((item) => [item.status, item.issued_work_id]), [["done", finished]]);
+
+  const running = await createWork(core, "running", projectA);
+  await setWorkState(db, running, "running");
+  const linkedRunning = await link(running, [items[1].id], "running");
+  assert.equal(linkedRunning.data.status, "in_progress");
+  assert.equal(linkedRunning.data.items[0].status, "in_progress");
+
+  const cancelled = await createWork(core, "cancelled", projectA);
+  await setWorkState(db, cancelled, "cancelled");
+  await assert.rejects(link(cancelled, [items[2].id], "cancelled"), errorCode("invalid_state_transition"));
+  await assert.rejects(link(running, [itemB.id], "other-project"), errorCode("validation_error"));
+  await assert.rejects(link(running, [items[0].id], "not-open"), errorCode("invalid_state_transition"));
+  await assert.rejects(link(running, [items[1].id], "already-linked"), errorCode("invalid_state_transition"));
+  await assert.rejects(link(createUlid(), [items[2].id], "no-work"), errorCode("work_not_found"));
+  assert.equal(core.listBacklogItems({ status: "open", work_id: source }).items.length, 3);
+});
+
+const advisorRunner = {
+  runManagerPlan: async () => { throw new Error("unexpected"); },
+  runWorker: async () => ({ outcome: "failed", failure_class: "deterministic", error_key: "advisor_backlog_test", retry_allowed: false, message: "stop" }),
+  runReviewer: async () => { throw new Error("unexpected"); },
+};
+
+async function seedOpenItem(db, workId, problem) {
+  const { taskId } = await seedTaskAndReviews(db, workId, { reviews: [{ round: 1, findings: [minor("a.ts", problem)] }] });
+  await register(db, taskId);
+  return db.get("SELECT id FROM backlog_items WHERE problem = ?", problem).id;
+}
+
+function createAction(payload) {
+  return { type: "create_work", description: "d", payload: { title: "Advisor Work", summary: "Do it.", size: "small", ...payload } };
+}
+
+test("Advisor create_work links and dismisses backlog items atomically, and rejects bad ids", async (t) => {
+  const { root, db, core } = await setup(t, advisorRunner);
+  const projectA = await createProject(root, core, "adv-a");
+  const projectB = await createProject(root, core, "adv-b");
+  const sourceA = await createWork(core, "src-a", projectA);
+  const sourceB = await createWork(core, "src-b", projectB);
+  const link = await seedOpenItem(db, sourceA, "link me");
+  const drop = await seedOpenItem(db, sourceA, "drop me");
+  const other = await seedOpenItem(db, sourceB, "other project");
+  const status = (id) => db.get("SELECT status, issued_work_id FROM backlog_items WHERE id = ?", id);
+  const worksTitled = () => db.get("SELECT COUNT(*) AS count FROM works WHERE title = 'Advisor Work'").count;
+
+  for (const [suffix, bad] of [["other", { backlog_item_ids: [other] }], ["missing", { dismiss_backlog_item_ids: ["nope"] }], ["wrong-dismiss", { dismiss_backlog_item_ids: [other] }], ["null-link", { backlog_item_ids: null }], ["null-dismiss", { dismiss_backlog_item_ids: null }], ["long", { summary: "x".repeat(20000), backlog_item_ids: [link] }]]) {
+    const { notices } = await core.dispatchAdvisorWorkActions("c", `turn-bad-${suffix}`, [createAction({ project_id: projectA, ...bad })]);
+    assert.match(notices[0], /Workの起票に失敗しました/u);
+    assert.equal(worksTitled(), 0);
+    assert.equal(status(other).status, "open");
+    assert.equal(status(link).status, "open");
+  }
+
+  const { notices } = await core.dispatchAdvisorWorkActions("c", "turn-ok", [createAction({
+    project_id: projectA, backlog_item_ids: [link], dismiss_backlog_item_ids: [drop],
+  })]);
+  assert.match(notices[0], /起票し/u);
+  const work = db.get("SELECT id, summary FROM works WHERE title = 'Advisor Work'");
+  assert.deepEqual({ ...status(link) }, { status: "in_progress", issued_work_id: work.id });
+  assert.equal(status(drop).status, "dismissed");
+  assert.ok(work.summary.includes(link) && work.summary.includes(drop));
+
+  const again = await core.dispatchAdvisorWorkActions("c", "turn-reuse", [createAction({ project_id: projectA, backlog_item_ids: [link] })]);
+  assert.match(again.notices[0], /起票に失敗/u);
+  assert.equal(worksTitled(), 1);
+});
+
+test("Advisor prompt shows the open backlog count and the GET /api/v1/backlog pointer, not the items", async (t) => {
+  const { db, core } = await setup(t, advisorRunner);
+  const workId = await createWork(core, "prompt");
+  await seedOpenItem(db, workId, "secret finding text");
+  const prompt = core.buildAdvisorSystemPrompt();
+  assert.match(prompt, /1 open item/u);
+  assert.ok(prompt.includes("GET /api/v1/backlog"));
+  assert.ok(prompt.includes("backlog_item_ids") && prompt.includes("dismiss_backlog_item_ids"));
+  assert.ok(!prompt.includes("secret finding text"));
 });

@@ -75,15 +75,22 @@ import { ResearchRecorder, type ResearchAttributionRole } from "./research-recor
 import { RESEARCH_CAPTURE_ROLES } from "../../shared/dist/permission-args.js";
 import {
   BACKLOG_STATUSES,
+  applyAdvisorBacklogInTransaction,
+  detachWorkBacklogOnDeleteInTransaction,
   dismissBacklogItemsInTransaction,
   issueBacklogWorkInTransaction,
+  linkBacklogItemsToWorkInTransaction,
   listBacklogItems,
+  listInProgressBacklogItemsOfWork,
+  releaseWorkBacklogInTransaction,
   type BacklogListFilter,
   type BacklogListResult,
   type DismissBacklogItemsData,
   type DismissBacklogItemsPayload,
   type IssueBacklogWorkData,
   type IssueBacklogWorkPayload,
+  type LinkBacklogItemsData,
+  type LinkBacklogItemsPayload,
 } from "./review-backlog.js";
 import {
   addAdvisorReplyTargetInstruction,
@@ -1428,6 +1435,13 @@ export class Core {
       payload: { kind: "work_created", schema_version: "1.0.0" },
     }, (transaction) => {
       const row = createWorkInTransaction(transaction, request.payload);
+      applyAdvisorBacklogInTransaction(
+        transaction,
+        row,
+        request.payload.backlog_item_ids ?? [],
+        request.payload.dismiss_backlog_item_ids ?? [],
+        utcNow(),
+      );
       return {
         data: { work_id: row.id, state: row.state as "memo" | "ready", state_version: row.state_version },
         version: row.state_version,
@@ -1441,6 +1455,9 @@ export class Core {
     }
     if (filter.work_id !== undefined && !this.db.get("SELECT id FROM works WHERE id = ?", filter.work_id)) {
       throw notFound("work", filter.work_id);
+    }
+    if (filter.issued_work_id !== undefined && !this.db.get("SELECT id FROM works WHERE id = ?", filter.issued_work_id)) {
+      throw notFound("work", filter.issued_work_id);
     }
     return listBacklogItems(this.db, filter);
   }
@@ -1469,6 +1486,21 @@ export class Core {
       const data = issueBacklogWorkInTransaction(transaction, request.payload, utcNow());
       return { data, version: data.state_version };
     });
+  }
+
+  public async linkBacklogItems(
+    workId: string,
+    request: CommandRequest<LinkBacklogItemsPayload>,
+  ): Promise<CommandResponse<LinkBacklogItemsData>> {
+    return this.runCommand(request, {
+      type: "system.alert",
+      workId,
+      resourceKey: "backlog",
+      payload: { kind: "backlog_items_linked", schema_version: "1.0.0", work_id: workId },
+    }, (transaction) => ({
+      data: linkBacklogItemsToWorkInTransaction(transaction, workId, request.payload.item_ids, utcNow()),
+      version: 0,
+    }));
   }
 
   public listWorks(query: WorkListQuery = {}): ListResponse<WorkSummary> {
@@ -1694,6 +1726,7 @@ export class Core {
           payload: { owner_cancel: true },
         });
       }
+      releaseWorkBacklogInTransaction(transaction, workId, utcNow());
       return { data: { work_id: workId, state: "cancelled", cancel_requested: true }, version: result.next.state_version };
     });
     await this.announceDecisionCancellations(cancelledDecisionIds);
@@ -1905,22 +1938,7 @@ export class Core {
           taskJson,
           taskJson,
         );
-        const issuedItems = transaction.all<{ id: string; work_id: string; project_id: string | null; dedupe_key: string }>(
-          "SELECT id, work_id, project_id, dedupe_key FROM backlog_items WHERE issued_work_id = ? ORDER BY id",
-          workId,
-        );
-        for (const item of issuedItems) {
-          const duplicate = item.project_id === null
-            ? transaction.get<{ id: string }>("SELECT id FROM backlog_items WHERE work_id = ? AND project_id IS NULL AND dedupe_key = ? AND status = 'open' AND id != ? LIMIT 1", item.work_id, item.dedupe_key, item.id)
-            : transaction.get<{ id: string }>("SELECT id FROM backlog_items WHERE project_id = ? AND dedupe_key = ? AND status = 'open' AND id != ? LIMIT 1", item.project_id, item.dedupe_key, item.id);
-          transaction.run(
-            duplicate
-              ? "UPDATE backlog_items SET status = 'dismissed', issued_work_id = NULL, updated_at = ? WHERE id = ?"
-              : "UPDATE backlog_items SET status = 'open', issued_work_id = NULL, updated_at = ? WHERE id = ?",
-            now,
-            item.id,
-          );
-        }
+        detachWorkBacklogOnDeleteInTransaction(transaction, workId, now);
         transaction.run("DELETE FROM backlog_items WHERE work_id = ?", workId);
         transaction.run("DELETE FROM reviews WHERE task_id IN (SELECT value FROM json_each(?))", taskJson);
         transaction.run("DELETE FROM decision_answers WHERE decision_id IN (SELECT value FROM json_each(?))", decisionJson);
@@ -3853,7 +3871,7 @@ export class Core {
       language === "en"
         ? "Owl's language setting is English: reply to the operator in English and write every Work title and summary in English, even when the operator writes in another language."
         : "Owl's language setting is Japanese: reply to the operator in Japanese (日本語) and write every Work title and summary in Japanese, even when the operator writes in another language. Code, commands, paths, and identifiers stay as they are.",
-    ].join(" ") + "\n\n" + workSummaryInstruction(language);
+    ].join(" ") + "\n\n" + workSummaryInstruction(language) + "\n\n" + this.advisorBacklogInstruction();
     // No Work context here, so only Rule Store lines apply. A rule reload
     // changes this prompt, which the Advisor runtime detects as drift and
     // restarts the session with it before the next turn.
@@ -3884,6 +3902,14 @@ export class Core {
       '  When the Owner asks you to look at a screenshot ("スクショ見て", "look at the screenshot") without a path, list the image files in this folder sorted by modification time and open the newest one. If they mention several ("the last 2 screenshots"), open that many, newest first. Do not modify or delete files here.',
     ].join("\n") : null;
     return [base, rulesBlock, personaBlock, foldersBlock].filter((part): part is string => part !== null).join("\n\n");
+  }
+
+  private advisorBacklogInstruction(): string {
+    const open = this.db.get<{ count: number }>("SELECT COUNT(*) AS count FROM backlog_items WHERE status = 'open'")?.count ?? 0;
+    return [
+      `Review backlog: ${open} open item(s) are waiting. Read their contents with GET /api/v1/backlog (status=open) when relevant; they are not listed here.`,
+      "create_work payload may include backlog_item_ids (array of backlog item IDs to link to the new Work; they become in_progress) and dismiss_backlog_item_ids (array of backlog item IDs to dismiss). Both are optional; every ID must be an open item of the same Project as the Work.",
+    ].join(" ");
   }
 
   private advisorProcessSkillsLines(harness: "claude" | "codex"): string[] {
@@ -4133,6 +4159,14 @@ export class Core {
         continue;
       }
       const projectId = typeof requestedProjectId === "string" ? requestedProjectId : inheritedProject;
+      const backlogItemIds: unknown = payload?.backlog_item_ids === undefined ? [] : payload.backlog_item_ids;
+      const dismissItemIds: unknown = payload?.dismiss_backlog_item_ids === undefined ? [] : payload.dismiss_backlog_item_ids;
+      const isIdList = (value: unknown): value is string[] =>
+        Array.isArray(value) && value.every((id) => typeof id === "string");
+      if (!isIdList(backlogItemIds) || !isIdList(dismissItemIds)) {
+        notices.push(t.createFailed("backlog_item_ids and dismiss_backlog_item_ids must be arrays of strings."));
+        continue;
+      }
       const createKey = `advisor-work:${turnId}:${index}:create`;
       let createdWorkId: string | null = null;
       try {
@@ -4146,6 +4180,8 @@ export class Core {
             size,
             project_id: projectId,
             ...(designMode === "lead" ? { design_mode: "lead" as const } : {}),
+            ...(backlogItemIds.length > 0 ? { backlog_item_ids: backlogItemIds } : {}),
+            ...(dismissItemIds.length > 0 ? { dismiss_backlog_item_ids: dismissItemIds } : {}),
           },
         });
         createdWorkId = created.data.work_id;
@@ -4425,7 +4461,7 @@ export class Core {
                 agent_run_id: agentRunId,
                 project_id: workProject?.project_id ?? null,
                 lessons: verdict.lessons.map(normalizeLesson),
-              });
+              }, verdict.unaddressed_backlog_items.map((entry) => entry.item_id));
               if (completed) {
                 if (verdict.lessons.length > 0) {
                   this.scheduleLearningRun(`Work ${workId}`);
@@ -5541,7 +5577,7 @@ export class Core {
         notes: [],
         reason: "All Tasks completed; request the Manager final verdict.",
         mode: "finalize" as const,
-        context: { mode: "finalize", work_id: workId, tasks: managerTasks, reports, design_documents: this.completedDesignDocuments(workId), ...this.processSkillsRequestContext() },
+        context: { mode: "finalize", work_id: workId, tasks: managerTasks, reports, design_documents: this.completedDesignDocuments(workId), backlog_items: listInProgressBacklogItemsOfWork(this.db, workId).map(({ id, file, line, problem, suggestion }) => ({ id, file, line, problem, suggestion })), ...this.processSkillsRequestContext() },
       };
       const outcome = await this.attemptFinalManager(workId, roleRequest);
       if (outcome === null) return null;
@@ -7350,6 +7386,9 @@ function requireManagerVerdict(value: unknown, workId: string): FinalManagerVerd
     verdict: value.verdict,
     summary: value.summary,
     missing: value.missing,
+    unaddressed_backlog_items: (Array.isArray(value.unaddressed_backlog_items) ? value.unaddressed_backlog_items : []).flatMap(
+      (entry: unknown) => isRecord(entry) && typeof entry.item_id === "string" && typeof entry.reason === "string" ? [{ item_id: entry.item_id, reason: entry.reason }] : [],
+    ),
     lessons: value.lessons,
   };
 }

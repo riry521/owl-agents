@@ -721,6 +721,8 @@ export interface CreateWorkPayload extends JsonObject {
   readonly size: "small" | "normal" | "large";
   readonly project_id: string | null;
   readonly design_mode?: "auto" | "lead";
+  readonly backlog_item_ids?: string[];
+  readonly dismiss_backlog_item_ids?: string[];
 }
 
 export interface CreateWorkData extends JsonObject {

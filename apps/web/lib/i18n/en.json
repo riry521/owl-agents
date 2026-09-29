@@ -798,7 +798,7 @@
   },
   "backlog": {
     "title": "Backlog",
-    "subtitle": "Minor findings from reviews. Issue a Work from the items you select, or dismiss the ones you don't need.",
+    "subtitle": "Minor findings from reviews. Issue a Work from the items you select, link them to an existing Work, or dismiss the ones you don't need.",
     "loading": "Loading…",
     "loadError": "Could not load the backlog.",
     "empty": "No matching items.",
@@ -810,7 +810,8 @@
     },
     "status": {
       "open": "Open",
-      "done": "Issued",
+      "in_progress": "In progress",
+      "done": "Done",
       "dismissed": "Dismissed"
     },
     "item": {
@@ -819,15 +820,16 @@
       "reason": "Reason",
       "suggestion": "Suggestion",
       "source": "Source",
-      "issuedWork": "Issued to",
-      "select": "Select this item"
+      "select": "Select this item",
+      "linkedWork": "Work"
     },
     "actions": {
       "selectedCount": "{{count}} selected",
       "issue": "Issue a Work from selection",
       "dismiss": "Dismiss",
       "dismissSelected": "Dismiss selection",
-      "clearSelection": "Clear selection"
+      "clearSelection": "Clear selection",
+      "link": "Link selection to a Work"
     },
     "issue": {
       "formTitle": "Issue a Work",
@@ -854,12 +856,26 @@
       "notFound": "Items were not found. The list was refreshed.",
       "validation": "Check the input.",
       "network": "Cannot reach the server.",
-      "default": "The action failed."
+      "default": "The action failed.",
+      "workNotFound": "The Work was not found. The list was refreshed."
     },
     "workSection": {
       "title": "Backlog",
       "openAll": "Open the backlog",
-      "loadError": "Could not load the backlog."
+      "loadError": "Could not load the backlog.",
+      "linkedTitle": "Items this Work addresses"
+    },
+    "link": {
+      "formTitle": "Link to an existing Work",
+      "workLabel": "Work",
+      "workPlaceholder": "Select a Work",
+      "help": "Linked items become \"In progress\" and turn \"Done\" when that Work completes. Linking to a completed Work makes them \"Done\" at once.",
+      "submit": "Link",
+      "success": "Linked {{count}} item(s) to Work #{{number}}.",
+      "loadError": "Could not load the Work list.",
+      "noCandidates": "No Work in this project can take these items (cancelled Works are excluded).",
+      "mixedProjects": "Items from different projects cannot be linked to one Work. Filter by project first.",
+      "cancel": "Cancel"
     }
   },
   "skills": {

@@ -149,6 +149,8 @@ export interface ManagerVerdict {
   readonly verdict: "complete" | "incomplete";
   readonly summary: string;
   readonly missing: readonly ManagerMissingItem[];
+  /** Absent in verdicts recorded before backlog items were tied to Works. */
+  readonly unaddressed_backlog_items?: readonly { readonly item_id: string; readonly reason: string }[];
   readonly lessons: readonly (ManagerLesson | LegacyManagerLesson)[];
 }
 

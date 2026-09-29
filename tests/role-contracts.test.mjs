@@ -224,7 +224,7 @@ test("Manager replan: the rendered template parses as task.replanned with fixed 
   const input = renderedInput(prompt, "Manager input");
   assert.deepEqual(Object.keys(input), ["mode", "work", "tasks", "reports", "notes", "reason", "context"]);
   assert.deepEqual(Object.keys(input.context), [
-    "start_mode", "failed_task_ids", "current_plan", "question", "failed_tasks", "final_verdict", "rules", "knowledge", "skills", "design_documents",
+    "start_mode", "failed_task_ids", "current_plan", "question", "failed_tasks", "final_verdict", "backlog_items", "rules", "knowledge", "skills", "design_documents",
   ]);
   assert.deepEqual(input.context.failed_tasks, []);
   assert.equal(input.context.final_verdict, null);
@@ -345,6 +345,19 @@ test("Manager finalize: the rendered template parses into a verdict; an off-enum
     runnerAnswering((template) => ({ verdict: { ...template.verdict, verdict: "done" } })).runManagerPlan(finalizeInput),
     (error) => error.code === "manager_plan_invalid" && error.reason === "manager_output_schema:verdict.verdict:not_one_of_complete|incomplete",
   );
+});
+
+test("Manager finalize: unaddressed_backlog_items requires item_id and reason; a verdict without it parses as []", async () => {
+  const items = MANAGER_FINALIZE_OUTPUT_SCHEMA.properties.verdict.properties.unaddressed_backlog_items;
+  assert.equal(items.type, "array");
+  assert.deepEqual(items.items.required, ["item_id", "reason"]);
+  const finalizeInput = { work: { id: "work-1", title: "Archive Works" }, mode: "finalize", tasks: [task], reports: [] };
+  const legacy = await runnerAnswering(() => ({ verdict: { verdict: "complete", summary: "s", missing: [], lessons: [] } })).runManagerPlan(finalizeInput);
+  assert.deepEqual(legacy.verdict.unaddressed_backlog_items, []);
+  const mixed = await runnerAnswering(() => ({ verdict: { verdict: "complete", summary: "s", missing: [], lessons: [], unaddressed_backlog_items: [
+    { item_id: 1, reason: "r" }, { item_id: "a" }, "x", { item_id: "b", reason: "ok" },
+  ] } })).runManagerPlan(finalizeInput);
+  assert.deepEqual(mixed.verdict.unaddressed_backlog_items, [{ item_id: "b", reason: "ok" }]);
 });
 
 test("Worker: the rendered template parses as a report; a wrong field type is rejected", async () => {

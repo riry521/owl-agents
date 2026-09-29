@@ -1246,6 +1246,7 @@ interface ExternalCore {
   listBacklogItems?(filter: { status?: string; project_id?: string; work_id?: string; limit?: number; offset?: number }): { items: readonly unknown[]; next_offset: number | null };
   dismissBacklogItems?(request: JsonObject): Promise<ExternalCommandResponse>;
   issueBacklogWork?(request: JsonObject): Promise<ExternalCommandResponse>;
+  linkBacklogItems?(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   getSkillSettings?(): unknown;
   setSkillSettings?(value: unknown): Promise<unknown>;
   getLanguage?(): Promise<OwnerLanguage>;
@@ -2160,6 +2161,16 @@ export class ExternalCoreAdapter implements CorePort {
       return { data: response.data, version: response.version };
     } catch (error) {
       throw externalError(error, "issueBacklogWork");
+    }
+  }
+
+  async linkBacklogItems(workId: string, request: JsonObject): Promise<{ data: JsonObject; version: number }> {
+    if (typeof this.core.linkBacklogItems !== "function") throw skillApiUnavailable("Review backlog linking");
+    try {
+      const response = await this.core.linkBacklogItems(workId, request);
+      return { data: response.data, version: response.version };
+    } catch (error) {
+      throw externalError(error, "linkBacklogItems");
     }
   }
 

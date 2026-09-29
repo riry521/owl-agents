@@ -28,7 +28,7 @@ import { enqueueLearningJobInTransaction } from "./learning-pipeline.js";
 import { DEFAULT_KNOWLEDGE_LIMITS, KnowledgeRetriever, type KnowledgeLimits } from "./knowledge-retrieval.js";
 import { ownerGuidance } from "./owner-guidance.js";
 import { dependencyContext, isTaskReviewRequired, loadFixContext, loadRetrySubtasks, reviewerTaskView, roleTaskView, taskDependencyIds } from "./task-context.js";
-import { registerReviewBacklogInTransaction } from "./review-backlog.js";
+import { registerReviewBacklogInTransaction, settleWorkBacklogOnCompletionInTransaction } from "./review-backlog.js";
 import { clearPausedReviewerWait, recordPausedReviewerWait } from "./provider-pause-reviewer-wait.js";
 import { agentCliNames, installedAgentCliMatches, listProcesses, planSubagentReconciliation } from "./subagent-watcher.js";
 import type {
@@ -1029,6 +1029,7 @@ export class WorkflowEngine {
     managerFinalVerdict: string,
     merge?: JsonObject,
     learnings?: WorkLearningInput,
+    unaddressedBacklogItemIds: readonly string[] = [],
   ): Promise<boolean> {
     const tasks = this.db.all<{ status: string }>("SELECT status FROM tasks WHERE work_id = ?", workId);
     const work = this.db.get<{ created_at: string; plan_revision: number; state_version: number }>(
@@ -1067,6 +1068,7 @@ export class WorkflowEngine {
           expected_version: work?.state_version,
           payload: { all_tasks_completed: true, manager_final_verdict: managerFinalVerdict, now: completedAt },
         });
+        settleWorkBacklogOnCompletionInTransaction(transaction, workId, unaddressedBacklogItemIds, completedAt);
         if (learnings) {
           enqueueLearningJobInTransaction(transaction, {
             work_id: workId,
