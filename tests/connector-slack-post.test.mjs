@@ -71,11 +71,11 @@ test("Slack notification renders a colored Block Kit card with plain fallback te
   assert.equal(posts.length, 1);
   assert.equal(posts[0].text, "✅ 完了しました: Finished with a guide");
   assert.equal(posts[0].blocks.length, 1);
-  assert.equal(posts[0].blocks[0].text.text, "*✅ 完了しました*");
+  assert.equal(posts[0].blocks[0].text.text, "*✅ 完了しました: Finished with a <https://example.com/finish|guide>*");
   assert.equal(posts[0].attachments.length, 1);
   assert.equal(posts[0].attachments[0].color, "#4CAF50");
   assert.equal(posts[0].attachments[0].fallback, posts[0].text);
-  assert.equal(posts[0].attachments[0].blocks[0].text.text, "*Finished* with a <https://example.com/finish|guide>");
+  assert.equal(posts[0].attachments[0].blocks.length, 0);
 });
 
 test("Slack notification sections stay within the Block Kit text limit after Markdown conversion", async () => {
@@ -209,4 +209,19 @@ test("Advisor parsing preserves Markdown for non-Slack consumers", () => {
     reply: markdown,
     suggested_actions: [],
   });
+});
+
+test("Slack notifications show the Work title in the header and text", async () => {
+  const posts = [];
+  const client = { chat: { postMessage: async (message) => { posts.push(message); return { ts: "1.1" }; } } };
+  const base = { kind: "event", sequence: 1, cursor: "1", schema_version: "1.0.0" };
+  await sendNotification(client, { ...base, event_id: "e-wt-1", type: "work.completed", payload: { work_id: "W000000", work_title: "請求書整理" } }, [{ channelId: "C1" }]);
+  assert.match(posts[0].blocks[0].text.text, /完了しました: 請求書整理/u);
+  assert.match(posts[0].text, /請求書整理/u);
+  await sendNotification(client, {
+    ...base, event_id: "e-wt-2", type: "decision.opened",
+    payload: { work_id: "W000000", work_title: "請求書整理", decision_id: "D0000000000000", question: "どうする？", options: [] },
+  }, [{ channelId: "C1" }]);
+  assert.match(posts[1].text, /請求書整理/u);
+  assert.match(posts[1].attachments[0].blocks[0].text.text, /^請求書整理\n/u);
 });

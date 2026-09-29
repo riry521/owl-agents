@@ -59,6 +59,7 @@ test("records source attribution and extracted key points", async (t) => {
 test("updates one note for equivalent URLs and preserves first research time", async (t) => {
   const { recorder, knowledge, setNow } = await setup(t);
   const first = await recorder.record(capture(), { role: "advisor", conversation_id: "conversation-1", work_id: "old-work" });
+  const createdLine = (await readFile(join(knowledge.knowledgeDir, first.path), "utf8")).match(/^created: .*$/mu)[0];
   await knowledge.update(first.path, { metadata: { status: "stale_flagged" } });
   setNow("2026-09-29T02:03:04.000Z");
 
@@ -70,7 +71,7 @@ test("updates one note for equivalent URLs and preserves first research time", a
   assert.equal((await readdir(join(knowledge.knowledgeDir, "research"))).length, 1);
   const note = await readFile(join(knowledge.knowledgeDir, first.path), "utf8");
   assert.match(note, /first_researched_at: 2026-09-28T01:02:03\.000Z/u);
-  assert.match(note, /created: 2026-09-28/u);
+  assert.ok(note.includes(createdLine));
   assert.match(note, /researched_at: 2026-09-29T02:03:04\.000Z/u);
   assert.match(note, /work_id: new-work/u);
   assert.match(note, /status: active/u);

@@ -55,7 +55,7 @@ for (const [type, emoji, jaTitle, enTitle, color, payload, extra = { work_id: WO
       assert.equal(card.language, language);
       assert.equal(card.eventType, type);
       assert.equal(card.emoji, emoji);
-      assert.equal(card.title, language === "ja" ? jaTitle : enTitle);
+      assert.equal(card.title, (language === "ja" ? jaTitle : enTitle) + (type === "work.completed" ? ": Archive" : ""));
       assert.equal(card.color, color);
       assert.equal(typeof card.fallbackText, "string");
       assert.ok(card.fallbackText.length > 0);
@@ -79,7 +79,7 @@ test("work.completed includes task count and duration and derives duration from 
     task_count: 5,
     duration_ms: 4_980_000,
   }), { language: "ja", formatTime: () => "12:00", replyStyle: "thread" });
-  assert.equal(fromValues.body, "Archive\nTask 5件・所要 1時間23分");
+  assert.equal(fromValues.body, "Task 5件・所要 1時間23分");
   assert.equal(fromValues.footer, "Work 9WORK1");
 
   assert.equal(formatWorkCompletionSummary({ task_count: 1, started_at: "2025-01-01T00:00:00Z", completed_at: "2025-01-01T01:23:00Z" }, "en"), "1 task · 1h 23m");
@@ -97,7 +97,7 @@ test("work.completed includes task count and duration and derives duration from 
     language: "en", formatTime: () => "12:00", replyStyle: "thread",
   });
   assert.equal(absent.body, "Work 9WORK1");
-  assert.equal(absent.footer, null);
+  assert.equal(absent.footer, "Work 9WORK1");
 });
 
 test("decision.opened keeps the main body short and returns background in threadDetail", () => {
@@ -144,4 +144,76 @@ test("fallback text is plain, concise, and includes only the event subject", () 
   assert.equal(buildNotificationCard(event("system.alert", { message: "  " }), {
     language: "ja", formatTime: () => "12:00", replyStyle: "thread",
   }), null);
+});
+
+const WORK_TITLE = "請求書アーカイブの整理";
+const CARD_CTX = (language) => ({ language, formatTime: () => "12:00", replyStyle: "thread" });
+const titledCases = [
+  ["work.completed", { work_id: WORK_ID }, "heading"],
+  ["work.cancelled", { work_id: WORK_ID }, "heading"],
+  ["work.paused", { work_id: WORK_ID }, "heading"],
+  ["work.reopened", { work_id: WORK_ID }, "heading"],
+  ["decision.opened", { work_id: WORK_ID, decision_id: DECISION_ID, question: "どちらにしますか？", options: [] }, "body"],
+  ["decision.resolved", { work_id: WORK_ID, decision_id: DECISION_ID, answer: "進める" }, "body"],
+  ["decision.cancelled", { work_id: WORK_ID, decision_id: DECISION_ID, reason: "work_cancelled" }, "body"],
+  ["system.alert", { work_id: WORK_ID, message: "Failure" }, "body"],
+];
+
+for (const [type, payload, where] of titledCases) {
+  for (const language of ["ja", "en"]) {
+    test(`${type} shows the Work title in ${where} and fallbackText, keeping footer IDs (${language})`, () => {
+      const p = { ...payload, work_title: WORK_TITLE, ...(type === "decision.opened" ? { language } : {}) };
+      const card = buildNotificationCard(event(type, p), CARD_CTX(language));
+      if (where === "heading") assert.ok(card.title.includes(WORK_TITLE));
+      else assert.equal(card.body.split("\n")[0], WORK_TITLE);
+      assert.ok(card.fallbackText.includes(WORK_TITLE));
+      assert.match(card.footer, /Work 9WORK1/u);
+      if (type.startsWith("decision.")) assert.match(card.footer, /ID /u);
+      assert.ok(!card.title.includes("Project") && !(card.body ?? "").includes("Project"));
+
+      const bare = buildNotificationCard(event(type, payload), CARD_CTX(language));
+      assert.ok(!bare.fallbackText.includes(WORK_TITLE));
+      assert.match(bare.footer, /Work 9WORK1/u);
+    });
+  }
+}
+
+test("work.* heading is capped at 150 chars, uses title as fallback, and prefers work_title", () => {
+  const long = buildNotificationCard(event("work.completed", { work_id: WORK_ID, work_title: "あ".repeat(400) }), CARD_CTX("ja"));
+  assert.ok(long.title.length <= 150);
+  assert.ok(long.fallbackText.startsWith("✅ 完了しました: あああ"));
+  const legacy = buildNotificationCard(event("work.paused", { work_id: WORK_ID, title: "Legacy" }), CARD_CTX("en"));
+  assert.equal(legacy.title, "Paused: Legacy");
+  const both = buildNotificationCard(event("work.paused", { work_id: WORK_ID, title: "Old", work_title: "New" }), CARD_CTX("en"));
+  assert.equal(both.title, "Paused: New");
+  const decision = buildNotificationCard(event("decision.opened", {
+    work_id: WORK_ID, work_title: "Keep me", decision_id: DECISION_ID, question: "q".repeat(400), options: [],
+  }), CARD_CTX("ja"));
+  assert.ok(decision.fallbackText.includes("Keep me"));
+});
+
+test("work-less system.alert and provider.* cards are unchanged by work_title", () => {
+  const alert = buildNotificationCard(event("system.alert", { message: "Notice", work_title: "X" }), CARD_CTX("ja"));
+  assert.equal(alert.title, "システム通知");
+  assert.equal(alert.body, "Notice");
+  assert.equal(alert.footer, null);
+  assert.equal(alert.fallbackText, "⚠️ システム通知: Notice");
+  const resumed = buildNotificationCard(event("provider.resumed", { provider: "Anthropic", work_title: "X" }), CARD_CTX("ja"));
+  assert.equal(resumed.fallbackText, "▶️ 処理を再開しました: Anthropic");
+  assert.equal(resumed.footer, null);
+});
+
+test("provider.paused / provider.resumed cards are identical with and without work_title", () => {
+  const payloads = {
+    "provider.paused": { provider: "Anthropic", resume_at: "2025-01-01T12:00:00Z", resume_source: "reported" },
+    "provider.resumed": { provider: "Anthropic" },
+  };
+  for (const language of ["ja", "en"]) {
+    for (const [type, payload] of Object.entries(payloads)) {
+      const base = buildNotificationCard(event(type, payload), CARD_CTX(language));
+      const withTitle = buildNotificationCard(event(type, { ...payload, work_id: WORK_ID, work_title: WORK_TITLE, title: WORK_TITLE }), CARD_CTX(language));
+      for (const key of ["title", "body", "footer", "fallbackText"]) assert.equal(withTitle[key], base[key], `${type} ${language} ${key}`);
+      assert.ok(!base.fallbackText.includes(WORK_TITLE));
+    }
+  }
 });

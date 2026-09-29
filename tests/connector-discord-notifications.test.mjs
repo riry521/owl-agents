@@ -299,3 +299,14 @@ test("a reply to the bot's unrelated message is not a decision answer", async ()
 
   assert.equal(requests.some(({ path }) => path === `/decisions/${DECISION_ID}/answer`), false);
 });
+
+test("notification cards show the Work title in embed title, description and content", async () => {
+  const { sends, client } = discordClient();
+  await sendNotification(client, event("work.completed", { work_id: WORK_ID, work_title: "請求書整理" }, { work_id: WORK_ID }), "D-NOTIFICATIONS");
+  assert.match(sends[0].message.content, /請求書整理/u);
+  assert.equal(embedData(sends[0]).title, "✅ 完了しました: 請求書整理");
+  assert.match(embedData(sends[0]).footer.text, /Work 9WORK1/u);
+  await sendNotification(client, opened({ work_title: "請求書整理" }), "D-NOTIFICATIONS");
+  assert.match(sends[1].message.content, /請求書整理/u);
+  assert.ok(embedData(sends[1]).description.startsWith("請求書整理\n"));
+});

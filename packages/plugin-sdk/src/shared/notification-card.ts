@@ -259,15 +259,16 @@ export function buildDecisionClosedCard(event: OwlEvent, ctx: DecisionClosedCont
     workId ? shortWork(workId) : null,
     decisionId ? `ID ${decisionShortId(decisionId)}` : null,
   ].filter((part): part is string => part !== null).join(" · ") || null;
+  const workTitle = eventWorkTitle(event);
   return makeCard(
     event.type,
     language,
     style,
     resolved ? t.titles.decisionResolved : t.titles.decisionCancelled,
-    ctx.question ? `❓ ${ctx.question}` : null,
+    joinLines(workTitle, ctx.question ? `❓ ${ctx.question}` : null),
     [{ label: resolved ? t.fieldAnswer : t.fieldReason, value: truncateText(subject, FIELD_VALUE_MAX) }],
     footer,
-    subject,
+    withWorkTitle(workTitle, subject),
   );
 }
 
@@ -428,16 +429,16 @@ export function formatClockTime(epochMs: number, language: OwlLanguage): string 
 function buildWorkCard(event: OwlEvent, language: OwlLanguage): NotificationCard {
   const payload = event.payload;
   const workId = eventWorkId(event);
-  const title = text(payload.title);
+  const title = eventWorkTitle(event);
   const label = title ?? (workId ? shortWork(workId) : "Work");
   const languageText = CARD_TEXT[language];
   const style = CARD_STYLES[event.type as Exclude<NotificationCardEvent, "system.alert">];
-  let body = label;
+  let body = title ? "" : label;
   let fields: CardField[] = [];
   switch (event.type) {
     case "work.completed": {
       const summary = formatWorkCompletionSummary(payload, language);
-      if (summary) body += `\n${summary}`;
+      if (summary) body += `${body ? "\n" : ""}${summary}`;
       break;
     }
     case "work.paused":
@@ -451,8 +452,10 @@ function buildWorkCard(event: OwlEvent, language: OwlLanguage): NotificationCard
     : event.type === "work.cancelled" ? languageText.titles.workCancelled
       : event.type === "work.paused" ? languageText.titles.workPaused
         : languageText.titles.workReopened;
-  const footer = title && workId ? shortWork(workId) : null;
-  return makeCard(event.type as NotificationCardEvent, language, style, cardTitle, truncateText(body, BODY_MAX), fields, footer, label);
+  const footer = workId ? shortWork(workId) : null;
+  return makeCard(event.type as NotificationCardEvent, language, style,
+    title ? truncateText(`${cardTitle}: ${title}`, QUESTION_MAX) : cardTitle,
+    body ? truncateText(body, BODY_MAX) : null, fields, footer, title ? "" : label);
 }
 
 function buildDecisionOpenedCard(event: OwlEvent, ctx: CardRenderContext): NotificationCard {
@@ -462,7 +465,8 @@ function buildDecisionOpenedCard(event: OwlEvent, ctx: CardRenderContext): Notif
   const question = decisionQuestion(payload, language);
   const options = decisionOptionViews(payload);
   const optionList = formatDecisionOptionList(options, language);
-  const body = `❓ ${question.line}${optionList ? `\n\n${optionList}` : ""}`;
+  const workTitle = eventWorkTitle(event);
+  const body = joinLines(workTitle, `❓ ${question.line}${optionList ? `\n\n${optionList}` : ""}`) ?? "";
   const decisionId = text(payload.decision_id);
   const targetId = decisionId ?? event.event_id;
   const actions = options.slice(0, MAX_CARD_ACTIONS).flatMap((option): CardAction[] => {
@@ -486,7 +490,7 @@ function buildDecisionOpenedCard(event: OwlEvent, ctx: CardRenderContext): Notif
     hasButtons: actions.length > 0,
     decisionId,
   });
-  return makeCard("decision.opened", language, CARD_STYLES["decision.opened"], decisionTitle(payload), truncateText(body, BODY_MAX), [], footer, question.line, {
+  return makeCard("decision.opened", language, CARD_STYLES["decision.opened"], decisionTitle(payload), truncateText(body, BODY_MAX), [], footer, withWorkTitle(workTitle, question.line), {
     actions,
     threadDetail: truncateText(threadDetail, DETAIL_MAX),
     question: question.source === "none" ? null : question.line,
@@ -528,10 +532,11 @@ function buildSystemAlertCard(event: OwlEvent, language: OwlLanguage): Notificat
   const t = CARD_TEXT[language];
   const message = text(payload.message) ?? "";
   const remediation = text(payload.remediation);
+  const workTitle = workScoped ? eventWorkTitle(event) : null;
   const fields = remediation ? [{ label: t.fieldRemediation, value: truncateText(remediation, FIELD_VALUE_MAX) }] : [];
   return makeCard("system.alert", language, CARD_STYLES[workScoped ? "system.alert.work" : "system.alert.system"],
-    workScoped ? t.titles.workProblem : t.titles.systemNotice, truncateText(message, BODY_MAX), fields,
-    workId ? shortWork(workId) : null, message.split(/\r?\n/u)[0] ?? "");
+    workScoped ? t.titles.workProblem : t.titles.systemNotice, truncateText(joinLines(workTitle, message) ?? "", BODY_MAX), fields,
+    workId ? shortWork(workId) : null, withWorkTitle(workTitle, message.split(/\r?\n/u)[0] ?? ""));
 }
 
 function makeCard(
@@ -545,7 +550,7 @@ function makeCard(
   subject: string,
   extra: Partial<Pick<NotificationCard, "actions" | "threadDetail" | "question">> = {},
 ): NotificationCard {
-  const fallbackText = truncateText(`${style.emoji} ${title}: ${toPlainText(subject)}`, FALLBACK_MAX);
+  const fallbackText = truncateText(`${style.emoji} ${toPlainText(title)}${subject ? `: ${toPlainText(subject)}` : ""}`, FALLBACK_MAX);
   return {
     eventType,
     language,
@@ -564,6 +569,20 @@ function makeCard(
 
 function eventWorkId(event: OwlEvent): string | null {
   return text(event.payload.work_id) ?? text(event.work_id);
+}
+
+/** Work title: work.* reads work_title then title; decision.* and system.alert read work_title only. */
+function eventWorkTitle(event: OwlEvent): string | null {
+  const payload = event.payload;
+  return text(payload.work_title) ?? (event.type.startsWith("work.") ? text(payload.title) : null);
+}
+
+function joinLines(first: string | null, rest: string | null): string | null {
+  return first && rest ? `${first}\n${rest}` : first ?? rest;
+}
+
+function withWorkTitle(workTitle: string | null, subject: string): string {
+  return workTitle ? `${workTitle}: ${subject}` : subject;
 }
 
 function shortWork(workId: string): string {

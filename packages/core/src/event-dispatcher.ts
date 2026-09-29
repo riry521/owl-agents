@@ -122,7 +122,7 @@ export class EventDispatcher {
         afterSequence,
         limit,
       );
-    return rows.filter((row) => !isInternalLifecycleEvent(row)).map(toCanonicalFrame);
+    return rows.filter((row) => !isInternalLifecycleEvent(row)).map((row) => toCanonicalFrame(row, this.db));
   }
 
   public async replayPending(): Promise<number> {
@@ -174,7 +174,7 @@ export class EventDispatcher {
           details: { event_id: row.id },
         });
       }
-      payload = parsed as JsonObject;
+      payload = withWorkTitle(this.db, row, parsed as JsonObject);
     } catch (error) {
       await this.updateLifecycle(row.id, "failed", null, row.attempt_no + 1, "event_payload_invalid");
       throw new HumanReadableError({
@@ -400,7 +400,7 @@ function resolveCursor(db: CoreDatabase, cursor: string | number | null): number
   return row.sequence;
 }
 
-function toCanonicalFrame(row: EventRow): CanonicalEventFrame {
+function toCanonicalFrame(row: EventRow, db: CoreDatabase): CanonicalEventFrame {
   let parsed: unknown;
   try {
     parsed = JSON.parse(row.payload_json);
@@ -431,8 +431,32 @@ function toCanonicalFrame(row: EventRow): CanonicalEventFrame {
     task_id: row.task_id,
     agent_run_id: row.agent_run_id,
     created_at: row.created_at,
-    payload: parsed as JsonObject,
+    payload: withWorkTitle(db, row, parsed as JsonObject),
   };
+}
+
+const WORK_TITLE_EVENT_TYPES: ReadonlySet<string> = new Set([
+  "work.completed",
+  "work.cancelled",
+  "work.paused",
+  "work.reopened",
+  "decision.opened",
+  "decision.resolved",
+  "decision.cancelled",
+  "system.alert",
+]);
+
+/** Delivery-time only: fills payload.work_title for notification events; stored rows are untouched. */
+function withWorkTitle(db: CoreDatabase, row: EventRow, payload: JsonObject): JsonObject {
+  if (!WORK_TITLE_EVENT_TYPES.has(row.type) || "work_title" in payload) {
+    return payload;
+  }
+  const workId = typeof payload.work_id === "string" && payload.work_id !== "" ? payload.work_id : row.work_id;
+  if (!workId) {
+    return payload;
+  }
+  const work = db.get<{ title: string }>("SELECT title FROM works WHERE id = ?", workId);
+  return work && work.title !== "" ? { ...payload, work_title: work.title } : payload;
 }
 
 function isInternalLifecycleEvent(row: EventRow): boolean {
