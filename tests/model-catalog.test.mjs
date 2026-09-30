@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,7 @@ import {
   mergeOfficialModels,
   parseAnthropicModels,
   readCodexModelCatalog,
+  refreshCodexModelCatalog,
 } from "../apps/server/dist/model-catalog.js";
 import { CODEX_BUILTIN_MODELS, DEFAULT_HARNESS_MODELS } from "../packages/shared/dist/index.js";
 
@@ -272,4 +273,71 @@ test("an injected model list replaces the built-in one", async () => {
     });
     assert.equal(updated.data.roles.find(({ role }) => role === "worker").model, "gpt-7-nova");
   });
+});
+
+async function withFakeCodex(script, run) {
+  const dir = await mkdtemp(join(tmpdir(), "owl-fake-codex-"));
+  try {
+    const executable = join(dir, "codex");
+    await writeFile(executable, `#!${process.execPath}\n${script}`);
+    await chmod(executable, 0o755);
+    return await run({ dir, executable });
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+const FAKE_APP_SERVER = `
+const fs = require("node:fs");
+const path = require("node:path");
+const hang = process.env.FAKE_HANG === "1";
+fs.writeFileSync(path.join(process.env.FAKE_DIR, "pid"), String(process.pid));
+let buffer = "";
+process.stdin.on("data", (chunk) => {
+  buffer += chunk;
+  let index;
+  while ((index = buffer.indexOf("\\n")) >= 0) {
+    const message = JSON.parse(buffer.slice(0, index));
+    buffer = buffer.slice(index + 1);
+    if (hang) continue;
+    if (message.method === "initialize") process.stdout.write(JSON.stringify({ id: message.id, result: {} }) + "\\n");
+    if (message.method === "model/list") {
+      fs.writeFileSync(path.join(process.env.FAKE_DIR, "params.json"), JSON.stringify(message.params));
+      fs.writeFileSync(path.join(process.env.CODEX_HOME, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6-sol", visibility: "list" }] }));
+      const data = [{ id: "gpt-6.1-sol", model: "gpt-6.1-sol", hidden: false }, { id: "gpt-reserve", model: "gpt-reserve", hidden: true }];
+      process.stdout.write(JSON.stringify({ id: message.id, result: { data } }) + "\\n");
+    }
+  }
+});
+setInterval(() => {}, 1000);
+`;
+
+test("refreshing the Codex catalog keeps the model/list answer even when the local cache lags", async (t) => {
+  t.mock.method(console, "warn", () => undefined);
+  await withCodexHome(null, async (home) => withFakeCodex(FAKE_APP_SERVER, async ({ dir, executable }) => {
+    const env = { ...process.env, ...home, FAKE_DIR: dir };
+    assert.equal(readCodexModelCatalog(env), null);
+    assert.equal(await refreshCodexModelCatalog({ executable, env }), true);
+    assert.deepEqual(JSON.parse(await readFile(join(dir, "params.json"), "utf8")), { includeHidden: true });
+    assert.deepEqual(readCodexModelCatalog(env), [{ slug: "gpt-6-sol", listed: true }]);
+    const known = codexKnownModels(env);
+    for (const slug of ["gpt-6.1-sol", "gpt-reserve", "gpt-6-sol"]) assert.ok(known.has(slug), slug);
+  }));
+});
+
+test("a hung Codex app-server is killed once the refresh times out", async (t) => {
+  const warn = t.mock.method(console, "warn", () => undefined);
+  await withCodexHome(null, async (home) => withFakeCodex(FAKE_APP_SERVER, async ({ dir, executable }) => {
+    const env = { ...process.env, ...home, FAKE_DIR: dir, FAKE_HANG: "1" };
+    assert.equal(await refreshCodexModelCatalog({ executable, env, timeoutMs: 500 }), false);
+    assert.equal(warn.mock.callCount(), 1);
+    const pid = Number(await readFile(join(dir, "pid"), "utf8"));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+  }));
+});
+
+test("a missing Codex executable resolves false without throwing", async (t) => {
+  t.mock.method(console, "warn", () => undefined);
+  assert.equal(await refreshCodexModelCatalog({ executable: join(tmpdir(), "owl-no-such-codex") }), false);
 });

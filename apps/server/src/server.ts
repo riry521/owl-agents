@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { scrubLegacySettings } from "./app-settings-store.js";
 import { createConfiguredAgentRunner, createExternalAgentRunner, createHybridExecutorRuntime } from "./agent-runner.js";
 import { isProcessAlive } from "./process-state.js";
+import { refreshCodexModelCatalog } from "./model-catalog.js";
 import {
   assertStaticExport,
   resolveDataDir,
@@ -447,6 +448,7 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
   process.once("SIGTERM", () => handleSignal("SIGTERM", false));
   process.once("SIGINT", () => handleSignal("SIGINT", true));
 
+  if (process.env.OWL_CORE_MODE !== "standalone" && providerMode() !== "stub") void refreshCodexModelCatalog();
   return { pid: process.pid, port: options.port, bind: options.bind, dataDir, pidFile, stateFile, http, shutdown };
 }
 
