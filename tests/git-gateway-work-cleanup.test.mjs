@@ -193,13 +193,14 @@ test("deleteWorkWorkspaces removes worktrees and deleteWorkBranches then removes
   assert.equal(git(project, "worktree", "list", "--porcelain").includes(".owl-workspaces/W4/"), false);
 });
 
-test("deleteWorkWorkspaces backs up leftover Task changes when a Project hook refuses the commit", async () => {
+test("deleteWorkWorkspaces backs up leftover Task changes when the commit is refused", async () => {
   const { project, owlRoot, gateway } = await fixture();
   const task = await gateway.prepareWorktree({ work_id: "W5", task_id: "T1" });
   assert.equal(task.ok, true, task.message);
-  const hooks = join(project, ".git", "hooks");
-  await mkdir(hooks, { recursive: true });
-  await writeFile(join(hooks, "pre-commit"), "#!/bin/sh\necho 'commits are refused here' >&2\nexit 1\n", { mode: 0o755 });
+  const signer = join(project, ".git", "reject-signing.sh");
+  await writeFile(signer, "#!/bin/sh\necho 'commits are refused here' >&2\nexit 1\n", { mode: 0o755 });
+  git(project, "config", "gpg.program", signer);
+  git(project, "config", "commit.gpgsign", "true");
   await mkdir(join(task.worktree_path, "notes"), { recursive: true });
   await writeFile(join(task.worktree_path, "notes", "draft.md"), "unfinished\n");
   git(task.worktree_path, "add", "notes/draft.md");
@@ -208,7 +209,7 @@ test("deleteWorkWorkspaces backs up leftover Task changes when a Project hook re
 
   assert.equal(cleanup.ok, true, cleanup.message);
   assert.equal(git(project, "worktree", "list", "--porcelain").includes(".owl-workspaces/W5/"), false);
-  assert.equal(git(project, "log", "--format=%s", "owl/task/W5/T1").includes("owl: complete task"), false, "the hook stayed in force");
+  assert.equal(git(project, "log", "--format=%s", "owl/task/W5/T1").includes("owl: complete task"), false, "the refused commit was not forced");
   const backups = join(owlRoot, "data", "outputs", "W5", "_uncommitted-changes");
   const [saved] = await readdir(backups);
   assert.equal(await readFile(join(backups, saved, "notes", "draft.md"), "utf8"), "unfinished\n");

@@ -5168,6 +5168,10 @@ export class Core {
         : "報告されたマージまたは検証の問題を解決して再試行するか、Workを中止してください。",
     };
     if (merge !== null && merge.base_branch !== null) alertPayload.base_branch = merge.base_branch;
+    if (merge?.kind === "error" && merge.dirty_files && merge.dirty_files.length > 0) {
+      alertPayload.dirty_files = [...merge.dirty_files];
+      if (merge.worktree_path) alertPayload.integration_worktree = merge.worktree_path;
+    }
     if (merge?.kind === "conflict") alertPayload.conflicting_files = [...merge.conflicting_files];
     if (merge?.kind === "verification_failed") {
       alertPayload.command_id = merge.command_id;

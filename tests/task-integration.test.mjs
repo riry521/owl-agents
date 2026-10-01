@@ -31,10 +31,13 @@ async function projectRepo(parent) {
   return project;
 }
 
-async function addRejectingPreCommit(projectPath) {
-  const hookPath = join(projectPath, ".git", "hooks", "pre-commit");
-  await writeFile(hookPath, "#!/bin/sh\nprintf '%s\\n' 'blocked by test pre-commit hook' >&2\nexit 1\n");
-  await chmod(hookPath, 0o755);
+async function addRejectingSigner(projectPath) {
+  // A repository-local signing program that always fails makes every commit fail.
+  const program = join(projectPath, ".git", "reject-signing.sh");
+  await writeFile(program, "#!/bin/sh\nprintf '%s\\n' 'blocked by test signer' >&2\nexit 1\n");
+  await chmod(program, 0o755);
+  execFileSync("git", ["-C", projectPath, "config", "gpg.program", program]);
+  execFileSync("git", ["-C", projectPath, "config", "commit.gpgsign", "true"]);
 }
 
 function fakeDatabase(parent, project) {
@@ -122,21 +125,21 @@ test("a merge conflict names the conflicting files", async () => {
   ].join("\n")), ["src/a.ts", "src/b.ts"]);
 });
 
-test("Task integration reports a pre-commit rejection as a commit failure with stderr", async () => {
+test("Task integration reports a rejected commit as a commit failure with stderr", async () => {
   const parent = await realpath(await mkdtemp(join(tmpdir(), "owl-task-commit-failure-")));
   const project = await projectRepo(parent);
   const gateway = new GitWorktreeGateway(fakeDatabase(parent, project), join(parent, "owl"));
   const prepared = await gateway.prepareWorktree({ work_id: "W", task_id: "T1" });
   await mkdir(join(prepared.worktree_path, "docs", "designs"), { recursive: true });
-  await writeFile(join(prepared.worktree_path, "docs", "designs", "x.md"), "hook-rejected content\n");
-  await addRejectingPreCommit(project);
+  await writeFile(join(prepared.worktree_path, "docs", "designs", "x.md"), "rejected content\n");
+  await addRejectingSigner(project);
 
   const result = await gateway.integrateTask({ work_id: "W", task_id: "T1", worktree_path: prepared.worktree_path });
 
   assert.equal(result.merged, false);
   assert.equal(result.failure_kind, "commit_failure");
-  assert.match(result.message, /could not commit the Task's changes: blocked by test pre-commit hook/);
-  assert.match(result.stderr_tail, /blocked by test pre-commit hook/);
+  assert.match(result.message, /could not commit the Task's changes:[\s\S]*blocked by test signer/);
+  assert.match(result.stderr_tail, /blocked by test signer/);
   assert.equal(result.aborted, true);
   await access(prepared.worktree_path);
 });
@@ -505,7 +508,7 @@ test("a design report that asks for replanning reaches the Manager without a doc
   assert.equal(db.get("SELECT COUNT(*) AS count FROM events WHERE work_id = ? AND json_extract(payload_json, '$.error_key') = 'design_document_missing'", workId).count, 0);
 });
 
-test("a commit hook failure reaches the Manager as a commit failure, not a merge conflict", async (t) => {
+test("a rejected commit reaches the Manager as a commit failure, not a merge conflict", async (t) => {
   const root = await realpath(await mkdtemp(join(tmpdir(), "owl-task-commit-replan-")));
   const project = await projectRepo(root);
   const db = openDatabase(join(root, "owl.db"));
@@ -521,7 +524,7 @@ test("a commit hook failure reaches the Manager as a commit failure, not a merge
       "project:commit-failure", "owner:default", "Commit failure", project, JSON.stringify([root]), now, now,
     );
   });
-  await addRejectingPreCommit(project);
+  await addRejectingSigner(project);
 
   let replanReason = null;
   const core = new Core({
@@ -546,7 +549,7 @@ test("a commit hook failure reaches the Manager as a commit failure, not a merge
       runWorker: async (request) => {
         const path = join(request.context.worktree, "docs", "designs", "x.md");
         await mkdir(join(request.context.worktree, "docs", "designs"), { recursive: true });
-        await writeFile(path, "The repository hook rejects this file.\n");
+        await writeFile(path, "The signer rejects the commit of this file.\n");
         return { outcome: "success", report_valid: true, report: workerReport(request.invocation_id, [{ file: "docs/designs/x.md", action: "added" }]) };
       },
       runReviewer: async () => ({ outcome: "failed", message: "The document Task does not need review." }),
@@ -578,15 +581,15 @@ test("a commit hook failure reaches the Manager as a commit failure, not a merge
 
   await waitFor(() => replanReason);
 
-  assert.match(replanReason, /could not commit the Task's changes: blocked by test pre-commit hook/);
+  assert.match(replanReason, /could not commit the Task's changes:[\s\S]*blocked by test signer/);
   assert.doesNotMatch(replanReason, /Git merge conflict/);
   const failure = JSON.parse(db.get(
     "SELECT payload_json FROM events WHERE work_id = ? AND type = 'verification.completed' ORDER BY sequence DESC LIMIT 1",
     workId,
   ).payload_json);
   assert.equal(failure.failure_kind, "commit_failure");
-  assert.match(failure.failure_message, /could not commit the Task's changes: blocked by test pre-commit hook/);
-  assert.match(failure.stderr_tail, /blocked by test pre-commit hook/);
+  assert.match(failure.failure_message, /could not commit the Task's changes:[\s\S]*blocked by test signer/);
+  assert.match(failure.stderr_tail, /blocked by test signer/);
   const task = db.get("SELECT status, worktree_state, worktree_path FROM tasks WHERE work_id = ?", workId);
   assert.ok(["failed", "judgement_waiting"].includes(task.status));
   assert.equal(task.worktree_state, "active");

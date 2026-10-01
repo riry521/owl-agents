@@ -66,20 +66,20 @@ test("discardTaskWorktree commits uncommitted changes to the Task branch and rem
   assert.equal(git(project, "show", "owl/task/W/T1:notes.txt"), "captured before discard");
 });
 
-test("discardTaskWorktree reports a rejected preservation commit with the hook's stderr", async () => {
+test("discardTaskWorktree reports a rejected preservation commit with its stderr", async () => {
   const parent = await realpath(await mkdtemp(join(tmpdir(), "owl-discard-commit-failure-")));
   const project = await projectRepo(parent);
   const gateway = new GitWorktreeGateway(fakeDatabase(parent, project), join(parent, "owl"));
   const prepared = await gateway.prepareWorktree({ work_id: "W", task_id: "T1" });
   await writeFile(join(prepared.worktree_path, "notes.txt"), "keep this until it can be committed\n");
-  await addRejectingPreCommit(project);
+  await addRejectingSigner(project);
 
   const result = await gateway.discardTaskWorktree({ work_id: "W", task_id: "T1", worktree_path: prepared.worktree_path });
 
   assert.equal(result.ok, false);
   assert.equal(result.failure_kind, "commit_failure");
-  assert.match(result.stderr_tail, /blocked by test pre-commit hook/);
-  assert.match(result.message, /blocked by test pre-commit hook/);
+  assert.match(result.stderr_tail, /blocked by test signer/);
+  assert.match(result.message, /blocked by test signer/);
   await access(prepared.worktree_path);
 });
 
@@ -197,10 +197,13 @@ async function insertTask(writeLane, id, workId, { status, worktreeState = null,
   });
 }
 
-async function addRejectingPreCommit(projectPath) {
-  const hookPath = join(projectPath, ".git", "hooks", "pre-commit");
-  await writeFile(hookPath, "#!/bin/sh\nprintf '%s\\n' 'blocked by test pre-commit hook' >&2\nexit 1\n");
-  await chmod(hookPath, 0o755);
+async function addRejectingSigner(projectPath) {
+  // A repository-local signing program that always fails makes every commit fail.
+  const program = join(projectPath, ".git", "reject-signing.sh");
+  await writeFile(program, "#!/bin/sh\nprintf '%s\\n' 'blocked by test signer' >&2\nexit 1\n");
+  await chmod(program, 0o755);
+  execFileSync("git", ["-C", projectPath, "config", "gpg.program", program]);
+  execFileSync("git", ["-C", projectPath, "config", "commit.gpgsign", "true"]);
 }
 
 async function recordMergedCompletion(writeLane, db, workId) {
@@ -230,7 +233,7 @@ async function prepareMergedConflictWork({ projectPath, owlRoot, db, writeLane, 
   await mkdir(join(task.worktree_path, "docs", "designs"), { recursive: true });
   await writeFile(join(task.worktree_path, "docs", "designs", "x.md"), "staged content must be discarded after merge\n");
   git(task.worktree_path, "add", "docs/designs/x.md");
-  await addRejectingPreCommit(projectPath);
+  await addRejectingSigner(projectPath);
   await insertTask(writeLane, "cancelled-conflict", workId, {
     status: "cancelled",
     worktreeState: "conflict_retained",
@@ -307,7 +310,7 @@ test("reconcileWorktrees removes a completed Work's integration worktree while i
   await assert.rejects(access(integrationPath), "the integration worktree is removed");
 });
 
-test("a merged Work discards staged cancelled Task changes without running the rejecting commit hook", async () => {
+test("a merged Work discards staged cancelled Task changes without committing them", async () => {
   const fixture = await reconcileFixture();
   const { projectPath, owlRoot, db, writeLane, gateway } = fixture;
   const paths = await prepareMergedConflictWork(fixture);

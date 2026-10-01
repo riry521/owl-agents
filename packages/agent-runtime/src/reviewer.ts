@@ -1,3 +1,5 @@
+import { realpathSync } from "node:fs";
+import { isAbsolute, relative } from "node:path";
 import { AgentRuntimeError, reviewInvalid } from "./errors";
 import { validateReportEnvelope } from "./protocol";
 import { DEFAULT_OWNER_LANGUAGE, renderWorkspaceToolsNote, type OwnerLanguage } from "@owl/shared";
@@ -50,6 +52,31 @@ export const REVIEW_OUTPUT_SCHEMA: RoleSchema = objectSchema({
   skill_proposals: SKILL_PROPOSALS_SCHEMA,
 });
 
+/** A reported path relative to the Task's workspace: absolute paths inside it are made relative, and a leading `./` is dropped. */
+function workspaceRelativePath(file: string, worktree: string | undefined): string {
+  const plain = file.replace(/^\.\//u, "");
+  if (!isAbsolute(plain) || worktree === undefined) return plain;
+  const real = (path: string): string => {
+    try { return realpathSync(path); } catch { return path; }
+  };
+  for (const [root, target] of [[worktree, plain], [real(worktree), real(plain)], [real(worktree), plain]] as const) {
+    const candidate = relative(root, target);
+    if (candidate.length > 0 && !candidate.startsWith("..") && !isAbsolute(candidate)) return candidate;
+  }
+  return plain;
+}
+
+/** Files the Task added that the Worker's report does not list in its changes; null for a design Task or when the added files are unknown. */
+function unreportedNewFiles(request: ReviewerRequest): string[] | null {
+  if (request.task.type === "design") return null;
+  if (request.added_files === undefined || request.added_files === null) return null;
+  const reported = new Set<string>();
+  for (const change of request.report.changes) {
+    if (typeof change.file === "string") reported.add(workspaceRelativePath(change.file, request.worktree));
+  }
+  return request.added_files.filter((path) => !reported.has(path));
+}
+
 /** The fixed Reviewer input: the same keys every time, null when absent. */
 export function reviewerPromptInput(request: ReviewerRequest): Record<string, unknown> {
   return {
@@ -58,6 +85,7 @@ export function reviewerPromptInput(request: ReviewerRequest): Record<string, un
     context: { rules: request.context ?? null, knowledge: request.knowledge ?? null, skills: request.skills ?? null },
     review_round: request.review_round ?? request.task.review_round,
     changed_files: request.changed_files ?? null,
+    unreported_new_files: unreportedNewFiles(request),
     design_document: request.design_document ?? null,
     previous_minor_findings: request.previous_minor_findings ?? null,
   };
@@ -86,6 +114,9 @@ export function buildReviewerPrompt(
       designer
         ? "design_document contains the external Markdown design (path and contents); review it directly because the Task has no changed repository files."
         : "changed_files lists the files the Worker changed (null when unknown); read those files in the workspace.",
+      designer
+        ? "unreported_new_files is null for a design Task."
+        : "unreported_new_files lists the files the Task added that the Worker's report does not list in its changes (an empty array when there are none, null when unknown). Check that each of them belongs in the deliverable; report any that is machine-local tool output or otherwise does not belong as a finding.",
       designer
         ? "If the Designer added decisions or scope the acceptance criteria and context did not call for, report it as a minor finding; it is not by itself a reason to fail."
         : "If the Worker added code, dependencies, abstractions, or files that the acceptance criteria and context did not call for, report it as a minor finding; it is not by itself a reason to fail.",

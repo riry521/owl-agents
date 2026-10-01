@@ -308,6 +308,8 @@ export type GitWorkMergeResult =
       readonly worktree_path: string | null;
       readonly base_branch: string | null;
       readonly work_branch: string | null;
+      /** Paths with uncommitted changes in the integration worktree, when that is why the merge stopped. */
+      readonly dirty_files?: readonly string[];
     };
 
 export type GitPushFailure = "non_fast_forward" | "hook_rejected" | "network" | "auth" | "unknown";
@@ -449,6 +451,8 @@ export interface GitGateway {
    * Project worktree, so the caller captures the whole isolated workspace.
    */
   changedPaths?(request: GitOperationRequest): Promise<readonly string[] | null>;
+  /** Like changedPaths, limited to files the Task added; null when unknown. */
+  addedPaths?(request: GitOperationRequest): Promise<readonly string[] | null>;
   /**
    * Reset a design Task's worktree and branch to where it forked from the
    * Work, removing untracked files, and return every path that was changed

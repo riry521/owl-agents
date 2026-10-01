@@ -1,9 +1,10 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants, type Dirent } from "node:fs";
-import { copyFile, lstat, mkdir, readFile, readdir, realpath, rm, rmdir } from "node:fs/promises";
+import { constants, mkdirSync, writeFileSync, type Dirent } from "node:fs";
+import { tmpdir } from "node:os";
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, rm, rmdir, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type {
   AdvisorWorkspaceInspection,
   AdvisorWorkspaceInspectionRequest,
@@ -25,6 +26,7 @@ import type {
 } from "./types";
 import { GitLanes } from "./git-lane.js";
 import { basePushArgs, classifyPushFailure, parsePushPorcelain, PUSH_HOOK_WARNING_MARKER, redactCredentials, safeRemoteName } from "./git-push.js";
+import { OWL_GIT_EXCLUDES_CONTENT } from "./owl-git-excludes.js";
 import { safeSegment, WorkspaceLayout } from "./workspace-layout.js";
 import { commitExcludePathspecs } from "./workspace-tooling.js";
 
@@ -187,7 +189,12 @@ export class GitWorktreeGateway implements GitGateway {
     private readonly lanes: GitLanes = processGitLanes,
     private readonly dataDir: string = join(owlRoot, "data"),
     private readonly layout: WorkspaceLayout = WorkspaceLayout.legacyOnly(owlRoot),
-  ) {}
+  ) {
+    this.excludesFile = writeOwlExcludesFile(dataDir);
+  }
+
+  /** Owl's own exclude list, passed to every isolated git command. */
+  private readonly excludesFile: string;
 
   public async prepareWorktree(request: GitOperationRequest): Promise<GitOperationResult> {
     const project = this.projectFor(request.work_id);
@@ -266,7 +273,7 @@ export class GitWorktreeGateway implements GitGateway {
     }
     const committed = await this.commitTaskChanges(worktreePath, workId, taskId, "checkpoint");
     if (!committed.ok) return committed;
-    const merge = await this.git(worktreePath, ["merge", "--no-edit", workBranch]);
+    const merge = await this.git(worktreePath, [...(await this.ownerIdentityArgs(worktreePath)), "merge", "--no-edit", workBranch]);
     if (merge.ok) {
       return { ok: true, exit_code: 0, recorded: false, worktree_path: worktreePath, message: merge.message };
     }
@@ -667,7 +674,7 @@ export class GitWorktreeGateway implements GitGateway {
       if (!leftover.ok) return integrationFailure(leftover.exit_code, leftover.message, false, leftover.message);
     }
 
-    const merge = await this.git(integrationPath, ["merge", "--no-edit", "--no-ff", taskBranch]);
+    const merge = await this.git(integrationPath, [...(await this.ownerIdentityArgs(integrationPath)), "merge", "--no-edit", "--no-ff", taskBranch]);
     if (merge.ok) {
       const removal = await this.removeWorktreeNow(request);
       return {
@@ -1002,14 +1009,32 @@ export class GitWorktreeGateway implements GitGateway {
    * carries the Work title only, and the repository's configured author
    * when there is one, so the base history holds no Owl bookkeeping.
    */
+  /**
+   * `-c` arguments naming the Owner (the author configured for the
+   * repository in the user's own git config), or Owl Agent when none is set.
+   * Read with the user's normal config, never the isolated one.
+   */
+  private async ownerIdentityArgs(cwd: string): Promise<string[]> {
+    const read = async (key: string): Promise<string> => {
+      try {
+        const result = await execFileAsync("git", ["-C", cwd, "config", "--get", key], { timeout: 10_000, maxBuffer: 64 * 1024 });
+        return String(result.stdout ?? "").trim();
+      } catch {
+        return "";
+      }
+    };
+    const name = await read("user.name");
+    const email = await read("user.email");
+    return name.length > 0 && email.length > 0
+      ? ["-c", `user.name=${name}`, "-c", `user.email=${email}`]
+      : ["-c", "user.name=Owl Agent", "-c", "user.email=owl-agent@localhost"];
+  }
+
   private async workCommitArgs(integrationPath: string, workId: string): Promise<string[]> {
     const title = this.db.get<{ title: string | null }>("SELECT title FROM works WHERE id = ?", workId)?.title ?? "";
     const subject = title.split(/\r?\n/u).map((line) => line.trim()).find((line) => line.length > 0) ?? "Apply Work changes";
-    const name = await this.git(integrationPath, ["config", "--get", "user.name"]);
-    const email = await this.git(integrationPath, ["config", "--get", "user.email"]);
-    const configured = name.ok && email.ok && name.message.trim().length > 0 && email.message.trim().length > 0;
     return [
-      ...(configured ? [] : ["-c", "user.name=Owl Agent", "-c", "user.email=owl-agent@localhost"]),
+      ...(await this.ownerIdentityArgs(integrationPath)),
       // The Work's content already passed the hooks when its Tasks were
       // committed; like the merge commit it replaces, landing it skips them.
       "commit", "--no-verify", "-m", subject,
@@ -1053,7 +1078,11 @@ export class GitWorktreeGateway implements GitGateway {
     }
     const cleanBefore = await this.git(integrationPath, ["status", "--porcelain=v1", "--untracked-files=all"]);
     if (!cleanBefore.ok || (cleanBefore.message !== "git operation completed" && cleanBefore.message.trim().length > 0)) {
-      return stop(workMergeError(`The integration worktree has uncommitted changes: ${cleanBefore.message}`, cleanBefore.exit_code || 1, context));
+      const dirtyFiles = cleanBefore.ok ? parsePorcelainZ(await this.gitStdout(integrationPath, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]) ?? "") : [];
+      return stop({
+        ...workMergeError(`The integration worktree has uncommitted changes: ${cleanBefore.message}`, cleanBefore.exit_code || 1, { ...context, worktree_path: integrationPath }),
+        ...(dirtyFiles.length > 0 ? { dirty_files: dirtyFiles } : {}),
+      });
     }
 
     const baseResult = await this.git(canonical, ["rev-parse", "--verify", `${baseRef}^{commit}`]);
@@ -1914,6 +1943,15 @@ export class GitWorktreeGateway implements GitGateway {
   }
 
   public async changedPaths(request: GitOperationRequest): Promise<readonly string[] | null> {
+    return this.taskPaths(request, false, []);
+  }
+
+  public async addedPaths(request: GitOperationRequest): Promise<readonly string[] | null> {
+    return this.taskPaths(request, true, null);
+  }
+
+  /** Paths a Task changed since it forked from the Work; only newly added files when `addedOnly`. */
+  private async taskPaths(request: GitOperationRequest, addedOnly: boolean, unknown: readonly string[] | null): Promise<readonly string[] | null> {
     const project = this.projectFor(request.work_id);
     if (!project || !request.task_id) return null;
     const canonical = await this.validProjectPath(project.canonical_path, project.allowed_roots_json);
@@ -1924,12 +1962,12 @@ export class GitWorktreeGateway implements GitGateway {
     // A Project Task never falls back to its whole checkout: when Git cannot
     // tell what changed, nothing is captured (the report still lists changes).
     const forkPoint = await this.git(taskPath, ["merge-base", "HEAD", base]);
-    if (!forkPoint.ok) return [];
+    if (!forkPoint.ok) return unknown;
     // Working tree against the fork point covers committed and uncommitted
     // edits; untracked files are listed separately. Deleted files are left out.
-    const tracked = await this.git(taskPath, ["diff", "-z", "--name-only", "--no-renames", "--diff-filter=d", forkPoint.message.trim()]);
+    const tracked = await this.git(taskPath, ["diff", "-z", "--name-only", "--no-renames", `--diff-filter=${addedOnly ? "A" : "d"}`, forkPoint.message.trim()]);
     const untracked = await this.git(taskPath, ["ls-files", "-z", "--others", "--exclude-standard"]);
-    if (!tracked.ok || !untracked.ok) return [];
+    if (!tracked.ok || !untracked.ok) return unknown;
     const lines = (result: GitOperationResult): string[] =>
       result.message === "git operation completed" ? [] : result.message.split("\0").filter((path) => path.length > 0);
     return [...new Set([...lines(tracked), ...lines(untracked)])].sort();
@@ -2151,9 +2189,60 @@ export class GitWorktreeGateway implements GitGateway {
     return canonical;
   }
 
+  /**
+   * Owl's git behaviour does not depend on the machine: no repository hooks,
+   * no system or global config, and Owl's own exclude list. The repository's
+   * local config still applies. Only the user's content filters (for example
+   * Git LFS) and trusted directories are carried over from their config.
+   */
+  private async isolatedInvocation(cwd: string, args: readonly string[]): Promise<{ args: string[]; options: { timeout: number; maxBuffer: number; env: NodeJS.ProcessEnv } }> {
+    const carried = await this.carriedUserConfig();
+    const excludes = await this.excludesFileFor(cwd);
+    return {
+      args: [...isolatedGitConfigArgs(excludes), ...carried, "-c", "core.quotePath=false", "-C", cwd, ...args],
+      options: {
+        timeout: 120_000,
+        maxBuffer: 2 * 1024 * 1024,
+        env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+      },
+    };
+  }
+
+  private carriedConfig: Promise<string[]> | null = null;
+
+  /** `-c` arguments for the user's `filter.*` and `safe.directory` entries from their system and global config. */
+  private carriedUserConfig(): Promise<string[]> {
+    this.carriedConfig ??= readCarriedUserConfig();
+    return this.carriedConfig;
+  }
+
+  private readonly excludesByCwd = new Map<string, Promise<string>>();
+
+  /** Owl's exclude list, combined with the repository's own `core.excludesFile` when it sets one. */
+  private excludesFileFor(cwd: string): Promise<string> {
+    let pending = this.excludesByCwd.get(cwd);
+    if (!pending) {
+      pending = combinedExcludesFile(cwd, this.excludesFile);
+      this.excludesByCwd.set(cwd, pending);
+    }
+    return pending;
+  }
+
+  /** Raw stdout of an isolated git command, or null when it fails. */
+  private async gitStdout(cwd: string, args: readonly string[]): Promise<string | null> {
+    try {
+      const invocation = await this.isolatedInvocation(cwd, args);
+      const result = await execFileAsync("git", invocation.args, invocation.options);
+      return String(result.stdout ?? "");
+    } catch {
+      return null;
+    }
+  }
+
   private async git(cwd: string, args: readonly string[], input?: string): Promise<GitOperationResult> {
     try {
-      const pending = execFileAsync("git", ["-C", cwd, ...args], { timeout: 120_000, maxBuffer: 2 * 1024 * 1024 });
+      const invocation = await this.isolatedInvocation(cwd, args);
+      const pending = execFileAsync("git", invocation.args, invocation.options);
       if (input !== undefined) {
         // git may exit before reading all of stdin; the rejected promise reports that failure.
         pending.child.stdin?.on("error", () => {});
@@ -2177,6 +2266,76 @@ export class GitWorktreeGateway implements GitGateway {
 
   private inLane<T>(repositoryPath: string, operation: () => Promise<T>): Promise<T> {
     return this.lanes.run(repositoryPath, operation);
+  }
+}
+
+function isolatedGitConfigArgs(excludesFile: string): string[] {
+  return ["-c", "core.hooksPath=/dev/null", "-c", `core.excludesFile=${excludesFile}`];
+}
+
+/** The user's `filter.*` and `safe.directory` config entries as `-c` arguments. */
+async function readCarriedUserConfig(): Promise<string[]> {
+  const args: string[] = [];
+  for (const scope of ["--system", "--global"]) {
+    let stdout = "";
+    try {
+      const result = await execFileAsync("git", ["config", scope, "-z", "--get-regexp", "^(filter\\..+|safe\\.directory)$"], { timeout: 10_000, maxBuffer: 1024 * 1024 });
+      stdout = String(result.stdout ?? "");
+    } catch {
+      continue;
+    }
+    for (const record of stdout.split("\0")) {
+      if (record.length === 0) continue;
+      const newline = record.indexOf("\n");
+      args.push("-c", newline < 0 ? record : `${record.slice(0, newline)}=${record.slice(newline + 1)}`);
+    }
+  }
+  return args;
+}
+
+/** Owl's exclude file, or a content-hashed combination of it and the repository's own `core.excludesFile`. */
+async function combinedExcludesFile(cwd: string, owlFile: string): Promise<string> {
+  try {
+    const configured = await execFileAsync("git", ["-C", cwd, "config", "--local", "--path", "--get", "core.excludesFile"], { timeout: 10_000, maxBuffer: 64 * 1024 });
+    const value = String(configured.stdout ?? "").trim();
+    if (value.length === 0) return owlFile;
+    const repositoryFile = resolve(cwd, value);
+    const repositoryContent = await readFile(repositoryFile, "utf8");
+    const content = `${OWL_GIT_EXCLUDES_CONTENT}${repositoryContent.endsWith("\n") ? repositoryContent : `${repositoryContent}\n`}`;
+    const hash = createHash("sha256").update(content).digest("hex").slice(0, 16);
+    const combined = join(dirname(owlFile), `owl-git-excludes-${hash}`);
+    await writeFile(combined, content);
+    return combined;
+  } catch {
+    return owlFile;
+  }
+}
+
+/** Destination paths from `git status --porcelain=v1 -z` output. */
+function parsePorcelainZ(output: string): string[] {
+  const records = output.split("\0");
+  const paths: string[] = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index] ?? "";
+    if (record.length < 4) continue;
+    paths.push(record.slice(3));
+    if (/[RC]/u.test(record.slice(0, 2))) index += 1;
+  }
+  return paths;
+}
+
+/** Write Owl's exclude list under the data dir, or a content-hashed temp path when that is not writable. */
+function writeOwlExcludesFile(dataDir: string): string {
+  const primary = join(dataDir, "owl-git-excludes");
+  try {
+    mkdirSync(dataDir, { recursive: true });
+    writeFileSync(primary, OWL_GIT_EXCLUDES_CONTENT);
+    return primary;
+  } catch {
+    const hash = createHash("sha256").update(OWL_GIT_EXCLUDES_CONTENT).digest("hex").slice(0, 16);
+    const fallback = join(tmpdir(), `owl-git-excludes-${hash}`);
+    writeFileSync(fallback, OWL_GIT_EXCLUDES_CONTENT);
+    return fallback;
   }
 }
 

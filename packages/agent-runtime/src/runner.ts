@@ -560,6 +560,11 @@ function coreReviewerRequestAsLocal(input: CoreReviewerRunRequest): ReviewerRequ
       : context.previous_minor_findings === null
         ? { previous_minor_findings: null }
         : {}),
+    ...(Array.isArray(context.added_files)
+      ? { added_files: context.added_files.filter((item): item is string => typeof item === "string") }
+      : context.added_files === null
+        ? { added_files: null }
+        : {}),
     ...(Array.isArray(context.changed_files)
       ? { changed_files: context.changed_files.filter((item): item is string => typeof item === "string") }
       : context.changed_files === null

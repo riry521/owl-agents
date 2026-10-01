@@ -2730,6 +2730,7 @@ export class WorkflowEngine {
         knowledge: await this.composeKnowledgeForTask(workId, taskId),
         ...(processSkillsPack ? { process_skills_dir: processSkillsPack.skills_dir, process_skills_source: processSkillsPack.source } : {}),
         changed_files: await this.git.changedPaths?.({ work_id: workId, task_id: taskId, worktree_path: task.worktree_path ?? undefined }) ?? null,
+        added_files: await this.git.addedPaths?.({ work_id: workId, task_id: taskId, worktree_path: task.worktree_path ?? undefined }) ?? null,
         previous_minor_findings: this.previousMinorFindings(taskId),
         ...(designDocument ? { design_document: designDocument } : {}),
       },
@@ -3063,7 +3064,7 @@ type TaskIntegration = {
 function integrationFailureReason(taskId: string, how: string, integration: TaskIntegration): string {
   if (integration.failure_kind === "commit_failure") {
     const message = integration.failure_message ?? "git commit failed";
-    return `Task ${taskId} ${how} but ${message}; the Task worktree is kept. Plan a fix, e.g. avoid files the repository's hooks reject.`;
+    return `Task ${taskId} ${how} but ${message}; the Task worktree is kept. Plan a fix, e.g. avoid files that cannot be committed.`;
   }
   return mergeConflictReason(taskId, how, integration);
 }

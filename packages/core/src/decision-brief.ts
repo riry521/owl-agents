@@ -118,6 +118,8 @@ const TEXT = {
       noOutput: "出力はありませんでした。",
       conflictFiles: (files: string) => `コンフリクトしたファイル:\n${files}`,
       verification: (id: string, command: string, output: string) => `失敗した検証コマンド${id ? ` (${id})` : ""}: ${command}\n出力末尾:\n${output}`,
+      dirtyIntegration: (path: string, files: string) => `統合用worktreeに未コミットの変更があります。\nworktree: ${path || "不明"}\n変更のあるファイル:\n${files}`,
+      dirtyFix: (path: string) => `次のいずれかを行ってから再試行してください。(1) Workの成果物であれば、Workブランチ（統合用worktree ${path || ""}）にコミットする。(2) ツールの出力であれば、そのファイルを復元または削除する、もしくはリポジトリの.gitignoreに追加する。`,
       baseMoved: (expected: string, actual: string) => `検証中にベースブランチが移動しました。期待値: ${expected || "不明"} / 実際: ${actual || "不明"}`,
       retry: {
         label: "マージを再試行する",
@@ -202,6 +204,8 @@ const TEXT = {
       noOutput: "There was no command output.",
       conflictFiles: (files: string) => `Conflicting files:\n${files}`,
       verification: (id: string, command: string, output: string) => `Failed verification command${id ? ` (${id})` : ""}: ${command}\nOutput tail:\n${output}`,
+      dirtyIntegration: (path: string, files: string) => `The integration worktree has uncommitted changes.\nWorktree: ${path || "unknown"}\nFiles with changes:\n${files}`,
+      dirtyFix: (path: string) => `Do one of the following, then retry. (1) If the files belong to the Work, commit them on the Work branch (integration worktree ${path || ""}). (2) If they are tool output, restore or delete them, or add them to the repository's .gitignore.`,
       baseMoved: (expected: string, actual: string) => `The base branch moved during verification. Expected: ${expected || "unknown"} / actual: ${actual || "unknown"}`,
       retry: {
         label: "Retry the merge",
@@ -310,7 +314,14 @@ export function coreWorkDecisionBrief(payload: JsonObject, language: OwnerLangua
     const outputTail = text(payload.output_tail) ?? t.noOutput;
     const expected = text(payload.expected_base_commit) ?? "";
     const actual = text(payload.actual_base_commit) ?? "";
-    const detail = mergeKind === "conflict" && conflictFiles.length > 0
+    const dirtyFiles = Array.isArray(payload.dirty_files)
+      ? payload.dirty_files.filter((path): path is string => typeof path === "string" && path.trim().length > 0).join("\n")
+      : "";
+    const integrationWorktree = text(payload.integration_worktree) ?? "";
+    const dirty = dirtyFiles.length > 0;
+    const detail = dirty
+      ? t.dirtyIntegration(integrationWorktree, dirtyFiles)
+      : mergeKind === "conflict" && conflictFiles.length > 0
       ? t.conflictFiles(conflictFiles)
       : mergeKind === "verification_failed"
         ? t.verification(commandId, command || t.noCommand, outputTail)
@@ -322,7 +333,7 @@ export function coreWorkDecisionBrief(payload: JsonObject, language: OwnerLangua
       reason: [t.reason, text(payload.message), detail].filter(Boolean).join("\n"),
       question: conflict ? t.conflictQuestion : t.question,
       current_state: t.currentState,
-      tried: text(payload.remediation) ?? t.noCause,
+      tried: dirty ? t.dirtyFix(integrationWorktree) : text(payload.remediation) ?? t.noCause,
       options: conflict
         ? [option(RESOLVE_CONFLICT_OPTION_KEY, t.resolveConflict), option("retry", t.retry), cancelWorkOption(language)]
         : [option("retry", t.retry), cancelWorkOption(language)],

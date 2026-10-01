@@ -191,7 +191,7 @@ test("Core auto-merges a completed Project Work into main and cleans its integra
   assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'task.worktree.discarded'", workId).n, 0);
 });
 
-test("Core completion discards a merged Work's leftover worktree past a rejecting pre-commit hook and deletes its branches", async (t) => {
+test("Core completion discards a merged Work's leftover worktree past a rejected commit and deletes its branches", async (t) => {
   let workId;
   let leftoverPath;
   const { project, db, core, projectId } = await openFixture(t, {
@@ -201,11 +201,14 @@ test("Core completion discards a merged Work's leftover worktree past a rejectin
       assert.equal(leftover.ok, true, leftover.message);
       leftoverPath = leftover.worktree_path;
       await mkdir(join(leftoverPath, "docs", "designs"), { recursive: true });
-      await writeFile(join(leftoverPath, "docs", "designs", "x.md"), "staged content the hook rejects\n");
+      await writeFile(join(leftoverPath, "docs", "designs", "x.md"), "staged content the signer rejects\n");
       git(leftoverPath, "add", "docs/designs/x.md");
-      const hookPath = join(project, ".git", "hooks", "pre-commit");
-      await writeFile(hookPath, "#!/bin/sh\nprintf '%s\\n' 'blocked by test pre-commit hook' >&2\nexit 1\n");
-      await chmod(hookPath, 0o755);
+      const signer = join(project, ".git", "reject-signing.sh");
+      await writeFile(signer, "#!/bin/sh\nprintf '%s\\n' 'blocked by test signer' >&2\nexit 1\n");
+      await chmod(signer, 0o755);
+      git(project, "config", "extensions.worktreeConfig", "true");
+      git(leftoverPath, "config", "--worktree", "gpg.program", signer);
+      git(leftoverPath, "config", "--worktree", "commit.gpgsign", "true");
       const now = new Date().toISOString();
       await db.createWriteLane().transact((tx) => {
         tx.run(
@@ -219,7 +222,7 @@ test("Core completion discards a merged Work's leftover worktree past a rejectin
       });
     },
   });
-  workId = await startSmallWork(core, projectId, "hook-leftover");
+  workId = await startSmallWork(core, projectId, "signer-leftover");
 
   assert.equal(await waitForTerminalDecision(db, workId), "completed");
   assert.ok(await waitFor(() => db.get("SELECT id FROM events WHERE work_id = ? AND type = 'work.branches_deleted'", workId)));

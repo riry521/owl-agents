@@ -250,6 +250,8 @@ export interface ReviewerRequest {
   readonly worktree?: string;
   /** Files the Worker changed, when Core could determine them; null when unknown. */
   readonly changed_files?: readonly string[] | null;
+  /** Files the Task added, when Core could determine them; null when unknown. */
+  readonly added_files?: readonly string[] | null;
   /** A design Task's external document, which the Reviewer reads instead of changed files. */
   readonly design_document?: { readonly path: string; readonly markdown: string } | null;
   /** The previous review round's minor findings; null on the first round. */
