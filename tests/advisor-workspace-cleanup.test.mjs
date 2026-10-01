@@ -136,7 +136,8 @@ test("sweepAdvisorWorkspaces keeps an ended session's workspace whose branch has
 });
 
 test("sweepAdvisorWorkspaces removes an empty stray directory that is not a registered worktree", async () => {
-  const { owlRoot, gateway } = await fixture();
+  const { owlRoot, writeLane, gateway } = await fixture();
+  await insertConversation(writeLane, "stray-empty");
   const strayPath = join(owlRoot, ".owl-workspaces", "advisor", "stray-empty");
   await mkdir(strayPath, { recursive: true });
 
@@ -146,7 +147,8 @@ test("sweepAdvisorWorkspaces removes an empty stray directory that is not a regi
 });
 
 test("sweepAdvisorWorkspaces keeps a non-empty stray directory that is not a registered worktree", async () => {
-  const { owlRoot, gateway } = await fixture();
+  const { owlRoot, writeLane, gateway } = await fixture();
+  await insertConversation(writeLane, "stray-full");
   const strayPath = join(owlRoot, ".owl-workspaces", "advisor", "stray-full");
   await mkdir(strayPath, { recursive: true });
   await writeFile(join(strayPath, "leftover.txt"), "leftover\n");
@@ -185,4 +187,74 @@ test("prepareAdvisorWorkspace recreates a swept conversation's workspace fresh f
   assert.equal(second.worktree_path, first.worktree_path);
   assert.match(second.message, /Prepared Advisor branch/, "it is branched fresh from base, not reused");
   assert.equal(git(second.worktree_path, "show", "HEAD:README.md"), "base");
+});
+
+async function forgetConversation(writeLane, id) {
+  await writeLane.transact((tx) => {
+    tx.run("DELETE FROM conversations WHERE id = ?", id);
+  });
+}
+
+test("sweepAdvisorWorkspaces leaves a clean, merged workspace of a conversation this database does not know", async () => {
+  const { projectPath, writeLane, gateway } = await fixture();
+  await insertConversation(writeLane, "conv-foreign", { workId: "work:1" });
+  const prepared = await gateway.prepareAdvisorWorkspace({ conversation_id: "conv-foreign" });
+  assert.equal(prepared.ok, true, prepared.message);
+  await forgetConversation(writeLane, "conv-foreign");
+
+  const result = await gateway.sweepAdvisorWorkspaces();
+  assert.deepEqual(result, { removed_workspaces: [], removed_branches: [] });
+  await access(prepared.worktree_path);
+  assert.match(git(projectPath, "branch", "--list", "owl/advisor/conv-foreign"), /owl\/advisor\/conv-foreign/);
+});
+
+test("sweepAdvisorWorkspaces leaves an empty stray directory of an unknown conversation", async () => {
+  const { owlRoot, gateway } = await fixture();
+  const strayPath = join(owlRoot, ".owl-workspaces", "advisor", "stray-foreign");
+  await mkdir(strayPath, { recursive: true });
+
+  const result = await gateway.sweepAdvisorWorkspaces();
+  assert.deepEqual(result.removed_workspaces, []);
+  await access(strayPath);
+});
+
+test("sweepAdvisorWorkspaces keeps a merged owl/advisor branch of an unknown conversation", async () => {
+  const { projectPath, writeLane, gateway } = await fixture();
+  await insertConversation(writeLane, "conv-foreign-branch", { workId: "work:1" });
+  const prepared = await gateway.prepareAdvisorWorkspace({ conversation_id: "conv-foreign-branch" });
+  assert.equal(prepared.ok, true, prepared.message);
+  git(projectPath, "worktree", "remove", "--force", prepared.worktree_path);
+  await forgetConversation(writeLane, "conv-foreign-branch");
+
+  const result = await gateway.sweepAdvisorWorkspaces();
+  assert.deepEqual(result.removed_branches, []);
+  assert.match(git(projectPath, "branch", "--list", "owl/advisor/conv-foreign-branch"), /owl\/advisor\/conv-foreign-branch/);
+});
+
+test("prepareAdvisorWorkspace recreates the worktree when an empty unregistered directory sits at its path", async () => {
+  const { projectPath, writeLane, gateway } = await fixture();
+  await insertConversation(writeLane, "conv-empty-dir", { workId: "work:1" });
+  const first = await gateway.prepareAdvisorWorkspace({ conversation_id: "conv-empty-dir" });
+  assert.equal(first.ok, true, first.message);
+  git(projectPath, "worktree", "remove", "--force", first.worktree_path);
+  await mkdir(first.worktree_path, { recursive: true });
+
+  const second = await gateway.prepareAdvisorWorkspace({ conversation_id: "conv-empty-dir" });
+  assert.equal(second.ok, true, second.message);
+  assert.equal(git(second.worktree_path, "show", "HEAD:README.md"), "base");
+});
+
+test("prepareAdvisorWorkspace still refuses a non-empty unregistered directory at its path", async () => {
+  const { projectPath, writeLane, gateway } = await fixture();
+  await insertConversation(writeLane, "conv-full-dir", { workId: "work:1" });
+  const first = await gateway.prepareAdvisorWorkspace({ conversation_id: "conv-full-dir" });
+  assert.equal(first.ok, true, first.message);
+  git(projectPath, "worktree", "remove", "--force", first.worktree_path);
+  await mkdir(first.worktree_path, { recursive: true });
+  await writeFile(join(first.worktree_path, "keep.txt"), "keep\n");
+
+  const second = await gateway.prepareAdvisorWorkspace({ conversation_id: "conv-full-dir" });
+  assert.equal(second.ok, false);
+  assert.match(second.message, /not registered with Git/);
+  assert.equal(await readFile(join(first.worktree_path, "keep.txt"), "utf8"), "keep\n");
 });

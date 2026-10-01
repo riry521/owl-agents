@@ -516,3 +516,35 @@ test("a Work's integration worktree is removed once it completes through Core", 
   assert.ok(workCommit);
   assert.equal(git(project, "show", `${workCommit}:code.ts`), "export {};");
 });
+
+test("a full-tree reconcile leaves a Task worktree of a Work this database has no row for", async () => {
+  const { db, writeLane, gateway } = await reconcileFixture();
+  await insertWork(writeLane, "W", { state: "running" });
+  const foreign = await gateway.prepareWorktree({ work_id: "W", task_id: "T1" });
+  assert.equal(foreign.ok, true, foreign.message);
+  await writeLane.transact((tx) => {
+    tx.run("DELETE FROM works WHERE id = 'W'");
+  });
+
+  const result = await reconcileWorktrees({ db, writeLane, git: gateway }, { reason: "startup" });
+  assert.deepEqual(result, { discarded: [], skipped: [] });
+  await access(foreign.worktree_path);
+});
+
+test("Core reconcile does not report a workspace of a Work this database has no row for", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "owl-reconcile-foreign-")));
+  const project = await projectRepo(root);
+  const db = openDatabase(join(root, "owl.db"));
+  db.migrate(migrations);
+  const core = new Core({ db, agentRunner: {}, version: "test", owlRoot: join(root, "owl") });
+  t.after(() => db.close());
+
+  const foreignGateway = new GitWorktreeGateway(fakeDatabase(root, project), join(root, "owl"));
+  const foreign = await foreignGateway.prepareWorktree({ work_id: "FOREIGN", task_id: "T1" });
+  assert.equal(foreign.ok, true, foreign.message);
+
+  const outcome = await core.runWorktreeReconcile(undefined, "startup");
+  assert.equal(outcome.verified, true);
+  assert.deepEqual(outcome.failures, []);
+  await access(foreign.worktree_path);
+});

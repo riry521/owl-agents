@@ -47,6 +47,7 @@ import type {
 import { ownerLanguage } from "./owner-language";
 import type { ReplanPlan } from "./replan-plan";
 import type { SkillBox } from "./skill-box";
+import { defaultOwlRoot } from "./workspace-layout.js";
 
 const ACTIVE_AGENT_STATUSES = ["launch_pending", "spawned", "running", "cancel_requested"] as const;
 
@@ -296,7 +297,7 @@ export class WorkflowEngine {
     this.onTaskPipelineSettled = options.onTaskPipelineSettled;
     this.onWorktreeCreated = options.onWorktreeCreated;
     this.providerPauseController = options.providerPauseController;
-    this.owlRoot = options.owlRoot ?? process.cwd();
+    this.owlRoot = options.owlRoot ?? defaultOwlRoot();
     this.dataDir = options.dataDir ?? join(this.owlRoot, "data");
     this.git = options.git ?? new GitWorktreeGateway(options.db, this.owlRoot);
     this.hybridExecutorOverride = options.hybridExecutor;

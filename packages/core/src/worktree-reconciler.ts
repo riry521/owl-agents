@@ -451,7 +451,8 @@ async function discardWorkLeftovers(deps: WorktreeReconcilerDeps, workId: string
 /**
  * Full filesystem scan (no Work scope): reclaim directories the read-model
  * above cannot see, because their Task row is missing, already marked
- * merged/discarded, or their Work has no row at all.
+ * merged/discarded. Directories of a Work with no row here belong to another
+ * Owl instance sharing the workspaces root and are left untouched.
  */
 async function reconcileStartupWorkspaces(
   deps: WorktreeReconcilerDeps,
@@ -472,6 +473,7 @@ async function reconcileStartupWorkspaces(
     }
     return;
   }
+  entries = entries.filter((entry) => deps.db.get("SELECT 1 FROM works WHERE id = ?", entry.work_id) !== undefined);
 
   // A Project-less Work left over from before a restart is saved and removed
   // as a whole, ahead of the per-entry loop below (which only ever discards

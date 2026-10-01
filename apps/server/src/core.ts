@@ -76,7 +76,7 @@ import { IntegrationStore } from "./integration-store.js";
 import { AppSettingsStore, type CustomProviderConfig } from "./app-settings-store.js";
 import { AdvisorFolderError, advisorFolderDefaults, ensureAdvisorSharedDir, isGitIgnoredDirectory, normalizeAdvisorFolder } from "./advisor-folders.js";
 import { detectProcessSkillsPack } from "../../../packages/core/dist/process-skills-pack.js";
-import { resolveWorkspacesRoot } from "../../../packages/core/dist/workspace-layout.js";
+import { defaultOwlRoot as defaultCoreOwlRoot, resolveWorkspacesRoot } from "../../../packages/core/dist/workspace-layout.js";
 import { buildAgentEnv } from "./agent-env.js";
 import { customProviderApiKeyEnvNames } from "./agent-runner.js";
 import { providerSelection } from "./provider-selection.js";
@@ -1092,7 +1092,7 @@ export class MemoryCore implements CorePort {
   }
 
   async getAdvisorFolders(): Promise<import("./types.js").AdvisorFoldersSnapshot> {
-    const defaults = advisorFolderDefaults(this.options.dataDir ?? resolveDataDir(this.options.owlRoot ?? process.cwd()));
+    const defaults = advisorFolderDefaults(this.options.dataDir ?? resolveDataDir(this.options.owlRoot ?? defaultCoreOwlRoot()));
     return { shared_dir: this.advisorSharedDir || defaults.sharedDir, screenshot_dir: this.advisorScreenshotDir || defaults.screenshotDir,
       defaults: { shared_dir: defaults.sharedDir, screenshot_dir: defaults.screenshotDir },
       custom: { shared_dir: !!this.advisorSharedDir, screenshot_dir: !!this.advisorScreenshotDir } };
@@ -1101,7 +1101,7 @@ export class MemoryCore implements CorePort {
   async setAdvisorFolders(sharedDir: string, screenshotDir: string): Promise<import("./types.js").AdvisorFoldersSnapshot> {
     const shared = normalizeAdvisorFolder(sharedDir);
     const screenshot = normalizeAdvisorFolder(screenshotDir);
-    const defaults = advisorFolderDefaults(this.options.dataDir ?? resolveDataDir(this.options.owlRoot ?? process.cwd()));
+    const defaults = advisorFolderDefaults(this.options.dataDir ?? resolveDataDir(this.options.owlRoot ?? defaultCoreOwlRoot()));
     if (!isGitIgnoredDirectory(shared || defaults.sharedDir)) throw new AdvisorFolderError("tracked");
     ensureAdvisorSharedDir(shared || defaults.sharedDir);
     this.advisorSharedDir = shared;
@@ -2933,7 +2933,8 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
       { dependency: "packages/core/dist/index.js", export: "createCore" },
     );
   }
-  const appSettings = new AppSettingsStore(options.owlRoot ?? process.cwd(), options.dataDir);
+  const owlRoot = options.owlRoot ?? defaultCoreOwlRoot();
+  const appSettings = new AppSettingsStore(owlRoot, options.dataDir);
   // A built-in provider id never has a custom-settings entry; both callbacks
   // below use this to decide whether a provider needs any override at all.
   const isBuiltinProviderId = (normalized: string): boolean =>
@@ -2944,15 +2945,15 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
     return Object.entries(appSettings.getCustomProviders())
       .find(([id]) => id.trim().toLowerCase() === normalized)?.[1];
   };
-  const coreOwlRoot = options.owlRoot ?? process.cwd();
   const enrichedOptions = {
     ...options,
+    owlRoot,
     workspacesRoot: resolveWorkspacesRoot(process.env, homedir()),
     // Stub agents never read MCP servers or indexes, so the setup and rehearsal only run with real agents.
-    ...(providerSelection(coreOwlRoot).mode === "real"
+    ...(providerSelection(owlRoot).mode === "real"
       ? {
         workspaceTooling: {
-          env: () => buildAgentEnv(process.env, { owlRoot: coreOwlRoot, deny: customProviderApiKeyEnvNames(coreOwlRoot) }),
+          env: () => buildAgentEnv(process.env, { owlRoot, deny: customProviderApiKeyEnvNames(owlRoot) }),
           home: homedir(),
         },
       }
@@ -2961,12 +2962,12 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
     getTypesafeApiKey: () => appSettings.getTypesafeApiKey(),
     getAdvisorPersona: () => appSettings.getAdvisorPersona(),
     getAdvisorFolders: () => {
-      const defaults = advisorFolderDefaults(options.dataDir ?? resolveDataDir(options.owlRoot ?? process.cwd()));
+      const defaults = advisorFolderDefaults(options.dataDir ?? resolveDataDir(owlRoot));
       const sharedDir = appSettings.getAdvisorSharedDir() || defaults.sharedDir;
       try { ensureAdvisorSharedDir(sharedDir); } catch { /* prompt construction remains available */ }
       return { sharedDir, screenshotDir: appSettings.getAdvisorScreenshotDir() || defaults.screenshotDir };
     },
-    getAdvisorSharedDir: () => appSettings.getAdvisorSharedDir() || advisorFolderDefaults(options.dataDir ?? resolveDataDir(options.owlRoot ?? process.cwd())).sharedDir,
+    getAdvisorSharedDir: () => appSettings.getAdvisorSharedDir() || advisorFolderDefaults(options.dataDir ?? resolveDataDir(owlRoot)).sharedDir,
     knownModels: (harness: "claude" | "codex"): ReadonlySet<string> | undefined =>
       harness === "codex" ? codexKnownModels() : undefined,
     getProviderHarness: (providerId: string): "claude" | "codex" | undefined => {
@@ -3004,8 +3005,8 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
   return new ExternalCoreAdapter(
     external,
     options.db,
-    options.owlRoot ?? process.cwd(),
-    options.dataDir ?? resolveDataDir(options.owlRoot ?? process.cwd()),
+    owlRoot,
+    options.dataDir ?? resolveDataDir(owlRoot),
     appSettings,
   );
 }

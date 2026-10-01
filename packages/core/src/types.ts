@@ -598,7 +598,7 @@ export interface CoreOptions {
   /** Cap on active non-Executor agent runs per Work. Unlimited unless set. */
   readonly max_parallel?: number;
   readonly dispatcher?: CoreDispatcherOptions;
-  /** Owl's own repository root, used to resolve `dataDir` and the legacy `<owlRoot>/.owl-workspaces` worktrees directory. Defaults to process.cwd(). */
+  /** Owl's own repository root, used to resolve `dataDir` and the legacy `<owlRoot>/.owl-workspaces` worktrees directory. Defaults to process.cwd() (a temporary directory under the Node test runner). */
   readonly owlRoot?: string;
   /** Durable runtime data directory. Defaults to `<owlRoot>/data`. */
   readonly dataDir?: string;

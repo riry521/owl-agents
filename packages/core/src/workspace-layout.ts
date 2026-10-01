@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
 /** Directory name used for Task/Work/Advisor worktrees nested inside an Owl clone. */
@@ -15,16 +16,45 @@ function inside(base: string, candidate: string): boolean {
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
+/** True when running under the Node test runner, which sets NODE_TEST_CONTEXT for every process it spawns. */
+export function isNodeTestRun(env: NodeJS.ProcessEnv = process.env): boolean {
+  return typeof env.NODE_TEST_CONTEXT === "string" && env.NODE_TEST_CONTEXT !== "";
+}
+
+const testScratchDirs = new Map<string, string>();
+
+/** A per-process temporary directory, created on first use, so test runs never touch real Owl data. */
+function testScratchDir(name: string): string {
+  let dir = testScratchDirs.get(name);
+  if (!dir) {
+    dir = mkdtempSync(join(tmpdir(), `owl-test-${name}-`));
+    testScratchDirs.set(name, dir);
+  }
+  return dir;
+}
+
+/**
+ * The Owl repository root used when none is given: `process.cwd()`, or a
+ * per-process temporary directory under the Node test runner so Git
+ * worktrees and branches are never created in the real repository.
+ */
+export function defaultOwlRoot(env: NodeJS.ProcessEnv = process.env): string {
+  return isNodeTestRun(env) ? testScratchDir("root") : process.cwd();
+}
+
 /**
  * Resolves the root directory Owl stores Task/Work/Advisor worktrees under.
  * `OWL_WORKSPACES_DIR`, when set to a non-empty string, takes precedence;
- * otherwise workspaces live under `~/.owl/workspaces`, outside of any repository.
+ * otherwise workspaces live under `~/.owl/workspaces`, outside of any
+ * repository. Under the Node test runner the fallback is a per-process
+ * temporary directory instead, so tests never touch the real root.
  */
 export function resolveWorkspacesRoot(env: NodeJS.ProcessEnv, home: string): string {
   const override = env.OWL_WORKSPACES_DIR;
   if (typeof override === "string" && override.trim() !== "") {
     return resolve(override);
   }
+  if (isNodeTestRun(env)) return testScratchDir("workspaces");
   return join(home, ".owl", "workspaces");
 }
 

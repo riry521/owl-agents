@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { mkdir, mkdtemp, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -42,6 +43,16 @@ test("resolveWorkspacesRoot prefers a non-empty OWL_WORKSPACES_DIR over the defa
   assert.equal(resolveWorkspacesRoot({ OWL_WORKSPACES_DIR: "   " }, home), join(home, ".owl", "workspaces"));
   assert.equal(resolveWorkspacesRoot({ OWL_WORKSPACES_DIR: "/custom/dir" }, home), resolve("/custom/dir"));
   assert.equal(resolveWorkspacesRoot({ OWL_WORKSPACES_DIR: "relative/dir" }, home), resolve("relative/dir"));
+});
+
+test("resolveWorkspacesRoot falls back to a per-process temporary directory under the Node test runner", () => {
+  const home = "/home/owl-user";
+  const env = { NODE_TEST_CONTEXT: "child-v8" };
+  const root = resolveWorkspacesRoot(env, home);
+  assert.notEqual(root, join(home, ".owl", "workspaces"));
+  assert.ok(root.startsWith(tmpdir()) || root.startsWith(realpathSync(tmpdir())));
+  assert.equal(resolveWorkspacesRoot(env, home), root);
+  assert.equal(resolveWorkspacesRoot({ ...env, OWL_WORKSPACES_DIR: "/custom/dir" }, home), resolve("/custom/dir"));
 });
 
 test("WorkspaceLayout.roots() dedupes when root and legacyRoot are the same", () => {

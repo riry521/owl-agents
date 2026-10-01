@@ -104,7 +104,7 @@ export type {
 } from "./workspace-tooling";
 export { parseClaudeMcpList, parseCodexMcpList, probeHttpServer, probeStdioServer } from "./mcp-probe";
 export type { CodexMcpServer, HttpServerTarget, McpServerStatus, ProbeResult, ProbeStatus, StdioServerTarget } from "./mcp-probe";
-export { LEGACY_WORKSPACES_DIRNAME, resolveWorkspacesRoot, safeSegment, WorkspaceLayout } from "./workspace-layout";
+export { defaultOwlRoot, isNodeTestRun, LEGACY_WORKSPACES_DIRNAME, resolveWorkspacesRoot, safeSegment, WorkspaceLayout } from "./workspace-layout";
 export {
   BACKLOG_STATUSES,
   backlogDedupeKey,

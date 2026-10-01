@@ -73,7 +73,7 @@ import {
 } from "@owl/shared";
 import { EXECUTOR_CONFIG_SETTINGS_KEY, HYBRID_MODE_SETTINGS_KEY } from "./types";
 import { GitWorktreeGateway } from "./git-gateway.js";
-import { safeSegment, WorkspaceLayout } from "./workspace-layout.js";
+import { defaultOwlRoot, safeSegment, WorkspaceLayout } from "./workspace-layout.js";
 import { parseVerificationMarker, WorkspaceProcessSweeper, type SweepRunInfo, type WorkspaceActivity } from "./workspace-process-sweeper.js";
 import { WorkspaceTooling } from "./workspace-tooling.js";
 import { AgentWorkspacePreparer, withWorkspacePreparation, worktreeHarnesses } from "./agent-workspace-preparer.js";
@@ -574,7 +574,7 @@ export class Core {
       },
     });
     this.decisions = new DecisionService(options.db);
-    this.owlRoot = options.owlRoot ?? process.cwd();
+    this.owlRoot = options.owlRoot ?? defaultOwlRoot();
     this.dataDir = options.dataDir ?? join(this.owlRoot, "data");
     this.workspaceLayout = new WorkspaceLayout(options.workspacesRoot ?? resolve(this.owlRoot, ".owl-workspaces"), resolve(this.owlRoot, ".owl-workspaces"));
     this.git = options.git ?? new GitWorktreeGateway(options.db, this.owlRoot, undefined, this.dataDir, this.workspaceLayout);
@@ -5126,6 +5126,7 @@ export class Core {
       );
       failures.push(...(result.failures ?? []));
       for (const entry of await this.git.listWorkspaces()) {
+        if (this.db.get("SELECT 1 FROM works WHERE id = ?", entry.work_id) === undefined) continue; // another Owl instance's Work
         if (!failures.some((failure) => failure.work_id === entry.work_id)) {
           failures.push({
             work_id: entry.work_id,

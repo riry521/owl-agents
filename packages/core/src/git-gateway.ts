@@ -366,13 +366,17 @@ export class GitWorktreeGateway implements GitGateway {
       if (registered) {
         return { ok: true, exit_code: 0, recorded: false, worktree_path: worktreePath, message: `Reusing Advisor branch ${branch}.` };
       }
-      return {
-        ok: false,
-        exit_code: 1,
-        recorded: false,
-        worktree_path: worktreePath,
-        message: "The Advisor workspace path exists but is not registered with Git; it was left untouched.",
-      };
+      const emptyDirectory = existingPath.isDirectory() && !existingPath.isSymbolicLink()
+        && await rmdir(worktreePath).then(() => true, () => false);
+      if (!emptyDirectory) {
+        return {
+          ok: false,
+          exit_code: 1,
+          recorded: false,
+          worktree_path: worktreePath,
+          message: "The Advisor workspace path exists but is not registered with Git; it was left untouched.",
+        };
+      }
     }
 
     await mkdir(resolve(worktreePath, ".."), { recursive: true });
@@ -461,7 +465,9 @@ export class GitWorktreeGateway implements GitGateway {
    * operations run on each repository's lane so they never interleave with a
    * worktree being created, and liveness is re-checked under that lane right
    * before a removal, so a session concurrently starting for the same
-   * conversation is never undercut.
+   * conversation is never undercut. Workspaces and branches of conversations
+   * this database does not know belong to another Owl instance sharing the
+   * root and are never touched.
    */
   public async sweepAdvisorWorkspaces(): Promise<AdvisorWorkspaceSweepResult> {
     const removedWorkspaces: string[] = [];
@@ -486,6 +492,7 @@ export class GitWorktreeGateway implements GitGateway {
   private async sweepAdvisorEntry(entryPath: string, conversationId: string, removed: string[]): Promise<void> {
     const real = await realpath(entryPath).catch(() => null);
     if (real === null) return; // already gone
+    if (!this.isKnownAdvisorConversation(conversationId)) return;
     if (await this.isLiveAdvisorWorkspace(real)) return;
 
     const registration = await this.registeredAdvisorWorktree(entryPath);
@@ -520,6 +527,7 @@ export class GitWorktreeGateway implements GitGateway {
   private async sweepAdvisorWorktreeNow(entryPath: string, conversationId: string, repositoryRoot: string): Promise<boolean> {
     const real = await realpath(entryPath).catch(() => null);
     if (real === null) return false;
+    if (!this.isKnownAdvisorConversation(conversationId)) return false;
     if (await this.isLiveAdvisorWorkspace(real)) return false;
 
     const status = await this.git(entryPath, ["status", "--porcelain"]);
@@ -601,6 +609,7 @@ export class GitWorktreeGateway implements GitGateway {
       for (const branch of refs.message.split(/\r?\n/u).filter((line) => line.length > 0)) {
         if (worktreeBranches.has(branch)) continue; // still in use; the entry sweep owns it
         const conversationId = branch.slice("owl/advisor/".length);
+        if (!this.isKnownAdvisorConversation(conversationId)) continue;
         if (this.isLiveAdvisorConversation(conversationId)) continue;
         const base = await this.resolveAdvisorBaseBranch(conversationId, repositoryRoot);
         const merged = await this.git(repositoryRoot, ["merge-base", "--is-ancestor", branch, base]);
@@ -622,6 +631,12 @@ export class GitWorktreeGateway implements GitGateway {
       if (real === realPath) return true;
     }
     return false;
+  }
+
+  /** Whether this database has a conversation whose workspace segment is `conversationId`. */
+  private isKnownAdvisorConversation(conversationId: string): boolean {
+    const rows = this.db.all<{ id: string }>("SELECT id FROM conversations");
+    return rows.some((row) => safeSegment(row.id) === conversationId);
   }
 
   /** Whether some not-(yet)-ended Advisor session belongs to this conversation. */
