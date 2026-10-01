@@ -5,6 +5,7 @@ import type { OwnerLanguage, WebResearchCapture } from "@owl/shared";
 import { filterResearchLinks, classifyResearchTarget, normalizeResearchQuery, normalizeResearchUrl, redactResearchText } from "./research-filter.js";
 import { slugifyKnowledgeName } from "./knowledge-naming.js";
 import type { KnowledgeBase } from "./knowledge-base.js";
+import type { KnowledgeLocation } from "./knowledge-location.js";
 
 export type ResearchAttributionRole = "advisor" | "manager" | "designer" | "worker" | "reviewer";
 
@@ -20,7 +21,7 @@ export interface ResearchAttribution {
 export type ResearchSkipReason =
   | "disabled" | "unsupported_tool" | "tool_error" | "http_error" | "redirect"
   | "invalid_url" | "credential_url" | "private_host" | "auth_page"
-  | "empty_content" | "secret_heavy" | "queue_full";
+  | "empty_content" | "secret_heavy" | "queue_full" | "storage_unavailable";
 
 export type ResearchRecordResult =
   | { readonly status: "saved"; readonly path: string; readonly created: boolean }
@@ -33,6 +34,8 @@ export interface ResearchRecorderOptions {
   readonly language: () => OwnerLanguage;
   readonly now?: () => Date;
   readonly maxQueue?: number;
+  /** When set, nothing is recorded while the storage is unavailable and writes hold a write lease. */
+  readonly gate?: Pick<KnowledgeLocation, "isAvailable" | "withWrite">;
 }
 
 interface PreparedResearch {
@@ -67,6 +70,7 @@ export class ResearchRecorder {
   public record(capture: WebResearchCapture, attribution: ResearchAttribution): Promise<ResearchRecordResult> {
     try {
       if (!this.options.isEnabled()) return Promise.resolve({ status: "skipped", reason: "disabled" });
+      if (this.options.gate && !this.options.gate.isAvailable()) return Promise.resolve({ status: "skipped", reason: "storage_unavailable" });
       if (this.pending >= this.maxQueue) return Promise.resolve({ status: "skipped", reason: "queue_full" });
       if (!capture || (capture.tool !== "WebFetch" && capture.tool !== "WebSearch")) {
         return Promise.resolve({ status: "skipped", reason: "unsupported_tool" });
@@ -203,7 +207,13 @@ export class ResearchRecorder {
     };
   }
 
-  private async save(prepared: PreparedResearch): Promise<ResearchRecordResult> {
+  private save(prepared: PreparedResearch): Promise<ResearchRecordResult> {
+    const gate = this.options.gate;
+    if (!gate) return this.saveUnlocked(prepared);
+    return gate.withWrite(() => this.saveUnlocked(prepared)).catch(() => ({ status: "failed", error: "record_failed" }));
+  }
+
+  private async saveUnlocked(prepared: PreparedResearch): Promise<ResearchRecordResult> {
     try {
       const relPath = `research/${prepared.filename}`;
       const updateMetadata = this.metadata(prepared);

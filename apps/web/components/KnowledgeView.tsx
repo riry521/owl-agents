@@ -9,6 +9,7 @@ import {
   updateKnowledgeEntry,
   deleteKnowledgeEntry,
   createRuleProposalFromNote,
+  getKnowledgeStorage,
 } from '@/lib/api-client';
 import type { KnowledgeEntry, KnowledgeSearchResult, RuleProposalRole } from '@/lib/types';
 import { formatRelative } from '@/lib/format';
@@ -124,6 +125,24 @@ export function KnowledgeView() {
 
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+
+  // Poll the storage state; reload the list when it becomes available again.
+  const [storageUnavailable, setStorageUnavailable] = useState(false);
+  useEffect(() => {
+    let wasUnavailable = false;
+    const poll = () =>
+      getKnowledgeStorage()
+        .then((s) => {
+          const unavailable = s.state === 'unavailable';
+          setStorageUnavailable(unavailable);
+          if (wasUnavailable && !unavailable) void refresh();
+          wasUnavailable = unavailable;
+        })
+        .catch(() => undefined);
+    void poll();
+    const timer = setInterval(poll, 5000);
+    return () => clearInterval(timer);
   }, [refresh]);
 
   async function handleSelect(path: string) {
@@ -431,6 +450,8 @@ export function KnowledgeView() {
         </div>
         <button className="btn btn--primary" onClick={handleNew}>{t('knowledge.newEntry')}</button>
       </div>
+
+      {storageUnavailable && <div className="error" role="alert">{t('knowledge.storageUnavailable')}</div>}
 
       <div className="kb-controls">
         <div className="pill-group">

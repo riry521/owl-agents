@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { OwnerLanguage } from "@owl/shared";
 
 import { KnowledgeBase } from "./knowledge-base.js";
+import type { KnowledgeLocation } from "./knowledge-location.js";
 import {
   resolveKnowledgeFilename,
   slugifyKnowledgeContentName,
@@ -65,7 +66,11 @@ export class MemorySaver {
   private readonly language: () => OwnerLanguage;
 
   /** `language` picks the headings of the notes it writes (the Owner reads them). */
-  public constructor(knowledge: KnowledgeBase, language: () => OwnerLanguage = () => "ja") {
+  public constructor(
+    knowledge: KnowledgeBase,
+    language: () => OwnerLanguage = () => "ja",
+    private readonly gate?: Pick<KnowledgeLocation, "withWrite">,
+  ) {
     this.knowledge = knowledge;
     this.language = language;
   }
@@ -256,6 +261,16 @@ export class MemorySaver {
    * path for its own folder and frontmatter format.
    */
   public async writeKnowledgeFile(
+    folder: string,
+    baseName: string,
+    content: string,
+    source?: { key: string; value: string; kind?: string; match?: Record<string, string> },
+  ): Promise<string> {
+    if (!this.gate) return this.writeKnowledgeFileUnlocked(folder, baseName, content, source);
+    return this.gate.withWrite(() => this.writeKnowledgeFileUnlocked(folder, baseName, content, source));
+  }
+
+  private async writeKnowledgeFileUnlocked(
     folder: string,
     baseName: string,
     content: string,

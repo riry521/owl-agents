@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, chmodSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 
 import { DEFAULT_AGENT_WALL_TIMEOUT_MS, DEFAULT_HARNESS_MODELS, parseDotEnv } from "../../../packages/shared/dist/index.js";
 
@@ -29,6 +29,8 @@ interface StoredAppSettings {
   advisor_persona: string;
   advisor_shared_dir: string;
   advisor_screenshot_dir: string;
+  /** Empty means the default <OWL_ROOT>/knowledge. */
+  knowledge_dir: string;
 }
 
 /** The .env variable that holds the Typesafe API key saved from the settings UI. */
@@ -69,6 +71,7 @@ const DEFAULTS: StoredAppSettings = {
   advisor_persona: "",
   advisor_shared_dir: "",
   advisor_screenshot_dir: "",
+  knowledge_dir: "",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -375,6 +378,7 @@ export class AppSettingsStore {
           : (() => { throw new Error("advisor_persona must be a string"); })();
       const advisorSharedDir = parsed.advisor_shared_dir === undefined ? "" : typeof parsed.advisor_shared_dir === "string" ? parsed.advisor_shared_dir : (() => { throw new Error("advisor_shared_dir must be a string"); })();
       const advisorScreenshotDir = parsed.advisor_screenshot_dir === undefined ? "" : typeof parsed.advisor_screenshot_dir === "string" ? parsed.advisor_screenshot_dir : (() => { throw new Error("advisor_screenshot_dir must be a string"); })();
+      const knowledgeDir = parsed.knowledge_dir === undefined ? "" : typeof parsed.knowledge_dir === "string" ? parsed.knowledge_dir : (() => { throw new Error("knowledge_dir must be a string"); })();
       return {
         hybrid_mode: hybridMode,
         executor_config: { provider, model, effort, timeout_ms: timeoutMs },
@@ -384,6 +388,7 @@ export class AppSettingsStore {
         advisor_persona: advisorPersona,
         advisor_shared_dir: advisorSharedDir,
         advisor_screenshot_dir: advisorScreenshotDir,
+        knowledge_dir: knowledgeDir,
       };
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -452,6 +457,21 @@ export class AppSettingsStore {
   setAdvisorSharedDir(path: string): string { this.settings.advisor_shared_dir = path; this.save(); return path; }
   getAdvisorScreenshotDir(): string { return this.settings.advisor_screenshot_dir; }
   setAdvisorScreenshotDir(path: string): string { this.settings.advisor_screenshot_dir = path; this.save(); return path; }
+
+  getKnowledgeDir(): string { return this.settings.knowledge_dir; }
+  /** Core normalizes first; only "" (default) or an absolute path without NUL is stored. */
+  setKnowledgeDir(path: string): string {
+    if (path !== "" && (!isAbsolute(path) || path.includes("\0"))) throw new Error("knowledge_dir must be empty or an absolute path");
+    const previous = this.settings.knowledge_dir;
+    this.settings.knowledge_dir = path;
+    try {
+      this.save();
+    } catch (error) {
+      this.settings.knowledge_dir = previous;
+      throw error;
+    }
+    return path;
+  }
 
   setAdvisorFolders(sharedDir: string, screenshotDir: string): void {
     this.settings.advisor_shared_dir = sharedDir;

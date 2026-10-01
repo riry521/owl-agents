@@ -2476,6 +2476,127 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/settings/knowledge-storage:
+    get:
+      operationId: getKnowledgeStorage
+      summary: Get the knowledge storage status
+      security:
+        - ownerBearer: []
+      parameters:
+        - name: refresh
+          in: query
+          required: false
+          description: When 1, re-check availability before answering.
+          schema:
+            type: string
+            enum: ['1']
+      responses:
+        '200':
+          description: Knowledge storage status.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KnowledgeStorageResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: dependency_unavailable
+          x-error-codes:
+            - dependency_unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    put:
+      operationId: updateKnowledgeStorage
+      summary: Move or relink the knowledge storage
+      security:
+        - ownerBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateKnowledgeStorageCommand'
+      responses:
+        '200':
+          description: Knowledge storage moved or relinked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KnowledgeStorageMoveResponse'
+        '400':
+          description: validation_error (payload types are invalid).
+          x-error-codes:
+            - validation_error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: knowledge_storage_busy, knowledge_storage_moving, or idempotency_conflict.
+          x-error-codes:
+            - knowledge_storage_busy
+            - knowledge_storage_moving
+            - idempotency_conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '415':
+          description: unsupported_media_type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: validation_error, or knowledge_target_invalid with details.reason (same_as_current, nested, reserved, not_directory, not_empty, parent_missing, not_writable, relink_requires_unavailable).
+          x-error-codes:
+            - validation_error
+            - knowledge_target_invalid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/KnowledgeStorageUpdateValidationErrorResponse'
+        '500':
+          description: knowledge_move_failed (original data and setting are unchanged).
+          x-error-codes:
+            - knowledge_move_failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: knowledge_storage_unavailable (the target storage is unavailable), or dependency_unavailable.
+          x-error-codes:
+            - knowledge_storage_unavailable
+            - dependency_unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/settings/integrations:
     get:
       operationId: getIntegrationSettings
@@ -3381,6 +3502,53 @@ components:
               type: object
               additionalProperties: true
           additionalProperties: false
+      additionalProperties: false
+    KnowledgeStorageUpdateValidationErrorResponse:
+      type: object
+      required:
+        - request_id
+        - error
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        error:
+          oneOf:
+            - type: object
+              required:
+                - code
+                - message
+                - details
+              properties:
+                code:
+                  type: string
+                  enum: [validation_error]
+                message:
+                  type: string
+                details:
+                  type: object
+                  additionalProperties: true
+              additionalProperties: false
+            - type: object
+              required:
+                - code
+                - message
+                - details
+              properties:
+                code:
+                  type: string
+                  enum: [knowledge_target_invalid]
+                message:
+                  type: string
+                details:
+                  type: object
+                  required:
+                    - reason
+                  properties:
+                    reason:
+                      type: string
+                      enum: [same_as_current, nested, reserved, not_directory, not_empty, parent_missing, not_writable, relink_requires_unavailable]
+                  additionalProperties: true
+              additionalProperties: false
       additionalProperties: false
     WorktreeCleanupIssue:
       type: object
@@ -5795,8 +5963,14 @@ components:
       properties:
         key:
           type: string
-          enum: [home, desktop, documents, downloads, owl_data]
+          description: home, desktop, documents, downloads, owl_data, icloud, volume:<name> or cloud:<name>.
         path: { type: string }
+        name:
+          type: string
+          description: Display name for volume and cloud shortcuts.
+        kind:
+          type: string
+          enum: [volume, cloud]
       additionalProperties: false
     DirectoryListingData:
       type: object
@@ -5874,6 +6048,109 @@ components:
           properties:
             payload:
               $ref: '#/components/schemas/UpdateAdvisorFoldersPayload'
+    KnowledgeStorageMoveStage:
+      type: string
+      enum: [validating, draining, scanning, copying, verifying, switching, cleaning_up]
+    KnowledgeStorageMoveMode:
+      type: string
+      enum: [move, relink]
+    KnowledgeStorageMoveWarning:
+      type: object
+      required: [code, path, remaining_files]
+      properties:
+        code: { type: string, enum: [source_cleanup_incomplete] }
+        path: { type: string }
+        remaining_files: { type: integer, minimum: 0 }
+      additionalProperties: false
+    KnowledgeStorageStatus:
+      type: object
+      required: [path, default_path, custom, state, reason, checked_at, move, last_move, interrupted_move]
+      properties:
+        path: { type: string }
+        default_path: { type: string }
+        custom: { type: boolean }
+        state: { type: string, enum: [available, unavailable, moving] }
+        reason:
+          type: [string, 'null']
+          enum: [invalid_path, missing, not_directory, permission_denied, not_writable, marker_missing, timeout, io_error, null]
+        checked_at: { type: [string, 'null'] }
+        move:
+          type: [object, 'null']
+          required: [target, mode, stage, started_at, files_total, files_done]
+          properties:
+            target: { type: string }
+            mode: { $ref: '#/components/schemas/KnowledgeStorageMoveMode' }
+            stage: { $ref: '#/components/schemas/KnowledgeStorageMoveStage' }
+            started_at: { type: string }
+            files_total: { type: [integer, 'null'], minimum: 0 }
+            files_done: { type: integer, minimum: 0 }
+          additionalProperties: false
+        last_move:
+          type: [object, 'null']
+          required: [from, to, mode, finished_at, files, bytes, warnings]
+          properties:
+            from: { type: string }
+            to: { type: string }
+            mode: { $ref: '#/components/schemas/KnowledgeStorageMoveMode' }
+            finished_at: { type: string }
+            files: { type: integer, minimum: 0 }
+            bytes: { type: integer, minimum: 0 }
+            warnings:
+              type: array
+              items: { $ref: '#/components/schemas/KnowledgeStorageMoveWarning' }
+          additionalProperties: false
+        interrupted_move:
+          type: [object, 'null']
+          required: [source, target, stage, started_at]
+          properties:
+            source: { type: string }
+            target: { type: string }
+            stage: { $ref: '#/components/schemas/KnowledgeStorageMoveStage' }
+            started_at: { type: string }
+          additionalProperties: false
+      additionalProperties: false
+    KnowledgeStorageResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/KnowledgeStorageStatus'
+    UpdateKnowledgeStorageCommand:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+        - type: object
+          properties:
+            payload:
+              type: object
+              required: [path]
+              properties:
+                path: { type: string }
+                mode: { $ref: '#/components/schemas/KnowledgeStorageMoveMode' }
+              additionalProperties: false
+    KnowledgeStorageMoveData:
+      type: object
+      required: [status, moved, warnings]
+      properties:
+        status: { $ref: '#/components/schemas/KnowledgeStorageStatus' }
+        moved:
+          type: object
+          required: [files, bytes]
+          properties:
+            files: { type: integer, minimum: 0 }
+            bytes: { type: integer, minimum: 0 }
+          additionalProperties: false
+        warnings:
+          type: array
+          items: { $ref: '#/components/schemas/KnowledgeStorageMoveWarning' }
+      additionalProperties: false
+    KnowledgeStorageMoveResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/KnowledgeStorageMoveData'
     AdvisorPersonaData:
       type: object
       required:

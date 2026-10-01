@@ -1,8 +1,8 @@
 'use client';
 
 import { Fragment, type FormEvent, useEffect, useState } from 'react';
-import { getModelSettings, updateModelSettings, getIntegrations, saveIntegration, testIntegration, deleteIntegration, getHybridMode, setHybridMode, getExecutorConfig, setExecutorConfig, listProviders, createProvider, deleteProvider, testProvider, saveProvider, getProviderModels, setProviderModels as setProviderModelsApi, getTypesafeApiKey, setTypesafeApiKey, getAdvisorPersona, setAdvisorPersona, getAdvisorFolders, putAdvisorFolders, getOwnerLanguage, setOwnerLanguage, getKnowledgeAutomationSettings, setKnowledgeAutomationSettings, ApiRequestError } from '@/lib/api-client';
-import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ExecutorConfig, ProviderInfo, SaveProviderPayload, AdvisorFolders, KnowledgeAutomationSettingsData, KnowledgeAutomationSettingsInput } from '@/lib/types';
+import { getModelSettings, updateModelSettings, getIntegrations, saveIntegration, testIntegration, deleteIntegration, getHybridMode, setHybridMode, getExecutorConfig, setExecutorConfig, listProviders, createProvider, deleteProvider, testProvider, saveProvider, getProviderModels, setProviderModels as setProviderModelsApi, getTypesafeApiKey, setTypesafeApiKey, getAdvisorPersona, setAdvisorPersona, getAdvisorFolders, putAdvisorFolders, getKnowledgeStorage, putKnowledgeStorage, getOwnerLanguage, setOwnerLanguage, getKnowledgeAutomationSettings, setKnowledgeAutomationSettings, ApiRequestError } from '@/lib/api-client';
+import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ExecutorConfig, ProviderInfo, SaveProviderPayload, AdvisorFolders, KnowledgeStorageStatus, KnowledgeAutomationSettingsData, KnowledgeAutomationSettingsInput } from '@/lib/types';
 import { roleDisplayName } from '@/lib/format';
 import { useLocale, type Locale } from '@/lib/i18n';
 import { humanizeError } from '@/lib/settings-errors';
@@ -415,6 +415,7 @@ export function SettingsView() {
       <OwnerLanguageSection />
       <AdvisorPersonaSection />
       <AdvisorFoldersSection />
+      <KnowledgeStorageSection />
       <KnowledgeAutomationSection />
       <ProviderManagementSection providerModels={providerModels} onModelsUpdate={(id, models) => setProviderModels(prev => ({ ...prev, [id]: models }))} />
       <IntegrationsSection />
@@ -776,6 +777,117 @@ export function AdvisorFoldersSection() {
           else if (picker?.field === 'screenshot') setScreenshotDir(path);
         }}
         onClose={() => setPicker(null)}
+      />
+    </section>
+  );
+}
+
+const KNOWLEDGE_STORAGE_POLL_MS = 5000;
+
+export function KnowledgeStorageSection() {
+  const { t } = useLocale();
+  const [status, setStatus] = useState<KnowledgeStorageStatus | null>(null);
+  const [path, setPath] = useState('');
+  const [moving, setMoving] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    let first = true;
+    const load = () =>
+      getKnowledgeStorage()
+        .then((value) => {
+          if (!alive) return;
+          setStatus(value);
+          if (first) setPath(value.custom ? value.path : '');
+          first = false;
+        })
+        .catch(() => undefined);
+    void load();
+    const timer = setInterval(load, KNOWLEDGE_STORAGE_POLL_MS);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+    };
+  }, []);
+
+  async function handleSave() {
+    setMoving(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const saved = await putKnowledgeStorage(path.trim());
+      setStatus(saved);
+      setPath(saved.custom ? saved.path : '');
+      setNotice(t('settings.knowledgeStorageSaved', { path: saved.path }));
+    } catch (err) {
+      // 4xx messages come from server-side validation; show them verbatim.
+      setError(err instanceof ApiRequestError && err.status !== null && err.status < 500 ? err.rawMessage : humanizeError(err, t));
+    } finally {
+      setMoving(false);
+    }
+  }
+
+  const busy = moving || status?.state === 'moving';
+  const progress = status?.move && status.move.files_total !== null ? ` (${status.move.files_done}/${status.move.files_total})` : '';
+
+  return (
+    <section className="panel" aria-labelledby="sec-knowledge-storage">
+      <h2 id="sec-knowledge-storage" className="panel__title">{t('settings.knowledgeStorage')}</h2>
+      <p className="settings-disclosure__hint">{t('settings.knowledgeStorageDescription')}</p>
+      {status && (
+        <p>
+          <span>{t('settings.knowledgeStorageCurrent')}: </span>
+          <code>{status.path}</code>{' '}
+          {!status.custom && <span className="badge badge--gray">{t('settings.knowledgeStorageDefaultBadge')}</span>}
+        </p>
+      )}
+      {status?.state === 'unavailable' && (
+        <div className="error" role="alert">
+          {t('settings.knowledgeStorageUnavailable')}{status.reason ? ` (${status.reason})` : ''}
+          <button type="button" className="btn btn--small" style={{ marginLeft: '8px' }} onClick={() => void getKnowledgeStorage(true).then(setStatus).catch(() => undefined)}>
+            {t('settings.knowledgeStorageRecheck')}
+          </button>
+        </div>
+      )}
+      <label className="form-field">
+        <span>{t('settings.knowledgeStorageLabel')}</span>
+        <div className="project-path-input">
+          <input
+            className="input"
+            style={{ fontFamily: 'monospace' }}
+            value={path}
+            onChange={(ev) => setPath(ev.target.value)}
+            placeholder={status?.default_path ?? ''}
+            maxLength={4096}
+            disabled={busy}
+          />
+          <button type="button" className="btn" onClick={() => setPickerOpen(true)} disabled={busy}>
+            {t('settings.advisorFoldersChoose')}
+          </button>
+        </div>
+      </label>
+      <p className="settings-disclosure__hint">{t('settings.knowledgeStorageHint')}</p>
+      <div className="btn-row">
+        <button type="button" className="btn btn--primary btn--small" onClick={handleSave} disabled={busy || !status}>
+          {t('settings.knowledgeStorageSave')}
+        </button>
+        {busy && <span className="note" role="status">{t('settings.knowledgeStorageMoving')}{progress}</span>}
+        {notice && <span className="note note--success">{notice}</span>}
+      </div>
+      {error && (
+        <div className="error" role="alert" style={{ marginTop: '12px' }}>
+          {error}
+          <div>{t('settings.knowledgeStorageUnchanged', { path: status?.path ?? '' })}</div>
+        </div>
+      )}
+      <FolderPickerDialog
+        open={pickerOpen}
+        initialPath={path.trim() || status?.path || ''}
+        onSelect={setPath}
+        onClose={() => setPickerOpen(false)}
       />
     </section>
   );

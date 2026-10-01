@@ -32,6 +32,7 @@ import { WorkDriver } from "./work-driver";
 import { WorkflowEngine } from "./workflow-engine";
 import { isPlanRejection, validatePlan, validateReplan, type ReplanPlan, type ReplanSnapshot } from "./replan-plan";
 import { KnowledgeBase } from "./knowledge-base";
+import { KnowledgeLocation, type KnowledgeMoveMode, type KnowledgeMoveResult, type KnowledgeStorageStatus } from "./knowledge-location";
 import { KnowledgeNotes } from "./knowledge-notes.js";
 import { migrateLegacyKnowledge as runLegacyKnowledgeMigration } from "./knowledge-migration.js";
 import { retagKnowledge, type KeywordExtractionItem, type KeywordExtractionResult } from "./knowledge-retag.js";
@@ -111,6 +112,7 @@ import {
   type LinkBacklogItemsData,
   type LinkBacklogItemsPayload,
 } from "./review-backlog.js";
+
 import {
   ADVISOR_CURATION_ACTION_TYPES,
   ADVISOR_CURATION_INSTRUCTION,
@@ -214,6 +216,11 @@ import type {
   GitPushResult,
   GitWorkMergeResult,
 } from "./types";
+
+const KNOWLEDGE_READ_METHODS = new Set<PropertyKey>(["resolveFilename", "search", "list", "get"]);
+const KNOWLEDGE_WRITE_METHODS = new Set<PropertyKey>([
+  "ensureDirectories", "create", "upsert", "update", "remove", "saveWorkLessons", "upsertBySource",
+]);
 
 type PushAlertKind = "work_push_failed" | "work_push_blocked_by_hook" | "work_push_skipped_no_upstream";
 
@@ -503,6 +510,7 @@ export class Core {
   private readonly workspaceLayout: WorkspaceLayout;
   private readonly knownModels: KnownModels;
   public readonly knowledge: KnowledgeBase;
+  private readonly knowledgeLocation: KnowledgeLocation;
   private readonly knowledgeNotes: KnowledgeNotes;
   private readonly knowledgeRetriever: KnowledgeRetriever;
   public readonly ruleStore: RuleStore;
@@ -570,6 +578,33 @@ export class Core {
     this.dataDir = options.dataDir ?? join(this.owlRoot, "data");
     this.workspaceLayout = new WorkspaceLayout(options.workspacesRoot ?? resolve(this.owlRoot, ".owl-workspaces"), resolve(this.owlRoot, ".owl-workspaces"));
     this.git = options.git ?? new GitWorktreeGateway(options.db, this.owlRoot, undefined, this.dataDir, this.workspaceLayout);
+    this.knowledgeLocation = new KnowledgeLocation({
+      owlRoot: this.owlRoot,
+      dataDir: this.dataDir,
+      persistence: options.knowledgeStorage,
+      now: options.now,
+      onAvailable: () => this.onKnowledgeStorageAvailable(),
+      onSwitched: () => this.knowledgeNotes.resetCache(),
+    });
+    const knowledgeBase = new KnowledgeBase(this.owlRoot, {
+      rootDir: () => this.knowledgeLocation.activeDir(),
+      requireRoot: () => this.knowledgeLocation.hasEverBeenAvailable(),
+    });
+    this.knowledge = new Proxy(knowledgeBase, {
+      get: (target, property, receiver) => {
+        const member = Reflect.get(target, property, receiver);
+        const lease = KNOWLEDGE_READ_METHODS.has(property)
+          ? "read"
+          : KNOWLEDGE_WRITE_METHODS.has(property) ? "write" : null;
+        if (!lease || typeof member !== "function") return member;
+        return (...args: unknown[]) => {
+          const operation = () => Reflect.apply(member, target, args) as Promise<unknown>;
+          return lease === "read"
+            ? this.knowledgeLocation.withRead(operation)
+            : this.knowledgeLocation.withWrite(operation);
+        };
+      },
+    });
     this.workspaceSweeper = new WorkspaceProcessSweeper({
       listWorkspaces: () => this.git.listWorkspaces(),
       activity: () => this.workspaceActivity(),
@@ -579,14 +614,14 @@ export class Core {
     if (this.git instanceof GitWorktreeGateway) {
       this.git.onBeforeWorktreeRemoval(async (path) => { await this.workspaceSweeper.sweep({ path }); });
     }
-    this.knowledge = new KnowledgeBase(this.owlRoot);
     this.researchRecorder = new ResearchRecorder({
       knowledge: this.knowledge,
+      gate: this.knowledgeLocation,
       isEnabled: () => this.readKnowledgeAutomationSettings().research_autosave,
       language: () => ownerLanguage(this.db),
     });
     this.knowledgeNotes = new KnowledgeNotes(this.knowledge, { now: options.now });
-    this.knowledgeRetriever = new KnowledgeRetriever(this.knowledgeNotes, { now: options.now });
+    this.knowledgeRetriever = new KnowledgeRetriever(this.knowledgeNotes, { now: options.now, gate: this.knowledgeLocation });
     this.ruleStore = new RuleStore(this.owlRoot);
     this.skillBox = new SkillBox({
       db: this.db,
@@ -606,7 +641,7 @@ export class Core {
       debounce_ms: options.skillCuratorDebounceMs,
     });
     this.advisorSessions = new AdvisorSessionManager(this.db);
-    this.memorySaver = new MemorySaver(this.knowledge, () => ownerLanguage(this.db));
+    this.memorySaver = new MemorySaver(this.knowledge, () => ownerLanguage(this.db), this.knowledgeLocation);
     const providerClient = options.providerClient as ProviderClient | undefined;
     if (providerClient?.createSession) {
       this.advisorRuntime = new AdvisorSessionRuntime({
@@ -650,10 +685,17 @@ export class Core {
       this.advisorRuntime = null;
     }
     this.librarian = new Librarian(this.knowledge, {
+      mergedArchiveDir: join(this.dataDir, "backups", "knowledge-merged"),
       getModelConfig: () => resolveRoleModelFromDb(this.db, "librarian"),
     });
     this.librarianScheduler = new LibrarianScheduler({
-      run: () => this.runCuration({ kind: "librarian", trigger: "scheduled", actor: "system" }),
+      run: async () => {
+        if (!this.knowledgeLocation.isAvailable()) {
+          console.warn("[owl-core] Skipping the scheduled Librarian run: the knowledge storage is unavailable");
+          return null;
+        }
+        return this.runCuration({ kind: "librarian", trigger: "scheduled", actor: "system" });
+      },
     });
     this.curationRuns = new CurationRunStore(this.db);
     this.learningJobs = new LearningJobs({ db: this.db, writeLane: this.writeLane, now: options.now });
@@ -671,6 +713,7 @@ export class Core {
       skillBox: this.skillBox,
       notes: this.knowledgeNotes,
       ruleProposals: this.ruleProposals,
+      gate: this.knowledgeLocation,
       now: options.now,
       debounce_ms: this.learningPipelineDebounceMs,
     });
@@ -942,14 +985,58 @@ export class Core {
     if (!input || typeof input.dry_run !== "boolean") {
       throw validationError("dry_run must be a boolean.", { field: "dry_run" });
     }
-    return runLegacyKnowledgeMigration({
+    return this.knowledgeLocation.withWrite(() => runLegacyKnowledgeMigration({
       knowledge: this.knowledge,
       notes: this.knowledgeNotes,
       ruleProposals: this.ruleProposals,
       dry_run: input.dry_run,
       language: ownerLanguage(this.db),
       now: this.options.now,
-    });
+    }));
+  }
+
+  public getKnowledgeStorage(): KnowledgeStorageStatus {
+    return this.knowledgeLocation.status();
+  }
+
+  public hasKnowledgeStorageEverBeenAvailable(): boolean {
+    return this.knowledgeLocation.hasEverBeenAvailable();
+  }
+
+  public checkKnowledgeStorage(): Promise<KnowledgeStorageStatus> {
+    return this.knowledgeLocation.check();
+  }
+
+  public activeKnowledgeDir(): string {
+    return this.knowledgeLocation.activeDir();
+  }
+
+  public withKnowledgeAccess<T>(kind: "read" | "write", fn: () => Promise<T>): Promise<T> {
+    return kind === "read" ? this.knowledgeLocation.withRead(fn) : this.knowledgeLocation.withWrite(fn);
+  }
+
+  /** Switches where knowledge is stored, without a restart; Core and HTTP read the location on every call. */
+  public async moveKnowledgeStorage(input: { path: string; mode?: KnowledgeMoveMode }): Promise<KnowledgeMoveResult> {
+    if (!input || typeof input.path !== "string") throw validationError("path must be a string.", { field: "path" });
+    const mode = input.mode ?? "move";
+    if (mode !== "move" && mode !== "relink") throw validationError("mode must be move or relink.", { field: "mode" });
+    if (this.retagRunning || this.activeCurations.has("librarian")) {
+      throw new HumanReadableError({
+        code: "knowledge_storage_busy",
+        message: "A Librarian run or a retag is running.",
+        remediation: "Move the knowledge storage after it finishes.",
+      });
+    }
+    const result = await this.knowledgeLocation.move({ path: input.path, mode });
+    await this.knowledge.ensureDirectories().catch((error: unknown) => console.warn("[owl-core] Could not prepare the knowledge folders", error));
+    return result;
+  }
+
+  /** Storage came back: prepare the folders and resume the learning jobs that waited. */
+  private async onKnowledgeStorageAvailable(): Promise<void> {
+    await this.knowledge.ensureDirectories();
+    this.knowledgeNotes.resetCache();
+    this.scheduleLearningRun("knowledge-storage");
   }
 
   /**
@@ -959,7 +1046,7 @@ export class Core {
   private retagRunning = false;
 
   public async retagKnowledgeNotes(input: {
-    /** Directory named "knowledge" whose files are retagged (backups go to <its parent>/data/backups). Defaults to this Core's knowledge directory. */
+    /** Absolute path of the knowledge directory to retag (any name). Defaults to this Core's current knowledge directory. Backups always go to <dataDir>/backups. */
     knowledge_dir?: string;
     dry_run: boolean;
     /** Retag every note, including those already marked as keyword-tagged. */
@@ -972,11 +1059,13 @@ export class Core {
     if (input.force !== undefined && typeof input.force !== "boolean") {
       throw validationError("force must be a boolean.", { field: "force" });
     }
-    const knowledgeDir = input.knowledge_dir ?? this.knowledge.knowledgeDir;
-    if (typeof knowledgeDir !== "string" || !isAbsolute(knowledgeDir) || basename(knowledgeDir) !== "knowledge") {
-      throw validationError("knowledge_dir must be an absolute path to a directory named knowledge.", { field: "knowledge_dir" });
+    const knowledgeDir = input.knowledge_dir ?? this.knowledgeLocation.path;
+    if (typeof knowledgeDir !== "string" || !isAbsolute(knowledgeDir)) {
+      throw validationError("knowledge_dir must be an absolute path.", { field: "knowledge_dir" });
     }
-    const knowledge = new KnowledgeBase(dirname(knowledgeDir));
+    const current = input.knowledge_dir === undefined || resolve(knowledgeDir) === resolve(this.knowledgeLocation.path);
+    const knowledge = current ? this.knowledge : new KnowledgeBase(this.owlRoot, { rootDir: () => knowledgeDir });
+    const notes = current ? this.knowledgeNotes : new KnowledgeNotes(knowledge);
     const runner = this.options.agentRunner as {
       runKeywordExtraction?: (request: { items: KeywordExtractionItem[]; language: string }) => Promise<KeywordExtractionResult>;
     };
@@ -987,21 +1076,22 @@ export class Core {
     if (this.retagRunning || this.activeCurations.has("librarian")) throw new Error("retag_in_progress");
     this.retagRunning = true;
     try {
-      return await retagKnowledge({
+      const run = () => retagKnowledge({
         knowledge,
-        notes: new KnowledgeNotes(knowledge),
-        backupRoot: join(dirname(knowledgeDir), "data", "backups"),
+        notes,
+        backupRoot: join(this.dataDir, "backups"),
         extract,
         dry_run: input.dry_run,
         force: input.force,
       });
+      return await (current ? this.knowledgeLocation.withWrite(run) : run());
     } finally {
       this.retagRunning = false;
     }
   }
 
   public async approveRuleProposal(proposalId: string) {
-    return this.ruleProposals.approve(proposalId);
+    return this.knowledgeLocation.withWrite(() => this.ruleProposals.approve(proposalId));
   }
 
   public async rejectRuleProposal(proposalId: string) {
@@ -1030,7 +1120,7 @@ export class Core {
     if (input.text !== undefined && typeof input.text !== "string") {
       throw validationError("text must be a string.", { field: "text" });
     }
-    const note = await this.knowledgeNotes.get(input.note_id);
+    const note = await this.knowledgeLocation.withRead(() => this.knowledgeNotes.get(input.note_id));
     if (!note) throw notFound("note", input.note_id);
     const claim = note.claims.find((item) => item.fingerprint === input.claim_fingerprint);
     if (!claim) throw notFound("note_claim", input.claim_fingerprint);
@@ -1166,7 +1256,8 @@ export class Core {
     }
     this.started = true;
     await this.checkWorkspacesRootInsideRepository();
-    await this.knowledge.ensureDirectories();
+    await this.knowledgeLocation.initialize();
+    if (this.knowledgeLocation.isAvailable()) await this.knowledge.ensureDirectories();
     await this.ruleStore.ensureDirectories();
     try {
       await this.ruleStore.load();
@@ -1267,6 +1358,7 @@ export class Core {
     actor_ref?: string | null;
     request_key?: string | null;
   }): Promise<CurationRunView> {
+    if (input.kind === "librarian") this.knowledgeLocation.assertAvailable();
     const key = input.request_key ?? null;
     if (key) {
       const pending = this.pendingCurationKeys.get(key);
@@ -1307,7 +1399,7 @@ export class Core {
 
   /** Runs the curation behind one kind; the Librarian also records where its merged notes went. */
   private async executeCurationReport(kind: CurationKind, runId: string): Promise<unknown> {
-    if (kind === "librarian") return this.librarian.run({ runId });
+    if (kind === "librarian") return this.knowledgeLocation.withWrite(() => this.librarian.run({ runId }));
     if (kind === "skill_curation") return this.curateSkills();
     if (kind === "rule_curation") return this.curateRules();
     throw new Error("curation_kind_not_implemented");
@@ -1522,6 +1614,7 @@ export class Core {
     this.providerPauseController.stop();
     if (!this.started) {
       await this.librarianScheduler.stop();
+      await this.knowledgeLocation.stop();
       this.skillCurator.stop();
       await Promise.allSettled([...this.activeCurations.values()]);
       await this.learningTask;
@@ -1530,6 +1623,7 @@ export class Core {
     }
     this.started = false;
     await this.librarianScheduler.stop();
+    await this.knowledgeLocation.stop();
     // Stopping the Curator releases a curation that is waiting on its provider.
     this.skillCurator.stop();
     await Promise.allSettled([...this.activeCurations.values()]);

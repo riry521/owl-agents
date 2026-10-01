@@ -1,6 +1,7 @@
 import type { OwlDatabase, WriteLane, WriteLaneTransaction } from "../../db/dist/index.js";
 import type { AgentFailureClass, AgentProcessEvent, CuratorCandidate, CuratorProposal, CuratorRequest, CuratorRunResult, OwnerLanguage, ProcessSkillsInstallCommand, ProcessSkillsSettings, RateLimitInfo, SkillFeedback, TokenUsage } from "@owl/shared";
 import type { ExecutorRuntime } from "./executor.js";
+import type { KnowledgeStoragePersistence } from "./knowledge-location.js";
 import type { DetectedProcessSkillsPack, ProcessSkillsFileSystem } from "./process-skills-pack.js";
 import type { NormalizedLesson } from "./final-verdict.js";
 
@@ -601,6 +602,8 @@ export interface CoreOptions {
   readonly owlRoot?: string;
   /** Durable runtime data directory. Defaults to `<owlRoot>/data`. */
   readonly dataDir?: string;
+  /** Persists the Owner-chosen knowledge directory ("" = `<owlRoot>/knowledge`). Without it the location is fixed. */
+  readonly knowledgeStorage?: KnowledgeStoragePersistence;
   /** Root directory for Work and Advisor worktrees. Defaults to `<owlRoot>/.owl-workspaces` for backward compatibility. */
   readonly workspacesRoot?: string;
   /**

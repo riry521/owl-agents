@@ -45,10 +45,17 @@ const KNOWLEDGE_SUBDIRS = ["global", "projects", "works", "policies", "notes", "
 const SNIPPET_LENGTH = 200;
 
 export class KnowledgeBase {
-  private readonly rootDir: string;
+  private readonly rootProvider: () => string;
+  private readonly requireRoot: () => boolean;
 
-  public constructor(owlRoot: string) {
-    this.rootDir = join(owlRoot, "knowledge");
+  /** `requireRoot`: when true, a missing root directory is an error instead of an empty knowledge base (custom locations that went away). */
+  public constructor(owlRoot: string, options: { rootDir?: () => string; requireRoot?: () => boolean } = {}) {
+    this.rootProvider = options.rootDir ?? (() => join(owlRoot, "knowledge"));
+    this.requireRoot = options.requireRoot ?? (() => false);
+  }
+
+  private get rootDir(): string {
+    return this.rootProvider();
   }
 
   public get knowledgeDir(): string {
@@ -120,18 +127,27 @@ export class KnowledgeBase {
   }
 
   public async list(folder?: string): Promise<KnowledgeSearchResult[]> {
-    const baseDir = folder ? this.safePath(folder) : this.rootDir;
+    const rootDir = this.rootDir;
+    const rootRequired = this.requireRoot();
     if (folder && !this.isValidFolder(folder)) throw new Error(`invalid_folder: ${folder}`);
+    if (folder && rootRequired) await stat(rootDir);
+    const baseDir = folder ? this.safePath(folder) : rootDir;
     try {
       await stat(baseDir);
-    } catch {
-      return [];
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ENOENT" && !folder && !rootRequired) return [];
+      if (code === "ENOENT" && folder) {
+        if (rootRequired) await stat(rootDir);
+        return [];
+      }
+      throw error;
     }
     const files = await this.walkMarkdown(baseDir);
     const results: KnowledgeSearchResult[] = [];
 
     for (const absPath of files) {
-      const relPath = relative(this.rootDir, absPath);
+      const relPath = relative(rootDir, absPath);
       const content = await readFile(absPath, "utf8");
       const parsed = parseFrontmatter(content);
       const fileStat = await stat(absPath);
@@ -383,8 +399,9 @@ export class KnowledgeBase {
           results.push(full);
         }
       }
-    } catch {
-      // directory doesn't exist yet
+    } catch (error) {
+      // A missing sub-directory just has no notes yet; an unreadable root means the storage is gone.
+      if (resolve(dir) === resolve(this.rootDir)) throw error;
     }
     return results;
   }

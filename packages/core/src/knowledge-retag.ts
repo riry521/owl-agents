@@ -1,4 +1,4 @@
-import { basename, join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { cp } from "node:fs/promises";
 
 import type { KnowledgeBase } from "./knowledge-base.js";
@@ -56,7 +56,7 @@ export async function retagKnowledge(input: {
   now?: () => Date;
 }): Promise<RetagReport> {
   const { knowledge, notes } = input;
-  if (basename(knowledge.knowledgeDir) !== "knowledge") throw new Error("retag_invalid_knowledge_dir");
+  if (!isAbsolute(knowledge.knowledgeDir) || !isAbsolute(input.backupRoot)) throw new Error("retag_invalid_knowledge_dir");
 
   const all: Target[] = [];
   const marked = new Set<string>();

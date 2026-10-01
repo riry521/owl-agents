@@ -183,3 +183,30 @@ test("OpenAPI documents the owner provider pause resume route and nullable pause
   assert.match(response, /type: 'null'/u);
   assert.match(response, /- pause/u);
 });
+
+test("OpenAPI documents GET/PUT /settings/knowledge-storage as the server serves them", () => {
+  assert.match(http, /pathname === `\$\{API_PREFIX\}\/settings\/knowledge-storage` && method === "GET"/u);
+  assert.match(http, /pathname === `\$\{API_PREFIX\}\/settings\/knowledge-storage` && method === "PUT"/u);
+  const route = yamlBlock(openapi, "  /api/v1/settings/knowledge-storage:");
+  const getOp = yamlBlock(route, "    get:");
+  const putOp = yamlBlock(route, "    put:");
+  assert.match(putOp, /UpdateKnowledgeStorageCommand/u);
+  const response = (op, status) => yamlBlock(op, `        '${status}':`);
+  assert.match(response(getOp, "503"), /- dependency_unavailable\n/u);
+  assert.doesNotMatch(getOp, /knowledge_storage_unavailable/u);
+  const putCodes = { "400": ["validation_error"], "409": ["idempotency_conflict", "knowledge_storage_busy", "knowledge_storage_moving"], "422": ["validation_error", "knowledge_target_invalid"], "500": ["knowledge_move_failed"], "503": ["knowledge_storage_unavailable"] };
+  for (const [status, codes] of Object.entries(putCodes)) {
+    for (const code of codes) assert.match(response(putOp, status), new RegExp(`- ${code}\\n`, "u"), `${status} ${code}`);
+  }
+  assert.match(response(putOp, "422"), /\$ref: '#\/components\/schemas\/KnowledgeStorageUpdateValidationErrorResponse'/u);
+  const invalid = yamlBlock(openapi, "    KnowledgeStorageUpdateValidationErrorResponse:");
+  assert.match(invalid, /enum: \[same_as_current, nested, reserved, not_directory, not_empty, parent_missing, not_writable, relink_requires_unavailable\]/u);
+  for (const name of ["KnowledgeStorageStatus", "KnowledgeStorageResponse", "UpdateKnowledgeStorageCommand", "KnowledgeStorageMoveResponse"]) {
+    yamlBlock(openapi, `    ${name}:`);
+  }
+  const command = yamlBlock(openapi, "    UpdateKnowledgeStorageCommand:");
+  assert.match(command, /required: \[path\]/u);
+  assert.match(command, /mode: \{ \$ref: '#\/components\/schemas\/KnowledgeStorageMoveMode' \}/u);
+  assert.match(command, /additionalProperties: false/u);
+  assert.match(yamlBlock(openapi, "    KnowledgeStorageMoveMode:"), /enum: \[move, relink\]/u);
+});

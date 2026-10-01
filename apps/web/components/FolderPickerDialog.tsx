@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState, type ChangeEvent } from 'react';
+import { createPortal } from 'react-dom';
 import { listDirectories, ApiRequestError } from '@/lib/api-client';
 import type { DirectoryListing } from '@/lib/types';
 import { useLocale } from '@/lib/i18n';
@@ -30,6 +31,7 @@ export function FolderPickerDialog({ open, initialPath, onSelect, onClose }: Fol
   const [listing, setListing] = useState<DirectoryListing | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [permissionHint, setPermissionHint] = useState(false);
   const [showHidden, setShowHidden] = useState(false);
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const previouslyFocused = useRef<Element | null>(null);
@@ -37,6 +39,7 @@ export function FolderPickerDialog({ open, initialPath, onSelect, onClose }: Fol
   async function load(path: string | undefined, hidden: boolean) {
     setLoading(true);
     setError(null);
+    setPermissionHint(false);
     try {
       setListing(await listDirectories(path, hidden));
     } catch (err) {
@@ -51,6 +54,7 @@ export function FolderPickerDialog({ open, initialPath, onSelect, onClose }: Fol
           ? err.rawMessage
           : humanizeError(err, t),
       );
+      setPermissionHint(err instanceof ApiRequestError && err.status === 403);
       setListing(null);
     } finally {
       setLoading(false);
@@ -101,7 +105,7 @@ export function FolderPickerDialog({ open, initialPath, onSelect, onClose }: Fol
 
   if (!open) return null;
 
-  return (
+  const dialog = (
     <div
       className="folder-picker-backdrop"
       role="presentation"
@@ -131,7 +135,7 @@ export function FolderPickerDialog({ open, initialPath, onSelect, onClose }: Fol
               disabled={loading}
               onClick={() => void load(shortcut.path, showHidden)}
             >
-              {t(SHORTCUT_LABEL_KEYS[shortcut.key] ?? shortcut.key)}
+              {SHORTCUT_LABEL_KEYS[shortcut.key] ? t(SHORTCUT_LABEL_KEYS[shortcut.key]) : (shortcut.name ?? shortcut.key)}
             </button>
           ))}
         </div>
@@ -156,6 +160,16 @@ export function FolderPickerDialog({ open, initialPath, onSelect, onClose }: Fol
         ) : error ? (
           <>
             <div className="error mt-10">{error}</div>
+            {permissionHint && (
+              <div className="note mt-10">
+                <p>{t('folderPicker.permissionHelp')}</p>
+                <ul>
+                  <li>{t('folderPicker.permissionFullDisk')}</li>
+                  <li>{t('folderPicker.permissionFilesFolders')}</li>
+                </ul>
+                <p>{t('folderPicker.permissionApp')}</p>
+              </div>
+            )}
             <div className="btn-row mt-10">
               <button type="button" className="btn" onClick={() => void load(undefined, showHidden)}>
                 {t('folderPicker.backHome')}
@@ -192,4 +206,5 @@ export function FolderPickerDialog({ open, initialPath, onSelect, onClose }: Fol
       </section>
     </div>
   );
+  return typeof document === 'undefined' ? dialog : createPortal(dialog, document.body);
 }

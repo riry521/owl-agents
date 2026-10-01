@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { Socket } from "node:net";
 
-import { ApiError, errorBody, humanUnexpectedMessage, newReferenceId } from "./errors.js";
+import { ApiError, type ApiErrorCode, errorBody, humanUnexpectedMessage, newReferenceId } from "./errors.js";
 import { AdvisorFolderError } from "./advisor-folders.js";
 import { listHostDirectories } from "./fs-directories.js";
 import { createUlid, isUlid } from "./ids.js";
@@ -209,6 +209,15 @@ interface KnowledgeRetagApiPort {
   retagKnowledgeNotes(input: { dry_run: boolean; force?: boolean }): Promise<unknown>;
 }
 
+interface KnowledgeStorageApiPort {
+  activeKnowledgeDir(): string;
+  getKnowledgeStorage(): { custom: boolean; state: string };
+  hasKnowledgeStorageEverBeenAvailable(): boolean;
+  checkKnowledgeStorage(): Promise<{ custom: boolean; state: string }>;
+  moveKnowledgeStorage(input: { path: string; mode?: "move" | "relink" }): Promise<unknown>;
+  withKnowledgeAccess<T>(kind: "read" | "write", fn: () => Promise<T>): Promise<T>;
+}
+
 interface CurationApiPort {
   runCuration(input: JsonObject): Promise<{ id: string; status: string; summary: string; error: string | null; report: unknown }>;
   listCurationRuns(query: JsonObject): { items: readonly unknown[]; next_cursor: string | null };
@@ -389,6 +398,19 @@ function logException(referenceId: string, context: string, error: unknown): voi
 
 async function sendApiError(response: ServerResponse, requestIdValue: string, error: unknown, context: string, core: CorePort): Promise<void> {
   const language = await requestOwnerLanguage(core);
+  const storageCode = knowledgeStorageErrorCode(error);
+  if (storageCode === "knowledge_storage_unavailable" || storageCode === "knowledge_storage_moving") {
+    const storageError = new ApiError(
+      storageCode === "knowledge_storage_unavailable" ? 503 : 409,
+      "dependency_unavailable",
+      error instanceof Error ? error.message : "The knowledge storage is unavailable.",
+      isObject(error) && isObject(error.details) ? error.details : {},
+    );
+    const body = errorBody(requestIdValue, storageError, language);
+    body.error.code = storageCode;
+    sendJson(response, storageError.status, body);
+    return;
+  }
   if (error instanceof ApiError) {
     sendJson(response, error.status, errorBody(requestIdValue, error, language));
     return;
@@ -1372,6 +1394,53 @@ function requireKnowledgeRetagApi(core: CorePort): KnowledgeRetagApiPort {
   const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
   if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support knowledge retagging.");
   return candidate;
+}
+
+function requireKnowledgeStorageApi(core: CorePort): KnowledgeStorageApiPort {
+  const has = (value: unknown): value is KnowledgeStorageApiPort => isObject(value)
+    && typeof value.activeKnowledgeDir === "function"
+    && typeof value.getKnowledgeStorage === "function"
+    && typeof value.hasKnowledgeStorageEverBeenAvailable === "function"
+    && typeof value.checkKnowledgeStorage === "function"
+    && typeof value.moveKnowledgeStorage === "function"
+    && typeof value.withKnowledgeAccess === "function";
+  const wrapped = core as CorePort & { core?: unknown };
+  const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
+  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support knowledge storage access.");
+  return candidate;
+}
+
+function knowledgeStorageErrorCode(error: unknown): string | null {
+  return isObject(error) && typeof error.code === "string" ? error.code : null;
+}
+
+function isKnowledgeStorageApiError(error: unknown): boolean {
+  const code = knowledgeStorageErrorCode(error);
+  return code === "knowledge_storage_unavailable" || code === "knowledge_storage_moving";
+}
+
+async function withKnowledgeStorageAccess<T>(core: CorePort, kind: "read" | "write", operation: () => Promise<T>): Promise<T> {
+  const api = requireKnowledgeStorageApi(core);
+  if (kind === "write" && api.getKnowledgeStorage().state === "moving") {
+    throw Object.assign(new Error("The knowledge storage is being moved."), { code: "knowledge_storage_moving", details: {} });
+  }
+  try {
+    return await api.withKnowledgeAccess(kind, operation);
+  } catch (error) {
+    if (knowledgeStorageErrorCode(error) === "knowledge_storage_unavailable") throw error;
+    const code = knowledgeStorageErrorCode(error);
+    if (code && ["ENOENT", "EIO", "ENXIO", "ENODEV", "ESTALE", "ETIMEDOUT", "EACCES", "EPERM", "EROFS"].includes(code)) {
+      const status = await api.checkKnowledgeStorage().catch(() => null);
+      if (status?.state === "unavailable") {
+        try {
+          api.activeKnowledgeDir();
+        } catch (unavailable) {
+          throw unavailable;
+        }
+      }
+    }
+    throw error;
+  }
 }
 
 function validateKnowledgeRetagPayload(payload: JsonObject): { dry_run: boolean; force?: boolean } {
@@ -2693,6 +2762,39 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
+  if (pathname === `${API_PREFIX}/settings/knowledge-storage` && method === "GET") {
+    requireOwner(request);
+    const api = requireKnowledgeStorageApi(context.core);
+    const status = url.searchParams.get("refresh") === "1" ? await api.checkKnowledgeStorage() : api.getKnowledgeStorage();
+    sendJson(response, 200, { request_id: requestIdValue, data: status as unknown as JsonObject, version: 0 });
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/settings/knowledge-storage` && method === "PUT") {
+    requireOwner(request);
+    const cmd = commandEnvelope(await readRequestBody(request));
+    exactKeys(cmd.payload, ["path"], "payload", ["mode"]);
+    const { path, mode } = cmd.payload;
+    if (typeof path !== "string" || (mode !== undefined && mode !== "move" && mode !== "relink")) {
+      throw new ApiError(400, "validation_error", "pathは文字列、modeはmoveまたはrelinkで指定してください。");
+    }
+    const api = requireKnowledgeStorageApi(context.core);
+    const result = await runCommand(context, pathname, cmd, 200, async () => {
+      try {
+        return { data: await api.moveKnowledgeStorage({ path, mode }) as unknown as JsonObject, version: 0 };
+      } catch (error) {
+        const code = knowledgeStorageErrorCode(error);
+        const status = code === "validation_error" || code === "knowledge_target_invalid" ? 422
+          : code === "knowledge_storage_busy" ? 409 : code === "knowledge_move_failed" ? 500 : 0;
+        if (status === 0 || !(error instanceof Error)) throw error;
+        const details = (error as { details?: unknown }).details;
+        throw new ApiError(status, code as ApiErrorCode, error.message, isObject(details) ? details : {});
+      }
+    });
+    sendJson(response, 200, result);
+    return;
+  }
+
   if (pathname === `${API_PREFIX}/settings/advisor-persona` && method === "GET") {
     requireOwner(request);
     const advisor_persona = await context.core.getAdvisorPersona();
@@ -3419,9 +3521,9 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     const folder = nullableQuery(url.searchParams.get("folder"));
     const tagsParam = nullableQuery(url.searchParams.get("tags"));
     const tags = tagsParam ? tagsParam.split(",").map((t) => t.trim()) : [];
-    const results = query
-      ? await context.knowledge.search(query, tags)
-      : await context.knowledge.list(folder ?? undefined);
+    const results = await withKnowledgeStorageAccess(context.core, "read", () => query
+      ? context.knowledge.search(query, tags)
+      : context.knowledge.list(folder ?? undefined));
     sendJson(response, 200, { request_id: requestIdValue, data: results });
     return;
   }
@@ -3431,9 +3533,10 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     requireOwner(request);
     const entryPath = decodeURIComponent(kbEntryMatch[1]);
     try {
-      const entry = await context.knowledge.get(entryPath);
+      const entry = await withKnowledgeStorageAccess(context.core, "read", () => context.knowledge.get(entryPath));
       sendJson(response, 200, { request_id: requestIdValue, data: entry });
-    } catch {
+    } catch (error) {
+      if (isKnowledgeStorageApiError(error)) throw error;
       throw new ApiError(404, "not_found", "指定されたナレッジエントリが見つかりません。");
     }
     return;
@@ -3451,9 +3554,10 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     const entryBody = stringField(body.body as string, "body", 0, 500000);
     const tags = Array.isArray(body.tags) ? (body.tags as string[]).filter((t) => typeof t === "string") : [];
     try {
-      const entry = await context.knowledge.create({ folder, filename, tags, body: entryBody });
+      const entry = await withKnowledgeStorageAccess(context.core, "write", () => context.knowledge.create({ folder, filename, tags, body: entryBody }));
       sendJson(response, 201, { request_id: requestIdValue, data: entry });
     } catch (e) {
+      if (isKnowledgeStorageApiError(e)) throw e;
       if (e instanceof Error && e.message.startsWith("already_exists")) {
         throw new ApiError(409, "version_conflict", "同名のナレッジエントリが既に存在します。");
       }
@@ -3481,9 +3585,10 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       update.body = typeof body.body === "string" ? body.body : "";
     }
     try {
-      const entry = await context.knowledge.update(entryPath, update);
+      const entry = await withKnowledgeStorageAccess(context.core, "write", () => context.knowledge.update(entryPath, update));
       sendJson(response, 200, { request_id: requestIdValue, data: entry });
-    } catch {
+    } catch (error) {
+      if (isKnowledgeStorageApiError(error)) throw error;
       throw new ApiError(404, "not_found", "指定されたナレッジエントリが見つかりません。");
     }
     return;
@@ -3496,9 +3601,10 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       throw new ApiError(400, "validation_error", "policiesは移行済みの読み取り専用のため、書き込みできません。");
     }
     try {
-      await context.knowledge.remove(entryPath);
+      await withKnowledgeStorageAccess(context.core, "write", () => context.knowledge.remove(entryPath));
       sendJson(response, 200, { request_id: requestIdValue, deleted: true });
-    } catch {
+    } catch (error) {
+      if (isKnowledgeStorageApiError(error)) throw error;
       throw new ApiError(404, "not_found", "指定されたナレッジエントリが見つかりません。");
     }
     return;
@@ -3805,7 +3911,10 @@ export function createOwlHttpServer(options: OwlHttpOptions): OwlHttpServer {
     workLocks: new Map(),
     websocketSockets: new Set(),
     shuttingDown: false,
-    knowledge: new KnowledgeBase(options.owlRoot),
+    knowledge: new KnowledgeBase(options.owlRoot, {
+      rootDir: () => requireKnowledgeStorageApi(options.core).activeKnowledgeDir(),
+      requireRoot: () => requireKnowledgeStorageApi(options.core).hasKnowledgeStorageEverBeenAvailable(),
+    }),
     ruleStore: options.ruleStore ?? new RuleStore(options.owlRoot),
     guardTokens: options.guardTokens ?? null,
   };

@@ -406,8 +406,11 @@ export interface DirectoryEntry {
 }
 
 export interface DirectoryShortcut {
-  key: 'home' | 'desktop' | 'documents' | 'downloads' | 'owl_data';
+  key: string;
   path: string;
+  /** Display name for volume and cloud shortcuts. */
+  name?: string;
+  kind?: 'volume' | 'cloud';
 }
 
 export interface DirectoryListing {
@@ -455,6 +458,17 @@ export interface AdvisorFolders {
   screenshot_dir: string;
   defaults: { shared_dir: string; screenshot_dir: string };
   custom: { shared_dir: boolean; screenshot_dir: boolean };
+}
+
+/** GET/PUT /api/v1/settings/knowledge-storage. */
+export interface KnowledgeStorageStatus {
+  path: string;
+  default_path: string;
+  custom: boolean;
+  state: 'available' | 'unavailable' | 'moving';
+  reason: string | null;
+  checked_at: string | null;
+  move: { target: string; stage: string; files_total: number | null; files_done: number } | null;
 }
 
 export interface AdvisorFoldersInput {

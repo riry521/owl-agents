@@ -1142,6 +1142,7 @@ export class AdvisorSessionRuntime {
       compaction_count: number;
     }>(`SELECT provider_id, model, compaction_count FROM advisor_sessions WHERE id = ?`, sessionId);
 
+    // The summary is only a knowledge note: when the storage is unavailable the compaction is still recorded.
     const { path, captured } = await this.config.memorySaver.saveCompactionSummary(sessionId, {
       conversationId,
       cause: event.cause,
@@ -1151,6 +1152,9 @@ export class AdvisorSessionRuntime {
       model: sessionRow?.model ?? "unknown",
       index: (sessionRow?.compaction_count ?? 0) + 1,
       transcriptPath: event.transcript_path,
+    }).catch((error: unknown) => {
+      console.warn("[owl-core] Could not save the compaction summary", error);
+      return { path: null, captured: false };
     });
 
     const compactionId = createUlid();

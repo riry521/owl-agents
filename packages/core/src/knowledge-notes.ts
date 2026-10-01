@@ -79,14 +79,21 @@ interface StoredNote {
 }
 
 export class KnowledgeNotes {
-  private readonly notesDir: string;
   private readonly minTopicScore: number;
   private readonly minTopicScoreGap: number;
   private readonly now: () => string;
   private readonly knownTitles = new Map<string, string>();
 
-  public constructor(knowledge: KnowledgeBase, options: KnowledgeNotesOptions = {}) {
-    this.notesDir = join(knowledge.knowledgeDir, "notes");
+  private get notesDir(): string {
+    return join(this.knowledge.knowledgeDir, "notes");
+  }
+
+  /** Drop cached titles after the knowledge location changed. */
+  public resetCache(): void {
+    this.knownTitles.clear();
+  }
+
+  public constructor(private readonly knowledge: KnowledgeBase, options: KnowledgeNotesOptions = {}) {
     this.minTopicScore = validThreshold(options.minTopicScore, DEFAULT_MIN_TOPIC_SCORE);
     this.minTopicScoreGap = validThreshold(options.minTopicScoreGap, DEFAULT_MIN_TOPIC_SCORE_GAP);
     this.now = options.now ?? (() => new Date().toISOString());

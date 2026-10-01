@@ -27,6 +27,11 @@ export {
 export { WorkflowEngine } from "./workflow-engine";
 export { WorkDriver } from "./work-driver";
 export { KnowledgeBase } from "./knowledge-base";
+export { KnowledgeLocation, normalizeKnowledgeDirInput } from "./knowledge-location";
+export type {
+  KnowledgeFs, KnowledgeMoveMode, KnowledgeMoveResult, KnowledgeMoveStage, KnowledgeMoveWarning,
+  KnowledgeStoragePersistence, KnowledgeStorageState, KnowledgeStorageStatus, KnowledgeUnavailableReason,
+} from "./knowledge-location";
 export { ResearchRecorder, extractResearchKeyPoints } from "./research-recorder.js";
 export type { ResearchAttribution, ResearchAttributionRole, ResearchRecordResult, ResearchRecorderOptions, ResearchSkipReason } from "./research-recorder.js";
 export {

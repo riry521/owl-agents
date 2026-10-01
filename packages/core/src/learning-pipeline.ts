@@ -44,6 +44,8 @@ export interface LearningPipelineOptions {
   readonly notes: Pick<KnowledgeNotes, "list" | "mergeClaim">;
   readonly ruleProposals: LearningRuleProposals;
   readonly onNotesChanged?: () => Promise<void> | void;
+  /** While the knowledge storage is unavailable jobs stay pending; processing holds a write lease otherwise. */
+  readonly gate?: { isAvailable(): boolean; withWrite<T>(fn: () => Promise<T>): Promise<T> };
   readonly now?: () => string;
   readonly logger?: { warn(message: string): void; error(message: string): void };
   readonly debounce_ms?: number;
@@ -218,6 +220,7 @@ export class LearningPipeline {
   private readonly batchSize: number;
   private readonly maxAttempts: number;
   private readonly staleRunningMs: number;
+  private readonly gate?: LearningPipelineOptions["gate"];
   private readonly afterOutput?: LearningPipelineOptions["afterOutput"];
   private pendingRun: Promise<void> = Promise.resolve();
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -230,6 +233,7 @@ export class LearningPipeline {
     this.notes = options.notes;
     this.ruleProposals = options.ruleProposals;
     this.onNotesChanged = options.onNotesChanged;
+    this.gate = options.gate;
     this.now = options.now ?? utcNow;
     this.logger = options.logger ?? console;
     this.debounceMs = nonNegativeInteger(options.debounce_ms, 5_000);
@@ -261,6 +265,7 @@ export class LearningPipeline {
   }
 
   public async processPendingNow(): Promise<void> {
+    if (this.gate && !this.gate.isAvailable()) return;
     await this.recoverStaleRunning();
     const jobs = this.db.all<Pick<LearningJobRecord, "id">>(
       `SELECT id FROM learning_jobs
@@ -272,7 +277,12 @@ export class LearningPipeline {
     for (const job of jobs) await this.processJob(job.id);
   }
 
-  public async processJob(jobId: string): Promise<LearningJobResult> {
+  public processJob(jobId: string): Promise<LearningJobResult> {
+    if (!this.gate) return this.processJobUnlocked(jobId);
+    return this.gate.withWrite(() => this.processJobUnlocked(jobId));
+  }
+
+  private async processJobUnlocked(jobId: string): Promise<LearningJobResult> {
     const claimed = await this.writeLane.transact((transaction: CoreWriteLaneTransaction) => {
       transaction.run(
         `UPDATE learning_jobs SET status='running', updated_at=?

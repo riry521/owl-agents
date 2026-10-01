@@ -1282,6 +1282,11 @@ export class MemoryCore implements CorePort {
   }
 }
 
+/** Wires the persisted knowledge_dir setting into Core's knowledge location. */
+export function knowledgeStorageOptions(appSettings: AppSettingsStore): { read(): string; write(value: string): void } {
+  return { read: () => appSettings.getKnowledgeDir(), write: (value) => { appSettings.setKnowledgeDir(value); } };
+}
+
 export function createCore(options: CreateCoreOptions): CorePort {
   return new MemoryCore(options);
 }
@@ -2952,6 +2957,7 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
         },
       }
       : {}),
+    knowledgeStorage: knowledgeStorageOptions(appSettings),
     getTypesafeApiKey: () => appSettings.getTypesafeApiKey(),
     getAdvisorPersona: () => appSettings.getAdvisorPersona(),
     getAdvisorFolders: () => {

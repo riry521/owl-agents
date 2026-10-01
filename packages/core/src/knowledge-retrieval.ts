@@ -1,3 +1,4 @@
+import type { KnowledgeLocation } from "./knowledge-location.js";
 import type { KnowledgeNotes, NoteDocument, NoteClaim } from "./knowledge-notes.js";
 
 export interface KnowledgeQuery {
@@ -53,7 +54,10 @@ export function estimateTokens(text: string): number {
 }
 
 export class KnowledgeRetriever {
-  public constructor(private readonly notes: KnowledgeNotes, _options: { now?: () => string } = {}) {}
+  public constructor(
+    private readonly notes: KnowledgeNotes,
+    private readonly options: { now?: () => string; gate?: Pick<KnowledgeLocation, "isAvailable" | "withRead"> } = {},
+  ) {}
 
   public async select(query: KnowledgeQuery, limits: KnowledgeLimits): Promise<{ note: NoteDocument; score: number }[]> {
     const bounded = normalizeKnowledgeLimits(limits);
@@ -76,6 +80,17 @@ export class KnowledgeRetriever {
   }
 
   public async render(
+    query: KnowledgeQuery,
+    limits: KnowledgeLimits,
+  ): Promise<{ text: string; tokens: number; characters: number; notes: number } | null> {
+    const gate = this.options.gate;
+    if (!gate) return this.renderNotes(query, limits);
+    // Unavailable storage: no knowledge instead of touching a slow or missing drive.
+    if (!gate.isAvailable()) return null;
+    return gate.withRead(() => this.renderNotes(query, limits)).catch(() => null);
+  }
+
+  private async renderNotes(
     query: KnowledgeQuery,
     limits: KnowledgeLimits,
   ): Promise<{ text: string; tokens: number; characters: number; notes: number } | null> {

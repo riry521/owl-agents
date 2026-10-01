@@ -55,6 +55,7 @@ import type {
   AdvisorSessionInfo,
   AdvisorFolders,
   AdvisorFoldersInput,
+  KnowledgeStorageStatus,
   DirectoryListing,
   SkillActivity,
   SkillListFilter,
@@ -1185,6 +1186,19 @@ export async function getAdvisorFolders(): Promise<AdvisorFolders> {
 export async function putAdvisorFolders(input: AdvisorFoldersInput): Promise<AdvisorFolders> {
   const response = await command<AdvisorFolders>('/settings/advisor-folders', input, 0, 'PUT');
   return response.data;
+}
+
+// ---- Knowledge Storage ------------------------------------------------------
+
+export async function getKnowledgeStorage(refresh = false): Promise<KnowledgeStorageStatus> {
+  const response = await requestJson<ApiEnvelope<KnowledgeStorageStatus>>(`/settings/knowledge-storage${refresh ? '?refresh=1' : ''}`);
+  return response.data;
+}
+
+/** Moves the knowledge directory to `path` ('' = default). Resolves after the move finished. */
+export async function putKnowledgeStorage(path: string): Promise<KnowledgeStorageStatus> {
+  const response = await command<{ status: KnowledgeStorageStatus }>('/settings/knowledge-storage', { path }, 0, 'PUT');
+  return response.data.status;
 }
 
 // ---- Filesystem Browsing (folder-picker dialog) ----------------------------
