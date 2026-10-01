@@ -182,7 +182,7 @@ export function registerReviewBacklogInTransaction(tx: CoreWriteLaneTransaction,
   for (const value of findings) {
     if (value === null || typeof value !== "object" || Array.isArray(value)) continue;
     const finding = value as Record<string, unknown>;
-    if (finding.severity !== "minor" || typeof finding.problem !== "string" || finding.problem.trim().length === 0) continue;
+    if (finding.severity !== "minor" || finding.target === "report" || typeof finding.problem !== "string" || finding.problem.trim().length === 0) continue;
     const file = normalizeBacklogFile(finding.file, context.worktree_path);
     const problem = finding.problem.trim();
     const line = Number.isInteger(finding.line) && (finding.line as number) >= 0 ? finding.line as number : 0;

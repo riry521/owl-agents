@@ -32,7 +32,8 @@ export const REVIEW_OUTPUT_SCHEMA: RoleSchema = objectSchema({
   findings: {
     type: "array",
     items: objectSchema({
-      severity: { type: "string", enum: ["major", "minor"], description: "major = behavior failure, acceptance-criteria violation, rule violation, or security issue in the delivered work; otherwise minor. A problem only in the report's wording, naming, or style is minor. If findings are only minor, the verdict must be pass." },
+      severity: { type: "string", enum: ["major", "minor"], description: "major = behavior failure, acceptance-criteria violation, rule violation, or security issue in the delivered work; otherwise minor. Never report the format, omissions, or wording of the report itself as a finding. If findings are only minor, the verdict must be pass." },
+      target: { type: "string", enum: ["deliverable", "report"], description: "deliverable = a finding about the deliverable (code, design document, or workspace state); report = a finding only about how the report is written. A report finding is always minor and is not registered in the backlog" },
       pre_existing: { type: "boolean", description: "true only for a failing test or check that already fails without the Task's changes; such a finding is minor, and file is the failing test or check file" },
       file: { type: "string", description: "path of the file the finding is about, relative to the Task's workspace root (never a path inside a temporary worktree), or empty string for a general finding" },
       line: { type: "integer", minimum: 0, description: "1-based line number, or 0 when no specific line applies" },
@@ -103,7 +104,8 @@ export function buildReviewerPrompt(
     instructions: [
       `Check the ${reviewedRole} report${designer ? " and design document" : " and the workspace"} against the Task's acceptance criteria.`,
       "Check every acceptance criterion across the whole change before you answer, and report every issue you find in this one review. Do not stop at the first problem: each review round costs a full Worker attempt, so a problem you could have reported now must not first appear in a later round.",
-      "Classify findings as major for behavior failures, acceptance-criteria violations, rule violations, or security issues in the delivered work; everything else is minor. When the delivered work is correct but the report misdescribes it, or the problem is only naming or style, the finding is minor. If findings are only minor, the verdict must be pass.",
+      "Classify findings as major for behavior failures, acceptance-criteria violations, rule violations, or security issues in the delivered work; everything else is minor. A problem that is only naming or style in the code is minor. If findings are only minor, the verdict must be pass.",
+      `Do not report the format, omissions, or wording of the ${reviewedRole} report as findings, not even as minor (for example, the report does not list a command or does not include output). Judge anything the report leaves out yourself by inspecting the workspace and running commands. Exception: when the report states something that is not true (it says tests passed but they fail, or it claims a verification that was not performed), treat it as a problem in verifying the deliverable: set target to deliverable and decide severity by the usual criteria.`,
       "A failing test or check counts against the Task when the Task's change caused it or an acceptance criterion names that test or check; a criterion that only says the whole test suite must pass does not name it. Before reporting a failure, check whether it depends on the changed files; when that is unclear, run it again without the Task's changes in a temporary detached worktree of the commit the Task started from, and remove that worktree afterwards. Never stash, reset or check out anything in the Task's workspace. Any other failure that already occurs without the Task's changes is pre-existing: report one minor finding per failing test or check file that says so, listing every failing case in that file, with pre_existing true and file set to the failing test or check file (empty string when no file applies), never as major, and never ask the Worker to fix, change or revert anything for it. Other findings have pre_existing false.",
       "When an acceptance criterion covers every occurrence of something, check the Worker's enumeration instead of hunting for occurrences one at a time: re-run the search named in verification.method, confirm each hit was handled, and judge whether that search could miss occurrences. Report every missed occurrence together in one finding.",
       "previous_minor_findings lists the minor findings of the previous review round (null when there are none). For each one that still applies, report it again with the same file and the same problem wording; drop the ones that no longer apply.",
@@ -145,6 +147,15 @@ export function parseReviewResultWithFeedback(
     if (error instanceof AgentRuntimeError && error.code === "provider_failed") throw error;
     throw reviewInvalid("reviewer_stdout_not_single_json_object", error);
   }
+  if (Array.isArray(payload.findings)) {
+    payload = {
+      ...payload,
+      findings: payload.findings.map((finding) =>
+        finding !== null && typeof finding === "object" && !Array.isArray(finding) && !("target" in finding)
+          ? { ...finding, target: "deliverable" }
+          : finding),
+    };
+  }
   const prepared = prepareLegacySkillOutput(REVIEW_OUTPUT_SCHEMA, payload);
   payload = prepared.payload;
   const problem = validateRoleOutput(REVIEW_OUTPUT_SCHEMA, payload);
@@ -153,6 +164,9 @@ export function parseReviewResultWithFeedback(
   }
   if ((payload.findings as ReviewResult["findings"]).some((finding) => finding.pre_existing && finding.severity === "major")) {
     throw reviewInvalid("pre_existing_major");
+  }
+  if ((payload.findings as ReviewResult["findings"]).some((finding) => finding.target === "report" && finding.severity === "major")) {
+    throw reviewInvalid("report_major");
   }
   const { skills_used: _skillsUsed, skill_proposals: _skillProposals, ...reviewPayload } = payload;
   return {

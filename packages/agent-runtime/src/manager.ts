@@ -26,7 +26,7 @@ const MANAGER_TASK_SCHEMA: RoleSchema = objectSchema({
   id: { type: "string", minLength: 1, description: "Task id such as T1" },
   title: { type: "string", minLength: 1, description: "short Task title" },
   type: { type: "string", enum: TASK_TYPE_VALUES, description: "kind of work" },
-  acceptance: { type: "string", minLength: 1, description: "checkable success criteria the Worker must meet; a criterion over every occurrence names its concrete scope" },
+  acceptance: { type: "string", minLength: 1, description: "checkable success criteria the Worker must meet; a criterion over every occurrence names its concrete scope; written as deliverable behavior and checks to run, never as report-format requirements" },
   depends_on: {
     type: "array",
     items: { type: "string", minLength: 1 },
@@ -231,7 +231,7 @@ const MODE_INSTRUCTIONS: Readonly<Record<"plan" | "replan", readonly string[]>> 
 };
 
 const ACCEPTANCE_GUIDANCE =
-  "Write acceptance criteria a Reviewer can check in one pass. When a criterion covers every occurrence of something (\"all\", \"every\", \"each\"), name its concrete scope: the directories or files, the identifiers, event types or UI surfaces it includes, and what it excludes, such as historical data or tests. Do not require the whole test suite or every existing check to pass, because some may already fail before the Work starts; require instead that the Task adds no new failures, and name the specific tests or checks that must pass. Plan a Task to fix an already failing test only when the Work asks for it; the Reviewer sends such failures to the backlog.";
+  "Write acceptance criteria a Reviewer can check in one pass. When a criterion covers every occurrence of something (\"all\", \"every\", \"each\"), name its concrete scope: the directories or files, the identifiers, event types or UI surfaces it includes, and what it excludes, such as historical data or tests. Do not require the whole test suite or every existing check to pass, because some may already fail before the Work starts; require instead that the Task adds no new failures, and name the specific tests or checks that must pass. Plan a Task to fix an already failing test only when the Work asks for it; the Reviewer sends such failures to the backlog. Do not put report-format requirements in acceptance criteria, such as \"state X in the report\", \"paste the command output verbatim\" or \"list Y in the report\"; write criteria about the deliverable's behavior and about verification that can be run and checked (tests, commands, file state).";
 
 const DESIGN_TASK_GUIDANCE: readonly string[] = [
   "Use type design for a Task whose deliverable is a design: architecture, data model, API, UX, or implementation approach. The Designer writes an external design document and changes no repository files.",

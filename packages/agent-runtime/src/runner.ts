@@ -213,6 +213,7 @@ function stubReview(report: ReportEnvelope): ReviewResult {
       findings: [
         {
           severity: "major",
+          target: "deliverable",
           pre_existing: false,
           file: "report",
           line: 0,

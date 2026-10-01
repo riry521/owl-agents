@@ -213,6 +213,8 @@ export type WorkerInput = WorkerRequest | TaskDetail;
 
 export interface ReviewFinding {
   readonly severity: "minor" | "major";
+  /** "report" = about the report's wording only; never registered in the backlog. */
+  readonly target: "deliverable" | "report";
   readonly pre_existing: boolean;
   /** Path of the file the finding is about; "" for a general finding. */
   readonly file: string;

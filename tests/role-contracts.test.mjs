@@ -960,7 +960,7 @@ test("Review-loop guidance: one full review, lenient report wording, and enumera
 
   assert.doesNotMatch(reviewer, /When in doubt/u);
   assert.match(reviewer, /report every issue you find in this one review/u);
-  assert.match(reviewer, /report misdescribes it[^.]*minor/u);
+  assert.match(reviewer, /Do not report the format, omissions, or wording of the Worker report as findings, not even as minor/u);
   assert.match(reviewer, /re-run the search named in verification\.method/u);
 
   assert.match(worker, /first enumerate the targets with a search/u);
