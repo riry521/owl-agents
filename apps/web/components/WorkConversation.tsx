@@ -28,8 +28,6 @@ export type WorkConversationMessage = {
 
 export type WorkConversationProps = {
   work: { id: string; state: string; state_version: number };
-  /** 'page' = Work detail column, 'panel' = Board side panel. */
-  variant: 'page' | 'panel';
   /** Conversation data owned (fetched/polled) by the parent; null while loading. */
   conversation: { messages: WorkConversationMessage[] } | null;
   /** Called after a send or a conflict so the parent reloads the Work and conversation. */
@@ -39,7 +37,7 @@ export type WorkConversationProps = {
 type Translate = (key: string, values?: Record<string, unknown>) => string;
 type SendState = { kind: 'idle' } | { kind: 'sending' } | { kind: 'failed'; messageKey: string };
 
-export function WorkConversation({ work, variant, conversation, onWorkChanged }: WorkConversationProps) {
+export function WorkConversation({ work, conversation, onWorkChanged }: WorkConversationProps) {
   const { locale, t } = useLocale() as { locale: 'ja' | 'en'; t: Translate };
   const [draft, setDraft] = useState('');
   const [sendState, setSendState] = useState<SendState>({ kind: 'idle' });
@@ -127,7 +125,7 @@ export function WorkConversation({ work, variant, conversation, onWorkChanged }:
   }
 
   return (
-    <section className={`work-chat work-chat--${variant}`} aria-label={t('workChat.title')}>
+    <section className="work-chat" aria-label={t('workChat.title')}>
       <div ref={messagesRef} className="work-chat__messages advisor__messages" onScroll={handleMessagesScroll}>
         {messages.length === 0 && <p className="work-chat__empty">{t('workChat.empty')}</p>}
         {messages.map((m) => (

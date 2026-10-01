@@ -281,22 +281,6 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
 
       <div className="two-col">
         <div>
-          {/* Conversation: first in the column so it is reachable without scrolling */}
-          <section className="panel work-detail__conversation" aria-labelledby="sec-conversation">
-            <h2 className="panel__title" id="sec-conversation">
-              {t('work.conversation')} <span className="note">{t('work.conversationSub')}</span>
-            </h2>
-            {conversationError && (
-              <p className="error" role="alert">
-                {t('work.conversationLoadError')}{' '}
-                <button type="button" className="btn" onClick={() => reloadRef.current()}>{t('work.retry')}</button>
-              </p>
-            )}
-            {(shownConversation || !conversationError) && (
-              <WorkConversation work={work} variant="page" conversation={shownConversation} onWorkChanged={() => reloadRef.current()} />
-            )}
-          </section>
-
           {/* Overview */}
           <section className="panel" aria-labelledby="sec-overview">
             <h2 className="panel__title" id="sec-overview">
@@ -391,6 +375,22 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
               </div>
             )}
             {operationError && <p className="error" role="alert">{operationError}</p>}
+          </section>
+
+          {/* Conversation */}
+          <section className="panel work-detail__conversation" aria-labelledby="sec-conversation">
+            <h2 className="panel__title" id="sec-conversation">
+              {t('work.conversation')} <span className="note">{t('work.conversationSub')}</span>
+            </h2>
+            {conversationError && (
+              <p className="error" role="alert">
+                {t('work.conversationLoadError')}{' '}
+                <button type="button" className="btn" onClick={() => reloadRef.current()}>{t('work.retry')}</button>
+              </p>
+            )}
+            {(shownConversation || !conversationError) && (
+              <WorkConversation work={work} conversation={shownConversation} onWorkChanged={() => reloadRef.current()} />
+            )}
           </section>
 
           {/* Progress */}

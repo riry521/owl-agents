@@ -1388,10 +1388,6 @@ a.card:hover {
   color: #92400e;
 }
 
-.work-chat--panel .work-chat__messages {
-  padding: 8px 12px;
-}
-
 .advisor-loading {
   text-align: center;
   color: var(--faint);
@@ -2545,15 +2541,6 @@ a.card:hover {
   padding: 20px 0 48px;
 }
 
-.board-layout--preview { grid-template-columns: 2fr 1fr; }
-
-.board-layout__panel {
-  position: sticky;
-  top: var(--nav-h);
-  min-width: 0;
-  padding: 20px 0 0;
-}
-
 .board-layout__back-row {
   display: flex;
   align-items: center;
@@ -2613,30 +2600,6 @@ a.card--selected:hover {
   display: flex;
   flex-direction: column;
   gap: 16px;
-}
-
-.preview--chat {
-  display: flex;
-  flex-direction: column;
-  height: calc(100vh - var(--nav-h) - 68px);
-}
-
-.preview--chat .preview__body {
-  flex: 0 1 auto;
-  max-height: 45%;
-  overflow-y: auto;
-}
-
-.preview__chat {
-  flex: 1 1 0;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  border-top: 1px solid var(--line);
-}
-
-@media (max-width: 900px) {
-  .preview--chat { height: 100%; }
 }
 
 .preview__head {
@@ -2766,26 +2729,11 @@ a.card--selected:hover {
     padding: 0;
     min-height: auto;
   }
-  .board-layout--preview { grid-template-columns: 1fr; }
   .board-layout__left {
     display: none;
   }
   .board-layout__right {
     padding: 0 0 48px;
-  }
-  /* Narrow screens: the panel is a full-screen overlay so the close button
-     and the chat input stay in view without scrolling. */
-  .board-layout__panel {
-    position: fixed;
-    inset: 0;
-    z-index: 1000;
-    height: 100dvh;
-    padding: 0;
-    background: var(--bg, #fff);
-  }
-  .board-layout__panel .preview {
-    height: 100%;
-    border-radius: 0;
   }
 }
 
@@ -2963,17 +2911,6 @@ input, textarea, select {
     backdrop-filter: blur(12px);
     border-top: 1px solid var(--line);
     z-index: 9;
-  }
-
-  .work-chat--panel .work-chat__input-area {
-    position: static;
-    bottom: auto;
-    left: auto;
-    right: auto;
-    z-index: auto;
-    padding: 8px 12px;
-    background: transparent;
-    backdrop-filter: none;
   }
 
   .board-layout {

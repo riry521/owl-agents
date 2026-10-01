@@ -244,7 +244,6 @@ const designDocumentsSectionModule = compileWebComponent(join(repoRoot, 'apps/we
   '@/lib/i18n': componentI18n,
 });
 const advisorStub = { AdvisorView: () => React.createElement('div', { 'data-testid': 'advisor' }) };
-const panelConversationProps = { current: null };
 const previewComponentModule = compileWebComponent(join(repoRoot, 'apps/web/components/WorkPreviewPanel.tsx'), {
   'next/link': linkModule,
   '@/lib/api-client': componentApiClient,
@@ -254,7 +253,6 @@ const previewComponentModule = compileWebComponent(join(repoRoot, 'apps/web/comp
   '@/lib/i18n': componentI18n,
   '@/lib/work-detail-safety.mjs': { humanizeWorkDetailError, normalizeWorkDetailData, workDetailHref },
   '@/components/WorkSummaryBlock': workSummaryBlockModule,
-  '@/components/WorkConversation': { WorkConversation: (props) => (panelConversationProps.current = props, null) },
 });
 const homePageModule = compileWebComponent(join(repoRoot, 'apps/web/app/page.tsx'), {
   '@/components/BoardView': boardComponentModule,
@@ -801,7 +799,7 @@ test('the design documents section hides itself when there are no design documen
   }
 });
 
-test('Board shows the Advisor chat by default and previews a clicked Work in the right panel', () => {
+test('Board shows the Advisor chat by default and previews a clicked Work in the left column', () => {
   const id = 'work-preview';
   const work = { id, title: 'Slack連携を作る', state: 'running', updated_at: '2026-09-23T00:00:00.000Z' };
 
@@ -831,7 +829,7 @@ test('Board shows the Advisor chat by default and previews a clicked Work in the
     ]);
     lastLinkProps = null;
     boardHarness.render(boardComponentModule.BoardView, { onSelectCard: (value) => selected.push(value), selectedCardId: null });
-    let onClick = lastLinkProps.onClick;
+    const onClick = lastLinkProps.onClick;
     const click = (overrides = {}) => {
       let prevented = false;
       onClick({ button: 0, defaultPrevented: false, preventDefault: () => { prevented = true; }, ...overrides });
@@ -840,19 +838,11 @@ test('Board shows the Advisor chat by default and previews a clicked Work in the
     assert.equal(click(), true, 'a plain click should stay on the Board');
     assert.deepEqual(selected, [id], 'a plain click should select the Work for the left column');
 
-    // Modified clicks keep normal navigation; on the home page a narrow screen follows the link
-    // because its preview column is hidden there.
+    // Modified clicks and narrow screens (left column hidden) keep normal navigation.
     assert.equal(click({ metaKey: true }), false);
     wide = false;
-    assert.equal(click(), false, 'home: a narrow screen should follow the link to the Work page');
+    assert.equal(click(), false);
     assert.deepEqual(selected, [id]);
-
-    // The Board page has a right panel at every width, so it keeps intercepting the click.
-    lastLinkProps = null;
-    boardHarness.render(boardComponentModule.BoardView, { onSelectCard: (value) => selected.push(value), selectedCardId: null, alwaysPreview: true });
-    onClick = lastLinkProps.onClick;
-    assert.equal(click(), true, 'board: a narrow screen should still open the right panel');
-    assert.deepEqual(selected, [id, id]);
   } finally {
     globalThis.window = originalWindow;
   }
@@ -865,6 +855,9 @@ test('Board shows the Advisor chat by default and previews a clicked Work in the
   const harness = createHookHarness([
     id,
     0,
+    detail,
+    Date.parse('2026-09-23T00:00:00.000Z'),
+    null,
     { works: [work], open_decisions: [] },
     [],
     Date.parse('2026-09-23T00:00:00.000Z'),
@@ -874,15 +867,6 @@ test('Board shows the Advisor chat by default and previews a clicked Work in the
     false,
     null,
     null,
-    false, // card armed
-    'idle', // card swipe state
-    null,
-    null,
-    detail,
-    Date.parse('2026-09-23T00:00:00.000Z'),
-    null,
-    null, // panel conversation
-    null, // panel conversation error
   ]);
   const { html } = harness.render(boardPageModule.default);
   assert.ok(!html.includes('data-testid="advisor"'), 'the preview should replace the chat while a Work is selected');
@@ -1493,11 +1477,12 @@ test('English and Japanese Work detail error strings define the same keys', () =
   }
 });
 
-test('Work detail puts the shared conversation first, with no legacy Bubble/composer', () => {
+test('Work detail puts the shared conversation right after the overview, with no legacy Bubble/composer', () => {
   const source = readFileSync(join(repoRoot, 'apps/web/components/WorkDetailView.tsx'), 'utf8');
   const css = readFileSync(join(repoRoot, 'apps/web/app/globals.css'), 'utf8');
-  assert.ok(source.indexOf('sec-conversation') < source.indexOf('sec-overview'), 'conversation precedes the overview');
-  assert.match(source, /<WorkConversation work=\{work\} variant="page" conversation=\{shownConversation\}/);
+  assert.ok(source.indexOf('sec-overview') < source.indexOf('sec-conversation'), 'conversation follows the overview');
+  assert.ok(source.indexOf('sec-conversation') < source.indexOf('sec-progress'), 'conversation precedes the progress section');
+  assert.match(source, /<WorkConversation work=\{work\} conversation=\{shownConversation\}/);
   assert.doesNotMatch(source, /Bubble|className="composer"|sendWorkInstruction/);
   assert.match(css, /\.work-detail__conversation \{[^}]*height: min\(560px, calc\(100vh - 240px\)\)/);
   const bg = (sel) => css.match(new RegExp(`\\.turn--${sel} \\{[^}]*background: ([^;]+);`))?.[1];
@@ -1520,86 +1505,4 @@ test('shared conversation keeps the send restrictions the detail page relied on'
   assert.match(source, /disabled = block\.blocked \|\| sending/);
   assert.match(source, /block\.reopen && !window\.confirm/);
   assert.match(source, /reopen: block\.reopen, expectedVersion: work\.state_version/);
-});
-
-test('the panel conversation poll retries after a failed fetch and stops on cleanup', async () => {
-  const originalSetTimeout = globalThis.setTimeout;
-  const originalGet = componentApiClient.getWorkConversation;
-  const originalError = console.error;
-  const timers = [];
-  let calls = 0;
-  globalThis.setTimeout = (fn, ms) => (ms === 3000 ? timers.push(fn) : originalSetTimeout(fn, ms));
-  console.error = () => {};
-  componentApiClient.getWorkConversation = async () => {
-    calls += 1;
-    if (calls === 1) throw new Error('boom');
-    return { messages: [] };
-  };
-  const settle = () => new Promise((resolve) => originalSetTimeout(resolve, 0));
-  try {
-    const harness = createHookHarness();
-    const { effects } = harness.render(previewComponentModule.WorkPreviewPanel, { workId: 'w1', onBack: () => {}, withConversation: true });
-    const [cleanup] = harness.runEffects([effects[0]]);
-    await settle();
-    assert.equal(calls, 1);
-    assert.equal(timers.length, 1, 'a failed fetch should still schedule the next poll');
-    timers.shift()();
-    await settle();
-    assert.equal(calls, 2, 'the poll should retry after the failure');
-    assert.equal(timers.length, 1);
-    cleanup();
-    timers.shift()();
-    await settle();
-    assert.equal(timers.length, 0, 'no poll may be scheduled after cleanup');
-  } finally {
-    globalThis.setTimeout = originalSetTimeout;
-    console.error = originalError;
-    componentApiClient.getWorkConversation = originalGet;
-  }
-});
-
-test('the panel conversation poll drops a stale fetch that finishes last and keeps one timer', async () => {
-  const originalSetTimeout = globalThis.setTimeout;
-  const originalClearTimeout = globalThis.clearTimeout;
-  const originalGet = componentApiClient.getWorkConversation;
-  const live = new Map();
-  let nextId = 0;
-  globalThis.setTimeout = (fn, ms) => {
-    if (ms !== 3000) return originalSetTimeout(fn, ms);
-    live.set(++nextId, fn);
-    return nextId;
-  };
-  globalThis.clearTimeout = (id) => (live.delete(id), originalClearTimeout(id));
-  const pending = [];
-  componentApiClient.getWorkConversation = () => new Promise((resolve) => pending.push(resolve));
-  const settle = () => new Promise((resolve) => originalSetTimeout(resolve, 0));
-  const props = { workId: 'w1', onBack: () => {}, withConversation: true };
-  const shown = (harness) => {
-    harness.render(previewComponentModule.WorkPreviewPanel, props);
-    return panelConversationProps.current.conversation;
-  };
-  try {
-    const harness = createHookHarness([
-      normalizeWorkDetailData({ work: { id: 'w1', title: 'W', state: 'running', progress: {} } }, 'w1'),
-    ]);
-    const { effects } = harness.render(previewComponentModule.WorkPreviewPanel, props);
-    const [cleanup] = harness.runEffects([effects[0]]);
-    const { onWorkChanged } = panelConversationProps.current;
-    onWorkChanged(); // reload while fetch A is still in flight => fetch B
-    assert.equal(pending.length, 2);
-    pending[1]({ workId: 'w1', messages: ['B'] });
-    await settle();
-    assert.deepEqual(shown(harness).messages, ['B']);
-    assert.equal(live.size, 1, 'only the latest fetch schedules the next poll');
-    pending[0]({ workId: 'w1', messages: ['A'] });
-    await settle();
-    assert.deepEqual(shown(harness).messages, ['B'], 'the stale fetch must not overwrite the newer conversation');
-    assert.equal(live.size, 1, 'the stale fetch must not add a timer');
-    cleanup();
-    assert.equal(live.size, 0);
-  } finally {
-    globalThis.setTimeout = originalSetTimeout;
-    globalThis.clearTimeout = originalClearTimeout;
-    componentApiClient.getWorkConversation = originalGet;
-  }
 });

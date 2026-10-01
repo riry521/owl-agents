@@ -122,7 +122,7 @@ const conversation = {
 function freshProps(overrides = {}) {
   harness.state.length = 0;
   sendCalls.length = 0;
-  return { work: { id: 'w1', state: 'running', state_version: 7 }, variant: 'panel', conversation, onWorkChanged: () => {}, ...overrides };
+  return { work: { id: 'w1', state: 'running', state_version: 7 }, conversation, onWorkChanged: () => {}, ...overrides };
 }
 
 async function typeAndSubmit(props, text) {

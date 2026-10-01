@@ -57,7 +57,6 @@ async function mount() {
   const render = (conversation) => act(() => root.render(
     React.createElement(WorkConversation, {
       work: { id: 'w1', state: 'running', state_version: 1 },
-      variant: 'page',
       conversation,
       onWorkChanged() {},
     }),
