@@ -95,6 +95,14 @@ test("a work cleanup alert appears in the Work Decision brief", () => {
   assert.match(brief.reason, /Could not remove worktree \/repo\/\.owl-workspaces\/W\/__work__: git reported busy\./);
 });
 
+test("a conflict Decision names the automatic rounds already tried, in both languages", () => {
+  const payload = { kind: "work_merge_failed", merge_kind: "conflict", conflicting_files: ["a.ts"], auto_resolve_attempts: 2 };
+
+  assert.match(coreWorkDecisionBrief(payload, "en").reason, /Automatic conflict resolution by the Manager was already tried twice/);
+  assert.match(coreWorkDecisionBrief(payload, "ja").reason, /自動解消を2回試しました/);
+  assert.doesNotMatch(coreWorkDecisionBrief({ ...payload, auto_resolve_attempts: undefined }, "en").reason, /already tried/);
+});
+
 test("the migration rewrites Decisions opened before the template", async (t) => {
   // Apply every migration before 009, store Decisions the old way, then migrate.
   const before = await mkdtemp(join(tmpdir(), "owl-migrations-before-"));

@@ -697,6 +697,7 @@
     "systemAlert": "System alert",
     "alertWorkflowStopped": "Work auto-run stopped",
     "alertWorkMergeFailed": "Work merge failed",
+    "alertWorkMergeConflictAuto": "Resolving Work merge conflict automatically",
     "alertBranchCleanupFailed": "Work branch cleanup failed",
     "alertFinalCheckFailed": "Final check failed",
     "alertFinalCheckIncomplete": "Final check found work incomplete",

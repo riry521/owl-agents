@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -25,8 +26,14 @@ function yamlBlock(text, header) {
   return block.join("\n");
 }
 
-test("contract manifest hashes match every artifact after the contract edits", async () => {
+test("contract manifest stores no digests and loading computes them from each artifact", async () => {
+  const raw = readJson("contracts/contract-manifest-v1.json");
+  for (const entry of raw.artifacts) assert.equal("sha256" in entry, false, entry.path);
   const manifest = await validateContractArtifacts(repoRoot);
+  for (const artifact of manifest.artifacts) {
+    const text = readFileSync(join(repoRoot, artifact.path), "utf8");
+    assert.equal(artifact.sha256, createHash("sha256").update(text, "utf8").digest("hex"), artifact.path);
+  }
   assert.ok(manifest.artifacts.some((artifact) => artifact.path === "contracts/jsonschema/owl-v1/decision.json"));
   assert.ok(manifest.artifacts.some((artifact) => artifact.path === "contracts/jsonschema/owl-v1/websocket-server-frame.json"));
   for (const path of [

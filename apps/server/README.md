@@ -11,7 +11,7 @@ under the same lifecycle implementation.
 
 Build from this directory with `npx tsc -p tsconfig.json`. The compiled server
 uses the repository root from `OWL_ROOT` or from its monorepo location, reads the
-contract manifest and all listed artifact digests before listening, and serves
+contract manifest and all listed artifacts (computing their digests) before listening, and serves
 the existing `apps/web/out` export at `/owl/`.
 
 `OWL_DATA_DIR` can select the runtime data directory; the default is `<OWL_ROOT>/data`.

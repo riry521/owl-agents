@@ -697,6 +697,7 @@
     "systemAlert": "システムアラート",
     "alertWorkflowStopped": "Workの自動実行が停止",
     "alertWorkMergeFailed": "Workの統合に失敗",
+    "alertWorkMergeConflictAuto": "Workの統合コンフリクトを自動解消中",
     "alertBranchCleanupFailed": "Workブランチの後片付けに失敗",
     "alertFinalCheckFailed": "最終チェックに失敗",
     "alertFinalCheckIncomplete": "最終チェックで未完了と判定",

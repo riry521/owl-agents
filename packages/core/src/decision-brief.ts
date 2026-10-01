@@ -117,6 +117,7 @@ const TEXT = {
       noCommand: "コマンドは記録されていません。",
       noOutput: "出力はありませんでした。",
       conflictFiles: (files: string) => `コンフリクトしたファイル:\n${files}`,
+      autoResolveTried: (rounds: number) => `Managerによる自動解消を${rounds}回試しましたが、コンフリクトは解消されませんでした。`,
       verification: (id: string, command: string, output: string) => `失敗した検証コマンド${id ? ` (${id})` : ""}: ${command}\n出力末尾:\n${output}`,
       dirtyIntegration: (path: string, files: string) => `統合用worktreeに未コミットの変更があります。\nworktree: ${path || "不明"}\n変更のあるファイル:\n${files}`,
       dirtyFix: (path: string) => `次のいずれかを行ってから再試行してください。(1) Workの成果物であれば、Workブランチ（統合用worktree ${path || ""}）にコミットする。(2) ツールの出力であれば、そのファイルを復元または削除する、もしくはリポジトリの.gitignoreに追加する。`,
@@ -160,6 +161,8 @@ const TEXT = {
       taskState: "失敗したタスクは判断待ちで止まっています。",
       workState: "Workは判断待ちで止まっています。",
       noDetail: "詳細は記録されていません。",
+      autoConflictReason: (files: string) => `Managerが計画を立て直せなかったため、Workの統合コンフリクトを自動で解消できませんでした。コンフリクトしたファイル: ${files}`,
+      noFiles: "記録なし",
       ownerAnswer: (answer: string) => `あなたの回答: ${answer}`,
       taskRetry: { label: "もう一度実行する", description: "失敗したタスクを同じ内容でもう一度実行します。" },
       workRetry: {
@@ -203,6 +206,7 @@ const TEXT = {
       noCommand: "No command was recorded.",
       noOutput: "There was no command output.",
       conflictFiles: (files: string) => `Conflicting files:\n${files}`,
+      autoResolveTried: (rounds: number) => `Automatic conflict resolution by the Manager was already tried ${rounds === 2 ? "twice" : `${rounds} times`}, and the conflict remains.`,
       verification: (id: string, command: string, output: string) => `Failed verification command${id ? ` (${id})` : ""}: ${command}\nOutput tail:\n${output}`,
       dirtyIntegration: (path: string, files: string) => `The integration worktree has uncommitted changes.\nWorktree: ${path || "unknown"}\nFiles with changes:\n${files}`,
       dirtyFix: (path: string) => `Do one of the following, then retry. (1) If the files belong to the Work, commit them on the Work branch (integration worktree ${path || ""}). (2) If they are tool output, restore or delete them, or add them to the repository's .gitignore.`,
@@ -246,6 +250,8 @@ const TEXT = {
       taskState: "The failed Tasks are stopped, waiting for your decision.",
       workState: "The Work is stopped, waiting for your decision.",
       noDetail: "No details were recorded.",
+      autoConflictReason: (files: string) => `Automatic resolution of the Work merge conflict failed because the Manager could not replan. Conflicting files: ${files}`,
+      noFiles: "not recorded",
       ownerAnswer: (answer: string) => `Owner's answer: ${answer}`,
       taskRetry: { label: "Run again", description: "Runs the failed Tasks again with the same content." },
       workRetry: {
@@ -329,8 +335,11 @@ export function coreWorkDecisionBrief(payload: JsonObject, language: OwnerLangua
           ? t.baseMoved(expected, actual)
           : text(payload.merge_message) ?? text(payload.message) ?? t.noCause;
     const conflict = mergeKind === "conflict";
+    const autoRounds = conflict && typeof payload.auto_resolve_attempts === "number" && payload.auto_resolve_attempts > 0
+      ? payload.auto_resolve_attempts
+      : 0;
     return {
-      reason: [t.reason, text(payload.message), detail].filter(Boolean).join("\n"),
+      reason: [t.reason, text(payload.message), detail, autoRounds > 0 ? t.autoResolveTried(autoRounds) : ""].filter(Boolean).join("\n"),
       question: conflict ? t.conflictQuestion : t.question,
       current_state: t.currentState,
       tried: dirty ? t.dirtyFix(integrationWorktree) : text(payload.remediation) ?? t.noCause,
@@ -376,6 +385,7 @@ export function managerReplanFailureBrief(
   language: OwnerLanguage,
   ownerAnswer?: string,
   finalMissing?: unknown,
+  autoConflictFiles?: readonly string[],
 ): DecisionBrief {
   const t = TEXT[language].replanFailed;
   const onTasks = scope === "task";
@@ -384,7 +394,9 @@ export function managerReplanFailureBrief(
   // missing stays visible to the Owner.
   const missing = finalMissing === undefined ? null : formatMissingList(finalMissing, language);
   return {
-    reason: t.reason(reason),
+    reason: autoConflictFiles === undefined
+      ? t.reason(reason)
+      : t.autoConflictReason(autoConflictFiles.length > 0 ? autoConflictFiles.join(", ") : t.noFiles),
     question: onTasks ? t.taskQuestion : t.workQuestion,
     current_state: onTasks ? t.taskState : t.workState,
     // The Owner's answer that led to this replan, so the next Decision shows

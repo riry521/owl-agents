@@ -233,7 +233,7 @@ test("Core completion discards a merged Work's leftover worktree past a rejected
   assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'system.alert'", workId).n, 0);
 });
 
-test("Core leaves a conflicting Project Work waiting, preserves main, and aborts the integration merge", async (t) => {
+test("Core records the automatic conflict resolution, leaves the Work waiting once it cannot continue, preserves main, and aborts the integration merge", async (t) => {
   let mainBeforeMerge;
   const { project, db, core, projectId, mergeCalls } = await openFixture(t, {
     onWorker: async (request) => writeFile(join(request.context.worktree, "README.md"), "Work version\n"),
@@ -255,9 +255,11 @@ test("Core leaves a conflicting Project Work waiting, preserves main, and aborts
   const decision = db.get("SELECT reason FROM decisions WHERE work_id = ? AND status = 'open'", workId);
   assert.ok(decision);
   assert.match(decision.reason, /README\.md/u);
-  const alert = db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = 'system.alert' ORDER BY sequence DESC LIMIT 1", workId);
+  const alert = db.get(
+    "SELECT payload_json FROM events WHERE work_id = ? AND type = 'system.alert' AND json_extract(payload_json, '$.kind') = 'work_merge_conflict_auto_resolve' ORDER BY sequence DESC LIMIT 1",
+    workId,
+  );
   const payload = JSON.parse(alert.payload_json);
-  assert.equal(payload.kind, "work_merge_failed");
   assert.equal(payload.merge_kind, "conflict");
   assert.deepEqual(payload.conflicting_files, ["README.md"]);
 

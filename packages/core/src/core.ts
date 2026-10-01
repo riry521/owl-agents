@@ -2762,7 +2762,7 @@ export class Core {
           sourceAlert?.kind === "final_manager_incomplete")
       ) {
         await this.writeLane.transact((transaction) =>
-          mergeOwnerReplanInTransaction(transaction, resumedWork.work_id, { kind: "decision", answer: request.payload.answer }),
+          queueDecisionReplanInTransaction(transaction, resumedWork.work_id, request.payload.answer),
         );
       }
       this.workDriver.register(resumedWork.work_id);
@@ -5134,7 +5134,7 @@ export class Core {
         ).map((task) => task.id);
         // After an incomplete final check the Manager gets the verdict's
         // summary and missing items, not only the Owner's answer.
-        const latestAlert = ownerReplan.kind === "decision" && failedIds.length === 0 ? this.latestSystemAlert(workId) : null;
+        const latestAlert = (ownerReplan.kind === "decision" || ownerReplan.kind === "auto_conflict") && failedIds.length === 0 ? this.latestSystemAlert(workId) : null;
         const finalVerdict = incompleteFinalVerdict(latestAlert);
         const conflict = mergeConflictReason(latestAlert);
         const reason = ownerReplan.kind === "reopen"
@@ -5189,7 +5189,13 @@ export class Core {
                 // the Work's new state decides what happens next.
                 if (merge.kind === "interrupted") return this.workflow.snapshot(workId);
                 if (merge.kind !== "merged") {
-                  await this.recordWorkMergeFailed(workId, merge);
+                  let autoAttempts = 0;
+                  if (merge.kind === "conflict") {
+                    const auto = await this.tryAutoResolveMergeConflict(workId, merge);
+                    if (auto.handled) return this.workflow.snapshot(workId);
+                    autoAttempts = auto.attempts;
+                  }
+                  await this.recordWorkMergeFailed(workId, merge, undefined, autoAttempts);
                   return this.workflow.snapshot(workId);
                 }
                 mergeRecord = {
@@ -5531,11 +5537,99 @@ export class Core {
     await this.dispatcher.replayPending();
   }
 
+  /**
+   * A Work merge that conflicted is first handed to the Manager without
+   * asking the Owner: the same Owner replan the `resolve_conflict` answer
+   * queues, so the next tick adds the conflict-resolution Task. Only
+   * MAX_AUTO_CONFLICT_RESOLUTIONS rounds run per Work, counted from the
+   * alerts recorded here. `handled` means nothing more is to be recorded
+   * (the replan was queued, or the Work is no longer in a state to act on).
+   * Otherwise the caller opens the usual Decision, carrying `attempts`.
+   */
+  private async tryAutoResolveMergeConflict(
+    workId: string,
+    merge: Extract<GitWorkMergeResult, { readonly kind: "conflict" }>,
+  ): Promise<{ readonly handled: true } | { readonly handled: false; readonly attempts: number }> {
+    // The limit counts rounds since the Work was last reopened; the total over
+    // the Work's life keeps each round's idempotency key unique.
+    const countRounds = (reader: { get<T extends object>(sql: string, ...parameters: (string | number)[]): T | undefined }): { current: number; total: number } => {
+      const row = reader.get<{ current: number; total: number }>(
+        `SELECT COUNT(*) AS total,
+                COALESCE(SUM(sequence > COALESCE((SELECT MAX(sequence) FROM events WHERE work_id = ? AND type = 'work.reopened'), 0)), 0) AS current
+           FROM events
+          WHERE work_id = ? AND type = 'system.alert' AND json_extract(payload_json, '$.kind') = ?`,
+        workId,
+        workId,
+        AUTO_CONFLICT_ALERT_KIND,
+      );
+      return { current: Number(row?.current ?? 0), total: Number(row?.total ?? 0) };
+    };
+    const before = countRounds(this.db);
+    const rounds = before.current;
+    if (rounds >= MAX_AUTO_CONFLICT_RESOLUTIONS) return { handled: false, attempts: rounds };
+    const round = rounds + 1;
+    const lifeRound = before.total + 1;
+    const english = ownerLanguage(this.db) === "en";
+    const files = [...merge.conflicting_files];
+    const listed = files.length > 0 ? files.join(", ") : english ? "not recorded" : "記録なし";
+    const payload: JsonObject = {
+      kind: AUTO_CONFLICT_ALERT_KIND,
+      merge_kind: "conflict",
+      round,
+      max_rounds: MAX_AUTO_CONFLICT_RESOLUTIONS,
+      conflicting_files: files,
+      message: english
+        ? `Merging the Work into the Project base branch conflicted. The Manager is resolving it automatically (round ${round} of ${MAX_AUTO_CONFLICT_RESOLUTIONS}). Conflicting files: ${listed}`
+        : `Workのベースブランチへの統合でコンフリクトが発生しました。Managerが自動で解消します(${round}/${MAX_AUTO_CONFLICT_RESOLUTIONS}回目)。コンフリクトしたファイル: ${listed}`,
+    };
+    if (merge.base_branch !== null) payload.base_branch = merge.base_branch;
+    const skipped = new Error("auto conflict resolution skipped");
+    try {
+      await this.writeLane.write({
+        mutateState: (transaction) => {
+          const work = transaction.get<Pick<WorkDbRow, "state">>("SELECT state FROM works WHERE id = ?", workId);
+          const openDecision = transaction.get<{ id: string }>(
+            "SELECT id FROM decisions WHERE work_id = ? AND status = 'open' LIMIT 1",
+            workId,
+          );
+          const pendingReplan = transaction.get<{ key: string }>(
+            "SELECT key FROM idempotency_keys WHERE key = ? AND json_extract(response_json, '$.status') = 'queued'",
+            ownerReplanKey(workId),
+          );
+          // The alert row is inserted before this callback, so it counts as `round`.
+          // Paused, cancelled, awaiting an Owner answer, or already being
+          // resolved by an earlier trigger for this same failure: do nothing.
+          if (work?.state !== "running" || openDecision || pendingReplan || countRounds(transaction).total !== lifeRound) throw skipped;
+          mergeOwnerReplanInTransaction(transaction, workId, { kind: "auto_conflict", answer: "Resolve the merge conflict automatically." });
+          return null;
+        },
+        event: {
+          id: createUlid(),
+          idempotencyKey: `work-merge-auto-resolve:${workId}:${lifeRound}`,
+          type: "system.alert",
+          workId,
+          payload,
+        },
+        outbox: [{ provider: "websocket" }],
+      });
+    } catch (error) {
+      if (error === skipped) return { handled: true };
+      // A concurrent trigger for the same round already recorded it.
+      if (isRecord(error) && error.code === "SQLITE_CONSTRAINT_UNIQUE") return { handled: true };
+      console.error(`[owl-core] automatic merge conflict resolution failed for Work ${workId}`, error);
+      return { handled: false, attempts: rounds };
+    }
+    this.workDriver.register(workId);
+    await this.dispatcher.replayPending();
+    return { handled: true };
+  }
+
   /** A Project merge must succeed before a complete final verdict can complete its Work. */
   private async recordWorkMergeFailed(
     workId: string,
     merge: Exclude<GitWorkMergeResult, { readonly kind: "merged" }> | null,
     thrown?: unknown,
+    autoResolveAttempts = 0,
   ): Promise<void> {
     const english = ownerLanguage(this.db) === "en";
     const mergeKind = merge?.kind ?? "error";
@@ -5558,7 +5652,10 @@ export class Core {
       alertPayload.dirty_files = [...merge.dirty_files];
       if (merge.worktree_path) alertPayload.integration_worktree = merge.worktree_path;
     }
-    if (merge?.kind === "conflict") alertPayload.conflicting_files = [...merge.conflicting_files];
+    if (merge?.kind === "conflict") {
+      alertPayload.conflicting_files = [...merge.conflicting_files];
+      if (autoResolveAttempts > 0) alertPayload.auto_resolve_attempts = autoResolveAttempts;
+    }
     if (merge?.kind === "verification_failed") {
       alertPayload.command_id = merge.command_id;
       alertPayload.command = [...merge.command];
@@ -5997,7 +6094,7 @@ export class Core {
         const value = JSON.parse(row.response_json) as unknown;
         if (isRecord(value) && typeof value.answer === "string") {
           return {
-            kind: value.kind === "reopen" || value.kind === "instruction" || value.kind === "work_update" ? value.kind : "decision",
+            kind: value.kind === "reopen" || value.kind === "instruction" || value.kind === "work_update" || value.kind === "auto_conflict" ? value.kind : "decision",
             answer: value.answer,
           };
         }
@@ -6114,7 +6211,15 @@ export class Core {
     // Defensive: the Manager only ever sees root failures (callers already pass only those).
     failedTaskIds = failedTaskIds.filter((taskId) => !this.isCascadedFailure(taskId));
     const fail = (detail: string): Promise<void> =>
-      this.openManagerReplanFailureDecision(workId, failedTaskIds, reason, detail, question, finalVerdict);
+      this.openManagerReplanFailureDecision(
+        workId,
+        failedTaskIds,
+        reason,
+        detail,
+        ownerReplan?.kind === "auto_conflict" ? undefined : question,
+        finalVerdict,
+        ownerReplan?.kind === "auto_conflict" ? mergeConflictFiles(this.latestSystemAlert(workId)) : undefined,
+      );
     let plan: ReplanPlan | null = null;
     let planSnapshot: ReplanSnapshot | null = null;
     let rejection: readonly string[] = [];
@@ -6247,6 +6352,7 @@ export class Core {
     detail: string,
     question?: string,
     finalVerdict: JsonObject | null = null,
+    autoConflictFiles?: readonly string[],
   ): Promise<void> {
     // Only root failures are blocked: a cascaded Task stays failed and
     // returns to waiting by itself once the answer resumes its dependency
@@ -6268,7 +6374,7 @@ export class Core {
           work_id: workId,
           scope,
           blocked_task_ids: eligibleTaskIds,
-          ...managerReplanFailureBrief(scope, reason, detail, ownerLanguage(this.db), question, finalVerdict?.missing),
+          ...managerReplanFailureBrief(scope, reason, detail, ownerLanguage(this.db), question, finalVerdict?.missing, autoConflictFiles),
           allow_free_text: true,
           issuer_role: "manager",
         },
@@ -8012,20 +8118,26 @@ function incompleteFinalVerdict(alert: JsonObject | null): JsonObject | null {
 }
 
 /**
- * Replan reason after the Owner asked the Manager to resolve a conflict
- * between the Work branch and the Project base; null for any other alert.
+ * Replan reason for resolving a conflict between the Work branch and the
+ * Project base, after the Owner asked for it or Core started it
+ * automatically; null for any other alert.
  */
 function mergeConflictReason(alert: JsonObject | null): string | null {
-  if (alert === null || alert.kind !== "work_merge_failed" || alert.merge_kind !== "conflict") return null;
-  const files = Array.isArray(alert.conflicting_files)
-    ? alert.conflicting_files.filter((path): path is string => typeof path === "string" && path.length > 0)
-    : [];
+  const automatic = alert?.kind === AUTO_CONFLICT_ALERT_KIND;
+  if (alert === null || (!automatic && (alert.kind !== "work_merge_failed" || alert.merge_kind !== "conflict"))) return null;
+  const files = mergeConflictFiles(alert);
   const base = typeof alert.base_branch === "string" && alert.base_branch.length > 0 ? alert.base_branch : "the Project base branch";
   return [
-    `Merging the Work into ${base} conflicted, and the Owner asked you to resolve the conflict.`,
+    `Merging the Work into ${base} conflicted, and ${automatic ? "Core is resolving the conflict automatically" : "the Owner asked you to resolve the conflict"}.`,
     `Add one Task that, in its worktree, merges the latest ${base} into the Work, resolves the conflicts, keeps the intent of both sides, and commits the result.`,
     files.length > 0 ? `Conflicting files: ${files.join(", ")}` : "The conflicting files were not recorded.",
   ].join("\n");
+}
+
+function mergeConflictFiles(alert: JsonObject | null): string[] {
+  return Array.isArray(alert?.conflicting_files)
+    ? alert.conflicting_files.filter((path): path is string => typeof path === "string" && path.length > 0)
+    : [];
 }
 
 function delay(ms: number): Promise<void> {
@@ -8039,8 +8151,13 @@ function policyDecisionIdempotencyKeyPrefix(workId: string): string {
   return `kb-policy-${workId}:`;
 }
 
+/** system.alert kind recorded each time a merge conflict is handed to the Manager without a Decision. */
+const AUTO_CONFLICT_ALERT_KIND = "work_merge_conflict_auto_resolve";
+/** Automatic conflict resolution rounds per Work before the Owner is asked. */
+const MAX_AUTO_CONFLICT_RESOLUTIONS = 2;
+
 interface OwnerReplanRequest {
-  readonly kind: "decision" | "reopen" | "instruction" | "work_update";
+  readonly kind: "decision" | "reopen" | "instruction" | "work_update" | "auto_conflict";
   readonly answer: string;
 }
 
@@ -8077,6 +8194,11 @@ function queueOwnerReplanInTransaction(
     now,
     new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
   );
+}
+
+/** Hand a Decision answer to the Manager as a replan at the next tick. */
+function queueDecisionReplanInTransaction(transaction: CoreWriteLaneTransaction, workId: string, answer: string): void {
+  mergeOwnerReplanInTransaction(transaction, workId, { kind: "decision", answer });
 }
 
 /** Queue a request, combining it with one that is still queued so neither is lost. */

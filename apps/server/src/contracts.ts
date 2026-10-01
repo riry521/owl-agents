@@ -161,9 +161,8 @@ export async function validateContractArtifacts(owlRoot: string): Promise<Contra
     const artifactPath = requireString(rawArtifact.path, "artifact.path");
     const role = requireString(rawArtifact.role, "artifact.role");
     const version = requireString(rawArtifact.version, "artifact.version");
-    const expectedSha = requireString(rawArtifact.sha256, "artifact.sha256");
-    if (version !== CONTRACT_VERSION || !/^[0-9a-f]{64}$/.test(expectedSha)) {
-      throw new ContractValidationError(cliText(`契約artifactのversionまたはsha256が不正です: ${artifactPath}`, `The contract artifact version or sha256 is invalid: ${artifactPath}`));
+    if (version !== CONTRACT_VERSION) {
+      throw new ContractValidationError(cliText(`契約artifactのversionが不正です: ${artifactPath}`, `The contract artifact version is invalid: ${artifactPath}`));
     }
     if (seen.has(artifactPath)) {
       throw new ContractValidationError(cliText(`契約artifactが重複しています: ${artifactPath}`, `Duplicate contract artifact: ${artifactPath}`));
@@ -172,9 +171,6 @@ export async function validateContractArtifacts(owlRoot: string): Promise<Contra
     const absolutePath = resolve(owlRoot, artifactPath);
     assertWithinRoot(owlRoot, absolutePath);
     const text = await readText(absolutePath);
-    if (sha256(text) !== expectedSha) {
-      throw new ContractValidationError(cliText(`契約artifactのsha256がmanifestと一致しません: ${artifactPath}`, `The contract artifact sha256 differs from the manifest: ${artifactPath}`));
-    }
     if (role === "rest_ws") {
       if (!text.includes("openapi: 3.1.0") || !text.includes("x-contract-version: 1.0.0")) {
         throw new ContractValidationError(cliText('OpenAPI artifactのversionまたはdialectが不正です。', 'The OpenAPI artifact version or dialect is invalid.'));
@@ -189,7 +185,7 @@ export async function validateContractArtifacts(owlRoot: string): Promise<Contra
       path: artifactPath,
       role,
       version,
-      sha256: expectedSha,
+      sha256: sha256(text),
       ...(typeof rawArtifact.openapi_version === "string" ? { openapi_version: rawArtifact.openapi_version } : {}),
       ...(typeof rawArtifact.schema_dialect === "string" ? { schema_dialect: rawArtifact.schema_dialect } : {}),
     });

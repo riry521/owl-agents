@@ -76,6 +76,7 @@ const EVENT_LABEL_KEYS: Record<string, string> = {
 const ALERT_LABEL_KEYS: Record<string, string> = {
   workflow_tick_failed: 'activity.alertWorkflowStopped',
   work_merge_failed: 'activity.alertWorkMergeFailed',
+  work_merge_conflict_auto_resolve: 'activity.alertWorkMergeConflictAuto',
   work_merge_branch_cleanup_failed: 'activity.alertBranchCleanupFailed',
   final_manager_failed: 'activity.alertFinalCheckFailed',
   final_manager_incomplete: 'activity.alertFinalCheckIncomplete',
