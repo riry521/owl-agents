@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { reapProcessGroup } from "@owl/shared";
 import { providerConfigInvalid, providerFailed } from "./errors";
 import { AdvisorSessionDriver } from "./advisor-session-driver.js";
 import { CodexSessionDriver } from "./codex-session-driver.js";
@@ -248,8 +249,8 @@ export function createCliProvider(options: AgentRunnerOptions): ProviderClient {
     let session: ProviderSession;
     try {
       session = requestIsClaude
-        ? await AdvisorSessionDriver.create(sessionRequest, selectedExecutable)
-        : await CodexSessionDriver.create(sessionRequest, selectedExecutable);
+        ? await AdvisorSessionDriver.create(sessionRequest, selectedExecutable, { reapGraceMs: options.reapGraceMs })
+        : await CodexSessionDriver.create(sessionRequest, selectedExecutable, { reapGraceMs: options.reapGraceMs });
     } catch (error) {
       lease?.release();
       throw error;
@@ -342,6 +343,7 @@ export function createCliProvider(options: AgentRunnerOptions): ProviderClient {
             if (idleTimer !== undefined) clearTimeout(idleTimer);
             if (killTimer !== undefined) clearTimeout(killTimer);
             if (request.signal) request.signal.removeEventListener("abort", abort);
+            void reapProcessGroup(child.pid, { graceMs: options.reapGraceMs });
             if (claudeStream) stdout = claudeStream.output();
             resolveResult({ stdout, stderr, code, signal, outputTooLarge: outputTooLarge || Buffer.byteLength(stderr) + (claudeStream ? claudeStream.retainedBytes() : Buffer.byteLength(stdout)) > MAX_CAPTURE_BYTES, timedOut, cancelled });
           };
@@ -352,13 +354,14 @@ export function createCliProvider(options: AgentRunnerOptions): ProviderClient {
             if (idleTimer !== undefined) clearTimeout(idleTimer);
             if (killTimer !== undefined) clearTimeout(killTimer);
             if (request.signal) request.signal.removeEventListener("abort", abort);
+            void reapProcessGroup(child.pid, { graceMs: options.reapGraceMs });
             rejectResult(error);
           };
           const terminate = (): void => {
             killProcessGroup(child, "SIGTERM");
             if (killTimer === undefined) {
               killTimer = setTimeout(() => {
-                if (!settled) killProcessGroup(child, "SIGKILL");
+                killProcessGroup(child, "SIGKILL");
               }, 30_000);
               killTimer.unref();
             }
@@ -422,8 +425,7 @@ export function createCliProvider(options: AgentRunnerOptions): ProviderClient {
           // explicit `-` marker above).
           child.stdin.end(request.prompt);
         } catch (cause) {
-          killProcessGroup(child, "SIGTERM");
-          setTimeout(() => killProcessGroup(child, "SIGKILL"), 5_000).unref();
+          void reapProcessGroup(child.pid, { graceMs: options.reapGraceMs });
           throw providerFailed("stdin_close_failed", cause);
         }
         const result = await resultPromise;

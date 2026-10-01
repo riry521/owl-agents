@@ -151,8 +151,10 @@ test("a custom provider's endpoint and API key reach the Advisor's provider sess
         return turn?.status === "completed" ? turn : null;
       }, "the Advisor turn to complete");
 
-      assert.equal(capturedRequests.length, 1);
-      const env = capturedRequests[0].env ?? {};
+      // The resident Advisor may already have started on the default provider before the switch.
+      const orcaRequests = capturedRequests.filter((request) => request.model === "orca-large");
+      assert.equal(orcaRequests.length, 1);
+      const env = orcaRequests[0].env ?? {};
       assert.equal(env.ANTHROPIC_BASE_URL, "https://orca.example/v1");
       assert.equal(env.ANTHROPIC_API_KEY, "orca-secret-key");
       assert.equal(env.OPENAI_BASE_URL, undefined);
@@ -219,7 +221,11 @@ test("a custom provider without a backend URL fails the Advisor start instead of
 
       await core.advisorRespond(conversation.conversation_id, messageId, { channel: "web" });
 
-      assert.equal(capturedRequests.length, 0, "a misconfigured provider must never reach the provider session");
+      assert.equal(
+        capturedRequests.filter((request) => request.model === "some-model").length,
+        0,
+        "a misconfigured provider must never reach the provider session",
+      );
 
       const errorMessage = db.get(
         "SELECT body FROM messages WHERE conversation_id = ? AND source_message_id LIKE 'advisor:error:%' ORDER BY created_at DESC LIMIT 1",

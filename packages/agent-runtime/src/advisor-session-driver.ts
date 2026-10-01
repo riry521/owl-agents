@@ -25,7 +25,7 @@ import type {
 } from "./types.js";
 import { classifyProviderFailure, formatProviderError } from "./provider-error.js";
 import { claudeRateLimitEvidence } from "./rate-limit.js";
-import { buildAgentPermissionArgs, extractWebResearchCapture, type WebResearchTool } from "@owl/shared";
+import { buildAgentPermissionArgs, extractWebResearchCapture, reapProcessGroup, type WebResearchTool } from "@owl/shared";
 
 const STDERR_RING_BUFFER_BYTES = 8 * 1024;
 const DEFAULT_STOP_GRACE_MS = 5000;
@@ -236,6 +236,8 @@ export class AdvisorSessionDriver implements ProviderSession {
   private done = false;
   private exitHandled = false;
   private childClosed = false;
+  /** The group reap started when the child exited; later stop() calls wait on it instead of signalling a pid that may have been reused. */
+  private groupReap: Promise<void> | null = null;
   private readonly stderrBuffer: string[] = [];
   private stderrBufferBytes = 0;
   private _providerSessionId = "";
@@ -246,7 +248,7 @@ export class AdvisorSessionDriver implements ProviderSession {
   private lastRateLimitEvent: unknown = null;
   private startupError: string | null = null;
 
-  private constructor(child: ChildProcess) {
+  private constructor(child: ChildProcess, private readonly reapGraceMs?: number) {
     this.child = child;
     this._pid = child.pid ?? 0;
     this.attachStdout();
@@ -278,6 +280,7 @@ export class AdvisorSessionDriver implements ProviderSession {
   public static async create(
     request: ProviderSessionRequest,
     executablePath: string,
+    options: { readonly reapGraceMs?: number } = {},
   ): Promise<AdvisorSessionDriver> {
     const freshSessionId = randomUUID();
     const argv = buildStartArgv(request, executablePath, freshSessionId);
@@ -294,7 +297,7 @@ export class AdvisorSessionDriver implements ProviderSession {
     } catch (cause) {
       throw new Error(formatProviderError("claude", cause));
     }
-    const driver = new AdvisorSessionDriver(child);
+    const driver = new AdvisorSessionDriver(child, options.reapGraceMs);
     return driver;
   }
 
@@ -350,6 +353,7 @@ export class AdvisorSessionDriver implements ProviderSession {
     // Keyed on the child having closed: a protocol failure marks the session
     // done before its SIGTERM has taken effect, and stop() must still reap it.
     if (this.childClosed) {
+      await this.groupReap;
       return;
     }
     this.stderrBuffer.push(`\n[advisor-session-driver] stop requested: ${reason}\n`);
@@ -360,7 +364,7 @@ export class AdvisorSessionDriver implements ProviderSession {
         return;
       }
       const timer = setTimeout(() => {
-        signalProcessGroup(this.child, "SIGKILL");
+        if (!this.childClosed) signalProcessGroup(this.child, "SIGKILL");
       }, graceMs);
       this.child.once("close", () => {
         clearTimeout(timer);
@@ -418,6 +422,7 @@ export class AdvisorSessionDriver implements ProviderSession {
     });
     this.child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       this.childClosed = true;
+      this.groupReap = reapProcessGroup(this.child.pid, { graceMs: this.reapGraceMs });
       this.handleExit(code, signal, null);
     });
   }
@@ -579,7 +584,7 @@ export class AdvisorSessionDriver implements ProviderSession {
           const resolver = this.eventResolvers.shift();
           if (resolver) resolver({ value: undefined as unknown as SessionEvent, done: true });
         }
-        signalProcessGroup(this.child, "SIGTERM");
+        if (!this.childClosed) signalProcessGroup(this.child, "SIGTERM");
         return [];
       }
       this.currentTurnId = null;
@@ -721,7 +726,7 @@ export class AdvisorSessionDriver implements ProviderSession {
       this.turnTextParts = [];
       this.startupError = error;
       this.done = true;
-      signalProcessGroup(this.child, "SIGTERM");
+      if (!this.childClosed) signalProcessGroup(this.child, "SIGTERM");
       return [
         { type: "session.exited", exit_code: null, signal: null, stderr_tail: error },
         { type: "turn.failed", turn_id: turnId, error },
@@ -730,7 +735,7 @@ export class AdvisorSessionDriver implements ProviderSession {
     this.startupError = error;
     this.done = true;
     this.finishEventResolvers();
-    signalProcessGroup(this.child, "SIGTERM");
+    if (!this.childClosed) signalProcessGroup(this.child, "SIGTERM");
     return [];
   }
 

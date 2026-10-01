@@ -369,6 +369,8 @@ export interface AgentRunnerOptions {
   readonly model?: string;
   readonly cwd?: string;
   readonly env?: Readonly<Record<string, string>>;
+  /** Grace between SIGTERM and SIGKILL when reaping an agent's process group. Defaults to 5 seconds. */
+  readonly reapGraceMs?: number;
   /** Optional user-defined provider ids mapped to one of the two CLI harnesses. */
   readonly providers?: Readonly<Record<string, {
     readonly adapter: AdapterId;

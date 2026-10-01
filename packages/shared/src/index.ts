@@ -532,3 +532,5 @@ export function isCanonicalEventType(value: string): value is CanonicalEventType
 }
 
 export { ClaudeStreamReader } from "./agent-stream.js";
+export { PROCESS_GROUP_REAP_GRACE_MS, isProcessGroupAlive, reapProcessGroup, type ReapProcessGroupOptions } from "./process-group.js";
+export { OWL_INSTANCE_ID_ENV, OWL_MARKER_PATTERN, resolveInstanceId } from "./instance-id.js";

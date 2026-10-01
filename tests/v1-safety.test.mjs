@@ -49,8 +49,11 @@ async function jsonFilesBelow(dir) {
   return found;
 }
 
+// Smoke servers started with the real HOME must not use the real workspaces directory.
+const SMOKE_WORKSPACES_DIR = join(tmpdir(), `owl-smoke-workspaces-${process.pid}`);
+
 function envWith(overrides) {
-  return { ...process.env, OWL_LANG: "en", ...overrides };
+  return { ...process.env, OWL_LANG: "en", OWL_WORKSPACES_DIR: SMOKE_WORKSPACES_DIR, ...overrides };
 }
 
 function request(remoteAddress, headers = {}) {

@@ -3,7 +3,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { createUlid, utcNow } from "../../db/dist/index.js";
-import { addTokenUsage, AGENT_STALE_THRESHOLD_MS, DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, designDocumentPath, tokenUsageOf, usageJson, type TokenUsage } from "@owl/shared";
+import { addTokenUsage, AGENT_STALE_THRESHOLD_MS, DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, designDocumentPath, OWL_INSTANCE_ID_ENV, reapProcessGroup, resolveInstanceId, tokenUsageOf, usageJson, type TokenUsage } from "@owl/shared";
+import { taskVerificationMarker } from "./workspace-process-sweeper.js";
 import { DEFAULT_EXECUTOR_CONFIG, defaultExecutorRuntime, runExecutorsParallel, terminateActiveExecutorsImmediately } from "./executor.js";
 import type { ExecutorConfig, ExecutorResult, ExecutorRunObserver, ExecutorRuntime, ExecutorTask } from "./executor.js";
 import { HumanReadableError, validationError } from "./errors";
@@ -132,6 +133,8 @@ export interface WorkflowEngineOptions {
    * its next periodic tick.
    */
   readonly onTaskSettled?: (workId: string) => void;
+  /** Called after a Task's pipeline settled, with the Work and Task that ran it. */
+  readonly onTaskPipelineSettled?: (workId: string, taskId: string) => void;
   /** Called when prepareWorktree created a new Task worktree, before its first agent run. */
   readonly onWorktreeCreated?: (worktreePath: string) => void;
   readonly providerPauseController?: ProviderPauseController;
@@ -244,11 +247,13 @@ export class WorkflowEngine {
   private readonly globalMaxParallel: number | null;
   private readonly onManagerReplanNeeded?: (input: ManagerReplanNeededInput) => Promise<void>;
   private readonly onTaskSettled?: (workId: string) => void;
+  private readonly onTaskPipelineSettled?: (workId: string, taskId: string) => void;
   private readonly onWorktreeCreated?: (worktreePath: string) => void;
   private readonly providerPauseController?: ProviderPauseController;
   private readonly reviewerRetriesInFlight = new Set<string>();
   /** In-process Task pipelines, keyed by the Worker's agent_run_id. */
   private readonly pipelines = new Map<string, Promise<void>>();
+  private readonly pipelineTasks = new Map<string, { readonly workId: string; readonly taskId: string }>();
   private readonly owlRoot: string;
   private readonly dataDir: string;
   private readonly hybridExecutorOverride?: ExecutorConfig;
@@ -288,6 +293,7 @@ export class WorkflowEngine {
     this.agentRunner = options.agentRunner;
     this.onManagerReplanNeeded = options.onManagerReplanNeeded;
     this.onTaskSettled = options.onTaskSettled;
+    this.onTaskPipelineSettled = options.onTaskPipelineSettled;
     this.onWorktreeCreated = options.onWorktreeCreated;
     this.providerPauseController = options.providerPauseController;
     this.owlRoot = options.owlRoot ?? process.cwd();
@@ -807,6 +813,12 @@ export class WorkflowEngine {
       .catch((error: unknown) => console.error(`[owl-core] Task ${taskId} pipeline failed outside the normal recovery path`, error))
       .finally(() => {
         this.pipelines.delete(agentRunId);
+        this.pipelineTasks.delete(agentRunId);
+        try {
+          this.onTaskPipelineSettled?.(workId, taskId);
+        } catch (error) {
+          console.error(`[owl-core] Task pipeline settle notification failed for Task ${taskId}`, error);
+        }
         try {
           this.onTaskSettled?.(workId);
         } catch (error) {
@@ -814,6 +826,12 @@ export class WorkflowEngine {
         }
       });
     this.pipelines.set(agentRunId, pipeline);
+    this.pipelineTasks.set(agentRunId, { workId, taskId });
+  }
+
+  /** Tasks whose Worker, verification, review or merge pipeline is in flight in this process. */
+  public activePipelineTasks(): readonly { readonly workId: string; readonly taskId: string }[] {
+    return [...this.pipelineTasks.values()];
   }
 
   private isWorkRunning(workId: string): boolean {
@@ -2426,13 +2444,14 @@ export class WorkflowEngine {
         results.push({ command_id: command.command_id, passed: false, error: "cwd_outside_allowed_roots" });
         continue;
       }
-      const result = await this.runVerificationCommand(command.argv, cwd, command.env_allowlist, command.timeout_seconds * 1000, command.stdout_limit, command.stderr_limit, command.expected_exit_codes);
+      const result = await this.runVerificationCommand(task.id, command.argv, cwd, command.env_allowlist, command.timeout_seconds * 1000, command.stdout_limit, command.stderr_limit, command.expected_exit_codes);
       results.push({ command_id: command.command_id, ...result });
     }
     return { passed: plan.length === 0 ? workerPassed : results.every((result) => result.passed === true), source: "project_verification_plan", commands: results };
   }
 
   private async runVerificationCommand(
+    taskId: string,
     argv: readonly string[],
     cwd: string,
     envAllowlist: readonly string[],
@@ -2448,6 +2467,8 @@ export class WorkflowEngine {
       const value = process.env[key];
       if (value !== undefined) env[key] = value;
     }
+    env[OWL_INSTANCE_ID_ENV] = resolveInstanceId(this.dataDir);
+    env.OWL_AGENT_RUN_ID = taskVerificationMarker(taskId);
     return new Promise<JsonObject>((resolveResult) => {
       let stdout = "";
       let stderr = "";
@@ -2467,7 +2488,7 @@ export class WorkflowEngine {
       };
       const timer = setTimeout(() => { timedOut = true; killGroup("SIGTERM"); setTimeout(() => killGroup("SIGKILL"), 5000).unref(); }, Math.max(1, timeoutMs));
       child.once("error", (error) => { clearTimeout(timer); this.verificationChildren.delete(child); resolveResult({ passed: false, exit_code: -1, stdout, stderr, error: error.message }); });
-      child.once("close", (code, signal) => { clearTimeout(timer); this.verificationChildren.delete(child); resolveResult({ passed: !timedOut && signal === null && expectedExitCodes.includes(code ?? -1), exit_code: code ?? -1, signal, stdout, stderr, timed_out: timedOut }); });
+      child.once("close", (code, signal) => { clearTimeout(timer); this.verificationChildren.delete(child); void reapProcessGroup(child.pid); resolveResult({ passed: !timedOut && signal === null && expectedExitCodes.includes(code ?? -1), exit_code: code ?? -1, signal, stdout, stderr, timed_out: timedOut }); });
     });
   }
 

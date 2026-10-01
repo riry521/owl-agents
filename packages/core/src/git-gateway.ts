@@ -27,6 +27,8 @@ import type {
 import { GitLanes } from "./git-lane.js";
 import { basePushArgs, classifyPushFailure, parsePushPorcelain, PUSH_HOOK_WARNING_MARKER, redactCredentials, safeRemoteName } from "./git-push.js";
 import { OWL_GIT_EXCLUDES_CONTENT } from "./owl-git-excludes.js";
+import { OWL_INSTANCE_ID_ENV, reapProcessGroup, resolveInstanceId } from "@owl/shared";
+import { workVerificationMarker } from "./workspace-process-sweeper.js";
 import { safeSegment, WorkspaceLayout } from "./workspace-layout.js";
 import { commitExcludePathspecs } from "./workspace-tooling.js";
 
@@ -195,6 +197,29 @@ export class GitWorktreeGateway implements GitGateway {
 
   /** Owl's own exclude list, passed to every isolated git command. */
   private readonly excludesFile: string;
+
+  private removalHook: ((path: string) => Promise<void>) | null = null;
+
+  private readonly verifyingWorks = new Set<string>();
+
+  /** Works whose merge verification commands are running right now. */
+  public verifyingWorkIds(): readonly string[] {
+    return [...this.verifyingWorks];
+  }
+
+  /** Registers work to run before a Task or Work worktree directory is removed. */
+  public onBeforeWorktreeRemoval(hook: ((path: string) => Promise<void>) | null): void {
+    this.removalHook = hook;
+  }
+
+  private async beforeRemoval(path: string): Promise<void> {
+    if (this.removalHook === null) return;
+    try {
+      await this.removalHook(path);
+    } catch (error) {
+      console.warn(`[owl-core] Pre-removal workspace process sweep failed for ${path}`, error);
+    }
+  }
 
   public async prepareWorktree(request: GitOperationRequest): Promise<GitOperationResult> {
     const project = this.projectFor(request.work_id);
@@ -710,7 +735,13 @@ export class GitWorktreeGateway implements GitGateway {
       const canonical = await this.validProjectPath(project.canonical_path, project.allowed_roots_json);
       const prepared = await this.inLane(canonical, () => this.prepareWorkMergeNow(request.work_id, project, canonical));
       if (prepared.kind === "result") return prepared.result;
-      const verification = await this.runWorkVerification(prepared.plan, prepared.context);
+      this.verifyingWorks.add(request.work_id);
+      let verification: GitWorkMergeResult | null;
+      try {
+        verification = await this.runWorkVerification(request.work_id, prepared.plan, prepared.context);
+      } finally {
+        this.verifyingWorks.delete(request.work_id);
+      }
       if (verification !== null) {
         await this.inLane(canonical, () => this.restoreIntegrationWorktreeNow(prepared.context.worktree_path, prepared.context.work_branch));
         return verification;
@@ -1155,7 +1186,7 @@ export class GitWorktreeGateway implements GitGateway {
   }
 
   /** Run the verification plan in the integration worktree; null when every command passed. */
-  private async runWorkVerification(plan: readonly VerificationCommand[], context: WorkMergeContext): Promise<GitWorkMergeResult | null> {
+  private async runWorkVerification(workId: string, plan: readonly VerificationCommand[], context: WorkMergeContext): Promise<GitWorkMergeResult | null> {
     const integrationPath = context.worktree_path;
     for (const command of plan) {
       const cwd = resolve(integrationPath, command.cwd);
@@ -1175,7 +1206,7 @@ export class GitWorktreeGateway implements GitGateway {
           timed_out: false,
         };
       }
-      const result = await this.runProjectVerificationCommand(command, cwd);
+      const result = await this.runProjectVerificationCommand(workId, command, cwd);
       if (!result.passed) {
         const stdoutTail = result.stdout.slice(-4_000);
         const stderrTail = result.stderr.slice(-4_000);
@@ -1308,13 +1339,15 @@ export class GitWorktreeGateway implements GitGateway {
     };
   }
 
-  private async runProjectVerificationCommand(command: VerificationCommand, cwd: string): Promise<VerificationCommandResult> {
+  private async runProjectVerificationCommand(workId: string, command: VerificationCommand, cwd: string): Promise<VerificationCommandResult> {
     if (command.argv.length === 0) return { passed: false, exit_code: -1, stdout: "", stderr: "", timed_out: false, error: "argv_empty" };
     const env: Record<string, string> = {};
     for (const key of new Set(["PATH", ...command.env_allowlist])) {
       const value = process.env[key];
       if (value !== undefined) env[key] = value;
     }
+    env[OWL_INSTANCE_ID_ENV] = resolveInstanceId(this.dataDir);
+    env.OWL_AGENT_RUN_ID = workVerificationMarker(workId);
     return new Promise((resolveResult) => {
       let stdout = "";
       let stderr = "";
@@ -1356,6 +1389,7 @@ export class GitWorktreeGateway implements GitGateway {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        void reapProcessGroup(child.pid);
         const exitCode = code ?? -1;
         resolveResult({ passed: !timedOut && signal === null && command.expected_exit_codes.includes(exitCode), exit_code: exitCode, stdout, stderr, timed_out: timedOut });
       });
@@ -1442,6 +1476,7 @@ export class GitWorktreeGateway implements GitGateway {
     const canonical = await this.validProjectPath(project.canonical_path, project.allowed_roots_json);
     const existing = await lstat(path).catch(() => null);
     if (!existing) return { ok: true, exit_code: 0, recorded: false, worktree_path: path, message: "Worktree was already absent." };
+    await this.beforeRemoval(path);
     return this.git(canonical, ["worktree", "remove", "--force", path]);
   }
 
@@ -1509,6 +1544,7 @@ export class GitWorktreeGateway implements GitGateway {
       if (ignored.length > 0) {
         return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: `Ignored contents remain: ${ignored.slice(0, 10).join(", ")}.` };
       }
+      await this.beforeRemoval(path);
       return this.git(canonical, ["worktree", "remove", "--force", path]);
     }
     // A leftover no longer has a Git index. Scan it and verify a backup before
@@ -1534,6 +1570,7 @@ export class GitWorktreeGateway implements GitGateway {
     }
     const pruned = await this.git(canonical, ["worktree", "prune"]);
     if (!pruned.ok) return pruned;
+    await this.beforeRemoval(path);
     await rm(path, { recursive: true, force: true });
     return { ok: true, exit_code: 0, recorded: false, worktree_path: path, message: "Removed an unregistered worktree directory." };
   }
@@ -1571,6 +1608,7 @@ export class GitWorktreeGateway implements GitGateway {
   }
 
   private async removeMergedWorktreeNow(canonical: string, path: string): Promise<GitOperationResult> {
+    await this.beforeRemoval(path);
     const removal = await this.git(canonical, ["worktree", "remove", "--force", path]);
     try {
       const existing = await lstat(path).catch((error: NodeJS.ErrnoException) => {
@@ -1646,6 +1684,7 @@ export class GitWorktreeGateway implements GitGateway {
     if (ignored.length > 0) {
       return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: `Ignored contents remain: ${ignored.slice(0, 10).join(", ")}.` };
     }
+    await this.beforeRemoval(path);
     return this.git(canonical, ["worktree", "remove", "--force", path]);
   }
 

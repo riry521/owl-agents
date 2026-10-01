@@ -148,6 +148,7 @@ test("server launches log-notify, delivers decision.opened, and stops it on SIGT
       OWL_PLUGINS_FILE: pluginsFile,
       OWL_PORT: String(port),
       OWL_PROVIDER: "stub",
+      OWL_WORKSPACES_DIR: join(owlRoot, "workspaces"),
       OWL_ROOT: owlRoot,
       OWL_WEB_OUT: join(repoRoot, "apps/web/out"),
     });

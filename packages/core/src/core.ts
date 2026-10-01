@@ -71,7 +71,8 @@ import {
 } from "@owl/shared";
 import { EXECUTOR_CONFIG_SETTINGS_KEY, HYBRID_MODE_SETTINGS_KEY } from "./types";
 import { GitWorktreeGateway } from "./git-gateway.js";
-import { WorkspaceLayout } from "./workspace-layout.js";
+import { safeSegment, WorkspaceLayout } from "./workspace-layout.js";
+import { parseVerificationMarker, WorkspaceProcessSweeper, type SweepRunInfo, type WorkspaceActivity } from "./workspace-process-sweeper.js";
 import { WorkspaceTooling } from "./workspace-tooling.js";
 import { AgentWorkspacePreparer, withWorkspacePreparation, worktreeHarnesses } from "./agent-workspace-preparer.js";
 import { redactCredentials } from "./git-push.js";
@@ -133,7 +134,7 @@ import { createProviderPauseController, type ProviderPauseController, type Provi
 // Imported from the agent-runtime "types" submodule (not the package barrel) for the
 // same reason advisor-runtime.ts does: the barrel re-exports core-contract.d.ts, which
 // imports back from "../../core/dist/types.js" and trips TS5055 mid-compile.
-import type { AdvisorSuggestedAction, ExecutorConfig, ProcessSkillsInstallCommand, ProviderClient } from "@owl/shared";
+import { resolveInstanceId, type AdvisorSuggestedAction, type ExecutorConfig, type ProcessSkillsInstallCommand, type ProviderClient } from "@owl/shared";
 import type {
   AgentListQuery,
   AgentRun,
@@ -496,6 +497,8 @@ export class Core {
   private advisorResidentRetryAt = 0;
   private advisorResidentSession: { id: string; upAt: number } | null = null;
   private skillTimer: ReturnType<typeof setInterval> | null = null;
+  private workspaceSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly workspaceSweeper: WorkspaceProcessSweeper;
   private learningTimer: ReturnType<typeof setInterval> | null = null;
   private learningTask: Promise<void> = Promise.resolve();
   private skillReconcilePromise: Promise<void> = Promise.resolve();
@@ -534,6 +537,15 @@ export class Core {
     this.dataDir = options.dataDir ?? join(this.owlRoot, "data");
     this.workspaceLayout = new WorkspaceLayout(options.workspacesRoot ?? resolve(this.owlRoot, ".owl-workspaces"), resolve(this.owlRoot, ".owl-workspaces"));
     this.git = options.git ?? new GitWorktreeGateway(options.db, this.owlRoot, undefined, this.dataDir, this.workspaceLayout);
+    this.workspaceSweeper = new WorkspaceProcessSweeper({
+      listWorkspaces: () => this.git.listWorkspaces(),
+      activity: () => this.workspaceActivity(),
+      instanceId: resolveInstanceId(this.dataDir),
+      runs: (ids) => this.sweepRunInfo(ids),
+    });
+    if (this.git instanceof GitWorktreeGateway) {
+      this.git.onBeforeWorktreeRemoval(async (path) => { await this.workspaceSweeper.sweep({ path }); });
+    }
     this.knowledge = new KnowledgeBase(this.owlRoot);
     this.researchRecorder = new ResearchRecorder({
       knowledge: this.knowledge,
@@ -650,6 +662,9 @@ export class Core {
       maxParallel: options.max_parallel,
       globalMaxParallel: options.dispatcher?.global_max_parallel,
       onTaskSettled: (workId) => this.onTaskSettled(workId),
+      onTaskPipelineSettled: (workId, taskId) => {
+        void this.workspaceSweeper.sweep({ workId: safeSegment(workId), path: this.workspaceLayout.taskPath(workId, taskId) });
+      },
       owlRoot: this.owlRoot,
       dataDir: this.dataDir,
       ruleStore: this.ruleStore,
@@ -1179,6 +1194,10 @@ export class Core {
       void this.keepAdvisorResident();
     }, 60_000);
     this.advisorKeepAliveTimer.unref();
+    this.workspaceSweepTimer = setInterval(() => {
+      void this.workspaceSweeper.sweep();
+    }, WORKSPACE_SWEEP_INTERVAL_MS);
+    this.workspaceSweepTimer.unref();
     this.skillTimer = setInterval(() => {
       this.refreshProcessSkillsPack();
       this.scheduleSkillReconciliation();
@@ -1484,6 +1503,10 @@ export class Core {
     if (this.advisorKeepAliveTimer !== null) {
       clearInterval(this.advisorKeepAliveTimer);
       this.advisorKeepAliveTimer = null;
+    }
+    if (this.workspaceSweepTimer !== null) {
+      clearInterval(this.workspaceSweepTimer);
+      this.workspaceSweepTimer = null;
     }
     if (this.skillTimer !== null) {
       clearInterval(this.skillTimer);
@@ -1918,7 +1941,7 @@ export class Core {
     workId: string,
     request: CommandRequest<JsonObject>,
   ): Promise<CommandResponse<{ work_id: string; archived_at: string | null }>> {
-    return this.runConditionalWorkCommand(request, { type: "work.archived", workId }, (transaction) => {
+    const response = await this.runConditionalWorkCommand(request, { type: "work.archived", workId }, (transaction) => {
       const now = utcNow();
       const result = setWorkArchivedInTransaction(transaction, workId, request.expected_version, true, now);
       return {
@@ -1927,6 +1950,8 @@ export class Core {
         events: result.changed ? [{ type: "work.archived", payload: { work_id: workId, archived_at: result.archived_at }, createdAt: now }] : [],
       };
     });
+    void this.workspaceSweeper.sweep({ workId: safeSegment(workId) });
+    return response;
   }
 
   public async unarchiveWork(
@@ -4624,6 +4649,61 @@ export class Core {
     }
   }
 
+  /** Work, Task and liveness of the given agent runs, for the leftover-process sweep. */
+  private sweepRunInfo(ids: readonly string[]): ReadonlyMap<string, SweepRunInfo> {
+    const info = new Map<string, SweepRunInfo>();
+    for (const id of ids) {
+      const verification = parseVerificationMarker(id);
+      if (verification !== null) {
+        // Verification commands belong to a Task or Work; its activity keeps them alive while it runs.
+        const owner = "taskId" in verification
+          ? this.db.get<{ work_id: string; task_id: string }>("SELECT work_id, id AS task_id FROM tasks WHERE id = ?", verification.taskId)
+          : this.db.get<{ work_id: string; task_id: null }>("SELECT id AS work_id, NULL AS task_id FROM works WHERE id = ?", verification.workId);
+        if (owner) info.set(id, { work_id: owner.work_id, task_id: owner.task_id, active: false });
+        continue;
+      }
+      if (this.advisorRuntime?.isSessionLive(id)) {
+        info.set(id, { work_id: null, task_id: null, active: true });
+        continue;
+      }
+      if (this.db.get<{ id: string }>("SELECT id FROM advisor_sessions WHERE id = ?", id)) {
+        info.set(id, { work_id: null, task_id: null, active: false });
+      }
+    }
+    for (let from = 0; from < ids.length; from += 400) {
+      const chunk = ids.slice(from, from + 400);
+      const rows = this.db.all<{ id: string; work_id: string; task_id: string | null; status: string }>(
+        `SELECT id, work_id, task_id, status FROM agent_runs WHERE id IN (${chunk.map(() => "?").join(",")})`,
+        ...chunk,
+      );
+      for (const row of rows) {
+        info.set(row.id, { work_id: row.work_id, task_id: row.task_id, active: ["launch_pending", "spawned", "running", "cancel_requested"].includes(row.status) });
+      }
+    }
+    return info;
+  }
+
+  /** Workspace directories an agent run or an in-progress verification still uses. */
+  private workspaceActivity(): WorkspaceActivity {
+    const works = new Set<string>();
+    const tasks = new Set<string>();
+    const mark = (workId: string, taskId: string | null): void => {
+      works.add(safeSegment(workId));
+      if (taskId !== null) tasks.add(`${safeSegment(workId)}/${safeSegment(taskId)}`);
+    };
+    for (const run of this.db.all<{ work_id: string; task_id: string | null }>(
+      `SELECT work_id, task_id FROM agent_runs WHERE status IN (${ACTIVE_AGENT_RUN_STATUSES_SQL})`,
+    )) mark(run.work_id, run.task_id);
+    for (const task of this.db.all<{ work_id: string; task_id: string }>("SELECT work_id, id AS task_id FROM tasks WHERE status = 'verifying'")) {
+      mark(task.work_id, task.task_id);
+    }
+    for (const pipeline of this.workflow.activePipelineTasks()) mark(pipeline.workId, pipeline.taskId);
+    if (this.git instanceof GitWorktreeGateway) {
+      for (const workId of this.git.verifyingWorkIds()) mark(workId, null);
+    }
+    return { works, tasks };
+  }
+
   /** A Task pipeline settled: schedule its Work again right away. */
   private onTaskSettled(workId: string): void {
     if (!this.started) return;
@@ -4642,6 +4722,8 @@ export class Core {
     reason: string,
   ): Promise<WorktreeReconcileOutcome> {
     const failures: WorktreeReconcileFailure[] = [];
+    // Leftover processes in the workspaces are stopped before their worktrees go away.
+    await this.workspaceSweeper.sweep(workId === undefined ? {} : { workId: safeSegment(workId) });
     try {
       const result = await reconcileWorktrees(
         { db: this.db, writeLane: this.writeLane, git: this.git, owlRoot: this.owlRoot, dataDir: this.dataDir, layout: this.workspaceLayout },
@@ -6686,6 +6768,7 @@ function toProject(row: ProjectDbRow): Project {
 }
 
 const PROJECT_LOCKING_WORK_STATES_SQL = PROJECT_LOCKING_WORK_STATES.map(() => "?").join(", ");
+const WORKSPACE_SWEEP_INTERVAL_MS = 10 * 60_000;
 const ACTIVE_AGENT_RUN_STATUSES_SQL = "'launch_pending', 'spawned', 'running', 'cancel_requested'";
 
 function computeProjectImpact(

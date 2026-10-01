@@ -13,7 +13,7 @@ import type {
   TokenUsage,
 } from "./types.js";
 import { classifyProviderFailure, formatProviderError } from "./provider-error.js";
-import { agentUserInstructionEnv, buildAgentPermissionArgs, buildCodexCustomProviderArgs, ProviderResumeUnsupportedError } from "@owl/shared";
+import { agentUserInstructionEnv, buildAgentPermissionArgs, buildCodexCustomProviderArgs, ProviderResumeUnsupportedError, reapProcessGroup } from "@owl/shared";
 
 const STDERR_RING_BUFFER_BYTES = 8 * 1024;
 const DEFAULT_STOP_GRACE_MS = 5000;
@@ -231,6 +231,8 @@ export class CodexSessionDriver implements ProviderSession {
   private done = false;
   private exitHandled = false;
   private childClosed = false;
+  /** The group reap started when the child exited; later stop() calls wait on it instead of signalling a pid that may have been reused. */
+  private groupReap: Promise<void> | null = null;
   private sessionExitEmitted = false;
   private readonly stderrBuffer: string[] = [];
   private stderrBufferBytes = 0;
@@ -247,7 +249,7 @@ export class CodexSessionDriver implements ProviderSession {
   private readyReject: ((error: Error) => void) | null = null;
   private readonly readyPromise: Promise<string>;
 
-  private constructor(child: ChildProcess) {
+  private constructor(child: ChildProcess, private readonly reapGraceMs?: number) {
     this.child = child;
     this._pid = child.pid ?? 0;
     this.readyPromise = new Promise<string>((resolve, reject) => {
@@ -283,6 +285,7 @@ export class CodexSessionDriver implements ProviderSession {
   public static async create(
     request: ProviderSessionRequest,
     executablePath: string,
+    options: { readonly reapGraceMs?: number } = {},
   ): Promise<CodexSessionDriver> {
     let child: ChildProcess;
     try {
@@ -304,7 +307,7 @@ export class CodexSessionDriver implements ProviderSession {
       throw new Error(formatProviderError("codex", cause));
     }
 
-    const driver = new CodexSessionDriver(child);
+    const driver = new CodexSessionDriver(child, options.reapGraceMs);
     driver.requestedEffort = request.effort;
     try {
       await driver.initialize(request);
@@ -400,6 +403,7 @@ export class CodexSessionDriver implements ProviderSession {
     // protocol failure or thread/closed marks the session done while the
     // app-server process may still be alive, and stop() must still reap it.
     if (this.childClosed) {
+      await this.groupReap;
       return;
     }
     this.appendStderr(`\n[codex-session-driver] stop requested: ${reason}\n`);
@@ -410,7 +414,7 @@ export class CodexSessionDriver implements ProviderSession {
         return;
       }
       const timer = setTimeout(() => {
-        signalProcessGroup(this.child, "SIGKILL");
+        if (!this.childClosed) signalProcessGroup(this.child, "SIGKILL");
       }, graceMs);
       this.child.once("close", () => {
         clearTimeout(timer);
@@ -512,6 +516,7 @@ export class CodexSessionDriver implements ProviderSession {
     });
     this.child.on("close", (code: number | null, signal: NodeJS.Signals | null) => {
       this.childClosed = true;
+      this.groupReap = reapProcessGroup(this.child.pid, { graceMs: this.reapGraceMs });
       this.handleExit(code, signal, null);
     });
   }
@@ -944,7 +949,7 @@ export class CodexSessionDriver implements ProviderSession {
     this.sessionExitEmitted = true;
     this.done = true;
     this.finishEventResolvers();
-    signalProcessGroup(this.child, "SIGTERM");
+    if (!this.childClosed) signalProcessGroup(this.child, "SIGTERM");
   }
 
   private localTurnIdForNotification(codexTurnId: string): string | null {

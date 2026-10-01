@@ -26,6 +26,7 @@ import { GuardTokenRegistry } from "./guard-tokens.js";
 import type { IntegrationStore } from "./integration-store.js";
 import type { IntegrationProvider } from "./types.js";
 import { prepareConnectorConfig } from "./secret-config.js";
+import { resolveInstanceId } from "../../../packages/shared/dist/instance-id.js";
 
 const SERVER_VERSION = "1.0.0";
 
@@ -191,6 +192,7 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
   if (timeoutError) throw new ContractValidationError(timeoutError);
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   await chmod(dataDir, 0o700).catch(() => undefined);
+  process.env.OWL_INSTANCE_ID = resolveInstanceId(dataDir);
   try {
     await prepareConnectorConfig(owlRoot, dataDir);
   } catch (error) {

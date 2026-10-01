@@ -187,6 +187,8 @@ export class AdvisorSessionRuntime {
   private readonly pendingTurnPayloads = new Map<string, AdvisorTurnRequest>();
   private activeDriver: ProviderSession | null = null;
   private activeSessionId: string | null = null;
+  /** Sessions whose provider process is being started and is not yet the active driver. */
+  private readonly startingSessionIds = new Set<string>();
   private activeSystemPrompt: string | null = null;
   private readonly workspaceWasDirty = new Map<string, boolean>();
   private turnLoopRunning = false;
@@ -361,6 +363,12 @@ export class AdvisorSessionRuntime {
     return id;
   }
 
+  /** Whether this runtime holds a running driver for the session, or is still starting one. */
+  public isSessionLive(sessionId: string): boolean {
+    if (this.startingSessionIds.has(sessionId)) return true;
+    return this.activeSessionId === sessionId && this.activeDriver !== null && this.activeDriver.exited !== true;
+  }
+
   /**
    * Stops the driver for `sessionId` (if this runtime currently holds it)
    * and ends the logical session with `reason`.
@@ -520,10 +528,23 @@ export class AdvisorSessionRuntime {
     conversationId: string,
     settings: AdvisorSettingsSnapshot,
   ): Promise<AdvisorSession> {
-    const createProviderSession = this.requireSessionSupport();
+    this.requireSessionSupport();
     const workspacePath = await this.buildWorkingDirectory(conversationId);
     const session = await this.config.sessionManager.startSession(ownerId, conversationId);
+    this.startingSessionIds.add(session.id);
+    try {
+      return await this.launchSession(session, settings, workspacePath);
+    } finally {
+      this.startingSessionIds.delete(session.id);
+    }
+  }
 
+  private async launchSession(
+    session: AdvisorSession,
+    settings: AdvisorSettingsSnapshot,
+    workspacePath: string,
+  ): Promise<AdvisorSession> {
+    const createProviderSession = this.requireSessionSupport();
     let driver: ProviderSession;
     try {
       driver = await createProviderSession({
@@ -603,6 +624,7 @@ export class AdvisorSessionRuntime {
   private async resumeSession(session: AdvisorSession, settings: AdvisorSettingsSnapshot, workspacePath: string): Promise<AdvisorSession> {
     const createProviderSession = this.requireSessionSupport();
 
+    this.startingSessionIds.add(session.id);
     try {
       // ensureSessionUnlocked only resumes (rather than replacing) a session
       // whose stored provider_id is null or already equal to
@@ -651,6 +673,8 @@ export class AdvisorSessionRuntime {
         return this.createSession(session.owner_id, session.conversation_id, settings);
       }
       throw error;
+    } finally {
+      this.startingSessionIds.delete(session.id);
     }
   }
 

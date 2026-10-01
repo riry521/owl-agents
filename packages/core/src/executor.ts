@@ -9,6 +9,7 @@ import {
   agentIdleTimeoutMs,
   buildAgentPermissionArgs,
   cliTokenUsage,
+  reapProcessGroup,
   CodexProgressTracker,
   ClaudeStreamReader,
   DEFAULT_AGENT_WALL_TIMEOUT_MS,
@@ -423,6 +424,7 @@ async function runExecutorProcess(
       if (settled) return;
       settled = true;
       activeExecutorChildren.delete(child);
+      void reapProcessGroup(child.pid);
       guardLease?.release();
       if (timer !== undefined) clearTimeout(timer);
       if (idleTimer !== undefined) clearTimeout(idleTimer);
