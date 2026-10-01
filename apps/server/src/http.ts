@@ -18,7 +18,7 @@ import { ADVISOR_CURATION_ACTION_TYPES, advisorCurationKind, builtinProviderHarn
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
 import { RESEARCH_CAPTURE_ROLES } from "../../../packages/shared/dist/permission-args.js";
 import { extractWebResearchCapture } from "../../../packages/shared/dist/web-research.js";
-import type { CoreEvent, CorePort, CreateProjectInput, DeleteProjectInput, InboundMessageInput, IntegrationConfigPatch, IntegrationProvider, JsonObject, PostMessageInput, Project, WorkInstructionInput, BacklogStatus, RoleModelSettingInput, ExecutorSettingsConfig, ProcessSkillsSettingsInput, RuntimeConfig, UpdateProjectInput, VerificationCommand } from "./types.js";
+import type { CoreEvent, CorePort, CreateProjectInput, DeleteProjectInput, InboundMessageInput, IntegrationConfigPatch, IntegrationProvider, JsonObject, PostMessageInput, Project, WorkInstructionInput, BacklogStatus, RoleModelSettingInput, ExecutorSettingsConfig, ProcessSkillsSettingsInput, RuntimeConfig, UpdateProjectInput, VerificationCommand, WorkConversation } from "./types.js";
 import type { KnowledgeAutomationSettings } from "../../../packages/shared/dist/knowledge-automation.js";
 import { browseProjectFolders, initializeExistingProjectFolder, initializeNewProjectFolder, inspectProjectFolder } from "./project-registration.js";
 
@@ -216,6 +216,10 @@ interface KnowledgeStorageApiPort {
   checkKnowledgeStorage(): Promise<{ custom: boolean; state: string }>;
   moveKnowledgeStorage(input: { path: string; mode?: "move" | "relink" }): Promise<unknown>;
   withKnowledgeAccess<T>(kind: "read" | "write", fn: () => Promise<T>): Promise<T>;
+}
+
+interface WorkConversationApiPort {
+  getWorkConversation(workId: string, opts: { limit: number }): Promise<WorkConversation>;
 }
 
 interface CurationApiPort {
@@ -1396,6 +1400,23 @@ function requireKnowledgeRetagApi(core: CorePort): KnowledgeRetagApiPort {
   return candidate;
 }
 
+function requireWorkConversationApi(core: CorePort): WorkConversationApiPort {
+  const has = (value: unknown): value is WorkConversationApiPort => isObject(value) && typeof value.getWorkConversation === "function";
+  const wrapped = core as CorePort & { core?: unknown };
+  const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
+  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support work conversations.");
+  return candidate;
+}
+
+function parseConversationLimit(value: string | null): number {
+  if (value === null || value === "") return 100;
+  const parsed = Number(value);
+  if (!/^\d+$/.test(value) || parsed < 1 || parsed > 500) {
+    throw new ApiError(400, "validation_error", "limitが不正です。1〜500の整数を指定してください。");
+  }
+  return parsed;
+}
+
 function requireKnowledgeStorageApi(core: CorePort): KnowledgeStorageApiPort {
   const has = (value: unknown): value is KnowledgeStorageApiPort => isObject(value)
     && typeof value.activeKnowledgeDir === "function"
@@ -1737,6 +1758,16 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     const workId = pathId(workDesignsMatch[1], "work_id");
     const data = await context.core.getWorkDesigns(workId);
     sendJson(response, 200, { request_id: requestIdValue, data });
+    return;
+  }
+
+  const workConversationMatch = pathname.match(new RegExp(`^${API_PREFIX}/works/([^/]+)/conversation$`));
+  if (workConversationMatch && method === "GET") {
+    requireOwner(request);
+    const workId = pathId(workConversationMatch[1]!, "work_id");
+    const limit = parseConversationLimit(url.searchParams.get("limit"));
+    const data = await requireWorkConversationApi(context.core).getWorkConversation(workId, { limit });
+    sendJson(response, 200, { request_id: requestIdValue, data: data as unknown as JsonObject });
     return;
   }
 

@@ -328,6 +328,60 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/works/{work_id}/conversation:
+    parameters:
+      - $ref: '#/components/parameters/WorkId'
+    get:
+      operationId: getWorkConversation
+      summary: Get a Work conversation with instruction status
+      security:
+        - ownerBearer: []
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+            default: 100
+      responses:
+        '200':
+          description: Messages oldest first; the newest `limit` are returned when truncated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkConversationResponse'
+        '400':
+          description: validation_error
+          x-error-codes:
+            - validation_error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: work_not_found
+          x-error-codes:
+            - work_not_found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: dependency_unavailable
+          x-error-codes:
+            - dependency_unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/works/{work_id}/backlog:
     parameters:
       - $ref: '#/components/parameters/WorkId'
@@ -3342,6 +3396,130 @@ components:
         - slack
         - discord
         - web
+        - advisor
+        - manager
+    MessageMetadata:
+      type: object
+      required:
+        - kind
+        - in_reply_to
+        - outcome
+        - plan_revision
+      properties:
+        kind:
+          type: string
+          enum:
+            - instruction_reply
+        in_reply_to:
+          type: array
+          items:
+            $ref: '#/components/schemas/ULID'
+        outcome:
+          type: string
+          enum:
+            - tasks_changed
+            - no_change
+            - decision_opened
+        plan_revision:
+          type: integer
+          nullable: true
+      additionalProperties: false
+    InstructionStatus:
+      type: object
+      required:
+        - status
+        - outcome
+        - reply_message_id
+      properties:
+        status:
+          type: string
+          enum:
+            - queued
+            - processing
+            - answered
+        outcome:
+          type: string
+          nullable: true
+          enum:
+            - tasks_changed
+            - no_change
+            - decision_opened
+            - null
+        reply_message_id:
+          type: string
+          nullable: true
+      additionalProperties: false
+    WorkConversationMessage:
+      type: object
+      required:
+        - id
+        - conversation_id
+        - source
+        - body
+        - attachment_ids
+        - created_at
+        - received_at
+        - instruction
+        - in_reply_to
+      properties:
+        id:
+          $ref: '#/components/schemas/ULID'
+        conversation_id:
+          $ref: '#/components/schemas/ULID'
+        source:
+          $ref: '#/components/schemas/MessageSource'
+        body:
+          type: string
+        attachment_ids:
+          type: array
+          items:
+            $ref: '#/components/schemas/ULID'
+        received_at:
+          $ref: '#/components/schemas/RFC3339'
+        created_at:
+          $ref: '#/components/schemas/RFC3339'
+        metadata:
+          allOf:
+            - $ref: '#/components/schemas/MessageMetadata'
+          nullable: true
+        instruction:
+          allOf:
+            - $ref: '#/components/schemas/InstructionStatus'
+          nullable: true
+        in_reply_to:
+          type: array
+          items:
+            $ref: '#/components/schemas/ULID'
+      additionalProperties: false
+    WorkConversationResponse:
+      type: object
+      required:
+        - request_id
+        - data
+      properties:
+        request_id:
+          type: string
+        data:
+          type: object
+          required:
+            - work_id
+            - conversation_id
+            - truncated
+            - messages
+          properties:
+            work_id:
+              $ref: '#/components/schemas/ULID'
+            conversation_id:
+              type: string
+              nullable: true
+            truncated:
+              type: boolean
+            messages:
+              type: array
+              items:
+                $ref: '#/components/schemas/WorkConversationMessage'
+          additionalProperties: false
+      additionalProperties: false
     OpaqueObject:
       type: object
       additionalProperties: true
@@ -4413,6 +4591,10 @@ components:
             $ref: '#/components/schemas/ULID'
         created_at:
           $ref: '#/components/schemas/RFC3339'
+        metadata:
+          allOf:
+            - $ref: '#/components/schemas/MessageMetadata'
+          nullable: true
       additionalProperties: false
     MessageListResponse:
       allOf:

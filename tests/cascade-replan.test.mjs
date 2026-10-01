@@ -556,7 +556,7 @@ test("an already-open Decision containing a cascaded Task can be answered after 
   const backfill = await insertBackfillRows(db);
 
   const result = db.migrate(migrations);
-  assert.deepEqual(result.applied, ["011", "012", "013", "014", "015", "016", "017", "018", "019", "020", "021", "022", "023", "024", "025", "026", "027", "028", "029", "030"]);
+  assert.deepEqual(result.applied, ["011", "012", "013", "014", "015", "016", "017", "018", "019", "020", "021", "022", "023", "024", "025", "026", "027", "028", "029", "030", "031"]);
   assert.equal(taskState(db, t2).marker, t1, "the backfill marks the cascaded failed Task");
   assert.equal(taskState(db, t1).marker, null);
   assert.equal(taskState(db, t3).marker, null, "only failed Tasks are backfilled");
@@ -589,7 +589,7 @@ test("012 corrects DBs that already ran 011", async (t) => {
   assert.deepEqual(db.migrate(dir011).applied, ["011"]);
   assert.deepEqual(markers(db, taskIds), { ...expected, [ids.paused]: null, [ids.laterEvent]: null }, "011 alone misses the paused and later-event cascades");
 
-  assert.deepEqual(db.migrate(migrations).applied, ["012", "013", "014", "015", "016", "017", "018", "019", "020", "021", "022", "023", "024", "025", "026", "027", "028", "029", "030"]);
+  assert.deepEqual(db.migrate(migrations).applied, ["012", "013", "014", "015", "016", "017", "018", "019", "020", "021", "022", "023", "024", "025", "026", "027", "028", "029", "030", "031"]);
   assert.deepEqual(markers(db, taskIds), expected, "012 gives the same markers as a DB that ran 011 and 012 together");
 
   assert.deepEqual(db.migrate(migrations).applied, [], "all migrations are recorded once and their checksums match");

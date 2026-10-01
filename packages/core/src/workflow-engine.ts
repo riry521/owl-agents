@@ -678,6 +678,7 @@ export class WorkflowEngine {
     guard: ReplanApplyGuard,
     reason: string,
     consumedOwnerReplanKey?: string,
+    options: { readonly afterApply?: (transaction: CoreWriteLaneTransaction, applied: ReplanApplyResult) => void } = {},
   ): Promise<ReplanApplyResult> {
     const result = await this.writeLane.write({
       mutateState: (transaction: CoreWriteLaneTransaction) => {
@@ -692,6 +693,7 @@ export class WorkflowEngine {
             consumedOwnerReplanKey,
           );
         }
+        options.afterApply?.(transaction, state);
         return state;
       },
       event: {

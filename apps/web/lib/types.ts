@@ -430,10 +430,35 @@ export interface ProjectSetupInput {
 export interface Message {
   id: ULID;
   conversation_id: ULID;
-  source: string;
+  source: 'slack' | 'discord' | 'web' | 'advisor' | 'manager' | (string & {});
   body: string;
   attachment_ids: ULID[];
   created_at: RFC3339;
+  metadata?: {
+    kind: 'instruction_reply';
+    in_reply_to: ULID[];
+    outcome: 'tasks_changed' | 'no_change' | 'decision_opened';
+    plan_revision: number | null;
+  } | null;
+}
+
+export interface InstructionStatus {
+  status: 'queued' | 'processing' | 'answered';
+  outcome: 'tasks_changed' | 'no_change' | 'decision_opened' | null;
+  reply_message_id: ULID | null;
+}
+
+export interface WorkConversationMessage extends Message {
+  received_at: string;
+  instruction: InstructionStatus | null;
+  in_reply_to: ULID[];
+}
+
+export interface WorkConversation {
+  work_id: ULID;
+  conversation_id: ULID | null;
+  truncated: boolean;
+  messages: WorkConversationMessage[];
 }
 
 export type AdvisorSessionStatus = 'starting' | 'running' | 'ending' | 'suspended' | 'none';

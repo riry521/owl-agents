@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   answerDecision,
   cancelWork,
@@ -10,13 +10,13 @@ import {
   pauseWork,
   reopenWork,
   resumeWork,
-  sendWorkInstruction,
+  getWorkConversation,
   startWork,
   subscribeToUpdates,
   type RealtimeStatus,
 } from '@/lib/api-client';
 import { humanizeWorkDetailError, normalizeWorkDetailData } from '@/lib/work-detail-safety.mjs';
-import type { AgentRun, Message, Report, TaskState, WorkDetailView as WorkData } from '@/lib/types';
+import type { AgentRun, Report, TaskState, WorkConversation as WorkConversationData, WorkDetailView as WorkData } from '@/lib/types';
 import {
   taskStateLabels,
   safeEnumLabel,
@@ -36,6 +36,7 @@ import { orderTasksByStage } from '../lib/task-stages.mjs';
 import { activeRunByTask, buildRunTree, isRunActive } from '../lib/agent-run-tree.mjs';
 import { workDeliverables } from '../lib/work-deliverables.mjs';
 import { useLocale, type TFunction, type Locale } from '@/lib/i18n';
+import { WorkConversation } from '@/components/WorkConversation';
 import { WorkSummaryBlock } from '@/components/WorkSummaryBlock';
 
 const LIVE_RUN = new Set<AgentRun['status']>(['launch_pending', 'spawned', 'running', 'cancel_requested']);
@@ -60,14 +61,15 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
   const [deleted, setDeleted] = useState(false);
   const [operationPending, setOperationPending] = useState(false);
   const [operationError, setOperationError] = useState<string | null>(null);
-  const [instruction, setInstruction] = useState('');
-  const [instructionSending, setInstructionSending] = useState(false);
-  const [instructionError, setInstructionError] = useState<string | null>(null);
+  const [conversation, setConversation] = useState<{ workId: string; data: WorkConversationData } | null>(null);
+  const [conversationError, setConversationError] = useState(false);
   // Bumped whenever a Work detail refresh succeeds, so the design documents
   // section refetches its list alongside the rest of the Work's data.
   const [designsRefreshToken, setDesignsRefreshToken] = useState(0);
 
   const retry = () => setRetryCount((current) => current + 1);
+  // Silent reload (no loading flash) so the conversation draft survives a send.
+  const reloadRef = useRef<() => void>(() => {});
 
   // Tick the clock while agents run so subagent elapsed times stay current.
   const hasLiveRun = !!data && data.runs.some((r) => LIVE_RUN.has(r.status));
@@ -113,17 +115,25 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
     const requestTimers = new Set<ReturnType<typeof setTimeout>>();
     setData(undefined);
     setLoadError(null);
+    setConversation(null);
+    setConversationError(false);
     const load = async () => {
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
-        const next = await Promise.race([
-          getWorkDetail(id),
+        const [next, nextConversation] = await Promise.race([
+          Promise.all([getWorkDetail(id), getWorkConversation(id).catch(() => undefined)]),
           new Promise<never>((_, reject) => {
             timeout = setTimeout(() => reject(new Error('request_timeout')), WORK_DETAIL_TIMEOUT_MS);
             requestTimers.add(timeout);
           }),
         ]);
         if (!alive) return;
+        if (nextConversation) {
+          setConversation({ workId: id, data: nextConversation });
+          setConversationError(false);
+        } else {
+          setConversationError(true);
+        }
         setData(next === null ? null : normalizeWorkDetailData(next, id));
         setNow(Date.now());
         setLoadError(null);
@@ -138,6 +148,7 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
         }
       }
     };
+    reloadRef.current = () => void load();
     void load();
     const unsubscribe = subscribeToUpdates(
       [id],
@@ -190,7 +201,8 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
     );
   }
 
-  const { work, tasks, runs, reports, decisions, messages } = data;
+  const { work, tasks, runs, reports, decisions } = data;
+  const shownConversation = conversation?.workId === id ? conversation.data : null;
   const displayNumber = workDisplayNumber(work.display_number);
   const canStart = work.state === 'memo' || work.state === 'ready';
   const canPause = work.state === 'running';
@@ -210,31 +222,6 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
       source: 'web',
       source_message_id: null,
     });
-  };
-  const instructionBlockedNote = work.state === 'cancelled'
-    ? t('work.instructionCancelledNote')
-    : canStart
-      ? t('work.instructionNotStartedNote')
-      : null;
-  const sendInstruction = async () => {
-    const body = instruction.trim();
-    if (!body || instructionSending || instructionBlockedNote !== null) return;
-    const reopen = work.state === 'completed';
-    if (reopen && !(typeof window !== 'undefined' && window.confirm(t('work.instructionReopenConfirm')))) return;
-    setInstructionSending(true);
-    setInstructionError(null);
-    try {
-      await sendWorkInstruction(work.id, body, { reopen, expectedVersion: work.state_version });
-      setInstruction('');
-      retry();
-    } catch (error) {
-      const kind = typeof error === 'object' && error !== null && 'kind' in error && typeof error.kind === 'string'
-        ? error.kind
-        : '';
-      setInstructionError(kind === 'network_error' ? t('work.errorNetwork') : t('work.instructionError'));
-    } finally {
-      setInstructionSending(false);
-    }
   };
   const canReopen = work.state === 'completed';
   const canArchive = work.state === 'completed' || work.state === 'cancelled';
@@ -294,6 +281,22 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
 
       <div className="two-col">
         <div>
+          {/* Conversation: first in the column so it is reachable without scrolling */}
+          <section className="panel work-detail__conversation" aria-labelledby="sec-conversation">
+            <h2 className="panel__title" id="sec-conversation">
+              {t('work.conversation')} <span className="note">{t('work.conversationSub')}</span>
+            </h2>
+            {conversationError && (
+              <p className="error" role="alert">
+                {t('work.conversationLoadError')}{' '}
+                <button type="button" className="btn" onClick={() => reloadRef.current()}>{t('work.retry')}</button>
+              </p>
+            )}
+            {(shownConversation || !conversationError) && (
+              <WorkConversation work={work} variant="page" conversation={shownConversation} onWorkChanged={() => reloadRef.current()} />
+            )}
+          </section>
+
           {/* Overview */}
           <section className="panel" aria-labelledby="sec-overview">
             <h2 className="panel__title" id="sec-overview">
@@ -551,52 +554,6 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
               </div>
             )}
           </section>
-
-          {/* Conversation */}
-          <section className="panel" aria-labelledby="sec-conversation">
-            <h2 className="panel__title" id="sec-conversation">
-              {t('work.conversation')} <span className="note">{t('work.conversationSub')}</span>
-            </h2>
-            {messages.length === 0 ? (
-              <p className="empty">{t('work.noConversation')}</p>
-            ) : (
-              <div className="chat">
-                {messages.map((m) => (
-                  <Bubble key={m.id} message={m} now={now} locale={locale} t={t} />
-                ))}
-              </div>
-            )}
-            <div className="composer">
-              {instructionBlockedNote !== null && <p className="note">{instructionBlockedNote}</p>}
-              <textarea
-                className="textarea"
-                value={instruction}
-                onChange={(event) => setInstruction(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) {
-                    event.preventDefault();
-                    void sendInstruction();
-                  }
-                }}
-                placeholder={t('work.instructionPlaceholder')}
-                aria-label={t('work.instructionPlaceholder')}
-                maxLength={100000}
-                rows={3}
-                disabled={instructionSending || instructionBlockedNote !== null}
-              />
-              <div className="btn-row mt-10">
-                <button
-                  type="button"
-                  className="btn btn--primary"
-                  disabled={instructionSending || instructionBlockedNote !== null || instruction.trim().length === 0}
-                  onClick={() => void sendInstruction()}
-                >
-                  {instructionSending ? t('work.instructionSending') : t('work.instructionSend')}
-                </button>
-              </div>
-              {instructionError && <p className="error" role="alert">{instructionError}</p>}
-            </div>
-          </section>
         </div>
 
         <aside>
@@ -802,16 +759,4 @@ function conciseWorkerSummary(value: string): string {
 function clipReportText(value: string, maxLength = 180): string {
   const compact = value.replace(/\s+/gu, ' ').trim();
   return compact.length > maxLength ? `${compact.slice(0, maxLength - 1)}…` : compact;
-}
-
-function Bubble({ message, now, locale, t }: { message: Message; now: number; locale: Locale; t: TFunction }) {
-  const mine = message.source === 'owner';
-  return (
-    <div className={`bubble ${mine ? 'bubble--owner' : 'bubble--advisor'}`}>
-      {message.body}
-      <div className="bubble__meta">
-        {mine ? t('work.bubbleOwner') : t('work.bubbleAdvisor')} · {formatRelative(message.created_at, now, locale)}
-      </div>
-    </div>
-  );
 }

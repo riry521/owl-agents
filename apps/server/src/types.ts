@@ -257,13 +257,40 @@ export interface ModelPreset {
   updated_at: string;
 }
 
+export interface MessageMetadata {
+  kind: "instruction_reply";
+  in_reply_to: string[];
+  outcome: "tasks_changed" | "no_change" | "decision_opened";
+  plan_revision: number | null;
+}
+
 export interface Message {
   id: string;
   conversation_id: string;
-  source: string;
+  source: "slack" | "discord" | "web" | "advisor" | "manager" | string;
   body: string;
   attachment_ids: string[];
   created_at: string;
+  metadata?: MessageMetadata | null;
+}
+
+export interface InstructionStatus {
+  status: "queued" | "processing" | "answered";
+  outcome: MessageMetadata["outcome"] | null;
+  reply_message_id: string | null;
+}
+
+export interface WorkConversationMessage extends Message {
+  received_at: string;
+  instruction: InstructionStatus | null;
+  in_reply_to: string[];
+}
+
+export interface WorkConversation {
+  work_id: string;
+  conversation_id: string | null;
+  truncated: boolean;
+  messages: WorkConversationMessage[];
 }
 
 export interface WorkInstructionInput {
@@ -578,6 +605,7 @@ export interface CorePort {
   getWork(workId: string): Promise<WorkDetail>;
   getWorkBranchStatus(workId: string): Promise<WorkBranchStatus>;
   getWorkDesigns(workId: string): Promise<WorkDesignList>;
+  getWorkConversation?(workId: string, opts: { limit: number }): Promise<WorkConversation>;
   getWorkDesign(workId: string, taskId: string): Promise<WorkDesignDetail | null>;
   startWork(workId: string, mode: "normal" | "small", command: CommandMeta): Promise<CommandResult<{
     work_id: string;

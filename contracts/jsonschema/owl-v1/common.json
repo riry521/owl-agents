@@ -61,7 +61,9 @@
       "enum": [
         "slack",
         "discord",
-        "web"
+        "web",
+        "advisor",
+        "manager"
       ]
     },
     "OpaqueObject": {

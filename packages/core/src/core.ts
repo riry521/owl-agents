@@ -83,6 +83,7 @@ import { cleanupWorkForDeletion, reconcileWorktrees, type WorktreeReconcileFailu
 import { processIdentityMatches, readProcessIdentity } from "./process-identity.js";
 import { formatRuntimeFailure } from "./error-display.js";
 import { ADVISOR_TEXT, workRef } from "./advisor-text.js";
+import { INSTRUCTION_REPLY_TEXT, type ReplanSummary } from "./instruction-reply-text.js";
 import { ownerGuidance } from "./owner-guidance.js";
 import { failedTaskBrief } from "./task-context.js";
 import { detectProcessSkillsPack, type DetectedProcessSkillsPack } from "./process-skills-pack.js";
@@ -472,6 +473,8 @@ interface MessageDbRow {
   body: string;
   attachment_ids_json: string;
   created_at: string;
+  received_at?: string;
+  metadata_json?: string | null;
 }
 
 interface StoredModelSettingsValue extends JsonObject {
@@ -2603,7 +2606,7 @@ export class Core {
         now,
         now,
       );
-      mergeOwnerReplanInTransaction(transaction, workId, { kind: "instruction", answer: body });
+      mergeOwnerReplanInTransaction(transaction, workId, { kind: "instruction", answer: body, message_ids: [messageId] });
       events.push({ type: "message.posted", payload: { kind: "message_posted", schema_version: "1.0.0" }, createdAt: now });
       return {
         data: { work_id: workId, conversation_id: conversation.id, message_id: messageId, status: "queued" as const },
@@ -3542,7 +3545,7 @@ export class Core {
     }
     const limit = boundLimit(query.limit ?? 50);
     const rows = this.db.all<MessageDbRow>(
-      `SELECT id, conversation_id, provider, source_message_id, body, attachment_ids_json, created_at
+      `SELECT id, conversation_id, provider, source_message_id, body, attachment_ids_json, created_at, metadata_json
          FROM messages
         WHERE conversation_id = ? AND (? IS NULL OR id > ?)
         ORDER BY id ASC LIMIT ?`,
@@ -3552,6 +3555,51 @@ export class Core {
       limit + 1,
     );
     return listResponse(query.request_id, rows.slice(0, limit).map(toMessage), rows.length > limit, limit);
+  }
+
+  /** The Work's conversation with each Owner instruction's reception state, derived from the replan marker and Manager replies. */
+  public getWorkConversation(workId: string, opts: { limit?: number } = {}): WorkConversation {
+    if (!this.db.get("SELECT id FROM works WHERE id = ?", workId)) throw notFound("work", workId);
+    const limit = Math.min(Math.max(opts.limit ?? 100, 1), 500);
+    const conversation = this.db.get<{ id: string }>(
+      "SELECT id FROM conversations WHERE work_id = ? AND channel = 'web' AND is_active = 1 AND archived_at IS NULL",
+      workId,
+    );
+    if (!conversation) return { work_id: workId, conversation_id: null, truncated: false, messages: [] };
+    const rows = this.db.all<MessageDbRow>(
+      `SELECT id, conversation_id, provider, source_message_id, body, attachment_ids_json, created_at, received_at, metadata_json
+         FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT ?`,
+      conversation.id,
+      limit + 1,
+    );
+    const markerRow = this.db.get<{ response_json: string }>("SELECT response_json FROM idempotency_keys WHERE key = ?", ownerReplanKey(workId));
+    let markerStatus: unknown = null;
+    let markerIds: string[] = [];
+    let processingIds: string[] = [];
+    try {
+      const marker = markerRow ? JSON.parse(markerRow.response_json) as unknown : null;
+      if (isRecord(marker)) {
+        markerStatus = marker.status;
+        markerIds = markerMessageIds(marker.message_ids);
+        processingIds = markerMessageIds(marker.processing_message_ids);
+      }
+    } catch {
+      // A malformed marker carries no instruction state.
+    }
+    const messages = rows.slice(0, limit).reverse().map((row) => ({ message: toMessage(row), received_at: row.received_at ?? row.created_at }));
+    const replies = messages.filter(({ message }) => message.metadata);
+    const result = messages.map(({ message, received_at }): WorkConversationMessage => {
+      const { metadata, ...rest } = message;
+      let instruction: InstructionStatus | null = null;
+      if (message.source !== "manager" && message.source !== "advisor") {
+        const reply = [...replies].reverse().find(({ message: r }) => r.metadata!.in_reply_to.includes(message.id));
+        if (markerStatus === "queued" && markerIds.includes(message.id)) instruction = { status: "queued", outcome: null, reply_message_id: null };
+        else if (reply) instruction = { status: "answered", outcome: reply.message.metadata!.outcome, reply_message_id: reply.message.id };
+        else if ((markerStatus === "attempted" && markerIds.includes(message.id)) || processingIds.includes(message.id)) instruction = { status: "processing", outcome: null, reply_message_id: null };
+      }
+      return { ...rest, received_at, instruction, in_reply_to: metadata?.in_reply_to ?? [] };
+    });
+    return { work_id: workId, conversation_id: conversation.id, truncated: rows.length > limit, messages: result };
   }
 
   public async recordAgentResearch(
@@ -6176,6 +6224,7 @@ export class Core {
    */
   private async consumeOwnerReplan(workId: string): Promise<OwnerReplanRequest | null> {
     return this.writeLane.transact((transaction) => {
+      foldProcessingOwnerReplanInTransaction(transaction, workId);
       const row = transaction.get<{ response_json: string }>(
         "SELECT response_json FROM idempotency_keys WHERE key = ? AND json_extract(response_json, '$.status') = 'queued'",
         ownerReplanKey(workId),
@@ -6191,6 +6240,7 @@ export class Core {
           return {
             kind: value.kind === "reopen" || value.kind === "instruction" || value.kind === "work_update" || value.kind === "auto_conflict" ? value.kind : "decision",
             answer: value.answer,
+            message_ids: markerMessageIds(value.message_ids),
           };
         }
       } catch {
@@ -6305,8 +6355,10 @@ export class Core {
     if (!this.started) return "requeue";
     // Defensive: the Manager only ever sees root failures (callers already pass only those).
     failedTaskIds = failedTaskIds.filter((taskId) => !this.isCascadedFailure(taskId));
-    const fail = (detail: string): Promise<void> =>
-      this.openManagerReplanFailureDecision(
+    const messageIds = ownerReplan?.message_ids ?? [];
+    const language = ownerLanguage(this.db);
+    const fail = async (detail: string): Promise<void> => {
+      await this.openManagerReplanFailureDecision(
         workId,
         failedTaskIds,
         reason,
@@ -6315,6 +6367,15 @@ export class Core {
         finalVerdict,
         ownerReplan?.kind === "auto_conflict" ? mergeConflictFiles(this.latestSystemAlert(workId)) : undefined,
       );
+      if (messageIds.length === 0) return;
+      await this.writeLane.write({
+        mutateState: (transaction) => {
+          insertInstructionReply(transaction, messageIds, "decision_opened", null, INSTRUCTION_REPLY_TEXT[language].decisionOpened(firstLine(detail)));
+        },
+        event: { idempotencyKey: `instruction-reply:${createUlid()}`, type: "message.posted", workId, payload: { kind: "message_posted", schema_version: "1.0.0" } },
+          outbox: [{ provider: "websocket" }],
+      });
+    };
     let plan: ReplanPlan | null = null;
     let planSnapshot: ReplanSnapshot | null = null;
     let rejection: readonly string[] = [];
@@ -6383,13 +6444,17 @@ export class Core {
     // every Task terminal and runs the final check.
     if (plan.newItems.length === 0 && plan.reopenIds.length === 0 && plan.supersessions.size === 0) {
       if (ownerReplan !== null) {
-        await this.writeLane.transact((transaction) => {
-          transaction.run(
-            `DELETE FROM idempotency_keys
-              WHERE key = ? AND json_extract(response_json, '$.status') = 'attempted'`,
-            ownerReplanKey(workId),
-          );
-          return null;
+        await this.writeLane.write({
+          mutateState: (transaction) => {
+            transaction.run(
+              `DELETE FROM idempotency_keys
+                WHERE key = ? AND json_extract(response_json, '$.status') = 'attempted'`,
+              ownerReplanKey(workId),
+            );
+            insertInstructionReply(transaction, messageIds, "no_change", null, INSTRUCTION_REPLY_TEXT[language].noChange);
+          },
+          event: { idempotencyKey: `instruction-reply:${createUlid()}`, type: "message.posted", workId, payload: { kind: "message_posted", schema_version: "1.0.0" } },
+          outbox: [{ provider: "websocket" }],
         });
       }
       await this.dispatcher.replayPending();
@@ -6408,6 +6473,19 @@ export class Core {
         guard,
         `Manager replan: ${reason}`,
         ownerReplan !== null ? ownerReplanKey(workId) : undefined,
+        {
+          afterApply: (transaction, result) => {
+            const revision = transaction.get<{ plan_revision: number }>("SELECT plan_revision FROM works WHERE id = ?", workId)?.plan_revision ?? 0;
+            const title = (taskId: string): string => transaction.get<{ title: string }>("SELECT title FROM tasks WHERE id = ?", taskId)?.title ?? taskId;
+            const summary: ReplanSummary = {
+              planRevision: revision,
+              added: result.registered.map((task) => task.title),
+              redone: result.reopened.map(title),
+              replaced: Object.entries(result.replacements).map(([oldId, newIds]) => `${title(oldId)} → ${newIds.map(title).join(", ")}`),
+            };
+            insertInstructionReply(transaction, messageIds, "tasks_changed", revision, INSTRUCTION_REPLY_TEXT[language].tasksChanged(summary));
+          },
+        },
       );
       await this.announceDecisionCancellations(applied.cancelled_decision_ids);
       void this.runWorktreeReconcile(workId, "replan_applied");
@@ -7333,22 +7411,88 @@ function assertProjectUnlocked(
   return impact;
 }
 
-function toMessage(row: MessageDbRow): Message {
-  const isAdvisor = row.source_message_id != null && row.source_message_id.startsWith("advisor:");
-  return {
+type InstructionOutcome = "tasks_changed" | "no_change" | "decision_opened";
+
+interface MessageMetadata {
+  readonly kind: "instruction_reply";
+  readonly in_reply_to: readonly string[];
+  readonly outcome: InstructionOutcome;
+  readonly plan_revision: number | null;
+}
+
+export interface InstructionStatus {
+  readonly status: "queued" | "processing" | "answered";
+  readonly outcome: InstructionOutcome | null;
+  readonly reply_message_id: string | null;
+}
+
+export interface WorkConversationMessage extends Message {
+  readonly received_at: string;
+  readonly instruction: InstructionStatus | null;
+  readonly in_reply_to: readonly string[];
+}
+
+export interface WorkConversation {
+  readonly work_id: string;
+  readonly conversation_id: string | null;
+  readonly truncated: boolean;
+  readonly messages: readonly WorkConversationMessage[];
+}
+
+/** Write the Manager's reply to Owner instruction messages; call inside the transaction that settles the replan marker. */
+function insertInstructionReply(
+  transaction: CoreWriteLaneTransaction,
+  messageIds: readonly string[],
+  outcome: InstructionOutcome,
+  planRevision: number | null,
+  body: string,
+): void {
+  if (messageIds.length === 0) return;
+  const origin = transaction.get<{ conversation_id: string; account_id: string }>(
+    "SELECT conversation_id, account_id FROM messages WHERE id = ?",
+    messageIds[0],
+  );
+  if (!origin) return;
+  const now = utcNow();
+  const metadata: MessageMetadata = { kind: "instruction_reply", in_reply_to: messageIds, outcome, plan_revision: planRevision };
+  transaction.run(
+    `INSERT INTO messages
+       (id, conversation_id, provider, account_id, source_message_id, body,
+        attachment_ids_json, received_at, created_at, metadata_json)
+     VALUES (?, ?, 'web', ?, ?, ?, '[]', ?, ?, ?)`,
+    createUlid(), origin.conversation_id, origin.account_id, `manager:${createUlid()}`, body, now, now, JSON.stringify(metadata),
+  );
+}
+
+function parseMessageMetadata(json: string | null | undefined): MessageMetadata | null {
+  if (json == null) return null;
+  try {
+    const value = JSON.parse(json) as unknown;
+    if (isRecord(value) && value.kind === "instruction_reply" && Array.isArray(value.in_reply_to)) return value as unknown as MessageMetadata;
+  } catch {
+    // The CHECK constraint rejects invalid JSON; anything else is treated as no metadata.
+  }
+  return null;
+}
+
+function toMessage(row: MessageDbRow): Message & { metadata?: MessageMetadata | null } {
+  const sourceId = row.source_message_id ?? "";
+  const message = {
     id: row.id,
     conversation_id: row.conversation_id,
-    source: isAdvisor ? "advisor" : row.provider,
+    source: sourceId.startsWith("manager:") ? "manager" : sourceId.startsWith("advisor:") ? "advisor" : row.provider,
     body: row.body,
     attachment_ids: parseStringArray(row.attachment_ids_json, "attachment_ids", row.id, "Message"),
     created_at: row.created_at,
   };
+  const metadata = parseMessageMetadata(row.metadata_json);
+  return metadata ? { ...message, metadata } : message;
 }
 
 function formatConversationMessage(message: Message): string {
   const timestamp = new Date(message.created_at);
   const time = Number.isNaN(timestamp.getTime()) ? message.created_at : timestamp.toISOString().slice(11, 16);
-  const role = message.source === "advisor" ? "Advisor" : "You";
+  const role = message.source === "advisor" ? "Advisor" : message.source === "manager" ? "Manager" : "You";
   return `[${time}] ${role}:\n${message.body}`;
 }
 
@@ -8254,6 +8398,12 @@ const MAX_AUTO_CONFLICT_RESOLUTIONS = 2;
 interface OwnerReplanRequest {
   readonly kind: "decision" | "reopen" | "instruction" | "work_update" | "auto_conflict";
   readonly answer: string;
+  /** Owner instruction messages this request answers; the Manager's reply links back to them. */
+  readonly message_ids?: readonly string[];
+}
+
+function markerMessageIds(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : [];
 }
 
 function workUpdateReplanAnswer(
@@ -8276,7 +8426,7 @@ function queueOwnerReplanInTransaction(
   transaction: CoreWriteLaneTransaction,
   workId: string,
   request: OwnerReplanRequest,
-  options: { readonly replace?: boolean } = {},
+  options: { readonly replace?: boolean; readonly processing_message_ids?: readonly string[]; readonly processing?: { readonly kind: OwnerReplanRequest["kind"]; readonly answer: string } } = {},
 ): void {
   const now = utcNow();
   transaction.run(
@@ -8285,7 +8435,7 @@ function queueOwnerReplanInTransaction(
      VALUES (?, ?, ?, 202, ?, ?)`,
     ownerReplanKey(workId),
     "0".repeat(64),
-    JSON.stringify({ work_id: workId, status: "queued", kind: request.kind, answer: request.answer }),
+    JSON.stringify({ work_id: workId, status: "queued", kind: request.kind, answer: request.answer, ...(request.message_ids?.length ? { message_ids: request.message_ids } : {}), ...(options.processing_message_ids?.length ? { processing_message_ids: options.processing_message_ids } : {}), ...(options.processing ? { processing_kind: options.processing.kind, processing_answer: options.processing.answer } : {}) }),
     now,
     new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
   );
@@ -8303,13 +8453,20 @@ function mergeOwnerReplanInTransaction(
   request: OwnerReplanRequest,
 ): void {
   const pending = transaction.get<{ response_json: string }>(
-    "SELECT response_json FROM idempotency_keys WHERE key = ? AND json_extract(response_json, '$.status') = 'queued'",
+    "SELECT response_json FROM idempotency_keys WHERE key = ?",
     ownerReplanKey(workId),
   );
   let merged = request;
+  let processing: string[] = [];
+  let processingRequest: { kind: OwnerReplanRequest["kind"]; answer: string } | undefined;
   try {
     const value = pending ? JSON.parse(pending.response_json) as unknown : null;
-    if (isRecord(value) && typeof value.answer === "string" && value.answer.length > 0) {
+    // An instruction the Manager is handling keeps its id beside the new queued one.
+    if (isRecord(value)) processing = markerMessageIds(value.status === "attempted" ? value.message_ids : value.processing_message_ids);
+    // Keep the body of the request being handled so a requeue can restore it.
+    if (isRecord(value) && value.status === "attempted" && typeof value.answer === "string") processingRequest = { kind: value.kind as OwnerReplanRequest["kind"], answer: value.answer };
+    else if (isRecord(value) && typeof value.processing_answer === "string") processingRequest = { kind: value.processing_kind as OwnerReplanRequest["kind"], answer: value.processing_answer };
+    if (isRecord(value) && value.status === "queued" && typeof value.answer === "string" && value.answer.length > 0) {
       merged = {
         kind: value.kind === "instruction" || request.kind === "instruction"
           ? "instruction"
@@ -8317,22 +8474,69 @@ function mergeOwnerReplanInTransaction(
             ? "work_update"
             : request.kind,
         answer: `${value.answer}\n\n${request.answer}`,
+        message_ids: [...new Set([...markerMessageIds(value.message_ids), ...(request.message_ids ?? [])])],
       };
     }
   } catch {
     // A malformed pending request is replaced.
   }
-  queueOwnerReplanInTransaction(transaction, workId, merged);
+  queueOwnerReplanInTransaction(transaction, workId, merged, { processing_message_ids: processing, processing: processingRequest });
+}
+
+/**
+ * A queued marker may still carry the request being handled when the process
+ * stopped: fold it into the queued one unless the Manager already answered it.
+ */
+function foldProcessingOwnerReplanInTransaction(transaction: CoreWriteLaneTransaction, workId: string): void {
+  const row = transaction.get<{ response_json: string }>("SELECT response_json FROM idempotency_keys WHERE key = ?", ownerReplanKey(workId));
+  let value: unknown = null;
+  try {
+    value = row ? JSON.parse(row.response_json) as unknown : null;
+  } catch {
+    return;
+  }
+  if (!isRecord(value) || value.status !== "queued" || typeof value.processing_answer !== "string") return;
+  const ids = markerMessageIds(value.processing_message_ids);
+  const answered = ids.length > 0 && ids.every((id) => transaction.get(
+    "SELECT 1 FROM messages, json_each(json_extract(messages.metadata_json, '$.in_reply_to')) WHERE json_each.value = ? LIMIT 1",
+    id,
+  ));
+  if (answered) {
+    transaction.run(
+      "UPDATE idempotency_keys SET response_json = json_remove(response_json, '$.processing_answer', '$.processing_kind', '$.processing_message_ids') WHERE key = ?",
+      ownerReplanKey(workId),
+    );
+  } else {
+    requeueOwnerReplanInTransaction(transaction, workId);
+  }
 }
 
 /** Undo `consumeOwnerReplan`: move an `attempted` marker back to `queued`. */
 function requeueOwnerReplanInTransaction(transaction: CoreWriteLaneTransaction, workId: string): void {
-  transaction.run(
-    `UPDATE idempotency_keys
-        SET response_json = json_set(response_json, '$.status', 'queued')
-      WHERE key = ? AND json_extract(response_json, '$.status') = 'attempted'`,
-    ownerReplanKey(workId),
-  );
+  const row = transaction.get<{ response_json: string }>("SELECT response_json FROM idempotency_keys WHERE key = ?", ownerReplanKey(workId));
+  let value: unknown = null;
+  try {
+    value = row ? JSON.parse(row.response_json) as unknown : null;
+  } catch {
+    return;
+  }
+  if (!isRecord(value)) return;
+  if (value.status === "attempted") {
+    transaction.run(
+      `UPDATE idempotency_keys SET response_json = json_set(response_json, '$.status', 'queued') WHERE key = ?`,
+      ownerReplanKey(workId),
+    );
+  } else if (value.status === "queued" && typeof value.processing_answer === "string" && typeof value.answer === "string") {
+    // A newer request replaced the one being handled: process both together.
+    const kind = (k: unknown) => (k === "instruction" || k === "work_update" ? k : null);
+    queueOwnerReplanInTransaction(transaction, workId, {
+      kind: kind(value.processing_kind) === "instruction" || kind(value.kind) === "instruction" ? "instruction"
+        : kind(value.processing_kind) === "work_update" || kind(value.kind) === "work_update" ? "work_update"
+          : value.kind as OwnerReplanRequest["kind"],
+      answer: `${value.processing_answer}\n\n${value.answer}`,
+      message_ids: [...new Set([...markerMessageIds(value.processing_message_ids), ...markerMessageIds(value.message_ids)])],
+    });
+  }
 }
 
 function requireAgentRunResult(value: unknown, operation: string): AgentRunResult {

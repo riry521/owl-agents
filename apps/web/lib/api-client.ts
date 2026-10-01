@@ -76,6 +76,7 @@ import type {
   ProcessSkillsSettingsData,
   KnowledgeAutomationSettingsInput,
   KnowledgeAutomationSettingsData,
+  WorkConversation,
 } from '@/lib/types';
 import { runOrdinals } from '@/lib/format';
 import type { Locale } from '@/lib/i18n';
@@ -457,6 +458,13 @@ export interface WorkDesignDetail {
 export async function getWorkDesigns(id: ULID): Promise<{ designs: WorkDesignSummary[] }> {
   const response = await requestJson<{ data?: { designs?: WorkDesignSummary[] } }>(`/works/${encodeURIComponent(id)}/designs`);
   return { designs: response.data?.designs ?? [] };
+}
+
+/** GET /api/v1/works/{id}/conversation. */
+export async function getWorkConversation(id: ULID, limit = 100): Promise<WorkConversation> {
+  const response = await requestJson<{ data?: WorkConversation }>(`/works/${encodeURIComponent(id)}/conversation?limit=${limit}`);
+  if (!response.data) throw new Error('Work conversation response did not include data.');
+  return response.data;
 }
 
 /** GET /api/v1/works/{id}/designs/{task_id}; a missing document is a 404 error. */

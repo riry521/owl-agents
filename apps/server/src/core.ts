@@ -56,6 +56,7 @@ import type {
   IntegrationTestResult,
   WorkBranchStatus,
   WorkDesignDetail,
+  WorkConversation,
   WorkDesignList,
   WorkDetail,
   WorkProgress,
@@ -388,6 +389,13 @@ export class MemoryCore implements CorePort {
   async getWorkDesigns(workId: string): Promise<WorkDesignList> {
     this.requireWork(workId);
     return { designs: [] };
+  }
+
+  async getWorkConversation(workId: string, opts: { limit: number }): Promise<WorkConversation> {
+    const conversationId = this.requireWork(workId).conversation_id;
+    const all = conversationId ? this.conversationMessages.get(conversationId) ?? [] : [];
+    const messages = all.slice(-opts.limit).map((m) => ({ ...m, received_at: m.created_at, instruction: null, in_reply_to: m.metadata?.in_reply_to ?? [] }));
+    return { work_id: workId, conversation_id: conversationId ?? null, truncated: all.length > opts.limit, messages };
   }
 
   async getWorkDesign(workId: string, _taskId: string): Promise<WorkDesignDetail | null> {
@@ -1359,6 +1367,7 @@ interface ExternalCore {
   getWork(workId: string, query?: JsonObject): ExternalCommandResponse;
   getWorkBranchStatus?(workId: string): Promise<WorkBranchStatus>;
   getWorkDesigns?(workId: string): Promise<WorkDesignList>;
+  getWorkConversation?(workId: string, opts: { limit: number }): Promise<WorkConversation>;
   getWorkDesign?(workId: string, taskId: string): Promise<WorkDesignDetail | null>;
   startWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   pauseWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
@@ -1736,6 +1745,16 @@ export class ExternalCoreAdapter implements CorePort {
       return await this.core.getWorkDesigns(workId);
     } catch (error) {
       throw externalError(error, "getWorkDesigns");
+    }
+  }
+
+  async getWorkConversation(workId: string, opts: { limit: number }): Promise<WorkConversation> {
+    try {
+      await this.core.getWork(workId);
+      if (!this.core.getWorkConversation) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support work conversations.");
+      return await this.core.getWorkConversation(workId, opts);
+    } catch (error) {
+      throw externalError(error, "getWorkConversation");
     }
   }
 

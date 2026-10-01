@@ -16,26 +16,31 @@ export default function BoardPage() {
   };
 
   return (
-    <div className="board-layout">
-      <div className="board-layout__left">
-        {selectedCardId ? (
-          <WorkPreviewPanel
-            key={selectedCardId}
-            workId={selectedCardId}
-            onBack={() => setSelectedCardId(null)}
-            onDeleted={handleWorkDeleted}
-          />
-        ) : (
+    <div className={`board-layout${selectedCardId ? " board-layout--preview" : ""}`}>
+      {!selectedCardId && (
+        <div className="board-layout__left">
           <AdvisorView />
-        )}
-      </div>
+        </div>
+      )}
       <div className="board-layout__right">
         <BoardView
           onSelectCard={setSelectedCardId}
           selectedCardId={selectedCardId}
+          alwaysPreview
           refreshToken={boardRefreshToken}
         />
       </div>
+      {selectedCardId && (
+        <div className="board-layout__panel">
+          <WorkPreviewPanel
+            key={selectedCardId}
+            withConversation
+            workId={selectedCardId}
+            onBack={() => setSelectedCardId(null)}
+            onDeleted={handleWorkDeleted}
+          />
+        </div>
+      )}
     </div>
   );
 }

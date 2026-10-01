@@ -235,6 +235,7 @@ const { WorkDetailView } = compile(join(repoRoot, 'apps/web/components/WorkDetai
   '@/components/WorkArchiveActions': archiveActions,
   '@/components/DesignDocumentsSection': { DesignDocumentsSection: () => null },
   '@/components/WorkBacklogSection': { WorkBacklogSection: () => null },
+  '@/components/WorkConversation': { WorkConversation: () => null },
   '@/lib/i18n': i18n,
   '@/lib/work-detail-safety.mjs': { asReportEnvelope, humanizeWorkDetailError, normalizeWorkDetailData },
   '@/components/WorkSummaryBlock': compile(join(repoRoot, 'apps/web/components/WorkSummaryBlock.tsx'), { '@/lib/i18n': i18n }),

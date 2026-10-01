@@ -32,6 +32,17 @@
     },
     "created_at": {
       "$ref": "common.json#/$defs/RFC3339"
+    },
+    "metadata": {
+      "type": ["object", "null"],
+      "required": ["kind", "in_reply_to", "outcome", "plan_revision"],
+      "properties": {
+        "kind": { "const": "instruction_reply" },
+        "in_reply_to": { "type": "array", "items": { "$ref": "common.json#/$defs/ULID" } },
+        "outcome": { "enum": ["tasks_changed", "no_change", "decision_opened"] },
+        "plan_revision": { "type": ["integer", "null"] }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

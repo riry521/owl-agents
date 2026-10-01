@@ -1,10 +1,10 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
-import { getWorkDetail, subscribeToUpdates } from '@/lib/api-client';
+import { useEffect, useRef, useState } from 'react';
+import { getWorkConversation, getWorkDetail, subscribeToUpdates } from '@/lib/api-client';
 import { humanizeWorkDetailError, normalizeWorkDetailData, workDetailHref } from '@/lib/work-detail-safety.mjs';
-import type { AgentRun, WorkDetailView as WorkData } from '@/lib/types';
+import type { AgentRun, WorkConversation as ConversationData, WorkDetailView as WorkData } from '@/lib/types';
 import {
   agentStatusLabels,
   agentOutcomeLabels,
@@ -22,16 +22,20 @@ import { WorkArchiveActions } from '@/components/WorkArchiveActions';
 import { activeRunByTask, buildRunTree, isRunActive } from '../lib/agent-run-tree.mjs';
 import { orderTasksByStage } from '../lib/task-stages.mjs';
 import { useLocale } from '@/lib/i18n';
+import { WorkConversation } from '@/components/WorkConversation';
 import { WorkSummaryBlock } from '@/components/WorkSummaryBlock';
 
 const LIVE_RUN = new Set<AgentRun['status']>(['launch_pending', 'spawned', 'running', 'cancel_requested']);
 const PREVIEW_TIMEOUT_MS = 45_000;
 const EVENT_LIMIT = 8;
+const CONVERSATION_POLL_MS = 3_000;
 
 interface WorkPreviewPanelProps {
   workId: string;
   onBack: () => void;
   onDeleted?: () => void;
+  /** Board only: show the Work conversation (read + send instructions) in the panel. */
+  withConversation?: boolean;
 }
 
 interface PreviewEvent {
@@ -45,11 +49,49 @@ interface PreviewEvent {
  * Compact Work detail shown in the Board's left column when a card is selected
  * (design: "Home (Task Detail)"). The full page stays at /work?id=….
  */
-export function WorkPreviewPanel({ workId, onBack, onDeleted }: WorkPreviewPanelProps) {
+export function WorkPreviewPanel({ workId, onBack, onDeleted, withConversation }: WorkPreviewPanelProps) {
   const { locale, t } = useLocale();
   const [data, setData] = useState<WorkData | null | undefined>(undefined);
   const [now, setNow] = useState(0);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [conversation, setConversation] = useState<{ workId: string; data: ConversationData } | null>(null);
+  const [conversationError, setConversationError] = useState<string | null>(null);
+  const reloadRef = useRef<() => void>(() => {});
+  const reloadConversationRef = useRef<() => void>(() => {});
+  const conversationRequestRef = useRef(0);
+
+  // Only the latest fetch is applied and reschedules, so there is one timer and no stale overwrite.
+  // A failure still reschedules; cleanup drops the timer and `alive` ignores late results.
+  useEffect(() => {
+    if (!withConversation) return;
+    let alive = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      clearTimeout(timer);
+      const request = ++conversationRequestRef.current;
+      try {
+        const next = await getWorkConversation(workId);
+        if (!alive || request !== conversationRequestRef.current) return;
+        setConversation({ workId, data: next });
+        setConversationError(null);
+      } catch (error) {
+        console.error('[Owl] Work conversation refresh failed', error);
+        if (!alive || request !== conversationRequestRef.current) return;
+        setConversationError(humanizeWorkDetailError(error, t));
+      }
+      timer = setTimeout(() => void tick(), CONVERSATION_POLL_MS);
+    };
+    reloadConversationRef.current = () => {
+      if (alive) void tick();
+    };
+    setConversation(null);
+    setConversationError(null);
+    void tick();
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [workId, t, withConversation]);
 
   // Tick the clock while agents run so subagent elapsed times stay current.
   const hasLiveRun = !!data && data.runs.some((r) => LIVE_RUN.has(r.status));
@@ -87,6 +129,9 @@ export function WorkPreviewPanel({ workId, onBack, onDeleted }: WorkPreviewPanel
           requestTimers.delete(timeout);
         }
       }
+    };
+    reloadRef.current = () => {
+      if (alive) void load();
     };
     void load();
     const unsubscribe = subscribeToUpdates(
@@ -185,7 +230,7 @@ export function WorkPreviewPanel({ workId, onBack, onDeleted }: WorkPreviewPanel
   const recentEvents = events.slice(0, EVENT_LIMIT);
 
   return (
-    <div className="preview">
+    <div className={withConversation ? 'preview preview--chat' : 'preview'}>
       {backRow}
       <div className="preview__body">
         {loadError && <div className="error" role="alert">{loadError}</div>}
@@ -325,6 +370,21 @@ export function WorkPreviewPanel({ workId, onBack, onDeleted }: WorkPreviewPanel
           )}
         </section>
       </div>
+      {withConversation && (
+        <div className="preview__chat">
+          {conversationError && <div className="error" role="alert">{conversationError}</div>}
+          <WorkConversation
+            key={workId}
+            work={work}
+            variant="panel"
+            conversation={conversation?.workId === workId ? conversation.data : null}
+            onWorkChanged={() => {
+              reloadRef.current();
+              reloadConversationRef.current();
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 }

@@ -26,7 +26,6 @@ export const SECTION_ORDER: BoardSection[] = ['judgement', 'running', 'waiting',
 const EMPTY_FORM: CreateWorkInput = { title: '', summary: '', size: 'normal', project_id: null };
 
 /** Matches the CSS breakpoint above which the Board's left column is visible. */
-const INLINE_PREVIEW_QUERY = '(min-width: 901px)';
 
 /** Swipe gesture tuning: how far/fast a drag on a Board card must travel before it "arms". */
 const DRAG_THRESHOLD_PX = 8;
@@ -36,16 +35,20 @@ const SPRING_BACK_MS = 220;
 
 /** How long a section's bulk-delete button stays armed (red, "Delete N") before reverting. */
 const BULK_ARM_MS = 3000;
+/** Below this width the home page hides its preview column, so cards fall back to the detail link. */
+const INLINE_PREVIEW_QUERY = '(min-width: 901px)';
 
 interface BoardViewProps {
   /** Select a Work to preview in the left column instead of navigating to /work. */
   onSelectCard?: (id: string) => void;
   selectedCardId?: string | null;
+  /** The page has a preview panel at every width (the Board page), so always intercept card clicks. */
+  alwaysPreview?: boolean;
   /** Refresh after a sibling preview has deleted a Work. */
   refreshToken?: number;
 }
 
-export function BoardView({ onSelectCard, selectedCardId, refreshToken = 0 }: BoardViewProps = {}) {
+export function BoardView({ onSelectCard, selectedCardId, alwaysPreview, refreshToken = 0 }: BoardViewProps = {}) {
   const { locale, t } = useLocale();
   const [data, setData] = useState<BoardData | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
@@ -305,6 +308,7 @@ export function BoardView({ onSelectCard, selectedCardId, refreshToken = 0 }: Bo
                     locale={locale}
                     t={t}
                     onSelect={onSelectCard}
+                    alwaysPreview={alwaysPreview}
                     isSelected={selectedCardId === w.id}
                     onArchiveChange={refresh}
                   />
@@ -365,6 +369,7 @@ export function WorkCard({
   locale,
   t,
   onSelect,
+  alwaysPreview,
   isSelected,
   onArchiveChange,
 }: {
@@ -375,6 +380,7 @@ export function WorkCard({
   locale: Locale;
   t: TFunction;
   onSelect?: (id: string) => void;
+  alwaysPreview?: boolean;
   isSelected?: boolean;
   /** Refresh the Board after an archive/unarchive commits, so stale `archived_at` reflects it. */
   onArchiveChange?: () => Promise<void>;
@@ -522,8 +528,7 @@ export function WorkCard({
     endDrag(null);
   };
 
-  // Plain clicks preview the Work in the left column; modified clicks, narrow screens (left
-  // column hidden) and clicks that end a real drag keep/skip the /work link behaviour.
+  // Plain clicks preview the Work in the right panel; modified clicks and clicks that end a real drag keep/skip the /work link behaviour.
   const handleLinkClick = (ev: MouseEvent<HTMLAnchorElement>) => {
     if (draggedRef.current) {
       draggedRef.current = false;
@@ -532,7 +537,7 @@ export function WorkCard({
     }
     if (!onSelect) return;
     if (ev.defaultPrevented || ev.button !== 0 || ev.metaKey || ev.ctrlKey || ev.shiftKey || ev.altKey) return;
-    if (typeof window === 'undefined' || !window.matchMedia(INLINE_PREVIEW_QUERY).matches) return;
+    if (!alwaysPreview && (typeof window === 'undefined' || !window.matchMedia(INLINE_PREVIEW_QUERY).matches)) return;
     ev.preventDefault();
     onSelect(work.id);
   };
