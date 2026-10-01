@@ -8,14 +8,14 @@
       "role": "rest_ws",
       "version": "1.0.0",
       "openapi_version": "3.1.0",
-      "sha256": "6befb5993054f18e5c7c51968ab574f5f6cd045f768c583f6d804a9ce884877a"
+      "sha256": "ad1fe511d8c1c0d1104bccb5b97353548fdbed84037ce2e07f478e51bf4ba514"
     },
     {
       "path": "contracts/jsonschema/owl-v1/agent-run.json",
       "role": "json_schema",
       "version": "1.0.0",
       "schema_dialect": "https://json-schema.org/draft/2020-12/schema",
-      "sha256": "7ee463ca32b8bc40da211108245602a147ca1466ae2999a38f2dde8760435e8b"
+      "sha256": "2cc1bd80cdfb51e3a252b589da809d09e74f4fc6a061ab0047b24dde866ef21e"
     },
     {
       "path": "contracts/jsonschema/owl-v1/common.json",

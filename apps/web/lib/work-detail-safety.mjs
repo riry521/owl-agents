@@ -1,3 +1,5 @@
+import { isAgentOutcome } from './agent-run-display.mjs';
+
 /**
  * @typedef {import('./types').WorkDetailView} WorkDetailView
  * @typedef {import('./types').WorkState} WorkState
@@ -121,6 +123,7 @@ function normalizeRuns(value, workId) {
     model: stringOr(run.model),
     effort: nullableString(run.effort),
     status: stringOr(run.status, 'unknown'),
+    outcome: isAgentOutcome(run.outcome) ? run.outcome : null,
     pid: typeof run.pid === 'number' && Number.isFinite(run.pid) ? run.pid : null,
     started_at: nullableString(run.started_at),
     ended_at: nullableString(run.ended_at),

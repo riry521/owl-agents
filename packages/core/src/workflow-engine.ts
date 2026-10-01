@@ -1578,11 +1578,13 @@ export class WorkflowEngine {
           const row = transaction.get<{ status: string }>("SELECT status FROM agent_runs WHERE id = ?", runId);
           const cancelled = row?.status === "cancel_requested" || row?.status === "cancelled";
           const status = cancelled ? "cancelled" : result.success ? "completed" : "failed";
+          const outcome = status === "completed" ? "success" : null;
           transaction.run(
-            `UPDATE agent_runs SET status = ?, pid = NULL, ended_at = COALESCE(ended_at, ?), updated_at = ?,
+            `UPDATE agent_runs SET status = ?, outcome = ?, pid = NULL, ended_at = COALESCE(ended_at, ?), updated_at = ?,
                 usage_json = COALESCE(?, usage_json)
               WHERE id = ? AND status IN ('launch_pending','spawned','running','cancel_requested')`,
             status,
+            outcome,
             now,
             now,
             usageJson(usage),
@@ -1756,6 +1758,7 @@ export class WorkflowEngine {
           reason,
           question,
           needs_replanning: needsReplanning,
+          run_outcome: question !== null ? "question" : "replan",
           ...(storableReport ? { report: reportObject } : {}),
           ...usage,
         }, "task.replan_requested", question);
@@ -1776,6 +1779,7 @@ export class WorkflowEngine {
       await this.writeFailureEvent(workId, taskId, agentRunId, {
         failure_class: "deterministic",
         error_key: "hybrid_worker_retry_requested",
+        run_outcome: "redo",
         retry_allowed: true,
         reason: `Hybrid Worker requested a retry for Task ${taskId}: ${JSON.stringify(retrySubtasks)}`,
         // The next Worker attempt reads these back as context.retry_subtasks.
@@ -1868,6 +1872,10 @@ export class WorkflowEngine {
     }
     const event = result.signal ? "agent.crashed" : "task.failure.classified";
     const hasReport = !result.signal && result.report && typeof result.report === "object" && !Array.isArray(result.report);
+    const reportResultValue = hasReport ? (result.report as JsonObject).result : null;
+    const reportRunOutcome = errorKey.startsWith("report_result:")
+      ? reportResultValue === "failed" ? "not_achieved" : reportResultValue === "partial" ? "partial" : null
+      : null;
     const payload: JsonObject = result.signal
       ? {
         report_present: false,
@@ -1881,6 +1889,8 @@ export class WorkflowEngine {
         error_key: errorKey,
         retry_allowed: result.retry_allowed !== false,
         reason: result.message ?? "The Worker reported a deterministic failure.",
+        // A failed or partial report is a valid result the agent produced.
+        ...(reportRunOutcome ? { run_outcome: reportRunOutcome } : {}),
         ...(hasReport ? { report: result.report } : {}),
         ...usage,
       };
@@ -2884,9 +2894,9 @@ export class WorkflowEngine {
         );
         const agentUpdate = transaction.run(
           `UPDATE agent_runs
-              SET status = ?, ended_at = ?, updated_at = ?, usage_json = COALESCE(?, usage_json)
+              SET status = 'completed', outcome = ?, ended_at = ?, updated_at = ?, usage_json = COALESCE(?, usage_json)
             WHERE id = ? AND status = 'running'`,
-          verdict === "pass" ? "completed" : "failed",
+          verdict === "pass" ? "success" : verdict === "replan_required" ? "replan" : "redo",
           utcNow(),
           utcNow(),
           usageJson(result.usage),

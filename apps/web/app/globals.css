@@ -2603,6 +2603,7 @@ a.card--selected:hover {
 .preview__event-dot--accent { background: var(--accent); }
 .preview__event-dot--green { background: var(--green); }
 .preview__event-dot--red { background: var(--red); }
+.preview__event-dot--amber { background: var(--amber); }
 
 .preview__event-text {
   flex-grow: 1;

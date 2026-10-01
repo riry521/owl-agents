@@ -138,6 +138,7 @@ const componentFormat = {
   workStateLabels: () => workStateDisplayNames,
   taskStateLabels: () => taskStateDisplayNames,
   agentStatusLabels: () => ({}),
+  agentOutcomeLabels: () => ({}),
   boardSectionLabels: () => ({ judgement: 'Needs review', running: 'Running', waiting: 'Waiting', done: 'Done', cancelled: 'Cancelled' }),
   boardSectionOf: actualFormatModule.boardSectionOf,
   formatRelative: () => 'just now',
@@ -244,7 +245,7 @@ const advisorStub = { AdvisorView: () => React.createElement('div', { 'data-test
 const previewComponentModule = compileWebComponent(join(repoRoot, 'apps/web/components/WorkPreviewPanel.tsx'), {
   'next/link': linkModule,
   '@/lib/api-client': componentApiClient,
-  '@/lib/format': { ...componentFormat, agentStatusLabels: () => ({}) },
+  '@/lib/format': { ...componentFormat, agentStatusLabels: () => ({}), agentOutcomeLabels: () => ({}) },
   '@/components/StateBadge': stateBadgeModule,
   '@/components/WorkArchiveActions': archiveActionsModule,
   '@/lib/i18n': componentI18n,

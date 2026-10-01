@@ -1210,17 +1210,34 @@ export function reduceTaskInTransaction(
       command.event === "task.replan_requested" ||
       command.event === "task.rate_limited")
   ) {
-    // task.replan_requested carries a finished Worker report: the AgentRun
-    // itself completed even though the Task now needs a Manager replan.
-    const status = command.event === "agent.exited" || command.event === "task.replan_requested"
-      ? "completed"
-      : command.event === "task.rate_limited" ? "exited" : "failed";
+    // The run ends `completed` with an outcome whenever it produced a valid
+    // result, even if that result sends the Task back (replan, question, redo,
+    // partial, not achieved). Only a run that could not produce a result ends
+    // `failed`.
+    const runOutcome = runOutcomeFromPayload(payload.run_outcome);
+    let status: string;
+    let outcome: string | null = null;
+    if (command.event === "agent.exited") {
+      status = "completed";
+      outcome = runOutcome ?? "success";
+    } else if (command.event === "task.replan_requested") {
+      status = "completed";
+      outcome = runOutcome ?? "replan";
+    } else if (command.event === "task.rate_limited") {
+      status = "exited";
+    } else if (command.event === "task.failure.classified" && runOutcome !== null) {
+      status = "completed";
+      outcome = runOutcome;
+    } else {
+      status = "failed";
+    }
     const reportValue = payload.report;
     const hasReport = !!reportValue && typeof reportValue === "object" && !Array.isArray(reportValue);
     const reportId = hasReport ? insertReport(transaction, agentRunId, reportValue, result.next.updated_at) : null;
     const update = transaction.run(
-      `UPDATE agent_runs SET status = ?, report_id = ?, ended_at = ?, updated_at = ?, usage_json = COALESCE(?, usage_json) WHERE id = ?`,
+      `UPDATE agent_runs SET status = ?, outcome = ?, report_id = ?, ended_at = ?, updated_at = ?, usage_json = COALESCE(?, usage_json) WHERE id = ?`,
       status,
+      outcome,
       reportId,
       result.next.updated_at,
       result.next.updated_at,
@@ -1431,6 +1448,12 @@ export function restoreCascadedDependentsInTransaction(transaction: CoreWriteLan
 }
 
 const REPORT_RESULT_VALUES = new Set(["success", "failed", "partial"]);
+
+const AGENT_RUN_OUTCOMES: ReadonlySet<string> = new Set(["success", "redo", "replan", "question", "partial", "not_achieved"]);
+
+function runOutcomeFromPayload(value: unknown): string | null {
+  return typeof value === "string" && AGENT_RUN_OUTCOMES.has(value) ? value : null;
+}
 
 function insertReport(
   transaction: CoreWriteLaneTransaction,

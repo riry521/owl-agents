@@ -1,5 +1,6 @@
 import type {
   AgentRun,
+  AgentRunOutcome,
   AgentRunStatus,
   RFC3339,
   TaskState,
@@ -29,6 +30,11 @@ export function taskStateLabels(locale: Locale): Record<TaskState, string> {
 /** Locale-aware Agent run status labels. */
 export function agentStatusLabels(locale: Locale): Record<AgentRunStatus, string> {
   return dicts[locale].format.agentStatus as Record<AgentRunStatus, string>;
+}
+
+/** Locale-aware Agent run outcome labels. */
+export function agentOutcomeLabels(locale: Locale): Record<AgentRunOutcome, string> {
+  return dicts[locale].format.agentOutcome as Record<AgentRunOutcome, string>;
 }
 
 /** Return a displayable label for known or unexpected API enum values. */

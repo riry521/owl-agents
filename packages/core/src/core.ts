@@ -399,6 +399,7 @@ interface AgentDbRow {
   model: string;
   effort: string | null;
   status: string;
+  outcome: string | null;
   pid: number | null;
   started_at: string | null;
   ended_at: string | null;
@@ -2669,7 +2670,7 @@ export class Core {
   public listAgentRuns(query: AgentListQuery = {}): ListResponse<AgentRun> {
     const limit = boundLimit(query.limit ?? 50);
     const rows = this.db.all<AgentDbRow>(
-      `SELECT id, work_id, task_id, role, design_tier, provider, model, effort, status, pid, started_at, ended_at, last_output_at, parent_agent_id, phase, subtask_count, label, origin
+      `SELECT id, work_id, task_id, role, design_tier, provider, model, effort, status, outcome, pid, started_at, ended_at, last_output_at, parent_agent_id, phase, subtask_count, label, origin
          FROM agent_runs
         WHERE (? IS NULL OR status = ?)
           AND (? IS NULL OR work_id = ?)
@@ -6387,7 +6388,7 @@ export class Core {
       mutateState: (transaction: CoreWriteLaneTransaction) => {
         const now = utcNow();
         transaction.run(
-          `UPDATE agent_runs SET status = 'completed', ended_at = ?, updated_at = ?, usage_json = COALESCE(?, usage_json) WHERE id = ?`,
+          `UPDATE agent_runs SET status = 'completed', outcome = 'success', ended_at = ?, updated_at = ?, usage_json = COALESCE(?, usage_json) WHERE id = ?`,
           now,
           now,
           usage,
@@ -6657,6 +6658,7 @@ function toAgentRun(row: AgentDbRow): AgentRun {
     model: row.model,
     effort: row.effort,
     status: row.status,
+    outcome: row.outcome,
     pid: row.pid,
     started_at: row.started_at,
     ended_at: row.ended_at,

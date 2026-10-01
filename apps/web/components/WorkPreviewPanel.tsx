@@ -7,6 +7,7 @@ import { humanizeWorkDetailError, normalizeWorkDetailData, workDetailHref } from
 import type { AgentRun, WorkDetailView as WorkData } from '@/lib/types';
 import {
   agentStatusLabels,
+  agentOutcomeLabels,
   formatAgentLabel,
   formatRelative,
   roleDisplayName,
@@ -14,6 +15,7 @@ import {
   safeEnumLabel,
   workDisplayNumber,
 } from '@/lib/format';
+import { agentRunDisplay } from '../lib/agent-run-display.mjs';
 import { AgentRunTree, ArchivedBadge, HybridPhaseBadge, TaskStateBadge, WorkStateBadge } from '@/components/StateBadge';
 import { WorkArchiveActions } from '@/components/WorkArchiveActions';
 // Relative on purpose: the node component tests stub the `@/` modules.
@@ -35,7 +37,7 @@ interface PreviewEvent {
   key: string;
   at: string;
   text: string;
-  tone: 'accent' | 'green' | 'red' | 'gray';
+  tone: 'accent' | 'green' | 'amber' | 'red' | 'gray';
 }
 
 /**
@@ -152,17 +154,19 @@ export function WorkPreviewPanel({ workId, onBack, onDeleted }: WorkPreviewPanel
   const { completed_tasks: doneCount, total_tasks: taskTotal, percent: pct } = work.progress;
 
   const statusLabels = agentStatusLabels(locale);
+  const outcomeLabels = agentOutcomeLabels(locale);
   const events: PreviewEvent[] = [];
   for (const r of runs) {
     if (r.started_at) {
       events.push({ key: `${r.id}-start`, at: r.started_at, text: t('board.preview.eventStarted', { agent: label(r) }), tone: 'accent' });
     }
     if (r.ended_at) {
-      const tone = r.status === 'completed' ? 'green' : r.status === 'failed' || r.status === 'spawn_failed' ? 'red' : 'gray';
+      const display = agentRunDisplay(r.status, r.outcome);
+      const tone = display.tone === 'accent' ? 'gray' : display.tone;
       events.push({
         key: `${r.id}-end`,
         at: r.ended_at,
-        text: t('board.preview.eventEnded', { agent: label(r), status: safeEnumLabel(statusLabels, r.status) }),
+        text: t('board.preview.eventEnded', { agent: label(r), status: safeEnumLabel(display.kind === 'outcome' ? outcomeLabels : statusLabels, display.key) }),
         tone,
       });
     }
@@ -173,7 +177,7 @@ export function WorkPreviewPanel({ workId, onBack, onDeleted }: WorkPreviewPanel
       key: `${rep.id}-report`,
       at: rep.created_at,
       text: t('board.preview.eventReported', { agent: run ? label(run) : roleDisplayName('worker', locale) }),
-      tone: rep.result === 'success' ? 'green' : rep.result === 'failed' ? 'red' : 'gray',
+      tone: rep.result === 'success' ? 'green' : rep.result === 'failed' ? 'amber' : 'gray',
     });
   }
   events.sort((a, b) => b.at.localeCompare(a.at));

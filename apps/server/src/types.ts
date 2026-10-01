@@ -144,6 +144,7 @@ export interface AgentRun {
   provider: string;
   model: string;
   status: string;
+  outcome: string | null;
   pid: number | null;
   started_at: string | null;
   ended_at: string | null;

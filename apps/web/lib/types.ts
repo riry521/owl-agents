@@ -57,6 +57,9 @@ export type AgentRunStatus =
   | 'cancel_requested'
   | 'cancelled';
 
+/** agent_runs.outcome CHECK: what a completed run's valid result said. */
+export type AgentRunOutcome = 'success' | 'redo' | 'replan' | 'question' | 'partial' | 'not_achieved';
+
 // ---- DTOs ---------------------------------------------------------------------
 
 export interface WorkSummary {
@@ -481,6 +484,8 @@ export interface AgentRun {
   /** Reasoning effort the run was launched with; null when unset or unknown. */
   effort?: string | null;
   status: AgentRunStatus;
+  /** Set when the run completed; null otherwise. */
+  outcome?: AgentRunOutcome | null;
   pid: number | null;
   started_at: RFC3339 | null;
   ended_at: RFC3339 | null;

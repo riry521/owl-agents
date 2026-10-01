@@ -859,6 +859,8 @@ export interface AgentRun extends JsonObject {
   /** Reasoning effort the run was launched with; null when unset or unknown. */
   readonly effort: string | null;
   readonly status: string;
+  /** Result of a completed run: success, redo, replan, question, partial or not_achieved; null otherwise. */
+  readonly outcome: string | null;
   readonly pid: number | null;
   readonly started_at: string | null;
   readonly ended_at: string | null;

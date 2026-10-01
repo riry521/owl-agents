@@ -1,9 +1,10 @@
 'use client';
 
 import type { AgentRun, AgentRunStatus, TaskState, WorkState } from '@/lib/types';
-import { safeEnumLabel, workStateLabels, taskStateLabels, agentStatusLabels, agentModelLabel } from '@/lib/format';
+import { safeEnumLabel, workStateLabels, taskStateLabels, agentStatusLabels, agentOutcomeLabels, agentModelLabel } from '@/lib/format';
 import { useLocale, type TFunction } from '@/lib/i18n';
 // Relative on purpose: the node component tests stub the `@/` modules.
+import { agentRunDisplay } from '../lib/agent-run-display.mjs';
 import { flattenRunTree, hybridProgress, isLiveRunStatus, type RunTree } from '../lib/agent-run-tree.mjs';
 
 type Tone = 'accent' | 'amber' | 'green' | 'red' | 'gray';
@@ -31,18 +32,6 @@ const TASK_TONE: Record<TaskState, Tone> = {
   cancelled: 'red',
 };
 
-const AGENT_TONE: Record<AgentRunStatus, Tone> = {
-  launch_pending: 'gray',
-  spawned: 'accent',
-  running: 'accent',
-  exited: 'amber',
-  completed: 'green',
-  failed: 'red',
-  spawn_failed: 'red',
-  cancel_requested: 'amber',
-  cancelled: 'red',
-};
-
 function Badge({ tone, children }: { tone: Tone; children: string }) {
   return <span className={`badge badge--${tone}`}>{children}</span>;
 }
@@ -66,19 +55,27 @@ export function TaskStateBadge({ status }: { status: string }) {
   return <Badge tone={tone}>{label}</Badge>;
 }
 
-export function AgentStatusBadge({ status, origin = null }: { status: string; origin?: AgentRun['origin'] }) {
+export function AgentStatusBadge({
+  status,
+  outcome = null,
+  origin = null,
+}: {
+  status: string;
+  outcome?: AgentRun['outcome'];
+  origin?: AgentRun['origin'];
+}) {
   const { locale, t } = useLocale();
   // An observed subagent that disappeared from the process tree has an unknown
   // outcome: show a neutral "exited" rather than the "no report" warning.
   if (status === 'exited' && origin === 'observed') return <Badge tone="gray">{t('hybrid.exited')}</Badge>;
-  const tone = Object.prototype.hasOwnProperty.call(AGENT_TONE, status) ? AGENT_TONE[status as AgentRunStatus] : 'gray';
-  const label = safeEnumLabel(agentStatusLabels(locale), status);
-  return <Badge tone={tone}>{label}</Badge>;
+  const display = agentRunDisplay(status, outcome);
+  const labels = display.kind === 'outcome' ? agentOutcomeLabels(locale) : agentStatusLabels(locale);
+  return <Badge tone={display.tone as Tone}>{safeEnumLabel(labels, display.key)}</Badge>;
 }
 
 export function ResultBadge({ result }: { result: string }) {
   const { t } = useLocale();
-  const tone: Tone = result === 'success' ? 'green' : result === 'failed' ? 'red' : result === 'partial' ? 'amber' : 'gray';
+  const tone: Tone = result === 'success' ? 'green' : result === 'failed' ? 'amber' : result === 'partial' ? 'amber' : 'gray';
   const label = result === 'success' ? t('badge.success') : result === 'failed' ? t('badge.failed') : result === 'partial' ? t('badge.partial') : result || '—';
   return <Badge tone={tone}>{label}</Badge>;
 }
@@ -123,9 +120,9 @@ function formatElapsed(startedAt: string | null, endedAt: string | null, now: nu
   return t('hybrid.elapsedSeconds', { s: String(s) });
 }
 
-function childDotClass(status: string): string {
+function childDotClass(status: string, outcome: AgentRun['outcome']): string {
   if (isLiveRunStatus(status)) return 'dot dot--running';
-  if (status === 'completed') return 'dot dot--done';
+  if (status === 'completed') return agentRunDisplay(status, outcome).tone === 'amber' ? 'dot dot--amber' : 'dot dot--done';
   if (status === 'failed' || status === 'spawn_failed') return 'dot dot--warn';
   if (status === 'cancelled') return 'dot dot--amber';
   return 'dot';
@@ -156,7 +153,7 @@ export function AgentRunTree({
           className={`run-tree__row${isLiveRunStatus(run.status) ? ' run-tree__row--live' : ''}`}
           style={depth > 0 ? { marginLeft: `${depth * 16}px` } : undefined}
         >
-          <span className={childDotClass(run.status)} />
+          <span className={childDotClass(run.status, run.outcome ?? null)} />
           <div className="run-tree__main">
             <div className="run-tree__title">
               <span className="run-tree__label">{agentModelLabel(run)}</span>
@@ -175,7 +172,7 @@ export function AgentRunTree({
             </div>
           </div>
           <div className="run-tree__end">
-            <AgentStatusBadge status={run.status} origin={run.origin} />
+            <AgentStatusBadge status={run.status} outcome={run.outcome} origin={run.origin} />
           </div>
         </li>
       ))}

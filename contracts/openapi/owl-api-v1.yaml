@@ -4305,6 +4305,7 @@ components:
         - provider
         - model
         - status
+        - outcome
         - pid
         - started_at
         - ended_at
@@ -4336,6 +4337,19 @@ components:
           type: string
         status:
           type: string
+        outcome:
+          description: What a completed run's valid result said; null for runs that did not complete.
+          type:
+            - string
+            - 'null'
+          enum:
+            - success
+            - redo
+            - replan
+            - question
+            - partial
+            - not_achieved
+            - null
         pid:
           type:
             - integer

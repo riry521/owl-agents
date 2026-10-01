@@ -27,7 +27,7 @@ import {
   runOrdinals,
   workDisplayNumber,
 } from '@/lib/format';
-import { AgentRunTree, ArchivedBadge, HybridPhaseBadge, ResultBadge, TaskStateBadge, WorkStateBadge } from '@/components/StateBadge';
+import { AgentRunTree, AgentStatusBadge, ArchivedBadge, HybridPhaseBadge, ResultBadge, TaskStateBadge, WorkStateBadge } from '@/components/StateBadge';
 import { WorkArchiveActions } from '@/components/WorkArchiveActions';
 import { DesignDocumentsSection } from '@/components/DesignDocumentsSection';
 import { WorkBacklogSection } from '@/components/WorkBacklogSection';
@@ -612,7 +612,7 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
                 <dt>{t('work.model')}</dt>
                 <dd className="mono">{latestManager.model}</dd>
                 <dt>{t('work.status')}</dt>
-                <dd>{latestManager.status}</dd>
+                <dd><AgentStatusBadge status={latestManager.status} outcome={latestManager.outcome} origin={latestManager.origin} /></dd>
                 <dt>{t('work.lastActivity')}</dt>
                 <dd>{formatRelative(latestManager.ended_at ?? latestManager.started_at, now, locale)}</dd>
               </dl>
@@ -667,7 +667,7 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
                     </div>
                   </div>
                   <div className="row__end">
-                    <span className="badge badge--gray">{r.status}</span>
+                    <AgentStatusBadge status={r.status} outcome={r.outcome} origin={r.origin} />
                   </div>
                 </div>
               ))}

@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import { getAgents } from '@/lib/api-client';
 import type { AgentActivity, AgentsView as AgentsData } from '@/lib/types';
 import { formatAgentLabel, formatRelative, silentSeconds, workDisplayNumber } from '@/lib/format';
+import { agentRunDisplay } from '../lib/agent-run-display.mjs';
 import { AgentRunTree, AgentStatusBadge, HybridPhaseBadge } from '@/components/StateBadge';
 import { buildRunTree, type RunTree } from '@/lib/agent-run-tree.mjs';
 import { useLocale } from '@/lib/i18n';
@@ -164,7 +165,7 @@ function RunningCard({
           </div>
           <div className="card__meta mono">{run.model}</div>
         </div>
-        <AgentStatusBadge status={run.status} origin={run.origin} />
+        <AgentStatusBadge status={run.status} outcome={run.outcome} origin={run.origin} />
       </div>
       {run.phase && (
         <div>
@@ -205,7 +206,7 @@ function RecentRow({ activity, now, tree }: { activity: AgentActivity; now: numb
   const { run, ordinal, task, work } = activity;
   const dot =
     run.status === 'completed'
-      ? 'dot dot--done'
+      ? agentRunDisplay(run.status, run.outcome).tone === 'amber' ? 'dot dot--amber' : 'dot dot--done'
       : run.status === 'failed' || run.status === 'spawn_failed'
         ? 'dot dot--warn'
         : 'dot dot--amber';
@@ -229,7 +230,7 @@ function RecentRow({ activity, now, tree }: { activity: AgentActivity; now: numb
       </div>
       <div className="row__end">
         <span className="note">{t('agents.ended', { time: formatRelative(run.ended_at, now, locale) })}</span>
-        <AgentStatusBadge status={run.status} origin={run.origin} />
+        <AgentStatusBadge status={run.status} outcome={run.outcome} origin={run.origin} />
       </div>
     </div>
   );

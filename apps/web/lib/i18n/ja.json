@@ -757,7 +757,7 @@
   },
   "badge": {
     "success": "成功",
-    "failed": "失敗",
+    "failed": "未達成",
     "partial": "一部完了"
   },
   "format": {
@@ -788,10 +788,18 @@
       "running": "実行中",
       "exited": "終了（報告なし）",
       "completed": "完了",
-      "failed": "失敗",
+      "failed": "エラー",
       "spawn_failed": "起動失敗",
       "cancel_requested": "中止要求中",
       "cancelled": "中止"
+    },
+    "agentOutcome": {
+      "success": "成功",
+      "redo": "やり直し",
+      "replan": "再計画",
+      "question": "確認待ち",
+      "partial": "一部完了",
+      "not_achieved": "未達成"
     },
     "boardSection": {
       "judgement": "判断待ち",

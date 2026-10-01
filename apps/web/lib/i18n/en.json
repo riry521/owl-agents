@@ -757,7 +757,7 @@
   },
   "badge": {
     "success": "Success",
-    "failed": "Failed",
+    "failed": "Not achieved",
     "partial": "Partial"
   },
   "format": {
@@ -788,10 +788,18 @@
       "running": "Running",
       "exited": "Exited (no report)",
       "completed": "Completed",
-      "failed": "Failed",
+      "failed": "Error",
       "spawn_failed": "Spawn failed",
       "cancel_requested": "Cancel requested",
       "cancelled": "Cancelled"
+    },
+    "agentOutcome": {
+      "success": "Success",
+      "redo": "Redo",
+      "replan": "Replan",
+      "question": "Question",
+      "partial": "Partial",
+      "not_achieved": "Not achieved"
     },
     "boardSection": {
       "judgement": "Awaiting Decision",
