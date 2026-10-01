@@ -26,6 +26,7 @@ export interface AdvisorText {
   readonly workResumed: (ref: string) => string;
   readonly workRetried: (ref: string) => string;
   readonly workCancelledNotice: (ref: string) => string;
+  readonly workDeletedNotice: (ref: string) => string;
   readonly workActionIncomplete: (action: string) => string;
   readonly workNotFound: (workId: string) => string;
   readonly instructionNotStarted: (ref: string) => string;
@@ -51,6 +52,7 @@ const WORK_ACTION_LABEL: Record<OwnerLanguage, Record<string, string>> = {
     pause_work: "一時停止",
     resume_work: "再開",
     cancel_work: "キャンセル",
+    delete_work: "削除",
   },
   en: {
     send_work_instruction: "sending the instruction",
@@ -58,6 +60,7 @@ const WORK_ACTION_LABEL: Record<OwnerLanguage, Record<string, string>> = {
     pause_work: "pause",
     resume_work: "resume",
     cancel_work: "cancellation",
+    delete_work: "deletion",
   },
 };
 
@@ -127,6 +130,7 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     workResumed: (ref) => `✓ Work${ref}を再開しました。`,
     workRetried: (ref) => `✓ エラーで止まっていたWork${ref}に再試行を指示しました。`,
     workCancelledNotice: (ref) => `✓ Work${ref}をキャンセルしました。`,
+    workDeletedNotice: (ref) => `✓ Work${ref}を削除しました。`,
     workActionIncomplete: (action) => `⚠ ${workActionLabel("ja", action)}を実行できませんでした。AdvisorのWork指定（work_idなど）が不足しているか形式が違います。Workは変更していません。`,
     workNotFound: (workId) => `⚠ ID ${workId} のWorkが見つからないため、何も変更していません。`,
     instructionNotStarted: (ref) => `⚠ Work${ref}はまだ開始されていないため、指示を送っていません。`,
@@ -173,6 +177,7 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     workResumed: (ref) => `✓ Resumed Work ${ref}.`,
     workRetried: (ref) => `✓ Told Work ${ref}, which had stopped on an error, to retry.`,
     workCancelledNotice: (ref) => `✓ Cancelled Work ${ref}.`,
+    workDeletedNotice: (ref) => `✓ Deleted Work ${ref}.`,
     workActionIncomplete: (action) => `⚠ Could not run the ${workActionLabel("en", action)}: the Advisor's Work details (such as work_id) were missing or malformed. No Work was changed.`,
     workNotFound: (workId) => `⚠ No Work has the ID ${workId}; nothing was changed.`,
     instructionNotStarted: (ref) => `⚠ Work ${ref} has not started yet, so the instruction was not sent.`,

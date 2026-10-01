@@ -8,6 +8,9 @@ import { test } from "node:test";
 
 import { Core } from "../packages/core/dist/index.js";
 import { createUlid, openDatabase } from "../packages/db/dist/index.js";
+import { SkillBox } from "../packages/core/dist/skill-box.js";
+import { SkillCurator } from "../packages/core/dist/skill-curator.js";
+import { renderSkillMd } from "../packages/core/dist/skill-files.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -55,14 +58,14 @@ function hasBranch(repository, branch) {
   }
 }
 
-test("deleteWork removes FK-linked execution rows in one transaction and preserves conversations and outputs", async (t) => {
+test("deleteWork removes FK-linked execution rows in one transaction and removes conversations and artifacts", async (t) => {
   const { root, db, core } = await setup(t);
   const workId = await createArchivedWork(core, db);
   const outside = await core.createWork(command({ title: "Unrelated", summary: "", size: "small", project_id: null }, "unrelated"));
   const externalWorkId = outside.data.work_id;
   const ids = {
-    taskA: createUlid(), taskB: createUlid(), externalTask: createUlid(),
-    run: createUlid(), externalRun: createUlid(), report: createUlid(),
+    taskA: createUlid(), taskB: createUlid(),
+    run: createUlid(), report: createUlid(),
     decision: createUlid(), answer: createUlid(), conversation: createUlid(),
     account: createUlid(), event: createUlid(), delivery: createUlid(),
     artifact: createUlid(), activity: createUlid(), receipt: createUlid(),
@@ -79,11 +82,6 @@ test("deleteWork removes FK-linked execution rows in one transaction and preserv
       ids.taskA, workId, now, now, ids.taskB, workId, now, now,
     );
     transaction.run("UPDATE tasks SET parent_task_id = ? WHERE id = ?", ids.taskA, ids.taskB);
-    transaction.run(
-      `INSERT INTO tasks (id, work_id, parent_task_id, title, type, status, priority, context, acceptance, created_at, updated_at)
-       VALUES (?, ?, ?, 'Outside child', 'test', 'completed', 'normal', '', '', ?, ?)`,
-      ids.externalTask, externalWorkId, ids.taskA, now, now,
-    );
     transaction.run("INSERT INTO task_dependencies (task_id, depends_on_task_id) VALUES (?, ?)", ids.taskA, ids.taskB);
     transaction.run(
       `INSERT INTO reviews (id, task_id, round, verdict, findings_json, verification_report_json, created_at)
@@ -101,11 +99,6 @@ test("deleteWork removes FK-linked execution rows in one transaction and preserv
       ids.report, ids.run, "a".repeat(64), now,
     );
     transaction.run("UPDATE agent_runs SET report_id = ? WHERE id = ?", ids.report, ids.run);
-    transaction.run(
-      `INSERT INTO agent_runs (id, work_id, task_id, parent_agent_id, subtask_id, report_id, role, provider, model, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 'reviewer', 'test', 'test', 'completed', ?, ?)`,
-      ids.externalRun, externalWorkId, ids.taskA, ids.run, ids.taskA, ids.report, now, now,
-    );
     transaction.run(
       `INSERT INTO decisions (id, work_id, scope, status, blocked_task_ids_json, reason, question, tried, current_state,
                               options_json, allow_free_text, issuer_role, created_at)
@@ -193,32 +186,17 @@ test("deleteWork removes FK-linked execution rows in one transaction and preserv
   assert.equal(db.get("SELECT id FROM events WHERE id = ?", ids.event), undefined);
   assert.equal(db.get("SELECT id FROM outbox_deliveries WHERE id = ?", ids.delivery), undefined);
   assert.equal(db.get("SELECT id FROM decision_answers WHERE id = ?", ids.answer), undefined);
-  const detachedConversation = db.get("SELECT work_id, archived_at, is_active FROM conversations WHERE id = ?", ids.conversation);
-  assert.equal(detachedConversation.work_id, null);
-  assert.match(detachedConversation.archived_at, /^\d{4}-\d\d-\d\dT/u);
-  assert.equal(detachedConversation.is_active, 0);
-  assert.deepEqual(db.get("SELECT work_id, task_id, source_event_id FROM artifacts WHERE id = ?", ids.artifact), {
-    work_id: null, task_id: null, source_event_id: null,
-  });
-  assert.equal(db.get("SELECT work_id FROM inbound_uploads WHERE id = ?", ids.upload).work_id, null);
+  assert.equal(db.get("SELECT id FROM conversations WHERE id = ?", ids.conversation), undefined);
+  assert.equal(db.get("SELECT id FROM artifacts WHERE id = ?", ids.artifact), undefined);
+  assert.equal(db.get("SELECT id FROM inbound_uploads WHERE id = ?", ids.upload), undefined);
   assert.equal(db.get("SELECT event_id FROM inbound_receipts WHERE id = ?", ids.receipt).event_id, null);
   assert.equal(db.get("SELECT agent_run_id FROM secret_audit WHERE id = ?", ids.audit).agent_run_id, null);
-  assert.deepEqual(db.get("SELECT parent_task_id FROM tasks WHERE id = ?", ids.externalTask), { parent_task_id: null });
-  assert.deepEqual(db.get("SELECT task_id, parent_agent_id, subtask_id, report_id FROM agent_runs WHERE id = ?", ids.externalRun), {
-    task_id: null, parent_agent_id: null, subtask_id: null, report_id: null,
-  });
   assert.deepEqual(JSON.parse(db.get("SELECT related_work_ids_json FROM works WHERE id = ?", externalWorkId).related_work_ids_json), []);
   assert.equal(db.get("SELECT key FROM idempotency_keys WHERE key = ?", `old-work-cache:${workId}`), undefined);
-  assert.ok(db.get("SELECT key FROM idempotency_keys WHERE key = ?", `work.delete:${workId}:-:-:-:${request.idempotency_key}`));
+  assert.equal(db.get("SELECT key FROM idempotency_keys WHERE key = ?", `work.delete:${workId}:-:-:-:${request.idempotency_key}`), undefined);
   assert.equal(db.all("PRAGMA foreign_key_check").length, 0);
-  assert.equal(await readFile(join(root, "data", "outputs", workId, "result.txt"), "utf8"), "preserved output\n");
-  assert.equal(await readFile(join(root, "data", "outputs", workId, "root-note.txt"), "utf8"), "also preserved\n");
   await assert.rejects(access(workspace));
-  assert.deepEqual(await core.deleteWork(workId, request), deleted, "delete retry replays the stored response after the Work row is gone");
-  await assert.rejects(
-    core.deleteWork(workId, { ...request, payload: { changed: true } }),
-    (error) => error.code === "idempotency_conflict",
-  );
+  await assert.rejects(core.deleteWork(workId, request), (error) => error.code === "work_not_found");
 });
 
 test("archiving keeps external design documents and deleting the Work removes them", async (t) => {
@@ -276,7 +254,7 @@ test("design documents that cannot be removed after a Work delete raise an alert
   assert.equal(payload.path, designDirectory);
 });
 
-test("deleteWork rejects non-terminal and unarchived Works before touching their workspace", async (t) => {
+test("deleteWork rejects non-terminal and missing Works before touching their workspace", async (t) => {
   const { root, db, core } = await setup(t);
   const created = await core.createWork(command({ title: "Running", summary: "", size: "small", project_id: null }, "running"));
   const path = join(root, ".owl-workspaces", created.data.work_id, "keep");
@@ -286,12 +264,7 @@ test("deleteWork rejects non-terminal and unarchived Works before touching their
   );
   await access(path);
 
-  const finished = await createArchivedWork(core, db, null, "Not yet archived");
-  await db.createWriteLane().transact((transaction) => transaction.run("UPDATE works SET archived_at = NULL WHERE id = ?", finished));
-  const finishedPath = join(root, ".owl-workspaces", finished, "keep");
-  await mkdir(finishedPath, { recursive: true });
-  await assert.rejects(core.deleteWork(finished, command({}, "delete-unarchived", 1)), (error) => error.code === "work_not_archived");
-  await access(finishedPath);
+  await assert.rejects(core.deleteWork(createUlid(), command({}, "delete-missing")), (error) => error.code === "work_not_found");
 });
 
 test("deleteWork accepts an archived cancelled Work", async (t) => {
@@ -514,4 +487,428 @@ test("a workspace scan failure retains its directories and skips database deleti
   await access(join(orphan, "escape.txt"));
   assert.ok(db.get("SELECT id FROM works WHERE id = ?", workId));
   assert.equal(db.get("SELECT key FROM idempotency_keys WHERE key = ?", `work.delete:${workId}:-:-:-:delete-test:scan-failure`), undefined);
+});
+
+async function createWorkInState(core, db, title, state) {
+  const id = (await core.createWork(command({ title, summary: "", size: "small", project_id: null }, `create:${title}`))).data.work_id;
+  const now = "2026-09-25T00:00:00.000Z";
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run("UPDATE works SET state = ?, state_version = 1, updated_at = ? WHERE id = ?", state, now, id);
+  });
+  return id;
+}
+
+function countIdRows(db, id) {
+  let total = 0;
+  for (const { name } of db.all("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")) {
+    const columns = db.all(`PRAGMA table_info("${name}")`).filter((column) => /TEXT|CHAR|CLOB/iu.test(column.type));
+    if (columns.length === 0) continue;
+    const where = columns.map((column) => `"${column.name}" LIKE ?`).join(" OR ");
+    total += db.get(`SELECT COUNT(*) AS count FROM "${name}" WHERE ${where}`, ...columns.map(() => `%${id}%`)).count;
+  }
+  return total;
+}
+
+test("deleteWork deletes unarchived completed and cancelled Works", async (t) => {
+  const { db, core } = await setup(t);
+  for (const state of ["completed", "cancelled"]) {
+    const id = await createWorkInState(core, db, `Unarchived ${state}`, state);
+    assert.equal(db.get("SELECT archived_at FROM works WHERE id = ?", id).archived_at, null);
+    assert.deepEqual((await core.deleteWork(id, command({}, `delete-${state}`, 1))).data, { work_id: id, deleted: true });
+    assert.equal(db.get("SELECT id FROM works WHERE id = ?", id), undefined);
+  }
+});
+
+test("deleteWork refuses running and paused Works and keeps every row", async (t) => {
+  const { db, core } = await setup(t);
+  for (const state of ["running", "paused"]) {
+    const id = await createWorkInState(core, db, `Active ${state}`, state);
+    const ownerId = db.get("SELECT owner_id FROM works WHERE id = ?", id).owner_id;
+    const now = "2026-09-25T00:00:00.000Z";
+    const taskId = createUlid(), runId = createUlid(), conversationId = createUlid(), accountId = createUlid(), messageId = createUlid(), reviewId = createUlid();
+    await db.createWriteLane().transact((transaction) => {
+      transaction.run(
+        `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, created_at, updated_at)
+         VALUES (?, ?, 'T', 'code', 'running', 'normal', '', '', ?, ?)`, taskId, id, now, now);
+      transaction.run(
+        `INSERT INTO agent_runs (id, work_id, task_id, role, provider, model, status, created_at, updated_at)
+         VALUES (?, ?, ?, 'worker', 'test', 'test', 'running', ?, ?)`, runId, id, taskId, now, now);
+      transaction.run("INSERT INTO conversations (id, owner_id, work_id, channel, is_active, created_at, updated_at) VALUES (?, ?, ?, 'web', 0, ?, ?)", conversationId, ownerId, id, now, now);
+      transaction.run("INSERT INTO connector_accounts (id, owner_id, provider, external_account_id, created_at) VALUES (?, ?, 'web', ?, ?)", accountId, ownerId, `web:${accountId}`, now);
+      transaction.run(
+        `INSERT INTO messages (id, conversation_id, provider, account_id, source_message_id, body, attachment_ids_json, received_at, created_at)
+         VALUES (?, ?, 'web', ?, ?, 'hi', '[]', ?, ?)`, messageId, conversationId, accountId, `src:${messageId}`, now, now);
+      transaction.run("INSERT INTO learning_jobs (id, work_id, payload_json, status, created_at, updated_at) VALUES (?, ?, '{}', 'pending', ?, ?)", createUlid(), id, now, now);
+      transaction.run(
+        `INSERT INTO reviews (id, task_id, round, verdict, findings_json, verification_report_json, created_at)
+         VALUES (?, ?, 0, 'pass', '[]', '{}', ?)`, reviewId, taskId, now);
+      transaction.run(
+        `INSERT INTO backlog_items (id, work_id, task_id, review_id, review_round, file, problem, dedupe_key, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 0, 'f.ts', 'p', ?, ?, ?)`, createUlid(), id, taskId, reviewId, `d:${id}`, now, now);
+      const sequence = transaction.get("SELECT coalesce(max(sequence), 0) + 1 AS sequence FROM events").sequence;
+      transaction.run(
+        `INSERT INTO events (id, sequence, idempotency_key, type, work_id, task_id, agent_run_id, payload_json, status, created_at)
+         VALUES (?, ?, ?, 'task.started', ?, ?, ?, '{}', 'handled', ?)`, createUlid(), sequence, `ev:${createUlid()}`, id, taskId, runId, now);
+      transaction.run(
+        `INSERT INTO skill_proposals (id, kind, target_skill, payload_json, source_work_id, source_agent_run_id, status, attempts, created_at, updated_at)
+         VALUES (?, 'new', NULL, '{}', ?, ?, 'awaiting_approval', 0, ?, ?)`, `sp-${state}`, id, runId, now, now);
+    });
+    const snapshot = () => JSON.stringify([
+      db.all("SELECT * FROM works WHERE id = ?", id),
+      ...["tasks", "agent_runs", "backlog_items", "learning_jobs", "conversations", "events"].map((table) => db.all(`SELECT * FROM ${table} WHERE work_id = ?`, id)),
+      db.all("SELECT * FROM messages WHERE conversation_id = ?", conversationId),
+      db.all("SELECT * FROM skill_proposals WHERE source_work_id = ?", id),
+    ]);
+    const before = snapshot();
+    await assert.rejects(core.deleteWork(id, command({}, `delete-${state}`, 1)), (error) => error.code === "invalid_state_transition");
+    assert.equal(snapshot(), before);
+  }
+});
+
+function preparedDecision(proposalId, name, { work, run, reason }) {
+  return JSON.stringify({
+    proposal_id: proposalId, target_name: name, target_revision: null,
+    files: { "SKILL.md": renderSkillMd({ name, description: "d", tags: [], scope: "global" }, "# Skill\n\nBody.") }, meta: { description: "d", tags: [], scope: "global" },
+    action: "create", archive: [], reason, source_proposal_id: proposalId,
+    source_work_id: work, source_agent_run_id: run, project_id: null, relation: "different",
+  });
+}
+
+test("deleteWork leaves no trace of the Work id and does not touch other Works", async (t) => {
+  const { root, db, core } = await setup(t);
+  const target = await createWorkInState(core, db, "Trace target", "completed");
+  const other = await createWorkInState(core, db, "Trace other", "completed");
+  const ownerId = db.get("SELECT owner_id FROM works WHERE id = ?", target).owner_id;
+  const now = "2026-09-25T00:00:00.000Z";
+  const seed = (transaction, workId) => {
+    const ids = { task: createUlid(), run: createUlid(), review: createUlid(), conversation: createUlid(), message: createUlid(), account: createUlid() };
+    transaction.run(
+      `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, created_at, updated_at)
+       VALUES (?, ?, 'T', 'code', 'completed', 'normal', '', '', ?, ?)`, ids.task, workId, now, now);
+    transaction.run(
+      `INSERT INTO agent_runs (id, work_id, task_id, role, provider, model, status, created_at, updated_at)
+       VALUES (?, ?, ?, 'worker', 'test', 'test', 'completed', ?, ?)`, ids.run, workId, ids.task, now, now);
+    transaction.run(
+      `INSERT INTO reviews (id, task_id, round, verdict, findings_json, verification_report_json, created_at)
+       VALUES (?, ?, 0, 'pass', '[]', '{}', ?)`, ids.review, ids.task, now);
+    transaction.run(
+      `INSERT INTO backlog_items (id, work_id, task_id, review_id, review_round, file, problem, dedupe_key, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 0, 'f.ts', 'p', ?, ?, ?)`, createUlid(), workId, ids.task, ids.review, `d:${workId}`, now, now);
+    transaction.run("INSERT INTO learning_jobs (id, work_id, payload_json, status, created_at, updated_at) VALUES (?, ?, '{}', 'pending', ?, ?)", createUlid(), workId, now, now);
+    transaction.run("INSERT INTO conversations (id, owner_id, work_id, channel, is_active, created_at, updated_at) VALUES (?, ?, ?, 'web', 0, ?, ?)", ids.conversation, ownerId, workId, now, now);
+    transaction.run("INSERT INTO connector_accounts (id, owner_id, provider, external_account_id, created_at) VALUES (?, ?, 'web', ?, ?)", ids.account, ownerId, `web:${ids.account}`, now);
+    transaction.run(
+      `INSERT INTO messages (id, conversation_id, provider, account_id, source_message_id, body, attachment_ids_json, received_at, created_at)
+       VALUES (?, ?, 'web', ?, ?, 'hi', '[]', ?, ?)`, ids.message, ids.conversation, ids.account, `src:${ids.message}`, now, now);
+    const sequence = transaction.get("SELECT coalesce(max(sequence), 0) + 1 AS sequence FROM events").sequence;
+    transaction.run(
+      `INSERT INTO events (id, sequence, idempotency_key, type, work_id, task_id, agent_run_id, payload_json, status, created_at)
+       VALUES (?, ?, ?, 'task.completed', ?, ?, ?, '{}', 'handled', ?)`, createUlid(), sequence, `ev:${createUlid()}`, workId, ids.task, ids.run, now);
+    return ids;
+  };
+  let targetRun;
+  await db.createWriteLane().transact((transaction) => {
+    targetRun = seed(transaction, target).run;
+    seed(transaction, other);
+    for (const [id, status] of [["sp-wait", "awaiting_approval"], ["sp-applied", "applied"]]) {
+      transaction.run(
+        `INSERT INTO skill_proposals (id, kind, target_skill, payload_json, source_work_id, source_agent_run_id, status, decision_json, attempts, created_at, updated_at)
+         VALUES (?, 'new', NULL, '{}', ?, ?, ?, ?, 0, ?, ?)`,
+        id, target, targetRun, status, preparedDecision(id, `trace-${id}`, { work: target, run: targetRun, reason: "because" }), now, now);
+    }
+  });
+  const snapshot = () => JSON.stringify([
+    db.all("SELECT * FROM works WHERE id = ?", other),
+    ...["tasks", "agent_runs", "backlog_items", "learning_jobs", "conversations", "events"].map((table) => db.all(`SELECT * FROM ${table} WHERE work_id = ?`, other)),
+    db.all("SELECT * FROM messages WHERE conversation_id IN (SELECT id FROM conversations WHERE work_id = ?)", other),
+  ]);
+  const before = snapshot();
+  assert.ok(countIdRows(db, target) > 0);
+
+  await core.deleteWork(target, command({}, "delete-trace", 1));
+
+  assert.equal(countIdRows(db, target), 0);
+  assert.equal(countIdRows(db, targetRun), 0);
+  assert.equal(snapshot(), before);
+  assert.equal(db.all("PRAGMA foreign_key_check").length, 0);
+  const curator = new SkillCurator({ db, skillBox: new SkillBox({ db, owlRoot: root }), agentRunner: {} });
+  await curator.approveProposal("sp-wait");
+  assert.equal(db.get("SELECT status FROM skill_proposals WHERE id = 'sp-wait'").status, "applied");
+  assert.ok(db.get("SELECT name FROM skills WHERE name = 'trace-sp-wait'"));
+});
+
+async function insertCompletedWork(db, id) {
+  const now = "2026-09-25T00:00:00.000Z";
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run("UPDATE works SET state = 'completed', state_version = 1, completed_at = ?, updated_at = ? WHERE id = ?", now, now, id);
+  });
+}
+
+function insertArtifact(transaction, id, workId, path) {
+  transaction.run(
+    `INSERT INTO artifacts (id, work_id, path, kind, deliverable, sha256, bytes, mime, version_no, created_at)
+     VALUES (?, ?, ?, 'generated', 1, ?, 1, 'text/plain', 1, ?)`,
+    id, workId, path, "b".repeat(64), "2026-09-25T00:00:00.000Z",
+  );
+}
+
+test("deleteWork removes the Work's outputs and temp uploads, and keeps files outside data, shared with another Work, or in knowledge", async (t) => {
+  const { root, db, core } = await setup(t);
+  const created = await core.createWork(command({ title: "Files", summary: "", size: "small", project_id: null }, "create:files"));
+  const workId = created.data.work_id;
+  const other = await core.createWork(command({ title: "Other files", summary: "", size: "small", project_id: null }, "create:files-other"));
+  await insertCompletedWork(db, workId);
+  const ownerId = db.get("SELECT owner_id FROM works WHERE id = ?", workId).owner_id;
+  const ids = { conversation: createUlid(), account: createUlid(), upload: createUlid(), otherUpload: createUlid(), otherConversation: createUlid() };
+  const files = {
+    own: join(root, "data", "uploads", "own.bin"),
+    shared: join(root, "data", "uploads", "shared.bin"),
+    sharedCopy: join(root, "data", "uploads", "shared-copy.bin"),
+    knowledge: join(root, "knowledge", "note.md"),
+    outside: join(root, "outside.txt"),
+    outsideCopy: join(root, "outside-copy.txt"),
+    part: join(root, "data", "uploads", ".tmp", `${ids.upload}.part`),
+    outputs: join(root, "data", "outputs", workId, "saved.txt"),
+  };
+  for (const file of Object.values(files)) {
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, "x");
+  }
+  const now = "2026-09-25T00:00:00.000Z";
+  await db.createWriteLane().transact((transaction) => {
+    insertArtifact(transaction, createUlid(), workId, "data/uploads/own.bin");
+    insertArtifact(transaction, createUlid(), workId, "data/uploads/shared.bin");
+    insertArtifact(transaction, createUlid(), other.data.work_id, "data/uploads/shared.bin");
+    insertArtifact(transaction, createUlid(), workId, "knowledge/note.md");
+    insertArtifact(transaction, createUlid(), workId, "outside.txt");
+    transaction.run(
+      `INSERT INTO conversations (id, owner_id, work_id, channel, is_active, created_at, updated_at) VALUES (?, ?, ?, 'web', 1, ?, ?)`,
+      ids.conversation, ownerId, workId, now, now,
+    );
+    transaction.run(
+      `INSERT INTO conversations (id, owner_id, work_id, channel, is_active, created_at, updated_at) VALUES (?, ?, ?, 'web', 0, ?, ?)`,
+      ids.otherConversation, ownerId, other.data.work_id, now, now,
+    );
+    transaction.run(
+      `INSERT INTO connector_accounts (id, owner_id, provider, external_account_id, created_at) VALUES (?, ?, 'web', ?, ?)`,
+      ids.account, ownerId, `web:${ids.account}`, now,
+    );
+    for (const [id, workRef, status, shared] of [
+      [ids.upload, workId, "receiving", null],
+      [createUlid(), workId, "stored", files.outsideCopy],
+      [createUlid(), workId, "stored", files.sharedCopy],
+      [ids.otherUpload, other.data.work_id, "stored", files.sharedCopy],
+    ]) {
+      const conversationId = id === ids.otherUpload ? ids.otherConversation : ids.conversation;
+      transaction.run(
+        `INSERT INTO inbound_uploads (id, provider, account_id, external_attachment_id, request_id, idempotency_key, request_hash,
+                                      work_id, conversation_id, filename, declared_bytes, bytes, expires_at, status, shared_copy_path, created_at)
+         VALUES (?, 'web', ?, ?, ?, ?, ?, ?, ?, 'f.txt', 1, ?, ?, ?, ?, ?)`,
+        id, ids.account, `attachment:${id}`, `req:${id}`, `key:${id}`, "d".repeat(64),
+        workRef, conversationId, status === "receiving" ? null : 1, "2099-01-01T00:00:00.000Z", status, shared, now,
+      );
+    }
+  });
+  const workspace = join(root, ".owl-workspaces", workId);
+  await mkdir(workspace, { recursive: true });
+  await writeFile(join(workspace, "left.txt"), "left\n");
+
+  await core.deleteWork(workId, command({}, "delete-files", 1));
+
+  await assert.rejects(access(join(root, "data", "outputs", workId)));
+  await assert.rejects(access(files.own));
+  await assert.rejects(access(files.part));
+  for (const kept of [files.shared, files.sharedCopy, files.knowledge, files.outside, files.outsideCopy]) await access(kept);
+  assert.equal(db.all("PRAGMA foreign_key_check").length, 0);
+});
+
+test("deleteWork leaves another Work's rows unchanged apart from related_work_ids_json", async (t) => {
+  const { db, core } = await setup(t);
+  const workId = (await core.createWork(command({ title: "Target", summary: "", size: "small", project_id: null }, "create:target"))).data.work_id;
+  const otherId = (await core.createWork(command({ title: "Other", summary: "", size: "small", project_id: null }, "create:other"))).data.work_id;
+  await insertCompletedWork(db, workId);
+  const taskId = createUlid();
+  const otherTaskId = createUlid();
+  const now = "2026-09-25T00:00:00.000Z";
+  await db.createWriteLane().transact((transaction) => {
+    for (const [id, work, parent] of [[taskId, workId, null], [otherTaskId, otherId, null]]) {
+      transaction.run(
+        `INSERT INTO tasks (id, work_id, parent_task_id, title, type, status, priority, context, acceptance, created_at, updated_at)
+         VALUES (?, ?, ?, 'T', 'code', 'completed', 'normal', '', '', ?, ?)`,
+        id, work, parent, now, now,
+      );
+    }
+    transaction.run("UPDATE works SET related_work_ids_json = ? WHERE id = ?", JSON.stringify([workId]), otherId);
+  });
+  const snapshot = () => ({
+    tasks: db.all("SELECT * FROM tasks WHERE work_id = ?", otherId),
+    runs: db.all("SELECT * FROM agent_runs WHERE work_id = ?", otherId),
+    artifacts: db.all("SELECT * FROM artifacts WHERE work_id = ?", otherId),
+    uploads: db.all("SELECT * FROM inbound_uploads WHERE work_id = ?", otherId),
+    work: { ...db.get("SELECT * FROM works WHERE id = ?", otherId), related_work_ids_json: null },
+  });
+  const before = snapshot();
+  // Another Work's task points at the target's task: the delete must not rewrite it.
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run("UPDATE tasks SET parent_task_id = ? WHERE id = ?", taskId, otherTaskId);
+  });
+  before.tasks[0].parent_task_id = taskId;
+  await assert.rejects(core.deleteWork(workId, command({}, "delete-cross-ref", 1)));
+  assert.deepEqual(snapshot(), before);
+  assert.ok(db.get("SELECT id FROM works WHERE id = ?", workId));
+
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run("UPDATE tasks SET parent_task_id = NULL WHERE id = ?", otherTaskId);
+  });
+  before.tasks[0].parent_task_id = null;
+  await core.deleteWork(workId, command({}, "delete-no-ref", 1));
+  assert.deepEqual(snapshot(), before);
+  assert.deepEqual(JSON.parse(db.get("SELECT related_work_ids_json FROM works WHERE id = ?", otherId).related_work_ids_json), []);
+});
+
+test("deleteWork compares files by real path: aliases, outputs and symlinks never delete shared or protected files", async (t) => {
+  const { root, db, core } = await setup(t);
+  const workId = (await core.createWork(command({ title: "Real", summary: "", size: "small", project_id: null }, "create:real"))).data.work_id;
+  const otherId = (await core.createWork(command({ title: "Real other", summary: "", size: "small", project_id: null }, "create:real-other"))).data.work_id;
+  await insertCompletedWork(db, workId);
+  const outside = join(root, "elsewhere");
+  const files = {
+    keep: join(root, "data", "uploads", "keep.txt"),
+    own: join(root, "data", "uploads", "own.txt"),
+    sharedOut: join(root, "data", "outputs", workId, "shared.txt"),
+    ownOut: join(root, "data", "outputs", workId, "own.txt"),
+    knowledge: join(root, "knowledge", "keep.txt"),
+    outside: join(outside, "keep.txt"),
+  };
+  for (const file of Object.values(files)) {
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, "x");
+  }
+  await symlink(join(root, "knowledge"), join(root, "data", "linked"));
+  await symlink(outside, join(root, "data", "linked-out"));
+  await db.createWriteLane().transact((transaction) => {
+    insertArtifact(transaction, createUlid(), workId, "data/uploads/keep.txt");
+    insertArtifact(transaction, createUlid(), otherId, "./data/uploads/keep.txt");
+    insertArtifact(transaction, createUlid(), workId, "data/uploads/own.txt");
+    insertArtifact(transaction, createUlid(), otherId, `data/outputs/${workId}/shared.txt`);
+    insertArtifact(transaction, createUlid(), workId, "data/linked/keep.txt");
+    insertArtifact(transaction, createUlid(), workId, "data/linked-out/keep.txt");
+  });
+  await core.deleteWork(workId, command({}, "delete-real", 1));
+  for (const kept of [files.keep, files.sharedOut, files.knowledge, files.outside]) await access(kept);
+  await assert.rejects(access(files.own));
+  await assert.rejects(access(files.ownOut));
+});
+
+test("deleteWork leaves agent_activity, inbound_uploads and skill_usages rows of another Work unchanged", async (t) => {
+  const { db, core } = await setup(t);
+  const workId = (await core.createWork(command({ title: "Mine", summary: "", size: "small", project_id: null }, "create:mine"))).data.work_id;
+  const otherId = (await core.createWork(command({ title: "Theirs", summary: "", size: "small", project_id: null }, "create:theirs"))).data.work_id;
+  await insertCompletedWork(db, workId);
+  const ownerId = db.get("SELECT owner_id FROM works WHERE id = ?", workId).owner_id;
+  const ids = { run: createUlid(), conversation: createUlid(), account: createUlid(), activity: createUlid(), upload: createUlid() };
+  const now = "2026-09-25T00:00:00.000Z";
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run(
+      `INSERT INTO agent_runs (id, work_id, role, provider, model, status, created_at, updated_at)
+       VALUES (?, ?, 'worker', 'test', 'test', 'completed', ?, ?)`,
+      ids.run, workId, now, now,
+    );
+    transaction.run(
+      `INSERT INTO conversations (id, owner_id, work_id, channel, is_active, created_at, updated_at) VALUES (?, ?, ?, 'web', 1, ?, ?)`,
+      ids.conversation, ownerId, workId, now, now,
+    );
+    transaction.run(
+      `INSERT INTO connector_accounts (id, owner_id, provider, external_account_id, created_at) VALUES (?, ?, 'web', ?, ?)`,
+      ids.account, ownerId, `web:${ids.account}`, now,
+    );
+    transaction.run(
+      "INSERT INTO skill_usages (agent_run_id, skill_name, work_id, revision, created_at, updated_at) VALUES (?, 'x', ?, 1, ?, ?)",
+      ids.run, otherId, now, now,
+    );
+  });
+  const snapshot = () => ({ usages: db.all("SELECT * FROM skill_usages WHERE work_id = ?", otherId) });
+  const before = snapshot();
+  assert.equal(before.usages.length, 1);
+  await core.deleteWork(workId, command({}, "delete-ownership", 1));
+  assert.deepEqual(snapshot(), before);
+});
+
+async function seedUpload(db, workId, uploadId) {
+  const ownerId = db.get("SELECT owner_id FROM works WHERE id = ?", workId).owner_id;
+  const now = "2026-09-25T00:00:00.000Z";
+  const conversation = createUlid();
+  const account = createUlid();
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run("INSERT INTO conversations (id, owner_id, work_id, channel, is_active, created_at, updated_at) VALUES (?, ?, ?, 'web', 0, ?, ?)", conversation, ownerId, workId, now, now);
+    transaction.run("INSERT INTO connector_accounts (id, owner_id, provider, external_account_id, created_at) VALUES (?, ?, 'web', ?, ?)", account, ownerId, `web:${account}`, now);
+    transaction.run(
+      `INSERT INTO inbound_uploads (id, provider, account_id, external_attachment_id, request_id, idempotency_key, request_hash,
+                                    work_id, conversation_id, filename, declared_bytes, bytes, expires_at, status, shared_copy_path, created_at)
+       VALUES (?, 'web', ?, ?, ?, ?, ?, ?, ?, 'f.txt', 1, NULL, ?, 'receiving', NULL, ?)`,
+      uploadId, account, `attachment:${uploadId}`, `req:${uploadId}`, `key:${uploadId}`, "d".repeat(64), workId, conversation, "2099-01-01T00:00:00.000Z", now,
+    );
+  });
+}
+
+test("deleteWork keeps proposal bodies equal to the Work id and the proposal can still be approved", async (t) => {
+  const { root, db, core } = await setup(t);
+  const target = await createWorkInState(core, db, "Skill source", "completed");
+  const now = "2026-09-25T00:00:00.000Z";
+  await db.createWriteLane().transact((transaction) => {
+    const decision = JSON.parse(preparedDecision("sp-same", "same-id", { work: target, run: null, reason: target }));
+    decision.files["references/notes.md"] = target;
+    transaction.run(
+      `INSERT INTO skill_proposals (id, kind, target_skill, payload_json, source_work_id, status, decision_json, attempts, created_at, updated_at)
+       VALUES ('sp-same', 'new', NULL, '{}', ?, 'awaiting_approval', ?, 0, ?, ?)`, target, JSON.stringify(decision), now, now);
+  });
+
+  await core.deleteWork(target, command({}, "delete-same", 1));
+
+  const decision = JSON.parse(db.get("SELECT decision_json FROM skill_proposals WHERE id = 'sp-same'").decision_json);
+  assert.equal(decision.source_work_id, null);
+  assert.equal(decision.reason, target);
+  assert.equal(decision.files["references/notes.md"], target);
+  const curator = new SkillCurator({ db, skillBox: new SkillBox({ db, owlRoot: root }), agentRunner: {} });
+  await curator.approveProposal("sp-same");
+  assert.equal(db.get("SELECT status FROM skill_proposals WHERE id = 'sp-same'").status, "applied");
+  assert.ok(db.get("SELECT name FROM skills WHERE name = 'same-id'"));
+});
+
+test("deleteWork keeps files behind a symlinked uploads/.tmp that points into knowledge or outside data", async (t) => {
+  const { root, db, core } = await setup(t);
+  const outside = await mkdtemp(join(tmpdir(), "owl-part-outside-"));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  for (const [label, linkTarget] of [["knowledge", join(root, "knowledge", "tmp-link")], ["outside", outside]]) {
+    const target = await createWorkInState(core, db, `Part ${label}`, "completed");
+    const uploadId = createUlid();
+    await seedUpload(db, target, uploadId);
+    await mkdir(linkTarget, { recursive: true });
+    const kept = join(linkTarget, `${uploadId}.part`);
+    await writeFile(kept, label);
+    await rm(join(root, "data", "uploads", ".tmp"), { recursive: true, force: true });
+    await mkdir(join(root, "data", "uploads"), { recursive: true });
+    await symlink(linkTarget, join(root, "data", "uploads", ".tmp"));
+
+    await core.deleteWork(target, command({}, `delete-part-${label}`, 1));
+
+    assert.equal(db.get("SELECT id FROM works WHERE id = ?", target), undefined);
+    await access(kept);
+  }
+});
+
+test("deleteWork keeps a .part that another Work's artifact references", async (t) => {
+  const { root, db, core } = await setup(t);
+  const target = await createWorkInState(core, db, "Shared part", "completed");
+  const other = await createWorkInState(core, db, "Shared part other", "completed");
+  const uploadId = createUlid();
+  await seedUpload(db, target, uploadId);
+  const part = join(root, "data", "uploads", ".tmp", `${uploadId}.part`);
+  await mkdir(dirname(part), { recursive: true });
+  await writeFile(part, "x");
+  await db.createWriteLane().transact((transaction) => insertArtifact(transaction, createUlid(), other, `data/uploads/.tmp/${uploadId}.part`));
+
+  await core.deleteWork(target, command({}, "delete-shared-part", 1));
+
+  await access(part);
 });

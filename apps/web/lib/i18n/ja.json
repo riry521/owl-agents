@@ -107,6 +107,7 @@
     "pauseReason": "Work詳細から一時停止しました。",
     "abortReason": "Work詳細からOwnerが中止しました。",
     "confirmAbort": "このWorkを中止しますか？ 実行中のAgentを停止し、このWorkは再開できなくなります。",
+    "deleteConfirm": "「{{name}}」を完全に削除します。元に戻せません。会話・ログ・worktree・ブランチも削除されます。",
     "deleteUnmergedConfirm": "このWorkにはProjectのベースブランチに取り込まれていない変更があります。削除すると失われます。続行しますか？",
     "deleteMultipleUnmergedConfirm": "{{count}}件のWorkにはProjectのベースブランチに取り込まれていない変更があります。削除すると失われます。続行しますか？",
     "deleteUnmergedUnknownConfirm": "{{count}}件のWorkについて、Projectのベースブランチに取り込まれていない変更がないか確認できませんでした。削除すると変更が失われる可能性があります。続行しますか？",

@@ -1593,6 +1593,7 @@ const ADVISOR_ACTION_TYPES: ReadonlySet<string> = new Set([
   "pause_work",
   "reopen_work",
   "cancel_work",
+  "delete_work",
   "send_work_instruction",
   "update_work",
   "resume_work",
@@ -2011,6 +2012,12 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
         } else if (action.type === "cancel_work") {
           const workId = pathId(stringField(payload.work_id, "work_id", 1, 128), "work_id");
           data = (await withWorkLock(context, workId, async () => context.core.cancelWork(workId, typeof payload.reason === "string" ? payload.reason : "Advisor requested cancellation.", payload.force === true, actionCommand))).data as unknown as JsonObject;
+        } else if (action.type === "delete_work") {
+          const workId = pathId(stringField(payload.work_id, "work_id", 1, 128), "work_id");
+          data = (await withWorkLock(context, workId, async () => {
+            const current = await context.core.getWork(workId);
+            return context.core.deleteWork(workId, { ...actionCommand, expected_version: current.state_version });
+          })).data as unknown as JsonObject;
         } else if (action.type === "send_work_instruction") {
           exactKeys(payload, ["work_id", "body"], `actions[${action.action_id}].payload`, ["reopen"]);
           const workId = pathId(stringField(payload.work_id, "work_id", 1, 128), "work_id");

@@ -177,7 +177,9 @@ test("non-terminal Works reject archive, unarchive, and DELETE with their curren
   await assertApiError(await deleteWork(api.request, readyId), 409, "invalid_state_transition", { state: "ready" });
 
   const unarchivedTerminalId = await createWork(api.core, api.db, "API terminal but active", "completed");
-  await assertApiError(await deleteWork(api.request, unarchivedTerminalId), 409, "work_not_archived");
+  const deleted = await deleteWork(api.request, unarchivedTerminalId);
+  assert.equal(deleted.status, 200);
+  await assertApiError(await api.request(`/works/${unarchivedTerminalId}`), 404, "work_not_found");
 });
 
 test("DELETE permanently removes an archived Work and reports missing ids", async (t) => {

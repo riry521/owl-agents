@@ -107,6 +107,7 @@
     "pauseReason": "Paused from Work details.",
     "abortReason": "Owner cancelled from Work details.",
     "confirmAbort": "Cancel this Work? Its running Agents will be stopped, and this Work cannot be resumed.",
+    "deleteConfirm": "Permanently delete \"{{name}}\"? This cannot be undone. Its conversation, logs, worktree and branch will also be deleted.",
     "deleteUnmergedConfirm": "This Work has changes that are not merged into its Project base branch. Deleting it will discard them. Continue?",
     "deleteMultipleUnmergedConfirm": "{{count}} Works have changes that are not merged into their Project base branches. Deleting them will discard those changes. Continue?",
     "deleteUnmergedUnknownConfirm": "Could not confirm whether {{count}} Work(s) have changes that are not merged into their Project base branch. Deleting may discard those changes. Continue?",

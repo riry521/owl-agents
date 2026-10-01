@@ -7,7 +7,7 @@ import type { WorkSummary } from '@/lib/types';
 import { useLocale, type TFunction } from '@/lib/i18n';
 import { ArchiveBoxIcon, RestoreIcon, TrashIcon } from '@/components/icons';
 
-type ArchivableWork = Pick<WorkSummary, 'id' | 'title' | 'state' | 'state_version' | 'archived_at'>;
+type ArchivableWork = Pick<WorkSummary, 'id' | 'title' | 'display_number' | 'state' | 'state_version' | 'archived_at'>;
 
 export function WorkArchiveActions({
   work,
@@ -43,7 +43,10 @@ export function WorkArchiveActions({
   const handleDelete = () => {
     setPending(true);
     setError(null);
-    void removeWorks([work], 'delete', () => confirmDeleteIfUnmerged([work], t))
+    const name = work.title || t('work.numberLabel', { number: String(work.display_number ?? '') });
+    const confirmDelete = async () =>
+      window.confirm(t('work.deleteConfirm', { name })) && await confirmDeleteIfUnmerged([work], t);
+    void removeWorks([work], 'delete', confirmDelete)
       .then((deleted) => {
         if (deleted) onDeleted();
       })

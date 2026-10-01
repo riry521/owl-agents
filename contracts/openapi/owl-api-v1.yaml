@@ -203,7 +203,8 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
     delete:
       operationId: deleteWork
-      summary: Permanently delete an archived work
+      summary: Permanently delete a completed or cancelled work
+      description: Deletes only a work in completed or cancelled state; archiving is not required. The deletion is complete and leaves no trace (conversations, messages, learning jobs, backlog items, uploads, artifacts and worktrees are removed). Any other state returns 409 invalid_state_transition.
       security:
         - ownerBearer: []
       requestBody:
@@ -251,7 +252,6 @@ paths:
           description: Work state, version, or idempotency conflict.
           x-error-codes:
             - invalid_state_transition
-            - work_not_archived
             - work_has_active_agents
             - work_has_open_decisions
             - version_conflict
@@ -6614,7 +6614,8 @@ components:
       description: >-
         Supported types and payloads: create_work; start_work; pause_work {work_id,
         reason?}; resume_work {work_id}; reopen_work; cancel_work {work_id, reason?,
-        force?}; send_work_instruction {work_id, body, reopen?}; update_work {work_id,
+        force?}; delete_work {work_id, reason?} (completed or cancelled Works only;
+        permanently deletes); send_work_instruction {work_id, body, reopen?}; update_work {work_id,
         title?, summary?} (at least one); answer_decision; send_file; run_librarian /
         run_skill_curation / run_rule_curation. send_work_instruction requires a body
         of 1 to 100,000 characters. update_work replaces the complete title and/or
@@ -6669,6 +6670,7 @@ components:
             - resume_work
             - reopen_work
             - cancel_work
+            - delete_work
             - send_work_instruction
             - update_work
             - answer_decision

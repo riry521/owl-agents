@@ -193,6 +193,24 @@ test("cancel_work cancels the selected Work and appends a success notice", async
   assert.match(body, /キャンセルしました/u);
 });
 
+test("delete_work removes completed and cancelled Works from the DB", async (t) => {
+  const { db, core, respond } = await setup(t);
+  for (const state of ["completed", "cancelled"]) {
+    const workId = await createWorkInState(core, db, state, `delete-${state}`);
+    const { body } = await respond([action("delete_work", { work_id: workId })]);
+    assert.equal(db.get("SELECT id FROM works WHERE id = ?", workId), undefined);
+    assert.match(body, /削除しました/u);
+  }
+});
+
+test("delete_work on a running Work fails and keeps the Work", async (t) => {
+  const { db, core, respond } = await setup(t);
+  const workId = await createWorkInState(core, db, "running", "delete-running");
+  const { body } = await respond([action("delete_work", { work_id: workId })]);
+  assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "running");
+  assert.match(body, /削除できません/u);
+});
+
 test("missing, cancelled, and not-started Work instructions produce failure notices without changes", async (t) => {
   const { db, core, respond } = await setup(t);
   const readyId = await createWorkInState(core, db, "ready", "not-started");
@@ -261,6 +279,7 @@ test("toString is not treated as a Work operation type", async (t) => {
 
   assert.ok(workTypes instanceof Set);
   for (const type of ["toString", "constructor", "valueOf"]) assert.equal(workTypes.has(type), false);
+  assert.equal(workTypes.has("delete_work"), true);
 
   await assert.doesNotReject(respond([
     action("toString", { work_id: workId, body: "Must be ignored" }),
@@ -273,11 +292,11 @@ test("the Advisor system prompt explains Work operations and the confirmation ru
   const { core } = await setup(t);
   const prompt = core.buildAdvisorSystemPrompt("codex");
 
-  for (const type of ["send_work_instruction", "update_work", "pause_work", "resume_work", "cancel_work"]) {
+  for (const type of ["send_work_instruction", "update_work", "pause_work", "resume_work", "cancel_work", "delete_work"]) {
     assert.ok(prompt.includes(type), `prompt should document ${type}`);
   }
   assert.match(prompt, /send_work_instruction \(without reopen\), pause_work and resume_work in the same turn/u);
-  assert.match(prompt, /Never emit cancel_work or update_work before the operator confirms/u);
+  assert.match(prompt, /Never emit cancel_work, delete_work or update_work before the operator confirms/u);
   assert.match(prompt, /Adding reopen:true to an instruction for a completed Work also needs the operator's explicit approval/u);
   assert.match(prompt, /every turn carries an <owl-work-search> list/u);
   assert.match(prompt, /If several Works match or none does, ask which Work/u);

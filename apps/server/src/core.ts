@@ -604,7 +604,6 @@ export class MemoryCore implements CorePort {
     if (work.state !== "completed" && work.state !== "cancelled") {
       throw new ApiError(409, "invalid_state_transition", "完了またはキャンセル済みのWorkだけ操作できます。", { state: work.state });
     }
-    if (work.archived_at === null) throw new ApiError(409, "work_not_archived", "削除する前にWorkをアーカイブしてください。", { work_id: workId });
     const taskIds = new Set(work.tasks);
     if ([...this.agents.values()].some((run) => run.task_id !== null && taskIds.has(run.task_id) && ["launch_pending", "spawned", "running", "cancel_requested"].includes(run.status))) {
       throw new ApiError(409, "work_has_active_agents", "稼働中のAgentが残っているため削除できません。", { work_id: workId });

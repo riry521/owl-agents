@@ -44,7 +44,7 @@ export function buildAdvisorWorkCatalogInstruction(db: Pick<CoreDatabase, "all">
 
   return [
     "<owl-work-search>",
-    "Use this list to find the Work the operator means before any Work operation (send_work_instruction, update_work, pause_work, resume_work, cancel_work).",
+    "Use this list to find the Work the operator means before any Work operation (send_work_instruction, update_work, pause_work, resume_work, cancel_work, delete_work).",
     "Match the operator's words (title, \"Work #N\", Project, recent conversation) against it and use the exact id. display_number is the \"Work #N\" shown in the UI and is unique only within its Project. Never invent an id; if several Works match or none does, ask the operator which Work they mean.",
     `Active Works (running, paused or judgement_waiting; most recently updated first):\n${JSON.stringify(active, null, 2)}`,
     ...(hasMoreActive ? ["More active Works exist than are listed (showing the 50 most recently updated). Ask the operator for the Work ID if the target is not listed."] : []),

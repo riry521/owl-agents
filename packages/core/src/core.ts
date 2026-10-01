@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
 import { createHash as createFileHash } from "node:crypto";
-import { constants, existsSync, mkdirSync, statSync } from "node:fs";
-import { copyFile, lstat, mkdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { constants, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { copyFile, lstat, mkdir, readFile, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createUlid, utcNow } from "../../db/dist/index.js";
 import { DecisionService, type OpenDecisionPayload } from "./decision";
 import { managerReplanFailureBrief, RESOLVE_CONFLICT_OPTION_KEY } from "./decision-brief";
@@ -232,6 +232,7 @@ function advisorWorkKeyForType(type: AdvisorWorkOperationType): string {
     case "pause_work": return "pause";
     case "resume_work": return "resume";
     case "cancel_work": return "cancel";
+    case "delete_work": return "delete";
   }
 }
 
@@ -242,6 +243,7 @@ function advisorWorkTypeForKey(key: string): AdvisorWorkOperationType | null {
     case "pause": return "pause_work";
     case "resume": return "resume_work";
     case "cancel": return "cancel_work";
+    case "delete": return "delete_work";
     default: return null;
   }
 }
@@ -2199,21 +2201,6 @@ export class Core {
   ): Promise<CommandResponse<{ work_id: string; deleted: true }>> {
     if (!isUlidLike(workId)) throw validationError("Work id must be a canonical ULID.", { work_id: workId });
     const scopedKey = ["work.delete", workId, "-", "-", "-", request.idempotency_key].join(":");
-    const requestHash = hashRequest({
-      operation: "work.delete",
-      work_id: workId,
-      task_id: null,
-      agent_run_id: null,
-      resource_key: null,
-      expected_version: request.expected_version,
-      payload: request.payload,
-    });
-    const cached = this.db.get<StoredIdempotencyRow>("SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?", scopedKey);
-    if (cached) {
-      if (cached.request_hash !== requestHash) throw idempotencyConflict(scopedKey);
-      return parseCommandResponse<{ work_id: string; deleted: true }>(cached.response_json, scopedKey);
-    }
-
     const work = this.db.get<{ state: string; archived_at: string | null; state_version: number; project_id: string | null }>(
       "SELECT state, archived_at, state_version, project_id FROM works WHERE id = ?",
       workId,
@@ -2230,23 +2217,13 @@ export class Core {
       owlRoot: this.owlRoot,
       dataDir: this.dataDir,
     }, workId);
-    if (!cleanup.ok && cleanup.details?.stage === "work_lookup") {
-      const replay = this.db.get<StoredIdempotencyRow>("SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?", scopedKey);
-      if (replay) {
-        if (replay.request_hash !== requestHash) throw idempotencyConflict(scopedKey);
-        return parseCommandResponse<{ work_id: string; deleted: true }>(replay.response_json, scopedKey);
-      }
-      throw notFound("work", workId);
-    }
+    if (!cleanup.ok && cleanup.details?.stage === "work_lookup") throw notFound("work", workId);
     if (!cleanup.ok) throw worktreeCleanupError(workId, cleanup);
 
+    let artifactFiles: string[] = [];
+    let outputDirs: string[] = [];
     try {
       const response = await this.writeLane.transact((transaction) => {
-        const replay = transaction.get<StoredIdempotencyRow>("SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?", scopedKey);
-        if (replay) {
-          if (replay.request_hash !== requestHash) throw idempotencyConflict(scopedKey);
-          throw new ReplayCommand(parseCommandResponse<{ work_id: string; deleted: true }>(replay.response_json, scopedKey));
-        }
         const current = transaction.get<{ state: string; archived_at: string | null; state_version: number }>(
           "SELECT state, archived_at, state_version FROM works WHERE id = ?",
           workId,
@@ -2260,11 +2237,12 @@ export class Core {
         const taskJson = JSON.stringify(taskIds);
         const runJson = JSON.stringify(runIds);
         const decisionJson = JSON.stringify(decisionIds);
+        const convIds = transaction.all<{ id: string }>("SELECT id FROM conversations WHERE work_id = ?", workId).map((row) => row.id);
+        const convJson = JSON.stringify(convIds);
         const eventIds = transaction.all<{ id: string }>(
           `SELECT id FROM events
             WHERE work_id = ?
-               OR task_id IN (SELECT value FROM json_each(?))
-               OR agent_run_id IN (SELECT value FROM json_each(?))`,
+               OR (work_id IS NULL AND (task_id IN (SELECT value FROM json_each(?)) OR agent_run_id IN (SELECT value FROM json_each(?))))`,
           workId,
           taskJson,
           runJson,
@@ -2291,7 +2269,7 @@ export class Core {
             related.id,
           );
         }
-        for (const id of [workId, ...taskIds, ...runIds, ...decisionIds, ...reportIds, ...eventIds]) {
+        for (const id of [workId, ...taskIds, ...runIds, ...decisionIds, ...reportIds, ...eventIds, ...convIds]) {
           transaction.run(
             "DELETE FROM idempotency_keys WHERE key <> ? AND (instr(key, ?) > 0 OR instr(response_json, ?) > 0)",
             scopedKey,
@@ -2301,41 +2279,130 @@ export class Core {
         }
 
         const now = utcNow();
-        transaction.run(
-          `UPDATE conversations
-              SET work_id = NULL, archived_at = COALESCE(archived_at, ?), is_active = 0, updated_at = ?
-            WHERE work_id = ?`,
-          now,
-          now,
+        const uploads = transaction.all<{ id: string; artifact_id: string | null; shared_copy_path: string | null }>(
+          `SELECT id, artifact_id, shared_copy_path FROM inbound_uploads
+            WHERE work_id = ? OR (work_id IS NULL AND conversation_id IN (SELECT value FROM json_each(?)))`,
           workId,
+          convJson,
         );
-        transaction.run("UPDATE inbound_uploads SET work_id = NULL WHERE work_id = ?", workId);
-        transaction.run(
-          `UPDATE artifacts SET work_id = NULL, task_id = NULL, source_event_id = NULL
-            WHERE work_id = ? OR task_id IN (SELECT value FROM json_each(?)) OR source_event_id IN (SELECT value FROM json_each(?))`,
+        const uploadJson = JSON.stringify(uploads.map((upload) => upload.id));
+        // Another Work's artifacts are never ours, even when an upload or task points at them.
+        const artifacts = transaction.all<{ id: string; path: string }>(
+          `SELECT id, path FROM artifacts
+            WHERE work_id = ?
+               OR (work_id IS NULL AND (task_id IN (SELECT value FROM json_each(?)) OR source_event_id IN (SELECT value FROM json_each(?))
+                   OR id IN (SELECT value FROM json_each(?))))`,
           workId,
           taskJson,
           eventJson,
+          JSON.stringify(uploads.map((upload) => upload.artifact_id).filter((id) => id !== null)),
         );
+        const artifactJson = JSON.stringify(artifacts.map((artifact) => artifact.id));
+        // Delete a file only if its real path is inside data/, outside knowledge/, and no other row still uses it.
+        // Paths are compared by real path, so "./x", symlinks and the like cannot hide a shared file.
+        const dataRoot = realPathOrResolve(this.dataDir) + sep;
+        const knowledgeRoot = realPathOrResolve(join(this.owlRoot, "knowledge")) + sep;
+        const real = (path: string) => realPathOrResolve(resolve(this.owlRoot, path));
+        const inUse = new Set<string>([
+          ...transaction.all<{ path: string }>("SELECT path FROM artifacts WHERE id NOT IN (SELECT value FROM json_each(?))", artifactJson).map((row) => real(row.path)),
+          ...transaction.all<{ path: string }>(
+            "SELECT shared_copy_path AS path FROM inbound_uploads WHERE shared_copy_path IS NOT NULL AND id NOT IN (SELECT value FROM json_each(?))",
+            uploadJson,
+          ).map((row) => real(row.path)),
+        ]);
+        const outputFiles: string[] = [];
+        const walk = (dir: string): void => {
+          let entries;
+          try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+          for (const entry of entries) {
+            const full = join(dir, entry.name);
+            if (entry.isDirectory()) { walk(full); outputDirs.push(full); }
+            else outputFiles.push(full);
+          }
+        };
+        outputDirs = [];
+        walk(join(this.dataDir, "outputs", workId));
+        outputDirs.push(join(this.dataDir, "outputs", workId));
+        artifactFiles = [...new Set([
+          ...artifacts.map((artifact) => real(artifact.path)),
+          ...uploads.filter((upload) => upload.artifact_id === null).map((upload) => real(join(this.dataDir, "uploads", ".tmp", `${upload.id}.part`))),
+          ...uploads.flatMap((upload) => (upload.shared_copy_path ? [real(upload.shared_copy_path)] : [])),
+          ...outputFiles.map(real),
+        ])].filter((file) => file.startsWith(dataRoot) && !file.startsWith(knowledgeRoot) && !inUse.has(file) && isRegularFile(file));
+        const messageJson = JSON.stringify(
+          transaction.all<{ id: string }>(
+            "SELECT id FROM messages WHERE conversation_id IN (SELECT value FROM json_each(?))",
+            convJson,
+          ).map((row) => row.id),
+        );
+        transaction.run("DELETE FROM inbound_receipts WHERE message_id IN (SELECT value FROM json_each(?))", messageJson);
         transaction.run("UPDATE inbound_receipts SET event_id = NULL WHERE event_id IN (SELECT value FROM json_each(?))", eventJson);
+        transaction.run("DELETE FROM advisor_turns WHERE conversation_id IN (SELECT value FROM json_each(?))", convJson);
+        transaction.run("DELETE FROM advisor_compactions WHERE conversation_id IN (SELECT value FROM json_each(?))", convJson);
+        transaction.run("DELETE FROM advisor_sessions WHERE conversation_id IN (SELECT value FROM json_each(?))", convJson);
+        transaction.run("DELETE FROM conversation_summaries WHERE conversation_id IN (SELECT value FROM json_each(?))", convJson);
+        transaction.run(
+          "DELETE FROM inbound_uploads WHERE id IN (SELECT value FROM json_each(?))",
+          uploadJson,
+        );
+        transaction.run("DELETE FROM messages WHERE conversation_id IN (SELECT value FROM json_each(?))", convJson);
+        transaction.run("DELETE FROM conversations WHERE id IN (SELECT value FROM json_each(?))", convJson);
+        transaction.run("DELETE FROM artifacts WHERE id IN (SELECT value FROM json_each(?))", artifactJson);
+        transaction.run("DELETE FROM learning_jobs WHERE work_id = ?", workId);
+        transaction.run(
+          "DELETE FROM skill_usages WHERE work_id = ? OR (work_id IS NULL AND agent_run_id IN (SELECT value FROM json_each(?)))",
+          workId,
+          runJson,
+        );
+        for (const table of ["skill_revisions", "skill_proposals"]) {
+          transaction.run(`UPDATE ${table} SET source_work_id = NULL WHERE source_work_id = ?`, workId);
+          transaction.run(`UPDATE ${table} SET source_agent_run_id = NULL WHERE source_agent_run_id IN (SELECT value FROM json_each(?))`, runJson);
+        }
+        // Drop references to this Work / its runs inside JSON text, keeping the rest of the body.
+        const goneIds = new Set<string>([workId, ...runIds]);
+        // Only values under reference keys change; reason, files, meta and other bodies stay as they are.
+        const refKey = /^(source_|related_)?(work|agent_run)_ids?$/;
+        const scrub = (value: unknown): unknown => {
+          if (Array.isArray(value)) return value.map(scrub);
+          if (value === null || typeof value !== "object") return value;
+          return Object.fromEntries(Object.entries(value).map(([key, item]) => {
+            if (refKey.test(key)) {
+              if (typeof item === "string" && goneIds.has(item)) return [key, null];
+              if (Array.isArray(item)) return [key, item.filter((id) => !(typeof id === "string" && goneIds.has(id)))];
+            }
+            return [key, scrub(item)];
+          }));
+        };
+        for (const table of ["skill_proposals", "skills", "skill_revisions", "rule_proposals", "curation_runs"]) {
+          const columns = transaction.all<{ name: string; type: string }>(`PRAGMA table_info(${table})`)
+            .filter((column) => column.type.toUpperCase() === "TEXT" && !column.name.endsWith("_id")).map((column) => column.name);
+          for (const column of columns) {
+            for (const id of goneIds) {
+              for (const row of transaction.all<{ rowid: number; value: string }>(`SELECT rowid, ${column} AS value FROM ${table} WHERE instr(${column}, ?) > 0`, id)) {
+                let parsed: unknown;
+                try { parsed = JSON.parse(row.value); } catch { continue; }
+                if (parsed === null || typeof parsed !== "object") continue;
+                transaction.run(`UPDATE ${table} SET ${column} = ? WHERE rowid = ?`, JSON.stringify(scrub(parsed)), row.rowid);
+              }
+            }
+          }
+        }
+        transaction.run("UPDATE provider_pauses SET last_work_id = NULL WHERE last_work_id = ?", workId);
+        transaction.run("UPDATE provider_pauses SET last_task_id = NULL WHERE last_task_id IN (SELECT value FROM json_each(?))", taskJson);
+        transaction.run("DELETE FROM rule_proposal_sources WHERE source_kind = 'work' AND source_ref = ?", workId);
+        for (const proposal of transaction.all<{ id: string; source_work_ids_json: string }>(
+          "SELECT id, source_work_ids_json FROM rule_proposals WHERE instr(source_work_ids_json, ?) > 0",
+          workId,
+        )) {
+          const ids = JSON.parse(proposal.source_work_ids_json) as unknown;
+          if (!Array.isArray(ids)) continue;
+          transaction.run("UPDATE rule_proposals SET source_work_ids_json = ? WHERE id = ?", JSON.stringify(ids.filter((id) => id !== workId)), proposal.id);
+        }
         transaction.run("UPDATE secret_audit SET agent_run_id = NULL WHERE agent_run_id IN (SELECT value FROM json_each(?))", runJson);
 
-        transaction.run("UPDATE tasks SET parent_task_id = NULL WHERE parent_task_id IN (SELECT value FROM json_each(?))", taskJson);
-        transaction.run(
-          `UPDATE agent_runs
-              SET parent_agent_id = NULL, retry_of_run_id = NULL, task_id = NULL, subtask_id = NULL, report_id = NULL
-            WHERE parent_agent_id IN (SELECT value FROM json_each(?))
-               OR retry_of_run_id IN (SELECT value FROM json_each(?))
-               OR task_id IN (SELECT value FROM json_each(?))
-               OR subtask_id IN (SELECT value FROM json_each(?))
-               OR report_id IN (SELECT value FROM json_each(?))`,
-          runJson,
-          runJson,
-          taskJson,
-          taskJson,
-          reportJson,
-        );
-
+        // Break reference cycles among this Work's own rows only.
+        transaction.run("UPDATE agent_runs SET parent_agent_id = NULL, retry_of_run_id = NULL, report_id = NULL WHERE work_id = ?", workId);
+        transaction.run("UPDATE tasks SET parent_task_id = NULL WHERE work_id = ?", workId);
         transaction.run(
           `DELETE FROM task_dependencies
             WHERE task_id IN (SELECT value FROM json_each(?)) OR depends_on_task_id IN (SELECT value FROM json_each(?))`,
@@ -2349,9 +2416,9 @@ export class Core {
         transaction.run(
           `DELETE FROM agent_activity
             WHERE work_id = ?
-               OR task_id IN (SELECT value FROM json_each(?))
-               OR agent_run_id IN (SELECT value FROM json_each(?))
-               OR source_event_id IN (SELECT value FROM json_each(?))`,
+               OR (work_id IS NULL AND (task_id IN (SELECT value FROM json_each(?))
+                   OR agent_run_id IN (SELECT value FROM json_each(?))
+                   OR source_event_id IN (SELECT value FROM json_each(?))))`,
           workId,
           taskJson,
           runJson,
@@ -2370,19 +2437,15 @@ export class Core {
           data: { work_id: workId, deleted: true },
           version: current?.state_version ?? 0,
         };
-        transaction.run(
-          `INSERT INTO idempotency_keys
-             (key, request_hash, response_json, status_code, created_at, expires_at)
-           VALUES (?, ?, ?, 200, ?, ?)`,
-          scopedKey,
-          requestHash,
-          JSON.stringify(response),
-          now,
-          new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
-        );
+        // No idempotency row: its key and response carry the Work id, and a delete leaves no trace.
         return response;
       });
       this.workDriver.unregister(workId);
+      for (const file of artifactFiles) {
+        await rm(file, { recursive: true, force: true }).catch((error) => console.warn(`[owl-core] Deleted Work ${workId}, but ${file} could not be removed`, error));
+      }
+      // Output directories go only when empty: files another Work still uses stay.
+      for (const dir of outputDirs) await rmdir(dir).catch(() => undefined);
       try {
         await rm(designDocumentPath(this.dataDir, workId), { recursive: true, force: true });
       } catch (error) {
@@ -4942,6 +5005,9 @@ export class Core {
         case "cancel_work":
           await this.cancelWork(workId, { ...request, payload: { reason: cancelReason!, force: false } });
           return t.workCancelledNotice(ref);
+        case "delete_work":
+          await this.deleteWork(workId, { ...request, payload: {} });
+          return t.workDeletedNotice(ref);
       }
     } catch (error) {
       const code = isRecord(error) && typeof error.code === "string" ? error.code : null;
@@ -7884,6 +7950,14 @@ function hashRequest(payload: JsonObject): string {
   return createHash("sha256").update(stableJson(payload), "utf8").digest("hex");
 }
 
+function realPathOrResolve(path: string): string {
+  try { return realpathSync(path); } catch { return resolve(path); }
+}
+
+function isRegularFile(path: string): boolean {
+  try { return lstatSync(path).isFile(); } catch { return false; }
+}
+
 function assertWorkDeletable(
   workId: string,
   work: { readonly state: string; readonly archived_at: string | null; readonly state_version: number } | undefined,
@@ -7892,14 +7966,6 @@ function assertWorkDeletable(
   if (!work) throw notFound("work", workId);
   if (work.state !== "completed" && work.state !== "cancelled") {
     throw invalidStateTransition("Only completed or cancelled Works can be deleted.", { work_id: workId, state: work.state });
-  }
-  if (work.archived_at === null) {
-    throw new HumanReadableError({
-      code: "work_not_archived",
-      message: "Archive this Work before deleting it.",
-      remediation: "Archive the completed or cancelled Work, then retry the delete command.",
-      details: { work_id: workId },
-    });
   }
   if (work.state_version !== expectedVersion) throw versionConflict(expectedVersion, work.state_version);
 }
