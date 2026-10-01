@@ -20,6 +20,7 @@ import { AgentRunTree, ArchivedBadge, HybridPhaseBadge, TaskStateBadge, WorkStat
 import { WorkArchiveActions } from '@/components/WorkArchiveActions';
 // Relative on purpose: the node component tests stub the `@/` modules.
 import { activeRunByTask, buildRunTree, isRunActive } from '../lib/agent-run-tree.mjs';
+import { orderTasksByStage } from '../lib/task-stages.mjs';
 import { useLocale } from '@/lib/i18n';
 import { WorkSummaryBlock } from '@/components/WorkSummaryBlock';
 
@@ -271,7 +272,7 @@ export function WorkPreviewPanel({ workId, onBack, onDeleted }: WorkPreviewPanel
             <p className="empty">{t('work.noTasks')}</p>
           ) : (
             <div className="list">
-              {tasks.map((tk) => {
+              {orderTasksByStage(tasks).map(({ task: tk, label: stageLabel }) => {
                 const live = liveRunByTask.get(tk.id);
                 const rowClass = tk.status === 'completed' ? 'row row--done' : live ? 'row row--running' : 'row';
                 // A Task whose agents are still working must not read as idle (waiting).
@@ -288,7 +289,7 @@ export function WorkPreviewPanel({ workId, onBack, onDeleted }: WorkPreviewPanel
                   <div className={rowClass} key={tk.id}>
                     <span className={dotClass} />
                     <div className="row__main">
-                      <div className="row__title row__title--task">{tk.title}</div>
+                      <div className="row__title row__title--task">{stageLabel ? `${stageLabel}. ${tk.title}` : tk.title}</div>
                       {live && <div className="row__sub">{label(live)} {t('work.working')}</div>}
                       {live?.phase && (
                         <div className="chips chips--tight">
