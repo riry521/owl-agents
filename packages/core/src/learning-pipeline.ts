@@ -180,7 +180,7 @@ export class LearningJobs {
     this.now = options.now ?? utcNow;
   }
 
-  /** Insert or merge the Work's normalized lessons using the §2.4 state table. */
+  /** Insert or merge the Work's normalized lessons using the lesson state table. */
   public async enqueue(
     workId: string,
     agentRunId: string | null,

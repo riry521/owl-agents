@@ -552,7 +552,7 @@ export class Core {
       throw validationError("Core requires db, agentRunner, and a non-empty version.", { fields: ["db", "agentRunner", "version"] });
     }
     this.options = options;
-    // §9.2 uses the same initial debounce for LearningPipeline and SkillCurator.
+    // LearningPipeline and SkillCurator share the same initial debounce.
     this.learningPipelineDebounceMs = Number.isSafeInteger(options.skillCuratorDebounceMs)
       && (options.skillCuratorDebounceMs ?? -1) >= 0
       ? options.skillCuratorDebounceMs as number

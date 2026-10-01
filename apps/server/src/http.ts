@@ -1704,7 +1704,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   if (pathname === `${API_PREFIX}/system/status` && method === "GET") {
     requireOwner(request);
     parseBoolean(url.searchParams.get("verbose"), false);
-    // data_dir lets connectors store inbound files next to the server's data (§ SystemStatusResponse).
+    // data_dir lets connectors store inbound files next to the server's data.
     sendJson(response, 200, { ...(context.core.status() as unknown as Record<string, unknown>), data_dir: context.dataDir });
     return;
   }

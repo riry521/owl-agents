@@ -129,7 +129,7 @@ function isSafeRelativePath(root: string, path: string): boolean {
   return path !== "" && !isAbsolute(path) && resolvedPath !== resolvedRoot && isInside(resolvedRoot, resolvedPath);
 }
 
-// Entries excluded from target emptiness checks and file-set verification (design §3.4).
+// Entries excluded from target emptiness checks and file-set verification.
 function isIgnoredEntry(path: string): boolean {
   return path === ".DS_Store" || path.endsWith(`${sep}.DS_Store`) || path === KNOWLEDGE_MARKER_FILE;
 }

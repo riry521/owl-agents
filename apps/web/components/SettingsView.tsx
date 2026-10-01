@@ -64,6 +64,10 @@ const ROLE_META: Record<string, { gradient: string; desc: string; icon: string }
 
 type RoleRow = RoleModelSettingInput & { catalog_version: string };
 
+const KNOWLEDGE_TARGET_INVALID_REASONS = [
+  'not_empty', 'not_writable', 'nested', 'reserved', 'same_as_current', 'parent_missing', 'not_directory', 'relink_requires_unavailable',
+];
+
 function toRows(roles: RoleModelSetting[]): RoleRow[] {
   const byRole = new Map(roles.map((r) => [r.role, r]));
   return ROLE_ORDER.map((role) => {
@@ -823,8 +827,11 @@ export function KnowledgeStorageSection() {
       setPath(saved.custom ? saved.path : '');
       setNotice(t('settings.knowledgeStorageSaved', { path: saved.path }));
     } catch (err) {
-      // 4xx messages come from server-side validation; show them verbatim.
-      setError(err instanceof ApiRequestError && err.status !== null && err.status < 500 ? err.rawMessage : humanizeError(err, t));
+      const reason = err instanceof ApiRequestError && err.code === 'knowledge_target_invalid' ? err.details.reason : undefined;
+      const reasonKey = typeof reason === 'string' ? `settings.knowledgeStorageTargetInvalid_${reason}` : null;
+      const localized = reasonKey !== null && KNOWLEDGE_TARGET_INVALID_REASONS.includes(reason as string) ? t(reasonKey) : null;
+      // Other 4xx messages come from server-side validation; show them verbatim.
+      setError(localized ?? (err instanceof ApiRequestError && err.status !== null && err.status < 500 ? err.rawMessage : humanizeError(err, t)));
     } finally {
       setMoving(false);
     }
