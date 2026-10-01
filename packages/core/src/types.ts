@@ -734,6 +734,31 @@ export interface CreateWorkData extends JsonObject {
   readonly state_version: number;
 }
 
+export interface UpdateWorkPayload extends JsonObject {
+  readonly title?: string;
+  readonly summary?: string;
+}
+
+export interface UpdateWorkData extends JsonObject {
+  readonly work_id: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly state: WorkState;
+  readonly changed_fields: readonly ("title" | "summary")[];
+  readonly replan_queued: boolean;
+}
+
+export interface ResumeWorkOrRetryPayload extends JsonObject {
+  readonly source?: "web" | "slack" | "discord" | "advisor";
+}
+
+export interface ResumeWorkOrRetryData extends JsonObject {
+  readonly work_id: string;
+  readonly state: "running" | "judgement_waiting";
+  readonly resumed_by: "resume" | "retry_decision";
+  readonly decision_id: string | null;
+}
+
 export interface WorkSummary extends JsonObject {
   readonly id: string;
   readonly display_number: number | null;

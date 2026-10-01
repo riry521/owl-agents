@@ -9,6 +9,26 @@ export interface ParsedAdvisorResponse {
   readonly suggested_actions: readonly AdvisorSuggestedAction[];
 }
 
+export type AdvisorWorkOperationType =
+  | "send_work_instruction"
+  | "update_work"
+  | "pause_work"
+  | "resume_work"
+  | "cancel_work";
+
+/** Work-operation action types from owl-actions. Use `.has` for untrusted action types. */
+export const ADVISOR_WORK_OPERATION_ACTION_TYPES: ReadonlySet<string> = new Set<AdvisorWorkOperationType>([
+  "send_work_instruction",
+  "update_work",
+  "pause_work",
+  "resume_work",
+  "cancel_work",
+]);
+
+export function isAdvisorWorkOperationType(type: string): type is AdvisorWorkOperationType {
+  return ADVISOR_WORK_OPERATION_ACTION_TYPES.has(type);
+}
+
 interface SourceLine {
   readonly content: string;
   readonly start: number;

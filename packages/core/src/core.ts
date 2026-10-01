@@ -25,6 +25,7 @@ import {
   reduceWorkInTransaction,
   restoreCascadedDependentsInTransaction,
   setWorkArchivedInTransaction,
+  updateWorkFieldsInTransaction,
   taskDependenciesCompletedInTransaction,
 } from "./state-reducer";
 import { WorkDriver } from "./work-driver";
@@ -80,12 +81,17 @@ import { recoverOrphanedState } from "./startup-recovery.js";
 import { cleanupWorkForDeletion, reconcileWorktrees, type WorktreeReconcileFailure } from "./worktree-reconciler.js";
 import { processIdentityMatches, readProcessIdentity } from "./process-identity.js";
 import { formatRuntimeFailure } from "./error-display.js";
-import { ADVISOR_TEXT } from "./advisor-text.js";
+import { ADVISOR_TEXT, workRef } from "./advisor-text.js";
 import { ownerGuidance } from "./owner-guidance.js";
 import { failedTaskBrief } from "./task-context.js";
 import { detectProcessSkillsPack, type DetectedProcessSkillsPack } from "./process-skills-pack.js";
 import { ResearchRecorder, type ResearchAttributionRole } from "./research-recorder.js";
 import { RESEARCH_CAPTURE_ROLES } from "../../shared/dist/permission-args.js";
+import {
+  ADVISOR_WORK_OPERATION_ACTION_TYPES,
+  isAdvisorWorkOperationType,
+  type AdvisorWorkOperationType,
+} from "../../shared/dist/advisor-response.js";
 import {
   BACKLOG_STATUSES,
   applyAdvisorBacklogInTransaction,
@@ -129,6 +135,7 @@ import {
   type WebResearchCapture,
 } from "@owl/shared";
 import { buildAdvisorProjectCatalogInstruction } from "./advisor-project-context";
+import { buildAdvisorWorkCatalogInstruction } from "./advisor-work-context";
 import { createProviderPauseStore, type ProviderPauseRow, type ProviderPauseStore } from "./provider-pause-store";
 import { createProviderPauseController, type ProviderPauseController, type ProviderPauseEvent } from "./provider-pause-controller";
 // Imported from the agent-runtime "types" submodule (not the package barrel) for the
@@ -185,7 +192,11 @@ import type {
   TaskPlanItem,
   TaskRow,
   TaskState,
+  UpdateWorkData,
+  UpdateWorkPayload,
   WorkState,
+  ResumeWorkOrRetryData,
+  ResumeWorkOrRetryPayload,
   TaskSummary,
   UpdateModelSettingsPayload,
   UpdateModelPresetPayload,
@@ -193,6 +204,7 @@ import type {
   WorkDetail,
   WorkProgress,
   WorkListQuery,
+  WorkRow,
   WorkSummary,
   AdvisorRunRequest,
   AdvisorRunResult,
@@ -204,6 +216,27 @@ import type {
 } from "./types";
 
 type PushAlertKind = "work_push_failed" | "work_push_blocked_by_hook" | "work_push_skipped_no_upstream";
+
+function advisorWorkKeyForType(type: AdvisorWorkOperationType): string {
+  switch (type) {
+    case "send_work_instruction": return "instruction";
+    case "update_work": return "update";
+    case "pause_work": return "pause";
+    case "resume_work": return "resume";
+    case "cancel_work": return "cancel";
+  }
+}
+
+function advisorWorkTypeForKey(key: string): AdvisorWorkOperationType | null {
+  switch (key) {
+    case "instruction": return "send_work_instruction";
+    case "update": return "update_work";
+    case "pause": return "pause_work";
+    case "resume": return "resume_work";
+    case "cancel": return "cancel_work";
+    default: return null;
+  }
+}
 
 function pushAlertText(
   language: OwnerLanguage,
@@ -1866,6 +1899,100 @@ export class Core {
     return response;
   }
 
+  public async resumeWorkOrRetryDecision(
+    workId: string,
+    request: CommandRequest<ResumeWorkOrRetryPayload>,
+  ): Promise<CommandResponse<ResumeWorkOrRetryData>> {
+    const event = { type: "work.resume_or_retry", workId };
+    const { scopedKey, requestHash } = this.commandScope(request, event);
+    const cached = this.db.get<StoredIdempotencyRow>(
+      "SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?",
+      scopedKey,
+    );
+    if (cached) {
+      if (cached.request_hash !== requestHash) throw idempotencyConflict(scopedKey);
+      return parseCommandResponse<ResumeWorkOrRetryData>(cached.response_json, scopedKey);
+    }
+
+    const work = this.db.get<{ state: WorkState; state_version: number }>(
+      "SELECT state, state_version FROM works WHERE id = ?",
+      workId,
+    );
+    if (!work) throw notFound("work", workId);
+
+    if (work.state === "paused") {
+      const response = await this.resumeWork(workId, {
+        request_id: request.request_id,
+        idempotency_key: request.idempotency_key,
+        expected_version: request.expected_version,
+        payload: {},
+      });
+      return this.runConditionalWorkCommand(request, event, () => ({
+        data: { work_id: workId, state: response.data.state, resumed_by: "resume", decision_id: null },
+        version: response.version,
+        events: [],
+      }));
+    }
+
+    if (work.state === "judgement_waiting") {
+      const decisions = this.db.all<{ id: string; options_json: string; state_version: number }>(
+        `SELECT id, options_json, state_version FROM decisions
+          WHERE work_id = ? AND status = 'open' AND scope = 'work'
+          ORDER BY id ASC`,
+        workId,
+      );
+      let retryDecision: { id: string; state_version: number; label: string | null } | null = null;
+      for (const decision of decisions) {
+        try {
+          const options = JSON.parse(decision.options_json) as unknown;
+          if (!Array.isArray(options)) continue;
+          const option = options.find((candidate) => isRecord(candidate) && candidate.key === "retry");
+          if (option && isRecord(option)) {
+            retryDecision = {
+              id: decision.id,
+              state_version: decision.state_version,
+              label: typeof option.label === "string" ? option.label : null,
+            };
+            break;
+          }
+        } catch {
+          // Ignore malformed Decisions and inspect the next open one.
+        }
+      }
+      if (retryDecision) {
+        if (request.expected_version !== work.state_version) {
+          throw versionConflict(request.expected_version, work.state_version);
+        }
+        await this.answerDecision(retryDecision.id, {
+          request_id: request.request_id,
+          idempotency_key: request.idempotency_key,
+          expected_version: retryDecision.state_version,
+          payload: {
+            answer: retryDecision.label ?? "retry",
+            option_key: "retry",
+            source: "advisor",
+            source_message_id: null,
+          },
+        });
+        const resumed = this.db.get<{ state: "running" | "judgement_waiting"; state_version: number }>(
+          "SELECT state, state_version FROM works WHERE id = ?",
+          workId,
+        );
+        if (!resumed) throw notFound("work", workId);
+        return this.runConditionalWorkCommand(request, event, () => ({
+          data: { work_id: workId, state: resumed.state, resumed_by: "retry_decision", decision_id: retryDecision.id },
+          version: resumed.state_version,
+          events: [],
+        }));
+      }
+    }
+
+    throw invalidStateTransition(
+      "Only a paused Work, or a Work stopped by an error with a retry option, can be resumed.",
+      { work_id: workId, state: work.state, reason: "not_resumable" },
+    );
+  }
+
   public async cancelWork(
     workId: string,
     request: CommandRequest<{ reason: string; force?: boolean } & JsonObject>,
@@ -2251,6 +2378,51 @@ export class Core {
       return { data: { work_id: workId, state: "running" as const }, version: result.next.state_version, events };
     });
     this.workDriver.register(workId);
+    return response;
+  }
+
+  public async updateWork(
+    workId: string,
+    request: CommandRequest<UpdateWorkPayload>,
+  ): Promise<CommandResponse<UpdateWorkData>> {
+    const { title, summary } = request.payload;
+    if (title === undefined && summary === undefined) {
+      throw validationError("Specify a new title or summary.", { field: "title" });
+    }
+    if (title !== undefined && (typeof title !== "string" || title.trim().length < 1 || title.length > 500)) {
+      throw validationError("Work title must contain between 1 and 500 characters.", { field: "title" });
+    }
+    if (summary !== undefined && (typeof summary !== "string" || summary.length > 20000)) {
+      throw validationError("Work summary cannot exceed 20,000 characters.", { field: "summary" });
+    }
+
+    const response = await this.runConditionalWorkCommand(request, { type: "work.updated", workId }, (transaction) => {
+      const now = utcNow();
+      const result = updateWorkFieldsInTransaction(transaction, workId, request.expected_version, { title, summary }, now);
+      const replanQueued = result.changed_fields.length > 0 &&
+        (result.before.state === "running" || result.before.state === "paused" || result.before.state === "judgement_waiting");
+      if (replanQueued) {
+        mergeOwnerReplanInTransaction(transaction, workId, {
+          kind: "work_update",
+          answer: workUpdateReplanAnswer(result.before, result.after, result.changed_fields),
+        });
+      }
+      return {
+        data: {
+          work_id: workId,
+          title: result.after.title,
+          summary: result.after.summary,
+          state: result.before.state,
+          changed_fields: result.changed_fields,
+          replan_queued: replanQueued,
+        },
+        version: result.before.state_version,
+        events: result.changed_fields.length > 0
+          ? [{ type: "work.updated", payload: { work_id: workId, changed_fields: result.changed_fields, title: result.after.title }, createdAt: now }]
+          : [],
+      };
+    });
+    if (response.data.replan_queued && response.data.state === "running") this.workDriver.wake(workId);
     return response;
   }
 
@@ -4063,7 +4235,7 @@ export class Core {
         messages,
         invocation_id: invocationId,
         system_prompt: addAdvisorReplyTargetInstruction(
-          `${this.buildAdvisorSystemPrompt(this.advisorHarness(advisorProvider))}\n\n${buildAdvisorProjectCatalogInstruction(this.db)}`,
+          `${this.buildAdvisorSystemPrompt(this.advisorHarness(advisorProvider))}\n\n${buildAdvisorProjectCatalogInstruction(this.db)}\n\n${buildAdvisorWorkCatalogInstruction(this.db)}`,
           origin?.channel ?? "web",
         ),
         ...(advisorRoleModel ? {
@@ -4355,23 +4527,37 @@ export class Core {
     const t = ADVISOR_TEXT[ownerLanguage(this.db)];
     const rows = this.db.all<{ key: string; response_json: string }>(
       "SELECT key, response_json FROM idempotency_keys WHERE key LIKE ?",
-      `system.alert:-:-:-:-:advisor-work:${turnId}:%:create`,
+      `%:advisor-work:${turnId}:%`,
     );
     for (const row of rows) {
-      // createWork's scoped key: system.alert : - : - : - : - : advisor-work : turnId : index : create
+      // Work commands scope their key as <event>:<work>:-:-:-:advisor-work:turn:index:op.
       const parts = row.key.split(":");
-      if (parts.length !== 9 || parts[5] !== "advisor-work" || parts[6] !== turnId || parts[8] !== "create") continue;
+      if (parts.length !== 9 || parts[5] !== "advisor-work" || parts[6] !== turnId) continue;
       const index = Number.parseInt(parts[7], 10);
       if (!Number.isInteger(index) || index < 0) continue;
       let response: unknown;
       try {
         response = JSON.parse(row.response_json);
       } catch (parseError) {
-        console.warn("[owl-core] Skipping malformed advisor-work create idempotency response_json", parseError);
+        console.warn("[owl-core] Skipping malformed advisor-work idempotency response_json", parseError);
         continue;
       }
       if (!isRecord(response) || !isRecord(response.data) || typeof response.data.work_id !== "string") continue;
       const workId = response.data.work_id;
+
+      if (parts[8] !== "create") {
+        const actionType = advisorWorkTypeForKey(parts[8]!);
+        if (!actionType) continue;
+        const work = this.db.get<{ title: string; display_number: number | null }>(
+          "SELECT title, display_number FROM works WHERE id = ?",
+          workId,
+        );
+        if (!work) continue;
+        recoveredIndexes.add(index);
+        notices.push(t.workActionAlreadyApplied(actionType, workRef(ownerLanguage(this.db), work.title, work.display_number, workId)));
+        continue;
+      }
+
       const work = this.db.get<{ title: string; size: "small" | "normal" | "large"; state: WorkState; state_version: number }>(
         "SELECT title, size, state, state_version FROM works WHERE id = ?",
         workId,
@@ -4448,6 +4634,13 @@ export class Core {
         }
         continue;
       }
+      if (ADVISOR_WORK_OPERATION_ACTION_TYPES.has(action.type)) {
+        if (!isAdvisorWorkOperationType(action.type)) continue;
+        handledIndexes.add(index);
+        if (recoveredIndexes.has(index)) continue;
+        notices.push(await this.runAdvisorWorkOperation(turnId, index, action, action.type, t));
+        continue;
+      }
       if (action.type !== "create_work") continue;
       handledIndexes.add(index);
       if (recoveredIndexes.has(index)) {
@@ -4517,6 +4710,114 @@ export class Core {
       }
     }
     return { notices, handledIndexes };
+  }
+
+  private async runAdvisorWorkOperation(
+    turnId: string,
+    index: number,
+    action: AdvisorSuggestedAction,
+    type: AdvisorWorkOperationType,
+    t: (typeof ADVISOR_TEXT)[OwnerLanguage],
+  ): Promise<string> {
+    const payload = action.payload;
+    const rawWorkId = payload?.work_id;
+    if (typeof rawWorkId !== "string" || rawWorkId.trim().length < 1 || rawWorkId.trim().length > 128) {
+      return t.workActionIncomplete(type);
+    }
+    const workId = rawWorkId.trim();
+    let body: string | undefined;
+    let reopen = false;
+    let title: string | undefined;
+    let summary: string | undefined;
+    let pauseReason = "Advisor requested pause.";
+    let cancelReason: string | undefined;
+
+    if (type === "send_work_instruction") {
+      const rawBody = payload?.body;
+      const requestedReopen = payload?.reopen;
+      if (typeof rawBody !== "string" || rawBody.trim().length < 1 || rawBody.length > 100_000 || (requestedReopen !== undefined && typeof requestedReopen !== "boolean")) {
+        return t.workActionIncomplete(type);
+      }
+      body = rawBody.trim();
+      reopen = requestedReopen === true;
+    } else if (type === "update_work") {
+      const rawTitle = payload?.title;
+      const rawSummary = payload?.summary;
+      if (
+        (rawTitle === undefined && rawSummary === undefined) ||
+        (rawTitle !== undefined && (typeof rawTitle !== "string" || rawTitle.trim().length < 1 || rawTitle.length > 500)) ||
+        (rawSummary !== undefined && (typeof rawSummary !== "string" || rawSummary.trim().length < 1 || rawSummary.length > 20_000))
+      ) {
+        return t.workActionIncomplete(type);
+      }
+      title = typeof rawTitle === "string" ? rawTitle.trim() : undefined;
+      summary = typeof rawSummary === "string" ? rawSummary.trim() : undefined;
+    } else if (type === "pause_work") {
+      const reason = payload?.reason;
+      if (reason !== undefined && (typeof reason !== "string" || reason.length > 1_000)) return t.workActionIncomplete(type);
+      if (typeof reason === "string") pauseReason = reason.trim();
+    } else if (type === "cancel_work") {
+      const reason = payload?.reason;
+      if (typeof reason !== "string" || reason.trim().length < 1 || reason.trim().length > 1_000) return t.workActionIncomplete(type);
+      cancelReason = reason.trim();
+    }
+
+    const language = ownerLanguage(this.db);
+    const work = this.db.get<{ title: string; display_number: number | null; state: WorkState; state_version: number }>(
+      "SELECT title, display_number, state, state_version FROM works WHERE id = ?",
+      workId,
+    );
+    if (!work) return t.workNotFound(workId);
+    const ref = workRef(language, work.title, work.display_number, workId);
+    const request = {
+      request_id: turnId,
+      idempotency_key: `advisor-work:${turnId}:${index}:${advisorWorkKeyForType(type)}`,
+      expected_version: work.state_version,
+    };
+
+    try {
+      switch (type) {
+        case "send_work_instruction": {
+          await this.postWorkInstruction(workId, { ...request, payload: { body: body!, reopen } });
+          return work.state === "completed" ? t.instructionSentReopened(ref) : t.instructionSent(ref);
+        }
+        case "update_work": {
+          const result = await this.updateWork(workId, {
+            ...request,
+            payload: { ...(title === undefined ? {} : { title }), ...(summary === undefined ? {} : { summary }) },
+          });
+          return result.data.changed_fields.length === 0
+            ? t.workUnchanged(ref)
+            : t.workUpdated(ref, result.data.changed_fields, result.data.replan_queued);
+        }
+        case "pause_work":
+          await this.pauseWork(workId, { ...request, payload: { reason: pauseReason } });
+          return t.workPaused(ref);
+        case "resume_work": {
+          const result = await this.resumeWorkOrRetryDecision(workId, { ...request, payload: { source: "advisor" } });
+          return result.data.resumed_by === "resume" ? t.workResumed(ref) : t.workRetried(ref);
+        }
+        case "cancel_work":
+          await this.cancelWork(workId, { ...request, payload: { reason: cancelReason!, force: false } });
+          return t.workCancelledNotice(ref);
+      }
+    } catch (error) {
+      const code = isRecord(error) && typeof error.code === "string" ? error.code : null;
+      const currentState = this.db.get<{ state: WorkState }>("SELECT state FROM works WHERE id = ?", workId)?.state ?? work.state;
+      if (code === "work_not_found") return t.workNotFound(workId);
+      if (type === "send_work_instruction") {
+        if (code === "work_cancelled") return t.instructionCancelled(ref);
+        if (code === "work_reopen_required") return t.instructionReopenRequired(ref);
+        if (code === "invalid_state_transition" && (currentState === "memo" || currentState === "ready")) {
+          return t.instructionNotStarted(ref);
+        }
+      }
+      if (code === "invalid_state_transition") return t.notAllowedInState(type, ref, currentState);
+      if (code === "version_conflict") return t.workActionConflict(ref);
+      if (code === "idempotency_conflict") return t.workActionAlreadyApplied(type, ref);
+      const detail = error instanceof Error ? error.message.slice(0, 300) : t.unknownCause;
+      return t.workActionFailed(type, ref, detail);
+    }
   }
 
   /** Phase 4: AdvisorSessionRuntime.onError — persist the failure as a visible Advisor message. */
@@ -4840,6 +5141,8 @@ export class Core {
           ? 'The Owner reopened the completed Work. Add the Tasks the Owner\'s request needs, or return {"tasks": []} if nothing is missing.'
           : ownerReplan.kind === "instruction"
             ? 'The Owner sent an instruction for the Work. Add the Tasks the Owner\'s instruction asks for, or return {"tasks": []} if nothing is missing.'
+            : ownerReplan.kind === "work_update"
+              ? 'The Owner changed the Work\'s title or summary. Compare the updated Work summary with the current plan, then add or change the Tasks it now requires, or return {"tasks": []} if the plan already covers it.'
           : failedIds.length > 0
             ? "The Owner answered the Decision about failed Tasks. Retry or replace them following the Owner's answer."
             : conflict !== null
@@ -5693,7 +5996,10 @@ export class Core {
       try {
         const value = JSON.parse(row.response_json) as unknown;
         if (isRecord(value) && typeof value.answer === "string") {
-          return { kind: value.kind === "reopen" || value.kind === "instruction" ? value.kind : "decision", answer: value.answer };
+          return {
+            kind: value.kind === "reopen" || value.kind === "instruction" || value.kind === "work_update" ? value.kind : "decision",
+            answer: value.answer,
+          };
         }
       } catch {
         // A malformed request is dropped; the normal terminal handling applies.
@@ -7734,8 +8040,19 @@ function policyDecisionIdempotencyKeyPrefix(workId: string): string {
 }
 
 interface OwnerReplanRequest {
-  readonly kind: "decision" | "reopen" | "instruction";
+  readonly kind: "decision" | "reopen" | "instruction" | "work_update";
   readonly answer: string;
+}
+
+function workUpdateReplanAnswer(
+  before: Pick<WorkRow, "title" | "summary">,
+  after: Pick<WorkRow, "title" | "summary">,
+  changedFields: readonly ("title" | "summary")[],
+): string {
+  const lines: string[] = [];
+  if (changedFields.includes("title")) lines.push(`The Owner renamed the Work from "${before.title}" to "${after.title}".`);
+  if (changedFields.includes("summary")) lines.push(`The Owner rewrote the Work summary. New summary:\n${after.summary}`);
+  return lines.join("\n");
 }
 
 /** Durable per-Work request for the next tick to hand an Owner answer to the Manager. */
@@ -7777,7 +8094,11 @@ function mergeOwnerReplanInTransaction(
     const value = pending ? JSON.parse(pending.response_json) as unknown : null;
     if (isRecord(value) && typeof value.answer === "string" && value.answer.length > 0) {
       merged = {
-        kind: value.kind === "instruction" || request.kind === "instruction" ? "instruction" : request.kind,
+        kind: value.kind === "instruction" || request.kind === "instruction"
+          ? "instruction"
+          : value.kind === "work_update" || request.kind === "work_update"
+            ? "work_update"
+            : request.kind,
         answer: `${value.answer}\n\n${request.answer}`,
       };
     }

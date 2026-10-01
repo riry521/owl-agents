@@ -16,6 +16,7 @@ import type { AdvisorSession, AdvisorSessionManager } from "./advisor-session";
 import type { MemorySaver } from "./memory-saver";
 import { resolveAdvisorWorkingDirectory } from "./advisor-working-directory";
 import { appendAdvisorProjectCatalog } from "./advisor-project-context";
+import { appendAdvisorWorkCatalog } from "./advisor-work-context";
 import { ADVISOR_TEXT, formatAdvisorRateLimitReply } from "./advisor-text";
 import { ownerLanguage, type OwnerLanguage } from "./owner-language";
 // Imported from the agent-runtime "types" submodule (not the package barrel
@@ -864,7 +865,7 @@ export class AdvisorSessionRuntime {
     const payload = {
       turn_id: turnRequest.turn_id,
       text: applyAdvisorInterfaceInstructions(
-        appendAdvisorProjectCatalog(turnRequest.text, this.config.db),
+        appendAdvisorWorkCatalog(appendAdvisorProjectCatalog(turnRequest.text, this.config.db), this.config.db),
         turnRequest.origin.channel,
       ),
       attachment_paths: turnRequest.attachment_paths,

@@ -1163,6 +1163,48 @@ export function setWorkArchivedInTransaction(
   return { archived_at: archivedAt, changed: true, state_version: row.state_version };
 }
 
+/** Update Work display fields without changing the state transition version. */
+export function updateWorkFieldsInTransaction(
+  transaction: CoreWriteLaneTransaction,
+  workId: string,
+  expectedVersion: number | undefined,
+  fields: { readonly title?: string; readonly summary?: string },
+  now: string,
+): {
+  before: WorkRow;
+  after: { title: string; summary: string };
+  changed_fields: ("title" | "summary")[];
+} {
+  const row = transaction.get<WorkRow>("SELECT * FROM works WHERE id = ?", workId);
+  if (!row) throw notFound("work", workId);
+  assertVersion(row.state_version, expectedVersion);
+  if (row.state === "completed" || row.state === "cancelled") {
+    throw invalidStateTransition("Completed or cancelled Works cannot be edited.", { work_id: workId, state: row.state });
+  }
+
+  const title = fields.title ?? row.title;
+  const summary = fields.summary ?? row.summary;
+  const changedFields: ("title" | "summary")[] = [];
+  if (fields.title !== undefined && title !== row.title) changedFields.push("title");
+  if (fields.summary !== undefined && summary !== row.summary) changedFields.push("summary");
+  if (changedFields.length === 0) return { before: row, after: { title, summary }, changed_fields: changedFields };
+
+  const result = transaction.run(
+    `UPDATE works SET title = ?, summary = ?, updated_at = ?
+      WHERE id = ? AND state_version = ?`,
+    title,
+    summary,
+    now,
+    workId,
+    row.state_version,
+  );
+  if (result.changes !== 1) {
+    const current = transaction.get<Pick<WorkRow, "state_version">>("SELECT state_version FROM works WHERE id = ?", workId);
+    throw versionConflict(expectedVersion ?? row.state_version, current?.state_version ?? row.state_version);
+  }
+  return { before: row, after: { title, summary }, changed_fields: changedFields };
+}
+
 /** Apply a Task reducer command inside the WriteLane transaction. */
 export function reduceTaskInTransaction(
   transaction: CoreWriteLaneTransaction,

@@ -3308,6 +3308,7 @@ components:
           type: string
         type:
           type: string
+          description: Canonical event name; title or summary edits emit work.updated.
         schema_version:
           const: 1.0.0
         work_id:
@@ -6143,6 +6144,17 @@ components:
                     - discord
     AdvisorAction:
       type: object
+      description: >-
+        Supported types and payloads: create_work; start_work; pause_work {work_id,
+        reason?}; resume_work {work_id}; reopen_work; cancel_work {work_id, reason?,
+        force?}; send_work_instruction {work_id, body, reopen?}; update_work {work_id,
+        title?, summary?} (at least one); answer_decision; send_file; run_librarian /
+        run_skill_curation / run_rule_curation. send_work_instruction requires a body
+        that is 1 to 100,000 characters after trimming. update_work replaces the
+        complete title and/or summary; title must be 1 to 500 characters and summary
+        1 to 20,000 characters after trimming. The new work actions may be rejected
+        with validation_error, work_not_found, invalid_state_transition,
+        work_cancelled, work_reopen_required, or version_conflict.
       required:
         - action_id
         - sequence
@@ -6156,6 +6168,20 @@ components:
           type: integer
         type:
           type: string
+          enum:
+            - create_work
+            - start_work
+            - pause_work
+            - resume_work
+            - reopen_work
+            - cancel_work
+            - send_work_instruction
+            - update_work
+            - answer_decision
+            - send_file
+            - run_librarian
+            - run_skill_curation
+            - run_rule_curation
         payload:
           $ref: '#/components/schemas/OpaqueObject'
         expected_version:

@@ -593,6 +593,12 @@ export interface CorePort {
     work_id: string;
     state: "running";
   }>>;
+  resumeWorkOrRetryDecision(workId: string, command: CommandMeta): Promise<CommandResult<{
+    work_id: string;
+    state: "running" | "judgement_waiting";
+    resumed_by: "resume" | "retry_decision";
+    decision_id: string | null;
+  }>>;
   cancelWork(workId: string, reason: string, force: boolean, command: CommandMeta): Promise<CommandResult<{
     work_id: string;
     state: "cancelled";
@@ -603,6 +609,14 @@ export interface CorePort {
     state: "running";
   }>>;
   postWorkInstruction(workId: string, input: WorkInstructionInput, command: CommandMeta): Promise<CommandResult<WorkInstructionResult>>;
+  updateWork(workId: string, input: { title?: string; summary?: string }, command: CommandMeta): Promise<CommandResult<{
+    work_id: string;
+    title: string;
+    summary: string;
+    state: WorkState;
+    changed_fields: readonly ("title" | "summary")[];
+    replan_queued: boolean;
+  }>>;
   archiveWork(workId: string, command: CommandMeta): Promise<CommandResult<{ work_id: string; archived_at: string | null }>>;
   unarchiveWork(workId: string, command: CommandMeta): Promise<CommandResult<{ work_id: string; archived_at: null }>>;
   deleteWork(workId: string, command: CommandMeta): Promise<CommandResult<{ work_id: string; deleted: true }>>;

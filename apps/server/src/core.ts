@@ -453,6 +453,22 @@ export class MemoryCore implements CorePort {
     return { data: { work_id: workId, state: "running" }, version: work.state_version };
   }
 
+  async resumeWorkOrRetryDecision(workId: string, command: CommandMeta): Promise<CommandResult<{
+    work_id: string;
+    state: "running" | "judgement_waiting";
+    resumed_by: "resume" | "retry_decision";
+    decision_id: string | null;
+  }>> {
+    if (this.requireWork(workId).state !== "paused") {
+      throw new ApiError(409, "invalid_state_transition", "一時停止中のWorkだけ再開できます。現在の状態を確認してください。", { reason: "not_resumable" });
+    }
+    const response = await this.resumeWork(workId, command);
+    return {
+      data: { work_id: workId, state: response.data.state, resumed_by: "resume", decision_id: null },
+      version: response.version,
+    };
+  }
+
   async cancelWork(workId: string, _reason: string, _force: boolean, command: CommandMeta): Promise<CommandResult<{
     work_id: string;
     state: "cancelled";
@@ -503,6 +519,39 @@ export class MemoryCore implements CorePort {
     work.conversation_id = conversationId;
     const posted = await this.postMessage(conversationId, { body: input.body, attachment_ids: input.attachment_ids ?? [] }, command);
     return { data: { work_id: workId, conversation_id: conversationId, message_id: posted.data.message_id, status: "queued" }, version: posted.version };
+  }
+
+  async updateWork(workId: string, input: { title?: string; summary?: string }, command: CommandMeta): Promise<CommandResult<{
+    work_id: string;
+    title: string;
+    summary: string;
+    state: WorkState;
+    changed_fields: readonly ("title" | "summary")[];
+    replan_queued: boolean;
+  }>> {
+    this.assertWritable();
+    const work = this.requireWork(workId);
+    this.assertVersion(work.state_version, command.expected_version);
+    if (work.state === "completed" || work.state === "cancelled") {
+      throw new ApiError(409, "invalid_state_transition", "完了またはキャンセル済みのWorkは編集できません。", { state: work.state });
+    }
+    const changed_fields: ("title" | "summary")[] = [];
+    if (input.title !== undefined && input.title !== work.title) {
+      work.title = input.title;
+      changed_fields.push("title");
+    }
+    if (input.summary !== undefined && input.summary !== work.summary) {
+      work.summary = input.summary;
+      changed_fields.push("summary");
+    }
+    if (changed_fields.length > 0) {
+      work.updated_at = utcNow();
+      this.emit("work.updated", { work_id: workId, changed_fields, title: work.title });
+    }
+    return {
+      data: { work_id: workId, title: work.title, summary: work.summary, state: work.state, changed_fields, replan_queued: false },
+      version: work.state_version,
+    };
   }
 
   async archiveWork(workId: string, command: CommandMeta): Promise<CommandResult<{ work_id: string; archived_at: string | null }>> {
@@ -1309,9 +1358,11 @@ interface ExternalCore {
   startWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   pauseWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   resumeWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
+  resumeWorkOrRetryDecision(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   cancelWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   reopenWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   postWorkInstruction(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
+  updateWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   archiveWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   unarchiveWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   deleteWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
@@ -1723,6 +1774,29 @@ export class ExternalCoreAdapter implements CorePort {
     }
   }
 
+  async resumeWorkOrRetryDecision(workId: string, command: CommandMeta): Promise<CommandResult<{
+    work_id: string;
+    state: "running" | "judgement_waiting";
+    resumed_by: "resume" | "retry_decision";
+    decision_id: string | null;
+  }>> {
+    try {
+      const response = await this.core.resumeWorkOrRetryDecision(workId, { ...command, payload: { source: "advisor" } });
+      const { version: _version, ...data } = response.data;
+      return {
+        data: data as unknown as {
+          work_id: string;
+          state: "running" | "judgement_waiting";
+          resumed_by: "resume" | "retry_decision";
+          decision_id: string | null;
+        },
+        version: response.version,
+      };
+    } catch (error) {
+      throw externalError(error, "resumeWorkOrRetryDecision");
+    }
+  }
+
   async cancelWork(workId: string, reason: string, force: boolean, command: CommandMeta): Promise<CommandResult<{ work_id: string; state: "cancelled"; cancel_requested: boolean }>> {
     try {
       const response = await this.core.cancelWork(workId, { ...command, payload: { reason, force } });
@@ -1750,6 +1824,33 @@ export class ExternalCoreAdapter implements CorePort {
       return { data: data as unknown as WorkInstructionResult, version: response.version };
     } catch (error) {
       throw externalError(error, "postWorkInstruction");
+    }
+  }
+
+  async updateWork(workId: string, input: { title?: string; summary?: string }, command: CommandMeta): Promise<CommandResult<{
+    work_id: string;
+    title: string;
+    summary: string;
+    state: WorkState;
+    changed_fields: readonly ("title" | "summary")[];
+    replan_queued: boolean;
+  }>> {
+    try {
+      const response = await this.core.updateWork(workId, { ...command, payload: input });
+      const { version: _version, ...data } = response.data;
+      return {
+        data: data as unknown as {
+          work_id: string;
+          title: string;
+          summary: string;
+          state: WorkState;
+          changed_fields: readonly ("title" | "summary")[];
+          replan_queued: boolean;
+        },
+        version: response.version,
+      };
+    } catch (error) {
+      throw externalError(error, "updateWork");
     }
   }
 

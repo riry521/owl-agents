@@ -874,6 +874,21 @@ function validateWorkInstructionPayload(payload: JsonObject): WorkInstructionInp
   return { body, attachment_ids: attachmentIds as string[], ...(payload.reopen === undefined ? {} : { reopen: payload.reopen }) };
 }
 
+function validateUpdateWorkPayload(payload: JsonObject): { title?: string; summary?: string } {
+  const hasTitle = Object.hasOwn(payload, "title");
+  const hasSummary = Object.hasOwn(payload, "summary");
+  if (!hasTitle && !hasSummary) throw new ApiError(400, "validation_error", "titleまたはsummaryを指定してください。");
+  const title = hasTitle ? stringField(payload.title, "title", 1, 500) : undefined;
+  if (title !== undefined && title.trim().length === 0) {
+    throw new ApiError(400, "validation_error", "titleは空白以外の文字を含めてください。");
+  }
+  const summary = hasSummary ? stringField(payload.summary, "summary", 0, 20000) : undefined;
+  return {
+    ...(title === undefined ? {} : { title: title.trim() }),
+    ...(summary === undefined ? {} : { summary: summary.trim() }),
+  };
+}
+
 function validateEmptyPayload(payload: JsonObject): void {
   exactKeys(payload, [], "Empty payload");
 }
@@ -1488,6 +1503,9 @@ const ADVISOR_ACTION_TYPES: ReadonlySet<string> = new Set([
   "pause_work",
   "reopen_work",
   "cancel_work",
+  "send_work_instruction",
+  "update_work",
+  "resume_work",
   "answer_decision",
   "send_file",
   ...ADVISOR_CURATION_ACTION_TYPES,
@@ -1893,6 +1911,20 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
         } else if (action.type === "cancel_work") {
           const workId = pathId(stringField(payload.work_id, "work_id", 1, 128), "work_id");
           data = (await withWorkLock(context, workId, async () => context.core.cancelWork(workId, typeof payload.reason === "string" ? payload.reason : "Advisor requested cancellation.", payload.force === true, actionCommand))).data as unknown as JsonObject;
+        } else if (action.type === "send_work_instruction") {
+          exactKeys(payload, ["work_id", "body"], `actions[${action.action_id}].payload`, ["reopen"]);
+          const workId = pathId(stringField(payload.work_id, "work_id", 1, 128), "work_id");
+          const input = validateWorkInstructionPayload({ body: payload.body, ...(payload.reopen === undefined ? {} : { reopen: payload.reopen }) });
+          data = (await withWorkLock(context, workId, async () => context.core.postWorkInstruction(workId, input, actionCommand))).data as unknown as JsonObject;
+        } else if (action.type === "update_work") {
+          exactKeys(payload, ["work_id"], `actions[${action.action_id}].payload`, ["title", "summary"]);
+          const workId = pathId(stringField(payload.work_id, "work_id", 1, 128), "work_id");
+          const input = validateUpdateWorkPayload(payload);
+          data = (await withWorkLock(context, workId, async () => context.core.updateWork(workId, input, actionCommand))).data as unknown as JsonObject;
+        } else if (action.type === "resume_work") {
+          exactKeys(payload, ["work_id"], `actions[${action.action_id}].payload`);
+          const workId = pathId(stringField(payload.work_id, "work_id", 1, 128), "work_id");
+          data = (await withWorkLock(context, workId, async () => context.core.resumeWorkOrRetryDecision(workId, actionCommand))).data as unknown as JsonObject;
         } else if (action.type === "answer_decision") {
           const decisionId = pathId(stringField(payload.decision_id, "decision_id", 1, 128), "decision_id");
           const answer = stringField(payload.answer, "answer", 1, 10000);

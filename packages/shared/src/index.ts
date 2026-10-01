@@ -471,6 +471,7 @@ export const CANONICAL_EVENT_REGISTRY = [
   "work.reopen_rejected",
   "work.completed",
   "work.cancelled",
+  "work.updated",
   "work.branches_deleted",
   "work.pushed",
   // No work.failed: Core surfaces Work failures as work-scoped system.alert or a Decision.

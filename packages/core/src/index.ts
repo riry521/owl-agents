@@ -1,4 +1,5 @@
 export { Core, createCore } from "./core";
+export { ADVISOR_WORK_CATALOG_ACTIVE_LIMIT, ADVISOR_WORK_CATALOG_RECENT_FINISHED_LIMIT, appendAdvisorWorkCatalog, buildAdvisorWorkCatalogInstruction } from "./advisor-work-context";
 export { DecisionService } from "./decision";
 export { EventDispatcher } from "./event-dispatcher";
 export { HumanReadableError } from "./errors";
@@ -173,6 +174,8 @@ export type {
   ProjectDeletionImpact,
   ProjectRunningWork,
   PauseWorkPayload,
+  ResumeWorkOrRetryData,
+  ResumeWorkOrRetryPayload,
   ReviewerRunRequest,
   ServiceStatus,
   StartWorkPayload,
@@ -184,6 +187,8 @@ export type {
   TaskState,
   TaskSummary,
   UpdateProjectPayload,
+  UpdateWorkData,
+  UpdateWorkPayload,
   WorkDetail,
   WorkListQuery,
   WorkProgress,
