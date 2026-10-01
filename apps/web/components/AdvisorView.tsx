@@ -155,12 +155,16 @@ export function AdvisorView() {
     followMessagesRef.current = distanceFromBottom <= 48;
   }
 
-  useEffect(() => {
-    if (!textareaRef.current) return;
+  // Touching style.height mid-composition makes mobile IMEs drop the
+  // unconfirmed text, so resize only outside composition and on its end.
+  const resizeTextarea = useCallback(() => {
     const ta = textareaRef.current;
+    if (!ta || composingRef.current) return;
     ta.style.height = 'auto';
     ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
-  }, [draft]);
+  }, []);
+
+  useEffect(resizeTextarea, [draft, resizeTextarea]);
 
   async function handleSend() {
     if (!conversationId) return;
@@ -342,7 +346,10 @@ export function AdvisorView() {
               ref={textareaRef}
               className="advisor__textarea"
               onCompositionStart={() => { composingRef.current = true; }}
-              onCompositionEnd={() => { setTimeout(() => { composingRef.current = false; }, 50); }}
+              onCompositionEnd={() => {
+                composingRef.current = false;
+                resizeTextarea();
+              }}
               value={draft}
               onChange={(ev) => setDraft(ev.target.value)}
               onKeyDown={onKeyDown}

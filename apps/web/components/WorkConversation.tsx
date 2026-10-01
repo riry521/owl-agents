@@ -49,6 +49,7 @@ export function WorkConversation({ work, variant, conversation, onWorkChanged }:
   const followMessagesRef = useRef(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
+  const composingEndTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   const messages = conversation?.messages ?? [];
   const block = instructionBlock(work.state);
@@ -78,12 +79,16 @@ export function WorkConversation({ work, variant, conversation, onWorkChanged }:
     if (maxScrollTop > el.scrollTop + 1) el.scrollTop = maxScrollTop;
   }, [conversation]);
 
-  useEffect(() => {
+  function resizeTextarea() {
     const ta = textareaRef.current;
-    if (!ta) return;
+    if (!ta || composingRef.current) return;
     ta.style.height = 'auto';
     ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
-  }, [draft]);
+  }
+
+  // Touching the textarea mid-composition makes mobile IMEs commit the pending text.
+  useEffect(resizeTextarea, [draft]);
+  useEffect(() => () => clearTimeout(composingEndTimerRef.current), []);
 
   function handleMessagesScroll() {
     const el = messagesRef.current;
@@ -144,8 +149,14 @@ export function WorkConversation({ work, variant, conversation, onWorkChanged }:
             <textarea
               ref={textareaRef}
               className="advisor__textarea work-chat__textarea"
-              onCompositionStart={() => { composingRef.current = true; }}
-              onCompositionEnd={() => { setTimeout(() => { composingRef.current = false; }, 50); }}
+              onCompositionStart={() => {
+                // A pending end-timer from the previous composition must not clear this one.
+                clearTimeout(composingEndTimerRef.current);
+                composingRef.current = true;
+              }}
+              onCompositionEnd={() => {
+                composingEndTimerRef.current = setTimeout(() => { composingRef.current = false; resizeTextarea(); }, 50);
+              }}
               value={draft}
               onChange={(ev) => {
                 setDraft(ev.target.value);
