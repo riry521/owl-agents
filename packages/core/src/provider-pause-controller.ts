@@ -29,6 +29,7 @@ export interface ProviderPauseController {
     readonly last_error_key?: string | null;
     readonly last_error?: string | null;
   }): Promise<ProviderPauseRow>;
+  resumeNow(provider: string): Promise<ProviderPauseRow | null>;
   noteProviderSucceeded(provider: string, runStartedAt: string): Promise<ProviderPauseRow | null>;
 }
 
@@ -134,6 +135,18 @@ export function createProviderPauseController(options: ProviderPauseControllerOp
           repeat: before !== undefined,
         },
       });
+      return row;
+    },
+
+    async resumeNow(providerInput) {
+      const provider = normalizeProvider(providerInput);
+      const current = options.store.get(provider);
+      if (!current || current.state !== "paused") return current ?? null;
+      const timer = timers.get(provider);
+      if (timer !== undefined) clearTimer(timer);
+      timers.delete(provider);
+      const row = await options.store.resume(provider);
+      if (row) await resumeNotification(provider, row);
       return row;
     },
 

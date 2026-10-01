@@ -3946,6 +3946,17 @@ input, textarea, select {
   flex-direction: column;
 }
 
+.provider-pause-banner__line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.provider-pause-banner__error {
+  flex-basis: 100%;
+}
+
 /* ---- Skill approvals ------------------------------------------------------ */
 
 .proposal-card {

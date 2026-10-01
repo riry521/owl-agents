@@ -15,6 +15,7 @@ export type ApiErrorCode =
   | "work_cancelled"
   | "version_conflict"
   | "idempotency_conflict"
+  | "provider_pause_not_found"
   | "project_not_found"
   | "project_has_running_works"
   | "project_deletion_impact_changed"

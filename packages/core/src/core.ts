@@ -10,7 +10,7 @@ import { managerReplanFailureBrief, RESOLVE_CONFLICT_OPTION_KEY } from "./decisi
 import { isFinalLesson, isFinalMissingItem, lessonBlockKey, normalizeLesson, parseLessonBlocks, splitLessonBlocks, type FinalManagerVerdict } from "./final-verdict";
 import { DEFAULT_OWNER_LANGUAGE, OWNER_LANGUAGE_SETTINGS_KEY, ownerLanguage, storedOwnerLanguage, type OwnerLanguage } from "./owner-language";
 import { EventDispatcher } from "./event-dispatcher";
-import { HumanReadableError, dependencyUnavailable, idempotencyConflict, invalidStateTransition, notFound, projectDeletionImpactChanged, projectHasRunningWorks, projectNotFound, projectPathConflict, validationError, versionConflict, workCancelled, workReopenRequired } from "./errors";
+import { HumanReadableError, dependencyUnavailable, idempotencyConflict, invalidStateTransition, notFound, projectDeletionImpactChanged, projectHasRunningWorks, projectNotFound, providerPauseNotFound, projectPathConflict, validationError, versionConflict, workCancelled, workReopenRequired } from "./errors";
 import {
   appendEventInTransaction,
   createWorkInTransaction,
@@ -3117,6 +3117,12 @@ export class Core {
       const view = toProviderPauseView(row);
       return view ? [view] : [];
     });
+  }
+
+  public async resumeProviderPause(provider: string): Promise<ProviderPauseView | null> {
+    const row = await this.providerPauseController.resumeNow(provider);
+    if (!row || row.state === "active") throw providerPauseNotFound(provider, await this.getLanguage());
+    return toProviderPauseView(row);
   }
 
   public getModelSettings(): { version: number; roles: readonly RoleModelSetting[] } {

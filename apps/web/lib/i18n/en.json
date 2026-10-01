@@ -37,7 +37,10 @@
     "timeLocale": "en-US",
     "reported": "{{label}} is paused because it reached its usage limit. It is expected to resume around {{resumeTime}}.",
     "backoff": "{{label}} is paused because it reached its usage limit. The reset time is unknown, so Owl will try again around {{resumeTime}}.",
-    "probing": "Checking whether {{label}} has resumed."
+    "probing": "Checking whether {{label}} has resumed.",
+    "resumeNow": "Resume now",
+    "resumeNowHint": "Use this if you have already reset the limit. If it is still limited, it pauses again automatically.",
+    "resumeFailed": "Could not resume. Please try again shortly."
   },
   "board": {
     "title": "Board",

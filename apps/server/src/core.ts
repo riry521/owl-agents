@@ -1085,6 +1085,10 @@ export class MemoryCore implements CorePort {
     return [];
   }
 
+  async resumeProviderPause(provider: string): Promise<ProviderPauseView | null> {
+    throw new ApiError(404, "provider_pause_not_found", `プロバイダーの一時停止が見つかりません。 / The provider pause was not found: ${provider}`);
+  }
+
   async getProvider(_id: string): Promise<ProviderConfigRecord | null> {
     return null;
   }
@@ -1290,6 +1294,7 @@ interface ExternalCore {
   getKnowledgeAutomationSettings?(): Promise<KnowledgeAutomationSnapshot>;
   setKnowledgeAutomationSettings?(input: KnowledgeAutomationSettings): Promise<KnowledgeAutomationSnapshot>;
   listProviderPauses?(): ProviderPauseView[];
+  resumeProviderPause?(provider: string): Promise<ProviderPauseView | null>;
   start(): Promise<void>;
   stop(options?: { force?: boolean; timeoutMs?: number }): Promise<void>;
   status(): { services: readonly { name: string; state: string; pid: number | null }[]; mvp_scope: string; version: string };
@@ -1535,6 +1540,7 @@ function externalError(error: unknown, operation: string): ApiError {
       "decision_not_found",
       "decision_already_resolved",
       "project_not_found",
+      "provider_pause_not_found",
       "project_has_running_works",
       "project_deletion_impact_changed",
       "model_preset_not_found",
@@ -2454,6 +2460,15 @@ export class ExternalCoreAdapter implements CorePort {
       return this.core.listProviderPauses?.() ?? [];
     } catch (error) {
       throw externalError(error, "listProviderPauses");
+    }
+  }
+
+  async resumeProviderPause(provider: string): Promise<ProviderPauseView | null> {
+    try {
+      if (!this.core.resumeProviderPause) throw new ApiError(404, "provider_pause_not_found", "プロバイダーの一時停止が見つかりません。 / The provider pause was not found.");
+      return await this.core.resumeProviderPause(provider);
+    } catch (error) {
+      throw externalError(error, "resumeProviderPause");
     }
   }
 

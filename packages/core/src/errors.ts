@@ -106,6 +106,15 @@ export function projectPathConflict(canonicalPath: string, projectId?: string): 
   });
 }
 
+export function providerPauseNotFound(id: string, language: OwnerLanguage): HumanReadableError {
+  return new HumanReadableError({
+    code: "provider_pause_not_found",
+    message: language === "ja" ? "指定されたプロバイダーの一時停止が見つかりません。" : "The provider pause was not found.",
+    remediation: language === "ja" ? "プロバイダーの一時停止一覧を再読み込みしてください。" : "Reload the provider pause list.",
+    details: { resource: "provider_pause", id },
+  });
+}
+
 export function projectNotFound(id: string, language: OwnerLanguage): HumanReadableError {
   return new HumanReadableError({
     code: "project_not_found",

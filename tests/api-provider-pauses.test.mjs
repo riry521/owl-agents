@@ -77,4 +77,51 @@ test("provider pause route lists paused providers and their planned retry times"
     },
   ]);
 
+  const resumePath = "/providers/pauses/openai%2Fcodex/resume";
+  assert.equal((await fetch(`${base}${resumePath}`, { method: "POST" })).status, 401);
+  const resumedResponse = await request(resumePath, { method: "POST" });
+  assert.equal(resumedResponse.status, 200);
+  const resumed = await resumedResponse.json();
+  assert.ok(resumed.request_id);
+  assert.deepEqual(resumed.data.pause, { ...listed.data.pauses[0], state: "probing", resume_at: NOW });
+  const repeated = await request("/providers/pauses/codex/resume", { method: "POST" });
+  assert.equal(repeated.status, 200);
+  assert.deepEqual((await repeated.json()).data, resumed.data);
+  for (const provider of ["missing", "codex"]) {
+    if (provider === "codex") await store.noteProviderSucceeded("openai", NOW);
+    const missing = await request(`/providers/pauses/${provider}/resume`, { method: "POST" });
+    assert.equal(missing.status, 404);
+    assert.equal((await missing.json()).error.code, "provider_pause_not_found");
+  }
+
+});
+
+test("Core resumes provider aliases and reports absent pauses in the Owner language", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "owl-core-provider-pauses-"));
+  const db = openDatabase(join(root, "owl.sqlite"));
+  db.migrate(join(repoRoot, "packages/db/migrations"));
+  const core = new Core({ db, agentRunner: {}, version: "provider-pauses-test", owlRoot: root, dataDir: root, now: () => NOW });
+  t.after(async () => {
+    await core.stop({ force: true });
+    db.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const store = createProviderPauseStore(db, () => NOW);
+  await store.recordRateLimit({ provider: "anthropic" });
+  const pause = await core.resumeProviderPause(" CLAUDE ");
+  assert.equal(pause.provider, "anthropic");
+  assert.equal(pause.state, "probing");
+  assert.equal(pause.resume_at, NOW);
+  assert.deepEqual(await core.resumeProviderPause("anthropic"), pause);
+  await store.noteProviderSucceeded("anthropic", NOW);
+  for (const language of ["ja", "en"]) {
+    await core.setLanguage(language);
+    for (const provider of ["claude", "missing"]) {
+      await assert.rejects(core.resumeProviderPause(provider), (error) => {
+        assert.equal(error.code, "provider_pause_not_found");
+        assert.match(error.message, language === "ja" ? /一時停止/u : /provider pause/u);
+        return true;
+      });
+    }
+  }
 });

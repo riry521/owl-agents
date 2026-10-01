@@ -37,6 +37,7 @@ export interface ProviderPauseStore {
   recordRateLimit(report: ProviderRateLimit): Promise<ProviderPauseRow>;
   resume(provider: string): Promise<ProviderPauseRow | null>;
   noteProviderSucceeded(provider: string, runStartedAt: string): Promise<ProviderPauseRow | null>;
+  get(provider: string): ProviderPauseRow | null;
   list(): ProviderPauseRow[];
 }
 
@@ -100,6 +101,10 @@ export function createProviderPauseStore(
         writeProviderPause(tx, next);
         return next;
       });
+    },
+
+    get(providerInput) {
+      return readProviderPause(db, validateProvider(providerInput)) ?? null;
     },
 
     list() {

@@ -37,7 +37,10 @@
     "timeLocale": "ja-JP",
     "reported": "{{label}} は利用上限のため停止中です。{{resumeTime}}ごろ再開予定",
     "backoff": "{{label}} は利用上限のため停止中です。解除時刻が分からないため、{{resumeTime}}ごろ再開を試します。",
-    "probing": "{{label}} の再開を確認しています。"
+    "probing": "{{label}} の再開を確認しています。",
+    "resumeNow": "今すぐ再開",
+    "resumeNowHint": "利用上限をすでにリセットした場合に使います。まだ上限中なら自動でまた停止します。",
+    "resumeFailed": "再開できませんでした。しばらくしてからもう一度お試しください。"
   },
   "board": {
     "title": "Board",

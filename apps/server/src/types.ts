@@ -700,6 +700,7 @@ export interface CorePort {
   getActiveConversation(): Promise<{ conversation_id: string }>;
   listProviders(): Promise<DetectedProvider[]>;
   listProviderPauses(): Promise<ProviderPauseView[]>;
+  resumeProviderPause(provider: string): Promise<ProviderPauseView | null>;
   getProvider(id: string): Promise<ProviderConfigRecord | null>;
   saveProvider(id: string, input: SaveProviderInput): Promise<ProviderConfigRecord>;
   deleteProvider(id: string): Promise<{ deleted: boolean }>;

@@ -1262,6 +1262,14 @@ export async function getProviderPauses(): Promise<ProviderPauseView[]> {
   return res.data.pauses;
 }
 
+export async function resumeProviderPause(provider: string): Promise<ProviderPauseView | null> {
+  const res = await requestJson<{ request_id: string; data: { pause: ProviderPauseView | null } }>(
+    `/providers/pauses/${encodeURIComponent(provider)}/resume`,
+    { method: 'POST' },
+  );
+  return res.data.pause;
+}
+
 export async function setProviderModels(providerId: string, models: string[]): Promise<string[]> {
   const res = await command<{ models: string[] }>(
     `/settings/provider-models/${encodeURIComponent(providerId)}`,

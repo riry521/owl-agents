@@ -169,3 +169,17 @@ test("OpenAPI project edit and deletion routes match the server handlers", () =>
   assert.match(http, /updateProject\(projectId,/u);
   assert.match(http, /deleteProject\(projectId,/u);
 });
+
+test("OpenAPI documents the owner provider pause resume route and nullable pause response", () => {
+  const route = yamlBlock(openapi, "  /api/v1/providers/pauses/{provider}/resume:");
+  assert.match(route, /operationId: resumeProviderPause/u);
+  assert.match(route, /ownerBearer/u);
+  assert.match(route, /name: provider/u);
+  assert.doesNotMatch(route, /requestBody:/u);
+  assert.match(route, /ProviderPauseResumeResponse/u);
+  assert.match(route, /provider_pause_not_found/u);
+  const response = yamlBlock(openapi, "    ProviderPauseResumeResponse:");
+  assert.match(response, /ProviderPauseView/u);
+  assert.match(response, /type: 'null'/u);
+  assert.match(response, /- pause/u);
+});

@@ -2632,6 +2632,38 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/providers/pauses/{provider}/resume:
+    post:
+      operationId: resumeProviderPause
+      summary: Resume a paused provider immediately
+      security:
+        - ownerBearer: []
+      parameters:
+        - in: path
+          name: provider
+          required: true
+          description: Provider identifier or alias, such as openai, anthropic, codex, or claude.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current provider pause after resuming.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProviderPauseResumeResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: provider_pause_not_found — No paused or probing provider was found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/advisor/actions:
     post:
       operationId: executeAdvisorActions
@@ -5927,6 +5959,25 @@ components:
               type: array
               items:
                 $ref: '#/components/schemas/ProviderPauseView'
+          additionalProperties: false
+      additionalProperties: false
+    ProviderPauseResumeResponse:
+      type: object
+      required:
+        - request_id
+        - data
+      properties:
+        request_id:
+          $ref: '#/components/schemas/RequestId'
+        data:
+          type: object
+          required:
+            - pause
+          properties:
+            pause:
+              anyOf:
+                - $ref: '#/components/schemas/ProviderPauseView'
+                - type: 'null'
           additionalProperties: false
       additionalProperties: false
     IntegrationSettingsData:

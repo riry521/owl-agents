@@ -2699,6 +2699,15 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
+  const providerPauseResumeMatch = pathname.match(new RegExp(`^${API_PREFIX}/providers/pauses/([^/]+)/resume$`));
+  if (providerPauseResumeMatch && method === "POST") {
+    requireOwner(request);
+    const provider = decodeURIComponent(providerPauseResumeMatch[1]);
+    const pause = await context.core.resumeProviderPause(provider);
+    sendJson(response, 200, { request_id: requestIdValue, data: { pause } });
+    return;
+  }
+
   if (pathname === `${API_PREFIX}/settings/providers` && method === "GET") {
     requireOwner(request);
     const providers = await context.core.listProviders();

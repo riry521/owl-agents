@@ -63,6 +63,14 @@ test("times on another local date include the date in Japanese and English", () 
   assert.match(enLine[0].text, /Sep 28.*3:00 PM/u);
 });
 
+test("resume button strings exist in both languages", () => {
+  for (const dictionary of [ja, en]) {
+    for (const key of ["resumeNow", "resumeNowHint", "resumeFailed"]) {
+      assert.ok(translate(dictionary, `providerPause.${key}`).length > 0);
+    }
+  }
+});
+
 test("no pauses produce no banner lines", () => {
   assert.deepEqual(providerPauseLines([], (key, params) => translate(ja, key, params), now), []);
 });
