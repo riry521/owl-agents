@@ -61,7 +61,7 @@ async function setup(t) {
       body: JSON.stringify({ request_id: `retag-${n}`, idempotency_key: `retag:${n}`, expected_version: 0, payload }),
     });
   };
-  return { post, gate, notes, noteId: note.note_id, core };
+  return { post, gate, notes, noteId: note.note_id, core, adapter };
 }
 
 test("POST /knowledge/retag runs through the adapter-wrapped Core and validates the payload", async (t) => {
@@ -108,4 +108,13 @@ test("POST /knowledge/retag answers 409 retag_in_progress while a run is active"
   assert.equal((await second.json()).error.code, "retag_in_progress");
   api.gate.release();
   assert.equal((await first).status, 200);
+});
+
+test("ExternalCoreAdapter delegates retagKnowledgeNotes to the wrapped Core", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const calls = [];
+  api.core.retagKnowledgeNotes = async (input) => { calls.push(input); return { delegated: true }; };
+  assert.deepEqual(await api.adapter.retagKnowledgeNotes({ dry_run: true, force: true }), { delegated: true });
+  assert.deepEqual(calls, [{ dry_run: true, force: true }]);
 });

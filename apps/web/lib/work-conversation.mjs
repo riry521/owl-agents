@@ -19,7 +19,7 @@ export function instructionBlock(workState) {
 }
 
 /**
- * Shift+Enter and Cmd/Ctrl+Enter send; plain Enter is a newline. Touch devices
+ * Only Shift+Enter sends; Cmd/Ctrl+Enter and plain Enter do not (plain Enter is a newline). Touch devices
  * never send on a key, and IME composition is never interrupted.
  * @param {{key: string, shiftKey?: boolean, metaKey?: boolean, ctrlKey?: boolean, keyCode?: number, nativeEvent?: {isComposing?: boolean, keyCode?: number}}} event
  * @param {{isTouchDevice: boolean, composing: boolean}} state

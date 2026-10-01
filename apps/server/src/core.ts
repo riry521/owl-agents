@@ -1338,6 +1338,7 @@ interface ExternalCore {
   listLearningJobs?(status?: string): readonly unknown[];
   retryLearningJob?(jobId: string): Promise<void>;
   runCuration?(input: JsonObject): Promise<unknown>;
+  retagKnowledgeNotes?(input: { dry_run: boolean; force?: boolean }): Promise<unknown>;
   listCurationRuns?(query: JsonObject): { items: readonly unknown[]; next_cursor: string | null };
   getCurationRun?(id: string): unknown;
   listBacklogItems?(filter: { status?: string; project_id?: string; work_id?: string; limit?: number; offset?: number }): { items: readonly unknown[]; next_offset: number | null };
@@ -2308,6 +2309,11 @@ export class ExternalCoreAdapter implements CorePort {
     } catch (error) {
       throw externalError(error, "rejectSkillProposal");
     }
+  }
+
+  retagKnowledgeNotes(input: { dry_run: boolean; force?: boolean }): Promise<unknown> {
+    if (typeof this.core.retagKnowledgeNotes !== "function") throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support knowledge retagging.");
+    return this.core.retagKnowledgeNotes(input);
   }
 
   runCuration(input: JsonObject): Promise<unknown> {

@@ -139,7 +139,7 @@ export interface CurationReport {
   readonly actions_needing_approval: CurationAction[];
   /** Near-duplicate notes merged in this run (source moved out of knowledge/). */
   readonly merged: MergedNoteRecord[];
-  /** Duplicate candidates that were not merged, with the reason (highest score first, at most 50). */
+  /** Duplicate candidates that were not merged, with the reason (highest score first, all of them). */
   readonly merge_skipped: MergeSkippedRecord[];
   readonly warnings: string[];
 }
