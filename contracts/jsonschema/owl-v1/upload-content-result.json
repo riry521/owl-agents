@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/upload-content-result.json",
+  "title": "UploadContentResult",
+  "type": "object",
+  "required": [
+    "upload_id",
+    "bytes",
+    "sha256",
+    "status"
+  ],
+  "properties": {
+    "upload_id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "status": {
+      "const": "receiving"
+    }
+  },
+  "additionalProperties": false
+}

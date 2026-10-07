@@ -1,0 +1,87 @@
+# Dependencies and build output
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+# Next.js
+.next/
+
+# System and temporary files
+.DS_Store
+*.log
+*.tmp
+*.bak
+*.swp
+tmp/
+.turbo/
+
+# Test output
+test-results/
+playwright-report/
+
+# Local databases
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+*.db-shm
+*.db-wal
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Keys and credentials
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.keystore
+*.jks
+id_rsa*
+id_ed25519*
+id_ecdsa*
+credentials.json
+service-account*.json
+.npmrc
+.netrc
+
+# Owl runtime data (user-generated)
+data/*
+.owl-data/
+.owl-workspaces/
+
+# Knowledge and Rule Store (user-managed local state)
+knowledge/*
+skills/*
+rules/*
+!rules/system/
+rules/system/*
+!rules/system/defaults.yaml
+!rules/system/safety.yaml
+!rules/system/owl-defaults.yaml
+!rules/role/
+rules/role/*
+!rules/role/advisor-defaults.yaml
+
+# Local design notes
+docs/designs/
+docs/superpowers/
+
+# Local tool and editor state
+.claude/
+.serena/
+.code-review-graph/
+.idea/
+.vscode/
+verification-screenshots/
+tmp-s2-evidence/
+
+# Internal work records (not shipped)
+docs/testing/
+evidence/
+verification/
+docs/verification/*

@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/envelopes.json",
+  "title": "Owl API v1 request and response envelopes",
+  "$defs": {
+    "CommandRequest": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "idempotency_key",
+        "expected_version",
+        "payload"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "common.json#/$defs/RequestId"
+        },
+        "idempotency_key": {
+          "$ref": "common.json#/$defs/IdempotencyKey"
+        },
+        "expected_version": {
+          "$ref": "common.json#/$defs/Version"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "Response": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "data",
+        "version"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "common.json#/$defs/RequestId"
+        },
+        "data": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "version": {
+          "$ref": "common.json#/$defs/Version"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ListResponse": {
+      "type": "object",
+      "required": [
+        "request_id",
+        "data",
+        "cursor",
+        "has_more"
+      ],
+      "properties": {
+        "request_id": {
+          "$ref": "common.json#/$defs/RequestId"
+        },
+        "data": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "has_more": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "type": "object",
+  "properties": {},
+  "additionalProperties": false
+}

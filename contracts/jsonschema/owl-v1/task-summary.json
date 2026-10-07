@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/task-summary.json",
+  "title": "TaskSummary",
+  "type": "object",
+  "required": [
+    "id",
+    "work_id",
+    "title",
+    "status",
+    "type",
+    "state_version",
+    "updated_at"
+  ],
+  "properties": {
+    "id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "work_id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "title": {
+      "type": "string"
+    },
+    "status": {
+      "$ref": "common.json#/$defs/TaskState"
+    },
+    "type": {
+      "type": "string"
+    },
+    "state_version": {
+      "$ref": "common.json#/$defs/Version"
+    },
+    "updated_at": {
+      "$ref": "common.json#/$defs/RFC3339"
+    }
+  },
+  "additionalProperties": false
+}

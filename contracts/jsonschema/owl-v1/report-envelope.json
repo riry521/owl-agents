@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/report-envelope.json",
+  "title": "ReportEnvelope",
+  "type": "object",
+  "required": [
+    "kind",
+    "schema_version",
+    "invocation_id",
+    "result",
+    "work_done",
+    "changes",
+    "verification",
+    "remaining_issues",
+    "next_action",
+    "needs_replanning",
+    "question_for_manager"
+  ],
+  "properties": {
+    "kind": {
+      "const": "report"
+    },
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "invocation_id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "result": {
+      "type": "string",
+      "enum": [
+        "success",
+        "failed",
+        "partial"
+      ]
+    },
+    "work_done": {
+      "type": "string"
+    },
+    "changes": {
+      "type": "array",
+      "items": {
+        "$ref": "common.json#/$defs/OpaqueObject"
+      }
+    },
+    "verification": {
+      "$ref": "common.json#/$defs/OpaqueObject"
+    },
+    "remaining_issues": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "next_action": {
+      "type": "string"
+    },
+    "needs_replanning": {
+      "type": "boolean"
+    },
+    "question_for_manager": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

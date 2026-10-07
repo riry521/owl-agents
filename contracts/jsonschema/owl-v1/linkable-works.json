@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/linkable-works.json",
+  "title": "LinkableWorks",
+  "type": "object",
+  "required": [
+    "works",
+    "next_cursor"
+  ],
+  "properties": {
+    "works": {
+      "type": "array",
+      "items": {
+        "$ref": "work-summary.json"
+      }
+    },
+    "next_cursor": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

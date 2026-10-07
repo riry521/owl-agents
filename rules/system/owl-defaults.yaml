@@ -1,0 +1,11 @@
+level: system
+rules:
+  - id: owl_no_hardcoding_generic_code
+    kind: instruction
+    text: "特別な条件がない限り、ハードコードは禁止。値・パス・名前・件数などは設定や引数から受け取り、汎用的に使えるコードを書くこと。"
+  - id: owl_acceptance_must_be_provable
+    kind: instruction
+    text: "受け入れ条件は、その Task の中で動かせるものだけで合否を判定できるように書き、確かめ方（実行するコマンドや残す証拠）を条件ごとに添えること。稼働中の本番サーバー・本番 data/・他の Work など Task の外で変わるものの前後比較や、外部の状態に左右されて証明できない条件は作らないこと。安全性を確かめたいときは、sandbox の書き込み拒否ログや対象ファイルのハッシュなど、Task の中で取れる直接の証拠を条件にすること。Worker や Reviewer は、証明できない条件を見つけたらやり直しを繰り返さず、条件の不備として Manager に返すこと。"
+  - id: owl_how_what_why_whynot
+    kind: instruction
+    text: "コードには How、テストには What（仕様）、コミットログには Why、コードコメントには Why not（他の案を選ばなかった理由）を書くこと。"

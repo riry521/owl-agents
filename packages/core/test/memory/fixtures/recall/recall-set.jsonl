@@ -1,0 +1,8 @@
+{"id": "r001", "question": "日付ライブラリのタイムゾーンってどうなってたっけ", "gold_ids": ["01HZZZZZZZZZZZZZZZZZZZZZR1"], "kind": "recall", "role": "advisor", "split": "dev"}
+{"id": "r002", "question": "圧縮の要約を取り出す方法を決めたい", "gold_ids": ["01HZZZZZZZZZZZZZZZZZZZZZR2"], "kind": "recall", "role": "advisor", "split": "dev"}
+{"id": "r003", "question": "認証のやり方をそろそろ決めよう", "gold_ids": ["01HZZZZZZZZZZZZZZZZZZZZZR3"], "kind": "recall", "role": "advisor", "split": "holdout"}
+{"id": "r004", "question": "本番で障害が起きたときの追い方を考えたい", "gold_ids": ["01HZZZZZZZZZZZZZZZZZZZZZR4"], "kind": "recall", "role": "manager", "split": "holdout"}
+{"id": "r005", "question": "おはよう", "gold_ids": [], "kind": "recall", "role": "advisor", "split": "dev"}
+{"id": "r006", "question": "今日の Work の進み具合を教えて", "gold_ids": [], "kind": "recall", "role": "advisor", "split": "dev"}
+{"id": "r007", "question": "このボタンの色を青にして", "gold_ids": [], "kind": "recall", "role": "manager", "split": "holdout"}
+{"id": "r008", "question": "ありがとう、助かった", "gold_ids": [], "kind": "recall", "role": "advisor", "split": "holdout"}

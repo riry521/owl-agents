@@ -1,0 +1,211 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "manifest_version": "1.0.0",
+  "contract_version": "1.0.0",
+  "artifacts": [
+    {
+      "path": "contracts/openapi/owl-api-v1.yaml",
+      "role": "rest_ws",
+      "version": "1.0.0",
+      "openapi_version": "3.1.0"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/agent-run.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/backlog-view.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/board-view.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/common.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/decision-view.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/decision.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/envelopes.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/error-response.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/inbound-ack.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/inbound-message.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/linkable-works.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/message.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/project.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/report-envelope.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/report.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/settings-view.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/task-detail.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/task-summary.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/tokens-view.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/upload-complete-request.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/upload-complete-result.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/upload-content-result.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/upload-register.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/upload-ticket.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/verification-command.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/websocket-client-frame.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/websocket-server-frame.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/work-design-list.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/work-design-summary.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/work-design.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/work-detail.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/work-summary.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "path": "contracts/jsonschema/owl-v1/work-view.json",
+      "role": "json_schema",
+      "version": "1.0.0",
+      "schema_dialect": "https://json-schema.org/draft/2020-12/schema"
+    }
+  ]
+}

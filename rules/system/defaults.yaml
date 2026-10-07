@@ -1,0 +1,64 @@
+level: system
+rules:
+  - id: block-git-force-push
+    kind: block_command
+    pattern: "git push --force"
+    message: "git push --force and git push -f are prohibited."
+  - id: block-rm-root
+    kind: block_command
+    pattern: "rm -rf /"
+    message: "Do not use rm -rf on the root or home directory."
+  - id: block-rm-home
+    kind: block_command
+    pattern: "rm -rf ~"
+    message: "Do not use rm -rf on the root or home directory."
+  - id: block-rm-home-env
+    kind: block_command
+    pattern: "rm -rf $HOME"
+    message: "Do not use rm -rf on the root or home directory."
+  - id: block-sudo-rm
+    kind: block_command
+    pattern: "sudo rm"
+    message: "sudo rm is prohibited."
+  - id: block-git-reset-hard
+    kind: block_command
+    pattern: "git reset --hard"
+    message: "git reset --hard is prohibited."
+  - id: block-git-clean-fdx
+    kind: block_command
+    pattern: "git clean -fdx"
+    message: "git clean -fdx is prohibited."
+  - id: block-env-files
+    kind: block_path
+    pattern: "**/.env*"
+    mode: both
+    except: "**/.env.example"
+    message: "Reading, writing, or deleting .env files is prohibited."
+  - id: block-secrets-json
+    kind: block_path
+    pattern: "**/secrets.json"
+    mode: both
+    message: "Reading, writing, or deleting secrets.json is prohibited."
+  - id: block-ssh-secrets
+    kind: block_path
+    pattern: "~/.ssh"
+    mode: both
+    message: "Reading, writing, or deleting files under ~/.ssh is prohibited."
+  - id: block-aws-secrets
+    kind: block_path
+    pattern: "~/.aws"
+    mode: both
+    message: "Reading, writing, or deleting files under ~/.aws is prohibited."
+  - id: block-gh-secrets
+    kind: block_path
+    pattern: "~/.config/gh"
+    mode: both
+    message: "Reading, writing, or deleting files under ~/.config/gh is prohibited."
+  - id: block-sqlite-file-writes
+    kind: block_path
+    pattern: "**/data/*.sqlite*"
+    mode: write
+    message: "Direct writes to or deletion of SQLite files under data are prohibited."
+  - id: minimal-work
+    kind: instruction
+    text: "Do only the minimum needed to achieve the request. Do not implement, test, or verify anything whose necessity you cannot explain. For checks that cover everything, production-like data, or long runs, use a representative sample unless there is a reason not to."

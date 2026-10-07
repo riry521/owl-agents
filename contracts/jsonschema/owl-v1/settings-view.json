@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/settings-view.json",
+  "title": "SettingsView",
+  "type": "object",
+  "required": [
+    "models",
+    "providers",
+    "hybrid",
+    "child_runs",
+    "language",
+    "remake_limits",
+    "knowledge_automation",
+    "advisor_persona",
+    "advisor_folders",
+    "integrations",
+    "system_status",
+    "typesafe",
+    "knowledge_storage"
+  ],
+  "properties": {
+    "models": {
+      "type": "object"
+    },
+    "providers": {
+      "type": "array"
+    },
+    "hybrid": {
+      "type": "object"
+    },
+    "child_runs": {
+      "type": "object"
+    },
+    "language": {
+      "type": "object"
+    },
+    "remake_limits": {
+      "type": "object"
+    },
+    "knowledge_automation": {
+      "type": "object"
+    },
+    "advisor_persona": {
+      "type": "object"
+    },
+    "advisor_folders": {
+      "type": "object"
+    },
+    "integrations": {
+      "type": "object"
+    },
+    "system_status": {
+      "type": "object"
+    },
+    "typesafe": {
+      "type": "object"
+    },
+    "knowledge_storage": {
+      "type": "object"
+    }
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "description": "Core はマージの前にこのファイルのテストを実行し、1つでも落ちたらマージしない（pnpm test:required）。リストから外したり、テストを skip したり弱めたりするのは、Work がそれを求めたときだけ。",
+  "files": [
+    { "path": "tests/work/auto-merge-integration.test.mjs", "flow": "work_lifecycle" },
+    { "path": "tests/work/merge-completion.test.mjs", "flow": "work_lifecycle" },
+    { "path": "tests/work/git-gateway-merge-work.test.mjs", "flow": "work_lifecycle" },
+    { "path": "tests/task/integration.test.mjs", "flow": "work_lifecycle" },
+    { "path": "tests/work/integration-verification.test.mjs", "flow": "work_lifecycle" },
+    { "path": "tests/work/finalize-terminal.test.mjs", "flow": "work_lifecycle" },
+    { "path": "tests/decision/answer-source.test.mjs", "flow": "decision_resume" },
+    { "path": "tests/work/pause-cancel-active.test.mjs", "flow": "decision_resume" },
+    { "path": "tests/work/lifecycle.test.mjs", "flow": "decision_resume" },
+    { "path": "tests/task/worker-completion-gate.test.mjs", "flow": "agent_reports" },
+    { "path": "tests/task/worker-unverifiable.test.mjs", "flow": "agent_reports" },
+    { "path": "tests/task/review-report-target.test.mjs", "flow": "agent_reports" },
+    { "path": "tests/task/reviewer-failure-budget.test.mjs", "flow": "agent_reports" },
+    { "path": "tests/remake/limits.test.mjs", "flow": "remake_limits" },
+    { "path": "tests/remake/gate-question.test.mjs", "flow": "remake_limits" },
+    { "path": "tests/remake/lineage-chain.test.mjs", "flow": "remake_limits" }
+  ]
+}

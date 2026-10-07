@@ -1,0 +1,20 @@
+{
+  "description": "テストの期待値に現在の値を写していないかを見る決め打ちチェック。scripts/check-test-hardcode.mjs が読む。除外は該当行かその直前の行に // hardcode-check-allow <rule-id>: <理由> を書く（理由が空なら除外にならない）",
+  "include": ["tests/**/*.test.mjs", "packages/*/test/**/*.test.mjs"],
+  "exclude_dirs": ["node_modules", "dist", ".git"],
+  "allow_marker": "hardcode-check-allow",
+  "rules": [
+    {
+      "id": "hash-literal",
+      "pattern": "assert\\.\\w+\\([^;]*?['\"`][0-9a-f]{64}['\"`]",
+      "flags": "",
+      "message": "64桁のハッシュ値を期待値に書いている。計算で得た値と比べるか、形式（長さ・文字種）を確かめる"
+    },
+    {
+      "id": "whole-list-equal",
+      "pattern": "assert\\.(?:deepStrictEqual|deepEqual)\\(\\s*[^,;]+,\\s*\\[(?:\\s*['\"`][^'\"`\\n]*['\"`]\\s*,){7,}\\s*['\"`][^'\"`\\n]*['\"`]\\s*[,\\]]",
+      "flags": "",
+      "message": "増えていく一覧を丸ごと一致で比べている。含むべき要素・件数の下限・並び順など性質で比べる"
+    }
+  ]
+}

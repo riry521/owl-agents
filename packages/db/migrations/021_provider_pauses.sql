@@ -1,0 +1,20 @@
+CREATE TABLE provider_pauses (
+  provider TEXT NOT NULL PRIMARY KEY CHECK (length(provider) > 0),
+  state TEXT NOT NULL CHECK (state IN ('active', 'paused', 'probing')),
+  paused_at TEXT NULL,
+  resume_at TEXT NULL,
+  resume_source TEXT NULL CHECK (resume_source IS NULL OR resume_source IN ('reported', 'backoff')),
+  reported_resets_at TEXT NULL,
+  backoff_step INTEGER NOT NULL DEFAULT 0 CHECK (backoff_step >= 0),
+  probe_started_at TEXT NULL,
+  last_error_key TEXT NULL,
+  last_error TEXT NULL,
+  last_role TEXT NULL,
+  last_work_id TEXT NULL,
+  last_task_id TEXT NULL,
+  resumed_at TEXT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  CHECK (state = 'active' OR (paused_at IS NOT NULL AND resume_at IS NOT NULL AND resume_source IS NOT NULL)),
+  CHECK (state <> 'probing' OR probe_started_at IS NOT NULL)
+);

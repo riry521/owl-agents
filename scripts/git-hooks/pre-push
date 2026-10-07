@@ -1,0 +1,293 @@
+#!/bin/sh
+# Owl pre-push guard: blocks pushes whose new commits contain words from a private word list.
+# Git calls this as: pre-push <remote-name> <remote-url>, with pushed refs on stdin.
+set -u
+LC_ALL=C
+export LC_ALL
+
+blocked() {
+  printf 'owl-pre-push: blocked: %s\n' "$1" >&2
+  exit 1
+}
+
+warning() {
+  printf 'owl-pre-push: warning: %s\n' "$1" >&2
+}
+
+all_zero() {
+  case "$1" in
+    *[!0]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+script_dir=$(CDPATH='' cd -- "$(dirname -- "$0")" 2>/dev/null && pwd -P) || blocked 'could not locate hook files'
+owl_root=$(CDPATH='' cd -- "$script_dir/../.." 2>/dev/null && pwd -P) || blocked 'could not locate hook files'
+
+list_file=${OWL_PRIVATE_WORDS_FILE-}
+if [ -n "$list_file" ]; then
+  if [ ! -f "$list_file" ] || [ ! -r "$list_file" ]; then
+    blocked 'OWL_PRIVATE_WORDS_FILE is set but the file cannot be read'
+  fi
+else
+  common_dir=$(git rev-parse --git-common-dir 2>/dev/null || :)
+  if [ -n "$common_dir" ]; then
+    case "$common_dir" in
+      /*) ;;
+      *) common_dir=$PWD/$common_dir ;;
+    esac
+    common_dir=$(CDPATH='' cd -- "$common_dir" 2>/dev/null && pwd -P) || common_dir=''
+    if [ -n "$common_dir" ] && [ "${common_dir##*/}" = .git ]; then
+      repo_root=${common_dir%/.git}
+      [ -n "$repo_root" ] || repo_root=/
+      if [ -e "$repo_root/data/private-words.txt" ] || [ -L "$repo_root/data/private-words.txt" ]; then
+        list_file=$repo_root/data/private-words.txt
+      fi
+    fi
+  fi
+  if [ -z "$list_file" ] && { [ -e "$owl_root/data/private-words.txt" ] || [ -L "$owl_root/data/private-words.txt" ]; }; then
+    list_file=$owl_root/data/private-words.txt
+  fi
+  if [ -z "$list_file" ]; then
+    cat >/dev/null
+    warning 'private word list not found; this push was not checked (set OWL_PRIVATE_WORDS_FILE or create data/private-words.txt)'
+    exit 0
+  fi
+  if [ ! -f "$list_file" ] || [ ! -r "$list_file" ]; then
+    blocked 'private word list cannot be read'
+  fi
+fi
+
+if ! cat "$list_file" >/dev/null 2>&1; then
+  if [ -n "${OWL_PRIVATE_WORDS_FILE-}" ]; then
+    blocked 'OWL_PRIVATE_WORDS_FILE is set but the file cannot be read'
+  fi
+  blocked 'private word list cannot be read'
+fi
+awk '
+  {
+    line = $0
+    sub(/\r$/, "", line)
+    sub(/^[ \t]+/, "", line)
+    sub(/[ \t]+$/, "", line)
+    if (line != "" && line !~ /^#/) count++
+  }
+  END { if (count == 0) exit 1 }
+' "$list_file" >/dev/null 2>&1
+list_status=$?
+if [ "$list_status" -eq 1 ]; then
+  cat >/dev/null
+  warning 'private word list is empty; this push was not checked'
+  exit 0
+elif [ "$list_status" -ne 0 ]; then
+  blocked 'could not read private word list'
+fi
+
+umask 077
+tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/owl-pre-push.XXXXXX" 2>/dev/null) || blocked 'could not prepare inspection'
+trap 'rm -rf "$tmpdir"' 0
+trap 'exit 1' HUP INT TERM
+
+if ! cat >"$tmpdir/refs"; then
+  blocked 'could not read pushed refs'
+fi
+: >"$tmpdir/commits.raw" || blocked 'could not prepare inspection'
+: >"$tmpdir/stream" || blocked 'could not prepare inspection'
+
+remote_name=${1-}
+line_no=0
+while IFS=' ' read -r local_ref local_sha remote_ref remote_sha extra || [ -n "${local_ref-}${local_sha-}${remote_ref-}${remote_sha-}${extra-}" ]; do
+  line_no=$((line_no + 1))
+  [ -n "${local_ref-}" ] || continue
+  if [ -z "${local_sha-}" ] || [ -z "${remote_ref-}" ] || [ -z "${remote_sha-}" ] || [ -n "${extra-}" ]; then
+    blocked "could not inspect pushed ref #$line_no"
+  fi
+  case "$local_sha$remote_sha" in
+    *[!0123456789abcdefABCDEF]*) blocked "could not inspect pushed ref #$line_no" ;;
+  esac
+  printf 'R\t%s\t%s\n' "$line_no" "$remote_ref" >>"$tmpdir/stream" || blocked 'could not prepare inspection'
+
+  if all_zero "$local_sha"; then
+    continue
+  fi
+
+  if all_zero "$remote_sha"; then
+    if [ -n "$remote_name" ] && git config --get "remote.$remote_name.url" >/dev/null 2>&1; then
+      if ! git rev-list "$local_sha" --not --remotes="$remote_name" >>"$tmpdir/commits.raw" 2>/dev/null; then
+        blocked "could not inspect pushed ref #$line_no"
+      fi
+    else
+      if ! git rev-list "$local_sha" >>"$tmpdir/commits.raw" 2>/dev/null; then
+        blocked "could not inspect pushed ref #$line_no"
+      fi
+    fi
+  elif git cat-file -e "$remote_sha^{commit}" >/dev/null 2>&1; then
+    if ! git rev-list "$remote_sha..$local_sha" >>"$tmpdir/commits.raw" 2>/dev/null; then
+      blocked "could not inspect pushed ref #$line_no"
+    fi
+  elif [ -n "$remote_name" ] && git config --get "remote.$remote_name.url" >/dev/null 2>&1; then
+    if ! git rev-list "$local_sha" --not --remotes="$remote_name" >>"$tmpdir/commits.raw" 2>/dev/null; then
+      blocked "could not inspect pushed ref #$line_no"
+    fi
+  else
+    if ! git rev-list "$local_sha" >>"$tmpdir/commits.raw" 2>/dev/null; then
+      blocked "could not inspect pushed ref #$line_no"
+    fi
+  fi
+done <"$tmpdir/refs"
+
+if ! sort -u "$tmpdir/commits.raw" >"$tmpdir/commits"; then
+  blocked 'could not inspect pushed commits'
+fi
+empty_tree=$(git hash-object -t tree /dev/null 2>/dev/null) || blocked 'could not inspect pushed commits'
+
+while IFS= read -r commit || [ -n "${commit-}" ]; do
+  [ -n "${commit-}" ] || continue
+  parent_line=$(git rev-list --parents -n 1 "$commit" 2>/dev/null) || blocked 'could not inspect pushed commits'
+  if [ "$parent_line" = "$commit" ]; then
+    parent=$empty_tree
+  else
+    parent=${parent_line#* }
+    parent=${parent%% *}
+    [ -n "$parent" ] || blocked 'could not inspect pushed commits'
+  fi
+
+  printf 'C\t%s\n' "$commit" >>"$tmpdir/stream" || blocked 'could not prepare inspection'
+  if ! git log -1 --format=%B "$commit" >"$tmpdir/message" 2>/dev/null; then
+    blocked 'could not inspect pushed commit message'
+  fi
+  if ! awk '{ print "M\t" $0 }' "$tmpdir/message" >>"$tmpdir/stream"; then
+    blocked 'could not inspect pushed commit message'
+  fi
+  if ! git -c core.quotePath=false diff --name-only --no-renames "$parent" "$commit" >"$tmpdir/paths" 2>/dev/null; then
+    blocked 'could not inspect pushed file paths'
+  fi
+  while IFS= read -r path || [ -n "${path-}" ]; do
+    printf 'P\t%s\n' "$path" >>"$tmpdir/stream" || blocked 'could not prepare inspection'
+  done <"$tmpdir/paths"
+  if ! git -c core.quotePath=false diff -U0 --no-color --no-ext-diff --no-renames --src-prefix=a/ --dst-prefix=b/ "$parent" "$commit" >"$tmpdir/diff" 2>/dev/null; then
+    blocked 'could not inspect pushed changes'
+  fi
+  if ! awk '{ print "D\t" $0 }' "$tmpdir/diff" >>"$tmpdir/stream"; then
+    blocked 'could not inspect pushed changes'
+  fi
+done <"$tmpdir/commits"
+
+OWL_PRE_PUSH_WORD_LIST=$list_file awk '
+  function trim(value) {
+    sub(/\r$/, "", value)
+    sub(/^[ \t]+/, "", value)
+    sub(/[ \t]+$/, "", value)
+    return value
+  }
+  function report(word_index, kind, sha, location, key, short_sha) {
+    key = word_index SUBSEP kind SUBSEP sha SUBSEP location
+    if (seen[key]++) return
+    match_count++
+    if (match_count <= 20) {
+      short_sha = substr(sha, 1, 12)
+      if (kind == "remote ref") {
+        printf "owl-pre-push: blocked: private word #%d (list line %d) in %s at %s\n", word_lines[word_index], word_lines[word_index], kind, location
+      } else {
+        printf "owl-pre-push: blocked: private word #%d (list line %d) in %s at %s %s\n", word_lines[word_index], word_lines[word_index], kind, short_sha, location
+      }
+    }
+  }
+  function check_text(text, kind, sha, location, i, found) {
+    found = 0
+    for (i = 1; i <= word_count; i++) {
+      if (index(tolower(text), words[i]) > 0) {
+        report(i, kind, sha, location)
+        found = 1
+      }
+    }
+    return found
+  }
+  BEGIN {
+    list_file = ENVIRON["OWL_PRE_PUSH_WORD_LIST"]
+    while ((read_status = (getline item < list_file)) > 0) {
+      physical_line++
+      item = trim(item)
+      if (item == "" || item ~ /^#/) continue
+      words[++word_count] = tolower(item)
+      word_lines[word_count] = physical_line
+    }
+    close_status = close(list_file)
+    if (read_status < 0 || close_status != 0) {
+      print "owl-pre-push: blocked: could not read private word list"
+      fatal = 1
+      exit
+    }
+    if (word_count == 0) {
+      print "owl-pre-push: warning: private word list is empty; this push was not checked"
+      empty_list = 1
+      exit
+    }
+  }
+  {
+    tag = substr($0, 1, 1)
+    value = substr($0, 3)
+    if (tag == "C") {
+      current_sha = value
+      current_path = ""
+      in_hunk = 0
+      message_line = 0
+    } else if (tag == "M") {
+      message_line++
+      check_text(value, "commit message", current_sha, "message line " message_line)
+    } else if (tag == "P") {
+      current_path = value
+      if (check_text(value, "file path", current_sha, "(path hidden)"))
+        hidden_path[current_sha SUBSEP value] = 1
+    } else if (tag == "D") {
+      diff_line = value
+      if (diff_line ~ /^diff --git /) {
+        in_hunk = 0
+        diff_path = ""
+      } else if (!in_hunk && diff_line ~ /^\+\+\+ /) {
+        diff_path = substr(diff_line, 5)
+        if (substr(diff_path, 1, 2) == "b/") diff_path = substr(diff_path, 3)
+        if (diff_path == "/dev/null") diff_path = ""
+        else if (check_text(diff_path, "file path", current_sha, "(path hidden)"))
+          hidden_path[current_sha SUBSEP diff_path] = 1
+      } else if (diff_line ~ /^@@ /) {
+        if (match(diff_line, /\+[0-9]+/)) {
+          line_number = substr(diff_line, RSTART + 1, RLENGTH - 1) + 0
+          in_hunk = 1
+        } else {
+          in_hunk = 0
+        }
+      } else if (in_hunk && substr(diff_line, 1, 1) == "+") {
+        shown_path = hidden_path[current_sha SUBSEP diff_path] ? "(path hidden)" : diff_path
+        check_text(substr(diff_line, 2), "added line", current_sha, shown_path ":" line_number)
+        line_number++
+      } else if (in_hunk && substr(diff_line, 1, 1) == " ") {
+        line_number++
+      }
+    } else if (tag == "R") {
+      tab = index(value, "\t")
+      ref_line = substr(value, 1, tab - 1)
+      ref_name = substr(value, tab + 1)
+      check_text(ref_name, "remote ref", "", "pushed ref #" ref_line)
+    }
+  }
+  END {
+    if (fatal) exit 2
+    if (empty_list) exit 0
+    if (match_count > 0) {
+      printf "owl-pre-push: blocked: %d match(es) found; the matched words are not shown. Fix the commits and push again.\n", match_count
+      if (match_count > 20)
+        printf "owl-pre-push: blocked: and %d more\n", match_count - 20
+      exit 1
+    }
+  }
+' <"$tmpdir/stream" >"$tmpdir/report" 2>/dev/null
+scan_status=$?
+if [ -s "$tmpdir/report" ]; then
+  cat "$tmpdir/report" >&2
+fi
+case "$scan_status" in
+  0) exit 0 ;;
+  1) exit 1 ;;
+  *) blocked 'could not inspect pushed content' ;;
+esac
