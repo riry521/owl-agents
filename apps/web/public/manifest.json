@@ -1,0 +1,21 @@
+{
+  "name": "Owl-Agent",
+  "short_name": "Owl",
+  "description": "Multi-agent orchestration board",
+  "start_url": "/owl/",
+  "display": "standalone",
+  "background_color": "#f5f4f2",
+  "theme_color": "#6366f1",
+  "icons": [
+    {
+      "src": "/owl/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/owl/icon.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ]
+}

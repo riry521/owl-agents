@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/verification-command.json",
+  "title": "VerificationCommand",
+  "type": "object",
+  "required": [
+    "command_id",
+    "argv",
+    "cwd",
+    "env_allowlist",
+    "timeout_seconds",
+    "stdout_limit",
+    "stderr_limit",
+    "expected_exit_codes",
+    "executor"
+  ],
+  "properties": {
+    "command_id": {
+      "type": "string"
+    },
+    "argv": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "cwd": {
+      "type": "string"
+    },
+    "env_allowlist": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "timeout_seconds": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "stdout_limit": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "stderr_limit": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "expected_exit_codes": {
+      "type": "array",
+      "items": {
+        "type": "integer"
+      }
+    },
+    "executor": {
+      "type": "string",
+      "enum": [
+        "core",
+        "reviewer"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

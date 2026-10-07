@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/inbound-message.json",
+  "title": "InboundMessage",
+  "type": "object",
+  "required": [
+    "provider",
+    "account_id",
+    "external_message_id",
+    "user_id",
+    "channel_id",
+    "thread_id",
+    "received_at",
+    "text",
+    "conversation_hint",
+    "attachment_ids"
+  ],
+  "properties": {
+    "provider": {
+      "type": "string",
+      "enum": [
+        "slack",
+        "discord"
+      ]
+    },
+    "account_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "external_message_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "user_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "channel_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200
+    },
+    "thread_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "maxLength": 200
+    },
+    "received_at": {
+      "$ref": "common.json#/$defs/RFC3339"
+    },
+    "text": {
+      "type": "string",
+      "minLength": 0,
+      "maxLength": 100000
+    },
+    "conversation_hint": {
+      "type": "object",
+      "required": [
+        "work_id",
+        "dm_ref",
+        "thread_ref"
+      ],
+      "properties": {
+        "work_id": {
+          "anyOf": [
+            {
+              "$ref": "common.json#/$defs/ULID"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "dm_ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "thread_ref": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 200
+        }
+      },
+      "additionalProperties": false
+    },
+    "attachment_ids": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "$ref": "common.json#/$defs/ULID"
+      }
+    }
+  },
+  "additionalProperties": false
+}

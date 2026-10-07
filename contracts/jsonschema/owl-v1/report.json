@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/report.json",
+  "title": "Report",
+  "type": "object",
+  "required": [
+    "id",
+    "agent_run_id",
+    "schema_version",
+    "result",
+    "payload",
+    "created_at"
+  ],
+  "properties": {
+    "id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "agent_run_id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "schema_version": {
+      "type": "string"
+    },
+    "result": {
+      "type": "string",
+      "enum": [
+        "success",
+        "failed",
+        "partial"
+      ]
+    },
+    "payload": {
+      "$ref": "common.json#/$defs/OpaqueObject"
+    },
+    "created_at": {
+      "$ref": "common.json#/$defs/RFC3339"
+    }
+  },
+  "additionalProperties": false
+}

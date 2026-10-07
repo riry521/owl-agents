@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "Node",
+    "rootDir": "src",
+    "outDir": "dist",
+    "declaration": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "noEmitOnError": true,
+    "baseUrl": ".",
+    "paths": {
+      "@owl/shared": ["../shared/dist/index.d.ts"],
+      "@owl/db": ["../db/dist/index.d.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}

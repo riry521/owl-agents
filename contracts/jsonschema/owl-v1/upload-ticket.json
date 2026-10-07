@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/upload-ticket.json",
+  "title": "UploadTicket",
+  "type": "object",
+  "required": [
+    "upload_id",
+    "put_path",
+    "expires_at",
+    "max_bytes",
+    "conversation_id"
+  ],
+  "properties": {
+    "upload_id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "put_path": {
+      "type": "string"
+    },
+    "expires_at": {
+      "$ref": "common.json#/$defs/RFC3339"
+    },
+    "max_bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "conversation_id": {
+      "$ref": "common.json#/$defs/ULID"
+    }
+  },
+  "additionalProperties": false
+}

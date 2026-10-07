@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/inbound-ack.json",
+  "title": "InboundAck",
+  "type": "object",
+  "required": [
+    "request_id",
+    "ack_id",
+    "message_id",
+    "event_id",
+    "deduplicated",
+    "status"
+  ],
+  "properties": {
+    "request_id": {
+      "$ref": "common.json#/$defs/RequestId"
+    },
+    "ack_id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "message_id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "event_id": {
+      "anyOf": [
+        {
+          "$ref": "common.json#/$defs/ULID"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "deduplicated": {
+      "type": "boolean"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "accepted",
+        "duplicate"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

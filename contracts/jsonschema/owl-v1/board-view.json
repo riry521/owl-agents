@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/board-view.json",
+  "title": "BoardView",
+  "type": "object",
+  "required": [
+    "works",
+    "open_decisions",
+    "projects",
+    "next_cursor"
+  ],
+  "properties": {
+    "works": {
+      "type": "array",
+      "items": {
+        "$ref": "work-summary.json"
+      }
+    },
+    "open_decisions": {
+      "type": "array",
+      "items": {
+        "$ref": "decision.json"
+      }
+    },
+    "projects": {
+      "type": "array",
+      "items": {
+        "$ref": "project.json"
+      }
+    },
+    "next_cursor": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  }
+}

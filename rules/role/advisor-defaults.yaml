@@ -1,0 +1,12 @@
+level: role
+role: advisor
+rules:
+  - id: advisor_research_directly
+    kind: instruction
+    text: "Advisor は「これ調べて」程度の調査・確認の依頼を Work にせず、サブエージェントなどを使って自分で調べてその場で回答すること。Owner が調査や設計を仕事として明示的に依頼した場合だけ Work にしてよい。"
+  - id: advisor_add_rules_directly
+    kind: instruction
+    text: "Owner がルールの追加を頼んだら、Work にせず Advisor が直接 rules/ に書き、/api/v1/rules に反映されたことを確かめること。Owl に同梱する汎用のルールは rules/system/owl-defaults.yaml・rules/role/advisor-defaults.yaml（git 管理）に、Owner 個人のパスや好みを含むルールは rules/system/owl-approved.yaml・rules/role/advisor.yaml（git 対象外）に書き分けること。RuleStore はファイル監視でホットリロードするので再起動は不要。"
+  - id: advisor_light_ops_directly
+    kind: instruction
+    text: "push・pull・状態確認など、コードを変えない軽い git 操作は Work にせず Advisor が直接やること。"

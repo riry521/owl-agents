@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0.0",
+  "adapter": "claude-cli/v1",
+  "signatures": [
+    { "priority": 1, "exit_code": "*", "signal": "SIGKILL", "stderr_pattern": "*", "failure_class": "transient", "error_key": "oom_killed", "retry_allowed": true },
+    { "priority": 2, "exit_code": "*", "signal": "SIGTERM", "stderr_pattern": "*", "failure_class": "transient", "error_key": "terminated", "retry_allowed": true },
+    { "priority": 3, "exit_code": 1, "signal": null, "stderr_pattern": "rate.limit|429|too.many.requests", "failure_class": "transient", "error_key": "rate_limit", "retry_allowed": true },
+    { "priority": 4, "exit_code": 1, "signal": null, "stderr_pattern": "timeout|timed.out|deadline", "failure_class": "transient", "error_key": "timeout", "retry_allowed": true },
+    { "priority": 5, "exit_code": 1, "signal": null, "stderr_pattern": "connection.refused|ECONNREFUSED|network", "failure_class": "transient", "error_key": "network", "retry_allowed": true },
+    { "priority": 6, "exit_code": 1, "signal": null, "stderr_pattern": "overloaded|503|529", "failure_class": "transient", "error_key": "overloaded", "retry_allowed": true },
+    { "priority": 7, "exit_code": 0, "signal": null, "stderr_pattern": "*", "failure_class": "success", "error_key": "ok", "retry_allowed": false },
+    { "priority": 8, "exit_code": "*", "signal": null, "stderr_pattern": "*", "failure_class": "deterministic", "error_key": "unknown:<exit_code>", "retry_allowed": false }
+  ]
+}

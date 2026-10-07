@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/tokens-view.json",
+  "title": "TokensView",
+  "type": "object",
+  "required": [
+    "report",
+    "plan_usage",
+    "plan_usage_settings",
+    "projects"
+  ],
+  "properties": {
+    "report": {
+      "type": "object"
+    },
+    "plan_usage": {
+      "type": "object"
+    },
+    "plan_usage_settings": {
+      "type": "object"
+    },
+    "projects": {
+      "type": "array",
+      "items": {
+        "$ref": "project.json"
+      }
+    }
+  }
+}

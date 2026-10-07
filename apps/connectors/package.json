@@ -1,0 +1,22 @@
+{
+  "name": "@owl-agent/connectors",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone Slack and Discord connectors for Owl, reusing the full notification and decision-routing implementations.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "start": "node dist/cli.js",
+    "start:slack": "node dist/cli.js --slack",
+    "start:discord": "node dist/cli.js --discord"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@owl/connector-discord": "workspace:*",
+    "@owl/connector-slack": "workspace:*"
+  }
+}

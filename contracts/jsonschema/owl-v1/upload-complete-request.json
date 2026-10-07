@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/upload-complete-request.json",
+  "title": "UploadCompleteRequest",
+  "type": "object",
+  "required": [
+    "bytes",
+    "sha256",
+    "mime"
+  ],
+  "properties": {
+    "bytes": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "mime": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

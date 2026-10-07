@@ -1,0 +1,1 @@
+ALTER TABLE projects ADD COLUMN auto_push INTEGER NOT NULL DEFAULT 0 CHECK (auto_push IN (0, 1));

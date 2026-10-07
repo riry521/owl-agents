@@ -1,0 +1,10 @@
+{"id":"q01","question":"毎月の売上をメールで届けてくれる処理はどうなっているか","gold_ids":["n01"],"kind":"natural","split":"dev"}
+{"id":"q02","question":"席が空いているか調べて猫カフェに席を取りたい","gold_ids":["n02"],"kind":"natural","split":"dev"}
+{"id":"q03","question":"北極星に合わせるときの望遠鏡の準備は何から始める？","gold_ids":["n03"],"kind":"natural","split":"holdout"}
+{"id":"q04","question":"パスワードを忘れた人にメールで送るリンクの期限は？","gold_ids":["n04"],"kind":"natural","split":"dev"}
+{"id":"q05","question":"買ってきた豆を長持ちさせるにはどこに置けばいいか","gold_ids":["n05"],"kind":"natural","split":"holdout"}
+{"id":"q06","question":"大きすぎる画像を上げたらどうなるの","gold_ids":["n06"],"kind":"natural","split":"holdout"}
+{"id":"q07","question":"勉強会の録画はどのくらい残してある？","gold_ids":["n07"],"kind":"natural","split":"dev"}
+{"id":"q08","question":"何度もログインに失敗したらアカウントはどうなる","gold_ids":["n08"],"kind":"natural","split":"dev"}
+{"id":"q09","question":"認証 ロック","gold_ids":["n08"],"kind":"keyword","split":"dev"}
+{"id":"q10","question":"望遠鏡 手順","gold_ids":["n03"],"kind":"keyword","split":"holdout"}

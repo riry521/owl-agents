@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/task-detail.json",
+  "title": "TaskDetail",
+  "type": "object",
+  "required": [
+    "id",
+    "work_id",
+    "title",
+    "status",
+    "type",
+    "state_version",
+    "updated_at",
+    "parent_task_id",
+    "acceptance",
+    "review_round",
+    "failure_count",
+    "worker_generation"
+  ],
+  "properties": {
+    "id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "work_id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "title": {
+      "type": "string"
+    },
+    "status": {
+      "$ref": "common.json#/$defs/TaskState"
+    },
+    "type": {
+      "type": "string"
+    },
+    "state_version": {
+      "$ref": "common.json#/$defs/Version"
+    },
+    "updated_at": {
+      "$ref": "common.json#/$defs/RFC3339"
+    },
+    "parent_task_id": {
+      "anyOf": [
+        {
+          "$ref": "common.json#/$defs/ULID"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "acceptance": {
+      "type": "string"
+    },
+    "review_round": {
+      "$ref": "common.json#/$defs/Version"
+    },
+    "failure_count": {
+      "$ref": "common.json#/$defs/Version"
+    },
+    "worker_generation": {
+      "$ref": "common.json#/$defs/Version"
+    }
+  },
+  "additionalProperties": false
+}

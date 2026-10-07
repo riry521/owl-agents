@@ -1,0 +1,22 @@
+{
+  "name": "@owl/connector-slack",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@owl/shared": "workspace:*",
+    "@owl/plugin-sdk": "workspace:*",
+    "@slack/socket-mode": "^2.0.0",
+    "@slack/web-api": "^7.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

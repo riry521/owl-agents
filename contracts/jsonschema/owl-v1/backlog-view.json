@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/backlog-view.json",
+  "title": "BacklogView",
+  "type": "object",
+  "required": [
+    "items",
+    "next_offset",
+    "projects"
+  ],
+  "properties": {
+    "items": {
+      "type": "array"
+    },
+    "next_offset": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "projects": {
+      "type": "array",
+      "items": {
+        "$ref": "project.json"
+      }
+    }
+  }
+}

@@ -1,0 +1,1652 @@
+{
+  "injections": {
+    "manager:null": "<owl-memory generated=\"<TS>\" storage=\"connected\" index_at=\"*\">\n\n## North Star\n\n## Owner の好み\n- [preference★3] pref — 日本語で簡潔に答える `notes/pref.md`\n\n## プロジェクト概要\n\n## 関連する記憶（検索: zebra keyword）\n- [lesson★3] old-format — no frontmatter at all, zebra keyword `notes/old-format.md`\n- [lesson★3] lesson-b — ビルドの順番に注意する `notes/lesson-b.md`\n- [lesson★4] lesson-a — 取り込み前にテストを回す `notes/lesson-a.md`\n\n本文は MCP owl-memory の expand（id またはパス。id でも指定できる）で取得し、探すときは recall / search を使う。\n\n_memory injected: 0.8kB / 6.0kB budget · 4 items · collapsed: なし_\n</owl-memory>",
+    "manager:p1": "<owl-memory generated=\"<TS>\" storage=\"connected\" index_at=\"*\">\n\n## North Star\n\n## Owner の好み\n- [preference★3] pref — 日本語で簡潔に答える `notes/pref.md`\n\n## プロジェクト概要\n\n## 関連する記憶（検索: zebra keyword）\n- [lesson★3] old-format — no frontmatter at all, zebra keyword `notes/old-format.md`\n- [lesson★3] lesson-b — ビルドの順番に注意する `notes/lesson-b.md`\n- [decision★3] decision — 設定は表の別の行に置く `notes/decision.md`\n- [lesson★4] lesson-a — 取り込み前にテストを回す `notes/lesson-a.md`\n\n本文は MCP owl-memory の expand（id またはパス。id でも指定できる）で取得し、探すときは recall / search を使う。\n\n_memory injected: 0.9kB / 6.0kB budget · 5 items · collapsed: なし_\n</owl-memory>",
+    "designer:null": "<owl-memory generated=\"<TS>\" storage=\"connected\" index_at=\"*\">\n\n## North Star\n\n## Owner の好み\n\n## プロジェクト概要\n\n## 関連する記憶（検索: zebra keyword）\n- [lesson★3] old-format — no frontmatter at all, zebra keyword `notes/old-format.md`\n- [reference★3] w1 — 作業の記録 `works/w1.md`\n- [lesson★3] lesson-b — ビルドの順番に注意する `notes/lesson-b.md`\n- [reference★3] clip — 架空の調査メモ `research/clip.md`\n- [lesson★4] lesson-a — 取り込み前にテストを回す `notes/lesson-a.md`\n\n本文は MCP owl-memory の expand（id またはパス。id でも指定できる）で取得し、探すときは recall / search を使う。\n\n_memory injected: 0.8kB / 6.0kB budget · 5 items · collapsed: なし_\n</owl-memory>",
+    "designer:p1": "<owl-memory generated=\"<TS>\" storage=\"connected\" index_at=\"*\">\n\n## North Star\n\n## Owner の好み\n\n## プロジェクト概要\n\n## 関連する記憶（検索: zebra keyword）\n- [lesson★3] old-format — no frontmatter at all, zebra keyword `notes/old-format.md`\n- [reference★3] w1 — 作業の記録 `works/w1.md`\n- [lesson★3] lesson-b — ビルドの順番に注意する `notes/lesson-b.md`\n- [decision★3] decision — 設定は表の別の行に置く `notes/decision.md`\n- [reference★3] clip — 架空の調査メモ `research/clip.md`\n- [lesson★4] lesson-a — 取り込み前にテストを回す `notes/lesson-a.md`\n\n本文は MCP owl-memory の expand（id またはパス。id でも指定できる）で取得し、探すときは recall / search を使う。\n\n_memory injected: 0.9kB / 6.0kB budget · 6 items · collapsed: なし_\n</owl-memory>",
+    "worker:null": "<owl-memory generated=\"<TS>\" storage=\"connected\" index_at=\"*\">\n\n## North Star\n\n## Owner の好み\n- [preference★3] pref — 日本語で簡潔に答える `notes/pref.md`\n\n## プロジェクト概要\n\n## 関連する記憶（検索: zebra keyword）\n- [lesson★3] old-format — no frontmatter at all, zebra keyword `notes/old-format.md`\n- [procedure★3] procedure — 公開前の手順 `notes/procedure.md`\n- [lesson★3] lesson-b — ビルドの順番に注意する `notes/lesson-b.md`\n- [lesson★4] lesson-a — 取り込み前にテストを回す `notes/lesson-a.md`\n\n本文は MCP owl-memory の expand（id またはパス。id でも指定できる）で取得し、探すときは recall / search を使う。\n\n_memory injected: 0.9kB / 4.0kB budget · 5 items · collapsed: なし_\n</owl-memory>",
+    "worker:p1": "<owl-memory generated=\"<TS>\" storage=\"connected\" index_at=\"*\">\n\n## North Star\n\n## Owner の好み\n- [preference★3] pref — 日本語で簡潔に答える `notes/pref.md`\n\n## プロジェクト概要\n\n## 関連する記憶（検索: zebra keyword）\n- [lesson★3] old-format — no frontmatter at all, zebra keyword `notes/old-format.md`\n- [procedure★3] procedure — 公開前の手順 `notes/procedure.md`\n- [lesson★3] lesson-b — ビルドの順番に注意する `notes/lesson-b.md`\n- [decision★3] decision — 設定は表の別の行に置く `notes/decision.md`\n- [lesson★4] lesson-a — 取り込み前にテストを回す `notes/lesson-a.md`\n\n本文は MCP owl-memory の expand（id またはパス。id でも指定できる）で取得し、探すときは recall / search を使う。\n\n_memory injected: 0.9kB / 4.0kB budget · 6 items · collapsed: なし_\n</owl-memory>",
+    "reviewer:null": "<owl-memory generated=\"<TS>\" storage=\"connected\" index_at=\"*\">\n\n## North Star\n\n## Owner の好み\n\n## プロジェクト概要\n\n## 関連する記憶（検索: zebra keyword）\n- [lesson★3] old-format — no frontmatter at all, zebra keyword `notes/old-format.md`\n- [lesson★3] lesson-b — ビルドの順番に注意する `notes/lesson-b.md`\n- [lesson★4] lesson-a — 取り込み前にテストを回す `notes/lesson-a.md`\n\n本文は MCP owl-memory の expand（id またはパス。id でも指定できる）で取得し、探すときは recall / search を使う。\n\n_memory injected: 0.7kB / 3.0kB budget · 3 items · collapsed: なし_\n</owl-memory>",
+    "reviewer:p1": "<owl-memory generated=\"<TS>\" storage=\"connected\" index_at=\"*\">\n\n## North Star\n\n## Owner の好み\n\n## プロジェクト概要\n\n## 関連する記憶（検索: zebra keyword）\n- [lesson★3] old-format — no frontmatter at all, zebra keyword `notes/old-format.md`\n- [lesson★3] lesson-b — ビルドの順番に注意する `notes/lesson-b.md`\n- [decision★3] decision — 設定は表の別の行に置く `notes/decision.md`\n- [lesson★4] lesson-a — 取り込み前にテストを回す `notes/lesson-a.md`\n\n本文は MCP owl-memory の expand（id またはパス。id でも指定できる）で取得し、探すときは recall / search を使う。\n\n_memory injected: 0.8kB / 3.0kB budget · 4 items · collapsed: なし_\n</owl-memory>",
+    "curator:null": "<owl-memory generated=\"<TS>\" storage=\"connected\" index_at=\"*\">\n\n## North Star\n\n## Owner の好み\n\n## プロジェクト概要\n\n## 関連する記憶（検索: zebra keyword）\n- [lesson★3] old-format — no frontmatter at all, zebra keyword `notes/old-format.md`\n- [procedure★3] procedure — 公開前の手順 `notes/procedure.md`\n- [lesson★3] lesson-b — ビルドの順番に注意する `notes/lesson-b.md`\n- [lesson★4] lesson-a — 取り込み前にテストを回す `notes/lesson-a.md`\n\n本文は MCP owl-memory の expand（id またはパス。id でも指定できる）で取得し、探すときは recall / search を使う。\n\n_memory injected: 0.8kB / 2.0kB budget · 4 items · collapsed: なし_\n</owl-memory>",
+    "curator:p1": "<owl-memory generated=\"<TS>\" storage=\"connected\" index_at=\"*\">\n\n## North Star\n\n## Owner の好み\n\n## プロジェクト概要\n\n## 関連する記憶（検索: zebra keyword）\n- [lesson★3] old-format — no frontmatter at all, zebra keyword `notes/old-format.md`\n- [procedure★3] procedure — 公開前の手順 `notes/procedure.md`\n- [lesson★3] lesson-b — ビルドの順番に注意する `notes/lesson-b.md`\n- [lesson★4] lesson-a — 取り込み前にテストを回す `notes/lesson-a.md`\n\n本文は MCP owl-memory の expand（id またはパス。id でも指定できる）で取得し、探すときは recall / search を使う。\n\n_memory injected: 0.8kB / 2.0kB budget · 4 items · collapsed: なし_\n</owl-memory>",
+    "advisor:turn1": "<owl-memory generated=\"<TS>\" storage=\"connected\" index_at=\"*\">\n\n## North Star\n- [north-star★5] ns — 目的は架空プロジェクトの自律運用 `notes/ns.md`\n\n## Owner の好み\n- [preference★3] pref — 日本語で簡潔に答える `notes/pref.md`\n\n## プロジェクト概要\n\n## 関連する記憶（検索: zebra keyword 架空の Work）\n- [decision★3] decision — 設定は表の別の行に置く `notes/decision.md`\n- [lesson★4] lesson-a — 取り込み前にテストを回す `notes/lesson-a.md`\n- [lesson★3] lesson-b — ビルドの順番に注意する `notes/lesson-b.md`\n- [lesson★3] old-format — no frontmatter at all, zebra keyword `notes/old-format.md`\n- [procedure★3] procedure — 公開前の手順 `notes/procedure.md`\n\n本文は MCP owl-memory の expand（id またはパス。id でも指定できる）で取得し、探すときは recall / search を使う。\n\n_memory injected: 1.0kB / 8.0kB budget · 7 items · collapsed: なし_\n</owl-memory>",
+    "advisor:turn2": null,
+    "advisor:turn3": null
+  },
+  "search": {
+    "zebra keyword": {
+      "memory": {
+        "items": [
+          {
+            "id": "path:notes/old-format.md",
+            "path": "notes/old-format.md",
+            "title": "old-format",
+            "type": "lesson",
+            "summary": "no frontmatter at all, zebra keyword",
+            "status": "active",
+            "importance": 3,
+            "updated": "2026-10-03",
+            "score": 1,
+            "match": "fts"
+          },
+          {
+            "id": "path:works/w1.md",
+            "path": "works/w1.md",
+            "title": "w1",
+            "type": "reference",
+            "summary": "作業の記録",
+            "status": "active",
+            "importance": 3,
+            "updated": "2026-10-03",
+            "score": 0.9839,
+            "match": "fts"
+          },
+          {
+            "id": "path:notes/ns.md",
+            "path": "notes/ns.md",
+            "title": "ns",
+            "type": "north-star",
+            "summary": "目的は架空プロジェクトの自律運用",
+            "status": "active",
+            "importance": 5,
+            "updated": "2026-10-03",
+            "score": 0.9683,
+            "match": "fts"
+          },
+          {
+            "id": "path:notes/pref.md",
+            "path": "notes/pref.md",
+            "title": "pref",
+            "type": "preference",
+            "summary": "日本語で簡潔に答える",
+            "status": "active",
+            "importance": 3,
+            "updated": "2026-10-03",
+            "score": 0.9531,
+            "match": "fts"
+          },
+          {
+            "id": "path:notes/procedure.md",
+            "path": "notes/procedure.md",
+            "title": "procedure",
+            "type": "procedure",
+            "summary": "公開前の手順",
+            "status": "active",
+            "importance": 3,
+            "updated": "2026-10-03",
+            "score": 0.9385,
+            "match": "fts"
+          },
+          {
+            "id": "path:notes/lesson-b.md",
+            "path": "notes/lesson-b.md",
+            "title": "lesson-b",
+            "type": "lesson",
+            "summary": "ビルドの順番に注意する",
+            "status": "active",
+            "importance": 3,
+            "updated": "2026-10-03",
+            "score": 0.9242,
+            "match": "fts"
+          },
+          {
+            "id": "path:research/clip.md",
+            "path": "research/clip.md",
+            "title": "clip",
+            "type": "reference",
+            "summary": "架空の調査メモ",
+            "status": "active",
+            "importance": 3,
+            "updated": "2026-10-03",
+            "score": 0.9104,
+            "match": "fts"
+          },
+          {
+            "id": "path:notes/lesson-a.md",
+            "path": "notes/lesson-a.md",
+            "title": "lesson-a",
+            "type": "lesson",
+            "summary": "取り込み前にテストを回す",
+            "status": "active",
+            "importance": 4,
+            "updated": "2026-10-03",
+            "score": 0.8971,
+            "match": "fts"
+          }
+        ],
+        "stale": false,
+        "mode": "fts"
+      },
+      "compat": [
+        {
+          "path": "notes/pref.md",
+          "title": "pref",
+          "mtime": "<TS>",
+          "tags": [
+            "output"
+          ],
+          "snippet": "zebra keyword body"
+        }
+      ]
+    },
+    "テスト": {
+      "memory": {
+        "items": [
+          {
+            "id": "path:notes/lesson-a.md",
+            "path": "notes/lesson-a.md",
+            "title": "lesson-a",
+            "type": "lesson",
+            "summary": "取り込み前にテストを回す",
+            "status": "active",
+            "importance": 4,
+            "updated": "2026-10-03",
+            "score": 1,
+            "match": "fts"
+          }
+        ],
+        "stale": false,
+        "mode": "fts"
+      },
+      "compat": []
+    },
+    "ビルド 順番": {
+      "memory": {
+        "items": [
+          {
+            "id": "path:notes/lesson-b.md",
+            "path": "notes/lesson-b.md",
+            "title": "lesson-b",
+            "type": "lesson",
+            "summary": "ビルドの順番に注意する",
+            "status": "active",
+            "importance": 3,
+            "updated": "2026-10-03",
+            "score": 1,
+            "match": "fts"
+          }
+        ],
+        "stale": false,
+        "mode": "fts"
+      },
+      "compat": []
+    }
+  },
+  "http": {
+    "search": {
+      "status": 200,
+      "body": {
+        "items": [
+          {
+            "id": "path:notes/old-format.md",
+            "path": "notes/old-format.md",
+            "title": "old-format",
+            "type": "lesson",
+            "summary": "no frontmatter at all, zebra keyword",
+            "status": "active",
+            "importance": 3,
+            "updated": "2026-10-03",
+            "score": 1,
+            "match": "fts"
+          },
+          {
+            "id": "path:works/w1.md",
+            "path": "works/w1.md",
+            "title": "w1",
+            "type": "reference",
+            "summary": "作業の記録",
+            "status": "active",
+            "importance": 3,
+            "updated": "2026-10-03",
+            "score": 0.9839,
+            "match": "fts"
+          },
+          {
+            "id": "path:notes/ns.md",
+            "path": "notes/ns.md",
+            "title": "ns",
+            "type": "north-star",
+            "summary": "目的は架空プロジェクトの自律運用",
+            "status": "active",
+            "importance": 5,
+            "updated": "2026-10-03",
+            "score": 0.9683,
+            "match": "fts"
+          },
+          {
+            "id": "path:notes/pref.md",
+            "path": "notes/pref.md",
+            "title": "pref",
+            "type": "preference",
+            "summary": "日本語で簡潔に答える",
+            "status": "active",
+            "importance": 3,
+            "updated": "2026-10-03",
+            "score": 0.9531,
+            "match": "fts"
+          },
+          {
+            "id": "path:notes/procedure.md",
+            "path": "notes/procedure.md",
+            "title": "procedure",
+            "type": "procedure",
+            "summary": "公開前の手順",
+            "status": "active",
+            "importance": 3,
+            "updated": "2026-10-03",
+            "score": 0.9385,
+            "match": "fts"
+          },
+          {
+            "id": "path:notes/lesson-b.md",
+            "path": "notes/lesson-b.md",
+            "title": "lesson-b",
+            "type": "lesson",
+            "summary": "ビルドの順番に注意する",
+            "status": "active",
+            "importance": 3,
+            "updated": "2026-10-03",
+            "score": 0.9242,
+            "match": "fts"
+          },
+          {
+            "id": "path:research/clip.md",
+            "path": "research/clip.md",
+            "title": "clip",
+            "type": "reference",
+            "summary": "架空の調査メモ",
+            "status": "active",
+            "importance": 3,
+            "updated": "2026-10-03",
+            "score": 0.9104,
+            "match": "fts"
+          },
+          {
+            "id": "path:notes/lesson-a.md",
+            "path": "notes/lesson-a.md",
+            "title": "lesson-a",
+            "type": "lesson",
+            "summary": "取り込み前にテストを回す",
+            "status": "active",
+            "importance": 4,
+            "updated": "2026-10-03",
+            "score": 0.8971,
+            "match": "fts"
+          }
+        ],
+        "stale": false,
+        "mode": "fts"
+      }
+    },
+    "search_types": {
+      "status": 200,
+      "body": {
+        "items": [
+          {
+            "id": "path:notes/lesson-a.md",
+            "path": "notes/lesson-a.md",
+            "title": "lesson-a",
+            "type": "lesson",
+            "summary": "取り込み前にテストを回す",
+            "status": "active",
+            "importance": 4,
+            "updated": "2026-10-03",
+            "score": 1,
+            "match": "fts"
+          }
+        ],
+        "stale": false,
+        "mode": "fts"
+      }
+    },
+    "expand": {
+      "status": 200,
+      "body": {
+        "found": true,
+        "id": "path:notes/lesson-a.md",
+        "path": "notes/lesson-a.md",
+        "frontmatter": {
+          "title": "lesson-a",
+          "type": "lesson",
+          "importance": "4",
+          "summary": "取り込み前にテストを回す",
+          "status": "active"
+        },
+        "body": "zebra keyword body [[lesson-b]] [[missing-note]]\n",
+        "truncated": false,
+        "links_out": [
+          {
+            "filename": "lesson-b",
+            "title": "lesson-b",
+            "status": "active",
+            "path": "notes/lesson-b.md",
+            "resolved": true
+          },
+          {
+            "filename": "missing-note",
+            "title": null,
+            "status": null,
+            "path": null,
+            "resolved": false
+          }
+        ],
+        "linked_from": [],
+        "superseded_chain": [],
+        "stale": false
+      }
+    },
+    "recall": {
+      "status": 200,
+      "body": {
+        "items": [],
+        "superseded": [],
+        "stale": false
+      }
+    },
+    "health": {
+      "status": 200,
+      "body": {
+        "storage": {
+          "available": true,
+          "dir": "<ROOT>/owl-root/knowledge"
+        },
+        "index": {
+          "notes": 10,
+          "by_type": {
+            "decision": 1,
+            "lesson": 3,
+            "log": 1,
+            "north-star": 1,
+            "preference": 1,
+            "procedure": 1,
+            "reference": 2
+          },
+          "by_folder": {
+            "advisor": 1,
+            "notes": 7,
+            "research": 1,
+            "works": 1
+          },
+          "invalid": 2,
+          "invalid_reasons": {
+            "missing:status": 1,
+            "no_frontmatter": 1
+          },
+          "invalid_notes": [
+            {
+              "path": "notes/lesson-b.md",
+              "reasons": [
+                "missing:status"
+              ]
+            },
+            {
+              "path": "notes/old-format.md",
+              "reasons": [
+                "no_frontmatter"
+              ]
+            }
+          ],
+          "unresolved_links": 1,
+          "stale": false,
+          "rebuilding": false,
+          "watcher": "watching",
+          "last_error": null,
+          "vec_error": null
+        },
+        "embedder": {
+          "model": null,
+          "model_path": null,
+          "dim": null,
+          "state": "disabled",
+          "last_error": "埋め込みは設定で無効です。利用するには memory_embeddings.enabled を true にしてください（OWL_MEMORY_EMBEDDINGS_ENABLED=true でも設定できます）。",
+          "retry_after": null,
+          "started_at": null,
+          "pending_passages": 0,
+          "warning": "埋め込みは設定で無効です。利用するには memory_embeddings.enabled を true にしてください（OWL_MEMORY_EMBEDDINGS_ENABLED=true でも設定できます）。"
+        },
+        "eval": null,
+        "queue": {
+          "pending_writes": null
+        },
+        "nightly": {
+          "last_run_at": null,
+          "status": null
+        },
+        "injection": {
+          "enabled": false,
+          "last_injection_at": null,
+          "limits_by_role": {
+            "advisor_session_start": {
+              "bytes": 8000,
+              "items": 25
+            },
+            "advisor_turn": {
+              "bytes": 2000,
+              "items": 6
+            },
+            "manager": {
+              "bytes": 6000,
+              "items": 20
+            },
+            "designer": {
+              "bytes": 6000,
+              "items": 20
+            },
+            "worker": {
+              "bytes": 4000,
+              "items": 12
+            },
+            "reviewer": {
+              "bytes": 3000,
+              "items": 8
+            },
+            "curator": {
+              "bytes": 2000,
+              "items": 8
+            }
+          }
+        }
+      }
+    }
+  },
+  "learning": {
+    "job": {
+      "status": "done",
+      "attempts": 0,
+      "payload_version": 1,
+      "result_json": {
+        "processed": [
+          "4b2f00563ec0dcc4",
+          "cf7556466a647389",
+          "548436950e886e47",
+          "b080deafcea0b83a",
+          "367afef295e72513"
+        ],
+        "skill_proposal_ids": [
+          "<ULID>"
+        ],
+        "note_ids": [
+          "<ULID>",
+          "<ULID>",
+          "<ULID>"
+        ],
+        "rule_proposal_ids": [
+          "<ULID>"
+        ],
+        "discarded": 0,
+        "failed": {}
+      }
+    },
+    "notes": {
+      "notes/deploy-order.md": "---\nid: <ULID>\ntitle: deploy-order\ntags: []\nsources: [<ULID>]\nlinks: []\nproject_ids: []\ncreated: <TS>\nupdated: <TS>\n---\n\n## Summary\n取り込みの前にビルドを通す\n\n## Claims\n- [fact] 取り込みの前にビルドを通す <!-- claim:7adf5ef654d516b4 sources:<ULID> -->\n\n## Related notes\n\n## Rule promotion\n\n",
+      "notes/settings-storage.md": "---\nid: <ULID>\ntitle: settings-storage\ntags: []\nsources: [<ULID>]\nlinks: []\nproject_ids: []\ncreated: <TS>\nupdated: <TS>\n---\n\n## Summary\n設定は別の表の行に置く。理由: 既存の設定と同じ置き方にそろえる\n\n## Claims\n- [decision] 設定は別の表の行に置く。理由: 既存の設定と同じ置き方にそろえる <!-- claim:f00c563866762362 sources:<ULID> -->\n\n## Related notes\n\n## Rule promotion\n\n",
+      "notes/stale-index.md": "---\nid: <ULID>\ntitle: stale-index\ntags: []\nsources: [<ULID>]\nlinks: []\nproject_ids: []\ncreated: <TS>\nupdated: <TS>\n---\n\n## Summary\n索引が古いと検索が空になる\n\n## Claims\n- [pitfall] 索引が古いと検索が空になる <!-- claim:e7cb8b6e970b6a1d sources:<ULID> -->\n\n## Related notes\n\n## Rule promotion\n\n"
+    },
+    "search": {
+      "items": [
+        {
+          "id": "<ULID>",
+          "path": "notes/deploy-order.md",
+          "title": "deploy-order",
+          "type": "lesson",
+          "summary": "取り込みの前にビルドを通す",
+          "status": "active",
+          "importance": 3,
+          "updated": "<TS>",
+          "score": 1,
+          "match": "fts"
+        }
+      ],
+      "stale": false,
+      "mode": "fts"
+    }
+  },
+  "permission_args": {
+    "advisor:claude": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--settings",
+      "{\"claudeMdExcludes\":[\"<ROOT>/.claude/CLAUDE.md\"],\"autoMemoryEnabled\":false,\"hooks\":{\"PreToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"'/opt/homebrew/Cellar/node@22/22.22.2_1/bin/node' '<ROOT>/apps/server/dist/permission-hook.js'\"}]}]}}",
+      "--plugin-dir",
+      "<ROOT>/.owl/superpowers-plugin-views/<hash>"
+    ],
+    "advisor:codex": [
+      "--dangerously-bypass-hook-trust",
+      "--sandbox",
+      "danger-full-access",
+      "--config",
+      "approval_policy=\"never\"",
+      "--config",
+      "features.hooks=true",
+      "--config",
+      "features.memories=false",
+      "--config",
+      "hooks.PreToolUse=[{matcher=\"*\",hooks=[{type=\"command\",command=\"'/opt/homebrew/Cellar/node@22/22.22.2_1/bin/node' '<ROOT>/apps/server/dist/permission-hook.js'\"}]}]",
+      "--config",
+      "marketplaces.openai-bundled.source=\"<ROOT>/.codex/.tmp/bundled-marketplaces/openai-bundled\""
+    ],
+    "manager:claude": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--settings",
+      "{\"claudeMdExcludes\":[\"<ROOT>/.claude/CLAUDE.md\"],\"autoMemoryEnabled\":false,\"hooks\":{\"PreToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"'/opt/homebrew/Cellar/node@22/22.22.2_1/bin/node' '<ROOT>/apps/server/dist/permission-hook.js'\"}]}]}}",
+      "--plugin-dir",
+      "<ROOT>/.owl/superpowers-plugin-views/<hash>"
+    ],
+    "manager:codex": [
+      "--dangerously-bypass-hook-trust",
+      "--sandbox",
+      "danger-full-access",
+      "--config",
+      "approval_policy=\"never\"",
+      "--config",
+      "features.hooks=true",
+      "--config",
+      "features.memories=false",
+      "--config",
+      "hooks.PreToolUse=[{matcher=\"*\",hooks=[{type=\"command\",command=\"'/opt/homebrew/Cellar/node@22/22.22.2_1/bin/node' '<ROOT>/apps/server/dist/permission-hook.js'\"}]}]",
+      "--config",
+      "marketplaces.openai-bundled.source=\"<ROOT>/.codex/.tmp/bundled-marketplaces/openai-bundled\""
+    ],
+    "designer:claude": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--settings",
+      "{\"claudeMdExcludes\":[\"<ROOT>/.claude/CLAUDE.md\"],\"autoMemoryEnabled\":false,\"hooks\":{\"PreToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"'/opt/homebrew/Cellar/node@22/22.22.2_1/bin/node' '<ROOT>/apps/server/dist/permission-hook.js'\"}]}]}}",
+      "--plugin-dir",
+      "<ROOT>/.owl/superpowers-plugin-views/<hash>"
+    ],
+    "designer:codex": [
+      "--dangerously-bypass-hook-trust",
+      "--sandbox",
+      "danger-full-access",
+      "--config",
+      "approval_policy=\"never\"",
+      "--config",
+      "features.hooks=true",
+      "--config",
+      "features.memories=false",
+      "--config",
+      "hooks.PreToolUse=[{matcher=\"*\",hooks=[{type=\"command\",command=\"'/opt/homebrew/Cellar/node@22/22.22.2_1/bin/node' '<ROOT>/apps/server/dist/permission-hook.js'\"}]}]",
+      "--config",
+      "marketplaces.openai-bundled.source=\"<ROOT>/.codex/.tmp/bundled-marketplaces/openai-bundled\""
+    ],
+    "worker:claude": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--settings",
+      "{\"claudeMdExcludes\":[\"<ROOT>/.claude/CLAUDE.md\"],\"autoMemoryEnabled\":false,\"hooks\":{\"PreToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"'/opt/homebrew/Cellar/node@22/22.22.2_1/bin/node' '<ROOT>/apps/server/dist/permission-hook.js'\"}]}]}}",
+      "--plugin-dir",
+      "<ROOT>/.owl/superpowers-plugin-views/<hash>"
+    ],
+    "worker:codex": [
+      "--dangerously-bypass-hook-trust",
+      "--sandbox",
+      "danger-full-access",
+      "--config",
+      "approval_policy=\"never\"",
+      "--config",
+      "features.hooks=true",
+      "--config",
+      "features.memories=false",
+      "--config",
+      "hooks.PreToolUse=[{matcher=\"*\",hooks=[{type=\"command\",command=\"'/opt/homebrew/Cellar/node@22/22.22.2_1/bin/node' '<ROOT>/apps/server/dist/permission-hook.js'\"}]}]",
+      "--config",
+      "marketplaces.openai-bundled.source=\"<ROOT>/.codex/.tmp/bundled-marketplaces/openai-bundled\""
+    ],
+    "reviewer:claude": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--settings",
+      "{\"claudeMdExcludes\":[\"<ROOT>/.claude/CLAUDE.md\"],\"autoMemoryEnabled\":false,\"hooks\":{\"PreToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"'/opt/homebrew/Cellar/node@22/22.22.2_1/bin/node' '<ROOT>/apps/server/dist/permission-hook.js'\"}]}]}}",
+      "--plugin-dir",
+      "<ROOT>/.owl/superpowers-plugin-views/<hash>"
+    ],
+    "reviewer:codex": [
+      "--dangerously-bypass-hook-trust",
+      "--sandbox",
+      "danger-full-access",
+      "--config",
+      "approval_policy=\"never\"",
+      "--config",
+      "features.hooks=true",
+      "--config",
+      "features.memories=false",
+      "--config",
+      "hooks.PreToolUse=[{matcher=\"*\",hooks=[{type=\"command\",command=\"'/opt/homebrew/Cellar/node@22/22.22.2_1/bin/node' '<ROOT>/apps/server/dist/permission-hook.js'\"}]}]",
+      "--config",
+      "marketplaces.openai-bundled.source=\"<ROOT>/.codex/.tmp/bundled-marketplaces/openai-bundled\""
+    ],
+    "curator:claude": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--settings",
+      "{\"claudeMdExcludes\":[\"<ROOT>/.claude/CLAUDE.md\"],\"autoMemoryEnabled\":false,\"hooks\":{\"PreToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"'/opt/homebrew/Cellar/node@22/22.22.2_1/bin/node' '<ROOT>/apps/server/dist/permission-hook.js'\"}]}]}}",
+      "--plugin-dir",
+      "<ROOT>/.owl/superpowers-plugin-views/<hash>"
+    ],
+    "curator:codex": [
+      "--dangerously-bypass-hook-trust",
+      "--sandbox",
+      "danger-full-access",
+      "--config",
+      "approval_policy=\"never\"",
+      "--config",
+      "features.hooks=true",
+      "--config",
+      "features.memories=false",
+      "--config",
+      "hooks.PreToolUse=[{matcher=\"*\",hooks=[{type=\"command\",command=\"'/opt/homebrew/Cellar/node@22/22.22.2_1/bin/node' '<ROOT>/apps/server/dist/permission-hook.js'\"}]}]",
+      "--config",
+      "marketplaces.openai-bundled.source=\"<ROOT>/.codex/.tmp/bundled-marketplaces/openai-bundled\""
+    ],
+    "librarian:claude": [
+      "--permission-mode",
+      "bypassPermissions",
+      "--settings",
+      "{\"claudeMdExcludes\":[\"<ROOT>/.claude/CLAUDE.md\"],\"autoMemoryEnabled\":false,\"hooks\":{\"PreToolUse\":[{\"matcher\":\"*\",\"hooks\":[{\"type\":\"command\",\"command\":\"'/opt/homebrew/Cellar/node@22/22.22.2_1/bin/node' '<ROOT>/apps/server/dist/permission-hook.js'\"}]}]}}",
+      "--disallowedTools",
+      "Write,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task",
+      "--plugin-dir",
+      "<ROOT>/.owl/superpowers-plugin-views/<hash>"
+    ],
+    "librarian:codex": [
+      "--dangerously-bypass-hook-trust",
+      "--sandbox",
+      "danger-full-access",
+      "--config",
+      "approval_policy=\"never\"",
+      "--config",
+      "features.hooks=true",
+      "--config",
+      "features.memories=false",
+      "--config",
+      "hooks.PreToolUse=[{matcher=\"*\",hooks=[{type=\"command\",command=\"'/opt/homebrew/Cellar/node@22/22.22.2_1/bin/node' '<ROOT>/apps/server/dist/permission-hook.js'\"}]}]",
+      "--config",
+      "marketplaces.openai-bundled.source=\"<ROOT>/.codex/.tmp/bundled-marketplaces/openai-bundled\""
+    ]
+  },
+  "manager_schemas": {
+    "plan": {
+      "type": "object",
+      "properties": {
+        "tasks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Task id such as T1"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "description": "short Task title"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "research",
+                  "design",
+                  "code",
+                  "config",
+                  "doc",
+                  "test"
+                ],
+                "description": "kind of work"
+              },
+              "acceptance": {
+                "type": "string",
+                "minLength": 1,
+                "description": "checkable success criteria the Worker must meet; a criterion over every occurrence names its concrete scope; written as deliverable behavior and checks to run, never as report-format requirements"
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "ids of Tasks that must complete first; [] if none"
+              },
+              "context": {
+                "type": "string",
+                "description": "background the Worker needs; empty string if none"
+              },
+              "notes": {
+                "type": "string",
+                "description": "extra notes for the Worker; empty string if none"
+              },
+              "review": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "true requires the Reviewer, false skips the Reviewer, null keeps the Work default"
+              },
+              "required_sections": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "for a doc Task: headings the deliverable must contain (at most 20), checked by Core; [] if none"
+              },
+              "required_tests": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "for a test Task: worktree-relative test files Core must run and see pass (at most 20); [] if none"
+              },
+              "replaces": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "ids of failed Tasks in current_plan that this NEW Task replaces; [] for a retried Task or a Task that replaces nothing"
+              },
+              "wait_for": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "replan only, on a retried Task: hold it until prerequisites outside this Work are met, then run it again; null otherwise (always null in a plan)",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "why the Task must wait"
+                  },
+                  "conditions": {
+                    "type": "array",
+                    "description": "all must hold before the Task runs again",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "task",
+                            "work",
+                            "base_branch",
+                            "owner"
+                          ],
+                          "description": "task: a Task of another Work completes; work: another Work completes; base_branch: the base branch has the given paths (or moves on, when paths is []); owner: only the Owner's resume releases it"
+                        },
+                        "target": {
+                          "type": "string",
+                          "description": "task: the Task id; work: the Work id or display number such as \"#51\"; base_branch and owner: empty string"
+                        },
+                        "paths": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "description": "base_branch only: repository-relative paths that must exist on the base branch; [] for every other kind"
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "what is awaited, in words the Owner can read"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "target",
+                        "paths",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "reason",
+                  "conditions"
+                ],
+                "additionalProperties": false
+              },
+              "base_sync_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "true when this Task or attempt's only purpose is to bring the base branch into the Task's branch and make its existing checks pass again; in a replan only on a retried Task or a NEW Task with replaces; null otherwise"
+              },
+              "necessity": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "why this Task and each of its criteria are needed; Core checks it and asks you to fix a plan that leaves it empty",
+                "properties": {
+                  "serves": {
+                    "type": "string",
+                    "description": "the part of the Owner's request this Task serves"
+                  },
+                  "if_omitted": {
+                    "type": "string",
+                    "description": "what goes wrong for the request if this Task is not done"
+                  },
+                  "criteria": {
+                    "type": "array",
+                    "description": "one entry per acceptance criterion, in the same order as the acceptance",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "serves": {
+                          "type": "string",
+                          "description": "the part of the request this criterion serves"
+                        },
+                        "if_omitted": {
+                          "type": "string",
+                          "description": "what goes wrong for the request without this criterion"
+                        },
+                        "check_weight": {
+                          "type": "string",
+                          "enum": [
+                            "light",
+                            "medium",
+                            "heavy"
+                          ],
+                          "description": "light: reading files, unit tests, typecheck, building the touched package; medium: the full test suite, an integration run or a local server or browser on temporary data; heavy: real model or paid API calls, production-size data or copies of it, every item of a large set, or runs of about ten minutes or more"
+                        },
+                        "weight_reason": {
+                          "type": "string",
+                          "description": "for heavy only: why no lighter check can prove what the request needs; empty string otherwise"
+                        }
+                      },
+                      "required": [
+                        "serves",
+                        "if_omitted",
+                        "check_weight",
+                        "weight_reason"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "serves",
+                  "if_omitted",
+                  "criteria"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "type",
+              "acceptance",
+              "depends_on",
+              "context",
+              "notes",
+              "review",
+              "required_sections",
+              "required_tests",
+              "replaces",
+              "wait_for",
+              "base_sync_only",
+              "necessity"
+            ],
+            "additionalProperties": false
+          },
+          "description": "the Tasks of the plan (at least one)"
+        },
+        "skills_used": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "name of a skill you used"
+              },
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "helpful",
+                  "misleading",
+                  "irrelevant"
+                ],
+                "description": "how the skill applied"
+              },
+              "note": {
+                "type": "string",
+                "description": "brief optional context; empty when none"
+              }
+            },
+            "required": [
+              "name",
+              "verdict",
+              "note"
+            ],
+            "additionalProperties": false
+          },
+          "example": [],
+          "description": "skills actually used and how they applied; [] if none"
+        }
+      },
+      "required": [
+        "tasks",
+        "skills_used"
+      ],
+      "additionalProperties": false
+    },
+    "replan": {
+      "type": "object",
+      "properties": {
+        "tasks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Task id such as T1"
+              },
+              "title": {
+                "type": "string",
+                "minLength": 1,
+                "description": "short Task title"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "research",
+                  "design",
+                  "code",
+                  "config",
+                  "doc",
+                  "test"
+                ],
+                "description": "kind of work"
+              },
+              "acceptance": {
+                "type": "string",
+                "minLength": 1,
+                "description": "checkable success criteria the Worker must meet; a criterion over every occurrence names its concrete scope; written as deliverable behavior and checks to run, never as report-format requirements"
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "ids of Tasks that must complete first; [] if none"
+              },
+              "context": {
+                "type": "string",
+                "description": "background the Worker needs; empty string if none"
+              },
+              "notes": {
+                "type": "string",
+                "description": "extra notes for the Worker; empty string if none"
+              },
+              "review": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "true requires the Reviewer, false skips the Reviewer, null keeps the Work default"
+              },
+              "required_sections": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "for a doc Task: headings the deliverable must contain (at most 20), checked by Core; [] if none"
+              },
+              "required_tests": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "for a test Task: worktree-relative test files Core must run and see pass (at most 20); [] if none"
+              },
+              "replaces": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": "ids of failed Tasks in current_plan that this NEW Task replaces; [] for a retried Task or a Task that replaces nothing"
+              },
+              "wait_for": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "replan only, on a retried Task: hold it until prerequisites outside this Work are met, then run it again; null otherwise (always null in a plan)",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "why the Task must wait"
+                  },
+                  "conditions": {
+                    "type": "array",
+                    "description": "all must hold before the Task runs again",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "task",
+                            "work",
+                            "base_branch",
+                            "owner"
+                          ],
+                          "description": "task: a Task of another Work completes; work: another Work completes; base_branch: the base branch has the given paths (or moves on, when paths is []); owner: only the Owner's resume releases it"
+                        },
+                        "target": {
+                          "type": "string",
+                          "description": "task: the Task id; work: the Work id or display number such as \"#51\"; base_branch and owner: empty string"
+                        },
+                        "paths": {
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1
+                          },
+                          "description": "base_branch only: repository-relative paths that must exist on the base branch; [] for every other kind"
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 1,
+                          "description": "what is awaited, in words the Owner can read"
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "target",
+                        "paths",
+                        "description"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "reason",
+                  "conditions"
+                ],
+                "additionalProperties": false
+              },
+              "base_sync_only": {
+                "type": [
+                  "boolean",
+                  "null"
+                ],
+                "description": "true when this Task or attempt's only purpose is to bring the base branch into the Task's branch and make its existing checks pass again; in a replan only on a retried Task or a NEW Task with replaces; null otherwise"
+              },
+              "necessity": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "why this Task and each of its criteria are needed; Core checks it and asks you to fix a plan that leaves it empty",
+                "properties": {
+                  "serves": {
+                    "type": "string",
+                    "description": "the part of the Owner's request this Task serves"
+                  },
+                  "if_omitted": {
+                    "type": "string",
+                    "description": "what goes wrong for the request if this Task is not done"
+                  },
+                  "criteria": {
+                    "type": "array",
+                    "description": "one entry per acceptance criterion, in the same order as the acceptance",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "serves": {
+                          "type": "string",
+                          "description": "the part of the request this criterion serves"
+                        },
+                        "if_omitted": {
+                          "type": "string",
+                          "description": "what goes wrong for the request without this criterion"
+                        },
+                        "check_weight": {
+                          "type": "string",
+                          "enum": [
+                            "light",
+                            "medium",
+                            "heavy"
+                          ],
+                          "description": "light: reading files, unit tests, typecheck, building the touched package; medium: the full test suite, an integration run or a local server or browser on temporary data; heavy: real model or paid API calls, production-size data or copies of it, every item of a large set, or runs of about ten minutes or more"
+                        },
+                        "weight_reason": {
+                          "type": "string",
+                          "description": "for heavy only: why no lighter check can prove what the request needs; empty string otherwise"
+                        }
+                      },
+                      "required": [
+                        "serves",
+                        "if_omitted",
+                        "check_weight",
+                        "weight_reason"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "serves",
+                  "if_omitted",
+                  "criteria"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "type",
+              "acceptance",
+              "depends_on",
+              "context",
+              "notes",
+              "review",
+              "required_sections",
+              "required_tests",
+              "replaces",
+              "wait_for",
+              "base_sync_only",
+              "necessity"
+            ],
+            "additionalProperties": false
+          },
+          "description": "Tasks to retry or add; [] when nothing is missing and no failed Task remains"
+        },
+        "updated_title": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "description": "the Work's full new title (1-500 characters) when the Owner's request changes it; null otherwise"
+        },
+        "updated_summary": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "description": "the Work's full revised summary (at most 20,000 characters) reflecting only what the Owner's request changed; null when the request does not affect the summary"
+        },
+        "task_actions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "task_id": {
+                "type": "string",
+                "minLength": 1,
+                "description": "id of an open Task in current_plan (waiting, ready, running, verifying, paused or blocked)"
+              },
+              "action": {
+                "type": "string",
+                "enum": [
+                  "cancel",
+                  "complete"
+                ],
+                "description": "cancel: the Task is no longer needed and its Agent is stopped; complete: treat the Task as done and stop its Agent (its worktree is not merged)"
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "description": "why, in one sentence"
+              }
+            },
+            "required": [
+              "task_id",
+              "action",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "description": "replan after an Owner request only: cancel or complete open Tasks; [] to leave every open Task as it is"
+        },
+        "skills_used": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "name of a skill you used"
+              },
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "helpful",
+                  "misleading",
+                  "irrelevant"
+                ],
+                "description": "how the skill applied"
+              },
+              "note": {
+                "type": "string",
+                "description": "brief optional context; empty when none"
+              }
+            },
+            "required": [
+              "name",
+              "verdict",
+              "note"
+            ],
+            "additionalProperties": false
+          },
+          "example": [],
+          "description": "skills actually used and how they applied; [] if none"
+        }
+      },
+      "required": [
+        "tasks",
+        "updated_title",
+        "updated_summary",
+        "task_actions",
+        "skills_used"
+      ],
+      "additionalProperties": false
+    },
+    "finalize": {
+      "type": "object",
+      "properties": {
+        "skills_used": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "description": "name of a skill you used"
+              },
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "helpful",
+                  "misleading",
+                  "irrelevant"
+                ],
+                "description": "how the skill applied"
+              },
+              "note": {
+                "type": "string",
+                "description": "brief optional context; empty when none"
+              }
+            },
+            "required": [
+              "name",
+              "verdict",
+              "note"
+            ],
+            "additionalProperties": false
+          },
+          "example": [],
+          "description": "skills actually used and how they applied; [] if none"
+        },
+        "skill_proposals": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "new",
+                  "update"
+                ],
+                "description": "create a new skill or update an existing one"
+              },
+              "target": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "existing skill name for update, otherwise null"
+              },
+              "summary": {
+                "type": "string",
+                "description": "what reusable procedure should be captured"
+              },
+              "steps_or_diff": {
+                "type": "string",
+                "description": "reusable steps or the change needed in the existing skill"
+              },
+              "evidence": {
+                "type": "string",
+                "description": "why the procedure is reusable or the skill needs correction"
+              }
+            },
+            "required": [
+              "kind",
+              "target",
+              "summary",
+              "steps_or_diff",
+              "evidence"
+            ],
+            "additionalProperties": false
+          },
+          "example": [],
+          "description": "proposals for reusable procedures or skill improvements; [] if none"
+        },
+        "verdict": {
+          "type": "object",
+          "properties": {
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "complete",
+                "incomplete"
+              ],
+              "description": "complete if the reports show the Work's goal was achieved, otherwise incomplete"
+            },
+            "summary": {
+              "type": "string",
+              "description": "one sentence describing what the Work accomplished"
+            },
+            "missing": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "item": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "what is left undone"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "description": "why it counts as missing, citing the reports"
+                  },
+                  "fix": {
+                    "type": "string",
+                    "description": "what should be done to complete it"
+                  }
+                },
+                "required": [
+                  "item",
+                  "reason",
+                  "fix"
+                ],
+                "additionalProperties": false
+              },
+              "example": [],
+              "description": "one entry per missing point; [] if complete"
+            },
+            "unaddressed_backlog_items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "item_id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "id of an item in context.backlog_items"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "description": "why the completed Tasks did not address it"
+                  }
+                },
+                "required": [
+                  "item_id",
+                  "reason"
+                ],
+                "additionalProperties": false
+              },
+              "example": [],
+              "description": "backlog items this Work did not address; [] if all were addressed or there are none"
+            },
+            "lessons": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "lesson": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "what was learned in 1–2 sentences"
+                  },
+                  "basis": {
+                    "type": "string",
+                    "description": "what in this Work shows it"
+                  },
+                  "applies_to": {
+                    "type": "string",
+                    "description": "which future Work or situations it applies to"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "procedure",
+                      "fact",
+                      "decision",
+                      "pitfall",
+                      "rule_candidate"
+                    ],
+                    "description": "reusable lesson kind; omit lessons with no reuse value"
+                  },
+                  "topic": {
+                    "type": "string",
+                    "description": "short topic for fact, decision, or pitfall; otherwise empty"
+                  },
+                  "procedure": {
+                    "type": "string",
+                    "description": "numbered procedure of at least 40 characters for procedure; otherwise empty"
+                  },
+                  "rule_text": {
+                    "type": "string",
+                    "description": "one-line imperative rule of at most 300 characters for rule_candidate; otherwise empty"
+                  },
+                  "rule_scope": {
+                    "type": "string",
+                    "enum": [
+                      "all",
+                      "manager",
+                      "designer",
+                      "worker",
+                      "reviewer",
+                      "advisor"
+                    ],
+                    "description": "scope for rule_candidate; all other lesson kinds use all"
+                  },
+                  "keywords": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "description": "3-5 short noun keywords (topic words, product/tool names) for kind fact, decision or pitfall; [] for other kinds. No sentences, no particles or verb endings."
+                  }
+                },
+                "required": [
+                  "lesson",
+                  "basis",
+                  "applies_to",
+                  "kind",
+                  "topic",
+                  "procedure",
+                  "rule_text",
+                  "rule_scope",
+                  "keywords"
+                ],
+                "additionalProperties": false
+              },
+              "example": [],
+              "description": "lessons learned for future Work; may be []"
+            }
+          },
+          "required": [
+            "verdict",
+            "summary",
+            "missing",
+            "unaddressed_backlog_items",
+            "lessons"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "skills_used",
+        "skill_proposals",
+        "verdict"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "finalize_prompt": "You are the Owl Manager performing the final review of a Work.\n\n## Instructions\nEvery Task for this Work has already finished running. The input below gives the Work, its Tasks, and each Task's final report.\nreports[].task_id links each report to a Task in tasks. Tasks with status cancelled were replaced by a replan or cancelled by the Owner and have no report; do not count their absence as missing work.\nRead the reports and judge whether the Work's goal was achieved by the completed Tasks.\ncontext.design_documents lists the design documents written by completed design Tasks as task_id, title and path ([] if none); a design Task's deliverable is that document, not repository changes.\ncontext.backlog_items lists the backlog items (id, file, line, problem, suggestion) this Work was started to handle ([] if none). Put in unaddressed_backlog_items (item_id and reason) every item the completed Tasks did not actually address; those items return to the backlog. Use only ids from context.backlog_items; every other item is treated as done. This does not affect verdict.\ncontext.work_verification is the result of the Project's checks run on the Work branch with every Task merged (status, commands, failed_command_id). Do not judge the Work complete unless status is passed; when status is not_applicable, judge from the Task reports.\ncontext.skills is an index of reusable procedures. Read a relevant skill before planning or reviewing, and read only the supplemental references you need. A skill marked [trial] is being validated, so check that it fits the situation. A skill never overrides rules, the Task, or acceptance criteria; report a contradictory skill as misleading and follow the Task.\nRules are binding; context.knowledge is reference information: an excerpt of relevant knowledge collected from past Works (null if none). It does not override rules, the Task, or acceptance criteria. Report knowledge that seems incorrect or outdated in lessons.\nList skills actually used in skills_used, with helpful, misleading, or irrelevant and a short note. Only list Skill Box skills that appear in the context.skills index; never list plugin or process skills (e.g. superpowers:*) there.\nPropose a skill only when a multi-step procedure can be reused, a reusable fix came from an error or dead end, Owner or Reviewer feedback shows a lasting approach, or an existing skill has a mistake or gap. Leave skill_proposals empty otherwise.\nInclude in lessons only insights reusable in future Works. Exclude one-off circumstances, facts unique to this Work, and points that can be readily derived again.\nUse kind=procedure with procedure text for reusable steps. Use fact/decision/pitfall with topic for durable facts, reasoned decisions, and failure patterns. Use rule_candidate with rule_text/rule_scope only for short binding instructions; a rule_candidate becomes a rule only after Owner approval.\n\n## Working style\nNothing you print before the final answer is shown to anyone. Do not narrate, announce steps, or report progress between tool calls.\nDo not restate the task, the plan, or the input back; act on them.\nRun builds and tests with their quiet or minimal-output options and filter the output (e.g. only failures, or the last lines). Never print a whole log to read it.\nRead only the parts of a file or command output you need (search, line ranges, tail). Do not dump whole files.\nThink briefly, decide, act. Put every explanation in the final answer, not in messages along the way.\n\n## Output template\nReturn exactly one JSON object and nothing else: no markdown fences, no prose before or after. Copy this template, keep every field, and replace only the values. An array shown with one example element may hold zero or more elements of that shape.\n{\n  \"skills_used\": [],\n  \"skill_proposals\": [],\n  \"verdict\": {\n    \"verdict\": \"complete\",\n    \"summary\": \"<one sentence describing what the Work accomplished>\",\n    \"missing\": [],\n    \"unaddressed_backlog_items\": [],\n    \"lessons\": []\n  }\n}\n\n## Output fields\n- skills_used: array of objects - skills actually used and how they applied; [] if none\n- skills_used[].name: string - name of a skill you used\n- skills_used[].verdict: \"helpful\" | \"misleading\" | \"irrelevant\" - how the skill applied\n- skills_used[].note: string - brief optional context; empty when none\n- skill_proposals: array of objects - proposals for reusable procedures or skill improvements; [] if none\n- skill_proposals[].kind: \"new\" | \"update\" - create a new skill or update an existing one\n- skill_proposals[].target: string | null - existing skill name for update, otherwise null\n- skill_proposals[].summary: string - what reusable procedure should be captured\n- skill_proposals[].steps_or_diff: string - reusable steps or the change needed in the existing skill\n- skill_proposals[].evidence: string - why the procedure is reusable or the skill needs correction\n- verdict: object\n- verdict.verdict: \"complete\" | \"incomplete\" - complete if the reports show the Work's goal was achieved, otherwise incomplete\n- verdict.summary: string - one sentence describing what the Work accomplished\n- verdict.missing: array of objects - one entry per missing point; [] if complete\n- verdict.missing[].item: non-empty string - what is left undone\n- verdict.missing[].reason: string - why it counts as missing, citing the reports\n- verdict.missing[].fix: string - what should be done to complete it\n- verdict.unaddressed_backlog_items: array of objects - backlog items this Work did not address; [] if all were addressed or there are none\n- verdict.unaddressed_backlog_items[].item_id: non-empty string - id of an item in context.backlog_items\n- verdict.unaddressed_backlog_items[].reason: string - why the completed Tasks did not address it\n- verdict.lessons: array of objects - lessons learned for future Work; may be []\n- verdict.lessons[].lesson: non-empty string - what was learned in 1–2 sentences\n- verdict.lessons[].basis: string - what in this Work shows it\n- verdict.lessons[].applies_to: string - which future Work or situations it applies to\n- verdict.lessons[].kind: \"procedure\" | \"fact\" | \"decision\" | \"pitfall\" | \"rule_candidate\" - reusable lesson kind; omit lessons with no reuse value\n- verdict.lessons[].topic: string - short topic for fact, decision, or pitfall; otherwise empty\n- verdict.lessons[].procedure: string - numbered procedure of at least 40 characters for procedure; otherwise empty\n- verdict.lessons[].rule_text: string - one-line imperative rule of at most 300 characters for rule_candidate; otherwise empty\n- verdict.lessons[].rule_scope: \"all\" | \"manager\" | \"designer\" | \"worker\" | \"reviewer\" | \"advisor\" - scope for rule_candidate; all other lesson kinds use all\n- verdict.lessons[].keywords: array of string - 3-5 short noun keywords (topic words, product/tool names) for kind fact, decision or pitfall; [] for other kinds. No sentences, no particles or verb endings.\nmissing is [] exactly when verdict is complete.\nEvery item_id in unaddressed_backlog_items is an id from context.backlog_items.\n\n## Output language\nWrite every human-readable value in Japanese (日本語): summaries, descriptions, titles, instructions, issues, findings and lessons. Keep enum values, ids, file paths, commands, code identifiers and quoted error messages exactly as they are. This rule covers only the JSON you return. Files you create or change follow the conventions of their repository.\n\n## Input\n\n### Manager input\n{\n  \"mode\": \"finalize\",\n  \"work\": {\n    \"id\": \"W\",\n    \"title\": \"架空の Work\",\n    \"summary\": \"x\"\n  },\n  \"tasks\": [],\n  \"reports\": [],\n  \"notes\": [],\n  \"reason\": null,\n  \"context\": {\n    \"start_mode\": null,\n    \"failed_task_ids\": [],\n    \"current_plan\": [],\n    \"question\": null,\n    \"failed_tasks\": [],\n    \"final_verdict\": null,\n    \"work_verification\": null,\n    \"backlog_items\": [],\n    \"rules\": null,\n    \"knowledge\": null,\n    \"skills\": null,\n    \"design_documents\": [],\n    \"owner_replan_kind\": null\n  }\n}",
+  "mcp_tools": {
+    "tools": [
+      {
+        "name": "search",
+        "description": "過去の決定・教訓・手順・好みなど保管庫の記憶を検索する。作業を始める前や、似た問題で迷ったときに呼ぶ。結果が0件なら health で状態を確認する。",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "query"
+          ],
+          "properties": {
+            "query": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30,
+              "description": "既定8、最大30"
+            },
+            "types": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "preference",
+                  "decision",
+                  "lesson",
+                  "procedure",
+                  "reference",
+                  "overview",
+                  "north-star",
+                  "reflection",
+                  "log",
+                  "raw"
+                ]
+              }
+            },
+            "scope": {
+              "type": "string",
+              "enum": [
+                "global",
+                "project",
+                "all"
+              ]
+            },
+            "include_superseded": {
+              "type": "boolean"
+            },
+            "include_raw": {
+              "type": "boolean"
+            }
+          }
+        },
+        "annotations": {
+          "readOnlyHint": true
+        }
+      },
+      {
+        "name": "expand",
+        "description": "search や recall で見つけたノートの本文・リンク・置換の経緯を読む。要約だけでは判断できないときに呼ぶ。note には id・path・ファイル名のいずれかを渡す。",
+        "inputSchema": {
+          "type": "object",
+          "required": [
+            "note"
+          ],
+          "properties": {
+            "note": {
+              "type": "string"
+            },
+            "include_body": {
+              "type": "boolean"
+            },
+            "max_bytes": {
+              "type": "integer",
+              "minimum": 1
+            }
+          }
+        },
+        "annotations": {
+          "readOnlyHint": true
+        }
+      },
+      {
+        "name": "recall",
+        "description": "テーマに関係する記憶を、関連度・重要度・更新の新しさ順にまとめて思い出す。新しい作業やタスクの冒頭で、前提となる方針や好みを確認するときに呼ぶ。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "topic": {
+              "type": "string"
+            },
+            "types": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "preference",
+                  "decision",
+                  "lesson",
+                  "procedure",
+                  "reference",
+                  "overview",
+                  "north-star",
+                  "reflection",
+                  "log",
+                  "raw"
+                ]
+              }
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50
+            },
+            "explain": {
+              "type": "boolean"
+            }
+          }
+        },
+        "annotations": {
+          "readOnlyHint": true
+        }
+      },
+      {
+        "name": "health",
+        "description": "保管庫・索引・埋め込みの状態を確認する。検索が0件や古い結果(stale)を返したとき、記憶が使えるか疑わしいときに呼ぶ。",
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        },
+        "annotations": {
+          "readOnlyHint": true
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/upload-register.json",
+  "title": "UploadRegister",
+  "type": "object",
+  "required": [
+    "provider",
+    "account_id",
+    "external_attachment_id",
+    "filename",
+    "declared_mime",
+    "declared_bytes",
+    "sha256",
+    "work_id",
+    "conversation_id",
+    "conversation_hint"
+  ],
+  "properties": {
+    "provider": {
+      "type": "string",
+      "enum": [
+        "slack",
+        "discord",
+        "web"
+      ]
+    },
+    "account_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "external_attachment_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "filename": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "declared_mime": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "declared_bytes": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 1073741824
+    },
+    "sha256": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "work_id": {
+      "anyOf": [
+        {
+          "$ref": "common.json#/$defs/ULID"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "conversation_id": {
+      "anyOf": [
+        {
+          "$ref": "common.json#/$defs/ULID"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "conversation_hint": {
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "work_id",
+            "dm_ref",
+            "thread_ref"
+          ],
+          "properties": {
+            "work_id": {
+              "anyOf": [
+                {
+                  "$ref": "common.json#/$defs/ULID"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "dm_ref": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            },
+            "thread_ref": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "maxLength": 200
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}

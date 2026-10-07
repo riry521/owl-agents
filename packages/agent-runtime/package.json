@@ -1,0 +1,26 @@
+{
+  "name": "@owl/agent-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Manager, Worker, and Reviewer role runtimes for Owl.",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@owl/shared": "file:../shared"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "@owl/connector-discord",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@owl/plugin-sdk": "workspace:*",
+    "discord.js": "^14.16.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

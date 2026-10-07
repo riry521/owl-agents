@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/work-view.json",
+  "title": "WorkView",
+  "type": "object",
+  "required": [
+    "work",
+    "tasks",
+    "runs",
+    "child_runs",
+    "reports",
+    "decisions",
+    "conversation",
+    "assurance"
+  ],
+  "properties": {
+    "work": {
+      "$ref": "work-detail.json"
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "$ref": "task-summary.json"
+      }
+    },
+    "runs": {
+      "type": "array",
+      "items": {
+        "$ref": "agent-run.json"
+      }
+    },
+    "child_runs": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "reports": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "items": {
+        "$ref": "decision.json"
+      }
+    },
+    "conversation": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "assurance": {
+      "type": [
+        "object",
+        "null"
+      ]
+    }
+  }
+}

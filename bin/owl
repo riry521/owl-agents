@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+repo_root="$(CDPATH= cd -- "$script_dir/.." && pwd -P)"
+
+if [ ! -f "$repo_root/apps/server/dist/cli.js" ]; then
+  echo "Owl-Agent is not built. Run ./setup.sh (or pnpm install/build) first." >&2
+  exit 4
+fi
+
+exec node "$repo_root/apps/server/dist/cli.js" "$@"

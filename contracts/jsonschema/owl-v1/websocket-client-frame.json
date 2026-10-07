@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/websocket-client-frame.json",
+  "title": "WebSocket client frame",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "request_id",
+        "work_ids",
+        "event_types"
+      ],
+      "properties": {
+        "kind": {
+          "const": "subscribe"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/RequestId"
+        },
+        "work_ids": {
+          "type": "array",
+          "items": {
+            "$ref": "common.json#/$defs/ULID"
+          }
+        },
+        "event_types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "request_id",
+        "cursor"
+      ],
+      "properties": {
+        "kind": {
+          "const": "resume"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/RequestId"
+        },
+        "cursor": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "request_id",
+        "cursor"
+      ],
+      "properties": {
+        "kind": {
+          "const": "ack"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/RequestId"
+        },
+        "cursor": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

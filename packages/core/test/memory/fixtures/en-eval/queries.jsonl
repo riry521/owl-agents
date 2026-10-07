@@ -1,0 +1,24 @@
+{"id":"q01","type":"keyword","query":"blue harbor canary deployment checklist","relevant":["n01"]}
+{"id":"q02","type":"keyword","query":"Atlas weekly sync shipment blocker","relevant":["n02"]}
+{"id":"q03","type":"keyword","query":"cumin lentil stew lemon parsley","relevant":["n03"]}
+{"id":"q04","type":"keyword","query":"Bracken Bay train platform station","relevant":["n04"]}
+{"id":"q05","type":"keyword","query":"db mirror snapshot rollback checksum","relevant":["n05"]}
+{"id":"q06","type":"keyword","query":"go worker retry queue mail","relevant":["n06"]}
+{"id":"q07","type":"keyword","query":"CI cache shard compiler restore","relevant":["n07"]}
+{"id":"q08","type":"keyword","query":"rate-limit token bucket gateway","relevant":["n08"]}
+{"id":"q09","type":"keyword","query":"e-mail reminder pottery deadline","relevant":["n09"]}
+{"id":"q10","type":"keyword","query":"postgresql btree vacuum invoice index","relevant":["n10"]}
+{"id":"q11","type":"keyword","query":"grafana latency panel request alert","relevant":["n11"]}
+{"id":"q12","type":"keyword","query":"tls certificate expiry renewal staging","relevant":["n12"]}
+{"id":"q13","type":"paraphrase","query":"When should Rowan hear that the courtyard has stayed too dim?","relevant":["n13"]}
+{"id":"q14","type":"paraphrase","query":"How did Juniper Studio make voice recordings sound less hollow?","relevant":["n14"]}
+{"id":"q15","type":"paraphrase","query":"What should a neighbor contribute before taking a different packet home?","relevant":["n15"]}
+{"id":"q16","type":"paraphrase","query":"Which repair should stop the Comet's back wheel from wobbling?","relevant":["n16"]}
+{"id":"q17","type":"paraphrase","query":"Where does a self-guided visit begin, and what device can guests collect?","relevant":["n17"]}
+{"id":"q18","type":"paraphrase","query":"How much time is available between arrival in Alderport and departure for Lark City?","relevant":["n18"]}
+{"id":"q19","type":"paraphrase","query":"On which evenings is there a shallow-water session for families at Cedar Street?","relevant":["n19"]}
+{"id":"q20","type":"paraphrase","query":"Which pastry should be made in a smaller run when supplies are running low?","relevant":["n20"]}
+{"id":"q21","type":"paraphrase","query":"What did the roof-mounted cells produce during the cloudless part of Tuesday?","relevant":["n21"]}
+{"id":"q22","type":"paraphrase","query":"What must callers prove before support gives them control of their profile again?","relevant":["n22"]}
+{"id":"q23","type":"paraphrase","query":"Which budget should carry the yearly bill for keeping remote files?","relevant":["n23"]}
+{"id":"q24","type":"paraphrase","query":"What reading tells the orchard watering system to stay idle?","relevant":["n24"]}

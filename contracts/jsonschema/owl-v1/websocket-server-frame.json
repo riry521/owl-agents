@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/websocket-server-frame.json",
+  "title": "WebSocket server frame",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "request_id",
+        "protocol_version",
+        "cursor"
+      ],
+      "properties": {
+        "kind": {
+          "const": "ready"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/RequestId"
+        },
+        "protocol_version": {
+          "const": "owl-ws-1"
+        },
+        "cursor": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "event_id",
+        "sequence",
+        "cursor",
+        "type",
+        "schema_version",
+        "payload"
+      ],
+      "properties": {
+        "kind": {
+          "const": "event"
+        },
+        "event_id": {
+          "$ref": "common.json#/$defs/ULID"
+        },
+        "sequence": {
+          "type": "integer"
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0.0"
+        },
+        "work_id": {
+          "anyOf": [
+            {
+              "$ref": "common.json#/$defs/ULID"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "task_id": {
+          "anyOf": [
+            {
+              "$ref": "common.json#/$defs/ULID"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "agent_run_id": {
+          "anyOf": [
+            {
+              "$ref": "common.json#/$defs/ULID"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created_at": {
+          "$ref": "common.json#/$defs/RFC3339"
+        },
+        "payload": {
+          "$ref": "common.json#/$defs/OpaqueObject"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "request_id",
+        "error"
+      ],
+      "properties": {
+        "kind": {
+          "const": "error"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/RequestId"
+        },
+        "error": {
+          "type": "object",
+          "required": [
+            "code",
+            "message",
+            "details"
+          ],
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  ]
+}

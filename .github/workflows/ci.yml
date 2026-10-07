@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # pnpm must be on PATH before setup-node can cache its store. The version
+      # comes from packageManager in package.json.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.17.0
+          cache: pnpm
+      # Tests create commits in temporary repositories.
+      - name: Configure git identity
+        run: |
+          git config --global user.name "Owl CI"
+          git config --global user.email "ci@example.invalid"
+      - name: Install workspace dependencies
+        run: pnpm install --recursive --include-workspace-root --frozen-lockfile --ignore-scripts
+      - name: Rebuild native dependencies
+        run: |
+          pnpm --filter @owl/db rebuild better-sqlite3 --pending
+          pnpm --filter web rebuild sharp --pending
+      - name: Build
+        run: pnpm run build
+      - name: Typecheck
+        run: pnpm run typecheck
+      - name: Test layout
+        run: pnpm test:layout
+      - name: Test hardcode
+        run: pnpm test:hardcode
+      - name: Quality gate
+        run: pnpm test:gate
+      - name: Test
+        run: pnpm test
+      - name: Audit production dependencies
+        run: pnpm audit --prod --audit-level high

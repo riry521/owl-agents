@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/decision-view.json",
+  "title": "DecisionView",
+  "type": "object",
+  "required": [
+    "decision",
+    "work",
+    "blocked_tasks"
+  ],
+  "properties": {
+    "decision": {
+      "$ref": "decision.json"
+    },
+    "work": {
+      "$ref": "work-detail.json"
+    },
+    "blocked_tasks": {
+      "type": "array",
+      "items": {
+        "$ref": "task-detail.json"
+      }
+    }
+  }
+}

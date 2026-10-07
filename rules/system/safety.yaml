@@ -1,0 +1,24 @@
+level: absolute
+rules:
+  - id: no_force_push
+    kind: block_command
+    pattern: "git push --force"
+    message: "Force pushes are prohibited. Use --force-with-lease."
+  - id: no_rm_root
+    kind: block_command
+    pattern: "rm -rf /"
+    message: "Do not delete the root directory."
+  - id: no_rm_home
+    kind: block_command
+    pattern: "rm -rf /home"
+    message: "Do not delete the home directory."
+  - id: no_sudo
+    kind: block_command
+    pattern: "sudo rm"
+    message: "sudo rm is prohibited."
+  - id: verify_before_done
+    kind: instruction
+    text: "Verify the result yourself before reporting completion."
+  - id: no_secrets_in_code
+    kind: instruction
+    text: "Do not write API keys, passwords, or tokens directly in source code."

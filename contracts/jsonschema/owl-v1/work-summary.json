@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/work-summary.json",
+  "title": "WorkSummary",
+  "type": "object",
+  "required": [
+    "id",
+    "display_number",
+    "title",
+    "state",
+    "state_version",
+    "updated_at",
+    "project_id"
+  ],
+  "properties": {
+    "id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "display_number": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 1
+    },
+    "title": {
+      "type": "string"
+    },
+    "state": {
+      "$ref": "common.json#/$defs/WorkState"
+    },
+    "state_version": {
+      "$ref": "common.json#/$defs/Version"
+    },
+    "updated_at": {
+      "$ref": "common.json#/$defs/RFC3339"
+    },
+    "project_id": {
+      "anyOf": [
+        {
+          "$ref": "common.json#/$defs/ULID"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false
+}

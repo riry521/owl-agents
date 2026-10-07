@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://owl.example.invalid/contracts/jsonschema/owl-v1/decision.json",
+  "title": "Decision",
+  "type": "object",
+  "required": [
+    "id",
+    "work_id",
+    "scope",
+    "status",
+    "reason",
+    "question",
+    "current_state",
+    "tried",
+    "options",
+    "recommended",
+    "allow_free_text",
+    "blocked_task_ids",
+    "state_version"
+  ],
+  "properties": {
+    "id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "work_id": {
+      "$ref": "common.json#/$defs/ULID"
+    },
+    "scope": {
+      "type": "string",
+      "enum": [
+        "task",
+        "work"
+      ]
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "open",
+        "resolved",
+        "cancelled"
+      ]
+    },
+    "reason": {
+      "type": "string"
+    },
+    "question": {
+      "type": "string"
+    },
+    "current_state": {
+      "type": "string"
+    },
+    "tried": {
+      "type": "string"
+    },
+    "options": {
+      "type": "array",
+      "items": {
+        "$ref": "common.json#/$defs/OpaqueObject"
+      }
+    },
+    "recommended": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "allow_free_text": {
+      "type": "boolean"
+    },
+    "blocked_task_ids": {
+      "type": "array",
+      "items": {
+        "$ref": "common.json#/$defs/ULID"
+      }
+    },
+    "state_version": {
+      "$ref": "common.json#/$defs/Version"
+    }
+  },
+  "additionalProperties": false
+}
