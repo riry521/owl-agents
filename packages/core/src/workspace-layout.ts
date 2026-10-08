@@ -5,9 +5,10 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 /** Directory name used for Task/Work/Advisor worktrees nested inside an Owl clone. */
 export const LEGACY_WORKSPACES_DIRNAME = ".owl-workspaces";
 
-/** Sanitizes an id (workId, taskId, conversationId, ...) into a filesystem-safe path segment. */
+/** Sanitizes an id (workId, taskId, conversationId, ...) into a filesystem-safe path segment; never empty, `.` or `..`. */
 export function safeSegment(value: string): string {
-  return value.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const segment = value.replace(/[^a-zA-Z0-9._-]/g, "_");
+  return /^\.*$/u.test(segment) ? segment.replace(/\./gu, "_") || "_" : segment;
 }
 
 /** True when `candidate` is `base` or a descendant of it, resolved via `relative()`. */

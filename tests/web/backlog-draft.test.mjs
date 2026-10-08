@@ -126,6 +126,13 @@ test('backlogWorkDraft keeps the summary under 20,000 characters and marks omitt
   assert.ok(!draft.summary.includes('2. src/file-2.ts'));
 });
 
+test('backlogWorkDraft keeps a single over-long finding within 20,000 characters including the omission mark', () => {
+  const draft = backlogWorkDraft([item({ problem: 'p'.repeat(30_000), reason: '', suggestion: '' })], 'en', t);
+
+  assert.equal(draft.summary.length, 20_000);
+  assert.ok(draft.summary.includes('…\n\nAcceptance:'));
+});
+
 test('ja and en expose the same backlog translation keys', () => {
   const ja = JSON.parse(readFileSync(join(repoRoot, 'apps/web/lib/i18n/ja.json'), 'utf8'));
   const en = JSON.parse(readFileSync(join(repoRoot, 'apps/web/lib/i18n/en.json'), 'utf8'));

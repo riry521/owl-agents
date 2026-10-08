@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { readFile, stat, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import { join } from "node:path";
 
 import { CoreClient } from "../../packages/plugin-sdk/dist/index.js";
 import { FileConnectorStateStore } from "../../packages/plugin-sdk/dist/shared/index.js";
 import { tempDir } from "../helpers/temp.mjs";
+import { waitFor } from "../helpers/wait.mjs";
 
 async function tempStateFile(t) {
   const dir = await tempDir(t, "owl-connector-state-");
@@ -143,4 +145,55 @@ test("CoreClient: without a state_store, cursor and decisions stay in memory onl
   await client.rememberDecisionMessage("D1", { channel_id: "C1", message_ref: "T1", posted_at: "2026-09-25T00:00:00.000Z" });
   assert.deepEqual(client.decisionMessage("D1"), { channel_id: "C1", message_ref: "T1", posted_at: "2026-09-25T00:00:00.000Z" });
   client.close();
+});
+
+test("CoreClient: the polling fallback delivers only the subscribed event types, as the WebSocket path does", async (t) => {
+  const stateFile = await tempStateFile(t);
+  // A prior cursor makes the first poll deliver events instead of only taking a history baseline.
+  await new FileConnectorStateStore(stateFile).save({ schema_version: 1, cursor: 1, decisions: {} });
+  const client = corePollingClient(stateFile);
+  const events = [
+    { event_id: "e2", sequence: 2, cursor: "2", type: "task.started", payload: {} },
+    { event_id: "e3", sequence: 3, cursor: "3", type: "decision.opened", payload: { decision_id: "D3" } },
+    { event_id: "e4", sequence: 4, cursor: "4", type: "agent_run.output", payload: {} },
+  ];
+  let polls = 0;
+  client.request = async () => {
+    polls += 1;
+    return { events, cursor: "4", has_more: false };
+  };
+
+  const handled = [];
+  await client.subscribeEvents(["decision.opened"], async (event) => { handled.push(event.type); });
+  await waitFor(() => handled.length > 0 && polls > 0, { message: "the first poll to deliver events" });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  client.close();
+
+  assert.ok(handled.includes("decision.opened"), "the subscribed event was delivered");
+  assert.ok(handled.every((type) => type === "decision.opened"), `unsubscribed types reached the handler: ${handled.join(", ")}`);
+});
+
+test("CoreClient: a request whose response is cut off mid-body rejects instead of hanging", async (t) => {
+  const server = createServer((request, response) => {
+    response.writeHead(200, { "content-type": "application/json", "content-length": "1000" });
+    response.write('{"data":');
+    setTimeout(() => request.socket.destroy(), 20);
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") return t.skip("localhost listen is unavailable");
+    throw error;
+  }
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  const client = new CoreClient({ core_api_base: `http://127.0.0.1:${server.address().port}/api/v1`, plugin_name: "test" });
+  const outcome = await Promise.race([
+    client.request("/system/status").then(() => "resolved", () => "rejected"),
+    new Promise((resolve) => setTimeout(() => resolve("still pending"), 2_000)),
+  ]);
+  assert.equal(outcome, "rejected");
 });

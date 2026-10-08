@@ -11,6 +11,7 @@ import { tempDir } from "../helpers/temp.mjs";
 import { waitFor } from "../helpers/wait.mjs";
 import { createAgentRunner } from "../../packages/agent-runtime/dist/index.js";
 import { splitRolePrompt } from "../../packages/agent-runtime/dist/role-contract.js";
+import { buildChildRunPrompt } from "../../packages/core/dist/executor.js";
 import { writeCommonIndex } from "../helpers/seed-knowledge.mjs";
 
 // Child processes (sh, sleep) need a PATH even when the runner has none.
@@ -246,6 +247,24 @@ test("a malformed hybrid_mode setting keeps Hybrid Mode off, logs the error and 
   assert.match(JSON.parse(alert.payload_json).message, /Hybrid Mode is off/u);
   await core.getHybridMode();
   assert.equal(db.all("SELECT 1 FROM events WHERE json_extract(payload_json, '$.kind') = 'hybrid_mode_setting_malformed'").length, 1, "the same broken value alerts once");
+});
+
+test("a relay-watched child's prompt carries the context budget and, after a relay, the previous child's memo", () => {
+  const task = { subtask_id: "s", instruction: "do it", workspace_dir: "/tmp", task: { title: "T", acceptance: "ok", context: "", rules: null, owner_guidance: [] } };
+  const budget = { handoff_tokens: 70000, kill_tokens: 95000 };
+  const plain = buildChildRunPrompt(task);
+  assert.doesNotMatch(plain, /## Context budget|## Handoff from the previous child/);
+
+  const first = buildChildRunPrompt(task, null, null, { budget, previous: null });
+  assert.match(first, /## Context budget\n[\s\S]*```owl-child-handoff\n\{"summary"[\s\S]*once its context reaches 95000 tokens[\s\S]*\n\nWhen finished, end your reply with exactly one fenced block/);
+  assert.doesNotMatch(first, /## Handoff from the previous child/);
+
+  const memo = { summary: "half done", done: ["a"], remaining: ["b"], next_steps: ["c"], changed_files: ["x.txt"], notes: "" };
+  const resumed = buildChildRunPrompt(task, null, null, { budget, previous: { reason: "kill", segment: 1, memo } });
+  assert.ok(resumed.indexOf("## Handoff from the previous child") < resumed.indexOf("## Task"));
+  assert.match(resumed, /too large \(kill\)[\s\S]*\nMemo: \{"summary":"half done"/);
+  const noMemo = buildChildRunPrompt(task, null, null, { budget, previous: { reason: "handoff", segment: 1, memo: null } });
+  assert.match(noMemo, /No memo was written; inspect the current state of your write_paths and continue\./);
 });
 
 // A second connection to the test DB file: OwlDatabase hides its handle, and the test plants bad rows.

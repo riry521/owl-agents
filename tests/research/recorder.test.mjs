@@ -405,3 +405,23 @@ test("clipping gets only normalized content tags; type is clipping", async (t) =
   const search = await plain.record({ tool: "WebSearch", url: null, query: "q", prompt: null, title: "T", content: "- a long enough search result summary line", links: [], http_status: 200, is_error: false }, { role: "worker" });
   assert.match(await read(search), /^tags: \[\]$/mu);
 });
+
+test("re-recording a note keeps its existing tags when the tagger returns none or fails", async (t) => {
+  const { knowledge } = await setup(t);
+  const make = (tagger) => new ResearchRecorder({ knowledge, isEnabled: () => true, language: () => "ja", tagger });
+  const read = async (result) => readFile(join(knowledge.knowledgeDir, result.path), "utf8");
+  const url = "https://tags.example.test/x";
+
+  const first = await make(async () => ({ ok: true, output: { tags: ["date-library"] } })).record(capture(url), { role: "worker" });
+  assert.match(await read(first), /^tags: \[date-library\]$/mu);
+
+  const failed = await make(async () => { throw new Error("model down"); }).record(capture(url), { role: "worker" });
+  assert.equal(failed.created, false);
+  assert.match(await read(failed), /^tags: \[date-library\]$/mu);
+
+  const empty = await make(async () => ({ ok: true, output: { tags: [] } })).record(capture(url), { role: "worker" });
+  assert.match(await read(empty), /^tags: \[date-library\]$/mu);
+
+  const retagged = await make(async () => ({ ok: true, output: { tags: ["typescript"] } })).record(capture(url), { role: "worker" });
+  assert.match(await read(retagged), /^tags: \[typescript\]$/mu);
+});

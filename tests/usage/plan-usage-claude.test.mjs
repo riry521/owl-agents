@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 
@@ -137,6 +138,20 @@ test("Keychain failures continue to the credentials file and ENOENT means missin
   });
   assert.deepEqual(calls.map((args) => args[2]), ["Claude Code-credentials"]);
   assert.deepEqual(result, { kind: "missing" });
+});
+
+test("a Keychain read killed by execFile's timeout is reported as keychain_timeout, not missing", async () => {
+  const result = await readClaudeCredential({
+    platform: "darwin",
+    env: {},
+    homedir: "/home/test",
+    // The same error shape execFile produces when its `timeout` kills the child.
+    runSecurity: () => new Promise((_resolve, reject) => {
+      execFile(process.execPath, ["-e", "setTimeout(() => {}, 10_000)"], { timeout: 50 }, (error) => reject(error));
+    }),
+    readFile: async () => { throw Object.assign(new Error("missing"), { code: "ENOENT" }); },
+  });
+  assert.deepEqual(result, { kind: "unreadable", detail: "keychain_timeout" });
 });
 
 test("Linux credentials honor CLAUDE_CONFIG_DIR and reject malformed JSON", async () => {

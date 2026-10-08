@@ -341,11 +341,19 @@ export function latestTestRun(db: Pick<CoreDatabase, "get" | "all">, filter: { s
   return loadRecord(db, row);
 }
 
+/** The baseline result at a commit: the newest passed/failed run's fields, with every file any such run covered (newest result per file). */
 export function baselineTestRun(db: Pick<CoreDatabase, "get" | "all">, projectId: string, commit: string): TestRunRecord | null {
-  return loadRecord(db, db.get<RunRow>(
-    `SELECT ${RUN_COLUMNS} FROM test_runs WHERE scope = 'baseline' AND project_id = ? AND commit_sha = ? AND status IN ('passed', 'failed') ORDER BY rowid DESC LIMIT 1`,
+  const rows = db.all<RunRow>(
+    `SELECT ${RUN_COLUMNS} FROM test_runs WHERE scope = 'baseline' AND project_id = ? AND commit_sha = ? AND status IN ('passed', 'failed') ORDER BY rowid DESC`,
     projectId, commit,
-  ));
+  );
+  const newest = loadRecord(db, rows[0]);
+  if (newest === null) return null;
+  const files = new Map(newest.files.map((entry) => [entry.file, entry]));
+  for (const row of rows.slice(1)) {
+    for (const entry of loadRecord(db, row)?.files ?? []) if (!files.has(entry.file)) files.set(entry.file, entry);
+  }
+  return { ...newest, files: [...files.values()].sort((a, b) => (a.file < b.file ? -1 : a.file > b.file ? 1 : 0)) };
 }
 
 /** Failure summaries for an agent: messages cut to brief_message_chars, at most brief_max_failures. */

@@ -1,4 +1,4 @@
-import { kb, type MemoryInjectionInput } from "./memory-injector.js";
+import { defuseTags, kb, type MemoryInjectionInput } from "./memory-injector.js";
 import type { MemoryIndex } from "./memory-index.js";
 import { estimatePageTokens } from "./page-format.js";
 import type { MemoryLogger } from "./memory-types.js";
@@ -113,7 +113,7 @@ export class IndexInjector {
     ).get(path) as { path: string; title: string; page_type: string; body: string; body_sha256: string; integrated_hash: string | null; source_hash: string | null; updated: string | null } | undefined;
     if (!row) return null;
     const hash = `${(row.page_type === "project-index" ? row.source_hash : row.integrated_hash) ?? ""}:${row.body_sha256}`;
-    return { path: row.path, title: row.title, page_type: row.page_type, hash, body: row.body, updated: row.updated ?? "" };
+    return { path: row.path, title: defuseTags(row.title), page_type: row.page_type, hash, body: defuseTags(row.body), updated: row.updated ?? "" };
   }
 
   private indexPage(projectId: string | null): PageText | null {
@@ -198,7 +198,7 @@ export class IndexInjector {
 
   private startShown(common: PageText | null, projects: readonly { title: string }[]): Map<string, Shown> {
     const shown = new Map<string, Shown>([[COMMON_INDEX, common ? this.shownOf(common) : { hash: "", title: "共通の目次", type: "project-index", lines: [], deleted: true }]]);
-    shown.set(PROJECT_LIST, { hash: "", title: "Project 目次の一覧", type: PROJECT_LIST, lines: projects.map((p) => `- ${p.title}`) });
+    shown.set(PROJECT_LIST, { hash: "", title: "Project 目次の一覧", type: PROJECT_LIST, lines: projects.map((p) => `- ${defuseTags(p.title)}`) });
     return shown;
   }
 
@@ -217,9 +217,9 @@ export class IndexInjector {
     if (projects.length > 0) {
       const lines: string[] = [];
       for (const [i, row] of projects.entries()) {
-        const next = [...lines, `- ${row.title}`];
+        const next = [...lines, `- ${defuseTags(row.title)}`];
         if (tokens(next.join("\n")) > ADVISOR_PROJECT_LIST_TOKEN_LIMIT) { lines.push(`- ほか ${projects.length - i} 件（index で全件）`); break; }
-        lines.push(`- ${row.title}`);
+        lines.push(`- ${defuseTags(row.title)}`);
       }
       sections.push({ title: "Project 目次の一覧", lines, collapsed: false });
     }
@@ -234,7 +234,7 @@ export class IndexInjector {
     let updated = 0;
     for (const [path, old] of [...shown]) {
       if (path === PROJECT_LIST) {
-        const lines = this.options.index.listPages({ types: ["project-index"], scope: "project" }).map((p) => `- ${p.title}`);
+        const lines = this.options.index.listPages({ types: ["project-index"], scope: "project" }).map((p) => `- ${defuseTags(p.title)}`);
         const added = lines.filter((l) => !old.lines.includes(l));
         const removed = old.lines.filter((l) => !lines.includes(l));
         if (added.length + removed.length === 0) continue;

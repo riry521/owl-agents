@@ -114,7 +114,8 @@ export class EventDispatcher {
     const select = `SELECT id, sequence, idempotency_key, type, work_id, task_id, agent_run_id,
                            payload_json, status, attempt_no, lease_expires_at, next_attempt_at, created_at
                       FROM events
-                     WHERE sequence > ?`;
+                     WHERE sequence > ?
+                       AND NOT COALESCE(type = 'system.alert' AND json_valid(payload_json) AND json_type(payload_json, '$.internal_dispatcher_marker') = 'true', 0)`;
     const rows = limit === undefined
       ? this.db.all<EventRow>(`${select} ORDER BY sequence ASC`, afterSequence)
       : this.db.all<EventRow>(

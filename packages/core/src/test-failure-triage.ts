@@ -94,7 +94,6 @@ async function runBaseline(deps: EnsureBaselineDeps): Promise<TestRunRecord | nu
     }, new Date().toISOString());
   });
   if (execution.status === "error") return null;
-  const added = baselineTestRun(deps.db, deps.projectId, deps.baseCommit);
-  if (added === null) return null;
-  return cached === null ? added : { ...added, files: [...cached.files, ...added.files] };
+  // Covers the cached files too: baselineTestRun gathers every run at the commit.
+  return baselineTestRun(deps.db, deps.projectId, deps.baseCommit);
 }

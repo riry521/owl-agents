@@ -59,6 +59,17 @@ test("WorkspaceLayout.roots() dedupes when root and legacyRoot are the same", ()
   assert.deepEqual(split.roots(), [resolve("/tmp/new-root"), resolve("/tmp/legacy-root")]);
 });
 
+test("empty ids and ids of only dots resolve to a directory below their parent, never to the parent or above it", async (t) => {
+  const parent = await tempDir(t, "owl-layout-dots-");
+  const layout = new WorkspaceLayout(join(parent, "root"), join(parent, "legacy"));
+  const below = (base, path) => path.startsWith(`${base}/`) && path.length > base.length + 1;
+  for (const id of ["", ".", ".."]) {
+    assert.ok(below(layout.root, layout.workDir(id)), `workDir(${id})`);
+    assert.ok(below(layout.workDir("work"), layout.taskPath("work", id)), `taskPath(work, ${id})`);
+    assert.ok(below(join(layout.root, "advisor"), layout.advisorDir(id)), `advisorDir(${id})`);
+  }
+});
+
 test("workDir prefers an existing legacy directory, otherwise falls back to the current root", async (t) => {
   const parent = await tempDir(t, "owl-layout-workdir-");
   const root = join(parent, "root");

@@ -26,8 +26,8 @@ export async function downloadAttachment(
   const timeout = setTimeout(() => controller.abort(), 60_000);
   timeout.unref?.();
   const response = await fetch(attachment.url, { signal: controller.signal });
-  clearTimeout(timeout);
   if (!response.ok) {
+    clearTimeout(timeout);
     throw new Error(`Failed to download ${attachment.name}: ${response.status}`);
   }
 
@@ -47,6 +47,9 @@ export async function downloadAttachment(
     await fileHandle.close();
     await unlink(destPath).catch(() => undefined);
     throw error;
+  } finally {
+    // Cleared only after the body: the abort signal is the sole guard against a stalled stream.
+    clearTimeout(timeout);
   }
   await fileHandle.close();
 

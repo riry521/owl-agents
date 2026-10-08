@@ -13,8 +13,9 @@
 // until Supervisor auto-start is wired into `owl install-service`.
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadOwlEnv } from "../../../packages/shared/dist/env.js";
 
 // The supervisor is a direct executable as well as a child-spawner. Load the
@@ -34,7 +35,9 @@ const DEFAULT_CONFIG: SupervisorConfig = {
   maxRestarts: 5,
   restartWindowMs: 300_000, // 5 minutes
   healthCheckIntervalMs: 30_000, // 30 seconds
-  healthCheckUrl: "http://127.0.0.1:3787/api/v1/health",
+  // Core listens on OWL_PORT (loaded from .env above); probing a fixed port
+  // would fail every check and restart a healthy Core in a loop.
+  healthCheckUrl: `http://127.0.0.1:${process.env.OWL_PORT?.trim() || "3787"}/api/v1/health`,
 };
 
 class Supervisor {
@@ -74,7 +77,12 @@ class Supervisor {
     }
 
     console.log("[supervisor] Spawning owl-core");
-    const child = spawn("node", [cliPath, "start", "--foreground"], {
+    // Failures counted while the previous Core was down belong to it, not to
+    // the Core that is only now starting.
+    this.healthFailureCount = 0;
+    // process.execPath, not "node": a launchd/systemd PATH often has no node,
+    // and another node on PATH could not load Core's native modules.
+    const child = spawn(process.execPath, [cliPath, "start", "--foreground"], {
       cwd: this.config.owlRoot,
       stdio: "inherit",
       env: { ...process.env },
@@ -124,7 +132,11 @@ class Supervisor {
     this.healthCheckTimer = setInterval(() => {
       void (async () => {
         try {
-          const response = await fetch(this.config.healthCheckUrl);
+          // Without a timeout a hung Core keeps each probe pending for minutes,
+          // so it is not counted as failed within the restart window.
+          const response = await fetch(this.config.healthCheckUrl, {
+            signal: AbortSignal.timeout(this.config.healthCheckIntervalMs),
+          });
           if (!response.ok) {
             this.healthFailureCount += 1;
             console.warn(`[supervisor] Health check failed: ${response.status}`);
@@ -172,13 +184,25 @@ class Supervisor {
   }
 }
 
-// CLI entry
-const args = process.argv.slice(2);
-const owlRoot = args.find((a) => a.startsWith("--root="))?.split("=")[1] ?? process.cwd();
-const supervisor = new Supervisor({ owlRoot: resolve(owlRoot) });
-supervisor.start().catch((err: unknown) => {
-  console.error("[supervisor] Fatal:", err);
-  process.exit(1);
-});
+function isEntryPoint(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return realpathSync(entry) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+// CLI entry, only when executed directly so that importing Supervisor starts nothing.
+if (isEntryPoint()) {
+  const rootArgument = process.argv.slice(2).find((a) => a.startsWith("--root="));
+  const owlRoot = rootArgument?.slice("--root=".length) || process.cwd();
+  const supervisor = new Supervisor({ owlRoot: resolve(owlRoot) });
+  supervisor.start().catch((err: unknown) => {
+    console.error("[supervisor] Fatal:", err);
+    process.exit(1);
+  });
+}
 
 export { Supervisor, type SupervisorConfig };

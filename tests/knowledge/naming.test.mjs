@@ -45,6 +45,15 @@ test("filename resolution uses the first free suffix and reuses matching sources
   });
 });
 
+test("filename resolution treats names that differ only in case or Unicode normalization as taken", async (t) => {
+  const dir = await tempDir(t, "owl-knowledge-naming-fold-");
+  await writeFile(join(dir, "Foo.md"), "hand written\n");
+  await writeFile(join(dir, "ガイド.md".normalize("NFD")), "hand written\n");
+
+  assert.deepEqual(await resolveKnowledgeFilename(dir, "foo"), { filename: "foo-2.md", existing: false });
+  assert.deepEqual(await resolveKnowledgeFilename(dir, "ガイド"), { filename: "ガイド-2.md", existing: false });
+});
+
 test("filename resolution finds matching sources after suffix gaps", async (t) => {
   const dir = join(await tempDir(t, "owl-knowledge-naming-"), "with-gap");
   await mkdir(dir, { recursive: true });

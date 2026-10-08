@@ -83,7 +83,7 @@ export interface TypePolicyInput {
   mode: "sole" | "supplement";
   runCommand: (argv: string[], cwd: string) => Promise<CommandOutcome>;
   /** Files Core's own test run already judged; those are not started again and carry no output. */
-  coreTestRun?: { run_id: string | null; passed_files: readonly string[]; failed_files: readonly string[] };
+  coreTestRun?: { run_id: string | null; mode?: "full" | "selected"; passed_files: readonly string[]; failed_files: readonly string[] };
 }
 
 const DELETE_ACTIONS = new Set(["delete", "deleted", "remove", "removed"]);
@@ -314,11 +314,16 @@ export async function evaluateTaskTypePolicy(input: TypePolicyInput): Promise<Ty
   }
   // Why not add .ts to the global code.checkers/test.runners defaults: `node --check` cannot check it and the
   // defaults cannot vary per project. The Project's resolved test settings decide instead: a whole-command run
-  // covers every changed file, so its result counts as the verification of this code Task.
+  // covers every changed file, so its result counts as the verification of this code Task. A per-file Project has
+  // no whole command; there Core's selected run of the tests related to the changed files is the verification, and
+  // it counts only when at least one test ran and none failed (failed files are judged by Core's own test gate).
   const core = input.coreTestRun;
   if (core && (core.passed_files.includes(WHOLE_RUN_FILE) || core.failed_files.includes(WHOLE_RUN_FILE))) {
     const ok = core.passed_files.includes(WHOLE_RUN_FILE);
     record({ command_id: "policy:test", passed: ok, file: WHOLE_RUN_FILE, detail: `Core whole test run ${core.run_id ?? ""}`.trimEnd() }, ok ? undefined : "test_failed");
+    executed += 1;
+  } else if (core?.mode === "selected" && core.passed_files.length > 0 && core.failed_files.length === 0) {
+    record({ command_id: "policy:test", passed: true, detail: `Core selected test run${core.run_id ? ` ${core.run_id}` : ""} passed ${core.passed_files.length} related test file(s).` });
     executed += 1;
   }
   if (executed === 0 && result.passed) unchecked("code_unchecked", "No changed file matches a configured code checker or test runner.");

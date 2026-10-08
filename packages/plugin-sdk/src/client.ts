@@ -274,6 +274,11 @@ export class CoreClient extends EventEmitter {
           }
           chunks.push(buffer);
         });
+        // A connection cut mid-body (e.g. Core restarting) destroys the
+        // socket, so neither "end" nor the request timeout ever fires; without
+        // these the promise would never settle and stall polling/event handling.
+        res.on("error", fail);
+        res.on("close", () => fail(new Error("Core response ended before it was complete")));
         res.on("end", () => {
           if (settled) return;
           const text = Buffer.concat(chunks).toString();
@@ -302,7 +307,7 @@ export class CoreClient extends EventEmitter {
     await this.loadState();
     if (!this.wsUrl) {
       console.warn("[plugin-sdk] No WebSocket URL configured, falling back to polling");
-      this.startPolling(handler, this.eventCursor === 0);
+      this.startPolling(eventTypes, handler, this.eventCursor === 0);
       return;
     }
     await this.connectWs(eventTypes, handler);
@@ -368,7 +373,7 @@ export class CoreClient extends EventEmitter {
             // established a cursor. Poll from that cursor so unhandled
             // events remain replayable; only a no-WebSocket startup performs
             // the history-discarding baseline below.
-            this.startPolling(handler, false);
+            this.startPolling(eventTypes, handler, false);
             return;
           }
           if (frame.kind === "ready") {
@@ -406,7 +411,7 @@ export class CoreClient extends EventEmitter {
             rawMessageLength: rawMessage.length,
           });
           try { ws.close(); } catch { /* close handler already schedules recovery */ }
-          this.startPolling(handler, false);
+          this.startPolling(eventTypes, handler, false);
         }
       });
       ws.on("close", () => {
@@ -415,7 +420,7 @@ export class CoreClient extends EventEmitter {
         this.reconnectTimer = setTimeout(() => {
           this.connectWs(eventTypes, handler).catch((error) => {
             console.error("[plugin-sdk] WebSocket reconnect failed; event delivery switched to polling", error);
-            this.startPolling(handler, false);
+            this.startPolling(eventTypes, handler, false);
           });
         }, 5000);
       });
@@ -428,14 +433,14 @@ export class CoreClient extends EventEmitter {
       const code = error instanceof Error && "code" in error ? (error as { code: string }).code : "";
       if (code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND") {
         console.warn("[plugin-sdk] ws module not available, falling back to polling");
-        this.startPolling(handler, true);
+        this.startPolling(eventTypes, handler, true);
       } else {
         throw error;
       }
     }
   }
 
-  private startPolling(handler: (event: OwlEvent) => Promise<void>, discardExistingHistory: boolean): void {
+  private startPolling(eventTypes: readonly string[], handler: (event: OwlEvent) => Promise<void>, discardExistingHistory: boolean): void {
     if (this.pollingTimer) return;
     this.pollingInitialSyncPending = discardExistingHistory && this.eventCursor === 0;
     const poll = async () => {
@@ -450,6 +455,9 @@ export class CoreClient extends EventEmitter {
         const page = await this.request<EventPage>(`/events?after=${this.eventCursor}&limit=50`);
         for (const event of page.events) {
           if (!Number.isSafeInteger(event.sequence) || event.sequence <= this.eventCursor) continue;
+          // GET /events has no type filter, so apply the subscription here exactly
+          // as the WebSocket path does; the page cursor below still moves past it.
+          if (eventTypes.length > 0 && !eventTypes.includes(event.type)) continue;
           try {
             await handler(event);
           } catch (handlerError) {

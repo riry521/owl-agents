@@ -346,6 +346,7 @@ test("a Manager replan receives readable failure details, not hashes", async (t)
       changes: [],
       remaining_issues: [{ issue: "out.txt missing", impact: "high", next_step: "free disk space" }],
     },
+    review_same_spot: null,
     reviewer_findings: [],
     verification_failure: null,
   }]);

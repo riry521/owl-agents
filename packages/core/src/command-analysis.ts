@@ -17,14 +17,15 @@ export function analyzeShellCommand(command: string): ShellCommandAnalysis | nul
   const allSegments = [...segments, ...nestedSegments].filter((segment) => segment.length > 0);
   const expanded: string[][] = [];
   for (const segment of allSegments) {
-    const effective = effectiveCommand(segment);
-    if (!effective) continue;
+    // `env -S <string>` has no command token of its own, so check it before the effective command.
     const splitStringCommand = environmentSplitStringCommand(segment);
     if (splitStringCommand !== null) {
       const nested = analyzeNestedShell(splitStringCommand, 1);
       if (nested === null) return null;
       expanded.push(...nested);
     }
+    const effective = effectiveCommand(segment);
+    if (!effective) continue;
     let script: string | null = null;
     if (["sh", "bash", "zsh", "dash", "ksh", "fish"].includes(effective.executable)) {
       const commandFlag = effective.args.findIndex((arg) => /^-[A-Za-z]*c[A-Za-z]*$/u.test(arg));
@@ -395,6 +396,14 @@ export interface EffectiveCommand {
   readonly wrappers: readonly string[];
 }
 
+/** Long `env` options whose value is the next token. */
+const ENV_OPTIONS_WITH_VALUE = new Set(["--unset", "--chdir", "--split-string"]);
+/** Options of the other wrappers whose value is the next token; every other leading `-` token is a flag. */
+const WRAPPER_OPTIONS_WITH_VALUE: ReadonlyMap<string, ReadonlySet<string>> = new Map([
+  ["exec", new Set(["-a"])],
+  ["time", new Set(["-o", "-f", "--output", "--format"])],
+]);
+
 export function effectiveCommand(tokens: readonly string[]): EffectiveCommand | null {
   let index = 0;
   const wrappers: string[] = [];
@@ -411,9 +420,10 @@ export function effectiveCommand(tokens: readonly string[]): EffectiveCommand | 
       index += 1;
       while (index < tokens.length) {
         const token = tokens[index] ?? "";
-        if (token === "-i" || token === "--ignore-environment" || token === "-0" || token === "--null") index += 1;
-        else if (token === "-u" || token === "--unset") index += 2;
-        else if (isEnvironmentAssignment(token)) index += 1;
+        if (token === "--") { index += 1; break; }
+        if (isEnvironmentAssignment(token)) index += 1;
+        // `-` alone is `-i`; `-u`, `-C`, `-P` and `-S` (also last in a cluster such as `-iC`) take the next token.
+        else if (token.startsWith("-")) index += ENV_OPTIONS_WITH_VALUE.has(token) || /^-[0iv]*[CPSu]$/u.test(token) ? 2 : 1;
         else break;
       }
       continue;
@@ -439,8 +449,14 @@ export function effectiveCommand(tokens: readonly string[]): EffectiveCommand | 
     if (["!", "command", "exec", "builtin", "nohup", "time"].includes(current)) {
       wrappers.push(current);
       index += 1;
-      if ((current === "command" || current === "builtin") && tokens[index] === "--") index += 1;
-      if (current === "time" && tokens[index]?.startsWith("-")) index += 1;
+      if (current === "!") continue;
+      const withValue = WRAPPER_OPTIONS_WITH_VALUE.get(current);
+      while (index < tokens.length) {
+        const token = tokens[index] ?? "";
+        if (token === "--") { index += 1; break; }
+        if (!token.startsWith("-") || token === "-") break;
+        index += withValue?.has(token) ? 2 : 1;
+      }
       continue;
     }
 

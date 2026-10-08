@@ -138,3 +138,32 @@ test("an Owner-replan marker left attempted by a crash hands the reopen's answer
   assert.deepEqual(replanned.context.owner_requests, [{ kind: "reopen", text: "Please also add a changelog entry.", message_ids: [] }]);
   assert.deepEqual(replanned.context.worker_questions, []);
 });
+
+test("a malformed Owner-replan request is removed instead of being left attempted for the next restart", async (t) => {
+  const { db, core } = await createCore(t, {});
+  const workId = await createRunningWork(core, db, "malformed");
+  await db.createWriteLane().transact((transaction) => {
+    insertIdempotencyKey(transaction, `owner-replan:${workId}`, { work_id: workId, status: "queued", kind: "reopen" });
+  });
+
+  assert.equal(await core.consumeOwnerReplan(workId), null);
+  assert.equal(db.get("SELECT 1 AS found FROM idempotency_keys WHERE key = ?", `owner-replan:${workId}`), undefined);
+});
+
+test("a merge wake schedules the waiting Work without remembering a key that can never match again", async (t) => {
+  const { db, core } = await createCore(t, {});
+  const sourceId = await createRunningWork(core, db, "wake-source");
+  const waiterId = await createRunningWork(core, db, "wake-waiter");
+  const taskId = createUlid();
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run("UPDATE works SET state = 'completed' WHERE id = ?", sourceId);
+    insertTask(transaction, waiterId, { id: taskId, status: "waiting", managerTaskId: "T1", title: "Waits" });
+    const spec = { reason: "r", source: "manager", conditions: [{ kind: "work", work_id: sourceId, description: "source" }], base_head: null, deadline_at: "2999-01-01T00:00:00.000Z", replan_question: null };
+    transaction.run("UPDATE tasks SET prerequisite_json = ? WHERE id = ?", JSON.stringify(spec), taskId);
+  });
+
+  core.wakePrerequisiteWaiters(sourceId, true);
+
+  assert.equal(core.prerequisiteRecheck.has(waiterId), true);
+  assert.equal(core.prerequisiteWoken.size, 0);
+});

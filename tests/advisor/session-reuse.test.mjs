@@ -487,6 +487,41 @@ test("shutdown during a slow resident spawn terminates the new driver", async (t
   assert.equal(live.db.get("SELECT COUNT(*) AS n FROM advisor_sessions WHERE status IN ('starting', 'running')").n, 0);
 });
 
+test("a session record write that fails after the spawn terminates the new driver and ends the session", async (t) => {
+  const spawned = fakeProviderSession(672);
+  spawned.terminated = false;
+  spawned.terminateImmediately = () => { spawned.terminated = true; };
+  const live = await createLiveRuntime(t, [spawned]);
+  live.runtime.config.sessionManager.setWorkspace = async () => { throw new Error("disk full"); };
+
+  await assert.rejects(live.runtime.ensureResident(live.ownerId, live.conversationId), /disk full/);
+  assert.equal(spawned.terminated, true);
+  assert.equal(live.runtime.activeDriver, null);
+  assert.equal(live.db.get("SELECT COUNT(*) AS n FROM advisor_sessions WHERE status IN ('starting', 'running')").n, 0);
+});
+
+test("shutdown while the new session is being recorded terminates the new driver", async (t) => {
+  const spawned = fakeProviderSession(673);
+  spawned.terminated = false;
+  spawned.terminateImmediately = () => { spawned.terminated = true; };
+  const live = await createLiveRuntime(t, [spawned]);
+  const manager = live.runtime.config.sessionManager;
+  const setWorkspace = manager.setWorkspace.bind(manager);
+  let releaseRecord;
+  const recordGate = new Promise((resolveGate) => { releaseRecord = resolveGate; });
+  let recording = false;
+  manager.setWorkspace = async (...args) => { recording = true; await recordGate; return setWorkspace(...args); };
+
+  const settled = live.runtime.ensureResident(live.ownerId, live.conversationId).then(() => "ok", (error) => error.message);
+  await waitFor(() => recording, { message: "the session to be recorded" });
+  live.runtime.stopImmediately();
+  releaseRecord();
+
+  assert.match(await settled, /shutting down/);
+  assert.equal(spawned.terminated, true);
+  assert.equal(live.runtime.activeDriver, null);
+});
+
 test("a prompt change keeps the session and prefixes the next turn with the updated instructions", async (t) => {
   const only = fakeProviderSession(701);
   const live = await createLiveRuntime(t, [only]);

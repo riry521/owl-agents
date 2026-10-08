@@ -63,7 +63,6 @@ export interface AdvisorRuntimeConfig {
   readonly owlRoot: string;
   readonly git?: GitGateway;
   readonly getAdvisorSettings: () => AdvisorSettingsSnapshot;
-  /** Project overview summaries for each Advisor turn; a failure only drops the overview block. */
   /** Memory catalog for each turn (design §6): the first call of a session is the start catalog, later calls only the new items. */
   readonly memoryInjector?: Pick<IndexInjector, "compose" | "resetSession">;
   readonly isProviderPaused?: (provider: string) => boolean;
@@ -574,22 +573,35 @@ export class AdvisorSessionRuntime {
       throw error;
     }
 
-    if (this.stopped) {
-      // Shutdown landed while the process was starting; nothing else holds it.
+    // Until it becomes activeDriver nothing else holds the new process, so a
+    // shutdown or a failed record write while it starts must end it here.
+    const abandon = async (reason: string): Promise<void> => {
       this.terminateDriver(driver);
-      await this.config.sessionManager.endSession(session.id, "core_restart");
+      await this.config.sessionManager.endSession(session.id, reason);
+    };
+    if (this.stopped) {
+      await abandon("core_restart");
       throw new AdvisorRuntimeStoppedError();
     }
 
-    await this.config.sessionManager.activateSession(session.id, driver.pid, driver.provider_session_id);
-    await this.config.sessionManager.setProviderConfig(session.id, {
-      providerId: settings.providerId,
-      harnessId: settings.harnessId,
-      model: settings.model,
-      effort: settings.effort ?? null,
-      systemPromptSha256: hashSystemPrompt(settings.systemPrompt),
-    });
-    await this.config.sessionManager.setWorkspace(session.id, workspacePath);
+    try {
+      await this.config.sessionManager.activateSession(session.id, driver.pid, driver.provider_session_id);
+      await this.config.sessionManager.setProviderConfig(session.id, {
+        providerId: settings.providerId,
+        harnessId: settings.harnessId,
+        model: settings.model,
+        effort: settings.effort ?? null,
+        systemPromptSha256: hashSystemPrompt(settings.systemPrompt),
+      });
+      await this.config.sessionManager.setWorkspace(session.id, workspacePath);
+    } catch (error) {
+      await abandon("spawn_failed").catch((endError: unknown) => console.error(`[owl-core] Could not end Advisor session ${session.id}`, endError));
+      throw error;
+    }
+    if (this.stopped) {
+      await abandon("core_restart");
+      throw new AdvisorRuntimeStoppedError();
+    }
 
     this.activeDriver = driver;
     this.activeSessionId = session.id;

@@ -874,7 +874,8 @@ export class KnowledgeLocation {
     let count = 0;
     const walk = async (dir: string, root = false): Promise<void> => {
       for (const name of await this.fs.readdir(dir)) {
-        if (root && name === KNOWLEDGE_MARKER_FILE) continue;
+        // .DS_Store is never copied or removed (isIgnoredEntry), so it is not a file left behind.
+        if ((root && name === KNOWLEDGE_MARKER_FILE) || name === ".DS_Store") continue;
         const path = join(dir, name);
         const info = await this.fs.lstat(path);
         if (info.isDirectory()) await walk(path);

@@ -76,7 +76,9 @@ const sectionMatch = (value: unknown): boolean => value === "exact" || value ===
 const headingPattern = (value: unknown): boolean => {
   if (typeof value !== "string") return false;
   try {
-    return new RegExp(value).exec("") !== undefined;
+    new RegExp(value);
+    // The empty alternative always matches "", so the match length reveals whether capture group 1 exists.
+    return (new RegExp(`(?:${value})|`).exec("")?.length ?? 0) >= 2;
   } catch {
     return false;
   }

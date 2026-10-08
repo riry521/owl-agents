@@ -45,7 +45,7 @@ import {
 } from "./work-summary-history";
 import { getWorkAssurance, type WorkAssurance } from "./work-assurance";
 import { WorkDriver } from "./work-driver";
-import { WorkflowEngine } from "./workflow-engine";
+import { WorkflowEngine, type HookSubagentInput } from "./workflow-engine";
 import { isPlanRejection, validatePlan, validateReplan, type PlanRejection, type ReplanAction, type ReplanPlan, type ReplanSnapshot } from "./replan-plan";
 import type { PlanWaitFor, PrerequisiteCondition, PrerequisiteSpec } from "../../shared/dist/prerequisite.js";
 import { isProcessGroupAlive } from "../../shared/dist/process-group.js";
@@ -203,7 +203,7 @@ import { failedTaskBrief, pendingAcceptanceDefect, pendingExternalBlocker } from
 import { planContextFields } from "./context-builder.js";
 import { detectProcessSkillsPack, type DetectedProcessSkillsPack } from "./process-skills-pack.js";
 import { ResearchRecorder, type ResearchAttributionRole } from "./research-recorder.js";
-import { buildTokenUsageReport } from "./token-usage-report.js";
+import { buildTokenUsageReport, countRequestsOverThreshold, type RequestThresholdCount } from "./token-usage-report.js";
 import type { TokenUsagePeriod, TokenUsageReport } from "../../shared/dist/token-usage-report.js";
 import { RESEARCH_CAPTURE_ROLES } from "../../shared/dist/permission-args.js";
 import {
@@ -244,6 +244,8 @@ import {
   CHILD_RUN_PROVIDERS,
   CODEX_BUILTIN_MODELS,
   DEFAULT_CHILD_RUN_SETTINGS,
+  CHILD_RUN_LIMITS,
+  tokenRelaySettingsProblem,
   DEFAULT_HARNESS_MODELS,
   DEFAULT_ROLE_MODELS,
   PROJECT_LOCKING_WORK_STATES,
@@ -610,6 +612,7 @@ interface ProjectDbRow {
   test_run_json: string | null;
   test_run_detected_json: string | null;
   test_policy_json: string | null;
+  report_check_commands_json: string | null;
 }
 
 interface MessageDbRow {
@@ -1107,6 +1110,7 @@ export class Core {
       skillBox: this.skillBox,
       memoryInjector: this.memoryInjector,
       getProcessSkillsPack: () => this.processSkillsPack,
+      getResearchSubagentSettings: () => this.getChildRunSettings().research_subagent,
       staleCheckIntervalMs: options.dispatcher?.stale_check_interval_ms,
       providerPauseController: this.providerPauseController,
       childRuns: this.childRuns,
@@ -2501,10 +2505,11 @@ export class Core {
     await this.projectOverviews.idle();
     await Promise.allSettled([...this.overviewRuns]);
     await this.dispatcher.stop();
+    // Before the drain: a failing research write records its own alert through the lane, and that write must not land after the drain.
+    await this.researchRecorder.idle();
     // These lanes contain only serialized SQLite mutations. Drain them so
     // already-queued state changes commit before the database connection closes.
     await this.writeLane.drain();
-    await this.researchRecorder.idle();
   }
 
   private async emitProviderPauseEvent(event: ProviderPauseEvent): Promise<void> {
@@ -2569,6 +2574,27 @@ export class Core {
       ...input,
       now: new Date(this.options.now?.() ?? utcNow()),
       harnessOf: (provider) => this.options.getProviderHarness?.(provider) ?? builtinProviderHarness(provider) ?? undefined,
+    });
+  }
+
+  /**
+   * How many recorded requests sent a prompt larger than the threshold. Defaults come from the child-run settings:
+   * the report threshold, and the relay-watched models plus the Claude researcher model.
+   */
+  public countLargeModelRequests(input: {
+    readonly threshold_tokens?: number; readonly models?: readonly string[]; readonly work_id?: string;
+  } = {}): RequestThresholdCount {
+    if (input.threshold_tokens !== undefined && (!Number.isSafeInteger(input.threshold_tokens) || input.threshold_tokens < 1)) {
+      throw validationError("threshold_tokens must be a positive integer.", { field: "threshold_tokens" });
+    }
+    const settings = this.getChildRunSettings();
+    const models = input.models && input.models.length > 0
+      ? input.models
+      : [...settings.token_relay.models.map((choice) => choice.model), settings.research_subagent.claude.model];
+    return countRequestsOverThreshold(this.db, {
+      threshold_tokens: input.threshold_tokens ?? settings.token_relay.report_threshold_tokens,
+      models,
+      ...(input.work_id ? { work_id: input.work_id } : {}),
     });
   }
 
@@ -4327,7 +4353,7 @@ export class Core {
     const limit = boundLimit(query.limit ?? 50);
     const rows = this.db.all<ProjectDbRow>(
       `SELECT id, name, canonical_path, base_branch, auto_push, allowed_roots_json, verification_plan_json,
-                worktree_prepare_argv_json, worktree_refresh_argv_json, post_merge_argv_json, post_merge_install_argv_json, required_test_argv_json, test_run_json, test_run_detected_json, test_policy_json
+                worktree_prepare_argv_json, worktree_refresh_argv_json, post_merge_argv_json, post_merge_install_argv_json, required_test_argv_json, test_run_json, test_run_detected_json, test_policy_json, report_check_commands_json
          FROM projects
         WHERE (? IS NULL OR id > ?)
         ORDER BY id ASC LIMIT ?`,
@@ -4379,7 +4405,7 @@ export class Core {
     }, (transaction) => {
       const row = transaction.get<ProjectDbRow>(
         `SELECT id, name, canonical_path, base_branch, auto_push, allowed_roots_json, verification_plan_json,
-                worktree_prepare_argv_json, worktree_refresh_argv_json, post_merge_argv_json, post_merge_install_argv_json, required_test_argv_json, test_run_json, test_run_detected_json, test_policy_json
+                worktree_prepare_argv_json, worktree_refresh_argv_json, post_merge_argv_json, post_merge_install_argv_json, required_test_argv_json, test_run_json, test_run_detected_json, test_policy_json, report_check_commands_json
            FROM projects WHERE id = ?`,
         projectId,
       );
@@ -4418,9 +4444,11 @@ export class Core {
       const testRunValue = hasTestRun ? validateTestRunPayload(payload.test_run, ownerLanguage(transaction)) : null;
       const hasTestPolicy = Object.prototype.hasOwnProperty.call(payload, "test_policy");
       const testPolicyValue = hasTestPolicy ? validateTestPolicyPayload(payload.test_policy, ownerLanguage(transaction)) : null;
+      const hasReportChecks = Object.prototype.hasOwnProperty.call(payload, "report_check_commands");
+      const reportChecks = hasReportChecks ? validateReportCheckCommands(payload.report_check_commands, ownerLanguage(transaction)) : [];
 
-      const hasVerificationPlan =Object.prototype.hasOwnProperty.call(payload, "verification_plan");
-      const verificationPlanJson = hasVerificationPlan ? JSON.stringify(payload.verification_plan) : row.verification_plan_json;
+      const hasVerificationPlan = Object.prototype.hasOwnProperty.call(payload, "verification_plan");
+      const verificationPlanJson = hasVerificationPlan ? JSON.stringify(validateVerificationPlan(payload.verification_plan)) : row.verification_plan_json;
 
       let name = row.name;
       if (hasName) {
@@ -4467,10 +4495,12 @@ export class Core {
       const requiredTestJson = !hasRequiredTest ? row.required_test_argv_json : (requiredTestCommand === null || requiredTestCommand.length === 0 ? null : JSON.stringify(requiredTestCommand));
       const testRunJson = !hasTestRun ? row.test_run_json : (testRunValue === null ? null : JSON.stringify(testRunValue));
       const testPolicyJson = !hasTestPolicy ? row.test_policy_json : (testPolicyValue === null ? null : JSON.stringify(testPolicyValue));
+      const reportChecksJson = !hasReportChecks ? row.report_check_commands_json : (reportChecks.length === 0 ? null : JSON.stringify(reportChecks));
       if (
         name === row.name
         && testRunJson === row.test_run_json
         && testPolicyJson === row.test_policy_json
+        && reportChecksJson === row.report_check_commands_json
         && canonicalPath === row.canonical_path
         && autoPush === (row.auto_push === 1)
         && setupJson === row.worktree_prepare_argv_json
@@ -4486,7 +4516,7 @@ export class Core {
       transaction.run(
         `UPDATE projects
             SET name = ?, canonical_path = ?, base_branch = ?, auto_push = ?, allowed_roots_json = ?,
-                worktree_prepare_argv_json = ?, worktree_refresh_argv_json = ?, post_merge_argv_json = ?, post_merge_install_argv_json = ?, required_test_argv_json = ?, test_run_json = ?, test_policy_json = ?, verification_plan_json = ?, updated_at = ?
+                worktree_prepare_argv_json = ?, worktree_refresh_argv_json = ?, post_merge_argv_json = ?, post_merge_install_argv_json = ?, required_test_argv_json = ?, test_run_json = ?, test_policy_json = ?, report_check_commands_json = ?, verification_plan_json = ?, updated_at = ?
           WHERE id = ?`,
         name,
         canonicalPath,
@@ -4500,6 +4530,7 @@ export class Core {
         requiredTestJson,
         testRunJson,
         testPolicyJson,
+        reportChecksJson,
         verificationPlanJson,
         now,
         projectId,
@@ -4519,6 +4550,7 @@ export class Core {
           required_test_argv_json: requiredTestJson,
           test_run_json: testRunJson,
           test_policy_json: testPolicyJson,
+          report_check_commands_json: reportChecksJson,
           verification_plan_json: verificationPlanJson,
         }),
         version: 0,
@@ -5086,7 +5118,7 @@ export class Core {
 
   public async recordHookSubagent(
     agent: GuardTokenAgent,
-    input: { readonly event: "start" | "stop"; readonly agentId: string; readonly agentType: string | null },
+    input: HookSubagentInput,
   ): Promise<{ readonly agent_run_id: string | null; readonly changed: boolean }> {
     if (agent.role !== "worker") return { agent_run_id: null, changed: false };
     return this.workflow.recordHookSubagent(agent.agent_run_id, input);
@@ -8405,8 +8437,11 @@ export class Core {
         if (hits.length === 0) continue;
         const hitIds = hits.map((condition) => (condition.kind === "task" ? condition.task_id : condition.kind === "work" ? condition.work_id : "base")).join(",");
         const key = merged ? `${waiter.id}:merge:${Date.now()}` : `${waiter.id}:${spec.deadline_at}:${sourceWorkId}:${source?.state}:${hitIds}`;
-        if (this.prerequisiteWoken.has(key)) continue;
-        this.prerequisiteWoken.add(key);
+        // Why not remember merge keys: they embed Date.now(), so they never match again and would only grow the set.
+        if (!merged) {
+          if (this.prerequisiteWoken.has(key)) continue;
+          this.prerequisiteWoken.add(key);
+        }
         this.prerequisiteRecheck.add(waiter.work_id);
         this.workDriver.wake(waiter.work_id);
       }
@@ -8606,6 +8641,8 @@ export class Core {
         // A malformed request is dropped; the normal terminal handling applies.
         console.warn(`[owl-core] Dropping a malformed Owner replan request for Work ${workId} (key ${ownerReplanKey(workId)})`, error);
       }
+      // Why delete: left `attempted`, startup recovery would requeue and drop it again on every restart.
+      transaction.run("DELETE FROM idempotency_keys WHERE key = ?", ownerReplanKey(workId));
       return null;
     });
   }
@@ -10530,6 +10567,7 @@ function toProject(row: ProjectDbRow): Project {
     test_run: row.test_run_json === null ? null : parseStoredJsonObject(row.test_run_json, "test_run", row.id),
     test_run_status: projectTestRunStatus(row),
     test_policy: readTestPolicy(row.test_policy_json),
+    report_check_commands: row.report_check_commands_json === null ? [] : parseStringArray(row.report_check_commands_json, "report_check_commands", row.id, "Project"),
     allowed_roots: parseStringArray(row.allowed_roots_json, "allowed_roots", row.id, "Project"),
     verification_plan: parseArray(row.verification_plan_json, "verification_plan", row.id, "Project") as unknown as readonly VerificationCommand[],
   };
@@ -11083,6 +11121,7 @@ function createProjectInTransaction(transaction: CoreWriteLaneTransaction, paylo
       test_run_detected_json: null,
     }),
     test_policy: readTestPolicy(testPolicy === null ? null : JSON.stringify(testPolicy)),
+    report_check_commands: [],
     allowed_roots: allowedRoots as readonly string[],
     verification_plan: verificationPlan,
   };
@@ -11288,6 +11327,23 @@ function validateWorktreeCommand(value: unknown, field: string, language: "ja" |
     );
   }
   return value as string[];
+}
+
+/** A Project's report_check_commands: shell command strings the Worker runs before reporting; null or [] clears them. */
+function validateReportCheckCommands(value: unknown, language: "ja" | "en"): string[] {
+  if (value === null) return [];
+  const valid = Array.isArray(value)
+    && value.length <= WORKTREE_COMMAND_MAX_ARGS
+    && value.every((item) => typeof item === "string" && item.trim().length > 0 && item.length <= WORKTREE_COMMAND_MAX_ARG_LENGTH && !item.includes("\0"));
+  if (!valid) {
+    throw validationError(
+      language === "ja"
+        ? "報告前の確認コマンドは、空でないコマンド文字列の配列（null か空配列で未設定）で指定してください。"
+        : "Specify report_check_commands as an array of non-empty command strings (null or an empty array clears them).",
+      { field: "report_check_commands" },
+    );
+  }
+  return (value as string[]).map((item) => item.trim());
 }
 
 /** A Project's test_run payload: null clears it; an object must pass validateTestRunSettings and its argv keys the command check. */
@@ -11578,6 +11634,8 @@ function normalizeChildRunSettings(value: unknown, knownModels: KnownModels): Ch
   const maxTimeout = integer("max_timeout_minutes", 5, 1440);
   const timeout = integer("timeout_minutes", 5, maxTimeout);
   const attempts = integer("max_attempts", 1, 3);
+  const tokenRelay = normalizeTokenRelaySettings(value.token_relay, knownModels);
+  const researchSubagent = normalizeResearchSubagentSettings(value.research_subagent, knownModels);
   return {
     default_provider: defaultProvider,
     default_model: defaultModel,
@@ -11588,7 +11646,76 @@ function normalizeChildRunSettings(value: unknown, knownModels: KnownModels): Ch
     timeout_minutes: timeout,
     max_timeout_minutes: maxTimeout,
     max_attempts: attempts,
+    token_relay: tokenRelay,
+    research_subagent: researchSubagent,
   };
+}
+
+/** Merge a possibly partial stored value over the defaults so settings saved before these keys existed still load. */
+function normalizeTokenRelaySettings(value: unknown, knownModels: KnownModels): ChildRunSettings["token_relay"] {
+  if (value !== undefined && !isRecord(value)) throw validationError("Token relay settings must be an object.", { field: "token_relay" });
+  const merged = { ...DEFAULT_CHILD_RUN_SETTINGS.token_relay, ...(value ?? {}) };
+  const rawModels: unknown = merged.models;
+  if (!Array.isArray(rawModels) || rawModels.length > CHILD_RUN_LIMITS.relay_models_max) {
+    throw validationError(`Token relay models must contain 0 to ${CHILD_RUN_LIMITS.relay_models_max} provider/model objects.`, { field: "token_relay.models" });
+  }
+  const models: { provider: "claude"; model: string }[] = [];
+  rawModels.forEach((choice: unknown, index) => {
+    if (!isRecord(choice) || typeof choice.model !== "string" || choice.model.trim().length === 0) {
+      throw validationError("Token relay models must be provider/model objects.", { field: "token_relay.models", index });
+    }
+    if (choice.provider !== "claude") throw validationError("Token relay supports only Claude children.", { field: "token_relay.models", index });
+    const model = choice.model.trim();
+    if (models.some((candidate) => candidate.model === model)) {
+      throw validationError("Token relay models cannot contain duplicates.", { field: "token_relay.models", index });
+    }
+    assertKnownModel(knownModels, "claude", model, { field: "token_relay.models", index });
+    models.push({ provider: "claude", model });
+  });
+  const settings = { ...merged, models } as ChildRunSettings["token_relay"];
+  const problem = tokenRelaySettingsProblem(settings);
+  if (problem) throw validationError(problem.message, { field: problem.field });
+  return {
+    models,
+    handoff_tokens: settings.handoff_tokens,
+    kill_tokens: settings.kill_tokens,
+    max_relays: settings.max_relays,
+    report_threshold_tokens: settings.report_threshold_tokens,
+  };
+}
+
+// Researcher model names end up inside JSON argv and a TOML file, so only plain model-id characters are allowed.
+const RESEARCH_MODEL_PATTERN = /^[A-Za-z0-9._:/-]+$/;
+
+function normalizeResearchSubagentSettings(value: unknown, knownModels: KnownModels): ChildRunSettings["research_subagent"] {
+  if (value !== undefined && !isRecord(value)) throw validationError("Researcher settings must be an object.", { field: "research_subagent" });
+  const raw = value ?? {};
+  const defaults = DEFAULT_CHILD_RUN_SETTINGS.research_subagent;
+  const choice = (harness: "claude" | "codex"): ChildRunSettings["research_subagent"]["claude"] => {
+    const field = `research_subagent.${harness}`;
+    const rawChoice = raw[harness];
+    if (rawChoice !== undefined && !isRecord(rawChoice)) throw validationError("Researcher settings must be an object.", { field });
+    const merged = { ...defaults[harness], ...(rawChoice ?? {}) };
+    const model = typeof merged.model === "string" ? merged.model.trim() : "";
+    if (model.length === 0 || model.length > 200 || !RESEARCH_MODEL_PATTERN.test(model)) {
+      throw validationError("Researcher models must be non-empty model names.", { field: `${field}.model` });
+    }
+    assertKnownModel(knownModels, harness, model, { field: `${field}.model` });
+    const turns = merged.max_turns;
+    if (typeof turns !== "number" || !Number.isSafeInteger(turns) || turns < CHILD_RUN_LIMITS.research_turns_min || turns > CHILD_RUN_LIMITS.research_turns_max) {
+      throw validationError(`Researcher turn limits must be integers from ${CHILD_RUN_LIMITS.research_turns_min} to ${CHILD_RUN_LIMITS.research_turns_max}.`, { field: `${field}.max_turns` });
+    }
+    return { model, max_turns: turns };
+  };
+  const answerMaxChars = raw.answer_max_chars === undefined ? defaults.answer_max_chars : raw.answer_max_chars;
+  if (typeof answerMaxChars !== "number" || !Number.isSafeInteger(answerMaxChars)
+    || answerMaxChars < CHILD_RUN_LIMITS.research_answer_chars_min || answerMaxChars > CHILD_RUN_LIMITS.research_answer_chars_max) {
+    throw validationError(
+      `The researcher answer limit must be an integer from ${CHILD_RUN_LIMITS.research_answer_chars_min} to ${CHILD_RUN_LIMITS.research_answer_chars_max}.`,
+      { field: "research_subagent.answer_max_chars" },
+    );
+  }
+  return { claude: choice("claude"), codex: choice("codex"), answer_max_chars: answerMaxChars };
 }
 
 function isRecord(value: unknown): value is JsonObject {

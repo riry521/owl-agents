@@ -1,4 +1,4 @@
-import type { AcceptanceDefect, GuardTokenIssuer, ManagerTrigger, RateLimitInfo, StoredAcceptanceCriterion, TaskNecessity, WebResearchCapture } from "@owl/shared";
+import type { AcceptanceDefect, GuardTokenIssuer, ManagerTrigger, RateLimitInfo, ResearchSubagentSettings, StoredAcceptanceCriterion, TaskNecessity, WebResearchCapture } from "@owl/shared";
 
 export const REPORT_SCHEMA_VERSION = "1.1.0" as const;
 /** Reports saved before schema 1.1.0 (`verification.passed` boolean). Read-only: new agent output must not use it. */
@@ -255,6 +255,8 @@ export interface WorkerContext {
   readonly skills?: string | null;
   /** Project test_policy.check_commands (argv lists) the Worker runs before reporting. */
   readonly check_commands?: readonly (readonly string[])[];
+  /** Commands Core chose for the Worker to run before reporting (Project setting, else test detection); [] = none. */
+  readonly report_check_commands?: readonly string[];
   readonly worktree?: string;
   readonly previous_report?: ReportEnvelope | null;
   /** Set when Core relaunches the Worker after the process it left running ended. */
@@ -362,6 +364,8 @@ export interface ProviderExecutionRequest {
   readonly env: Readonly<Record<string, string>>;
   /** Optional provider-enforced final-response schema for structured tasks. */
   readonly structured_output_schema?: Readonly<Record<string, unknown>>;
+  /** Worker launches only: defines Owl's read-only researcher subagent for this run. */
+  readonly research_subagent?: ResearchSubagentSettings;
   readonly signal?: AbortSignal;
   readonly on_spawn?: (pid: number) => void;
   readonly on_output?: () => void;

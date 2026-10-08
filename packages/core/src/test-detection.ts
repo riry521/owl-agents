@@ -174,3 +174,29 @@ export function resolveTestRun(input: {
   if (!detection.enabled || detection.settings === null) return { enabled: false, source: "detected", reason: detection.reason ?? "no_test_marker", save };
   return { enabled: true, source: "detected", settings: readTestRunSettings(detection.settings, input.warn), save };
 }
+
+/** One argv as a shell command line; an argument with other characters is single-quoted. */
+function shellLine(argv: readonly string[]): string {
+  return argv.map((arg) => (/^[\w@%+=:,./{}-]+$/u.test(arg) ? arg : `'${arg.replaceAll("'", "'\\''")}'`)).join(" ");
+}
+
+/**
+ * What a Worker runs before reporting: the Project's report_check_commands first, else the commands Core's test run
+ * resolves to (prepare, then the test command with "{file}" left for one test file), else [] so the Worker follows the
+ * project's documentation. The detection is not stored here, so the same input gives the same commands.
+ */
+export function reportCheckCommands(input: {
+  readonly configured: readonly string[];
+  readonly explicit_json: string | null;
+  readonly detected_json: string | null;
+  readonly root: string;
+  readonly rules?: TestDetectionRules;
+}): string[] {
+  if (input.configured.length > 0) return [...input.configured];
+  const resolved = resolveTestRun({ ...input, now: new Date().toISOString() });
+  if (!resolved.enabled) return [];
+  const { settings } = resolved;
+  return [settings.prepare_argv, settings.mode === "whole" ? settings.whole_argv : settings.file_argv]
+    .filter((argv) => argv.length > 0)
+    .map(shellLine);
+}

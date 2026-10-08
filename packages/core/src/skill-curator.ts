@@ -1048,7 +1048,8 @@ function parseProposal(text: string): CuratorProposal["payload"] | null {
     if (typeof value.summary !== "string" || typeof value.steps_or_diff !== "string" || typeof value.evidence !== "string") return null;
     return {
       kind: value.kind,
-      target: typeof value.target === "string" ? value.target : null,
+      // Only an update names a skill to change; SkillBox stores target_skill the same way.
+      target: value.kind === "update" && typeof value.target === "string" ? value.target : null,
       summary: value.summary,
       steps_or_diff: value.steps_or_diff,
       evidence: value.evidence,

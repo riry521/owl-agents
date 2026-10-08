@@ -473,6 +473,12 @@ test("a total review limit read from the settings survives a Core restart and se
 
   const { core } = await createTestCore(t, { ...coreOptions, db, owlRoot: root }, { start: true });
   assert.deepEqual(await core.getReviewLimitSettings(), { plan_review_rounds: 1, total_review_attempts: 3 });
+  // This test counts raw attempts, so it turns the replan refund (review_focus) off.
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((tx) => tx.run(
+    "INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at) VALUES ('review_focus', 'owner:default', '1.0.0', ?, ?)",
+    JSON.stringify({ replan_refund: 0 }), now,
+  ));
   const workId = await startWork(core, "review-limits");
 
   const decision = await waitFor(() => db.get("SELECT id FROM decisions WHERE work_id = ?", workId), { timeoutMs: 10_000 });

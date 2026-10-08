@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { stat } from "node:fs/promises";
+import { copyFile, mkdir, stat, symlink } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { runPluginFromEnv } from "../../packages/plugin-sdk/dist/index.js";
 import { FileConnectorStateStore } from "../../packages/plugin-sdk/dist/shared/index.js";
+import { repoRoot } from "../helpers/paths.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 
 function fakePlugin() {
@@ -123,4 +125,29 @@ test("runPluginFromEnv still exits with code 0 and reports a stop failure", asyn
   assert.equal(await exited, 0);
   assert.deepEqual(exits, [0]);
   assert.match(errors.join(""), /stop failed/u);
+});
+
+// The standalone connectors CLI is the other plugin process entry point.
+test("connectors CLI runs its entry point when installed under a directory with spaces and non-ASCII characters", async (t) => {
+  const root = join(await tempDir(t, "owl-connectors-cli-"), "owl cli テスト");
+  const dist = join(root, "apps", "connectors", "dist");
+  await mkdir(dist, { recursive: true });
+  await mkdir(join(root, "packages", "shared", "dist"), { recursive: true });
+  // Only cli.js is copied, so its own URL carries the encoded directory; its
+  // imports are symlinks that resolve back into this checkout.
+  await copyFile(join(repoRoot, "apps/connectors/dist/cli.js"), join(dist, "cli.js"));
+  for (const name of ["slack-connector.js", "discord-connector.js"]) {
+    await symlink(join(repoRoot, "apps/connectors/dist", name), join(dist, name));
+  }
+  await symlink(join(repoRoot, "packages/shared/dist/env.js"), join(root, "packages/shared/dist/env.js"));
+
+  // No provider flag: a CLI that actually ran main() fails with its usage message.
+  const result = spawnSync(process.execPath, [join(dist, "cli.js")], {
+    cwd: root,
+    encoding: "utf8",
+    env: { PATH: process.env.PATH ?? "", OWL_ROOT: root },
+    timeout: 30_000,
+  });
+  assert.equal(result.status, 2, `stderr: ${result.stderr}`);
+  assert.match(result.stderr, /Usage: node dist\/cli\.js/u);
 });

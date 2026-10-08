@@ -144,6 +144,20 @@ function taskFailure(db: ContextReader, taskId: string): TaskFailureInput {
   return { kind: "unknown", reason };
 }
 
+/** Why a Task whose reviews kept pointing at one spot went back to the Manager, with those findings; null for any other failure. */
+function reviewSameSpot(db: ContextReader, taskId: string): JsonObject | null {
+  const decided = db.get<{ payload_json: string }>(
+    "SELECT payload_json FROM events WHERE task_id = ? AND type = 'task.attempt_decided' ORDER BY sequence DESC LIMIT 1",
+    taskId,
+  );
+  const payload = decided === undefined ? null : parseObject(decided.payload_json);
+  if (payload === null || payload.reason !== "review_same_spot_repeated") return null;
+  return {
+    note: "Reviews keep reporting special cases at the same spot. Review where the fix goes and the assumptions behind it instead of patching each case again.",
+    findings: Array.isArray(payload.same_spot_findings) ? payload.same_spot_findings : [],
+  } as JsonObject;
+}
+
 /**
  * What the Manager needs to retry or replace a root failed Task — its
  * plan fields, why it failed, its last report, and the fix context of its
@@ -173,6 +187,7 @@ export function failedTaskBrief(db: ContextReader, taskId: string): JsonObject |
     title: task.title,
     acceptance_criteria: readStoredAcceptanceCriteria(task.acceptance_criteria_json, task.acceptance) as unknown as JsonObject[],
     failure: taskFailure(db, taskId) as unknown as JsonObject,
+    review_same_spot: reviewSameSpot(db, taskId),
     acceptance_defects: defectPayload === null ? [] : acceptanceDefectsOf(defectPayload),
     last_report: report === null ? null : reportSummary(report),
     reviewer_findings: fix?.reviewer_findings ?? [],

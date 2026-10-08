@@ -1,12 +1,12 @@
 import { readdirSync, readFileSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createDefaultEmbedder, DEFAULT_EMBEDDER_CONFIG, embeddingUnavailableWarning, type Embedder, type EmbedderHealth, type RetrievalProfile } from "./embedder.js";
 import { MemoryIndex, type MemoryIndexOptions, type MemoryIndexStatus, type MemoryScanResult } from "./memory-index.js";
 import type { MemoryMode } from "@owl/shared";
 import { advisorKey, MemoryReadLedger } from "./memory-read-ledger.js";
-import { estimatePageTokens, PAGE_LIMITS, SEARCHABLE_PAGE_KINDS, parsePage, renderPage, type PageSection, type StoredKind } from "./page-format.js";
+import { estimatePageTokens, PAGE_LIMITS, SEARCHABLE_PAGE_KINDS, parsePage, setFrontmatter, type PageSection, type StoredKind } from "./page-format.js";
 import { buildFilter, MemorySearch, type MemorySearchInput } from "./memory-search.js";
+import { writeAtomic } from "./page-router.js";
 import type { KnowledgeSearchResult } from "../knowledge-base.js";
 import { MEMORY_TYPES, type MemoryLogger, type MemoryNoteRow, type MemoryNoteStatus, type MemoryNoteType, type MemoryRequestContext, type MemoryStoragePort } from "./memory-types.js";
 
@@ -265,8 +265,9 @@ export class MemoryService {
       if (!withWrite) throw new Error("storage has no write lock");
       await withWrite.call(this.storage, async () => {
         const file = join(this.storage.activeDir(), path);
-        const page = parsePage(readFileSync(file, "utf8"));
-        if (page.frontmatter.status === "dormant") await writeFile(file, renderPage({ ...page, frontmatter: { ...page.frontmatter, status: "active" } }));
+        const text = readFileSync(file, "utf8");
+        // One line is edited, not a parse-and-render: that would drop what the parser does not keep (block lists, comments, CRLF).
+        if (parsePage(text).frontmatter.status === "dormant") await writeAtomic(file, setFrontmatter(text, "status", "active"));
       });
       await this.index.refreshChanged();
     } catch (error) {
@@ -280,7 +281,12 @@ export class MemoryService {
     const cutoff = new Date(this.now().getTime() - days * DAY_MS).toISOString().slice(0, 10);
     const out: { path: string; title: string; updated: string | null; last_opened: string | null }[] = [];
     for (const r of this.index.dormantCandidates(cutoff)) {
-      const text = await this.storage.withRead(async () => readFileSync(join(this.storage.activeDir(), r.path), "utf8"));
+      // A page deleted since the last scan is no candidate; it must not end the list for the rest.
+      const text = await this.storage.withRead(async () => readFileSync(join(this.storage.activeDir(), r.path), "utf8")).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      });
+      if (text === null) continue;
       const numbers = [...new Set([...text.matchAll(/\bW(\d+)\b/gu)].map((m) => Number(m[1])))];
       const sourceDay = this.options.sourceWorksUpdated?.(r.project_id, numbers) ?? r.updated ?? "";
       if (sourceDay < cutoff) out.push({ path: r.path, title: r.title, updated: r.updated, last_opened: this.index.lastOpened(r.path) });

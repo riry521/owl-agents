@@ -98,7 +98,8 @@ export class GitProjectSourceReader implements ProjectSourceReader {
       const { stdout } = await execFileAsync("git", ["-C", repo, ...args], {
         env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" },
         timeout: 10_000,
-        maxBuffer: 1024 * 1024,
+        // Why not 1 MiB: `ls-tree -r` of a repository with ~17k paths exceeds it and the whole listing became null.
+        maxBuffer: 64 * 1024 * 1024,
       });
       return stdout;
     } catch {
@@ -287,7 +288,8 @@ export async function collectFacts(project: ProjectOverviewInput, reader: Projec
   let pkg: Record<string, unknown> = {};
   const pkgText = has("package.json") ? await read("package.json") : null;
   try {
-    if (pkgText) pkg = JSON.parse(pkgText) as Record<string, unknown>;
+    const parsed: unknown = pkgText ? JSON.parse(pkgText) : null;
+    if (parsed !== null && typeof parsed === "object") pkg = parsed as Record<string, unknown>;
   } catch { /* ignore an unparsable package.json */ }
   const deps = new Set(Object.keys({ ...(pkg.dependencies as object | undefined), ...(pkg.devDependencies as object | undefined) }));
   const manager = typeof pkg.packageManager === "string" ? pkg.packageManager.split("@")[0] : has("pnpm-workspace.yaml") ? "pnpm" : has("yarn.lock") ? "yarn" : "npm";

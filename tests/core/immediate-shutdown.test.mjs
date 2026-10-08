@@ -99,3 +99,15 @@ async function waitsForReconcile(t, startCore) {
     await core.stop().catch(() => {});
   }
 }
+
+test("Core shutdown waits for background research writes before it drains the write lane", async (t) => {
+  const { core } = await createTestCore(t, { version: "shutdown-test" }, { prefix: "owl-shutdown-research-" });
+  await core.start();
+  const order = [];
+  const drain = core.writeLane.drain.bind(core.writeLane);
+  core.writeLane.drain = async () => { order.push("drain"); return drain(); };
+  core.researchRecorder.idle = async () => { order.push("research_idle"); };
+  await core.stop();
+  // Other components drain the same lane earlier; only the final drain closes the window.
+  assert.deepEqual(order.slice(-2), ["research_idle", "drain"]);
+});

@@ -56,16 +56,10 @@ export async function recoverOrphanedState(db: CoreDatabase, git?: GitGateway): 
   if (git) {
     const verifying = db.all<TaskRow>("SELECT * FROM tasks WHERE status = 'verifying'");
     for (const task of verifying) {
-      const taskBranch = `owl/task/${task.work_id}/${task.id}`;
-      const workBranch = `owl/work/${task.work_id}/work`;
-      const request: GitOperationRequest = {
-        work_id: task.work_id,
-        task_id: task.id,
-        worktree_path: task.worktree_path,
-        task_branch: taskBranch,
-        work_branch: workBranch,
-      };
-      const merged = await git.taskBranchMerged?.(request);
+      const request = taskGitRequest(task);
+      const taskBranch = request.task_branch as string;
+      const workBranch = request.work_branch as string;
+      const merged = await taskBranchMergedAtStartup(git, request);
       if (merged !== true) continue;
       const reviewRequired = effectiveReviewRequired(task, reviewRouting(db));
       const event = reviewRequired ? "review.passed" : "verification.completed";
@@ -92,7 +86,7 @@ export async function recoverOrphanedState(db: CoreDatabase, git?: GitGateway): 
         },
         outbox: [],
       });
-      await git.removeWorktree(request);
+      await removeWorktreeAtStartup(git, request);
       integratedVerifyingTasks += 1;
     }
   }
@@ -264,21 +258,13 @@ export async function recoverOrphanedState(db: CoreDatabase, git?: GitGateway): 
     let to: "merged" | "retained" = "retained";
     let reason = project === null || project === undefined ? "no_project" : "git_unavailable_at_startup";
     if (project !== null && project !== undefined && git) {
-      const taskBranch = `owl/task/${task.work_id}/${task.id}`;
-      const workBranch = `owl/work/${task.work_id}/work`;
-      const request: GitOperationRequest = {
-        work_id: task.work_id,
-        task_id: task.id,
-        worktree_path: task.worktree_path,
-        task_branch: taskBranch,
-        work_branch: workBranch,
-      };
-      const merged = await git.taskBranchMerged?.(request);
+      const request = taskGitRequest(task);
+      const merged = await taskBranchMergedAtStartup(git, request);
       if (merged === true) {
-        await git.removeWorktree(request);
+        await removeWorktreeAtStartup(git, request);
         to = "merged";
         reason = "merged";
-      } else {
+      } else if (merged !== "error") {
         // A merge is only ever attempted from the normal Task lifecycle, not
         // from startup recovery, so an unmerged worktree is simply retained.
         reason = "unmerged_at_startup";
@@ -362,6 +348,35 @@ function orphanedReviewerRunId(db: CoreDatabase, taskId: string): string | null 
     taskId,
   );
   return run?.id ?? null;
+}
+
+function taskGitRequest(task: TaskRow): GitOperationRequest {
+  return {
+    work_id: task.work_id,
+    task_id: task.id,
+    worktree_path: task.worktree_path,
+    task_branch: `owl/task/${task.work_id}/${task.id}`,
+    work_branch: `owl/work/${task.work_id}/work`,
+  };
+}
+
+/** A Git error (for example a Project directory that no longer exists) only skips this Task; it must not stop Core from starting. */
+async function taskBranchMergedAtStartup(git: GitGateway, request: GitOperationRequest): Promise<boolean | null | "error"> {
+  try {
+    return (await git.taskBranchMerged?.(request)) ?? null;
+  } catch (error) {
+    console.warn(`[owl-core] Startup recovery could not check whether Task ${request.task_id}'s branch is merged; leaving it as is`, error);
+    return "error";
+  }
+}
+
+async function removeWorktreeAtStartup(git: GitGateway, request: GitOperationRequest): Promise<void> {
+  try {
+    const removal = await git.removeWorktree(request);
+    if (!removal.ok) console.warn(`[owl-core] Startup recovery could not remove Task ${request.task_id}'s merged worktree: ${removal.message}`);
+  } catch (error) {
+    console.warn(`[owl-core] Startup recovery could not remove Task ${request.task_id}'s merged worktree`, error);
+  }
 }
 
 function isProcessAlive(pid: number): boolean {

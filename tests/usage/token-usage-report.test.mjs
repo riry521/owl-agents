@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
-import { buildTokenUsageReport } from "../../packages/core/dist/token-usage-report.js";
+import { buildTokenUsageReport, countRequestsOverThreshold, insertRequestUsageRows } from "../../packages/core/dist/token-usage-report.js";
 import { command, createTestCore } from "../helpers/core.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
 import { tempDir } from "../helpers/temp.mjs";
@@ -231,4 +231,56 @@ test("GET /api/v1/token-usage resolves through ExternalCoreAdapter and validates
   } finally {
     durableCore.getTokenUsageReport = method;
   }
+});
+
+test("large requests are counted strictly over the threshold per model, with defaults from the child-run settings", async (t) => {
+  const fixture = await setup(t, "owl-token-usage-requests-");
+  const { db, durableCore, nowIso, createWork, insertRuns } = fixture;
+  const workId = await createWork("Request Work");
+  const otherWork = await createWork("Other Request Work");
+  await insertRuns([
+    { id: "haiku-child", workId, role: "executor", provider: "claude", model: "claude-haiku-5-5", at: nowIso, usage: null },
+    { id: "opus-child", workId: otherWork, role: "executor", provider: "claude", model: "claude-opus-5-5", at: nowIso, usage: null },
+  ]);
+  const row = (agentRunId, work, model, messageId, promptTokens) => ({
+    agent_run_id: agentRunId, work_id: work, child_run_id: null, provider: "claude", model, message_id: messageId, subagent: false,
+    input_tokens: 10, cache_read_tokens: promptTokens - 10, cache_write_tokens: 0, output_tokens: 5, created_at: nowIso,
+  });
+  const inserted = await db.createWriteLane().transact((tx) => insertRequestUsageRows(tx, [
+    row("haiku-child", workId, "claude-haiku-5-5", "msg_exact", 100_000),
+    row("haiku-child", workId, "claude-haiku-5-5", "msg_over", 100_001),
+    row("haiku-child", workId, "claude-haiku-5-5-20261001", "msg_snapshot", 150_000),
+    row("haiku-child", workId, "claude-haiku-5-5", "msg_small", 2_000),
+    row("opus-child", otherWork, "claude-opus-5-5", "msg_opus", 200_000),
+    // The same request seen again (Claude repeats a message id per content block) is not a new row.
+    row("haiku-child", workId, "claude-haiku-5-5", "msg_over", 100_001),
+  ]));
+  assert.equal(inserted, 5);
+  assert.deepEqual(db.all("SELECT message_id, prompt_tokens FROM agent_run_requests WHERE message_id = 'msg_exact'"), [{ message_id: "msg_exact", prompt_tokens: 100_000 }]);
+
+  const count = (input) => countRequestsOverThreshold(db, input);
+  assert.deepEqual(count({ threshold_tokens: 100_000, models: ["claude-haiku-5-5"] }),
+    { threshold_tokens: 100_000, models: ["claude-haiku-5-5"], total_requests: 4, over_threshold: 2 });
+  assert.equal(count({ threshold_tokens: 120_000, models: ["claude-haiku-5-5"] }).over_threshold, 1);
+  assert.equal(count({ threshold_tokens: 100_000, models: ["claude-opus-5-5"] }).over_threshold, 1);
+  // A model matches itself and its dated snapshots ("<model>-..."), not any name that merely starts the same.
+  assert.equal(count({ threshold_tokens: 100_000, models: ["claude-haiku-5"] }).total_requests, 4);
+  assert.equal(count({ threshold_tokens: 100_000, models: ["claude-hai"] }).total_requests, 0);
+  assert.equal(count({ threshold_tokens: 100_000, models: null }).over_threshold, 3);
+  assert.equal(count({ threshold_tokens: 100_000, models: [] }).total_requests, 0);
+  assert.equal(count({ threshold_tokens: 100_000, models: null, work_id: otherWork }).total_requests, 1);
+
+  // Defaults: relay-watched models plus the Claude researcher model, at token_relay.report_threshold_tokens.
+  assert.deepEqual(durableCore.countLargeModelRequests(),
+    { threshold_tokens: 100_000, models: ["claude-haiku-5-5"], total_requests: 4, over_threshold: 2 });
+  assert.equal(durableCore.countLargeModelRequests({ models: ["claude-opus-5-5"] }).over_threshold, 1);
+  assert.throws(() => durableCore.countLargeModelRequests({ threshold_tokens: 0 }), (error) => error.details?.field === "threshold_tokens");
+  const settings = durableCore.getChildRunSettings();
+  await durableCore.setChildRunSettings({
+    ...settings,
+    token_relay: { ...settings.token_relay, models: [], report_threshold_tokens: 120_000 },
+    research_subagent: { ...settings.research_subagent, claude: { ...settings.research_subagent.claude, model: "claude-opus-5-5" } },
+  });
+  assert.deepEqual(durableCore.countLargeModelRequests(),
+    { threshold_tokens: 120_000, models: ["claude-opus-5-5"], total_requests: 1, over_threshold: 1 });
 });

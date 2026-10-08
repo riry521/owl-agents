@@ -14,6 +14,7 @@ import {
   refreshCodexModelCatalog,
 } from "../../apps/server/dist/model-catalog.js";
 import { CODEX_BUILTIN_MODELS, DEFAULT_HARNESS_MODELS } from "../../packages/shared/dist/index.js";
+import { DEFAULT_CHILD_RUN_SETTINGS } from "../../packages/shared/dist/child-runs.js";
 import { createTestCore } from "../helpers/core.mjs";
 import { createTestDatabase } from "../helpers/db.mjs";
 import { tempDir } from "../helpers/temp.mjs";
@@ -207,7 +208,11 @@ test("Core warns at startup about saved models its harness no longer offers, wit
   const root = await tempDir(t, "owl-model-warn-");
   // Every other role keeps its own default Claude model untouched by this
   // test, so the permissive list must still cover them for the save to pass.
-  const defaultClaudeModels = [DEFAULT_HARNESS_MODELS.claude, "claude-opus-5", "claude-fable-5-1", "claude-haiku-4-5-20251001"];
+  // Default child-agent Claude models are saved too, so they must be covered.
+  const defaultClaudeModels = [
+    DEFAULT_HARNESS_MODELS.claude, "claude-opus-5", "claude-fable-5-1", "claude-haiku-4-5-20251001",
+    ...DEFAULT_CHILD_RUN_SETTINGS.allowed_models.filter(({ provider }) => provider === "claude").map(({ model }) => model),
+  ];
   const permissiveKnownModels = (harness) =>
     harness === "codex"
       ? new Set(["retired-worker-model", ...CODEX_BUILTIN_MODELS])

@@ -1175,6 +1175,8 @@ export interface TaskRow extends JsonObject {
   reviewer_failure_count: number;
   /** Valid Reviewer verdicts across Manager replans; task.replanned keeps it. */
   total_review_attempts: number;
+  /** Review attempts handed back by Manager replans (review_focus); the budget counts total_review_attempts minus this. */
+  review_attempts_refunded?: number;
   /** 1 when the Task's current generation is marked base-sync-only (the Manager's mark, rewritten at each retry). Missing/0 = main work. */
   base_sync_only?: number;
   /** How many generations of this Task id were base-sync-only. */
@@ -1237,6 +1239,8 @@ export interface ReductionResult<S extends JsonObject> {
   readonly decision?: AttemptDecision;
   /** Set when the Reviewer verdict used up the Task's total review attempts. */
   readonly review_budget?: { readonly attempts: number; readonly limit: number };
+  /** Set when fix_required reviews kept pointing at the same spot; the findings that did. */
+  readonly review_same_spot?: readonly { readonly file: string; readonly line: number | null; readonly problem: string }[];
   /** Set when the lineage-wide Reviewer verdict count reached remake_limits.lineage_review_attempts or base_sync_lineage_review_attempts. */
   readonly lineage_budget?: {
     readonly reason: "lineage_review_attempts" | "base_sync_lineage_review_attempts";
@@ -1334,6 +1338,8 @@ export interface Project extends JsonObject {
   readonly test_run_status: TestRunStatus;
   /** Test handling; DEFAULT_TEST_POLICY when unset. */
   readonly test_policy: TestPolicy;
+  /** Shell command strings the Worker runs before reporting; [] = not set (Core falls back to test detection). */
+  readonly report_check_commands: readonly string[];
   readonly allowed_roots: readonly string[];
   readonly verification_plan: readonly VerificationCommand[];
 }
@@ -1363,6 +1369,7 @@ export interface UpdateProjectPayload extends JsonObject {
   readonly required_test_command?: readonly string[] | null;
   readonly test_run?: JsonObject | null;
   readonly test_policy?: JsonObject | null;
+  readonly report_check_commands?: readonly string[] | null;
   readonly verification_plan?: readonly VerificationCommand[];
 }
 

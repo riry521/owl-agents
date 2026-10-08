@@ -774,7 +774,7 @@ function BlockingWorks({
           {model.runningWorks.map((work: ProjectRunningWork) => (
             <div className="row" key={work.id}>
               <div className="row__main">
-                <Link href={`/works/${work.id}`} className="row__title row__title--wrap">
+                <Link href={`/work?id=${encodeURIComponent(work.id)}`} className="row__title row__title--wrap">
                   {work.display_number === null ? '' : `#${work.display_number} `}{work.title}
                 </Link>
               </div>

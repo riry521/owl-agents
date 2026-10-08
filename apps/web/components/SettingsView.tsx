@@ -299,12 +299,13 @@ export function SettingsView() {
         setChildSettingsError(t('settings.childRunTooManyAllowedModels'));
         return;
       }
+      // Spread the loaded settings first so fields this form has no inputs for (token_relay, research_subagent) are kept.
+      // The API still returns retired max_parallel_* limits; drop them rather than echo them back.
+      const kept = Object.fromEntries(
+        Object.entries(childSettings).filter(([key]) => !key.startsWith('max_parallel')),
+      ) as unknown as ChildRunSettings;
       const config: ChildRunSettings = {
-        default_provider: childSettings.default_provider,
-        default_model: childSettings.default_model,
-        default_effort: childSettings.default_effort,
-        allowed_efforts: childSettings.allowed_efforts,
-        max_timeout_minutes: childSettings.max_timeout_minutes,
+        ...kept,
         defaults_by_parent_harness: childDefaults,
         allowed_models: allowedModels,
         timeout_minutes: childTimeoutMinutes,

@@ -6,12 +6,13 @@ function main(): void {
     throw new Error("Usage: owl-db migrate --database <temporary-or-configured-path> [--migrations-dir <path>]");
   }
   const databasePath = valueFor(arguments_, "--database");
-  const migrationsDirectory = valueFor(arguments_, "--migrations-dir");
+  // Optional, as the usage line says: without it the package's own migrations are applied.
+  const migrationsDirectory = arguments_.includes("--migrations-dir") ? valueFor(arguments_, "--migrations-dir") : undefined;
   const database = openDatabase(databasePath);
   try {
     const result = database.migrate(migrationsDirectory);
     const applied = database.get<{ version: string; status: string; applied_at: string }>(
-      "SELECT version, status, applied_at FROM schema_migrations ORDER BY version",
+      "SELECT version, status, applied_at FROM schema_migrations ORDER BY version DESC LIMIT 1",
     );
     console.log(
       JSON.stringify(

@@ -12,6 +12,8 @@ export interface AgentGuardConfiguration {
   readonly owlRoot: string;
   readonly role: AgentPermissionRole;
   readonly env?: Readonly<Record<string, string | undefined>>;
+  /** Adds the relay hook (PostToolUse handoff notice and PreCompact block); only relay-watched Claude children get it. */
+  readonly tokenRelay?: boolean;
 }
 
 /** Work roles whose Claude sessions may save WebFetch and WebSearch results. */
@@ -27,6 +29,7 @@ const ALL_TOOLS_MATCHER = "*";
 const RESEARCH_TOOLS_MATCHER = "WebFetch|WebSearch";
 const RESEARCH_HOOK_TIMEOUT_SECONDS = 10;
 const SUBAGENT_HOOK_TIMEOUT_SECONDS = 5;
+const RELAY_HOOK_TIMEOUT_SECONDS = 5;
 
 /**
  * CLI arguments that install Owl's synchronous PreToolUse guard hook for
@@ -58,6 +61,25 @@ export function buildPreToolUseHookArgs(
         }],
       }]
       : null;
+    let relayCommand: string | null = null;
+    if (configuration.tokenRelay) {
+      const relayHookPath = resolve(configuration.owlRoot, "apps/server/dist/relay-hook.js");
+      if (!existsSync(relayHookPath) || !statSync(relayHookPath).isFile()) {
+        throw new Error(`Owl relay hook is missing at ${relayHookPath}; build Owl before starting an agent.`);
+      }
+      relayCommand = `${quoteShell(process.execPath)} ${quoteShell(relayHookPath)}`;
+    }
+    const postToolUse = [
+      ...(researchHookExists ? [{
+        matcher: RESEARCH_TOOLS_MATCHER,
+        hooks: [{
+          type: "command",
+          command: `${quoteShell(process.execPath)} ${quoteShell(researchHookPath)}`,
+          timeout: RESEARCH_HOOK_TIMEOUT_SECONDS,
+        }],
+      }] : []),
+      ...(relayCommand ? [{ matcher: ALL_TOOLS_MATCHER, hooks: [{ type: "command", command: relayCommand, timeout: RELAY_HOOK_TIMEOUT_SECONDS }] }] : []),
+    ];
     return [
       "--settings",
       JSON.stringify({
@@ -68,16 +90,9 @@ export function buildPreToolUseHookArgs(
             matcher: ALL_TOOLS_MATCHER,
             hooks: [{ type: "command", command }],
           }],
-          ...(researchHookExists ? {
-            PostToolUse: [{
-              matcher: RESEARCH_TOOLS_MATCHER,
-              hooks: [{
-                type: "command",
-                command: `${quoteShell(process.execPath)} ${quoteShell(researchHookPath)}`,
-                timeout: RESEARCH_HOOK_TIMEOUT_SECONDS,
-              }],
-            }],
-          } : {}),
+          ...(postToolUse.length > 0 ? { PostToolUse: postToolUse } : {}),
+          // No matcher: blocks both manual and automatic compaction.
+          ...(relayCommand ? { PreCompact: [{ hooks: [{ type: "command", command: relayCommand }] }] } : {}),
           ...(subagentHooks ? { SubagentStart: subagentHooks, SubagentStop: subagentHooks } : {}),
         },
       }),
@@ -131,9 +146,9 @@ function buildMemoryMcpArgs(adapter: AgentPermissionAdapter, configuration: Agen
 export function buildAgentPermissionArgs(
   role: AgentPermissionRole,
   adapter: AgentPermissionAdapter,
-  configuration: { readonly owlRoot: string; readonly resume?: boolean; readonly cwd?: string; readonly env?: Readonly<Record<string, string | undefined>> },
+  configuration: { readonly owlRoot: string; readonly resume?: boolean; readonly cwd?: string; readonly env?: Readonly<Record<string, string | undefined>>; readonly tokenRelay?: boolean },
 ): string[] {
-  const guardConfiguration: AgentGuardConfiguration = { owlRoot: configuration.owlRoot, role, env: configuration.env };
+  const guardConfiguration: AgentGuardConfiguration = { owlRoot: configuration.owlRoot, role, env: configuration.env, tokenRelay: configuration.tokenRelay };
   if (adapter === "claude") {
     return [
       "--permission-mode", "bypassPermissions",
@@ -404,6 +419,6 @@ function quoteShell(value: string): string {
   return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-function tomlString(value: string): string {
+export function tomlString(value: string): string {
   return JSON.stringify(value);
 }

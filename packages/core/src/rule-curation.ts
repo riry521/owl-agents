@@ -44,9 +44,9 @@ const NEAR_DUPLICATE = 0.8;
 const CONFLICT_SIMILARITY = 0.5;
 const NEGATION = /しない|禁止|してはいけない|不要|don't|do not|never|must not|prohibited/iu;
 
-/** True when one rule can apply to the same role as the other (system rules apply to every role). */
+/** True when one rule can apply to the same role as the other (absolute and system rules apply to every role). */
 function coApply(a: { level: string; role?: string | null }, b: { level: string; role?: string | null }): boolean {
-  return a.level === "system" || b.level === "system" || (a.role ?? null) === (b.role ?? null);
+  return a.level !== "role" || b.level !== "role" || (a.role ?? null) === (b.role ?? null);
 }
 
 /** Read-only judgement of open rule proposals against the current rules. */

@@ -304,9 +304,7 @@ export class GitWorktreeGateway implements GitGateway {
     const taskId = request.task_id ?? "worktree";
     const existingPath = await lstat(worktreePath).catch(() => null);
     if (existingPath) {
-      const listed = await this.git(canonical, ["worktree", "list", "--porcelain"]);
-      const registered = listed.ok && listed.message.split("\n").some((line) => line.trim() === `worktree ${worktreePath}`);
-      if (!registered) {
+      if (!await this.isRegisteredWorktree(canonical, worktreePath)) {
         return { ok: false, exit_code: 1, recorded: false, worktree_path: worktreePath, message: "The Task worktree path exists but is not registered with Git." };
       }
       // The worktree survived a restart (or a Task returned to `ready`), so it
@@ -2494,9 +2492,7 @@ export class GitWorktreeGateway implements GitGateway {
   ): Promise<GitOperationResult> {
     const existingPath = await lstat(integrationPath).catch(() => null);
     if (existingPath) {
-      const listed = await this.git(canonical, ["worktree", "list", "--porcelain"]);
-      const registered = listed.ok && listed.message.split("\n").some((line) => line.trim() === `worktree ${integrationPath}`);
-      if (registered) return { ok: true, exit_code: 0, recorded: false, worktree_path: integrationPath, message: "Reusing the existing Work integration worktree." };
+      if (await this.isRegisteredWorktree(canonical, integrationPath)) return { ok: true, exit_code: 0, recorded: false, worktree_path: integrationPath, message: "Reusing the existing Work integration worktree." };
       return { ok: false, exit_code: 1, recorded: false, worktree_path: integrationPath, message: "The Work integration path exists but is not registered with Git." };
     }
     await mkdir(resolve(integrationPath, ".."), { recursive: true });
@@ -2511,6 +2507,17 @@ export class GitWorktreeGateway implements GitGateway {
       worktree_path: integrationPath,
       message: result.message,
     };
+  }
+
+  /** Whether `path` is one of the repository's worktrees. Git lists worktrees by realpath, so both sides are compared resolved. */
+  private async isRegisteredWorktree(repositoryRoot: string, path: string): Promise<boolean> {
+    const listed = await this.git(repositoryRoot, ["worktree", "list", "--porcelain"]);
+    if (!listed.ok) return false;
+    const realPath = await realpath(path).catch(() => resolve(path));
+    for (const entry of parseWorktrees(listed.message)) {
+      if (entry.path === resolve(path) || await realpath(entry.path).catch(() => entry.path) === realPath) return true;
+    }
+    return false;
   }
 
   private projectFor(workId: string, includeVerificationPlan = false): ProjectRow | undefined {

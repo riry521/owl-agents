@@ -185,3 +185,12 @@ test("wait fetch timeout returns owl_dispatch_timeout and does not retry", async
     assert.equal(seen.length, 1);
   });
 });
+
+test("owl-dispatch ignores a JSON line that is not an object and keeps serving", async (t) => {
+  await withMcp(t, {}, async ({ child, rpc }) => {
+    child.stdin.write("null\n123\n");
+    // The unhandled rejection of a bad line surfaces after the next ping would already be answered.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.deepEqual((await rpc("ping")).result, {});
+  });
+});

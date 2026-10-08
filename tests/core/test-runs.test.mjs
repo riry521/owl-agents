@@ -7,7 +7,7 @@ import { baselineTestRun, latestTestRun, listTestFiles, recordTestRunInTransacti
 import { runCoreTests } from "../../packages/core/dist/core-test-run.js";
 import { resolveTestRun } from "../../packages/core/dist/test-detection.js";
 import { testFailureKey } from "../../packages/core/dist/nightly-tests.js";
-import { triageTestFailures } from "../../packages/core/dist/test-failure-triage.js";
+import { ensureBaselineRun, triageTestFailures } from "../../packages/core/dist/test-failure-triage.js";
 import { DEFAULT_TEST_RUN_SETTINGS, readTestRunSettings, validateTestRunSettings } from "../../packages/shared/dist/test-run-settings.js";
 import { git, createTestRepo } from "../helpers/git.mjs";
 import { openTestDatabase } from "../helpers/db.mjs";
@@ -260,4 +260,23 @@ test("a failed bun whole run reports the failing test names and error lines, not
   const errorOnly = async () => ({ exit_code: 1, timed_out: false, stdout: "Ran 0 tests across 1 files.\n", stderr: "error: Cannot find module './x'\n", duration_ms: 1 });
   const [second] = (await runWholeSuite({ root: ".", settings: bunSettings, run: errorOnly })).files;
   assert.equal(second.failures[0].message, "error: Cannot find module './x'");
+});
+
+test("a baseline file already run at a commit is not run again, even after other files were run at that commit", async (t) => {
+  const repo = await createTestRepo(t, { files });
+  const { db } = await openTestDatabase(t);
+  await seed(db);
+  const commit = git(repo, "rev-parse", "HEAD");
+  const ran = [];
+  const counting = (argv, cwd) => { ran.push(argv[argv.length - 1]); return nodeRunner(argv, cwd); };
+  const ensure = (baselineFiles) => ensureBaselineRun({
+    db, writeLane: db.createWriteLane(), settings, projectId: "p", repo, baseCommit: commit, files: baselineFiles,
+    workspaceRoot: repo, run: counting, locks: new Map(),
+  });
+  await ensure(["tests/b.test.mjs"]);
+  await ensure(["tests/a.test.mjs"]);
+  ran.length = 0;
+  const again = await ensure(["tests/b.test.mjs"]);
+  assert.deepEqual(ran, []);
+  assert.ok(again.files.some((entry) => entry.file === "tests/b.test.mjs" && entry.status === "failed"));
 });

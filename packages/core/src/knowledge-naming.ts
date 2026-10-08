@@ -49,7 +49,10 @@ export async function resolveKnowledgeFilename(
     else throw error;
   }
 
-  const byName = new Map(entries.map((entry) => [entry.name, entry]));
+  // Case-insensitive, normalization-insensitive file systems (APFS) refuse a name that differs only in
+  // case or NFC/NFD, and callers retry the same name on EEXIST, so compare folded names.
+  const foldName = (name: string) => name.normalize("NFC").toLowerCase();
+  const taken = new Set(entries.map((entry) => foldName(entry.name)));
   if (source) {
     const candidates = entries
       .filter((entry) => entry.isFile() && entry.name.endsWith(".md"))
@@ -76,7 +79,7 @@ export async function resolveKnowledgeFilename(
 
   for (let suffix = 1; ; suffix += 1) {
     const filename = `${safeSlug}${suffix === 1 ? "" : `-${suffix}`}.md`;
-    if (!byName.has(filename)) return { filename, existing: false };
+    if (!taken.has(foldName(filename))) return { filename, existing: false };
   }
 }
 

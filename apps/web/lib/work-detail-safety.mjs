@@ -139,6 +139,7 @@ function normalizePrerequisite(value) {
   if (!isRecord(value)) return null;
   return {
     reason: stringOr(value.reason),
+    source: value.source === 'worker' ? 'worker' : 'manager',
     conditions: Array.isArray(value.conditions)
       ? value.conditions.filter(isRecord).map((condition) => ({
         kind: stringOr(condition.kind),

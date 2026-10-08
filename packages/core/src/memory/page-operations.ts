@@ -606,13 +606,15 @@ const projectOf = (page: string, doc: Doc): string => {
 };
 const titleKeyTaken = (run: Run, key: string, except?: string): boolean =>
   run.ctx.titleTaken(key) || [...run.docs, ...run.tx.docs].some(([p, d]) => p !== except && themeTitleKey(titleOf(p, d)) === key);
+/** A title becomes a file name: no folders, and no leading `_` or `.`, which name Owl's own files (_index.md, _history/) and hidden files. */
+const reservedTitle = (title: string): boolean => /[/\\]|^[._]/u.test(title);
 const relatedProjects = (doc: Doc): string[] => { const v = fmOf(doc).related_projects; return Array.isArray(v) ? [...v] : []; };
 
 const applySplit: Applier = (run, op) => {
   const page = op.page as string;
   const refs = op.items as Ref[];
   const title = op.new_title as string;
-  if (/[/\\]/u.test(title)) reject("invalid_title");
+  if (reservedTitle(title)) reject("invalid_title");
   if (new Set(refs.map(keyOf)).size !== refs.length) reject("item_already_used");
   const doc = run.requireWritable(page);
   const key = themeTitleKey(title);
@@ -654,7 +656,7 @@ const applyPromote: Applier = (run, op) => {
   if (typeof op.text === "string" && isProcedure(to.section) && !op.text.startsWith("### ")) reject("kind_mismatch");
   const key = themeTitleKey(to.title);
   const commonDir = run.ctx.commonDir ?? "common";
-  if (/[/\\]/u.test(to.title)) reject("invalid_title");
+  if (reservedTitle(to.title)) reject("invalid_title");
   let commonPath = [...run.docs, ...run.tx.docs].find(([p, d]) => fmOf(d).scope === "common" && themeTitleKey(titleOf(p, d)) === key)?.[0];
   if (commonPath === undefined) {
     commonPath = `${commonDir}/${to.title}.md`;
@@ -769,6 +771,8 @@ export function applyOperations(state: PageOpsState, ops: readonly unknown[], ct
     try {
       const op = validateShape(raw, opts.allowCoreOps === true);
       APPLIERS[op.op as string](run, op);
+      // Every page an operation changes was valid before (or is new), so a template error here is the operation's own.
+      for (const doc of run.tx.docs.values()) if (!validatePage(parsePage(textOf(doc)), { writer: "owl" }).ok) reject("page_invalid");
       run.commit();
       applied.push({ index, op: raw });
     } catch (error) {

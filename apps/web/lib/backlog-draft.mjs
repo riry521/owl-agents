@@ -78,7 +78,8 @@ export function backlogWorkDraft(items, locale, t) {
   }
   if (summary.length > SUMMARY_LIMIT && retained.length > 0) {
     omitted = true;
-    const fixedLength = renderSummary([], true).length;
+    // An empty entry keeps the newline that separates the kept entry from the omission mark.
+    const fixedLength = renderSummary([''], true).length;
     const maxEntryLength = Math.max(0, SUMMARY_LIMIT - fixedLength);
     retained = [retained[0].slice(0, maxEntryLength)];
     summary = renderSummary(retained, omitted);

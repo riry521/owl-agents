@@ -82,7 +82,8 @@ function parseCredential(text: string): ClaudeCredentialRead {
 function timedOut(error: unknown): boolean {
   if (error === null || typeof error !== "object") return false;
   const fields = error as Record<string, unknown>;
-  return fields.code === "ETIMEDOUT";
+  // execFile's `timeout` kills the child and reports `killed: true` with a null code, never ETIMEDOUT.
+  return fields.code === "ETIMEDOUT" || fields.killed === true;
 }
 
 function outputFromSecurity(stdout: string): ClaudeCredentialRead {

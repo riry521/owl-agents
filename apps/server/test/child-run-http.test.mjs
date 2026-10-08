@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { DEFAULT_CHILD_RUN_SETTINGS } from "../../../packages/shared/dist/child-runs.js";
 import { Core } from "../../../packages/core/dist/index.js";
+import { insertRequestUsageRows } from "../../../packages/core/dist/token-usage-report.js";
 import { createUlid, openDatabase } from "../../../packages/db/dist/index.js";
 import { AppSettingsStore } from "../dist/app-settings-store.js";
 import { ExternalCoreAdapter } from "../dist/core.js";
@@ -271,6 +272,126 @@ test("child settings APIs and the legacy executor route map defaults and timeout
   assert.equal(unsetEffort.status, 200);
   assert.equal((await unsetEffort.json()).data.effort, null);
   assert.equal(api.fake.settings().default_effort, null);
+});
+
+test("token relay and researcher settings PUT through HTTP are kept by GET, and invalid values name their field", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "owl-child-run-http-relay-"));
+  const db = openDatabase(join(root, "owl.db"));
+  db.migrate(join(repoRoot, "packages/db/migrations"));
+  const core = new Core({ db, agentRunner: {}, version: "child-run-http-relay-test", owlRoot: root });
+  const adapter = new ExternalCoreAdapter(core, db, root, join(root, "data"));
+  const previousToken = process.env.OWL_API_TOKEN;
+  process.env.OWL_API_TOKEN = "relay-owner-token";
+  const http = createOwlHttpServer({
+    core: adapter, webOut: root, bind: "127.0.0.1", port: 0,
+    contract: { contract_version: "1.0.0" }, owlRoot: root,
+    guardTokens: { verify: () => null },
+  });
+  t.after(async () => {
+    await http.close().catch(() => {});
+    if (previousToken === undefined) delete process.env.OWL_API_TOKEN;
+    else process.env.OWL_API_TOKEN = previousToken;
+    await core.stop({ force: true, timeoutMs: 1000 }).catch(() => {});
+    db.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  try {
+    await http.listen();
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") { t.skip("listen not permitted"); return; }
+    throw error;
+  }
+  const url = `http://127.0.0.1:${http.server.address().port}/api/v1/settings/child-runs`;
+  const headers = { authorization: "Bearer relay-owner-token", "content-type": "application/json" };
+  const put = (payload, key) => fetch(url, { method: "PUT", headers, body: JSON.stringify(envelope(payload, key)) });
+
+  const changed = {
+    ...DEFAULT_CHILD_RUN_SETTINGS,
+    token_relay: { ...DEFAULT_CHILD_RUN_SETTINGS.token_relay, handoff_tokens: 60_000, kill_tokens: 90_000, max_relays: 3 },
+    research_subagent: { ...DEFAULT_CHILD_RUN_SETTINGS.research_subagent, claude: { model: "claude-haiku-5-5", max_turns: 8 }, answer_max_chars: 1000 },
+  };
+  const saved = await put(changed, "relay-settings-update");
+  assert.equal(saved.status, 200);
+  assert.deepEqual((await saved.json()).data, changed);
+  const read = await fetch(url, { headers });
+  assert.deepEqual((await read.json()).data, changed);
+
+  const invalid = await put({ ...changed, token_relay: { ...changed.token_relay, handoff_tokens: 90_000 } }, "relay-settings-invalid");
+  assert.equal(invalid.status, 400);
+  const body = await invalid.json();
+  assert.equal(body.error.code, "validation_error");
+  assert.equal(body.error.details.field, "token_relay.handoff_tokens");
+  assert.deepEqual((await (await fetch(url, { headers })).json()).data, changed);
+});
+
+test("GET /token-usage/requests counts dispatched child requests over the threshold through the adapter", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "owl-child-run-http-requests-"));
+  const db = openDatabase(join(root, "owl.db"));
+  db.migrate(join(repoRoot, "packages/db/migrations"));
+  const core = new Core({ db, agentRunner: {}, version: "child-run-http-requests-test", owlRoot: root });
+  const adapter = new ExternalCoreAdapter(core, db, root, join(root, "data"));
+  const previousToken = process.env.OWL_API_TOKEN;
+  process.env.OWL_API_TOKEN = "requests-owner-token";
+  const http = createOwlHttpServer({
+    core: adapter, webOut: root, bind: "127.0.0.1", port: 0,
+    contract: { contract_version: "1.0.0" }, owlRoot: root,
+    guardTokens: { verify: () => null },
+  });
+  t.after(async () => {
+    await http.close().catch(() => {});
+    if (previousToken === undefined) delete process.env.OWL_API_TOKEN;
+    else process.env.OWL_API_TOKEN = previousToken;
+    await core.stop({ force: true, timeoutMs: 1000 }).catch(() => {});
+    db.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  try {
+    await http.listen();
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") { t.skip("listen not permitted"); return; }
+    throw error;
+  }
+  const workId = (await core.createWork(envelope({ title: "Request counts", summary: "", size: "small", project_id: null }, "requests-work"))).data.work_id;
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((tx) => {
+    tx.run(
+      `INSERT INTO agent_runs (id, work_id, role, provider, model, status, created_at, updated_at)
+       VALUES ('haiku-child-run', ?, 'executor', 'claude', 'claude-haiku-5-5', 'completed', ?, ?)`,
+      workId, now, now,
+    );
+    insertRequestUsageRows(tx, [100_000, 100_001, 140_000].map((tokens, index) => ({
+      agent_run_id: "haiku-child-run", work_id: workId, child_run_id: null, provider: "claude", model: "claude-haiku-5-5",
+      message_id: `msg_${index}`, subagent: false, input_tokens: tokens, cache_read_tokens: 0, cache_write_tokens: 0, output_tokens: 1, created_at: now,
+    })));
+  });
+  const url = `http://127.0.0.1:${http.server.address().port}/api/v1/token-usage/requests`;
+  const get = (query) => fetch(`${url}${query}`, { headers: { authorization: "Bearer requests-owner-token" } });
+
+  const defaults = await get("");
+  assert.equal(defaults.status, 200);
+  assert.deepEqual((await defaults.json()).data, { threshold_tokens: 100_000, models: ["claude-haiku-5-5"], total_requests: 3, over_threshold: 2 });
+  const higher = await get(`?threshold_tokens=120000&model=claude-haiku-5-5&model=claude-opus-5-5&work_id=${workId}`);
+  assert.equal(higher.status, 200);
+  assert.deepEqual((await higher.json()).data, { threshold_tokens: 120_000, models: ["claude-haiku-5-5", "claude-opus-5-5"], total_requests: 3, over_threshold: 1 });
+  for (const bad of ["0", "-5", "1e5", "abc"]) {
+    const invalid = await get(`?threshold_tokens=${bad}`);
+    assert.equal(invalid.status, 400, bad);
+    const body = await invalid.json();
+    assert.equal(body.error.code, "validation_error");
+    assert.equal(body.error.details.field, "threshold_tokens");
+  }
+  const unauthorized = await fetch(url);
+  assert.equal(unauthorized.status, 401);
+
+  const method = core.countLargeModelRequests;
+  core.countLargeModelRequests = undefined;
+  try {
+    const missing = await get("");
+    assert.equal(missing.status, 503);
+    assert.equal((await missing.json()).error.code, "dependency_unavailable");
+  } finally {
+    core.countLargeModelRequests = method;
+  }
 });
 
 test("app settings ignore the retired executor_config fallback", async () => {

@@ -239,6 +239,7 @@ export interface UpdateProjectInput {
   required_test_command?: string[] | null;
   test_run?: Record<string, unknown> | null;
   test_policy?: Record<string, unknown> | null;
+  report_check_commands?: string[] | null;
   verification_plan?: VerificationCommand[];
 }
 

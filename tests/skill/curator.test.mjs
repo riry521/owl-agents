@@ -497,6 +497,24 @@ test("a create never overwrites an existing skill with the same name", async (t)
   assert.equal(skillBox.listRevisions("unrelated-skill").length, 1);
 });
 
+test("a new-skill proposal that names a target still creates a new skill and leaves the target unchanged", async (t) => {
+  const { root, db } = await curatorDatabase(t);
+  const skillBox = new SkillBox({ db, owlRoot: root });
+  await seedSkill(skillBox, "unrelated-skill");
+  const before = await skillBox.readFile("unrelated-skill", "SKILL.md");
+  await addPendingProposal(db, "proposal-new-with-target", { ...validProposal, target: "unrelated-skill" });
+  const curator = new SkillCurator({
+    db,
+    skillBox,
+    agentRunner: { runCurator: async () => ({ ok: true, results: [curatedResult("proposal-new-with-target", "release-steps")] }) },
+  });
+  await curator.processPending();
+  assert.equal(db.get("SELECT status FROM skill_proposals WHERE id = ?", "proposal-new-with-target").status, "applied");
+  assert.equal(await skillBox.readFile("unrelated-skill", "SKILL.md"), before);
+  assert.equal(skillBox.listRevisions("unrelated-skill").length, 1);
+  assert.ok(skillBox.getSkill("release-steps"));
+});
+
 test("a failed approval write keeps the approval, counts the attempt, and surfaces the error", async (t) => {
   const { root, db } = await curatorDatabase(t);
   await useConservativeMode(db);

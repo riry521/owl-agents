@@ -310,3 +310,26 @@ test("a workspace directory that matches no Task at all is folded into the outpu
   assert.equal(await readText(join(outputsDir, "result.txt")), "from T1");
   assert.equal(await readText(join(outputsDir, "notes.txt")), "from a non-Task directory", "the stray directory's file is saved, not dropped");
 });
+
+test("a conflicting version never overwrites a file that already has the conflict name", async (t) => {
+  const { owlRoot, dataDir, db, writeLane, gateway } = await fixture(t);
+  await insertWork(writeLane, "W20", { state: "running" });
+  await insertTask(writeLane, "task-aaaaaaaa1111", "W20", { status: "completed", updatedAt: "2030-01-01T00:00:00.000Z" });
+  await insertTask(writeLane, "task-bbbbbbbb2222", "W20", { status: "completed", updatedAt: "2030-01-01T00:00:01.000Z" });
+
+  const conflictName = `shared.${"task-bbbbbbbb2222".slice(-8)}.txt`;
+  const first = await gateway.prepareWorktree({ work_id: "W20", task_id: "task-aaaaaaaa1111" });
+  await writeFile(join(first.worktree_path, "shared.txt"), "from first");
+  await writeFile(join(first.worktree_path, conflictName), "first's own file");
+  const second = await gateway.prepareWorktree({ work_id: "W20", task_id: "task-bbbbbbbb2222" });
+  await writeFile(join(second.worktree_path, "shared.txt"), "from second");
+
+  await setWorkState(writeLane, "W20", "completed");
+  assert.equal(await saveProjectlessWorkOutputs({ db, owlRoot, dataDir }, "W20"), true);
+
+  const outputsDir = join(dataDir, "outputs", "W20");
+  assert.equal(await readText(join(outputsDir, "shared.txt")), "from first");
+  assert.equal(await readText(join(outputsDir, conflictName)), "first's own file", "the file already named like the conflict is kept");
+  const contents = await Promise.all((await readdir(outputsDir)).map((name) => readText(join(outputsDir, name))));
+  assert.ok(contents.includes("from second"), "the conflicting version is still saved under another name");
+});

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { link, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -6,8 +7,9 @@ import test from "node:test";
 
 import { buildProjectInvestigationPrompt, createAgentRunner, parseProjectInvestigationResponse } from "../../packages/agent-runtime/dist/index.js";
 import { DEFAULT_PROJECT_INVESTIGATION_OUTPUT_SETTINGS } from "../../packages/shared/dist/project-investigation-settings.js";
+import { GitProjectSourceReader, collectFacts } from "../../packages/core/dist/project-overview-note.js";
 import { RuleStore } from "../../packages/core/dist/rule-store.js";
-import { git } from "../helpers/git.mjs";
+import { createTestRepo, git } from "../helpers/git.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 
 const item = (text, paths = ["README.md"]) => ({ text, evidence_paths: paths });
@@ -280,4 +282,27 @@ test("a value that breaks the output settings is resubmitted, and the settings l
   assert.equal(strict.ok, false);
   assert.match(strict.error, /^invalid_output:cautions: must have at most 1 items/u);
   assert.match(buildProjectInvestigationPrompt({ ...baseRequest(repo), output_settings: limits }), /0 to 1 items/u);
+});
+
+test("overview facts are collected even when package.json holds JSON null", async () => {
+  const files = { "package.json": "null", "README.md": "# Demo\n" };
+  const reader = {
+    listFiles: async () => Object.keys(files),
+    readFile: async (_repo, _ref, filePath) => files[filePath] ?? null,
+    changedPaths: async () => [],
+  };
+  const project = { id: "01ARZ3NDEKTSV4RRFFQ69G5FAV", name: "Demo", canonical_path: "/repo", base_branch: "main" };
+  const facts = await collectFacts(project, reader, "main");
+  assert.ok(facts.tech.includes("Node.js"));
+});
+
+test("a repository whose file list is over 1 MiB is still listed, capped at 5000 paths", async (t) => {
+  const repo = await createTestRepo(t, { prefix: "owl-overview-big-" });
+  const blob = git(repo, "rev-parse", "HEAD:README.md");
+  // Index entries only (no working-tree files), so the large tree is cheap to build.
+  const entries = Array.from({ length: 6000 }, (_, index) => `100644 ${blob}\tsrc/${"a".repeat(200)}-${index}.md\n`).join("");
+  execFileSync("git", ["-C", repo, "update-index", "--add", "--index-info"], { input: entries });
+  git(repo, "commit", "-q", "-m", "many files");
+  const listed = await new GitProjectSourceReader().listFiles(repo, "main");
+  assert.equal(listed?.length, 5000);
 });

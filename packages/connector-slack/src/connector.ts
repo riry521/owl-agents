@@ -25,6 +25,7 @@ import { postSlackMessage } from "./posting.js";
 
 const PENDING_DECISION_PAGE_LIMIT = 50;
 const MAX_PENDING_DECISION_PAGES = 10_000;
+const USER_MESSAGE_SUBTYPES: ReadonlySet<string> = new Set(["file_share", "thread_broadcast"]);
 
 export class SlackConnector {
   private readonly config: SlackConfig;
@@ -63,7 +64,11 @@ export class SlackConnector {
         }) | undefined;
         // Slack may omit `subtype` on some bot-authored channel events. Never
         // feed app/bot messages back into Owl, or outbound notifications loop.
-        if (!message || message.subtype || message.bot_id || message.bot_profile || !message.user) return;
+        // A user's file upload arrives as `file_share` and a thread reply also
+        // sent to the channel as `thread_broadcast`; every other subtype is an
+        // edit, deletion or system message.
+        if (!message || (message.subtype && !USER_MESSAGE_SUBTYPES.has(message.subtype))
+          || message.bot_id || message.bot_profile || !message.user) return;
         if (!this.conversationChannelIds.includes(message.channel) && !this.decisionForThread(message)) return;
         await this.handleMessage(message).catch((error) => this.reportMessageError(message.channel, error));
       } catch (error) {
