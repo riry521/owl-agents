@@ -24,7 +24,9 @@ interface WinningFile {
 }
 
 interface ConflictFile {
+  /** The path the conflicting version clashed on; it is saved under a free `<suffix>` name beside it. */
   readonly relPath: string;
+  readonly suffix: string;
   readonly source: string;
   readonly sha256: string;
   readonly bytes: number;
@@ -108,6 +110,17 @@ function withSuffix(relPath: string, suffix: string): string {
   return dir === "." ? named : `${dir}/${named}`;
 }
 
+/**
+ * The first `withSuffix` name (then `<suffix>-2`, `-3`, ...) not in `taken`, claimed on return.
+ * Named only once every winner is known, because a winner can already hold the plain suffixed name.
+ */
+function unclaimedName(taken: Set<string>, relPath: string, suffix: string): string {
+  let candidate = withSuffix(relPath, suffix);
+  for (let n = 2; taken.has(candidate); n += 1) candidate = withSuffix(relPath, `${suffix}-${n}`);
+  taken.add(candidate);
+  return candidate;
+}
+
 function taskShortId(taskId: string): string {
   return taskId.length > 8 ? taskId.slice(-8) : taskId;
 }
@@ -137,7 +150,7 @@ function claimOrKeepAlongside(
   if (allowOverwrite) {
     winners.set(relPath, { source, owner, sha256: digest.sha256, bytes: digest.bytes });
   } else {
-    conflicts.push({ relPath: withSuffix(relPath, suffix), source, sha256: digest.sha256, bytes: digest.bytes });
+    conflicts.push({ relPath, suffix, source, sha256: digest.sha256, bytes: digest.bytes });
   }
 }
 
@@ -260,9 +273,10 @@ export async function saveProjectlessWorkOutputs(deps: OutputsStoreDeps, workId:
     }
 
     await mkdir(stagingPath, { recursive: true });
+    const taken = new Set(winners.keys());
     const copies = [
       ...[...winners.entries()].map(([relPath, entry]) => ({ relPath, ...entry })),
-      ...conflicts,
+      ...conflicts.map((conflict) => ({ ...conflict, relPath: unclaimedName(taken, conflict.relPath, conflict.suffix) })),
     ];
     for (const copy of copies) {
       const destination = join(stagingPath, copy.relPath);

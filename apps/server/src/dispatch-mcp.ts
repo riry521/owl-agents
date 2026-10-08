@@ -126,6 +126,8 @@ function send(message: Json): void {
 async function handle(line: string): Promise<void> {
   let request: { id?: unknown; method?: string; params?: Json };
   try { request = JSON.parse(line); } catch { return; }
+  // A line such as `null` parses but cannot be destructured; an unhandled rejection would end the server.
+  if (typeof request !== "object" || request === null) return;
   const { id, method, params } = request;
   if (id === undefined) return; // notifications
   if (method === "initialize") {

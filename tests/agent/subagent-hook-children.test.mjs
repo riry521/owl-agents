@@ -5,6 +5,8 @@ import test from "node:test";
 
 import { createUlid } from "../../packages/db/dist/index.js";
 import { GuardTokenRegistry } from "../../apps/server/dist/guard-tokens.js";
+import { countRequestsOverThreshold } from "../../packages/core/dist/token-usage-report.js";
+import { SUBAGENT_USAGE_BATCH_MAX } from "../../packages/shared/dist/token-relay.js";
 import { createTestCore } from "../helpers/core.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
 
@@ -91,4 +93,57 @@ test("hook events record a Worker's subagent as an observed child and close it",
   await core.workflow.scanSubagents(idle);
   assert.equal(children().find((c) => c.hook_agent_id === "a2").status, "exited");
   assert.equal(events("subagent.exited").length, 3);
+});
+
+test("usage uploads store a stopped subagent's requests once and count those over the threshold", async (t) => {
+  const { root, db, core } = await createTestCore(t, {}, { prefix: "owl-hook-usage-" });
+  const guardTokens = GuardTokenRegistry.open(join(root, "guard-tokens"));
+  t.after(() => guardTokens.clear());
+  const api = await startTestHttpServer(t, { core, webOut: root, owlRoot: root, guardTokens }, { token: "test-owner-api-token" });
+  if (!api) {
+    t.skip("localhost listen is unavailable");
+    return;
+  }
+  const created = await core.createWork({ request_id: createUlid(), idempotency_key: "hu-create", expected_version: 0, payload: { title: "Hook usage", summary: "x", size: "normal", project_id: null } });
+  const workId = created.data.work_id;
+  const now = new Date().toISOString();
+  const workerRun = createUlid();
+  await db.createWriteLane().transact((tx) => tx.run(
+    "INSERT INTO agent_runs (id, work_id, role, provider, model, status, pid, started_at, created_at, updated_at) VALUES (?, ?, 'worker', 'claude', 'm', 'running', NULL, ?, ?, ?)",
+    workerRun, workId, now, now, now,
+  ));
+  const tokenFor = async (role) => (await readFile(guardTokens.issue({ agent_run_id: workerRun, role }).file, "utf8")).trim();
+  const workerAuth = `Bearer ${await tokenFor("worker")}`;
+  const post = (authorization, payload) => fetch(`${api.baseUrl}/api/v1/subagents/hook-event`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization },
+    body: JSON.stringify({ request_id: createUlid(), idempotency_key: createUlid(), expected_version: 0, payload }),
+  });
+  const request = (message_id, prompt) => ({
+    message_id, model: "claude-haiku-5-5", input_tokens: prompt - 300, cache_read_tokens: 200, cache_write_tokens: 100, output_tokens: 9, created_at: now,
+  });
+  const usage = { event: "usage", agent_id: "r1", requests: [request("msg_a", 120000), request("msg_b", 50000)] };
+  const rows = () => db.all("SELECT * FROM agent_run_requests ORDER BY prompt_tokens DESC");
+
+  // Rejected: requests on start, too many requests, other roles.
+  assert.equal((await post(workerAuth, { event: "start", agent_id: "r1", requests: usage.requests })).status, 400);
+  const tooMany = Array.from({ length: SUBAGENT_USAGE_BATCH_MAX + 1 }, (_, i) => request(`msg_${i}`, 1000));
+  assert.equal((await post(workerAuth, { event: "usage", agent_id: "r1", requests: tooMany })).status, 400);
+  assert.equal((await post(`Bearer ${await tokenFor("manager")}`, usage)).status, 403);
+  assert.equal(rows().length, 0);
+
+  assert.equal((await post(workerAuth, { event: "start", agent_id: "r1", agent_type: "owl-researcher" })).status, 202);
+  assert.equal((await post(workerAuth, usage)).status, 202);
+  assert.equal((await post(workerAuth, { event: "stop", agent_id: "r1" })).status, 202);
+  assert.equal((await post(workerAuth, usage)).status, 202);
+
+  const child = db.get("SELECT id FROM agent_runs WHERE parent_agent_id = ? AND hook_agent_id = 'r1'", workerRun);
+  assert.deepEqual(rows().map((r) => [r.agent_run_id, r.work_id, r.child_run_id, r.provider, r.model, r.subagent, r.prompt_tokens]), [
+    [child.id, workId, null, "claude", "claude-haiku-5-5", 1, 120000],
+    [child.id, workId, null, "claude", "claude-haiku-5-5", 1, 50000],
+  ]);
+  assert.deepEqual(
+    countRequestsOverThreshold(db, { threshold_tokens: 100000, models: ["claude-haiku-5-5"] }),
+    { threshold_tokens: 100000, models: ["claude-haiku-5-5"], total_requests: 2, over_threshold: 1 },
+  );
 });

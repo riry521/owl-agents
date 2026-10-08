@@ -6,7 +6,9 @@
 //
 // Usage: node dist/cli.js --slack | --discord | --all
 
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { loadOwlEnv } from "../../../packages/shared/dist/env.js";
 import { SlackConnector, type SlackConnectorConfig } from "./slack-connector.js";
 import { DiscordConnector, type DiscordConnectorConfig } from "./discord-connector.js";
@@ -168,7 +170,9 @@ async function main(): Promise<void> {
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
-if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/"))) {
+// Compare as file URLs: import.meta.url percent-encodes spaces and non-ASCII
+// characters, so a raw-path suffix match never ran main() from such a directory.
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   void main().catch((error: unknown) => {
     process.stderr.write(`${error instanceof Error ? error.message : "Connector startup failed."}\n`);
     process.exitCode = 2;

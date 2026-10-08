@@ -1,7 +1,8 @@
 import { tokenUsagePeriodRange } from "../../shared/dist/token-usage-report.js";
 import type { TokenUsageHarness, TokenUsageMetrics, TokenUsagePeriod, TokenUsageTaskTotals, TokenUsageReport, TokenUsageRole, TokenUsageTotals } from "../../shared/dist/token-usage-report.js";
 import { storedTokenUsage } from "../../shared/dist/token-usage.js";
-import type { CoreDatabase } from "./types.js";
+import { createUlid } from "../../db/dist/index.js";
+import type { CoreDatabase, CoreWriteLaneTransaction } from "./types.js";
 
 const TOKEN_KEYS = ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"] as const;
 const MAX_SAFE_TOKEN = 9007199254740991;
@@ -271,4 +272,71 @@ export function buildTokenUsageReport(
       || compareText(a.provider, b.provider) || compareText(a.model, b.model) || compareText(a.harness, b.harness)),
     top_works: byWork.slice(0, input.top),
   };
+}
+
+/** One model request to store in agent_run_requests. */
+export interface AgentRunRequestRow {
+  readonly agent_run_id: string;
+  readonly work_id: string;
+  readonly child_run_id: string | null;
+  readonly provider: string;
+  readonly model: string;
+  readonly message_id: string;
+  readonly subagent: boolean;
+  readonly input_tokens: number;
+  readonly cache_read_tokens: number;
+  readonly cache_write_tokens: number;
+  readonly output_tokens: number;
+  readonly created_at: string;
+}
+
+/** Inserts request rows, ignoring ones already stored for the same run and message id; returns how many were new. */
+export function insertRequestUsageRows(tx: CoreWriteLaneTransaction, rows: readonly AgentRunRequestRow[]): number {
+  let inserted = 0;
+  for (const row of rows) {
+    inserted += tx.run(
+      `INSERT OR IGNORE INTO agent_run_requests
+         (id, agent_run_id, work_id, child_run_id, provider, model, message_id, subagent, prompt_tokens,
+          input_tokens, cache_read_tokens, cache_write_tokens, output_tokens, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      createUlid(), row.agent_run_id, row.work_id, row.child_run_id, row.provider, row.model, row.message_id, row.subagent ? 1 : 0,
+      // Derived here so every writer counts the prompt size the same way.
+      row.input_tokens + row.cache_read_tokens + row.cache_write_tokens,
+      row.input_tokens, row.cache_read_tokens, row.cache_write_tokens, row.output_tokens, row.created_at,
+    ).changes;
+  }
+  return inserted;
+}
+
+export interface RequestThresholdCount {
+  readonly threshold_tokens: number;
+  readonly models: string[] | null;
+  readonly total_requests: number;
+  readonly over_threshold: number;
+}
+
+/**
+ * Counts stored requests and those whose prompt is strictly larger than the threshold.
+ * `models` matches a name exactly or as `<model>-…` (dated snapshot names); null counts every model.
+ */
+export function countRequestsOverThreshold(
+  db: Pick<CoreDatabase, "get">,
+  input: {
+    readonly threshold_tokens: number; readonly models: readonly string[] | null;
+    readonly work_id?: string; readonly since?: string; readonly until?: string;
+  },
+): RequestThresholdCount {
+  const models = input.models === null ? null : [...new Set(input.models)];
+  // substr rather than LIKE, so "_" and "%" in model names are not wildcards.
+  const modelFilter = models === null ? "1 = 1"
+    : models.length === 0 ? "1 = 0"
+    : `(${models.map(() => "(model = ? OR substr(model, 1, length(?) + 1) = ? || '-')").join(" OR ")})`;
+  const counts = db.get<{ total_requests: number; over_threshold: number }>(
+    `SELECT COUNT(*) AS total_requests, COALESCE(SUM(CASE WHEN prompt_tokens > ? THEN 1 ELSE 0 END), 0) AS over_threshold
+       FROM agent_run_requests
+      WHERE ${modelFilter} AND (? IS NULL OR work_id = ?) AND (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)`,
+    input.threshold_tokens, ...(models ?? []).flatMap((model) => [model, model, model]),
+    input.work_id ?? null, input.work_id ?? null, input.since ?? null, input.since ?? null, input.until ?? null, input.until ?? null,
+  )!;
+  return { threshold_tokens: input.threshold_tokens, models, total_requests: counts.total_requests, over_threshold: counts.over_threshold };
 }

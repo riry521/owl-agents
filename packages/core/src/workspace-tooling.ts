@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, copyFile, lstat, mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { GitLanes } from "./git-lane.js";
 import {
   parseClaudeMcpList,
@@ -33,10 +34,10 @@ export type CommandRunner = (
 
 const OUTPUT_CAP_BYTES = 1024 * 1024;
 
-/** Appends `chunk` to `current`, keeping only the last `cap` bytes without splitting a UTF-8 code point. */
-function appendCapped(current: string, chunk: Buffer, cap: number): string {
+/** Appends decoded `text` to `current`, keeping only the last `cap` bytes without splitting a UTF-8 code point. */
+function appendCapped(current: string, text: string, cap: number): string {
   if (cap <= 0) return current;
-  const combined = Buffer.concat([Buffer.from(current), chunk]);
+  const combined = Buffer.from(current + text);
   if (combined.byteLength <= cap) return combined.toString("utf8");
   let start = combined.byteLength - cap;
   while (start < combined.byteLength && (combined[start]! & 0xc0) === 0x80) start += 1;
@@ -76,8 +77,11 @@ export const runCommand: CommandRunner = (command, args, options) => {
       child.stdin?.end(options.input);
     }
 
-    child.stdout?.on("data", (chunk: Buffer) => { stdout = appendCapped(stdout, chunk, OUTPUT_CAP_BYTES); });
-    child.stderr?.on("data", (chunk: Buffer) => { stderr = appendCapped(stderr, chunk, OUTPUT_CAP_BYTES); });
+    // A decoder per stream holds back a code point split across chunks instead of turning it into U+FFFD.
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    child.stdout?.on("data", (chunk: Buffer) => { stdout = appendCapped(stdout, stdoutDecoder.write(chunk), OUTPUT_CAP_BYTES); });
+    child.stderr?.on("data", (chunk: Buffer) => { stderr = appendCapped(stderr, stderrDecoder.write(chunk), OUTPUT_CAP_BYTES); });
 
     const killGroup = (signal: NodeJS.Signals): void => {
       if (child.pid === undefined) return;

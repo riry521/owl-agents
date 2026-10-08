@@ -121,8 +121,10 @@ export function agentCliOf(args: string, names: ReadonlySet<string>, installedCl
   const first = executableName(tokens[0]);
   if (names.has(first)) return !tokens[0].includes("/") || installedCliMatches(first, tokens[0]) ? first : null;
   if (!INTERPRETERS.has(first)) return null;
-  const script = tokens.slice(1).find((token) => !token.startsWith("-"));
-  if (!script || tokens.includes("-c")) return null;
+  const scriptIndex = tokens.findIndex((token, index) => index > 0 && !token.startsWith("-"));
+  // Only the interpreter's own `-c` (before the script) means inline code; a CLI's `-c` option (codex `-c key=value`) does not.
+  if (scriptIndex < 0 || tokens.slice(1, scriptIndex).includes("-c")) return null;
+  const script = tokens[scriptIndex];
   const scriptName = executableName(script);
   return names.has(scriptName) && (!script.includes("/") || installedCliMatches(scriptName, script)) ? scriptName : null;
 }

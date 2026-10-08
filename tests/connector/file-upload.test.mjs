@@ -3,8 +3,9 @@ import { readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 
-import { SlackConnector } from "../../packages/connector-slack/dist/index.js";
-import { DiscordConnector } from "../../packages/connector-discord/dist/index.js";
+import { SlackConnector, downloadFile } from "../../packages/connector-slack/dist/index.js";
+import { DiscordConnector, downloadAttachment } from "../../packages/connector-discord/dist/index.js";
+import { tempDir } from "../helpers/temp.mjs";
 
 // Both connectors handle a file_upload intent by: downloading each file to
 // an OS temp dir, hashing it, uploading it through plugin-sdk's
@@ -166,6 +167,98 @@ test("Slack file_upload: a download failure rejects, sends no Core request, and 
     globalThis.fetch = originalFetch;
   }
 });
+
+test("Slack Socket Mode routes user-authored file_share and thread_broadcast messages but still drops bot and edit events", async () => {
+  const fileBytes = Buffer.from("shared file contents", "utf8");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(fileBytes, { status: 200 });
+
+  const { calls, request } = coreRequestFake();
+  try {
+    const connector = new SlackConnector({
+      botToken: "xoxb-file-share-test",
+      appToken: "xapp-file-share-test",
+      conversationChannelId: "C-FILE-SHARE",
+      notificationChannelId: "C-FILE-SHARE-NOTIFICATIONS",
+      coreApiBase: "http://127.0.0.1:1/api/v1",
+      accountId: "ACCT-SLACK-FILE-SHARE",
+    });
+    const handlers = new Map();
+    connector.socket.on = (name, handler) => { handlers.set(name, handler); return connector.socket; };
+    connector.socket.start = async () => ({ ok: true });
+    connector.socket.disconnect = async () => {};
+    connector.core.subscribeEvents = async () => {};
+    connector.web.chat.postMessage = async () => ({ ok: true });
+    connector.core.requestPage = async () => ({ data: [], cursor: null, has_more: false });
+    connector.core.request = request;
+    await connector.start();
+
+    const deliver = (event) => handlers.get("message")({ ack: async () => {}, event });
+    await deliver({
+      subtype: "file_share",
+      user: "U-FILE-SHARE",
+      text: "",
+      channel: "C-FILE-SHARE",
+      ts: "1712400200.000100",
+      files: [{ id: "F1", name: "shared.txt", size: fileBytes.byteLength, mimetype: "text/plain", url_private_download: "https://files.slack.example/shared.txt" }],
+    });
+    await deliver({ subtype: "thread_broadcast", user: "U-FILE-SHARE", text: "also in channel", channel: "C-FILE-SHARE", ts: "1712400201.000100", thread_ts: "1712400100.000100" });
+    await deliver({ subtype: "bot_message", bot_id: "B1", text: "bot echo", channel: "C-FILE-SHARE", ts: "1712400202.000100" });
+    await deliver({ subtype: "file_share", bot_id: "B1", user: "U-BOT", text: "bot file", channel: "C-FILE-SHARE", ts: "1712400203.000100", files: [] });
+    await deliver({ subtype: "message_changed", user: "U-FILE-SHARE", text: "edited", channel: "C-FILE-SHARE", ts: "1712400204.000100" });
+
+    const inbound = calls.filter((c) => c.path === "/inbound/messages");
+    assert.equal(inbound.length, 2, "only the two user-authored messages reach Core");
+    assert.equal(inbound[0].body.attachment_ids.length, 1, "the file_share message carries its uploaded file");
+    assert.equal(inbound[1].body.text, "also in channel");
+    await connector.stop();
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+/** A fetch whose body sends one chunk and then stalls until the request signal aborts. */
+function stalledBodyFetch() {
+  return async (_url, init = {}) => new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("partial"));
+      init.signal?.addEventListener("abort", () => controller.error(init.signal.reason ?? new Error("aborted")));
+    },
+  }), { status: 200 });
+}
+
+/** Settle state of a promise after letting real I/O callbacks run, without waiting on mocked timers. */
+async function settledState(promise) {
+  let state = "pending";
+  promise.then(() => { state = "resolved"; }, () => { state = "rejected"; });
+  for (let turn = 0; turn < 500 && state === "pending"; turn += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  return state;
+}
+
+for (const [platform, download] of [
+  ["Slack", (dir) => downloadFile("xoxb-stall-test", { id: "F1", name: "stall.txt", size: 10, mimetype: "text/plain", url_private_download: "https://files.slack.example/stall.txt" }, dir)],
+  ["Discord", (dir) => downloadAttachment({ id: "F1", name: "stall.txt", size: 10, contentType: "text/plain", url: "https://cdn.discord.example/stall.txt" }, dir)],
+]) {
+  test(`${platform} download timeout also aborts a response body that stalls after the headers, leaving no partial file`, async (t) => {
+    const dir = await tempDir(t, "owl-download-stall-");
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = stalledBodyFetch();
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    try {
+      const pending = download(dir);
+      pending.catch(() => undefined);
+      assert.equal(await settledState(pending), "pending", "the body is still streaming before the timeout");
+      t.mock.timers.tick(60 * 60 * 1000);
+      assert.equal(await settledState(pending), "rejected", "a stalled body must not hang the download forever");
+      assert.deepEqual(await readdir(dir), [], "the partial download is removed");
+    } finally {
+      t.mock.timers.reset();
+      globalThis.fetch = originalFetch;
+    }
+  });
+}
 
 function discordAttachment({ id, name, size, contentType, url }) {
   return { id, name, size, contentType, url };

@@ -33,7 +33,30 @@ const fakeClaude = [
   "const summary = prompt.includes('LARGE_REPORT') ? 'x'.repeat(1200) : 'child summary';",
   "const fence = String.fromCharCode(96).repeat(3);",
   "const report = fence + 'owl-child-report\\n' + JSON.stringify({ result: 'succeeded', summary, changed_files: ['src/child.ts'], checks: [{ command: 'node --test', passed: true }], remaining_issues: [] }) + '\\n' + fence;",
-  "setTimeout(() => { console.log(JSON.stringify({ type: 'result', subtype: 'success', result: report })); }, 100);",
+  "const finish = () => setTimeout(() => { console.log(JSON.stringify({ type: 'result', subtype: 'success', result: report })); }, 100);",
+  // USAGE_PLAN: one request per prompt size (each id on two lines, like Claude). The memo goes out with the first request,
+  // so a child stopped later still streamed one. Then: hang (HANG_AFTER_PLAN), hand off once Owl asks, or finish.
+  "const segment = count + 1;",
+  "const plan = prompt.match(/USAGE_PLAN=(\\[[0-9,]+\\])/u);",
+  "const finishOn = prompt.match(/FINISH_ON_SEGMENT=([0-9]+)/u);",
+  "if (plan && !(finishOn && Number(finishOn[1]) === segment)) {",
+  "  const args = process.argv.slice(2);",
+  "  const model = args[args.indexOf('--model') + 1];",
+  "  const memo = fence + 'owl-child-handoff\\n' + JSON.stringify({ summary: 'memo of segment ' + segment, done: ['done ' + segment], remaining: ['remaining ' + segment], next_steps: ['continue ' + segment], changed_files: ['src/relay-' + segment + '.ts'], notes: '' }) + '\\n' + fence;",
+  "  const line = (index, tokens, text) => JSON.stringify({ type: 'assistant', message: { id: 'msg_' + index, model, usage: { input_tokens: 10, cache_read_input_tokens: tokens - 10, cache_creation_input_tokens: 0, output_tokens: 5 }, content: [{ type: 'text', text }] } });",
+  "  JSON.parse(plan[1]).forEach((tokens, index) => { console.log(line(index, tokens, 'step')); console.log(line(index, tokens, index === 0 ? memo : 'step')); });",
+  "  if (prompt.includes('HANG_AFTER_PLAN')) { process.on('SIGTERM', () => process.exit(143)); setInterval(() => {}, 1000); }",
+  "  else {",
+  "    const deadline = Date.now() + 2000;",
+  "    const poll = () => {",
+  "      let state = null;",
+  "      try { state = JSON.parse(readFileSync(process.env.OWL_RELAY_STATE_FILE, 'utf8')); } catch {}",
+  "      if (state && state.phase === 'handoff') { console.log(JSON.stringify({ type: 'result', subtype: 'success', result: memo })); return; }",
+  "      if (Date.now() < deadline) setTimeout(poll, 50); else finish();",
+  "    };",
+  "    poll();",
+  "  }",
+  "} else finish();",
 ].join("\n");
 
 const fakeCodex = [
@@ -269,6 +292,121 @@ test("a Codex child uses its allowlisted provider and model with the same automa
   assert.equal(record.dispatchMcp, null);
   assert.equal(record.workId, ids.work);
   assert.match(record.prompt, /Your write_paths: src\/codex\.ts/u);
+});
+
+test("the default settings allow a claude-haiku-5-5 child; an allowlist without it rejects the dispatch", { skip: process.platform === "win32" }, async (t) => {
+  const { scheduler, ids } = await setup(t);
+  const child = await dispatch(scheduler, ids.parent, "Haiku child", ["src/haiku.ts"], "haiku-child", { provider: "claude", model: "claude-haiku-5-5" });
+  assert.equal(child.provider, "claude");
+  assert.equal(child.model, "claude-haiku-5-5");
+  const response = await scheduler.wait(ids.parent, { child_ids: [child.child_id], timeout_seconds: 8 }, new AbortController().signal);
+  assert.equal(response.children[0].status, "completed");
+
+  const withoutHaiku = DEFAULT_CHILD_RUN_SETTINGS.allowed_models.filter((choice) => choice.model !== "claude-haiku-5-5");
+  const narrowed = await setup(t, { settings: { allowed_models: withoutHaiku } });
+  await assert.rejects(
+    dispatch(narrowed.scheduler, narrowed.ids.parent, "Haiku child", ["src/haiku.ts"], "haiku-denied", { provider: "claude", model: "claude-haiku-5-5" }),
+    (error) => error.code === "model_not_allowed",
+  );
+});
+
+const HAIKU = { provider: "claude", model: "claude-haiku-5-5" };
+const relaySettings = (tokenRelay) => ({ token_relay: { ...DEFAULT_CHILD_RUN_SETTINGS.token_relay, ...tokenRelay } });
+
+async function runHaikuChild(fixture, instruction) {
+  const child = await dispatch(fixture.scheduler, fixture.ids.parent, instruction, ["src/relay"], instruction, HAIKU);
+  const waited = await fixture.scheduler.wait(fixture.ids.parent, { child_ids: [child.child_id], timeout_seconds: 20 }, new AbortController().signal);
+  const events = (type) => fixture.db.all("SELECT payload_json FROM events WHERE type = ? AND json_extract(payload_json, '$.child_run_id') = ?", type, child.child_id)
+    .map((row) => JSON.parse(row.payload_json));
+  const runs = fixture.db.all("SELECT id, status FROM agent_runs WHERE child_run_id = ?", child.child_id);
+  const prompt = async (runId) => JSON.parse(await readFile(join(fixture.records, `${runId}.json`), "utf8")).prompt;
+  return {
+    child: waited.children[0],
+    row: fixture.db.get("SELECT relay_count, attempt, handoff_json FROM child_runs WHERE id = ?", child.child_id),
+    relayed: events("child_run.relayed"),
+    limited: events("child_run.relay_limited"),
+    runs,
+    prompt,
+  };
+}
+
+test("a Haiku child that hands off at the handoff limit is restarted from its memo without using an attempt", { skip: process.platform === "win32" }, async (t) => {
+  const fixture = await setup(t);
+  const result = await runHaikuChild(fixture, "USAGE_PLAN=[1000,72000] FINISH_ON_SEGMENT=2");
+
+  assert.equal(result.child.status, "completed", JSON.stringify(result.child));
+  assert.equal(result.child.summary.result, "succeeded");
+  assert.equal(result.row.relay_count, 1);
+  assert.equal(result.row.attempt, 1);
+  assert.equal(result.relayed.length, 1);
+  assert.equal(result.relayed[0].reason, "handoff");
+  assert.equal(result.relayed[0].relay_count, 1);
+  assert.equal(result.relayed[0].has_memo, true);
+  assert.equal(result.runs.length, 2);
+  const first = result.relayed[0].agent_run_id;
+  const second = result.runs.find((run) => run.id !== first).id;
+  assert.doesNotMatch(await result.prompt(first), /## Handoff from the previous child/u);
+  const resumed = await result.prompt(second);
+  assert.match(resumed, /## Handoff from the previous child[\s\S]*\(handoff\)[\s\S]*Memo: .*memo of segment 1/u);
+  assert.equal(fixture.scheduler.list({ parent_agent_run_id: fixture.ids.parent })[0].relay_count, 1);
+
+  // Each request is one row even though Claude repeats a message id over several lines.
+  const requests = fixture.db.all("SELECT * FROM agent_run_requests WHERE agent_run_id = ? ORDER BY prompt_tokens", first);
+  assert.deepEqual(requests.map((row) => [row.message_id, row.prompt_tokens, row.model, row.provider, row.subagent, row.child_run_id, row.work_id]), [
+    ["msg_0", 1000, "claude-haiku-5-5", "claude", 0, result.child.child_id, fixture.ids.work],
+    ["msg_1", 72000, "claude-haiku-5-5", "claude", 0, result.child.child_id, fixture.ids.work],
+  ]);
+});
+
+test("a Haiku child stopped at the stop limit is restarted from the last memo it streamed", { skip: process.platform === "win32" }, async (t) => {
+  const fixture = await setup(t);
+  const result = await runHaikuChild(fixture, "USAGE_PLAN=[1000,96000] HANG_AFTER_PLAN FINISH_ON_SEGMENT=2");
+
+  assert.equal(result.child.status, "completed", JSON.stringify(result.child));
+  assert.equal(result.row.relay_count, 1);
+  assert.equal(result.row.attempt, 1);
+  assert.equal(result.relayed.length, 1);
+  assert.equal(result.relayed[0].reason, "kill");
+  assert.equal(result.relayed[0].peak_prompt_tokens, 96000);
+  const first = result.relayed[0].agent_run_id;
+  assert.equal(result.runs.find((run) => run.id === first).status, "failed");
+  const resumed = await result.prompt(result.runs.find((run) => run.id !== first).id);
+  assert.match(resumed, /## Handoff from the previous child[\s\S]*\(kill\)[\s\S]*Memo: .*memo of segment 1/u);
+});
+
+test("past max_relays the child returns to the Worker as partial with the latest memo as its remaining work", { skip: process.platform === "win32" }, async (t) => {
+  const fixture = await setup(t, { settings: relaySettings({ max_relays: 1 }) });
+  const result = await runHaikuChild(fixture, "USAGE_PLAN=[1000,72000]");
+
+  assert.equal(result.child.status, "completed", JSON.stringify(result.child));
+  assert.equal(result.child.summary.result, "partial");
+  assert.match(result.child.summary.summary, /after 1 restarts \(token relay limit\)\. Last handoff: memo of segment 2/u);
+  assert.deepEqual(result.child.summary.remaining_issues, ["remaining 2", "next: continue 2"]);
+  assert.deepEqual(result.child.summary.changed_files, ["src/relay-2.ts"]);
+  assert.equal(result.row.relay_count, 1);
+  assert.equal(JSON.parse(result.row.handoff_json).memo.summary, "memo of segment 2");
+  assert.equal(result.relayed.length, 1);
+  assert.deepEqual(result.limited, [{ child_run_id: result.child.child_id, relay_count: 1, peak_prompt_tokens: 72000 }]);
+});
+
+test("token relay settings decide whether a child hands off, returns at once, or is stopped", { skip: process.platform === "win32" }, async (t) => {
+  const higherHandoff = await runHaikuChild(await setup(t, { settings: relaySettings({ handoff_tokens: 80_000 }) }), "USAGE_PLAN=[1000,72000]");
+  assert.equal(higherHandoff.child.status, "completed");
+  assert.equal(higherHandoff.child.summary.result, "succeeded");
+  assert.equal(higherHandoff.row.relay_count, 0);
+  assert.equal(higherHandoff.relayed.length + higherHandoff.limited.length, 0);
+
+  const noRelays = await runHaikuChild(await setup(t, { settings: relaySettings({ max_relays: 0 }) }), "USAGE_PLAN=[1000,72000]");
+  assert.equal(noRelays.child.summary.result, "partial");
+  assert.equal(noRelays.row.relay_count, 0);
+  assert.equal(noRelays.relayed.length, 0);
+  assert.equal(noRelays.limited.length, 1);
+  assert.equal(noRelays.runs.length, 1);
+
+  const lowerStop = await runHaikuChild(await setup(t, { settings: relaySettings({ handoff_tokens: 60_000, kill_tokens: 71_000 }) }), "USAGE_PLAN=[1000,72000] HANG_AFTER_PLAN FINISH_ON_SEGMENT=2");
+  assert.equal(lowerStop.child.status, "completed");
+  assert.equal(lowerStop.relayed.length, 1);
+  assert.equal(lowerStop.relayed[0].reason, "kill");
 });
 
 test("dispatch resolves provider, model and effort independently from the parent's harness defaults", { skip: process.platform === "win32" }, async (t) => {

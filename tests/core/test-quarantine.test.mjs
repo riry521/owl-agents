@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { runCoreTests } from "../../packages/core/dist/core-test-run.js";
@@ -110,4 +111,29 @@ test("quarantine does not expire: days passing add no Work and no event", async 
   await ctx.coreRun("work");
   assert.equal(ctx.db.all("SELECT id FROM works").length, 1);
   assert.equal(ctx.db.all("SELECT 1 FROM events WHERE type = 'test_quarantine.expired'").length, 0);
+});
+
+test("a file that also has a new failure is not quarantined, so the Work-level run keeps running it", async (t) => {
+  const ctx = await setup(t, () => false);
+  await ctx.known(["b"]);
+  // b fails the test the nightly run knows and also a test that only the Work broke.
+  const notOk = (cwd, file, n, name) => [
+    `# Subtest: ${name}`, `not ok ${n} - ${name}`, "  ---", `  location: '${join(cwd, file)}:${n + 2}:1'`,
+    "  failureType: 'testCodeFailure'", `  error: 'failed ${name}'`, "  ...",
+  ];
+  const run = async (argv, cwd) => {
+    const file = argv[argv.length - 1];
+    if (file !== "tests/b.test.mjs") return { exit_code: 0, timed_out: false, stdout: "TAP version 13\nok 1 - x\n", stderr: "", duration_ms: 1 };
+    const stdout = ["TAP version 13", ...notOk(cwd, file, 1, "b works"), ...notOk(cwd, file, 2, "b new behaviour")].join("\n");
+    return { exit_code: 1, timed_out: false, stdout, stderr: "", duration_ms: 1 };
+  };
+
+  const first = await ctx.coreRun("work", { run });
+  assert.equal(first.status, "failed");
+  assert.ok(first.in_scope.some((f) => f.name === "b new behaviour"));
+  assert.ok(!quarantinedFiles(ctx.db, ctx.projectId).includes("tests/b.test.mjs"));
+
+  const second = await ctx.coreRun("work", { run });
+  assert.equal(second.status, "failed");
+  assert.ok(second.failed_files.includes("tests/b.test.mjs"));
 });

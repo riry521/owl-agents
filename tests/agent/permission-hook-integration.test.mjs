@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { spawn } from "node:child_process";
 import { mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -13,7 +14,7 @@ import { command as envelope, createTestCore } from "../helpers/core.mjs";
 import { OutboundGuard } from "../../packages/core/dist/outbound-guard.js";
 import { GuardTokenRegistry } from "../../apps/server/dist/guard-tokens.js";
 
-function runHook({ role = "worker", apiBase, tokenFile, toolName, toolInput, cwd, owlRoot, nodeOptions }) {
+function runHook({ role = "worker", apiBase, tokenFile, toolName, toolInput, cwd, owlRoot, nodeOptions, agentType }) {
   return new Promise((resolve, reject) => {
     const env = { ...process.env, OWL_AGENT_ROLE: role, OWL_GUARD_API_BASE: apiBase, OWL_AGENT_CWD: cwd };
     if (nodeOptions) env.NODE_OPTIONS = nodeOptions;
@@ -32,7 +33,7 @@ function runHook({ role = "worker", apiBase, tokenFile, toolName, toolInput, cwd
     child.stderr.on("data", (chunk) => stderr.push(chunk));
     child.once("error", reject);
     child.once("close", (code) => resolve({ code, stdout: Buffer.concat(stdout).toString("utf8"), stderr: Buffer.concat(stderr).toString("utf8") }));
-    child.stdin.end(JSON.stringify({ hook_event_name: "PreToolUse", tool_name: toolName, tool_input: toolInput, cwd }));
+    child.stdin.end(JSON.stringify({ hook_event_name: "PreToolUse", tool_name: toolName, tool_input: toolInput, cwd, ...(agentType === undefined ? {} : { agent_type: agentType }) }));
   });
 }
 
@@ -207,6 +208,82 @@ test("PreToolUse hook allows tool calls without path or command arguments withou
   }
 });
 
+test("options of env, command, exec and time do not hide the wrapped command from block rules", async (t) => {
+  const root = await tempDir(t, "owl-wrapper-options-");
+  const ruleStore = new RuleStore(process.cwd());
+  await ruleStore.load();
+  for (const command of [
+    "env -C /tmp git push -f",
+    "env --chdir /tmp git push -f",
+    "env --chdir=/tmp git push -f",
+    "env -iC /tmp git push -f",
+    "env -v git push -f",
+    "env - git push -f",
+    "env -- git push -f",
+    "env -u FOO -- A=1 git push -f",
+    "command -p git push -f",
+    "command -- git push -f",
+    "exec -a name git push -f",
+    "exec -c git push -f",
+    "time -o /tmp/out -p git push -f",
+  ]) {
+    assert.equal(ruleStore.checkCommand(command, root, root, "worker").blocked, true, command);
+  }
+  for (const command of ["env -C /tmp git push --force-with-lease", "command -v git"]) {
+    assert.equal(ruleStore.checkCommand(command, root, root, "worker").blocked, false, command);
+  }
+});
+
+test("the researcher subagent may call only its read tools, while the Worker itself and other subagents keep the normal guard", async (t) => {
+  const root = await tempDir(t, "owl-researcher-hook-");
+  const tokenFile = path.join(root, "token");
+  await writeFile(tokenFile, "test-token\n");
+  const asked = [];
+  const guard = http.createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      asked.push(JSON.parse(Buffer.concat(chunks).toString("utf8")).payload.tool_name);
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ data: { allowed: true } }));
+    });
+  });
+  await new Promise((resolve) => guard.listen(0, "127.0.0.1", resolve));
+  t.after(() => guard.close());
+  const hook = (agentType, toolName, toolInput) => runHook({ apiBase: `http://127.0.0.1:${guard.address().port}`, tokenFile, cwd: root, agentType, toolName, toolInput });
+  const decision = (result) => (result.stdout === "" ? "pass" : JSON.parse(result.stdout).hookSpecificOutput.permissionDecision);
+  const researcherDenied = (result) => result.stdout !== "" && /調べもの役は読み取り専用/u.test(JSON.parse(result.stdout).hookSpecificOutput.permissionDecisionReason);
+
+  for (const cmd of ["sort -o target source", "uniq source target", "/tmp/x/cat a", "git -c core.pager=touch log", "git diff --output=out", "rg --pre ./x foo", "cat a > b", "ls"]) {
+    assert.ok(researcherDenied(await hook("owl-researcher", "Bash", { command: cmd })), cmd);
+  }
+  for (const [tool, input] of [["Write", { file_path: path.join(root, "a"), content: "x" }], ["Edit", { file_path: path.join(root, "a") }], ["NotebookEdit", { notebook_path: path.join(root, "a.ipynb") }], ["Agent", { prompt: "x" }], ["Task", { prompt: "x" }], ["mcp__owl-memory__search", { query: "x" }], ["Foo", {}], ["toString", {}]]) {
+    assert.ok(researcherDenied(await hook("owl-researcher", tool, input)), tool);
+  }
+  for (const [tool, input] of [["exec_command", { cmd: "sort -o t s" }], ["shell", { command: ["ls"] }], ["Bash", { command: "echo x > child.txt" }], ["apply_patch", { command: "*** Begin Patch\n*** Add File: child2.txt\n+y\n*** End Patch" }], ["spawn_agent", { message: "x" }], ["collaborationspawn_agent", { message: "x" }], ["Read", { file_path: path.join(root, "a.txt") }], ["Grep", { pattern: "x", path: root }], ["WebFetch", { url: "https://example.com" }], ["ToolSearch", { query: "x" }]]) {
+    assert.ok(researcherDenied(await hook("owl_researcher", tool, input)), tool);
+  }
+  assert.equal(decision(await hook("owl_researcher", "web_search", { query: "x" })), "pass");
+  assert.equal(decision(await hook("owl_researcher", "webrun", { search_query: [{ q: "x" }] })), "pass");
+  asked.length = 0;
+  assert.equal(decision(await hook(undefined, "apply_patch", { command: "*** Begin Patch\n*** Add File: parent.txt\n+p\n*** End Patch" })), "pass", "the parent Codex Worker keeps the normal guard");
+  assert.deepEqual(asked, ["apply_patch"]);
+
+  asked.length = 0;
+  for (const [tool, input] of [["Read", { file_path: path.join(root, "a.txt") }], ["Grep", { pattern: "x", path: root }], ["Glob", { pattern: "*.ts", path: root }], ["WebSearch", { query: "x" }], ["ToolSearch", { query: "WebSearch" }]]) {
+    assert.equal(decision(await hook("owl-researcher", tool, input)), "pass", tool);
+  }
+  assert.ok(asked.includes("Read"), "an allowed Read still goes to the guard");
+
+  for (const agentType of [undefined, "general-purpose"]) {
+    asked.length = 0;
+    const result = await hook(agentType, "Bash", { command: "sort -o target source" });
+    assert.equal(researcherDenied(result), false, String(agentType));
+    assert.equal(decision(result), "pass", String(agentType));
+    assert.deepEqual(asked, ["Bash"], String(agentType));
+  }
+});
+
 test("a guard token answers only for its own role and only until it is released", async (t) => {
   const root = await tempDir(t, "owl-guard-token-");
   const guardTokens = GuardTokenRegistry.open(path.join(root, "guard-tokens"));
@@ -334,7 +411,9 @@ test("outbound guard checks WebFetch and curl/wget destinations in the PreToolUs
     'https_proxy=http://127.0.0.1:8080 bash -c "curl https://93.184.216.34/"', "ALL_PROXY=socks5://localhost:1 eval 'wget http://example.com/'",
     "https_proxy=`printf http://127.0.0.1:8080` curl https://93.184.216.34/", "https_proxy=$(printf http://127.0.0.1:8080) curl https://93.184.216.34/",
     'wget -e "$PROXY_SETTING" http://93.184.216.34/',
-    "sudo bash -lc 'echo hi; curl 127.0.0.1'", 'curl "$URL"', "curl http://$HOST/", 'curl "$(echo http://127.0.0.1/)"', "curl -K f", "curl --config=f", "wget -i f", "wget --input-file=f",
+    "{ curl http://127.0.0.1/; }", "if true; then curl http://127.0.0.1/; fi", "! curl http://127.0.0.1/", "while true; do wget http://localhost/; done",
+    "timeout 5 curl http://127.0.0.1/", "xargs curl http://127.0.0.1/", "stdbuf -o0 curl http://127.0.0.1/", "bash -c -- 'curl http://127.0.0.1/'",
+    "sudo bash -lc 'echo hi; curl 127.0.0.1'", "env -i curl http://127.0.0.1/", "nice -n 5 curl 127.0.0.1", "time -p wget http://localhost/", "sudo -u nobody bash -c 'curl 10.0.0.1'", 'curl "$URL"', "curl http://$HOST/", 'curl "$(echo http://127.0.0.1/)"', "curl -K f", "curl --config=f", "wget -i f", "wget --input-file=f",
     "curl --connect-to 93.184.216.34:80:127.0.0.1:80 http://93.184.216.34/", "curl --connect-to ::localhost: http://93.184.216.34/",
     "curl --proxy http://127.0.0.1:8080 http://93.184.216.34/", "curl -x http://127.0.0.1:8080 http://93.184.216.34/", "curl -xhttp://10.0.0.1:1 http://93.184.216.34/", "curl --preproxy socks5://127.0.0.1:1 http://93.184.216.34/",
     "curl --resolve example.com:80:10.0.0.1 http://example.com/", "curl --resolve public.example:80:93.184.216.34,127.0.0.1 http://public.example/",

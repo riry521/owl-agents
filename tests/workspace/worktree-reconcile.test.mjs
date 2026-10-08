@@ -431,6 +431,32 @@ test("a full-tree reconcile discards a worktree whose Task row no longer exists"
   assert.equal(db.all("SELECT type FROM events").length, 0, "an orphaned Task with no row emits no event");
 });
 
+test("a full-tree reconcile still cleans other Projects when one Project's directory no longer exists", async (t) => {
+  const { parent, owlRoot, db, writeLane, gateway } = await reconcileFixture(t);
+  const now = new Date().toISOString();
+  await writeLane.transact((tx) => {
+    tx.run(
+      `INSERT INTO projects
+         (id, owner_id, name, canonical_path, base_branch, allowed_roots_json,
+          verification_plan_json, worktree_prepare_argv_json, created_at, updated_at)
+       VALUES ('project:missing', 'owner:default', 'Missing', ?, 'main', ?, '[]', '[]', ?, ?)`,
+      join(parent, "moved-away"), JSON.stringify([parent]), now, now,
+    );
+  });
+  await insertWork(writeLane, "A", { projectId: "project:missing", state: "running" });
+  const stranded = join(owlRoot, ".owl-workspaces", "A", "stranded");
+  await mkdir(stranded, { recursive: true });
+  await insertWork(writeLane, "W", { state: "running" });
+  const ghost = await gateway.prepareWorktree({ work_id: "W", task_id: "ghost" });
+
+  const result = await reconcileWorktrees({ db, writeLane, git: gateway }, { reason: "startup" });
+
+  assert.ok(result.discarded.includes("ghost"), "the healthy Project's leftover is still discarded");
+  assert.ok(result.skipped.includes("stranded"), "the leftover of the missing Project is reported as skipped");
+  await assert.rejects(access(ghost.worktree_path));
+  await access(stranded);
+});
+
 // --- Core wiring ---------------------------------------------------------
 
 function workerReport(invocationId, changes) {

@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.1 - 2026-10-08
+
+Whole-codebase review and fixes after the first public release, plus Worker and review-loop improvements.
+
+### Fixes from the full review
+
+- Reviewed every area (core lifecycle, git/workspace, knowledge/rules/skills/learning, memory, Advisor, agent-runtime/providers, server, web, connectors) and fixed bugs, safety issues, and code-quality problems
+- Knowledge `update` without `tags` keeps the original tag lines as written instead of re-serializing parsed values, so body-only edits no longer change tags
+- Memory Librarian and router no longer roll back appends written by another writer between routes
+
+### Workers and reviews
+
+- Workers can use Haiku 5.5 as a dispatch child (wraps up at 70k tokens and restarts automatically) and a read-only research helper (Haiku 5.5 for Claude, gpt-6-luna for Codex)
+- Workers no longer report "partially done" before their subagents finish; such partial reports are retried automatically
+- Pre-report checks no longer hard-code commands; they come from per-project settings, auto-detection, and docs
+- When reviews keep flagging new edge cases in the same place, the Manager is asked to change the approach early, and part of the review budget is restored after a replan (configurable, with a cap)
+- Added a default rule that Works must finish generated build outputs before completing
+
 ## 1.0.0 - 2026-10-07
 
 First public release. It establishes the safety and installability needed for v1 and ships the full feature set below.

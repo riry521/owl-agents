@@ -5,7 +5,7 @@ import { createUlid } from "../../../db/dist/index.js";
 import { fingerprint } from "../learning-fingerprint.js";
 import { slugifyKnowledgeName } from "../knowledge-naming.js";
 import {
-  assertValidPage, emptyThemePage, estimatePageTokens, findSecretPatterns, INDEX_SECTIONS, SOURCE_LABEL, parsePage, renderPage, themeTitleKey, uniqueFilename,
+  assertValidPage, bodySha256, emptyThemePage, estimatePageTokens, findSecretPatterns, INDEX_SECTIONS, SOURCE_LABEL, parsePage, renderPage, themeTitleKey, uniqueFilename,
   PageRejectedError, type ParsedPage,
 } from "./page-format.js";
 
@@ -21,6 +21,8 @@ export interface RouteInput {
   readonly theme?: string;
   readonly project_id: string | null;
   readonly cross_project?: boolean;
+  /** Pages the caller wrote with an earlier route and the hash it left on each; the router reports the ones that differ when it takes the write lease. */
+  readonly own_hashes?: Readonly<Record<string, string>>;
   readonly source: { readonly work_number: number | null; readonly work_id: string | null; readonly actor: string; /** Source label used when there is no Work number (e.g. 会話2026-10-04-1). */ readonly label?: string };
 }
 
@@ -29,6 +31,10 @@ export interface RouteResult {
   readonly page?: string;
   readonly section?: RouteSection;
   readonly reason?: string;
+  /** bodySha256 of `page` as read inside the write lease that wrote it, so a caller can tell this write from a later one. */
+  readonly written_hash?: string;
+  /** Pages of `own_hashes` that another writer changed before this route wrote; decided inside the write lease. */
+  readonly foreign_pages?: readonly string[];
 }
 
 export interface PageRouterOptions {
@@ -137,7 +143,18 @@ export class PageRouter {
 
   private async routeNow(input: RouteInput): Promise<RouteResult> {
     try {
-      return await this.options.withWrite(() => this.routeLocked(input));
+      return await this.options.withWrite(async () => {
+        const foreign: string[] = [];
+        for (const [page, hash] of Object.entries(input.own_hashes ?? {})) {
+          const now = await readFile(join(this.options.knowledgeDir(), page), "utf8").catch(() => null);
+          if (now === null || bodySha256(now) !== hash) foreign.push(page);
+        }
+        const routed = await this.routeLocked(input);
+        const result = foreign.length > 0 ? { ...routed, foreign_pages: foreign } : routed;
+        if (!result.page) return result;
+        const text = await readFile(join(this.options.knowledgeDir(), result.page), "utf8").catch(() => null);
+        return text === null ? result : { ...result, written_hash: bodySha256(text) };
+      });
     } catch (error) {
       if (isStorageUnavailable(error)) return { status: "deferred", reason: "storage_unavailable" };
       if (error instanceof PageRejectedError) return { status: "rejected", reason: "template_invalid" };

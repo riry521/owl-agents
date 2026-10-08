@@ -183,6 +183,8 @@ test('child-run settings have no concurrency-limit inputs and Save sends none', 
     allowed_models: [{ provider: 'claude', model: 'm1' }, { provider: 'codex', model: 'm1' }],
     allowed_efforts: [], timeout_minutes: 60, max_timeout_minutes: 120, max_attempts: 2,
     max_parallel_per_worker: 3, max_parallel_total: 6, // the API still returns them; Save must not echo them back
+    token_relay: { models: [{ provider: 'claude', model: 'm1' }], handoff_tokens: 1000, kill_tokens: 2000, max_relays: 1, report_threshold_tokens: 3000 },
+    research_subagent: { claude: { model: 'm1', max_turns: 4 }, codex: { model: 'm1', max_turns: 5 }, answer_max_chars: 700 },
   };
   const preset = { 0: [], 9: true, 11: child, 12: child.defaults_by_parent_harness, 16: false };
   let index = 0;
@@ -210,6 +212,8 @@ test('child-run settings have no concurrency-limit inputs and Save sends none', 
   await saveButton.onClick();
   assert.ok(sent);
   assert.deepEqual(Object.keys(sent).filter((key) => key.startsWith('max_parallel')), []);
+  assert.deepEqual(sent.token_relay, child.token_relay);
+  assert.deepEqual(sent.research_subagent, child.research_subagent);
 });
 
 test('i18n has no child-run concurrency-limit keys', () => {

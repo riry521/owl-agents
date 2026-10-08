@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, readlink, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { createUlid, utcNow } from "../../db/dist/index.js";
-import { OUTPUT_FORMAT_INVALID_ERROR_KEY, readDesignBlocked, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, readStoredAcceptanceCriteria, readStoredTaskPlanContext, requestsSpecTest, AGENT_STALE_THRESHOLD_MS, builtinProviderHarness, DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, designDocumentPath, OWL_INSTANCE_ID_ENV, reapProcessGroup, resolveInstanceId, tokenUsageOf, usageJson, type DelegationMismatchKind, type TaskReplanTrigger, type TokenUsage } from "@owl/shared";
+import { OUTPUT_FORMAT_INVALID_ERROR_KEY, readDesignBlocked, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, readStoredAcceptanceCriteria, readStoredTaskPlanContext, requestsSpecTest, AGENT_STALE_THRESHOLD_MS, builtinProviderHarness, DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, designDocumentPath, OWL_INSTANCE_ID_ENV, reapProcessGroup, resolveInstanceId, tokenUsageOf, usageJson, type DelegationMismatchKind, type ResearchSubagentSettings, type TaskReplanTrigger, type TokenUsage } from "@owl/shared";
 import { matchesAnyGlob } from "../../shared/dist/glob.js";
 import { taskVerificationMarker } from "./workspace-process-sweeper.js";
 import { TRANSIENT_RETRY_DELAYS_MS, TRANSIENT_RETRY_LIMIT } from "./attempt-policy";
@@ -56,11 +56,13 @@ import { NO_CORE_ACTIVITY, type CoreActivityReporter } from "./core-activity.js"
 import { coreTestErrorOutcome, coreTestRunBrief, notApplicableTestRun, runCoreTests, workTestRunner, type CoreTestRunDeps, type CoreTestRunOutcome } from "./core-test-run.js";
 import { DEFAULT_TEST_RUN_SETTINGS, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
 import { DEFAULT_TEST_DETECTION_RULES, type TestDetectionRules } from "./test-detection-rules.js";
-import { resolveTestRun, type TestRunResolution } from "./test-detection.js";
+import { reportCheckCommands, resolveTestRun, type TestRunResolution } from "./test-detection.js";
 import { latestTestRun, testRunSettingsFromJson, type TestCommandRunner } from "./test-runs.js";
 import { QUARANTINE_FIX_TASK_PREFIX } from "./test-quarantine.js";
 import { evaluateTaskTypePolicy, verificationPolicySettings, type TaskVerificationSpec } from "./task-verification-policy.js";
 import { reviewRouting } from "./assurance-settings.js";
+import { insertRequestUsageRows } from "./token-usage-report.js";
+import type { HookRequestUsage } from "../../shared/dist/token-relay.js";
 import { decideReviewRouting, effectiveReviewRequired, taskArtifactPaths, type ReviewRoutingDecision } from "./review-routing.js";
 import type {
   AgentRunResult,
@@ -174,6 +176,11 @@ function mimeForPath(path: string): string {
   return types[extension ?? ""] ?? "application/octet-stream";
 }
 
+/** A SubagentStart / SubagentStop notification, or the stopped subagent's request usage. */
+export type HookSubagentInput =
+  | { readonly event: "start" | "stop"; readonly agentId: string; readonly agentType: string | null }
+  | { readonly event: "usage"; readonly agentId: string; readonly agentType: string | null; readonly requests: readonly HookRequestUsage[] };
+
 export interface ManagerReplanNeededInput {
   readonly work_id: string;
   readonly failed_task_ids: readonly string[];
@@ -209,6 +216,8 @@ export interface WorkflowEngineOptions {
   readonly skillBox?: SkillBox;
   readonly memoryInjector?: Pick<IndexInjector, "compose">;
   readonly getProcessSkillsPack?: () => { readonly skills_dir: string; readonly source: "setting" | "claude" | "codex" } | null;
+  /** Settings for the Worker's read-only researcher subagent, read at every Worker launch. */
+  readonly getResearchSubagentSettings?: () => ResearchSubagentSettings;
   /** How often checkStaleAgents scans for dead/idle agents. Defaults to 60 seconds. */
   readonly staleCheckIntervalMs?: number;
   /** Where baseline checkouts for Core test runs go. Defaults to `<owlRoot>/.owl-workspaces`. */
@@ -311,6 +320,7 @@ export class WorkflowEngine {
   private readonly skillBox?: SkillBox;
   private readonly memoryInjector?: Pick<IndexInjector, "compose">;
   private readonly getProcessSkillsPack?: () => { readonly skills_dir: string; readonly source: "setting" | "claude" | "codex" } | null;
+  private readonly getResearchSubagentSettings?: () => ResearchSubagentSettings;
   private readonly verificationChildren = new Set<ChildProcess>();
   private readonly workspaceRoot: string;
   private readonly testCommandRunner?: TestCommandRunner;
@@ -364,6 +374,7 @@ export class WorkflowEngine {
     this.memoryInjector = options.memoryInjector;
     this.contextBuilder = new ContextBuilder(this.db, this.dataDir, { ruleStore: this.ruleStore, skillBox: this.skillBox, memoryInjector: this.memoryInjector });
     this.getProcessSkillsPack = options.getProcessSkillsPack;
+    this.getResearchSubagentSettings = options.getResearchSubagentSettings;
     this.maxParallel = resolveMaxParallel(options.maxParallel);
     if (options.globalMaxParallel !== undefined && (!Number.isSafeInteger(options.globalMaxParallel) || options.globalMaxParallel < 1)) {
       throw validationError("dispatcher.global_max_parallel must be a positive integer.", { global_max_parallel: options.globalMaxParallel });
@@ -521,11 +532,12 @@ export class WorkflowEngine {
   /**
    * A Worker's own subagent as its harness reported it (SubagentStart / Stop
    * hook). Only the id and type are kept, never the hook's prompt or other
-   * input. A repeated start or stop changes nothing.
+   * input. A repeated start or stop changes nothing. A usage upload stores
+   * the subagent's request token counts; a repeated one adds no rows.
    */
   public recordHookSubagent(
     parentRunId: string,
-    input: { readonly event: "start" | "stop"; readonly agentId: string; readonly agentType: string | null },
+    input: HookSubagentInput,
   ): Promise<{ readonly agent_run_id: string | null; readonly changed: boolean }> {
     // One notification at a time, so the lookup and the write cannot interleave.
     const run = this.hookSubagentChain.then(() => this.recordHookSubagentNow(parentRunId, input));
@@ -537,7 +549,7 @@ export class WorkflowEngine {
 
   private async recordHookSubagentNow(
     parentRunId: string,
-    input: { readonly event: "start" | "stop"; readonly agentId: string; readonly agentType: string | null },
+    input: HookSubagentInput,
   ): Promise<{ readonly agent_run_id: string | null; readonly changed: boolean }> {
     const parent = this.db.get<{ id: string; work_id: string; task_id: string | null; provider: string; model: string }>(
       "SELECT id, work_id, task_id, provider, model FROM agent_runs WHERE id = ? AND role = 'worker'",
@@ -549,6 +561,14 @@ export class WorkflowEngine {
       parent.id,
       input.agentId,
     );
+    if (input.event === "usage") {
+      // Without a recorded start, the rows belong to the Worker's own run.
+      const runId = existing?.id ?? parent.id;
+      const inserted = await this.writeLane.transact((tx) => insertRequestUsageRows(tx, input.requests.map((request) => ({
+        ...request, agent_run_id: runId, work_id: parent.work_id, child_run_id: null, provider: parent.provider, subagent: true,
+      }))));
+      return { agent_run_id: runId, changed: inserted > 0 };
+    }
     if (input.event === "start") {
       if (existing) return { agent_run_id: existing.id, changed: false };
       const runId = createUlid();
@@ -1409,6 +1429,7 @@ export class WorkflowEngine {
     const workerContext = await this.contextBuilder.buildWorkerContext(role, workId, taskId, taskRow);
     const hybridMode = !isDesigner && this.isHybridModeEnabled();
     const processSkillsPack = this.getProcessSkillsPack?.() ?? null;
+    const research = isDesigner ? null : this.researchSubagentSettings();
     const runModel = this.db.get<{ provider: string; model: string }>("SELECT provider, model FROM agent_runs WHERE id = ?", agentRunId);
     const workerRoleModel = resolveRoleModel(this.db, isDesigner && designTier === "lead" ? "lead_designer" : role);
     const workerProvider = this.providerForRoleModel(workerRoleModel);
@@ -1436,6 +1457,8 @@ export class WorkflowEngine {
         ...(designPath ? { design_document_path: designPath, design_tier: designTier } : {}),
         ...(designStop ? { design_stop: { ...designStop, review_history: lineageReviewHistory(this.db, taskId) as unknown as JsonObject[] } } : {}),
         ...(processSkillsPack ? { process_skills_dir: processSkillsPack.skills_dir, process_skills_source: processSkillsPack.source } : {}),
+        ...(research ? { research_subagent: research as unknown as JsonObject } : {}),
+        ...(isDesigner ? {} : { report_check_commands: this.workerReportCheckCommands(workId, taskRow?.worktree_path ?? null) }),
         ...workerContext,
       },
       ...(workerRoleModel ? {
@@ -1578,6 +1601,16 @@ export class WorkflowEngine {
       });
     } catch (error) {
       console.error(`[owl-core] Failed to record delegation mismatch for ${workerRunId}`, error);
+    }
+  }
+
+  /** A stored setting that fails validation drops the researcher from both the prompt and the argv; the Worker still starts. */
+  private researchSubagentSettings(): ResearchSubagentSettings | null {
+    try {
+      return this.getResearchSubagentSettings?.() ?? null;
+    } catch (error) {
+      console.error("[owl-core] Researcher settings could not be read; starting the Worker without the researcher", error);
+      return null;
     }
   }
 
@@ -2777,7 +2810,7 @@ export class WorkflowEngine {
       spec,
       settings,
       mode,
-      coreTestRun: coreTests && coreTests.outcome.status !== "not_applicable" ? { run_id: coreTests.outcome.run_id, passed_files: coreTests.outcome.passed_files, failed_files: coreTests.outcome.failed_files } : undefined,
+      coreTestRun: coreTests && coreTests.outcome.status !== "not_applicable" ? { run_id: coreTests.outcome.run_id, mode: coreTests.outcome.mode, passed_files: coreTests.outcome.passed_files, failed_files: coreTests.outcome.failed_files } : undefined,
       runCommand: async (argv, cwd) => {
         const outcome = await this.runVerificationCommand(task.id, argv, cwd, limits.env_allowlist, limits.timeout_seconds * 1000, limits.stdout_limit_bytes, limits.stderr_limit_bytes, [0]);
         return {
@@ -3008,11 +3041,24 @@ export class WorkflowEngine {
     return outcome === null ? null : { outcome, settings };
   }
 
-  private projectTestRunRow(workId: string): { id: string; canonical_path: string; test_run_json: string | null; test_run_detected_json: string | null } | undefined {
+  private projectTestRunRow(workId: string): { id: string; canonical_path: string; test_run_json: string | null; test_run_detected_json: string | null; report_check_commands_json: string | null } | undefined {
     return this.db.get(
-      "SELECT p.id, p.canonical_path, p.test_run_json, p.test_run_detected_json FROM projects p JOIN works w ON w.project_id = p.id WHERE w.id = ?",
+      "SELECT p.id, p.canonical_path, p.test_run_json, p.test_run_detected_json, p.report_check_commands_json FROM projects p JOIN works w ON w.project_id = p.id WHERE w.id = ?",
       workId,
     );
+  }
+
+  /** Commands the Worker runs before reporting, resolved in the Task worktree; [] without a Project. */
+  private workerReportCheckCommands(workId: string, worktree: string | null): string[] {
+    const project = this.projectTestRunRow(workId);
+    if (!project) return [];
+    return reportCheckCommands({
+      configured: project.report_check_commands_json === null ? [] : JSON.parse(project.report_check_commands_json) as string[],
+      explicit_json: project.test_run_json,
+      detected_json: project.test_run_detected_json,
+      root: worktree ?? project.canonical_path,
+      rules: this.testDetectionRules,
+    });
   }
 
   /** Explicit test_run > saved detection > detection now (stored for the next check). */

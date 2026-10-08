@@ -1,5 +1,6 @@
 import { compareText } from "../context-canonical.js";
 import type { MemoryIndex } from "./memory-index.js";
+import { defuseTags } from "./memory-injector.js";
 import type { MemorySearch } from "./memory-search.js";
 import type { MemoryLogger } from "./memory-types.js";
 
@@ -58,6 +59,6 @@ export class ResearchRecall {
 /** One line per clipping, titles and summaries only (no body); null when there is nothing to say. */
 export function renderRecall(items: readonly RecallItem[]): string | null {
   if (items.length === 0) return null;
-  const lines = items.map((i) => `前に調べた資料: [[${i.title}]] — ${i.summary}${i.retrieved ? `（${i.retrieved}）` : ""}`);
+  const lines = items.map((i) => `前に調べた資料: [[${defuseTags(i.title)}]] — ${defuseTags(i.summary)}${i.retrieved ? `（${i.retrieved}）` : ""}`);
   return `<owl-research-recall>\n${lines.join("\n")}\n</owl-research-recall>`;
 }

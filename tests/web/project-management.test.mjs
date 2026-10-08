@@ -389,7 +389,7 @@ function createView() {
   const modules = {
     react: hooks,
     'react/jsx-runtime': jsxRuntime,
-    'next/link': { default: ({ children }) => children },
+    'next/link': ({ href, children }) => React.createElement('a', { href }, children),
     'next/navigation': { useRouter: () => ({ push: () => {} }) },
     '@/lib/i18n': { useLocale: () => ({ locale: 'en', t: (key, vars) => (vars ? `${key}${JSON.stringify(vars)}` : key) }) },
     '@/lib/format': { workStateLabels: () => ({}) },
@@ -535,6 +535,23 @@ test('ProjectsView delete shows the impact confirmation first, then calls the de
     assert.match(view.html, /Beta/);
     assert.match(view.html, /projects\.deleteSuccessWithWorks/);
     assert.doesNotMatch(view.html, /projects\.deleteTitle/);
+  } finally {
+    api.restore();
+  }
+});
+
+test('ProjectsView links each running Work that blocks deletion to its Work detail page', async () => {
+  const runningWork = { id: 'work/1', title: 'Busy work', state: 'running', display_number: 7 };
+  const api = installFakeApi((method, pathname) => {
+    if (method === 'GET' && pathname === '/api/v1/projects') return { request_id: 'r', data: twoProjects(), has_more: false };
+    return { request_id: 'r', data: impact({ project_id: 'p1', work_count: 1, running_work_count: 1, running_works: [runningWork], blockers: ['running_works'], deletable: false }) };
+  });
+  try {
+    const view = createView();
+    await view.render();
+    await view.click('button', byAria('projects.deleteAria{"name":"Alpha"}'));
+
+    assert.match(view.html, /<a href="\/work\?id=work%2F1">#7 Busy work<\/a>/);
   } finally {
     api.restore();
   }

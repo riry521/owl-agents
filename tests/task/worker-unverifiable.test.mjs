@@ -12,6 +12,7 @@ import { ACCEPTANCE_DEFECT_EVENT, workerAcceptanceDefects } from "../../packages
 import { DESIGNER_REPORT_SCHEMA, WORKER_REPORT_SCHEMA, buildWorkerPrompt } from "../../packages/agent-runtime/dist/worker.js";
 import { buildManagerPrompt } from "../../packages/agent-runtime/dist/manager.js";
 import { lineageUsage } from "../../packages/core/dist/task-lineage.js";
+import { DEFAULT_ATTEMPT_POLICY_CONFIG } from "../../packages/core/dist/attempt-policy.js";
 import { validateReportEnvelope, validateReportSemantics } from "../../packages/agent-runtime/dist/protocol.js";
 import { createTestCore, command } from "../helpers/core.mjs";
 import { disablePlanQuality } from "../helpers/plan-quality.mjs";
@@ -349,4 +350,43 @@ test("an external blocker reaches the Manager and relaunches although no_progres
   assert.equal(eventCount(db, workId, "task.no_progress_limited"), 0);
   assert.equal(openDecisions(db, workId), 0);
   assert.equal(runner.state.replanRequests.length, 2);
+});
+
+// A partial after a side effect with nothing for the Manager or the Owner (no pending_process, external_blocker,
+// unverifiable criterion or needs_replanning) only needs another run: Core retries it within the deterministic limits.
+const resumable = (seen) => (request) => {
+  seen?.push(request.context?.previous_report ?? null);
+  return partialAfterSideEffect({ ...passedReport(request.invocation_id), work_done: "Half done; continue from here.", external_blocker: null });
+};
+
+test("a partial after a side effect with nothing to escalate is retried with its report, without an Owner Decision", async (t) => {
+  const seen = [];
+  const record = (request) => { seen.push(request.context?.previous_report ?? null); };
+  const runner = blockerRunner([resumable(seen), record]);
+  const { db, core } = await openCore(t, runner);
+  runner.state.db = db;
+  const workId = await startWork(core, "resumable-partial");
+
+  assert.ok(await waitFor(() => t1Of(db, workId)?.status === "completed"), `T1 completes (${JSON.stringify(tasksOf(db, workId))})`);
+  assert.equal(runner.state.t1Calls, 2);
+  assert.equal(seen[0], null);
+  assert.equal(seen[1]?.work_done, "Half done; continue from here.", "the retried Worker gets the previous report");
+  assert.ok(decidedReasons(db, workId).includes("resumable_partial"), JSON.stringify(decidedReasons(db, workId)));
+  assert.ok(!decidedReasons(db, workId).includes("retry_not_allowed"));
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ? AND blocked_task_ids_json != '[]'", workId).n, 0, "no Owner Decision blocked the Task");
+  assert.equal(runner.state.replanRequests.length, 0);
+});
+
+test("a resumable partial past the deterministic failure limit waits for the Owner", async (t) => {
+  const limit = DEFAULT_ATTEMPT_POLICY_CONFIG.deterministicFailureLimit;
+  const runner = blockerRunner(Array.from({ length: limit + 1 }, () => resumable()));
+  const { db, core } = await openCore(t, runner);
+  runner.state.db = db;
+  const workId = await startWork(core, "resumable-partial-limit");
+
+  assert.ok(await waitFor(() => t1Of(db, workId)?.status === "judgement_waiting"), `T1 waits for the Owner (${JSON.stringify(tasksOf(db, workId))})`);
+  assert.ok(await waitFor(() => openDecisions(db, workId) === 1));
+  assert.equal(runner.state.t1Calls, limit);
+  const reasons = decidedReasons(db, workId);
+  assert.deepEqual([reasons.filter((r) => r === "resumable_partial").length, reasons.at(-1)], [limit - 1, "retry_not_allowed"]);
 });

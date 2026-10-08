@@ -212,6 +212,24 @@ test("file reconciliation records external edits, imports new skills, and exclud
   assert.equal(db.get("SELECT state FROM skills WHERE name = 'release-procedure'").state, "active");
 });
 
+test("a Curator write refuses to overwrite files edited outside Owl until they are recorded", async (t) => {
+  const { root, skillBox } = await openSkillBox(t);
+  await skillBox.applyRevision({ name: "release-procedure", files: skillFiles("first"), meta, actor: "user", action: "create", reason: "initial", trial: false });
+  const edited = skillFiles("edited by hand")["SKILL.md"];
+  await writeFile(join(root, "skills/release-procedure/SKILL.md"), edited);
+  await mkdir(join(root, "skills/release-procedure/references"));
+  await writeFile(join(root, "skills/release-procedure/references/notes.md"), "hand note");
+  const curatorWrite = { name: "release-procedure", files: skillFiles("curator"), meta, actor: "curator", action: "update", reason: "improved", trial: true };
+
+  await assert.rejects(skillBox.applyRevision(curatorWrite), /skill_changed_on_disk/u);
+  assert.equal(await readFile(join(root, "skills/release-procedure/SKILL.md"), "utf8"), edited);
+  assert.equal(await readFile(join(root, "skills/release-procedure/references/notes.md"), "utf8"), "hand note");
+
+  await skillBox.reconcileFiles();
+  await skillBox.applyRevision(curatorWrite);
+  assert.equal(await readFile(join(root, "skills/release-procedure/SKILL.md"), "utf8"), skillFiles("curator")["SKILL.md"]);
+});
+
 test("concurrent skill writes receive distinct revision numbers", async (t) => {
   const { db, skillBox } = await openSkillBox(t);
   const revisions = await Promise.all(Array.from({ length: 10 }, (_, index) => skillBox.applyRevision({

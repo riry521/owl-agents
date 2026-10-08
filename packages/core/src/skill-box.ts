@@ -1003,6 +1003,12 @@ export class SkillBox {
     const files = validateFiles(input.name, input.files, input.meta);
     const contentHash = hashSkillFiles(files);
     const existing = this.getSkill(input.name);
+    // Reconciliation only runs on ticks, so a Curator write can arrive before an outside edit is recorded;
+    // writing then would delete that edit without any revision holding it.
+    if (input.actor === "curator" && existing) {
+      const onDisk = hashSkillFiles(await this.loadFiles(join(this.skillsRoot, input.name)));
+      if (onDisk !== existing.content_hash) throw new Error(`skill_changed_on_disk: ${input.name} has edits that are not recorded yet`);
+    }
     const revision = this.nextRevisionNumber(input.name);
     const revisionId = createUlid();
     const now = this.now();

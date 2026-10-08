@@ -29,6 +29,7 @@ import { ReviewRoutingSettingsValidationError, validateReviewRoutingSettings } f
 import type { ReviewRoutingSettings } from "../../../packages/shared/dist/review-routing-settings.js";
 import type { PlanUsageSettings, PlanUsageView } from "../../../packages/shared/dist/plan-usage-settings.js";
 import { isOwnerLanguage, type OwnerLanguage } from "../../../packages/shared/dist/owner-language.js";
+import { SUBAGENT_USAGE_BATCH_MAX, type HookRequestUsage } from "../../../packages/shared/dist/token-relay.js";
 import { ADVISOR_CURATION_ACTION_TYPES, advisorCurationKind, builtinProviderHarness, designDocumentPath, isRuleRole, RULE_ROLES } from "../../../packages/shared/dist/index.js";
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
 import { GUARD_SHELL_COMMAND_KEYS, GUARD_SHELL_TOOL_NAMES } from "../../../packages/shared/dist/guard-inputs.js";
@@ -287,6 +288,10 @@ interface WorkSummaryHistoryApiPort {
 
 interface TokenUsageReportApiPort {
   getTokenUsageReport(input: { readonly period: TokenUsagePeriod; readonly top: number }): TokenUsageReport;
+}
+
+interface LargeRequestCountApiPort {
+  countLargeModelRequests(input: { readonly threshold_tokens?: number; readonly models?: readonly string[]; readonly work_id?: string }): object;
 }
 
 interface CurationApiPort {
@@ -1381,7 +1386,7 @@ async function assertProjectPathNotRegistered(core: CorePort, canonicalPath: str
 }
 
 function validateProjectUpdatePayload(payload: JsonObject): UpdateProjectInput {
-  const allowed = ["name", "canonical_path", "auto_push", "worktree_setup_command", "worktree_refresh_command", "post_merge_command", "post_merge_install_command", "required_test_command", "test_run", "test_policy", "verification_plan"];
+  const allowed = ["name", "canonical_path", "auto_push", "worktree_setup_command", "worktree_refresh_command", "post_merge_command", "post_merge_install_command", "required_test_command", "test_run", "test_policy", "report_check_commands", "verification_plan"];
   const extra = Object.keys(payload).filter((key) => !allowed.includes(key));
   if (extra.length > 0) {
     throw new ApiError(400, "validation_error", "UpdateProject payloadの項目が契約と一致しません。必須項目と余分な項目を確認してください。", { missing: [], extra });
@@ -1422,6 +1427,7 @@ function validateProjectUpdatePayload(payload: JsonObject): UpdateProjectInput {
   }
   if (Object.prototype.hasOwnProperty.call(payload, "test_run")) input.test_run = testRunField(payload.test_run);
   if (Object.prototype.hasOwnProperty.call(payload, "test_policy")) input.test_policy = testPolicyField(payload.test_policy);
+  if (Object.prototype.hasOwnProperty.call(payload, "report_check_commands")) input.report_check_commands = reportCheckCommandsField(payload.report_check_commands);
   if (Object.prototype.hasOwnProperty.call(payload, "verification_plan")) {
     if (!Array.isArray(payload.verification_plan)) {
       throw new ApiError(400, "validation_error", "verification_planが不正です。配列を指定してください。");
@@ -1443,6 +1449,13 @@ function testPolicyField(value: unknown): Record<string, unknown> | null {
   if (value === null) return null;
   if (typeof value !== "object" || Array.isArray(value)) throw new ApiError(400, "validation_error", "test_policyはオブジェクトかnullで指定してください。", { field: "test_policy" });
   return value as Record<string, unknown>;
+}
+
+/** Shape only; Core validates each command string. */
+function reportCheckCommandsField(value: unknown): string[] | null {
+  if (value === null) return null;
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) throw new ApiError(400, "validation_error", "report_check_commandsはコマンド文字列の配列かnullで指定してください。", { field: "report_check_commands" });
+  return [...value];
 }
 
 function worktreeCommandField(value: unknown, field: string): string[] {
@@ -1737,8 +1750,41 @@ function requireDecisionViewApi(core: CorePort): DecisionViewApiPort {
 interface HookSubagentApiPort {
   recordHookSubagent(
     agent: GuardTokenAgent,
-    input: { readonly event: "start" | "stop"; readonly agentId: string; readonly agentType: string | null },
+    input:
+      | { readonly event: "start" | "stop"; readonly agentId: string; readonly agentType: string | null }
+      | { readonly event: "usage"; readonly agentId: string; readonly agentType: string | null; readonly requests: readonly HookRequestUsage[] },
   ): Promise<{ readonly agent_run_id: string | null; readonly changed: boolean }>;
+}
+
+/** The request list of a subagent usage upload: 1 to SUBAGENT_USAGE_BATCH_MAX entries of ids and non-negative counts. */
+function hookRequestUsages(value: unknown): HookRequestUsage[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > SUBAGENT_USAGE_BATCH_MAX) {
+    throw new ApiError(400, "validation_error", `requestsは1〜${SUBAGENT_USAGE_BATCH_MAX}件の配列で指定してください。`);
+  }
+  const count = (item: JsonObject, key: string): number => {
+    const number = item[key];
+    if (typeof number !== "number" || !Number.isSafeInteger(number) || number < 0) {
+      throw new ApiError(400, "validation_error", `requests.${key}は0以上の整数で指定してください。`);
+    }
+    return number;
+  };
+  return value.map((item: unknown) => {
+    if (!isObject(item)) throw new ApiError(400, "validation_error", "requestsの要素はオブジェクトで指定してください。");
+    exactKeys(item, ["message_id", "model", "input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens", "created_at"], "requests item");
+    const created_at = stringField(item.created_at, "requests.created_at", 1, 200);
+    if (!Number.isFinite(Date.parse(created_at)) || !/T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(created_at)) {
+      throw new ApiError(400, "validation_error", "requests.created_atはISO 8601の日時で指定してください。");
+    }
+    return {
+      message_id: stringField(item.message_id, "requests.message_id", 1, 200),
+      model: stringField(item.model, "requests.model", 1, 200),
+      input_tokens: count(item, "input_tokens"),
+      cache_read_tokens: count(item, "cache_read_tokens"),
+      cache_write_tokens: count(item, "cache_write_tokens"),
+      output_tokens: count(item, "output_tokens"),
+      created_at,
+    };
+  });
 }
 
 function requireHookSubagentApi(core: CorePort): HookSubagentApiPort {
@@ -1777,7 +1823,7 @@ async function prerequisiteCall<T>(operation: () => Promise<T>): Promise<T> {
     return await operation();
   } catch (error) {
     const code = isObject(error) && typeof error.code === "string" ? error.code : "";
-    const status = PREREQUISITE_ERROR_STATUS[code];
+    const status = Object.hasOwn(PREREQUISITE_ERROR_STATUS, code) ? PREREQUISITE_ERROR_STATUS[code] : undefined;
     if (status === undefined || error instanceof ApiError) throw error;
     throw new ApiError(status, code as ApiError["code"], error instanceof Error ? error.message : code, isObject((error as { details?: unknown }).details) ? (error as { details: Record<string, unknown> }).details : {}, { cause: error });
   }
@@ -1792,6 +1838,9 @@ function requireChildRunApi(core: CorePort): ChildRunApiPort {
   return candidate;
 }
 
+/** Legacy executor provider names mapped to child-run harnesses. */
+const HARNESS_PROVIDER_ALIASES: Readonly<Record<string, ChildRunProvider>> = { anthropic: "claude", openai: "codex" };
+
 const CHILD_RUN_ERROR_STATUS: Readonly<Record<string, number>> = {
   validation_error: 400, write_paths_invalid: 400, model_not_allowed: 400, effort_not_allowed: 400, timeout_out_of_range: 400,
   parent_not_active: 409, too_many_children: 409, child_not_found: 404,
@@ -1803,7 +1852,7 @@ async function childRunCall<T>(operation: () => T | Promise<T>): Promise<T> {
     return await operation();
   } catch (error) {
     const code = isObject(error) && typeof error.code === "string" ? error.code : "";
-    const status = CHILD_RUN_ERROR_STATUS[code];
+    const status = Object.hasOwn(CHILD_RUN_ERROR_STATUS, code) ? CHILD_RUN_ERROR_STATUS[code] : undefined;
     if (status === undefined || error instanceof ApiError) throw error;
     throw new ApiError(status, code as ApiError["code"], error instanceof Error ? error.message : code, isObject((error as { details?: unknown }).details) ? (error as { details: Record<string, unknown> }).details : {}, { cause: error });
   }
@@ -1922,6 +1971,14 @@ function requireTokenUsageReportApi(core: CorePort): TokenUsageReportApiPort {
   const wrapped = core as CorePort & { core?: unknown };
   const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
   if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support token usage reports.");
+  return candidate;
+}
+
+function requireLargeRequestCountApi(core: CorePort): LargeRequestCountApiPort {
+  const has = (value: unknown): value is LargeRequestCountApiPort => isObject(value) && typeof value.countLargeModelRequests === "function";
+  const wrapped = core as CorePort & { core?: unknown };
+  const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
+  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support request token counts.");
   return candidate;
 }
 
@@ -2373,7 +2430,7 @@ function validateIssueBacklogWorkPayload(payload: JsonObject): { item_ids: strin
   return { item_ids, title, summary, size: payload.size };
 }
 
-function decodeSkillRouteValue(value: string, label: string): string {
+function decodeRouteValue(value: string, label: string): string {
   try {
     return decodeURIComponent(value);
   } catch (error) {
@@ -2393,8 +2450,8 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   if (rawSkillFileMatch && method === "GET") {
     requireOwner(request);
     const skills = requireSkillApi(context.core);
-    const name = decodeSkillRouteValue(rawSkillFileMatch[1]!, "name");
-    const filePath = decodeSkillRouteValue(rawSkillFileMatch[2]!, "path");
+    const name = decodeRouteValue(rawSkillFileMatch[1]!, "name");
+    const filePath = decodeRouteValue(rawSkillFileMatch[2]!, "path");
     const content = await skills.readSkillFile(name, filePath);
     sendJson(response, 200, { request_id: requestIdValue, data: { content } });
     return;
@@ -2462,6 +2519,23 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     const data = requireTokenUsageReportApi(context.core).getTokenUsageReport({
       period,
       top: parseTokenUsageTop(url.searchParams.get("top")),
+    });
+    sendJson(response, 200, { request_id: requestIdValue, data });
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/token-usage/requests` && method === "GET") {
+    requireOwner(request);
+    const threshold = url.searchParams.get("threshold_tokens");
+    if (threshold !== null && !/^[1-9][0-9]*$/u.test(threshold)) {
+      throw new ApiError(400, "validation_error", "threshold_tokens must be a positive integer.", { field: "threshold_tokens" });
+    }
+    const models = url.searchParams.getAll("model").filter((model) => model.length > 0);
+    const workId = url.searchParams.get("work_id");
+    const data = requireLargeRequestCountApi(context.core).countLargeModelRequests({
+      ...(threshold !== null ? { threshold_tokens: Number(threshold) } : {}),
+      ...(models.length > 0 ? { models } : {}),
+      ...(workId ? { work_id: workId } : {}),
     });
     sendJson(response, 200, { request_id: requestIdValue, data });
     return;
@@ -3441,8 +3515,8 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   const skillRevisionDetailMatch = pathname.match(new RegExp(`^${API_PREFIX}/skills/([^/]+)/revisions/([^/]+)$`));
   if (skillRevisionDetailMatch && method === "GET") {
     requireOwner(request);
-    const name = decodeSkillRouteValue(skillRevisionDetailMatch[1]!, "name");
-    const revisionId = decodeSkillRouteValue(skillRevisionDetailMatch[2]!, "revision_id");
+    const name = decodeRouteValue(skillRevisionDetailMatch[1]!, "name");
+    const revisionId = decodeRouteValue(skillRevisionDetailMatch[2]!, "revision_id");
     if (!isUlid(revisionId)) throw new ApiError(400, "validation_error", "revision_id must be a ULID.", { field: "revision_id" });
     const data = skills().getSkillRevision(name, revisionId);
     sendJson(response, 200, { request_id: requestIdValue, data });
@@ -3452,7 +3526,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   const skillRevisionListMatch = pathname.match(new RegExp(`^${API_PREFIX}/skills/([^/]+)/revisions$`));
   if (skillRevisionListMatch && method === "GET") {
     requireOwner(request);
-    const name = decodeSkillRouteValue(skillRevisionListMatch[1]!, "name");
+    const name = decodeRouteValue(skillRevisionListMatch[1]!, "name");
     const data = skills().listSkillRevisions(name);
     sendJson(response, 200, { request_id: requestIdValue, data });
     return;
@@ -3461,7 +3535,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   const skillRestoreMatch = pathname.match(new RegExp(`^${API_PREFIX}/skills/([^/]+)/restore$`));
   if (skillRestoreMatch && method === "POST") {
     requireOwner(request);
-    const name = decodeSkillRouteValue(skillRestoreMatch[1]!, "name");
+    const name = decodeRouteValue(skillRestoreMatch[1]!, "name");
     const command = commandEnvelope(await readRequestBody(request));
     exactKeys(command.payload, ["revision_id"], "Restore skill payload");
     const revisionId = stringField(command.payload.revision_id, "revision_id", 1, 128);
@@ -3477,7 +3551,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   const skillDetailMatch = pathname.match(new RegExp(`^${API_PREFIX}/skills/([^/]+)$`));
   if (skillDetailMatch && method === "GET") {
     requireOwner(request);
-    const name = decodeSkillRouteValue(skillDetailMatch[1]!, "name");
+    const name = decodeRouteValue(skillDetailMatch[1]!, "name");
     const data = await skills().getSkill(name);
     sendJson(response, 200, { request_id: requestIdValue, data });
     return;
@@ -3485,7 +3559,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
 
   if (skillDetailMatch && method === "PATCH") {
     requireOwner(request);
-    const name = decodeSkillRouteValue(skillDetailMatch[1]!, "name");
+    const name = decodeRouteValue(skillDetailMatch[1]!, "name");
     const command = commandEnvelope(await readRequestBody(request));
     const keys = Object.keys(command.payload);
     const extra = keys.filter((key) => key !== "state" && key !== "scope");
@@ -3603,7 +3677,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   const ruleProposalActionMatch = pathname.match(new RegExp(`^${API_PREFIX}/rule-proposals/([^/]+)/(approve|reject)$`));
   if (ruleProposalActionMatch && method === "POST") {
     requireRuleProposalOwner(request);
-    const proposalId = decodeSkillRouteValue(ruleProposalActionMatch[1]!, "proposal_id");
+    const proposalId = decodeRouteValue(ruleProposalActionMatch[1]!, "proposal_id");
     if (!isUlid(proposalId)) throw new ApiError(400, "validation_error", "proposal_id must be a ULID.", { field: "proposal_id" });
     const command = commandEnvelope(await readRequestBody(request));
     validateEmptyPayload(command.payload);
@@ -3634,7 +3708,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   const learningJobRetryMatch = pathname.match(new RegExp(`^${API_PREFIX}/learning-jobs/([^/]+)/retry$`));
   if (learningJobRetryMatch && method === "POST") {
     requireOwner(request);
-    const jobId = decodeSkillRouteValue(learningJobRetryMatch[1]!, "job_id");
+    const jobId = decodeRouteValue(learningJobRetryMatch[1]!, "job_id");
     if (!isUlid(jobId)) throw new ApiError(400, "validation_error", "job_id must be a ULID.", { field: "job_id" });
     await featureCore.retryLearningJob(jobId);
     sendJson(response, 200, { request_id: requestIdValue, data: { job_id: jobId } });
@@ -3644,7 +3718,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   const skillProposalActionMatch = pathname.match(new RegExp(`^${API_PREFIX}/skill-proposals/([^/]+)/(approve|reject)$`));
   if (skillProposalActionMatch && method === "POST") {
     requireOwner(request);
-    const proposalId = decodeSkillRouteValue(skillProposalActionMatch[1]!, "proposal_id");
+    const proposalId = decodeRouteValue(skillProposalActionMatch[1]!, "proposal_id");
     const command = commandEnvelope(await readRequestBody(request));
     validateEmptyPayload(command.payload);
     const action = skillProposalActionMatch[2];
@@ -3870,7 +3944,10 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     if (p.effort !== undefined && p.effort !== null && !(CHILD_RUN_EFFORTS as readonly string[]).includes(p.effort as string)) {
       throw new ApiError(400, "validation_error", "effortはlow、medium、high、xhigh、maxのいずれかを指定してください。");
     }
-    const provider = (({ anthropic: "claude", openai: "codex" }) as Record<string, ChildRunProvider>)[p.provider] ?? p.provider as ChildRunProvider;
+    const provider = (Object.hasOwn(HARNESS_PROVIDER_ALIASES, p.provider) ? HARNESS_PROVIDER_ALIASES[p.provider] : p.provider) as ChildRunProvider;
+    if (!(CHILD_RUN_PROVIDERS as readonly string[]).includes(provider)) {
+      throw new ApiError(400, "validation_error", `providerは${CHILD_RUN_PROVIDERS.join("、")}のいずれかで指定してください。`);
+    }
     const model = p.model;
     const timeoutMs = p.timeout_ms as number;
     const result = await runCommand(context, pathname, cmd, 200, async () => {
@@ -4039,7 +4116,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   const providerPauseResumeMatch = pathname.match(new RegExp(`^${API_PREFIX}/providers/pauses/([^/]+)/resume$`));
   if (providerPauseResumeMatch && method === "POST") {
     requireOwner(request);
-    const provider = decodeURIComponent(providerPauseResumeMatch[1]);
+    const provider = decodeRouteValue(providerPauseResumeMatch[1], "provider");
     const pause = await context.core.resumeProviderPause(provider);
     sendJson(response, 200, { request_id: requestIdValue, data: { pause } });
     return;
@@ -4056,7 +4133,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
 
   if (providerIdMatch && method === "GET") {
     requireOwner(request);
-    const providerId = decodeURIComponent(providerIdMatch[1]);
+    const providerId = decodeRouteValue(providerIdMatch[1], "provider");
     const provider = await context.core.getProvider(providerId);
     if (!provider) {
       throw new ApiError(404, "not_found", `指定されたプロバイダーが見つかりません: ${providerId}`);
@@ -4090,7 +4167,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
 
   if (providerIdMatch && method === "PUT") {
     requireOwner(request);
-    const providerId = decodeURIComponent(providerIdMatch[1]);
+    const providerId = decodeRouteValue(providerIdMatch[1], "provider");
     const body = await readRequestBody(request);
     const cmd = commandEnvelope(body);
     const p = cmd.payload;
@@ -4109,7 +4186,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
 
   if (providerIdMatch && method === "DELETE") {
     requireOwner(request);
-    const providerId = decodeURIComponent(providerIdMatch[1]);
+    const providerId = decodeRouteValue(providerIdMatch[1], "provider");
     const body = await readRequestBody(request);
     const cmd = commandEnvelope(body);
     const result = await runCommand(context, pathname, cmd, 200, async () => {
@@ -4132,7 +4209,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   const providerModelsMatch = pathname.match(new RegExp(`^${API_PREFIX}/settings/provider-models/([^/]+)$`));
   if (providerModelsMatch && method === "PUT") {
     requireOwner(request);
-    const providerId = decodeURIComponent(providerModelsMatch[1]);
+    const providerId = decodeRouteValue(providerModelsMatch[1], "provider");
     const body = await readRequestBody(request);
     const cmd = commandEnvelope(body);
     if (!Array.isArray(cmd.payload.models) || !cmd.payload.models.every((m: unknown): m is string => typeof m === "string")) {
@@ -4149,7 +4226,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     const providerTestMatch = pathname.match(new RegExp(`^${API_PREFIX}/settings/providers/([^/]+)/test$`));
   if (providerTestMatch && method === "POST") {
     requireOwner(request);
-    const providerId = decodeURIComponent(providerTestMatch[1]);
+    const providerId = decodeRouteValue(providerTestMatch[1], "provider");
     const result = await context.core.testProvider(providerId);
     sendJson(response, 200, { request_id: requestIdValue, data: result });
     return;
@@ -4700,14 +4777,19 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     if (command.expected_version !== 0) {
       throw new ApiError(400, "validation_error", "expected_versionは0で指定してください。");
     }
-    exactKeys(command.payload, ["event", "agent_id"], "SubagentHookEvent payload", ["agent_type"]);
+    exactKeys(command.payload, ["event", "agent_id"], "SubagentHookEvent payload", ["agent_type", "requests"]);
     const event = command.payload.event;
-    if (event !== "start" && event !== "stop") {
-      throw new ApiError(400, "validation_error", "eventはstartまたはstopで指定してください。");
+    if (event !== "start" && event !== "stop" && event !== "usage") {
+      throw new ApiError(400, "validation_error", "eventはstart・stop・usageのいずれかで指定してください。");
     }
     const agentId = stringField(command.payload.agent_id, "agent_id", 1, 200);
     const agentType = command.payload.agent_type === undefined ? null : stringField(command.payload.agent_type, "agent_type", 1, 200);
-    const result = await requireHookSubagentApi(context.core).recordHookSubagent(agent, { event, agentId, agentType });
+    if (event !== "usage" && command.payload.requests !== undefined) {
+      throw new ApiError(400, "validation_error", "requestsはeventがusageのときだけ指定できます。");
+    }
+    const result = await requireHookSubagentApi(context.core).recordHookSubagent(agent, event === "usage"
+      ? { event, agentId, agentType, requests: hookRequestUsages(command.payload.requests) }
+      : { event, agentId, agentType });
     sendJson(response, 202, { request_id: command.request_id, data: { accepted: result.agent_run_id !== null } });
     return;
   }
@@ -4787,7 +4869,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   const kbEntryMatch = pathname.match(new RegExp(`^${API_PREFIX}/knowledge/(.+)$`));
   if (kbEntryMatch && method === "GET") {
     requireOwner(request);
-    const entryPath = decodeURIComponent(kbEntryMatch[1]);
+    const entryPath = decodeRouteValue(kbEntryMatch[1], "knowledge path");
     try {
       const entry = await withKnowledgeStorageAccess(context.core, "read", () => context.knowledge.get(entryPath));
       sendJson(response, 200, { request_id: requestIdValue, data: entry });
@@ -4831,7 +4913,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
 
   if (kbEntryMatch && method === "PUT") {
     requireOwner(request);
-    const entryPath = decodeURIComponent(kbEntryMatch[1]);
+    const entryPath = decodeRouteValue(kbEntryMatch[1], "knowledge path");
     if (entryPath.startsWith("policies/")) {
       throw new ApiError(400, "validation_error", "policiesは移行済みの読み取り専用のため、書き込みできません。");
     }
@@ -4839,10 +4921,12 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     if (!isObject(body)) throw new ApiError(400, "validation_error", "リクエストボディが不正です。");
     const update: { tags?: string[]; body?: string } = {};
     if (body.tags !== undefined) {
-      update.tags = Array.isArray(body.tags) ? (body.tags as string[]).filter((t) => typeof t === "string") : [];
+      if (!Array.isArray(body.tags)) throw new ApiError(400, "validation_error", "tagsは文字列の配列で指定してください。");
+      update.tags = (body.tags as unknown[]).filter((t): t is string => typeof t === "string");
     }
     if (body.body !== undefined) {
-      update.body = typeof body.body === "string" ? body.body : "";
+      if (typeof body.body !== "string") throw new ApiError(400, "validation_error", "bodyは文字列で指定してください。");
+      update.body = body.body;
     }
     try {
       const entry = await withKnowledgeStorageAccess(context.core, "write", () => context.knowledge.update(entryPath, update));
@@ -4859,7 +4943,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
 
   if (kbEntryMatch && method === "DELETE") {
     requireOwner(request);
-    const entryPath = decodeURIComponent(kbEntryMatch[1]);
+    const entryPath = decodeRouteValue(kbEntryMatch[1], "knowledge path");
     if (entryPath.startsWith("policies/")) {
       throw new ApiError(400, "validation_error", "policiesは移行済みの読み取り専用のため、書き込みできません。");
     }

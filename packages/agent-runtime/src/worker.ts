@@ -13,7 +13,7 @@ import {
   type RolePromptSlots,
   type RoleSchema,
 } from "./role-contract";
-import { DESIGN_BLOCKED_SCHEMA, DEFAULT_OWNER_LANGUAGE, EXTERNAL_BLOCKER_SCHEMA, MINIMAL_CODE_RULES, UNVERIFIABLE_STATUS, renderWorkspaceToolsNote, WORKER_OWN_SUBAGENT_RULES, WORKER_SUBAGENT_RULES, type OwnerLanguage } from "@owl/shared";
+import { DESIGN_BLOCKED_SCHEMA, DEFAULT_OWNER_LANGUAGE, EXTERNAL_BLOCKER_SCHEMA, MINIMAL_CODE_RULES, UNVERIFIABLE_STATUS, renderWorkspaceToolsNote, workerOwnSubagentRules, workerSubagentRules, type OwnerLanguage, type ResearcherPromptRef } from "@owl/shared";
 import {
   type ProviderResponse,
   type ReportEnvelope,
@@ -335,11 +335,25 @@ const FINALIZATION_INSTRUCTIONS: readonly string[] = [
   "If you cannot meet an acceptance criterion because of a problem that already exists on the base branch (pre_existing) or a gap in the Project environment that this Task must not set up (environment) — for example Attempt.verification_failure.error_key is code_unchecked because no checker or test runner is configured for the files you changed — do not work around it: report result \"partial\" with external_blocker {kind, summary, evidence, suggested_fix}, and mark that criterion failed. evidence must show, from what you ran or read, that the problem does not come from this Task's changes. Otherwise external_blocker is null. A failure that does not block any criterion stays in remaining_issues as before.",
 ];
 
+/**
+ * The test-placement rule plus the check to run before reporting. Core picks the commands (Project setting, else
+ * test detection); without any, the Worker follows the project's own documentation instead of reporting blocked.
+ */
+function workerTestsInstruction(commands: readonly string[] | undefined): string {
+  const placement = "Tests: add them to the existing feature test file, fix an existing test that checks the same thing, and create a new test file only for a new feature.";
+  if (commands && commands.length > 0) {
+    const fileNote = commands.some((command) => command.includes("{file}")) ? " (`{file}` stands for one test file you changed)" : "";
+    return `${placement} Before you report, run these checks yourself${fileNote} and fix any violation on the spot: ${commands.map((command) => `\`${command}\``).join(", ")}.`;
+  }
+  return `${placement} No check command is set or detected for this project: before you report, run the checks the project's own documentation describes (README, AGENTS.md, CLAUDE.md and similar). If it describes none, the check is not applicable: say so in verification.method and do not report blocked or partial for it.`;
+}
+
 export function buildWorkerPrompt(
   request: WorkerRequest,
   language: OwnerLanguage = DEFAULT_OWNER_LANGUAGE,
   processSkills: readonly string[] | null = null,
   hybridMode = false,
+  researcher: ResearcherPromptRef | null = null,
 ): string {
   return renderRolePrompt({
     role: "You are the Owl Worker. Perform the assigned task.",
@@ -348,15 +362,15 @@ export function buildWorkerPrompt(
       "Always complete the required delegation field: explain how work was split, list each dispatched child's instruction and provider/model, and name each part kept with its reason. If no work was dispatched, explain why and record what you kept. Work you split among your own subagents (not Owl dispatch) goes in decomposition; delegated holds only child_ids returned by dispatch, never your own subagents.",
       ...(hybridMode ? [
         "Hybrid Mode: before starting, you must consider whether the Task can run in parallel: break it into a few bounded parts and identify which parts are independent of each other. Examples of independent parts: changes in different areas or packages, fixes to unrelated tests, splitting up an investigation.",
-        "Hand independent parts to Owl dispatch children (not provider-native subagents) to run in parallel as much as possible: use Owl's dispatch tool to start all ready independent parts at once. Do not split only when the Task is small, or when the parts depend so strongly on each other that splitting would make them disagree. There is no numeric threshold; the judgment is yours, but the consideration is mandatory. Give each child a self-contained instruction and select its provider and model explicitly. Use wait on every dispatched run and receive all results before moving on.",
+        `Hand independent parts to Owl dispatch children (not provider-native subagents${researcher ? "; only Owl's read-only researcher is allowed, for research" : ""}) to run in parallel as much as possible: use Owl's dispatch tool to start all ready independent parts at once. Do not split only when the Task is small, or when the parts depend so strongly on each other that splitting would make them disagree. There is no numeric threshold; the judgment is yours, but the consideration is mandatory. Give each child a self-contained instruction and select its provider and model explicitly. Use wait on every dispatched run and receive all results${researcher ? ", including every researcher result," : ""} before moving on.`,
         "Inspect every child's result against its instruction and the whole Task, integrate the work, and check it together. If something is incomplete, dispatch another focused child or fix it yourself. Do not finish until the full Task is complete and coherent.",
         "A child's success report is evidence, not proof of the Task's correctness: read the integrated final workspace yourself and verify every acceptance criterion. Wait until every dispatched child has finished; never return success while a child is still running or its result is missing.",
         "Hybrid Task Finalization, after the children return: (1) confirm every part you planned has a dispatched child (by child_id) or is listed as retained, and that no part is missing; (2) confirm every child finished and returned a result, and treat a failed, partial, or missing child result as unfinished work; (3) compare the files each child reported with the files actually changed in the final workspace, and investigate any difference; (4) check the interfaces between the children's work (names, types, call sites, data formats) match; (5) resolve conflicts and gaps between children yourself or with a focused child; (6) run the Task-level checks that cover each acceptance criterion against the integrated workspace; (7) when you delegated children or used your own subagents, run an integration check that exercises the combined result (build, typecheck, tests across the parts) and record it in verification.integration_check with its status and evidence, and with required true only when you dispatched children through Owl; when you neither dispatched children through Owl nor used your own subagents, integration_check is not needed; (8) fix any defect found and re-verify the whole Task; (9) never count a child's success report as the Task's correctness; (10) list unverified items and failed checks in remaining_issues; (11) keep secrets and large logs out of the evidence; (12) report success only when all of the above hold, otherwise report partial or failed with the reason.",
         "In the required delegation field, explain how you divided the Task, record each dispatch-returned child_id with a brief summary of the work assigned to that child and its provider and model, and list every part you kept with the reason. If you dispatched nobody, say why the Task stayed together, state whether the reason is that it was small or that its parts depend strongly on each other, and record the work you retained.",
       ] : []),
-      ...(hybridMode ? WORKER_SUBAGENT_RULES : WORKER_OWN_SUBAGENT_RULES),
+      ...(hybridMode ? workerSubagentRules(researcher) : workerOwnSubagentRules(researcher)),
       ...MINIMAL_CODE_RULES,
-      "Tests: add them to the existing feature test file, fix an existing test that checks the same thing, and create a new test file only for a new feature. Before you report, run `pnpm test:layout` yourself and fix any violation on the spot.",
+      workerTestsInstruction(request.context?.report_check_commands),
       WORKER_NECESSITY_INSTRUCTION,
       ...WORKER_CONTEXT_INSTRUCTIONS,
       ...FINALIZATION_INSTRUCTIONS,

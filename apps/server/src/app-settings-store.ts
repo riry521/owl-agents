@@ -37,6 +37,7 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string[]> = {
     "claude-sonnet-5-5",
     "claude-opus-5",
     "claude-haiku-4-5",
+    "claude-haiku-5-5",
   ],
   openai: [
     "gpt-6-astra",
@@ -451,8 +452,8 @@ export class AppSettingsStore {
   private mergeProviderModels(stored: Record<string, string[]>): Record<string, string[]> {
     const merged: Record<string, string[]> = { ...DEFAULT_PROVIDER_MODELS };
     for (const [id, models] of Object.entries(stored)) {
-      const canonicalId = PROVIDER_ID_MIGRATION[id] ?? id;
-      merged[canonicalId] = canonicalId in DEFAULT_PROVIDER_MODELS
+      const canonicalId = Object.hasOwn(PROVIDER_ID_MIGRATION, id) ? PROVIDER_ID_MIGRATION[id] : id;
+      merged[canonicalId] = Object.hasOwn(DEFAULT_PROVIDER_MODELS, canonicalId)
         ? [...new Set([...DEFAULT_PROVIDER_MODELS[canonicalId], ...models])]
         : models;
     }

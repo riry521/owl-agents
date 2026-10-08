@@ -130,6 +130,20 @@ test("commitExcludePathspecs: excludes only paths not already tracked in HEAD", 
   assert.deepEqual(pathspecs, [":(exclude,literal)new/file.txt", ":(exclude,literal)newdir"]);
 });
 
+test("runCommand keeps a multi-byte character intact when it arrives split across output chunks", async () => {
+  // The first write ends in the middle of a 3-byte character; the rest follows in a later chunk on both streams.
+  const script = [
+    "const text = Buffer.from('ファイル名.txt\\0');",
+    "process.stdout.write(text.subarray(0, 2));",
+    "process.stderr.write(text.subarray(0, 4));",
+    "setTimeout(() => { process.stdout.write(text.subarray(2)); process.stderr.write(text.subarray(4)); }, 200);",
+  ].join("\n");
+  const result = await runCommand(process.execPath, ["-e", script], { cwd: tmpdir(), env: process.env, timeout_ms: 10_000 });
+  assert.equal(result.exit_code, 0);
+  assert.equal(result.stdout, "ファイル名.txt\0");
+  assert.equal(result.stderr, "ファイル名.txt\0");
+});
+
 // ---------------------------------------------------------------------------
 // probeStdioServer
 // ---------------------------------------------------------------------------

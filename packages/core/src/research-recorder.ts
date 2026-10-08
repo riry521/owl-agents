@@ -257,11 +257,14 @@ export class ResearchRecorder {
     }
   }
 
-  /** Keeps a valid existing `id`; a note written before the clipping format gets one now. */
+  /**
+   * Keeps a valid existing `id`; a note written before the clipping format gets one now.
+   * No tags (no tagger, or it failed or returned none) keeps the note's existing tags.
+   */
   private async update(relPath: string, prepared: PreparedResearch, body: string, tags: string[]): Promise<void> {
     const hasId = await this.options.knowledge.frontmatterId(relPath);
     const metadata = { ...this.metadata(prepared), ...(hasId ? {} : { id: generateUlid() }) };
-    await this.options.knowledge.update(relPath, { tags, body, metadata });
+    await this.options.knowledge.update(relPath, { ...(tags.length > 0 ? { tags } : {}), body, metadata });
   }
 
   private metadata(prepared: PreparedResearch, firstResearchedAt?: string): Record<string, string> {

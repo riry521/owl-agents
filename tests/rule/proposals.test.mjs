@@ -230,6 +230,21 @@ test("approval failure keeps approval pending and increments attempts with a las
   assert.match(row.last_error, /rules are broken/u);
 });
 
+test("approval whose rule was already written by an interrupted attempt completes without writing it again", async (t) => {
+  let writes = 0;
+  const f = await setup(t, { ruleWriter: { apply: async () => { writes += 1; throw Object.assign(new Error("duplicate"), { code: "duplicate_rule_id" }); } } });
+  const proposal = await f.proposals.create(input("policies/interrupted.md#1"));
+  const ruleId = `owl-${proposal.proposal_id.toLowerCase()}`;
+  const rule = { id: ruleId, level: "system", kind: "instruction", text: "Validate the release state before deployment." };
+  f.ruleStore.rules.files = [{ path: "rules/system/owl-approved.yaml", level: "system", rules: [rule] }];
+
+  const result = await f.proposals.approve(proposal.proposal_id);
+
+  assert.equal(writes, 0);
+  assert.deepEqual(result, { proposal_id: proposal.proposal_id, status: "applied", applied_rule_id: ruleId, applied_path: "rules/system/owl-approved.yaml" });
+  assert.equal(f.db.get("SELECT status FROM rule_proposals WHERE id=?", proposal.proposal_id).status, "applied");
+});
+
 test("only awaiting proposals can be approved or rejected, and rejection suppresses the rule key", async (t) => {
   const promotions = [];
   const f = await setup(t, {
@@ -287,6 +302,20 @@ test("curate lists awaiting proposals and rule overlaps without changing rules o
   assert.equal(verdicts["Always write tests for new code paths."], "approve_candidate");
   assert.notEqual(verdicts["Never push directly to the main branch."], "approve_candidate");
   assert.equal(report.rule_findings.some((x) => x.kind === "possible_conflict" && x.rules[0].path === "rules/system/a.yaml"), true);
+});
+
+test("curate compares role proposals and role rules with absolute rules, which apply to every role", async (t) => {
+  const promptRules = [
+    { id: "a1", level: "absolute", kind: "instruction", text: "Never force push to main." },
+    { id: "w1", level: "role", role: "worker", kind: "instruction", text: "Force push to main." },
+  ];
+  const f = await setup(t, { promptRules });
+  await f.proposals.create(input("policies/abs.md#1", { level: "role", role: "worker", text: "Never force push to main." }));
+
+  const report = f.proposals.curate();
+
+  assert.equal(report.proposals[0].verdict, "duplicate_of_rule");
+  assert.equal(report.rule_findings.some((x) => x.kind === "possible_conflict" && x.rules.map((r) => r.id).sort().join() === "a1,w1"), true);
 });
 
 test("curate finds conflicts across system and role rules and leaves real rule files byte-identical", async (t) => {

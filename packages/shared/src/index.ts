@@ -3,7 +3,8 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { AdvisorSuggestedAction } from "./advisor-response.js";
 import type { OwnerLanguage } from "./owner-language.js";
 import type { WebResearchCapture } from "./web-research.js";
-import type { ChildRunFailureKind } from "./child-runs.js";
+import type { ChildRunFailureKind, ExecutorRelayConfig, ResearchSubagentSettings } from "./child-runs.js";
+import type { HandoffMemo } from "./token-relay.js";
 import type { AgentFailureClass, RateLimitInfo } from "./rate-limit.js";
 import type { StoredAcceptanceCriterion } from "./acceptance-criteria.js";
 import type { TaskNecessity } from "./task-necessity.js";
@@ -69,7 +70,8 @@ export {
   type TokenUsageTotals,
   type TokenUsageWorkTotals,
 } from "./token-usage-report.js";
-export { MINIMAL_CODE_RULES, WORKER_OWN_SUBAGENT_RULES, WORKER_SUBAGENT_RULES, WORKING_STYLE_RULES } from "./agent-rules.js";
+export { MINIMAL_CODE_RULES, WORKER_OWN_SUBAGENT_RULES, WORKER_SUBAGENT_RULES, WORKING_STYLE_RULES, workerOwnSubagentRules, workerSubagentRules, type ResearcherPromptRef } from "./agent-rules.js";
+export * from "./research-subagent.js";
 export { PROCESS_SKILLS_INSTALL_COMMANDS, PROCESS_SKILLS_PROMPT_FILES, PROCESS_SKILLS_SETTINGS_KEY, renderProcessSkills, type ProcessSkillsHarness, type ProcessSkillsInstallCommand, type ProcessSkillsPackForPrompt, type ProcessSkillsRole, type ProcessSkillsSettings } from "./process-skills.js";
 export { designDocumentPath, taskReportPath } from "./design-documents.js";
 export {
@@ -128,7 +130,9 @@ export { renderWorkspaceToolsNote } from "./workspace-tools-note.js";
 export { DEFAULT_ROLE_MODELS } from "./default-role-models.js";
 export {
   builtinProviderHarness,
+  CLAUDE_HAIKU_5_5_MODEL,
   CODEX_BUILTIN_MODELS,
+  CODEX_GPT_6_LUNA_MODEL,
   DEFAULT_HARNESS_MODELS,
   parseCodexModelsCache,
   type CodexCatalogModel,
@@ -315,8 +319,8 @@ export interface ExecutorTaskContext {
   readonly knowledge?: string | null;
 }
 export interface ExecutorTask { readonly subtask_id: string; /** Ids of the Task this subtask belongs to; they become OWL_WORK_ID, OWL_TASK_ID and OWL_PROJECT_ID. */ readonly work_id?: string; readonly task_id?: string; readonly project_id?: string; readonly instruction: string; readonly workspace_dir: string; readonly task: ExecutorTaskContext; /** Relative paths this Executor may edit; omitted means whole-workspace scope. */ readonly write_paths?: readonly string[]; readonly process_skills_dir?: string; /** Where process_skills_dir was detected; decides whether the Executor's own harness can invoke a skill natively. */ readonly process_skills_source?: "setting" | "claude" | "codex"; /** The Task's git worktree, when workspace_dir is one; null/omitted when it is not (e.g. the Owl workspace fallback). */ readonly worktree?: string | null; }
-export interface ExecutorResult { readonly subtask_id: string; readonly success: boolean; readonly output: string; readonly exit_code: number; readonly duration_ms: number; /** Set when the process failed; a missing kind on a failure means it never started. */ readonly failure_kind?: ChildRunFailureKind; readonly rate_limit?: { readonly resets_at: string | null }; }
-export interface ExecutorConfig { readonly provider: "claude" | "codex" | string; readonly model: string; readonly effort?: string; readonly timeout_ms: number; }
+export interface ExecutorResult { readonly subtask_id: string; readonly success: boolean; readonly output: string; readonly exit_code: number; readonly duration_ms: number; /** Set when the process failed; a missing kind on a failure means it never started. */ readonly failure_kind?: ChildRunFailureKind; readonly rate_limit?: { readonly resets_at: string | null }; /** Set when a relay-watched child handed off or was stopped at the prompt-size limit. */ readonly relay?: { readonly reason: "handoff" | "kill"; readonly memo: HandoffMemo | null; readonly peak_prompt_tokens: number }; }
+export interface ExecutorConfig { readonly provider: "claude" | "codex" | string; readonly model: string; readonly effort?: string; readonly timeout_ms: number; /** Prompt-size limits; only for Claude children Owl watches. */ readonly relay?: ExecutorRelayConfig; }
 export interface ProviderExecutionRequest {
   readonly adapter: string;
   readonly role: "manager" | "worker" | "reviewer" | "advisor" | "curator" | "librarian";
@@ -330,6 +334,8 @@ export interface ProviderExecutionRequest {
   readonly env: Readonly<Record<string, string>>;
   /** Optional provider-enforced final-response schema for structured tasks. */
   readonly structured_output_schema?: Readonly<Record<string, unknown>>;
+  /** Worker launches only: defines Owl's read-only researcher subagent for this run. */
+  readonly research_subagent?: ResearchSubagentSettings;
   readonly signal?: AbortSignal;
   readonly on_spawn?: (pid: number) => void;
 }
@@ -602,6 +608,7 @@ export function isCanonicalEventType(value: string): value is CanonicalEventType
 }
 
 export { ClaudeStreamReader } from "./agent-stream.js";
+export * from "./token-relay.js";
 export { PROCESS_GROUP_REAP_GRACE_MS, isProcessGroupAlive, reapProcessGroup, type ReapProcessGroupOptions } from "./process-group.js";
 export { OWL_INSTANCE_ID_ENV, OWL_MARKER_PATTERN, resolveInstanceId } from "./instance-id.js";
 export * from "./child-runs.js";

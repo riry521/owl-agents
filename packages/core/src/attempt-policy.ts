@@ -4,6 +4,8 @@ import { EXTERNAL_BLOCKER_EVENT } from "../../shared/dist/external-blocker.js";
 import type { DesignBlockedReport } from "../../shared/dist/design-blocked.js";
 import { DEFAULT_PROGRESS_GUARD_SETTINGS } from "../../shared/dist/progress-guard-settings.js";
 import { DEFAULT_REVIEW_LIMIT_SETTINGS, type ReviewLimitSettings } from "../../shared/dist/review-limit-settings.js";
+import { DEFAULT_REVIEW_FOCUS_SETTINGS, type ReviewFocusSettings } from "../../shared/dist/review-focus-settings.js";
+import { repeatedSpots, type ReviewSpot } from "./review-focus";
 import type { ReductionResult, TaskRow, TaskState } from "./types";
 
 /** agent-runtime が provider 失敗に付ける error_key の接頭辞（provider-error.ts, runner.ts の "provider_failed:"）。Core 側で参照する唯一の場所 */
@@ -18,10 +20,10 @@ export type AttemptAction = "retry" | "fix" | "review" | "replan" | "wait" | "ow
 /** 判断の理由。閉じた集合。 */
 export type AttemptReason =
   | "transient_failure" | "transient_budget_exhausted" | "rate_limited"
-  | "deterministic_failure" | "deterministic_threshold" | "retry_not_allowed"
+  | "deterministic_failure" | "deterministic_threshold" | "retry_not_allowed" | "resumable_partial"
   | "crash" | "crash_threshold" | "reviewer_crash" | "reviewer_crash_threshold" | "reviewer_output_invalid"
   | "verification_failed" | "verification_exhausted"
-  | "review_fix_required" | "review_replan_required" | "review_budget_reached" | "review_budget_exceeded"
+  | "review_fix_required" | "review_same_spot_repeated" | "review_replan_required" | "review_budget_reached" | "review_budget_exceeded"
   | "lineage_budget_exhausted" | "base_sync_lineage_budget_exhausted"
   | "design_escalated_to_lead" | "lead_rejections_exhausted" | "design_blocked"
   | "worker_replan_requested" | "worker_question" | "acceptance_defect"
@@ -69,7 +71,7 @@ export type AttemptTaskSnapshot = Readonly<Pick<TaskRow,
   | "status" | "type" | "worker_generation"
   | "failure_count" | "same_error_count" | "last_error_key" | "last_error_generation"
   | "reviewer_failure_count" | "review_round" | "lead_designer_start_round" | "design_escalated"
-  | "total_review_attempts" | "base_sync_only" | "base_sync_review_attempts" | "lead_review_rejections"
+  | "total_review_attempts" | "review_attempts_refunded" | "base_sync_only" | "base_sync_review_attempts" | "lead_review_rejections"
   | "design_stop_json"
 >>;
 
@@ -95,6 +97,7 @@ export interface AttemptPolicyConfig {
   readonly deterministicFailureLimit: number;
   readonly reviewerFailureLimit: number;
   readonly reviewLimits: ReviewLimitSettings;
+  readonly reviewFocus: ReviewFocusSettings;
   /** null なら row 18d と 18e を飛ばす。 */
   readonly lineageLimits: AttemptLineageLimits | null;
   readonly noProgressLimit: number;
@@ -107,6 +110,7 @@ export const DEFAULT_ATTEMPT_POLICY_CONFIG: AttemptPolicyConfig = {
   deterministicFailureLimit: DETERMINISTIC_FAILURE_LIMIT,
   reviewerFailureLimit: REVIEWER_FAILURE_LIMIT,
   reviewLimits: DEFAULT_REVIEW_LIMIT_SETTINGS,
+  reviewFocus: DEFAULT_REVIEW_FOCUS_SETTINGS,
   lineageLimits: null,
   noProgressLimit: DEFAULT_PROGRESS_GUARD_SETTINGS.no_progress_limit,
   externalBlockerLimit: DEFAULT_PROGRESS_GUARD_SETTINGS.external_blocker_limit,
@@ -124,9 +128,25 @@ export type IntegrationMerge =
   | { readonly outcome: "merged"; readonly worktreeRetained: boolean }
   | { readonly outcome: "commit_failure" | "conflict"; readonly taskBranch: string; readonly workBranch: string };
 
+/** The fields of a partial Worker report that hand the Task to someone other than the next Worker run. */
+export interface PartialReportObservation {
+  readonly pendingProcess: boolean;
+  readonly externalBlocker: boolean;
+  readonly unverifiable: boolean;
+  readonly needsReplanning: boolean;
+}
+
 export type AttemptTaskObservation =
   | { readonly kind: "transient_failure"; readonly task: AttemptTaskSnapshot; readonly retryNo: number; readonly nextAttemptAt: string | null }
-  | { readonly kind: "deterministic_failure"; readonly task: AttemptTaskSnapshot; readonly errorKey: string; readonly retryAllowed: boolean; readonly escalatedFromTransient: boolean }
+  | {
+      readonly kind: "deterministic_failure";
+      readonly task: AttemptTaskSnapshot;
+      readonly errorKey: string;
+      readonly retryAllowed: boolean;
+      readonly escalatedFromTransient: boolean;
+      /** What the Worker's report asks for when it reported result partial; absent or null for any other result. */
+      readonly partialReport?: PartialReportObservation | null;
+    }
   | { readonly kind: "worker_crash"; readonly task: AttemptTaskSnapshot; readonly errorKey: string }
   | { readonly kind: "reviewer_crash"; readonly task: AttemptTaskSnapshot }
   | { readonly kind: "verification_failed"; readonly task: AttemptTaskSnapshot }
@@ -136,7 +156,12 @@ export type AttemptTaskObservation =
       readonly verdict: "fix_required" | "replan_required";
       /** lineage_reset_json.review_attempts（Owner の最後の回答時点の total_review_attempts）。 */
       readonly reviewAttemptsBase: number | undefined;
+      /** review_attempts_refunded at the Owner's last answer; refunds up to there are already folded into the restart. */
+      readonly refundedBase?: number;
       readonly lineage: AttemptLineageObservation | null;
+      /** This review's findings and those of the fix_required reviews just before it (newest first); absent skips the same-spot check. */
+      readonly findings?: readonly ReviewSpot[];
+      readonly fixHistory?: readonly (readonly ReviewSpot[])[];
     }
   | {
       readonly kind: "design_stop";
@@ -186,6 +211,8 @@ export interface AttemptPolicyDecision extends AttemptDecision {
   readonly reviewBudget?: NonNullable<ReductionResult<TaskRow>["review_budget"]>;
   readonly lineageBudget?: NonNullable<ReductionResult<TaskRow>["lineage_budget"]>;
   readonly designBlock?: NonNullable<ReductionResult<TaskRow>["design_block"]>;
+  /** The findings that kept pointing at the same spot (reason review_same_spot_repeated). */
+  readonly sameSpot?: readonly ReviewSpot[];
 }
 
 export type AttemptTaskEvaluation =
@@ -235,7 +262,7 @@ function decide(
   sideEffects: readonly string[],
   managerTrigger: boolean,
   patch: AttemptRowPatch,
-  extra: Partial<Pick<AttemptPolicyDecision, "designStop" | "reviewBudget" | "lineageBudget" | "designBlock">> = {},
+  extra: Partial<Pick<AttemptPolicyDecision, "designStop" | "reviewBudget" | "lineageBudget" | "designBlock" | "sameSpot">> = {},
 ): AttemptTaskEvaluation {
   const action = attemptAction(to, managerTrigger, reason);
   if (action === null) throw new Error(`Attempt policy produced a non-decision transition to ${to} (${reason}).`);
@@ -258,7 +285,7 @@ function failureBase(task: AttemptTaskSnapshot, errorKey: string, counters: { sa
 function evaluateReviewFailed(o: Extract<AttemptTaskObservation, { kind: "review_failed" }>, c: AttemptPolicyConfig): AttemptTaskEvaluation {
   const task = o.task;
   const totalAttempts = task.total_review_attempts + 1;
-  const attempts = totalAttempts - (o.reviewAttemptsBase ?? 0);
+  const attempts = totalAttempts - (o.reviewAttemptsBase ?? 0) - ((task.review_attempts_refunded ?? 0) - (o.refundedBase ?? 0));
   const limit = c.reviewLimits.total_review_attempts;
   const planRounds = c.reviewLimits.plan_review_rounds;
   const baseSync = task.base_sync_only === 1;
@@ -308,6 +335,13 @@ function evaluateReviewFailed(o: Extract<AttemptTaskObservation, { kind: "review
     return decide(task, "failed", "review_budget_reached", trigger, true, counted, { reviewBudget: { attempts, limit } });
   }
   if (o.verdict === "replan_required") return decide(task, "failed", "review_replan_required", trigger, true, counted);
+  // Why before the fix rounds: a fix aimed at the same spot again is the signal to change approach, whatever rounds are left.
+  // Why not for design: Lead escalation, design_stop and design_blocked already handle repeated findings; an earlier Manager review would pre-empt them.
+  const focus = c.reviewFocus;
+  if (task.type !== "design" && o.findings && o.fixHistory && o.fixHistory.length >= focus.same_spot_threshold - 1) {
+    const sameSpot = repeatedSpots(o.findings, o.fixHistory.slice(0, focus.same_spot_threshold - 1), focus.same_spot_line_distance);
+    if (sameSpot.length > 0) return decide(task, "failed", "review_same_spot_repeated", trigger, true, counted, { sameSpot });
+  }
   const leadStart = task.lead_designer_start_round ?? null;
   if (task.type === "design" && leadStart === null && task.review_round === planRounds - 1) {
     return decide(task, "review_fix_waiting", "design_escalated_to_lead", fix, false, {
@@ -319,6 +353,13 @@ function evaluateReviewFailed(o: Extract<AttemptTaskObservation, { kind: "review
     return decide(task, "review_fix_waiting", "review_fix_required", fix, false, { ...counted, review_round: task.review_round + 1 });
   }
   return decide(task, "failed", "review_fix_required", trigger, true, counted);
+}
+
+/** review_attempts_refunded after a replan: replan_refund more, never past refund_limit and never more than the attempts spent. */
+export function refundedAfterReplan(task: AttemptTaskSnapshot, reviewAttemptsBase: number | undefined, focus: ReviewFocusSettings, refundedBase = 0): number {
+  const refunded = task.review_attempts_refunded ?? 0;
+  const spent = Math.max(0, task.total_review_attempts - (reviewAttemptsBase ?? 0) - (refunded - refundedBase));
+  return refunded + Math.min(focus.replan_refund, Math.max(0, focus.refund_limit - refunded), spent);
 }
 
 function evaluateIntegration(o: Extract<AttemptTaskObservation, { kind: "integration" }>): AttemptTaskEvaluation {
@@ -364,8 +405,18 @@ export function evaluate(observation: AttemptObservation, c: AttemptPolicyConfig
       const o = observation;
       const counters = deterministicCounters(o.task, o.errorKey);
       const base: AttemptRowPatch = { ...failureBase(o.task, o.errorKey, counters), next_attempt_at: null };
-      if (!o.retryAllowed) return decide(o.task, "judgement_waiting", "retry_not_allowed", ["core_decision_required"], false, { ...base, paused_from: null });
-      if (counters.same < c.deterministicSameErrorLimit && counters.total < c.deterministicFailureLimit) {
+      const withinLimits = counters.same < c.deterministicSameErrorLimit && counters.total < c.deterministicFailureLimit;
+      if (!o.retryAllowed) {
+        // Why not keep every non-retryable failure for the Owner: a side-effect tool (Bash) marks almost every partial report
+        // non-retryable, yet a partial that asks nobody for anything only needs another run of the same Task. Other
+        // side-effect failures stay with the Owner so a half-applied external action is not repeated unseen.
+        const p = o.partialReport;
+        if (p && !p.pendingProcess && !p.externalBlocker && !p.unverifiable && !p.needsReplanning && withinLimits) {
+          return decide(o.task, "ready", "resumable_partial", ["deterministic_retry_scheduled"], false, base);
+        }
+        return decide(o.task, "judgement_waiting", "retry_not_allowed", ["core_decision_required"], false, { ...base, paused_from: null });
+      }
+      if (withinLimits) {
         return decide(o.task, "ready", o.escalatedFromTransient ? "transient_budget_exhausted" : "deterministic_failure", ["deterministic_retry_scheduled"], false, base);
       }
       return decide(o.task, "failed", "deterministic_threshold", ["manager_trigger_required"], true, base);

@@ -44,6 +44,15 @@ export interface WriteLaneTransactionResult<StateResult> {
 }
 
 /**
+ * SQLite already ends the transaction itself on some errors (RAISE(ROLLBACK),
+ * SQLITE_FULL, ...). A second ROLLBACK would then throw "no transaction is
+ * active" and replace the error that explains the failure.
+ */
+export function rollbackIfOpen(database: SqliteDatabase, transactionStarted: boolean): void {
+  if (transactionStarted && database.inTransaction) database.exec("ROLLBACK");
+}
+
+/**
  * The only write entry point exposed by the package. Calls are serialized and
  * each state mutation, event append, and outbox insert uses one transaction.
  * The callback receives database primitives only; external I/O is intentionally
@@ -155,9 +164,7 @@ export class WriteLane {
         outboxIds,
       };
     } catch (error) {
-      if (transactionStarted) {
-        this.database.exec("ROLLBACK");
-      }
+      rollbackIfOpen(this.database, transactionStarted);
       throw error;
     }
   }
@@ -172,7 +179,7 @@ export class WriteLane {
       transactionStarted = false;
       return state;
     } catch (error) {
-      if (transactionStarted) this.database.exec("ROLLBACK");
+      rollbackIfOpen(this.database, transactionStarted);
       throw error;
     }
   }

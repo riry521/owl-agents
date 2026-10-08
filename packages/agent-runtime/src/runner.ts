@@ -12,7 +12,7 @@ import {
 } from "./provider-error";
 import { asManagerRequest, buildManagerPrompt, managerOutputSchema, parseManagerPlanWithFeedback } from "./manager";
 import { statSync } from "node:fs";
-import { AgentTimeoutSettingError, readStoredAcceptanceCriteria, DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, PROCESS_SKILLS_PROMPT_FILES, renderProcessSkills, type CuratorRequest, type CuratorRunResult, type ProcessSkillsRole, type PromptObserver, roleSessionContextLimit } from "@owl/shared";
+import { AgentTimeoutSettingError, readStoredAcceptanceCriteria, DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, PROCESS_SKILLS_PROMPT_FILES, renderProcessSkills, parseResearchSubagentSettings, researchSubagentPromptRef, type CuratorRequest, type ResearcherPromptRef, type ResearchSubagentSettings, type CuratorRunResult, type ProcessSkillsRole, type PromptObserver, roleSessionContextLimit } from "@owl/shared";
 import { extractProviderUsage, harnessFailureDetail, isClaudeReportFormatFailure, isRecord, parseSingleJsonObject, unwrapClaudeCliResult, unwrapCodexCliResult } from "./protocol";
 import { extractRoleOutputObject, providerSchema } from "./role-contract";
 import { RoleSessionManager } from "./role-session-manager";
@@ -338,6 +338,7 @@ function requestForProvider(
   cwdOverride?: string,
   envOverrides?: Readonly<Record<string, string>>,
   structuredOutputSchema?: Readonly<Record<string, unknown>>,
+  researchSubagent?: ResearchSubagentSettings,
 ): ProviderExecutionRequest {
   return {
     adapter: adapterOverride ?? options.adapter ?? "claude-cli/v1",
@@ -349,6 +350,7 @@ function requestForProvider(
     workspace_id: workspaceId,
     cwd: cwdOverride ?? options.cwd ?? ".",
     ...(structuredOutputSchema ? { structured_output_schema: structuredOutputSchema } : {}),
+    ...(researchSubagent ? { research_subagent: researchSubagent } : {}),
     env: {
       ...(options.env ?? {}),
       ...(envOverrides ?? {}),
@@ -531,6 +533,7 @@ function coreWorkerRequestAsLocal(input: CoreWorkerRunRequest): WorkerRequest {
     ...(typeof context.knowledge === "string" ? { knowledge: context.knowledge } : {}),
     ...(typeof context.skills === "string" ? { skills: context.skills } : {}),
     ...(Array.isArray(context.check_commands) ? { check_commands: context.check_commands as string[][] } : {}),
+    ...(Array.isArray(context.report_check_commands) ? { report_check_commands: context.report_check_commands.filter((item): item is string => typeof item === "string") } : {}),
     ...(typeof context.worktree === "string" ? { worktree: context.worktree } : {}),
     ...(Array.isArray(context.dependency_reports) ? { dependency_reports: context.dependency_reports as NonNullable<WorkerRequest["context"]>["dependency_reports"] } : {}),
     ...(Array.isArray(context.artifact_paths) ? { artifact_paths: context.artifact_paths as string[] } : {}),
@@ -1044,10 +1047,10 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     hybridMode = false,
   ): Promise<RuntimeAgentRunResult | ReportEnvelope> => {
     const reportSchema = role === "designer" ? DESIGNER_REPORT_SCHEMA : WORKER_REPORT_SCHEMA;
-    const buildPrompt = (request: WorkerRequest, language: OwnerLanguage, processSkills?: readonly string[] | null) =>
+    const buildPrompt = (request: WorkerRequest, language: OwnerLanguage, processSkills?: readonly string[] | null, researcher: ResearcherPromptRef | null = null) =>
       role === "designer"
         ? buildDesignerRolePrompt(request, language, processSkills)
-        : buildWorkerPrompt(request, language, processSkills, hybridMode);
+        : buildWorkerPrompt(request, language, processSkills, hybridMode, researcher);
     if (isCoreWorkerRequest(input)) {
       const request = coreWorkerRequestAsLocal(input);
       const invocationId = input.invocation_id;
@@ -1057,10 +1060,13 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
         const overrides = resolveOverrides(input as unknown as Record<string, unknown>, options);
         adapter = overrides.adapter;
         const processSkills = processSkillsFor(role, input.context, overrides.adapter ?? options.adapter);
+        const researchSettings = role === "worker" ? parseResearchSubagentSettings(input.context.research_subagent) : null;
+        // The prompt and the argv both follow researcher: the Worker is never told to use a role it was not given.
+        const researcher = researchSettings ? researchSubagentPromptRef(isCodexAdapterId(overrides.adapter ?? options.adapter) ? "codex" : "claude") : null;
         const workerRequest = requestForProvider(
           role,
           invocationId,
-          buildPrompt(request, requestLanguage(input), processSkills),
+          buildPrompt(request, requestLanguage(input), processSkills, researcher),
           options,
           input.work_id,
           overrides.model,
@@ -1072,6 +1078,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
             ...(hybridMode ? { [DISPATCH_MCP_ENABLE_ENV]: "1" } : {}),
           },
           providerSchema(reportSchema),
+          researcher && researchSettings ? researchSettings : undefined,
         );
         const resumeSessionId = reportResubmitSession(input.context);
         const first = resumeSessionId

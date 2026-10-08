@@ -1,4 +1,4 @@
-import { access, lstat, realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { join, extname, basename } from "node:path";
 
 export const KNOWN_EXTENSIONS = new Set([
@@ -30,12 +30,8 @@ export async function uniqueName(dir: string, name: string): Promise<string> {
     const candidatePath = join(normalizedDir, candidate);
     if (!candidatePath.startsWith(`${normalizedDir}/`)) throw new Error("Upload path escaped its directory.");
     try {
-      const existing = await lstat(candidatePath);
-      if (existing.isSymbolicLink()) {
-        candidate = `${base}_${counter}${ext}`;
-        counter += 1;
-        continue;
-      }
+      // lstat (not stat) so a dangling symlink also counts as taken.
+      await lstat(candidatePath);
       candidate = `${base}_${counter}${ext}`;
       counter += 1;
     } catch {

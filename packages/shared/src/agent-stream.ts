@@ -10,7 +10,10 @@ export class ClaudeStreamReader {
   private tail = "";
   private result: string | null = null;
   private discarding = false;
-  public constructor(private readonly onProgress: () => void) {}
+  public constructor(
+    private readonly onProgress: () => void,
+    private readonly hooks: { onAssistant?(event: Record<string, unknown>): void } = {},
+  ) {}
   public push(chunk: string | Buffer): void {
     let text = Buffer.isBuffer(chunk) ? this.decoder.write(chunk) : chunk;
     if (this.discarding) {
@@ -40,6 +43,7 @@ export class ClaudeStreamReader {
     if (event.type === "error") { this.result = line; return; }
     if (event.type === "result") { this.result = line; this.onProgress(); return; }
     this.appendTail(line);
+    if (event.type === "assistant") this.hooks.onAssistant?.(event);
     if (event.type === "rate_limit_event" || (event.type === "system" && event.subtype === "api_retry") || !event.type) return;
     this.onProgress();
   }

@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import { test } from "node:test";
 
+import { AppSettingsStore } from "../../apps/server/dist/app-settings-store.js";
+import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { createChildRunScheduler } from "../../packages/core/dist/child-run-scheduler.js";
 import {
   AgentTimeoutSettingError,
@@ -44,6 +48,7 @@ test("child settings derive from legacy executor_config without saving the migra
     { provider: "codex", model: "gpt-5.6-luna" },
     { provider: "claude", model: "claude-sonnet-5" },
     { provider: "claude", model: "claude-sonnet-5-5" },
+    { provider: "claude", model: "claude-haiku-5-5" },
   ]);
   assert.deepEqual(settings.defaults_by_parent_harness, DEFAULT_CHILD_RUN_SETTINGS.defaults_by_parent_harness);
   assert.deepEqual(settings.allowed_efforts, ["low", "medium", "high", "xhigh"]);
@@ -106,6 +111,75 @@ test("saved child settings without per-parent defaults are completed when read",
   });
   const core = await makeCore();
   assert.deepEqual(core.getChildRunSettings().defaults_by_parent_harness, DEFAULT_CHILD_RUN_SETTINGS.defaults_by_parent_harness);
+});
+
+test("token relay and researcher settings have defaults and partial saved values are merged with them", async (t) => {
+  assert.deepEqual(DEFAULT_CHILD_RUN_SETTINGS.token_relay, {
+    models: [{ provider: "claude", model: "claude-haiku-5-5" }],
+    handoff_tokens: 70_000, kill_tokens: 95_000, max_relays: 5, report_threshold_tokens: 100_000,
+  });
+  assert.equal(DEFAULT_CHILD_RUN_SETTINGS.research_subagent.claude.model, "claude-haiku-5-5");
+  assert.equal(DEFAULT_CHILD_RUN_SETTINGS.research_subagent.codex.model, "gpt-6-luna");
+  assert.ok(DEFAULT_CHILD_RUN_SETTINGS.research_subagent.claude.max_turns >= 2);
+
+  const { db, makeCore } = await openCore(t);
+  const now = new Date().toISOString();
+  const { token_relay: _relay, research_subagent: _research, ...withoutNewKeys } = DEFAULT_CHILD_RUN_SETTINGS;
+  await db.createWriteLane().transact((tx) => {
+    tx.run("INSERT INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Test Owner', ?, ?)", now, now);
+    tx.run(
+      "INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at) VALUES ('child_run_settings', 'owner:default', '1.0.0', ?, ?)",
+      JSON.stringify(withoutNewKeys), now,
+    );
+  });
+  const core = await makeCore();
+  assert.deepEqual(core.getChildRunSettings().token_relay, DEFAULT_CHILD_RUN_SETTINGS.token_relay);
+  assert.deepEqual(core.getChildRunSettings().research_subagent, DEFAULT_CHILD_RUN_SETTINGS.research_subagent);
+
+  const saved = await core.setChildRunSettings({
+    ...DEFAULT_CHILD_RUN_SETTINGS,
+    token_relay: { kill_tokens: 120_000 },
+    research_subagent: { claude: { max_turns: 20 } },
+  });
+  assert.deepEqual(saved.token_relay, { ...DEFAULT_CHILD_RUN_SETTINGS.token_relay, kill_tokens: 120_000 });
+  assert.deepEqual(saved.research_subagent, {
+    ...DEFAULT_CHILD_RUN_SETTINGS.research_subagent,
+    claude: { ...DEFAULT_CHILD_RUN_SETTINGS.research_subagent.claude, max_turns: 20 },
+  });
+});
+
+test("invalid token relay and researcher settings are rejected with the offending field", async (t) => {
+  const { makeCore } = await openCore(t);
+  const core = await makeCore();
+  const relay = DEFAULT_CHILD_RUN_SETTINGS.token_relay;
+  const research = DEFAULT_CHILD_RUN_SETTINGS.research_subagent;
+  const cases = [
+    [{ token_relay: "on" }, "token_relay"],
+    [{ token_relay: { ...relay, handoff_tokens: 999 } }, "token_relay.handoff_tokens"],
+    [{ token_relay: { ...relay, kill_tokens: 1_000_001 } }, "token_relay.kill_tokens"],
+    [{ token_relay: { ...relay, handoff_tokens: 95_000, kill_tokens: 95_000 } }, "token_relay.handoff_tokens"],
+    [{ token_relay: { ...relay, max_relays: 21 } }, "token_relay.max_relays"],
+    [{ token_relay: { ...relay, max_relays: 1.5 } }, "token_relay.max_relays"],
+    [{ token_relay: { ...relay, report_threshold_tokens: 10_000_001 } }, "token_relay.report_threshold_tokens"],
+    [{ token_relay: { ...relay, models: [{ provider: "codex", model: "gpt-6-luna" }] } }, "token_relay.models"],
+    [{ token_relay: { ...relay, models: [relay.models[0], relay.models[0]] } }, "token_relay.models"],
+    [{ token_relay: { ...relay, models: ["claude-haiku-5-5"] } }, "token_relay.models"],
+    [{ research_subagent: [] }, "research_subagent"],
+    [{ research_subagent: { ...research, claude: { model: "", max_turns: 12 } } }, "research_subagent.claude.model"],
+    [{ research_subagent: { ...research, claude: { model: "haiku\"} --x", max_turns: 12 } } }, "research_subagent.claude.model"],
+    [{ research_subagent: { ...research, codex: { model: "not-a-codex-model", max_turns: 12 } } }, "research_subagent.codex.model"],
+    [{ research_subagent: { ...research, codex: { ...research.codex, max_turns: 1 } } }, "research_subagent.codex.max_turns"],
+    [{ research_subagent: { ...research, answer_max_chars: 8_001 } }, "research_subagent.answer_max_chars"],
+    [{ research_subagent: { ...research, answer_max_chars: null } }, "research_subagent.answer_max_chars"],
+  ];
+  for (const [patch, field] of cases) {
+    await assert.rejects(
+      () => core.setChildRunSettings({ ...DEFAULT_CHILD_RUN_SETTINGS, ...patch }),
+      (error) => error?.code === "validation_error" && error?.details?.field === field,
+      `${JSON.stringify(patch)} should be rejected on ${field}`,
+    );
+  }
+  assert.deepEqual(core.getChildRunSettings(), DEFAULT_CHILD_RUN_SETTINGS);
 });
 
 test("legacy executor PUT updates both parent defaults and dispatch uses the saved values", async (t) => {
@@ -236,4 +310,43 @@ test("an invalid role-specific setting names its own key", () => {
     () => roleSessionContextLimit({ OWL_ROLE_SESSION_CONTEXT_LIMIT_WORKER: "0" }, "worker"),
     (error) => error instanceof AgentTimeoutSettingError && error.setting === "OWL_ROLE_SESSION_CONTEXT_LIMIT_WORKER",
   );
+});
+
+test("server routes answer 400 for malformed path escapes and inherited-property provider names", async (t) => {
+  const { root, core, db } = await createTestCore(t, {}, { prefix: "owl-route-hardening-api-" });
+  const token = randomUUID();
+  const dataDir = join(root, "data");
+  await mkdir(dataDir, { recursive: true });
+  const api = await startTestHttpServer(t, { core: new ExternalCoreAdapter(core, db, root, dataDir), db, webOut: root, owlRoot: root, dataDir }, { token });
+  if (!api) return t.skip("localhost listen is unavailable");
+  const envelope = (payload) => ({ request_id: randomUUID(), idempotency_key: randomUUID(), expected_version: 0, payload });
+
+  for (const route of ["/settings/providers/%E0%A4%A", "/knowledge/%E0%A4%A"]) {
+    assert.equal((await api.request("GET", `/api/v1${route}`)).status, 400, route);
+  }
+  assert.equal((await api.request("GET", "/api/v1/settings/providers/constructor")).status, 404);
+  // A non-string body must not be saved as an empty entry body.
+  assert.equal((await api.request("PUT", "/api/v1/knowledge/global/a.md", { body: null })).status, 400);
+  const before = (await (await api.request("GET", "/api/v1/settings/executor")).json()).data;
+  const update = await api.request("PUT", "/api/v1/settings/executor", envelope({ provider: "constructor", model: "m", timeout_ms: 60_000 }));
+  assert.equal(update.status, 400);
+  assert.deepEqual((await (await api.request("GET", "/api/v1/settings/executor")).json()).data, before);
+
+  assert.equal((await api.request("PUT", "/api/v1/knowledge/global/a.md", { tags: "x" })).status, 400);
+
+  // A domain error code named like an inherited property is not an HTTP status.
+  const inheritedCode = () => { throw Object.assign(new Error("boom"), { code: "constructor" }); };
+  core.setChildRunSettings = inheritedCode;
+  core.resumePrerequisiteWait = inheritedCode;
+  const childRuns = await api.request("PUT", "/api/v1/settings/executor", envelope({ provider: "claude", model: "m", timeout_ms: 60_000 }));
+  assert.equal(childRuns.status, 500);
+  assert.notEqual((await childRuns.json()).error?.code, "constructor");
+  const resumed = await api.request("POST", `/api/v1/tasks/${"0".repeat(26)}/prerequisite/resume`, envelope({}));
+  assert.equal(resumed.status, 500);
+  assert.notEqual((await resumed.json()).error?.code, "constructor");
+
+  // A saved provider-models entry named like an inherited property must not make the next start fail.
+  const saved = await api.request("PUT", "/api/v1/settings/provider-models/constructor", envelope({ models: ["m1"] }));
+  assert.equal(saved.status, 200);
+  assert.deepEqual(new AppSettingsStore(root, dataDir).getProviderModels().constructor, ["m1"]);
 });

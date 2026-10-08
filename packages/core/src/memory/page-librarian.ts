@@ -3,7 +3,7 @@ import { dirname, join, posix, sep } from "node:path";
 import { createUlid } from "../../../db/dist/index.js";
 import type { IndexScope } from "./index-builder.js";
 import type { PageQuery, PageRow } from "./memory-types.js";
-import { bodySha256, estimatePageTokens, findSecretPatterns, PAGE_LIMITS, parsePage, validatePage } from "./page-format.js";
+import { bodySha256, estimatePageTokens, findSecretPatterns, PAGE_LIMITS, parsePage, setFrontmatter, validatePage } from "./page-format.js";
 import { newLinesOf, type MemoryLibrarianSetting } from "./page-integration.js";
 import type { RouteInput, RouteResult } from "./page-router.js";
 import { applyOperations, itemsOf, parseOperationsOutput, type PageOpsContext, type PageOpsState, type SectionItems } from "./page-operations.js";
@@ -121,18 +121,6 @@ const FAILURE_KEY = "(librarian)";
 const BACKUP_FOLDER = join("backups", "memory-pages");
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const normalizePath = (path: string): string => posix.normalize(path.replace(/\\/gu, "/")).replace(/^\.?\//u, "");
-
-/** Sets `key: value` in the frontmatter by editing that one line (or adding it before the closing `---`). */
-function setFrontmatter(text: string, key: string, value: string): string {
-  const lines = text.split("\n");
-  const end = lines.findIndex((line, i) => i > 0 && line.replace(/\r$/u, "") === "---");
-  if (lines[0]?.replace(/\r$/u, "") !== "---" || end < 0) return text;
-  const cr = lines[end].endsWith("\r") ? "\r" : "";
-  const at = lines.findIndex((line, i) => i > 0 && i < end && line.startsWith(`${key}:`));
-  if (at >= 0) lines[at] = `${key}: ${value}${cr}`;
-  else lines.splice(end, 0, `${key}: ${value}${cr}`);
-  return lines.join("\n");
-}
 
 const USAGE = "使いどころ";
 const EXTRA_OPS = new Set(["take_conversation", "set_usage"]);
@@ -432,8 +420,15 @@ export class PageLibrarian {
       const originals = new Map<string, string | null>();
       const touchedBefore = new Set(ctx.touched);
       const pagesBefore = new Set(result.pages);
-      const rollback = async (): Promise<void> => {
+      // The hash this operation's last route left on each page; a page that differs from it before the next route was changed by another writer.
+      const ownHash = new Map<string, string>();
+      const foreign = new Set<string>();
+      const rollback = (): Promise<void> => this.options.vault.withWrite(async () => {
         for (const [page, original] of originals) {
+          if (foreign.has(page)) continue; // another writer's lines landed between two routes; the snapshot would drop them
+          // A page another writer changed after the router keeps its text: restoring the snapshot would drop that writer's lines.
+          const current = await readText(join(root, page)).catch(this.nullUnlessMissing(`hash ${page} before rollback`));
+          if (current !== null && bodySha256(current) !== ctx.written.get(page)) continue;
           if (original === null) {
             await rm(join(root, page), { force: true });
             ctx.created.delete(page);
@@ -446,7 +441,7 @@ export class PageLibrarian {
             if (at >= 0) result.pages.splice(at, 1);
           }
         }
-      };
+      });
       if (conversation) {
         const router = this.options.router;
         if (first.frontmatter.extraction !== "pending" || !router) { reject("not_applicable"); continue; }
@@ -454,13 +449,26 @@ export class PageLibrarian {
         const label = `会話${rel.replace(/^.*\//u, "").replace(/\.md$/u, "")}`;
         let failed: string | null = null;
         for (const item of o.items as { kind: RouteInput["kind"]; text: string }[]) {
-          const before = await this.snapshotThemes(rows, ctx);
-          const routed = await router.route({ kind: item.kind, text: item.text, theme: "", project_id: project, source: { work_number: null, work_id: null, actor: "librarian", label } });
-          if (routed.page) {
-            if (!originals.has(routed.page)) originals.set(routed.page, before.get(routed.page) ?? null);
-            await this.adopt(ctx, routed.page, before.get(routed.page) ?? null, result.pages);
+          try {
+            for (const [page, hash] of ownHash) {
+              const now = await readText(join(root, page)).catch(this.nullUnlessMissing(`hash ${page} between routes`));
+              if (now === null || bodySha256(now) !== hash) foreign.add(page);
+            }
+            const before = await this.snapshotThemes(rows, ctx);
+            const routed = await router.route({ kind: item.kind, text: item.text, theme: "", project_id: project, source: { work_number: null, work_id: null, actor: "librarian", label }, own_hashes: Object.fromEntries(ownHash) });
+            // Judged by the router inside its write lease, so a writer that came after the check above and before this write is caught too.
+            for (const page of routed.foreign_pages ?? []) foreign.add(page);
+            if (routed.page) {
+              if (!originals.has(routed.page)) originals.set(routed.page, before.get(routed.page) ?? null);
+              await this.adopt(ctx, routed.page, before.get(routed.page) ?? null, result.pages, routed.written_hash);
+              if (routed.written_hash !== undefined) ownHash.set(routed.page, routed.written_hash);
+            }
+            if (routed.status !== "appended" && routed.status !== "duplicate") { failed = routed.reason ?? routed.status; break; }
+          } catch (error) {
+            // A throw is a failed route too: left to the run's catch, the lines already routed stayed and the next run added them again.
+            failed = `thrown:${messageOf(error)}`;
+            break;
           }
-          if (routed.status !== "appended" && routed.status !== "duplicate") { failed = routed.reason ?? routed.status; break; }
         }
         if (failed !== null) { await rollback(); reject(`route_failed:${failed}`); continue; }
       }
@@ -506,7 +514,17 @@ export class PageLibrarian {
   }
 
   /** Registers a page the router wrote: its original is backed up (or it is remembered as created) and it counts as touched. */
-  private async adopt(ctx: RunContext, rel: string, original: string | null, pages: string[]): Promise<void> {
+  private async adopt(ctx: RunContext, rel: string, original: string | null, pages: string[], writtenHash?: string): Promise<void> {
+    // Registered before the backup is attempted: if the backup throws, the caller's rollback still sees this write as the run's own and undoes it.
+    // The router's own hash is preferred; reading the page here would also pick up a writer that came after the router.
+    let hash = writtenHash;
+    if (hash === undefined) {
+      const current = await readText(join(this.options.vault.activeDir(), rel)).catch(this.nullUnlessMissing(`hash ${rel} after writing`));
+      if (current !== null) hash = bodySha256(current);
+    }
+    if (hash !== undefined) ctx.written.set(rel, hash);
+    ctx.touched.add(rel);
+    if (!pages.includes(rel)) pages.push(rel);
     if (!ctx.backedUp.has(rel) && !ctx.created.has(rel)) {
       if (original === null) ctx.created.add(rel);
       else {
@@ -515,10 +533,6 @@ export class PageLibrarian {
         ctx.backedUp.add(rel);
       }
     }
-    const current = await readText(join(this.options.vault.activeDir(), rel)).catch(this.nullUnlessMissing(`hash ${rel} after writing`));
-    if (current !== null) ctx.written.set(rel, bodySha256(current));
-    ctx.touched.add(rel);
-    if (!pages.includes(rel)) pages.push(rel);
   }
 
   /** Applies the operations to the vault as it is now (inside the write lease), then writes what changed. */

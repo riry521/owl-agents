@@ -94,3 +94,51 @@ test("startup recovery skips merge abort when no Git gateway is configured", asy
 
   await assert.doesNotReject(recoverOrphanedState(db));
 });
+
+async function insertTask(db, id, workId, status, worktreeState) {
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((tx) => {
+    tx.run(
+      `INSERT INTO tasks
+         (id, work_id, title, type, status, priority, context, acceptance,
+          worker_generation, worktree_path, worktree_state, created_at, updated_at)
+       VALUES (?, ?, 'Task', 'doc', ?, 'normal', '', 'Done.', 0, NULL, ?, ?, ?)`,
+      id, workId, status, worktreeState, now, now,
+    );
+  });
+}
+
+test("a Git error while checking whether Task branches are merged warns and does not stop startup recovery", async (t) => {
+  const { db, projectId } = await fixture(t);
+  const workId = "project-missing-directory";
+  await insertWork(db, workId, projectId, "running");
+  await insertTask(db, "verifying-task", workId, "verifying", "active");
+  await insertTask(db, "completed-task", workId, "completed", "active");
+  const removed = [];
+  // The real gateway resolves the Project directory first and throws (ENOENT) when it is gone.
+  const git = {
+    abortIntegrationMerge: async () => ({ ok: true, exit_code: 0, recorded: true, message: "No merge in progress." }),
+    taskBranchMerged: async () => { throw new Error("ENOENT: no such file or directory, realpath"); },
+    removeWorktree: async (request) => {
+      removed.push(request.task_id);
+      return { ok: true, exit_code: 0, recorded: true, message: "removed" };
+    },
+  };
+
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.map(String).join(" "));
+  let recovery;
+  try {
+    recovery = await recoverOrphanedState(db, git);
+  } finally {
+    console.warn = originalWarn;
+  }
+
+  assert.equal(recovery.integratedVerifyingTasks, 0);
+  assert.deepEqual(removed, [], "no worktree is removed while its merge state is unknown");
+  assert.notEqual(db.get("SELECT status FROM tasks WHERE id = ?", "verifying-task").status, "completed");
+  assert.notEqual(db.get("SELECT worktree_state FROM tasks WHERE id = ?", "completed-task").worktree_state, "merged");
+  assert.ok(warnings.some((line) => line.includes("verifying-task")), "the skipped verifying Task is named in a warning");
+  assert.ok(warnings.some((line) => line.includes("completed-task")), "the skipped completed Task is named in a warning");
+});

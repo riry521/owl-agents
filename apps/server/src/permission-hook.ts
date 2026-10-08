@@ -4,12 +4,15 @@ import { isAbsolute } from "node:path";
 
 import { GUARD_COMMAND_KEYS, GUARD_NAMED_TOOLS, guardChecksToolCall, isReadOnlyAgentRole, readOnlyToolAllowed } from "../../../packages/shared/dist/guard-inputs.js";
 import { GUARD_TOKEN_FILE_ENV } from "../../../packages/shared/dist/guard-token.js";
+import { isResearchSubagentType, researchToolDecision } from "../../../packages/shared/dist/research-subagent.js";
 
 interface HookInput {
   readonly hook_event_name?: unknown;
   readonly tool_name?: unknown;
   readonly tool_input?: unknown;
   readonly cwd?: unknown;
+  /** Set by the CLI when a subagent makes the call; the model cannot change it. */
+  readonly agent_type?: unknown;
 }
 
 interface GuardResponse {
@@ -24,7 +27,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//iu;
-const COMMAND_WRAPPERS = new Set(["sudo", "env", "command", "time", "nohup", "exec", "nice", "builtin"]);
+/** Words that run the next command: wrappers (sudo, timeout) and shell keywords that can start a simple command ("then ..."). */
+const COMMAND_WRAPPERS = new Set([
+  "sudo", "env", "command", "time", "nohup", "exec", "nice", "builtin", "timeout", "xargs", "stdbuf",
+  "{", "!", "if", "then", "elif", "else", "do", "while", "until",
+]);
 /** Options whose next argument is a value, not a destination. The short flags differ between curl and wget. */
 const VALUE_OPTIONS: Record<"curl" | "wget", { short: string; long: Set<string> }> = {
   curl: {
@@ -143,11 +150,16 @@ function networkCommandUrls(command: string): string[] {
       throw new Error("proxy destination cannot be determined");
     }
     let index = words.findIndex((w) => !/^\w+=/u.test(w) && !COMMAND_WRAPPERS.has(w));
+    // Wrapper options such as "env -i" or "nice -n 5" hide the real program, so look for it past them.
+    if (index > 0 && words.slice(0, index).some((w) => COMMAND_WRAPPERS.has(w))) {
+      const real = words.findIndex((w, i) => i >= index && /^(?:curl|wget|eval|(?:ba|z|da|k)?sh)$/u.test(w.replace(/^.*\//u, "")));
+      if (real >= 0) index = real;
+    }
     const program = index < 0 ? "" : words[index].replace(/^.*\//u, "");
     const tool = program === "curl" || program === "wget" ? program : undefined;
     if (SHELLS.test(program) || program === "eval") {
       const rest = words.slice(index + 1);
-      const script = program === "eval" ? rest.join(" ") : rest[rest.findIndex((w) => /^-[a-zA-Z]*c[a-zA-Z]*$/u.test(w)) + 1];
+      const script = program === "eval" ? rest.join(" ") : rest.slice(rest.findIndex((w) => /^-[a-zA-Z]*c[a-zA-Z]*$/u.test(w)) + 1).find((w) => w !== "--");
       if (typeof script === "string" && NETWORK_TOOL_MENTION.test(script)) {
         for (const w of words.slice(0, index)) {
           const assignment = /^(\w+)=(.*)$/u.exec(w);
@@ -253,6 +265,10 @@ async function main(): Promise<void> {
   }
   if (typeof input.tool_name !== "string" || input.tool_name.length === 0 || !isRecord(input.tool_input)) {
     deny("Tool execution was denied because the tool name or input could not be determined.");
+    return;
+  }
+  if (isResearchSubagentType(input.agent_type) && researchToolDecision(input.agent_type, input.tool_name) === "deny") {
+    deny("Owl の調べもの役は読み取り専用のため、このツールを使えない。使えるのは調べもの用のツールだけ。");
     return;
   }
   if (isReadOnlyAgentRole(process.env.OWL_AGENT_ROLE) && !readOnlyToolAllowed(input.tool_name)) {

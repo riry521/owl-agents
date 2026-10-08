@@ -36,6 +36,8 @@ test("agent CLIs are recognised from any launcher, shells running -c are not", (
   assert.equal(agentCliOf("/bin/sh /tmp/x/codex exec", names, installed), null);
   assert.equal(agentCliOf("gemini -m gemini-2.5-pro", names), "gemini");
   assert.equal(agentCliOf("/bin/zsh -c codex exec hi", names), null);
+  assert.equal(agentCliOf("python3 -c import codex", names), null);
+  assert.equal(agentCliOf("node /opt/homebrew/bin/codex exec -c model=o3", names, installed), "codex", "the CLI's own -c option is not the interpreter's");
   assert.equal(agentCliOf("node /srv/app/server.js", names), null);
   assert.equal(agentCliOf("my-agent run", names), null);
   assert.equal(agentCliOf("my-agent run", agentCliNames({ OWL_SUBAGENT_CLI_NAMES: "my-agent, bad name" })), "my-agent");

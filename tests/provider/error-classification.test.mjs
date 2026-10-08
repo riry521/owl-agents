@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { classifyProviderFailure, providerFailureCause } from "../../packages/agent-runtime/dist/index.js";
 import { providerFailed } from "../../packages/agent-runtime/dist/errors.js";
 import { harnessFailureDetail, unwrapClaudeCliResult } from "../../packages/agent-runtime/dist/protocol.js";
+import { spawnProvider } from "../../packages/providers/dist/spawn.js";
 
 function exited(fields) {
   return { exit_code: 1, signal: null, kind: "exit", ...fields };
@@ -86,6 +87,19 @@ test("a harness that cannot be started is a configuration failure", () => {
   assert.equal(failure.retry_allowed, false);
   assert.equal(failure.error_key, "provider_failed:spawn_error");
   assert.match(failure.message, /実行設定が不正です/u);
+});
+
+test("spawnProvider rejects a missing executable as spawn_failed without an unhandled rejection", async (t) => {
+  const unhandled = [];
+  const onUnhandled = (reason) => unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  t.after(() => process.off("unhandledRejection", onUnhandled));
+  await assert.rejects(
+    spawnProvider({ adapter: "claude-cli/v1", argv: ["/nonexistent-owl-provider/claude"], cwd: process.cwd(), env: {} }),
+    (error) => error.errorKey === "spawn_failed" && error.reasonCode === "child_process_error",
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(unhandled, []);
 });
 
 test("an unexpected signal is deterministic even when stderr mentions a timeout", () => {

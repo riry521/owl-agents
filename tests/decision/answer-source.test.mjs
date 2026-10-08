@@ -163,3 +163,33 @@ test("a resolve request without a source still commits, defaulting to web", asyn
   const stored = db.get("SELECT source FROM decision_answers WHERE decision_id = ?", decisionId);
   assert.equal(stored.source, "web");
 });
+
+test("answering one of two open work-scope Decisions keeps the Work waiting until the other is answered", async (t) => {
+  const db = await openDb(t);
+  const service = new DecisionService(db);
+  const workId = "work-decision-two-open";
+  await seedWork(db, workId);
+  const first = await openDecision(service, workId, "two-open-a");
+  const second = createUlid();
+  await db.createWriteLane().transact((tx) => {
+    tx.run(
+      `INSERT INTO decisions
+         (id, work_id, scope, status, blocked_task_ids_json, reason, question, tried,
+          current_state, options_json, recommended, allow_free_text, issuer_role, state_version, created_at)
+       VALUES (?, ?, 'work', 'open', '[]', 'Second.', 'Second?', 'Nothing.', 'Waiting.', ?, NULL, 1, 'core', 0, ?)`,
+      second, workId, JSON.stringify([{ key: "approve", label: "承認", description: "Proceed." }]), new Date().toISOString(),
+    );
+    return null;
+  });
+  const answer = (decisionId, key) => service.resolve({
+    request_id: createUlid(),
+    idempotency_key: `decision-resolve-${key}`,
+    expected_version: 0,
+    payload: { decision_id: decisionId, answer: "承認", option_key: "approve", source_message_id: null, source: "web" },
+  });
+
+  await answer(first, "two-open-a");
+  assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "judgement_waiting");
+  await answer(second, "two-open-b");
+  assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "running");
+});

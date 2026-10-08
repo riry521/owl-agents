@@ -3,6 +3,8 @@ import {
   CHILD_RUN_EFFORTS,
   CHILD_RUN_LIMITS,
   CHILD_RUN_PROVIDERS,
+  relayConfigFor,
+  tokenRelaySettingsProblem,
   tokenUsageOf,
   usageJson,
   type ChildDispatchRequest,
@@ -19,10 +21,13 @@ import {
   type ExecutorResult,
   type ExecutorTask,
   type ExecutorTaskContext,
+  type HandoffMemo,
+  type RequestTokenUsage,
   type TokenUsage,
 } from "@owl/shared";
 import { HumanReadableError, validationError } from "./errors.js";
 import { normalizeWritePaths, runExecutorProcess, writeScopesOverlap, type ExecutorRunObserver, type ExecutorRuntime } from "./executor.js";
+import { insertRequestUsageRows } from "./token-usage-report.js";
 import type { ProviderPauseController } from "./provider-pause-controller.js";
 import { readProcessIdentity } from "./process-identity.js";
 import type { CoreDatabase, CoreWriteLaneTransaction } from "./types.js";
@@ -70,6 +75,13 @@ interface ChildRow {
   status: ChildRunRecord["status"]; blocked_reason: ChildRunBlockedReason | null; current_agent_run_id: string | null;
   summary_json: string | null; report_text: string | null; failure_kind: ChildRunFailureKind | null;
   failure_reason: string | null; created_at: string; started_at: string | null; finished_at: string | null; updated_at: string;
+  relay_count: number; handoff_json: string | null;
+}
+
+/** The latest relay of a child (child_runs.handoff_json); `memo` is the newest memo any segment wrote. */
+interface HandoffRecord {
+  reason: "handoff" | "kill"; segment: number; agent_run_id: string; peak_prompt_tokens: number;
+  memo: HandoffMemo | null; memo_segment: number | null; created_at: string;
 }
 
 const ACTIVE_PARENT_STATUSES = ["launch_pending", "spawned", "running"];
@@ -146,9 +158,22 @@ function toRecord(row: ChildRow): ChildRunRecord {
       ? summarizeChildReport("", { success: false, failure_kind: row.failure_kind, failure_reason: row.failure_reason }, row.attempt,
         row.started_at && row.finished_at ? Math.max(0, Math.round((Date.parse(row.finished_at) - Date.parse(row.started_at)) / 1000)) : 0)
       : null;
-  const { write_paths_json, summary_json, workspace_dir, rate_limit_requeues, ...rest } = row;
-  void summary_json; void workspace_dir; void rate_limit_requeues;
+  const { write_paths_json, summary_json, workspace_dir, rate_limit_requeues, handoff_json, ...rest } = row;
+  void summary_json; void workspace_dir; void rate_limit_requeues; void handoff_json;
   return { ...rest, write_paths: JSON.parse(write_paths_json) as string[], summary };
+}
+
+/** The owl-child-report a child returns with once it used up its relay restarts; the latest memo becomes its remaining work. */
+export function renderRelayLimitReport(record: HandoffRecord, restarts: number): string {
+  const memo = record.memo;
+  const report = {
+    result: "partial",
+    summary: `Owl stopped restarting this child after ${restarts} restarts (token relay limit). Last handoff: ${memo?.summary ?? "no memo was written."}`,
+    changed_files: memo?.changed_files ?? [],
+    checks: [],
+    remaining_issues: memo ? [...memo.remaining, ...memo.next_steps.map((step) => `next: ${step}`)] : [],
+  };
+  return "```owl-child-report\n" + JSON.stringify(report) + "\n```";
 }
 
 /** Validates the Worker's write_paths: workspace-relative, no `..`, no wildcards (except a lone `*`). */
@@ -205,7 +230,8 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
       }) ||
       !Number.isSafeInteger(settings.timeout_minutes) || settings.timeout_minutes < 5 ||
       !Number.isSafeInteger(settings.max_timeout_minutes) || settings.max_timeout_minutes < settings.timeout_minutes || settings.max_timeout_minutes > 1440 ||
-      !Number.isSafeInteger(settings.max_attempts) || settings.max_attempts < 1 || settings.max_attempts > 3
+      !Number.isSafeInteger(settings.max_attempts) || settings.max_attempts < 1 || settings.max_attempts > 3 ||
+      !settings.token_relay || tokenRelaySettingsProblem(settings.token_relay) !== null
     ) {
       throw childError("child_run_settings_invalid", "Child run settings contain invalid defaults, limits or allowlists.");
     }
@@ -280,10 +306,14 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
       outbox: [{ provider: "websocket" }],
     });
     let lastTouch = 0;
+    // Keyed on relay_count, not on this segment's start: a retried segment after a relay must also resume from the memo.
+    const handoff = r.relay_count > 0 && r.handoff_json ? JSON.parse(r.handoff_json) as HandoffRecord : null;
     return {
       agent_run_id: runId,
       signal: controller.signal,
       ...(r.attempt > 1 && r.failure_kind ? { retry: { failure_kind: r.failure_kind, failure_reason: r.failure_reason ?? "" } } : {}),
+      ...(handoff ? { relayResume: { reason: handoff.reason, segment: handoff.segment, memo: handoff.memo } } : {}),
+      onRequestUsage: (usage) => recordRequestUsage(r, runId, usage),
       onSpawn: (pid) => {
         const identity = readProcessIdentity(pid);
         void writeLane.transact((tx) => {
@@ -309,6 +339,67 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
         }).catch((error) => console.error(`[owl-core] Failed to persist child output activity ${runId}`, error));
       },
     };
+  }
+
+  /** Stores one request's token counts; a failed write is only logged so it never affects the child. */
+  function recordRequestUsage(r: ChildRow, runId: string, usage: RequestTokenUsage): void {
+    void writeLane.transact((tx) => insertRequestUsageRows(tx, [{
+      ...usage, agent_run_id: runId, work_id: r.work_id, child_run_id: r.id, provider: r.provider,
+    }])).catch((error) => console.error(`[owl-core] Failed to record request usage for ${runId}`, error));
+  }
+
+  /**
+   * After a handoff or a stop at the prompt-size limit: start a fresh segment from the latest memo,
+   * or return the child to the Worker as partial once it has used up max_relays restarts.
+   */
+  async function relayOrReturn(r: ChildRow, runId: string, relay: NonNullable<ExecutorResult["relay"]>, settings: ChildRunSettings): Promise<void> {
+    const previous = r.handoff_json ? JSON.parse(r.handoff_json) as HandoffRecord : null;
+    const segment = r.relay_count + 1;
+    const record: HandoffRecord = {
+      reason: relay.reason, segment, agent_run_id: runId, peak_prompt_tokens: relay.peak_prompt_tokens,
+      // A stopped segment often writes no memo; keep the last one so the next child resumes from it.
+      memo: relay.memo ?? previous?.memo ?? null,
+      memo_segment: relay.memo ? segment : previous?.memo_segment ?? null,
+      created_at: timestamp(),
+    };
+    const handoffJson = JSON.stringify(record);
+    if (r.relay_count >= settings.token_relay.max_relays) {
+      await writeLane.write({
+        mutateState: (tx) => tx.run("UPDATE child_runs SET handoff_json = ?, updated_at = ? WHERE id = ? AND status = 'running'", handoffJson, record.created_at, r.id).changes,
+        event: {
+          idempotencyKey: `child-run-relay-limited:${r.id}`,
+          type: "child_run.relay_limited",
+          workId: r.work_id,
+          taskId: r.task_id,
+          payload: { child_run_id: r.id, relay_count: r.relay_count, peak_prompt_tokens: relay.peak_prompt_tokens },
+        },
+        outbox: [{ provider: "websocket" }],
+      });
+      await settle(r, "completed", { success: true, failure_kind: null, failure_reason: null, report: renderRelayLimitReport(record, r.relay_count) });
+      return;
+    }
+    // attempt - 1: pumpOnce adds one back, so a relay does not use up a retry (same as the rate-limit requeue).
+    // Clearing failure_kind keeps an older failure's retry note out of the next segment's prompt.
+    await writeLane.write({
+      mutateState: (tx) => tx.run(
+        `UPDATE child_runs SET status = 'queued', blocked_reason = NULL, attempt = attempt - 1, relay_count = relay_count + 1,
+                handoff_json = ?, failure_kind = NULL, failure_reason = NULL, updated_at = ?
+          WHERE id = ? AND status = 'running'`,
+        handoffJson, record.created_at, r.id,
+      ).changes,
+      event: {
+        idempotencyKey: `child-run-relayed:${r.id}:${segment}`,
+        type: "child_run.relayed",
+        workId: r.work_id,
+        taskId: r.task_id,
+        agentRunId: runId,
+        payload: {
+          child_run_id: r.id, parent_agent_run_id: r.parent_agent_run_id, agent_run_id: runId, reason: relay.reason,
+          relay_count: segment, peak_prompt_tokens: relay.peak_prompt_tokens, has_memo: relay.memo !== null,
+        },
+      },
+      outbox: [{ provider: "websocket" }],
+    });
   }
 
   /** Closes the attempt's AgentRun; resolves true when it had been cancelled. */
@@ -378,6 +469,9 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
         return;
       }
       const sink: { usage: TokenUsage | null } = { usage: null };
+      // Read per segment, so a settings change applies from the next segment on.
+      const settings = readSettings();
+      const relay = relayConfigFor(settings, r.provider, r.model);
       observer = await track(r, parent, controller);
       const task: ExecutorTask = {
         subtask_id: r.id,
@@ -394,13 +488,16 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
       };
       const result = await runExecutorProcess(
         task,
-        { provider: r.provider, model: r.model, ...(r.effort ? { effort: r.effort } : {}), timeout_ms: r.timeout_ms },
+        { provider: r.provider, model: r.model, ...(r.effort ? { effort: r.effort } : {}), timeout_ms: r.timeout_ms, ...(relay ? { relay } : {}) },
         observer, sink, await options.executorRuntime(),
       );
       const cancelled = (await finishAgentRun(r, observer.agent_run_id, result, sink.usage)) || controller.signal.aborted;
       const kind = result.failure_kind ?? "spawn_error";
       if (cancelled) {
         await settle(r, "cancelled", { success: false, failure_kind: abortKinds.get(r.id) ?? "cancelled", failure_reason: "The child run was cancelled.", report: result.output });
+      } else if (result.relay) {
+        // Before the success branch: a handoff is a successful process that still has work left.
+        await relayOrReturn(r, observer.agent_run_id, result.relay, settings);
       } else if (result.success) {
         await settle(r, "completed", { success: true, failure_kind: null, failure_reason: null, report: result.output });
       } else if (result.rate_limit && r.rate_limit_requeues < CHILD_RUN_LIMITS.rate_limit_requeue_max) {

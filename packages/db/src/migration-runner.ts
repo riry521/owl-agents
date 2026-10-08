@@ -3,6 +3,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { createUlid, utcNow } from "./ids";
+import { rollbackIfOpen } from "./write-lane";
 
 type SqliteDatabase = Database.Database;
 
@@ -162,10 +163,7 @@ export function runMigrations(
     transactionStarted = false;
     return { applied, skipped, checksum: lastChecksum, holderId };
   } catch (error) {
-    if (transactionStarted) {
-      database.exec("ROLLBACK");
-      transactionStarted = false;
-    }
+    rollbackIfOpen(database, transactionStarted);
     if (error instanceof MigrationError) {
       throw error;
     }

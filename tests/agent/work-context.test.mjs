@@ -7,6 +7,8 @@ import { createUlid } from "../../packages/db/dist/index.js";
 import { dependencyContext, readDependencyReport } from "../../packages/core/dist/task-context.js";
 import { ContextBuilder } from "../../packages/core/dist/context-builder.js";
 import { command, createTestCore } from "../helpers/core.mjs";
+import { necessityFor, criteriaFor } from "../helpers/necessity.mjs";
+import { waitFor } from "../helpers/wait.mjs";
 
 const agentRunner = {
   runManagerPlan: async () => ({ outcome: "failed", message: "unused" }),
@@ -124,4 +126,28 @@ test("the Fix Packet numbers the findings, drops scoring and trims the previous 
   assert.deepEqual(attempt.process_wait, { done_path: "d" });
   const rest = JSON.stringify(inputs.filter((slot) => slot.name !== "Attempt"));
   assert.ok(!rest.includes("P1") && !rest.includes("FULL-ONLY-EVIDENCE"), "findings stay in the Attempt field only");
+});
+
+test("the Worker context carries the researcher settings and the Designer context does not", async (t) => {
+  const planned = (id, type) => ({
+    id, title: `${id} title`, type, necessity: necessityFor(), acceptance_criteria: criteriaFor("Done; verified by the test."),
+    depends_on: [], context: "", notes: "", review: false, required_sections: [], required_tests: [], wait_for: null, base_sync_only: null, replaces: [],
+  });
+  const requests = {};
+  const stop = { outcome: "failed", failure_class: "deterministic", error_key: "x", retry_allowed: false, message: "Stops here in this test." };
+  const runner = {
+    runManagerPlan: async (request) => (request.mode ?? request.context?.mode) === "plan"
+      ? { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [planned("T1", "code"), planned("D1", "design")] } }
+      : { outcome: "failed", message: "The Manager stops here in this test." },
+    runWorker: async (request) => { requests.worker = request; return stop; },
+    runDesigner: async (request) => { requests.designer = request; return stop; },
+    runReviewer: async () => ({ outcome: "failed" }),
+    runAdvisor: async () => ({ reply: "" }),
+  };
+  const { core } = await createTestCore(t, { agentRunner: runner, max_parallel: 4, dispatcher: { tick_interval_ms: 25 } }, { prefix: "owl-work-context-research-", start: true });
+  const created = await core.createWork(command({ title: "W", summary: "x", size: "normal", project_id: null }, "wc:research:create"));
+  await core.startWork(created.data.work_id, command({ mode: "normal" }, "wc:research:start", created.version));
+  await waitFor(() => requests.worker && requests.designer);
+  assert.deepEqual(requests.worker.context.research_subagent, core.getChildRunSettings().research_subagent);
+  assert.equal("research_subagent" in requests.designer.context, false);
 });

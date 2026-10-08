@@ -8,6 +8,8 @@ export const DEFAULT_HARNESS_MODELS: Readonly<Record<ModelHarness, string>> = {
 };
 
 export const CLAUDE_SONNET_5_5_MODEL = "claude-sonnet-5-5";
+export const CLAUDE_HAIKU_5_5_MODEL = "claude-haiku-5-5";
+export const CODEX_GPT_6_LUNA_MODEL = "gpt-6-luna";
 
 /**
  * Codex model slugs Owl accepts without reading the Codex CLI's local model

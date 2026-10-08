@@ -7,7 +7,7 @@ import {
   resolveKnowledgeFilename,
   slugifyKnowledgeNameOrContent,
 } from "./knowledge-naming.js";
-import { parseScalar } from "./knowledge-notes.js";
+import { parseScalar, splitFlowArray } from "./knowledge-notes.js";
 
 export interface KnowledgeEntry {
   path: string;
@@ -290,14 +290,18 @@ export class KnowledgeBase {
     const absPath = await this.safeExistingPath(relPath);
     const existing = await readFile(absPath, "utf8");
     const parsed = parseFrontmatter(existing);
+    if (parsed.unsupported) throw new Error(`unsupported_frontmatter: ${relPath}`);
 
+    // Tags not being changed are written back as the lines on disk, not as the parsed values.
     const newTags = input.tags ?? parsed.tags;
-    const newBody = input.body ?? parsed.body;
+    const writtenTags = input.tags ?? (parsed.rawTags === undefined ? parsed.tags : new RawValue(parsed.rawTags));
+    // composeEntry puts a blank line before the body, so drop the one read back with it.
+    const newBody = input.body ?? parsed.body.replace(/^\n/u, "");
     const created = parsed.created || new Date().toISOString().slice(0, 10);
 
     // Values already on disk are kept verbatim; only newly supplied values go through the quoting rule.
-    const kept = Object.fromEntries(Object.entries(parsed.metadata).map(([key, raw]) => [key, new RawValue(raw)]));
-    const content = composeEntry({ tags: newTags, created, metadata: { ...kept, ...input.metadata }, body: newBody });
+    const kept = Object.fromEntries(Object.entries(parsed.rawMetadata).map(([key, raw]) => [key, new RawValue(raw)]));
+    const content = composeEntry({ tags: writtenTags, created, metadata: { ...kept, ...input.metadata }, body: newBody });
     this.pageGuard?.(content);
 
     const tmpPath = `${absPath}.tmp-${process.pid}-${Date.now()}`;
@@ -444,30 +448,57 @@ interface ParsedFrontmatter {
   title: string;
   body: string;
   metadata: Record<string, string>;
+  /** Each metadata key's lines as written, including continuation lines such as block lists. */
+  rawMetadata: Record<string, string>;
+  /** The tags key line and the lines under it as written; undefined when the file has no tags key. */
+  rawTags?: string;
+  /** The file has frontmatter whose lines `update` could not write back. */
+  unsupported: boolean;
 }
 
 function parseFrontmatter(content: string): ParsedFrontmatter {
-  const result: ParsedFrontmatter = { tags: [], created: "", title: "", body: content, metadata: {} };
+  const result: ParsedFrontmatter = {
+    tags: [], created: "", title: "", body: content, metadata: {}, rawMetadata: {}, unsupported: /^---\r?\n/u.test(content),
+  };
   if (!content.startsWith("---\n")) return result;
 
   const endIndex = content.indexOf("\n---\n", 4);
   if (endIndex < 0) return result;
 
+  result.unsupported = false;
   const frontmatter = content.slice(4, endIndex);
   result.body = content.slice(endIndex + 5);
 
+  // A line that does not start a key belongs to the key above it (block list items, block scalars).
+  let owner: string | undefined;
   for (const line of frontmatter.split("\n")) {
-    const tagsMatch = line.match(/^tags:\s*\[(.+)\]$/);
-    if (tagsMatch) {
-      result.tags = tagsMatch[1].split(",").map((t) => t.trim().replace(/^['"]|['"]$/g, ""));
+    const keyMatch = line.match(/^([\w-]+):\s*(.*)$/);
+    if (!keyMatch) {
+      if (owner === "tags") result.rawTags += `\n${line}`;
+      const tagItem = owner === "tags" ? line.match(/^\s*-\s+(.+)$/) : null;
+      if (tagItem) {
+        const strict = strictTagScalar(tagItem[1]);
+        if (strict === undefined) result.unsupported = true;
+        result.tags.push(strict ?? tagItem[1].trim());
+      }
+      else if (owner !== undefined && owner !== "tags" && owner !== "created") result.rawMetadata[owner] += `\n${line}`;
+      else if (line.trim() !== "") result.unsupported = true;
+      continue;
     }
-    const createdMatch = line.match(/^created:\s*(.+)$/);
-    if (createdMatch) {
-      result.created = createdMatch[1].trim();
+    const [, key, value] = keyMatch;
+    owner = key;
+    // update rewrites tags and created from their parsed values, so YAML node syntax there would be lost.
+    if (key === "created" && hasYamlNodeSyntax(value)) result.unsupported = true;
+    if (key === "tags") {
+      result.rawTags = line;
+      const strict = strictTags(value);
+      if (strict === undefined) result.unsupported = true;
+      result.tags = strict ?? parseTags(value.trim());
     }
-    const metadataMatch = line.match(/^([\w-]+):\s*(.*)$/);
-    if (metadataMatch && metadataMatch[1] !== "tags" && metadataMatch[1] !== "created") {
-      result.metadata[metadataMatch[1]] = metadataMatch[2];
+    else if (key === "created") result.created = value.trim();
+    else {
+      result.metadata[key] = value;
+      result.rawMetadata[key] = line;
     }
   }
 
@@ -477,6 +508,80 @@ function parseFrontmatter(content: string): ParsedFrontmatter {
   }
 
   return result;
+}
+
+// Anchors (&), aliases (*), tags (!) and block scalars (|, >) at the start of a value.
+function hasYamlNodeSyntax(value: string): boolean {
+  return /^[&*!|>]/u.test(value.trim());
+}
+
+// `update` rewrites tags, so only plain or quoted string scalars are accepted; a mapping, nested array,
+// node syntax or an unquoted bracket is undefined here and makes the file unsupported rather than guessed at.
+// Not a YAML parser on purpose: widening it has kept turning up new ways to corrupt tags.
+function strictTagScalar(raw: string): string | undefined {
+  const item = raw.trim();
+  try {
+    if (item === "" || /^[&*!|>\[\]{}]/u.test(item) || /^[-?:](\s|$)/u.test(item)) return undefined;
+    if (item.startsWith('"') || item.startsWith("'")) {
+      const q = item[0];
+      let end = -1;
+      for (let i = 1; i < item.length && end < 0; i += 1) {
+        if (q === '"' && item[i] === "\\") i += 1;
+        else if (item[i] === q) {
+          if (q === "'" && item[i + 1] === "'") i += 1;
+          else end = i;
+        }
+      }
+      // Anything after the closing quote other than a comment is more syntax than a single string.
+      if (end < 0 || !/^(\s+#.*)?$/u.test(item.slice(end + 1))) return undefined;
+      return parseScalar(item.slice(0, end + 1));
+    }
+    return /[\[\]{}]|:(\s|$)|\s#/u.test(item) ? undefined : item;
+  } catch {
+    return undefined;
+  }
+}
+
+function strictTags(raw: string): string[] | undefined {
+  const value = raw.trim();
+  if (value === "") return [];
+  if (!value.startsWith("[")) {
+    const tag = strictTagScalar(value);
+    return tag === undefined ? undefined : [tag];
+  }
+  // The closing bracket is the first one outside quotes; only blank or a comment may follow it.
+  let quote = "";
+  let end = -1;
+  for (let i = 1; i < value.length && end < 0; i += 1) {
+    const c = value[i];
+    if (quote) {
+      if (c === "\\" && quote === '"') i += 1;
+      else if (c === quote) quote = "";
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === "#" && /\s/u.test(value[i - 1])) return undefined;
+    else if (c === "]") end = i;
+  }
+  if (end < 0 || !/^(\s+#.*)?$/u.test(value.slice(end + 1))) return undefined;
+  const inner = value.slice(1, end).trim();
+  if (inner === "") return [];
+  try {
+    const tags = splitFlowArray(inner).map(strictTagScalar);
+    return tags.every((tag) => tag !== undefined) ? tags : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+// Files written before tags were quoted per item may not split cleanly; those fall back to a plain comma split.
+function parseTags(value: string): string[] {
+  // Text after the closing bracket is a trailing comment.
+  const inner = value.startsWith("[") && value.includes("]") ? value.slice(1, value.lastIndexOf("]")).trim() : value;
+  if (inner === "") return [];
+  try {
+    return splitFlowArray(inner).map(parseScalar);
+  } catch {
+    return inner.split(",").map((t) => t.trim().replace(/^['"]|['"]$/g, ""));
+  }
 }
 
 function getNotesFrontmatterTitle(relPath: string, parsed: ParsedFrontmatter): string | undefined {
@@ -505,7 +610,7 @@ class RawValue {
 }
 
 /** The exact text `create` writes for an entry. */
-export function composeEntry(input: { tags: string[]; created: string; metadata?: Record<string, string | string[] | RawValue>; body: string }): string {
+export function composeEntry(input: { tags: string[] | RawValue; created: string; metadata?: Record<string, string | string[] | RawValue>; body: string }): string {
   return `${buildFrontmatter(input.tags, input.created, input.metadata)}\n${input.body}`;
 }
 
@@ -520,19 +625,21 @@ function frontmatterScalar(raw: string, inArray: boolean): string {
   } catch {
     plain = false;
   }
-  if (plain && value !== "" && value === value.trim() && !(inArray && /[,"'\[\]]/u.test(value))) return value;
+  // A leading &, *, !, | or > would make `update` reject the file as unsupported YAML node syntax.
+  if (plain && value !== "" && value === value.trim() && !/^[&*!|>]/u.test(value) && !(inArray && (/[,"'\[\]]/u.test(value) || strictTagScalar(value) !== value))) return value;
   return JSON.stringify(value);
 }
 
-function buildFrontmatter(tags: string[], created: string, metadata: Record<string, string | string[] | RawValue> = {}): string {
-  const tagStr = tags.map((t) => (t.includes(",") || t.includes(" ") ? `"${t}"` : t)).join(", ");
+function buildFrontmatter(tags: string[] | RawValue, created: string, metadata: Record<string, string | string[] | RawValue> = {}): string {
+  const tagsLine = tags instanceof RawValue ? tags.text : `tags: [${tags.map((t) => frontmatterScalar(t, true)).join(", ")}]`;
   const metadataLines = Object.entries(metadata).map(([key, value]) => {
+    // Kept lines are copied from the file as they are, continuation lines included.
+    if (value instanceof RawValue) return value.text;
     if (!/^[A-Za-z_][\w-]*$/u.test(key)) throw new Error("invalid_metadata_key");
-    if (value instanceof RawValue) return `${key}: ${value.text.replace(/[\r\n]+/gu, " ")}`;
     if (Array.isArray(value)) return `${key}: [${value.map((item) => frontmatterScalar(item, true)).join(", ")}]`;
     return `${key}: ${frontmatterScalar(value, false)}`;
   });
-  return `---\ntags: [${tagStr}]\ncreated: ${created}\n${metadataLines.length > 0 ? `${metadataLines.join("\n")}\n` : ""}---\n`;
+  return `---\n${tagsLine}\ncreated: ${created}\n${metadataLines.length > 0 ? `${metadataLines.join("\n")}\n` : ""}---\n`;
 }
 
 export function extractSnippet(body: string, query: string): string {

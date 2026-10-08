@@ -197,11 +197,13 @@ export async function runCoreTests(deps: CoreTestRunDeps, req: CoreTestRunReques
     mutateState: (tx) => {
       recordTestRunInTransaction(tx, record, new Date().toISOString());
       // Files that fail on the base too are quarantined (and listed in one backlog item per Project); a whole-command run cannot name files.
+      // A file that also has a new failure stays out: quarantining it would hide that failure from the next Work-level run.
       if (!whole) {
         const now = new Date().toISOString();
         const entries = execution.files.flatMap((file) => {
-          const old = (classified.get(file.file) ?? []).filter((f) => f.classification === "pre_existing");
-          return file.status !== "passed" && old.length > 0 ? [{ file: file.file, classified_by: old[0].pre_existing_by ?? "baseline", failures: old }] : [];
+          const failures = classified.get(file.file) ?? [];
+          const old = failures.filter((f) => f.classification === "pre_existing");
+          return file.status !== "passed" && old.length > 0 && old.length === failures.length ? [{ file: file.file, classified_by: old[0].pre_existing_by ?? "baseline", failures: old }] : [];
         });
         quarantineFilesInTransaction(tx, req.project_id, entries, now);
         if (entries.length > 0) {

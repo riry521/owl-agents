@@ -162,3 +162,19 @@ test("migrations 055 and 056 add test_policy_json and a test_quarantine table th
   await core.deleteProject(projectId, command({ confirmed_work_count: 0 }, "policy-delete"));
   assert.equal(db.all("SELECT file FROM test_quarantine WHERE project_id = ?", projectId).length, 0);
 });
+
+test("a Project's report_check_commands save through updateProject, survive a Core restart, and clear with null", async (t) => {
+  const { core, db, root, projectId, created } = await setup(t);
+  assert.deepEqual(created.data.report_check_commands, []);
+  const updated = await core.updateProject(projectId, command({ report_check_commands: ["pnpm test:layout"] }, "checks-set"));
+  assert.deepEqual(updated.data.report_check_commands, ["pnpm test:layout"]);
+  for (const [index, value] of [[""], ["  "], [["pnpm"]], "pnpm test:layout", {}].entries()) {
+    await assert.rejects(core.updateProject(projectId, command({ report_check_commands: value }, `checks-bad-${index}`)), (error) => error.code === "validation_error", JSON.stringify(value));
+  }
+  await core.stop();
+
+  const { core: restarted } = await createTestCore(t, { db, owlRoot: root });
+  assert.deepEqual(restarted.listProjects().data.find((project) => project.id === projectId).report_check_commands, ["pnpm test:layout"]);
+  await restarted.updateProject(projectId, command({ report_check_commands: null }, "checks-clear"));
+  assert.deepEqual(restarted.listProjects().data.find((project) => project.id === projectId).report_check_commands, []);
+});

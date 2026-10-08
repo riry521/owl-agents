@@ -5,6 +5,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
 import { GUARD_TOKEN_FILE_ENV } from "../../packages/shared/dist/guard-token.js";
+import { SUBAGENT_USAGE_BATCH_MAX } from "../../packages/shared/dist/token-relay.js";
 import { repoRoot } from "../helpers/paths.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 
@@ -90,4 +91,54 @@ test("hook exits 0 quickly and silently when Core is unreachable, token is missi
     assert.ok(result.ms < 5000, `took ${result.ms}ms`);
   }
   assert.equal(requests.length, 0);
+});
+
+const assistantLine = (id, prompt, timestamp) => JSON.stringify({
+  type: "assistant",
+  timestamp,
+  message: {
+    id, model: "claude-haiku-5-5", content: [{ type: "text", text: "SECRET-BODY" }],
+    usage: { input_tokens: prompt - 1000, cache_read_input_tokens: 600, cache_creation_input_tokens: 400, output_tokens: 7 },
+  },
+});
+
+test("SubagentStop posts stop, then the transcript's deduplicated request usage without its text", async (t) => {
+  const { requests, apiBase, tokenFile, dir } = await setup(t);
+  const transcript = path.join(dir, "agent.jsonl");
+  await writeFile(transcript, [
+    assistantLine("msg_a", 120000, "2026-10-08T00:00:00.000Z"),
+    assistantLine("msg_a", 120000, "2026-10-08T00:00:01.000Z"),
+    JSON.stringify({ type: "user", message: { content: "SECRET-USER" } }),
+    "{broken json SECRET",
+    assistantLine("msg_b", 50000, "2026-10-08T00:00:02.000Z"),
+  ].join("\n"), "utf8");
+  const result = await runHook({ hook_event_name: "SubagentStop", agent_id: "agent-1", agent_type: "owl-researcher", agent_transcript_path: transcript }, { apiBase, tokenFile });
+  assert.equal(result.code, 0);
+  assert.deepEqual(requests.map((r) => JSON.parse(r.body).payload.event), ["stop", "usage"]);
+  const usage = JSON.parse(requests[1].body).payload;
+  assert.equal(usage.agent_id, "agent-1");
+  assert.deepEqual(usage.requests.map((r) => [r.message_id, r.model, r.input_tokens + r.cache_read_tokens + r.cache_write_tokens]), [
+    ["msg_a", "claude-haiku-5-5", 120000],
+    ["msg_b", "claude-haiku-5-5", 50000],
+  ]);
+  assert.deepEqual(Object.keys(usage.requests[0]).sort(), ["cache_read_tokens", "cache_write_tokens", "created_at", "input_tokens", "message_id", "model", "output_tokens"]);
+  assert.equal(usage.requests[0].created_at, "2026-10-08T00:00:00.000Z");
+  assert.ok(!requests.some((r) => /SECRET/u.test(r.body)));
+});
+
+test("SubagentStart sends no usage, a missing transcript sends only stop, and a long one is split into batches", async (t) => {
+  const { requests, apiBase, tokenFile, dir } = await setup(t);
+  const transcript = path.join(dir, "long.jsonl");
+  const lines = Array.from({ length: SUBAGENT_USAGE_BATCH_MAX + 1 }, (_, i) => assistantLine(`msg_${i}`, 2000, "2026-10-08T00:00:00.000Z"));
+  await writeFile(transcript, lines.join("\n"), "utf8");
+
+  assert.equal((await runHook({ hook_event_name: "SubagentStart", agent_id: "a", agent_transcript_path: transcript }, { apiBase, tokenFile })).code, 0);
+  assert.equal((await runHook({ hook_event_name: "SubagentStop", agent_id: "a", agent_transcript_path: path.join(dir, "missing.jsonl") }, { apiBase, tokenFile })).code, 0);
+  assert.deepEqual(requests.map((r) => JSON.parse(r.body).payload.event), ["start", "stop"]);
+
+  requests.length = 0;
+  assert.equal((await runHook({ hook_event_name: "SubagentStop", agent_id: "a", agent_transcript_path: transcript }, { apiBase, tokenFile })).code, 0);
+  const payloads = requests.map((r) => JSON.parse(r.body).payload);
+  assert.deepEqual(payloads.map((p) => p.event), ["stop", "usage", "usage"]);
+  assert.deepEqual(payloads.slice(1).map((p) => p.requests.length), [SUBAGENT_USAGE_BATCH_MAX, 1]);
 });

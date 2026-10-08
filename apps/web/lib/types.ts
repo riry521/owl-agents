@@ -326,6 +326,18 @@ export interface ChildRunSettings {
   timeout_minutes: number;
   max_timeout_minutes: number;
   max_attempts: number;
+  token_relay: {
+    models: { provider: 'claude'; model: string }[];
+    handoff_tokens: number;
+    kill_tokens: number;
+    max_relays: number;
+    report_threshold_tokens: number;
+  };
+  research_subagent: {
+    claude: { model: string; max_turns: number };
+    codex: { model: string; max_turns: number };
+    answer_max_chars: number;
+  };
 }
 
 export interface ProviderInfo {

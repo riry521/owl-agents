@@ -218,9 +218,12 @@ export class RuleProposals {
     }
 
     const appliedRuleId = `owl-${proposal.id.toLowerCase()}`;
+    // The id is unique to this proposal, so finding it means an earlier attempt wrote the rule but did not
+    // record it; writing again would always fail with duplicate_rule_id.
+    const alreadyWritten = this.ruleStore.rules.files?.find((file) => file.rules.some((rule) => rule.id === appliedRuleId));
     let written: { path: string };
     try {
-      written = await this.ruleWriter.apply({
+      written = alreadyWritten ? { path: alreadyWritten.path } : await this.ruleWriter.apply({
         level: proposal.level,
         ...(proposal.role === null ? {} : { role: proposal.role }),
         id: appliedRuleId,

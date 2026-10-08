@@ -4,10 +4,11 @@ import { test } from "node:test";
 import { TRANSIENT_RETRY_LIMIT, createCore, reduceTask } from "../../packages/core/dist/index.js";
 import { reduceTaskInTransaction } from "../../packages/core/dist/state-reducer.js";
 import {
-  DEFAULT_ATTEMPT_POLICY_CONFIG, REVIEWER_FAILURE_LIMIT, attemptAction, evaluate, normalizeErrorKey,
+  DEFAULT_ATTEMPT_POLICY_CONFIG, REVIEWER_FAILURE_LIMIT, attemptAction, evaluate, normalizeErrorKey, refundedAfterReplan,
 } from "../../packages/core/dist/attempt-policy.js";
 import { DEFAULT_PROGRESS_GUARD_SETTINGS } from "../../packages/shared/dist/progress-guard-settings.js";
 import { DEFAULT_REVIEW_LIMIT_SETTINGS } from "../../packages/shared/dist/review-limit-settings.js";
+import { failedTaskBrief } from "../../packages/core/dist/task-context.js";
 import { openTestDatabase } from "../helpers/db.mjs";
 
 // reduceTask attaches an Attempt Policy decision (action / reason) to every
@@ -651,4 +652,99 @@ test("reducer applies evaluate: a merged review pass completes and a conflict fa
   assert.equal(merged.next.status, "completed");
   const conflict = assertReducerFollowsEvaluate(row, { event: "review.passed", payload: { merge_exit_code: 1, task_branch: "t", work_branch: "w" } }, { ...base, merge: { outcome: "conflict", taskBranch: "t", workBranch: "w" } });
   assert.equal(conflict.next.status, "failed");
+});
+
+// --- review_focus: same-spot findings go back to the Manager early; a replan hands review attempts back ---
+
+const spot = (file, line, problem = "special case") => ({ file, line, problem });
+const tagsHistory = [[spot("src/tags.ts", 42, "empty tag")], [spot("src/tags.ts", 50, "unicode tag")]];
+
+test("review failure: fix_required on the same spot as the reviews before it goes back to the Manager", () => {
+  const same = decisionOf(evaluate(reviewFailed({}, { findings: [spot("src/tags.ts", 47, "tag with spaces")], fixHistory: tagsHistory }), cfg()));
+  assert.deepEqual([same.to, same.reason, same.managerTrigger, same.action], ["failed", "review_same_spot_repeated", true, "replan"]);
+  assert.deepEqual(same.sameSpot, [...[...tagsHistory].reverse().flat(), spot("src/tags.ts", 47, "tag with spaces")], "fixHistory is newest first; the Manager gets the earlier findings oldest first, then the current one");
+  // the threshold comes from the config: 4 reviews are needed, only 3 exist
+  const later = cfg({ reviewFocus: { ...DEFAULT_ATTEMPT_POLICY_CONFIG.reviewFocus, same_spot_threshold: 4 } });
+  assert.equal(decisionOf(evaluate(reviewFailed({}, { findings: [spot("src/tags.ts", 47)], fixHistory: tagsHistory }), later)).reason, "review_fix_required");
+});
+
+test("review failure: a design Task with findings on the same spot keeps its Lead escalation flow", () => {
+  const planRounds = DEFAULT_REVIEW_LIMIT_SETTINGS.plan_review_rounds;
+  const over = { findings: [spot("design.md", null)], fixHistory: [[spot("design.md", null)], [spot("design.md", null)]] };
+  assert.equal(decisionOf(evaluate(reviewFailed({ type: "design", review_round: planRounds - 1 }, over), cfg())).reason, "design_escalated_to_lead");
+  assert.equal(decisionOf(evaluate(reviewFailed({ type: "code" }, over), cfg())).reason, "review_same_spot_repeated");
+});
+
+test("review failure: findings scattered over other files or far lines stay a normal fix round", () => {
+  const apart = [[spot("src/a.ts", 1)], [spot("src/b.ts", 1)]];
+  assert.equal(decisionOf(evaluate(reviewFailed({}, { findings: [spot("src/tags.ts", 42)], fixHistory: apart }), cfg())).reason, "review_fix_required");
+  const far = decisionOf(evaluate(reviewFailed({}, { findings: [spot("src/tags.ts", 400)], fixHistory: tagsHistory }), cfg()));
+  assert.equal(far.reason, "review_fix_required");
+  const short = decisionOf(evaluate(reviewFailed({}, { findings: [spot("src/tags.ts", 42)], fixHistory: tagsHistory.slice(0, 1) }), cfg()));
+  assert.equal(short.reason, "review_fix_required");
+});
+
+test("review budget: a replan hands attempts back up to the limit, the total budget still stops", () => {
+  const focus = DEFAULT_ATTEMPT_POLICY_CONFIG.reviewFocus;
+  const limit = DEFAULT_REVIEW_LIMIT_SETTINGS.total_review_attempts;
+  const refunded = (total, already = 0, base) => refundedAfterReplan(taskRow({ total_review_attempts: total, review_attempts_refunded: already }), base, focus);
+  assert.equal(refunded(limit - 1), focus.replan_refund);
+  assert.equal(refunded(limit - 1, focus.replan_refund), focus.replan_refund * 2);
+  assert.equal(refunded(limit - 1, focus.refund_limit), focus.refund_limit);
+  assert.equal(refunded(1), 1, "cannot hand back more than was spent");
+  assert.equal(refunded(limit, 0, limit), 0, "attempts before the Owner's last answer are not spent");
+  const before = decisionOf(evaluate(reviewFailed({ total_review_attempts: limit - 1 }), cfg()));
+  assert.equal(before.reason, "review_budget_reached");
+  const after = decisionOf(evaluate(reviewFailed({ total_review_attempts: limit - 1, review_attempts_refunded: focus.replan_refund }), cfg()));
+  assert.equal(after.reason, "review_fix_required");
+  const stopped = decisionOf(evaluate(reviewFailed({ total_review_attempts: limit - 1 + focus.replan_refund, review_attempts_refunded: focus.replan_refund }), cfg()));
+  assert.equal(stopped.reason, "review_budget_reached");
+  // an Owner answer folds the refunds so far into the restart: they do not lift the budget a second time
+  const restarted = (extra) => decisionOf(evaluate(reviewFailed({ total_review_attempts: limit - 1, review_attempts_refunded: 4 }, { refundedBase: 4, ...extra }), cfg()));
+  assert.equal(restarted({}).reason, "review_budget_reached");
+  assert.equal(decisionOf(evaluate(reviewFailed({ total_review_attempts: limit - 1, review_attempts_refunded: 4 + focus.replan_refund }, { refundedBase: 4 }), cfg())).reason, "review_fix_required");
+  assert.equal(refundedAfterReplan(taskRow({ total_review_attempts: limit - 1, review_attempts_refunded: 4 }), undefined, focus, 4), Math.min(4 + focus.replan_refund, focus.refund_limit));
+});
+
+test("review_focus: the reducer reads the settings, tells the Manager about the spot and records the refund on the Task row", async (t) => {
+  const { db } = await openTestDatabase(t, { prefix: "owl-review-focus-" });
+  const lane = db.createWriteLane();
+  const now = "2026-09-24T00:00:00.000Z";
+  await lane.transact((tx) => {
+    tx.run("INSERT OR IGNORE INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Owner', ?, ?)", now, now);
+    tx.run(`INSERT INTO works (id, owner_id, project_id, title, summary, size, state, rules_json, related_work_ids_json, created_at, updated_at)
+            VALUES ('W', 'owner:default', NULL, 'W', 'x', 'normal', 'running', '[]', '[]', ?, ?)`, now, now);
+    tx.run(`INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, state_version, failure_count, same_error_count,
+              review_round, worker_generation, created_at, updated_at, retry_no, manager_task_id, total_review_attempts)
+            VALUES ('T1', 'W', 'T1', 'code', 'verifying', 'normal', '', 'Done.', 0, 0, 0, 0, 1, ?, ?, 0, 'T1', 4)`, now, now);
+    tagsHistory.forEach((spots, round) => tx.run(
+      "INSERT INTO reviews (id, task_id, round, verdict, findings_json, verification_report_json, created_at) VALUES (?, 'T1', ?, 'fix_required', ?, '{}', ?)",
+      `R${round}`, round, JSON.stringify(spots.map((s) => ({ ...s, severity: "major" }))), now,
+    ));
+  });
+  const reduce = (event, payload) => lane.transact((tx) => reduceTaskInTransaction(tx, "T1", { event, payload }));
+  const failedReview = await reduce("review.failed", { verdict: "fix_required", review: { findings: [{ ...spot("src/tags.ts", 44, "tag with spaces"), severity: "major" }] } });
+  assert.equal(failedReview.next.status, "failed");
+  assert.equal(failedReview.decision.reason, "review_same_spot_repeated");
+  const brief = failedTaskBrief(db, "T1");
+  assert.match(brief.review_same_spot.note, /same spot/);
+  assert.deepEqual(brief.review_same_spot.findings, [...tagsHistory.flat(), spot("src/tags.ts", 44, "tag with spaces")]);
+
+  const replan = () => reduce("task.replanned", { base_plan_version: 1, current_plan_version: 1, dependencies_completed: true });
+  const stored = () => db.get("SELECT review_attempts_refunded AS n, total_review_attempts AS total FROM tasks WHERE id = 'T1'");
+  await replan();
+  assert.deepEqual({ ...stored() }, { n: 2, total: 5 });
+  assert.equal(failedTaskBrief(db, "T1").review_same_spot, null, "the replan ends the same-spot report");
+  await lane.transact((tx) => tx.run("UPDATE tasks SET status = 'failed' WHERE id = 'T1'"));
+  await lane.transact((tx) => tx.run("INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at) VALUES ('review_focus', 'owner:default', '1.0.0', ?, ?)", JSON.stringify({ refund_limit: 3 }), now));
+  await replan();
+  assert.equal(stored().n, 3, "the limit comes from the setting");
+  await lane.transact((tx) => tx.run("UPDATE tasks SET status = 'failed' WHERE id = 'T1'"));
+  await replan();
+  assert.equal(stored().n, 3, "no more is handed back at the limit");
+
+  // after the replan, the earlier reviews no longer count as consecutive fixes for the new approach
+  await lane.transact((tx) => tx.run("UPDATE tasks SET status = 'verifying' WHERE id = 'T1'"));
+  const again = await reduce("review.failed", { verdict: "fix_required", review: { findings: [{ ...spot("src/tags.ts", 44), severity: "major" }] } });
+  assert.equal(again.decision.reason, "review_fix_required");
 });

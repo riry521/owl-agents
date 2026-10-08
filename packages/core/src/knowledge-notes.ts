@@ -438,7 +438,7 @@ function readArray(fields: Map<string, string>, key: string): string[] {
   return contents ? splitFlowArray(contents).map(parseScalar) : [];
 }
 
-function splitFlowArray(value: string): string[] {
+export function splitFlowArray(value: string): string[] {
   const items: string[] = [];
   let start = 0;
   let quote = "";

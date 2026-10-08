@@ -285,7 +285,8 @@ export function readFixContext(db: ContextReader, taskId: string, workerFindings
     `SELECT type, agent_run_id, payload_json, created_at FROM events
       WHERE task_id = ? AND sequence > ?
         AND (type IN ('verification.completed', 'review.passed', 'task.process_wait_started')
-             OR (type = 'review.failed' AND json_type(payload_json, '$.review') = 'object'))
+             OR (type = 'review.failed' AND json_type(payload_json, '$.review') = 'object')
+             OR (type = 'task.failure.classified' AND json_extract(payload_json, '$.report.result') = 'partial'))
       ORDER BY sequence DESC LIMIT 1`,
     taskId,
     boundary,
@@ -307,6 +308,10 @@ export function readFixContext(db: ContextReader, taskId: string, workerFindings
         started_at: event.created_at,
       },
     };
+  }
+  // A partial report retried on the same Task: the next run continues from it.
+  if (event.type === "task.failure.classified") {
+    return isRecord(payload.report) ? { previous_report: workerReportOnly(payload.report) } : null;
   }
   if (event.type === "verification.completed") {
     if (payload.outcome !== "fail") return null;

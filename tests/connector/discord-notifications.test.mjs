@@ -299,6 +299,38 @@ test("a reply to the bot's unrelated message is not a decision answer", async ()
   assert.equal(requests.some(({ path }) => path === `/decisions/${DECISION_ID}/answer`), false);
 });
 
+test("connector-authored Discord messages (Advisor replies, acknowledgements, error notices) suppress every mention", async () => {
+  const { connector } = await decisionReplyConnector();
+  const { sends, client } = discordClient();
+  connector.client.channels.fetch = client.channels.fetch;
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    await connector.handleAdvisorResponse(event("advisor.responded", {
+      origin: { channel: "discord", channel_id: "D-CONVERSATION" },
+      reply: "@everyone <@&123> <@456> the build finished",
+    }));
+    await connector.handleAdvisorResponse(event("advisor.responded", {
+      origin: { channel: "discord", channel_id: "D-CONVERSATION" },
+      conversation_id: "C1", message_id: "missing",
+    }));
+  } finally {
+    console.error = originalError;
+  }
+  const replies = [];
+  await connector.handleMessage({
+    id: "M3", author: { id: "U1", bot: false }, content: "@everyone status", channelId: "D-CONVERSATION",
+    reference: { messageId: "M1" }, fetchReference: async () => ({}),
+    attachments: new Map(), channel: { isDMBased: () => false, isTextBased: () => true, send: async (message) => replies.push(message) },
+  });
+
+  assert.ok(sends.length >= 2, "the Advisor reply and its failure notice were both sent");
+  for (const message of [...sends.map((send) => send.message), ...replies]) {
+    assert.deepEqual(message.allowedMentions?.parse, [], `mentions must not be parsed in: ${message.content}`);
+  }
+  assert.ok(replies.length >= 1, "the Decision acknowledgement was sent");
+});
+
 test("notification cards show the Work title in embed title, description and content", async () => {
   const { sends, client } = discordClient();
   await sendNotification(client, event("work.completed", { work_id: WORK_ID, work_title: "請求書整理" }, { work_id: WORK_ID }), "D-NOTIFICATIONS");

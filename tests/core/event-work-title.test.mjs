@@ -47,3 +47,24 @@ test("notification events get payload.work_title on live frames and history", as
   const stored = db.get("SELECT payload_json FROM events WHERE id = 'e1'");
   assert.equal(stored.payload_json, JSON.stringify({ work_id: "w1" }));
 });
+
+test("event history fills a limited page with visible events when internal dispatcher alerts come first", async (t) => {
+  const { root, db, core } = await createTestCore(t, { version: "event-history-limit-test", now: () => new Date().toISOString() }, { prefix: "owl-event-history-limit-" });
+  await mkdir(join(root, "data"), { recursive: true });
+  await db.createWriteLane().transact((tx) => {
+    const events = [
+      ["i1", "system.alert", { internal_dispatcher_marker: true }],
+      ["i2", "system.alert", { internal_dispatcher_marker: true }],
+      ["n1", "system.alert", { internal_dispatcher_marker: 1 }],
+      ["v1", "work.completed", { work_id: "w1" }],
+      ["v2", "work.paused", { work_id: "w1" }],
+    ];
+    events.forEach(([id, type, payload], i) => {
+      tx.run(
+        "INSERT INTO events (id, sequence, idempotency_key, type, payload_json, status, created_at) VALUES (?, ?, ?, ?, ?, 'handled', ?)",
+        id, i + 1, `key-${id}`, type, JSON.stringify(payload), NOW,
+      );
+    });
+  });
+  assert.deepEqual(core.listEventsAfter(null, 3).map((frame) => frame.event_id), ["n1", "v1", "v2"]);
+});

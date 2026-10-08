@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -105,4 +105,23 @@ test("a Task worktree that conflicts with the Work branch is reported without le
   // The abort left no merge in progress and T2's own edit is intact.
   assert.throws(() => git(firstPrepare.worktree_path, "rev-parse", "-q", "--verify", "MERGE_HEAD"));
   assert.equal(await readFile(join(firstPrepare.worktree_path, "README.md"), "utf8"), "T2 version\n");
+});
+
+test("Task and integration worktrees are reused when the Owl root is reached through a symbolic link", async (t) => {
+  const parent = await tempDir(t, "owl-worktree-symlink-");
+  const project = await projectRepo(parent);
+  await mkdir(join(parent, "owl-real"), { recursive: true });
+  await symlink(join(parent, "owl-real"), join(parent, "owl"));
+  const gateway = new GitWorktreeGateway(fakeDatabase(parent, project), join(parent, "owl"));
+
+  const firstPrepare = await gateway.prepareWorktree({ work_id: "W", task_id: "T2" });
+  assert.equal(firstPrepare.ok, true, firstPrepare.message);
+  const reused = await gateway.prepareWorktree({ work_id: "W", task_id: "T2" });
+  assert.equal(reused.ok, true, reused.message);
+  assert.equal(reused.worktree_path, firstPrepare.worktree_path);
+
+  // The second integration reuses the Work's integration worktree created by the first.
+  await advanceWorkBranch(gateway, "W", "T3", "first.txt", "from T3\n");
+  await advanceWorkBranch(gateway, "W", "T4", "second.txt", "from T4\n");
+  assert.equal(git(project, "show", "owl/work/W/work:second.txt"), "from T4");
 });

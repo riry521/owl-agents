@@ -5,7 +5,7 @@ import { test } from "node:test";
 
 import { createUlid } from "../../packages/db/dist/index.js";
 import { MemoryIndex } from "../../packages/core/dist/memory/memory-index.js";
-import { estimatePageTokens } from "../../packages/core/dist/memory/page-format.js";
+import { bodySha256, estimatePageTokens } from "../../packages/core/dist/memory/page-format.js";
 import { PageLibrarian } from "../../packages/core/dist/memory/page-librarian.js";
 import { tempDir } from "../helpers/temp.mjs";
 
@@ -65,7 +65,7 @@ created: 2026-10-01
 `;
 
 /** A vault with `conversations` pending logs and `clippings` unused clippings; each file is `ageSeconds(i)` old. */
-async function setup(t, { conversations, clippings = 0, batch, propose, rebuildIndexes, themeRow, themeRows }) {
+async function setup(t, { conversations, clippings = 0, batch, propose, rebuildIndexes, themeRow, themeRows, router }) {
   const parent = await tempDir(t, "owl-librarian-batch-");
   const vault = join(parent, "vault");
   const dataDir = join(parent, "data");
@@ -89,7 +89,7 @@ async function setup(t, { conversations, clippings = 0, batch, propose, rebuildI
     vault: { isAvailable: () => true, activeDir: () => vault, withWrite: (fn) => fn() }, dataDir,
     index: { refresh: () => index.refreshChanged(), listPages: (query) => (themeRows && query.types?.includes("theme") ? themeRows(files) : themeRow &&requests.length > 0 ? [themeRow(files[0])] : index.listPages(query)) },
     rebuildIndexes,
-    router: { route: async () => ({ status: "appended", page: null }) },
+    router: router ?? { route: async () => ({ status: "appended", page: null }) },
     propose: async (request) => { requests.push(request); return propose(request, requests.length); },
     model: () => ({ provider: "claude", model: "m", effort: "low" }), batch: () => batch.current, now: () => NOW, logger: { warn: () => undefined },
   });
@@ -318,4 +318,184 @@ test("each batch backs up into its own directory; a batch 2 failure keeps batch 
   assert.equal(await readFile(join(root, "batch-2", "after-items", homePath), "utf8"), "index after batch 1", "batch 2 saved what batch 1 left");
   assert.equal(await readFile(join(vault, homePath), "utf8"), "index after batch 1", "only the failed batch's index write is undone");
   assert.equal((await env.librarian.pendingStats()).pending_conversations, 0);
+});
+
+test("a rejected take_conversation does not undo lines another writer added to a theme page after the router wrote", async (t) => {
+  const batch = { current: { max_items: 2, max_input_tokens: 60000, max_batches: 1 } };
+  const themeA = "themes/a.md";
+  let vault;
+  let calls = 0;
+  const append = async (line) => writeFile(join(vault, themeA), (await readFile(join(vault, themeA), "utf8")).replace("## 決まりごと\n", `## 決まりごと\n${line}\n`));
+  const env = await setup(t, {
+    conversations: 1, batch,
+    propose: async (request) => ({ ok: true, output: { operations: request.conversations.map((c) => ({ op: "take_conversation", conversation: c.path, h: c.h, items: [{ kind: "fact", text: "一つ目" }, { kind: "fact", text: "二つ目" }] })) } }),
+    themeRows: () => [{ path: themeA, page_scope: "common", project_id: null }],
+    router: {
+      route: async () => {
+        calls += 1;
+        if (calls === 1) { await append("- 司書が足した行"); return { status: "appended", page: themeA }; }
+        await append("- 別の書き手が足した行");
+        return { status: "rejected", reason: "template_invalid", page: null };
+      },
+    },
+  });
+  vault = env.vault;
+  await mkdir(join(vault, "themes"), { recursive: true });
+  await writeFile(join(vault, themeA), themePage(createUlid(), "テーマ A"));
+  const report = await env.run();
+  assert.ok(report.rejected.some((r) => r.code.startsWith("route_failed")), JSON.stringify(report.rejected));
+  assert.match(await readFile(join(vault, themeA), "utf8"), /別の書き手が足した行/u);
+});
+
+test("a router that throws mid take_conversation is undone like a rejected route and leaves the conversation pending", async (t) => {
+  const batch = { current: { max_items: 2, max_input_tokens: 60000, max_batches: 1 } };
+  const themeA = "themes/a.md";
+  let vault;
+  let calls = 0;
+  const env = await setup(t, {
+    conversations: 1, batch,
+    propose: async (request) => ({ ok: true, output: { operations: request.conversations.map((c) => ({ op: "take_conversation", conversation: c.path, h: c.h, items: [{ kind: "fact", text: "一つ目" }, { kind: "fact", text: "二つ目" }] })) } }),
+    themeRows: () => [{ path: themeA, page_scope: "common", project_id: null }],
+    router: {
+      route: async () => {
+        calls += 1;
+        if (calls > 1) throw new Error("router broke");
+        const text = await readFile(join(vault, themeA), "utf8");
+        await writeFile(join(vault, themeA), text.replace("## 決まりごと\n", "## 決まりごと\n- 司書が足した行\n"));
+        return { status: "appended", page: themeA };
+      },
+    },
+  });
+  vault = env.vault;
+  await mkdir(join(vault, "themes"), { recursive: true });
+  const original = themePage(createUlid(), "テーマ A");
+  await writeFile(join(vault, themeA), original);
+  const report = await env.run();
+  assert.ok(report.rejected.some((r) => r.code === "route_failed:thrown:router broke"), JSON.stringify(report));
+  assert.doesNotMatch(await readFile(join(vault, themeA), "utf8"), /司書が足した行/u);
+  assert.match(await readFile(join(vault, env.files[0]), "utf8"), /extraction: pending/u);
+});
+
+test("a take_conversation whose backup of a router-written page fails is undone and stays pending", async (t) => {
+  const batch = { current: { max_items: 2, max_input_tokens: 60000, max_batches: 1 } };
+  const themeA = "themes/a.md";
+  const runId = createUlid();
+  let vault;
+  let dataDir;
+  const env = await setup(t, {
+    conversations: 1, batch,
+    propose: async (request) => ({ ok: true, output: { operations: request.conversations.map((c) => ({ op: "take_conversation", conversation: c.path, h: c.h, items: [{ kind: "fact", text: "一つ目" }] })) } }),
+    themeRows: () => [{ path: themeA, page_scope: "common", project_id: null }],
+    router: {
+      route: async () => {
+        const text = await readFile(join(vault, themeA), "utf8");
+        await writeFile(join(vault, themeA), text.replace("## 決まりごと\n", "## 決まりごと\n- 司書が足した行\n"));
+        const blocked = join(dataDir, "backups", "memory-pages", runId, "batch-1");
+        await mkdir(blocked, { recursive: true });
+        await writeFile(join(blocked, "themes"), "blocks the backup directory");
+        return { status: "appended", page: themeA };
+      },
+    },
+  });
+  vault = env.vault;
+  dataDir = env.dataDir;
+  await mkdir(join(vault, "themes"), { recursive: true });
+  const original = themePage(createUlid(), "テーマ A");
+  await writeFile(join(vault, themeA), original);
+  const report = await env.librarian.run({ run_id: runId, mode: "nightly" });
+  assert.ok(report.rejected.some((r) => r.code.startsWith("route_failed:thrown:")), JSON.stringify(report));
+  assert.doesNotMatch(await readFile(join(vault, themeA), "utf8"), /司書が足した行/u);
+  assert.match(await readFile(join(vault, env.files[0]), "utf8"), /extraction: pending/u);
+});
+
+test("a rejected take_conversation keeps a line another writer added after the router wrote, using the router's own hash", async (t) => {
+  const batch = { current: { max_items: 2, max_input_tokens: 60000, max_batches: 1 } };
+  const themeA = "themes/a.md";
+  let vault;
+  let calls = 0;
+  const env = await setup(t, {
+    conversations: 1, batch,
+    propose: async (request) => ({ ok: true, output: { operations: request.conversations.map((c) => ({ op: "take_conversation", conversation: c.path, h: c.h, items: [{ kind: "fact", text: "一つ目" }, { kind: "fact", text: "二つ目" }] })) } }),
+    themeRows: () => [{ path: themeA, page_scope: "common", project_id: null }],
+    router: {
+      route: async () => {
+        calls += 1;
+        if (calls > 1) return { status: "rejected", reason: "template_invalid" };
+        const text = await readFile(join(vault, themeA), "utf8");
+        const written = text.replace("## 決まりごと\n", "## 決まりごと\n- 司書が足した行\n");
+        await writeFile(join(vault, themeA), written);
+        const written_hash = bodySha256(written);
+        await writeFile(join(vault, themeA), written.replace("## 決まりごと\n", "## 決まりごと\n- 別の書き手が足した行\n")); // lands between the router and adopt
+        return { status: "appended", page: themeA, written_hash };
+      },
+    },
+  });
+  vault = env.vault;
+  await mkdir(join(vault, "themes"), { recursive: true });
+  await writeFile(join(vault, themeA), themePage(createUlid(), "テーマ A"));
+  const report = await env.run();
+  assert.ok(report.rejected.some((r) => r.code.startsWith("route_failed")), JSON.stringify(report.rejected));
+  assert.match(await readFile(join(vault, themeA), "utf8"), /別の書き手が足した行/u);
+});
+
+test("a rejected take_conversation keeps a line another writer added after the librarian's own check and before the next route wrote", async (t) => {
+  const batch = { current: { max_items: 3, max_input_tokens: 60000, max_batches: 1 } };
+  const themeA = "themes/a.md";
+  let vault;
+  let calls = 0;
+  const env = await setup(t, {
+    conversations: 1, batch,
+    propose: async (request) => ({ ok: true, output: { operations: request.conversations.map((c) => ({ op: "take_conversation", conversation: c.path, h: c.h, items: [{ kind: "fact", text: "一つ目" }, { kind: "fact", text: "二つ目" }, { kind: "fact", text: "三つ目" }] })) } }),
+    themeRows: () => [{ path: themeA, page_scope: "common", project_id: null }],
+    router: {
+      // Honours the router contract: inside its lease it reports the own_hashes pages that no longer match, then writes.
+      route: async (input) => {
+        calls += 1;
+        if (calls > 2) return { status: "rejected", reason: "template_invalid" };
+        if (calls === 2) await writeFile(join(vault, themeA), (await readFile(join(vault, themeA), "utf8")).replace("## 決まりごと\n", "## 決まりごと\n- 別の書き手が足した行\n"));
+        const text = await readFile(join(vault, themeA), "utf8");
+        const foreign_pages = Object.entries(input.own_hashes ?? {}).filter(([page, hash]) => page === themeA && bodySha256(text) !== hash).map(([page]) => page);
+        const written = text.replace("## 決まりごと\n", "## 決まりごと\n- 司書が足した行\n");
+        await writeFile(join(vault, themeA), written);
+        return { status: "appended", page: themeA, written_hash: bodySha256(written), ...(foreign_pages.length > 0 ? { foreign_pages } : {}) };
+      },
+    },
+  });
+  vault = env.vault;
+  await mkdir(join(vault, "themes"), { recursive: true });
+  await writeFile(join(vault, themeA), themePage(createUlid(), "テーマ A"));
+  const report = await env.run();
+  assert.ok(report.rejected.some((r) => r.code.startsWith("route_failed")), JSON.stringify(report.rejected));
+  assert.match(await readFile(join(vault, themeA), "utf8"), /別の書き手が足した行/u);
+});
+
+test("a rejected take_conversation keeps a line another writer added between two successful routes to the same page", async (t) => {
+  const batch = { current: { max_items: 3, max_input_tokens: 60000, max_batches: 1 } };
+  const themeA = "themes/a.md";
+  let vault;
+  let calls = 0;
+  const env = await setup(t, {
+    conversations: 1, batch,
+    propose: async (request) => ({ ok: true, output: { operations: request.conversations.map((c) => ({ op: "take_conversation", conversation: c.path, h: c.h, items: [{ kind: "fact", text: "一つ目" }, { kind: "fact", text: "二つ目" }, { kind: "fact", text: "三つ目" }] })) } }),
+    themeRows: () => [{ path: themeA, page_scope: "common", project_id: null }],
+    router: {
+      route: async () => {
+        calls += 1;
+        if (calls > 2) return { status: "rejected", reason: "template_invalid" };
+        const text = await readFile(join(vault, themeA), "utf8");
+        const written = text.replace("## 決まりごと\n", "## 決まりごと\n- 司書が足した行\n");
+        await writeFile(join(vault, themeA), written);
+        const written_hash = bodySha256(written);
+        // After the first route returns its hash, another writer appends; the second route then hashes that line in too.
+        if (calls === 1) await writeFile(join(vault, themeA), written.replace("## 決まりごと\n", "## 決まりごと\n- 別の書き手が足した行\n"));
+        return { status: "appended", page: themeA, written_hash };
+      },
+    },
+  });
+  vault = env.vault;
+  await mkdir(join(vault, "themes"), { recursive: true });
+  await writeFile(join(vault, themeA), themePage(createUlid(), "テーマ A"));
+  const report = await env.run();
+  assert.ok(report.rejected.some((r) => r.code.startsWith("route_failed")), JSON.stringify(report.rejected));
+  assert.match(await readFile(join(vault, themeA), "utf8"), /別の書き手が足した行/u);
 });

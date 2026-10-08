@@ -245,6 +245,18 @@ test("code: a whole-command Core test run verifies a .ts-only Task; its failure 
   assert.equal((await run(undefined)).error_key, "code_unchecked");
 });
 
+test("code: a passing selected Core test run verifies a .ts-only Task", async (t) => {
+  const result = await directly(t, { type: "code", files: { "src/a.ts": "x" }, coreTestRun: { run_id: "R1", mode: "selected", passed_files: ["tests/a.test.mjs"], failed_files: [] } });
+  assert.equal(result.passed, true);
+  assert.ok(result.checks.some((check) => check.command_id === "policy:test" && check.passed));
+});
+
+test("code: a selected Core test run with no passed file, or no run at all, stays code_unchecked", async (t) => {
+  const run = (coreTestRun) => directly(t, { type: "code", files: { "src/a.ts": "x" }, coreTestRun });
+  assert.equal((await run(undefined)).error_key, "code_unchecked");
+  assert.equal((await run({ run_id: null, mode: "selected", passed_files: [], failed_files: [] })).error_key, "code_unchecked");
+});
+
 test("doc: a file limit cannot hide an empty document", async (t) => {
   const limited = readVerificationPolicySettings({ limits: { max_files_per_check: 1 } });
   const result = await directly(t, { type: "doc", files: { "ok.md": "# A\n", "empty.md": " \n" }, settings: limited });

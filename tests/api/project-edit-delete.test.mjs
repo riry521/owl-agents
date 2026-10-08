@@ -833,3 +833,20 @@ test("post_merge_install_command saves, reads back, resets, and rejects invalid 
     await assertApiError(await patch(value, key), 400, "validation_error");
   }
 });
+
+test("updateProject rejects an invalid verification_plan and keeps the stored plan readable", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "verification-plan-project");
+  if (!repo) return;
+  const project = await createProject(api, "verification-plan", { path: repo });
+  const read = () => api.db.get("SELECT verification_plan_json FROM projects WHERE id = ?", project.id).verification_plan_json;
+  const before = read();
+  for (const [key, value] of [["string", "x"], ["bad-entry", [{ command_id: "a" }]]]) {
+    await assert.rejects(
+      () => api.durableCore.updateProject(project.id, command({ verification_plan: value }, `bad-plan:${key}`)),
+      (error) => error?.code === "validation_error",
+    );
+  }
+  assert.equal(read(), before);
+});

@@ -18,13 +18,15 @@ import * as AttemptPolicy from "./attempt-policy";
 import { attemptAction, type AttemptDecision, type AttemptReason } from "./attempt-policy";
 import { ownerLanguage } from "./owner-language";
 import { reviewLimits } from "./review-limits";
+import { previousFixSpots, reviewFocusSettings, reviewSpots, type ReviewSpot } from "./review-focus";
+import type { ReviewFocusSettings } from "../../shared/dist/review-focus-settings.js";
 import { remakeLimits } from "./remake-limits";
 import { progressGuard } from "./progress-guard";
 import { assignReplacementLineageInTransaction, lineageExternalBlockerReports, lineageGenerationCount, lineageReviewAttemptsExcluding, lineageUsage, parseLineageReset, restartLineageBudgetInTransaction } from "./task-lineage";
 import type { RemakeLimitSettings } from "../../shared/dist/remake-limit-settings.js";
 import { findDependencyCycle, type ReplanPlan } from "./replan-plan";
 import { PROCESS_WAIT_EVENT, validatePrerequisiteSpec, type PrerequisiteSpec } from "../../shared/dist/prerequisite.js";
-import { ACCEPTANCE_DEFECT_EVENT } from "../../shared/dist/acceptance-defect.js";
+import { ACCEPTANCE_DEFECT_EVENT, workerAcceptanceDefects } from "../../shared/dist/acceptance-defect.js";
 import { EXTERNAL_BLOCKER_EVENT } from "../../shared/dist/external-blocker.js";
 import type {
   CoreWriteLaneTransaction,
@@ -340,6 +342,7 @@ function attemptPolicyConfig(options: TaskReducerOptions): AttemptPolicy.Attempt
   return {
     ...AttemptPolicy.DEFAULT_ATTEMPT_POLICY_CONFIG,
     reviewLimits: options.reviewLimits ?? AttemptPolicy.DEFAULT_ATTEMPT_POLICY_CONFIG.reviewLimits,
+    reviewFocus: options.reviewFocus ?? AttemptPolicy.DEFAULT_ATTEMPT_POLICY_CONFIG.reviewFocus,
     lineageLimits: options.lineage
       ? { reviewAttempts: options.lineage.limit, baseSyncReviewAttempts: options.lineage.baseSyncLimit, leadReviewRejections: options.lineage.leadRejectionLimit }
       : null,
@@ -379,6 +382,7 @@ function applyAttemptDecision(row: TaskRow, decision: AttemptPolicy.AttemptPolic
     ...(decision.reviewBudget ? { review_budget: decision.reviewBudget } : {}),
     ...(decision.lineageBudget ? { lineage_budget: decision.lineageBudget } : {}),
     ...(decision.designBlock ? { design_block: decision.designBlock } : {}),
+    ...(decision.sameSpot ? { review_same_spot: decision.sameSpot } : {}),
   };
 }
 
@@ -500,10 +504,14 @@ export function reduceWork(row: WorkRow, command: WorkReducerCommand): Reduction
 
 export interface TaskReducerOptions {
     readonly reviewLimits?: ReviewLimitSettings;
+    readonly reviewFocus?: ReviewFocusSettings;
+    /** The fix_required reviews just before this one, newest first; read from the reviews table by reduceTaskInTransaction. */
+    readonly fixHistory?: readonly (readonly ReviewSpot[])[];
     /** External blocker reports earlier in the lineage and the progress_guard limit; used only for EXTERNAL_BLOCKER_EVENT. */
     readonly externalBlocker?: { readonly earlierReports: number; readonly limit: number };
     /** total_review_attempts at the Owner's last answer (lineage_reset_json); rows 18b/18c count from there. */
     readonly reviewAttemptsBase?: number;
+    readonly refundedBase?: number;
     /** Lineage budget inputs; without them row 18d is skipped. */
     readonly lineage?: {
       readonly otherReviewAttempts: number;
@@ -675,12 +683,21 @@ export function reduceTask(
   if (row.status === "running" && event === "task.failure.classified" && payload.failure_class === "deterministic") {
     const errorKey = requiredString(payload, "error_key");
     const retryAllowed = requiredBoolean(payload, "retry_allowed");
+    const report = payload.report !== null && typeof payload.report === "object" && !Array.isArray(payload.report) ? payload.report as JsonObject : null;
     return applyAttemptEvaluation(row, event, now, AttemptPolicy.evaluate({
       kind: "deterministic_failure",
       task: row,
       errorKey,
       retryAllowed,
       escalatedFromTransient: payload.escalated_from === "transient",
+      partialReport: report?.result === "partial"
+        ? {
+          pendingProcess: report.pending_process != null,
+          externalBlocker: report.external_blocker != null,
+          unverifiable: workerAcceptanceDefects(report).length > 0,
+          needsReplanning: report.needs_replanning === true,
+        }
+        : null,
     }, policy));
   }
 
@@ -770,7 +787,10 @@ export function reduceTask(
       task: row,
       verdict: payload.verdict,
       reviewAttemptsBase: options.reviewAttemptsBase,
+      refundedBase: options.refundedBase,
       lineage: lineageObservation(options),
+      findings: options.fixHistory === undefined ? undefined : reviewSpots((payload.review as { findings?: unknown } | undefined)?.findings),
+      fixHistory: options.fixHistory,
     }, policy));
   }
 
@@ -796,6 +816,7 @@ export function reduceTask(
         lead_designer_start_round: row.type === "design" && row.lead_designer_start_round != null ? 0 : null,
         failed_by_dependency_task_id: null,
         lineage_generation: (row.lineage_generation ?? 1) + 1,
+        review_attempts_refunded: AttemptPolicy.refundedAfterReplan(row, options.reviewAttemptsBase, policy.reviewFocus, options.refundedBase),
       },
       ["plan_revision_incremented"],
     ), target === "ready" ? "replanned" : payload.prerequisite !== undefined ? "process_wait" : "dependency_incomplete");
@@ -979,7 +1000,7 @@ function persistTaskRow(transaction: CoreWriteLaneTransaction, row: TaskRow): vo
            last_error_key = ?, last_error_generation = ?, review_round = ?, lead_designer_start_round = ?, reviewer_failure_count = ?, total_review_attempts = ?, base_sync_review_attempts = ?, lineage_generation = ?,
            worker_generation = ?, worktree_path = ?, worktree_state = ?,
            last_failure_class = ?, paused_from = ?, retry_no = ?, next_attempt_at = ?,
-           failed_by_dependency_task_id = ?, lead_review_rejections = ?, design_stop_json = ?, design_escalated = ?, updated_at = ?
+           failed_by_dependency_task_id = ?, lead_review_rejections = ?, design_stop_json = ?, design_escalated = ?, review_attempts_refunded = ?, updated_at = ?
      WHERE id = ? AND state_version = ?`,
     row.status,
     row.state_version,
@@ -1004,6 +1025,7 @@ function persistTaskRow(transaction: CoreWriteLaneTransaction, row: TaskRow): vo
     row.lead_review_rejections ?? 0,
     row.design_stop_json ?? null,
     row.design_escalated ?? 0,
+    row.review_attempts_refunded ?? 0,
     row.updated_at,
     row.id,
     row.state_version - 1,
@@ -1500,7 +1522,11 @@ export function reduceTaskInTransaction(
   const externalBlocker = command.event === EXTERNAL_BLOCKER_EVENT
     ? { earlierReports: lineageExternalBlockerReports(transaction, row.id, typeof objectPayload(command).agent_run_id === "string" ? String(objectPayload(command).agent_run_id) : null), limit: progressGuard(transaction).external_blocker_limit }
     : undefined;
-  let result = reduceTask(row, command, { reviewLimits: reviewLimits(transaction), lineage, externalBlocker, reviewAttemptsBase: reset?.review_attempts });
+  const reviewFocus = reviewFocusSettings(transaction);
+  const fixHistory = command.event === "review.failed" && objectPayload(command).verdict === "fix_required"
+    ? previousFixSpots(transaction, row.id, reviewFocus.same_spot_threshold - 1)
+    : undefined;
+  let result = reduceTask(row, command, { reviewLimits: reviewLimits(transaction), reviewFocus, fixHistory, lineage, externalBlocker, reviewAttemptsBase: reset?.review_attempts, refundedBase: reset?.review_attempts_refunded });
   if (row.manager_task_id?.startsWith(QUARANTINE_FIX_TASK_PREFIX) && result.side_effects.includes("core_decision_required")) {
     // A quarantine fix Task that cannot be fixed ends failed: no Decision, and the Work goes on.
     result = { ...taskResult(row, { ...result.next, status: "failed" }), changed: true };
@@ -1534,6 +1560,7 @@ export function reduceTaskInTransaction(
           same_error: result.next.same_error_count,
           retry_no: result.next.retry_no,
         },
+        ...(result.review_same_spot ? { same_spot_findings: result.review_same_spot } : {}),
         ...(result.review_budget ? { budget: { review_budget: result.review_budget } } : result.lineage_budget ? { budget: { lineage_budget: result.lineage_budget } } : result.design_block ? { budget: { design_block: { trigger: result.design_block.trigger, rejections: result.design_block.rejections, limit: result.design_block.limit } } } : {}),
       },
     });
@@ -2921,7 +2948,12 @@ export function resolveDecisionInTransaction(
         details: { work_id: decision.work_id, decision_id: decision.id },
       });
     }
-    if (work.state === "judgement_waiting") {
+    // The Work waits until its last open work-scope Decision is answered, as cancelWorkDecisions does.
+    const stillOpen = transaction.get<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM decisions WHERE work_id = ? AND status = 'open' AND scope = 'work'",
+      decision.work_id,
+    );
+    if (work.state === "judgement_waiting" && Number(stillOpen?.count ?? 0) === 0) {
       reduceWorkInTransaction(transaction, decision.work_id, {
         event: "decision.resolved",
         payload: { winner_commit: true },

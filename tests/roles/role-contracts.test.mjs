@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -9,6 +9,7 @@ import { MANAGER_PLAN_OUTPUT_SCHEMA, MANAGER_REPLAN_OUTPUT_SCHEMA, MANAGER_FINAL
 import { DESIGNER_REPORT_SCHEMA, WORKER_REPORT_SCHEMA, buildDesignerRolePrompt, buildWorkerPrompt } from "../../packages/agent-runtime/dist/worker.js";
 import { buildReviewerPrompt, REVIEW_OUTPUT_SCHEMA } from "../../packages/agent-runtime/dist/reviewer.js";
 import { validateReportEnvelope } from "../../packages/agent-runtime/dist/protocol.js";
+import { reportCheckCommands } from "../../packages/core/dist/test-detection.js";
 import { tempDir } from "../helpers/temp.mjs";
 
 // Every role and mode renders one fixed prompt template whose "## Output
@@ -1044,15 +1045,49 @@ test("test-placement rules appear in the Worker, Manager and Reviewer prompts", 
   const calls = [];
   const runner = runnerAnswering((template) => fillTemplate(template), calls);
   await runner.runReviewer(reviewerRequest());
-  await runner.runWorker(workerRequest());
+  await runner.runWorker(workerRequest({ report_check_commands: ["pnpm test:layout"] }));
   await runner.runManagerPlan(managerRequest("plan"));
   await runner.runManagerPlan(managerRequest("replan"));
   const [reviewer, worker, plan, replan] = calls.map((call) => call.prompt);
 
   assert.match(worker, /add them to the existing feature test file, fix an existing test that checks the same thing, and create a new test file only for a new feature/u);
-  assert.match(worker, /run `pnpm test:layout` yourself and fix any violation on the spot/u);
+  assert.match(worker, /run these checks yourself and fix any violation on the spot: `pnpm test:layout`/u);
   for (const manager of [plan, replan]) {
     assert.match(manager, /add them to the existing feature test file or fix the existing test that checks the same thing; a new test file only for a new feature/u);
   }
   assert.match(reviewer, /Never send the Worker back, and never report a finding \(not even a minor one for the backlog\), because of where a test file is placed or because a test duplicates another/u);
+});
+
+test("the Worker's check before reporting is the Project setting, else the detected test command, else the project's documentation", async (t) => {
+  const calls = [];
+  const runner = runnerAnswering((template) => fillTemplate(template), calls);
+  const promptFor = async (root, configured) => {
+    const commands = reportCheckCommands({ configured, explicit_json: null, detected_json: null, root });
+    await runner.runWorker(workerRequest({ worktree: root, report_check_commands: commands }));
+    return calls.at(-1).prompt;
+  };
+  const placement = /add them to the existing feature test file, fix an existing test that checks the same thing, and create a new test file only for a new feature\./u;
+
+  const detectable = await tempDir(t);
+  await writeFile(join(detectable, "package.json"), JSON.stringify({ scripts: { test: "vitest run" } }));
+  await writeFile(join(detectable, "pnpm-lock.yaml"), "");
+
+  // The setting wins over what detection would pick in the same folder.
+  const configured = await promptFor(detectable, ["pnpm test:layout"]);
+  assert.match(configured, placement);
+  assert.match(configured, /Before you report, run these checks yourself and fix any violation on the spot: `pnpm test:layout`\./u);
+  assert.doesNotMatch(configured, /`pnpm test`/u);
+  assert.equal(await promptFor(detectable, ["pnpm test:layout"]), configured);
+
+  const detected = await promptFor(detectable, []);
+  assert.match(detected, placement);
+  assert.match(detected, /Before you report, run these checks yourself and fix any violation on the spot: `pnpm test`\./u);
+  assert.doesNotMatch(detected, /test:layout/u);
+
+  const undetectable = await tempDir(t);
+  const none = await promptFor(undetectable, []);
+  assert.match(none, placement);
+  assert.match(none, /No check command is set or detected for this project: before you report, run the checks the project's own documentation describes \(README, AGENTS\.md, CLAUDE\.md and similar\)/u);
+  assert.match(none, /the check is not applicable: say so in verification\.method and do not report blocked or partial for it\./u);
+  assert.doesNotMatch(none, /Before you report, run these checks yourself/u);
 });

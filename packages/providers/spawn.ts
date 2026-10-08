@@ -229,6 +229,9 @@ export function spawnProvider(request: SpawnRequest): Promise<RawProviderProcess
       closeReject = reject;
     },
   );
+  // A spawn error rejects this before the stream captures finish and it is
+  // awaited; without a handler Node treats that as an unhandled rejection.
+  closePromise.catch(() => undefined);
   let childError: unknown = null;
   child.on("error", (error: unknown) => {
     childError = error;

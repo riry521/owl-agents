@@ -143,11 +143,11 @@ function parseValue(raw: string): FrontmatterValue {
   return value;
 }
 
-/** Quotes only what would not parse back to the same value. */
+/** Quotes only what would not parse back to the same value, or would break onto another line (a new key). */
 function renderValue(value: FrontmatterValue): string {
   if (Array.isArray(value)) return `[${value.map((item) => (item === "" || /[,"'\n]|^\s|\s$/u.test(item) ? JSON.stringify(item) : item)).join(", ")}]`;
   if (value === null) return "";
-  if (typeof value === "string" && value !== "" && parseValue(value) !== value) return JSON.stringify(value);
+  if (typeof value === "string" && value !== "" && (/[\r\n]/u.test(value) || parseValue(value) !== value)) return JSON.stringify(value);
   return String(value);
 }
 
@@ -209,6 +209,18 @@ export function parsePage(text: string): ParsedPage {
 }
 
 /** LF, one trailing newline. */
+/** Sets `key: value` in the frontmatter by editing that one line (or adding it before the closing `---`). */
+export function setFrontmatter(text: string, key: string, value: string): string {
+  const lines = text.split("\n");
+  const end = lines.findIndex((line, i) => i > 0 && line.replace(/\r$/u, "") === "---");
+  if (lines[0]?.replace(/\r$/u, "") !== "---" || end < 0) return text;
+  const cr = lines[end].endsWith("\r") ? "\r" : "";
+  const at = lines.findIndex((line, i) => i > 0 && i < end && line.startsWith(`${key}:`));
+  if (at >= 0) lines[at] = `${key}: ${value}${cr}`;
+  else lines.splice(end, 0, `${key}: ${value}${cr}`);
+  return lines.join("\n");
+}
+
 export function renderPage(page: ParsedPage): string {
   const out: string[] = [];
   if (page.frontmatter_order.length > 0) {
@@ -220,7 +232,7 @@ export function renderPage(page: ParsedPage): string {
     out.push("---");
   }
   if (page.comment !== null) out.push(page.comment);
-  if (page.title !== null) out.push(`# ${page.title}`, "");
+  if (page.title !== null) out.push(`# ${page.title.replace(/[\r\n]+/gu, " ")}`, "");
   if (page.preamble.length > 0) out.push(...page.preamble, "");
   page.sections.forEach((section, i) => {
     if (i > 0) out.push("");

@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { agentUserInstructionEnv, buildAgentPermissionArgs } from "../../packages/shared/dist/index.js";
+import { argv as executorArgv } from "../../packages/core/dist/executor.js";
 import { tempDir } from "../helpers/temp.mjs";
 
 async function withPermissionHook(t, run) {
@@ -386,4 +387,35 @@ test("superpowers isolation: an unreadable settings.json fails the launch", asyn
   console.error = () => {};
   t.after(() => { console.error = originalError; });
   assert.throws(() => buildAgentPermissionArgs("worker", "claude", { owlRoot: root, env: { CLAUDE_CONFIG_DIR: config } }), /superpowers isolation setup failed/);
+});
+
+test("only a relay-watched Claude child gets the relay hook and PreCompact, in its single --settings", async (t) => {
+  await withResearchHook(t, async (root) => {
+    const relayHook = path.join(root, "apps", "server", "dist", "relay-hook.js");
+    await writeFile(relayHook, "", "utf8");
+    const runtime = { owlRoot: root, env: { HOME: root }, executables: { claude: "claude", codex: "codex" } };
+    const settingsOf = (args) => {
+      const all = args.flatMap((arg, index) => arg === "--settings" ? [JSON.parse(args[index + 1])] : []);
+      assert.equal(all.length, 1);
+      return all[0];
+    };
+    const haiku = settingsOf(executorArgv({ provider: "claude", model: "claude-haiku-5-5", timeout_ms: 0, relay: { handoff_tokens: 70000, kill_tokens: 95000 } }, runtime, root, runtime.env));
+    assert.ok(haiku.hooks.PreCompact[0].hooks[0].command.includes(relayHook));
+    assert.equal(haiku.hooks.PreCompact[0].matcher, undefined);
+    const relayEntry = haiku.hooks.PostToolUse.find((entry) => entry.hooks[0].command.includes(relayHook));
+    assert.equal(relayEntry.matcher, "*");
+    assert.ok(haiku.hooks.PostToolUse.some((entry) => entry.matcher === "WebFetch|WebSearch"), "the research hook stays next to it");
+    assert.ok(haiku.hooks.PreToolUse);
+
+    const sonnetArgs = executorArgv({ provider: "claude", model: "claude-sonnet-5-5", timeout_ms: 0 }, runtime, root, runtime.env);
+    assert.equal(settingsOf(sonnetArgs).hooks.PreCompact, undefined);
+    assert.equal(JSON.stringify(sonnetArgs).includes("relay-hook.js"), false);
+    assert.equal(JSON.stringify(buildAgentPermissionArgs("worker", "codex", { owlRoot: root, tokenRelay: true })).includes("relay-hook.js"), false);
+  });
+});
+
+test("a relay-watched child fails to start when relay-hook.js is not built", async (t) => {
+  await withPermissionHook(t, async (root) => {
+    assert.throws(() => buildAgentPermissionArgs("worker", "claude", { owlRoot: root, env: { HOME: root }, tokenRelay: true }), /Owl relay hook is missing at .*relay-hook\.js; build Owl/);
+  });
 });

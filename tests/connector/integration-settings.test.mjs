@@ -762,7 +762,7 @@ test("Discord Advisor responses are posted as regular channel messages", async (
       origin: { channel: "discord", channel_id: "D-CONVERSATION", ref: "source-message-id" },
     },
   });
-  assert.deepEqual(sent, [{ content: "返信を受け取りました。" }]);
+  assert.deepEqual(sent, [{ content: "返信を受け取りました。", allowedMentions: { parse: [] } }]);
 });
 
 test("Discord Advisor responses render suggested_actions, matching Slack", async () => {
@@ -796,6 +796,7 @@ test("Discord Advisor responses render suggested_actions, matching Slack", async
   });
   assert.deepEqual(sent, [{
     content: "返信を受け取りました。\n\n次のアクション案:\n• work: この変更をWorkに登録する",
+    allowedMentions: { parse: [] },
   }]);
 });
 

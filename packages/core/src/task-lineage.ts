@@ -56,6 +56,8 @@ export interface LineageReset {
   readonly base_sync_generations: number;
   /** Absent in snapshots taken before lead_review_rejections existed (read as 0). */
   readonly lead_review_rejections?: number;
+  /** review_attempts_refunded at the restart (read as 0 when absent); only refunds after it lift the budget again. */
+  readonly review_attempts_refunded?: number;
 }
 
 /** A broken JSON or a missing key means "never restarted" (the limits stay in force). */
@@ -137,8 +139,8 @@ export function lineageGenerationCount(reader: LineageReader, taskId: string): n
 
 /** The Owner answered a Decision that blocked the Task: usage counts from here (call inside the decision.resolved transaction). */
 export function restartLineageBudgetInTransaction(transaction: CoreWriteLaneTransaction, taskId: string, now: string): void {
-  const row = transaction.get<{ total_review_attempts: number; base_sync_review_attempts: number | null; lineage_generation: number; base_sync_generations: number | null; lead_review_rejections: number | null }>(
-    "SELECT total_review_attempts, base_sync_review_attempts, lineage_generation, base_sync_generations, lead_review_rejections FROM tasks WHERE id = ?",
+  const row = transaction.get<{ total_review_attempts: number; base_sync_review_attempts: number | null; lineage_generation: number; base_sync_generations: number | null; lead_review_rejections: number | null; review_attempts_refunded: number | null }>(
+    "SELECT total_review_attempts, base_sync_review_attempts, lineage_generation, base_sync_generations, lead_review_rejections, review_attempts_refunded FROM tasks WHERE id = ?",
     taskId,
   );
   if (!row) return;
@@ -149,6 +151,7 @@ export function restartLineageBudgetInTransaction(transaction: CoreWriteLaneTran
     lineage_generation: row.lineage_generation,
     base_sync_generations: row.base_sync_generations ?? 0,
     lead_review_rejections: row.lead_review_rejections ?? 0,
+    review_attempts_refunded: row.review_attempts_refunded ?? 0,
   };
   transaction.run("UPDATE tasks SET lineage_reset_json = ? WHERE id = ?", JSON.stringify(reset), taskId);
 }

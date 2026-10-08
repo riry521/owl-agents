@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { statSync } from "node:fs";
+import { mkdtempSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   AGENT_IDLE_TIMEOUT_ENV,
@@ -16,17 +17,23 @@ import {
   DEFAULT_HARNESS_MODELS,
   GUARD_TOKEN_FILE_ENV,
   MINIMAL_CODE_RULES,
+  parseHandoffMemo,
   PROCESS_SKILLS_PROMPT_FILES,
+  RELAY_STATE_FILE_ENV,
+  RequestUsageTracker,
   renderProcessSkills,
   renderWorkspaceToolsNote,
   WORKING_STYLE_RULES,
   type AgentTimeoutKind,
   type ChildRunFailureKind,
   type ExecutorConfig,
+  type ExecutorRelayConfig,
   type ExecutorResult,
   type ExecutorTask,
   type GuardTokenIssuer,
   type GuardTokenLease,
+  type HandoffMemo,
+  type RequestTokenUsage,
   type TokenUsage,
 } from "@owl/shared";
 import { formatRuntimeFailure } from "./error-display.js";
@@ -92,6 +99,7 @@ function environment(
   guardLease: GuardTokenLease | undefined,
   runId: string | undefined,
   provider: ExecutorConfig["provider"],
+  relayStateFile?: string,
 ): Record<string, string> {
   const instructionEnv = provider === "claude" || provider === "codex"
     ? agentUserInstructionEnv(provider, runtime.env)
@@ -111,12 +119,15 @@ function environment(
   };
   // Children never get the dispatch tools, so they cannot start grandchildren.
   delete env.OWL_DISPATCH_MCP;
+  // Only this segment's own state file may reach the relay hook, never one inherited from the server.
+  delete env[RELAY_STATE_FILE_ENV];
+  if (relayStateFile) env[RELAY_STATE_FILE_ENV] = relayStateFile;
   return env;
 }
 
 /** `env` is the Executor's own process environment, so the owl-memory MCP config gets its run id, ids and guard token file. */
 export function argv(config: ExecutorConfig, runtime: ExecutorRuntime, cwd?: string, env: Readonly<Record<string, string | undefined>> | undefined = runtime.env): string[] {
-  const guard = { owlRoot: runtime.owlRoot, role: "worker" as const, env, cwd };
+  const guard = { owlRoot: runtime.owlRoot, role: "worker" as const, env, cwd, tokenRelay: config.relay !== undefined };
   if (config.provider === "codex") {
     return [runtime.executables.codex ?? "codex", "exec", "--json", ...buildAgentPermissionArgs("worker", "codex", guard), "--skip-git-repo-check", "--model", config.model,
       ...(config.effort ? ["--config", `model_reasoning_effort=${config.effort}`] : []), "--", "-"];
@@ -210,11 +221,22 @@ function compactExecutorOutput(report: string): string {
   return `${bytes.subarray(0, headBytes).toString("utf8")}${EXECUTOR_RESULT_TRUNCATION_MARKER}${bytes.subarray(bytes.byteLength - tailBytes).toString("utf8")}`;
 }
 
+/** Where a relayed child left off; given to the next segment's prompt. */
+export interface RelayResume { readonly reason: "handoff" | "kill"; readonly segment: number; readonly memo: HandoffMemo | null }
+
+/** What the relay hook tells a child whose prompt crossed the handoff limit. */
+export function relayHandoffMessage(promptTokens: number, relay: ExecutorRelayConfig): string {
+  return `Owl: this session's context has reached ${promptTokens} tokens, over the handoff limit of ${relay.handoff_tokens}. Stop starting new work. Finish at most the step in progress, then end your reply with the owl-child-handoff block from your instructions. Owl stops this session at ${relay.kill_tokens} tokens.`;
+}
+
+const HANDOFF_FORMAT = '{"summary":"<= 1200 chars, the goal of this part and where it stands","done":["finished step"],"remaining":["step still to do"],"next_steps":["the very next action"],"changed_files":["relative/path"],"notes":"<= 1500 chars, decisions, pitfalls, and commands the next child needs"}';
+
 /** The prompt every child gets: the Worker's instruction plus the Task, Owl rules, Owner guidance and working rules. */
 export function buildChildRunPrompt(
   task: ExecutorTask,
   processSkills: readonly string[] | null = null,
   retry: { readonly failure_kind: string; readonly failure_reason: string } | null = null,
+  relay: { readonly budget: ExecutorRelayConfig; readonly previous: RelayResume | null } | null = null,
 ): string {
   const { title, acceptance_criteria, context, manager_notes, necessity, rules, owner_guidance: guidance, knowledge } = task.task;
   const writePaths = task.write_paths?.length ? task.write_paths : ["*"];
@@ -225,6 +247,12 @@ export function buildChildRunPrompt(
     "Other child agents may run at the same time in this workspace with disjoint write_paths. Edit only files inside your write_paths; you may read anything. Do not depend on changes another child is making concurrently. Inspect relevant existing code before editing and preserve correct work already present. Do not commit, push, create branches, rebase, or reset; the Worker integrates and Owl commits. You cannot dispatch further agents.",
     `Your write_paths: ${writePaths.join(", ")}`,
     ...(retry ? [`A previous attempt failed. Check the current state of your write_paths first and keep correct work. Previous attempt: ${JSON.stringify({ failure_kind: retry.failure_kind, failure_reason: retry.failure_reason.slice(0, 300) })}`] : []),
+    ...(relay?.previous ? [
+      "",
+      "## Handoff from the previous child",
+      `A previous child worked on this part and was replaced because its context grew too large (${relay.previous.reason}). Continue from the memo below: do not redo finished work, check the current state of your write_paths (for example with git status and git diff) before editing, and keep correct changes. When the reason is "kill", Owl stopped the previous child at the context limit, so it may have changed files after this memo.`,
+      relay.previous.memo ? `Memo: ${JSON.stringify(relay.previous.memo)}` : "No memo was written; inspect the current state of your write_paths and continue.",
+    ] : []),
     "",
     "## Task",
     JSON.stringify({ title, acceptance_criteria, context, manager_notes, necessity }),
@@ -244,6 +272,15 @@ export function buildChildRunPrompt(
     "",
     ...MINIMAL_CODE_RULES,
     "",
+    ...(relay ? [
+      "## Context budget",
+      "Owl watches how large this session's context grows. When a tool result tells you that Owl asks for a handoff, stop starting new work and end your reply with exactly one fenced block in this format instead of the owl-child-report, and nothing after it:",
+      "```owl-child-handoff",
+      HANDOFF_FORMAT,
+      "```",
+      `Owl then starts a new child that continues from your memo. Owl stops this session without asking once its context reaches ${relay.budget.kill_tokens} tokens, so hand off promptly. If you finish the whole part before that, end with the owl-child-report as usual.`,
+      "",
+    ] : []),
     "When finished, end your reply with exactly one fenced block in this format and nothing after it:",
     "```owl-child-report",
     '{"result":"succeeded|partial|failed","summary":"<= 1200 chars, what you did and the outcome","changed_files":["relative/path"],"checks":[{"command":"<command>","passed":true}],"remaining_issues":["<issue>"]}',
@@ -303,6 +340,10 @@ export interface ExecutorRunObserver {
   signal?: AbortSignal;
   /** Failure of the previous attempt, shown to a retried child. */
   retry?: { readonly failure_kind: string; readonly failure_reason: string };
+  /** Where the previous relay segment left off, shown to the next one. */
+  relayResume?: RelayResume;
+  /** One Claude request with its final usage. Must not throw. */
+  onRequestUsage?(usage: RequestTokenUsage): void;
   onSpawn?(pid: number): void;
   onOutput?(): void;
   /**
@@ -397,12 +438,27 @@ export async function runExecutorProcess(
       });
       return;
     }
-    const processEnv = environment(task, runtime, guardLease, observer.agent_run_id, config.provider);
+    // Owl counts the prompt size from Claude's stream; the hook only relays what this state file says.
+    const relay = config.provider === "claude" ? config.relay : undefined;
+    let relayDir: string | undefined;
+    let relayStateFile: string | undefined;
+    if (relay) {
+      try {
+        relayDir = mkdtempSync(join(tmpdir(), "owl-relay-"));
+        relayStateFile = join(relayDir, "state.json");
+        writeFileSync(relayStateFile, JSON.stringify({ phase: "running" }));
+      } catch (error) {
+        console.warn(`[owl] Relay state file could not be prepared; only the stop limit applies: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    const removeRelayDir = (): void => { if (relayDir) rmSync(relayDir, { recursive: true, force: true }); };
+    const processEnv = environment(task, runtime, guardLease, observer.agent_run_id, config.provider, relayStateFile);
     let command: string[];
     try {
       command = argv(config, runtime, task.workspace_dir, processEnv);
     } catch (error) {
       guardLease?.release();
+      removeRelayDir();
       resolve({
         subtask_id: task.subtask_id,
         success: false,
@@ -424,6 +480,7 @@ export async function runExecutorProcess(
       });
     } catch (error) {
       guardLease?.release();
+      removeRelayDir();
       resolve({
         subtask_id: task.subtask_id,
         success: false,
@@ -455,6 +512,7 @@ export async function runExecutorProcess(
       if (idleTimer !== undefined) clearTimeout(idleTimer);
       if (killTimer !== undefined) clearTimeout(killTimer);
       observer.signal?.removeEventListener("abort", cancel);
+      removeRelayDir();
       resolve(result);
     };
     const cancel = (): void => {
@@ -481,7 +539,57 @@ export async function runExecutorProcess(
     };
     const notifyProgress = (): void => { armIdleTimer(); observer.onOutput?.(); };
     const progress = new CodexProgressTracker(armIdleTimer);
-    const claudeStream = config.provider === "claude" ? new ClaudeStreamReader(notifyProgress) : null;
+    let peakPromptTokens = 0;
+    let relayKilled = false;
+    let handoffRequested = false;
+    let lastMemo: HandoffMemo | null = null;
+    const totals = { input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0 };
+    const relayStop = (): void => {
+      if (settled || relayKilled) return;
+      relayKilled = true;
+      signalProcessGroup(child, "SIGTERM");
+      setTimeout(() => {
+        if (!settled) signalProcessGroup(child, "SIGKILL");
+      }, KILL_GRACE_MS).unref();
+    };
+    const requestHandoff = (promptTokens: number): void => {
+      handoffRequested = true;
+      if (!relay || !relayStateFile) return;
+      // Write then rename so the hook never reads half a JSON document.
+      try {
+        writeFileSync(`${relayStateFile}.tmp`, JSON.stringify({ phase: "handoff", message: relayHandoffMessage(promptTokens, relay) }));
+        renameSync(`${relayStateFile}.tmp`, relayStateFile);
+      } catch (error) {
+        console.warn(`[owl] Relay state file could not be written; only the stop limit applies: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    };
+    // Every Claude child's requests are recorded; only relay-watched ones are judged, by the child's own (non-subagent) requests.
+    const tracker = new RequestUsageTracker({
+      onRequest: (usage) => {
+        if (!relay || usage.subagent) return;
+        peakPromptTokens = Math.max(peakPromptTokens, usage.prompt_tokens);
+        if (usage.prompt_tokens >= relay.kill_tokens) relayStop();
+        else if (usage.prompt_tokens >= relay.handoff_tokens && !handoffRequested) requestHandoff(usage.prompt_tokens);
+      },
+      onFlush: (usage) => {
+        totals.input_tokens += usage.input_tokens;
+        totals.output_tokens += usage.output_tokens;
+        totals.cache_read_tokens += usage.cache_read_tokens;
+        totals.cache_write_tokens += usage.cache_write_tokens;
+        observer.onRequestUsage?.(usage);
+      },
+    }, config.model);
+    const onAssistant = (event: Record<string, unknown>): void => {
+      tracker.accept(event);
+      if (!relay || event.parent_tool_use_id) return;
+      const content = (event.message as { content?: unknown } | undefined)?.content;
+      const text = Array.isArray(content)
+        ? content.map((part: { type?: unknown; text?: unknown }) => part?.type === "text" && typeof part.text === "string" ? part.text : "").join("\n")
+        : "";
+      // Keep the latest memo seen mid-stream, so a child stopped right after writing one still hands it on.
+      if (text.includes("```owl-child-handoff")) lastMemo = parseHandoffMemo(text) ?? lastMemo;
+    };
+    const claudeStream = config.provider === "claude" ? new ClaudeStreamReader(notifyProgress, { onAssistant }) : null;
     const capture = (which: "stdout" | "stderr", chunk: Buffer): void => {
       if (which === "stdout" && claudeStream) { claudeStream.push(chunk); return; }
       const current = which === "stdout" ? stdout : stderr;
@@ -521,10 +629,38 @@ export async function runExecutorProcess(
     }));
     child.once("close", (code) => {
       if (claudeStream) { stdout = claudeStream.output(); outputTooLarge ||= claudeStream.retainedBytes() + Buffer.byteLength(stderr) > OUTPUT_CAP_BYTES; }
+      tracker.flush();
+      if (relay && relayKilled && !cancelled) {
+        // A killed process emits no result line, so its usage comes from the tracked requests.
+        sink.usage = totals;
+        finish({
+          subtask_id: task.subtask_id,
+          success: false,
+          output: `Executor was stopped at ${peakPromptTokens} prompt tokens (token relay stop limit ${relay.kill_tokens}).`,
+          exit_code: code ?? -1,
+          duration_ms: Date.now() - started,
+          failure_kind: "exit_code",
+          relay: { reason: "kill", memo: lastMemo, peak_prompt_tokens: peakPromptTokens },
+        });
+        return;
+      }
       const processSucceeded = code === 0 && timedOut === null && !outputTooLarge;
       const report = processSucceeded ? executorFinalReport(config.provider, stdout) : null;
       const success = processSucceeded && report !== null && !report.is_error;
       if (processSucceeded) sink.usage = extractExecutorUsage(config.provider, stdout);
+      // A child-report means the part is done even after a handoff request; otherwise a handoff block, or silence after the request, is a handoff.
+      if (relay && processSucceeded && !report?.is_error && !report?.text.includes("```owl-child-report")
+        && (handoffRequested || report?.text.includes("```owl-child-handoff"))) {
+        finish({
+          subtask_id: task.subtask_id,
+          success: true,
+          output: report ? compactExecutorOutput(report.text) : "Executor handed off without a final reply.",
+          exit_code: code ?? 0,
+          duration_ms: Date.now() - started,
+          relay: { reason: "handoff", memo: (report ? parseHandoffMemo(report.text) : null) ?? lastMemo, peak_prompt_tokens: peakPromptTokens },
+        });
+        return;
+      }
       const output = success
         ? compactExecutorOutput(report.text)
         : processSucceeded && report !== null && report.is_error
@@ -564,7 +700,7 @@ export async function runExecutorProcess(
       // A process cancelled while the prompt is still being written can close
       // stdin first; the close handler remains responsible for classifying it.
       child.stdin!.on("error", () => {});
-      child.stdin!.end(buildChildRunPrompt(task, executorProcessSkills(task, config.provider), observer.retry ?? null));
+      child.stdin!.end(buildChildRunPrompt(task, executorProcessSkills(task, config.provider), observer.retry ?? null, relay ? { budget: relay, previous: observer.relayResume ?? null } : null));
     } catch (error) {
       signalProcessGroup(child, "SIGTERM");
       finish({

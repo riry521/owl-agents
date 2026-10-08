@@ -31,6 +31,9 @@ import { downloadAttachment } from "./files.js";
 const DEFAULT_CHAR_LIMIT = 2000;
 const PENDING_DECISION_PAGE_LIMIT = 50;
 const MAX_PENDING_DECISION_PAGES = 10_000;
+// Replies carry Advisor output and user-supplied names; like notifications,
+// they must never ping @everyone, roles or users.
+const NO_MENTIONS = { parse: [] } as const;
 
 export class DiscordConnector {
   private readonly config: DiscordConfig;
@@ -335,7 +338,7 @@ export class DiscordConnector {
       try {
         const channel = await this.client.channels.fetch(channelId);
         if (channel && channel.isTextBased() && "send" in channel) {
-          await channel.send({ content: t.notificationFailed(subject, safe) });
+          await channel.send({ content: t.notificationFailed(subject, safe), allowedMentions: NO_MENTIONS });
         }
       } catch (postError) {
         console.error(`[discord] Could not post notification failure to ${channelId}:`, postError);
@@ -364,7 +367,7 @@ export class DiscordConnector {
       // unhandled, the same way the Slack connector does.
       const text = formatAdvisorReply(reply, event.payload.suggested_actions, await this.core.language());
       for (const chunk of splitAtParagraphs(text, this.charLimit)) {
-        await channel.send({ content: chunk });
+        await channel.send({ content: chunk, allowedMentions: NO_MENTIONS });
       }
     } catch (error) {
       await this.reportChannelError(channelId, error);
@@ -440,7 +443,7 @@ export class DiscordConnector {
     if (!channel.isTextBased() || !("send" in channel)) {
       throw new Error("The Discord channel for this message is not available.");
     }
-    await channel.send({ content });
+    await channel.send({ content, allowedMentions: NO_MENTIONS });
   }
 
   private async fetchPendingDecisions(_throwOnError = true): Promise<PendingDecision[]> {
@@ -481,7 +484,7 @@ export class DiscordConnector {
     try {
       const channel = await this.client.channels.fetch(channelId);
       if (channel && channel.isTextBased() && "send" in channel) {
-        await channel.send({ content: `⚠ ${safe}` });
+        await channel.send({ content: `⚠ ${safe}`, allowedMentions: NO_MENTIONS });
       }
     } catch (postError) {
       console.error(`[discord] Could not post the failure message to ${channelId}:`, postError);

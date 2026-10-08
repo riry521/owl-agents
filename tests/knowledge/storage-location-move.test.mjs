@@ -56,4 +56,6 @@ test("move succeeds when source and target both contain .DS_Store", async (t) =>
   assert.equal(result.status.state, "available");
   assert.equal(await fs.readFile(join(target, ".DS_Store"), "utf8"), "target meta");
   assert.equal(await fs.readFile(join(target, "note.md"), "utf8"), "body");
+  assert.deepEqual(result.warnings, []);
+  await assert.rejects(fs.readFile(join(source, ".owl-knowledge")), { code: "ENOENT" });
 });

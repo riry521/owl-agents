@@ -123,6 +123,7 @@ const componentTranslations = {
   'work.delete': 'Delete',
   'work.taskTypeDesign': 'Design',
   'work.prerequisiteWaiting': 'Waiting on a prerequisite',
+  'work.processWaiting': 'Waiting for a process',
   'work.prerequisiteReason': ({ reason }) => `Reason: ${reason}`,
   'work.prerequisiteTargets': ({ targets }) => `Waiting for: ${targets}`,
   'work.prerequisiteDeadline': ({ time }) => `Deadline: ${time}`,
@@ -777,6 +778,7 @@ test('Work detail shows why a Task waits, what it waits for and why a Task stopp
         status: 'waiting',
         prerequisite: {
           reason: 'page-format.ts has not landed',
+          source: 'manager',
           conditions: [{ kind: 'base_branch', target: null, description: 'page-format.ts on main' }],
           deadline_at: '2026-09-26T00:00:00.000Z',
           since: '2026-09-23T00:00:00.000Z',
@@ -784,6 +786,14 @@ test('Work detail shows why a Task waits, what it waits for and why a Task stopp
         stop_reason: null,
       },
       { ...base, id: 'task-stopped', title: 'Stopped task', status: 'judgement_waiting', prerequisite: null, stop_reason: 'Reached the no-progress limit (3)' },
+      {
+        ...base,
+        id: 'task-process',
+        title: 'Process task',
+        status: 'waiting',
+        prerequisite: { reason: 'nightly build running', source: 'worker', conditions: [], deadline_at: '2026-09-26T00:00:00.000Z', since: null },
+        stop_reason: null,
+      },
     ];
     globalThis.fetch = (input) => successfulApiFetch(input, { state: 'running', title: 'Prerequisite work', taskRows });
     const board = renderBoardWorkLink({ id, title: 'Prerequisite work', state: 'running', updated_at: '2026-09-23T00:00:00.000Z' });
@@ -791,7 +801,9 @@ test('Work detail shows why a Task waits, what it waits for and why a Task stopp
     for (const expected of ['page-format.ts has not landed', 'page-format.ts on main', 'Stop waiting and resume', 'Reached the no-progress limit (3)']) {
       assert.ok(screen.html.includes(expected), `the screen should show: ${expected}`);
     }
-    assert.equal(screen.html.split('Stop waiting and resume').length - 1, 1, 'only the waiting Task gets a resume button');
+    assert.equal(screen.html.split('Waiting on a prerequisite').length - 1, 1, 'a Manager-set prerequisite is labelled as a prerequisite wait');
+    assert.equal(screen.html.split('Waiting for a process').length - 1, 1, 'a Worker-started process wait is labelled as a process wait');
+    assert.equal(screen.html.split('Stop waiting and resume').length - 1, 2, 'only the waiting Tasks get a resume button');
     const pausedRows = taskRows.map((row) => (row.status === 'waiting' ? { ...row, status: 'paused' } : row));
     globalThis.fetch = (input) => successfulApiFetch(input, { state: 'paused', title: 'Prerequisite work', taskRows: pausedRows });
     const pausedScreen = await renderDetailFromRoute(board.href, client);

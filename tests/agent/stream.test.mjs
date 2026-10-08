@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { ClaudeStreamReader } from "../../packages/shared/dist/index.js";
+import { ClaudeStreamReader, RequestUsageTracker, promptTokensOf } from "../../packages/shared/dist/index.js";
 import { harnessFailureDetail } from "../../packages/agent-runtime/dist/protocol.js";
 
 test("Claude stream returns the final result and session id without retaining tool output", () => {
@@ -68,4 +68,39 @@ test("Claude stream tail never starts mid UTF-8 character", () => {
   const out = reader.output();
   assert.equal(out.includes("�"), false);
   assert.ok(out.startsWith("あ"));
+});
+
+const usageLine = (id, usage, extra = {}) => ({ type: "assistant", message: { id, model: "claude-haiku-5-5", usage, content: [{ type: "text", text: "step" }] }, ...extra });
+
+test("Claude stream hands assistant lines to the request tracker, one request per message id with the prompt-side sum", () => {
+  const requests = [];
+  const flushed = [];
+  const tracker = new RequestUsageTracker({ onRequest: (u) => requests.push(u), onFlush: (u) => flushed.push(u) }, "fallback-model");
+  const reader = new ClaudeStreamReader(() => {}, { onAssistant: (event) => tracker.accept(event) });
+  const push = (value) => reader.push(JSON.stringify(value) + "\n");
+  push(usageLine("msg_1", { input_tokens: 10, cache_read_input_tokens: 70000, cache_creation_input_tokens: 2000, output_tokens: 1 }));
+  push(usageLine("msg_1", { input_tokens: 10, cache_read_input_tokens: 70000, cache_creation_input_tokens: 2000, output_tokens: 40 }));
+  push(usageLine("msg_sub", { input_tokens: 5, cache_read_input_tokens: 100, output_tokens: 2 }, { parent_tool_use_id: "toolu_1" }));
+  push({ type: "assistant", message: { id: "msg_2", usage: { input_tokens: 3 }, content: [] } });
+  push({ type: "result", result: "done", usage: { input_tokens: 999999, cache_read_input_tokens: 999999 } });
+  reader.output();
+  tracker.flush();
+  assert.deepEqual(requests.map((u) => [u.message_id, u.prompt_tokens, u.subagent]), [["msg_1", 72010, false], ["msg_sub", 105, true], ["msg_2", 3, false]]);
+  assert.equal(flushed.length, 3);
+  assert.equal(flushed[0].output_tokens, 40, "the id's last line is the recorded usage");
+  assert.equal(flushed[2].model, "fallback-model");
+  assert.ok(flushed.every((u) => u.prompt_tokens < 999999), "the cumulative result usage is never counted");
+});
+
+test("Request tracker uses a transcript line's timestamp and ignores a message id once it was flushed", () => {
+  const flushed = [];
+  const tracker = new RequestUsageTracker({ onFlush: (u) => flushed.push(u) });
+  tracker.accept({ ...usageLine("msg_a", { input_tokens: 1, cache_read_input_tokens: 2, cache_creation_input_tokens: 3 }), timestamp: "2026-10-01T00:00:00.000Z" });
+  tracker.accept(usageLine("msg_b", { input_tokens: 1 }));
+  tracker.accept(usageLine("msg_a", { input_tokens: 1, output_tokens: 99 }));
+  tracker.flush();
+  assert.deepEqual(flushed.map((u) => u.message_id), ["msg_a", "msg_b"]);
+  assert.equal(flushed[0].created_at, "2026-10-01T00:00:00.000Z");
+  assert.equal(flushed[0].prompt_tokens, 6);
+  assert.equal(promptTokensOf({ input_tokens: 1, cache_read_input_tokens: 2, cache_creation_input_tokens: 3, output_tokens: 50 }), 6);
 });

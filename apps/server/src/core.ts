@@ -2773,8 +2773,9 @@ export class ExternalCoreAdapter implements CorePort {
     if (builtin) {
       return builtinProviderToRecord(builtin);
     }
-    const custom = this.appSettings.getCustomProviders()[id];
-    if (!custom) return null;
+    const customProviders = this.appSettings.getCustomProviders();
+    if (!Object.hasOwn(customProviders, id)) return null;
+    const custom = customProviders[id];
     return {
       id,
       displayName: custom.displayName,

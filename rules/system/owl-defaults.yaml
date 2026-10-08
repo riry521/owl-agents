@@ -9,3 +9,9 @@ rules:
   - id: owl_how_what_why_whynot
     kind: instruction
     text: "コードには How、テストには What（仕様）、コミットログには Why、コードコメントには Why not（他の案を選ばなかった理由）を書くこと。"
+  - id: owl_build_served_artifacts
+    kind: instruction
+    text: "Work でコードを変えたプロジェクトにビルド手順（画面のビルドなど）がある場合は、ビルドまで終わらせ、配信されるファイル（dist など）に変更が反映されたことを確かめること。git の管理外の生成物も対象。サーバーの再起動はしないこと（再起動は Owner が行う）。"
+  - id: owl_no_internal_docs_in_git
+    kind: instruction
+    text: "設計・計画・検証・レビュー結果・作業記録などの内部資料は git で追跡しないこと。git add -f や .gitignore の例外（!）で無視設定を破らないこと。テストやコードが内部資料のファイルを読む作りにしないこと（必要な値はテストやコード側に持たせる）。"
