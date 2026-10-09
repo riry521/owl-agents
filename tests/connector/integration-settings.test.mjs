@@ -584,6 +584,7 @@ test("persistent Advisor actions create and start a Work through Core", async (t
   let sentTurnText = null;
   let sessionRequest = null;
   let workerRequest = null;
+  let sharedWorktree = null;
   const providerClient = {
     createSession: async (request) => {
       sessionRequest = request;
@@ -593,7 +594,13 @@ test("persistent Advisor actions create and start a Work through Core", async (t
         send: async (turn) => {
           sentTurnId = turn.turn_id;
           sentTurnText = typeof turn?.text === "string" ? turn.text : JSON.stringify(turn);
-          await writeFile(join(sessionRequest.cwd, "advisor-change.txt"), "kept in the Advisor worktree\n");
+          const prepared = await core.prepareAdvisorWorkspaceForSession({
+            session_id: sessionRequest.env.OWL_AGENT_RUN_ID,
+            project_id: null,
+          });
+          assert.equal(prepared.ok, true);
+          sharedWorktree = prepared.worktree_path;
+          await writeFile(join(sharedWorktree, "advisor-change.txt"), "kept in the Advisor worktree\n");
         },
         events: () => ({
           async *[Symbol.asyncIterator]() {
@@ -629,16 +636,25 @@ test("persistent Advisor actions create and start a Work through Core", async (t
     channel_id: "C-ADVISOR-ACTIONS",
     ref: "1712345678.000100",
   });
-  assert.equal(sessionRequest.cwd, realpathSync(join(root, ".owl-workspaces", "advisor", "conversation_advisor-actions")));
+  const advisorHome = realpathSync(join(root, ".owl-workspaces", "advisor", "home"));
+  assert.equal(sessionRequest.cwd, advisorHome);
+  assert.ok(!sessionRequest.cwd.startsWith(realpathSync(projectRoot)), "the read-only session must not run inside the Project");
+  assert.equal(
+    projectGit("worktree", "list", "--porcelain").split("\n").filter((line) => line.startsWith("worktree ")).length,
+    1,
+    "a session start creates no worktree",
+  );
+  assert.equal(projectGit("branch", "--list", "owl/advisor/*"), "", "a session start creates no Advisor branch");
   assert.match(sessionRequest.system_prompt, /must become an Owl Work that you dispatch/u);
   assert.match(sessionRequest.system_prompt, /every concrete request to perform work.*regardless of size/u);
   assert.match(sessionRequest.system_prompt, /'これやっといて' is a normal Work request/u);
   assert.match(sessionRequest.system_prompt, /Only bypass Work when the operator explicitly asks you to do the work directly/u);
-  assert.match(sessionRequest.system_prompt, /For that explicit exception, do the work in your Advisor workspace and do not create a Work/u);
+  assert.match(sessionRequest.system_prompt, /For that explicit exception, first prepare your Advisor workspace as described under Advisor workspace, do the work only there, and do not create a Work/u);
   assert.match(sessionRequest.system_prompt, /Before returning create_work, compare the full request and conversation context against the complete current Project catalog/u);
-  assert.match(sessionRequest.system_prompt, new RegExp(`## Workspace tools\\n- You are working in the git worktree ${sessionRequest.cwd.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}\\.`, "u"));
-  assert.equal(execFileSync("git", ["-C", sessionRequest.cwd, "branch", "--show-current"], { encoding: "utf8" }).trim(), "owl/advisor/conversation_advisor-actions");
-  assert.equal(await readFile(join(sessionRequest.cwd, "README.md"), "utf8"), "Advisor worktree fixture\n");
+  assert.match(sessionRequest.system_prompt, /## Advisor workspace/u);
+  assert.ok(sessionRequest.system_prompt.includes(projectRoot));
+  assert.ok(sessionRequest.system_prompt.includes(`git -C ${projectRoot} show main:`));
+  assert.doesNotMatch(sessionRequest.system_prompt, /## Workspace tools\n- You are working in the git worktree/u);
 
   const reply = await waitFor(
     () => workerRequest && db.get("SELECT body FROM messages WHERE conversation_id = ? AND source_message_id LIKE 'advisor:%' ORDER BY created_at DESC LIMIT 1", conversationId),
@@ -652,7 +668,9 @@ test("persistent Advisor actions create and start a Work through Core", async (t
   assert.match(sentTurnText, /Use null only after checking every entry/u);
   assert.match(reply.body, /^設定を確認しました。/u);
   assert.match(reply.body, /未コミット、またはベースブランチ未統合の変更があります/u);
-  assert.ok(reply.body.includes(sessionRequest.cwd));
+  assert.ok(sharedWorktree, "the provider should have prepared the shared worktree");
+  assert.ok(reply.body.includes(sharedWorktree));
+  assert.match(sentTurnText, /"base_branch": "main"/u);
   assert.match(reply.body, /Work「依存関係の修正」を起票し、Workerへ渡しました（ID: [0-9A-HJKMNP-TV-Z]{26}）。/u);
   assert.doesNotMatch(reply.body, /```owl-actions/u);
   assert.equal(workerRequest.context.task.title, "依存関係の修正");
@@ -662,14 +680,28 @@ test("persistent Advisor actions create and start a Work through Core", async (t
   assert.equal(createdWork.project_id, "project:advisor-actions", "a linked project should be inherited when the action leaves it unset");
   assert.equal(createdWork.size, "small");
   assert.notEqual(createdWork.state, "memo", "Core should start the Work automatically");
-  assert.equal(await readFile(join(sessionRequest.cwd, "advisor-change.txt"), "utf8"), "kept in the Advisor worktree\n");
+  assert.equal(await readFile(join(sharedWorktree, "advisor-change.txt"), "utf8"), "kept in the Advisor worktree\n");
   assert.equal(projectGit("status", "--porcelain=v1"), "", "the user's registered checkout remains unchanged");
-  const reusedWorkspace = await core.gitGateway().prepareAdvisorWorkspace({ conversation_id: conversationId });
+  const reusedWorkspace = await core.prepareAdvisorWorkspaceForSession({
+    session_id: sessionRequest.env.OWL_AGENT_RUN_ID,
+    project_id: null,
+  });
   assert.equal(reusedWorkspace.ok, true);
-  assert.equal(reusedWorkspace.worktree_path, sessionRequest.cwd);
-  assert.equal(await readFile(join(sessionRequest.cwd, "advisor-change.txt"), "utf8"), "kept in the Advisor worktree\n");
+  assert.equal(reusedWorkspace.worktree_path, sharedWorktree);
+  assert.equal(reusedWorkspace.synced, false);
+  assert.deepEqual(reusedWorkspace.dirty_reasons, ["uncommitted_changes"]);
+  assert.equal(await readFile(join(sharedWorktree, "advisor-change.txt"), "utf8"), "kept in the Advisor worktree\n");
   await core.restartAdvisorSession(ownerId);
-  assert.equal(await readFile(join(sessionRequest.cwd, "advisor-change.txt"), "utf8"), "kept in the Advisor worktree\n");
+  assert.equal(await readFile(join(sharedWorktree, "advisor-change.txt"), "utf8"), "kept in the Advisor worktree\n");
+  // Advancing base is visible through git without any extra worktree.
+  await writeFile(join(projectRoot, "README.md"), "Advanced base\n");
+  projectGit("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-am", "advance");
+  assert.equal(projectGit("show", "main:README.md"), "Advanced base");
+  assert.equal(
+    projectGit("worktree", "list", "--porcelain").split("\n").filter((line) => line.startsWith("worktree ") && line.includes("/advisor/")).length,
+    1,
+    "exactly one shared Advisor worktree exists",
+  );
   assert.equal(db.get("SELECT COUNT(*) AS count FROM messages WHERE conversation_id = ? AND source_message_id LIKE 'advisor:%'", conversationId).count, 1);
 
   const event = core.listEventsAfter(null, 100).find((candidate) => candidate.type === "advisor.responded");

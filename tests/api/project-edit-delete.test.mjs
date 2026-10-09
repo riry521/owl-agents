@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { ExternalCoreAdapter, MemoryCore } from "../../apps/server/dist/core.js";
+import { GuardTokenRegistry } from "../../apps/server/dist/guard-tokens.js";
 import { createUlid, openDatabase } from "../../packages/db/dist/index.js";
 import { createTestCore, command as coreCommand } from "../helpers/core.mjs";
 import { git } from "../helpers/git.mjs";
@@ -33,13 +34,16 @@ async function setup(t, { memory = false, legacyAdapter = false, coreOptions = {
   }
   const httpCore = memory ? new MemoryCore({ version: "api-project-edit-delete-memory" }) : new ExternalCoreAdapter(targetCore, db, root, dataDir);
   const token = randomBytes(32).toString("hex");
-  const server = await startTestHttpServer(t, { core: httpCore, db, webOut: root, owlRoot: root, dataDir }, { token });
+  const guardTokens = GuardTokenRegistry.open(join(root, "guard-tokens"));
+  t.after(() => guardTokens.clear());
+  const server = await startTestHttpServer(t, { core: httpCore, db, webOut: root, owlRoot: root, dataDir, guardTokens }, { token });
   if (!server) {
     t.skip("localhost listen is not permitted in this environment");
     return null;
   }
   const request = (path, { method = "GET", body } = {}) => server.request(method, `/api/v1${path}`, body);
-  return { root, dataDir, db, durableCore, httpCore, request };
+  const advisorToken = async () => (await readFile(guardTokens.issue({ agent_run_id: "advisor-1", role: "advisor" }).file, "utf8")).trim();
+  return { root, dataDir, db, durableCore, httpCore, request, server, advisorToken };
 }
 
 function testGit(t, cwd, ...args) {
@@ -849,4 +853,16 @@ test("updateProject rejects an invalid verification_plan and keeps the stored pl
     );
   }
   assert.equal(read(), before);
+});
+
+test("an Advisor guard token alone can register a Project with POST /projects", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const path = join(api.root, "advisor-created");
+  const response = await fetch(`${api.server.baseUrl}/api/v1/projects`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${await api.advisorToken()}` },
+    body: JSON.stringify(command({ name: "Advisor created", canonical_path: path, base_branch: "main", allowed_roots: [path], verification_plan: [] }, "advisor-create")),
+  });
+  assert.equal(response.status, 201);
 });

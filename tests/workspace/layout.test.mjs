@@ -66,7 +66,7 @@ test("empty ids and ids of only dots resolve to a directory below their parent, 
   for (const id of ["", ".", ".."]) {
     assert.ok(below(layout.root, layout.workDir(id)), `workDir(${id})`);
     assert.ok(below(layout.workDir("work"), layout.taskPath("work", id)), `taskPath(work, ${id})`);
-    assert.ok(below(join(layout.root, "advisor"), layout.advisorDir(id)), `advisorDir(${id})`);
+    assert.ok(below(join(layout.root, "advisor"), layout.advisorSharedDir(id)), `advisorSharedDir(${id})`);
   }
 });
 
@@ -90,17 +90,15 @@ test("workDir prefers an existing legacy directory, otherwise falls back to the 
   assert.equal(layout.integrationPath("W2"), join(root, "W2", "__work__"));
 });
 
-test("advisorDir prefers an existing legacy advisor directory, otherwise falls back to the current root", async (t) => {
+test("advisorSharedDir and advisorHomeDir always resolve under the current root, even when a legacy advisor directory exists", async (t) => {
   const parent = await tempDir(t, "owl-layout-advisordir-");
   const root = join(parent, "root");
   const legacyRoot = join(parent, "legacy");
   const layout = new WorkspaceLayout(root, legacyRoot);
+  await mkdir(join(legacyRoot, "advisor", "shared", "repo-1"), { recursive: true });
 
-  assert.equal(layout.advisorDir("conv-1"), join(root, "advisor", "conv-1"));
-
-  await mkdir(join(legacyRoot, "advisor", "conv-1"), { recursive: true });
-  assert.equal(layout.advisorDir("conv-1"), join(legacyRoot, "advisor", "conv-1"));
-  assert.equal(layout.advisorDir("conv-2"), join(root, "advisor", "conv-2"));
+  assert.equal(layout.advisorSharedDir("repo-1"), join(root, "advisor", "shared", "repo-1"));
+  assert.equal(layout.advisorHomeDir(), join(root, "advisor", "home"));
 });
 
 test("contains and rootOf identify which root (if any) holds a given path", () => {

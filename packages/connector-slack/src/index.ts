@@ -15,15 +15,28 @@ export {
 
 import { SlackConnector } from "./connector.js";
 import type { SlackConfig } from "./types.js";
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { loadOwlEnv } from "../../shared/dist/env.js";
 
 loadOwlEnv();
+
+function isEntryPoint(): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+}
 
 export function createSlackConnector(config: SlackConfig): SlackConnector {
   return new SlackConnector(config);
 }
 
-if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/"))) {
+// import.meta.url percent-encodes spaces and non-ASCII characters, so compare
+// file URLs (as apps/connectors/src/cli.ts does) rather than a raw-path suffix.
+if (isEntryPoint()) {
   const config: SlackConfig = {
     botToken: process.env.SLACK_BOT_TOKEN ?? "",
     appToken: process.env.SLACK_APP_TOKEN ?? "",

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { createUlid } from "../../packages/db/dist/index.js";
 import { registerReviewBacklogInTransaction } from "../../packages/core/dist/index.js";
 import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
+import { GuardTokenRegistry } from "../../apps/server/dist/guard-tokens.js";
 import { command, createTestCore } from "../helpers/core.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
 
@@ -32,7 +33,9 @@ async function startServer(t) {
   });
   await durableCore.start();
   const core = new ExternalCoreAdapter(durableCore, db, root, join(root, "data"));
-  const server = await startTestHttpServer(t, { core, db, webOut: root, owlRoot: root }, { token });
+  const guardTokens = GuardTokenRegistry.open(join(root, "guard-tokens"));
+  t.after(() => guardTokens.clear());
+  const server = await startTestHttpServer(t, { core, db, webOut: root, owlRoot: root, guardTokens }, { token });
   if (!server) {
     t.skip("localhost listen is not permitted in this environment");
     return null;
@@ -46,7 +49,8 @@ async function startServer(t) {
     if (options.auth !== false) return server.request(method, `${apiRoot}${path}`, body);
     return fetch(`${server.baseUrl}${apiRoot}${path}`, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   };
-  return { core, db, durableCore, get, write, root };
+  const advisorToken = async () => (await readFile(guardTokens.issue({ agent_run_id: "advisor-1", role: "advisor" }).file, "utf8")).trim();
+  return { core, db, durableCore, get, write, root, server, advisorToken };
 }
 
 async function createProject(root, core, suffix) {
@@ -375,4 +379,23 @@ test("backlog delete API removes only dismissed or done items, all or nothing", 
   const dismissGone = await api.write("POST", "/backlog/dismiss", { item_ids: [byName.done] });
   assert.equal(dismissGone.status, 404);
   assert.equal((await dismissGone.json()).error.code, "backlog_item_not_found");
+});
+
+test("an Advisor guard token alone can link a backlog item to a Work", async (t) => {
+  const api = await startServer(t);
+  if (!api) return;
+  const project = await createProject(api.root, api.durableCore, "advisor-link");
+  const source = await createWork(api.durableCore, "advisor-source", project);
+  const running = await createWork(api.durableCore, "advisor-running", project);
+  await api.db.createWriteLane().transact((tx) => tx.run("UPDATE works SET state = 'running' WHERE id = ?", running));
+  await registerFindings(api.db, source, [{ severity: "minor", subject: "other", file: "src/a.ts", problem: "Issue a" }]);
+  const [item] = (await (await api.get(`/works/${source}/backlog`)).json()).data;
+
+  const response = await fetch(`${api.server.baseUrl}${apiRoot}/works/${running}/backlog/link`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${await api.advisorToken()}` },
+    body: JSON.stringify(command({ item_ids: [item.id] }, createUlid())),
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).data.items[0].issued_work_id, running);
 });

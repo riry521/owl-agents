@@ -125,3 +125,75 @@ test("advisorRespond dispatches the referenced message's own body, not whichever
     );
   }
 });
+
+test("the next Advisor turn's input carries the previous reply's owl-actions results, including failures", async (t) => {
+  const root = await tempDir(t, "owl-advisor-action-results-");
+  const sentTurns = [];
+  const replies = [
+    [
+      "Working on it.",
+      "```owl-actions",
+      JSON.stringify([
+        { type: "create_work", description: "Create", payload: { title: "Carry results Work", summary: "Check the result is passed on.", size: "small", project_id: null } },
+        { type: "pause_work", description: "Pause", payload: { work_id: "no-such-work-id" } },
+      ]),
+      "```",
+    ].join("\n"),
+    "Second reply.",
+  ];
+  let currentTurn;
+  let readySent = false;
+  const providerClient = {
+    createSession: async () => ({
+      provider_session_id: "advisor-action-results-session",
+      pid: process.pid,
+      send: async (turn) => {
+        currentTurn = turn;
+        sentTurns.push(turn);
+      },
+      events: () => ({
+        async *[Symbol.asyncIterator]() {
+          if (!readySent) {
+            readySent = true;
+            yield { type: "session.ready", provider_session_id: "advisor-action-results-session", pid: process.pid };
+          }
+          yield { type: "turn.completed", turn_id: currentTurn.turn_id, reply: replies.shift(), usage: null };
+        },
+      }),
+      stop: async () => {},
+    }),
+  };
+  const agentRunner = {
+    runManagerPlan: async () => ({ outcome: "failed", message: "unused" }),
+    runWorker: async () => ({ outcome: "failed" }),
+    runReviewer: async () => ({ outcome: "failed" }),
+    runAdvisor: async () => { throw new Error("The persistent provider session should handle Advisor replies."); },
+  };
+  const { core, db } = await createTestCore(t, {
+    agentRunner, providerClient, version: "advisor-action-results-test", owlRoot: root, dataDir: root,
+    dispatcher: { tick_interval_ms: 25 },
+  });
+  core.gitGateway().inspectAdvisorWorkspace = async () => ({ ok: true, dirty: false, message: "clean" });
+  await core.start();
+
+  const conversation = await core.getActiveConversation();
+  const webAccount = db.get("SELECT id FROM connector_accounts WHERE owner_id = ? AND provider = 'web'", ownerId);
+  const first = await insertMessage(db, conversation.conversation_id, webAccount.id, "First request");
+  await core.advisorRespond(conversation.conversation_id, first, { channel: "web" });
+  const advisorMessage = () => db.get("SELECT body FROM messages WHERE conversation_id = ? AND source_message_id LIKE 'advisor:%'", conversation.conversation_id);
+  await waitFor(() => advisorMessage());
+  const workId = db.get("SELECT id FROM works WHERE title = 'Carry results Work'")?.id;
+  assert.ok(workId, "the create_work action should have created the Work");
+  const shownToOwner = advisorMessage().body;
+
+  const second = await insertMessage(db, conversation.conversation_id, webAccount.id, "Second request");
+  await core.advisorRespond(conversation.conversation_id, second, { channel: "web" });
+  await waitFor(() => sentTurns.length === 2);
+  const secondText = sentTurns[1].text;
+  const noticeLines = shownToOwner.split("\n").filter((line) => line.includes(workId) || line.includes("no-such-work-id"));
+  assert.ok(noticeLines.length >= 1, "the Owner-facing reply reports the results");
+  for (const line of noticeLines) assert.ok(secondText.includes(line), `the next turn carries: ${line}`);
+  assert.ok(noticeLines.some((line) => !line.includes(workId)), "the failed pause_work notice is a separate line");
+  assert.ok(secondText.indexOf("<owl-action-results>") < secondText.indexOf("Second request"));
+  assert.equal(sentTurns[0].text.includes("owl-action-results"), false);
+});

@@ -3465,6 +3465,80 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/advisor/workspace:
+    post:
+      operationId: prepareAdvisorWorkspace
+      summary: Prepare the shared Advisor worktree for the calling Advisor session
+      security:
+        - advisorServiceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                project_id:
+                  type:
+                    - string
+                    - 'null'
+              additionalProperties: false
+      responses:
+        '200':
+          description: The prepared worktree. synced is false when retained changes kept it from fast-forwarding.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AdvisorWorkspacePreparation'
+        '400':
+          description: Request validation failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: forbidden — the caller is not a running Advisor session.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: advisor_session_not_found, project_not_found or conversation_not_found.
+          x-error-codes:
+            - advisor_session_not_found
+            - project_not_found
+            - conversation_not_found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: advisor_workspace_unavailable — the worktree could not be prepared. details include error_code and message.
+          x-error-codes:
+            - advisor_workspace_unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: dependency_unavailable
+          x-error-codes:
+            - dependency_unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/inbound/messages:
     post:
       operationId: receiveInboundMessage
@@ -7689,6 +7763,77 @@ components:
                   items:
                     $ref: '#/components/schemas/AdvisorActionResult'
               additionalProperties: false
+    AdvisorWorkspacePreparation:
+      type: object
+      required:
+        - ok
+        - kind
+        - worktree_path
+        - repository_root
+        - branch
+        - base_branch
+        - base_head
+        - head
+        - synced
+        - dirty_reasons
+        - error_code
+        - message
+      properties:
+        ok:
+          type: boolean
+        kind:
+          type: string
+          enum:
+            - worktree
+            - direct
+        worktree_path:
+          type:
+            - string
+            - 'null'
+        repository_root:
+          type:
+            - string
+            - 'null'
+        branch:
+          type:
+            - string
+            - 'null'
+        base_branch:
+          type:
+            - string
+            - 'null'
+        base_head:
+          type:
+            - string
+            - 'null'
+        head:
+          type:
+            - string
+            - 'null'
+        synced:
+          type: boolean
+        dirty_reasons:
+          type: array
+          items:
+            type: string
+            enum:
+              - uncommitted_changes
+              - unmerged_commits
+        error_code:
+          type:
+            - string
+            - 'null'
+          enum:
+            - conversation_not_found
+            - project_not_found
+            - project_unavailable
+            - base_not_found
+            - workspace_conflict
+            - sync_failed
+            - null
+        message:
+          type: string
+      additionalProperties: false
     InboundMessage:
       type: object
       required:

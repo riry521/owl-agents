@@ -154,6 +154,23 @@ test("a Keychain read killed by execFile's timeout is reported as keychain_timeo
   assert.deepEqual(result, { kind: "unreadable", detail: "keychain_timeout" });
 });
 
+test("a Keychain read that fails by maxBuffer overflow or abort is not reported as keychain_timeout", async () => {
+  const failures = [
+    Object.assign(new Error("maxBuffer exceeded"), { code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER", killed: true }),
+    Object.assign(new Error("aborted"), { name: "AbortError", code: "ABORT_ERR", killed: true }),
+  ];
+  for (const failure of failures) {
+    const result = await readClaudeCredential({
+      platform: "darwin",
+      env: {},
+      homedir: "/home/test",
+      runSecurity: async () => { throw failure; },
+      readFile: async () => { throw Object.assign(new Error("missing"), { code: "ENOENT" }); },
+    });
+    assert.notDeepEqual(result, { kind: "unreadable", detail: "keychain_timeout" });
+  }
+});
+
 test("Linux credentials honor CLAUDE_CONFIG_DIR and reject malformed JSON", async () => {
   const paths = [];
   const result = await readClaudeCredential({

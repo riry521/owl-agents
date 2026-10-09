@@ -1,4 +1,4 @@
-import { OUTPUT_RESUBMIT_LIMIT_SETTINGS_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_OPTION_KEY } from "@owl/shared";
+import { OUTPUT_RESUBMIT_LIMIT_SETTINGS_KEY, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_OPTION_KEY } from "@owl/shared";
 import type { SettingsReader } from "./owner-language";
 
 export const REPORT_RESUBMIT_LIMIT_KEY = "report_resubmit_limit";
@@ -51,7 +51,7 @@ export function pendingReportResubmit(db: ResubmitReader, taskId: string, agentR
     taskId,
   );
   const payload = failure ? parseObject(failure.payload_json) : null;
-  if (!failure || !payload || payload.error_key !== REPORT_FORMAT_INVALID_ERROR_KEY) return null;
+  if (!failure || !payload || !isReportFormatInvalidErrorKey(payload.error_key)) return null;
   if (typeof payload.provider_session_id !== "string" || payload.provider_session_id.length === 0) return null;
   if (worktreePath === null || payload.worktree_path !== worktreePath) return null;
   const answers = db.all<{ answer_json: string; received_at: string }>(

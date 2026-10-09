@@ -1,3 +1,4 @@
+import { advisorAlternativeActions, matchAdvisorBlockedApi, validateOwnApiPath, type AdvisorBlockedApi } from "./advisor-api-policy.js";
 import { validateRoleOutput, type RoleSchema } from "./role-schema.js";
 
 export interface AdvisorSuggestedAction {
@@ -462,4 +463,68 @@ export const ADVISOR_CURATION_ACTION_TYPES: ReadonlySet<string> = new Set(
 /** The curation kind an owl-actions type runs, or null when the type is not a curation action. */
 export function advisorCurationKind(type: string): AdvisorCurationKind | null {
   return Object.hasOwn(ADVISOR_CURATION_ACTIONS, type) ? ADVISOR_CURATION_ACTIONS[type]! : null;
+}
+
+export const ADVISOR_CALL_API_ACTION_TYPE = "call_api";
+export const ADVISOR_CALL_API_MAX_BODY_CHARS = 100_000;
+const ADVISOR_CALL_API_MAX_REASON_CHARS = 1_000;
+const ADVISOR_CALL_API_KEYS: ReadonlySet<string> = new Set(["method", "path", "body", "reason"]);
+const ADVISOR_CALL_API_METHODS: ReadonlySet<string> = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+export interface AdvisorCallApiRequest {
+  readonly method: "POST" | "PUT" | "PATCH" | "DELETE";
+  readonly path: string;
+  readonly body?: Readonly<Record<string, unknown>>;
+  readonly reason: string;
+  readonly blocked: Extract<AdvisorBlockedApi, { kind: "call_api" }>;
+}
+
+function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Validate a call_api payload in the order the design fixes; the first failure wins. */
+export function parseAdvisorCallApiPayload(
+  payload: unknown,
+): { ok: true; value: AdvisorCallApiRequest } | { ok: false; reason: string } {
+  const fail = (reason: string) => ({ ok: false as const, reason });
+  if (!isPlainJsonObject(payload)) return fail("call_api payload must be an object");
+  if (Object.keys(payload).some((key) => !ADVISOR_CALL_API_KEYS.has(key))) {
+    return fail("call_api payload may only have method, path, body and reason");
+  }
+  const field = (key: string): unknown => (Object.hasOwn(payload, key) ? payload[key] : undefined);
+  const method = field("method");
+  if (typeof method !== "string" || !ADVISOR_CALL_API_METHODS.has(method)) {
+    return fail(method === "GET"
+      ? "GET needs no approval: call it directly with the owl-api tool"
+      : "method must be POST, PUT, PATCH or DELETE");
+  }
+  const checked = validateOwnApiPath(field("path") as string, { allowQuery: false });
+  if (!checked.ok) return fail(checked.reason);
+  const row = matchAdvisorBlockedApi(method, checked.pathname);
+  if (row === null) return fail("this API is not blocked: call it directly with the owl-api tool");
+  if (row.kind === "dedicated") {
+    const instead = `Use ${advisorAlternativeActions(row).join(" or ")} under its confirmation rule instead.`;
+    return fail(row.path === "/advisor/actions" ? `${row.reason} ${instead}` : instead);
+  }
+  const body = field("body");
+  if (body !== undefined && !isPlainJsonObject(body)) return fail("body must be a JSON object");
+  if (body !== undefined && JSON.stringify(body).length > ADVISOR_CALL_API_MAX_BODY_CHARS) {
+    return fail(`body must be at most ${ADVISOR_CALL_API_MAX_BODY_CHARS} characters`);
+  }
+  const reason = field("reason");
+  const trimmed = typeof reason === "string" ? reason.trim() : "";
+  if (trimmed.length < 1 || trimmed.length > ADVISOR_CALL_API_MAX_REASON_CHARS) {
+    return fail(`reason must be 1 to ${ADVISOR_CALL_API_MAX_REASON_CHARS} characters`);
+  }
+  return {
+    ok: true,
+    value: {
+      method: method as AdvisorCallApiRequest["method"],
+      path: checked.pathname,
+      ...(body === undefined ? {} : { body }),
+      reason: trimmed,
+      blocked: row,
+    },
+  };
 }

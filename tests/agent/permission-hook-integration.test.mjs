@@ -439,6 +439,37 @@ test("outbound guard checks WebFetch and curl/wget destinations in the PreToolUs
   assert.equal(await decide("Bash", { command: "curl --url=https://93.184.216.34/" }), "deny");
   assert.equal(await decide("Bash", { command: "curl --url=https://93.184.216.34/" }, ""), "deny");
 
+  // An Advisor is pointed at owl-api instead of curl; a Worker's reason stays as it was.
+  await writeFile(path.join(root, "rules", "system", "outbound.yaml"), "blocked_hosts:\n  - blocked.example\n");
+  const advisorLease = guardTokens.issue({ agent_run_id: "run-advisor-outbound", role: "advisor" });
+  const asAdvisor = async (toolName, toolInput) => {
+    const result = await runHook({ role: "advisor", apiBase: api.baseUrl, tokenFile: advisorLease.file, cwd: root, owlRoot: root, toolName, toolInput, nodeOptions: `--import=${pathToFileURL(preload).href}` });
+    const output = result.stdout === "" ? null : JSON.parse(result.stdout).hookSpecificOutput;
+    return { decision: output ? output.permissionDecision : "allow", reason: output?.permissionDecisionReason ?? "" };
+  };
+  for (const command of ['curl "$OWL_GUARD_API_BASE/api/v1/works"', `curl ${api.baseUrl}/api/v1/works`]) {
+    const advisor = await asAdvisor("Bash", { command });
+    assert.equal(advisor.decision, "deny", command);
+    assert.match(advisor.reason, /owl-api/, command);
+    assert.equal(await decide("Bash", { command }), "deny", command);
+    assert.doesNotMatch(lastReason, /owl-api/, command);
+  }
+  assert.equal((await asAdvisor("Bash", { command: "curl https://public.example/" })).decision, "allow");
+
+  // An Advisor's tools may not read the guard token directory (derived from OWL_GUARD_TOKEN_FILE).
+  const tokenDir = path.dirname(advisorLease.file);
+  for (const [toolName, toolInput] of [
+    ["Read", { file_path: advisorLease.file }],
+    ["Grep", { pattern: ".", path: tokenDir }],
+    ["Bash", { command: 'cat "$OWL_GUARD_TOKEN_FILE"' }],
+    ["Bash", { command: `ls ${tokenDir}` }],
+  ]) {
+    const advisor = await asAdvisor(toolName, toolInput);
+    assert.equal(advisor.decision, "deny", `${toolName} ${JSON.stringify(toolInput)}`);
+    assert.match(advisor.reason, /guard トークン/);
+  }
+  assert.equal((await asAdvisor("Read", { file_path: path.join(root, "notes.txt") })).reason.includes("guard トークン"), false);
+
   // Tools with no destination URL keep working, even with a broken guard.
   assert.equal(await decide("WebSearch", { query: "node test runner" }), "allow");
   assert.equal(await decide("WebSearch", { query: "node test runner" }, ""), "allow");

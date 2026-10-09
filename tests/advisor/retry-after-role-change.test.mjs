@@ -66,7 +66,7 @@ async function harness(t, { pausedProviders = ["anthropic"], hold = null } = {})
     memorySaver: {},
     providerClient: { createSession: async () => fakeProviderSession(sent, hold) },
     owlRoot: root,
-    git: { prepareAdvisorWorkspace: async () => ({ ok: true, worktree_path: root }) },
+    git: { resolveAdvisorSessionDirectory: async () => ({ kind: "direct", cwd: root }) },
     getAdvisorSettings: () => settings,
     resolveAttachmentPaths: () => ({ paths: [], notes: [] }),
     isProviderPaused: (provider) => paused.has(provider),

@@ -221,7 +221,7 @@ test("the dependency summary setting, written through Core, sets the length of t
   assert.equal(workerInput(second).Dependencies.dependencies[0].work_done.length, 25);
 });
 
-test("a self-contradictory success report is rejected before verification and the retry keeps the last accepted report", async (t) => {
+test("a self-contradictory success report is lowered to partial and the retry sees it as the previous report", async (t) => {
   // repro-context: attempt 1 is sent back by the Reviewer, attempt 2 fails
   // its own verification, attempt 3 passes review. Attempt 3 must see the
   // verification failure, not the older review's findings.
@@ -258,12 +258,10 @@ test("a self-contradictory success report is rejected before verification and th
   assert.match(inputs[1].Attempt.previous_report.work_done, /WORK-1-MARKER/);
   assert.deepEqual(inputs[1].Attempt.reviewer_findings.map((finding) => finding.problem), ["REVIEW-FINDING-1"]);
 
-  // A success report whose verification failed contradicts itself: the protocol
-  // rejects it before Core verification, so the retry keeps the last accepted
-  // report and the Reviewer findings.
-  assert.equal(inputs[2].Attempt.verification_failure, null);
-  assert.match(inputs[2].Attempt.previous_report.work_done, /WORK-1-MARKER/);
-  assert.deepEqual(inputs[2].Attempt.reviewer_findings.map((finding) => finding.problem), ["REVIEW-FINDING-1"]);
+  // A success report whose verification failed is accepted as partial, so the
+  // retry receives it as the previous report.
+  assert.equal(inputs[2].Attempt.previous_report.result, "partial");
+  assert.match(inputs[2].Attempt.previous_report.work_done, /WORK-2-MARKER/);
 });
 
 test("a review-fix attempt receives only the latest round's findings", async (t) => {

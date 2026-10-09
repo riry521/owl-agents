@@ -9,7 +9,7 @@ import { evaluateWorkerCompletion } from "../../packages/core/dist/task-completi
 import { DEFAULT_PROGRESS_GUARD_SETTINGS } from "../../packages/shared/dist/progress-guard-settings.js";
 import { DEFAULT_REMAKE_LIMIT_SETTINGS } from "../../packages/shared/dist/remake-limit-settings.js";
 import { ACCEPTANCE_DEFECT_EVENT, workerAcceptanceDefects } from "../../packages/shared/dist/acceptance-defect.js";
-import { DESIGNER_REPORT_SCHEMA, WORKER_REPORT_SCHEMA, buildWorkerPrompt } from "../../packages/agent-runtime/dist/worker.js";
+import { DESIGNER_REPORT_SCHEMA, WORKER_REPORT_SCHEMA, buildWorkerPrompt, normalizeWorkerResponseWithFeedback } from "../../packages/agent-runtime/dist/worker.js";
 import { buildManagerPrompt } from "../../packages/agent-runtime/dist/manager.js";
 import { lineageUsage } from "../../packages/core/dist/task-lineage.js";
 import { DEFAULT_ATTEMPT_POLICY_CONFIG } from "../../packages/core/dist/attempt-policy.js";
@@ -389,4 +389,70 @@ test("a resumable partial past the deterministic failure limit waits for the Own
   assert.equal(runner.state.t1Calls, limit);
   const reasons = decidedReasons(db, workId);
   assert.deepEqual([reasons.filter((r) => r === "resumable_partial").length, reasons.at(-1)], [limit - 1, "retry_not_allowed"]);
+});
+
+// A report whose result contradicts its own fields is repaired by lowering the result, never by raising it.
+const asProvider = (payload) => ({ adapter: "claude", stdout: JSON.stringify(payload), stderr: "", exit_code: 0, signal: null, format: "plain-text" });
+// The model never writes the criterion text; the runtime fills it from the Task.
+const modelAcceptance = [{ criterion_id: "AC1", status: "passed", evidence: "node --test passed" }];
+const claimedSuccess = (extra = {}) => ({ ...passedReport("i"), external_blocker: null, pending_process: null, ...extra, verification: { ...passedReport("i").verification, acceptance: modelAcceptance, ...extra.verification } });
+const blockedItem = { criterion_id: "AC2", status: "blocked", evidence: "n/a" };
+const withVerification = (extra) => ({ verification: extra });
+
+test("success contradicted by its own fields is lowered to partial and keeps the question and needs_replanning", () => {
+  const cases = {
+    success_with_question_for_manager: claimedSuccess({ question_for_manager: "Which branch?" }),
+    success_with_needs_replanning: claimedSuccess({ needs_replanning: true }),
+    success_with_unpassed_item: claimedSuccess(withVerification({ acceptance: [...modelAcceptance, blockedItem] })),
+    success_with_unpassed_verification: claimedSuccess(withVerification({ status: "blocked" })),
+  };
+  for (const [rule, payload] of Object.entries(cases)) {
+    const { report, corrections } = normalizeWorkerResponseWithFeedback(asProvider(payload), "i");
+    assert.equal(report.result, "partial", rule);
+    assert.ok(corrections.some((c) => c.rule === rule && c.from_result === "success" && c.to_result === "partial"), JSON.stringify(corrections));
+    assert.equal(report.question_for_manager, payload.question_for_manager ?? null);
+    assert.equal(report.needs_replanning, payload.needs_replanning ?? false);
+  }
+  const checks = claimedSuccess(withVerification({ checks: [{ name: "tsc", status: "failed", evidence: "errors" }] }));
+  assert.equal(normalizeWorkerResponseWithFeedback(asProvider(checks), "i").report.result, "partial");
+});
+
+test("corrections never raise a result and leave broken or ambiguous reports rejected", () => {
+  for (const result of ["failed", "partial"]) {
+    const payload = claimedSuccess({ result, question_for_manager: "Q?", needs_replanning: true });
+    const { report, corrections } = normalizeWorkerResponseWithFeedback(asProvider(payload), "i");
+    assert.deepEqual([report.result, corrections.length, report.question_for_manager, report.needs_replanning], [result, 0, "Q?", true]);
+  }
+  assert.equal(normalizeWorkerResponseWithFeedback(asProvider(claimedSuccess()), "i").corrections.length, 0);
+  assert.throws(() => normalizeWorkerResponseWithFeedback(asProvider({ ...claimedSuccess(), result: "done" }), "i"), /Owl report contract|worker_output/);
+  assert.throws(() => normalizeWorkerResponseWithFeedback(asProvider({ ...claimedSuccess(), verification: null }), "i"), /Owl report contract|worker_output/);
+  assert.throws(() => validateReportSemantics(validateReportEnvelope(claimedSuccess()), { verdict: "retry", retry_subtasks: [] }), /Owl report contract/);
+});
+
+test("the Worker and Designer paths share the one correction list", () => {
+  const payload = claimedSuccess({ question_for_manager: "Which branch?" });
+  const { external_blocker: _blocker, ...designerPayload } = payload;
+  for (const [schema, body] of [[WORKER_REPORT_SCHEMA, payload], [DESIGNER_REPORT_SCHEMA, designerPayload]]) {
+    const { report, corrections } = normalizeWorkerResponseWithFeedback(asProvider(body), "i", false, undefined, schema);
+    assert.deepEqual([report.result, corrections.map((c) => c.rule)], ["partial", ["success_with_question_for_manager"]]);
+  }
+  const delegated = { ...claimedSuccess(), delegation: { decomposition: "d", delegated: [{ child_id: "c", instruction: "i", provider: "p", model: "m" }], retained: [] } };
+  assert.equal(normalizeWorkerResponseWithFeedback(asProvider(delegated), "i", true).report.result, "partial", "a Hybrid success without a passed integration check is lowered too");
+});
+
+test("a lowered report with a question reaches the Manager and the correction is recorded in events", async (t) => {
+  const lowered = (request) => ({
+    outcome: "partial", failure_class: "deterministic", error_key: "report_result:partial", retry_allowed: true, report_valid: true,
+    report_corrections: [{ rule: "success_with_question_for_manager", from_result: "success", to_result: "partial" }],
+    report: { ...passedReport(request.invocation_id), result: "partial", external_blocker: null, pending_process: null, question_for_manager: "Which branch?" },
+  });
+  const runner = blockerRunner([lowered]);
+  const { db, core } = await openCore(t, runner);
+  runner.state.db = db;
+  const workId = await startWork(core, "corrected");
+
+  assert.ok(await waitFor(() => eventCount(db, workId, "worker.report_corrected") === 1), "the correction event is recorded");
+  const payload = JSON.parse(db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = 'worker.report_corrected'", workId).payload_json);
+  assert.deepEqual(payload.corrections, [{ rule: "success_with_question_for_manager", from_result: "success", to_result: "partial" }]);
+  assert.ok(await waitFor(() => runner.state.replanRequests.length === 1), "the question went to the Manager");
 });

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { Core } from "../../../packages/core/dist/index.js";
+import { assertValidPage, Core } from "../../../packages/core/dist/index.js";
 import { createUlid, openDatabase } from "../../../packages/db/dist/index.js";
 import { ExternalCoreAdapter } from "../dist/core.js";
 import { createOwlHttpServer } from "../dist/http.js";
@@ -106,4 +106,27 @@ test("PUT /knowledge refuses a body that breaks the template and leaves the file
   const res = await api.put(`${FOLDER}/clip.md`, { body: "## 自由欄\n独自の形式\n" });
   assert.equal(res.status, 422);
   assert.equal(await readFile(api.file("clip.md"), "utf8"), before);
+});
+
+const clippingMetadata = () => {
+  const { created: _created, ...metadata } = Object.fromEntries(CLIPPING.split("---")[1].trim().split("\n").map((line) => [line.slice(0, line.indexOf(":")), line.slice(line.indexOf(":") + 2)]));
+  return metadata;
+};
+
+test("POST /knowledge with metadata stores a page that Owl's own check (assertValidPage) accepts too", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  assert.equal((await api.post({ filename: "same.md", tags: [], body: bodyOf(CLIPPING), metadata: clippingMetadata() })).status, 201);
+  assert.doesNotThrow(() => assertValidPage(readFileSync(api.file("same.md"), "utf8")));
+});
+
+test("POST /knowledge refuses metadata missing a template field (422) and a malformed metadata key (400)", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const extra = await api.post({ filename: "extra.md", tags: [], body: bodyOf(CLIPPING), metadata: { ...clippingMetadata(), summary: undefined } });
+  assert.equal(extra.status, 422);
+  assert.equal(existsSync(api.file("extra.md")), false);
+  const badKey = await api.post({ filename: "bad.md", tags: [], body: bodyOf(CLIPPING), metadata: { ...clippingMetadata(), "bad key": "x" } });
+  assert.equal(badKey.status, 400);
+  assert.equal(existsSync(api.file("bad.md")), false);
 });

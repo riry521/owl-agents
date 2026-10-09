@@ -208,7 +208,7 @@ test("persistent web and Slack turns receive the latest Work catalog", async (t)
     }),
   };
   const { root, db, core, conversation } = await fixture(t, "persistent-turns", { providerClient });
-  core.gitGateway().prepareAdvisorWorkspace = async () => ({ ok: true, worktree_path: root });
+  core.gitGateway().resolveAdvisorSessionDirectory = async () => ({ kind: "direct", cwd: root });
   core.gitGateway().inspectAdvisorWorkspace = async () => ({ ok: true, dirty: false, message: "clean" });
   core.gitGateway().sweepAdvisorWorkspaces = async () => {};
 

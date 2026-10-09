@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { CommandResult, CommandRunner } from "./workspace-tooling.js";
 import { redactCredentials } from "./git-push.js";
 
@@ -21,7 +23,22 @@ export function redactArgv(argv: readonly string[]): string[] {
 
 /** Manifests and lockfiles whose change means dependencies changed; matched by base name so workspace packages count. */
 export const DEFAULT_POST_MERGE_DEPENDENCY_FILES: readonly string[] = [
-  "package.json", "pnpm-lock.yaml", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "bun.lock", "bun.lockb",
+  "package.json", "pnpm-lock.yaml", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "bun.lock", "bun.lockb", "uv.lock",
+];
+
+/**
+ * Lockfile name -> install command, in priority order: the first lockfile present in a changed directory picks the
+ * package manager. A table (not a switch) so a new package manager is one entry and CoreOptions can replace it.
+ */
+export interface PostMergeInstallRule { readonly file: string; readonly argv: readonly string[] }
+export const DEFAULT_POST_MERGE_INSTALL_RULES: readonly PostMergeInstallRule[] = [
+  { file: "bun.lock", argv: ["bun", "install"] },
+  { file: "bun.lockb", argv: ["bun", "install"] },
+  { file: "pnpm-lock.yaml", argv: ["pnpm", "install"] },
+  { file: "yarn.lock", argv: ["yarn", "install"] },
+  { file: "package-lock.json", argv: ["npm", "install"] },
+  { file: "npm-shrinkwrap.json", argv: ["npm", "install"] },
+  { file: "uv.lock", argv: ["uv", "sync"] },
 ];
 
 export const POST_MERGE_COMMAND_TIMEOUT_MS = 15 * 60_000;
@@ -49,9 +66,12 @@ export interface ResolvedPostMergeCommand {
   readonly argv: readonly string[];
   readonly cwd: string;
   readonly default_command: boolean;
-  /** Runs before argv when a dependency file changed; empty means no install step. */
-  readonly install_argv: readonly string[];
-  /** Base names (package.json, pnpm-lock.yaml, ...) whose change triggers install_argv. */
+  /** The Project's own install command: wins over detection everywhere; [] means no install; null means detect. */
+  readonly install_override: readonly string[] | null;
+  /** Used for a changed directory whose lockfile matches no rule (e.g. only package.json changed). */
+  readonly install_default: readonly string[];
+  readonly install_rules: readonly PostMergeInstallRule[];
+  /** Base names (package.json, pnpm-lock.yaml, ...) whose change makes their directory get an install. */
   readonly dependency_files: readonly string[];
 }
 
@@ -62,6 +82,8 @@ export interface PostMergeRunOutcome {
   readonly command: ResolvedPostMergeCommand;
   /** "install" when the install step failed (the build did not run), otherwise "build". */
   readonly stage: PostMergeStage;
+  /** The step that ran last (the failed install, or the build); absent means the build at command.cwd. */
+  readonly step?: { readonly argv: readonly string[]; readonly cwd: string };
   readonly result: CommandResult;
   readonly duration_ms: number;
   readonly timeout_ms: number;
@@ -115,34 +137,46 @@ export class PostMergeCommandQueue {
         const command = this.deps.resolve(projectId);
         if (command === null) continue;
         const started = Date.now();
-        const run = (argv: readonly string[]) => this.deps.run(argv[0]!, argv.slice(1), {
-          cwd: command.cwd, env: postMergeCommandEnv(process.env), timeout_ms: this.deps.timeoutMs,
+        const run = (argv: readonly string[], cwd = command.cwd) => this.deps.run(argv[0]!, argv.slice(1), {
+          cwd, env: postMergeCommandEnv(process.env), timeout_ms: this.deps.timeoutMs,
         });
         let stage: PostMergeStage = "build";
         let result: CommandResult | null = null;
-        if (command.install_argv.length > 0 && await this.dependenciesChanged(command, job.merge)) {
-          const installed = await run(command.install_argv);
-          if (!isSuccess(installed)) { stage = "install"; result = installed; }
+        let step: PostMergeRunOutcome["step"];
+        for (const install of await this.installSteps(command, job.merge)) {
+          const installed = await run(install.argv, install.cwd);
+          if (!isSuccess(installed)) { stage = "install"; result = installed; step = install; break; }
         }
         if (this.stopped) return;
         result ??= await run(command.argv);
         if (this.stopped) return;
-        await this.deps.record({ job, command, stage, result, duration_ms: Date.now() - started, timeout_ms: this.deps.timeoutMs });
+        await this.deps.record({ job, command, stage, step, result, duration_ms: Date.now() - started, timeout_ms: this.deps.timeoutMs });
       } catch (error) {
         this.deps.log(`Post-merge command for Work ${job.work_id} could not be run`, error);
       }
     }
   }
 
-  /** A diff that cannot be read counts as changed: a needless install is cheaper than a build on stale dependencies. */
-  private async dependenciesChanged(command: ResolvedPostMergeCommand, merge: PostMergeMerge): Promise<boolean> {
-    if (merge.old_base_commit === null) return true;
-    const diff = await this.deps.run("git", ["diff", "--name-only", "-z", merge.old_base_commit, merge.new_base_commit], {
+  /**
+   * One install per changed dependency directory. A diff that cannot be read counts as "root changed": a needless
+   * install is cheaper than a build on stale dependencies. Directories that no longer exist (deleted packages) are skipped.
+   */
+  private async installSteps(command: ResolvedPostMergeCommand, merge: PostMergeMerge): Promise<{ argv: readonly string[]; cwd: string }[]> {
+    if (command.install_override?.length === 0) return [];
+    const diff = merge.old_base_commit === null ? null : await this.deps.run("git", ["diff", "--name-only", "-z", merge.old_base_commit, merge.new_base_commit], {
       cwd: command.cwd, env: postMergeCommandEnv(process.env), timeout_ms: this.deps.timeoutMs,
     });
-    if (!isSuccess(diff)) return true;
     const names = new Set(command.dependency_files);
-    return diff.stdout.split("\0").some((file) => names.has(file.split("/").pop() ?? ""));
+    const dirs = diff === null || !isSuccess(diff) ? ["."]
+      : [...new Set(diff.stdout.split("\0").filter((file) => names.has(file.split("/").pop() ?? "")).map((file) => dirname(file)))];
+    const steps = new Map<string, { argv: readonly string[]; cwd: string }>();
+    for (const dir of dirs) {
+      const cwd = join(command.cwd, dir);
+      if (!existsSync(cwd)) continue;
+      const argv = command.install_override ?? command.install_rules.find((rule) => existsSync(join(cwd, rule.file)))?.argv ?? command.install_default;
+      if (argv.length > 0) steps.set(cwd, { argv, cwd });
+    }
+    return [...steps.values()];
   }
 }
 
@@ -201,11 +235,12 @@ function postMergeAlertText(language: "ja" | "en", stage: PostMergeStage, argv: 
 export function postMergeResultEvent(outcome: PostMergeRunOutcome, language: "ja" | "en"):
   { readonly type: "work.post_merge_command_succeeded" | "system.alert"; readonly idempotencyKey: string; readonly payload: Record<string, unknown> } {
   const { job, command, result, stage } = outcome;
-  const argv = stage === "install" ? command.install_argv : command.argv;
+  const argv = outcome.step?.argv ?? command.argv;
+  const cwd = outcome.step?.cwd ?? command.cwd;
   const stdoutTail = tailBytes(redactSecrets(result.stdout), STDOUT_TAIL_BYTES);
   const stderrTail = tailBytes(redactSecrets(result.stderr), STDERR_TAIL_BYTES);
   const detail = {
-    project_id: job.project_id, stage, argv: redactArgv(argv), cwd: command.cwd,
+    project_id: job.project_id, stage, argv: redactArgv(argv), cwd,
     default_command: command.default_command, exit_code: result.exit_code, duration_ms: outcome.duration_ms,
     stdout_tail: stdoutTail, stderr_tail: stderrTail,
     base_branch: job.merge.base_branch, old_base_commit: job.merge.old_base_commit, new_base_commit: job.merge.new_base_commit, merge_commit: job.merge.merge_commit,
@@ -215,7 +250,7 @@ export function postMergeResultEvent(outcome: PostMergeRunOutcome, language: "ja
   if (isSuccess(result)) {
     return { type: "work.post_merge_command_succeeded", idempotencyKey: `work-post-merge-succeeded:${suffix}`, payload: { work_id: job.work_id, ...detail } };
   }
-  const text = postMergeAlertText(language, stage, argv, command.cwd, result, outcome.timeout_ms);
+  const text = postMergeAlertText(language, stage, argv, cwd, result, outcome.timeout_ms);
   const body = (stderrTail || stdoutTail).slice(-500);
   return {
     type: "system.alert",

@@ -30,7 +30,8 @@ import type { ReviewRoutingSettings } from "../../../packages/shared/dist/review
 import type { PlanUsageSettings, PlanUsageView } from "../../../packages/shared/dist/plan-usage-settings.js";
 import { isOwnerLanguage, type OwnerLanguage } from "../../../packages/shared/dist/owner-language.js";
 import { SUBAGENT_USAGE_BATCH_MAX, type HookRequestUsage } from "../../../packages/shared/dist/token-relay.js";
-import { ADVISOR_CURATION_ACTION_TYPES, advisorCurationKind, builtinProviderHarness, designDocumentPath, isRuleRole, RULE_ROLES } from "../../../packages/shared/dist/index.js";
+import { ADVISOR_CURATION_ACTION_TYPES, ADVISOR_WORKSPACE_API_PATH, advisorAlternativeActions, advisorCurationKind, matchAdvisorBlockedApi, builtinProviderHarness, designDocumentPath, isRuleRole, RULE_ROLES } from "../../../packages/shared/dist/index.js";
+import type { AdvisorBlockedApi } from "../../../packages/shared/dist/advisor-api-policy.js";
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
 import { GUARD_SHELL_COMMAND_KEYS, GUARD_SHELL_TOOL_NAMES } from "../../../packages/shared/dist/guard-inputs.js";
 import { RESEARCH_CAPTURE_ROLES } from "../../../packages/shared/dist/permission-args.js";
@@ -251,6 +252,10 @@ interface ChildRunApiPort {
   listChildRuns(filter: ChildRunListFilter): readonly ChildRunRecord[];
   getChildRunSettings(): ChildRunSettings;
   setChildRunSettings(settings: ChildRunSettings): ChildRunSettings | Promise<ChildRunSettings>;
+}
+
+interface AdvisorWorkspaceApiPort {
+  prepareAdvisorWorkspaceForSession(request: { session_id: string; project_id: string | null }): Promise<unknown>;
 }
 
 interface KnowledgeRetagApiPort {
@@ -953,8 +958,33 @@ function pathId(value: string, label: string): string {
   return decoded;
 }
 
+// 要求ごとの Advisor 資格情報の判定結果。WeakSet なので要求と一緒に消える
+const advisorAuthorizedRequests = new WeakSet<IncomingMessage>();
+
+function bearerOf(request: IncomingMessage): string {
+  const authorization = headerValue(request, "authorization");
+  return authorization?.startsWith("Bearer ") ? authorization.slice("Bearer ".length).trim() : "";
+}
+
+/** ループバックで live な role=advisor の guard token を示した要求なら、その agent。それ以外は null */
+function advisorRequestAgent(request: IncomingMessage, guardTokens: GuardTokenVerifier | null): GuardTokenAgent | null {
+  const bearer = bearerOf(request);
+  if (!bearer || !guardTokens || !isLoopback(request)) return null;
+  const agent = guardTokens.verify(bearer);
+  return agent?.role === "advisor" ? agent : null;
+}
+
+function advisorBlockedError(row: AdvisorBlockedApi, method: string, pathname: string): ApiError {
+  const alternatives = advisorAlternativeActions(row);
+  return new ApiError(403, "advisor_action_required", `${row.reason} Use ${alternatives.join(" or ")} instead.`, {
+    method,
+    path: pathname,
+    alternative_actions: alternatives,
+  });
+}
+
 function requireOwner(request: IncomingMessage): string {
-  if (!isOwnerRequestAuthorized(request)) {
+  if (!isOwnerRequestAuthorized(request) && !advisorAuthorizedRequests.has(request)) {
     if (configuredApiToken() && !isLoopback(request)) {
       throw new ApiError(401, "unauthorized", "外部接続には正しいAuthorization: Bearer <OWL_API_TOKEN>が必要です。local cookieは外部経路では使用できません。");
     }
@@ -1918,6 +1948,14 @@ function waitRequest(payload: JsonObject): ChildWaitRequest {
   };
 }
 
+function requireAdvisorWorkspaceApi(core: CorePort): AdvisorWorkspaceApiPort {
+  const wrapped = core as CorePort & { core?: unknown };
+  const has = (value: unknown): value is AdvisorWorkspaceApiPort => isObject(value) && typeof value.prepareAdvisorWorkspaceForSession === "function";
+  const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
+  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support Advisor workspaces.");
+  return candidate;
+}
+
 function requireKnowledgeRetagApi(core: CorePort): KnowledgeRetagApiPort {
   const wrapped = core as CorePort & { core?: unknown };
   const has = (value: unknown): value is KnowledgeRetagApiPort => isObject(value) && typeof value.retagKnowledgeNotes === "function";
@@ -2446,6 +2484,20 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   const featureCore = context.core as FeatureCorePort;
   assertSameOriginWrite(request, context);
 
+  const advisorAgent = advisorRequestAgent(request, context.guardTokens);
+  if (advisorAgent) {
+    const blocked = matchAdvisorBlockedApi(method, pathname);
+    if (blocked) throw advisorBlockedError(blocked, method, pathname);
+    advisorAuthorizedRequests.add(request);
+  } else {
+    // 失効した guard token が、OWL_API_TOKEN 未設定のループバックで Owner に落ちるのを防ぐ
+    const bearer = bearerOf(request);
+    if (bearer && /^[0-9a-f]{64}$/.test(bearer) && bearer !== configuredApiToken()
+      && isLoopback(request) && context.guardTokens?.verify(bearer) === null) {
+      throw new ApiError(401, "unauthorized", "guard tokenが無効か失効しています。Agentを再実行してください。");
+    }
+  }
+
   const rawSkillFileMatch = rawPathname.match(new RegExp(`^${API_PREFIX}/skills/([^/]+)/files/(.*)$`));
   if (rawSkillFileMatch && method === "GET") {
     requireOwner(request);
@@ -2882,6 +2934,31 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     const payload = validateAnswerPayload(command.payload);
     const result = await runCommand(context, pathname, command, 200, async () => context.core.answerDecision(decisionId, payload, command), decisionWorkId(context, decisionId));
     sendJson(response, 200, result);
+    return;
+  }
+
+  if (pathname === ADVISOR_WORKSPACE_API_PATH && method === "POST") {
+    // セッションは guard token の agent_run_id で決まるので、Advisor 本人以外は呼べない
+    const agent = requireGuard(request, context.guardTokens);
+    if (agent?.role !== "advisor") throw new ApiError(403, "forbidden", "Only a running Advisor session can prepare its workspace.");
+    const body = await readRequestBody(request);
+    if (!isObject(body)) throw new ApiError(400, "validation_error", "リクエスト本文はJSON objectで指定してください。");
+    exactKeys(body, [], "AdvisorWorkspace payload", ["project_id"]);
+    const projectId = body.project_id === undefined || body.project_id === null ? null : stringField(body.project_id, "project_id", 1, 64);
+    const api = requireAdvisorWorkspaceApi(context.core);
+    let data: unknown;
+    try {
+      data = await api.prepareAdvisorWorkspaceForSession({ session_id: agent.agent_run_id, project_id: projectId });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AdvisorSessionNotFoundError") throw new ApiError(404, "advisor_session_not_found", error.message);
+      throw error;
+    }
+    const result = data as { ok: boolean; error_code: string | null; message: string };
+    if (!result.ok) {
+      if (result.error_code === "project_not_found" || result.error_code === "conversation_not_found") throw new ApiError(404, result.error_code, result.message);
+      throw new ApiError(409, "advisor_workspace_unavailable", result.message, { error_code: result.error_code, message: result.message });
+    }
+    sendJson(response, 200, { request_id: requestIdValue, data, version: 0 });
     return;
   }
 

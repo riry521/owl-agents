@@ -1,6 +1,15 @@
 /** error_key Core receives when a Claude report kept failing the enforced schema. */
 export const REPORT_FORMAT_INVALID_ERROR_KEY = "report_format_invalid";
 
+/** Prefix the runner puts on an error_key once the run had an external side effect. */
+const SIDE_EFFECT_FAILURE_PREFIX = "side_effect_failure:";
+
+/** True for report_format_invalid, also when the runner wrapped it as side_effect_failure:report_format_invalid. */
+export function isReportFormatInvalidErrorKey(errorKey: unknown): errorKey is string {
+  if (typeof errorKey !== "string") return false;
+  return (errorKey.startsWith(SIDE_EFFECT_FAILURE_PREFIX) ? errorKey.slice(SIDE_EFFECT_FAILURE_PREFIX.length) : errorKey) === REPORT_FORMAT_INVALID_ERROR_KEY;
+}
+
 /** AgentRunRequest.context key Core uses to cap report-only resubmissions. */
 export const REPORT_RESUBMIT_LIMIT_CONTEXT_KEY = "report_resubmit_limit";
 

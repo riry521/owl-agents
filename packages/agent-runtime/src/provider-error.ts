@@ -78,7 +78,7 @@ function statusFrom(text: string, context: ProviderErrorContext): number | null 
 }
 
 function isAuthenticationFailure(text: string, status: number | null): boolean {
-  return status === 401 || /authentication_error|authentication failed|unauthorized|invalid (?:api[-_ ]?key|token)|access token.*revoked|token.*expired|login required|not authenticated/iu.test(text);
+  return status === 401 || /authentication_error|authentication[_ ]failed|failed to authenticate|unauthorized|invalid (?:api[-_ ]?key|token)|access token.*revoked|(?:token|oauth session).*expired|login required|not authenticated/iu.test(text);
 }
 
 function isPermissionFailure(text: string, status: number | null): boolean {

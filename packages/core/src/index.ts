@@ -94,7 +94,7 @@ export type { ApplyRevisionInput, DetectSkillReadsInput, SkillAction, SkillActor
 export type { ParseSkillMdResult, ParsedSkillMd, SkillFilePathResult, SkillMetadata } from "./skill-files";
 export { RuleFileError, RuleLoadError, RuleStore, RULE_ROLES, parseRuleYaml, parseWorkRules, renderRuleFile } from "./rule-store";
 export { AdvisorSessionManager } from "./advisor-session";
-export { AdvisorSessionRuntime } from "./advisor-runtime";
+export { AdvisorSessionNotFoundError, AdvisorSessionRuntime } from "./advisor-runtime";
 export { MemorySaver, slugify } from "./memory-saver";
 export { CURATION_KINDS, CURATION_RUN_STATUSES, CurationRunStore } from "./curation-runs";
 export type {

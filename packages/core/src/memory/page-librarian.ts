@@ -8,6 +8,7 @@ import { newLinesOf, type MemoryLibrarianSetting } from "./page-integration.js";
 import type { RouteInput, RouteResult } from "./page-router.js";
 import { applyOperations, itemsOf, parseOperationsOutput, type PageOpsContext, type PageOpsState, type SectionItems } from "./page-operations.js";
 import { writeAtomic } from "./page-router.js";
+import { normalizeOp, type OpDefinitions } from "../op-shape.js";
 
 /** The page librarian (design §3, §4): the model names operations, the applier of page-operations.ts is the only writer of page text. */
 
@@ -22,12 +23,26 @@ export interface PageActionReport {
   readonly path: string;
   readonly action: "updated" | "created";
 }
+/** What a rejected operation looked like: names and types only, never values (they may hold page text or secrets). */
+export interface RejectedOp { readonly index: number; readonly code: string; readonly op?: string; readonly op_type?: string; readonly keys?: readonly string[]; readonly shape?: string; readonly detail?: Record<string, unknown> }
+const SHAPE_NAME_MAX = 64;
+const SHAPE_KEYS_MAX = 20;
+const shapeType = (v: unknown): string => (v === null ? "null" : Array.isArray(v) ? "array" : typeof v);
+export function describeRejectedOp(op: unknown): Pick<RejectedOp, "op" | "op_type" | "keys" | "shape"> {
+  if (typeof op !== "object" || op === null || Array.isArray(op)) return { shape: shapeType(op) };
+  const o = op as Record<string, unknown>;
+  return {
+    ...(typeof o.op === "string" ? { op: o.op.slice(0, SHAPE_NAME_MAX) } : { op_type: shapeType(o.op) }),
+    keys: Object.keys(o).slice(0, SHAPE_KEYS_MAX).map((k) => k.slice(0, SHAPE_NAME_MAX)),
+  };
+}
+
 export interface PageRunReport {
   readonly run_id: string;
   readonly mode: PageRunMode;
   readonly pages: PageActionReport[];
   readonly applied: number;
-  readonly rejected: readonly { readonly index: number; readonly code: string }[];
+  readonly rejected: readonly RejectedOp[];
   readonly warnings: readonly { readonly page?: string; readonly code: string; readonly message: string }[];
   readonly remaining: number;
   readonly llm_calls: number;
@@ -70,12 +85,14 @@ export type ProposeOperationsFn = (request: LibrarianOpsRequest) => Promise<Libr
 export const LIBRARIAN_RULES = [
   "Output only JSON {\"operations\":[...]} (optionally \"note\"). Never output page text; there is no way to rewrite a page.",
   "Point at lines by {page, section, h} exactly as listed under `items`. A line marked `<!-- owl:new … -->` is new: take it in with move (to its own page and section, or the page it belongs to, which also drops the mark), merge it into an existing line, or retire it as a duplicate. Do not leave new lines behind.",
-  "Operations: merge{items,into,text,star?} · move{item,to} · retire{item,reason,evidence,replaced_by?} · link{from,to,relation} · split{page,new_title,new_summary,items,relation} · promote_common{items,to:{title,section},text?} · dormant{page} · reactivate{page}. `into`/`to` are {page,section} or {title,section}.",
-  "retire reasons: contradiction (evidence.works = newer Work numbers like \"W812\", and replaced_by = the line that wins), missing_path (evidence.paths = repository paths that no longer exist; project pages only), duplicate (evidence.kept = the line you keep).",
+  "Every operation is one flat object whose \"op\" field names it, like {\"op\":\"merge\",\"items\":[…],\"into\":{…},\"text\":\"…\"}. Never wrap it as {\"merge\":{…}}.",
+  "Operations: merge{items,into,text,star?} · move{item,to} · retire{item,reason,evidence,replaced_by?} · link{from,to,relation} · split{page,new_title,new_summary,items,relation} · promote_common{items,to:{title,section},text?} · dormant{page} · reactivate{page}.",
+  "Field types: a line reference is the object {page,section,h} copied from `items` and nothing else; `item`, `replaced_by`, `evidence.kept` and every element of `items` are line references. `into` and `to` of merge, move, split and promote_common are {page,section} or {title,section}. link `from`/`to` and the `page` of dormant/reactivate are page paths as plain strings, e.g. link{from:\"projects/a/x.md\",to:\"projects/b/y.md\",relation:\"…\"}. merge needs at least 2 items; to take a single line in, use move.",
+  "retire reasons: contradiction (evidence {works:[\"W812\",…]} = newer Work numbers, and replaced_by = the line that wins), missing_path (evidence {paths:[…]} = repository paths that no longer exist; project pages only), duplicate (evidence {kept:{page,section,h}} = the line you keep).",
   "When lines contradict, prefer the newer Work's statement and retire the older one. Never retire a line the Owner wrote (no Work source and no owl:new mark) and never retire without evidence.",
   "Merge duplicate lines into one; keep one line per fact. Link pages that belong together. Move a rule that holds across Projects to a common page with promote_common.",
-  "Conversations: for each entry of `conversations`, output take_conversation{conversation: its path, h: its h, items:[{kind:\"decision\"|\"pitfall\"|\"fact\", text}]} with the decisions the Owner agreed to and the pitfalls/facts learned (one line each, no Work sources). The program appends them to theme pages as new lines.",
-  "Clippings: for each entry of `clippings`, output set_usage{clipping: its path, h: its h, text} where text is one line saying when to use the clipping.",
+  "Conversations: for each entry of `conversations`, output {op:\"take_conversation\", conversation: its path, h: its h, items:[{kind:\"decision\"|\"pitfall\"|\"fact\", text}]} with the decisions the Owner agreed to and the pitfalls/facts learned (one line each, no Work sources). The program appends them to theme pages as new lines.",
+  "Clippings: for each entry of `clippings`, output {op:\"set_usage\", clipping: its path, h: its h, text} where text is one line saying when to use the clipping.",
   "dormant only for pages listed in `dormant_candidates`; never delete or shorten lines to fit a size limit.",
   "Every text field is one line without Work sources, ULIDs, API keys or tokens.",
 ].join("\n");
@@ -123,9 +140,13 @@ const messageOf = (error: unknown): string => (error instanceof Error ? error.me
 const normalizePath = (path: string): string => posix.normalize(path.replace(/\\/gu, "/")).replace(/^\.?\//u, "");
 
 const USAGE = "使いどころ";
-const EXTRA_OPS = new Set(["take_conversation", "set_usage"]);
+// Definitions of the two operations judged here instead of in page-operations; they feed the shared shape normalizer.
+const EXTRA_SPECS: OpDefinitions = {
+  take_conversation: { required: { conversation: "string", h: "string", items: "items" } },
+  set_usage: { required: { clipping: "string", h: "string", text: "string" } },
+};
+const EXTRA_OPS = new Set(Object.keys(EXTRA_SPECS));
 const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-const isExtraOp = (op: unknown): boolean => isPlainObject(op) && typeof op.op === "string" && EXTRA_OPS.has(op.op);
 const isLine = (v: unknown): v is string => typeof v === "string" && v.trim() !== "" && !/[\r\n]/u.test(v) && findSecretPatterns(v).length === 0;
 
 /** Puts `- line` under 使いどころ (in place of its placeholder, or as a new section before 関係する Project); every other line stays as it was. Null when there is no such place or it is already filled. */
@@ -262,7 +283,12 @@ export class PageLibrarian {
       }
       const themeOps: { op: unknown; index: number }[] = [];
       const extraOps: { op: unknown; index: number }[] = [];
-      parsed.ops.forEach((op, index) => (isExtraOp(op) ? extraOps : themeOps).push({ op, index }));
+      parsed.ops.forEach((raw, index) => {
+        const flat = normalizeOp(raw, EXTRA_SPECS);
+        // Only these two are taken here; every other shape goes on unchanged to applyOperations, which has its own table.
+        if (flat !== null) extraOps.push({ op: flat, index });
+        else themeOps.push({ op: raw, index });
+      });
       // Lines taken out of conversations go first, so the theme pass below sees (and stamps around) them.
       const extra = await this.applyExtra(extraOps, rows, { conversations, clippings }, ctx);
       settled = extra;
@@ -387,8 +413,8 @@ export class PageLibrarian {
    * take_conversation and set_usage: the model names the lines, this code writes them. An operation whose target is missing,
    * not pending / already filled, or whose hash differs from what the model was shown is rejected and nothing changes.
    */
-  private async applyExtra(ops: readonly { op: unknown; index: number }[], rows: readonly PageRow[], inputs: { conversations: readonly { path: string }[]; clippings: readonly { path: string }[] }, ctx: RunContext): Promise<{ applied: number; rejected: { index: number; code: string }[]; pages: string[] }> {
-    const result = { applied: 0, rejected: [] as { index: number; code: string }[], pages: [] as string[] };
+  private async applyExtra(ops: readonly { op: unknown; index: number }[], rows: readonly PageRow[], inputs: { conversations: readonly { path: string }[]; clippings: readonly { path: string }[] }, ctx: RunContext): Promise<{ applied: number; rejected: RejectedOp[]; pages: string[] }> {
+    const result = { applied: 0, rejected: [] as RejectedOp[], pages: [] as string[] };
     const root = this.options.vault.activeDir();
     for (const { op, index } of ops) {
       const o = op as Record<string, unknown>;
@@ -396,14 +422,22 @@ export class PageLibrarian {
       const targetKey = conversation ? "conversation" : "clipping";
       const valueKey = conversation ? "items" : "text";
       const path = o[targetKey];
-      const reject = (code: string): void => { result.rejected.push({ index, code }); };
+      const reject = (code: string, detail?: Record<string, unknown>): void => { result.rejected.push({ index, code, ...describeRejectedOp(op), ...(detail ? { detail } : {}) }); };
       const valueOk = conversation
         ? Array.isArray(o.items) && o.items.length > 0 && o.items.every((i) => isPlainObject(i) && ["decision", "pitfall", "fact"].includes(i.kind as string) && isLine(i.text) && Object.keys(i).length === 2)
         : isLine(o.text);
-      if (typeof path !== "string" || typeof o.h !== "string" || !valueOk || Object.keys(o).some((k) => !["op", targetKey, "h", valueKey].includes(k))) { reject("missing_field"); continue; }
+      if (typeof path !== "string" || typeof o.h !== "string" || !valueOk || Object.keys(o).some((k) => !["op", targetKey, "h", valueKey].includes(k))) {
+        const allowed = ["op", targetKey, "h", valueKey];
+        const missing = [targetKey, "h", valueKey].filter((k) => !(k in o) || (k === "h" ? typeof o.h !== "string" : k === targetKey ? typeof path !== "string" : !valueOk));
+        reject("missing_field", { missing, unknown: Object.keys(o).filter((k) => !allowed.includes(k)).slice(0, SHAPE_KEYS_MAX).map((k) => k.slice(0, SHAPE_NAME_MAX)) });
+        continue;
+      }
       const rel = normalizePath(path);
       // Only the pages this run showed to the model can be targets, so a path outside the vault is never touched.
       if (!(conversation ? inputs.conversations : inputs.clippings).some((c) => c.path === rel)) { reject("unknown_page"); continue; }
+      let actualHash = "";
+      // Names and hash prefixes only: the page text must not reach the report.
+      const mismatch = (): Record<string, unknown> => ({ page: rel, section: conversation ? "extraction" : USAGE, h_given: (o.h as string).slice(0, 8), h_given_length: (o.h as string).length, h_checked: actualHash.slice(0, 8), changed_earlier: ctx.touched.has(rel) });
       const check = async (): Promise<{ text: string; frontmatter: Record<string, unknown> } | "unknown_page" | "hash_mismatch"> => {
         // The real file must stay inside the vault: a symlink swapped in after the request is refused.
         const real = await realpath(join(root, rel)).catch(this.nullUnlessMissing(`resolve ${rel}`));
@@ -412,10 +446,11 @@ export class PageLibrarian {
         const text = await readText(join(root, rel)).catch(this.nullUnlessMissing(`read ${rel}`));
         const parsed = text === null ? null : parsePage(text);
         if (text === null || parsed === null || parsed.kind !== (conversation ? "conversation-log" : "clipping")) return "unknown_page";
-        return bodySha256(text) === o.h ? { text, frontmatter: parsed.frontmatter } : "hash_mismatch";
+        actualHash = bodySha256(text);
+        return actualHash === o.h ? { text, frontmatter: parsed.frontmatter } : "hash_mismatch";
       };
       const first = await check();
-      if (typeof first === "string") { reject(first); continue; }
+      if (typeof first === "string") { reject(first, first === "hash_mismatch" ? mismatch() : undefined); continue; }
       // Theme lines routed for this conversation are undone when the operation ends up rejected.
       const originals = new Map<string, string | null>();
       const touchedBefore = new Set(ctx.touched);
@@ -487,7 +522,7 @@ export class PageLibrarian {
         ctx.touched.add(rel);
         return "applied";
       });
-      if (outcome !== "applied") { await rollback(); reject(outcome); continue; }
+      if (outcome !== "applied") { await rollback(); reject(outcome, outcome === "hash_mismatch" ? mismatch() : undefined); continue; }
       result.pages.push(rel);
       result.applied += 1;
     }
@@ -536,7 +571,7 @@ export class PageLibrarian {
   }
 
   /** Applies the operations to the vault as it is now (inside the write lease), then writes what changed. */
-  private async applyAll(ops: readonly unknown[], rows: readonly PageRow[], candidates: ReadonlySet<string>, ctx: RunContext, report: { pages: PageActionReport[]; applied: number; rejected: readonly { index: number; code: string }[]; warnings: PageRunReport["warnings"] }): Promise<void> {
+  private async applyAll(ops: readonly unknown[], rows: readonly PageRow[], candidates: ReadonlySet<string>, ctx: RunContext, report: { pages: PageActionReport[]; applied: number; rejected: readonly RejectedOp[]; warnings: PageRunReport["warnings"] }): Promise<void> {
     const root = this.options.vault.activeDir();
     const state: PageOpsState = { pages: new Map(), histories: new Map(), pageIds: new Map() };
     const dirs = new Set<string>();
@@ -573,7 +608,7 @@ export class PageLibrarian {
     };
     const result = applyOperations(state, ops, opsCtx, { allowCoreOps: true });
     report.applied = result.applied.length;
-    report.rejected = result.rejected.map((r) => ({ index: r.index, code: r.code }));
+    report.rejected = result.rejected.map((r) => ({ index: r.index, code: r.code, ...describeRejectedOp(r.op), ...(r.detail ? { detail: r.detail } : {}) }));
     report.warnings = result.warnings;
 
     const files = new Map<string, string>();

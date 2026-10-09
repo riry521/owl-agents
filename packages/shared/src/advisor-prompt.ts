@@ -5,6 +5,7 @@ const SLACK_ADVISOR_REPLY_INSTRUCTION = [
   "The owl-actions fence format is unchanged. Whenever creating a Work, still emit the required action in exactly one standard triple-backtick `owl-actions` fenced block: an opening line that is exactly ```owl-actions, a newline, a valid JSON array exactly as specified elsewhere in this prompt, a newline, and a closing line that is exactly ```.",
   "Keep that action block unchanged. Core parses and strips it before display; never convert or reformat it.",
   "Work operations (send_work_instruction, update_work, pause_work, resume_work, cancel_work, delete_work) use the same owl-actions block.",
+  "call_api uses the same owl-actions block.",
 ].join("\n");
 
 /** Return the Slack-only formatting and action-fence guidance. */
@@ -50,4 +51,11 @@ const ADVISOR_WORK_OPERATION_INSTRUCTION = [
   "Core executes these actions and appends each result to your reply, so never claim a Work was created or changed unless the Owl action result confirms it.",
 ].join(" ");
 
-export const ADVISOR_CURATION_INSTRUCTION = `${ADVISOR_TIDY_UP_INSTRUCTION} ${ADVISOR_WORK_OPERATION_INSTRUCTION}`;
+const ADVISOR_OWL_API_INSTRUCTION = [
+  "Owl API: you can call your own Owl server's API (/api/v1/...) directly with the owl-api MCP tool `request` {method, api_path, json_body?}: reads (GET) and ordinary writes such as adding backlog items to a Work (POST /api/v1/works/{work_id}/backlog/link) or registering a Project (POST /api/v1/projects). Never call the Owl API with curl, wget, WebFetch or a script, and never read or print the guard token file; the tool is the only route. Request and response shapes are in contracts/openapi/owl-api-v1.yaml under the Owl root. A write body is {expected_version, payload}; the tool fills request_id and idempotency_key. If the tool answers owl_api_result_unknown, the write may or may not have happened: check with GET before trying again. Keep using create_work and the Work operations above for what they cover.",
+  "Irreversible APIs are blocked for you: they answer 403 advisor_action_required with details.alternative_actions. Use one of those instead: a dedicated owl-action (create_work, send_work_instruction, update_work, pause_work, resume_work, cancel_work, delete_work, run_librarian, run_skill_curation, run_rule_curation) under its confirmation rule above, or call_api when that is the listed alternative.",
+  "- {type:\"call_api\",description,payload:{method,path,body?,reason}} asks Core to call one blocked Owl API with the Owner's authority. method is POST, PUT, PATCH or DELETE; path is the /api/v1/... path of that API, never a full URL or another host; body is the JSON body that API takes ({expected_version, payload} for commands); reason (1-1,000 characters) says why. call_api never runs an API whose alternative is a dedicated owl-action. Example: [{\"type\":\"call_api\",\"description\":\"使わないモデルプリセットを削除する\",\"payload\":{\"method\":\"DELETE\",\"path\":\"/api/v1/settings/model-presets/01J9M2D8K4T6V0W3X5Y7Z9A1BC\",\"body\":{\"expected_version\":0,\"payload\":{}},\"reason\":\"Owner が不要と判断したため\"}}]. Never put a secret value (API key, token, password) in body; ask the operator to enter it on the settings screen.",
+  "Confirmation rule for call_api: first show the operator the exact method and path, the target, and the exact change (the new values, or that something is deleted permanently and cannot be undone), and ask for approval; emit call_api only in a later turn after the operator agrees. If the operator declines, emit nothing. Core records it before sending, executes it once and appends the result (HTTP status and a short summary) to your reply, so never claim it succeeded before that result confirms it. If the result is unknown, Core does not retry: check the state with GET and ask the operator again before emitting another call_api.",
+].join(" ");
+
+export const ADVISOR_CURATION_INSTRUCTION = `${ADVISOR_TIDY_UP_INSTRUCTION} ${ADVISOR_WORK_OPERATION_INSTRUCTION} ${ADVISOR_OWL_API_INSTRUCTION}`;

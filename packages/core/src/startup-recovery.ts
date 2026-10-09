@@ -59,7 +59,7 @@ export async function recoverOrphanedState(db: CoreDatabase, git?: GitGateway): 
       const request = taskGitRequest(task);
       const taskBranch = request.task_branch as string;
       const workBranch = request.work_branch as string;
-      const merged = await taskBranchMergedAtStartup(git, request);
+      const merged = await taskBranchMergedAtStartup(git, request, "leaving the verifying Task as is");
       if (merged !== true) continue;
       const reviewRequired = effectiveReviewRequired(task, reviewRouting(db));
       const event = reviewRequired ? "review.passed" : "verification.completed";
@@ -259,7 +259,7 @@ export async function recoverOrphanedState(db: CoreDatabase, git?: GitGateway): 
     let reason = project === null || project === undefined ? "no_project" : "git_unavailable_at_startup";
     if (project !== null && project !== undefined && git) {
       const request = taskGitRequest(task);
-      const merged = await taskBranchMergedAtStartup(git, request);
+      const merged = await taskBranchMergedAtStartup(git, request, "marking its worktree retained (git_unavailable_at_startup)");
       if (merged === true) {
         await removeWorktreeAtStartup(git, request);
         to = "merged";
@@ -361,11 +361,11 @@ function taskGitRequest(task: TaskRow): GitOperationRequest {
 }
 
 /** A Git error (for example a Project directory that no longer exists) only skips this Task; it must not stop Core from starting. */
-async function taskBranchMergedAtStartup(git: GitGateway, request: GitOperationRequest): Promise<boolean | null | "error"> {
+async function taskBranchMergedAtStartup(git: GitGateway, request: GitOperationRequest, outcome: string): Promise<boolean | null | "error"> {
   try {
     return (await git.taskBranchMerged?.(request)) ?? null;
   } catch (error) {
-    console.warn(`[owl-core] Startup recovery could not check whether Task ${request.task_id}'s branch is merged; leaving it as is`, error);
+    console.warn(`[owl-core] Startup recovery could not check whether Task ${request.task_id}'s branch is merged; ${outcome}`, error);
     return "error";
   }
 }

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { Core } from "../../packages/core/dist/index.js";
+import { Core, TRANSIENT_RETRY_LIMIT } from "../../packages/core/dist/index.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { openTestDatabase } from "../helpers/db.mjs";
 import { tempDir } from "../helpers/temp.mjs";
@@ -30,7 +30,9 @@ function fakeGit(merges = []) {
     },
     async mergeWorkIntoBase(request) {
       calls.push(["mergeWorkIntoBase", request.work_id]);
-      return merges.shift() ?? { kind: "merged", ok: true, message: "merged" };
+      const next = merges.shift();
+      if (typeof next === "function") return next();
+      return next ?? { kind: "merged", ok: true, message: "merged" };
     },
     async deleteMergedWorkBranches(request) {
       calls.push(["deleteMergedWorkBranches", request.work_id]);
@@ -446,6 +448,39 @@ test("the third merge conflict opens the Decision and says automatic resolution 
   assert.equal(JSON.parse(alert.payload_json).auto_resolve_attempts, 2);
 });
 
+test("a conflict git reported as an error, or thrown, goes to the Manager like a conflict; the Decision opens only at the limit", async (t) => {
+  const asError = { ...mergeError, message: "Auto-merging src/app.ts\nCONFLICT (content): Merge conflict in src/app.ts" };
+  const git = fakeGit([{ ...asError }, () => { throw new Error("CONFLICT (modify/delete): src/lib.ts deleted in work"); }, { ...asError }]);
+  const { db, core } = await openMergeCore(t, git);
+  const { workId } = await seedFinishedWork(t, core, db, true);
+
+  await core.tick(workId);
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ?", workId).n, 0);
+  assert.equal(autoAlerts(db, workId).length, 1);
+
+  await tickUntilDecision(core, db, workId);
+
+  assert.equal(autoAlerts(db, workId).length, 2);
+  const options = JSON.parse(db.get("SELECT options_json FROM decisions WHERE work_id = ? AND status = 'open'", workId).options_json);
+  assert.deepEqual(options.map((option) => option.key), ["resolve_conflict", "retry", "cancel"]);
+});
+
+test("a conflict thrown at the limit opens the conflict Decision, not a plain merge error", async (t) => {
+  const thrown = () => { throw new Error("Automatic merge failed; fix conflicts\nCONFLICT (content): Merge conflict in src/app.ts"); };
+  const git = fakeGit([thrown, thrown, thrown]);
+  const { db, core } = await openMergeCore(t, git);
+  const { workId } = await seedFinishedWork(t, core, db, true);
+
+  await tickUntilDecision(core, db, workId);
+
+  assert.equal(autoAlerts(db, workId).length, 2);
+  const options = JSON.parse(db.get("SELECT options_json FROM decisions WHERE work_id = ? AND status = 'open'", workId).options_json);
+  assert.deepEqual(options.map((option) => option.key), ["resolve_conflict", "retry", "cancel"]);
+  const alert = db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = 'system.alert' ORDER BY sequence DESC LIMIT 1", workId);
+  assert.equal(JSON.parse(alert.payload_json).merge_kind, "conflict");
+  assert.equal(JSON.parse(alert.payload_json).auto_resolve_attempts, 2);
+});
+
 test("a merge error still opens the Decision without trying automatic resolution", async (t) => {
   const git = fakeGit([{ ...mergeError }]);
   const { db, core } = await openMergeCore(t, git);
@@ -457,6 +492,40 @@ test("a merge error still opens the Decision without trying automatic resolution
   const decision = db.get("SELECT options_json FROM decisions WHERE work_id = ? AND status = 'open'", workId);
   assert.deepEqual(JSON.parse(decision.options_json).map((option) => option.key), ["retry", "cancel"]);
   assert.equal(autoAlerts(db, workId).length, 0);
+});
+
+const baseMoved = {
+  kind: "base_moved", ok: false, exit_code: 1, recorded: false, message: "Base branch main moved during verification; it was left unchanged by this merge.",
+  worktree_path: "/tmp/integration", base_branch: "main", work_branch: "owl/work/test/work",
+  expected_base_commit: "a".repeat(40), actual_base_commit: "b".repeat(40),
+};
+
+test("a base that moved during verification is merged again without a Decision", async (t) => {
+  const git = fakeGit([{ ...baseMoved }, { ...merged }]);
+  const { db, core } = await openMergeCore(t, git);
+  const { workId } = await seedFinishedWork(t, core, db, true);
+
+  await core.tick(workId);
+
+  assert.equal(git.calls.filter(([name]) => name === "mergeWorkIntoBase").length, 2);
+  assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "completed");
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ?", workId).n, 0);
+});
+
+test("a base that keeps moving opens the base_moved Decision only after the retry limit", async (t) => {
+  const withinLimit = fakeGit([...Array(TRANSIENT_RETRY_LIMIT).fill(baseMoved).map((r) => ({ ...r })), { ...merged }]);
+  const first = await openMergeCore(t, withinLimit);
+  const seeded = await seedFinishedWork(t, first.core, first.db, true);
+  await first.core.tick(seeded.workId);
+  assert.equal(first.db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ?", seeded.workId).n, 0);
+
+  const beyond = fakeGit(Array(TRANSIENT_RETRY_LIMIT + 1).fill(baseMoved).map((r) => ({ ...r })));
+  const { db, core } = await openMergeCore(t, beyond);
+  const { workId } = await seedFinishedWork(t, core, db, true);
+  await core.tick(workId);
+  assert.equal(beyond.calls.filter(([name]) => name === "mergeWorkIntoBase").length, TRANSIENT_RETRY_LIMIT + 1);
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ? AND status = 'open'", workId).n, 1);
+  assert.match(JSON.stringify(db.all("SELECT payload_json FROM events WHERE work_id = ? AND type = 'system.alert'", workId)), /base_moved/);
 });
 
 test("resolving a merge conflict from the Decision asks the Manager for a Task that merges the base, naming the conflicting files", async (t) => {
@@ -489,6 +558,17 @@ test("a verification failure records the command and output tail in the Decision
   const decision = db.get("SELECT reason FROM decisions WHERE work_id = ? AND status = 'open'", workId);
   assert.match(decision.reason, /pnpm test/);
   assert.match(decision.reason, /2 failing tests/);
+});
+
+test("a merge stopped by uncommitted changes that overlap the merge names the files in the Decision", async (t) => {
+  const git = fakeGit([{ ...mergeError, overlap_files: ["src/a.ts", "src/b.ts"], base_worktree: "/tmp/project" }]);
+  const { db, core } = await openMergeCore(t, git);
+  const { workId } = await seedFinishedWork(t, core, db, true);
+
+  await core.tick(workId);
+
+  const decision = db.get("SELECT reason FROM decisions WHERE work_id = ? AND status = 'open'", workId);
+  assert.match(decision.reason, /src\/a\.ts\nsrc\/b\.ts/);
 });
 
 test("a Project-less Work skips merge and still saves outputs and removes its workspace", async (t) => {

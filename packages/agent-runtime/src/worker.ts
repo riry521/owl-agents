@@ -1,4 +1,4 @@
-import { extractReportPayload, validateReportEnvelope, validateReportSemantics } from "./protocol";
+import { correctReportSemantics, extractReportPayload, validateReportEnvelope, validateReportSemantics, type ReportCorrection } from "./protocol";
 import { AgentRuntimeError, reportInvalid } from "./errors";
 import {
   extractRoleOutputObject,
@@ -145,9 +145,27 @@ const WORKER_REPORT_PROPERTIES: Readonly<Record<string, RoleSchema>> = {
   pending_process: PENDING_PROCESS_SCHEMA,
 };
 
+/** When result is "success" the report must be free of open questions and failures (the Core gate rejects it otherwise). */
+const SUCCESS_RULES: Readonly<Record<string, unknown>> = {
+  if: { properties: { result: { const: "success" } }, required: ["result"] },
+  then: {
+    properties: {
+      question_for_manager: { type: "null" },
+      needs_replanning: { const: false },
+      verification: {
+        properties: {
+          status: { const: "passed" },
+          acceptance: { items: { properties: { status: { const: "passed" } } } },
+          checks: { items: { properties: { status: { const: "passed" } } } },
+        },
+      },
+    },
+  },
+};
+
 /** Normal Worker output. */
 // external_blocker is not in WORKER_REPORT_PROPERTIES: the Designer spreads those and must not get it.
-export const WORKER_REPORT_SCHEMA: RoleSchema = objectSchema({ ...WORKER_REPORT_PROPERTIES, external_blocker: EXTERNAL_BLOCKER_SCHEMA });
+export const WORKER_REPORT_SCHEMA: RoleSchema = { ...objectSchema({ ...WORKER_REPORT_PROPERTIES, external_blocker: EXTERNAL_BLOCKER_SCHEMA }), providerRules: SUCCESS_RULES };
 
 /** Designer output: the Worker report plus an optional design_blocked (null unless the design cannot be produced). */
 export const DESIGNER_REPORT_SCHEMA: RoleSchema = {
@@ -162,6 +180,7 @@ export const DESIGNER_REPORT_SCHEMA: RoleSchema = {
     },
   },
   required: objectSchema(WORKER_REPORT_PROPERTIES).required,
+  providerRules: SUCCESS_RULES,
 };
 
 /** Longest error summary per failed test that reaches the Worker. */
@@ -483,7 +502,7 @@ export function normalizeWorkerResponseWithFeedback(
   hybrid = false,
   task?: CriteriaTask,
   schema: RoleSchema = WORKER_REPORT_SCHEMA,
-): { readonly report: ReportEnvelope; readonly skill_feedback: import("@owl/shared").SkillFeedback | null } {
+): { readonly report: ReportEnvelope; readonly skill_feedback: import("@owl/shared").SkillFeedback | null; readonly corrections: readonly ReportCorrection[] } {
   try {
     const rawPayload = extractWorkerPayload(response, invocationId);
     // The prompt shows a placeholder ("<will be filled>") for invocation_id
@@ -499,11 +518,13 @@ export function normalizeWorkerResponseWithFeedback(
       if (problem.startsWith("delegation.delegated")) validateReportEnvelope(reportPayload);
       throw reportInvalid(`worker_output_schema:${problem}`);
     }
-    const report = validateReportEnvelope(withCriterionTexts(reportPayload, task));
     // A Hybrid success is an "ok" verdict and needs a passed integration check.
+    const parsed = validateReportEnvelope(withCriterionTexts(reportPayload, task));
+    const { report, corrections } = correctReportSemantics(parsed, hybrid && parsed.result === "success" ? { verdict: "ok", retry_subtasks: [] } : undefined);
     validateReportSemantics(report, hybrid && report.result === "success" ? { verdict: "ok", retry_subtasks: [] } : undefined);
     return {
       report,
+      corrections,
       skill_feedback: skillFeedbackFromOutput(payload, prepared.hasSkillFields),
     };
   } catch (error) {

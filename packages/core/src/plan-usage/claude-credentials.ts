@@ -82,7 +82,8 @@ function parseCredential(text: string): ClaudeCredentialRead {
 function timedOut(error: unknown): boolean {
   if (error === null || typeof error !== "object") return false;
   const fields = error as Record<string, unknown>;
-  // execFile's `timeout` kills the child and reports `killed: true` with a null code, never ETIMEDOUT.
+  // maxBuffer overflow and abort also set `killed: true`, so they are excluded; only execFile's `timeout` (killed with a null code, never ETIMEDOUT) counts.
+  if (fields.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || fields.code === "ABORT_ERR" || fields.name === "AbortError") return false;
   return fields.code === "ETIMEDOUT" || fields.killed === true;
 }
 

@@ -124,6 +124,7 @@ test("link adds a described link to the related page in one direction only", () 
   assert.equal(r.state.pages.get(PATH_B), textB);
   const again = apply([{ op: "link", from: PATH_A, to: PATH_B, relation: "a" }, { op: "link", from: PATH_A, to: PATH_B, relation: "b" }, { op: "link", from: PATH_A, to: PATH_A, relation: "c" }]);
   assert.deepEqual(again.rejected.map((x) => x.code), ["link_exists", "self_link"]);
+  assert.deepEqual(again.rejected[0].detail, { from: PATH_A, to: PATH_B });
 });
 
 test("split moves items to a new page byte for byte and links the two pages to each other", () => {
@@ -357,4 +358,196 @@ test("applyOperationsToRoot applies to the files of the given root and leaves th
     assert.ok(readFileSync(join(root, "projects/owl/_history/テスト実行.md"), "utf8").includes("src/old.ts を使う"));
     assert.equal(snap()[1], before[1]);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+// The shape the model returns must not change what is applied: flat vs wrapped by name, per operation.
+test("every operation applies the same when wrapped by its name, with or without a matching op, or with a differently cased op", () => {
+  const retireOp = { op: "retire", item: item(PATH_A, "落とし穴", 1), reason: "missing_path", evidence: { paths: ["src/old.ts"] } };
+  const retired = apply([retireOp]);
+  const histPath = "projects/owl/_history/テスト実行.md";
+  const entry = parseHistory(retired.state.histories.get(histPath)).entries[0];
+  const cases = [
+    [{ op: "merge", items: [item(PATH_A, "落とし穴", 0), item(PATH_A, "落とし穴", 1)], into: { page: PATH_A, section: "落とし穴" }, text: "まとめ" }],
+    [{ op: "move", item: item(PATH_A, "落とし穴", 1), to: { page: PATH_B, section: "決まりごと" } }],
+    [retireOp],
+    [{ op: "dormant", page: PATH_A }, {}, { allowCoreOps: true }],
+    [{ op: "reactivate", page: PATH_A }, { isDormant: () => true }],
+    [{ op: "link", from: PATH_A, to: PATH_B, relation: "同じ" }],
+    [{ op: "split", page: PATH_A, new_title: "古い手順", new_summary: "要約", items: [item(PATH_A, "落とし穴", 2)], relation: "切り出し" }],
+    [{ op: "promote_common", items: [item(PATH_A, "落とし穴", 0), item(PATH_B, "落とし穴", 0)], to: { title: "tmp の共有", section: "落とし穴" } }],
+    [{ op: "restore", history: histPath, entry: entry.id }, {}, undefined, retired.state],
+  ];
+  assert.equal(cases.length, 9);
+  for (const [flat, over, opts, st] of cases) {
+    const { op, ...fields } = flat;
+    const run = (o) => {
+      let n = 0; // the same ids for every run, so the written text can be compared
+      const r = apply([o], st ?? state(), { ...over, newId: () => `01M44${String(++n).padStart(21, "0")}` }, opts);
+      return { applied: r.applied.length, rejected: r.rejected.map((x) => x.code), pages: [...r.state.pages], histories: [...r.state.histories] };
+    };
+    const expected = run(flat);
+    assert.equal(expected.applied, 1, op);
+    for (const wrapped of [{ [op]: fields }, { op, [op]: fields }, { op: ` ${op.toUpperCase()} `, ...fields }]) assert.deepEqual(run(wrapped), expected, op);
+  }
+});
+
+test("shapes the definition cannot settle are rejected as unknown_op, and every check after shaping still applies to a wrapped operation", () => {
+  const retire = { item: item(PATH_A, "落とし穴", 2), reason: "missing_path", evidence: { paths: ["src/old.ts"] } };
+  const code = (o, opts) => apply([o], state(), {}, opts).rejected[0]?.code;
+  assert.equal(code({ retire, link: { from: PATH_A, to: PATH_B, relation: "r" } }), "unknown_op");
+  assert.equal(code({ nonsense: retire }), "unknown_op");
+  assert.equal(code({ op: "link", retire }), "unknown_op");
+  assert.equal(code({ op: "merge", retire }), "unknown_op");
+  assert.equal(code({ toString: retire }), "unknown_op");
+  assert.equal(code({ dormant: { page: PATH_A } }), "unknown_op"); // a core-only operation stays refused without allowCoreOps
+  const bad = [
+    { ...retire, extra: 1 }, // extra key
+    { item: retire.item, reason: "missing_path" }, // missing evidence
+    { ...retire, evidence: {} }, // retire without evidence
+    { ...retire, evidence: { paths: ["src/exists.ts"] } },
+    { ...retire, item: { ...retire.item, h: "000000000000" } },
+  ];
+  for (const fields of bad) {
+    const flat = code({ op: "retire", ...fields });
+    assert.ok(flat !== undefined, JSON.stringify(fields));
+    assert.equal(code({ retire: fields }), flat);
+  }
+});
+
+test("a list under another key is taken when it is the only one left, otherwise the output is refused", () => {
+  assert.deepEqual(parseOperationsOutput({ ops: [{ op: "x" }], note: "n" }), { ops: [{ op: "x" }] });
+  assert.deepEqual(parseOperationsOutput({ operations: [], other: [] }), { error: "unexpected_key" });
+  assert.deepEqual(parseOperationsOutput({ ops: [], acts: [] }), { error: "unexpected_key" });
+  assert.deepEqual(parseOperationsOutput({ ops: "x" }), { error: "unexpected_key" });
+  assert.deepEqual(parseOperationsOutput({ pages: [], ops: [] }), { error: "full_text_not_accepted" });
+});
+
+test("retire aimed at an Owner-written place is refused with the same code flat or wrapped, and the page stays as it was", () => {
+  const fields = { item: { page: PATH_A, section: "更新履歴", h: "000000000000" }, reason: "missing_path", evidence: { paths: ["src/old.ts"] } };
+  for (const o of [{ op: "retire", ...fields }, { retire: fields }]) {
+    const r = apply([o]);
+    assert.equal(r.applied.length, 0);
+    assert.equal(r.rejected[0].code, "section_not_allowed");
+    assert.equal(r.state.pages.get(PATH_A), textA);
+  }
+  const broken = state({ pages: { [PATH_A]: "# not a page\n" } });
+  const r = apply([{ retire: { ...fields, item: { ...fields.item, section: "落とし穴" } } }], broken);
+  assert.equal(r.rejected[0].code, "page_not_writable");
+});
+
+test("link, retire(duplicate) and merge keep their field types: objects where a path is expected and one-item merges are missing_field", () => {
+  const linkObj = apply([{ op: "link", from: { page: PATH_A, section: "落とし穴" }, to: { page: PATH_B, section: "落とし穴" }, relation: "関連" }]);
+  assert.equal(linkObj.rejected[0].code, "missing_field");
+  const linkOk = apply([{ op: "link", from: PATH_A, to: PATH_B, relation: "関連" }]);
+  assert.deepEqual(linkOk.rejected, []);
+  const retireStr = apply([{ op: "retire", item: item(PATH_B, "落とし穴", 0), reason: "duplicate", evidence: { kept: "並列で tmp を共有しない" } }]);
+  assert.equal(retireStr.rejected[0].code, "missing_field");
+  const retireRef = apply([{ op: "retire", item: item(PATH_B, "落とし穴", 0), reason: "duplicate", evidence: { kept: item(PATH_A, "落とし穴", 0) } }]);
+  assert.deepEqual(retireRef.rejected, []);
+  const one = apply([{ op: "merge", items: [item(PATH_A, "落とし穴", 1)], into: { page: PATH_A, section: "落とし穴" }, text: "- 別の落とし穴（W11）" }]);
+  assert.equal(one.rejected[0].code, "missing_field");
+});
+
+test("a rejection reports field names and hash prefixes, never line text", () => {
+  const good = item(PATH_A, "落とし穴", 1);
+  const r = apply([
+    { op: "link", from: PATH_A, to: PATH_B },
+    { op: "retire", item: { ...good, h: "deadbeefcafe" }, reason: "missing_path", evidence: { paths: ["src/old.ts"] } },
+  ]);
+  assert.deepEqual(r.rejected[0].detail, { missing: ["relation"], unknown: [] });
+  const d = r.rejected[1].detail;
+  assert.deepEqual([d.page, d.section, d.h_given, d.changed_earlier], [PATH_A, "落とし穴", "deadbeef", false]);
+  assert.ok(d.h_checked.includes(good.h.slice(0, 8)));
+  assert.ok(!JSON.stringify(r.rejected.map((x) => x.detail)).includes("別の落とし穴"));
+  // the same page after an earlier operation of the run changed it
+  const later = apply([
+    { op: "retire", item: item(PATH_A, "落とし穴", 2), reason: "missing_path", evidence: { paths: ["src/old.ts"] } },
+    { op: "move", item: { ...good, h: "deadbeefcafe" }, to: { page: PATH_B, section: "落とし穴" } },
+  ]);
+  assert.equal(later.rejected[0].detail.changed_earlier, true);
+});
+
+test("equal lines keep resolving after an earlier operation removed one of them", () => {
+  const dup = textA.replace("- 別の落とし穴（W11）", "- 重複（W11）\n- 重複（W11）");
+  const hs = itemsOf(dup).find((s) => s.section === "落とし穴").items.filter((i) => i.text.includes("重複")).map((i) => i.h);
+  const ref = (h) => ({ page: PATH_A, section: "落とし穴", h });
+  const r = apply([
+    { op: "move", item: ref(hs[0]), to: { page: PATH_A, section: "決まりごと" } },
+    { op: "move", item: ref(hs[1]), to: { page: PATH_A, section: "決まりごと" } },
+  ], state({ pages: { [PATH_A]: dup } }));
+  assert.deepEqual(r.rejected, []);
+  assert.equal(r.applied.length, 2);
+});
+
+test("references follow the lines as they stood before the run, however many equal lines an earlier operation removed", () => {
+  const dup = textA.replace("- 別の落とし穴（W11）", "- 重複（W11）\n- 重複（W11）\n- 重複（W11）");
+  const hs = itemsOf(dup).find((s) => s.section === "落とし穴").items.filter((i) => i.text.includes("重複")).map((i) => i.h);
+  assert.equal(hs.length, 3);
+  const ref = (h) => ({ page: PATH_A, section: "落とし穴", h });
+  const move = (h) => ({ op: "move", item: ref(h), to: { page: PATH_A, section: "決まりごと" } });
+  const st = () => state({ pages: { [PATH_A]: dup } });
+  // 1st, then 3rd (renumbered to ~2 by now), then 2nd
+  const ok = apply([move(hs[0]), move(hs[2]), move(hs[1])], st());
+  assert.deepEqual(ok.rejected, []);
+  assert.equal(ok.applied.length, 3);
+  // a reference used once stays used even though its number now names another line
+  const again = apply([move(hs[0]), move(hs[0])], st());
+  assert.deepEqual(again.rejected.map((x) => x.code), ["item_already_used"]);
+});
+
+test("a reference the model was never shown, or one whose line was already moved, is still rejected", () => {
+  const dup = textA.replace("- 別の落とし穴（W11）", "- 重複（W11）\n- 重複（W11）");
+  const hs = itemsOf(dup).find((s) => s.section === "落とし穴").items.filter((i) => i.text.includes("重複")).map((i) => i.h);
+  const base = hs[0].split("~")[0];
+  const mv = (h) => ({ op: "move", item: { page: PATH_A, section: "落とし穴", h }, to: { page: PATH_A, section: "決まりごと" } });
+  const r = apply([mv(`${base}~999`), mv("invalid~1"), mv(base)], state({ pages: { [PATH_A]: dup } }));
+  assert.deepEqual(r.rejected.map((x) => x.code), ["line_hash_mismatch", "line_hash_mismatch", "line_hash_mismatch"]);
+  const good = item(PATH_A, "落とし穴", 1);
+  const gone = apply([{ op: "move", item: good, to: { page: PATH_B, section: "落とし穴" } }, { op: "retire", item: good, reason: "missing_path", evidence: { paths: ["src/old.ts"] } }]);
+  assert.deepEqual(gone.rejected.map((x) => x.code), ["item_already_used"]);
+});
+
+test("merge, link and retire name their failure: a stale line hash, a missing field, a wrong type or an extra key", () => {
+  const a = item(PATH_A, "落とし穴", 0);
+  const b = item(PATH_A, "落とし穴", 1);
+  const run = (ops) => apply(ops).rejected.map((x) => [x.code, x.detail?.missing]);
+  const to = { page: PATH_A, section: "落とし穴" };
+  assert.deepEqual(run([{ op: "merge", items: [a, { ...b, h: "deadbeefcafe" }], into: to, text: "x" }]), [["line_hash_mismatch", undefined]]);
+  assert.deepEqual(run([{ op: "link", from: PATH_A, to: PATH_B }]), [["missing_field", ["relation"]]]);
+  assert.deepEqual(run([{ op: "link", from: PATH_A, to: 3, relation: "r" }]), [["missing_field", ["to"]]]);
+  assert.deepEqual(run([{ op: "retire", item: a, reason: "missing_path" }]).map((x) => x[0]), ["missing_field"]);
+  assert.deepEqual(run([{ op: "retire", item: { ...a, extra: 1 }, reason: "missing_path", evidence: { paths: ["x"] } }]).map((x) => x[0]), ["missing_field"]);
+  assert.deepEqual(run([{ op: "link", from: PATH_A, to: PATH_B, relation: "r", extra: 1 }]).map((x) => x[0]), ["unknown_op"]);
+});
+
+test("a merge after an earlier removal of an equal line keeps its references, and an unshown bare hash stays rejected", () => {
+  const dup = textA.replace("- 別の落とし穴（W11）", "- 重複（W11）\n- 重複（W11）\n- 重複（W11）");
+  const hs = itemsOf(dup).find((s) => s.section === "落とし穴").items.filter((i) => i.text.includes("重複")).map((i) => i.h);
+  const ref = (h) => ({ page: PATH_A, section: "落とし穴", h });
+  const first = { op: "move", item: ref(hs[0]), to: { page: PATH_A, section: "決まりごと" } };
+  const ok = apply([first, { op: "merge", items: [ref(hs[1]), ref(hs[2])], into: { page: PATH_A, section: "落とし穴" }, text: "まとめ" }], state({ pages: { [PATH_A]: dup } }));
+  assert.deepEqual(ok.rejected, []);
+  const bare = hs[0].split("~")[0];
+  const two = textA.replace("- 別の落とし穴（W11）", "- 重複（W11）\n- 重複（W11）");
+  const r = apply([{ op: "move", item: ref(bare), to: { page: PATH_A, section: "決まりごと" } }], state({ pages: { [PATH_A]: two } }));
+  assert.equal(r.rejected[0].code, "line_hash_mismatch");
+});
+
+test("missing_field names the unknown keys inside a ref or the evidence, never their values", () => {
+  const a = item(PATH_A, "落とし穴", 0);
+  const d = (op) => apply([op]).rejected[0].detail;
+  const inRef = d({ op: "retire", item: { ...a, extra: "SECRET" }, reason: "missing_path", evidence: { paths: ["x"] } });
+  assert.deepEqual(inRef.unknown, ["extra"]);
+  assert.ok(!JSON.stringify(inRef).includes("SECRET"));
+  assert.deepEqual(d({ op: "retire", item: a, reason: "missing_path", evidence: { paths: ["x"], bogus: "SECRET" } }).unknown, ["bogus"]);
+});
+
+test("evidence_item_missing says which reference failed and why, with a hash prefix only", () => {
+  const a = item(PATH_A, "落とし穴", 0);
+  const retire = (evidence) => apply([{ op: "retire", item: a, reason: "duplicate", evidence }]).rejected[0];
+  const same = retire({ kept: a });
+  assert.equal(same.code, "evidence_item_missing");
+  assert.deepEqual(same.detail, { field: "kept", page: PATH_A, section: "落とし穴", h_given: a.h.slice(0, 8), cause: "same_as_item" });
+  const gone = retire({ kept: { ...item(PATH_B, "落とし穴", 0), h: "deadbeefcafe" } });
+  assert.deepEqual([gone.detail.field, gone.detail.cause, gone.detail.h_given], ["kept", "line_hash_mismatch", "deadbeef"]);
 });

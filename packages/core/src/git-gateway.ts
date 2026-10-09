@@ -2,12 +2,16 @@ import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, mkdirSync, writeFileSync, type Dirent } from "node:fs";
 import { tmpdir } from "node:os";
-import { copyFile, lstat, mkdir, readFile, readdir, realpath, rm, rmdir, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type {
+  AdvisorSessionDirectory,
+  AdvisorWorkspaceDirtyReason,
+  AdvisorWorkspaceErrorCode,
   AdvisorWorkspaceInspection,
   AdvisorWorkspaceInspectionRequest,
+  AdvisorWorkspacePreparation,
   AdvisorWorkspaceRequest,
   AdvisorWorkspaceSweepResult,
   ChangedFile,
@@ -33,7 +37,7 @@ import { basePushArgs, classifyPushFailure, parsePushPorcelain, PUSH_HOOK_WARNIN
 import { OWL_GIT_EXCLUDES_CONTENT } from "./owl-git-excludes.js";
 import { OWL_INSTANCE_ID_ENV, reapProcessGroup, resolveInstanceId } from "@owl/shared";
 import { workVerificationMarker } from "./workspace-process-sweeper.js";
-import { safeSegment, WorkspaceLayout } from "./workspace-layout.js";
+import { ADVISOR_HOME_DIRNAME, ADVISOR_SHARED_DIRNAME, safeSegment, WorkspaceLayout } from "./workspace-layout.js";
 import { commitExcludePathspecs } from "./workspace-tooling.js";
 
 export { safeSegment } from "./workspace-layout.js";
@@ -206,9 +210,55 @@ function cleanupFailure(path: string, stage: string, error: unknown): WorktreeCl
   };
 }
 
-function advisorBranchFor(conversationId: string): string {
+/** The pre-shared-worktree, per-conversation branch; only the sweep still reads it. */
+function legacyAdvisorBranchFor(conversationId: string): string {
   return `owl/advisor/${safeSegment(conversationId)}`;
 }
+
+const SHARED_ADVISOR_BRANCH_PREFIX = "owl/advisor/shared/";
+
+function sharedAdvisorBranchFor(key: string): string {
+  return `${SHARED_ADVISOR_BRANCH_PREFIX}${key}`;
+}
+
+function firstLine(text: string): string {
+  return text.trim().split(/\r?\n/u)[0] ?? "";
+}
+
+interface AdvisorRepositoryIdentity {
+  /** The caller's own checkout; where git runs and where a `HEAD` base is resolved. */
+  readonly sourceRoot: string;
+  readonly commonDir: string;
+  /** Lane key and display name source; a function of `commonDir` only. */
+  readonly repositoryRoot: string;
+  readonly key: string;
+}
+
+interface AdvisorRepositoryTarget {
+  readonly kind: "repository";
+  readonly identity: AdvisorRepositoryIdentity;
+  readonly worktreePath: string;
+  readonly branch: string;
+  readonly baseBranch: string;
+  readonly baseRef: string;
+}
+
+type AdvisorTarget = { readonly kind: "direct"; readonly directory: string } | AdvisorRepositoryTarget;
+
+const EMPTY_PREPARATION: AdvisorWorkspacePreparation = {
+  ok: true,
+  kind: "worktree",
+  worktree_path: null,
+  repository_root: null,
+  branch: null,
+  base_branch: null,
+  base_head: null,
+  head: null,
+  synced: false,
+  dirty_reasons: [],
+  error_code: null,
+  message: "",
+};
 
 /**
  * Git operations that touch a repository's index, refs or worktree registry
@@ -302,11 +352,15 @@ export class GitWorktreeGateway implements GitGateway {
     const taskBranch = request.task_branch ?? branchName("task", request.work_id, request.task_id);
     const workBranch = request.work_branch ?? branchName("work", request.work_id, null);
     const taskId = request.task_id ?? "worktree";
-    const existingPath = await lstat(worktreePath).catch(() => null);
+    let existingPath = await lstat(worktreePath).catch(() => null);
+    let repairNote = "";
+    if (existingPath && !await this.isRegisteredWorktree(canonical, worktreePath)) {
+      const repaired = await this.repairUnregisteredTaskWorktree(canonical, worktreePath, taskBranch, request.work_id, taskId);
+      if (!repaired.ok) return repaired;
+      repairNote = ` ${repaired.message}`;
+      existingPath = null;
+    }
     if (existingPath) {
-      if (!await this.isRegisteredWorktree(canonical, worktreePath)) {
-        return { ok: false, exit_code: 1, recorded: false, worktree_path: worktreePath, message: "The Task worktree path exists but is not registered with Git." };
-      }
       // The worktree survived a restart (or a Task returned to `ready`), so it
       // may have fallen behind other Tasks integrated into the Work branch in
       // the meantime; catch it up before it is handed back to a Worker.
@@ -327,16 +381,68 @@ export class GitWorktreeGateway implements GitGateway {
       ? await this.git(canonical, ["worktree", "add", worktreePath, taskBranch])
       : await this.git(canonical, ["worktree", "add", "-b", taskBranch, worktreePath, startPoint]);
     if (result.exit_code !== 0) {
-      return { ok: false, exit_code: result.exit_code, recorded: false, worktree_path: worktreePath, message: result.message };
+      return { ok: false, exit_code: result.exit_code, recorded: false, worktree_path: worktreePath, message: `${result.message}${repairNote}` };
     }
     if (branchExists.exit_code === 0) {
       // The Task branch already existed (a leftover from an earlier attempt);
       // it may predate Tasks that have since been integrated into the Work
       // branch, so it needs the same catch-up as a reused worktree.
       const synced = await this.syncTaskWorktreeWithWork(worktreePath, workBranch, taskId, request.work_id);
-      if (!synced.ok) return synced;
+      if (!synced.ok) return { ...synced, message: `${synced.message}${repairNote}` };
     }
-    return { ok: true, exit_code: 0, recorded: false, created: true, worktree_path: worktreePath, message: `Prepared ${taskBranch}.` };
+    return { ok: true, exit_code: 0, recorded: false, created: true, worktree_path: worktreePath, message: `Prepared ${taskBranch}.${repairNote}` };
+  }
+
+  /**
+   * A Task folder whose `.git/worktrees/<name>` metadata vanished. Only a folder
+   * whose `.git` file points into this repository's worktrees directory is
+   * treated as Owl's; its uncommitted state is saved as a patch against the Task
+   * branch and the folder is moved (never deleted) aside so a fresh worktree can
+   * be added. Anything unverifiable keeps the original error and is left untouched.
+   */
+  private async repairUnregisteredTaskWorktree(
+    canonical: string,
+    worktreePath: string,
+    taskBranch: string,
+    workId: string,
+    taskId: string,
+  ): Promise<GitOperationResult> {
+    const refused: GitOperationResult = { ok: false, exit_code: 1, recorded: false, worktree_path: worktreePath, message: "The Task worktree path exists but is not registered with Git." };
+    const common = await this.git(canonical, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    if (!common.ok) return refused;
+    const commonDir = await realpath(common.message.trim()).catch(() => null);
+    const dotGit = join(worktreePath, ".git");
+    const dotGitStat = await lstat(dotGit).catch(() => null);
+    if (!commonDir || !dotGitStat?.isFile()) return refused;
+    const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(await readFile(dotGit, "utf8").catch(() => ""))?.[1];
+    if (!pointer) return refused;
+    const metadataDir = resolve(worktreePath, pointer);
+    const parent = await realpath(dirname(metadataDir)).catch(() => null);
+    if (parent !== join(commonDir, "worktrees")) return refused;
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const backupRoot = resolve(this.dataDir, "outputs", safeSegment(workId), "_unregistered-worktrees", `${safeSegment(taskId)}-${stamp}`);
+    const patchPath = join(backupRoot, "uncommitted.patch");
+    const movedPath = join(backupRoot, "worktree");
+    await mkdir(backupRoot, { recursive: true });
+    // The folder can no longer run git itself, so diff through a throwaway index
+    // that also picks up untracked files.
+    const env = { GIT_INDEX_FILE: join(backupRoot, "index.tmp") };
+    const treeArgs = [`--git-dir=${commonDir}`, `--work-tree=${worktreePath}`];
+    for (const step of [["read-tree", taskBranch], ["add", "-A"]]) {
+      const result = await this.git(canonical, [...treeArgs, ...step], undefined, env);
+      if (!result.ok) return { ...refused, exit_code: result.exit_code, message: `${refused.message} Could not save the uncommitted changes: ${result.message}` };
+    }
+    // Raw stdout: git() trims, which would corrupt trailing blank context lines.
+    const patch = await this.gitStdout(canonical, [...treeArgs, "diff", "--cached", "--binary", taskBranch], env);
+    if (patch === null) return { ...refused, message: `${refused.message} Could not save the uncommitted changes.` };
+    await writeFile(patchPath, patch);
+    await rename(worktreePath, movedPath);
+    const message = `Repaired the unregistered Task worktree: moved the old folder to ${movedPath} and saved its uncommitted changes as ${patchPath}.`;
+    console.warn(`[git-gateway] ${message}`);
+    const pruned = await this.git(canonical, ["worktree", "prune"]);
+    if (!pruned.ok) return { ...pruned, worktree_path: worktreePath, message: `${message} Then git worktree prune failed: ${pruned.message}` };
+    return { ok: true, exit_code: 0, recorded: false, worktree_path: worktreePath, message };
   }
 
   /**
@@ -369,146 +475,227 @@ export class GitWorktreeGateway implements GitGateway {
   }
 
   /**
-   * Prepare or reuse a conversation-scoped Advisor worktree. Projects
-   * without Git keep using their registered directory directly. When there
-   * is no linked Project, Owl itself is the source repository if it is Git
-   * managed; otherwise the existing Owl root fallback is used directly. A
-   * workspace this call created is not removed once the conversation stops
-   * being the active session's - sweepAdvisorWorkspaces() reclaims it later
-   * - so a conversation whose workspace was swept gets a fresh one here,
-   * branched again from base.
+   * The repository an Advisor workspace belongs to, derived only from the
+   * realpath'd Git common dir so a main checkout and every linked worktree
+   * (however it is named or registered as a Project) map to one key, one
+   * worktree path, one branch and one lane. Null when `source` is not Git managed.
    */
-  public async prepareAdvisorWorkspace(request: AdvisorWorkspaceRequest): Promise<GitOperationResult> {
-    const conversation = this.db.get<{ work_id: string | null }>(
-      "SELECT work_id FROM conversations WHERE id = ?",
-      request.conversation_id,
-    );
-    if (!conversation) {
-      return { ok: false, exit_code: 1, recorded: false, message: `Conversation ${request.conversation_id} was not found.` };
+  private async advisorRepositoryIdentity(source: string): Promise<AdvisorRepositoryIdentity | null> {
+    const top = await this.git(source, ["rev-parse", "--show-toplevel"]);
+    const common = await this.git(source, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    if (!top.ok || !common.ok) return null;
+    try {
+      const sourceRoot = await realpath(firstLine(top.message));
+      const commonDir = await realpath(firstLine(common.message));
+      const repositoryRoot = basename(commonDir) === ".git" ? dirname(commonDir) : commonDir;
+      const key = `${safeSegment(basename(repositoryRoot))}-${createHash("sha256").update(commonDir).digest("hex").slice(0, 12)}`;
+      return { sourceRoot, commonDir, repositoryRoot, key };
+    } catch {
+      return null;
     }
-
-    const project = conversation.work_id ? this.projectFor(conversation.work_id) : undefined;
-    const sourceDirectory = project
-      ? await this.validProjectPath(project.canonical_path, project.allowed_roots_json)
-      : await realpath(this.owlRoot);
-    return this.inLane(sourceDirectory, () => this.prepareAdvisorWorkspaceNow(request, project, sourceDirectory));
   }
 
-  private async prepareAdvisorWorkspaceNow(
-    request: AdvisorWorkspaceRequest,
-    project: ProjectRow | undefined,
-    sourceDirectory: string,
-  ): Promise<GitOperationResult> {
-    const repositoryResult = await this.git(sourceDirectory, ["rev-parse", "--show-toplevel"]);
-    if (!repositoryResult.ok) {
+  /** Which repository, shared worktree and base an Advisor request targets, without creating anything. */
+  private async resolveAdvisorTarget(request: AdvisorWorkspaceRequest): Promise<
+    { readonly ok: true; readonly target: AdvisorTarget } | { readonly ok: false; readonly error_code: AdvisorWorkspaceErrorCode; readonly message: string }
+  > {
+    const conversation = this.db.get<{ work_id: string | null }>("SELECT work_id FROM conversations WHERE id = ?", request.conversation_id);
+    if (!conversation) {
+      return { ok: false, error_code: "conversation_not_found", message: `Conversation ${request.conversation_id} was not found.` };
+    }
+    let project: ProjectRow | undefined;
+    if (request.project_id) {
+      project = this.db.get<ProjectRow>(
+        "SELECT canonical_path, base_branch, allowed_roots_json FROM projects WHERE id = ?",
+        request.project_id,
+      );
+      if (!project) return { ok: false, error_code: "project_not_found", message: `Project ${request.project_id} was not found.` };
+    } else if (conversation.work_id) {
+      project = this.projectFor(conversation.work_id);
+    }
+    let source: string;
+    try {
+      source = project ? await this.validProjectPath(project.canonical_path, project.allowed_roots_json) : await realpath(this.owlRoot);
+    } catch (error) {
+      return { ok: false, error_code: "project_unavailable", message: error instanceof Error ? error.message : "Project path could not be resolved." };
+    }
+    const identity = await this.advisorRepositoryIdentity(source);
+    if (!identity) return { ok: true, target: { kind: "direct", directory: source } };
+
+    await mkdir(this.layout.root, { recursive: true });
+    const layoutRoot = await realpath(this.layout.root);
+    const worktreePath = resolve(layoutRoot, relative(this.layout.root, this.layout.advisorSharedDir(identity.key)));
+    const baseBranch = project?.base_branch ?? await this.currentBranchOrHead(identity.sourceRoot);
+    return {
+      ok: true,
+      target: {
+        kind: "repository",
+        identity,
+        worktreePath,
+        branch: sharedAdvisorBranchFor(identity.key),
+        baseBranch,
+        baseRef: baseBranch === "HEAD" ? "HEAD" : `refs/heads/${baseBranch}`,
+      },
+    };
+  }
+
+  /** Where a read-only Advisor session runs. Creates no worktree or branch: only the empty scratch home directory. */
+  public async resolveAdvisorSessionDirectory(request: { readonly conversation_id: string }): Promise<AdvisorSessionDirectory> {
+    const resolved = await this.resolveAdvisorTarget(request);
+    if (!resolved.ok) throw new Error(resolved.message);
+    const { target } = resolved;
+    if (target.kind === "direct") return { kind: "direct", cwd: target.directory };
+    const home = this.layout.advisorHomeDir();
+    await mkdir(home, { recursive: true });
+    return {
+      kind: "repository",
+      cwd: await realpath(home),
+      repository_root: target.identity.sourceRoot,
+      base_branch: target.baseBranch,
+    };
+  }
+
+  /**
+   * Prepare the repository's single shared Advisor worktree and fast-forward
+   * it to the latest base. A worktree with uncommitted changes or commits
+   * base does not have is left exactly as it is and reported instead, so
+   * nothing the Advisor wrote is ever discarded. Projects without Git keep
+   * using their registered directory directly.
+   */
+  public async prepareAdvisorWorkspace(request: AdvisorWorkspaceRequest): Promise<AdvisorWorkspacePreparation> {
+    const resolved = await this.resolveAdvisorTarget(request);
+    if (!resolved.ok) {
+      return { ...EMPTY_PREPARATION, ok: false, error_code: resolved.error_code, message: resolved.message };
+    }
+    const { target } = resolved;
+    if (target.kind === "direct") {
       return {
+        ...EMPTY_PREPARATION,
         ok: true,
-        exit_code: 0,
-        recorded: false,
-        worktree_path: sourceDirectory,
+        kind: "direct",
+        worktree_path: target.directory,
+        synced: true,
         message: "Advisor is using the Project directory directly because it is not a Git repository.",
       };
     }
-
-    const repositoryRoot = resolve(repositoryResult.message.trim().split(/\r?\n/u)[0] ?? sourceDirectory);
-    const containerRoot = this.layout.rootOf(this.layout.advisorDir(request.conversation_id)) ?? this.layout.root;
-    await mkdir(containerRoot, { recursive: true });
-    const worktreeRoot = await realpath(containerRoot);
-    const worktreePath = resolve(worktreeRoot, "advisor", safeSegment(request.conversation_id));
-    const branch = advisorBranchFor(request.conversation_id);
-    const existingPath = await lstat(worktreePath).catch(() => null);
-    if (existingPath) {
-      const listed = await this.git(repositoryRoot, ["worktree", "list", "--porcelain"]);
-      const registered = listed.ok && listed.message.split(/\r?\n/u).some((line) =>
-        line.startsWith("worktree ") && resolve(line.slice("worktree ".length)) === worktreePath,
-      );
-      if (registered) {
-        return { ok: true, exit_code: 0, recorded: false, worktree_path: worktreePath, message: `Reusing Advisor branch ${branch}.` };
-      }
-      const emptyDirectory = existingPath.isDirectory() && !existingPath.isSymbolicLink()
-        && await rmdir(worktreePath).then(() => true, () => false);
-      if (!emptyDirectory) {
-        return {
-          ok: false,
-          exit_code: 1,
-          recorded: false,
-          worktree_path: worktreePath,
-          message: "The Advisor workspace path exists but is not registered with Git; it was left untouched.",
-        };
-      }
-    }
-
-    await mkdir(resolve(worktreePath, ".."), { recursive: true });
-    const baseBranch = project?.base_branch ?? await this.currentBranchOrHead(repositoryRoot);
-    const branchExists = await this.git(repositoryRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
-    const result = branchExists.exit_code === 0
-      ? await this.git(repositoryRoot, ["worktree", "add", worktreePath, branch])
-      : await this.git(repositoryRoot, ["worktree", "add", "-b", branch, worktreePath, baseBranch]);
-    return {
-      ok: result.ok,
-      exit_code: result.exit_code,
-      recorded: false,
-      worktree_path: worktreePath,
-      message: result.ok ? `Prepared Advisor branch ${branch}.` : result.message,
-    };
+    return this.inLane(target.identity.repositoryRoot, () => this.prepareSharedAdvisorWorkspaceNow(target));
   }
 
-  public async inspectAdvisorWorkspace(
-    request: AdvisorWorkspaceInspectionRequest,
-  ): Promise<AdvisorWorkspaceInspection> {
-    const containerRoot = this.layout.rootOf(this.layout.advisorDir(request.conversation_id)) ?? this.layout.root;
-    let worktreeRoot: string;
-    try {
-      worktreeRoot = await realpath(containerRoot);
-    } catch (error) {
-      return { ok: false, dirty: false, message: error instanceof Error ? error.message : "Owl root could not be resolved." };
-    }
-    const expectedPath = resolve(worktreeRoot, "advisor", safeSegment(request.conversation_id));
-    if (resolve(request.workspace_path) !== expectedPath || !inside(worktreeRoot, expectedPath)) {
-      return { ok: false, dirty: false, message: "The requested path is not this conversation's Advisor workspace." };
-    }
-
-    const conversation = this.db.get<{ work_id: string | null }>(
-      "SELECT work_id FROM conversations WHERE id = ?",
-      request.conversation_id,
-    );
-    if (!conversation) return { ok: false, dirty: false, message: "Conversation was not found." };
-    const project = conversation.work_id ? this.projectFor(conversation.work_id) : undefined;
-    let sourceDirectory: string;
-    try {
-      sourceDirectory = project
-        ? await this.validProjectPath(project.canonical_path, project.allowed_roots_json)
-        : await realpath(this.owlRoot);
-    } catch (error) {
-      return { ok: false, dirty: false, message: error instanceof Error ? error.message : "Project path could not be resolved." };
-    }
-    return this.inLane(sourceDirectory, () => this.inspectAdvisorWorkspaceNow(project, sourceDirectory, expectedPath));
-  }
-
-  private async inspectAdvisorWorkspaceNow(
-    project: ProjectRow | undefined,
-    sourceDirectory: string,
-    expectedPath: string,
-  ): Promise<AdvisorWorkspaceInspection> {
-    const repositoryResult = await this.git(sourceDirectory, ["rev-parse", "--show-toplevel"]);
-    if (!repositoryResult.ok) return { ok: true, dirty: false, message: "The Project is not a Git worktree." };
-    const repositoryRoot = resolve(repositoryResult.message.trim().split(/\r?\n/u)[0] ?? sourceDirectory);
-    const listed = await this.git(repositoryRoot, ["worktree", "list", "--porcelain"]);
-    const registered = listed.ok && listed.message.split(/\r?\n/u).some((line) =>
-      line.startsWith("worktree ") && resolve(line.slice("worktree ".length)) === expectedPath,
-    );
-    if (!registered) return { ok: false, dirty: false, message: "Advisor worktree is no longer registered with Git." };
-
-    const status = await this.git(expectedPath, ["status", "--porcelain=v1", "--untracked-files=all"]);
-    if (!status.ok) return { ok: false, dirty: false, message: status.message };
-    const baseBranch = project?.base_branch ?? await this.currentBranchOrHead(repositoryRoot);
-    const commitsAhead = await this.git(expectedPath, ["rev-list", "--count", `${baseBranch}..HEAD`]);
-    if (!commitsAhead.ok) return { ok: false, dirty: false, message: commitsAhead.message };
-    return {
+  private async prepareSharedAdvisorWorkspaceNow(target: AdvisorRepositoryTarget): Promise<AdvisorWorkspacePreparation> {
+    const { identity, worktreePath, branch, baseBranch, baseRef } = target;
+    const source = identity.sourceRoot;
+    const outcome = (fields: Partial<AdvisorWorkspacePreparation> & { readonly message: string }): AdvisorWorkspacePreparation => ({
+      ...EMPTY_PREPARATION,
       ok: true,
-      dirty: (status.message !== "git operation completed" && status.message.trim().length > 0) || Number(commitsAhead.message.trim()) > 0,
-      message: status.message === "git operation completed" ? `${commitsAhead.message.trim()} commits ahead of ${baseBranch}` : status.message,
-    };
+      kind: "worktree",
+      worktree_path: worktreePath,
+      repository_root: source,
+      branch,
+      base_branch: baseBranch,
+      ...fields,
+    });
+    const failed = (error_code: AdvisorWorkspaceErrorCode, message: string, baseHead: string | null = null) =>
+      outcome({ ok: false, error_code, base_head: baseHead, message });
+
+    const baseHead = await this.git(source, ["rev-parse", "--verify", `${baseRef}^{commit}`]);
+    if (!baseHead.ok) return failed("base_not_found", baseHead.message);
+    const base = baseHead.message.trim();
+
+    const existing = await lstat(worktreePath).catch(() => null);
+    const registered = await this.isRegisteredWorktree(source, worktreePath);
+    if (!existing || !registered) {
+      if (existing) {
+        const emptyDirectory = existing.isDirectory() && !existing.isSymbolicLink()
+          && await rmdir(worktreePath).then(() => true, () => false);
+        if (!emptyDirectory) {
+          return failed("workspace_conflict", "The Advisor workspace path exists but is not registered with Git; it was left untouched.", base);
+        }
+      } else if (registered) {
+        await this.git(source, ["worktree", "prune"]);
+      }
+      await mkdir(dirname(worktreePath), { recursive: true });
+      const branchExists = await this.git(source, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
+      const added = branchExists.exit_code === 0
+        ? await this.git(source, ["worktree", "add", worktreePath, branch])
+        : await this.git(source, ["worktree", "add", "-b", branch, worktreePath, base]);
+      if (!added.ok) return failed("sync_failed", added.message, base);
+    }
+
+    const state = await this.readAdvisorWorkspaceState(target, base);
+    if (!state.ok) return failed("sync_failed", state.message, base);
+    if (state.dirty_reasons.length > 0) {
+      return outcome({
+        synced: false,
+        dirty_reasons: state.dirty_reasons,
+        head: state.head,
+        base_head: base,
+        branch: state.branch ?? branch,
+        message: `The shared Advisor worktree was left untouched: ${state.dirty_reasons.join(", ")}.`,
+      });
+    }
+
+    // git refuses these when they would overwrite anything, so a failure leaves the worktree intact and needs no rollback.
+    if (state.branch !== branch) {
+      const branchExists = await this.git(source, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
+      const switched = await this.git(worktreePath, branchExists.exit_code === 0 ? ["switch", branch] : ["switch", "-c", branch, base]);
+      if (!switched.ok) return failed("sync_failed", switched.message, base);
+    }
+    const merged = await this.git(worktreePath, ["merge", "--ff-only", base]);
+    if (!merged.ok) return failed("sync_failed", merged.message, base);
+    const head = await this.git(worktreePath, ["rev-parse", "HEAD"]);
+    if (!head.ok || head.message.trim() !== base) {
+      return failed("sync_failed", `The shared Advisor worktree is not at ${baseBranch} after syncing.`, base);
+    }
+    return outcome({ synced: true, head: base, base_head: base, message: `Shared Advisor worktree is at ${baseBranch} (${base.slice(0, 12)}).` });
+  }
+
+  /** Whether the shared worktree holds uncommitted changes or commits the base does not have. */
+  private async readAdvisorWorkspaceState(target: AdvisorRepositoryTarget, baseHead: string): Promise<
+    | { readonly ok: true; readonly head: string; readonly branch: string | null; readonly dirty_reasons: readonly AdvisorWorkspaceDirtyReason[] }
+    | { readonly ok: false; readonly message: string }
+  > {
+    const { worktreePath, branch } = target;
+    const source = target.identity.sourceRoot;
+    const status = await this.git(worktreePath, ["status", "--porcelain=v1", "--untracked-files=all"]);
+    if (!status.ok) return { ok: false, message: status.message };
+    const head = await this.git(worktreePath, ["rev-parse", "HEAD"]);
+    if (!head.ok) return { ok: false, message: head.message };
+    const current = await this.git(worktreePath, ["symbolic-ref", "-q", "--short", "HEAD"]);
+    const reasons: AdvisorWorkspaceDirtyReason[] = [];
+    if (status.message !== "git operation completed" && status.message.trim().length > 0) reasons.push("uncommitted_changes");
+    const headAhead = await this.git(source, ["rev-list", "--count", `${baseHead}..${head.message.trim()}`]);
+    if (!headAhead.ok) return { ok: false, message: headAhead.message };
+    let ahead = Number(headAhead.message.trim());
+    if ((await this.git(source, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])).exit_code === 0) {
+      const branchAhead = await this.git(source, ["rev-list", "--count", `${baseHead}..refs/heads/${branch}`]);
+      if (!branchAhead.ok) return { ok: false, message: branchAhead.message };
+      ahead += Number(branchAhead.message.trim());
+    }
+    if (ahead > 0) reasons.push("unmerged_commits");
+    return { ok: true, head: head.message.trim(), branch: current.ok ? current.message.trim() : null, dirty_reasons: reasons };
+  }
+
+  public async inspectAdvisorWorkspace(request: AdvisorWorkspaceInspectionRequest): Promise<AdvisorWorkspaceInspection> {
+    const resolved = await this.resolveAdvisorTarget(request);
+    if (!resolved.ok) return { ok: false, dirty: false, message: resolved.message };
+    const { target } = resolved;
+    if (target.kind === "direct") return { ok: true, dirty: false, message: "No shared Advisor workspace." };
+    return this.inLane(target.identity.repositoryRoot, async () => {
+      const { worktreePath, identity } = target;
+      if (!(await lstat(worktreePath).catch(() => null)) || !(await this.isRegisteredWorktree(identity.sourceRoot, worktreePath))) {
+        return { ok: true, dirty: false, message: "No shared Advisor workspace." };
+      }
+      const baseHead = await this.git(identity.sourceRoot, ["rev-parse", "--verify", `${target.baseRef}^{commit}`]);
+      if (!baseHead.ok) return { ok: false, dirty: false, message: baseHead.message };
+      const state = await this.readAdvisorWorkspaceState(target, baseHead.message.trim());
+      if (!state.ok) return { ok: false, dirty: false, message: state.message };
+      return {
+        ok: true,
+        dirty: state.dirty_reasons.length > 0,
+        worktree_path: worktreePath,
+        message: state.dirty_reasons.length > 0 ? state.dirty_reasons.join(", ") : `Shared Advisor worktree has nothing base ${target.baseBranch} lacks.`,
+      };
+    });
   }
 
   /**
@@ -537,12 +724,14 @@ export class GitWorktreeGateway implements GitGateway {
       const entries = await readdir(advisorRoot, { withFileTypes: true }).catch(() => []);
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
+        // The shared worktrees and the scratch home are in use by design; only per-conversation leftovers are swept.
+        if (entry.name === ADVISOR_SHARED_DIRNAME || entry.name === ADVISOR_HOME_DIRNAME) continue;
         await this.sweepAdvisorEntry(resolve(advisorRoot, entry.name), entry.name, removedWorkspaces);
       }
     }
 
-    for (const repositoryRoot of await this.advisorBranchRepositories()) {
-      await this.sweepOrphanAdvisorBranches(repositoryRoot, removedBranches);
+    for (const repository of await this.advisorBranchRepositories()) {
+      await this.sweepOrphanAdvisorBranches(repository, removedBranches);
     }
 
     return { removed_workspaces: removedWorkspaces, removed_branches: removedBranches };
@@ -567,14 +756,10 @@ export class GitWorktreeGateway implements GitGateway {
 
   /** Whether `entryPath` is registered as a Git worktree, and the repository it belongs to. */
   private async registeredAdvisorWorktree(entryPath: string): Promise<{ readonly repositoryRoot: string } | null> {
-    const commonDir = await this.git(entryPath, ["rev-parse", "--git-common-dir"]);
-    if (!commonDir.ok) return null;
-    const repositoryRoot = resolve(resolve(entryPath, commonDir.message.trim()), "..");
-    const listed = await this.git(repositoryRoot, ["worktree", "list", "--porcelain"]);
-    const registered = listed.ok && listed.message.split(/\r?\n/u).some((line) =>
-      line.startsWith("worktree ") && resolve(line.slice("worktree ".length)) === resolve(entryPath),
-    );
-    return registered ? { repositoryRoot } : null;
+    const identity = await this.advisorRepositoryIdentity(entryPath);
+    if (!identity) return null;
+    const { repositoryRoot } = identity;
+    return await this.isRegisteredWorktree(repositoryRoot, entryPath) ? { repositoryRoot } : null;
   }
 
   /**
@@ -599,7 +784,7 @@ export class GitWorktreeGateway implements GitGateway {
       return false;
     }
 
-    const branch = advisorBranchFor(conversationId);
+    const branch = legacyAdvisorBranchFor(conversationId);
     const base = await this.resolveAdvisorBaseBranch(conversationId, repositoryRoot);
     const merged = await this.git(repositoryRoot, ["merge-base", "--is-ancestor", branch, base]);
     if (!merged.ok) {
@@ -641,30 +826,35 @@ export class GitWorktreeGateway implements GitGateway {
     }
   }
 
-  /** Every repository whose `owl/advisor/*` branches this sweep also cleans up: Owl's own (if Git managed) plus every registered Git Project. */
-  private async advisorBranchRepositories(): Promise<readonly string[]> {
-    const roots = new Set<string>();
+  /**
+   * Every repository whose `owl/advisor/*` branches this sweep also cleans up: Owl's own (if Git managed)
+   * plus every registered Git Project, one entry per Git common dir however many checkouts point at it.
+   */
+  private async advisorBranchRepositories(): Promise<readonly { readonly gitCwd: string; readonly lane: string }[]> {
+    const sources: string[] = [];
     const owlRootReal = await realpath(this.owlRoot).catch(() => null);
-    if (owlRootReal !== null) {
-      const owlRepo = await this.git(owlRootReal, ["rev-parse", "--show-toplevel"]);
-      if (owlRepo.ok) roots.add(resolve(owlRepo.message.trim().split(/\r?\n/u)[0] ?? owlRootReal));
-    }
+    if (owlRootReal !== null) sources.push(owlRootReal);
     for (const project of this.db.all<ProjectRow>("SELECT canonical_path, base_branch, allowed_roots_json FROM projects")) {
-      let canonical: string;
       try {
-        canonical = await this.validProjectPath(project.canonical_path, project.allowed_roots_json);
+        sources.push(await this.validProjectPath(project.canonical_path, project.allowed_roots_json));
       } catch {
         continue; // an unreachable/misconfigured Project is left for its own health checks
       }
-      const repo = await this.git(canonical, ["rev-parse", "--show-toplevel"]);
-      if (repo.ok) roots.add(resolve(repo.message.trim().split(/\r?\n/u)[0] ?? canonical));
     }
-    return [...roots];
+    const repositories = new Map<string, { readonly gitCwd: string; readonly lane: string }>();
+    for (const source of sources) {
+      const identity = await this.advisorRepositoryIdentity(source);
+      if (identity && !repositories.has(identity.commonDir)) {
+        repositories.set(identity.commonDir, { gitCwd: identity.sourceRoot, lane: identity.repositoryRoot });
+      }
+    }
+    return [...repositories.values()];
   }
 
-  /** Delete this repository's merged, worktree-less `owl/advisor/*` branches that no live session owns. */
-  private async sweepOrphanAdvisorBranches(repositoryRoot: string, removed: string[]): Promise<void> {
-    await this.inLane(repositoryRoot, async () => {
+  /** Delete this repository's merged, worktree-less legacy `owl/advisor/<conversation>` branches that no live session owns. */
+  private async sweepOrphanAdvisorBranches(repository: { readonly gitCwd: string; readonly lane: string }, removed: string[]): Promise<void> {
+    const repositoryRoot = repository.gitCwd;
+    await this.inLane(repository.lane, async () => {
       const refs = await this.git(repositoryRoot, ["for-each-ref", "--format=%(refname:short)", "refs/heads/owl/advisor/"]);
       if (!refs.ok || refs.message === "git operation completed") return;
       const worktrees = await this.git(repositoryRoot, ["worktree", "list", "--porcelain"]);
@@ -674,13 +864,17 @@ export class GitWorktreeGateway implements GitGateway {
           .map((line) => line.slice("branch ".length).replace(/^refs\/heads\//u, "")),
       );
       for (const branch of refs.message.split(/\r?\n/u).filter((line) => line.length > 0)) {
+        if (branch.startsWith(SHARED_ADVISOR_BRANCH_PREFIX)) continue; // the shared worktree's branch is never swept
         if (worktreeBranches.has(branch)) continue; // still in use; the entry sweep owns it
         const conversationId = branch.slice("owl/advisor/".length);
         if (!this.isKnownAdvisorConversation(conversationId)) continue;
         if (this.isLiveAdvisorConversation(conversationId)) continue;
         const base = await this.resolveAdvisorBaseBranch(conversationId, repositoryRoot);
         const merged = await this.git(repositoryRoot, ["merge-base", "--is-ancestor", branch, base]);
-        if (!merged.ok) continue; // unmerged; left for the owner to look at
+        if (!merged.ok) {
+          console.warn(`[owl-core] Advisor branch sweep is keeping ${branch}: it has commits not in ${base}.`);
+          continue; // unmerged; left for the owner to look at
+        }
         const deleted = await this.git(repositoryRoot, ["branch", "-D", branch]);
         if (deleted.ok) removed.push(branch);
       }
@@ -874,6 +1068,26 @@ export class GitWorktreeGateway implements GitGateway {
    * state version.
    */
   public async mergeWorkIntoBase(request: { readonly work_id: string; readonly expected_state_version?: number; readonly verified_commit?: string }): Promise<GitWorkMergeResult> {
+    // Keyed by project_id, not by the git lane: the lane is released while the
+    // verification commands run, which is exactly when another merge would move
+    // the base. Holding the lane through verification would block every other
+    // git operation of the repository for that long.
+    const projectId = this.db.get<{ project_id: string | null }>("SELECT project_id FROM works WHERE id = ?", request.work_id)?.project_id ?? null;
+    if (projectId === null) return this.mergeWorkIntoBaseNow(request);
+    const previous = this.mergeQueues.get(projectId) ?? Promise.resolve();
+    const run = previous.then(() => this.mergeWorkIntoBaseNow(request));
+    const tail = run.then(() => undefined, () => undefined);
+    this.mergeQueues.set(projectId, tail);
+    try {
+      return await run;
+    } finally {
+      if (this.mergeQueues.get(projectId) === tail) this.mergeQueues.delete(projectId);
+    }
+  }
+
+  private readonly mergeQueues = new Map<string, Promise<void>>();
+
+  private async mergeWorkIntoBaseNow(request: { readonly work_id: string; readonly expected_state_version?: number; readonly verified_commit?: string }): Promise<GitWorkMergeResult> {
     try {
       const project = this.projectFor(request.work_id, true);
       if (!project) return workMergeError("A Project is required to merge a Work into its base branch.");
@@ -1629,9 +1843,20 @@ export class GitWorktreeGateway implements GitGateway {
       if (await this.mergeInProgress(baseWorktree)) {
         return workMergeError(`The checkout of ${baseBranch} at ${baseWorktree} already has a merge in progress; it was left unchanged.`, 1, context);
       }
-      const status = await this.git(baseWorktree, ["status", "--porcelain=v1", "--untracked-files=no"]);
-      if (!status.ok || (status.message !== "git operation completed" && status.message.trim().length > 0)) {
-        return workMergeError(`The checkout of ${baseBranch} at ${baseWorktree} has uncommitted changes: ${status.message}`, status.exit_code || 1, context);
+      // Like git itself, only uncommitted paths that the fast-forward would rewrite block it; unrelated edits stay untouched.
+      const localOut = await this.gitStdout(baseWorktree, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+      const incomingOut = await this.gitStdout(canonical, ["diff", "--name-only", "-z", oldBaseCommit, mergeCommit]);
+      if (localOut === null || incomingOut === null) {
+        return workMergeError(`Could not compare uncommitted changes in the checkout of ${baseBranch} at ${baseWorktree} with the incoming changes.`, 1, context);
+      }
+      const incoming = new Set(incomingOut.split("\0").filter((path) => path.length > 0));
+      const overlap = parsePorcelainZ(localOut).filter((path) => incoming.has(path));
+      if (overlap.length > 0) {
+        return {
+          ...(workMergeError(`The checkout of ${baseBranch} at ${baseWorktree} has uncommitted changes to files this merge also changes: ${overlap.join(", ")}`, 1, context) as Extract<GitWorkMergeResult, { kind: "error" }>),
+          overlap_files: overlap,
+          base_worktree: baseWorktree,
+        };
       }
       const advanced = await this.git(baseWorktree, ["merge", "--ff-only", mergeCommit]);
       if (!advanced.ok) {
@@ -2586,9 +2811,10 @@ export class GitWorktreeGateway implements GitGateway {
   }
 
   /** Raw stdout of an isolated git command, or null when it fails. */
-  private async gitStdout(cwd: string, args: readonly string[]): Promise<string | null> {
+  private async gitStdout(cwd: string, args: readonly string[], env?: NodeJS.ProcessEnv): Promise<string | null> {
     try {
       const invocation = await this.isolatedInvocation(cwd, args);
+      if (env) invocation.options.env = { ...invocation.options.env, ...env };
       const result = await execFileAsync("git", invocation.args, invocation.options);
       return String(result.stdout ?? "");
     } catch {
@@ -2596,9 +2822,10 @@ export class GitWorktreeGateway implements GitGateway {
     }
   }
 
-  private async git(cwd: string, args: readonly string[], input?: string): Promise<GitOperationResult> {
+  private async git(cwd: string, args: readonly string[], input?: string, env?: NodeJS.ProcessEnv): Promise<GitOperationResult> {
     try {
       const invocation = await this.isolatedInvocation(cwd, args);
+      if (env) invocation.options.env = { ...invocation.options.env, ...env };
       const pending = execFileAsync("git", invocation.args, invocation.options);
       if (input !== undefined) {
         // git may exit before reading all of stdin; the rejected promise reports that failure.

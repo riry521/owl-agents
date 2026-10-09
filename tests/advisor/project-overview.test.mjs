@@ -39,7 +39,7 @@ async function runTurn(t, label, setup = async () => {}) {
     version: "advisor-overview-test",
     providerClient,
   }, { prefix: `owl-advisor-overview-${label}-` });
-  core.gitGateway().prepareAdvisorWorkspace = async () => ({ ok: true, worktree_path: root });
+  core.gitGateway().resolveAdvisorSessionDirectory = async () => ({ kind: "direct", cwd: root });
   core.gitGateway().inspectAdvisorWorkspace = async () => ({ ok: true, dirty: false, message: "clean" });
   core.gitGateway().sweepAdvisorWorkspaces = async () => {};
   const conversation = await core.getActiveConversation();

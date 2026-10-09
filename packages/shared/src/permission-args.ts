@@ -4,6 +4,7 @@ import type { Dirent } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { compareClaudeEntries } from "./semver.js";
+import { buildOwlApiMcpArgs } from "./owl-api-mcp-args.js";
 
 export type AgentPermissionAdapter = "claude" | "codex";
 export type AgentPermissionRole = "advisor" | "manager" | "designer" | "worker" | "reviewer" | "curator" | "librarian";
@@ -155,6 +156,7 @@ export function buildAgentPermissionArgs(
       ...buildPreToolUseHookArgs(adapter, guardConfiguration),
       ...(role === "librarian" ? ["--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task"] : []),
       ...buildMemoryMcpArgs(adapter, guardConfiguration),
+      ...buildOwlApiMcpArgs(adapter, guardConfiguration),
       ...superpowersWithoutHooksArgs(configuration.env, configuration.cwd),
     ];
   }
@@ -167,6 +169,7 @@ export function buildAgentPermissionArgs(
     `approval_policy=${tomlString("never")}`,
     ...buildPreToolUseHookArgs(adapter, guardConfiguration),
     ...buildMemoryMcpArgs(adapter, guardConfiguration),
+    ...buildOwlApiMcpArgs(adapter, guardConfiguration),
     "--config",
     `marketplaces.openai-bundled.source=${tomlString(codexBundledMarketplaceSource(configuration.env))}`,
   ];

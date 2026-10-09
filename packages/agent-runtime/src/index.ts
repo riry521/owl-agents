@@ -10,6 +10,8 @@ export {
   readStoredReport,
   validateReportEnvelope,
   validateReportSemantics,
+  correctReportSemantics,
+  REPORT_CORRECTION_RULES,
 } from "./protocol";
 export { toolNamesInLine } from "./provider";
 export { AgentRuntimeError } from "./errors";

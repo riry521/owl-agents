@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import { createUlid } from "../../packages/db/dist/index.js";
 import { command, createTestCore } from "../helpers/core.mjs";
+import { necessityFor, criteriaFor } from "../helpers/necessity.mjs";
 import { git } from "../helpers/git.mjs";
 import { waitFor as pollFor } from "../helpers/wait.mjs";
 
@@ -60,11 +61,13 @@ function markerPlan() {
   return { plan, runs: () => (existsSync(mark) ? readFileSync(mark, "utf8").length : 0) };
 }
 
-async function openFixture(t, { verificationPlan = [], autoPush = false, beforeFinalize = async () => {}, onWorker = async () => {} } = {}) {
+async function openFixture(t, { verificationPlan = [], autoPush = false, beforeFinalize = async () => {}, onWorker = async () => {}, onReplan = null } = {}) {
   const agentRunner = {
     runManagerPlan: async (request) => request.mode === "finalize"
       ? (await beforeFinalize(request), managerComplete(request))
-      : { outcome: "failed", message: `Unexpected Manager mode: ${request.mode}` },
+      : request.mode === "replan" && onReplan !== null
+        ? onReplan(request)
+        : { outcome: "failed", message: `Unexpected Manager mode: ${request.mode}` },
     runWorker: async (request) => {
       await onWorker(request);
       return { outcome: "success", report_valid: true, report: workerReport(request.invocation_id) };
@@ -259,6 +262,49 @@ test("Core records the automatic conflict resolution, leaves the Work waiting on
   }
 });
 
+test("Core hands a real merge conflict to a conflict-resolution Task, opens no Decision, and merges after the retry", async (t) => {
+  let conflictCommitted = false;
+  let replanned = false;
+  const { project, db, core, projectId, mergeCalls } = await openFixture(t, {
+    onWorker: async (request) => {
+      const cwd = request.context.worktree;
+      if (!replanned) {
+        await writeFile(join(cwd, "README.md"), "Work version\n");
+        await writeFile(join(cwd, "check.mjs"), "export {};\n");
+        return;
+      }
+      // The resolution Task brings the latest main into the Work and settles the conflict.
+      try { git(cwd, "merge", "--no-commit", "main"); } catch { /* the conflict is expected */ }
+      await writeFile(join(cwd, "README.md"), "resolved version\n");
+      git(cwd, "add", "README.md");
+      git(cwd, "commit", "-m", "resolve conflict with main");
+    },
+    beforeFinalize: async () => {
+      if (conflictCommitted) return;
+      conflictCommitted = true;
+      await writeFile(join(project, "README.md"), "conflicting main version\n");
+      git(project, "add", "README.md");
+      git(project, "commit", "-m", "conflicting main edit");
+    },
+    onReplan: (request) => {
+      replanned = true;
+      const resolveTask = {
+        id: "resolve-conflict", title: "Resolve the base merge conflict", type: "doc", necessity: necessityFor(),
+        acceptance_criteria: criteriaFor("README.md is resolved against main."), depends_on: [], context: "", notes: "", review: false,
+        required_sections: [], required_tests: [], wait_for: null, base_sync_only: null, replaces: [],
+      };
+      return { outcome: "success", report_valid: true, report: { tasks: [...(request.tasks ?? []), resolveTask], event: "task.replanned" } };
+    },
+  });
+  const workId = await startSmallWork(core, projectId, "conflict-resolve");
+
+  const finalState = await waitForTerminalDecision(db, workId);
+  assert.equal(finalState, "completed");
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ?", workId).n, 0);
+  assert.equal(mergeCalls.length, 2, "the integration was retried after the resolution Task");
+  assert.equal(git(project, "show", "main:README.md"), "resolved version");
+});
+
 test("Core keeps main unchanged and opens a Decision when Project verification fails", async (t) => {
   const verificationPlan = [{
     command_id: "fail-check",
@@ -433,4 +479,42 @@ test("Core re-verifies before merging when the base moved after the integration 
   assert.equal(await waitForTerminalDecision(fixture.db, workId), "completed");
   assert.equal(runs(), runsBeforeMerge + 1, "the plan ran again on the merge commit");
   assert.equal(fixture.db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'work.merge_verification_skipped'", workId).n, 0);
+});
+
+test("Core re-verifies on the newest base and merges, without a Decision, when main moves during the merge verification", async (t) => {
+  const { plan, runs } = markerPlan();
+  let project;
+  const fixture = await openFixture(t, {
+    verificationPlan: plan,
+    onWorker: async (request) => writeFile(join(request.context.worktree, "feature.mjs"), "export {};\n"),
+    // Moving main here makes the squash tree differ from the verified tree, so the merge verification runs.
+    beforeFinalize: async () => {
+      await writeFile(join(project, "first.md"), "first\n");
+      git(project, "add", "first.md");
+      git(project, "commit", "-m", "first");
+    },
+  });
+  project = fixture.project;
+  const gateway = fixture.core.gitGateway();
+  const verify = gateway.runWorkVerification.bind(gateway);
+  const seen = [];
+  let moved = null;
+  gateway.runWorkVerification = async (workId, planArg, context, ...rest) => {
+    if (moved === null) {
+      await writeFile(join(project, "second.md"), "second\n");
+      git(project, "add", "second.md");
+      git(project, "commit", "-m", "second");
+      moved = git(project, "rev-parse", "refs/heads/main");
+    } else {
+      git(context.worktree_path, "merge-base", "--is-ancestor", moved, "HEAD");
+    }
+    seen.push(moved);
+    return verify(workId, planArg, context, ...rest);
+  };
+  const workId = await startSmallWork(fixture.core, fixture.projectId, "moved-during-merge");
+
+  assert.equal(await waitForTerminalDecision(fixture.db, workId), "completed");
+  assert.equal(seen.length, 2, "the merge verification ran again after the base moved");
+  assert.equal(fixture.db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ?", workId).n, 0);
+  for (const file of ["first.md", "second.md", "feature.mjs"]) assert.ok(git(project, "show", `main:${file}`).length > 0, file);
 });

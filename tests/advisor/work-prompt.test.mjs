@@ -32,3 +32,15 @@ test("the built Advisor prompt explains Work operations and their confirmation r
   assert.match(prompt, /Adding reopen:true to an instruction for a completed Work also needs the operator's explicit approval/u);
   assert.match(prompt, /If several Works match or none does, ask which Work before emitting the action/u);
 });
+
+test("the built Advisor prompt explains the owl-api tool, the 403 fallback and the call_api confirmation rule", async (t) => {
+  const { core } = await createTestCore(t, { agentRunner }, { prefix: "owl-advisor-api-prompt-", start: true });
+
+  const prompt = core.getAdvisorSettingsSnapshot().systemPrompt;
+  assert.match(prompt, /owl-api MCP tool `request` \{method, api_path, json_body\?\}/u);
+  assert.match(prompt, /answer 403 advisor_action_required with details\.alternative_actions/u);
+  assert.match(prompt, /owl_api_result_unknown/u);
+  assert.match(prompt, /\{type:"call_api",description,payload:\{method,path,body\?,reason\}\}/u);
+  assert.match(prompt, /emit call_api only in a later turn after the operator agrees/u);
+  assert.doesNotMatch(prompt, /127\.0\.0\.1|localhost|guard-tokens/u);
+});

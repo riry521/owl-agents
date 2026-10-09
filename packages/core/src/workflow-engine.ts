@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, readlink, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { createUlid, utcNow } from "../../db/dist/index.js";
-import { OUTPUT_FORMAT_INVALID_ERROR_KEY, readDesignBlocked, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, readStoredAcceptanceCriteria, readStoredTaskPlanContext, requestsSpecTest, AGENT_STALE_THRESHOLD_MS, builtinProviderHarness, DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, designDocumentPath, OWL_INSTANCE_ID_ENV, reapProcessGroup, resolveInstanceId, tokenUsageOf, usageJson, type DelegationMismatchKind, type ResearchSubagentSettings, type TaskReplanTrigger, type TokenUsage } from "@owl/shared";
+import { OUTPUT_FORMAT_INVALID_ERROR_KEY, readDesignBlocked, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, readStoredAcceptanceCriteria, readStoredTaskPlanContext, requestsSpecTest, AGENT_STALE_THRESHOLD_MS, builtinProviderHarness, DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, designDocumentPath, OWL_INSTANCE_ID_ENV, reapProcessGroup, resolveInstanceId, tokenUsageOf, usageJson, type DelegationMismatchKind, type ResearchSubagentSettings, type TaskReplanTrigger, type TokenUsage } from "@owl/shared";
 import { matchesAnyGlob } from "../../shared/dist/glob.js";
 import { taskVerificationMarker } from "./workspace-process-sweeper.js";
 import { TRANSIENT_RETRY_DELAYS_MS, TRANSIENT_RETRY_LIMIT } from "./attempt-policy";
@@ -1800,6 +1800,7 @@ export class WorkflowEngine {
     if (this.stopping) return;
     if (await this.closeAbandonedWorkerRun(workId, taskId, agentRunId)) return;
     this.recordSkillFeedback(agentRunId, result.skill_feedback);
+    await this.recordReportCorrections(workId, taskId, agentRunId, result.report_corrections);
     // Every outcome below stores the tokens the Worker spent.
     const usage = usagePayload(result.usage);
     if (result.failure_class === "rate_limited") {
@@ -2000,7 +2001,7 @@ export class WorkflowEngine {
         ...(reportRunOutcome ? { run_outcome: reportRunOutcome } : {}),
         ...(hasReport ? { report: result.report } : {}),
         // Lets a "resubmit only the report" answer resume this very session.
-        ...(errorKey === REPORT_FORMAT_INVALID_ERROR_KEY && result.provider_session_id
+        ...(isReportFormatInvalidErrorKey(errorKey) && result.provider_session_id
           ? { provider_session_id: result.provider_session_id, worktree_path: this.db.get<{ worktree_path: string | null }>("SELECT worktree_path FROM tasks WHERE id = ?", taskId)?.worktree_path ?? null }
           : {}),
         ...usage,
@@ -2146,6 +2147,27 @@ export class WorkflowEngine {
     if (verificationEvent.state.manager_trigger) {
       await this.triggerManagerReplanIfNeeded(workId, integrationTrigger(taskId, "verification", integration));
     }
+  }
+
+  private async recordReportCorrections(
+    workId: string,
+    taskId: string,
+    agentRunId: string,
+    corrections: AgentRunResult["report_corrections"],
+  ): Promise<void> {
+    if (!corrections || corrections.length === 0) return;
+    await this.writeLane.write({
+      mutateState: () => ({}),
+      event: {
+        idempotencyKey: `worker-report-corrected:${agentRunId}`,
+        type: "worker.report_corrected",
+        workId,
+        taskId,
+        agentRunId,
+        payload: { agent_run_id: agentRunId, corrections: corrections.map((c) => ({ ...c })) },
+      },
+      outbox: [],
+    });
   }
 
   private recordSkillFeedback(agentRunId: string, feedback: AgentRunResult["skill_feedback"]): void {

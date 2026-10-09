@@ -18,6 +18,7 @@ import {
 } from "./contracts.js";
 import { agentTimeoutConfigurationError, configuredApiToken, configuredBind, configuredIdempotencyTtlMs, configuredPort, configuredScreenViewLimits, providerMode, serverExposureError } from "./config.js";
 import { createConfiguredCore } from "./core.js";
+import { createOwnApiCaller } from "./own-api-caller.js";
 import { ConnectorManager, formatConnectorFailure } from "./connector-manager.js";
 import { createPluginManagerFromEnv, type PluginManager } from "./plugin-manager.js";
 import { ApiError, ContractValidationError, humanUnexpectedMessage, newReferenceId } from "./errors.js";
@@ -29,7 +30,7 @@ import { prepareConnectorConfig } from "./secret-config.js";
 import { resolveInstanceId } from "../../../packages/shared/dist/instance-id.js";
 import { classifyProviderFailure } from "../../../packages/agent-runtime/dist/index.js";
 
-const SERVER_VERSION = "0.1.1";
+const SERVER_VERSION = "0.1.2";
 
 async function recordServerFailure(referenceId: string, context: string, error: unknown): Promise<void> {
   const raw = error instanceof Error ? (error.stack ?? error.message) : String(error);
@@ -254,6 +255,7 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
     owlRoot,
     dataDir,
     providerClient,
+    callOwnApi: createOwnApiCaller({ apiBase: guardApiBase, token: configuredApiToken }),
     executorRuntime: async () => {
       const runtime = await createHybridExecutorRuntime(owlRoot, guard)();
       return {

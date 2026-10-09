@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { createAgentRunner, MINIMAL_CODE_RULES, WORKING_STYLE_HEADING, WORKING_STYLE_RULES } from "../../packages/agent-runtime/dist/index.js";
-import { objectSchema, renderOutputTemplate, renderRolePrompt, splitRenderedPrompt, splitRolePrompt, validateRoleOutput } from "../../packages/agent-runtime/dist/role-contract.js";
+import { objectSchema, providerSchema, renderOutputTemplate, renderRolePrompt, splitRenderedPrompt, splitRolePrompt, validateRoleOutput } from "../../packages/agent-runtime/dist/role-contract.js";
 import { MANAGER_PLAN_OUTPUT_SCHEMA, MANAGER_REPLAN_OUTPUT_SCHEMA, MANAGER_FINALIZE_OUTPUT_SCHEMA } from "../../packages/agent-runtime/dist/manager.js";
 import { DESIGNER_REPORT_SCHEMA, WORKER_REPORT_SCHEMA, buildDesignerRolePrompt, buildWorkerPrompt } from "../../packages/agent-runtime/dist/worker.js";
 import { buildReviewerPrompt, REVIEW_OUTPUT_SCHEMA } from "../../packages/agent-runtime/dist/reviewer.js";
@@ -1090,4 +1090,34 @@ test("the Worker's check before reporting is the Project setting, else the detec
   assert.match(none, /No check command is set or detected for this project: before you report, run the checks the project's own documentation describes \(README, AGENTS\.md, CLAUDE\.md and similar\)/u);
   assert.match(none, /the check is not applicable: say so in verification\.method and do not report blocked or partial for it\./u);
   assert.doesNotMatch(none, /Before you report, run these checks yourself/u);
+});
+
+test("Worker and Designer provider schemas carry the success rules only when asked (Claude), never for Codex", () => {
+  for (const schema of [WORKER_REPORT_SCHEMA, DESIGNER_REPORT_SCHEMA]) {
+    const plain = JSON.stringify(providerSchema(schema));
+    assert.ok(!/allOf|"if"|"then"|providerRules/.test(plain));
+    const ruled = providerSchema(schema, true);
+    assert.ok(!("allOf" in ruled) && !("anyOf" in ruled) && !("oneOf" in ruled));
+    const rule = ruled;
+    assert.deepEqual(rule.if.properties.result, { const: "success" });
+    assert.deepEqual(rule.then.properties.question_for_manager, { type: "null" });
+    assert.deepEqual(rule.then.properties.needs_replanning, { const: false });
+    assert.deepEqual(rule.then.properties.verification.properties.status, { const: "passed" });
+    assert.deepEqual(rule.then.properties.verification.properties.acceptance.items.properties.status, { const: "passed" });
+    assert.deepEqual(rule.then.properties.verification.properties.checks.items.properties.status, { const: "passed" });
+    assert.ok(!JSON.stringify(ruled.properties).includes("allOf"));
+  }
+});
+
+test("validateRoleOutput ignores the success rules for success and partial reports", () => {
+  const report = {
+    kind: "report", schema_version: "1.1.0", invocation_id: "x", result: "success", work_done: "d",
+    delegation: { decomposition: "d", delegated: [], retained: [] }, changes: [],
+    verification: { status: "passed", method: "m", acceptance: [{ criterion_id: "AC1", status: "passed", evidence: "e" }], checks: [], integration_check: null },
+    remaining_issues: [], next_action: "none", needs_replanning: false, question_for_manager: null,
+    skills_used: [], skill_proposals: [], pending_process: null, external_blocker: null,
+  };
+  assert.equal(validateRoleOutput(WORKER_REPORT_SCHEMA, report), null);
+  const partial = { ...report, result: "partial", question_for_manager: "q", verification: { ...report.verification, status: "blocked" } };
+  assert.equal(validateRoleOutput(WORKER_REPORT_SCHEMA, partial), null);
 });

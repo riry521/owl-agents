@@ -38,10 +38,10 @@ async function fixture(t, verificationPlan = []) {
   return { parent, project, owlRoot, work, gateway: new GitWorktreeGateway(db, owlRoot) };
 }
 
-async function addWorkChange(gateway, workId = "W") {
+async function addWorkChange(gateway, workId = "W", file = "feature.txt") {
   const task = await gateway.prepareWorktree({ work_id: workId, task_id: "T1" });
   assert.equal(task.ok, true, task.message);
-  await writeFile(join(task.worktree_path, "feature.txt"), "Work feature\n");
+  await writeFile(join(task.worktree_path, file), "Work feature\n");
   const integrated = await gateway.integrateTask({ work_id: workId, task_id: "T1", worktree_path: task.worktree_path });
   assert.equal(integrated.merged, true, integrated.message);
   return `owl/work/${workId}/work`;
@@ -276,7 +276,47 @@ test("mergeWorkIntoBase detects a checked-out base moving between validation and
   assertNoMergeHead(join(owlRoot, ".owl-workspaces", "W", "__work__"));
 });
 
-test("mergeWorkIntoBase preserves canonical uncommitted changes when fast-forward is refused", async (t) => {
+test("mergeWorkIntoBase runs one merge at a time per Project, so the second verifies on the first's base", async (t) => {
+  const plan = [{
+    command_id: "build", argv: ["node", "-e", "setTimeout(() => {}, 300)"], cwd: ".", env_allowlist: [], timeout_seconds: 20,
+    stdout_limit: 1_024, stderr_limit: 1_024, expected_exit_codes: [0], executor: "core",
+  }];
+  const { project, gateway } = await fixture(t, plan);
+  await addWorkChange(gateway, "W1", "one.txt");
+  await addWorkChange(gateway, "W2", "two.txt");
+  const spans = [];
+  const original = gateway.runWorkVerification.bind(gateway);
+  gateway.runWorkVerification = async (workId, ...rest) => {
+    const span = { workId, start: Date.now() };
+    spans.push(span);
+    try { return await original(workId, ...rest); } finally { span.end = Date.now(); }
+  };
+
+  const results = await Promise.all(["W1", "W2"].map((work_id) => gateway.mergeWorkIntoBase({ work_id })));
+
+  assert.deepEqual(results.map((r) => r.kind), ["merged", "merged"], results.map((r) => r.message).join("; "));
+  assert.equal(spans.length, 2);
+  assert.ok(spans[0].end <= spans[1].start, "verification spans must not overlap");
+  for (const file of ["one.txt", "two.txt"]) assert.equal(git(project, "show", `main:${file}`), "Work feature");
+});
+
+test("mergeWorkIntoBase merges past uncommitted changes that do not overlap the merge",async (t) => {
+  const { project, gateway } = await fixture(t);
+  await addWorkChange(gateway);
+  await writeFile(join(project, "README.md"), "owner edit\n");
+  await writeFile(join(project, "scratch.txt"), "untracked\n");
+  const oldBase = git(project, "rev-parse", "refs/heads/main");
+
+  const result = await gateway.mergeWorkIntoBase({ work_id: "W" });
+
+  assert.equal(result.kind, "merged", result.message);
+  assert.notEqual(git(project, "rev-parse", "refs/heads/main"), oldBase);
+  assert.equal(git(project, "rev-parse", "refs/heads/main"), result.merge_commit);
+  assert.equal(await readFile(join(project, "README.md"), "utf8"), "owner edit\n");
+  assert.equal(await readFile(join(project, "scratch.txt"), "utf8"), "untracked\n");
+});
+
+test("mergeWorkIntoBase refuses uncommitted changes that overlap the merge, naming every file", async (t) => {
   const { project, owlRoot, gateway } = await fixture(t);
   await addWorkChange(gateway);
   await writeFile(join(project, "feature.txt"), "owner local change\n");
@@ -285,7 +325,9 @@ test("mergeWorkIntoBase preserves canonical uncommitted changes when fast-forwar
 
   const result = await gateway.mergeWorkIntoBase({ work_id: "W" });
 
-  assert.ok(result.kind === "error" || result.kind === "base_moved", result.message);
+  assert.equal(result.kind, "error", result.message);
+  assert.match(result.message, /feature\.txt/);
+  assert.deepEqual(result.overlap_files, ["feature.txt"]);
   assert.equal(git(project, "rev-parse", "refs/heads/main"), oldBase);
   assert.equal(git(project, "status", "--porcelain=v1", "--untracked-files=all"), statusBefore);
   assert.equal(await readFile(join(project, "feature.txt"), "utf8"), "owner local change\n");

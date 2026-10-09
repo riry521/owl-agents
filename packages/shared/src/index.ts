@@ -25,6 +25,10 @@ export {
   type AdvisorMalformedHandler,
   type AdvisorSuggestedAction,
   type ParsedAdvisorResponse,
+  ADVISOR_CALL_API_ACTION_TYPE,
+  ADVISOR_CALL_API_MAX_BODY_CHARS,
+  parseAdvisorCallApiPayload,
+  type AdvisorCallApiRequest,
 } from "./advisor-response.js";
 export {
   ADVISOR_CURATION_INSTRUCTION,
@@ -274,6 +278,8 @@ export interface AgentRunResult {
   readonly report?: JsonObject | null;
   readonly message?: string;
   readonly skill_feedback: SkillFeedback | null;
+  /** Report contradictions the runtime repaired by lowering the result (rule name and results). */
+  readonly report_corrections?: readonly { readonly rule: string; readonly from_result: string; readonly to_result: string }[];
   /** Tokens the provider reported for this run; absent or null when it reported none. */
   readonly usage?: TokenUsage | null;
   /** Claude session to resume when only the report must be produced again. */
@@ -617,7 +623,9 @@ export * from "./task-necessity.js";
 export * from "./manager-trigger.js";
 export * from "./acceptance-criteria.js";
 export * from "./test-policy.js";
-export { DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, OUTPUT_RESUBMIT_LIMIT_SETTINGS_KEY, REVIEW_RERUN_OPTION_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_OPTION_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY } from "./report-resubmit.js";
+export * from "./advisor-api-policy.js";
+export { OWL_API_MCP_SERVER_NAME, OWL_API_MCP_TOOL_TIMEOUT_MS, OWL_API_MCP_ENV_NAMES, buildOwlApiMcpArgs } from "./owl-api-mcp-args.js";
+export { DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, OUTPUT_RESUBMIT_LIMIT_SETTINGS_KEY, REVIEW_RERUN_OPTION_KEY,REPORT_FORMAT_INVALID_ERROR_KEY, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_OPTION_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY } from "./report-resubmit.js";
 export * from "./role-schema.js";
 export {
   EXTERNAL_BLOCKER_EVENT,

@@ -84,7 +84,7 @@ import { DEFAULT_SKILL_FEEDBACK_WEIGHTS, detectSkillReads, SkillBox, type SkillS
 import { isValidSkillScope, validateSkillFilePath, validateSkillName } from "./skill-files";
 import { SKILL_CURATOR_DEBOUNCE_MS, SkillCurator, type SkillCurationResult } from "./skill-curator";
 import { AdvisorSessionManager } from "./advisor-session.js";
-import { AdvisorSessionRuntime, type AdvisorSettingsSnapshot } from "./advisor-runtime.js";
+import { AdvisorSessionNotFoundError, AdvisorSessionRuntime, type AdvisorSettingsSnapshot } from "./advisor-runtime.js";
 import { MemorySaver } from "./memory-saver.js";
 import { slugifyKnowledgeContentName } from "./knowledge-naming.js";
 import { LibrarianScheduler, parseLibrarianTime } from "./librarian-scheduler.js";
@@ -184,12 +184,13 @@ import {
   type KnowledgeAutomationSnapshot,
 } from "@owl/shared";
 import { CHILD_RUN_SETTINGS_KEY, HYBRID_MODE_SETTINGS_KEY } from "./types";
+import type { AdvisorWorkspacePreparation } from "./types";
 import { CoreActivityRegistry } from "./core-activity.js";
 import { GitWorktreeGateway } from "./git-gateway.js";
 import { defaultOwlRoot, safeSegment, WorkspaceLayout } from "./workspace-layout.js";
 import { parseVerificationMarker, WorkspaceProcessSweeper, type SweepRunInfo, type WorkspaceActivity } from "./workspace-process-sweeper.js";
 import { WorkspaceTooling, runCommand } from "./workspace-tooling.js";
-import { DEFAULT_POST_MERGE_DEPENDENCY_FILES, POST_MERGE_COMMAND_TIMEOUT_MS, PostMergeCommandQueue, postMergeResultEvent, redactArgv, type PostMergeRunOutcome, type ResolvedPostMergeCommand } from "./post-merge-command.js";
+import { DEFAULT_POST_MERGE_DEPENDENCY_FILES, DEFAULT_POST_MERGE_INSTALL_RULES, POST_MERGE_COMMAND_TIMEOUT_MS, PostMergeCommandQueue, postMergeResultEvent, redactArgv, type PostMergeInstallRule, type PostMergeRunOutcome, type ResolvedPostMergeCommand } from "./post-merge-command.js";
 import { AgentWorkspacePreparer, withWorkspacePreparation, worktreeHarnesses } from "./agent-workspace-preparer.js";
 import { redactCredentials } from "./git-push.js";
 import { recoverOrphanedState } from "./startup-recovery.js";
@@ -207,7 +208,10 @@ import { buildTokenUsageReport, countRequestsOverThreshold, type RequestThreshol
 import type { TokenUsagePeriod, TokenUsageReport } from "../../shared/dist/token-usage-report.js";
 import { RESEARCH_CAPTURE_ROLES } from "../../shared/dist/permission-args.js";
 import {
+  ADVISOR_CALL_API_ACTION_TYPE,
   ADVISOR_WORK_OPERATION_ACTION_TYPES,
+  parseAdvisorCallApiPayload,
+  redactProviderOutput,
   isAdvisorWorkOperationType,
   type AdvisorWorkOperationType,
 } from "../../shared/dist/advisor-response.js";
@@ -287,6 +291,7 @@ import { readTestPolicy, validateTestPolicy } from "../../shared/dist/test-polic
 import { resolveTestRun } from "./test-detection.js";
 import { matchDeniedCommand, reviewerDeniedCommands, REVIEWER_TEST_COMMAND_DENIED_MESSAGE, type ReviewerTestCommandCheck } from "./reviewer-test-guard.js";
 import { createChildRunScheduler, type ChildRunScheduler } from "./child-run-scheduler.js";
+import { TRANSIENT_RETRY_LIMIT } from "./attempt-policy.js";
 import { defaultExecutorRuntime } from "./executor.js";
 import type {
   AgentListQuery,
@@ -671,6 +676,7 @@ export class Core {
   private readonly owlRoot: string;
   private readonly postMergeCommands: PostMergeCommandQueue;
   private readonly postMergeInstallDefault: readonly string[];
+  private readonly postMergeInstallRules: readonly PostMergeInstallRule[];
   private readonly postMergeDependencyFiles: readonly string[];
   private readonly postMergeOwlRootDefault: readonly string[];
   private readonly dataDir: string;
@@ -794,6 +800,7 @@ export class Core {
     this.dataDir = options.dataDir ?? join(this.owlRoot, "data");
     this.postMergeOwlRootDefault = options.postMergeCommand?.owlRootDefault ?? ["pnpm", "build"];
     this.postMergeInstallDefault = options.postMergeCommand?.installDefault ?? ["pnpm", "install"];
+    this.postMergeInstallRules = options.postMergeCommand?.installRules ?? DEFAULT_POST_MERGE_INSTALL_RULES;
     this.postMergeDependencyFiles = options.postMergeCommand?.dependencyFiles ?? DEFAULT_POST_MERGE_DEPENDENCY_FILES;
     this.postMergeCommands = new PostMergeCommandQueue({
       run: runCommand,
@@ -5945,6 +5952,19 @@ export class Core {
     await this.advisorSessions.endSession(session.id, "owner_requested");
   }
 
+  /**
+   * Prepare the shared Advisor worktree for a running Advisor session and
+   * fast-forward it to the latest base when it is clean. `project_id` null
+   * targets the session's own repository.
+   */
+  public async prepareAdvisorWorkspaceForSession(request: {
+    readonly session_id: string;
+    readonly project_id: string | null;
+  }): Promise<AdvisorWorkspacePreparation> {
+    if (!this.advisorRuntime) throw new AdvisorSessionNotFoundError(request.session_id);
+    return this.advisorRuntime.prepareWorkspace(request.session_id, request.project_id);
+  }
+
   /** The settings snapshot AdvisorSessionRuntime uses to (re)start an Advisor ProviderSession. */
   private getAdvisorSettingsSnapshot(): AdvisorSettingsSnapshot {
     const setting = resolveRoleModelFromDb(this.db, "advisor");
@@ -5990,7 +6010,7 @@ export class Core {
       ? "Request: Correct the requested label.\\n\\nAcceptance:\\n- The label reads as requested."
       : "依頼: Correct the requested label.\\n\\n受け入れ条件:\\n- The label reads as requested.";
     const base = [
-      "You are the Owl Advisor, the operator's front door to Owl. Answer questions and discuss ideas directly. By default, every concrete request to perform work (make, fix, change, investigate, or build something), regardless of size, must become an Owl Work that you dispatch; ordinary wording like 'please do this' does not authorize you to do it yourself. In Japanese, 'これやっといて' is a normal Work request; phrases like '直接やって', 'Workにせず直接', or 'Advisor自身で実装して' explicitly ask you to bypass Work. Only bypass Work when the operator explicitly asks you to do the work directly yourself or without creating a Work. For that explicit exception, do the work in your Advisor workspace and do not create a Work. Never claim you lack permission to create a Work.",
+      "You are the Owl Advisor, the operator's front door to Owl. Answer questions and discuss ideas directly. By default, every concrete request to perform work (make, fix, change, investigate, or build something), regardless of size, must become an Owl Work that you dispatch; ordinary wording like 'please do this' does not authorize you to do it yourself. In Japanese, 'これやっといて' is a normal Work request; phrases like '直接やって', 'Workにせず直接', or 'Advisor自身で実装して' explicitly ask you to bypass Work. Only bypass Work when the operator explicitly asks you to do the work directly yourself or without creating a Work. For that explicit exception, first prepare your Advisor workspace as described under Advisor workspace, do the work only there, and do not create a Work. Never claim you lack permission to create a Work.",
       "When you issue a Work for a concrete request without an explicit direct-work instruction (the rules below decide when), append exactly one ```owl-actions``` fenced JSON array containing {type:\"create_work\", description, payload:{title,summary,size,project_id}}. Core will create the Work and start it, unless payload.draft is true. When the operator says \"draft\", \"just register it\", \"don't run it yet\", '下書き', '登録だけ', or 'まだ動かさないで' (for example a Work to be issued after another Work finishes), set the optional payload.draft to true: Core then creates the Work as a memo and does not start it, and the operator starts it with the Start button on the Work detail page. Omit draft otherwise. Use size \"small\" for a focused, lightweight change so it goes directly to the Worker; use \"normal\" or \"large\" for work that needs Manager planning. Before returning create_work, compare the full request and conversation context against the complete current Project catalog in context. Set the exact project_id when one Project matches, use null only when none matches, and ask which Project to use if multiple are plausible. Project registration is optional. The payload may also carry the optional backlog_item_ids (IDs of open backlog items from GET /api/v1/backlog (status=open) to link to the new Work; they become in_progress) and dismiss_backlog_item_ids (backlog item IDs to dismiss); every ID must belong to the same Project as the Work. Example: ```owl-actions\n[{\"type\":\"create_work\",\"description\":\"Fix the label\",\"payload\":{\"title\":\"Fix the label\",\"summary\":\"" + exampleSummary + "\",\"size\":\"small\",\"project_id\":null}}]\n```.",
       "First classify every request as small, normal, or large.",
       "When the operator explicitly asks for the strongest or Lead Designer to handle the design from the start, set create_work payload.design_mode to \"lead\" and size to \"normal\" or \"large\" so Manager plans a design Task. Otherwise omit design_mode (automatic routing). Never infer this override merely from Work size.",
@@ -6104,6 +6124,7 @@ export class Core {
       ? mergeAdvisorSuggestedActions(suggestedActions, fencedActions)
       : [...suggestedActions];
     const recovery = await this.recoverAdvisorWorkActions(turnId);
+    recovery.notices.push(...await this.recoverAdvisorCallApis(turnId));
     const actionResult = await this.dispatchAdvisorWorkActions(conversationId, turnId, allSuggestedActions, recovery.recoveredIndexes);
     const trimmedReply = visibleReply.trimEnd();
     const allNotices = [
@@ -6176,6 +6197,8 @@ export class Core {
           // Connectors post this body as-is instead of searching the
           // conversation's message list, which pages oldest first.
           reply: replyBody,
+          // The next turn's input carries these (AdvisorSessionRuntime), since the provider session never saw them.
+          action_results: actionNotices,
           suggested_actions: publishedActions,
           origin,
         },
@@ -6183,6 +6206,109 @@ export class Core {
       outbox: [],
     });
     return result.state;
+  }
+
+  private async writeAdvisorCallApiEvent(key: string, type: string, payload: Record<string, unknown>): Promise<void> {
+    await this.writeLane.write({
+      mutateState: () => null,
+      event: { id: createUlid(), idempotencyKey: key, type, payload },
+      outbox: [{ provider: "websocket" }],
+    });
+  }
+
+  /** Marks started-only calls of a turn as unknown: a crash after the send leaves no way to tell whether it ran. */
+  private async recoverAdvisorCallApis(turnId: string): Promise<string[]> {
+    const t = ADVISOR_TEXT[ownerLanguage(this.db)];
+    const notices: string[] = [];
+    const started = this.db.all<{ idempotency_key: string; payload_json: string }>(
+      `SELECT idempotency_key, payload_json FROM events
+        WHERE type = 'advisor.api_call_started' AND json_extract(payload_json, '$.turn_id') = ?`,
+      turnId,
+    );
+    for (const row of started) {
+      const key = row.idempotency_key.replace(/:started$/u, "");
+      if (this.db.get("SELECT 1 AS found FROM events WHERE idempotency_key = ?", `${key}:finished`)) continue;
+      const { conversation_id, request_hash, method, path } = JSON.parse(row.payload_json) as Record<string, string>;
+      try {
+        await this.writeAdvisorCallApiEvent(`${key}:finished`, "advisor.api_call_finished", {
+          schema_version: "1.0.0", conversation_id, turn_id: turnId, request_hash, method, path,
+          outcome: "unknown", status: null, summary: "",
+        });
+      } catch (error) {
+        console.warn("[owl-core] Could not record the unknown call_api outcome.", error);
+      }
+      notices.push(t.callApiUnknown(method, path));
+    }
+    return notices;
+  }
+
+  /** Records the call before sending it, so a crash can never lead to a second send of the same request. */
+  private async runAdvisorCallApi(
+    conversationId: string,
+    turnId: string,
+    action: AdvisorSuggestedAction,
+    t: (typeof ADVISOR_TEXT)[keyof typeof ADVISOR_TEXT],
+  ): Promise<string> {
+    const parsed = parseAdvisorCallApiPayload(action.payload);
+    if (!parsed.ok) return t.callApiRejected(parsed.reason);
+    const callOwnApi = this.options.callOwnApi;
+    if (!callOwnApi) return t.callApiUnavailable;
+    const { method, path, body, reason } = parsed.value;
+    const requestHash = createHash("sha256").update(stableJson({ method, path, body: body ?? null }), "utf8").digest("hex").slice(0, 16);
+    const key = `advisor-call-api:${turnId}:${requestHash}`;
+    const previous = this.db.all<{ idempotency_key: string; payload_json: string }>(
+      "SELECT idempotency_key, payload_json FROM events WHERE idempotency_key IN (?, ?)",
+      `${key}:started`,
+      `${key}:finished`,
+    );
+    const finished = previous.find((row) => row.idempotency_key === `${key}:finished`);
+    if (finished) {
+      const record = JSON.parse(finished.payload_json) as { outcome: string; status: number | null };
+      return t.callApiAlreadyHandled(method, path, record.outcome, record.status);
+    }
+    if (previous.length > 0) {
+      await this.recoverAdvisorCallApis(turnId);
+      return t.callApiUnknown(method, path);
+    }
+    const base = { schema_version: "1.0.0", conversation_id: conversationId, turn_id: turnId, request_hash: requestHash, method, path };
+    const payloadValue = body?.payload;
+    try {
+      await this.writeAdvisorCallApiEvent(`${key}:started`, "advisor.api_call_started", {
+        ...base,
+        reason,
+        body_keys: Object.keys(isRecord(payloadValue) ? payloadValue : body ?? {}),
+      });
+    } catch (error) {
+      console.warn("[owl-core] Could not record call_api start; not sending.", error);
+      return t.callApiNotRecorded(method, path);
+    }
+    const sendBody = body !== undefined && Object.hasOwn(body, "payload")
+      ? { ...body, request_id: turnId, idempotency_key: key, expected_version: body.expected_version ?? 0 }
+      : body;
+    const result = await callOwnApi({ method, path, ...(sendBody === undefined ? {} : { body: sendBody }) });
+    let outcome: "succeeded" | "failed" | "unknown";
+    let status: number | null = null;
+    let summary: string;
+    if (result.kind === "response") {
+      status = result.status;
+      outcome = status >= 200 && status < 300 ? "succeeded" : "failed";
+      const data = isRecord(result.body) ? result.body : {};
+      const error = isRecord(data.error) ? data.error : null;
+      summary = outcome === "succeeded"
+        ? JSON.stringify(data.data ?? null)
+        : error ? `${String(error.code)}: ${String(error.message)}` : "";
+    } else {
+      outcome = result.kind === "unknown" ? "unknown" : "failed";
+      summary = result.error;
+    }
+    summary = redactProviderOutput(summary.slice(0, 300));
+    try {
+      await this.writeAdvisorCallApiEvent(`${key}:finished`, "advisor.api_call_finished", { ...base, outcome, status, summary });
+    } catch (error) {
+      console.warn("[owl-core] Could not record call_api result.", error);
+    }
+    if (outcome === "unknown") return t.callApiUnknown(method, path);
+    return outcome === "succeeded" ? t.callApiDone(method, path, status ?? 0, summary) : t.callApiFailed(method, path, status ?? 0, summary);
   }
 
   /**
@@ -6304,6 +6430,12 @@ export class Core {
         } catch (error) {
           notices.push(t.curationFailed(kind, error instanceof Error ? error.message.slice(0, 300) : t.unknownCause));
         }
+        continue;
+      }
+      if (action.type === ADVISOR_CALL_API_ACTION_TYPE) {
+        // Kept out of suggested_actions: the body may carry secrets.
+        handledIndexes.add(index);
+        notices.push(await this.runAdvisorCallApi(conversationId, turnId, action, t));
         continue;
       }
       if (ADVISOR_WORK_OPERATION_ACTION_TYPES.has(action.type)) {
@@ -6904,13 +7036,28 @@ export class Core {
                 const expected = this.db.get<{ state_version: number }>("SELECT state_version FROM works WHERE id = ?", workId);
                 try {
                   const verified = integration.verification;
-                  merge = await this.git.mergeWorkIntoBase({
-                    work_id: workId,
-                    expected_state_version: expected?.state_version,
-                    ...(verified.status === "passed" && verified.work_commit !== null ? { verified_commit: verified.work_commit } : {}),
-                  });
+                  // Each retry rebuilds the squash commit on the new base and
+                  // verifies it again. The budget reuses the transient retry
+                  // limit so no separate setting is added for a rare race.
+                  let baseMovedRetries = 0;
+                  for (;;) {
+                    merge = await this.git.mergeWorkIntoBase({
+                      work_id: workId,
+                      expected_state_version: expected?.state_version,
+                      ...(verified.status === "passed" && verified.work_commit !== null ? { verified_commit: verified.work_commit } : {}),
+                    });
+                    if (merge.kind !== "base_moved" || baseMovedRetries >= TRANSIENT_RETRY_LIMIT) break;
+                    baseMovedRetries += 1;
+                  }
                 } catch (error) {
-                  await this.recordWorkMergeFailed(workId, null, error);
+                  const thrownConflict = asMergeConflict(error instanceof Error ? error.message : String(error));
+                  let thrownAttempts = 0;
+                  if (thrownConflict !== null) {
+                    const auto = await this.tryAutoResolveMergeConflict(workId, thrownConflict);
+                    if (auto.handled) return this.workflow.snapshot(workId);
+                    thrownAttempts = auto.attempts;
+                  }
+                  await this.recordWorkMergeFailed(workId, thrownConflict, thrownConflict === null ? error : undefined, thrownAttempts);
                   return this.workflow.snapshot(workId);
                 }
                 // A pause or cancel during the merge left the base unchanged;
@@ -6918,12 +7065,13 @@ export class Core {
                 if (merge.kind === "interrupted") return this.workflow.snapshot(workId);
                 if (merge.kind !== "merged") {
                   let autoAttempts = 0;
-                  if (merge.kind === "conflict") {
-                    const auto = await this.tryAutoResolveMergeConflict(workId, merge);
+                  const conflict = merge.kind === "conflict" ? merge : merge.kind === "error" ? asMergeConflict(merge.message, merge) : null;
+                  if (conflict !== null) {
+                    const auto = await this.tryAutoResolveMergeConflict(workId, conflict);
                     if (auto.handled) return this.workflow.snapshot(workId);
                     autoAttempts = auto.attempts;
                   }
-                  await this.recordWorkMergeFailed(workId, merge, undefined, autoAttempts);
+                  await this.recordWorkMergeFailed(workId, conflict ?? merge, undefined, autoAttempts);
                   return this.workflow.snapshot(workId);
                 }
                 if (merge.verification_skipped !== undefined) {
@@ -7625,6 +7773,10 @@ export class Core {
       alertPayload.dirty_files = [...merge.dirty_files];
       if (merge.worktree_path) alertPayload.integration_worktree = merge.worktree_path;
     }
+    if (merge?.kind === "error" && merge.overlap_files && merge.overlap_files.length > 0) {
+      alertPayload.overlap_files = [...merge.overlap_files];
+      if (merge.base_worktree) alertPayload.base_worktree = merge.base_worktree;
+    }
     if (merge?.kind === "conflict") {
       alertPayload.conflicting_files = [...merge.conflicting_files];
       if (autoResolveAttempts > 0) alertPayload.auto_resolve_attempts = autoResolveAttempts;
@@ -7680,7 +7832,7 @@ export class Core {
     const installStored = row.post_merge_install_argv_json === null ? null : parseStringArray(row.post_merge_install_argv_json, "post_merge_install_command", projectId, "Project");
     return argv.length === 0 ? null : {
       argv, cwd: row.canonical_path, default_command: isDefault,
-      install_argv: installStored ?? this.postMergeInstallDefault, dependency_files: this.postMergeDependencyFiles,
+      install_override: installStored, install_default: this.postMergeInstallDefault, install_rules: this.postMergeInstallRules, dependency_files: this.postMergeDependencyFiles,
     };
   }
 
@@ -12009,6 +12161,24 @@ function policyDecisionIdempotencyKeyPrefix(workId: string): string {
 const AUTO_CONFLICT_ALERT_KIND = "work_merge_conflict_auto_resolve";
 /** Automatic conflict resolution rounds per Work before the Owner is asked. */
 const MAX_AUTO_CONFLICT_RESOLUTIONS = 2;
+
+/**
+ * git's own conflict report in a failure message. The gateway classifies a
+ * conflict by unmerged index entries, so a conflict that left none (or a
+ * failure thrown past it) arrives as `error` and would open a Decision
+ * instead of reaching the Manager's conflict-resolution Task.
+ */
+function asMergeConflict(
+  message: string,
+  from?: { readonly worktree_path: string | null; readonly base_branch: string | null; readonly work_branch: string | null; readonly exit_code: number },
+): Extract<GitWorkMergeResult, { readonly kind: "conflict" }> | null {
+  if (!/^CONFLICT \(|Automatic merge failed/m.test(message)) return null;
+  return {
+    kind: "conflict", ok: false, exit_code: from?.exit_code ?? 1, recorded: false, message,
+    worktree_path: from?.worktree_path ?? "", base_branch: from?.base_branch ?? "", work_branch: from?.work_branch ?? "",
+    conflicting_files: [], aborted: false, abort_message: null,
+  };
+}
 
 interface OwnerReplanRequest {
   readonly kind: "decision" | "reopen" | "instruction" | "work_update" | "auto_conflict" | "auto_final";

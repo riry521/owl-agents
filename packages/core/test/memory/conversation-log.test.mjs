@@ -151,7 +151,7 @@ function runtimeWith(canInstruct) {
   const runtime = new AdvisorSessionRuntime({
     db, sessionManager: new AdvisorSessionManager({ ...db }), memorySaver: {}, owlRoot: root,
     providerClient: { createSession: async (request) => { requests.push(request); throw new Error("stop after capture"); } },
-    git: { prepareAdvisorWorkspace: async () => ({ ok: true, worktree_path: root }) },
+    git: { resolveAdvisorSessionDirectory: async () => ({ kind: "direct", cwd: root }) },
     getAdvisorSettings: () => ({ providerId: "p", harnessId: "claude", model: "m", systemPrompt: "Advisor" }),
     canInstructCompaction: canInstruct,
     resolveAttachmentPaths: () => ({ paths: [], notes: [] }), onReply: async () => null, onError: async () => {},

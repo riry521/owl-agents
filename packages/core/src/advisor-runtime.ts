@@ -8,13 +8,13 @@
 //
 
 import { createHash } from "node:crypto";
-import { resolve } from "node:path";
 import { createUlid, utcNow } from "../../db/dist/index.js";
-import { applyAdvisorInterfaceInstructions, formatAdvisorMalformed, parseAdvisorResponse, parseSlackAdvisorResponse, renderWorkspaceToolsNote } from "@owl/shared";
-import type { AdvisorTurnRequest, CoreDatabase, CoreWriteLaneTransaction, GitGateway } from "./types";
+import { applyAdvisorInterfaceInstructions, formatAdvisorMalformed, parseAdvisorResponse, parseSlackAdvisorResponse } from "@owl/shared";
+import type { AdvisorSessionDirectory, AdvisorTurnRequest, AdvisorWorkspacePreparation, CoreDatabase, CoreWriteLaneTransaction, GitGateway } from "./types";
 import type { AdvisorSession, AdvisorSessionManager } from "./advisor-session";
 import type { MemorySaver } from "./memory-saver";
 import { resolveAdvisorWorkingDirectory } from "./advisor-working-directory";
+import { renderAdvisorWorkspaceNote } from "./advisor-workspace-note";
 import { appendAdvisorProjectCatalog } from "./advisor-project-context";
 import { appendAdvisorWorkCatalog } from "./advisor-work-context";
 import { ADVISOR_TEXT, formatAdvisorRateLimitReply } from "./advisor-text";
@@ -187,6 +187,14 @@ export function parseAdvisorTurnReply(
   return malformed ? { ...parsed, malformed } : parsed;
 }
 
+/** No live Advisor session has the requested id. */
+export class AdvisorSessionNotFoundError extends Error {
+  public constructor(sessionId: string) {
+    super(`Advisor session ${sessionId} was not found.`);
+    this.name = "AdvisorSessionNotFoundError";
+  }
+}
+
 class AdvisorRuntimeStoppedError extends Error {
   public constructor() {
     super("The Advisor runtime is shutting down.");
@@ -218,7 +226,11 @@ export class AdvisorSessionRuntime {
   private lastTurnTarget: { readonly sessionId: string; readonly conversationId: string; readonly origin: AdvisorTurnRequest["origin"] } | null = null;
   /** Serializes handling of unsolicited replies so they are posted in arrival order. */
   private unsolicitedChain: Promise<void> = Promise.resolve();
+  /** Keyed by conversation and shared worktree path, so one dirty worktree is announced once however many targets point at it. */
   private readonly workspaceWasDirty = new Map<string, boolean>();
+  private readonly sessionDirectories = new Map<string, AdvisorSessionDirectory>();
+  /** Project ids (null = the session's default target) whose shared worktree this session prepared, so replies keep checking them. */
+  private readonly preparedTargets = new Map<string, Set<string | null>>();
   private turnLoopRunning = false;
   /** Set when startTurnLoop is called while the loop is already running; the loop switches to this session once its current queue drains. */
   private turnLoopKick: string | null = null;
@@ -539,11 +551,11 @@ export class AdvisorSessionRuntime {
     settings: AdvisorSettingsSnapshot,
   ): Promise<AdvisorSession> {
     this.requireSessionSupport();
-    const workspacePath = await this.buildWorkingDirectory(conversationId);
+    const directory = await this.buildWorkingDirectory(conversationId);
     const session = await this.config.sessionManager.startSession(ownerId, conversationId);
     this.startingSessionIds.add(session.id);
     try {
-      return await this.launchSession(session, settings, workspacePath);
+      return await this.launchSession(session, settings, directory);
     } finally {
       this.startingSessionIds.delete(session.id);
     }
@@ -552,8 +564,9 @@ export class AdvisorSessionRuntime {
   private async launchSession(
     session: AdvisorSession,
     settings: AdvisorSettingsSnapshot,
-    workspacePath: string,
+    directory: AdvisorSessionDirectory,
   ): Promise<AdvisorSession> {
+    const workspacePath = directory.cwd;
     const createProviderSession = this.requireSessionSupport();
     let driver: ProviderSession;
     try {
@@ -564,7 +577,7 @@ export class AdvisorSessionRuntime {
         effort: settings.effort,
         cwd: workspacePath,
         env: this.buildChildEnv(session.id, workspacePath, settings.connectionEnv),
-        system_prompt: this.systemPromptFor(settings, workspacePath),
+        system_prompt: this.systemPromptFor(settings, directory),
         ...(this.config.canInstructCompaction?.(settings.harnessId) ? { compact_instructions: CONVERSATION_COMPACT_INSTRUCTIONS } : {}),
         on_unsolicited_reply: (unsolicited) => this.handleUnsolicitedReply(session.id, unsolicited),
       });
@@ -603,6 +616,7 @@ export class AdvisorSessionRuntime {
       throw new AdvisorRuntimeStoppedError();
     }
 
+    this.sessionDirectories.set(session.id, directory);
     this.activeDriver = driver;
     this.activeSessionId = session.id;
     this.activeSystemPrompt = settings.systemPrompt;
@@ -709,33 +723,47 @@ export class AdvisorSessionRuntime {
     return createProviderSession.bind(this.config.providerClient);
   }
 
-  private async buildWorkingDirectory(conversationId: string): Promise<string> {
+  private async buildWorkingDirectory(conversationId: string): Promise<AdvisorSessionDirectory> {
     if (this.config.git) {
-      if (!this.config.git.prepareAdvisorWorkspace) {
-        throw new Error("The configured Git gateway does not support isolated Advisor workspaces.");
+      if (!this.config.git.resolveAdvisorSessionDirectory) {
+        throw new Error("The configured Git gateway does not support Advisor session directories.");
       }
-      const prepared = await this.config.git.prepareAdvisorWorkspace({ conversation_id: conversationId });
-      if (!prepared.ok || !prepared.worktree_path) {
-        throw new Error(`Advisor worktree could not be prepared: ${prepared.message}`);
-      }
-      return resolve(prepared.worktree_path);
+      return this.config.git.resolveAdvisorSessionDirectory({ conversation_id: conversationId });
     }
-    return resolveAdvisorWorkingDirectory(this.config.db, this.config.owlRoot, conversationId);
+    return { kind: "direct", cwd: resolveAdvisorWorkingDirectory(this.config.db, this.config.owlRoot, conversationId) };
   }
 
   /**
    * The system prompt actually sent to the provider for one session start:
-   * settings.systemPrompt plus a workspace-tools note, appended only when
-   * the workspace is a real Project git worktree (prepareAdvisorWorkspace
-   * configured), not the plain fallback directory. Kept separate from
+   * settings.systemPrompt plus an Advisor workspace note, appended only when
+   * a Git gateway resolves the session directory. Kept separate from
    * settings.systemPrompt itself so a workspace change alone never counts as
    * a system-prompt change.
    */
-  private systemPromptFor(settings: AdvisorSettingsSnapshot, workspacePath: string): string {
-    if (!this.config.git?.prepareAdvisorWorkspace) return settings.systemPrompt;
-    const note = renderWorkspaceToolsNote(workspacePath);
-    if (!note) return settings.systemPrompt;
-    return `${settings.systemPrompt}\n\n${["## Workspace tools", ...note].join("\n")}`;
+  private systemPromptFor(settings: AdvisorSettingsSnapshot, directory: AdvisorSessionDirectory): string {
+    if (!this.config.git?.resolveAdvisorSessionDirectory) return settings.systemPrompt;
+    return `${settings.systemPrompt}\n\n${renderAdvisorWorkspaceNote(directory)}`;
+  }
+
+  /**
+   * Prepare (and sync to the latest base) the shared worktree an Advisor
+   * session asked for. `projectId` null targets the session's own repository.
+   */
+  public async prepareWorkspace(sessionId: string, projectId: string | null): Promise<AdvisorWorkspacePreparation> {
+    const session = this.config.db.get<{ conversation_id: string }>(
+      "SELECT conversation_id FROM advisor_sessions WHERE id = ? AND status != 'ended'",
+      sessionId,
+    );
+    if (!session) throw new AdvisorSessionNotFoundError(sessionId);
+    const prepare = this.config.git?.prepareAdvisorWorkspace;
+    if (!prepare) throw new Error("The configured Git gateway does not support Advisor workspaces.");
+    const prepared = await prepare.call(this.config.git, { conversation_id: session.conversation_id, project_id: projectId });
+    if (prepared.ok && prepared.kind === "worktree") {
+      const targets = this.preparedTargets.get(sessionId) ?? new Set<string | null>();
+      targets.add(projectId);
+      this.preparedTargets.set(sessionId, targets);
+    }
+    return prepared;
   }
 
   private async includeWorkspaceNotice(conversationId: string, sessionId: string, reply: string): Promise<string> {
@@ -746,28 +774,29 @@ export class AdvisorSessionRuntime {
   private async getWorkspaceNotice(conversationId: string, sessionId: string): Promise<string | null> {
     const inspect = this.config.git?.inspectAdvisorWorkspace;
     if (!inspect) return null;
-    const session = this.config.db.get<{ workspace_path: string | null }>(
-      "SELECT workspace_path FROM advisor_sessions WHERE id = ?",
+    const session = this.config.db.get<{ conversation_id: string }>(
+      "SELECT conversation_id FROM advisor_sessions WHERE id = ?",
       sessionId,
     );
-    if (!session?.workspace_path) return null;
-    try {
-      const status = await inspect.call(this.config.git, {
-        conversation_id: conversationId,
-        workspace_path: session.workspace_path,
-      });
-      if (!status.ok) {
-        console.warn(`[owl-core] Could not inspect Advisor workspace for ${conversationId}: ${status.message}`);
-        return null;
+    if (!session) return null;
+    const targets = new Set<string | null>([null, ...(this.preparedTargets.get(sessionId) ?? [])]);
+    for (const projectId of targets) {
+      try {
+        const status = await inspect.call(this.config.git, { conversation_id: session.conversation_id, project_id: projectId });
+        if (!status.ok) {
+          console.warn(`[owl-core] Could not inspect Advisor workspace for ${conversationId}: ${status.message}`);
+          continue;
+        }
+        if (!status.worktree_path) continue;
+        const key = `${conversationId}\u0000${status.worktree_path}`;
+        const previouslyDirty = this.workspaceWasDirty.get(key) ?? false;
+        this.workspaceWasDirty.set(key, status.dirty);
+        if (status.dirty && !previouslyDirty) return ADVISOR_TEXT[ownerLanguage(this.config.db)].dirtyWorkspace(status.worktree_path);
+      } catch (error) {
+        console.warn(`[owl-core] Could not inspect Advisor workspace for ${conversationId}`, error);
       }
-      const previouslyDirty = this.workspaceWasDirty.get(conversationId) ?? false;
-      this.workspaceWasDirty.set(conversationId, status.dirty);
-      if (!status.dirty || previouslyDirty) return null;
-      return ADVISOR_TEXT[ownerLanguage(this.config.db)].dirtyWorkspace(session.workspace_path);
-    } catch (error) {
-      console.warn(`[owl-core] Could not inspect Advisor workspace for ${conversationId}`, error);
-      return null;
     }
+    return null;
   }
 
   private async notifyRetainedWorkspace(sessionId: string): Promise<void> {
@@ -874,8 +903,22 @@ export class AdvisorSessionRuntime {
     await this.markTurnRunning(turnRow.id);
     await this.config.sessionManager.recordActivity(sessionId);
 
-    const turnRequest = this.loadTurnRequest(turnRow);
+    const loadedRequest = this.loadTurnRequest(turnRow);
     this.pendingTurnPayloads.delete(turnRow.id);
+    // Read at send time, from the persisted event, so a message queued before the previous reply
+    // finished and a turn recovered after a restart both still carry that reply's action results.
+    const previousReply = this.config.db.get<{ payload_json: string }>(
+      `SELECT payload_json FROM events WHERE type = 'advisor.responded' AND json_extract(payload_json, '$.conversation_id') = ? ORDER BY rowid DESC LIMIT 1`,
+      turnRow.conversation_id,
+    );
+    let actionResults = "";
+    try {
+      const value = previousReply ? JSON.parse(previousReply.payload_json).action_results : "";
+      if (typeof value === "string") actionResults = value;
+    } catch { /* an unreadable payload just means no results to hand over */ }
+    const turnRequest = actionResults
+      ? { ...loadedRequest, text: `<owl-action-results>\n${actionResults}\n</owl-action-results>\n\n${loadedRequest.text}` }
+      : loadedRequest;
 
     const driver = this.activeDriver;
     if (!driver || this.activeSessionId !== sessionId) {
@@ -905,7 +948,8 @@ export class AdvisorSessionRuntime {
         "SELECT workspace_path FROM advisor_sessions WHERE id = ?",
         sessionId,
       );
-      const composedPrompt = this.systemPromptFor(this.config.getAdvisorSettings(), workspace?.workspace_path ?? "");
+      const directory = this.sessionDirectories.get(sessionId) ?? { kind: "direct" as const, cwd: workspace?.workspace_path ?? "" };
+      const composedPrompt = this.systemPromptFor(this.config.getAdvisorSettings(), directory);
       payload.text = `${OWL_INSTRUCTIONS_UPDATE_HEADER}\n--- BEGIN UPDATED OWL INSTRUCTIONS ---\n${composedPrompt}\n--- END UPDATED OWL INSTRUCTIONS ---\n\n${payload.text}`;
     }
     this.lastTurnTarget = { sessionId, conversationId: turnRow.conversation_id, origin: turnRequest.origin };

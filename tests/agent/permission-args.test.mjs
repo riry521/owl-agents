@@ -414,6 +414,31 @@ test("only a relay-watched Claude child gets the relay hook and PreCompact, in i
   });
 });
 
+test("owl-api MCP is registered for the advisor only, without the token value in the config file", async (t) => {
+  await withPermissionHook(t, async (root) => {
+    await writeFile(path.join(root, "apps", "server", "dist", "owl-api-mcp.js"), "", "utf8");
+    const env = { HOME: root, OWL_AGENT_RUN_ID: "run-1", OWL_GUARD_API_BASE: "http://127.0.0.1:1", OWL_GUARD_TOKEN_FILE: path.join(root, "token-file") };
+    const claude = buildAgentPermissionArgs("advisor", "claude", { owlRoot: root, env });
+    const config = claude.filter((arg) => /owl-api-mcp-.*\.json$/.test(arg));
+    assert.equal(config.length, 1);
+    const parsed = JSON.parse(await readFile(config[0], "utf8"));
+    assert.equal(parsed.mcpServers["owl-api"].env.OWL_ROLE, "advisor");
+    assert.equal(parsed.mcpServers["owl-api"].env.OWL_GUARD_TOKEN_FILE, env.OWL_GUARD_TOKEN_FILE);
+    const codex = buildAgentPermissionArgs("advisor", "codex", { owlRoot: root, env });
+    assert.ok(codex.some((arg) => arg.startsWith("mcp_servers.owl-api.command=")));
+    assert.ok(codex.some((arg) => arg.startsWith("mcp_servers.owl-api.env=")));
+    for (const role of ["worker", "reviewer", "librarian"]) {
+      for (const adapter of ["claude", "codex"]) {
+        assert.equal(buildAgentPermissionArgs(role, adapter, { owlRoot: root, env }).join(" ").includes("owl-api"), false);
+      }
+    }
+    const { OWL_GUARD_TOKEN_FILE: _omitted, ...incomplete } = env;
+    for (const adapter of ["claude", "codex"]) {
+      assert.equal(buildAgentPermissionArgs("advisor", adapter, { owlRoot: root, env: incomplete }).join(" ").includes("owl-api"), false);
+    }
+  });
+});
+
 test("a relay-watched child fails to start when relay-hook.js is not built", async (t) => {
   await withPermissionHook(t, async (root) => {
     assert.throws(() => buildAgentPermissionArgs("worker", "claude", { owlRoot: root, env: { HOME: root }, tokenRelay: true }), /Owl relay hook is missing at .*relay-hook\.js; build Owl/);

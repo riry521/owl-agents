@@ -5,6 +5,9 @@ import { isAbsolute, join, relative, resolve } from "node:path";
 /** Directory name used for Task/Work/Advisor worktrees nested inside an Owl clone. */
 export const LEGACY_WORKSPACES_DIRNAME = ".owl-workspaces";
 
+export const ADVISOR_SHARED_DIRNAME = "shared";
+export const ADVISOR_HOME_DIRNAME = "home";
+
 /** Sanitizes an id (workId, taskId, conversationId, ...) into a filesystem-safe path segment; never empty, `.` or `..`. */
 export function safeSegment(value: string): string {
   const segment = value.replace(/[^a-zA-Z0-9._-]/g, "_");
@@ -102,13 +105,14 @@ export class WorkspaceLayout {
     return join(this.workDir(workId), "__work__");
   }
 
-  /** The Advisor workspace directory for `conversationId`, preferring an already-existing legacy directory. */
-  advisorDir(conversationId: string): string {
-    const legacy = join(this.legacyRoot, "advisor", safeSegment(conversationId));
-    if (existsSync(legacy)) {
-      return legacy;
-    }
-    return join(this.root, "advisor", safeSegment(conversationId));
+  /** The single shared Advisor worktree for the repository identified by `key`; always under the current root. */
+  advisorSharedDir(key: string): string {
+    return join(this.root, "advisor", ADVISOR_SHARED_DIRNAME, safeSegment(key));
+  }
+
+  /** The empty scratch directory read-only Advisor sessions run in, outside any repository. */
+  advisorHomeDir(): string {
+    return join(this.root, "advisor", ADVISOR_HOME_DIRNAME);
   }
 
   /** True when `path` is inside (or equal to) any root this layout resolves under. */

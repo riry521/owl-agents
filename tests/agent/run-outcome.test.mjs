@@ -298,9 +298,9 @@ async function reportFormatFailureCalls(toolName) {
   return calls;
 }
 
-test("report resubmission re-runs the provider without a side effect and stops after one with", async () => {
+test("report resubmission re-runs the provider whether or not the run had a side effect", async () => {
   assert.equal(await reportFormatFailureCalls("Read"), 3);
-  assert.equal(await reportFormatFailureCalls("mcp__slack__post_message"), 1);
+  assert.equal(await reportFormatFailureCalls("mcp__slack__post_message"), 3);
 });
 
 test("a reviewer failure after a side effect is not retryable", async () => {

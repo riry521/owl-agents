@@ -21,6 +21,11 @@ export interface RoleSchema {
    * It is not a validation keyword and providerSchema() strips it.
    */
   readonly example?: unknown;
+  /**
+   * One semantic rule as a JSON Schema if/then. providerSchema() spreads it into the schema
+   * (not as allOf: the Anthropic API rejects top-level allOf) only when asked; validateRoleOutput() ignores them (Core's gate checks the same rules).
+   */
+  readonly providerRules?: Readonly<Record<string, unknown>>;
 }
 
 export function schemaTypes(schema: RoleSchema): readonly RoleSchemaType[] {
