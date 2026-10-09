@@ -197,7 +197,11 @@
 }
 
 .token-usage__table tbody tr:hover > * {
-  background: rgba(99, 102, 241, 0.04);
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+}
+
+.token-usage__table tbody tr:hover > th {
+  background: color-mix(in srgb, var(--accent) 4%, white);
 }
 
 .token-usage__sort-bar {
@@ -207,6 +211,21 @@
   margin-bottom: 10px;
   color: var(--muted);
   font-size: 13px;
+}
+
+.token-usage__sort-bar label {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.token-usage__sort-bar select {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.token-usage__sort-bar .btn {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .token-usage__sort {

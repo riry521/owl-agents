@@ -840,6 +840,8 @@ export interface CreateCoreOptions {
   workspacesRoot?: string;
   /** Provider client for persistent Advisor sessions (agent-runtime's ProviderClient), forwarded to @owl/core. */
   providerClient?: unknown;
+  /** Calls Owl's own HTTP API as the Owner for the Advisor's call_api action; forwarded to @owl/core. */
+  callOwnApi?: (request: { method: string; path: string; body?: unknown }) => Promise<unknown>;
   getTypesafeApiKey?: () => string;
   getAdvisorPersona?: () => string;
   getAdvisorFolders?: () => { sharedDir: string; screenshotDir: string } | null;

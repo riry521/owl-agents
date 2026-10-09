@@ -157,16 +157,20 @@ export function renderFieldReference(schema: RoleSchema, path = ""): string[] {
 }
 
 /** The exact schema object given to the provider for enforcement. */
-export function providerSchema(schema: RoleSchema): Readonly<Record<string, unknown>> {
+export function providerSchema(schema: RoleSchema, withRules = false): Readonly<Record<string, unknown>> {
   // minLength is enforced by validateRoleOutput only: OpenAI strict structured
   // outputs (Codex --output-schema) reject it as an unsupported keyword.
-  const { example: _example, minLength: _minLength, properties, items, ...rest } = schema;
+  // providerRules (one if/then, spread at the top level) is opt-in: OpenAI strict structured outputs
+  // (Codex) reject if/then. It is never wrapped in allOf: the Anthropic API rejects
+  // allOf/anyOf/oneOf at the top level of a tool input_schema (Claude CLI --json-schema).
+  const { example: _example, minLength: _minLength, providerRules, properties, items, ...rest } = schema;
   return {
     ...rest,
+    ...(withRules && providerRules ? providerRules : {}),
     ...(properties
-      ? { properties: Object.fromEntries(Object.entries(properties).map(([key, value]) => [key, providerSchema(value)])) }
+      ? { properties: Object.fromEntries(Object.entries(properties).map(([key, value]) => [key, providerSchema(value, withRules)])) }
       : {}),
-    ...(items ? { items: providerSchema(items) } : {}),
+    ...(items ? { items: providerSchema(items, withRules) } : {}),
   };
 }
 

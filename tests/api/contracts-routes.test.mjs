@@ -278,3 +278,11 @@ test("a real GET /tasks/{task_id} response fits the OpenAPI TaskDetail (required
   }
   assert.ok(Array.isArray(data.depends_on) && data.depends_on.every((id) => typeof id === "string"));
 });
+
+test("OpenAPI documents POST /advisor/workspace and AdvisorWorkspacePreparation, and the server serves it", () => {
+  const route = yamlBlock(openapi, "  /api/v1/advisor/workspace:");
+  assert.match(route, /^    post:/mu);
+  assert.match(route, /AdvisorWorkspacePreparation/u);
+  assert.match(yamlBlock(openapi, "    AdvisorWorkspacePreparation:"), /- worktree_path/u);
+  assert.match(http, /pathname === ADVISOR_WORKSPACE_API_PATH/u);
+});

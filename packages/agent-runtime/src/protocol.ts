@@ -313,6 +313,53 @@ export interface HybridRouting {
   readonly retry_subtasks: readonly unknown[];
 }
 
+/** One contradiction whose fix direction is unambiguous: the report is lowered from success, never raised. */
+export interface ReportCorrectionRule {
+  readonly name: string;
+  readonly applies: (report: ReportEnvelope, hybrid?: HybridRouting) => boolean;
+}
+
+/** Recorded in Core's events for each correction applied to a report. */
+export interface ReportCorrection {
+  readonly rule: string;
+  readonly from_result: ReportResult;
+  readonly to_result: ReportResult;
+}
+
+/**
+ * The only place report contradictions are repaired, for every role that
+ * returns a ReportEnvelope. All rules apply to result=success only and lower
+ * it to "partial"; question_for_manager and needs_replanning stay on the report
+ * because Core reads them whatever the result. Rules that would raise a result
+ * or drop a question are deliberately absent. Anything ambiguous is left for
+ * validateReportSemantics to reject.
+ */
+export const REPORT_CORRECTION_RULES: readonly ReportCorrectionRule[] = [
+  { name: "success_with_unpassed_verification", applies: (r) => r.verification.status !== "passed" },
+  {
+    name: "success_with_unpassed_item",
+    applies: (r) => [...r.verification.acceptance, ...r.verification.checks].some((item) => item.status !== "passed"),
+  },
+  { name: "success_with_needs_replanning", applies: (r) => r.needs_replanning },
+  { name: "success_with_question_for_manager", applies: (r) => r.question_for_manager !== null },
+  {
+    name: "hybrid_ok_without_passed_integration",
+    applies: (r, hybrid) =>
+      hybrid?.verdict === "ok" && r.delegation.delegated.length > 0 && r.verification.integration_check?.status !== "passed",
+  },
+];
+
+export function correctReportSemantics(
+  report: ReportEnvelope,
+  hybrid?: HybridRouting,
+): { readonly report: ReportEnvelope; readonly corrections: readonly ReportCorrection[] } {
+  if (report.result !== "success") return { report, corrections: [] };
+  const corrections = REPORT_CORRECTION_RULES.filter((rule) => rule.applies(report, hybrid)).map(
+    (rule): ReportCorrection => ({ rule: rule.name, from_result: "success", to_result: "partial" }),
+  );
+  return corrections.length === 0 ? { report, corrections } : { report: { ...report, result: "partial" }, corrections };
+}
+
 /**
  * Meaning checks a shape-valid report can still fail: a success claim that the
  * verification contradicts. blocked and failed are both rejected, for

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -125,3 +125,60 @@ test("Task and integration worktrees are reused when the Owl root is reached thr
   await advanceWorkBranch(gateway, "W", "T4", "second.txt", "from T4\n");
   assert.equal(git(project, "show", "owl/work/W/work:second.txt"), "from T4");
 });
+
+async function unregisteredTask(t, prefix) {
+  const parent = await tempDir(t, prefix);
+  const project = await projectRepo(parent);
+  const owl = join(parent, "owl");
+  const gateway = new GitWorktreeGateway(fakeDatabase(parent, project), owl);
+  const prepared = await gateway.prepareWorktree({ work_id: "W", task_id: "T1" });
+  assert.equal(prepared.ok, true, prepared.message);
+  return { parent, project, owl, gateway, folder: prepared.worktree_path };
+}
+
+test("a Task folder whose Git registration vanished is rebuilt after saving its uncommitted work", async (t) => {
+  const { project, owl, gateway, folder } = await unregisteredTask(t, "owl-worktree-repair-");
+  await writeFile(join(folder, "README.md"), "base\nedited\n");
+  await writeFile(join(folder, "new.txt"), "brand new\n");
+  const metadata = join(project, ".git", "worktrees", folder.split("/").pop());
+  await rm(metadata, { recursive: true });
+
+  const repaired = await gateway.prepareWorktree({ work_id: "W", task_id: "T1" });
+  assert.equal(repaired.ok, true, repaired.message);
+  assert.equal(repaired.worktree_path, folder);
+  assert.match(git(project, "worktree", "list", "--porcelain"), new RegExp(`worktree .*${folder.split("/").pop()}`));
+  assert.equal(git(folder, "rev-parse", "--abbrev-ref", "HEAD"), "owl/task/W/T1");
+
+  const [, patchPath] = /saved its uncommitted changes as (.+)\.$/.exec(repaired.message);
+  const [, movedPath] = /moved the old folder to (.+) and saved/.exec(repaired.message);
+  assert.ok(patchPath.startsWith(owl) && movedPath.startsWith(owl), "backups live under the data dir");
+  const patch = await readFile(patchPath, "utf8");
+  assert.match(patch, /\+edited/);
+  assert.match(patch, /new\.txt/);
+  assert.match(patch, /\+brand new/);
+  assert.equal(await readFile(join(movedPath, "new.txt"), "utf8"), "brand new\n");
+  assert.equal(await readFile(join(movedPath, "README.md"), "utf8"), "base\nedited\n");
+});
+
+for (const [label, setup] of [
+  ["no .git", async ({ folder }) => rm(join(folder, ".git"), { recursive: true })],
+  ["a .git directory", async ({ folder }) => { await rm(join(folder, ".git")); await mkdir(join(folder, ".git")); }],
+  ["a gitdir in another repository", async ({ parent, folder }) => {
+    const other = join(parent, "other");
+    await mkdir(join(other, ".git", "worktrees", "x"), { recursive: true });
+    await writeFile(join(folder, ".git"), `gitdir: ${join(other, ".git", "worktrees", "x")}\n`);
+  }],
+]) {
+  test(`a Task folder with ${label} is refused untouched`, async (t) => {
+    const ctx = await unregisteredTask(t, "owl-worktree-refuse-");
+    await writeFile(join(ctx.folder, "wip.txt"), "keep\n");
+    await rm(join(ctx.project, ".git", "worktrees", ctx.folder.split("/").pop()), { recursive: true });
+    await setup(ctx);
+    const before = await readdir(ctx.folder);
+    const result = await ctx.gateway.prepareWorktree({ work_id: "W", task_id: "T1" });
+    assert.equal(result.ok, false);
+    assert.equal(result.message, "The Task worktree path exists but is not registered with Git.");
+    assert.deepEqual(await readdir(ctx.folder), before);
+    assert.equal(await readFile(join(ctx.folder, "wip.txt"), "utf8"), "keep\n");
+  });
+}

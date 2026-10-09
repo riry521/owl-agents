@@ -1,4 +1,4 @@
-import { OUTPUT_FORMAT_INVALID_ERROR_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_OPTION_KEY, REVIEW_RERUN_OPTION_KEY, type DesignBlockCauseKind, type DesignBlockedReport } from "@owl/shared";
+import { OUTPUT_FORMAT_INVALID_ERROR_KEY, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_OPTION_KEY, REVIEW_RERUN_OPTION_KEY, type DesignBlockCauseKind, type DesignBlockedReport } from "@owl/shared";
 import { DEFAULT_TEST_RUN_SETTINGS } from "../../shared/dist/test-run-settings.js";
 import { validationError } from "./errors";
 import { formatMissingList } from "./final-verdict";
@@ -136,6 +136,8 @@ const TEXT = {
       autoResolveTried: (rounds: number) => `Managerによる自動解消を${rounds}回試しましたが、コンフリクトは解消されませんでした。`,
       verification: (id: string, command: string, output: string) => `失敗した検証コマンド${id ? ` (${id})` : ""}: ${command}\n出力末尾:\n${output}`,
       dirtyIntegration: (path: string, files: string) => `統合用worktreeに未コミットの変更があります。\nworktree: ${path || "不明"}\n変更のあるファイル:\n${files}`,
+      overlapBase: (path: string, files: string) => `ベースブランチのチェックアウトに、今回の統合で変わるファイルの未コミット変更があります。\nフォルダ: ${path || "不明"}\n重なったファイル:\n${files}`,
+      overlapFix: "重なったファイルの変更をコミットするか退避（または破棄）してから再試行してください。重ならない未コミット変更は問題ありません。",
       dirtyFix: (path: string) => `次のいずれかを行ってから再試行してください。(1) Workの成果物であれば、Workブランチ（統合用worktree ${path || ""}）にコミットする。(2) ツールの出力であれば、そのファイルを復元または削除する、もしくはリポジトリの.gitignoreに追加する。`,
       baseMoved: (expected: string, actual: string) => `検証中にベースブランチが移動しました。期待値: ${expected || "不明"} / 実際: ${actual || "不明"}`,
       retry: {
@@ -261,6 +263,8 @@ const TEXT = {
       autoResolveTried: (rounds: number) => `Automatic conflict resolution by the Manager was already tried ${rounds === 2 ? "twice" : `${rounds} times`}, and the conflict remains.`,
       verification: (id: string, command: string, output: string) => `Failed verification command${id ? ` (${id})` : ""}: ${command}\nOutput tail:\n${output}`,
       dirtyIntegration: (path: string, files: string) => `The integration worktree has uncommitted changes.\nWorktree: ${path || "unknown"}\nFiles with changes:\n${files}`,
+      overlapBase: (path: string, files: string) => `The base branch checkout has uncommitted changes to files this merge also changes.\nFolder: ${path || "unknown"}\nOverlapping files:\n${files}`,
+      overlapFix: "Commit, stash or discard changes to the overlapping files, then retry. Uncommitted changes to other files are fine.",
       dirtyFix: (path: string) => `Do one of the following, then retry. (1) If the files belong to the Work, commit them on the Work branch (integration worktree ${path || ""}). (2) If they are tool output, restore or delete them, or add them to the repository's .gitignore.`,
       baseMoved: (expected: string, actual: string) => `The base branch moved during verification. Expected: ${expected || "unknown"} / actual: ${actual || "unknown"}`,
       retry: {
@@ -469,7 +473,13 @@ export function coreWorkDecisionBrief(payload: JsonObject, language: OwnerLangua
       : "";
     const integrationWorktree = text(payload.integration_worktree) ?? "";
     const dirty = dirtyFiles.length > 0;
-    const detail = dirty
+    const overlapFiles = Array.isArray(payload.overlap_files)
+      ? payload.overlap_files.filter((path): path is string => typeof path === "string" && path.trim().length > 0).join("\n")
+      : "";
+    const overlap = overlapFiles.length > 0;
+    const detail = overlap
+      ? t.overlapBase(text(payload.base_worktree) ?? "", overlapFiles)
+      : dirty
       ? t.dirtyIntegration(integrationWorktree, dirtyFiles)
       : mergeKind === "conflict" && conflictFiles.length > 0
       ? t.conflictFiles(conflictFiles)
@@ -486,7 +496,7 @@ export function coreWorkDecisionBrief(payload: JsonObject, language: OwnerLangua
       reason: [t.reason, text(payload.message), detail, autoRounds > 0 ? t.autoResolveTried(autoRounds) : ""].filter(Boolean).join("\n"),
       question: conflict ? t.conflictQuestion : t.question,
       current_state: t.currentState,
-      tried: dirty ? t.dirtyFix(integrationWorktree) : text(payload.remediation) ?? t.noCause,
+      tried: overlap ? t.overlapFix : dirty ? t.dirtyFix(integrationWorktree) : text(payload.remediation) ?? t.noCause,
       options: conflict
         ? [option(RESOLVE_CONFLICT_OPTION_KEY, t.resolveConflict), option("retry", t.retry), cancelWorkOption(language)]
         : [option("retry", t.retry), cancelWorkOption(language)],
@@ -511,7 +521,7 @@ export function coreWorkDecisionBrief(payload: JsonObject, language: OwnerLangua
 export function coreTaskDecisionBrief(taskTitle: string, payload: JsonObject, language: OwnerLanguage): DecisionBrief {
   const t = TEXT[language].taskFailed;
   const errorKey = text(payload.error_key);
-  const canResubmit = errorKey === REPORT_FORMAT_INVALID_ERROR_KEY && text(payload.provider_session_id) !== null;
+  const canResubmit = isReportFormatInvalidErrorKey(errorKey) && text(payload.provider_session_id) !== null;
   if (canResubmit) {
     const r = TEXT[language].reportFormat;
     return {

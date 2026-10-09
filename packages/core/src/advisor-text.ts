@@ -41,6 +41,13 @@ export interface AdvisorText {
   readonly workActionFailed: (action: string, ref: string, detail: string) => string;
   readonly dirtyWorkspace: (path: string) => string;
   readonly attachmentQuarantined: (filename: string) => string;
+  readonly callApiDone: (method: string, path: string, status: number, summary: string) => string;
+  readonly callApiFailed: (method: string, path: string, status: number, summary: string) => string;
+  readonly callApiUnknown: (method: string, path: string) => string;
+  readonly callApiNotRecorded: (method: string, path: string) => string;
+  readonly callApiAlreadyHandled: (method: string, path: string, outcome: string, status: number | null) => string;
+  readonly callApiRejected: (reason: string) => string;
+  readonly callApiUnavailable: string;
 }
 
 const CURATION_KIND_LABEL: Record<OwnerLanguage, Record<string, string>> = {
@@ -150,6 +157,13 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     workActionFailed: (action, ref, detail) => `⚠ Work${ref}の${workActionLabel("ja", action)}に失敗しました。${detail}`,
     dirtyWorkspace: (path) => `Advisor の作業用 worktree に未コミット、またはベースブランチ未統合の変更があります。変更は保持されており、自動では統合されません。\n${path}`,
     attachmentQuarantined: (filename) => `⚠ ${filename} は隔離されました。Advisorには渡していません。`,
+    callApiDone: (method, path, status, summary) => `✓ Owl API を実行しました: ${method} ${path} → ${status}（${summary}）`,
+    callApiFailed: (method, path, status, summary) => `⚠ Owl API の実行に失敗しました: ${method} ${path} → ${status}（${summary}）`,
+    callApiUnknown: (method, path) => `⚠ Owl API の実行結果がわかりません: ${method} ${path}。自動ではやり直しません。GET で状態を確かめてから、必要なら改めて承認を取ってください。`,
+    callApiNotRecorded: (method, path) => `⚠ 実行の記録を書けなかったため、Owl API を呼びませんでした: ${method} ${path}`,
+    callApiAlreadyHandled: (method, path, outcome, status) => `✓ この呼び出しは前回の試行で処理済みです（${method} ${path}、結果: ${outcome}${status === null ? "" : ` ${status}`}）。`,
+    callApiRejected: (reason) => `⚠ call_api を実行しませんでした: ${reason}`,
+    callApiUnavailable: "⚠ この環境では Owl API を呼べないため、call_api を実行しませんでした。",
   },
   en: {
     replyFailed: "⚠ The Advisor could not reply.",
@@ -202,6 +216,13 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     workActionFailed: (action, ref, detail) => `⚠ The ${workActionLabel("en", action)} of Work ${ref} failed. ${detail}`,
     dirtyWorkspace: (path) => `The Advisor's worktree has uncommitted changes, or changes not merged into the base branch. They are kept and will not be merged automatically.\n${path}`,
     attachmentQuarantined: (filename) => `⚠ ${filename} was quarantined and was not handed to the Advisor.`,
+    callApiDone: (method, path, status, summary) => `✓ Called the Owl API: ${method} ${path} → ${status} (${summary})`,
+    callApiFailed: (method, path, status, summary) => `⚠ The Owl API call failed: ${method} ${path} → ${status} (${summary})`,
+    callApiUnknown: (method, path) => `⚠ The result of the Owl API call is unknown: ${method} ${path}. It will not be retried automatically. Check the state with GET, then ask the operator to approve again if needed.`,
+    callApiNotRecorded: (method, path) => `⚠ The call record could not be written, so the Owl API was not called: ${method} ${path}`,
+    callApiAlreadyHandled: (method, path, outcome, status) => `✓ This call was already handled by an earlier attempt (${method} ${path}, outcome: ${outcome}${status === null ? "" : ` ${status}`}).`,
+    callApiRejected: (reason) => `⚠ call_api was not run: ${reason}`,
+    callApiUnavailable: "⚠ The Owl API cannot be called in this environment, so call_api was not run.",
   },
 };
 

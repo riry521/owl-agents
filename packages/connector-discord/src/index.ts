@@ -7,15 +7,28 @@ export { formatStatusResponse } from "@owl/plugin-sdk/shared";
 
 import { DiscordConnector } from "./connector.js";
 import type { DiscordConfig } from "./types.js";
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { loadOwlEnv } from "../../shared/dist/env.js";
 
 loadOwlEnv();
+
+function isEntryPoint(): boolean {
+  if (!process.argv[1]) return false;
+  try {
+    return import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href;
+  } catch {
+    return false;
+  }
+}
 
 export function createDiscordConnector(config: DiscordConfig): DiscordConnector {
   return new DiscordConnector(config);
 }
 
-if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/\\/g, "/"))) {
+// import.meta.url percent-encodes spaces and non-ASCII characters, so compare
+// file URLs (as apps/connectors/src/cli.ts does) rather than a raw-path suffix.
+if (isEntryPoint()) {
   const config: DiscordConfig = {
     botToken: process.env.DISCORD_BOT_TOKEN ?? "",
     conversationChannelId: process.env.DISCORD_CONVERSATION_CHANNEL_ID ?? process.env.DISCORD_CHANNEL_ID ?? "",

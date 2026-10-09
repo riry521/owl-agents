@@ -91,6 +91,46 @@ test('token table is built from the column model with card labels, tabs, sort ba
   assert.match(css, /\.token-usage__table tbody th\s*\{[^}]*position: sticky;\s*left: 0/);
   assert.match(css, /\.token-usage__table-wrap\s*\{[^}]*max-height:[^}]*overflow: auto/);
   assert.match(narrow, /\.token-usage__sort-bar\s*\{\s*display: flex/);
+  assert.match(css, /\.token-usage__sort-bar \.btn\s*\{[^}]*white-space: nowrap/);
+  assert.match(css, /\.token-usage__sort-bar select\s*\{[^}]*min-width: 0/);
+});
+
+test('row hover keeps the sticky name column opaque', () => {
+  const css = readFileSync(join(repoRoot, 'apps/web/app/tokens/tokens.css'), 'utf8');
+  const globals = readFileSync(join(repoRoot, 'apps/web/app/globals.css'), 'utf8');
+  const vars = Object.fromEntries([...globals.matchAll(/(--[\w-]+):\s*([^;]+);/g)].map((m) => [m[1], m[2].trim()]));
+  const split = (text) => {
+    const parts = [];
+    let depth = 0;
+    let from = 0;
+    for (let i = 0; i < text.length; i += 1) {
+      if (text[i] === '(') depth += 1;
+      else if (text[i] === ')') depth -= 1;
+      else if (text[i] === ',' && depth === 0) { parts.push(text.slice(from, i).trim()); from = i + 1; }
+    }
+    return [...parts, text.slice(from).trim()];
+  };
+  const resolve = (v) => v.replace(/var\((--[\w-]+)\)/g, (_, name) => vars[name] ?? '\u0000');
+  const fraction = (n) => (n.endsWith('%') ? parseFloat(n) / 100 : parseFloat(n));
+  const opaqueColor = (value) => {
+    const v = resolve(value.trim()).replace(/\s+[\d.]+(%|px)$/, '');
+    const hex = v.match(/^#([\da-f]+)$/i)?.[1];
+    if (hex) return hex.length === 3 || hex.length === 6 || (hex.length === 4 && /f$/i.test(hex)) || (hex.length === 8 && /ff$/i.test(hex));
+    const fn = v.match(/^([\w-]+)\((.*)\)$/s);
+    if (!fn) return /^[a-z]+$/i.test(v) && !/^(transparent|currentcolor|inherit|initial|unset)$/i.test(v);
+    const args = split(fn[2]);
+    if (fn[1] === 'color-mix') return args.slice(1).every(opaqueColor);
+    if (fn[1] === 'linear-gradient' || fn[1] === 'radial-gradient') return args.filter((arg) => !/^(to |[\d.-]+(deg|turn|rad|grad)|circle|ellipse)/.test(arg)).every(opaqueColor);
+    const alpha = fn[2].match(/\/\s*([\d.]+%?)\s*$/)?.[1] ?? (/^(rgba|hsla)$/.test(fn[1]) ? args[3] : '1');
+    return alpha !== undefined && fraction(alpha) === 1;
+  };
+  const opaque = (value) => opaqueColor(split(value).at(-1));
+  const backgroundOf = (selector) => css.match(new RegExp(`${selector}\\s*\\{[^}]*?background:\\s*([^;]+);`))?.[1];
+  const hover = backgroundOf('\\.token-usage__table tbody tr:hover > th')
+    ?? backgroundOf('\\.token-usage__table tbody tr:hover > \\*')
+    ?? backgroundOf('\\.token-usage__table tbody th');
+  assert.ok(hover, 'tbody th needs a background');
+  assert.ok(opaque(hover), `sticky th background must stay opaque on row hover: ${hover}`);
 });
 
 test('token CSS lives in tokens.css, is scoped to token classes, and does not collapse columns', () => {

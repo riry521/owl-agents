@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createAgentRunner } from "../../packages/agent-runtime/dist/index.js";
+import { createAgentRunner, toolNamesInLine } from "../../packages/agent-runtime/dist/index.js";
 import { createCliProvider } from "../../packages/agent-runtime/dist/provider.js";
 
 const OUTPUT_TEMPLATE_HEADING = "## Output template\n";
@@ -105,6 +105,27 @@ test("a report format failure is resubmitted in the same session and succeeds", 
   assert.equal(calls[1].provider_session_id, "session-X");
   assert.match(calls[1].prompt, /Do not edit files/u);
   assert.ok(calls[1].structured_output_schema);
+  assert.equal(result.outcome, "success");
+});
+
+test("a report format failure after a Bash tool call is still resubmitted and succeeds", async () => {
+  const calls = [];
+  const bashUse = JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: {} }] } });
+  const runner = createAgentRunner({
+    adapter: "claude-cli/v1",
+    outputLogDir: null,
+    provider: {
+      toolNamesInLine,
+      execute: async (request) => {
+        calls.push(request);
+        if (calls.length > 1) return okResponse({ ...request, prompt: calls[0].prompt });
+        const failed = formatFailure(request);
+        return { ...failed, stdout: `${bashUse}\n${failed.stdout}` };
+      },
+    },
+  });
+  const result = await runner.runWorker(limited(2));
+  assert.equal(calls.length, 2);
   assert.equal(result.outcome, "success");
 });
 

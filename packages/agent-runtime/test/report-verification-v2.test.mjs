@@ -163,22 +163,24 @@ test("a legacy free-text Task reads as AC1 and a report that points at AC1 is ac
   assert.match(reason(() => accept(report(), false, legacyTask)), /worker_acceptance_criterion_ids/);
 });
 
-test("Worker acceptance rejects a success report that its verification contradicts", () => {
+test("Worker acceptance lowers a success report that its verification contradicts to partial", () => {
   const failed = report({ verification: verification({ status: "failed", acceptance: [ac("AC1", "failed"), ac("AC2")] }) });
-  assert.match(reason(() => accept(failed)), /success_with_verification_failed/);
+  assert.equal(accept(failed).result, "partial");
   const blocked = report({ verification: verification({ status: "blocked", acceptance: [ac("AC1", "blocked"), ac("AC2")] }) });
-  assert.match(reason(() => accept(blocked)), /success_with_verification_blocked/);
+  assert.equal(accept(blocked).result, "partial");
   const failedItem = report({ verification: verification({ acceptance: [ac("AC1"), ac("AC2", "failed")] }) });
-  assert.match(reason(() => accept(failedItem)), /success_with_failed_item/);
-  assert.match(reason(() => accept(report({ needs_replanning: true }))), /success_with_needs_replanning/);
-  assert.match(reason(() => accept(report({ question_for_manager: "Which?" }))), /success_with_question_for_manager/);
+  assert.equal(accept(failedItem).result, "partial");
+  const replan = accept(report({ needs_replanning: true }));
+  assert.deepEqual([replan.result, replan.needs_replanning], ["partial", true]);
+  const asked = accept(report({ question_for_manager: "Which?" }));
+  assert.deepEqual([asked.result, asked.question_for_manager], ["partial", "Which?"]);
   assert.equal(accept(report()).result, "success");
 });
 
-test("Worker acceptance rejects a Hybrid success with delegated children and no passed integration_check", () => {
+test("Worker acceptance lowers a Hybrid success with delegated children and no passed integration_check to partial", () => {
   for (const integration_check of [null, { status: "failed", evidence: "x" }]) {
     const delegated = report({ delegation: delegatedReport(), verification: verification({ integration_check }) });
-    assert.match(reason(() => accept(delegated, true)), /hybrid_ok_without_passed_integration/);
+    assert.equal(accept(delegated, true).result, "partial");
     // Outside Hybrid the same report is not subject to the integration rule.
     assert.equal(accept(delegated, false).result, "success");
   }

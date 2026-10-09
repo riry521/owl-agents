@@ -8,7 +8,7 @@ import { command } from "../helpers/core.mjs";
 import { createTestDatabase } from "../helpers/db.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 
-async function setup(t) {
+async function setup(t, coreOptions = {}) {
   const root = await tempDir(t, "owl-advisor-work-actions-");
   const db = createTestDatabase(root);
   const advisorReplies = [];
@@ -22,7 +22,7 @@ async function setup(t) {
       return { reply: advisorReplies.shift() ?? "Unexpected empty test Advisor response." };
     },
   };
-  const core = createCore({ db, agentRunner, version: "advisor-work-actions-test", owlRoot: root, dataDir: root });
+  const core = createCore({ db, agentRunner, version: "advisor-work-actions-test", owlRoot: root, dataDir: root, ...coreOptions });
   t.after(async () => {
     await core.stop({ force: true }).catch(() => {});
     db.close();
@@ -332,4 +332,105 @@ test("work operation notices follow the Owner language in Japanese and English",
   const englishWorkId = await createWorkInState(core, core.db, "running", "notice-en");
   const english = await respond([action("send_work_instruction", { work_id: englishWorkId, body: "Add coverage" })]);
   assert.match(english.body, /Sent the instruction to Work/u);
+});
+
+const API_PAYLOAD = { method: "PUT", path: "/api/v1/settings/models", body: { payload: { worker: "secret-model-name" } }, reason: "Owner approved" };
+
+function callApiEvents(db, type) {
+  return db.all("SELECT idempotency_key, payload_json FROM events WHERE type = ?", type);
+}
+
+test("call_api calls the Owl API once, records started before and finished after, and passes the result on", async (t) => {
+  const calls = [];
+  let db;
+  const callOwnApi = async (request) => {
+    calls.push({ request, startedBefore: callApiEvents(db, "advisor.api_call_started").length });
+    return { kind: "response", status: 200, body: { data: { ok: true } } };
+  };
+  const ctx = await setup(t, { callOwnApi });
+  db = ctx.db;
+
+  const { body } = await ctx.respond([action("call_api", API_PAYLOAD)]);
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].startedBefore, 1);
+  assert.equal(calls[0].request.method, "PUT");
+  assert.equal(calls[0].request.path, "/api/v1/settings/models");
+  assert.match(calls[0].request.body.idempotency_key, /^advisor-call-api:/u);
+  const finished = callApiEvents(db, "advisor.api_call_finished");
+  assert.equal(finished.length, 1);
+  const record = JSON.parse(finished[0].payload_json);
+  assert.equal(record.outcome, "succeeded");
+  assert.equal(record.status, 200);
+  for (const row of [...callApiEvents(db, "advisor.api_call_started"), ...finished]) {
+    assert.doesNotMatch(row.payload_json, /secret-model-name/u);
+  }
+  const responded = db.get("SELECT payload_json FROM events WHERE type = 'advisor.responded' ORDER BY rowid DESC LIMIT 1");
+  assert.match(JSON.parse(responded.payload_json).action_results, /PUT \/api\/v1\/settings\/models → 200/u);
+  assert.match(body, /PUT \/api\/v1\/settings\/models/u);
+});
+
+test("call_api does not send when the started record cannot be written", async (t) => {
+  let calls = 0;
+  const ctx = await setup(t, { callOwnApi: async () => { calls += 1; return { kind: "response", status: 200, body: {} }; } });
+  const write = ctx.core.writeLane.write.bind(ctx.core.writeLane);
+  ctx.core.writeLane.write = async (input) => {
+    if (input.event?.type === "advisor.api_call_started") throw new Error("disk full");
+    return write(input);
+  };
+
+  const { body } = await ctx.respond([action("call_api", API_PAYLOAD)]);
+
+  assert.equal(calls, 0);
+  assert.match(body, /記録を書けなかった/u);
+  assert.equal(callApiEvents(ctx.db, "advisor.api_call_finished").length, 0);
+});
+
+test("call_api is never sent twice for a reprocessed turn or a duplicated action", async (t) => {
+  let calls = 0;
+  const ctx = await setup(t, { callOwnApi: async () => { calls += 1; return { kind: "response", status: 200, body: {} }; } });
+  const turnId = createUlid();
+  const reply = (actions) => ctx.core.persistAdvisorReply(ctx.conversationId, "", turnId, { channel: "web" }, actions);
+
+  await reply([action("call_api", API_PAYLOAD), action("call_api", API_PAYLOAD)]);
+  assert.equal(calls, 1);
+  await reply([action("call_api", API_PAYLOAD)]);
+  assert.equal(calls, 1);
+  assert.equal(callApiEvents(ctx.db, "advisor.api_call_finished").length, 1);
+});
+
+test("a call_api left started-only is recorded unknown and not sent again", async (t) => {
+  let calls = 0;
+  const ctx = await setup(t, { callOwnApi: async () => { calls += 1; return { kind: "response", status: 200, body: {} }; } });
+  const turnId = createUlid();
+  // First attempt crashes after the send: make the finished write fail.
+  const write = ctx.core.writeLane.write.bind(ctx.core.writeLane);
+  ctx.core.writeLane.write = async (input) => {
+    if (input.event?.type === "advisor.api_call_finished") throw new Error("crash");
+    return write(input);
+  };
+  await ctx.core.persistAdvisorReply(ctx.conversationId, "", turnId, { channel: "web" }, [action("call_api", API_PAYLOAD)]);
+  assert.equal(calls, 1);
+  ctx.core.writeLane.write = write;
+
+  await ctx.core.persistAdvisorReply(ctx.conversationId, "", turnId, { channel: "web" }, [action("call_api", API_PAYLOAD)]);
+
+  assert.equal(calls, 1);
+  const finished = callApiEvents(ctx.db, "advisor.api_call_finished").map((row) => JSON.parse(row.payload_json));
+  assert.deepEqual(finished.map((row) => row.outcome), ["unknown"]);
+});
+
+test("call_api unknown results are not retried and not_sent is a failure", async (t) => {
+  const results = [{ kind: "unknown", error: "timeout" }, { kind: "not_sent", error: "ECONNREFUSED" }];
+  let calls = 0;
+  const ctx = await setup(t, { callOwnApi: async () => { calls += 1; return results.shift(); } });
+
+  const unknown = await ctx.respond([action("call_api", API_PAYLOAD)]);
+  assert.match(unknown.body, /結果がわかりません/u);
+  const failed = await ctx.respond([action("call_api", API_PAYLOAD)]);
+  assert.match(failed.body, /失敗しました/u);
+
+  assert.equal(calls, 2);
+  const outcomes = callApiEvents(ctx.db, "advisor.api_call_finished").map((row) => JSON.parse(row.payload_json).outcome).sort();
+  assert.deepEqual(outcomes, ["failed", "unknown"]);
 });

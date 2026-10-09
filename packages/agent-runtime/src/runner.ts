@@ -13,7 +13,7 @@ import {
 import { asManagerRequest, buildManagerPrompt, managerOutputSchema, parseManagerPlanWithFeedback } from "./manager";
 import { statSync } from "node:fs";
 import { AgentTimeoutSettingError, readStoredAcceptanceCriteria, DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, PROCESS_SKILLS_PROMPT_FILES, renderProcessSkills, parseResearchSubagentSettings, researchSubagentPromptRef, type CuratorRequest, type ResearcherPromptRef, type ResearchSubagentSettings, type CuratorRunResult, type ProcessSkillsRole, type PromptObserver, roleSessionContextLimit } from "@owl/shared";
-import { extractProviderUsage, harnessFailureDetail, isClaudeReportFormatFailure, isRecord, parseSingleJsonObject, unwrapClaudeCliResult, unwrapCodexCliResult } from "./protocol";
+import { type ReportCorrection, extractProviderUsage, harnessFailureDetail, isClaudeReportFormatFailure, isRecord, parseSingleJsonObject, unwrapClaudeCliResult, unwrapCodexCliResult } from "./protocol";
 import { extractRoleOutputObject, providerSchema } from "./role-contract";
 import { RoleSessionManager } from "./role-session-manager";
 import { resolveOutputLogDir, writeInvalidOutputLog } from "./output-log";
@@ -261,6 +261,10 @@ const PROVIDER_TO_ADAPTER: Record<string, string> = {
 
 function isCodexAdapterId(adapter: string | undefined): boolean {
   return adapter === "codex" || adapter === "codex-cli/v1" || adapter?.startsWith("codex/") === true;
+}
+
+function isClaudeAdapterId(adapter: string | undefined): boolean {
+  return adapter === undefined || adapter === "claude" || adapter === "claude-cli/v1" || adapter.startsWith("claude/");
 }
 
 function processSkillsSourceOf(context: Record<string, unknown>): "setting" | "claude" | "codex" {
@@ -651,9 +655,11 @@ function reportAsCoreResult(
   response: { readonly exit_code: number | null; readonly signal: string | null },
   usage: TokenUsage | null = null,
   skillFeedback: RuntimeAgentRunResult["skill_feedback"] = null,
+  corrections: readonly ReportCorrection[] = [],
 ): RuntimeAgentRunResult {
   const result: RuntimeAgentRunResult = {
     outcome: report.result,
+    ...(corrections.length > 0 ? { report_corrections: corrections } : {}),
     report_valid: true,
     report: report as unknown as Record<string, unknown>,
     report_envelope: report,
@@ -903,7 +909,8 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
   /**
    * Parses one role answer. A format violation (a contract error, or Claude running out of
    * structured-output retries) resumes the same session and asks for the answer only, up to
-   * `limit` times, for every role and both harnesses.
+   * `limit` times, for every role and both harnesses. A side effect does not stop it: the
+   * resubmit prompt only rewrites the answer (no commands, no edits), so it repeats nothing.
    */
   const runAndParse = <T>(
     request: ProviderExecutionRequest,
@@ -915,7 +922,6 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     runWithOutputResubmit({
       first,
       limit,
-      canResubmit: () => !sideEffectInvocations.has(request.invocation_id),
       resubmit: (sessionId, prompt) => sessions.resubmit(request, sessionId, prompt, execute),
       parse: (response) => {
         if (request.structured_output_schema !== undefined && response.exit_code !== 0 && response.signal === null && isClaudeReportFormatFailure(request.adapter, response.stdout)) {
@@ -1077,7 +1083,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
             ...overrides.env,
             ...(hybridMode ? { [DISPATCH_MCP_ENABLE_ENV]: "1" } : {}),
           },
-          providerSchema(reportSchema),
+          providerSchema(reportSchema, isClaudeAdapterId(overrides.adapter ?? options.adapter)),
           researcher && researchSettings ? researchSettings : undefined,
         );
         const resumeSessionId = reportResubmitSession(input.context);
@@ -1093,7 +1099,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
         response = outcome.response;
         if (exhaustedFormat(outcome)) { recordInvalidOutput((outcome as { error: OutputFormatError }).error.original, outcome.response, invocationId, role); return afterSideEffect(invocationId, formatFailureAsCoreResult(REPORT_FORMAT_INVALID_ERROR_KEY, outcome.response, outcome.resubmits, requestLanguage(input), outcome.usage)); }
         const normalized = acceptedValue(outcome);
-        return afterSideEffect(invocationId, reportAsCoreResult(normalized.report, outcome.response, outcome.usage, normalized.skill_feedback));
+        return afterSideEffect(invocationId, reportAsCoreResult(normalized.report, outcome.response, outcome.usage, normalized.skill_feedback, normalized.corrections));
       } catch (error) {
         return afterSideEffect(invocationId, runtimeFailureAsCoreResult(error, adapter ?? options.adapter ?? "provider", recordInvalidOutput(error, response, invocationId, role), requestLanguage(input), response ? extractProviderUsage(response) : null, providerSecretValues(options)));
       }
@@ -1112,7 +1118,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
       undefined,
       request.context?.worktree,
       undefined,
-      providerSchema(reportSchema),
+      providerSchema(reportSchema, isClaudeAdapterId(options.adapter)),
     );
     const outcome = await runAndParse(
       legacyRequest,

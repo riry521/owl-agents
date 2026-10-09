@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
+import { CurationRunStore } from "../../dist/curation-runs.js";
+import { openDatabase } from "../../../db/dist/index.js";
 import { MemoryIndex } from "../../dist/memory/memory-index.js";
-import { PageLibrarian } from "../../dist/memory/page-librarian.js";
+import { LIBRARIAN_RULES, PageLibrarian } from "../../dist/memory/page-librarian.js";
 import { bodySha256, estimatePageTokens, parsePage } from "../../dist/memory/page-format.js";
 import { newLinesOf } from "../../dist/memory/page-integration.js";
 import { itemsOf } from "../../dist/memory/page-operations.js";
@@ -359,6 +362,10 @@ test("a conversation edited while its lines are routed is rejected and the theme
     const report = await t.librarian.run({ run_id: runId(), mode: "manual" });
     assert.equal(report.applied, 0);
     assert.equal(report.rejected[0].code, "hash_mismatch");
+    // the re-check just before the write also reports the page, the field and both hash prefixes
+    const d = report.rejected[0].detail;
+    assert.deepEqual([d.page, d.section, d.h_given, d.h_checked], [CONV, "extraction", bodySha256(conversation()).slice(0, 8), bodySha256(t.read(CONV)).slice(0, 8)]);
+    assert.ok(!JSON.stringify(d).includes("追記"));
     assert.equal(fixtureThemes(), themes);
   } finally { await t.cleanup(); }
 });
@@ -482,5 +489,140 @@ test("nightly stops when a batch is all rejected and the item is an input of the
     assert.equal(t.calls.length, 1);
     await t.librarian.run({ run_id: runId(), mode: "nightly" });
     assert.equal(t.calls.at(-1).conversations.length, 1);
+  } finally { await t.cleanup(); }
+});
+
+/** Saves the report as curation_runs.report_json and reads it back by run id. */
+async function stored(report) {
+  const root = mkdtempSync(join(tmpdir(), "owl-librarian-runs-"));
+  const db = openDatabase(join(root, "owl.db"));
+  try {
+    db.migrate(fileURLToPath(new URL("../../../db/migrations", import.meta.url)));
+    const runs = new CurationRunStore(db);
+    const run = await runs.start({ kind: "librarian", trigger: "manual_api", actor: "system" });
+    await runs.finish(run.id, { summary: "", counts: {}, report });
+    return runs.get(run.id).report;
+  } finally { db.close(); rmSync(root, { recursive: true, force: true }); }
+}
+
+test("a rejected operation is reported with its op name and top-level keys, never its values", async () => {
+  const SECRET = "SECRET-CANARY-sk-0123456789";
+  const t = setup({ [PATH_A]: page(ID("A"), "テスト", {}, false) }, { propose: () => ok([]) });
+  try {
+    await t.start();
+    t.state.propose = () => ok([
+      { op: "merge_items", items: [], into: "x", text: SECRET },
+      { op: 42, text: SECRET },
+      "bare-string-op",
+      { op: "x".repeat(500), ...Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`k${i}`, SECRET])) },
+    ]);
+    const report = await stored(await t.librarian.run({ run_id: runId(), mode: "manual" }));
+    const [a, b, c, d] = report.rejected;
+    assert.deepEqual([a.op, a.keys], ["merge_items", ["op", "items", "into", "text"]]);
+    assert.deepEqual([b.op, b.op_type, b.keys], [undefined, "number", ["op", "text"]]);
+    assert.deepEqual([c.shape, c.keys], ["string", undefined]);
+    assert.ok(d.op.length <= 64 && d.keys.length <= 20);
+    assert.ok(!JSON.stringify(report).includes(SECRET));
+  } finally { await t.cleanup(); }
+});
+
+test("a rejected take_conversation operation is reported by shape too", async () => {
+  const SECRET = "SECRET-CANARY-extra";
+  const t = setup(EXTRA(), { propose: () => ok([]) });
+  try {
+    await t.start();
+    t.state.propose = () => ok([{ op: "take_conversation", conversation: CONV, h: "bad", items: [{ kind: "fact", text: SECRET }] }]);
+    const report = await stored(await t.librarian.run({ run_id: runId(), mode: "manual" }));
+    assert.equal(report.rejected[0].op, "take_conversation");
+    assert.deepEqual(report.rejected[0].keys, ["op", "conversation", "h", "items"]);
+    assert.ok(!JSON.stringify(report).includes(SECRET));
+  } finally { await t.cleanup(); }
+});
+
+test("a model that wraps operations as {\"retire\":{…}} unless told otherwise is told to use flat {op:…} objects, and its operations then apply (the real model was rejected as unknown_op)", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "owl-librarian-repo-"));
+  const t = setup({ [PATH_A]: page(ID("A"), "テスト", { pitfalls: ["- 古い手順は src/old.ts を使う（W5）"] }, true) }, { repo, propose: () => ok([]) });
+  try {
+    await t.start();
+    // The stub follows the instructions it is given, as the real model did: wrapped by name unless LIBRARIAN_RULES says flat.
+    t.state.propose = () => {
+      const body = { item: t.ref(PATH_A, "落とし穴", 0), reason: "missing_path", evidence: { paths: ["src/old.ts"] } };
+      return ok([/Never wrap it as/u.test(LIBRARIAN_RULES) ? { op: "retire", ...body } : { retire: body }]);
+    };
+    const report = await t.librarian.run({ run_id: runId(), mode: "manual" });
+    assert.deepEqual(report.rejected, []);
+    assert.equal(report.applied, 1);
+  } finally { await t.cleanup(); rmSync(repo, { recursive: true, force: true }); }
+});
+
+test("take_conversation and set_usage give the same result flat and wrapped, and unsettled shapes keep their rejection codes", async () => {
+  const runWith = async (build) => {
+    const t = setup(EXTRA(), { propose: () => ok([]) });
+    try {
+      await t.start();
+      const hs = { conv: bodySha256(t.read(CONV)), clip: bodySha256(t.read(CLIP)) };
+      t.state.propose = () => ok(build(hs));
+      const report = await t.librarian.run({ run_id: runId(), mode: "manual" });
+      return { applied: report.applied, rejected: report.rejected.map((r) => r.code), conv: t.read(CONV), clip: t.read(CLIP), pages: allThemes(t).map((x) => x.replace(/^id: .*$/gmu, "")) };
+    } finally { await t.cleanup(); }
+  };
+  const take = (h) => ({ conversation: CONV, h: h.conv, items: [{ kind: "decision", text: "認証は PKCE を使う" }] });
+  const usage = (h) => ({ clipping: CLIP, h: h.clip, text: "サインイン方式を選ぶとき" });
+  const flatTake = await runWith((h) => [{ op: "take_conversation", ...take(h) }]);
+  const flatUsage = await runWith((h) => [{ op: "set_usage", ...usage(h) }]);
+  assert.deepEqual([flatTake.applied, flatTake.rejected], [1, []]);
+  assert.deepEqual([flatUsage.applied, flatUsage.rejected], [1, []]);
+  assert.equal(parsePage(flatTake.conv).frontmatter.extraction, "librarian");
+  assert.ok(flatUsage.clip.includes("- サインイン方式を選ぶとき"));
+  assert.deepEqual(await runWith((h) => [{ take_conversation: take(h) }]), flatTake);
+  assert.deepEqual(await runWith((h) => [{ op: "take_conversation", take_conversation: take(h) }]), flatTake);
+  assert.deepEqual(await runWith((h) => [{ op: " TAKE_CONVERSATION ", ...take(h) }]), flatTake);
+  assert.deepEqual(await runWith((h) => [{ set_usage: usage(h) }]), flatUsage);
+  assert.deepEqual(await runWith((h) => [{ op: "set_usage", set_usage: usage(h) }]), flatUsage);
+  assert.deepEqual(await runWith((h) => [{ op: " SET_USAGE ", ...usage(h) }]), flatUsage);
+
+  const untouched = await runWith(() => []);
+  const rejects = [
+    ["missing_field", (h) => ({ op: "set_usage", set_usage: usage(h), take_conversation: {} })], // op names it, but its fields are not at the top level
+    ["unknown_op", (h) => ({ set_usage: { op: "take_conversation", ...usage(h) } })], // inner op disagrees
+    ["unknown_op", (h) => ({ nonsense: usage(h) })],
+    ["missing_field", (h) => ({ set_usage: { ...usage(h), extra: 1 } })], // extra key
+    ["missing_field", (h) => ({ op: "set_usage", ...usage(h), extra: 1 })],
+    ["missing_field", (h) => ({ set_usage: { clipping: CLIP, h: h.clip } })], // required field missing
+    ["missing_field", (h) => ({ op: "take_conversation", conversation: CONV, h: h.conv })],
+    ["hash_mismatch", (h) => ({ set_usage: { ...usage(h), h: "0".repeat(64) } })],
+  ];
+  for (const [code, build] of rejects) {
+    const r = await runWith((h) => [build(h)]);
+    assert.deepEqual([r.applied, r.rejected, r.clip, r.conv], [0, [code], untouched.clip, untouched.conv], `${code} ${build}`);
+  }
+});
+
+test("the librarian rules spell out the field types of every operation the program checks", () => {
+  const rules = Array.isArray(LIBRARIAN_RULES) ? LIBRARIAN_RULES.join("\n") : String(LIBRARIAN_RULES);
+  assert.match(rules, /Field types:/);
+  assert.match(rules, /link `from`\/`to` and the `page` of dormant\/reactivate are page paths as plain strings/);
+  assert.match(rules, /`evidence\.kept` and every element of `items` are line references/);
+  assert.match(rules, /merge needs at least 2 items/);
+  assert.match(rules, /evidence \{kept:\{page,section,h\}\}/);
+  assert.doesNotMatch(rules, /`into`\/`to` are \{page,section\}/);
+});
+
+test("a rejected extra operation reports field names and hash prefixes, never page text", async () => {
+  const t = setup(EXTRA(), { propose: () => ok([]) });
+  try {
+    await t.start();
+    const h = bodySha256(t.read(CLIP));
+    const usage = { op: "set_usage", clipping: CLIP, h, text: "サインイン方式を選ぶとき" };
+    t.state.propose = () => ok([usage, { ...usage }, { ...usage, h: "f".repeat(64) }, { op: "set_usage", clipping: CLIP, h, extra: 1 }]);
+    const report = await t.librarian.run({ run_id: runId(), mode: "manual" });
+    const byIndex = (i) => report.rejected.find((r) => r.index === i);
+    assert.equal(report.applied, 1);
+    // the second operation shows a hash the first one already made stale
+    assert.deepEqual(byIndex(1).detail, { page: CLIP, section: "使いどころ", h_given: h.slice(0, 8), h_given_length: 64, h_checked: bodySha256(t.read(CLIP)).slice(0, 8), changed_earlier: true });
+    assert.equal(byIndex(2).detail.h_given, "ffffffff");
+    assert.deepEqual(byIndex(3).detail, { missing: ["text"], unknown: ["extra"] });
+    const dump = JSON.stringify(report.rejected);
+    for (const secret of ["サインイン", "PKCE", "認証コードフロー"]) assert.ok(!dump.includes(secret));
   } finally { await t.cleanup(); }
 });

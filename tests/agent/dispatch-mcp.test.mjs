@@ -186,6 +186,124 @@ test("wait fetch timeout returns owl_dispatch_timeout and does not retry", async
   });
 });
 
+async function withOwlApi(t, { handler, env = {}, tokenValue = "api-token-xyz" }, run) {
+  const seen = [];
+  const http = createServer((req, res) => {
+    const chunks = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      const request = { method: req.method, url: req.url, authorization: req.headers.authorization, body: Buffer.concat(chunks).toString("utf8") };
+      seen.push(request);
+      handler(request, req, res);
+    });
+  });
+  await new Promise((resolve) => http.listen(0, "127.0.0.1", resolve));
+  const dir = await tempDir(t, "owl-api-mcp-");
+  const tokenFile = join(dir, "token");
+  await writeFile(tokenFile, `${tokenValue}\n`);
+  const child = spawn(process.execPath, [fileURLToPath(new URL("../../apps/server/dist/owl-api-mcp.js", import.meta.url))], {
+    env: { PATH: process.env.PATH ?? "", OWL_ROLE: "advisor", OWL_GUARD_TOKEN_FILE: tokenFile, OWL_GUARD_API_BASE: `http://127.0.0.1:${http.address().port}`, ...env },
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  let buffer = "";
+  const waiting = new Map();
+  child.stdout.on("data", (chunk) => {
+    buffer += chunk.toString("utf8");
+    for (let end = buffer.indexOf("\n"); end >= 0; end = buffer.indexOf("\n")) {
+      const message = JSON.parse(buffer.slice(0, end));
+      buffer = buffer.slice(end + 1);
+      waiting.get(message.id)?.(message);
+    }
+  });
+  let nextId = 1;
+  const call = (args) => new Promise((resolve) => {
+    const id = nextId++;
+    waiting.set(id, resolve);
+    child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "request", arguments: args } })}\n`);
+  });
+  try {
+    await run({ call, seen, tokenValue });
+  } finally {
+    child.kill();
+    http.closeAllConnections();
+    await new Promise((resolve) => http.close(resolve));
+  }
+}
+
+const errorCodeOf = (response) => JSON.parse(response.result.content[0].text).error.code;
+
+test("owl-api request sends a Bearer GET to the local server and returns status and body; 403 comes back as an error", async (t) => {
+  await withOwlApi(t, {
+    handler: (request, _req, res) => request.url.startsWith("/api/v1/works") ? reply(res, 200, { data: [1] }) : reply(res, 403, { error: { code: "advisor_action_required" } }),
+  }, async ({ call, seen }) => {
+    const ok = await call({ method: "GET", api_path: "/api/v1/works?limit=1" });
+    assert.deepEqual(JSON.parse(ok.result.content[0].text), { status: 200, body: { data: [1] } });
+    assert.equal(ok.result.isError, undefined);
+    assert.equal(seen[0].authorization, "Bearer api-token-xyz");
+    assert.equal(seen[0].url, "/api/v1/works?limit=1");
+    const denied = await call({ method: "GET", api_path: "/api/v1/settings/x" });
+    assert.equal(denied.result.isError, true);
+    assert.deepEqual(JSON.parse(denied.result.content[0].text), { status: 403, body: { error: { code: "advisor_action_required" } } });
+  });
+});
+
+test("owl-api rejects unsafe paths and non-loopback bases without any request, and never prints the token", async (t) => {
+  await withOwlApi(t, { handler: (_request, _req, res) => reply(res, 200, {}) }, async ({ call, seen, tokenValue }) => {
+    for (const api_path of ["http://evil.example/api/v1/x", "//evil.example/api/v1/x", "/api/v1/../x", "/api/v1/%2e%2e/x", "/api/v1\\x", "/other/x"]) {
+      const response = await call({ method: "GET", api_path });
+      assert.equal(errorCodeOf(response), "owl_api_invalid_path", api_path);
+      assert.equal(response.result.content[0].text.includes(tokenValue), false);
+    }
+    assert.equal(seen.length, 0);
+  });
+  await withOwlApi(t, { handler: (_request, _req, res) => reply(res, 200, {}), env: { OWL_GUARD_API_BASE: "http://example.com:80" } }, async ({ call, seen, tokenValue }) => {
+    const response = await call({ method: "GET", api_path: "/api/v1/works" });
+    assert.equal(errorCodeOf(response), "owl_api_unavailable");
+    assert.equal(response.result.content[0].text.includes(tokenValue), false);
+    assert.equal(seen.length, 0);
+  });
+});
+
+test("owl-api does not follow a 302 and reports a dropped connection as result unknown after one request", async (t) => {
+  await withOwlApi(t, { handler: (_request, _req, res) => { res.statusCode = 302; res.setHeader("location", "http://127.0.0.1:1/x"); res.end(); } }, async ({ call, seen }) => {
+    const response = await call({ method: "POST", api_path: "/api/v1/works", json_body: { payload: {} } });
+    assert.equal(errorCodeOf(response), "owl_api_result_unknown");
+    assert.equal(seen.length, 1);
+    assert.match(seen[0].body, /idempotency_key/);
+  });
+  await withOwlApi(t, { handler: (_request, req) => req.socket.destroy() }, async ({ call, seen }) => {
+    const response = await call({ method: "GET", api_path: "/api/v1/works" });
+    assert.equal(errorCodeOf(response), "owl_api_result_unknown");
+    assert.equal(seen.length, 1);
+  });
+});
+
+test("owl-api strips the token from JSON and text responses", async (t) => {
+  await withOwlApi(t, { handler: (request, _req, res) => request.url.endsWith("/text") ? (res.end("echo api-token-xyz")) : reply(res, 200, { leak: "api-token-xyz" }) }, async ({ call, tokenValue }) => {
+    for (const api_path of ["/api/v1/json", "/api/v1/text"]) {
+      const response = await call({ method: "GET", api_path });
+      assert.equal(response.result.content[0].text.includes(tokenValue), false, api_path);
+      assert.match(response.result.content[0].text, /\[redacted\]/);
+    }
+  });
+});
+
+test("owl-api strips a token hidden behind JSON unicode escapes", async (t) => {
+  await withOwlApi(t, { handler: (_request, _req, res) => { res.setHeader("content-type", "application/json"); res.end('{"leak":"\\u0061pi-token-xyz"}'); } }, async ({ call, tokenValue }) => {
+    const response = await call({ method: "GET", api_path: "/api/v1/json" });
+    assert.equal(response.result.content[0].text.includes(tokenValue), false);
+    assert.match(response.result.content[0].text, /\[redacted\]/);
+  });
+});
+
+test("owl-api reports an unresponsive server as result unknown after one request", async (t) => {
+  await withOwlApi(t, { handler: () => {}, env: { OWL_GUARD_API_TIMEOUT_MS: "300" } }, async ({ call, seen }) => {
+    const response = await call({ method: "GET", api_path: "/api/v1/works" });
+    assert.equal(errorCodeOf(response), "owl_api_result_unknown");
+    assert.equal(seen.length, 1);
+  });
+});
+
 test("owl-dispatch ignores a JSON line that is not an object and keeps serving", async (t) => {
   await withMcp(t, {}, async ({ child, rpc }) => {
     child.stdin.write("null\n123\n");

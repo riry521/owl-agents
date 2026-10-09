@@ -139,6 +139,7 @@ test("a Git error while checking whether Task branches are merged warns and does
   assert.deepEqual(removed, [], "no worktree is removed while its merge state is unknown");
   assert.notEqual(db.get("SELECT status FROM tasks WHERE id = ?", "verifying-task").status, "completed");
   assert.notEqual(db.get("SELECT worktree_state FROM tasks WHERE id = ?", "completed-task").worktree_state, "merged");
-  assert.ok(warnings.some((line) => line.includes("verifying-task")), "the skipped verifying Task is named in a warning");
-  assert.ok(warnings.some((line) => line.includes("completed-task")), "the skipped completed Task is named in a warning");
+  assert.ok(warnings.some((line) => line.includes("verifying-task") && line.includes("leaving the verifying Task as is")), "the verifying Task is warned as left as is");
+  assert.ok(warnings.some((line) => line.includes("completed-task") && line.includes("retained (git_unavailable_at_startup)")), "the completed Task is warned as retained");
+  assert.equal(db.get("SELECT worktree_state FROM tasks WHERE id = ?", "completed-task").worktree_state, "retained");
 });

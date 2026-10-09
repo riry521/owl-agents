@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.0.2 - 2026-10-09
+
+Fewer stuck Works and rejected curation operations, a more capable Advisor, and a batch of small fixes.
+
+### Advisor
+
+- The Advisor uses a single shared worktree, prepared only when it needs to write files and synced to the latest configured base branch (`/api/v1/advisor/workspace`); if it holds uncommitted changes or commits not yet integrated into the base, it is left as is and not synced
+- The Advisor can call the Owl API directly; irreversible operations go through approval-gated `owl-actions`, and the results are passed to the next turn
+
+### Works and merging
+
+- Fewer Works wait for a decision when integrating into the base branch: the uncommitted-changes check now matches git, conflicts automatically create a resolution Task, and a base-branch move during verification triggers automatic re-verification and retry
+- A Work's worktree whose git registration disappeared is repaired automatically instead of stalling the Work
+- After a merge, if dependency files (`package.json`, lockfiles) changed, Owl runs install in the main checkout before building
+
+### Reliability
+
+- Knowledge curation operations are no longer rejected for small variations in model output; shared shape normalization plus fixes for the remaining rejection causes, and rejected operations are logged to find causes
+- Report format errors no longer restart the whole run: inconsistencies are fixed in code, the schema is stricter, and resubmission works correctly
+- Claude "OAuth session expired" is classified as an authentication error instead of a confusing run-configuration error
+
+### Fixes
+
+- Token list layout on phones and hover styling
+- Clearer startup-recovery warning text
+- Keychain timeout detection for plan usage
+- Slack and Discord connector entrypoint detection
+
 ## 1.0.1 - 2026-10-08
 
 Whole-codebase review and fixes after the first public release, plus Worker and review-loop improvements.

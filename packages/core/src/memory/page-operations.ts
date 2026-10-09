@@ -1,5 +1,6 @@
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
+import { findListKey, normalizeOp } from "../op-shape.js";
 
 import {
   emptyThemePage, findSecretPatterns, lineHash, parseHistory, parsePage, renderHistory, renderPage, themeTitleKey, validatePage,
@@ -35,7 +36,7 @@ export interface PageOpsWarning { readonly page?: string; readonly code: string;
 export interface PageOpsResult {
   state: PageOpsState;
   applied: { index: number; op: unknown }[];
-  rejected: { index: number; op: unknown; code: string }[];
+  rejected: { index: number; op: unknown; code: string; detail?: Record<string, unknown> }[];
   warnings: PageOpsWarning[];
   /** For the DB, not the files. */
   activity: { page: string; action: "dormant" | "reactivate" }[];
@@ -51,10 +52,12 @@ const PROCEDURE = "手順";
 const REASONS = { contradiction: "矛盾", missing_path: "参照先なし", duplicate: "重複" } as const;
 const LABELS: Readonly<Record<string, string>> = { merge: "統合", move: "移動", retire: "退役", link: "リンク", split: "分割", promote_common: "共通化", restore: "復元" };
 
+/** How much of a hash a diagnostic shows. */
+export const H_PREFIX = 8;
 class Reject extends Error {
-  public constructor(public readonly code: string) { super(code); }
+  public constructor(public readonly code: string, public readonly detail?: Record<string, unknown>) { super(code); }
 }
-const reject = (code: string): never => { throw new Reject(code); };
+const reject = (code: string, detail?: Record<string, unknown>): never => { throw new Reject(code, detail); };
 
 // ---------------------------------------------------------------- lines and items
 
@@ -206,8 +209,10 @@ export function parseOperationsOutput(raw: unknown): { ops: unknown[] } | { erro
   if (typeof value !== "object" || value === null || Array.isArray(value)) return { error: "invalid_json" };
   const keys = Object.keys(value);
   if (keys.some((k) => FULL_TEXT_KEYS.includes(k))) return { error: "full_text_not_accepted" };
-  if (keys.some((k) => k !== "operations" && k !== "note")) return { error: "unexpected_key" };
-  const ops = (value as { operations?: unknown }).operations;
+  // A list under another key is accepted only when it is the one key left over besides `note`.
+  const listKey = findListKey(value as Record<string, unknown>, "operations", ["note"]) ?? "operations";
+  if (keys.some((k) => k !== listKey && k !== "note")) return { error: "unexpected_key" };
+  const ops = (value as Record<string, unknown>)[listKey];
   return Array.isArray(ops) ? { ops } : { error: "invalid_json" };
 }
 
@@ -232,26 +237,42 @@ const isTarget = (v: unknown): boolean => isObj(v) && (exactKeys(v, ["page", "se
 const isEvidence = (v: unknown): boolean => isObj(v) && Object.keys(v).every((k) => ["works", "conversation", "paths", "kept"].includes(k))
   && (v.works === undefined || (Array.isArray(v.works) && v.works.every(nonEmpty))) && (v.paths === undefined || (Array.isArray(v.paths) && v.paths.every(nonEmpty)))
   && (v.conversation === undefined || nonEmpty(v.conversation)) && (v.kept === undefined || isRef(v.kept));
+/** Names only, never values: keys a nested ref, target or evidence carries beyond the ones it allows. */
+const KNOWN_KEYS: Readonly<Record<string, readonly string[]>> = { ref: ["page", "section", "h"], target: ["page", "section", "title"], evidence: ["works", "conversation", "paths", "kept"] };
+function extraKeys(type: string, v: unknown): string[] {
+  if (type === "refs") return Array.isArray(v) ? v.flatMap((r) => extraKeys("ref", r)) : [];
+  if (!isObj(v) || !KNOWN_KEYS[type]) return [];
+  const own = Object.keys(v).filter((k) => !KNOWN_KEYS[type].includes(k));
+  return type === "evidence" && isObj(v.kept) ? [...own, ...extraKeys("ref", v.kept)] : own;
+}
 const CHECKS: Readonly<Record<string, (v: unknown) => boolean>> = {
   string: nonEmpty, boolean: (v) => typeof v === "boolean", ref: isRef, refs: (v) => Array.isArray(v) && v.every(isRef), target: isTarget, strings: (v) => Array.isArray(v) && v.every(nonEmpty), evidence: isEvidence,
 };
 const NEWLINE_FIELDS = ["text", "relation", "new_title", "new_summary"];
 
-function validateShape(op: unknown, allowCoreOps: boolean): Record<string, unknown> {
+function validateShape(rawOp: unknown, allowCoreOps: boolean): Record<string, unknown> {
+  const op = normalizeOp(rawOp, SPECS) ?? rawOp;
   if (!isObj(op) || typeof op.op !== "string" || !Object.hasOwn(SPECS, op.op)) return reject("unknown_op");
   const spec = SPECS[op.op];
   if (op.op === "dormant" && !allowCoreOps) return reject("unknown_op");
   const allowed = new Set(["op", ...Object.keys(spec.required), ...Object.keys(spec.optional)]);
   if (Object.keys(op).some((k) => !allowed.has(k))) return reject("unknown_op");
-  for (const [k, type] of Object.entries(spec.required)) if (!(k in op) || !CHECKS[type](op[k])) reject("missing_field");
-  for (const [k, type] of Object.entries(spec.optional)) if (k in op && op[k] !== undefined && !CHECKS[type](op[k])) reject("missing_field");
+  // Field names only: the values may hold page text.
+  const missing = [
+    ...Object.entries(spec.required).filter(([k, type]) => !(k in op) || !CHECKS[type](op[k])).map(([k]) => k),
+    ...Object.entries(spec.optional).filter(([k, type]) => k in op && op[k] !== undefined && !CHECKS[type](op[k])).map(([k]) => k),
+  ];
+  if (Array.isArray(op.items) && op.items.length < (op.op === "split" ? 1 : 2)) missing.push("items");
+  if (missing.length > 0) {
+    const unknown = Object.entries({ ...spec.required, ...spec.optional }).flatMap(([k, type]) => k in op ? extraKeys(type, op[k]) : []);
+    reject("missing_field", { missing: [...new Set(missing)], unknown: [...new Set(unknown)] });
+  }
   for (const k of NEWLINE_FIELDS) {
     const v = op[k];
     if (typeof v === "string" && /[\r\n]/u.test(v)) reject("text_has_newline");
     if (typeof v === "string" && findSecretPatterns(v).length > 0) reject("secret_detected");
   }
   if (isObj(op.to) && typeof op.to.title === "string" && /[\r\n]/u.test(op.to.title)) reject("text_has_newline");
-  if (Array.isArray(op.items) && op.items.length < (op.op === "split" ? 1 : 2)) reject("missing_field");
   return op;
 }
 
@@ -355,7 +376,24 @@ class Run {
     const sec = section(doc, ref.section);
     if (!sec) reject("unknown_section");
     if (ref.section === UPDATES) reject("section_not_allowed");
-    return sec!.items.find((i) => i.h === ref.h) ?? reject("line_hash_mismatch");
+    // The model only saw the references of the text before this run. Equal lines are numbered `h~n` and the numbers shift once
+    // an earlier operation removes one, so a reference is followed to its line by where that line started, not by its current hash.
+    const first = this.startItem(ref);
+    // A page made during this run has no starting text, so only there the current hash is the reference.
+    const found = first ? sec!.items.find((i) => doc.lines[i.start].o === first.start)
+      : this.state.pages.has(ref.page) ? undefined : sec!.items.find((i) => i.h === ref.h);
+    return found ?? reject("line_hash_mismatch", {
+      page: ref.page, section: ref.section, h_given: ref.h.slice(0, H_PREFIX), h_checked: sec!.items.slice(0, 20).map((i) => i.h.slice(0, H_PREFIX)),
+      changed_earlier: textOf(doc) !== this.state.pages.get(ref.page),
+    });
+  }
+  private readonly startScans = new Map<string, Sec[]>();
+  private startItem(ref: Ref): Item | undefined {
+    const text = this.state.pages.get(ref.page);
+    if (text === undefined) return undefined;
+    let secs = this.startScans.get(ref.page);
+    if (!secs) this.startScans.set(ref.page, secs = scan(docOf(text)));
+    return secs.find((s) => s.heading === ref.section)?.items.find((i) => i.h === ref.h);
   }
   public tallyOf(page: string, label: string, ref?: string): void { this.tx.tally.push({ page, label, ref }); }
 }
@@ -524,10 +562,12 @@ const applyRetire: Applier = (run, op) => {
   if (!Object.hasOwn(REASONS, reason)) reject("unknown_reason");
   const item = run.resolve(ref);
   const replacedBy = op.replaced_by as Ref | undefined;
-  const resolveOther = (r: Ref | undefined): Item | undefined => {
+  const resolveOther = (r: Ref | undefined, field: string): Item | undefined => {
     if (!r) return undefined;
-    if (keyOf(r) === keyOf(ref)) reject("evidence_item_missing");
-    try { return run.resolve(r, { check: false, allowDormant: true }); } catch (e) { if (e instanceof Reject && e.code !== "item_already_used") return reject("evidence_item_missing"); throw e; }
+    // Names and hash prefixes only: the page text must not reach the report.
+    const missing = (cause: string): never => reject("evidence_item_missing", { field, page: r.page, section: r.section, h_given: r.h.slice(0, H_PREFIX), cause });
+    if (keyOf(r) === keyOf(ref)) missing("same_as_item");
+    try { return run.resolve(r, { check: false, allowDormant: true }); } catch (e) { if (e instanceof Reject && e.code !== "item_already_used") return missing(e.code); throw e; }
   };
   let evidenceText = "";
   let replacedText = "なし";
@@ -543,7 +583,7 @@ const applyRetire: Applier = (run, op) => {
     }
     if (evidence.conversation && !run.ctx.conversationExists(evidence.conversation)) reject("evidence_conversation_missing");
     evidenceText = [...works, ...(evidence.conversation ? [evidence.conversation] : [])].join(", ");
-    replacedText = firstLine(resolveOther(replacedBy)!.text);
+    replacedText = firstLine(resolveOther(replacedBy, "replaced_by")!.text);
   } else if (reason === "missing_path") {
     const paths = evidence.paths ?? [];
     if (paths.length === 0) reject("retire_without_evidence");
@@ -555,12 +595,12 @@ const applyRetire: Applier = (run, op) => {
       if (r === "unavailable") reject("path_check_unavailable");
     }
     evidenceText = `${paths.join(", ")}（base に無い）`;
-    if (replacedBy) replacedText = firstLine(resolveOther(replacedBy)!.text);
+    if (replacedBy) replacedText = firstLine(resolveOther(replacedBy, "replaced_by")!.text);
   } else {
     if (!evidence.kept) reject("retire_without_evidence");
-    const kept = resolveOther(evidence.kept)!;
+    const kept = resolveOther(evidence.kept, "kept")!;
     evidenceText = `残した行 ${evidence.kept!.h}${sourcesText(worksOf(kept.text))}`;
-    replacedText = firstLine(replacedBy ? resolveOther(replacedBy)!.text : kept.text);
+    replacedText = firstLine(replacedBy ? resolveOther(replacedBy, "replaced_by")!.text : kept.text);
   }
   const doc = run.peek(ref.page);
   appendHistory(run, ref.page, {
@@ -595,7 +635,7 @@ const applyLink: Applier = (run, op) => {
   if (from === to) reject("self_link");
   const fromDoc = run.requireWritable(from);
   const toTitle = titleOf(to, run.peek(to));
-  if (hasLink(fromDoc, toTitle)) reject("link_exists");
+  if (hasLink(fromDoc, toTitle)) reject("link_exists", { from, to });
   addLink(run.doc(from), toTitle, op.relation);
   run.tallyOf(from, "link");
 };
@@ -777,7 +817,7 @@ export function applyOperations(state: PageOpsState, ops: readonly unknown[], ct
       applied.push({ index, op: raw });
     } catch (error) {
       if (!(error instanceof Reject)) throw error;
-      rejected.push({ index, op: raw, code: error.code });
+      rejected.push({ index, op: raw, code: error.code, ...(error.detail ? { detail: error.detail } : {}) });
     }
   });
 

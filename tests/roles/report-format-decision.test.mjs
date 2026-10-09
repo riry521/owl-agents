@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { coreTaskDecisionBrief } from "../../packages/core/dist/decision-brief.js";
 import { outputResubmitLimit, reportResubmitLimit } from "../../packages/core/dist/report-resubmit.js";
 import { createUlid } from "../../packages/db/dist/index.js";
-import { createAgentRunner } from "../../packages/agent-runtime/dist/index.js";
+import { createAgentRunner, toolNamesInLine } from "../../packages/agent-runtime/dist/index.js";
 import { createTestCore, command } from "../helpers/core.mjs";
 import { git } from "../helpers/git.mjs";
 import { waitFor as waitForCondition } from "../helpers/wait.mjs";
@@ -56,6 +56,7 @@ async function openCore(t, script, reviewer = async () => ({ outcome: "success",
     adapter: "claude-cli/v1",
     outputLogDir: null,
     provider: {
+      toolNamesInLine,
       execute: async (request) => {
         calls.push(request);
         const response = await script(calls.length, request, worktree);
@@ -136,6 +137,31 @@ test("reaching the limit opens a report-format Decision and resubmitting only th
   assert.doesNotMatch(calls[3].prompt, /## Output template/u);
 });
 
+test("after a Bash call the exhausted format failure keeps the side_effect_failure: error_key, stores the session and still offers the resubmission", async (t) => {
+  let resubmit = false;
+  const bashUse = JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: {} }] } });
+  const { db, core, workId, calls } = await openCore(t, async (n, request, worktree) => {
+    if (n === 1) await writeFile(join(worktree, "out.mjs"), "export {};\n");
+    if (resubmit) return okResponse(request, calls[0].prompt);
+    const failed = formatFailure(request);
+    return { ...failed, stdout: `${bashUse}\n${failed.stdout}` };
+  });
+  const decision = await openDecision(db, workId);
+  assert.ok(decision);
+  const event = db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = 'task.failure.classified' AND payload_json LIKE '%side_effect_failure:report_format_invalid%' ORDER BY rowid DESC LIMIT 1", workId);
+  assert.ok(event, "the failure event carries the prefixed error_key");
+  assert.equal(JSON.parse(event.payload_json).provider_session_id, "session-X");
+  assert.ok(JSON.parse(decision.options_json).some((o) => o.key === "resubmit_report"));
+  assert.equal(calls.length, 3, "the first call plus two automatic resubmissions");
+
+  resubmit = true;
+  await core.answerDecision(decision.id, envelope({ answer: "報告だけ出し直す", option_key: "resubmit_report", source_message_id: null }, "answer", decision.state_version));
+  assert.ok(await taskCompleted(db, workId), "the Task completed through the resubmission");
+  assert.equal(calls.length, 4);
+  assert.equal(calls[3].provider_session_id, "session-X");
+  assert.match(calls[3].prompt, /Do not edit files/u);
+});
+
 test("a Reviewer whose verdict keeps breaking the format opens a Decision, and rerunning only the Reviewer never reruns the Worker", async (t) => {
   let reviews = 0;
   const { db, core, workId, calls } = await openCore(
@@ -178,6 +204,8 @@ test("a nonzero exit that is not a format violation keeps the Harness decision",
 test("coreTaskDecisionBrief only offers the resubmission for a format violation with a session", () => {
   const base = { error_key: "report_format_invalid", reason: "x" };
   assert.deepEqual(coreTaskDecisionBrief("T", { ...base, provider_session_id: "s" }, "ja").options.map((o) => o.key).slice(0, 2), ["resubmit_report", "retry"]);
+  const wrapped = { error_key: "side_effect_failure:report_format_invalid", reason: "x", provider_session_id: "s" };
+  assert.deepEqual(coreTaskDecisionBrief("T", wrapped, "ja").options.map((o) => o.key).slice(0, 2), ["resubmit_report", "retry"]);
   assert.ok(!coreTaskDecisionBrief("T", base, "ja").options.some((o) => o.key === "resubmit_report"));
   assert.equal(coreTaskDecisionBrief("T", { error_key: "provider_failed:exit:1", reason: "x" }, "ja").recommended, null);
 });

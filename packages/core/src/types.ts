@@ -176,6 +176,8 @@ export interface AgentRunResult {
   readonly report?: JsonObject | null;
   readonly message?: string;
   readonly skill_feedback: SkillFeedback | null;
+  /** Report contradictions the runtime repaired by lowering the result (rule name and results). */
+  readonly report_corrections?: readonly { readonly rule: string; readonly from_result: string; readonly to_result: string }[];
   /** Tokens the provider reported for this run; absent or null when it reported none. */
   readonly usage?: TokenUsage | null;
   /** Claude session to resume when only the report must be produced again. */
@@ -335,6 +337,9 @@ export type GitWorkMergeResult =
       readonly work_branch: string | null;
       /** Paths with uncommitted changes in the integration worktree, when that is why the merge stopped. */
       readonly dirty_files?: readonly string[];
+      /** Uncommitted paths in the base checkout that the merge would also change, when that is why it stopped. */
+      readonly overlap_files?: readonly string[];
+      readonly base_worktree?: string;
     };
 
 export type GitPushFailure = "non_fast_forward" | "hook_rejected" | "network" | "auth" | "unknown";
@@ -385,17 +390,50 @@ export interface GitBranchCleanupResult extends GitOperationResult {
 
 export interface AdvisorWorkspaceRequest {
   readonly conversation_id: string;
+  /** When set, targets that Project's repository; otherwise the conversation's Project, or Owl's own repository. */
+  readonly project_id?: string | null;
 }
+
+export type AdvisorWorkspaceDirtyReason = "uncommitted_changes" | "unmerged_commits";
+
+export type AdvisorWorkspaceErrorCode =
+  | "conversation_not_found"
+  | "project_not_found"
+  | "project_unavailable"
+  | "base_not_found"
+  | "workspace_conflict"
+  | "sync_failed";
+
+export interface AdvisorWorkspacePreparation {
+  readonly ok: boolean;
+  readonly kind: "worktree" | "direct";
+  readonly worktree_path: string | null;
+  readonly repository_root: string | null;
+  readonly branch: string | null;
+  readonly base_branch: string | null;
+  readonly base_head: string | null;
+  readonly head: string | null;
+  readonly synced: boolean;
+  readonly dirty_reasons: readonly AdvisorWorkspaceDirtyReason[];
+  readonly error_code: AdvisorWorkspaceErrorCode | null;
+  readonly message: string;
+}
+
+/** Where an Advisor session runs: an empty scratch directory beside a Git repository, or a non-Git Project directory itself. */
+export type AdvisorSessionDirectory =
+  | { readonly kind: "repository"; readonly cwd: string; readonly repository_root: string; readonly base_branch: string }
+  | { readonly kind: "direct"; readonly cwd: string };
 
 export interface AdvisorWorkspaceInspectionRequest {
   readonly conversation_id: string;
-  readonly workspace_path: string;
+  readonly project_id?: string | null;
 }
 
 export interface AdvisorWorkspaceInspection {
   readonly ok: boolean;
   readonly dirty: boolean;
   readonly message: string;
+  readonly worktree_path?: string | null;
 }
 
 /** Outcome of one Advisor workspace sweep. */
@@ -449,14 +487,17 @@ export interface GitGateway {
   mergeBaseIntoWorkBranch?(request: { readonly work_id: string }): Promise<
     { readonly ok: true; readonly merged: boolean; readonly head: string } | { readonly ok: false; readonly conflict: boolean; readonly message: string }
   >;
-  /** Prepare or reuse a persistent, conversation-scoped Advisor worktree. */
-  prepareAdvisorWorkspace?(request: AdvisorWorkspaceRequest): Promise<GitOperationResult>;
-  /** Inspect a conversation's Advisor worktree without changing it. */
+  /** Resolve the directory a read-only Advisor session runs in; creates no worktree or branch. */
+  resolveAdvisorSessionDirectory?(request: { readonly conversation_id: string }): Promise<AdvisorSessionDirectory>;
+  /** Prepare or reuse the repository's single shared Advisor worktree and fast-forward it to the latest base when it is clean. */
+  prepareAdvisorWorkspace?(request: AdvisorWorkspaceRequest): Promise<AdvisorWorkspacePreparation>;
+  /** Inspect the repository's shared Advisor worktree without changing it. */
   inspectAdvisorWorkspace?(request: AdvisorWorkspaceInspectionRequest): Promise<AdvisorWorkspaceInspection>;
   /**
-   * Reclaim `.owl-workspaces/advisor` entries and `owl/advisor/*` branches no
-   * live Advisor session (any status but `ended`) still uses: a clean,
-   * fully-merged worktree is removed with its branch; a dirty or unmerged one
+   * Reclaim legacy per-conversation `advisor/<conversation>` entries and
+   * `owl/advisor/<conversation>` branches no live Advisor session (any status
+   * but `ended`) still uses; the shared worktree and its branch are never
+   * removed. A clean, fully-merged worktree is removed with its branch; a dirty or unmerged one
    * is kept and warned about; an empty stray directory is removed; a
    * non-empty one is kept and warned about. Also deletes merged, worktree-less
    * `owl/advisor/*` branches in Owl's own repository and every registered Git
@@ -662,11 +703,25 @@ export class NoopGitGateway implements GitGateway {
   }
 }
 
+export interface OwnApiRequest {
+  readonly method: string;
+  readonly path: string;
+  readonly body?: unknown;
+}
+
+/** not_sent: the request provably never reached the server. unknown: it may have been executed. */
+export type OwnApiResult =
+  | { readonly kind: "response"; readonly status: number; readonly body: unknown }
+  | { readonly kind: "not_sent"; readonly error: string }
+  | { readonly kind: "unknown"; readonly error: string };
+
 export interface CoreOptions {
   readonly db: CoreDatabase;
   readonly agentRunner: AgentRunner;
   readonly git?: GitGateway;
   readonly version: string;
+  /** Calls Owl's own HTTP API with the Owner's credential, for the Advisor's call_api action. Without it call_api is refused. */
+  readonly callOwnApi?: (request: OwnApiRequest) => Promise<OwnApiResult>;
   /** Reads a project's tracked files for its overview note. Defaults to git. */
   readonly projectSourceReader?: import("./project-overview-note.js").ProjectSourceReader;
   /** Cap on active non-Executor agent runs per Work. Unlimited unless set. */
@@ -700,8 +755,10 @@ export interface CoreOptions {
   readonly postMergeCommand?: {
     /** Used when the Project at owlRoot has no setting (NULL). Unset: no default. */
     readonly owlRootDefault?: readonly string[];
-    /** Install step run before the command when a dependency file changed, unless the Project sets its own. Default: pnpm install. */
+    /** Install for a changed directory whose lockfile matches no installRules entry, unless the Project sets its own. Default: pnpm install. */
     readonly installDefault?: readonly string[];
+    /** Lockfile name -> install command, first match in a changed directory wins. Default: bun, pnpm, yarn, npm, uv. */
+    readonly installRules?: readonly { readonly file: string; readonly argv: readonly string[] }[];
     /** Base names that count as dependency files. Default: package.json and common lockfiles. */
     readonly dependencyFiles?: readonly string[];
     readonly timeoutMs?: number;

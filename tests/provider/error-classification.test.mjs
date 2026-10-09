@@ -54,6 +54,18 @@ test("the harness HTTP status decides before any text", () => {
   assert.equal(badRequest.failure_class, "deterministic");
 });
 
+test("an expired Claude login is reported as an authentication failure", () => {
+  const failure = classifyProviderFailure("claude-cli/v1", {
+    exit_code: 0,
+    signal: null,
+    kind: "harness_error",
+    error: "Failed to authenticate: OAuth session expired and could not be refreshed",
+  });
+  assert.equal(failure.failure_class, "deterministic");
+  assert.equal(failure.retry_allowed, false);
+  assert.match(failure.message, /認証に失敗しました/u);
+});
+
 test("a timeout is transient whatever the output says, and the key names its kind", () => {
   const idle = classifyProviderFailure("codex-cli/v1", {
     exit_code: null,

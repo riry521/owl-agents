@@ -179,7 +179,7 @@ test("Core defaults to pnpm build for its own unset project", async (t) => {
 async function runMergeWith(t, changed, { install, build, projectInstall }) {
   const { dir, commits } = await repoWithChange(t, changed);
   const log = join(await tempDir(t, "owl-post-merge-log-"), "log.txt");
-  const { db, core } = await openMergeCore(t, { installDefault: install(log) }, commits);
+  const { db, core } = await openMergeCore(t, { installDefault: install(log), installRules: [] }, commits);
   const { workId, projectId } = await seedFinishedWork(core, db, dir, build(log));
   if (projectInstall) db.createWriteLane().transact((tx) => { tx.run("UPDATE projects SET post_merge_install_argv_json = ? WHERE id = ?", JSON.stringify(projectInstall(log)), projectId); return null; });
   await core.tick(workId);
@@ -258,7 +258,7 @@ test("coalesced merges diff from the earliest old base", async (t) => {
   const queue = new PostMergeCommandQueue({
     timeoutMs: 1000,
     run: async (cmd, args) => { calls.push([cmd, ...args]); if (cmd === "build-first") await gate; return cmd === "git" ? { ...ok, stdout: "package.json\0" } : ok; },
-    resolve: (id) => ({ argv: [id === "p1" && calls.length === 0 ? "build-first" : "build"], cwd: "/tmp", default_command: false, install_argv: ["install"], dependency_files: ["package.json"] }),
+    resolve: (id) => ({ argv: [id === "p1" && calls.length === 0 ? "build-first" : "build"], cwd: "/tmp", default_command: false, install_override: null, install_default: ["install"], install_rules: [], dependency_files: ["package.json"] }),
     record: async () => {},
     log: () => {},
   });
@@ -270,4 +270,61 @@ test("coalesced merges diff from the earliest old base", async (t) => {
   await queue.idle();
   const diffs = calls.filter((call) => call[0] === "git");
   assert.deepEqual(diffs.at(-1), ["git", "diff", "--name-only", "-z", "c1", "c3"]);
+});
+
+/** argv that logs "label@cwd" so a test sees where each step ran. */
+const loggingCwd = (log, label, exit = 0) => [process.execPath, "-e", `require('node:fs').appendFileSync(${JSON.stringify(log)}, ${JSON.stringify(label + "@")} + require('node:path').basename(process.cwd()) + "\\n"); process.exit(${exit});`];
+
+async function runWithRules(t, changed, { rules, fallback = () => [], build, projectInstall }) {
+  const { dir, commits } = await repoWithChange(t, changed);
+  const log = join(await tempDir(t, "owl-post-merge-log-"), "log.txt");
+  const { db, core } = await openMergeCore(t, { installDefault: fallback(log), installRules: rules(log) }, commits);
+  const { workId, projectId } = await seedFinishedWork(core, db, dir, build(log));
+  if (projectInstall) db.createWriteLane().transact((tx) => { tx.run("UPDATE projects SET post_merge_install_argv_json = ? WHERE id = ?", JSON.stringify(projectInstall(log)), projectId); return null; });
+  await core.tick(workId);
+  const event = await waitFor(() => resultEvent(db, workId), { message: "post-merge result" });
+  const lines = async () => (await readFile(log, "utf8").catch(() => "")).trim().split("\n").filter(Boolean);
+  return { event, payload: JSON.parse(event.payload_json), lines, dir };
+}
+
+test("a changed lockfile picks the install from the rule table and runs it in that directory before the build", async (t) => {
+  const run = await runWithRules(t, ["engine/bun.lock", "web/yarn.lock"], {
+    rules: (log) => [{ file: "bun.lock", argv: loggingCwd(log, "bun") }, { file: "yarn.lock", argv: loggingCwd(log, "yarn") }],
+    fallback: (log) => loggingCwd(log, "fallback"), build: (log) => loggingCwd(log, "build"),
+  });
+  assert.deepEqual(await run.lines(), ["bun@engine", "yarn@web", `build@${run.dir.split("/").pop()}`]);
+});
+
+test("a changed manifest without a known lockfile falls back to the default install", async (t) => {
+  const run = await runWithRules(t, ["pkg/package.json"], {
+    rules: (log) => [{ file: "bun.lock", argv: loggingCwd(log, "bun") }], fallback: (log) => loggingCwd(log, "fallback"), build: (log) => logging(log, "build"),
+  });
+  assert.deepEqual(await run.lines(), ["fallback@pkg", "build"]);
+});
+
+test("no dependency file change runs only the build", async (t) => {
+  const run = await runWithRules(t, ["engine/src.js"], {
+    rules: (log) => [{ file: "bun.lock", argv: logging(log, "bun") }], fallback: (log) => logging(log, "fallback"), build: (log) => logging(log, "build"),
+  });
+  assert.deepEqual(await run.lines(), ["build"]);
+});
+
+test("the Project's install command overrides detection and [] disables install", async (t) => {
+  const common = { rules: (log) => [{ file: "bun.lock", argv: logging(log, "bun") }], build: (log) => logging(log, "build") };
+  const over = await runWithRules(t, ["engine/bun.lock"], { ...common, projectInstall: (log) => loggingCwd(log, "project") });
+  assert.deepEqual(await over.lines(), ["project@engine", "build"]);
+  const off = await runWithRules(t, ["engine/bun.lock"], { ...common, projectInstall: () => [] });
+  assert.deepEqual(await off.lines(), ["build"]);
+});
+
+test("a failing install in a subdirectory alerts with stage, cwd and argv and skips the build", async (t) => {
+  const run = await runWithRules(t, ["engine/bun.lock"], {
+    rules: (log) => [{ file: "bun.lock", argv: loggingCwd(log, "bun", 5) }], build: (log) => logging(log, "build"),
+  });
+  assert.equal(run.event.type, "system.alert");
+  assert.equal(run.payload.stage, "install");
+  assert.equal(run.payload.cwd, join(run.dir, "engine"));
+  assert.equal(run.payload.argv[0], process.execPath);
+  assert.match(run.payload.message, /install/);
+  assert.deepEqual(await run.lines(), ["bun@engine"]);
 });

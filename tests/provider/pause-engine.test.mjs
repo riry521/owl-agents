@@ -449,7 +449,7 @@ test("an Advisor rate limit replies with the reset time, pauses the provider and
     memorySaver: {},
     providerClient: { createSession: async () => providerSession },
     owlRoot: root,
-    git: { prepareAdvisorWorkspace: async () => ({ ok: true, worktree_path: root }) },
+    git: { resolveAdvisorSessionDirectory: async () => ({ kind: "direct", cwd: root }) },
     getAdvisorSettings: () => ({ providerId: "anthropic", harnessId: "claude", model: "claude-test", systemPrompt: "Advisor" }),
     resolveAttachmentPaths: () => ({ paths: [], notes: [] }),
     isProviderPaused: (provider) => providerPauseController.isPaused(provider),

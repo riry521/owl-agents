@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { dirname, isAbsolute, resolve, sep } from "node:path";
 
-import { GUARD_COMMAND_KEYS, GUARD_NAMED_TOOLS, guardChecksToolCall, isReadOnlyAgentRole, readOnlyToolAllowed } from "../../../packages/shared/dist/guard-inputs.js";
+import { GUARD_COMMAND_KEYS, GUARD_NAMED_TOOLS, GUARD_PATH_KEYS, guardChecksToolCall, isReadOnlyAgentRole, readOnlyToolAllowed } from "../../../packages/shared/dist/guard-inputs.js";
 import { GUARD_TOKEN_FILE_ENV } from "../../../packages/shared/dist/guard-token.js";
 import { isResearchSubagentType, researchToolDecision } from "../../../packages/shared/dist/research-subagent.js";
 
@@ -230,6 +230,32 @@ async function checkOutbound(toolName: string, toolInput: Record<string, unknown
   }
 }
 
+/** Added to an Advisor's outbound denial so it moves to the API route instead of retrying curl. */
+const ADVISOR_API_HINT = " Owl の API は curl ではなく owl-api（MCP ツール）で呼ぶこと。";
+
+/**
+ * Why an Advisor may not touch the guard token directory, or null. Accident prevention, not a boundary:
+ * the tokens would otherwise land in the conversation and the records.
+ */
+function advisorTokenDenial(toolInput: Record<string, unknown>, cwd: unknown): string | null {
+  const tokenFile = process.env[GUARD_TOKEN_FILE_ENV];
+  if (!tokenFile || !isAbsolute(tokenFile)) return null;
+  const tokenDir = dirname(tokenFile);
+  const base = typeof cwd === "string" && isAbsolute(cwd) ? cwd : process.env.OWL_AGENT_CWD ?? tokenDir;
+  const reason = "Advisor は guard トークンのディレクトリを読めない（トークンが会話や記録に残るため）。";
+  for (const key of GUARD_PATH_KEYS) {
+    const value = toolInput[key];
+    for (const item of Array.isArray(value) ? value : [value]) {
+      if (typeof item !== "string" || item === "") continue;
+      const target = resolve(base, item);
+      if (target === tokenDir || target.startsWith(tokenDir + sep)) return reason;
+    }
+  }
+  const command = GUARD_COMMAND_KEYS.map((key) => toolInput[key]).find((value) => typeof value === "string");
+  if (typeof command === "string" && (command.includes(tokenDir) || command.includes(GUARD_TOKEN_FILE_ENV))) return reason;
+  return null;
+}
+
 function deny(reason: string): void {
   process.stdout.write(`${JSON.stringify({
     hookSpecificOutput: {
@@ -275,9 +301,15 @@ async function main(): Promise<void> {
     deny("読み取り専用の調査ではこのツールを使えない。");
     return;
   }
+  const isAdvisor = process.env.OWL_AGENT_ROLE === "advisor";
+  const tokenDenial = isAdvisor ? advisorTokenDenial(input.tool_input, input.cwd) : null;
+  if (tokenDenial) {
+    deny(tokenDenial);
+    return;
+  }
   const outboundDenial = await checkOutbound(input.tool_name, input.tool_input);
   if (outboundDenial) {
-    deny(outboundDenial);
+    deny(isAdvisor ? outboundDenial + ADVISOR_API_HINT : outboundDenial);
     return;
   }
   // A call with no path or command arguments has nothing the rules can
