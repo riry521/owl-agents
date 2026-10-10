@@ -31,6 +31,9 @@ Knowledge that stays organized, curation that runs on its own, and stronger hand
 - Attachments sent from Slack (such as images) now reach the Advisor
 - Flaky tests that occasionally failed on GitHub CI are made deterministic
 - Acceptance criteria over the length limit are only recorded instead of sending the Manager back to rewrite them
+- Knowledge organizing (#144) removes the `owl:new` mark from new lines the model judged already placed, and a run with zero changes is no longer treated as a failure
+- The `memory_librarian` setting is removed (#145): knowledge organizing and the other curation runs use the Librarian and Curator role settings, and all default models move to the 5.5 generation
+- Knowledge organizing no longer writes page backups under `data/backups/memory-pages/` on every run; a failed run is still rolled back from the original text kept in memory
 
 ## 1.0.2 - 2026-10-09
 

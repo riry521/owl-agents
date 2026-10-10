@@ -8,7 +8,7 @@ import { CurationRunStore } from "../../dist/curation-runs.js";
 import { openDatabase } from "../../../db/dist/index.js";
 import { MemoryIndex } from "../../dist/memory/memory-index.js";
 import { IndexBuilder } from "../../dist/memory/index-builder.js";
-import { LIBRARIAN_OUTPUT_FILE, LIBRARIAN_RULES, PageLibrarian } from "../../dist/memory/page-librarian.js";
+import { LIBRARIAN_RULES, PageLibrarian } from "../../dist/memory/page-librarian.js";
 import { DEFAULT_MEMORY_LIBRARIAN_BATCH, MEMORY_LIBRARIAN_MAX_BATCHES_LIMIT, readMemoryLibrarianBatch } from "../../../shared/dist/index.js";
 import { bodySha256, emptyThemePage, estimatePageTokens, PAGE_LIMITS, pageSize, parsePage } from "../../dist/memory/page-format.js";
 import { newLinesOf } from "../../dist/memory/page-integration.js";
@@ -197,7 +197,6 @@ test("confirm drops only the owl:new marks of the named new lines and the run is
     assert.equal(report.applied, 1);
     assert.notEqual(report.stop_reason, "no_progress");
     assert.notEqual(report.stop_reason, "error");
-    assert.ok(report.backup_dir && existsSync(report.backup_dir));
     const after = t.read(PATH_A);
     assert.ok(after.includes("- 確認する行（W9）\n"), "the line stays");
     assert.ok(!after.includes(`確認する行（W9） ${NEW}`), "its mark is gone");
@@ -877,14 +876,6 @@ test("an incident-sized page shared by title with a common page converges within
     assert.equal(joined.length, 1);
     assert.deepEqual(sectionOf(joined[0], "決まりごと").map((i) => i.text), rules.slice(0, LIMIT.決まりごと));
     for (const entry of t.calls[0].pages) for (const sec of entry.items ?? []) for (const i of sec.items) assert.equal(i.ref.page, entry.path);
-    for (let k = 1; k <= t.calls.length; k++) {
-      const file = readFileSync(join(report.backup_dir, `batch-${k}`, LIBRARIAN_OUTPUT_FILE), "utf8");
-      assert.ok(Array.isArray(JSON.parse(file).calls[0].output.operations));
-      if (k === 1) {
-        assert.ok(file.includes("[secret:sk-]") && !file.includes(secret));
-        assert.equal(JSON.parse(file).rejected[0].op.op, "move");
-      }
-    }
   } finally { await t.cleanup(); }
 });
 

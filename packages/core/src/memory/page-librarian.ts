@@ -48,7 +48,6 @@ export interface PageRunReport {
   readonly remaining: number;
   readonly llm_calls: number;
   readonly input_tokens: number;
-  readonly backup_dir: string | null;
   readonly skipped?: string;
   readonly error?: string;
   /** Why the run ended; absent on reports Core builds itself (busy, ...). */
@@ -146,20 +145,16 @@ export interface PageLibrarianOptions {
    */
   readonly rebuildIndexes?: (scopes: readonly IndexScope[], backup: (rel: string) => Promise<void>) => Promise<unknown>;
   readonly onChanged?: (paths: readonly string[]) => void;
-  readonly limits?: { readonly input_tokens?: number; readonly output_tokens?: number; readonly consecutive_failures?: number; readonly backup_days?: number };
+  readonly limits?: { readonly input_tokens?: number; readonly output_tokens?: number; readonly consecutive_failures?: number };
   readonly now?: () => Date;
   readonly newId?: () => string;
   readonly logger?: { warn(message: string, error?: unknown): void };
 }
 
-const DAY_MS = 86_400_000;
 const FAILURE_FILE = "memory-page-failures.json";
 const FAILURE_KEY = "(librarian)";
 const REJECTION_FILE = "memory-page-rejections.json";
 const REJECTION_MAX = 10;
-const BACKUP_FOLDER = join("backups", "memory-pages");
-/** Each batch's raw model output and rejected operations, under `<backup_dir>/batch-N/`. */
-export const LIBRARIAN_OUTPUT_FILE = "librarian-output.json";
 const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 const normalizePath = (path: string): string => posix.normalize(path.replace(/\\/gu, "/")).replace(/^\.?\//u, "");
 
@@ -206,8 +201,8 @@ class WriteError extends Error {
 }
 
 interface RunContext {
-  readonly backupDir: string;
-  readonly backedUp: Set<string>;
+  /** Original text of each file this run changed, kept in memory only so a failed run can put it back. */
+  readonly originals: Map<string, string>;
   readonly created: Set<string>;
   readonly touched: Set<string>;
   /** sha256 of what this run last wrote per file, so a restore never overwrites someone else's edit. */
@@ -216,7 +211,7 @@ interface RunContext {
 
 export class PageLibrarian {
   private readonly now: () => Date;
-  private readonly limits: { input_tokens: number; output_tokens: number; consecutive_failures: number; backup_days: number };
+  private readonly limits: { input_tokens: number; output_tokens: number; consecutive_failures: number };
   private failures: Map<string, PageFailure> | null = null;
 
   public constructor(private readonly options: PageLibrarianOptions) {
@@ -225,7 +220,6 @@ export class PageLibrarian {
       input_tokens: options.limits?.input_tokens ?? PAGE_LIMITS.librarian_run_tokens,
       output_tokens: options.limits?.output_tokens ?? PAGE_LIMITS.librarian_output_tokens,
       consecutive_failures: options.limits?.consecutive_failures ?? 3,
-      backup_days: options.limits?.backup_days ?? 30,
     };
   }
 
@@ -238,11 +232,11 @@ export class PageLibrarian {
   public async run(input: PageRunInput): Promise<PageRunReport> {
     const maxBatches = input.paths ? 1 : this.options.batch?.().max_batches ?? 1;
     const total: { -readonly [K in keyof PageRunReport]: PageRunReport[K] } = {
-      run_id: input.run_id, mode: input.mode, pages: [], applied: 0, rejected: [], warnings: [], remaining: 0, llm_calls: 0, input_tokens: 0, backup_dir: null,
+      run_id: input.run_id, mode: input.mode, pages: [], applied: 0, rejected: [], warnings: [], remaining: 0, llm_calls: 0, input_tokens: 0,
     };
     let before = this.options.vault.isAvailable() ? await this.measure() : null;
     for (let n = 1; ; n++) {
-      const batch = await this.runBatch(input, n);
+      const batch = await this.runBatch(input);
       for (const page of batch.pages) if (!total.pages.some((p) => p.path === page.path)) total.pages.push(page);
       total.applied += batch.applied;
       total.llm_calls += batch.llm_calls;
@@ -250,7 +244,6 @@ export class PageLibrarian {
       total.rejected = [...total.rejected, ...batch.rejected];
       total.warnings = [...total.warnings, ...batch.warnings];
       total.remaining = batch.remaining;
-      if (batch.backup_dir !== null) total.backup_dir = join(this.options.dataDir, BACKUP_FOLDER, input.run_id);
       total.error = batch.error;
       total.skipped = batch.skipped;
       if (batch.skipped) { total.stop_reason = "skipped"; break; }
@@ -283,35 +276,17 @@ export class PageLibrarian {
     return left;
   }
 
-  private async runBatch(input: PageRunInput, batchNo: number): Promise<PageRunReport> {
+  private async runBatch(input: PageRunInput): Promise<PageRunReport> {
     const report: { -readonly [K in keyof PageRunReport]: PageRunReport[K] } = {
-      run_id: input.run_id, mode: input.mode, pages: [], applied: 0, rejected: [], warnings: [], remaining: 0, llm_calls: 0, input_tokens: 0, backup_dir: null,
+      run_id: input.run_id, mode: input.mode, pages: [], applied: 0, rejected: [], warnings: [], remaining: 0, llm_calls: 0, input_tokens: 0,
     };
     if (!this.options.vault.isAvailable()) return { ...report, skipped: "storage_unavailable" };
-    const runDir = join(this.options.dataDir, BACKUP_FOLDER, input.run_id);
-    const ctx: RunContext = { backupDir: join(runDir, `batch-${batchNo}`), backedUp: new Set(), created: new Set(), touched: new Set(), written: new Map() };
+    const ctx: RunContext = { originals: new Map(), created: new Set(), touched: new Set(), written: new Map() };
     // Conversation/clipping results are settled per item in `ctx`; theme and index writes use `rest`, so their failure never undoes settled items.
-    const rest: RunContext = { backupDir: join(ctx.backupDir, "after-items"), backedUp: new Set(), created: new Set(), touched: new Set(), written: new Map() };
-    const calls: Record<string, unknown>[] = [];
-    let appliedCall: number | null = null;
-    let saved = false;
+    const rest: RunContext = { originals: new Map(), created: new Set(), touched: new Set(), written: new Map() };
     let parsed: ReturnType<typeof parseOperationsOutput> | { error: string } | null = null;
-    // Failing to keep the output only costs the investigation trail, so it never fails the run.
-    const saveOutput = async (): Promise<void> => {
-      if (calls.length === 0) return;
-      const rejected = report.rejected.map((r) => ({ index: r.index, code: r.code, ...(r.detail ? { detail: r.detail } : {}), op: parsed !== null && "ops" in parsed ? parsed.ops[r.index] : undefined }));
-      const record = maskSecrets({ run_id: input.run_id, batch: batchNo, at: this.now().toISOString(), calls, applied_call: appliedCall, rejected });
-      try {
-        await mkdir(ctx.backupDir, { recursive: true });
-        await writeFile(join(ctx.backupDir, LIBRARIAN_OUTPUT_FILE), `${JSON.stringify(record, null, 2)}\n`);
-        saved = true;
-      } catch (error) {
-        this.options.logger?.warn("Could not save the librarian output", error);
-      }
-    };
     let settled: { applied: number; pages: string[] } = { applied: 0, pages: [] };
     try {
-      await this.pruneBackups();
       await this.options.index.refresh();
       const rows = this.options.index.listPages({ types: ["theme"], status: ["active", "dormant", "archived"] });
       const pending = await this.scanPending();
@@ -323,15 +298,13 @@ export class PageLibrarian {
       for (;;) {
         report.input_tokens = estimatePageTokens(JSON.stringify(built.request));
         if (report.input_tokens > limit) {
-          await saveOutput();
-          return { ...report, error: "input_over_limit", backup_dir: saved ? ctx.backupDir : null };
+          return { ...report, error: "input_over_limit" };
         }
         report.llm_calls += 1;
         const proposed = await this.call(built.request);
         parsed = !proposed.ok ? { error: proposed.error }
           : estimatePageTokens(JSON.stringify(proposed.output ?? null)) > this.limits.output_tokens ? { error: "output_over_limit" }
             : parseOperationsOutput(proposed.output);
-        calls.push({ n: report.llm_calls, ok: proposed.ok, ...(proposed.ok ? { ...(proposed.usage ? { usage: proposed.usage } : {}), output: proposed.output } : { error: proposed.error }), ...("error" in parsed && proposed.ok ? { parse_error: parsed.error } : {}) });
         if (!("error" in parsed) || parsed.error !== "output_over_limit" || built.size <= 1) break;
         const smaller = await this.buildRequest(input, rows, candidates, pending, Math.floor(built.size / 2));
         if (smaller.size >= built.size) break; // over-limit pages stay in whatever the cap: the same input would only fail again
@@ -341,10 +314,8 @@ export class PageLibrarian {
       if (parsed === null || "error" in parsed) {
         const error = parsed?.error ?? "no_output";
         this.recordFailure(error);
-        await saveOutput();
-        return { ...report, error, backup_dir: saved ? ctx.backupDir : null };
+        return { ...report, error };
       }
-      appliedCall = report.llm_calls;
       const themeOps: { op: unknown; index: number }[] = [];
       const extraOps: { op: unknown; index: number }[] = [];
       parsed.ops.forEach((raw, index) => {
@@ -377,11 +348,9 @@ export class PageLibrarian {
       report.error = `write_failed:${error.message}`;
       rest.touched.clear();
     }
-    await saveOutput();
     const written = [...ctx.touched, ...rest.touched];
     if (written.length > 0) this.options.onChanged?.(written);
-    const kept = ctx.backedUp.size > 0 ? ctx : rest.backedUp.size > 0 ? rest : null;
-    return { ...report, backup_dir: kept ? kept.backupDir : saved ? ctx.backupDir : null };
+    return report;
   }
 
   private async call(request: LibrarianOpsRequest): Promise<LibrarianOpsResult> {
@@ -635,13 +604,9 @@ export class PageLibrarian {
     if (hash !== undefined) ctx.written.set(rel, hash);
     ctx.touched.add(rel);
     if (!pages.includes(rel)) pages.push(rel);
-    if (!ctx.backedUp.has(rel) && !ctx.created.has(rel)) {
+    if (!ctx.originals.has(rel) && !ctx.created.has(rel)) {
       if (original === null) ctx.created.add(rel);
-      else {
-        await mkdir(dirname(join(ctx.backupDir, rel)), { recursive: true });
-        await writeFile(join(ctx.backupDir, rel), original);
-        ctx.backedUp.add(rel);
-      }
+      else ctx.originals.set(rel, original);
     }
   }
 
@@ -753,17 +718,15 @@ export class PageLibrarian {
     }
   }
 
-  /** Copies the original to `data/backups/memory-pages/<run_id>/<path>` once; a file that does not exist yet is remembered as created. */
+  /** Keeps the original text in memory once; a file that does not exist yet is remembered as created. */
   private async backup(ctx: RunContext, rel: string): Promise<void> {
-    if (ctx.backedUp.has(rel) || ctx.created.has(rel)) return;
+    if (ctx.originals.has(rel) || ctx.created.has(rel)) return;
     const original = await readFile(join(this.options.vault.activeDir(), rel)).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return null;
       throw error;
     });
     if (original === null) { ctx.created.add(rel); return; }
-    await mkdir(dirname(join(ctx.backupDir, rel)), { recursive: true });
-    await writeFile(join(ctx.backupDir, rel), original);
-    ctx.backedUp.add(rel);
+    ctx.originals.set(rel, original.toString("utf8"));
   }
 
   /** Puts back what this run wrote: backed-up originals return, newly created files go. A file edited since this run wrote it is left alone. */
@@ -776,16 +739,16 @@ export class PageLibrarian {
     };
     try {
       await this.options.vault.withWrite(async () => {
-        for (const rel of ctx.backedUp) {
+        for (const [rel, original] of ctx.originals) {
           try {
             if (!(await untouched(rel))) {
-              this.options.logger?.warn(`Kept ${rel}: it changed after the librarian wrote it; the original is in ${ctx.backupDir}`);
+              this.options.logger?.warn(`Kept ${rel}: it changed after the librarian wrote it`);
               continue;
             }
             await mkdir(dirname(join(root, rel)), { recursive: true });
-            await writeAtomic(join(root, rel), await readFile(join(ctx.backupDir, rel), "utf8"));
+            await writeAtomic(join(root, rel), original);
           } catch (error) {
-            this.options.logger?.warn(`Could not restore ${rel} from the librarian backup`, error);
+            this.options.logger?.warn(`Could not restore ${rel} from the original text`, error);
           }
         }
         for (const rel of ctx.created) {
@@ -798,20 +761,9 @@ export class PageLibrarian {
         }
       });
     } catch (error) {
-      this.options.logger?.warn("Could not restore the librarian backup", error);
+      this.options.logger?.warn("Could not restore the original pages", error);
     }
-    this.options.onChanged?.([...ctx.backedUp, ...ctx.created]);
-  }
-
-  /** Backups older than `backup_days` go. */
-  private async pruneBackups(): Promise<void> {
-    const dir = join(this.options.dataDir, BACKUP_FOLDER);
-    const names = await readdir(dir).catch(() => [] as string[]);
-    const limit = this.now().getTime() - this.limits.backup_days * DAY_MS;
-    for (const name of names) {
-      const info = await stat(join(dir, name)).catch(() => null);
-      if (info && info.mtimeMs < limit) await rm(join(dir, name), { recursive: true, force: true }).catch(() => undefined);
-    }
+    this.options.onChanged?.([...ctx.originals.keys(), ...ctx.created]);
   }
 
   private loadFailures(): Map<string, PageFailure> {

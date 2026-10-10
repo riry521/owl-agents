@@ -129,7 +129,7 @@ async function setupCore(t) {
 test("run_librarian (manual) and the nightly run do the same page run: intake, merge, metabolism and linking in one librarian run", async (t) => {
   const core = await setupCore(t);
   const runs = [];
-  core.pageLibrarian.run = async (input) => { runs.push(input.mode); return { run_id: input.run_id, mode: input.mode, pages: [], applied: 0, rejected: [], warnings: [], remaining: 0, llm_calls: 1, input_tokens: 1, backup_dir: null }; };
+  core.pageLibrarian.run = async (input) => { runs.push(input.mode); return { run_id: input.run_id, mode: input.mode, pages: [], applied: 0, rejected: [], warnings: [], remaining: 0, llm_calls: 1, input_tokens: 1 }; };
   const manual = await core.runCuration({ kind: "librarian", trigger: "manual_api", actor: "owner" });
   assert.equal(manual.status, "succeeded");
   const nightly = await core.runCuration({ kind: "librarian", trigger: "scheduled", actor: "system" });
@@ -139,7 +139,7 @@ test("run_librarian (manual) and the nightly run do the same page run: intake, m
   assert.equal(core.getCurationRun(nightly.id).report.mode, "nightly");
 });
 
-const reportOf = (input, extra) => ({ run_id: input.run_id, mode: input.mode, pages: [], applied: 0, rejected: [], warnings: [], remaining: 0, llm_calls: 1, input_tokens: 1, backup_dir: null, ...extra });
+const reportOf = (input, extra) => ({ run_id: input.run_id, mode: input.mode, pages: [], applied: 0, rejected: [], warnings: [], remaining: 0, llm_calls: 1, input_tokens: 1, ...extra });
 
 test("a librarian report with an error, or with remaining items and no organized page, is recorded as failed", async (t) => {
   const core = await setupCore(t);
