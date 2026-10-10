@@ -6,7 +6,7 @@ import {
   validateRoleOutput,
   type RoleSchema,
 } from "./role-contract";
-import type { OwnerLanguage } from "@owl/shared";
+import { externalJsonBlock, type OwnerLanguage } from "@owl/shared";
 import type { ProviderResponse } from "./types";
 
 export interface KeywordExtractionRequest {
@@ -44,7 +44,7 @@ export function buildKeywordPrompt(request: KeywordExtractionRequest): string {
     output: KEYWORD_OUTPUT_SCHEMA,
     outputRules: [],
     language: request.language ?? "en",
-    inputs: [{ name: "Items", value: request.items }],
+    inputs: [{ name: "Items", value: externalJsonBlock("owl-items", request.items) }],
   });
 }
 

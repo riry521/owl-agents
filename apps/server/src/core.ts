@@ -276,6 +276,8 @@ function knowledgeAutomationSnapshot(settings: KnowledgeAutomationSettings): Kno
     ...settings,
     librarian_times: [...settings.librarian_times],
     next_librarian_run_at: null,
+    next_skill_curation_run_at: null,
+    next_rule_curation_run_at: null,
     time_zone: timeZone,
   };
 }

@@ -12,7 +12,7 @@ import {
 } from "./provider-error";
 import { asManagerRequest, buildManagerPrompt, managerOutputSchema, parseManagerPlanWithFeedback } from "./manager";
 import { statSync } from "node:fs";
-import { AgentTimeoutSettingError, readStoredAcceptanceCriteria, DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, PROCESS_SKILLS_PROMPT_FILES, renderProcessSkills, parseResearchSubagentSettings, researchSubagentPromptRef, type CuratorRequest, type ResearcherPromptRef, type ResearchSubagentSettings, type CuratorRunResult, type ProcessSkillsRole, type PromptObserver, roleSessionContextLimit } from "@owl/shared";
+import { EXTERNAL_DATA_POLICY, AgentTimeoutSettingError, readStoredAcceptanceCriteria, DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, PROCESS_SKILLS_PROMPT_FILES, renderProcessSkills, parseResearchSubagentSettings, researchSubagentPromptRef, type CuratorRequest, type ResearcherPromptRef, type ResearchSubagentSettings, type CuratorRunResult, type ProcessSkillsRole, type PromptObserver, roleSessionContextLimit } from "@owl/shared";
 import { type ReportCorrection, extractProviderUsage, harnessFailureDetail, isClaudeReportFormatFailure, isRecord, parseSingleJsonObject, unwrapClaudeCliResult, unwrapCodexCliResult } from "./protocol";
 import { extractRoleOutputObject, providerSchema } from "./role-contract";
 import { RoleSessionManager } from "./role-session-manager";
@@ -22,8 +22,8 @@ import { OutputFormatError, outputResubmitPrompt, runWithOutputResubmit, type Ou
 import { DEFAULT_SIDE_EFFECT_TOOLS, isSideEffectTool } from "./side-effects";
 import { buildKeywordPrompt, keywordProviderSchema, parseKeywordResponse, type KeywordExtractionRequest, type KeywordExtractionRunResult } from "./keyword-extraction";
 import {
-  buildClippingTagsPrompt, buildLibrarianOperationsPrompt, buildPageIntegrationPrompt, parseClippingTagsResponse, parseLibrarianOperationsResponse, parsePageIntegrationResponse,
-  type ClippingTagsRequest, type LibrarianModelSetting, type LibrarianOperationsRequest, type LibrarianRunResult, type PageIntegrationRequest,
+  buildClippingTagsPrompt, buildLibrarianOperationsPrompt, buildRuleJudgmentsPrompt, parseClippingTagsResponse, parseRuleJudgmentsResponse, parseLibrarianOperationsResponse,
+  type ClippingTagsRequest, type RuleJudgmentsRequest, type LibrarianModelSetting, type LibrarianOperationsRequest, type LibrarianRunResult,
 } from "./page-integration";
 import { buildProjectInvestigationPrompt, parseProjectInvestigationResponse, projectInvestigationProviderSchema, type ProjectInvestigationRequest, type ProjectInvestigationRunResult } from "./project-investigation";
 import { buildCuratorPrompt, curatorProviderSchema, parseCuratorResponse } from "./curator";
@@ -1306,8 +1306,9 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     prefix: string,
     prompt: string,
     schema: Readonly<Record<string, unknown>> | undefined,
-    parse: typeof parsePageIntegrationResponse,
+    parse: typeof parseLibrarianOperationsResponse,
     failure: string,
+    resubmitLimit: number = resubmitLimitFor(),
   ): Promise<LibrarianRunResult> => {
     const invocationId = input.run_id ?? invocationIdFactory();
     let directory: string | undefined;
@@ -1336,7 +1337,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
           if ("error" in result) throw new OutputFormatError(result.error);
           return result;
         },
-        resubmitLimitFor(),
+        resubmitLimit,
         executeProviderWithPlanUsage,
       );
       if (!outcome.ok) {
@@ -1363,14 +1364,15 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
   // No provider schema for the two librarian calls below: haiku often answers with prose (about an unavailable
   // StructuredOutput tool, or a summary of what it did) under --json-schema; the prompt carries the output shape
   // and the parser takes the JSON text (fenced or not).
-  const runPageIntegration = (input: PageIntegrationRequest): Promise<LibrarianRunResult> =>
-    runLibrarianJson(input, "owl-page-integration-", buildPageIntegrationPrompt(input), undefined, parsePageIntegrationResponse, "page_integration_failed");
-
   const runLibrarianOperations = (input: LibrarianOperationsRequest): Promise<LibrarianRunResult> =>
     runLibrarianJson(input, "owl-librarian-operations-", buildLibrarianOperationsPrompt(input), undefined, parseLibrarianOperationsResponse, "librarian_operations_failed");
 
   const runClippingTags = (input: ClippingTagsRequest): Promise<LibrarianRunResult> =>
     runLibrarianJson(input, "owl-clipping-tags-", buildClippingTagsPrompt(input), undefined, parseClippingTagsResponse, "clipping_tags_failed");
+
+  // Resubmission is off: one judgement is one model call, and Core treats an unreadable answer as "no judgement".
+  const runRuleJudgments = (input: RuleJudgmentsRequest): Promise<LibrarianRunResult> =>
+    runLibrarianJson(input, "owl-rule-judgments-", buildRuleJudgmentsPrompt(input), undefined, parseRuleJudgmentsResponse, "rule_judgments_failed", 0);
 
   const runProjectInvestigation = async (input: ProjectInvestigationRequest): Promise<ProjectInvestigationRunResult> => {
     const invocationId = input.invocation_id ?? invocationIdFactory();
@@ -1432,9 +1434,9 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     runAdvisor,
     runCurator,
     runKeywordExtraction,
-    runPageIntegration,
     runLibrarianOperations,
     runClippingTags,
+    runRuleJudgments,
     runProjectInvestigation,
     provider: observedProvider,
     cancelAgent: async (invocationId: string, force?: boolean) => {
@@ -1534,6 +1536,7 @@ export function buildAdvisorPrompt(request: AdvisorRequest): string {
   }, null, 2);
   return [
     systemPrompt,
+    ...(systemPrompt.includes(EXTERNAL_DATA_POLICY) ? [] : [EXTERNAL_DATA_POLICY]),
     "Return exactly one JSON object (no markdown fences, no extra text before or after) in this exact shape:",
     shape,
     "reply: a helpful, direct answer or response to the latest message.",

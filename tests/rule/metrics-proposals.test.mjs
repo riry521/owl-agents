@@ -97,7 +97,7 @@ test("metrics proposals come only from low first-review pass rates, merge per ty
 
   const propose = (list = candidates, max_ids = 3) => proposeFromMetrics(core.ruleProposals, list, { project_id: null, language: "en", max_ids });
   const [first] = await propose();
-  assert.equal(first.status, "awaiting_approval");
+  assert.equal(first.status, "pending", "one snapshot is one source, below the minimum of two");
   const [again] = await propose();
   assert.equal(again.already_recorded, true);
 
@@ -126,6 +126,7 @@ test("metrics proposals come only from low first-review pass rates, merge per ty
   });
   const [second] = await propose(metricsRuleCandidates(db, settings));
   assert.equal(second.proposal_id, first.proposal_id);
+  assert.equal(second.status, "awaiting_approval");
   const open = core.listRuleProposals("awaiting_approval");
   assert.equal(open.length, 1);
   assert.equal(open[0].origin, "metrics");

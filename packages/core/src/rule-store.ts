@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { lstatSync, realpathSync, statSync } from "node:fs";
-import { readdir, readFile, watch, mkdir } from "node:fs/promises";
+import { watch, type FSWatcher } from "node:fs";
+import { readdir, readFile, mkdir } from "node:fs/promises";
 import { join, extname, resolve } from "node:path";
 import { GUARD_COMMAND_KEYS, GUARD_CONTENT_KEYS, GUARD_PATH_KEYS, isRuleRole, type ActorRole } from "@owl/shared";
 import {
@@ -264,6 +265,8 @@ const LEVEL_PRIORITY: Record<RuleLevel, number> = {
 const RULES_SUBDIRS = ["system", "role"] as const;
 const RELOAD_DEBOUNCE_MS = 250;
 const UNRESOLVED_PATH_RULE_ID = "guard-unresolved-path";
+/** The one prompt line standing for every block_command / block_path rule. */
+const BLOCK_RULES_SUMMARY = "[system] Dangerous commands and operations on secret files are blocked mechanically at run time; a blocked call returns its reason.";
 const EMPTY_RULE_SET: RuleSet = { files: [], blockRules: [], blockPaths: [], promptRules: [] };
 
 export class RuleStore {
@@ -526,24 +529,36 @@ export class RuleStore {
   }
 
   /**
-   * The prompt lines for `role`: one line per rule as `[level] text`, in
+   * The prompt lines for `role`: one line per instruction as `[level] text`, in
    * absolute → system → role order (file path, then written order), then the
-   * Work's rules as `[work] text`. A line identical to an earlier one is
-   * emitted once; guard enforcement is unaffected.
+   * Work's rules as `[work] text`. Block rules collapse into one summary line
+   * (BLOCK_RULES_SUMMARY) at the place of the first one. An instruction whose
+   * text was already emitted at a stronger level is skipped; guard enforcement
+   * is unaffected.
+   *
+   * Why not spell block rules out: every agent run goes through
+   * buildAgentPermissionArgs, which installs the PreToolUse guard hook for both
+   * claude and codex (and throws when the hook is not built), so there is no
+   * unguarded path that would still need the full text.
    */
   public getInstructionsForRole(role: RuleRole, workRules: readonly string[] = []): string[] {
     const seen = new Set<string>();
     const lines: string[] = [];
-    const push = (line: string) => {
-      if (seen.has(line)) return;
-      seen.add(line);
-      lines.push(line);
-    };
+    let summarized = false;
     for (const rule of this.currentRules.promptRules) {
       if (rule.level === "role" && rule.role !== role) continue;
-      push(`[${rule.level}] ${rule.text}`);
+      if (rule.kind !== "instruction") {
+        if (!summarized) {
+          summarized = true;
+          lines.push(BLOCK_RULES_SUMMARY);
+        }
+        continue;
+      }
+      if (seen.has(rule.text)) continue;
+      seen.add(rule.text);
+      lines.push(`[${rule.level}] ${rule.text}`);
     }
-    for (const rule of workRules) push(`[work] ${rule}`);
+    for (const rule of new Set(workRules)) lines.push(`[work] ${rule}`);
     return lines;
   }
 
@@ -598,9 +613,12 @@ export class RuleStore {
   public async startWatching(onChange: (result: RuleReloadResult) => Promise<void> | void): Promise<void> {
     if (this.watcherAbort) return;
     const abort = new AbortController();
-    let watcher: ReturnType<typeof watch>;
+    let watcher: FSWatcher;
     try {
-      watcher = watch(this.rulesDir, { recursive: true, signal: abort.signal });
+      // Callback fs.watch, not fs/promises.watch: on Linux the recursive watcher rescans
+      // folders itself and emits 'error' (ENOENT when one vanishes) on an emitter only
+      // this form lets us listen to; without a listener that is an uncaughtException.
+      watcher = watch(this.rulesDir, { recursive: true });
     } catch (error) {
       console.warn("[owl-core] fs.watch is not available; rule hot reload is disabled.", error);
       return;
@@ -636,24 +654,24 @@ export class RuleStore {
         this.reloadRunning = false;
       }
     };
-    void (async () => {
-      try {
-        for await (const _event of watcher) {
-          if (this.reloadTimer !== null) clearTimeout(this.reloadTimer);
-          this.reloadTimer = setTimeout(() => {
-            this.reloadTimer = null;
-            void reload();
-          }, RELOAD_DEBOUNCE_MS);
-          this.reloadTimer.unref?.();
-        }
-      } catch (error) {
-        if (abort.signal.aborted) return;
-        // The watcher itself died: later file changes are not seen until Owl
-        // restarts, so tell the Owner once.
-        console.error("[owl-core] Rule file watcher failed", error);
-        await deliver({ ok: false, error: new RuleLoadError([{ path: this.rulesDir, line: null, reason: `watcher failed: ${error instanceof Error ? error.message : String(error)}` }]) });
-      }
-    })();
+    abort.signal.addEventListener("abort", () => watcher.close(), { once: true });
+    watcher.on("change", () => {
+      if (abort.signal.aborted) return;
+      if (this.reloadTimer !== null) clearTimeout(this.reloadTimer);
+      this.reloadTimer = setTimeout(() => {
+        this.reloadTimer = null;
+        void reload();
+      }, RELOAD_DEBOUNCE_MS);
+      this.reloadTimer.unref?.();
+    });
+    watcher.on("error", (error) => {
+      if (abort.signal.aborted) return;
+      // The watcher itself died: later file changes are not seen until Owl
+      // restarts, so tell the Owner once.
+      abort.abort();
+      console.error("[owl-core] Rule file watcher failed", error);
+      void deliver({ ok: false, error: new RuleLoadError([{ path: this.rulesDir, line: null, reason: `watcher failed: ${error instanceof Error ? error.message : String(error)}` }]) });
+    });
   }
 
   public stopWatching(): void {

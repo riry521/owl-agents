@@ -32,6 +32,8 @@ export interface PlanQualitySettings {
   readonly heavy_check_patterns: readonly string[];
   /** Warning codes that are still rejected after the repair requests are used up. */
   readonly blocking_codes: readonly PlanQualityCode[];
+  /** Warning codes that are only recorded: they never trigger a repair request and are left out of the repair message. */
+  readonly record_only_codes: readonly PlanQualityCode[];
 }
 
 export const DEFAULT_PLAN_QUALITY_SETTINGS: PlanQualitySettings = {
@@ -56,6 +58,7 @@ export const DEFAULT_PLAN_QUALITY_SETTINGS: PlanQualitySettings = {
     "(本番|production)[^。.\\n]{0,12}(コピー|複製|\\bcopy\\b|\\bsnapshot\\b)",
   ],
   blocking_codes: ["external_state_comparison", "criterion_field_missing", "heavy_check_unjustified"],
+  record_only_codes: ["acceptance_chars_over"],
 };
 
 export class PlanQualitySettingsValidationError extends Error {
@@ -78,6 +81,9 @@ const isRegexSources = (value: unknown, flags = "g"): value is string[] => {
   }
 };
 
+const isCodes = (value: unknown): boolean => Array.isArray(value) && new Set(value).size === value.length
+  && value.every((code) => (PLAN_QUALITY_CODES as readonly unknown[]).includes(code));
+
 const FIELD_CHECKS: Record<keyof PlanQualitySettings, (value: unknown) => boolean> = {
   enabled: (value) => typeof value === "boolean",
   max_repair_requests: (value) => isCount(value, 0),
@@ -93,8 +99,8 @@ const FIELD_CHECKS: Record<keyof PlanQualitySettings, (value: unknown) => boolea
   state_comparison_patterns: (value) => isRegexSources(value, "iu"),
   external_state_exempt_patterns: (value) => isRegexSources(value, "iu"),
   heavy_check_patterns: (value) => isRegexSources(value, "iu"),
-  blocking_codes: (value) => Array.isArray(value) && new Set(value).size === value.length
-    && value.every((code) => (PLAN_QUALITY_CODES as readonly unknown[]).includes(code)),
+  blocking_codes: isCodes,
+  record_only_codes: isCodes,
 };
 
 /** For PUT: exact keys, each value valid. */

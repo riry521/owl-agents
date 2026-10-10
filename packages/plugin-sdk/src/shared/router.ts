@@ -11,7 +11,7 @@ export interface PendingDecision {
 }
 
 export type RoutedIntent<TFile> =
-  | { kind: "conversation"; text: string; files?: readonly TFile[] }
+  | { kind: "conversation"; text: string }
   | { kind: "status_query" }
   | { kind: "decision_answer"; decisionId: string; answer: string; optionKey: string | null; optionLabel: string | null }
   | { kind: "file_upload"; files: readonly TFile[]; text?: string }
@@ -57,7 +57,9 @@ export function classifyIntent<TFile>(
     if (subIntent.kind === "decision_answer" || subIntent.kind === "decision_clarification") {
       return subIntent;
     }
-    return { kind: "conversation", text, files };
+    // Why not "conversation" with files: connectors send conversation text
+    // only, so the attachments were silently dropped. file_upload carries text.
+    return { kind: "file_upload", files, text };
   }
 
   return classifyTextOnly(text, pendingDecisions, statusKeywords, language);

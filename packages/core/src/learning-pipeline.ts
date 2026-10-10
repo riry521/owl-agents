@@ -295,6 +295,11 @@ export class LearningPipeline {
     return this.gate.withWrite(() => this.processJobUnlocked(jobId));
   }
 
+  private projectName(projectId: string | null): string | null {
+    if (!projectId) return null;
+    return this.db.get<{ name: string }>("SELECT name FROM projects WHERE id=?", projectId)?.name ?? null;
+  }
+
   private async processJobUnlocked(jobId: string): Promise<LearningJobResult> {
     const claimed = await this.writeLane.transact((transaction: CoreWriteLaneTransaction) => {
       transaction.run(
@@ -358,6 +363,21 @@ export class LearningPipeline {
             ...(lesson.theme ? { theme: lesson.theme } : {}),
             project_id: row.project_id,
             cross_project: lesson.cross_project === true,
+            source: { work_number: workNumber, work_id: row.work_id, actor: "final-manager" },
+          });
+          if (routed.status === "deferred") {
+            storageUnavailable = true;
+            break;
+          }
+          record({ fingerprint: sourceFingerprint, kind: lesson.kind, ...routed });
+        } else if (lesson.kind === "rule_candidate" && isSpecificRuleText(lesson.rule_text, this.projectName(row.project_id))) {
+          // A rule naming a file, Task, Work or Project cannot apply to other Works, so it goes to the Project's knowledge instead of the rule queue.
+          const routed = await pages.router.route({
+            kind: "pitfall",
+            text: lesson.rule_text,
+            ...(lesson.theme ? { theme: lesson.theme } : {}),
+            project_id: row.project_id,
+            cross_project: false,
             source: { work_number: workNumber, work_id: row.work_id, actor: "final-manager" },
           });
           if (routed.status === "deferred") {
@@ -574,4 +594,21 @@ function positiveInteger(value: number | undefined, fallback: number): number {
 
 function nonNegativeInteger(value: number | undefined, fallback: number): number {
   return Number.isSafeInteger(value) && (value ?? -1) >= 0 ? value as number : fallback;
+}
+
+// File name = "name.ext": any Unicode name and any extension that starts with a letter, with no length cap, because capping it kept leaking real files.
+// Not matched: a bare ".yaml" (no name) and "1.2" (extension starts with a digit). Plain "input/output" or "Node.js" follow the rule on purpose: a fixed exception list was the patchwork we are avoiding.
+const FILE_NAME_PATTERN = /[\p{L}\p{N}_-]+(?:\.[\p{L}\p{N}_-]+)*\.\p{L}[\p{L}\p{N}_-]*/u;
+// Paths per the rule: a word starting with "/", "~/", "./" or "../", or any unspaced "word/word". Characters are not restricted ("/@cache" is a path).
+const PATH_PATTERN = /^(?:~|\.{1,2})?\/\S|\S\/\S/;
+// Fixed exclusions, judged on a whole word only: inside a longer word ("e.g.ts", "/e.g.") they must not hide a real file or path.
+const PROSE_ABBREVIATION = /^(?:and\/or|e\.g\.?|i\.e\.?|etc\.?)$/i;
+const TASK_OR_WORK_NUMBER_PATTERN = /\bT\d+\b|#\d+/;
+
+/** True when the rule names a concrete file, path, Task/Work number or the Project, so it cannot be a general rule. */
+export function isSpecificRuleText(ruleText: string, projectName: string | null): boolean {
+  const words = ruleText.split(/\s+/).map((word) => word.replace(/^[(["'`]+|[,;:!?)\]"'`]+$/g, "")).filter((word) => word && !PROSE_ABBREVIATION.test(word));
+  if (words.some((word) => FILE_NAME_PATTERN.test(word) || PATH_PATTERN.test(word)) || TASK_OR_WORK_NUMBER_PATTERN.test(ruleText)) return true;
+  const name = projectName?.trim().toLowerCase();
+  return Boolean(name) && ruleText.toLowerCase().includes(name as string);
 }

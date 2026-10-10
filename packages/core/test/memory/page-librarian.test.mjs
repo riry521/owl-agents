@@ -7,11 +7,13 @@ import { test } from "node:test";
 import { CurationRunStore } from "../../dist/curation-runs.js";
 import { openDatabase } from "../../../db/dist/index.js";
 import { MemoryIndex } from "../../dist/memory/memory-index.js";
-import { LIBRARIAN_RULES, PageLibrarian } from "../../dist/memory/page-librarian.js";
-import { bodySha256, estimatePageTokens, parsePage } from "../../dist/memory/page-format.js";
+import { IndexBuilder } from "../../dist/memory/index-builder.js";
+import { LIBRARIAN_OUTPUT_FILE, LIBRARIAN_RULES, PageLibrarian } from "../../dist/memory/page-librarian.js";
+import { DEFAULT_MEMORY_LIBRARIAN_BATCH, MEMORY_LIBRARIAN_MAX_BATCHES_LIMIT, readMemoryLibrarianBatch } from "../../../shared/dist/index.js";
+import { bodySha256, emptyThemePage, estimatePageTokens, PAGE_LIMITS, pageSize, parsePage } from "../../dist/memory/page-format.js";
 import { newLinesOf } from "../../dist/memory/page-integration.js";
 import { itemsOf } from "../../dist/memory/page-operations.js";
-import { PageRouter } from "../../dist/memory/page-router.js";
+import { OTHER_NOTES_TITLE, PageRouter } from "../../dist/memory/page-router.js";
 
 const PID = "01HZZZZZZZZZZZZZZZZZZZZZZP";
 const PID2 = "01HZZZZZZZZZZZZZZZZZZZZZZQ";
@@ -247,7 +249,7 @@ const CLIP = "clippings/oauth.md";
 const conversation = (extraction = "pending") => `---\nid: ${ID("C")}\ntype: conversation-log\ntitle: 会話 2026-10-05-1\nconversation_id: c1\nsession_id: s1\ncompaction_index: 1\nprovider: claude\nmodel: m\ncause: auto\nsummary_source: provider\nextraction: ${extraction}\nproject_id: ${PID}\ncreated: 2026-10-05\n---\n# 会話 2026-10-05-1\n\n## 話したこと\n- （司書待ち）\n\n## 決まったこと\n- （司書待ち）\n\n## 学んだこと\n- （司書待ち）\n\n## 反映先\n- （司書待ち）\n\n## 原文\n- 認証は PKCE を使うと決めた。tmp は共有しないと分かった。\n`;
 const clipping = (usage) => `---\nid: ${ID("K")}\ntype: clipping\ntitle: 認証フローの種類\nsource_url: https://example.com/oauth\nretrieved_at: 2026-10-03T05:00:00Z\nretrieved_by: research-recorder\nproject_ids: [${PID}]\nsummary: OAuth の認証フローの違い。\ntags: [x]\ncreated: 2026-10-03\n---\n# 認証フローの種類\n\n## 出典\n- URL: https://example.com/oauth\n- 取得: 2026-10-03（research-recorder、W812）\n\n## 要点\n- 認証コードフローは PKCE と組み合わせる\n\n${usage}## 関係する Project\n- [[projects/kotori/_index|ことり家計簿 の目次]] — 参考\n`;
 const EXTRA = () => ({ ...FIXTURE(), [CONV]: conversation(), [CLIP]: clipping("") });
-const allThemes = (t) => { const walk = (d) => readdirSync(join(t.vault, d), { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)])); return walk("projects").map((p) => t.read(p)); };
+const allThemes = (t) => { const walk = (d) => readdirSync(join(t.vault, d), { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(d, e.name)) : [join(d, e.name)])); return ["projects", "common"].filter((d) => existsSync(join(t.vault, d))).flatMap(walk).map((p) => t.read(p)); };
 
 test("a pending conversation log is read by the librarian: decisions and learnings are appended with owl:new and the log is marked done", async () => {
   const t = setup(EXTRA(), { propose: () => ok([]) });
@@ -608,6 +610,14 @@ test("the librarian rules spell out the field types of every operation the progr
   assert.doesNotMatch(rules, /`into`\/`to` are \{page,section\}/);
 });
 
+test("the librarian rules forbid numbered continuation pages for the other-notes page and send lines to theme pages, once", () => {
+  const rules = Array.isArray(LIBRARIAN_RULES) ? LIBRARIAN_RULES.join("\n") : String(LIBRARIAN_RULES);
+  const rule = `title ${OTHER_NOTES_TITLE})`;
+  assert.equal(rules.split(rule).length - 1, 1);
+  assert.match(rules, /never create or fill a numbered continuation page/);
+  assert.match(rules, /move each line to a page named for its theme, new or listed/);
+});
+
 test("a rejected extra operation reports field names and hash prefixes, never page text", async () => {
   const t = setup(EXTRA(), { propose: () => ok([]) });
   try {
@@ -624,5 +634,449 @@ test("a rejected extra operation reports field names and hash prefixes, never pa
     assert.deepEqual(byIndex(3).detail, { missing: ["text"], unknown: ["extra"] });
     const dump = JSON.stringify(report.rejected);
     for (const secret of ["サインイン", "PKCE", "認証コードフロー"]) assert.ok(!dump.includes(secret));
+  } finally { await t.cleanup(); }
+});
+
+const routed = (theme, over = {}) => ({ kind: "pitfall", text: `${theme || "無題"}の落とし穴`, theme, project_id: PID, source: { work_number: 7, work_id: null, actor: "manager" }, ...over });
+const themeTitles = (t, folder) => readdirSync(join(t.vault, folder)).filter((f) => f.endsWith(".md") && f !== "_index.md").sort();
+const linesOf = (text) => Object.fromEntries(parsePage(text).sections.map((s) => [s.heading, s.lines]));
+
+test("PageRouter: an unknown theme gets a new theme page in its scope and appears in the rebuilt index", async () => {
+  const t = setup({});
+  try {
+    await t.start();
+    const router = new PageRouter({ knowledgeDir: () => t.vault, withWrite: (fn) => fn(), now: () => NOW, projectName: () => "kotori" });
+    const own = await router.route(routed("新しい話"));
+    assert.deepEqual([own.status, own.page], ["appended", "projects/kotori/新しい話.md"]);
+    const common = await router.route(routed("共通の新話", { cross_project: true }));
+    assert.equal(common.page, "common/共通の新話.md");
+    assert.equal(parsePage(t.read(common.page)).frontmatter.scope, "common");
+    assert.ok(linesOf(t.read(own.page))["落とし穴"].some((l) => l.includes("新しい話の落とし穴")));
+    const written = new Map();
+    const builder = new IndexBuilder({
+      index: t.index, projects: { get: () => ({ id: PID, name: "kotori" }) },
+      writer: { read: async (p) => written.get(p) ?? null, write: async (p, text) => { written.set(p, text); return { path: p, written: true }; } },
+    });
+    const project = await builder.rebuild({ kind: "project", project_id: PID });
+    assert.ok(linesOf(project.text)["テーマ"].some((l) => l.includes("[[新しい話")));
+    const shared = await builder.rebuild({ kind: "common" });
+    assert.ok(linesOf(shared.text)["テーマ"].some((l) => l.includes("[[共通の新話")));
+  } finally { await t.cleanup(); }
+});
+
+test("PageRouter: spelling variants of an existing theme go to that page and create none", async () => {
+  const t = setup({});
+  try {
+    const router = new PageRouter({ knowledgeDir: () => t.vault, withWrite: (fn) => fn(), now: () => NOW, projectName: () => "kotori" });
+    const first = await router.route(routed("Build Cache"));
+    const before = themeTitles(t, "projects/kotori");
+    for (const variant of ["build cache", "  BUILD   CACHE ", "Build\tCache", "ＢＵＩＬＤ Ｃａｃｈｅ"]) {
+      const out = await router.route(routed(variant, { text: `${variant}の別の落とし穴` }));
+      assert.equal(out.page, first.page, variant);
+    }
+    assert.deepEqual(themeTitles(t, "projects/kotori"), before);
+  } finally { await t.cleanup(); }
+});
+
+test("PageRouter: an empty theme goes to その他の注意 and creates no theme page", async () => {
+  const t = setup({});
+  try {
+    const router = new PageRouter({ knowledgeDir: () => t.vault, withWrite: (fn) => fn(), now: () => NOW, projectName: () => "kotori" });
+    const out = await router.route(routed("  "));
+    assert.equal(out.page, "projects/kotori/その他の注意.md");
+    assert.deepEqual(themeTitles(t, "projects/kotori"), ["その他の注意.md", "プロジェクトの構成.md"]);
+    const unsymbolic = await router.route(routed("///"));
+    assert.equal(unsymbolic.page, "projects/kotori/その他の注意.md");
+  } finally { await t.cleanup(); }
+});
+
+test("PageRouter: a theme with a slash gets a safe file name, keeps its title, and later routes find it", async () => {
+  const t = setup({});
+  try {
+    const router = new PageRouter({ knowledgeDir: () => t.vault, withWrite: (fn) => fn(), now: () => NOW, projectName: () => "kotori" });
+    const first = await router.route(routed("CI/CD"));
+    assert.match(first.page, /^projects\/kotori\/[^/]+\.md$/u);
+    assert.notEqual(first.page, "projects/kotori/その他の注意.md");
+    assert.equal(parsePage(t.read(first.page)).title, "CI/CD");
+    const again = await router.route(routed("ci/cd", { text: "別の落とし穴" }));
+    assert.equal(again.page, first.page);
+    const escape = await router.route(routed("../escape"));
+    assert.match(escape.page, /^projects\/kotori\/[^/.][^/]*\.md$/u);
+  } finally { await t.cleanup(); }
+});
+
+const FACTS40 = Array.from({ length: 40 }, (_, i) => `- 決まりごとその${i}：${"あ".repeat(120)}（W${i + 1}）`);
+const overLimitPages = (request) => request.pages.filter((p) => p.over_limit);
+
+test("a page over the size limit always has its items in the request, even without new lines and past the item budget", async () => {
+  const t = setup({ [PATH_A]: page(ID("A"), "巨大", { facts: FACTS40 }, true), [PATH_B]: page(ID("B"), "ビルド", { pitfalls: ["- ビルドの行（W20）"] }, true) }, { propose: () => ok([]), options: { limits: { input_tokens: 1 } } });
+  try {
+    await t.start();
+    await t.librarian.run({ run_id: runId(), mode: "nightly" });
+    const big = t.calls[0].pages.find((p) => p.path === PATH_A);
+    assert.equal(big.over_limit, true);
+    assert.equal(big.new_lines, 0);
+    assert.equal(big.items.find((s) => s.section === "決まりごと").items.length, 40);
+    assert.equal(t.calls[0].pages.find((p) => p.path === PATH_B).items, null);
+  } finally { await t.cleanup(); }
+});
+
+test("a page over the limit is split by line references over repeated calls until every page fits, and no line is lost", async () => {
+  const t = setup({ [PATH_A]: page(ID("A"), "巨大", { facts: FACTS40 }, true) }, { propose: () => ok([]), options: { batch: BATCH(DEFAULT_MEMORY_LIBRARIAN_BATCH.max_batches) } });
+  try {
+    await t.start();
+    const linesOf = () => allThemes(t).flatMap((text) => text.split("\n").filter((l) => l.startsWith("- 決まりごとその"))).sort();
+    const before = linesOf();
+    assert.ok(allThemes(t).every((text) => estimatePageTokens(text) > PAGE_LIMITS.theme_tokens), "the page starts over the token target");
+    let n = 0;
+    t.state.propose = (request) => ok(overLimitPages(request).map((p) => {
+      const items = p.items.find((s) => s.section === "決まりごと").items.slice(0, 10).map((i) => i.ref);
+      return { op: "split", page: p.path, new_title: `分冊${++n}`, new_summary: "分けた行", items, relation: "分割元" };
+    }));
+    const report = await t.librarian.run({ run_id: runId(), mode: "nightly" });
+    assert.equal(report.error, undefined, JSON.stringify(report));
+    assert.ok(t.calls.length > 1, "the model is called again in the same run");
+    for (const text of allThemes(t)) {
+      assert.ok(estimatePageTokens(text) <= PAGE_LIMITS.theme_tokens);
+      assert.ok(itemsOf(text).find((s) => s.section === "決まりごと").items.length <= LIMIT.決まりごと);
+    }
+    assert.ok(allThemes(t).length > 1);
+    assert.deepEqual(linesOf(), before);
+  } finally { await t.cleanup(); }
+});
+
+test("set_usage and take_conversation accept the head of the hash as theme lines do, and reject a different head", async () => {
+  const t = setup(EXTRA(), { propose: () => ok([]) });
+  try {
+    await t.start();
+    const head = (path) => bodySha256(t.read(path)).slice(0, 12);
+    t.state.propose = () => ok([
+      { op: "set_usage", clipping: CLIP, h: "0".repeat(12), text: "x" },
+      { op: "take_conversation", conversation: CONV, h: "0".repeat(12), items: [{ kind: "fact", text: "x" }] },
+      { op: "set_usage", clipping: CLIP, h: head(CLIP), text: "サインイン方式を選ぶとき" },
+      { op: "take_conversation", conversation: CONV, h: head(CONV), items: [{ kind: "fact", text: "短い照合の事実" }] },
+    ]);
+    const report = await t.librarian.run({ run_id: runId(), mode: "manual" });
+    assert.deepEqual(report.rejected.map((r) => r.code), ["hash_mismatch", "hash_mismatch"]);
+    assert.equal(report.applied, 2);
+    assert.match(t.read(CLIP), /サインイン方式を選ぶとき/u);
+    assert.equal(parsePage(t.read(CONV)).frontmatter.extraction, "librarian");
+  } finally { await t.cleanup(); }
+});
+
+// ---- continuing by what actually shrank (design 4.2) ----
+const SIZE0 = pageSize(emptyThemePage({ id: ID("Z"), title: "x", summary: "x", scope: "project", project_id: PID, today: "2026-10-05" }));
+const LIMIT = Object.fromEntries(SIZE0.sections.map((x) => [x.section, x.limit]));
+const MAX_BATCHES = DEFAULT_MEMORY_LIBRARIAN_BATCH.max_batches;
+const longLines = (prefix, n) => Array.from({ length: n }, (_, i) => `- ${prefix}その${i + 1}：${"あ".repeat(50)}（W${i + 1}）`);
+const shortLines = (prefix, n) => Array.from({ length: n }, (_, i) => `- ${prefix}${i + 1}（W${i + 1}）`);
+const ownerUpdates = (n) => Array.from({ length: n }, (_, i) => `- 2026-09-${String(i + 1).padStart(2, "0")} Owner: 更新その${i + 1}`);
+const themeFile = (id, title, scope, { summary = [], rules = [], pitfalls = [], updates = ["- 2026-09-28 W812 新規作成"], hashed = true }) => {
+  const list = (lines) => (lines.length ? lines.join("\n") : "（なし）");
+  const body = `# ${title}\n\n## 概要\n${list(summary)}\n\n## 決まりごと\n${list(rules)}\n\n## 落とし穴\n${list(pitfalls)}\n\n## 手順\n（なし）\n\n## 関連ページ\n（なし）\n\n## 更新履歴\n${updates.join("\n")}\n`;
+  const head = (hash) => `---\nid: ${id}\ntype: theme\ntitle: ${title}\nsummary: ${title}の要約\nscope: ${scope}\n${scope === "project" ? `project_id: ${PID}\n` : ""}status: active\nintegrated_hash: ${hash}\nintegrated_at: ${hash ? "2026-10-01T00:00:00Z" : ""}\ncreated: 2026-09-20\nupdated: 2026-10-01\n---\n`;
+  return head(hashed ? bodySha256(head("") + body) : "") + body;
+};
+const countLines = (t, wanted) => {
+  const all = allThemes(t).flatMap((text) => text.split("\n").map((l) => l.trim()));
+  return wanted.map((l) => all.filter((x) => x === l).length);
+};
+const fileTexts = (t) => allThemes(t).filter((x) => x.includes("type: theme"));
+const sectionOf = (text, name) => itemsOf(text).find((x) => x.section === name)?.items ?? [];
+
+test("an incident-sized page shared by title with a common page converges within max_batches: every section and page fits, no line is lost or duplicated, the common page is untouched, and each batch's output is kept", async () => {
+  const PROJ = "projects/kotori/その他の注意.md";
+  const COMMON = "common/その他の注意.md";
+  const summary = longLines("概要", LIMIT.概要 + 14);
+  const rules = longLines("決まり", LIMIT.決まりごと + 9);
+  const pitfalls = longLines("落とし穴", LIMIT.落とし穴 + 54);
+  const updates = ownerUpdates(LIMIT.更新履歴 + 2);
+  const projText = themeFile(ID("A"), "その他の注意", "project", { summary, rules, pitfalls, updates });
+  const commonText = themeFile(ID("B"), "その他の注意", "common", { summary: ["- 共通の概要（W1）"], rules: ["- 共通の決まり（W2）"], pitfalls: ["- 共通の落とし穴その一（W3）", "- 共通の落とし穴その二（W4）"] });
+  const size = pageSize(parsePage(projText));
+  assert.ok(size.tokens > PAGE_LIMITS.theme_tokens * 2);
+  for (const name of ["概要", "決まりごと", "落とし穴", "更新履歴"]) assert.ok(size.sections.find((x) => x.section === name).lines > LIMIT[name], name);
+  const linkCost = estimatePageTokens("- [[その他の注意]] — 分割元\n") + estimatePageTokens("- 2026-10-05 司書: 移動 1\n");
+  const secret = "sk-" + "a".repeat(24);
+  let seq = 0;
+  let batchNo = 0;
+  const propose = (request) => {
+    batchNo += 1;
+    const ops = [];
+    const used = new Map();
+    for (const p of request.pages.filter((x) => x.over_limit && x.items)) {
+      const negative = Object.entries(p.free.lines).filter(([, v]) => v < 0).map(([k]) => k);
+      for (const section of negative.length ? negative : p.free.tokens < 0 ? ["落とし穴"] : []) {
+        const lines = p.items.find((x) => x.section === section).items;
+        const lineCost = estimatePageTokens(JSON.stringify(lines[0].text));
+        const want = Math.min(LIMIT[section], lines.length);
+        if (batchNo === 1 && section === "決まりごと") {
+          const half = want / 2;
+          for (const part of [lines.slice(0, half), lines.slice(half, want)]) ops.push({ op: "split", page: p.path, items: part.map((i) => i.ref), relation: "分割元", new_title: "合流先", new_summary: "二回の split の行き先" });
+          continue;
+        }
+        const dest = request.pages.find((d) => d.path !== p.path && d.scope === p.scope && d.project_id === p.project_id && !d.over_limit && d.free && !used.has(d.path) && d.free.lines[section] > 0);
+        const fit = dest ? Math.min(want, dest.free.lines[section], Math.floor((dest.free.tokens - 2 * linkCost) / lineCost)) : 0;
+        if (dest && fit > 0) {
+          used.set(dest.path, true);
+          ops.push({ op: "split", page: p.path, items: lines.slice(0, fit).map((i) => i.ref), relation: "分割元", into: dest.path });
+        } else {
+          ops.push({ op: "split", page: p.path, items: lines.slice(0, want).map((i) => i.ref), relation: "分割元", new_title: `分冊${++seq}`, new_summary: "分けた行" });
+        }
+      }
+    }
+    if (batchNo === 1) {
+      const foreign = request.pages.find((x) => x.scope === "common").items.find((x) => x.section === "落とし穴").items[0].ref;
+      ops.push({ op: "move", item: { page: PROJ, section: "落とし穴", h: foreign.h }, to: { page: PROJ, section: "落とし穴" } });
+    }
+    return { ok: true, output: { operations: ops, ...(batchNo === 1 ? { note: secret } : {}) }, usage: { input_tokens: 1, output_tokens: 1 } };
+  };
+  const t = setup({ [PROJ]: projText, [COMMON]: commonText }, { propose, options: { batch: BATCH(MAX_BATCHES) } });
+  try {
+    await t.start();
+    const report = await t.librarian.run({ run_id: runId(), mode: "nightly" });
+    assert.equal(report.stop_reason, "done", JSON.stringify(report));
+    assert.ok(t.calls.length >= 2 && t.calls.length <= MAX_BATCHES, String(t.calls.length));
+    for (const text of fileTexts(t)) {
+      const fit = pageSize(parsePage(text));
+      assert.ok(fit.tokens <= fit.token_limit, `${fit.tokens} tokens`);
+      for (const x of fit.sections) assert.ok(x.lines <= x.limit, `${x.section}: ${x.lines}`);
+    }
+    assert.deepEqual(countLines(t, [...summary, ...rules, ...pitfalls, ...updates, "- 共通の概要（W1）", "- 共通の決まり（W2）", "- 共通の落とし穴その一（W3）", "- 共通の落とし穴その二（W4）"]).filter((n) => n !== 1), []);
+    assert.equal(t.read(COMMON), commonText);
+    assert.deepEqual([...new Set(report.rejected.map((r) => r.code))], ["item_in_other_page"]);
+    assert.ok(report.rejected.every((r) => r.detail.found_in.includes(COMMON)));
+    const joined = fileTexts(t).filter((x) => x.includes("title: 合流先"));
+    assert.equal(joined.length, 1);
+    assert.deepEqual(sectionOf(joined[0], "決まりごと").map((i) => i.text), rules.slice(0, LIMIT.決まりごと));
+    for (const entry of t.calls[0].pages) for (const sec of entry.items ?? []) for (const i of sec.items) assert.equal(i.ref.page, entry.path);
+    for (let k = 1; k <= t.calls.length; k++) {
+      const file = readFileSync(join(report.backup_dir, `batch-${k}`, LIBRARIAN_OUTPUT_FILE), "utf8");
+      assert.ok(Array.isArray(JSON.parse(file).calls[0].output.operations));
+      if (k === 1) {
+        assert.ok(file.includes("[secret:sk-]") && !file.includes(secret));
+        assert.equal(JSON.parse(file).rejected[0].op.op, "move");
+      }
+    }
+  } finally { await t.cleanup(); }
+});
+
+const overPage = (pitfalls, extra = {}) => themeFile(ID("A"), "超過", "project", { pitfalls, ...extra });
+
+test("a model that never makes progress stops after one batch with no_progress", async () => {
+  const before = overPage(shortLines("落とし穴", LIMIT.落とし穴 + 3));
+  const t = setup({ [PATH_A]: before, [PATH_F]: page(ID("F"), "別件", { pitfalls: ["- 別件の行（W11）"], pid: PID2 }, true) }, {
+    propose: (request) => ok([{ op: "split", page: PATH_A, items: request.pages.find((p) => p.path === PATH_A).items.find((x) => x.section === "落とし穴").items.slice(0, 3).map((i) => i.ref), relation: "分割元", into: PATH_F }]),
+    options: { batch: BATCH(MAX_BATCHES) },
+  });
+  try {
+    await t.start();
+    const report = await t.librarian.run({ run_id: runId(), mode: "nightly" });
+    assert.equal(report.stop_reason, "no_progress");
+    assert.equal(t.calls.length, 1);
+    assert.deepEqual(report.rejected.map((r) => r.code), ["scope_mismatch"]);
+    assert.equal(t.read(PATH_A), before);
+  } finally { await t.cleanup(); }
+});
+
+test("while a page stays over a limit, taking new lines in or moving lines into new pages is not progress", async () => {
+  const marked = (n) => Array.from({ length: n }, (_, i) => `- 新しい行${i + 1}（W9） ${NEW}`);
+  const first = (request, path, pick) => request.pages.find((p) => p.path === path).items.flatMap((x) => x.items).find(pick).ref;
+  const isNew = (i) => i.text.includes("owl:new");
+  const split = (ref, page, n) => ({ op: "split", page, items: [ref], relation: "分割元", new_title: `新規${n}`, new_summary: "分けた行" });
+  const cases = {
+    "new lines of a page within its limits go to new pages": {
+      files: { [PATH_A]: overPage(shortLines("落とし穴", LIMIT.落とし穴 + 3), { hashed: true }), [PATH_B]: themeFile(ID("B"), "ビルド", "project", { pitfalls: ["- ビルドの行（W20）", ...marked(2)], hashed: false }) },
+      propose: (n) => (request) => ok([split(first(request, PATH_B, isNew), PATH_B, ++n.v)]),
+    },
+    "new lines of the over-limit page lose their mark in the same section": {
+      files: { [PATH_A]: overPage([...shortLines("落とし穴", LIMIT.落とし穴 + 1), ...marked(2)], { hashed: false }) },
+      propose: () => (request) => { const ref = first(request, PATH_A, isNew); return ok([{ op: "move", item: ref, to: { page: PATH_A, section: "落とし穴" } }]); },
+    },
+    "unmarked lines of a page within its limits go to new pages": {
+      files: { [PATH_A]: overPage(shortLines("落とし穴", LIMIT.落とし穴 + 3)), [PATH_B]: themeFile(ID("B"), "ビルド", "project", { pitfalls: ["- ビルドの行（W20）", "- ビルドの行その二（W21）"] }) },
+      propose: (n) => (request) => ok([split(first(request, PATH_B, (i) => i.text.includes("ビルドの行")), PATH_B, ++n.v)]),
+    },
+  };
+  for (const [name, c] of Object.entries(cases)) {
+    const t = setup(c.files, { propose: () => ok([]), options: { batch: BATCH(MAX_BATCHES) } });
+    try {
+      await t.start();
+      t.state.propose = c.propose({ v: 0 });
+      const report = await t.librarian.run({ run_id: runId(), mode: "nightly" });
+      assert.equal(t.calls.length, 1, name);
+      assert.equal(report.stop_reason, "no_progress", name);
+      assert.deepEqual(report.rejected, [], name);
+    } finally { await t.cleanup(); }
+  }
+  const t = setup({ [PATH_B]: themeFile(ID("B"), "ビルド", "project", { pitfalls: ["- ビルドの行（W20）", ...marked(2)], hashed: false }) }, { propose: () => ok([]), options: { batch: BATCH(MAX_BATCHES) } });
+  try {
+    await t.start();
+    let n = 0;
+    t.state.propose = (request) => ok([split(first(request, PATH_B, isNew), PATH_B, ++n)]);
+    const report = await t.librarian.run({ run_id: runId(), mode: "nightly" });
+    assert.equal(t.calls.length, 2, "with no page over a limit the run continues until no new line is left");
+    assert.equal(report.stop_reason, "done");
+  } finally { await t.cleanup(); }
+});
+
+test("Core moving 更新履歴 lines to _history counts as progress once, so a model that does nothing stops after the second batch", async () => {
+  const UPD = "projects/kotori/履歴.md";
+  const pitfalls = shortLines("落とし穴", LIMIT.落とし穴 + 3);
+  const t = setup({ [PATH_A]: overPage(pitfalls), [UPD]: themeFile(ID("G"), "履歴", "project", { pitfalls: ["- 履歴の行（W1）"], updates: ownerUpdates(LIMIT.更新履歴 + 2) }) }, { propose: () => ok([]), options: { batch: BATCH(MAX_BATCHES) } });
+  try {
+    await t.start();
+    const report = await t.librarian.run({ run_id: runId(), mode: "nightly" });
+    assert.equal(t.calls.length, 2, JSON.stringify(report));
+    assert.equal(report.stop_reason, "no_progress");
+    assert.equal(sectionOf(t.read(UPD), "更新履歴").length, LIMIT.更新履歴);
+    assert.ok(t.read("projects/kotori/_history/履歴.md").includes(ownerUpdates(LIMIT.更新履歴 + 2)[LIMIT.更新履歴 + 1]));
+    assert.deepEqual(sectionOf(t.read(PATH_A), "落とし穴").map((i) => i.text), pitfalls);
+  } finally { await t.cleanup(); }
+});
+
+test("a model that keeps making small progress stops at max_batches", async () => {
+  const t = setup({ [PATH_A]: overPage(shortLines("落とし穴", LIMIT.落とし穴 + 5)) }, { propose: () => ok([]), options: { batch: BATCH(3) } });
+  try {
+    await t.start();
+    let n = 0;
+    t.state.propose = (request) => ok([{ op: "split", page: PATH_A, items: [request.pages.find((p) => p.path === PATH_A).items.find((x) => x.section === "落とし穴").items[0].ref], relation: "分割元", new_title: `一行${++n}`, new_summary: "分けた行" }]);
+    const report = await t.librarian.run({ run_id: runId(), mode: "nightly" });
+    assert.equal(t.calls.length, 3);
+    assert.equal(report.stop_reason, "max_batches");
+  } finally { await t.cleanup(); }
+});
+
+test("max_batches outside 1..MEMORY_LIBRARIAN_MAX_BATCHES_LIMIT falls back to the default with a warning", () => {
+  for (const bad of [0, MEMORY_LIBRARIAN_MAX_BATCHES_LIMIT + 1, "5"]) {
+    const warned = [];
+    assert.equal(readMemoryLibrarianBatch({ ...DEFAULT_MEMORY_LIBRARIAN_BATCH, max_batches: bad }, (m) => warned.push(m)).max_batches, DEFAULT_MEMORY_LIBRARIAN_BATCH.max_batches);
+    assert.equal(warned.length, 1);
+  }
+  for (const good of [1, MEMORY_LIBRARIAN_MAX_BATCHES_LIMIT]) {
+    assert.equal(readMemoryLibrarianBatch({ ...DEFAULT_MEMORY_LIBRARIAN_BATCH, max_batches: good }, () => assert.fail("no warning")).max_batches, good);
+  }
+});
+
+test("a page path written with 「・」 resolves to the page stored with 「-」 instead of unknown_page", async () => {
+  const dashed = "projects/kotori/テスト-検証.md";
+  const t = setup({ ...FIXTURE(), [dashed]: page(ID("G"), "テスト・検証", {}, true) }, { propose: () => ok([]) });
+  try {
+    await t.start();
+    t.state.propose = () => ok([{ op: "split", page: PATH_A, into: "projects/kotori/テスト・検証.md", items: [t.ref(PATH_A, "落とし穴", 3)], relation: "切り出し" }]);
+    const report = await t.librarian.run({ run_id: runId(), mode: "nightly" });
+    assert.deepEqual(report.rejected, []);
+    assert.ok(t.read(dashed).includes("切り出す行"));
+  } finally { await t.cleanup(); }
+});
+
+// ---- destination room, scope and repeated rejections ----
+const PATH_COMMON = "common/共通.md";
+const commonPage = () => themeFile(ID("M"), "共通", "common", { pitfalls: ["- 共通の行（W40）"] });
+
+test("the request lists, per page, only same-scope same-project destinations with their free room; a common page is never a destination of a project page", async () => {
+  const t = setup({ [PATH_A]: page(ID("A"), "巨大", { facts: FACTS40 }, true), [PATH_B]: page(ID("B"), "ビルド", { pitfalls: ["- ビルドの行（W20）"] }, true), [PATH_COMMON]: commonPage(), [PATH_F]: page(ID("F"), "別件", { pid: PID2 }, true) }, { propose: () => ok([]) });
+  try {
+    await t.start();
+    await t.librarian.run({ run_id: runId(), mode: "nightly" });
+    const pages = new Map(t.calls[0].pages.map((p) => [p.path, p]));
+    assert.deepEqual(pages.get(PATH_A).move_to, [PATH_B]);
+    assert.deepEqual(pages.get(PATH_B).move_to, [PATH_A]);
+    assert.deepEqual(pages.get(PATH_COMMON).move_to, []);
+    assert.equal(pages.get(PATH_B).free.lines.落とし穴, LIMIT.落とし穴 - 1);
+    assert.ok(pages.get(PATH_B).free.tokens > 0);
+  } finally { await t.cleanup(); }
+});
+
+test("a split that sends more lines than the destination has room for is cut to the room, and the other operations of the batch still apply", async () => {
+  const t = setup({
+    [PATH_A]: page(ID("A"), "元", { facts: longLines("元", 3), pitfalls: ["- 切り出す行（W4）", "- 残す行（W5）"] }, true),
+    [PATH_B]: page(ID("B"), "先", { facts: shortLines("先", LIMIT.決まりごと - 1) }, true),
+  }, { propose: () => ok([]) });
+  try {
+    await t.start();
+    t.state.propose = () => ok([
+      { op: "split", page: PATH_A, into: PATH_B, relation: "分割", items: [0, 1, 2].map((i) => t.ref(PATH_A, "決まりごと", i)) },
+      { op: "split", page: PATH_A, new_title: "新ページ", new_summary: "切り出し", relation: "分割", items: [t.ref(PATH_A, "落とし穴", 0)] },
+    ]);
+    const report = await t.librarian.run({ run_id: runId(), mode: "manual" });
+    assert.deepEqual(report.rejected, []);
+    assert.equal(report.applied, 2);
+    assert.equal(itemsOf(t.read(PATH_B)).find((s) => s.section === "決まりごと").items.length, LIMIT.決まりごと);
+    assert.ok(allThemes(t).every((text) => itemsOf(text).find((s) => s.section === "決まりごと").items.length <= LIMIT.決まりごと));
+    assert.ok(existsSync(join(t.vault, "projects/kotori/新ページ.md")));
+  } finally { await t.cleanup(); }
+});
+
+test("an operation rejected in one run is handed to the next run's model, even on a new librarian over the same data dir", async () => {
+  const files = { [PATH_A]: page(ID("A"), "巨大", { facts: FACTS40 }, true), [PATH_COMMON]: commonPage() };
+  const t = setup(files, { propose: () => ok([]) });
+  try {
+    await t.start();
+    const bad = () => ok([{ op: "split", page: PATH_A, into: PATH_COMMON, relation: "分割", items: [t.ref(PATH_A, "決まりごと", 0)] }]);
+    t.state.propose = bad;
+    const first = await t.librarian.run({ run_id: runId(), mode: "nightly" });
+    assert.equal(first.stop_reason, "no_progress");
+    assert.equal(first.rejected[0].code, "scope_mismatch");
+    assert.deepEqual(t.calls[0].previous_rejections, []);
+    const again = setup(files, { propose: bad });
+    try {
+      writeFileSync(join(again.dataDir, "memory-page-rejections.json"), readFileSync(join(t.dataDir, "memory-page-rejections.json")));
+      await again.start();
+      await again.librarian.run({ run_id: runId(), mode: "nightly" });
+      const [prev] = again.calls[0].previous_rejections;
+      assert.deepEqual([prev.code, prev.op, prev.page, prev.into], ["scope_mismatch", "split", PATH_A, PATH_COMMON]);
+    } finally { await again.cleanup(); }
+  } finally { await t.cleanup(); }
+});
+
+test("moves and splits are fitted in order to the room the batch leaves, a dropped one is rejected at its index in the model's ops, and the saved rejections follow those indexes", async () => {
+  const t = setup({
+    [PATH_A]: page(ID("A"), "元", { facts: longLines("元", 3), pitfalls: ["- 落とし穴の行（W4）"] }, true),
+    [PATH_B]: page(ID("B"), "先", { facts: shortLines("先", LIMIT.決まりごと - 1) }, true),
+    [PATH_COMMON]: commonPage(),
+    [CONV]: conversation(),
+  }, { propose: () => ok([]) });
+  try {
+    await t.start();
+    const into = (i) => ({ op: "move", item: t.ref(PATH_A, "決まりごと", i), to: { page: PATH_B, section: "決まりごと" } });
+    t.state.propose = () => ok([
+      { op: "take_conversation", conversation: CONV, h: "0".repeat(64), items: [{ kind: "fact", text: "x" }] },
+      into(0),
+      into(1),
+      { op: "split", page: PATH_A, into: PATH_B, relation: "分割", items: [t.ref(PATH_A, "決まりごと", 2)] },
+      { op: "split", page: PATH_A, into: PATH_COMMON, relation: "分割", items: [t.ref(PATH_A, "落とし穴", 0)] },
+    ]);
+    const report = await t.librarian.run({ run_id: runId(), mode: "manual" });
+    assert.deepEqual(report.rejected.map((r) => [r.index, r.code]), [[0, "hash_mismatch"], [2, "target_over_limit"], [3, "target_over_limit"], [4, "scope_mismatch"]]);
+    assert.equal(report.applied, 1);
+    assert.ok(allThemes(t).every((text) => itemsOf(text).find((s) => s.section === "決まりごと").items.length <= LIMIT.決まりごと));
+    const saved = JSON.parse(readFileSync(join(t.dataDir, "memory-page-rejections.json"), "utf8"));
+    assert.deepEqual(saved.map((r) => [r.code, r.op]), [["hash_mismatch", "take_conversation"], ["target_over_limit", "move"], ["target_over_limit", "split"], ["scope_mismatch", "split"]]);
+    const next = setup({ [PATH_A]: t.read(PATH_A), [PATH_B]: t.read(PATH_B) }, { propose: () => ok([]) });
+    try {
+      writeFileSync(join(next.dataDir, "memory-page-rejections.json"), readFileSync(join(t.dataDir, "memory-page-rejections.json")));
+      await next.start();
+      await next.librarian.run({ run_id: runId(), mode: "manual" });
+      assert.equal(next.calls[0].previous_rejections.length, 4);
+    } finally { await next.cleanup(); }
+  } finally { await t.cleanup(); }
+});
+
+test("room a move frees on a full page counts for the operations after it, and one that cannot be applied takes none", async () => {
+  const t = setup({
+    [PATH_A]: page(ID("A"), "元", { facts: shortLines("元", 2) }, true),
+    [PATH_B]: page(ID("B"), "先", { facts: shortLines("先", LIMIT.決まりごと) }, true),
+    [PATH_COMMON]: commonPage(),
+    [CONV]: conversation(),
+  }, { propose: () => ok([]) });
+  try {
+    await t.start();
+    const mv = (from, i, to) => ({ op: "move", item: t.ref(from, "決まりごと", i), to: { page: to, section: "決まりごと" } });
+    t.state.propose = () => ok([mv(PATH_B, 0, PATH_A), mv(PATH_A, 0, PATH_B), mv(PATH_A, 1, PATH_B)]);
+    const report = await t.librarian.run({ run_id: runId(), mode: "manual" });
+    assert.deepEqual(report.rejected.map((r) => [r.index, r.code]), [[2, "target_over_limit"]]);
+    assert.equal(report.applied, 2);
+    assert.ok(allThemes(t).every((text) => itemsOf(text).find((s) => s.section === "決まりごと").items.length <= LIMIT.決まりごと));
   } finally { await t.cleanup(); }
 });

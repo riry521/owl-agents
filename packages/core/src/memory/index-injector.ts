@@ -1,4 +1,4 @@
-import { defuseTags, kb, type MemoryInjectionInput } from "./memory-injector.js";
+import { defuseTags, EXTERNAL_DATA_ATTR, kb, type MemoryInjectionInput } from "./memory-injector.js";
 import type { MemoryIndex } from "./memory-index.js";
 import { estimatePageTokens } from "./page-format.js";
 import type { MemoryLogger } from "./memory-types.js";
@@ -16,7 +16,7 @@ const ADVISOR_START_BYTE_BUDGET = 5400;
 const PROJECT_LIST = "(project-list)";
 const OMITTED = "(上限超過のため省略 — MCP の index で取得)";
 const GUIDE = "テーマページは owl-memory の page で開く（[[ページ名]] を渡す）。\n外部の資料は search で探す。Work の記録は普段は読まない。";
-const ADVISOR_GUIDE = "Project の目次は owl-memory の index（project に名前を渡す）で開く。テーマページは page で開く（[[ページ名]] を渡す）。\n外部の資料は search で探す。Work の記録は普段は読まない。";
+const ADVISOR_GUIDE = "Project の目次は owl-memory の index（project に名前を渡す）で開く。テーマページは page で開く（[[ページ名]] を渡す）。\n外部の資料は search で探す。Work の記録は普段は読まない。\n会話で決まったことは append で、テンプレートのセクション（概要・決まりごと・落とし穴・手順）に沿って書く。";
 /** Sections dropped when the block is over its limit, first to last. 必読 is never dropped. */
 const COLLAPSE_ORDER = ["Project 目次の一覧", "共通テーマ", "概要", "テーマ"];
 
@@ -142,8 +142,8 @@ export class IndexInjector {
     // Reviewer judges changes, not the project: the summary is left out (design §5.2).
     const kept = role === "reviewer" ? sections.filter((s) => s.title !== "概要") : sections;
     const scope = own ? "project" : "common";
-    const head = `<owl-memory scope="${scope}"${own ? ` project="${attr(nameOf(page.title))}"` : ""}>`;
-    return this.fit({ head, minHead: `<owl-memory scope="${scope}">`, notice, sections: kept, guide: GUIDE, limit: INDEX_TOKEN_LIMIT, budget: INDEX_BYTE_BUDGET });
+    const head = `<owl-memory scope="${scope}"${own ? ` project="${attr(nameOf(page.title))}"` : ""} ${EXTERNAL_DATA_ATTR}>`;
+    return this.fit({ head, minHead: `<owl-memory scope="${scope}" ${EXTERNAL_DATA_ATTR}>`, notice, sections: kept, guide: GUIDE, limit: INDEX_TOKEN_LIMIT, budget: INDEX_BYTE_BUDGET });
   }
 
   /** Collapses sections in COLLAPSE_ORDER until the block fits `limit`; the size line comes after the closing tag. */
@@ -224,7 +224,7 @@ export class IndexInjector {
       sections.push({ title: "Project 目次の一覧", lines, collapsed: false });
     }
     if (sessionId) this.sessions.set(sessionId, this.startShown(common, projects));
-    const head = `<owl-memory scope="advisor" generated="${now}">`;
+    const head = `<owl-memory scope="advisor" generated="${now}" ${EXTERNAL_DATA_ATTR}>`;
     return this.fit({ head, minHead: head, notice, sections, guide: ADVISOR_GUIDE, limit: ADVISOR_START_TOKEN_LIMIT, budget: ADVISOR_START_BYTE_BUDGET });
   }
 
@@ -268,7 +268,7 @@ export class IndexInjector {
       changes.push(`## ${current.type === "project-index" ? current.title : `[[${current.title}]] の更新履歴`}`, ...(lines.length > 0 ? lines : ["（本文が更新された）"]));
     }
     if (updated === 0) return null;
-    const open = `<owl-memory-diff generated="${this.now()}">`;
+    const open = `<owl-memory-diff generated="${this.now()}" ${EXTERNAL_DATA_ATTR}>`;
     const text = `${open}\n${changes.join("\n")}\n</owl-memory-diff>`;
     return tokens(text) <= ADVISOR_DIFF_TOKEN_LIMIT ? text : `${open}${updated} ページが更新された。page で開き直す</owl-memory-diff>`;
   }

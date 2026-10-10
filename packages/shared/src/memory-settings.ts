@@ -158,18 +158,21 @@ export const MEMORY_LIBRARIAN_BATCH_SETTINGS_KEY = "memory_librarian_batch";
 export interface MemoryLibrarianBatch {
   readonly max_items: number;
   readonly max_input_tokens: number;
-  /** One run repeats batches up to this many times while pending inputs keep shrinking. */
+  /** One run repeats batches up to this many times, while unread input, an over-limit excess or (with nothing over a limit) new lines keep shrinking. */
   readonly max_batches: number;
 }
-export const DEFAULT_MEMORY_LIBRARIAN_BATCH: MemoryLibrarianBatch = { max_items: 20, max_input_tokens: 60000, max_batches: 3 };
+export const DEFAULT_MEMORY_LIBRARIAN_BATCH: MemoryLibrarianBatch = { max_items: 20, max_input_tokens: 60000, max_batches: 10 };
+/** Upper bound of max_batches: one batch can use max_input_tokens, so this caps a night's cost. */
+export const MEMORY_LIBRARIAN_MAX_BATCHES_LIMIT = 20;
 
-/** Tolerant parsing of stored values: a field that is not a positive integer falls back to its default. */
+/** Tolerant parsing of stored values: a field that is not a positive integer (max_batches: 1..MEMORY_LIBRARIAN_MAX_BATCHES_LIMIT) falls back to its default. */
 export function readMemoryLibrarianBatch(value: unknown, warn?: (message: string) => void): MemoryLibrarianBatch {
   if (value === undefined || value === null) return DEFAULT_MEMORY_LIBRARIAN_BATCH;
   const record = isRecord(value) ? value : {};
   const pick = (key: keyof MemoryLibrarianBatch): number => {
     const v = record[key];
-    if (Number.isInteger(v) && (v as number) >= 1) return v as number;
+    // Why not clamp an out-of-range max_batches: every unusable value already falls back to the default; one rule for all.
+    if (Number.isInteger(v) && (v as number) >= 1 && (key !== "max_batches" || (v as number) <= MEMORY_LIBRARIAN_MAX_BATCHES_LIMIT)) return v as number;
     warn?.(`Invalid ${MEMORY_LIBRARIAN_BATCH_SETTINGS_KEY}.${key}; using ${DEFAULT_MEMORY_LIBRARIAN_BATCH[key]}`);
     return DEFAULT_MEMORY_LIBRARIAN_BATCH[key];
   };

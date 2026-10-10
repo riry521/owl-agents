@@ -745,6 +745,8 @@ export interface CoreOptions {
     readonly clock?: import("./librarian-scheduler.js").LibrarianSchedulerClock;
     readonly timeoutMs?: number;
   };
+  /** `clock` lets tests drive the scheduled Librarian, skill curation and rule curation runs without real time. */
+  readonly knowledgeSchedule?: { readonly clock?: import("./librarian-scheduler.js").LibrarianSchedulerClock };
   /**
    * Runs each Project's worktree setup and refresh commands before Worker,
    * Designer and Reviewer runs, and checks that their MCP servers start in the

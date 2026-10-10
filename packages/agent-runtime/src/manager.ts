@@ -10,7 +10,7 @@ import {
   validateRoleOutput,
   type RoleSchema,
 } from "./role-contract";
-import { ACCEPTANCE_CRITERION_ID_PREFIX, CHECK_WEIGHTS, CRITERION_KINDS, DEFAULT_OWNER_LANGUAGE, renderAcceptanceCriteria, validateAcceptanceCriteria, type AcceptanceCriterion, type OwnerLanguage, type TaskNecessity } from "@owl/shared";
+import { ACCEPTANCE_CRITERION_ID_PREFIX, CHECK_WEIGHTS, CRITERION_KINDS, DEFAULT_OWNER_LANGUAGE, KNOWLEDGE_EXTERNAL_COMMAND_RULE, renderAcceptanceCriteria, validateAcceptanceCriteria, type AcceptanceCriterion, type OwnerLanguage, type TaskNecessity } from "@owl/shared";
 import type { PlanWaitFor } from "../../shared/dist/prerequisite.js";
 import {
   type ManagerPlanRequest,
@@ -149,7 +149,7 @@ export const MANAGER_REPLAN_OUTPUT_SCHEMA: RoleSchema = objectSchema({
 
 /** Lesson keys for routing facts, decisions and pitfalls to theme pages. */
 const PAGES_LESSON_PROPERTIES = {
-  theme: { type: "string", description: "for kind fact, decision or pitfall: choose one title from the `## テーマ` / `## 共通テーマ` list of the injected index; empty if none fits or for other kinds" },
+  theme: { type: "string", description: "for kind fact, decision or pitfall: choose one title from the `## テーマ` / `## 共通テーマ` list of the injected index; if none fits, give a new short theme title; empty only if it cannot be classified, or for other kinds" },
   cross_project: { type: "boolean", description: "true only if the lesson applies across Projects, not just this one; otherwise false" },
 } as const;
 
@@ -196,7 +196,7 @@ function finalizeOutputSchema(pages: boolean): RoleSchema {
         },
         topic: { type: "string", description: "short topic for fact, decision, or pitfall; otherwise empty" },
         procedure: { type: "string", description: "numbered procedure of at least 40 characters for procedure; otherwise empty" },
-        rule_text: { type: "string", description: "one-line imperative rule of at most 300 characters for rule_candidate; otherwise empty" },
+        rule_text: { type: "string", description: "one-line imperative rule of at most 300 characters for rule_candidate, in general wording with no file names, Project names, Task or Work numbers; otherwise empty" },
         rule_scope: {
           type: "string",
           enum: ["all", "manager", "designer", "worker", "reviewer", "advisor"],
@@ -210,7 +210,7 @@ function finalizeOutputSchema(pages: boolean): RoleSchema {
         ...(pages ? PAGES_LESSON_PROPERTIES : {}),
       }),
       example: [],
-      description: "lessons learned for future Work; may be []",
+      description: `lessons learned for future Work; may be []. ${KNOWLEDGE_EXTERNAL_COMMAND_RULE}`,
     },
   }),
   });
@@ -390,7 +390,7 @@ const ADVISOR_BACKLOG_INSTRUCTION = "work.advisor_backlog is {linked, dismissed}
 
 const KNOWLEDGE_CONTEXT_INSTRUCTION = "Rules are binding; context.knowledge is reference information: an excerpt of relevant knowledge collected from past Works (null if none). It does not override rules, the Task, or acceptance criteria. Report knowledge that seems incorrect or outdated in lessons.";
 const SKILL_USAGE_INSTRUCTION = "List skills actually used in skills_used, with helpful, misleading, or irrelevant and a short note. Only list Skill Box skills that appear in the context.skills index; never list plugin or process skills (e.g. superpowers:*) there.";
-const PAGES_THEME_INSTRUCTION = "For fact/decision/pitfall lessons set theme to one title from the `## テーマ` / `## 共通テーマ` list of context.knowledge (empty if none fits), and set cross_project true only for a lesson that applies beyond this Project. Leave both empty/false for other kinds.";
+const PAGES_THEME_INSTRUCTION = "For fact/decision/pitfall lessons set theme to one title from the `## テーマ` / `## 共通テーマ` list of context.knowledge (use the existing title when one fits; when none fits, give a new short theme title; leave it empty only for a lesson that cannot be classified), and set cross_project true only for a lesson that applies beyond this Project. Leave both empty/false for other kinds.";
 const SKILL_PROPOSAL_INSTRUCTION = "Propose a skill only when a multi-step procedure can be reused, a reusable fix came from an error or dead end, Owner or Reviewer feedback shows a lasting approach, or an existing skill has a mistake or gap. Leave skill_proposals empty otherwise.";
 
 function buildFinalizeManagerPrompt(request: ManagerPlanRequest, language: OwnerLanguage, processSkills: readonly string[] | null): string {
@@ -409,7 +409,7 @@ function buildFinalizeManagerPrompt(request: ManagerPlanRequest, language: Owner
       SKILL_USAGE_INSTRUCTION,
       SKILL_PROPOSAL_INSTRUCTION,
       "Include in lessons only insights reusable in future Works. Exclude one-off circumstances, facts unique to this Work, and points that can be readily derived again.",
-      "Use kind=procedure with procedure text for reusable steps. Use fact/decision/pitfall with topic for durable facts, reasoned decisions, and failure patterns. Use rule_candidate with rule_text/rule_scope only for short binding instructions; a rule_candidate becomes a rule only after Owner approval.",
+      "Use kind=procedure with procedure text for reusable steps. Use fact/decision/pitfall with topic for durable facts, reasoned decisions, and failure patterns. Use rule_candidate with rule_text/rule_scope only for short binding instructions; a rule_candidate becomes a rule only after Owner approval. Write rule_text in general wording that applies to any Project and Work: never put file names, paths, Project names, Task numbers (T3) or Work numbers (#12) in it. If the lesson cannot be stated without them, use pitfall or decision instead of rule_candidate.",
       ...(request.memory_mode === "pages" ? [PAGES_THEME_INSTRUCTION] : []),
     ],
     processSkills,

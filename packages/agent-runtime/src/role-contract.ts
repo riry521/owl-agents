@@ -7,6 +7,7 @@ import {
   schemaTypes,
   templatePlaceholder,
   WORKING_STYLE_RULES,
+  EXTERNAL_DATA_POLICY,
   type OwnerLanguage,
   type RoleSchema,
   type RoleSchemaType,
@@ -245,6 +246,7 @@ export function renderRolePrompt(slots: RolePromptSlots): string {
       ? [["## Workspace tools", ...slots.workspaceTools].join("\n")]
       : []),
     [WORKING_STYLE_HEADING, ...WORKING_STYLE_RULES].join("\n"),
+    ["## External content", EXTERNAL_DATA_POLICY].join("\n"),
     [
       "## Output template",
       "Return exactly one JSON object and nothing else: no markdown fences, no prose before or after. Copy this template, keep every field, and replace only the values. An array shown with one example element may hold zero or more elements of that shape.",

@@ -9,6 +9,10 @@ import {
 } from "../helpers/test-run-core.mjs";
 import { waitFor } from "../helpers/wait.mjs";
 
+// Core keeps merging and cleaning up git state after the asserted event; the test must not return (and remove
+// its temp root) before the Work ends, or the cleanup races Core's git writes (ENOTEMPTY on Linux CI).
+const workEnded = (db) => waitFor(() => db.get("SELECT id FROM works WHERE state IN ('completed', 'cancelled')"), { timeoutMs: 30_000, message: "the Work to end" });
+
 // Task verification runs Project test files through Core's stub runner. The Worker is told which tests
 // failed and why in one line, never the raw output, and the re-check runs only what matters.
 
@@ -100,6 +104,7 @@ test("the Reviewer gets Core's test result as core_tests with the failed test na
   await core.startWork(created.data.work_id, { ...envelope({ mode: "normal" }, "start"), expected_version: created.version });
 
   await waitFor(() => reviewerRequests.length >= 1, { timeoutMs: 30_000, message: "the Reviewer run" });
+  await workEnded(db);
 
   const coreTests = reviewerRequests[0].context.core_tests;
   assert.ok(coreTests, "the Reviewer gets Core's test run");
@@ -149,16 +154,18 @@ async function runUntilVerified(t, { kind, taskType = "code", check, workerFiles
 
 test("a test file added by a Task without a spec_test criterion is removed and logged; kept with one; existing files are untouched", async (t) => {
   for (const kind of [undefined, "work_check"]) {
-    const { workerRequests, verified, removed } = await runUntilVerified(t, { kind, workerFiles: () => ({ "tests/new.test.mjs": "x\n", "tests/a.test.mjs": "changed\n" }) });
+    const { db, workerRequests, verified, removed } = await runUntilVerified(t, { kind, workerFiles: () => ({ "tests/new.test.mjs": "x\n", "tests/a.test.mjs": "changed\n" }) });
     assert.equal(workerRequests.length, 1, "removal does not send the Task back");
     assert.equal(verified.outcome, "pass");
     assert.deepEqual(removed().map(({ files, reason }) => ({ files, reason })), [{ files: ["tests/new.test.mjs"], reason: "no_spec_test_criterion" }]);
     assert.equal(await readFile(join(workerRequests[0].context.worktree, "tests/new.test.mjs"), "utf8").catch(() => null), null);
     assert.equal(await readFile(join(workerRequests[0].context.worktree, "tests/a.test.mjs"), "utf8"), "changed\n");
+    await workEnded(db);
   }
-  const { workerRequests, removed } = await runUntilVerified(t, { kind: "spec_test", workerFiles: () => ({ "tests/new.test.mjs": "x\n" }) });
+  const { db, workerRequests, removed } = await runUntilVerified(t, { kind: "spec_test", workerFiles: () => ({ "tests/new.test.mjs": "x\n" }) });
   assert.deepEqual(removed(), []);
   assert.equal(await readFile(join(workerRequests[0].context.worktree, "tests/new.test.mjs"), "utf8"), "x\n");
+  await workEnded(db);
 });
 test("a test-type Task with only an unrequested added test still passes after removal", async (t) => {
   const { verified, removed } = await runUntilVerified(t, { taskType: "test", workerFiles: () => ({ "tests/new.test.mjs": "x\n" }) });

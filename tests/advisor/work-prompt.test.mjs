@@ -44,3 +44,10 @@ test("the built Advisor prompt explains the owl-api tool, the 403 fallback and t
   assert.match(prompt, /emit call_api only in a later turn after the operator agrees/u);
   assert.doesNotMatch(prompt, /127\.0\.0\.1|localhost|guard-tokens/u);
 });
+
+test("the Advisor system prompt carries the external-data policy exactly once", async (t) => {
+  const { EXTERNAL_DATA_POLICY } = await import("../../packages/shared/dist/index.js");
+  const { core } = await createTestCore(t, { agentRunner }, { prefix: "owl-advisor-policy-prompt-", start: true });
+  const prompt = core.getAdvisorSettingsSnapshot().systemPrompt;
+  assert.equal(prompt.split(EXTERNAL_DATA_POLICY).length - 1, 1);
+});

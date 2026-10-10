@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.0.3 - 2026-10-10
+
+Knowledge that stays organized, curation that runs on its own, and stronger handling of external data.
+
+### Knowledge
+
+- Notes no longer pile up in the catch-all "other notes" page: a new theme can be created at write time, and an overflowing page is split into theme pages instead of creating a numbered "(2)" page
+- Pages no longer grow too large, and spelling variants of a page name no longer create separate pages
+- The Librarian's page reorganization converges: moves into existing pages, no page mix-ups, size limits are respected, and it keeps going until done
+- The Advisor can write decisions from a conversation directly into a Project's knowledge, following the page template
+
+### Curation
+
+- Rule curation and skill curation run on a schedule with the same settings as the Librarian, so duplicate or stale rule proposals and unused trial skills no longer linger
+- Duplicate and conflicting rules are judged by meaning with a model instead of text similarity, so paraphrases (including Japanese) are merged
+- Rule proposals are limited to general-purpose rules: they are rephrased, project-specific items are routed to Project knowledge, conflicts and duplicates are dropped, and personal rules go to personal files
+- Curation Slack notifications are combined into one plain-language message without internal details, and adding a rule sends a notification
+
+### Safety
+
+- Web search results and imported data (clips, attachments, knowledge from external sources) are treated as reference data, never as instructions
+
+### Prompts
+
+- Rules enforced mechanically at run time are left out of the prompt text, and each rule appears only once
+
+### Fixes
+
+- Attachments sent from Slack (such as images) now reach the Advisor
+- Flaky tests that occasionally failed on GitHub CI are made deterministic
+- Acceptance criteria over the length limit are only recorded instead of sending the Manager back to rewrite them
+
 ## 1.0.2 - 2026-10-09
 
 Fewer stuck Works and rejected curation operations, a more capable Advisor, and a batch of small fixes.

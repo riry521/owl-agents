@@ -50,7 +50,9 @@ rules:
     text: "Answer concisely."
 `;
 
-test("prompt lines are one per rule, ordered by level, scoped to the role and end with Work rules", async (t) => {
+const BLOCK_SUMMARY = "[system] Dangerous commands and operations on secret files are blocked mechanically at run time; a blocked call returns its reason.";
+
+test("prompt lines are one per instruction plus one block summary, ordered by level, scoped to the role and end with Work rules", async (t) => {
   const { store } = await withRules(t, {
     "system/safety.yaml": ABSOLUTE,
     "system/defaults.yaml": SYSTEM,
@@ -58,17 +60,52 @@ test("prompt lines are one per rule, ordered by level, scoped to the role and en
   });
   await store.load();
   assert.deepEqual(store.getInstructionsForRole("advisor", ["Keep the API stable."]), [
-    "[absolute] Force push is forbidden.",
+    BLOCK_SUMMARY,
     "[absolute] Verify before reporting done.",
-    "[system] Do not read .env files.",
     "[system] Run the tests.",
-    "[role] Advisors do not publish.",
     "[role] Answer concisely.",
     "[work] Keep the API stable.",
   ]);
   const worker = store.getInstructionsForRole("worker");
   assert.equal(worker.some((line) => line.startsWith("[role]")), false);
-  assert.equal(worker.length, 4);
+  assert.equal(worker.length, 3);
+  assert.deepEqual(store.getInstructionsForRole("worker", ["repeat", "repeat"]).filter((line) => line === "[work] repeat"), ["[work] repeat"]);
+});
+
+test("block rules never appear one by one in any role's prompt lines, only as the single summary", async (t) => {
+  const { store } = await withRules(t, { "system/safety.yaml": ABSOLUTE, "system/defaults.yaml": SYSTEM, "role/advisor.yaml": ADVISOR });
+  await store.load();
+  for (const role of ["manager", "worker", "reviewer", "advisor"]) {
+    const lines = store.getInstructionsForRole(role);
+    assert.equal(lines.filter((line) => line === BLOCK_SUMMARY).length, 1, role);
+    assert.equal(lines.some((line) => /Force push|\.env|publish/u.test(line)), false, role);
+    assert.equal(lines.includes("[absolute] Verify before reporting done."), true, role);
+  }
+});
+
+test("the same rule at several levels is emitted once, from the strongest level", async (t) => {
+  const { store } = await withRules(t, {
+    "system/safety.yaml": ABSOLUTE,
+    "system/defaults.yaml": `level: system
+rules:
+  - id: block-git-force-push
+    kind: block_command
+    pattern: "git push --force"
+    message: "Force push is forbidden."
+  - id: verify-again
+    kind: instruction
+    text: "Verify before reporting done."
+`,
+    "role/worker.yaml": `level: role
+role: worker
+rules:
+  - id: verify-worker
+    kind: instruction
+    text: "Verify before reporting done."
+`,
+  });
+  await store.load();
+  assert.deepEqual(store.getInstructionsForRole("worker"), [BLOCK_SUMMARY, "[absolute] Verify before reporting done."]);
 });
 
 test("two block rules with the same message produce one prompt line", async (t) => {
@@ -86,7 +123,7 @@ rules:
 `,
   });
   await store.load();
-  assert.deepEqual(store.getInstructionsForRole("worker"), ["[system] Destructive git commands are forbidden."]);
+  assert.deepEqual(store.getInstructionsForRole("worker"), [BLOCK_SUMMARY]);
   assert.equal(store.checkCommand("git clean -fdx").blocked, true);
   assert.equal(store.checkCommand("git reset --hard").blocked, true);
 });

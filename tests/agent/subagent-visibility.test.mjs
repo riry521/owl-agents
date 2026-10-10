@@ -174,7 +174,7 @@ test("the Hybrid Worker dispatches its own child and owns nested agent processes
           remaining_issues: [], next_action: "none", needs_replanning: false, question_for_manager: null,
           delegation: {
             decomposition: "Writing notes is independent; whole-task checking stays with the Worker.",
-            delegated: [{ instruction: "Write the notes with details", provider: child.provider, model: child.model }],
+            delegated: [{ child_id: child.child_id, instruction: "Write the notes with details", provider: child.provider, model: child.model }],
             retained: [{ part: "Whole-task check", reason: "The Worker must review the completed notes." }],
           },
         },
@@ -215,6 +215,7 @@ test("the Hybrid Worker dispatches its own child and owns nested agent processes
     return worker && !["launch_pending", "spawned", "running"].includes(worker.status) ? worker : null;
   }, 20_000);
   assert.ok(finished, "the Worker run should finish after its child");
+  assert.equal(finished.status, "completed", "the completion gate must accept the Worker's report, or the Task is retried");
   assert.equal(workerRequests.length, 1);
   assert.equal(workerRequests[0].context.hybrid_phase, undefined);
   assert.equal(childWait.done, true);

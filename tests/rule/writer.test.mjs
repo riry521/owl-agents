@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { copyFile as copyFileFs, mkdir, open as openFs, readFile, readdir, rename as renameFs, rm, stat, unlink as unlinkFs, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
@@ -34,7 +35,7 @@ test("the writer writes approved rules to system and role files and merges exist
   ]);
 
   const roleResult = await writer.apply({ level: "role", role: "worker", id: "approved_worker", text: "Worker only." });
-  const rolePath = join(rulesDir, "role", "owl-approved-worker.yaml");
+  const rolePath = join(rulesDir, "role", "worker.yaml");
   assert.equal(roleResult.path, rolePath);
   assert.ok((await readFile(rolePath, "utf8")).includes("approved_worker"));
   assert.deepEqual(ruleStore.getInstructionsForRole("worker"), [
@@ -222,4 +223,31 @@ test("loading during every apply file operation succeeds and the rename target s
   assert.equal(parsed.rules[1].mode, undefined);
   assert.equal(parsed.rules[1].message, undefined);
   assert.deepEqual(ruleStore.getInstructionsForRole("worker"), newRules);
+});
+
+test("approving writes role rules to rules/role/<role>.yaml, keeps existing rules and leaves tracked defaults untouched", async (t) => {
+  const { rulesDir, ruleStore } = await setup(t);
+  const defaults = {
+    "system/defaults.yaml": "level: system\nrules: []\n",
+    "system/owl-defaults.yaml": "level: system\nrules: []\n",
+    "system/safety.yaml": "level: system\nrules: []\n",
+    "role/advisor-defaults.yaml": "level: role\nrole: advisor\nrules: []\n",
+  };
+  const hash = async () => Object.fromEntries(await Promise.all(Object.keys(defaults).map(async (f) => [f, createHash("sha256").update(await readFile(join(rulesDir, f))).digest("hex")])));
+  for (const [f, body] of Object.entries(defaults)) await writeFile(join(rulesDir, f), body);
+  const workerPath = join(rulesDir, "role", "worker.yaml");
+  await writeFile(workerPath, `level: role\nrole: worker\nrules:\n  - id: r1\n    kind: instruction\n    text: "One."\n  - id: r2\n    kind: instruction\n    text: "Two."\n`);
+  await ruleStore.load();
+  const before = await hash();
+  const writer = new RuleWriter(ruleStore, rulesDir);
+  const roleResult = await writer.apply({ level: "role", role: "worker", id: "r3", text: "Three." });
+  const systemResult = await writer.apply({ level: "system", id: "s1", text: "Sys." });
+  assert.equal(roleResult.path, workerPath);
+  assert.equal(systemResult.path, join(rulesDir, "system", "owl-approved.yaml"));
+  const parsed = parseRuleYaml(await readFile(workerPath, "utf8"), workerPath);
+  assert.deepEqual(parsed.rules.map((r) => [r.id, r.kind, r.text]), [["r1", "instruction", "One."], ["r2", "instruction", "Two."], ["r3", "instruction", "Three."]]);
+  assert.deepEqual(await hash(), before);
+  assert.deepEqual((await readdir(join(rulesDir, "role"))).filter((n) => n.startsWith("owl-approved-")), []);
+  await assert.rejects(writer.apply({ level: "role", role: "advisor-defaults", id: "x", text: "X." }));
+  assert.deepEqual(await hash(), before);
 });

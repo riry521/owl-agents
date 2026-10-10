@@ -160,26 +160,25 @@ test("a librarian report with an error, or with remaining items and no organized
   }
 });
 
-test("a failed scheduled librarian run records one system.alert naming the run", async (t) => {
+const runAlerts = (core) => core.db.all("SELECT payload_json FROM events WHERE type = 'system.alert'").map((r) => JSON.parse(r.payload_json)).filter((p) => p.kind === "curation_run_failed" || p.kind === "curation_run_finished");
+const settleWrites = async () => { for (let i = 0; i < 200; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+
+test("a failed scheduled librarian run is recorded as failed and raises no per-run system.alert", async (t) => {
   const core = await setupCore(t);
   core.pageLibrarian.run = async (input) => reportOf(input, { error: "propose_failed" });
   const run = await core.runCuration({ kind: "librarian", trigger: "scheduled", actor: "system" });
   assert.equal(core.getCurationRun(run.id).status, "failed");
-  const alerts = () => core.db.all("SELECT payload_json FROM events WHERE type = 'system.alert'").map((r) => JSON.parse(r.payload_json)).filter((p) => p.kind === "curation_run_failed");
-  for (let i = 0; i < 200 && alerts().length === 0; i += 1) await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(alerts().length, 1);
-  assert.match(alerts()[0].message, new RegExp(`${run.id}.*propose_failed`));
+  await settleWrites();
+  assert.equal(runAlerts(core).length, 0);
 });
 
-test("a scheduled librarian run that throws is recorded as failed with one system.alert", async (t) => {
+test("a scheduled librarian run that throws is recorded as failed (error boom) and raises no per-run system.alert", async (t) => {
   const core = await setupCore(t);
   core.pageLibrarian.run = async () => { throw new Error("boom"); };
   const run = await core.runCuration({ kind: "librarian", trigger: "scheduled", actor: "system" });
   const stored = core.getCurationRun(run.id);
   assert.equal(stored.status, "failed");
   assert.equal(stored.error, "boom");
-  const alerts = () => core.db.all("SELECT payload_json FROM events WHERE type = 'system.alert'").map((r) => JSON.parse(r.payload_json)).filter((p) => p.kind === "curation_run_failed");
-  for (let i = 0; i < 200 && alerts().length === 0; i += 1) await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(alerts().length, 1);
-  assert.match(alerts()[0].message, new RegExp(`${run.id}.*boom`));
+  await settleWrites();
+  assert.equal(runAlerts(core).length, 0);
 });

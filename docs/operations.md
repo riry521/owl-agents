@@ -411,6 +411,7 @@ silently uses its default; an invalid key falls back to its default with a warni
 | `external_state_exempt_patterns` | a copy or temp directory, or write-denial evidence | same |
 | `heavy_check_patterns` | wording of heavy checks (`real model`, Japanese equivalents, 100+ items, 10+ minutes, a production copy, …) | not non-empty strings that compile as regular expressions |
 | `blocking_codes` | `external_state_comparison`, `necessity_missing`, `heavy_check_unjustified` | not a list of known warning codes |
+| `record_only_codes` | `acceptance_chars_over` | same; these warnings are recorded but never trigger a repair request or appear in its message |
 
 Two more warning codes: `criterion_verification_missing` (one criterion names no way to check it) and
 `external_state_comparison` (one criterion compares state that changes outside the Task, such as

@@ -47,6 +47,8 @@ export interface SkillSettings {
   readonly confidence_threshold: number;
   readonly stale_days: number;
   readonly archived_days: number;
+  /** Days a trial Skill may go without a detected read or verdict before it turns stale. */
+  readonly trial_unused_days?: number;
   readonly max_items: number;
   readonly max_characters: number;
   /** Penalty per objective signal (a Task counted once per kind) subtracted from a Skill's evaluation_score. */
@@ -535,6 +537,7 @@ export class SkillBox {
       confidence_threshold: typeof threshold === "number" && Number.isFinite(threshold) ? Math.min(1, Math.max(0, threshold)) : 0.5,
       stale_days: positiveInteger(staleDays, 60),
       archived_days: positiveInteger(archivedDays, 30),
+      trial_unused_days: positiveInteger(stored.trial_unused_days, 14),
       max_items: positiveInteger(stored.max_items, 30),
       max_characters: positiveInteger(stored.max_characters, 6000),
       feedback_weights: feedbackWeights(stored.feedback_weights),

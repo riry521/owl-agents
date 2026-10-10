@@ -34,6 +34,14 @@ export interface ConversationLogResult {
   readonly routed: readonly RouteResult[];
 }
 
+/** The first unused `<day>-<n>.md` of the day's conversation folder: the name the conversation being written will get. */
+export async function nextConversationName(root: string, today: string): Promise<string> {
+  const used = new Set(await readdir(join(root, "conversations", today.slice(0, 7))).catch(() => [] as string[]));
+  let n = 1;
+  while (used.has(`${today}-${n}.md`)) n += 1;
+  return `${today}-${n}.md`;
+}
+
 /**
  * Keeps a compaction summary as a `type: conversation-log` page and, when the summary has the 4-field shape,
  * sends its decisions and learnings to the theme pages. No AI is called: the fields are cut out by fixed rules,
@@ -60,10 +68,7 @@ export class ConversationLogWriter {
     const dir = `conversations/${today.slice(0, 7)}`;
     const name = await this.options.withWrite(async () => {
       await mkdir(join(root, dir), { recursive: true });
-      const used = new Set(await readdir(join(root, dir)));
-      let n = 1;
-      while (used.has(`${today}-${n}.md`)) n += 1;
-      return `${today}-${n}.md`;
+      return nextConversationName(root, today);
     });
     const label = name.replace(/\.md$/u, "");
     const title = `会話 ${label}`;

@@ -17,6 +17,9 @@ export interface SkillCurationResult {
   trial_results: Array<{ skill: string; result: "graduated" | "rolled_back" | "archived" | "continuing" }>;
   proposals: Array<{ id: string; target: string | null; kind: string; from: string; to: string; reason: string | null; attempts: number }>;
   automatic_proposals: Array<{ id: string; target: string | null; kind: string }>;
+  /** Content changes: state_changes alone miss new skills and in-place updates. */
+  applied: Array<{ id: string; target: string | null }>;
+  trials_ended: Array<{ skill: string; result: string }>;
   pending_remaining: number;
   awaiting_approval: Array<{ id: string; target: string | null; kind: string }>;
   warnings: string[];
@@ -75,6 +78,7 @@ interface SkillSettings {
   readonly confidence_threshold: number;
   readonly stale_days: number;
   readonly archived_days: number;
+  readonly trial_unused_days: number;
 }
 
 interface PreparedSkillWrite {
@@ -396,6 +400,8 @@ export class SkillCurator {
         trial_results,
         proposals,
         automatic_proposals: createdDuring.map(brief),
+        applied: proposals.filter((p) => p.to === "applied").map((p) => ({ id: p.id, target: p.target })),
+        trials_ended: trial_results.filter((t) => t.result !== "continuing"),
         pending_remaining: [...openAfter.values()].filter((p) => p.status === "pending").length,
         awaiting_approval: [...openAfter.values()].filter((p) => p.status === "awaiting_approval").map(brief),
         warnings,
@@ -651,6 +657,24 @@ export class SkillCurator {
     const now = Date.parse(this.now());
     if (!Number.isFinite(now)) return;
     if (skill.state === "active") {
+      if (skill.trial === 1) {
+        const used = this.db.get<{ found: number }>(
+          `SELECT 1 AS found FROM skill_usages
+            WHERE skill_name = ? AND revision = ? AND (read_detected = 1 OR verdict IS NOT NULL) LIMIT 1`,
+          skill.name,
+          skill.current_revision,
+        );
+        const revisedAt = this.db.get<{ created_at: string }>(
+          "SELECT created_at FROM skill_revisions WHERE skill_name = ? AND revision = ?",
+          skill.name,
+          skill.current_revision,
+        )?.created_at;
+        const since = Math.max(revisedAt ? Date.parse(revisedAt) : 0, Date.parse(skill.state_changed_at));
+        if (!used && Number.isFinite(since) && now - since >= settings.trial_unused_days * 24 * 60 * 60 * 1000) {
+          await this.skillBox.setState(skill.name, "stale", "curator", `Trial skill had no detected reads or feedback for ${settings.trial_unused_days} days.`);
+          return;
+        }
+      }
       const activity = this.db.get<{ last_activity: string | null }>(
         `SELECT MAX(updated_at) AS last_activity FROM skill_usages
           WHERE skill_name = ? AND (read_detected = 1 OR verdict IS NOT NULL)`,
@@ -734,10 +758,10 @@ export class SkillCurator {
 
   private settings(): SkillSettings {
     const row = this.db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = 'skills'");
-    if (!row) return { mode: "autonomous", confidence_threshold: 0.5, stale_days: 60, archived_days: 30 };
+    if (!row) return { mode: "autonomous", confidence_threshold: 0.5, stale_days: 60, archived_days: 30, trial_unused_days: 14 };
     try {
       const value: unknown = JSON.parse(row.value_json);
-      if (!isRecord(value)) return { mode: "autonomous", confidence_threshold: 0.5, stale_days: 60, archived_days: 30 };
+      if (!isRecord(value)) return { mode: "autonomous", confidence_threshold: 0.5, stale_days: 60, archived_days: 30, trial_unused_days: 14 };
       const mode: SkillCuratorMode = value.mode === "conservative" ? "conservative" : "autonomous";
       const configuredThreshold = value.confidence_threshold ?? value.threshold;
       const threshold = typeof configuredThreshold === "number" && Number.isFinite(configuredThreshold)
@@ -748,10 +772,11 @@ export class SkillCurator {
         confidence_threshold: threshold,
         stale_days: positiveDays(value.stale_days ?? value.stale_after_days, 60),
         archived_days: positiveDays(value.archived_days ?? value.archive_after_days, 30),
+        trial_unused_days: positiveDays(value.trial_unused_days, 14),
       };
     } catch (error) {
       console.warn("[owl-core] Could not parse the skills setting; using defaults.", error);
-      return { mode: "autonomous", confidence_threshold: 0.5, stale_days: 60, archived_days: 30 };
+      return { mode: "autonomous", confidence_threshold: 0.5, stale_days: 60, archived_days: 30, trial_unused_days: 14 };
     }
   }
 

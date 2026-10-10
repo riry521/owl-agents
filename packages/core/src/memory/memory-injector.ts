@@ -40,5 +40,4 @@ export function searchQuery(role: MemoryRole, m: QueryMaterials): (string | null
 
 export const kb = (n: number): string => `${(n / 1000).toFixed(1)}kB`;
 
-/** Page and clipping text is placed inside `<owl-…>` blocks: a fullwidth ＜ keeps a tag in it from closing (or faking) one. */
-export const defuseTags = (text: string): string => text.replace(/<(?=\s*\/?\s*owl-)/giu, "＜");
+export { defuseTags, EXTERNAL_DATA_ATTR } from "@owl/shared";

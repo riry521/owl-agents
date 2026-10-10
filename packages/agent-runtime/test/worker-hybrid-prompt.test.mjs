@@ -150,3 +150,11 @@ test("Manager prompt tells the Manager to bundle small unrelated items into one 
     assert.match(prompt, /max_acceptance_items/);
   }
 });
+
+test("Manager finalize prompt and schema let a lesson take a new theme title and leave theme empty only when unclassifiable", async () => {
+  const { buildManagerPrompt, MANAGER_FINALIZE_PAGES_OUTPUT_SCHEMA } = await import("../dist/manager.js");
+  const prompt = buildManagerPrompt({ mode: "finalize", memory_mode: "pages", work: { id: "w", title: "t", summary: "s" }, tasks: [] });
+  assert.match(prompt, /use the existing title when one fits; when none fits, give a new short theme title; leave it empty only for a lesson that cannot be classified/);
+  const description = JSON.stringify(MANAGER_FINALIZE_PAGES_OUTPUT_SCHEMA);
+  assert.match(description, /if none fits, give a new short theme title; empty only if it cannot be classified/);
+});

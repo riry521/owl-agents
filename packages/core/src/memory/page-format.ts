@@ -58,7 +58,9 @@ export const PAGE_LIMITS = {
   librarian_run_pages: 20, librarian_run_tokens: 100000,
 } as const;
 
-export const THEME_SECTIONS = ["概要", "決まりごと", "落とし穴", "手順", "関連ページ", "更新履歴"] as const;
+/** The heading of the theme section Core writes on its own (audit lines); the model never points at it. */
+export const UPDATES_SECTION = "更新履歴";
+export const THEME_SECTIONS = ["概要", "決まりごと", "落とし穴", "手順", "関連ページ", UPDATES_SECTION] as const;
 export const INDEX_SECTIONS = ["概要", "必読（決まりごと・落とし穴）", "テーマ", "共通テーマ"] as const;
 export const WORK_LOG_SECTIONS = ["何をしたか", "学んだこと", "反映先"] as const;
 export const CLIPPING_SECTIONS = ["出典", "要点", "使いどころ", "関係する Project"] as const;
@@ -354,6 +356,8 @@ export function renderHistory(history: ParsedHistory): string {
 
 /** NFKC and whitespace removal: the match key for theme titles. */
 export const themeTitleKey = (title: string): string => title.normalize("NFKC").replace(/\s+/gu, "");
+/** themeTitleKey that also reads 「・」 as 「-」: slugifyKnowledgeName turns 「・」 into 「-」, so both spellings name one file. */
+export const pagePathKey = (path: string): string => themeTitleKey(path).replace(/・/gu, "-");
 
 const SECRET_PATTERNS: readonly (readonly [string, RegExp])[] = [
   ["sk-", /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}/u],
@@ -364,6 +368,14 @@ const SECRET_PATTERNS: readonly (readonly [string, RegExp])[] = [
 /** Names of the secret shapes found in `text` (never the secret itself). */
 export function findSecretPatterns(text: string): readonly string[] {
   return SECRET_PATTERNS.filter(([, pattern]) => pattern.test(text)).map(([name]) => name);
+}
+/** Copies a JSON value with every secret shape in its strings (object keys too) replaced by `[secret:<name>]`, using the patterns findSecretPatterns names. */
+export function maskSecrets(value: unknown): unknown {
+  const maskText = (text: string): string => SECRET_PATTERNS.reduce((t, [name, pattern]) => t.replace(new RegExp(pattern.source, `${pattern.flags}g`), `[secret:${name}]`), text);
+  if (typeof value === "string") return maskText(value);
+  if (Array.isArray(value)) return value.map(maskSecrets);
+  if (typeof value === "object" && value !== null) return Object.fromEntries(Object.entries(value).map(([k, v]) => [maskText(k), maskSecrets(v)]));
+  return value;
 }
 
 /** `name.md` → `name-2.md`, `name-3.md`, … until `exists` is false. */
@@ -477,6 +489,23 @@ function countLines(kind: PageKind, section: PageSection): number {
   return section.lines.filter((l) => /^\s*- /u.test(l) && l.trim() !== "- （なし）").length;
 }
 
+export interface PageSize {
+  readonly tokens: number;
+  readonly token_limit: number;
+  readonly sections: readonly { readonly section: string; readonly lines: number; readonly limit: number }[];
+}
+/** The page's tokens and per-section line counts with their template limits, measured as validatePage measures them; null for a page of unknown kind. */
+export function pageSize(page: ParsedPage): PageSize | null {
+  if (page.kind === null) return null;
+  const kind = page.kind;
+  const template = TEMPLATES[kind];
+  const sections = page.sections.flatMap((s) => {
+    const limit = template.lines[s.heading];
+    return template.sections.includes(s.heading) && limit !== undefined ? [{ section: s.heading, lines: countLines(kind, s), limit }] : [];
+  });
+  return { tokens: estimatePageTokens(renderPage({ ...page, frontmatter_order: [] })), token_limit: template.tokens, sections };
+}
+
 export function validatePage(page: ParsedPage, options: ValidateOptions): ValidateResult {
   const errors: PageIssue[] = [];
   const warnings: PageIssue[] = [];
@@ -518,18 +547,18 @@ export function validatePage(page: ParsedPage, options: ValidateOptions): Valida
     }
     const wanted = template.sections.filter((h) => known.some((s) => s.heading === h));
     if (known.some((s, i) => s.heading !== wanted[i])) errors.push({ code: "section_order", message: "欄の順番がテンプレートと違う" });
-    for (const section of known) {
-      const limit = template.lines[section.heading];
-      if (limit !== undefined && countLines(page.kind, section) > limit) warnings.push({ code: "section_over_lines", section: section.heading, message: `${section.heading} が ${limit} 行を超えている` });
+    const size = pageSize(page)!;
+    for (const s of size.sections) {
+      if (s.lines > s.limit) warnings.push({ code: "section_over_lines", section: s.section, message: `${s.section} が ${s.limit} 行を超えている` });
     }
     if (page.kind === "work-log") {
       const learned = known.find((s) => s.heading === "学んだこと");
       const applied = known.find((s) => s.heading === "反映先");
       if (learned && applied && countLines(page.kind, applied) > countLines(page.kind, learned)) warnings.push({ code: "section_over_lines", section: "反映先", message: "反映先が学んだことより多い" });
     }
-    if (tokens > template.tokens) {
+    if (size.tokens > size.token_limit) {
       // The token limit is a hint for splitting, never a rejection.
-      warnings.push({ code: "over_budget", message: `${tokens} トークンで目安 ${template.tokens} を超えている` });
+      warnings.push({ code: "over_budget", message: `${size.tokens} トークンで目安 ${size.token_limit} を超えている` });
     }
   }
 

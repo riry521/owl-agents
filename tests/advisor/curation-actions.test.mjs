@@ -418,28 +418,89 @@ test("the chat reply and POST /advisor/actions return while the curation is stil
   assert.equal(core.getCurationRun(chatRun.id).status, "succeeded");
 });
 
-test("a finished background curation raises exactly one notification, for success and for failure", async (t) => {
+/** Waits for the curations and then for the notice write that follows them. */
+async function settleNotices(core) {
+  await settle(core);
+  await new Promise((resolve) => setImmediate(resolve));
+  await core.writeLane.write({ mutateState: () => null }).catch(() => {});
+}
+
+const NOTHING_RUNS = [
+  { type: "run_librarian", description: "a", payload: {} },
+  { type: "run_skill_curation", description: "b", payload: {} },
+  { type: "run_rule_curation", description: "c", payload: {} },
+];
+
+async function replyWithAllCurations(core) {
+  const { conversation_id: conversationId } = await core.getActiveConversation();
+  await core.persistAdvisorReply(conversationId, "", createUlid(), { channel: "web" }, NOTHING_RUNS);
+  await settleNotices(core);
+}
+
+/** The Owner must read plain sentences: no run id, JSON, proposal text or path. */
+function assertPlain(message, runIds) {
+  for (const id of runIds) assert.equal(message.includes(id), false, message);
+  assert.doesNotMatch(message, /\{|\//u, message);
+}
+
+test("three curations from one reply raise one plain info notice with a line per kind", async (t) => {
+  const { core } = await setup(t);
+  core.pageLibrarian.run = async () => ({ actions_taken: [{ path: "notes/secret.md" }], warnings: [] });
+  core.curateSkills = async () => ({ state_changes: [{ skill: "s1" }], awaiting_approval: [], warnings: [] });
+  core.curateRules = () => ({ awaiting_approval: [{ id: "p1", text: "ルール案の全文" }, { id: "p2", text: "別の案" }], warnings: [] });
+  await replyWithAllCurations(core);
+
+  assert.equal(alerts(core, "curation_run_finished").length + alerts(core, "curation_run_failed").length, 0);
+  const notices = alerts(core, "curation_notice");
+  assert.equal(notices.length, 1, JSON.stringify(notices));
+  assert.equal(notices[0].severity, "info");
+  assert.deepEqual(notices[0].message.split("\n"), ["ナレッジを整理しました", "スキルを整理しました", "承認待ちのルール提案があります（2件）"]);
+  assertPlain(notices[0].message, core.listCurationRuns({ limit: 10 }).items.map((run) => run.id));
+});
+
+test("a failed curation is one plain line in the same warning notice, without its error", async (t) => {
+  const { core } = await setup(t);
+  core.pageLibrarian.run = async () => { throw new Error("librarian exploded at /secret/path {x}"); };
+  core.curateSkills = async () => ({ state_changes: [{ skill: "s1" }], awaiting_approval: [], warnings: [] });
+  await replyWithAllCurations(core);
+
+  const notices = alerts(core, "curation_notice");
+  assert.equal(notices.length, 1, JSON.stringify(notices));
+  assert.equal(notices[0].severity, "warning");
+  assert.deepEqual(notices[0].message.split("\n"), ["ナレッジ整理に失敗しました", "スキルを整理しました"]);
+  assertPlain(notices[0].message, core.listCurationRuns({ limit: 10 }).items.map((run) => run.id));
+});
+
+test("a skill curation that only applied proposals still raises the skill line", async (t) => {
+  const { core } = await setup(t);
+  core.curateSkills = async () => ({ state_changes: [], applied: [{ id: "p1", target: "s1" }], trials_ended: [], awaiting_approval: [], warnings: [] });
+  await replyWithAllCurations(core);
+  assert.deepEqual(alerts(core, "curation_notice").map((n) => n.message), ["スキルを整理しました"]);
+});
+
+test("curations that changed nothing raise no notice", async (t) => {
+  const { core } = await setup(t);
+  await replyWithAllCurations(core);
+  assert.equal(alerts(core, "curation_notice").length, 0);
+});
+
+test("a single background curation raises one notice for itself, for success and for failure", async (t) => {
   const { core } = await setup(t);
   const outcomes = [
-    ["success", () => ({ warnings: [] }), "succeeded"],
-    ["thrown", () => { throw new Error("librarian exploded"); }, "failed"],
-    ["report error", () => ({ error: "bad report", warnings: [] }), "failed"],
+    ["success", () => ({ actions_taken: [{ path: "a.md" }], warnings: [] }), "ナレッジを整理しました", "info"],
+    ["thrown", () => { throw new Error("librarian exploded"); }, "ナレッジ整理に失敗しました", "warning"],
+    ["report error", () => ({ error: "bad report", warnings: [] }), "ナレッジ整理に失敗しました", "warning"],
   ];
-  for (const [label, impl, status] of outcomes) {
+  for (const [label, impl, message, severity] of outcomes) {
+    const before = alerts(core, "curation_notice").length;
     core.pageLibrarian.run = async () => impl();
-    const { run, started } = await core.startCurationInBackground({ kind: "librarian", trigger: "advisor_action", actor: "advisor", request_key: `k-${label}` });
+    const { started } = await core.startCurationInBackground({ kind: "librarian", trigger: "advisor_action", actor: "advisor", request_key: `k-${label}` });
     assert.equal(started, true, label);
-    await settle(core);
-    await new Promise((resolve) => setImmediate(resolve));
-    await core.writeLane.write({ mutateState: () => null }).catch(() => {});
-    assert.equal(core.getCurationRun(run.id).status, status, label);
-    const related = [...alerts(core, "curation_run_finished"), ...alerts(core, "curation_run_failed")].filter((payload) => payload.message.includes(run.id));
-    assert.equal(related.length, 1, `${label}: ${JSON.stringify(related)}`);
-    // The alert carries the outcome, the counts and, for a failure, the error.
-    assert.match(related[0].message, status === "succeeded" ? /succeeded \(/ : /failed: .+ \(/, label);
-    assert.match(related[0].message, /\(.+\)/, label);
-    if (label === "thrown") assert.match(related[0].message, /librarian exploded.*counts unavailable/, label);
-    if (label === "report error") assert.match(related[0].message, /bad report/, label);
+    await settleNotices(core);
+    const notices = alerts(core, "curation_notice");
+    assert.equal(notices.length, before + 1, label);
+    assert.equal(notices.at(-1).message, message, label);
+    assert.equal(notices.at(-1).severity, severity, label);
   }
 });
 

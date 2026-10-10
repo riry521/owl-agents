@@ -256,9 +256,9 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
       runAdvisor(request: unknown): Promise<unknown>;
       runCurator?(request: unknown): Promise<unknown>;
       runKeywordExtraction?(request: unknown): Promise<unknown>;
-      runPageIntegration?(request: unknown): Promise<unknown>;
       runLibrarianOperations?(request: unknown): Promise<unknown>;
       runClippingTags?(request: unknown): Promise<unknown>;
+      runRuleJudgments?(request: unknown): Promise<unknown>;
       runProjectInvestigation?(request: unknown): Promise<unknown>;
       provider?: unknown;
       cancelAgent?: (invocationId: string, force?: boolean) => Promise<void>;
@@ -415,11 +415,6 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
         if (typeof delegateValue.runKeywordExtraction !== "function") return { ok: false, error: "keyword_extraction_unavailable" };
         return delegateValue.runKeywordExtraction(request);
       },
-      runPageIntegration: async (request: unknown) => {
-        const delegateValue = await getDelegate();
-        if (typeof delegateValue.runPageIntegration !== "function") return { ok: false, error: "page_integration_unavailable" };
-        return delegateValue.runPageIntegration(request);
-      },
       runLibrarianOperations: async (request: unknown) => {
         const delegateValue = await getDelegate();
         if (typeof delegateValue.runLibrarianOperations !== "function") return { ok: false, error: "librarian_operations_unavailable" };
@@ -429,6 +424,11 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
         const delegateValue = await getDelegate();
         if (typeof delegateValue.runClippingTags !== "function") return { ok: false, error: "clipping_tags_unavailable" };
         return delegateValue.runClippingTags(request);
+      },
+      runRuleJudgments: async (request: unknown) => {
+        const delegateValue = await getDelegate();
+        if (typeof delegateValue.runRuleJudgments !== "function") return { ok: false, error: "rule_judgments_unavailable" };
+        return delegateValue.runRuleJudgments(request);
       },
       runProjectInvestigation: async (request: unknown) => {
         try {

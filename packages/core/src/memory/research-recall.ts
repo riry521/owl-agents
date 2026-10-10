@@ -1,6 +1,6 @@
 import { compareText } from "../context-canonical.js";
 import type { MemoryIndex } from "./memory-index.js";
-import { defuseTags } from "./memory-injector.js";
+import { defuseTags, EXTERNAL_DATA_ATTR } from "./memory-injector.js";
 import type { MemorySearch } from "./memory-search.js";
 import type { MemoryLogger } from "./memory-types.js";
 
@@ -60,5 +60,5 @@ export class ResearchRecall {
 export function renderRecall(items: readonly RecallItem[]): string | null {
   if (items.length === 0) return null;
   const lines = items.map((i) => `前に調べた資料: [[${defuseTags(i.title)}]] — ${defuseTags(i.summary)}${i.retrieved ? `（${i.retrieved}）` : ""}`);
-  return `<owl-research-recall>\n${lines.join("\n")}\n</owl-research-recall>`;
+  return `<owl-research-recall ${EXTERNAL_DATA_ATTR}>\n${lines.join("\n")}\n</owl-research-recall>`;
 }

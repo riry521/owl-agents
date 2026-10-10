@@ -1,9 +1,11 @@
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import { findListKey, normalizeOp } from "../op-shape.js";
+import { slugifyKnowledgeName } from "../knowledge-naming.js";
+import { OTHER_NOTES_TITLE } from "./page-router.js";
 
 import {
-  emptyThemePage, findSecretPatterns, lineHash, parseHistory, parsePage, renderHistory, renderPage, themeTitleKey, validatePage,
+  emptyThemePage, findSecretPatterns, lineHash, pageSize, parseHistory, parsePage, renderHistory, renderPage, themeTitleKey, pagePathKey, UPDATES_SECTION, validatePage,
   type FrontmatterValue, type HistoryEntry,
 } from "./page-format.js";
 
@@ -46,7 +48,11 @@ export interface PageOpsResult {
 
 export const PROMOTE_RELATION = "共通化";
 const HISTORY_SECTION = "退役";
-const UPDATES = "更新履歴";
+const UPDATES = UPDATES_SECTION;
+/** The start of the audit line Core adds to 更新履歴; revertAudit finds its own line by it. */
+const AUDIT_MARK = "司書: ";
+/** How many paths or hashes a diagnostic lists. */
+const DETAIL_LIST_MAX = 20;
 const RELATED = "関連ページ";
 const PROCEDURE = "手順";
 const REASONS = { contradiction: "矛盾", missing_path: "参照先なし", duplicate: "重複" } as const;
@@ -170,7 +176,7 @@ const fmOf = (doc: Doc): Readonly<Record<string, FrontmatterValue>> => parsePage
 const titleOf = (path: string, doc: Doc): string => { const t = fmOf(doc).title; return typeof t === "string" && t !== "" ? t : posix.basename(path, ".md"); };
 
 const OWL_NEW = /\s*<!--\s*owl:new\b.*?-->\s*$/u;
-const stripNew = (text: string): string => text.split("\n").map((l) => l.replace(OWL_NEW, "")).join("\n");
+export const stripNew = (text: string): string => text.split("\n").map((l) => l.replace(OWL_NEW, "")).join("\n");
 const SOURCES = /[（(]\s*(W\d+(?:\s*[,、]\s*W\d+)*)\s*[）)]\s*$/u;
 const worksOf = (text: string): number[] => text.split("\n").flatMap((l) => [...(SOURCES.exec(l.replace(OWL_NEW, ""))?.[1] ?? "").matchAll(/W(\d+)/gu)].map((m) => Number(m[1])));
 const sourcesText = (works: readonly number[]): string => (works.length > 0 ? `（${[...new Set(works)].sort((a, b) => a - b).map((n) => `W${n}`).join(", ")}）` : "");
@@ -225,7 +231,7 @@ const SPECS: Readonly<Record<string, Spec>> = {
   dormant: { required: { page: "string" }, optional: {} },
   reactivate: { required: { page: "string" }, optional: {} },
   link: { required: { from: "string", to: "string", relation: "string" }, optional: {} },
-  split: { required: { page: "string", new_title: "string", new_summary: "string", items: "refs", relation: "string" }, optional: {} },
+  split: { required: { page: "string", items: "refs", relation: "string" }, optional: { into: "string", new_title: "string", new_summary: "string" } },
   promote_common: { required: { items: "refs", to: "target" }, optional: { text: "string" } },
   restore: { required: { history: "string", entry: "string" }, optional: {} },
 };
@@ -287,6 +293,19 @@ interface Pending {
   tally: { page: string; label: string; ref?: string }[];
   activity: { page: string; action: "dormant" | "reactivate" }[];
   warnings: PageOpsWarning[];
+  /** Pages that take lines from another page in this operation; they must fit every limit afterwards. */
+  receivers: Set<string>;
+}
+type Tally = Map<string, Map<string, { count: number; refs: Set<string> }>>;
+function mergeTally(map: Tally, entries: readonly { page: string; label: string; ref?: string }[]): void {
+  for (const t of entries) {
+    const labels = map.get(t.page) ?? new Map<string, { count: number; refs: Set<string> }>();
+    const entry = labels.get(t.label) ?? { count: 0, refs: new Set<string>() };
+    entry.count += 1;
+    if (t.ref) entry.refs.add(t.ref);
+    labels.set(t.label, entry);
+    map.set(t.page, labels);
+  }
 }
 const keyOf = (r: Ref): string => `${r.page}\0${r.section}\0${r.h}`;
 
@@ -296,7 +315,7 @@ class Run {
   public readonly ids: Map<string, string>;
   public readonly used = new Set<string>();
   public readonly protectedKeys = new Set<string>();
-  public readonly tally = new Map<string, Map<string, { count: number; refs: Set<string> }>>();
+  public readonly tally: Tally = new Map();
   public readonly activity: { page: string; action: "dormant" | "reactivate" }[] = [];
   public readonly warnings: PageOpsWarning[] = [];
   public readonly reactivated = new Set<string>();
@@ -311,7 +330,7 @@ class Run {
   }
 
   public begin(): void {
-    this.tx = { docs: new Map(), hists: new Map(), ids: new Map(), used: [], protectedKeys: [], tally: [], activity: [], warnings: [] };
+    this.tx = { docs: new Map(), hists: new Map(), ids: new Map(), used: [], protectedKeys: [], tally: [], activity: [], warnings: [], receivers: new Set() };
   }
   public commit(): void {
     for (const [p, d] of this.tx.docs) this.docs.set(p, d);
@@ -319,14 +338,7 @@ class Run {
     for (const [k, v] of this.tx.ids) this.ids.set(k, v);
     this.tx.used.forEach((k) => this.used.add(k));
     this.tx.protectedKeys.forEach((k) => this.protectedKeys.add(k));
-    for (const t of this.tx.tally) {
-      const labels = this.tally.get(t.page) ?? new Map<string, { count: number; refs: Set<string> }>();
-      const entry = labels.get(t.label) ?? { count: 0, refs: new Set<string>() };
-      entry.count += 1;
-      if (t.ref) entry.refs.add(t.ref);
-      labels.set(t.label, entry);
-      this.tally.set(t.page, labels);
-    }
+    mergeTally(this.tally, this.tx.tally);
     for (const a of this.tx.activity) {
       this.activity.push(a);
       if (a.action === "reactivate") { this.reactivated.add(a.page); this.dormanted.delete(a.page); } else { this.dormanted.add(a.page); this.reactivated.delete(a.page); }
@@ -382,18 +394,27 @@ class Run {
     // A page made during this run has no starting text, so only there the current hash is the reference.
     const found = first ? sec!.items.find((i) => doc.lines[i.start].o === first.start)
       : this.state.pages.has(ref.page) ? undefined : sec!.items.find((i) => i.h === ref.h);
+    if (!found && !first) {
+      // Why not read the line from the page that holds it: the rest of the operation (split's page, merge's into, retire's
+      // scope rules, promote's projects) was chosen for the page the model named; switching pages silently changes what the
+      // operation does, e.g. moves a common rule into one project. The model gets the ref to copy in the next batch.
+      const foundIn = [...this.state.pages.keys()].filter((p) => p !== ref.page && this.startScan(p).find((s) => s.heading === ref.section)?.items.some((i) => i.h === ref.h));
+      if (foundIn.length > 0) reject("item_in_other_page", { page: ref.page, section: ref.section, h_given: ref.h.slice(0, H_PREFIX), found_in: foundIn.slice(0, DETAIL_LIST_MAX) });
+    }
     return found ?? reject("line_hash_mismatch", {
-      page: ref.page, section: ref.section, h_given: ref.h.slice(0, H_PREFIX), h_checked: sec!.items.slice(0, 20).map((i) => i.h.slice(0, H_PREFIX)),
+      page: ref.page, section: ref.section, h_given: ref.h.slice(0, H_PREFIX), h_checked: sec!.items.slice(0, DETAIL_LIST_MAX).map((i) => i.h.slice(0, H_PREFIX)),
       changed_earlier: textOf(doc) !== this.state.pages.get(ref.page),
     });
   }
   private readonly startScans = new Map<string, Sec[]>();
+  private startScan(page: string): Sec[] {
+    let secs = this.startScans.get(page);
+    if (!secs) this.startScans.set(page, secs = scan(docOf(this.state.pages.get(page) ?? "")));
+    return secs;
+  }
   private startItem(ref: Ref): Item | undefined {
-    const text = this.state.pages.get(ref.page);
-    if (text === undefined) return undefined;
-    let secs = this.startScans.get(ref.page);
-    if (!secs) this.startScans.set(ref.page, secs = scan(docOf(text)));
-    return secs.find((s) => s.heading === ref.section)?.items.find((i) => i.h === ref.h);
+    if (!this.state.pages.has(ref.page)) return undefined;
+    return this.startScan(ref.page).find((s) => s.heading === ref.section)?.items.find((i) => i.h === ref.h);
   }
   public tallyOf(page: string, label: string, ref?: string): void { this.tx.tally.push({ page, label, ref }); }
 }
@@ -435,7 +456,7 @@ function revertAudit(doc: Doc, entry: HistoryEntry): boolean {
   if (!body || fmOf(doc).updated !== entry.date) return false;
   const now = realLines(body.lines);
   const pre = realLines(entry.pre_updates);
-  if (now.length !== pre.length + 1 || !now[0].startsWith(`- ${entry.date} 司書: `) || now.slice(1).some((l, i) => l !== pre[i])) return false;
+  if (now.length !== pre.length + 1 || !now[0].startsWith(`- ${entry.date} ${AUDIT_MARK}`) || now.slice(1).some((l, i) => l !== pre[i])) return false;
   doc.lines.splice(body.sec.head + 1, body.lines.length, ...entry.pre_updates.map(mk));
   const end = frontmatterEnd(doc);
   const at = doc.lines.findIndex((l, i) => i > 0 && i < end && l.t.startsWith("updated:"));
@@ -488,6 +509,16 @@ function beforeOf(doc: Doc, heading: string, item: Item, removing: readonly Item
 const firstLine = (text: string): string => text.split("\n")[0];
 const hasLink = (doc: Doc, title: string): boolean => (section(doc, RELATED)?.items ?? []).some((i) => i.text.includes(`[[${title}]]`) || i.text.includes(`[[${title}|`));
 const addLink = (doc: Doc, title: string, relation: string): void => addToSection(doc, RELATED, [`- [[${title}]] — ${relation}`]);
+/** Adds the link unless the page already has it or 関連ページ is at its limit (then it warns). */
+function linkIfRoom(run: Run, path: string, doc: Doc, title: string, relation: string): void {
+  if (hasLink(doc, title)) return;
+  const related = pageSize(parsePage(textOf(doc)))?.sections.find((s) => s.section === RELATED);
+  // Why not reject the operation when 関連ページ is full: the lines still have to leave an over-limit page.
+  // Why not add the link anyway: it would push 関連ページ over its limit, which target_over_limit refuses.
+  if (related && related.lines >= related.limit) { run.tx.warnings.push({ page: path, code: "link_skipped_section_full", message: `${RELATED} が上限のためリンクを張らなかった: ${title}` }); return; }
+  addLink(doc, title, relation);
+}
+const receive = (run: Run, path: string): void => { run.tx.receivers.add(path); };
 
 type Applier = (run: Run, op: Record<string, any>) => void;
 
@@ -505,6 +536,7 @@ const applyMerge: Applier = (run, op) => {
   const works = items.flatMap((i) => worksOf(i.item.text));
   const star = typeof op.star === "boolean" ? op.star : items.some((i) => hasStar(i.item.text));
   const newLine = isProcedure(into.section) ? op.text : `- ${star ? "★ " : ""}${op.text}${sourcesText(works)}`;
+  if (items.some((i) => i.ref.page !== into.page)) receive(run, into.page);
   const byPage = new Map<string, typeof items>();
   for (const it of items) byPage.set(it.ref.page, [...(byPage.get(it.ref.page) ?? []), it]);
   // History first: "before" is read from the untouched pages.
@@ -548,6 +580,8 @@ const applyMove: Applier = (run, op) => {
   } else {
     removeItems(run.doc(ref.page), [{ heading: ref.section, items: [item] }]);
     addToSection(run.doc(to.page), to.section, moved);
+    // A move inside one page gives and takes on the same page, so that page is judged as a source, not a destination.
+    if (to.page !== ref.page) receive(run, to.page);
     if (run.isDormant(to.page)) run.tx.activity.push({ page: to.page, action: "reactivate" });
   }
   used(run, ref);
@@ -650,38 +684,91 @@ const titleKeyTaken = (run: Run, key: string, except?: string): boolean =>
 const reservedTitle = (title: string): boolean => /[/\\]|^[._]/u.test(title);
 const relatedProjects = (doc: Doc): string[] => { const v = fmOf(doc).related_projects; return Array.isArray(v) ? [...v] : []; };
 
+/** The theme page of the same scope and project as `source` whose title has this key: undefined when none, title_exists when several. */
+function findThemeInScope(run: Run, source: string, sourceDoc: Doc, key: string): string | undefined {
+  const scope = fmOf(sourceDoc).scope;
+  const project = projectOf(source, sourceDoc);
+  const found = [...run.docs, ...run.tx.docs].filter(([p, d]) => fmOf(d).type === "theme" && fmOf(d).scope === scope && projectOf(p, d) === project && themeTitleKey(titleOf(p, d)) === key).map(([p]) => p);
+  const paths = [...new Set(found)];
+  if (paths.length > 1) reject("title_exists", { found_in: paths.slice(0, DETAIL_LIST_MAX) });
+  return paths[0];
+}
+
+/** Strips a trailing number ((2), -2, 2) from a themeTitleKey; NFKC has made the brackets half-width already. */
+const unnumbered = (key: string): string => key.replace(/(?:\(\d+\)|-?\d+)$/u, "");
+const isOtherFamily = (key: string): boolean => unnumbered(key) === themeTitleKey(OTHER_NOTES_TITLE);
+const isNumberedContinuation = (key: string): boolean => isOtherFamily(key) && key !== themeTitleKey(OTHER_NOTES_TITLE);
+
 const applySplit: Applier = (run, op) => {
   const page = op.page as string;
   const refs = op.items as Ref[];
-  const title = op.new_title as string;
-  if (reservedTitle(title)) reject("invalid_title");
+  const into = op.into as string | undefined;
+  const title = op.new_title as string | undefined;
+  const summary = op.new_summary as string | undefined;
+  if (into !== undefined && (title !== undefined || summary !== undefined)) {
+    reject("split_target_conflict", { fields: [into !== undefined && "into", title !== undefined && "new_title", summary !== undefined && "new_summary"].filter(Boolean) });
+  }
+  if (into === undefined && title === undefined) reject("missing_field", { missing: ["into", "new_title"], unknown: [] });
+  if (title !== undefined && reservedTitle(title)) reject("invalid_title");
   if (new Set(refs.map(keyOf)).size !== refs.length) reject("item_already_used");
   const doc = run.requireWritable(page);
-  const key = themeTitleKey(title);
-  const newPath = posix.join(posix.dirname(page), `${title}.md`);
-  if (titleKeyTaken(run, key) || run.docs.has(newPath) || run.tx.docs.has(newPath)) reject("title_exists");
   if (refs.some((r) => r.page !== page)) reject("item_not_in_page");
+  // Why not reject a new_title that names a page of the same scope (title_exists): the router already treats that title as
+  // that page (PageRouter.pickPage), and a model that splits in several steps reuses its own new_title; appending keeps the
+  // two readings the same and keeps the run from stalling on title_exists.
+  // Why not the global title check (titleKeyTaken) here: titles are unique per scope folder, as the router keeps them;
+  // a project may hold a page whose title a common page (or another project) also uses.
+  let destPath = into ?? findThemeInScope(run, page, doc, themeTitleKey(title!));
+  // Why not let the 「その他」 page spill into a numbered continuation: it collects unrelated lines and keeps growing; the
+  // lines must go to a page named for their theme (the rejection comes back to the model as previous_rejections).
+  if (isOtherFamily(themeTitleKey(titleOf(page, doc)))) {
+    const destKey = destPath === undefined ? themeTitleKey(title!) : themeTitleKey(titleOf(destPath, run.peek(destPath)));
+    if (isNumberedContinuation(destKey) || (destPath !== undefined && isNumberedContinuation(pagePathKey(posix.basename(destPath, ".md"))))) reject("split_into_continuation");
+  }
+  const newPath = destPath === undefined ? posix.join(posix.dirname(page), `${slugifyKnowledgeName(title!)}.md`) : undefined;
+  if (newPath !== undefined) {
+    if (run.docs.has(newPath) || run.tx.docs.has(newPath)) reject("title_exists");
+    if (summary === undefined) reject("missing_field", { missing: ["new_summary"], unknown: [] });
+  } else {
+    if (destPath === page) reject("split_into_self");
+    const destDoc = run.peek(destPath!);
+    if (!run.writable(destPath!) || fmOf(destDoc).type !== "theme") reject("page_not_writable");
+    // Why not let split move lines across scopes or projects: moving a project line to common is promote_common's decision
+    // (it needs the line in two projects), and moving a common line into one project hides it from every other project.
+    const reason = fmOf(destDoc).scope !== fmOf(doc).scope ? "scope" : projectOf(destPath!, destDoc) !== projectOf(page, doc) ? "project" : null;
+    if (reason) reject("scope_mismatch", { into: destPath, reason });
+  }
   const items = refs.map((r) => ({ ref: r, item: run.resolve(r) }));
   const movable = scan(doc).filter((s) => s.heading !== UPDATES && s.heading !== RELATED).flatMap((s) => s.items);
+  // Why not allow emptying the source into an existing page: that is a page merge, and the empty shell would stay behind;
+  // archiving pages is not split's job.
   if (movable.length > 0 && movable.every((m) => items.some((i) => i.item.start === m.start))) reject("split_empties_page");
-  const fm = fmOf(doc);
-  const created = emptyThemePage({
-    id: run.ctx.newId(), title, summary: op.new_summary, scope: fm.scope === "common" ? "common" : "project",
-    project_id: typeof fm.project_id === "string" ? fm.project_id : null, today: run.ctx.today,
-  });
-  const newDoc = docOf(renderPage(created));
-  run.tx.docs.set(newPath, newDoc);
-  run.tx.ids.set(String(created.frontmatter.id), newPath);
+  let destDoc: Doc;
+  if (newPath !== undefined) {
+    const fm = fmOf(doc);
+    const created = emptyThemePage({
+      id: run.ctx.newId(), title: title!, summary: summary!, scope: fm.scope === "common" ? "common" : "project",
+      project_id: typeof fm.project_id === "string" ? fm.project_id : null, today: run.ctx.today,
+    });
+    destDoc = docOf(renderPage(created));
+    run.tx.docs.set(newPath, destDoc);
+    run.tx.ids.set(String(created.frontmatter.id), newPath);
+    destPath = newPath;
+  } else {
+    destDoc = run.doc(destPath!);
+    if (run.isDormant(destPath!)) run.tx.activity.push({ page: destPath!, action: "reactivate" });
+  }
+  receive(run, destPath!);
   const src = run.doc(page);
   const bySection = new Map<string, Item[]>();
   for (const it of items) bySection.set(it.ref.section, [...(bySection.get(it.ref.section) ?? []), it.item]);
   removeItems(src, [...bySection].map(([heading, list]) => ({ heading, items: list })));
-  for (const [heading, list] of bySection) for (const it of list.sort((a, b) => a.start - b.start)) addToSection(newDoc, heading, stripNew(it.text).split("\n"));
-  addLink(src, title, op.relation);
-  addLink(newDoc, titleOf(page, doc), op.relation);
+  for (const [heading, list] of bySection) for (const it of list.sort((a, b) => a.start - b.start)) addToSection(destDoc, heading, stripNew(it.text).split("\n"));
+  linkIfRoom(run, page, src, titleOf(destPath!, destDoc), op.relation);
+  linkIfRoom(run, destPath!, destDoc, titleOf(page, doc), op.relation);
   used(run, ...refs);
   run.tallyOf(page, "split");
-  run.tallyOf(newPath, "split");
+  run.tallyOf(destPath!, "split");
 };
 
 const applyPromote: Applier = (run, op) => {
@@ -699,7 +786,7 @@ const applyPromote: Applier = (run, op) => {
   if (reservedTitle(to.title)) reject("invalid_title");
   let commonPath = [...run.docs, ...run.tx.docs].find(([p, d]) => fmOf(d).scope === "common" && themeTitleKey(titleOf(p, d)) === key)?.[0];
   if (commonPath === undefined) {
-    commonPath = `${commonDir}/${to.title}.md`;
+    commonPath = `${commonDir}/${slugifyKnowledgeName(to.title)}.md`;
     if (titleKeyTaken(run, key) || run.docs.has(commonPath)) reject("title_exists");
   } else if (!run.writable(commonPath)) reject("page_not_writable");
   const works = items.flatMap((i) => worksOf(i.item.text));
@@ -725,6 +812,7 @@ const applyPromote: Applier = (run, op) => {
   }
   if (!section(commonDoc, to.section)) reject("unknown_section");
   addToSection(commonDoc, to.section, newLine.split("\n"));
+  receive(run, commonPath);
   const related = [...new Set([...relatedProjects(commonDoc), ...projects])];
   setFm(commonDoc, "related_projects", `[${related.join(", ")}]`);
   const commonTitle = titleOf(commonPath, commonDoc);
@@ -738,7 +826,7 @@ const applyPromote: Applier = (run, op) => {
   for (const [page, groups] of byPage) {
     const doc = run.doc(page);
     removeItems(doc, groups);
-    if (!hasLink(doc, commonTitle)) addLink(doc, commonTitle, PROMOTE_RELATION);
+    linkIfRoom(run, page, doc, commonTitle, PROMOTE_RELATION);
     run.tallyOf(page, "promote_common");
   }
   run.tallyOf(commonPath, "promote_common");
@@ -793,6 +881,7 @@ const applyRestore: Applier = (run, op) => {
   setFm(copy, "updated", run.ctx.today);
   run.tx.hists.set(path, copy);
   if (run.isDormant(page)) run.tx.activity.push({ page, action: "reactivate" });
+  receive(run, page);
   if (!revertAudit(doc, entry)) run.tallyOf(page, "restore", entry.id);
 };
 
@@ -801,18 +890,143 @@ const APPLIERS: Readonly<Record<string, Applier>> = {
   link: applyLink, split: applySplit, promote_common: applyPromote, restore: applyRestore,
 };
 
+// ---------------------------------------------------------------- limits and the update history
+
+const updatesLimit = (doc: Doc): number | undefined => pageSize(parsePage(textOf(doc)))?.sections.find((s) => s.section === UPDATES)?.limit;
+const isUpdateLine = (t: string): boolean => /^\s*- /u.test(t) && !isPlaceholder(t);
+
+/** Removes the update lines past the first `limit` and returns them in page order (blank lines stay). */
+function takeOverflow(doc: Doc, limit: number): string[] {
+  const sec = section(doc, UPDATES);
+  if (!sec) return [];
+  const at: number[] = [];
+  for (let i = sec.head + 1; i < sec.end; i += 1) if (isUpdateLine(doc.lines[i].t)) at.push(i);
+  const over = at.slice(limit);
+  const lines = over.map((i) => doc.lines[i].t);
+  for (const i of [...over].reverse()) doc.lines.splice(i, 1);
+  return lines;
+}
+
+/** A copy of the page with this run's audit line in 更新履歴 and `updated` set; `overflow` holds the update lines pushed past the limit. */
+function withAudit(doc: Doc, labels: ReadonlyMap<string, { count: number; refs: Set<string> }>, today: string, limit: number): { doc: Doc; overflow: string[] } {
+  const copy = cloneDoc(doc);
+  const parts = [...labels].map(([label, { count, refs }]) => `${LABELS[label]} ${count}${refs.size > 0 ? `（${[...refs].join(", ")}）` : ""}`);
+  addToSection(copy, UPDATES, [`- ${today} ${AUDIT_MARK}${parts.join("・")}`], "start");
+  setFm(copy, "updated", today);
+  return { doc: copy, overflow: takeOverflow(copy, limit) };
+}
+
+/** Puts update lines taken off a page at the top of `## 更新履歴` in `_history/<題名>.md` (they are newer than what it holds). */
+function archiveUpdates(run: Run, page: string, lines: readonly string[]): void {
+  if (lines.length === 0) return;
+  const path = historyPath(page);
+  const base = run.tx.hists.get(path) ?? run.hists.get(path);
+  if (!base) {
+    const pageDoc = run.peek(page);
+    const title = titleOf(page, pageDoc);
+    const frontmatter = { id: run.ctx.newId(), type: "history", title: `${title} の履歴`, page_id: String(fmOf(pageDoc).id ?? ""), created: run.ctx.today, updated: run.ctx.today };
+    run.tx.hists.set(path, docOf(renderHistory({ frontmatter, frontmatter_order: Object.keys(frontmatter), title: `${title} の履歴`, entries: [], updates: [...lines] })));
+    return;
+  }
+  const doc = run.tx.hists.get(path) ?? cloneDoc(base);
+  run.tx.hists.set(path, doc);
+  if (section(doc, UPDATES)) addToSection(doc, UPDATES, lines, "start");
+  else if (section(doc, HISTORY_SECTION)) doc.lines.push(...["", `## ${UPDATES}`, "", ...lines].map(mk));
+  else {
+    // Old shape (title and bullet lines only): the new headings go in front of the old lines, which then sit under 更新履歴.
+    let at = Math.max(0, frontmatterEnd(doc) + 1);
+    while (at < doc.lines.length && (doc.lines[at].t.trim() === "" || doc.lines[at].t.startsWith("# "))) at += 1;
+    doc.lines.splice(at, 0, ...[`## ${HISTORY_SECTION}`, "", `## ${UPDATES}`, "", ...lines].map(mk));
+  }
+  setFm(doc, "updated", run.ctx.today);
+}
+
+/** Before the operations: writable pages whose 更新履歴 is over its limit give their oldest lines to `_history`, whoever wrote them. */
+function settleUpdates(run: Run): void {
+  run.begin();
+  for (const [path, doc] of run.docs) {
+    const limit = updatesLimit(doc);
+    if (limit === undefined || !run.writable(path)) continue;
+    const sec = section(doc, UPDATES);
+    if (!sec || doc.lines.slice(sec.head + 1, sec.end).filter((l) => isUpdateLine(l.t)).length <= limit) continue;
+    archiveUpdates(run, path, takeOverflow(run.doc(path), limit));
+  }
+  run.commit();
+}
+
+/** The page as it would be written: with this run's audit line (and, with `includeTx`, the current operation's changes). */
+function audited(run: Run, path: string, includeTx: boolean): Doc {
+  const doc = includeTx ? run.peek(path) : run.docs.get(path)!;
+  const tally: Tally = new Map();
+  const labels = new Map([...(run.tally.get(path) ?? [])].map(([l, v]) => [l, { count: v.count, refs: new Set(v.refs) }] as const));
+  tally.set(path, labels);
+  if (includeTx) mergeTally(tally, run.tx.tally.filter((t) => t.page === path));
+  const merged = tally.get(path)!;
+  return merged.size === 0 ? doc : withAudit(doc, merged, run.ctx.today, updatesLimit(doc) ?? Infinity).doc;
+}
+
+/**
+ * The first limit the page would break once the current operation is applied, or null.
+ * A page that takes lines in must fit every limit; a page that only gives lines may stay over, as long as nothing over a limit
+ * grows and nothing within one crosses it.
+ * Why not one rule for every page (refuse only growth over a limit): a destination that was already over a limit would keep
+ * taking lines as long as its over-limit section did not grow.
+ * Why not measure a source's tokens with the owl:new marks: dropping a mark would pay for an added link or audit line, and
+ * the run's progress (measured without marks) would see the excess grow.
+ */
+function limitCheck(run: Run, path: string): Record<string, unknown> | null {
+  const textA = textOf(audited(run, path, true));
+  const textB = run.docs.has(path) ? textOf(audited(run, path, false)) : null;
+  const role = textB === null || run.tx.receivers.has(path) ? "destination" : "source";
+  const view = role === "destination" ? (t: string): string => t : stripNew;
+  const a = pageSize(parsePage(view(textA)));
+  if (!a) return null;
+  const b = textB === null ? null : pageSize(parsePage(view(textB)));
+  const metrics = [...a.sections.map((s) => ({ section: s.section as string | null, value: s.lines, limit: s.limit })), { section: null, value: a.tokens, limit: a.token_limit }];
+  for (const m of metrics) {
+    const before = (m.section === null ? b?.tokens : b?.sections.find((s) => s.section === m.section)?.lines) ?? 0;
+    if (m.value > m.limit && (role === "destination" || m.value > before)) return { page: path, role, section: m.section, limit: m.limit, before, after: m.value };
+  }
+  return null;
+}
+
 /** Applies the operations one by one. A rejected operation changes nothing; the rest go on. */
+/**
+ * Copies `op` with every page path (`page` fields, split's `into`, link's `from`/`to`) replaced by the stored page it names under pagePathKey,
+ * so 「テスト・検証.md」 and 「テスト-検証.md」 reach the same page. A path that matches no page, or several, stays as given.
+ */
+function resolvePaths<T extends Record<string, unknown>>(op: T, pages: ReadonlyMap<string, unknown>): T {
+  const byKey = new Map<string, string[]>();
+  for (const path of pages.keys()) byKey.set(pagePathKey(path), [...(byKey.get(pagePathKey(path)) ?? []), path]);
+  const fix = (path: string): string => {
+    const found = byKey.get(pagePathKey(path)) ?? [];
+    return pages.has(path) || found.length !== 1 ? path : found[0];
+  };
+  const walk = (v: unknown, key?: string): unknown => {
+    if (typeof v === "string") return key === "page" || (key === "into" && op.op === "split") || (op.op === "link" && (key === "from" || key === "to")) ? fix(v) : v;
+    if (Array.isArray(v)) return v.map((x) => walk(x, key));
+    if (isObj(v)) return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, walk(x, k)]));
+    return v;
+  };
+  return walk(op) as T;
+}
+
 export function applyOperations(state: PageOpsState, ops: readonly unknown[], ctx: PageOpsContext, opts: { allowCoreOps?: boolean } = {}): PageOpsResult {
   const run = new Run(state, ctx);
   const applied: PageOpsResult["applied"] = [];
   const rejected: PageOpsResult["rejected"] = [];
+  settleUpdates(run);
   ops.forEach((raw, index) => {
     run.begin();
     try {
-      const op = validateShape(raw, opts.allowCoreOps === true);
+      const op = resolvePaths(validateShape(raw, opts.allowCoreOps === true), run.docs);
       APPLIERS[op.op as string](run, op);
       // Every page an operation changes was valid before (or is new), so a template error here is the operation's own.
       for (const doc of run.tx.docs.values()) if (!validatePage(parsePage(textOf(doc)), { writer: "owl" }).ok) reject("page_invalid");
+      for (const path of run.tx.docs.keys()) {
+        const over = limitCheck(run, path);
+        if (over) reject("target_over_limit", over);
+      }
       run.commit();
       applied.push({ index, op: raw });
     } catch (error) {
@@ -822,13 +1036,15 @@ export function applyOperations(state: PageOpsState, ops: readonly unknown[], ct
   });
 
   // One line per run on the pages that changed, then the final check of the untouched lines.
+  run.begin();
   for (const [page, labels] of run.tally) {
     const doc = run.docs.get(page);
     if (!doc) continue;
-    const parts = [...labels].map(([label, { count, refs }]) => `${LABELS[label]} ${count}${refs.size > 0 ? `（${[...refs].join(", ")}）` : ""}`);
-    addToSection(doc, UPDATES, [`- ${ctx.today} 司書: ${parts.join("・")}`], "start");
-    setFm(doc, "updated", ctx.today);
+    const audit = withAudit(doc, labels, ctx.today, updatesLimit(doc) ?? Infinity);
+    run.tx.docs.set(page, audit.doc);
+    archiveUpdates(run, page, audit.overflow);
   }
+  run.commit();
   const out: PageOpsState = { pages: new Map(), histories: new Map(), pageIds: run.ids };
   const touched = new Set<string>();
   const warnings = [...run.warnings];

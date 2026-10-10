@@ -29,7 +29,7 @@ const fakeMemory = {
   stop: async () => {},
 };
 
-async function setup(t, { withMemory = true, withMemorySaver = true, startCore = false, unavailableKnowledgeStorage = false } = {}) {
+async function setup(t, { withMemory = true, withMemorySaver = true, startCore = false, unavailableKnowledgeStorage = false, withGuard = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), "owl-memory-http-"));
   if (unavailableKnowledgeStorage) writeFileSync(join(root, "knowledge"), "blocks the knowledge directory");
   const db = openDatabase(join(root, "owl.db"));
@@ -40,9 +40,10 @@ async function setup(t, { withMemory = true, withMemorySaver = true, startCore =
   else core.memory = withMemory ? fakeMemory : { stop: async () => {} };
   if (!withMemorySaver) core.memorySaver = undefined;
   const adapter = new ExternalCoreAdapter(core, db, root, join(root, "data"));
+  const guardTokens = withGuard ? (await import("../dist/guard-tokens.js")).GuardTokenRegistry.open(join(root, "guard-tokens")) : undefined;
   const prior = process.env.OWL_API_TOKEN;
   process.env.OWL_API_TOKEN = "mem-token";
-  const http = createOwlHttpServer({ core: adapter, webOut: root, bind: "127.0.0.1", port: 0, contract: { contract_version: "1.0.0" }, owlRoot: root });
+  const http = createOwlHttpServer({ core: adapter, webOut: root, bind: "127.0.0.1", port: 0, contract: { contract_version: "1.0.0" }, owlRoot: root, ...(guardTokens ? { guardTokens } : {}) });
   t.after(async () => {
     await http.close().catch(() => {});
     if (prior === undefined) delete process.env.OWL_API_TOKEN; else process.env.OWL_API_TOKEN = prior;
@@ -60,7 +61,7 @@ async function setup(t, { withMemory = true, withMemorySaver = true, startCore =
     headers: { authorization: "Bearer mem-token", "content-type": "application/json", ...headers },
     ...(op === "health" || op === "mode" ? {} : { body: JSON.stringify(body) }),
   });
-  return { origin, call, root };
+  return { origin, call, root, guardTokens };
 }
 
 test("memory routes run through the adapter-wrapped Core", async (t) => {
@@ -291,4 +292,64 @@ test("real Core: health has injection, guard tokens authenticate per role, reind
 
   lease.release();
   for (const bad of [token, "not-a-token"]) assert.equal((await call("search", { query: "x" }, bad)).status, 401);
+});
+
+/** One stdio session of the built memory-mcp.js as `role`, with its guard token file; returns the JSON-RPC replies by id. */
+async function mcpSession(origin, role, tokenFile, messages) {
+  const env = { ...process.env, OWL_GUARD_API_BASE: `${origin}/api/v1`, OWL_GUARD_TOKEN_FILE: tokenFile, OWL_ROLE: role };
+  delete env.OWL_API_TOKEN;
+  const child = spawn(process.execPath, [join(repoRoot, "apps/server/dist/memory-mcp.js")], { env });
+  let stdout = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stdin.end(messages.map((m) => JSON.stringify(m)).join("\n") + "\n");
+  await new Promise((resolve) => child.on("close", resolve));
+  return Object.fromEntries(stdout.trim().split("\n").map((l) => JSON.parse(l)).map((r) => [r.id, r]));
+}
+
+test("append is Advisor-only: HTTP refuses other roles and bad input without touching the page; MCP lists and routes it only for advisor", async (t) => {
+  const { createHash } = await import("node:crypto");
+  const { estimatePageTokens } = await import("../../../packages/core/dist/memory/page-format.js");
+  const api = await setup(t, { startCore: true, withGuard: true });
+  if (!api) return;
+  const project = "01HZZZZZZZZZZZZZZZZZZZZZZP";
+  const lease = (role) => api.guardTokens.issue({ agent_run_id: `run-${role}`, role });
+  const leases = Object.fromEntries(["advisor", "worker", "manager"].map((role) => [role, lease(role)]));
+  const post = (body, token) => api.call("append", body, token === null ? { authorization: "" } : { authorization: `Bearer ${token ?? readFileSync(leases.advisor.file, "utf8")}` });
+  const input = { project_id: project, section: "落とし穴", text: "月末は固定日時を渡す", theme: "テストの注意" };
+
+  const ok = await post(input);
+  assert.equal(ok.status, 200);
+  const done = await ok.json();
+  assert.equal(done.status, "appended");
+  const file = join(api.root, "knowledge", done.page);
+  const text = readFileSync(file, "utf8");
+  assert.match(text, /^- 月末は固定日時を渡す（会話\d{4}-\d{2}-\d{2}-1） <!-- owl:new /mu);
+  assert.equal((await (await post(input)).json()).status, "duplicate");
+
+  const sha = () => createHash("sha256").update(readFileSync(file)).digest("hex");
+  const before = sha();
+  for (const body of [{ ...input, section: "関連ページ" }, { ...input, section: "更新履歴" }, { ...input, section: "未知" }, { ...input, text: "" }, { ...input, text: "  \n " }, { project_id: project, text: "x" }, { project_id: project, section: "概要" }]) {
+    const response = await post(body);
+    assert.equal(response.status, 400, JSON.stringify(body));
+  }
+  for (const role of ["worker", "manager"]) assert.equal((await post({ ...input, text: "別の行" }, readFileSync(leases[role].file, "utf8"))).status, 403, role);
+  assert.equal((await post({ ...input, text: "別の行" }, "mem-token")).status, 403, "owner");
+  assert.ok((await post({ ...input, text: "別の行" }, null)).status >= 400, "no token");
+  assert.equal(sha(), before);
+
+  const list = { jsonrpc: "2.0", id: 2, method: "tools/list" };
+  const call = { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "append", arguments: { ...input, text: "MCP 経由の追記" } } };
+  const advisor = await mcpSession(api.origin, "advisor", leases.advisor.file, [list, call]);
+  assert.deepEqual(advisor[2].result.tools.map((tool) => tool.name), ["index", "page", "search", "append"]);
+  assert.ok(estimatePageTokens(advisor[2].result.tools.map((tool) => tool.description).join("")) <= 350);
+  assert.equal(JSON.parse(advisor[3].result.content[0].text).status, "appended");
+  assert.match(readFileSync(file, "utf8"), /- MCP 経由の追記（会話/u);
+
+  const after = sha();
+  for (const role of ["worker", "manager"]) {
+    const replies = await mcpSession(api.origin, role, leases[role].file, [list, call]);
+    assert.deepEqual(replies[2].result.tools.map((tool) => tool.name), ["index", "page", "search"], role);
+    assert.deepEqual(JSON.parse(replies[3].result.content[0].text), { error: "unknown_tool" }, role);
+  }
+  assert.equal(sha(), after);
 });

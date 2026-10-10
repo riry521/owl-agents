@@ -156,7 +156,7 @@ test("a complete Work enqueues a worker-scoped rule candidate for approval", asy
   });
   const job = await waitForLearningJob(db, workId);
   const proposal = db.get("SELECT * FROM rule_proposals WHERE id = ?", JSON.parse(job.result_json).rule_proposal_ids[0]);
-  assert.equal(proposal.status, "awaiting_approval");
+  assert.equal(proposal.status, "pending", "a single source stays pending");
   assert.equal(proposal.level, "role");
   assert.equal(proposal.role, "worker");
   assert.equal(proposal.text, "Use the shared lock.");
@@ -172,7 +172,7 @@ test("a complete Work routes a legacy proposes_rule lesson through the learning 
   });
   const job = await waitForLearningJob(db, workId);
   const proposal = db.get("SELECT * FROM rule_proposals WHERE id = ?", JSON.parse(job.result_json).rule_proposal_ids[0]);
-  assert.equal(proposal.status, "awaiting_approval");
+  assert.equal(proposal.status, "pending", "a single source stays pending");
   assert.equal(proposal.origin, "lesson");
   assert.equal(proposal.level, "system");
   assert.equal(proposal.text, "Legacy rule text.");
@@ -211,10 +211,10 @@ test("repeated final lessons deduplicate rule proposals by text and scope", asyn
         if (request.mode !== "finalize") return { outcome: "failed", message: "unexpected" };
         finalizeCalls += 1;
         const lessons = finalizeCalls === 1
-          ? [ruleLesson("candidate-1", "all")]
+          ? [ruleLesson("Always pin the migration number.", "all")]
           : finalizeCalls === 2
-            ? [ruleLesson("candidate-2", "all")]
-            : [ruleLesson("candidate-3", "all"), ruleLesson("candidate-3", "worker")];
+            ? [ruleLesson("Run the linter before merging.", "all")]
+            : [ruleLesson("Write docs for public endpoints.", "all"), ruleLesson("Write docs for public endpoints.", "worker")];
         return {
           outcome: "success",
           report_valid: true,
@@ -256,19 +256,19 @@ test("repeated final lessons deduplicate rule proposals by text and scope", asyn
   assert.equal(db.get("SELECT COUNT(*) AS n FROM rule_proposals").n, 2);
 
   let version = db.get("SELECT state_version FROM works WHERE id = ?", workId).state_version;
-  await core.reopenWork(workId, commandEnvelope({ reason: "Add both scopes of the third rule." }, "candidate-3-scopes", version));
+  await core.reopenWork(workId, commandEnvelope({ reason: "Add both scopes of the third rule." }, "Write docs for public endpoints.-scopes", version));
   assert.ok(await waitFor(() => finalizeCalls >= 3 && db.get("SELECT state FROM works WHERE id = ?", workId).state === "completed"));
   await waitFor(() => db.get("SELECT COUNT(*) AS n FROM rule_proposals").n === 4, { timeoutMs: 15_000 });
   const proposals = db.all("SELECT text, level, role, status FROM rule_proposals ORDER BY text, level, role");
   assert.deepEqual(proposals, [
-    { text: "candidate-1", level: "system", role: null, status: "awaiting_approval" },
-    { text: "candidate-2", level: "system", role: null, status: "awaiting_approval" },
-    { text: "candidate-3", level: "role", role: "worker", status: "awaiting_approval" },
-    { text: "candidate-3", level: "system", role: null, status: "awaiting_approval" },
+    { text: "Always pin the migration number.", level: "system", role: null, status: "pending" },
+    { text: "Run the linter before merging.", level: "system", role: null, status: "pending" },
+    { text: "Write docs for public endpoints.", level: "role", role: "worker", status: "pending" },
+    { text: "Write docs for public endpoints.", level: "system", role: null, status: "pending" },
   ]);
 
   version = db.get("SELECT state_version FROM works WHERE id = ?", workId).state_version;
-  await core.reopenWork(workId, commandEnvelope({ reason: "Repeat both scopes of the third rule." }, "repeat-candidate-3-scopes", version));
+  await core.reopenWork(workId, commandEnvelope({ reason: "Repeat both scopes of the third rule." }, "repeat-Write docs for public endpoints.-scopes", version));
   assert.ok(await waitFor(() => finalizeCalls >= 4 && db.get("SELECT state FROM works WHERE id = ?", workId).state === "completed"));
   await waitForLearningJob(db, workId);
   assert.equal(db.get("SELECT COUNT(*) AS n FROM rule_proposals").n, 4);
@@ -497,7 +497,7 @@ test("an incomplete final verdict enqueues proposed rules while waiting for Owne
   const job = await waitForLearningJob(db, workId);
   const result = JSON.parse(job.result_json);
   const proposal = db.get("SELECT * FROM rule_proposals WHERE id = ?", result.rule_proposal_ids[0]);
-  assert.equal(proposal.status, "awaiting_approval");
+  assert.equal(proposal.status, "pending", "a single source stays pending");
   assert.equal(proposal.text, "lesson-marker");
   assert.equal(proposal.rationale, "seen here");
   assert.equal((await core.knowledge.list("works")).length, 1, "the Work log page");

@@ -10,7 +10,7 @@ import { useView } from '@/lib/view-loader';
 import type { RuleProposal, RuleProposalCommandResult, RuleProposalStatus } from '@/lib/types';
 import { useLocale, type TFunction } from '@/lib/i18n';
 
-type ProposalListStatus = Extract<RuleProposalStatus, 'awaiting_approval' | 'pending'>;
+type ProposalListStatus = Extract<RuleProposalStatus, 'awaiting_approval' | 'pending' | 'expired'>;
 
 function errorField(error: unknown, key: 'code' | 'kind'): string {
   if (error !== null && typeof error === 'object' && !Array.isArray(error)) {
@@ -38,7 +38,7 @@ export function RuleApprovalsView() {
 
   useEffect(() => {
     const queryStatus = new URLSearchParams(window.location.search).get('status');
-    if (queryStatus === 'pending') setStatus('pending');
+    if (queryStatus === 'pending' || queryStatus === 'expired') setStatus(queryStatus);
   }, []);
 
   function classifyError(error: unknown): string {
@@ -88,7 +88,9 @@ export function RuleApprovalsView() {
               : t('rules.approvals.title', { count: String(proposals.length) })}
           </h1>
           <p className="page__sub">
-            {status === 'pending' ? t('rules.approvals.pendingSubtitle') : t('rules.approvals.subtitle')}
+            {status === 'pending'
+              ? t('rules.approvals.pendingSubtitle')
+              : status === 'expired' ? t('rules.approvals.expiredSubtitle') : t('rules.approvals.subtitle')}
           </p>
         </div>
       </div>
@@ -114,7 +116,11 @@ export function RuleApprovalsView() {
       {proposals === null && !loadError && <p className="empty">{t('common.loading')}</p>}
 
       {proposals !== null && proposals.length === 0 && !loadError && (
-        <p className="empty">{status === 'pending' ? t('rules.approvals.emptyPending') : t('rules.approvals.empty')}</p>
+        <p className="empty">
+          {status === 'pending'
+            ? t('rules.approvals.emptyPending')
+            : status === 'expired' ? t('rules.approvals.emptyExpired') : t('rules.approvals.empty')}
+        </p>
       )}
 
       {proposals !== null && proposals.length > 0 && (

@@ -21,9 +21,13 @@ const withoutExempt = (sources: readonly string[], text: string): string => sour
 
 export type PlanQualityOutcome = "repair_requested" | "accepted_with_warnings" | "rejected";
 
+/** The warnings worth asking the Manager to repair; record-only warnings are left out. */
+export const repairableWarnings = (warnings: readonly PlanQualityWarning[], settings: PlanQualitySettings): PlanQualityWarning[] =>
+  warnings.filter((warning) => !settings.record_only_codes.includes(warning.code));
+
 /** Decides what happens to a plan with warnings; call only when warnings is not empty. */
 export function planQualityOutcome(warnings: readonly PlanQualityWarning[], repairsUsed: number, settings: PlanQualitySettings): PlanQualityOutcome {
-  if (repairsUsed < settings.max_repair_requests) return "repair_requested";
+  if (repairsUsed < settings.max_repair_requests && repairableWarnings(warnings, settings).length > 0) return "repair_requested";
   return warnings.some((warning) => settings.blocking_codes.includes(warning.code)) ? "rejected" : "accepted_with_warnings";
 }
 

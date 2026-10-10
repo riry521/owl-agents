@@ -42,6 +42,8 @@ const styles = [
   ["provider.resumed", "▶️", "処理を再開しました", "Resumed", "#4CAF50", { provider: "Anthropic" }],
   ["system.alert", "🚨", "問題が発生", "Problem", "#F44336", { message: "Failure" }, { work_id: WORK_ID }],
   ["system.alert", "⚠️", "システム通知", "System notice", "#FF9800", { message: "Notice" }, {}],
+  ["system.alert", "📝", "整理のお知らせ", "Curation notice", "#607D8B", { kind: "curation_notice", severity: "info", message: "a\nb" }, {}],
+  ["system.alert", "⚠️", "システム通知", "System notice", "#FF9800", { kind: "curation_notice", severity: "warning", message: "Failed" }, {}],
 ];
 
 for (const [type, emoji, jaTitle, enTitle, color, payload, extra = { work_id: WORK_ID }] of styles) {

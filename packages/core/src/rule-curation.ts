@@ -1,6 +1,7 @@
 import { fingerprint } from "./learning-fingerprint.js";
 import type { PromptRule, RuleSet } from "./rule-store.js";
 import type { RuleProposalRecord } from "./rule-proposals.js";
+import type { RulePairJudge } from "./rule-judge.js";
 
 export type RuleCurationVerdict =
   | "approve_candidate" | "duplicate_of_rule" | "near_duplicate_of_rule" | "possible_conflict"
@@ -40,20 +41,24 @@ export interface RuleCurationResult {
   readonly warnings: string[];
 }
 
-const NEAR_DUPLICATE = 0.8;
-const CONFLICT_SIMILARITY = 0.5;
-const NEGATION = /しない|禁止|してはいけない|不要|don't|do not|never|must not|prohibited/iu;
+/** Threshold of the create-time fold of a new proposal into an open one (rule-proposals.ts); curation itself asks the model. */
+export const NEAR_DUPLICATE = 0.8;
 
 /** True when one rule can apply to the same role as the other (absolute and system rules apply to every role). */
-function coApply(a: { level: string; role?: string | null }, b: { level: string; role?: string | null }): boolean {
+export function coApply(a: { level: string; role?: string | null }, b: { level: string; role?: string | null }): boolean {
   return a.level !== "role" || b.level !== "role" || (a.role ?? null) === (b.role ?? null);
 }
 
-/** Read-only judgement of open rule proposals against the current rules. */
-export function curateRuleProposals(input: {
+/**
+ * Read-only judgement of open rule proposals against the current rules.
+ * Meaning comes from `judge`; without it only exact (fingerprint) matches are reported.
+ */
+export async function curateRuleProposals(input: {
   readonly proposals: readonly RuleProposalRecord[];
   readonly rules: Pick<RuleSet, "promptRules"> & Partial<Pick<RuleSet, "files">>;
-}): RuleCurationResult {
+  readonly judge?: RulePairJudge;
+}): Promise<RuleCurationResult> {
+  const judge = input.judge;
   const open = input.proposals
     .filter((p): p is RuleProposalRecord & { status: "pending" | "awaiting_approval" } => p.status === "pending" || p.status === "awaiting_approval")
     .sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id));
@@ -62,13 +67,29 @@ export function curateRuleProposals(input: {
   for (const file of input.rules.files ?? []) for (const rule of file.rules) pathById.set(rule.id, file.path);
   const pathOf = (rule: PromptRule): string | null => pathById.get(rule.id) ?? null;
 
+  const isValid = (p: RuleProposalRecord): boolean => [...p.text].length >= 1 && [...p.text].length <= 300 && !/[\r\n]/u.test(p.text);
+  const candidate = (a: string, b: string): boolean => fingerprint(a) !== fingerprint(b) && judge !== undefined && judge.isCandidate(a, b);
+  const toJudge: Array<readonly [string, string]> = [];
+  for (const proposal of open.filter(isValid)) {
+    for (const rule of input.rules.promptRules) if (coApply(rule, proposal) && candidate(proposal.text, rule.text)) toJudge.push([proposal.text, rule.text]);
+  }
+  const allRules = input.rules.promptRules;
+  for (let i = 0; i < allRules.length; i += 1) {
+    for (let j = i + 1; j < allRules.length; j += 1) {
+      if (coApply(allRules[i] as PromptRule, allRules[j] as PromptRule) && candidate((allRules[i] as PromptRule).text, (allRules[j] as PromptRule).text)) {
+        toJudge.push([(allRules[i] as PromptRule).text, (allRules[j] as PromptRule).text]);
+      }
+    }
+  }
+  await judge?.judge(toJudge);
+  const relation = (a: string, b: string) => (candidate(a, b) ? judge?.get(a, b) ?? null : null);
+
   const seen = new Map<string, RuleProposalRecord>();
   const proposals = open.map((proposal): RuleCurationProposal => {
     const base = { id: proposal.id, status: proposal.status, text: proposal.text, level: proposal.level, role: proposal.role };
     const done = (verdict: RuleCurationVerdict, note: string, related: RuleCurationRelated[] = []): RuleCurationProposal =>
       ({ ...base, verdict, related, note });
-    const length = [...proposal.text].length;
-    if (length < 1 || length > 300 || /[\r\n]/u.test(proposal.text)) return done("invalid", "Text must be one line of 1-300 characters.");
+    if (!isValid(proposal)) return done("invalid", "Text must be one line of 1-300 characters.");
 
     const fp = fingerprint(proposal.text);
     const scoped = input.rules.promptRules.filter((r) => coApply(r, proposal));
@@ -77,13 +98,13 @@ export function curateRuleProposals(input: {
 
     const same = scoped.find((r) => fingerprint(r.text) === fp);
     if (same) return done("duplicate_of_rule", "An existing rule already says this.", [relate(same, 1)]);
-    const scored = scoped.map((rule) => ({ rule, similarity: dice(proposal.text, rule.text) })).sort((a, b) => b.similarity - a.similarity);
-    const conflict = scored.filter((s) => s.similarity >= CONFLICT_SIMILARITY && negated(s.rule.text) !== negated(proposal.text));
+    const judged = scoped.map((rule) => ({ rule, relation: relation(proposal.text, rule.text), similarity: dice(proposal.text, rule.text) }));
+    const conflict = judged.filter((s) => s.relation === "conflict");
     if (conflict.length > 0) {
-      return done("possible_conflict", "Similar to an existing rule with opposite polarity.", conflict.map((s) => relate(s.rule, s.similarity)));
+      return done("possible_conflict", "The model judged this to contradict an existing rule.", conflict.map((s) => relate(s.rule, s.similarity)));
     }
-    const near = scored.find((s) => s.similarity >= NEAR_DUPLICATE);
-    if (near) return done("near_duplicate_of_rule", "An existing rule is nearly identical.", [relate(near.rule, near.similarity)]);
+    const near = judged.filter((s) => s.relation === "same");
+    if (near.length > 0) return done("near_duplicate_of_rule", "The model judged an existing rule to say the same thing.", near.map((s) => relate(s.rule, s.similarity)));
     const earlier = seen.get(`${proposal.level}\u0000${proposal.role ?? ""}\u0000${fp}`);
     if (earlier) return done("duplicate_of_proposal", "An older open proposal has the same text.", [{ proposal_id: earlier.id, text: earlier.text, similarity: 1 }]);
     seen.set(`${proposal.level}\u0000${proposal.role ?? ""}\u0000${fp}`, proposal);
@@ -99,17 +120,16 @@ export function curateRuleProposals(input: {
       const a = rules[i] as PromptRule;
       const b = rules[j] as PromptRule;
       if (!coApply(a, b)) continue;
-      const similarity = fingerprint(a.text) === fingerprint(b.text) ? 1 : dice(a.text, b.text);
-      const kind = similarity === 1 ? "duplicate"
-        : similarity >= CONFLICT_SIMILARITY && negated(a.text) !== negated(b.text) ? "possible_conflict"
-        : similarity >= NEAR_DUPLICATE ? "near_duplicate"
-        : null;
+      const exact = fingerprint(a.text) === fingerprint(b.text);
+      const judged = exact ? null : relation(a.text, b.text);
+      const similarity = exact ? 1 : dice(a.text, b.text);
+      const kind = exact ? "duplicate" : judged === "conflict" ? "possible_conflict" : judged === "same" ? "near_duplicate" : null;
       if (!kind) continue;
       rule_findings.push({
         kind,
         rules: [a, b].map((r) => ({ id: r.id, path: pathOf(r), text: r.text })),
         similarity,
-        note: kind === "possible_conflict" ? "Similar rules with opposite polarity." : "Rules overlap.",
+        note: kind === "possible_conflict" ? "The model judged these rules to contradict each other." : "Rules overlap.",
       });
     }
   }
@@ -119,12 +139,8 @@ export function curateRuleProposals(input: {
     proposals,
     awaiting_approval: proposals.filter((p) => p.status === "awaiting_approval").map((p) => ({ id: p.id, text: p.text, verdict: p.verdict })),
     rule_findings,
-    warnings,
+    warnings: [...warnings, ...(judge?.warnings ?? [])],
   };
-}
-
-function negated(text: string): boolean {
-  return NEGATION.test(text);
 }
 
 function bigrams(text: string): Map<string, number> {
@@ -137,7 +153,7 @@ function bigrams(text: string): Map<string, number> {
   return map;
 }
 
-function dice(left: string, right: string): number {
+export function dice(left: string, right: string): number {
   const a = bigrams(left);
   const b = bigrams(right);
   let overlap = 0;

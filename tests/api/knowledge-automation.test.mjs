@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import { MemoryCore, ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { startTestHttpServer } from "../helpers/http.mjs";
+import { createTestCore } from "../helpers/core.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 
 async function startServer(t) {
@@ -57,6 +58,8 @@ test("knowledge automation settings GET defaults and PUT round-trips through Mem
     research_tags_min: 3,
     research_tags_max: 5,
     next_librarian_run_at: null,
+    next_skill_curation_run_at: null,
+    next_rule_curation_run_at: null,
     time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone || "local",
   });
 
@@ -69,6 +72,8 @@ test("knowledge automation settings GET defaults and PUT round-trips through Mem
     librarian_times: ["08:30", "19:15"],
     research_autosave: false,
     next_librarian_run_at: null,
+    next_skill_curation_run_at: null,
+    next_rule_curation_run_at: null,
     time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone || "local",
   });
 
@@ -123,6 +128,41 @@ test("ExternalCoreAdapter keeps knowledge automation settings in its in-memory f
     librarian_times: [],
     research_autosave: false,
     next_librarian_run_at: null,
+    next_skill_curation_run_at: null,
+    next_rule_curation_run_at: null,
     time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone || "local",
   });
+});
+
+test("updating the times reschedules all three runs and GET returns their next run times", async (t) => {
+  const clock = {
+    now: () => new Date(2026, 8, 28, 10, 0),
+    setTimeout: () => ({}),
+    clearTimeout: () => {},
+  };
+  const { root, db, core } = await createTestCore(t, { version: "test", knowledgeSchedule: { clock } }, { prefix: "owl-api-knowledge-schedule-" });
+  await core.start();
+  const adapter = new ExternalCoreAdapter(core, db, root, root);
+  const token = "test-knowledge-schedule-token";
+  const server = await startTestHttpServer(t, { core: adapter, db, webOut: root, owlRoot: root, dataDir: root }, { token });
+  if (!server) return t.skip("localhost listen is not permitted in this environment");
+  const url = `${server.baseUrl}/api/v1/settings/knowledge-automation`;
+  const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+
+  const put = await fetch(url, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({
+      request_id: "schedule-1",
+      idempotency_key: "knowledge-automation:schedule-1",
+      expected_version: 0,
+      payload: { librarian_times: ["18:30"], research_autosave: true },
+    }),
+  });
+  assert.equal(put.status, 200);
+  const data = (await (await fetch(url, { headers })).json()).data;
+  const expected = new Date(2026, 8, 28, 18, 30).toISOString();
+  assert.equal(data.next_librarian_run_at, expected);
+  assert.equal(data.next_skill_curation_run_at, expected);
+  assert.equal(data.next_rule_curation_run_at, expected);
 });

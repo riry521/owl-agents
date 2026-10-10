@@ -111,7 +111,7 @@ test("the language reaches every role request and lessons enter the learning pip
   for (const request of workerRequests) assert.equal(request.language, "en");
   const result = JSON.parse(job.result_json);
   const proposal = db.get("SELECT * FROM rule_proposals WHERE id = ?", result.rule_proposal_ids[0]);
-  assert.equal(proposal.status, "awaiting_approval");
+  assert.equal(proposal.status, "pending", "a single source stays pending");
   assert.equal(proposal.text, "Pin the migration number early.");
   assert.equal(proposal.rationale, "Two Works clashed.");
   assert.equal((await core.knowledge.list("policies")).length, 0);

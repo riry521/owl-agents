@@ -828,7 +828,7 @@ export interface KnowledgeEntry {
   body: string;
 }
 
-export type RuleProposalStatus = 'pending' | 'awaiting_approval' | 'applied' | 'rejected';
+export type RuleProposalStatus = 'pending' | 'awaiting_approval' | 'applied' | 'rejected' | 'expired' | 'merged';
 export type RuleProposalOrigin = 'lesson' | 'note' | 'legacy_policy' | 'metrics';
 export type RuleProposalRole = 'advisor' | 'manager' | 'designer' | 'worker' | 'reviewer' | 'librarian' | 'curator';
 
@@ -1062,6 +1062,8 @@ export interface KnowledgeAutomationSettingsInput {
 
 export interface KnowledgeAutomationSettingsData extends KnowledgeAutomationSettingsInput {
   next_librarian_run_at: string | null;
+  next_skill_curation_run_at: string | null;
+  next_rule_curation_run_at: string | null;
   time_zone: string;
 }
 

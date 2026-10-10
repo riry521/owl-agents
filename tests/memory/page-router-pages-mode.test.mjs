@@ -184,7 +184,7 @@ test("the learning pipeline in pages mode records routes, writes the destination
   assert.equal(row.status, "done");
   const result = JSON.parse(row.result_json);
   assert.equal(result.routes.filter((route) => route.status === "appended").length, 2);
-  assert.ok(result.routes.some((route) => route.section === "落とし穴" && /その他の注意/u.test(route.page)));
+  assert.ok(result.routes.some((route) => route.section === "落とし穴" && /存在しないテーマ/u.test(route.page)));
   assert.equal(f.skillBox.proposals.length, 1);
   assert.equal(f.legacyNotes.merges, 0);
 
@@ -249,4 +249,15 @@ test("the Final Manager schema has theme and cross_project only for memory_mode 
   const request = { work: { id: "w", title: "t" }, mode: "finalize", context: {} };
   assert.equal(buildManagerPrompt(request, "en").includes("cross_project"), false);
   assert.equal(buildManagerPrompt({ ...request, memory_mode: "pages" }, "en").includes("cross_project"), true);
+});
+
+test("a theme page for a title with 「・」 is created under the slugified file name and keeps its title", async (t) => {
+  const { root, router } = await vault(t);
+  await router.route(input("pitfall", "最初の落とし穴"));
+  const result = await router.route(input("pitfall", "新しいテーマの罠", { theme: "テスト・検証・リソース" }));
+  assert.equal(result.status, "appended");
+  const files = await readdir(await projectDir(root));
+  assert.ok(files.includes("テスト-検証-リソース.md") && !files.includes("テスト・検証・リソース.md"));
+  const page = parsePage(await readFile(join(await projectDir(root), "テスト-検証-リソース.md"), "utf8"));
+  assert.equal(page.frontmatter.title, "テスト・検証・リソース");
 });

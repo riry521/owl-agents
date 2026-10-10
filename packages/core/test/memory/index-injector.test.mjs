@@ -110,7 +110,7 @@ test("pages mode: Manager, Designer, Worker and Reviewer get the project index w
   const found = await roles(PROJECT_ID);
   for (const [role, text] of Object.entries(found)) {
     assert.ok(text, `${role} has no index`);
-    assert.match(text, /^<owl-memory scope="project" project="ことり家計簿">/u, role);
+    assert.match(text, /^<owl-memory scope="project" project="ことり家計簿" data="external[^"]*">/u, role);
     assert.ok(text.includes("[[テストの落とし穴]]") && text.includes("owl-memory の page で開く"), role);
     assert.ok(tokens(text) <= 1200, `${role} ${tokens(text)} tokens`);
     assert.match(text, /\n<\/owl-memory>\n_memory injected: [\d.]+kB \/ [\d.]+kB budget · collapsed: none_$/u, role);
@@ -122,7 +122,7 @@ test("pages mode: Manager, Designer, Worker and Reviewer get the project index w
 test("pages mode: a Work without a Project gets the common index; the Curator gets nothing", async (t) => {
   const { core, roles } = await coreWithPages(t);
   const found = await roles(null);
-  assert.match(found.manager, /^<owl-memory scope="common">/u);
+  assert.match(found.manager, /^<owl-memory scope="common" data="external[^"]*">/u);
   assert.ok(found.manager.includes("Project をまたぐ決まりごと"));
   assert.equal(await core.memoryInjector.compose({ role: "curator", query: ["x"], project_id: PROJECT_ID }), null);
 });
@@ -171,7 +171,7 @@ test("Advisor: first turn lists project index titles; later turns are empty unti
   writeFileSync(join(vault, "projects/p/_index.md"), fixture("project-index").replace("- [[金額と集計]] — 金額の型と月次集計の区切り方\n", "").replace(/^source_hash: .*$/mu, "source_hash: " + "e1".repeat(32)));
   await index.rebuild("manual");
   const diff = await turn("s1");
-  assert.match(diff, /^<owl-memory-diff generated="[^"]+">/u);
+  assert.match(diff, /^<owl-memory-diff generated="[^"]+" data="external[^"]*">/u);
   assert.ok(diff.includes("+ Project をまたぐ決まりごと（更新）") && diff.includes("- Project をまたぐ決まりごと"));
   assert.ok(diff.includes("+ - 2030-01-02 W900 落とし穴+1（司書）") && diff.includes("- - [[金額と集計]] — 金額の型と月次集計の区切り方"));
   assert.ok(!diff.includes("テストの落とし穴]] — 日付"), "unchanged lines are not repeated");
@@ -330,7 +330,7 @@ test("Advisor: a diff over 300 tokens becomes a one-line notice", async (t) => {
   const lines = Array.from({ length: 80 }, (_, i) => `- [[新しいページ${i}]] — ${"説明".repeat(10)}`).join("\n");
   writeFileSync(join(vault, "common/_index.md"), COMMON_INDEX.replace(/## テーマ\n/u, `## テーマ\n${lines}\n`).replace(/^source_hash: .*$/mu, "source_hash: " + "f1".repeat(32)));
   await index.rebuild("manual");
-  assert.match(await injector.compose({ role: "advisor", query: [], project_id: null, session_id: "s" }), /^<owl-memory-diff generated="[^"]+">1 ページが更新された。page で開き直す<\/owl-memory-diff>$/u);
+  assert.match(await injector.compose({ role: "advisor", query: [], project_id: null, session_id: "s" }), /^<owl-memory-diff generated="[^"]+" data="external[^"]*">1 ページが更新された。page で開き直す<\/owl-memory-diff>$/u);
 });
 
 const advisorCtx = { caller: "advisor", agent_run_id: "s", work_id: null, task_id: null, project_id: null };

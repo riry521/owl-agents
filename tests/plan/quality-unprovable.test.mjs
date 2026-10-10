@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { evaluatePlanQuality, formatPlanQualityReason, planQualityOutcome } from "../../packages/core/dist/plan-quality.js";
+import { evaluatePlanQuality, formatPlanQualityReason, planQualityOutcome, repairableWarnings } from "../../packages/core/dist/plan-quality.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import {
   DEFAULT_PLAN_QUALITY_SETTINGS,
@@ -69,6 +69,17 @@ test("planQualityOutcome: repair first, then reject blocking codes only", () => 
   assert.equal(planQualityOutcome(blocking, S.max_repair_requests, S), "rejected");
   assert.equal(planQualityOutcome(soft, S.max_repair_requests, S), "accepted_with_warnings");
   assert.equal(planQualityOutcome(blocking, S.max_repair_requests, { ...S, blocking_codes: [] }), "accepted_with_warnings");
+});
+
+test("record_only_codes: a chars-over warning alone is accepted without repair and never reaches the repair message", () => {
+  const chars = { code: "acceptance_chars_over", task_ref: "t", title: "t", detail: "d", measured: 1, threshold: 1 };
+  const items = { code: "acceptance_items_over", task_ref: "t", title: "t", detail: "d", measured: 1, threshold: 1 };
+  assert.equal(planQualityOutcome([chars], 0, S), "accepted_with_warnings");
+  assert.equal(planQualityOutcome([chars, items], 0, S), "repair_requested");
+  assert.deepEqual(repairableWarnings([chars, items], S).map((w) => w.code), ["acceptance_items_over"]);
+  assert.equal(planQualityOutcome([chars], 0, { ...S, record_only_codes: [] }), "repair_requested");
+  assert.throws(() => validatePlanQualitySettings({ ...S, record_only_codes: ["nope"] }));
+  assert.deepEqual(validatePlanQualitySettings({ ...S, record_only_codes: [] }).record_only_codes, []);
 });
 
 const managerTask = (id, list) => ({
