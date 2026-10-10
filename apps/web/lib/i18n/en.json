@@ -623,7 +623,7 @@
     "providerLabel": "Provider",
     "modelLabel": "Model",
     "effortLabel": "Effort",
-    "modelPlaceholder": "e.g. claude-sonnet-5",
+    "modelPlaceholder": "e.g. claude-sonnet-5-5",
     "saveSuccess": "Settings saved.",
     "advisorPersona": "Advisor Persona",
     "advisorPersonaDescription": "Define how the Advisor should communicate, think, and behave.",

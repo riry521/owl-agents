@@ -1,6 +1,5 @@
 export const MEMORY_MODE_SETTINGS_KEY = "memory_mode";
 export const MEMORY_FOLDER_KINDS_SETTINGS_KEY = "memory_folder_kinds";
-export const MEMORY_LIBRARIAN_SETTINGS_KEY = "memory_librarian";
 export const MEMORY_RECALL_LIMIT_SETTINGS_KEY = "memory_recall_limit";
 export const MEMORY_RECALL_MIN_SIMILARITY_SETTINGS_KEY = "memory_recall_min_similarity";
 
@@ -57,16 +56,6 @@ export const DEFAULT_MEMORY_FOLDER_KINDS: MemoryFolderKinds = {
   ],
 };
 
-export const MEMORY_LIBRARIAN_PROVIDERS = ["anthropic", "claude", "openai", "codex"] as const;
-export const MEMORY_LIBRARIAN_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
-export interface MemoryLibrarian {
-  readonly provider: string;
-  readonly model: string;
-  readonly effort: string;
-}
-/** Model for the migration / page-librarian LLM calls; independent of the model_settings roles. */
-export const DEFAULT_MEMORY_LIBRARIAN: MemoryLibrarian = { provider: "anthropic", model: "claude-haiku-4-5-20251001", effort: "low" };
-
 export class MemorySettingsValidationError extends Error {
   public constructor(message: string) {
     super(message);
@@ -108,32 +97,6 @@ export function readMemoryFolderKinds(value: unknown, warn?: (message: string) =
 /** `pages` is the only mode. A `legacy` (or any other) value an older build saved is read as `pages`. */
 export function readMemoryMode(_value: unknown): MemoryMode {
   return DEFAULT_MEMORY_MODE;
-}
-
-/** Strict validation for settings writes. */
-export function validateMemoryLibrarian(value: unknown): MemoryLibrarian {
-  if (!isRecord(value) || Object.keys(value).some((key) => !["provider", "model", "effort"].includes(key))) {
-    throw new MemorySettingsValidationError("memory_librarian must be {provider, model, effort}.");
-  }
-  if (!(MEMORY_LIBRARIAN_PROVIDERS as readonly unknown[]).includes(value.provider)) {
-    throw new MemorySettingsValidationError(`memory_librarian.provider must be one of ${MEMORY_LIBRARIAN_PROVIDERS.join(", ")}.`);
-  }
-  if (typeof value.model !== "string" || value.model.trim() === "") throw new MemorySettingsValidationError("memory_librarian.model must be a non-empty string.");
-  if (!(MEMORY_LIBRARIAN_EFFORTS as readonly unknown[]).includes(value.effort)) {
-    throw new MemorySettingsValidationError(`memory_librarian.effort must be one of ${MEMORY_LIBRARIAN_EFFORTS.join(", ")}.`);
-  }
-  return { provider: value.provider as string, model: value.model.trim(), effort: value.effort as string };
-}
-
-/** Tolerant parsing of stored values: anything invalid falls back to the default. */
-export function readMemoryLibrarian(value: unknown, warn?: (message: string) => void): MemoryLibrarian {
-  if (value === undefined) return DEFAULT_MEMORY_LIBRARIAN;
-  try {
-    return validateMemoryLibrarian(value);
-  } catch (error) {
-    warn?.(`Invalid memory_librarian; using defaults: ${(error as Error).message}`);
-    return DEFAULT_MEMORY_LIBRARIAN;
-  }
 }
 
 /** Integer 1–3; anything else gives the default. */

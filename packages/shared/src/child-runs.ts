@@ -123,7 +123,6 @@ export const DEFAULT_CHILD_RUN_SETTINGS: ChildRunSettings = {
     codex: { provider: "claude", model: CLAUDE_SONNET_5_5_MODEL, effort: "medium" },
   },
   allowed_models: [
-    { provider: "claude", model: DEFAULT_HARNESS_MODELS.claude },
     { provider: "claude", model: CLAUDE_SONNET_5_5_MODEL },
     { provider: "codex", model: "gpt-5.6-luna" },
     { provider: "claude", model: CLAUDE_HAIKU_5_5_MODEL },

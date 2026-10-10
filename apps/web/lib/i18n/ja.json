@@ -623,7 +623,7 @@
     "providerLabel": "Provider",
     "modelLabel": "Model",
     "effortLabel": "Effort",
-    "modelPlaceholder": "例: claude-sonnet-5",
+    "modelPlaceholder": "例: claude-sonnet-5-5",
     "saveSuccess": "設定を保存しました。",
     "advisorPersona": "アドバイザーペルソナ",
     "advisorPersonaDescription": "Advisorの話し方・視点・振る舞いを設定します。",

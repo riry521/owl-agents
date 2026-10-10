@@ -222,17 +222,22 @@ test("rule_curation merges each group the model calls the same into its oldest p
   assert.equal(new Set(seen).size, seen.length, "tidy and curate never ask the same pair twice");
 });
 
-test("rule_curation asks the model with the memory_librarian setting and the Owner language, and only about related pairs", async (t) => {
+test("rule_curation asks the model with the Curator role setting and the Owner language, and only about related pairs", async (t) => {
   const judging = judgingRunner(() => "different");
   const { core, db } = await curationFixture(t, { runRuleJudgments: judging.run });
+  const curator = { provider: "codex", model: "curator-test-model", effort: "high" };
+  await db.createWriteLane().transact((tx) => {
+    const now = new Date().toISOString();
+    tx.run("INSERT OR IGNORE INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Owner', ?, ?)", now, now);
+    tx.run("INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at) VALUES ('model_settings', 'owner:default', '1.0.0', ?, ?)", JSON.stringify({ version: 1, roles: [{ role: "curator", ...curator }] }), now);
+  });
   await insertOpenProposals(db, [["01UNRELATED", "role", "manager", "Reply to the Owner in plain words."]]);
 
   await core.runCuration({ kind: "rule_curation", trigger: "manual_api", actor: "owner" });
 
-  const settings = await core.getMemorySettings();
   assert.ok(judging.requests.length >= 1);
   for (const request of judging.requests) {
-    assert.deepEqual(request.model, settings.memory_librarian);
+    assert.deepEqual(request.model, curator);
     assert.match(request.language, /^(ja|en)$/u);
   }
   const asked = judging.requests.flatMap((r) => r.pairs);

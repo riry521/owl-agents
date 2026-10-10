@@ -1,14 +1,16 @@
 /** Agent CLIs Owl runs models through. */
 export type ModelHarness = "claude" | "codex";
 
+export const CLAUDE_SONNET_5_5_MODEL = "claude-sonnet-5-5";
+export const CLAUDE_HAIKU_5_5_MODEL = "claude-haiku-5-5";
+export const CLAUDE_OPUS_5_5_MODEL = "claude-opus-5-5";
+
 /** Model each harness uses when no role or Executor setting names one. */
 export const DEFAULT_HARNESS_MODELS: Readonly<Record<ModelHarness, string>> = {
-  claude: "claude-sonnet-5",
+  claude: CLAUDE_SONNET_5_5_MODEL,
   codex: "gpt-5.6-terra",
 };
 
-export const CLAUDE_SONNET_5_5_MODEL = "claude-sonnet-5-5";
-export const CLAUDE_HAIKU_5_5_MODEL = "claude-haiku-5-5";
 export const CODEX_GPT_6_LUNA_MODEL = "gpt-6-luna";
 
 /**

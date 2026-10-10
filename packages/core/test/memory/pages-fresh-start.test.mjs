@@ -11,6 +11,7 @@ import { assertValidPage, parsePage } from "../../dist/memory/page-format.js";
 import { DEFAULT_RESEARCH_TAGS_MAX, DEFAULT_RESEARCH_TAGS_MIN } from "../../../shared/dist/index.js";
 import { createUlid, openDatabase } from "../../../db/dist/index.js";
 
+const LIBRARIAN_ROLE = { role: "librarian", provider: "codex", model: "librarian-test-model", effort: "high" };
 const migrations = join(dirname(fileURLToPath(import.meta.url)), "../../../db/migrations");
 const PROJECT = "01HZZZZZZZZZZZZZZZZZZZZZZP";
 const ctx = { caller: "owner", agent_run_id: "run-1", work_id: null, task_id: null, project_id: PROJECT };
@@ -60,6 +61,7 @@ async function setup(t) {
   const workId = createUlid();
   await db.createWriteLane().transact((tx) => {
     tx.run("INSERT INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Owner', ?, ?)", at, at);
+    tx.run(`INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at) VALUES ('model_settings', 'owner:default', '1.0.0', ?, ?)`, JSON.stringify({ version: 1, roles: [LIBRARIAN_ROLE] }), at);
     tx.run(`INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at) VALUES ('memory_mode', 'owner:default', '1.0.0', ?, ?)`, JSON.stringify("pages"), at);
     tx.run(
       `INSERT INTO projects (id, owner_id, name, canonical_path, base_branch, allowed_roots_json, verification_plan_json, worktree_prepare_argv_json, created_at, updated_at)
@@ -71,12 +73,13 @@ async function setup(t) {
 
   // Fake model: tags (some of them to be dropped by normalization) and one usage line per clipping the librarian is shown.
   const tagCalls = [];
+  const opsCalls = [];
   const agentRunner = {
     runClippingTags: async (request) => {
       tagCalls.push(request);
       return { ok: true, output: { tags: ["Date Library", "time_zone", "日付", "Research", "Web Fetch", "tz-a", "tz-b", "tz-c", "tz-d"] } };
     },
-    runLibrarianOperations: async (request) => ({
+    runLibrarianOperations: async (request) => (opsCalls.push(request), {
       ok: true, usage: { input_tokens: 1, output_tokens: 1 },
       output: { operations: request.clippings.map((c) => ({ op: "set_usage", clipping: c.path, h: c.h, text: "日付の扱いを決めるとき" })) },
     }),
@@ -91,13 +94,13 @@ async function setup(t) {
     rmSync(parent, { recursive: true, force: true });
   });
   await core.start();
-  return { parent, vault, core, workId, tagCalls };
+  return { parent, vault, core, workId, tagCalls, opsCalls };
 }
 
 const contains = (value, text) => JSON.stringify(value).includes(text);
 
 test("a legacy vault is archived at start, and everything saved afterwards is a valid page that is found and recalled", async (t) => {
-  const { parent, vault, core, workId, tagCalls } = await setup(t);
+  const { parent, vault, core, workId, tagCalls, opsCalls } = await setup(t);
 
   // 1. The old files moved out; the vault starts as an empty pages vault.
   assert.ok(!existsSync(join(vault, "notes")) && !existsSync(join(vault, "research")) && !existsSync(join(vault, "Home.md")));
@@ -160,6 +163,9 @@ test("a legacy vault is archived at start, and everything saved afterwards is a 
   assert.ok(tags.every((tag) => /^[a-z0-9]+(-[a-z0-9]+)*$/u.test(tag)), tags.join());
   assert.ok(!tags.some((tag) => ["research", "web-search", "web-fetch"].includes(tag)));
   assert.equal(tagCalls.length, 1);
+  assert.deepEqual(tagCalls[0].model, { provider: LIBRARIAN_ROLE.provider, model: LIBRARIAN_ROLE.model, effort: LIBRARIAN_ROLE.effort }, "clipping tags run on the Librarian role model");
+  assert.ok(opsCalls.length > 0, "knowledge upkeep called the runner");
+  for (const call of opsCalls) assert.deepEqual(call.model, { provider: LIBRARIAN_ROLE.provider, model: LIBRARIAN_ROLE.model, effort: LIBRARIAN_ROLE.effort }, "knowledge upkeep runs on the Librarian role model");
 
   // 5. Each saved page is reachable by the route the design gives it:
   //    theme pages are in the table of contents injected into roles; theme / work-log / clipping are found by search;

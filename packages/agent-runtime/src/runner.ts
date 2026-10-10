@@ -1300,7 +1300,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     }
   };
 
-  /** One read-only librarian call on the `memory_librarian` model; Core writes whatever the returned JSON allows. */
+  /** One read-only librarian call on the Librarian role model; Core writes whatever the returned JSON allows. */
   const runLibrarianJson = async (
     input: { readonly model: LibrarianModelSetting; readonly run_id?: string },
     prefix: string,

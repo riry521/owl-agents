@@ -58,30 +58,19 @@ test("PUT /api/v1/settings/memory saves folder kinds and GET reads them back; me
   assert.equal(after.data.mode, "pages");
 });
 
-test("memory_librarian defaults to haiku/low, is saved by PUT, and invalid values give 400", async (t) => {
+test("memory_librarian is no longer a setting: GET omits it and PUT rejects it with 400, while memory_librarian_batch stays readable", async (t) => {
   const api = await setup(t);
   if (!api) return;
-  const haiku = { provider: "anthropic", model: "claude-haiku-4-5-20251001", effort: "low" };
-  assert.deepEqual((await (await api.get()).json()).data.memory_librarian, haiku);
+  const data = (await (await api.get()).json()).data;
+  assert.equal("memory_librarian" in data, false);
+  assert.ok(data.memory_librarian_batch);
   const chosen = { provider: "codex", model: "gpt-5.6-luna", effort: "medium" };
-  const put = await api.put({ memory_librarian: chosen });
-  assert.equal(put.status, 200);
-  assert.deepEqual((await put.json()).data.memory_librarian, chosen);
-  assert.deepEqual((await (await api.get()).json()).data.memory_librarian, chosen);
-  for (const payload of [
-    {},
-    { memory_librarian: "haiku" },
-    { memory_librarian: { provider: "nope", model: "m", effort: "low" } },
-    { memory_librarian: { provider: "anthropic", model: "", effort: "low" } },
-    { memory_librarian: { provider: "anthropic", model: "m", effort: "ultra" } },
-    { memory_librarian: { ...chosen, extra: 1 } },
-    { memory_librarian: chosen, memory_mode: "pages" },
-  ]) {
-    assert.equal((await api.put(payload)).status, 400, JSON.stringify(payload));
+  for (const payload of [{ memory_librarian: chosen }, { memory_librarian: chosen, folder_kinds: folderKinds }]) {
+    const put = await api.put(payload);
+    assert.equal(put.status, 400);
+    assert.equal((await put.json()).error.code, "validation_error");
   }
-  const after = await (await api.get()).json();
-  assert.deepEqual(after.data.memory_librarian, chosen);
-  assert.equal(after.data.mode, "pages");
+  assert.equal((await api.put({})).status, 400);
 });
 
 test("PUT /api/v1/settings/memory rejects an invalid or unwritable memory_mode and invalid folder kinds with 4xx", async (t) => {

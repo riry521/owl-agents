@@ -285,7 +285,7 @@ import { coreTestRunBrief } from "./core-test-run";
 import { QUARANTINE_FIX_TASK_PREFIX } from "./test-quarantine";
 import type { BaseMergeConflict, ManagerTrigger, WorkerQuestion } from "@owl/shared";
 import { acceptanceCriteriaProblems, formatAdvisorMalformed, parseTaskNecessity, readStoredAcceptanceCriteria, renderAcceptanceCriteria, renderTaskNecessity, type AcceptanceCriterion, type TaskPlanContext, resolveInstanceId, type AdvisorSuggestedAction, type ProcessSkillsInstallCommand, type ProviderClient } from "@owl/shared";
-import { MEMORY_FOLDER_KINDS_SETTINGS_KEY, MEMORY_LIBRARIAN_BATCH_SETTINGS_KEY, MEMORY_LIBRARIAN_SETTINGS_KEY, MEMORY_MODE_SETTINGS_KEY, MEMORY_RECALL_LIMIT_SETTINGS_KEY, MEMORY_RECALL_MIN_SIMILARITY_SETTINGS_KEY, MemorySettingsValidationError, readMemoryFolderKinds, readMemoryLibrarian, readMemoryLibrarianBatch, readMemoryMode, readMemoryRecallLimit, readMemoryRecallMinSimilarity, validateMemoryFolderKinds, validateMemoryLibrarian, type MemoryFolderKinds, type MemoryLibrarian, type MemoryLibrarianBatch, type MemoryMode } from "@owl/shared";
+import { MEMORY_FOLDER_KINDS_SETTINGS_KEY, MEMORY_LIBRARIAN_BATCH_SETTINGS_KEY, MEMORY_MODE_SETTINGS_KEY, MEMORY_RECALL_LIMIT_SETTINGS_KEY, MEMORY_RECALL_MIN_SIMILARITY_SETTINGS_KEY, MemorySettingsValidationError, readMemoryFolderKinds, readMemoryLibrarianBatch, readMemoryMode, readMemoryRecallLimit, readMemoryRecallMinSimilarity, validateMemoryFolderKinds, type MemoryFolderKinds, type MemoryLibrarianBatch, type MemoryMode } from "@owl/shared";
 import { EXTERNAL_DATA_POLICY, externalJsonBlock, MEMORY_ARCHIVE_SETTINGS_KEY, readMemoryArchive, REVIEW_RERUN_OPTION_KEY } from "@owl/shared";
 import { validateTestRunSettings } from "../../shared/dist/test-run-settings.js";
 import { readTestPolicy, validateTestPolicy } from "../../shared/dist/test-policy.js";
@@ -870,7 +870,7 @@ export class Core {
       tagger: (request) => {
         const runner = this.options.agentRunner as { runClippingTags?: (request: unknown) => Promise<unknown> };
         if (typeof runner.runClippingTags !== "function") return Promise.resolve({ ok: false });
-        return runner.runClippingTags({ ...request, model: this.memorySettings().memory_librarian, language: ownerLanguage(this.db) });
+        return runner.runClippingTags({ ...request, model: resolveRoleModelFromDb(this.db, "librarian"), language: ownerLanguage(this.db) });
       },
       language: () => ownerLanguage(this.db),
       onFailure: (error, attribution) => this.recordBackgroundFailure("research_record_failed", error, {
@@ -1751,7 +1751,7 @@ export class Core {
         const runner = this.options.agentRunner as { runRuleJudgments?: RuleJudgmentRunner };
         return typeof runner.runRuleJudgments === "function" ? (request) => runner.runRuleJudgments!(request) : undefined;
       },
-      model: () => this.memorySettings().memory_librarian,
+      model: () => requireRoleModel(this.db, "curator"),
       language: () => ownerLanguage(this.db),
     });
   }
@@ -2095,7 +2095,7 @@ export class Core {
       workExists: (number) => this.db.get("SELECT 1 AS found FROM works WHERE display_number = ? LIMIT 1", number) !== undefined,
       conversationExists: (name) => this.memory.index.resolvePageRef(name) !== null,
       pathMissing: (projectId, path) => this.repoPathMissing(projectId, path),
-      model: () => this.memorySettings().memory_librarian,
+      model: () => requireRoleModel(this.db, "librarian"),
       batch: () => this.memorySettings().memory_librarian_batch,
       rebuildIndexes: async (scopes, backup) => {
         backupBeforeWrite = backup;
@@ -9541,7 +9541,7 @@ export class Core {
   }
 
   /** Read at every call. `memory_mode` is always `pages`: a `legacy` value saved by an older build is read as `pages`. */
-  private memorySettings(): { mode: MemoryMode; folder_kinds: MemoryFolderKinds; memory_librarian: MemoryLibrarian; memory_librarian_batch: MemoryLibrarianBatch } {
+  private memorySettings(): { mode: MemoryMode; folder_kinds: MemoryFolderKinds; memory_librarian_batch: MemoryLibrarianBatch } {
     const read = (key: string): unknown => {
       try {
         const row = this.db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", key);
@@ -9554,7 +9554,6 @@ export class Core {
     return {
       mode: readMemoryMode(read(MEMORY_MODE_SETTINGS_KEY)),
       folder_kinds: readMemoryFolderKinds(read(MEMORY_FOLDER_KINDS_SETTINGS_KEY), (message) => console.warn(`[owl-core] ${message}`)),
-      memory_librarian: readMemoryLibrarian(read(MEMORY_LIBRARIAN_SETTINGS_KEY), (message) => console.warn(`[owl-core] ${message}`)),
       memory_librarian_batch: readMemoryLibrarianBatch(read(MEMORY_LIBRARIAN_BATCH_SETTINGS_KEY), (message) => console.warn(`[owl-core] ${message}`)),
     };
   }
@@ -9626,46 +9625,12 @@ export class Core {
     }
   }
 
-  public async getMemorySettings(): Promise<{ mode: MemoryMode; folder_kinds: MemoryFolderKinds; memory_librarian: MemoryLibrarian }> {
-    return this.memorySettings();
-  }
-
-  /** Owner-only. Model for the migration LLM calls; read again at every migration request. */
-  public async setMemoryLibrarian(input: unknown): Promise<{ mode: MemoryMode; folder_kinds: MemoryFolderKinds; memory_librarian: MemoryLibrarian }> {
-    let normalized: MemoryLibrarian;
-    try {
-      normalized = validateMemoryLibrarian(input);
-    } catch (error) {
-      if (error instanceof MemorySettingsValidationError) throw validationError(error.message, { field: "memory_librarian" });
-      throw error;
-    }
-    await this.writeLane.write({
-      mutateState: (transaction) => {
-        const now = utcNow();
-        ensureOwner(transaction, DEFAULT_OWNER_ID, now);
-        transaction.run(
-          `INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at)
-           VALUES (?, ?, '1.0.0', ?, ?)
-           ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
-          MEMORY_LIBRARIAN_SETTINGS_KEY,
-          DEFAULT_OWNER_ID,
-          JSON.stringify(normalized),
-          now,
-        );
-        return normalized;
-      },
-      event: {
-        idempotencyKey: `settings-memory-librarian:${createUlid()}`,
-        type: "settings.memory_librarian_updated",
-        payload: { provider: normalized.provider, model: normalized.model, effort: normalized.effort },
-      },
-      outbox: [{ provider: "websocket" }],
-    });
+  public async getMemorySettings(): Promise<{ mode: MemoryMode; folder_kinds: MemoryFolderKinds }> {
     return this.memorySettings();
   }
 
   /** Owner-only. `memory_mode` is not written here. */
-  public async setMemoryFolderKinds(input: unknown): Promise<{ mode: MemoryMode; folder_kinds: MemoryFolderKinds; memory_librarian: MemoryLibrarian }> {
+  public async setMemoryFolderKinds(input: unknown): Promise<{ mode: MemoryMode; folder_kinds: MemoryFolderKinds }> {
     let normalized: MemoryFolderKinds;
     try {
       normalized = validateMemoryFolderKinds(input);
@@ -10946,6 +10911,13 @@ const MODEL_SETTINGS_KEY = "model_settings";
 const MODEL_PRESETS_KEY = "model_presets";
 const KNOWLEDGE_SETTINGS_KEY = "knowledge";
 const LEGACY_EXECUTOR_CONFIG_SETTINGS_KEY = "executor_config";
+
+/** For callers whose model type requires effort: a role saved without one is a settings error, not a value to guess. */
+function requireRoleModel(db: CoreDatabase, role: string): { model: string; provider: string; effort: string } {
+  const resolved = resolveRoleModelFromDb(db, role);
+  if (!resolved?.effort) throw validationError(`No ${role} model with an effort is configured.`, { role });
+  return { ...resolved, effort: resolved.effort };
+}
 
 function resolveRoleModelFromDb(db: CoreDatabase, role: string): { model: string; provider: string; effort?: string } | undefined {
   const row = db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", MODEL_SETTINGS_KEY);

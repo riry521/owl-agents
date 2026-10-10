@@ -46,7 +46,6 @@ test("child settings derive from legacy executor_config without saving the migra
   assert.equal(settings.default_effort, "xhigh");
   assert.deepEqual(settings.allowed_models, [
     { provider: "codex", model: "gpt-5.6-luna" },
-    { provider: "claude", model: "claude-sonnet-5" },
     { provider: "claude", model: "claude-sonnet-5-5" },
     { provider: "claude", model: "claude-haiku-5-5" },
   ]);

@@ -1,12 +1,13 @@
-import type { MemoryLibrarian } from "@owl/shared";
 import { findListKey, normalizeOp, type OpDefinitions } from "./op-shape.js";
 import { dice } from "./rule-curation.js";
 
 /** How two rule texts relate; "different" and an absent judgment both mean "do not treat as overlapping". */
 export type RuleRelation = "same" | "conflict" | "different";
 
+export interface RuleJudgeModel { readonly provider: string; readonly model: string; readonly effort: string }
+
 export interface RuleJudgmentRequest {
-  readonly model: MemoryLibrarian;
+  readonly model: RuleJudgeModel;
   readonly language: string;
   readonly pairs: Array<{ pair_id: string; left: string; right: string }>;
 }
@@ -15,7 +16,7 @@ export type RuleJudgmentRunner = (request: RuleJudgmentRequest) => Promise<{ ok:
 export interface RulePairJudgeOptions {
   /** Undefined when the agent runner cannot judge; every pair is then left unjudged. */
   readonly runner: () => RuleJudgmentRunner | undefined;
-  readonly model: () => MemoryLibrarian;
+  readonly model: () => RuleJudgeModel;
   readonly language: () => string;
   readonly batchSize?: number;
   readonly minDice?: number;
