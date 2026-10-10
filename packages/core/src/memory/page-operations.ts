@@ -234,6 +234,7 @@ const SPECS: Readonly<Record<string, Spec>> = {
   split: { required: { page: "string", items: "refs", relation: "string" }, optional: { into: "string", new_title: "string", new_summary: "string" } },
   promote_common: { required: { items: "refs", to: "target" }, optional: { text: "string" } },
   restore: { required: { history: "string", entry: "string" }, optional: {} },
+  confirm: { required: { items: "refs" }, optional: {} },
 };
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const nonEmpty = (v: unknown): v is string => typeof v === "string" && v !== "";
@@ -268,7 +269,7 @@ function validateShape(rawOp: unknown, allowCoreOps: boolean): Record<string, un
     ...Object.entries(spec.required).filter(([k, type]) => !(k in op) || !CHECKS[type](op[k])).map(([k]) => k),
     ...Object.entries(spec.optional).filter(([k, type]) => k in op && op[k] !== undefined && !CHECKS[type](op[k])).map(([k]) => k),
   ];
-  if (Array.isArray(op.items) && op.items.length < (op.op === "split" ? 1 : 2)) missing.push("items");
+  if (Array.isArray(op.items) && op.items.length < (op.op === "split" || op.op === "confirm" ? 1 : 2)) missing.push("items");
   if (missing.length > 0) {
     const unknown = Object.entries({ ...spec.required, ...spec.optional }).flatMap(([k, type]) => k in op ? extraKeys(type, op[k]) : []);
     reject("missing_field", { missing: [...new Set(missing)], unknown: [...new Set(unknown)] });
@@ -589,6 +590,21 @@ const applyMove: Applier = (run, op) => {
   if (to.page !== ref.page) run.tallyOf(to.page, "move");
 };
 
+/**
+ * Why not a top-level field or a reading of `note`: both need a second parse path in agent-runtime and in parseOperationsOutput,
+ * and a free-text note cannot name which lines were checked. An operation reuses the validation, backup and index rebuild of the others.
+ */
+const applyConfirm: Applier = (run, op) => {
+  const refs = op.items as Ref[];
+  const found = refs.map((r) => ({ ref: r, item: run.resolve(r) }));
+  if (found.some(({ item }) => stripNew(item.text) === item.text)) reject("not_new_line");
+  for (const { ref, item } of found) {
+    run.doc(ref.page).lines.splice(item.start, item.end - item.start, ...stripNew(item.text).split("\n").map(mk));
+    run.tallyOf(ref.page, "confirm");
+  }
+  used(run, ...refs);
+};
+
 const applyRetire: Applier = (run, op) => {
   const ref = op.item as Ref;
   const reason = op.reason as string;
@@ -887,7 +903,7 @@ const applyRestore: Applier = (run, op) => {
 
 const APPLIERS: Readonly<Record<string, Applier>> = {
   merge: applyMerge, move: applyMove, retire: applyRetire, dormant: applyDormant, reactivate: applyReactivate,
-  link: applyLink, split: applySplit, promote_common: applyPromote, restore: applyRestore,
+  link: applyLink, split: applySplit, promote_common: applyPromote, restore: applyRestore, confirm: applyConfirm,
 };
 
 // ---------------------------------------------------------------- limits and the update history

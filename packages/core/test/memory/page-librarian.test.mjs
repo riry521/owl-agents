@@ -185,6 +185,33 @@ test("a retire for a missing path is applied only when the path is really absent
   } finally { await t.cleanup(); rmSync(repo, { recursive: true, force: true }); }
 });
 
+test("confirm drops only the owl:new marks of the named new lines and the run is not a failure", async () => {
+  const mark = (s) => `${s} ${NEW}`;
+  const text = page(ID("A"), "テスト", { pitfalls: [mark("- 確認する行（W9）"), mark("- 確認しない行（W9）"), "- 古い行（W5）"] }, false);
+  const t = setup({ [PATH_A]: text }, { propose: () => ok([]) });
+  try {
+    await t.start();
+    t.state.propose = () => ok([{ op: "confirm", items: [t.ref(PATH_A, "落とし穴", 0)] }]);
+    const report = await t.librarian.run({ run_id: runId(), mode: "manual" });
+    assert.deepEqual(report.rejected, []);
+    assert.equal(report.applied, 1);
+    assert.notEqual(report.stop_reason, "no_progress");
+    assert.notEqual(report.stop_reason, "error");
+    assert.ok(report.backup_dir && existsSync(report.backup_dir));
+    const after = t.read(PATH_A);
+    assert.ok(after.includes("- 確認する行（W9）\n"), "the line stays");
+    assert.ok(!after.includes(`確認する行（W9） ${NEW}`), "its mark is gone");
+    assert.ok(after.includes(`- 確認しない行（W9） ${NEW}`), "an unnamed new line keeps its mark");
+
+    // A line without a mark is rejected and the page stays as it was.
+    const before = t.read(PATH_A);
+    t.state.propose = () => ok([{ op: "confirm", items: [t.ref(PATH_A, "落とし穴", 2)] }]);
+    const rejected = await t.librarian.run({ run_id: runId(), mode: "manual" });
+    assert.equal(rejected.rejected.length, 1);
+    assert.equal(t.read(PATH_A), before);
+  } finally { await t.cleanup(); }
+});
+
 test("a rejected retire leaves an unintegrated page byte-identical", async () => {
   const repo = mkdtempSync(join(tmpdir(), "owl-librarian-repo-"));
   mkdirSync(join(repo, "src"), { recursive: true });
