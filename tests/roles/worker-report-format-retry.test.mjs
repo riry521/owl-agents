@@ -319,3 +319,23 @@ test("the limit comes from the settings reader when the request carries none", a
   assert.equal(count, 2);
   assert.equal(result.error_key, "output_format_invalid");
 });
+
+const ruleJudgmentsRequest = { model: { provider: "claude", model: "m", effort: "low" }, language: "en", pairs: [{ pair_id: "p1", left: "Always run tests", right: "Run the tests every time" }, { pair_id: "p2", left: "Use tabs", right: "Never use tabs" }] };
+const resultResponse = (request, text) => ({ adapter: request.adapter, stdout: JSON.stringify({ type: "result", result: text, session_id: "s" }), stderr: "", exit_code: 0, signal: null, provider_session_id: "s" });
+
+test("runRuleJudgments returns the JSON object (fenced or bare) and an error value for prose or provider failure", async () => {
+  const judgments = { judgments: [{ pair_id: "p1", relation: "same" }, { pair_id: "p2", relation: "conflict", reason: "x" }] };
+  const prompts = [];
+  for (const text of ["```json\n" + JSON.stringify(judgments) + "\n```", JSON.stringify(judgments)]) {
+    const result = await runnerWith(async (request) => { prompts.push(request.prompt); return resultResponse(request, text); }).runRuleJudgments(ruleJudgmentsRequest);
+    assert.deepEqual(result, { ok: true, output: judgments });
+  }
+  for (const id of ["p1", "p2", "Always run tests", "Never use tabs", "same", "conflict", "different"]) assert.ok(prompts[0].includes(id), id);
+  let proseCalls = 0;
+  const prose = await runnerWith(async (request) => { proseCalls += 1; return resultResponse(request, "no JSON here"); }).runRuleJudgments({ ...ruleJudgmentsRequest, run_id: "r1" });
+  assert.equal(prose.ok, false);
+  assert.equal(proseCalls, 1);
+  assert.equal(typeof prose.error, "string");
+  const failed = await runnerWith(async () => { throw new Error("boom"); }).runRuleJudgments(ruleJudgmentsRequest);
+  assert.equal(failed.ok, false);
+});

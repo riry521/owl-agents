@@ -80,7 +80,7 @@ test("every role input carries the index; the Reviewer's has no summary and the 
   for (const role of ["manager", "designer", "worker", "reviewer"]) {
     const text = await run[role]();
     assert.ok(text, `${role} input has no index`);
-    assert.match(text, /^<owl-memory scope="common">/, role);
+    assert.match(text, /^<owl-memory scope="common" data="external[^"]*">/, role);
     assert.ok(text.includes("</owl-memory>"), role);
     assert.equal(text.includes(SUMMARY), role !== "reviewer", role);
   }

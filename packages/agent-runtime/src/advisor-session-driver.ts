@@ -28,7 +28,7 @@ import type {
 import { readClaudeCompactionSummaries, waitForCompactionSummary } from "./compaction-summary.js";
 import { classifyProviderFailure, formatProviderError } from "./provider-error.js";
 import { claudeRateLimitEvidence } from "./rate-limit.js";
-import { buildAgentPermissionArgs, extractWebResearchCapture, reapProcessGroup, type WebResearchTool } from "@owl/shared";
+import { buildAgentPermissionArgs, externalJsonBlock, extractWebResearchCapture, reapProcessGroup, type WebResearchTool } from "@owl/shared";
 
 const STDERR_RING_BUFFER_BYTES = 8 * 1024;
 const DEFAULT_STOP_GRACE_MS = 5000;
@@ -349,7 +349,7 @@ export class AdvisorSessionDriver implements ProviderSession {
     this.lastRateLimitEvent = null;
     const text =
       turn.attachment_paths && turn.attachment_paths.length > 0
-        ? `${turn.text}\n\n<owl-attachments>${JSON.stringify(turn.attachment_paths)}</owl-attachments>`
+        ? `${turn.text}\n\n${externalJsonBlock("owl-attachments", turn.attachment_paths)}`
         : turn.text;
     const payload = {
       type: "user",

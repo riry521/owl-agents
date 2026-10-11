@@ -2,9 +2,10 @@ import { realpathSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
+import { KIND_OF_SECTION } from "../../../packages/core/dist/memory/page-router.js";
 
 /**
- * owl-memory: a stdio MCP server exposing the read-only memory page API to agents.
+ * owl-memory: a stdio MCP server exposing the memory page API to agents (read-only; the Advisor also gets append).
  * The Owl server address and guard token file come from the agent environment
  * (OWL_GUARD_API_BASE, OWL_GUARD_TOKEN_FILE); nothing is stored in source.
  */
@@ -30,9 +31,20 @@ export const PAGE_TOOLS: readonly Tool[] = [
   },
 ];
 
+/** Advisor only: appends one line to a theme page with no approval step. Listed and callable only when OWL_ROLE is advisor. */
+export const APPEND_TOOL: Tool = {
+  name: "append", method: "POST",
+  description: "会話で決まったことを Project のテーマページに1行追記する。section はテンプレートの概要・決まりごと・落とし穴・手順。",
+  inputSchema: {
+    type: "object", required: ["project_id", "section", "text"],
+    properties: { project_id: { type: "string" }, section: { type: "string", enum: Object.keys(KIND_OF_SECTION) }, text: { type: "string" }, theme: { type: "string" }, procedure: { type: "string" } },
+  },
+};
+
 const nullProto = (tools: readonly Tool[]): Record<string, Tool> => Object.assign(Object.create(null) as Record<string, Tool>, Object.fromEntries(tools.map((t) => [t.name, t])));
 // Null-prototype map: agent-supplied tool names such as "toString" or "__proto__" must not resolve.
-const PAGES_BY_NAME = nullProto(PAGE_TOOLS);
+const PAGES_BY_NAME = nullProto([...PAGE_TOOLS, APPEND_TOOL]);
+const toolsForRole = (): readonly Tool[] => (process.env.OWL_ROLE === "advisor" ? [...PAGE_TOOLS, APPEND_TOOL] : PAGE_TOOLS);
 
 const CONTEXT_HEADERS: readonly (readonly [string, string])[] = [
   ["OWL_AGENT_RUN_ID", "x-owl-agent-run-id"], ["OWL_ROLE", "x-owl-role"], ["OWL_WORK_ID", "x-owl-work-id"],
@@ -51,7 +63,7 @@ async function request(): Promise<{ root: string; headers: Record<string, string
 }
 
 export async function callTool(name: unknown, args: unknown): Promise<unknown> {
-  if (typeof name !== "string" || !Object.hasOwn(PAGES_BY_NAME, name)) return { error: "unknown_tool" };
+  if (typeof name !== "string" || !Object.hasOwn(PAGES_BY_NAME, name) || !toolsForRole().includes(PAGES_BY_NAME[name])) return { error: "unknown_tool" };
   const tool = PAGES_BY_NAME[name];
   try {
     const target = await request();
@@ -76,7 +88,7 @@ async function handle(message: { id?: unknown; method?: unknown; params?: { name
     case "ping":
       return reply({});
     case "tools/list":
-      return reply({ tools: PAGE_TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema, annotations: { readOnlyHint: true } })) });
+      return reply({ tools: toolsForRole().map((tool) => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, annotations: { readOnlyHint: tool !== APPEND_TOOL } })) });
     case "tools/call": {
       const result = await callTool(message.params?.name, message.params?.arguments);
       const failed = typeof result === "object" && result !== null && Object.hasOwn(result, "error");

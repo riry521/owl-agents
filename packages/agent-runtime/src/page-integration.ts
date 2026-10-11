@@ -1,29 +1,15 @@
 import {
   extractRoleOutputObject,
   objectSchema,
-  providerSchema,
   renderRolePrompt,
   validateRoleOutput,
   type RoleSchema,
 } from "./role-contract";
-import type { OwnerLanguage } from "@owl/shared";
+import { externalJsonBlock, type OwnerLanguage } from "@owl/shared";
 import { AgentRuntimeError } from "./errors";
 import type { ProviderResponse } from "./types";
 
-/** Structural copies of Core's `PageIntegrationRequest` / `MigrationClassifyRequest` (the runner receives them as plain objects). */
 export interface LibrarianModelSetting { readonly provider: string; readonly model: string; readonly effort: string }
-export interface PageIntegrationRequest {
-  readonly run_id: string;
-  readonly reason: string;
-  readonly page: { readonly path: string; readonly title: string; readonly scope: string; readonly project_id: string | null; readonly body: string; readonly tokens: number };
-  readonly new_lines: ReadonlyArray<{ section: string; text: string; work_label: string | null }>;
-  readonly siblings: ReadonlyArray<{ title: string; summary: string }>;
-  readonly referrers?: readonly { path: string; heading: string }[];
-  readonly rules: string;
-  readonly model: LibrarianModelSetting;
-  readonly max_output_tokens: number;
-  readonly language?: OwnerLanguage;
-}
 export interface ClippingTagsRequest {
   readonly title: string;
   readonly summary: string;
@@ -37,44 +23,6 @@ export interface ClippingTagsRequest {
 export type LibrarianRunResult =
   | { readonly ok: true; readonly output: unknown; readonly usage?: { readonly input_tokens: number; readonly output_tokens: number } }
   | { readonly ok: false; readonly error: string };
-
-export const PAGE_INTEGRATION_OUTPUT_SCHEMA: RoleSchema = objectSchema({
-  op: { type: "string", enum: ["rewrite", "split", "merge_into", "create_from_misc", "noop"], description: "what was done to the page" },
-  pages: {
-    type: "array",
-    items: objectSchema({
-      path: { type: "string", minLength: 1, description: "vault-relative path of the output page" },
-      title: { type: "string", minLength: 1, description: "page title, 30 characters or fewer" },
-      summary: { type: "string", minLength: 1, description: "one-line description, 40 characters or fewer" },
-      body: { type: "string", minLength: 1, description: "the body from the `## 概要` heading on, without frontmatter or the H1" },
-    }),
-    description: "the finished pages; empty only for noop",
-  },
-  history_line: { type: "string", description: "one 更新履歴 line; write `n 行統合` when n lines were merged away" },
-  star_changes: { type: "array", items: { type: "string" }, description: "lines that gained or lost the ★ mark" },
-  link_updates: { type: "array", items: { type: "string" }, description: "split only: `path`s from `referrers` whose links to the split page now belong to the new page; otherwise empty" },
-  reason: { type: "string", description: "why this operation was chosen" },
-});
-
-export function buildPageIntegrationPrompt(request: PageIntegrationRequest): string {
-  return renderRolePrompt({
-    role: "You are Owl's Librarian. Integrate a theme page of the long-term memory.",
-    instructions: [
-      `Reason for this run: ${request.reason}. Rewrite the page body so it follows the rules below; keep every fact unless it is a duplicate.`,
-      request.rules,
-      `Keep the output within ${request.max_output_tokens} tokens.`,
-    ],
-    output: PAGE_INTEGRATION_OUTPUT_SCHEMA,
-    outputRules: [],
-    language: request.language ?? "ja",
-    inputs: [
-      { name: "Page", value: request.page },
-      { name: "New lines", value: request.new_lines },
-      { name: "Sibling pages", value: request.siblings },
-      ...(request.referrers?.length ? [{ name: "Referrers", value: request.referrers }] : []),
-    ],
-  });
-}
 
 function parseWith(schema: RoleSchema, reason: string, label: string, response: Pick<ProviderResponse, "adapter" | "stdout" | "format">): { readonly output: unknown } | { readonly error: string } {
   try {
@@ -124,21 +72,16 @@ export function buildLibrarianOperationsPrompt(request: LibrarianOperationsReque
     outputRules: [],
     language: request.language ?? "ja",
     inputs: [
-      { name: "Pages", value: request.pages },
+      { name: "Pages", value: externalJsonBlock("owl-pages", request.pages) },
       { name: "Dormant candidates", value: request.dormant_candidates },
-      { name: "Conversations", value: request.conversations ?? [] },
-      { name: "Clippings", value: request.clippings ?? [] },
+      { name: "Conversations", value: externalJsonBlock("owl-conversations", request.conversations ?? []) },
+      { name: "Clippings", value: externalJsonBlock("owl-clippings", request.clippings ?? []) },
     ],
   });
 }
 
 export const parseLibrarianOperationsResponse = (response: Pick<ProviderResponse, "adapter" | "stdout" | "format">) =>
   parseWith(LIBRARIAN_OPERATIONS_OUTPUT_SCHEMA, "librarian_operations_stdout_not_single_json_object", "librarian_operations", response);
-
-export const parsePageIntegrationResponse = (response: Pick<ProviderResponse, "adapter" | "stdout" | "format">) =>
-  parseWith(PAGE_INTEGRATION_OUTPUT_SCHEMA, "page_integration_stdout_not_single_json_object", "page_integration", response);
-
-export const pageIntegrationProviderSchema = (): Readonly<Record<string, unknown>> => providerSchema(PAGE_INTEGRATION_OUTPUT_SCHEMA);
 
 export const CLIPPING_TAGS_OUTPUT_SCHEMA: RoleSchema = objectSchema({
   tags: { type: "array", items: { type: "string", minLength: 1 }, description: "tags describing the content of the article" },
@@ -158,10 +101,46 @@ export function buildClippingTagsPrompt(request: ClippingTagsRequest): string {
     language: request.language ?? "ja",
     inputs: [
       { name: "Existing tags", value: request.existing_tags },
-      { name: "Clipping", value: { title: request.title, summary: request.summary, points: request.points } },
+      { name: "Clipping", value: externalJsonBlock("owl-clipping", { title: request.title, summary: request.summary, points: request.points }) },
     ],
   });
 }
 
 export const parseClippingTagsResponse = (response: Pick<ProviderResponse, "adapter" | "stdout" | "format">) =>
   parseWith(CLIPPING_TAGS_OUTPUT_SCHEMA, "clipping_tags_stdout_not_single_json_object", "clipping_tags", response);
+
+export interface RuleJudgmentsRequest {
+  readonly model: LibrarianModelSetting;
+  readonly language?: OwnerLanguage;
+  readonly run_id?: string;
+  readonly pairs: ReadonlyArray<{ readonly pair_id: string; readonly left: string; readonly right: string }>;
+}
+
+/** Only "a JSON object" is required here: Core's op-shape normalisation absorbs deviations in the judgments, so a strict schema would only turn recoverable answers into failures. */
+export const RULE_JUDGMENTS_OUTPUT_SCHEMA: RoleSchema = {
+  type: "object",
+  properties: {
+    judgments: {
+      type: "array",
+      items: { type: "object" },
+      description: "one entry per pair: { pair_id, relation: same | conflict | different, reason? (short) }",
+    },
+  },
+};
+
+export function buildRuleJudgmentsPrompt(request: RuleJudgmentsRequest): string {
+  return renderRolePrompt({
+    role: "You are Owl's Librarian. Judge how pairs of rule statements relate in meaning.",
+    instructions: [
+      "For each pair, answer with relation `same` (they ask for the same thing, only worded differently), `conflict` (they cannot both be followed) or `different` (unrelated, or compatible but distinct).",
+      "Answer every pair and copy its pair_id exactly. Add a short reason when the relation is `same` or `conflict`.",
+    ],
+    output: RULE_JUDGMENTS_OUTPUT_SCHEMA,
+    outputRules: [],
+    language: request.language ?? "ja",
+    inputs: [{ name: "Pairs", value: request.pairs }],
+  });
+}
+
+export const parseRuleJudgmentsResponse = (response: Pick<ProviderResponse, "adapter" | "stdout" | "format">) =>
+  parseWith(RULE_JUDGMENTS_OUTPUT_SCHEMA, "rule_judgments_stdout_not_single_json_object", "rule_judgments", response);

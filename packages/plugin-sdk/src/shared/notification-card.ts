@@ -107,7 +107,7 @@ export const FIELD_VALUE_MAX = 1000;
 export const FALLBACK_MAX = 200;
 export const DETAIL_MAX = 3800;
 
-type CardStyleKey = Exclude<NotificationCardEvent, "system.alert"> | "system.alert.work" | "system.alert.system";
+type CardStyleKey = Exclude<NotificationCardEvent, "system.alert"> | "system.alert.work" | "system.alert.system" | "system.alert.notice";
 
 const CARD_STYLES: Readonly<Record<CardStyleKey, { readonly emoji: string; readonly color: CardColor }>> = {
   "work.completed": { emoji: "✅", color: "#4CAF50" },
@@ -121,6 +121,7 @@ const CARD_STYLES: Readonly<Record<CardStyleKey, { readonly emoji: string; reado
   "provider.resumed": { emoji: "▶️", color: "#4CAF50" },
   "system.alert.work": { emoji: "🚨", color: "#F44336" },
   "system.alert.system": { emoji: "⚠️", color: "#FF9800" },
+  "system.alert.notice": { emoji: "📝", color: "#607D8B" },
 };
 
 export const DETAIL_COLOR: CardColor = "#607D8B";
@@ -138,6 +139,7 @@ export interface NotificationCardText {
     readonly providerResumed: string;
     readonly workProblem: string;
     readonly systemNotice: string;
+    readonly curationNotice: string;
   };
   readonly fieldReason: string;
   readonly fieldRemediation: string;
@@ -168,7 +170,7 @@ export const CARD_TEXT: Readonly<Record<OwlLanguage, NotificationCardText>> = {
       workCompleted: "完了しました", workCancelled: "中止されました", workPaused: "一時停止しました", workReopened: "再オープンしました",
       decisionOpened: "判断が必要です", decisionResolved: "解決しました", decisionCancelled: "取り消されました",
       providerPaused: "利用上限で停止中", providerResumed: "処理を再開しました",
-      workProblem: "問題が発生", systemNotice: "システム通知",
+      workProblem: "問題が発生", systemNotice: "システム通知", curationNotice: "整理のお知らせ",
     },
     fieldReason: "理由", fieldRemediation: "対処", fieldAnswer: "回答", emptyAnswer: "（回答なし）",
     noQuestion: "（質問文がありません）", moreOptions: (count) => `…ほか${count}件`,
@@ -191,7 +193,7 @@ export const CARD_TEXT: Readonly<Record<OwlLanguage, NotificationCardText>> = {
       workCompleted: "Completed", workCancelled: "Cancelled", workPaused: "Paused", workReopened: "Reopened",
       decisionOpened: "Decision needed", decisionResolved: "Resolved", decisionCancelled: "Cancelled",
       providerPaused: "Paused at usage limit", providerResumed: "Resumed",
-      workProblem: "Problem", systemNotice: "System notice",
+      workProblem: "Problem", systemNotice: "System notice", curationNotice: "Curation notice",
     },
     fieldReason: "Reason", fieldRemediation: "What to do", fieldAnswer: "Answer", emptyAnswer: "(no answer)",
     noQuestion: "(No question provided)", moreOptions: (count) => `…and ${count} more`,
@@ -536,8 +538,12 @@ function buildSystemAlertCard(event: OwlEvent, language: OwlLanguage): Notificat
   const remediation = text(payload.remediation);
   const workTitle = workScoped ? eventWorkTitle(event) : null;
   const fields = remediation ? [{ label: t.fieldRemediation, value: truncateText(remediation, FIELD_VALUE_MAX) }] : [];
-  return makeCard("system.alert", language, CARD_STYLES[workScoped ? "system.alert.work" : "system.alert.system"],
-    workScoped ? t.titles.workProblem : t.titles.systemNotice, truncateText(joinLines(workTitle, message) ?? "", BODY_MAX), fields,
+  const notice = !workScoped && payload.kind === "curation_notice";
+  const noticeInfo = notice && payload.severity === "info";
+  const styleKey = workScoped ? "system.alert.work" : noticeInfo ? "system.alert.notice" : "system.alert.system";
+  const title = workScoped ? t.titles.workProblem : noticeInfo ? t.titles.curationNotice : t.titles.systemNotice;
+  return makeCard("system.alert", language, CARD_STYLES[styleKey],
+    title, truncateText(joinLines(workTitle, message) ?? "", BODY_MAX), fields,
     workId ? shortWork(workId) : null, withWorkTitle(workTitle, message.split(/\r?\n/u)[0] ?? ""));
 }
 

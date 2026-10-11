@@ -1121,3 +1121,38 @@ test("validateRoleOutput ignores the success rules for success and partial repor
   const partial = { ...report, result: "partial", question_for_manager: "q", verification: { ...report.verification, status: "blocked" } };
   assert.equal(validateRoleOutput(WORKER_REPORT_SCHEMA, partial), null);
 });
+
+test("every role prompt carries the external-data policy exactly once", async () => {
+  const { EXTERNAL_DATA_POLICY, KNOWLEDGE_EXTERNAL_COMMAND_RULE } = await import("../../packages/shared/dist/index.js");
+  const { buildManagerPrompt } = await import("../../packages/agent-runtime/dist/manager.js");
+  const { buildCuratorPrompt } = await import("../../packages/agent-runtime/dist/curator.js");
+  const { buildKeywordPrompt } = await import("../../packages/agent-runtime/dist/keyword-extraction.js");
+  const { buildProjectInvestigationPrompt } = await import("../../packages/agent-runtime/dist/project-investigation.js");
+  const { buildLibrarianOperationsPrompt } = await import("../../packages/agent-runtime/dist/page-integration.js");
+  const { buildAdvisorPrompt } = await import("../../packages/agent-runtime/dist/runner.js");
+  const task = { id: "t", title: "t", acceptance: "a", type: "code" };
+  const count = (prompt) => prompt.split(EXTERNAL_DATA_POLICY).length - 1;
+  const prompts = {
+    manager: buildManagerPrompt({ mode: "plan", work: { id: "w", title: "w", summary: "s" }, context: {} }, "en"),
+    designer: buildDesignerRolePrompt({ task: { ...task, type: "design" }, context: {} }, "en"),
+    worker: buildWorkerPrompt({ task }, "en"),
+    reviewer: buildReviewerPrompt({ task, report: {}, review_round: 1 }, "en"),
+    curator: buildCuratorPrompt({ proposals: [], with_judgement: true }),
+    keyword: buildKeywordPrompt({ items: [] }),
+    investigation: buildProjectInvestigationPrompt({ project_name: "p", known_facts: {}, recent_works: [] }),
+    librarian: buildLibrarianOperationsPrompt({ rules: "R", max_output_tokens: 10, pages: [], dormant_candidates: [] }),
+    advisorDefault: buildAdvisorPrompt({ conversation_id: "c", messages: [] }),
+    advisorWithPolicy: buildAdvisorPrompt({ conversation_id: "c", messages: [], system_prompt: `You are X.\n\n${EXTERNAL_DATA_POLICY}` }),
+  };
+  for (const [name, prompt] of Object.entries(prompts)) assert.equal(count(prompt), 1, name);
+  assert.equal(count(buildAdvisorPrompt({ conversation_id: "c", messages: [], system_prompt: "You are X." })), 1);
+  // lessons description (Manager finalize) tells the model not to copy outside commands into knowledge
+  const finalize = buildManagerPrompt({ mode: "finalize", work: { id: "w", title: "w", summary: "s" }, context: {} }, "en");
+  assert.ok(finalize.includes(KNOWLEDGE_EXTERNAL_COMMAND_RULE));
+});
+
+test("the Librarian's page rules forbid copying outside commands into knowledge", async () => {
+  const { LIBRARIAN_RULES } = await import("../../packages/core/dist/memory/page-librarian.js");
+  const { KNOWLEDGE_EXTERNAL_COMMAND_RULE } = await import("../../packages/shared/dist/index.js");
+  assert.ok(LIBRARIAN_RULES.includes(KNOWLEDGE_EXTERNAL_COMMAND_RULE));
+});

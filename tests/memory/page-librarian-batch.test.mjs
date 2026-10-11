@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, utimes, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { chmod, mkdir, readFile, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -158,11 +159,9 @@ test("a write failure on one entry leaves only that entry pending, and an input 
   await mkdir(join(env.vault, "conversations", "2026-11"), { recursive: true });
   const second = "conversations/2026-11/late.md";
   await writeFile(join(env.vault, second), conversation("late"));
-  const runId = createUlid();
-  const backupDir = join(env.dataDir, "backups", "memory-pages", runId, "batch-1");
-  await mkdir(join(backupDir, "conversations"), { recursive: true });
-  await writeFile(join(backupDir, "conversations", "2026-11"), "blocks the backup directory of the second entry");
-  const failed = await env.librarian.run({ run_id: runId, mode: "nightly" });
+  await chmod(join(env.vault, "conversations", "2026-11"), 0o555); // the second entry cannot be written
+  const failed = await env.librarian.run({ run_id: createUlid(), mode: "nightly" });
+  await chmod(join(env.vault, "conversations", "2026-11"), 0o755);
   assert.equal(failed.applied, 1);
   assert.deepEqual(failed.rejected.map((r) => r.code), ["write_failed"]);
   assert.doesNotMatch(await readFile(join(env.vault, env.files[0]), "utf8"), /extraction: pending/u);
@@ -265,7 +264,7 @@ ${title}の概要。
 - 2026-09-28 W812 新規作成
 `;
 
-test("each batch backs up into its own directory; a batch 2 failure keeps batch 1 originals and settled inputs and restores only theme / index", async (t) => {
+test("a batch 2 failure keeps batch 1 results and settled inputs and restores only theme / index", async (t) => {
   const batch = { current: { max_items: 2, max_input_tokens: 60000, max_batches: 2 } };
   const themeA = "themes/a.md";
   const themeB = "themes/b.md";
@@ -297,25 +296,16 @@ test("each batch backs up into its own directory; a batch 2 failure keeps batch 
   await writeFile(join(vault, themeB), themePage(createUlid(), "テーマ B"));
   await writeFile(join(vault, themeC), themePage(createUlid(), "テーマ C"));
   await writeFile(join(vault, homePath), "index original");
-  const originals = await Promise.all(env.files.map((rel) => readFile(join(env.vault, rel), "utf8")));
-  const runId = createUlid();
-  const report = await env.librarian.run({ run_id: runId, mode: "nightly" });
-  const root = join(env.dataDir, "backups", "memory-pages", runId);
+  const report = await env.librarian.run({ run_id: createUlid(), mode: "nightly" });
   assert.match(report.error, /^write_failed:/u);
-  assert.equal(report.backup_dir, root);
   assert.equal(env.requests.length, batch.current.max_batches);
-  for (const [i, rel] of env.files.entries()) {
-    const dir = join(root, `batch-${i < batch.current.max_items ? 1 : 2}`);
-    assert.equal(await readFile(join(dir, rel), "utf8"), originals[i], "each original is saved once, in its own batch dir");
+  assert.ok(!existsSync(join(env.dataDir, "backups")), "no backup files are written");
+  for (const rel of env.files) {
     assert.doesNotMatch(await readFile(join(env.vault, rel), "utf8"), /extraction: pending/u, "settled inputs stay");
   }
   assert.notEqual(afterBatch1.theme, originalTheme, "batch 1 wrote the theme page");
   assert.match(afterBatch1.theme, /関連 batch 1/u);
-  assert.equal(await readFile(join(root, "batch-1", "after-items", themeA), "utf8"), originalTheme);
-  assert.equal(await readFile(join(root, "batch-2", "after-items", themeA), "utf8"), afterBatch1.theme, "batch 2 saved what batch 1 left");
   assert.equal(await readFile(join(vault, themeA), "utf8"), afterBatch1.theme, "the theme page is restored to batch 1's content");
-  assert.equal(await readFile(join(root, "batch-1", "after-items", homePath), "utf8"), "index original");
-  assert.equal(await readFile(join(root, "batch-2", "after-items", homePath), "utf8"), "index after batch 1", "batch 2 saved what batch 1 left");
   assert.equal(await readFile(join(vault, homePath), "utf8"), "index after batch 1", "only the failed batch's index write is undone");
   assert.equal((await env.librarian.pendingStats()).pending_conversations, 0);
 });
@@ -372,38 +362,6 @@ test("a router that throws mid take_conversation is undone like a rejected route
   await writeFile(join(vault, themeA), original);
   const report = await env.run();
   assert.ok(report.rejected.some((r) => r.code === "route_failed:thrown:router broke"), JSON.stringify(report));
-  assert.doesNotMatch(await readFile(join(vault, themeA), "utf8"), /司書が足した行/u);
-  assert.match(await readFile(join(vault, env.files[0]), "utf8"), /extraction: pending/u);
-});
-
-test("a take_conversation whose backup of a router-written page fails is undone and stays pending", async (t) => {
-  const batch = { current: { max_items: 2, max_input_tokens: 60000, max_batches: 1 } };
-  const themeA = "themes/a.md";
-  const runId = createUlid();
-  let vault;
-  let dataDir;
-  const env = await setup(t, {
-    conversations: 1, batch,
-    propose: async (request) => ({ ok: true, output: { operations: request.conversations.map((c) => ({ op: "take_conversation", conversation: c.path, h: c.h, items: [{ kind: "fact", text: "一つ目" }] })) } }),
-    themeRows: () => [{ path: themeA, page_scope: "common", project_id: null }],
-    router: {
-      route: async () => {
-        const text = await readFile(join(vault, themeA), "utf8");
-        await writeFile(join(vault, themeA), text.replace("## 決まりごと\n", "## 決まりごと\n- 司書が足した行\n"));
-        const blocked = join(dataDir, "backups", "memory-pages", runId, "batch-1");
-        await mkdir(blocked, { recursive: true });
-        await writeFile(join(blocked, "themes"), "blocks the backup directory");
-        return { status: "appended", page: themeA };
-      },
-    },
-  });
-  vault = env.vault;
-  dataDir = env.dataDir;
-  await mkdir(join(vault, "themes"), { recursive: true });
-  const original = themePage(createUlid(), "テーマ A");
-  await writeFile(join(vault, themeA), original);
-  const report = await env.librarian.run({ run_id: runId, mode: "nightly" });
-  assert.ok(report.rejected.some((r) => r.code.startsWith("route_failed:thrown:")), JSON.stringify(report));
   assert.doesNotMatch(await readFile(join(vault, themeA), "utf8"), /司書が足した行/u);
   assert.match(await readFile(join(vault, env.files[0]), "utf8"), /extraction: pending/u);
 });

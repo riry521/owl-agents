@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { Module } from 'node:module';
+import { createRequire, Module } from 'node:module';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import ts from 'typescript';
@@ -43,6 +43,8 @@ const settings = {
   librarian_times: ['03:00', '15:00'],
   research_autosave: true,
   next_librarian_run_at: '2026-09-29T03:00:00.000Z',
+  next_skill_curation_run_at: '2026-09-29T03:00:00.000Z',
+  next_rule_curation_run_at: '2026-09-29T03:00:00.000Z',
   time_zone: 'Asia/Tokyo',
 };
 
@@ -112,4 +114,66 @@ test('setKnowledgeAutomationSettings surfaces server validation errors', async (
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test('KnowledgeAutomationSection shows the next run of all three scheduled kinds', () => {
+  const webRequire = createRequire(join(repoRoot, 'apps/web/package.json'));
+  const React = webRequire('react');
+  const { renderToStaticMarkup } = webRequire('react-dom/server');
+  const viewPath = join(repoRoot, 'apps/web/components/SettingsView.tsx');
+  const { outputText } = ts.transpileModule(readFileSync(viewPath, 'utf8'), {
+    compilerOptions: { esModuleInterop: true, jsx: ts.JsxEmit.ReactJSX, module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
+  });
+  const loaded = new Module(viewPath);
+  loaded.filename = viewPath;
+  loaded.paths = Module._nodeModulePaths(dirname(viewPath));
+  // useState order in KnowledgeAutomationSection: settings, librarianTimes, researchAutosave, loading, saving, error, notice.
+  const renderSection = (current) => {
+  const state = [current, settings.librarian_times, true, false, false, null, null];
+  let index = 0;
+  const stubs = {
+    react: {
+      ...React,
+      useState: (initial) => {
+        const i = index++;
+        if (i >= state.length) state[i] = initial;
+        return [state[i], () => {}];
+      },
+      useEffect: () => {},
+    },
+    '@/lib/i18n': { useLocale: () => ({ t: (key, vars) => (vars?.time ? `${key}|${vars.time}` : key) }) },
+    '@/lib/view-loader': { useView: () => ({ data: undefined, error: null, loading: false, refresh: async () => {} }) },
+    '@/lib/api-client': new Proxy({}, { get: (_, name) => (name === 'ApiRequestError' ? class extends Error {} : async () => ({})) }),
+    '@/lib/format': {},
+    '@/lib/settings-errors': {},
+    '@/lib/remake-limits.mjs': {},
+    '@/lib/model-presets': {},
+    '@/components/ModelPresetsBar': {},
+    '@/components/FolderPickerDialog': {},
+  };
+  const originalLoad = Module._load;
+  Module._load = function (request, parent, isMain) {
+    if (Object.hasOwn(stubs, request)) return stubs[request];
+    return originalLoad.call(this, request, parent, isMain);
+  };
+  try {
+    loaded._compile(outputText, viewPath);
+  } finally {
+    Module._load = originalLoad;
+  }
+  return renderToStaticMarkup(React.createElement(loaded.exports.KnowledgeAutomationSection));
+  };
+  const time = (iso) => new Date(iso).toLocaleString();
+  const withTimes = renderSection({
+    ...settings,
+    next_librarian_run_at: '2026-09-29T03:00:00.000Z',
+    next_skill_curation_run_at: '2026-09-30T04:00:00.000Z',
+    next_rule_curation_run_at: '2026-10-01T05:00:00.000Z',
+  });
+  assert.ok(withTimes.includes(`settings.librarianNextRun|${time('2026-09-29T03:00:00.000Z')}`));
+  assert.ok(withTimes.includes(`settings.skillCurationNextRun|${time('2026-09-30T04:00:00.000Z')}`));
+  assert.ok(withTimes.includes(`settings.ruleCurationNextRun|${time('2026-10-01T05:00:00.000Z')}`));
+  const withoutRule = renderSection({ ...settings, next_rule_curation_run_at: null });
+  assert.ok(withoutRule.includes('settings.librarianNextRunNone'));
+  assert.ok(!withoutRule.includes('settings.ruleCurationNextRun'));
 });

@@ -259,3 +259,21 @@ test("the periodic tick reconciles, evaluates lifecycle rules, and retries pendi
   assert.equal(db.get("SELECT attempts FROM skill_proposals WHERE id = 'tick-pending'").attempts, 1);
   assert.equal(calls, 1);
 });
+
+test("unused trial skills go stale after trial_unused_days and archive later, without being reported as graduated", async (t) => {
+  const { db, now, advance, skillBox, curator } = await setup(t);
+  await addSkill(skillBox, "unused-trial", "# Unused", { trial: true });
+  await addSkill(skillBox, "used-trial", "# Used", { trial: true });
+  await addUsage(db, "used-trial", 1, "helpful", "Fine.", "used-1", now());
+  advance(10);
+  await addSkill(skillBox, "fresh-trial", "# Fresh", { trial: true });
+  advance(5);
+  const result = await curator.curate();
+  assert.equal(skillBox.getSkill("unused-trial").state, "stale");
+  assert.equal(skillBox.getSkill("used-trial").state, "active");
+  assert.equal(skillBox.getSkill("fresh-trial").state, "active");
+  assert.equal(result.trial_results.find((r) => r.skill === "unused-trial").result, "continuing");
+  advance(31);
+  await curator.evaluateLifecycle();
+  assert.equal(skillBox.getSkill("unused-trial").state, "archived");
+});

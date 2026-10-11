@@ -1,6 +1,6 @@
 {
   "name": "@owl/server",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "private": true,
   "type": "module",
   "description": "Owl Core REST, WebSocket, static Web boundary, and owl CLI.",

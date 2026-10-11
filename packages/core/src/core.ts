@@ -78,7 +78,8 @@ import { ruleKeyFingerprint } from "./learning-fingerprint.js";
 import { LearningJobs, LearningPipeline, type LearningJobStatus } from "./learning-pipeline.js";
 import { RuleLoadError, RuleStore, parseWorkRules, type RuleReloadResult, type RuleRole } from "./rule-store";
 import type { RuleCurationResult } from "./rule-curation.js";
-import { RuleProposals, type RuleProposalCreateResult, type RuleProposalStatus } from "./rule-proposals.js";
+import { RulePairJudge, type RuleJudgmentRunner } from "./rule-judge.js";
+import { RuleProposals,type RuleProposalCreateResult, type RuleProposalStatus, type RuleProposalTidyResult } from "./rule-proposals.js";
 import { RuleWriter } from "./rule-writer.js";
 import { DEFAULT_SKILL_FEEDBACK_WEIGHTS, detectSkillReads, SkillBox, type SkillSettings, type SkillState } from "./skill-box";
 import { isValidSkillScope, validateSkillFilePath, validateSkillName } from "./skill-files";
@@ -111,7 +112,7 @@ import {
   type CurationRunView,
   type CurationTrigger,
 } from "./curation-runs.js";
-import { curationCompletionMessage, curationReportFailure, summarizeCurationReport } from "./curation-summary.js";
+import { buildCurationNotice, curationNoticeWrite, curationReportFailure, summarizeCurationReport, type CurationNotice, type CurationNoticeEntry } from "./curation-summary.js";
 import { reviewLimits } from "./review-limits.js";
 import { dependencySummarySettings } from "./dependency-summary-settings.js";
 import {
@@ -140,7 +141,7 @@ import {
   type RemakeLimitSettings,
 } from "../../shared/dist/remake-limit-settings.js";
 import { reviewRouting, workVerification } from "./assurance-settings.js";
-import { evaluatePlanQuality, formatPlanQualityReason, planQualityOutcome, type PlanQualityOutcome, type PlanQualityWarning, type PreviousOutputFeedback } from "./plan-quality.js";
+import { evaluatePlanQuality, formatPlanQualityReason, planQualityOutcome, repairableWarnings, type PlanQualityOutcome, type PlanQualityWarning, type PreviousOutputFeedback } from "./plan-quality.js";
 import { planQualitySettings } from "./plan-quality-settings.js";
 import { projectInvestigationOutputSettings } from "./project-investigation-settings.js";
 import {
@@ -284,8 +285,8 @@ import { coreTestRunBrief } from "./core-test-run";
 import { QUARANTINE_FIX_TASK_PREFIX } from "./test-quarantine";
 import type { BaseMergeConflict, ManagerTrigger, WorkerQuestion } from "@owl/shared";
 import { acceptanceCriteriaProblems, formatAdvisorMalformed, parseTaskNecessity, readStoredAcceptanceCriteria, renderAcceptanceCriteria, renderTaskNecessity, type AcceptanceCriterion, type TaskPlanContext, resolveInstanceId, type AdvisorSuggestedAction, type ProcessSkillsInstallCommand, type ProviderClient } from "@owl/shared";
-import { MEMORY_FOLDER_KINDS_SETTINGS_KEY, MEMORY_LIBRARIAN_BATCH_SETTINGS_KEY, MEMORY_LIBRARIAN_SETTINGS_KEY, MEMORY_MODE_SETTINGS_KEY, MEMORY_RECALL_LIMIT_SETTINGS_KEY, MEMORY_RECALL_MIN_SIMILARITY_SETTINGS_KEY, MemorySettingsValidationError, readMemoryFolderKinds, readMemoryLibrarian, readMemoryLibrarianBatch, readMemoryMode, readMemoryRecallLimit, readMemoryRecallMinSimilarity, validateMemoryFolderKinds, validateMemoryLibrarian, type MemoryFolderKinds, type MemoryLibrarian, type MemoryLibrarianBatch, type MemoryMode } from "@owl/shared";
-import { MEMORY_ARCHIVE_SETTINGS_KEY, readMemoryArchive, REVIEW_RERUN_OPTION_KEY } from "@owl/shared";
+import { MEMORY_FOLDER_KINDS_SETTINGS_KEY, MEMORY_LIBRARIAN_BATCH_SETTINGS_KEY, MEMORY_MODE_SETTINGS_KEY, MEMORY_RECALL_LIMIT_SETTINGS_KEY, MEMORY_RECALL_MIN_SIMILARITY_SETTINGS_KEY, MemorySettingsValidationError, readMemoryFolderKinds, readMemoryLibrarianBatch, readMemoryMode, readMemoryRecallLimit, readMemoryRecallMinSimilarity, validateMemoryFolderKinds, type MemoryFolderKinds, type MemoryLibrarianBatch, type MemoryMode } from "@owl/shared";
+import { EXTERNAL_DATA_POLICY, externalJsonBlock, MEMORY_ARCHIVE_SETTINGS_KEY, readMemoryArchive, REVIEW_RERUN_OPTION_KEY } from "@owl/shared";
 import { validateTestRunSettings } from "../../shared/dist/test-run-settings.js";
 import { readTestPolicy, validateTestPolicy } from "../../shared/dist/test-policy.js";
 import { resolveTestRun } from "./test-detection.js";
@@ -709,6 +710,7 @@ export class Core {
   public readonly memorySaver: MemorySaver;
   private readonly pageRouter: PageRouter;
   private readonly pageLibrarian: PageLibrarian;
+  private indexBuilder: IndexBuilder | null = null;
   private readonly librarianScheduler: LibrarianScheduler;
   private readonly nightlyScheduler: LibrarianScheduler;
   private readonly nightlyExecutor: NightlyTestExecutor;
@@ -868,7 +870,7 @@ export class Core {
       tagger: (request) => {
         const runner = this.options.agentRunner as { runClippingTags?: (request: unknown) => Promise<unknown> };
         if (typeof runner.runClippingTags !== "function") return Promise.resolve({ ok: false });
-        return runner.runClippingTags({ ...request, model: this.memorySettings().memory_librarian, language: ownerLanguage(this.db) });
+        return runner.runClippingTags({ ...request, model: resolveRoleModelFromDb(this.db, "librarian"), language: ownerLanguage(this.db) });
       },
       language: () => ownerLanguage(this.db),
       onFailure: (error, attribution) => this.recordBackgroundFailure("research_record_failed", error, {
@@ -903,6 +905,8 @@ export class Core {
       sourceWorksUpdated: (projectId, numbers) => this.sourceWorksUpdated(projectId, numbers),
       integrationFailed: () => this.pageLibrarian.integrationFailed(),
       ledger: memoryReadLedger,
+      router: this.pageRouter,
+      rebuildProjectIndex: (project_id) => this.knowledgeLocation.withWrite(() => this.indexBuilder!.rebuildAll([{ kind: "project", project_id }])),
       onAdvisorPageShown: (sessionId, path) => this.noteMemoryShown(sessionId, path),
       embedder: new ChildEmbedder(embedderConfig),
       weights: embedderConfig.weights,
@@ -1041,13 +1045,28 @@ export class Core {
       clock: options.nightlyTests?.clock,
     });
     this.librarianScheduler = new LibrarianScheduler({
+      // One slot runs all three kinds in turn so LLM-backed curations never overlap; one failing kind must not stop the rest.
       run: async () => {
-        if (!this.knowledgeLocation.isAvailable()) {
-          console.warn("[owl-core] Skipping the scheduled Librarian run: the knowledge storage is unavailable");
-          return null;
+        const runs: unknown[] = [];
+        const entries: CurationNoticeEntry[] = [];
+        for (const kind of ["librarian", "skill_curation", "rule_curation"] as const) {
+          if (kind === "librarian" && !this.knowledgeLocation.isAvailable()) {
+            console.warn("[owl-core] Skipping the scheduled Librarian run: the knowledge storage is unavailable");
+            continue;
+          }
+          try {
+            const done = await this.runCuration({ kind, trigger: "scheduled", actor: "system" });
+            runs.push(done);
+            entries.push({ kind, run: done });
+          } catch (error) {
+            console.warn(`[owl-core] Scheduled ${kind} run failed`, error);
+            entries.push({ kind, run: null });
+          }
         }
-        return this.runCuration({ kind: "librarian", trigger: "scheduled", actor: "system" });
+        this.sendCurationNoticeFor(entries);
+        return runs;
       },
+      clock: options.knowledgeSchedule?.clock,
     });
     this.curationRuns = new CurationRunStore(this.db);
     const usageSources: { readonly claude?: PlanUsageSource | null; readonly codex?: PlanUsageSource | null } =
@@ -1069,6 +1088,7 @@ export class Core {
       ruleWriter: new RuleWriter(this.ruleStore, join(this.owlRoot, "rules")),
       notes: this.knowledgeNotes,
       now: options.now,
+      judge: () => this.newRuleJudge(),
     });
     this.learningPipeline = new LearningPipeline({
       db: this.db,
@@ -1543,6 +1563,17 @@ export class Core {
     }).catch((writeError: unknown) => console.warn(`[owl-core] Could not record ${kind}`, writeError));
   }
 
+  /** Records a plain system.alert (kind curation_notice); the Owner sees a sentence, never ids or JSON. Never throws. */
+  private sendCurationNotice(notice: CurationNotice): void {
+    void this.writeLane.write(curationNoticeWrite(notice)).catch((writeError: unknown) => console.warn("[owl-core] Could not record curation_notice", writeError));
+  }
+
+  /** One notice for curations that finished together; nothing is sent when none of them has news. */
+  private sendCurationNoticeFor(entries: readonly CurationNoticeEntry[]): void {
+    const notice = buildCurationNotice(entries, ownerLanguage(this.db));
+    if (notice) this.sendCurationNotice(notice);
+  }
+
   /** Storage came back: prepare the folders and resume the learning jobs that waited. */
   private async onKnowledgeStorageAvailable(): Promise<void> {
     await this.knowledge.ensureDirectories();
@@ -1714,8 +1745,23 @@ export class Core {
     return this.skillCurator.curate();
   }
 
-  public curateRules(): RuleCurationResult {
-    return this.ruleProposals.curate();
+  private newRuleJudge(): RulePairJudge {
+    return new RulePairJudge({
+      runner: () => {
+        const runner = this.options.agentRunner as { runRuleJudgments?: RuleJudgmentRunner };
+        return typeof runner.runRuleJudgments === "function" ? (request) => runner.runRuleJudgments!(request) : undefined;
+      },
+      model: () => requireRoleModel(this.db, "curator"),
+      language: () => ownerLanguage(this.db),
+    });
+  }
+
+  /** Merges near-duplicate open proposals and expires stale ones, then judges what is left; approval and rule files stay untouched. */
+  public async curateRules(): Promise<RuleCurationResult & RuleProposalTidyResult> {
+    // One judge for both steps so a pair is asked at most once per run.
+    const judge = this.newRuleJudge();
+    const tidied = await this.ruleProposals.tidy(judge);
+    return { ...(await this.ruleProposals.curate(judge)), ...tidied };
   }
 
   public async rejectSkillProposal(proposalId: string): Promise<SkillProposalCommandResult> {
@@ -1915,8 +1961,8 @@ export class Core {
   /**
    * Starts an Advisor-requested curation without waiting for it. The running row exists when this
    * returns; a request for a kind that is already running gets that run back instead of a new one.
-   * The completion alert is raised here (alertScheduledCurationFailure only covers scheduled runs),
-   * so each run yields exactly one.
+   * A newly started run reports its outcome to `collect` when given (so the caller can send one
+   * notice for several runs); otherwise it sends a notice for itself.
    */
   public async startCurationInBackground(input: {
     kind: CurationKind;
@@ -1924,7 +1970,7 @@ export class Core {
     actor: CurationActor;
     actor_ref?: string | null;
     request_key?: string | null;
-  }): Promise<{ run: CurationRunView; started: boolean }> {
+  }, collect?: (finished: Promise<CurationNoticeEntry>) => void): Promise<{ run: CurationRunView; started: boolean }> {
     if (input.kind === "librarian") this.knowledgeLocation.assertAvailable();
     const existing = input.request_key ? this.curationRuns.findByRequestKey(input.request_key) : null;
     if (existing) return { run: existing, started: false };
@@ -1940,13 +1986,16 @@ export class Core {
     }
     const row = new Promise<CurationRunView>((resolve, reject) => {
       // runCuration tracks the promise in activeCurations, so core.stop() waits for it; the rejection handler keeps it from going unhandled.
-      void this.runCuration(input, resolve).then(
-        (done) => this.recordBackgroundFailure("curation_run_finished", new Error(curationCompletionMessage(input.kind, done)), {}),
+      const finished: Promise<CurationNoticeEntry> = this.runCuration(input, resolve).then(
+        (done) => ({ kind: input.kind, run: done }),
         (error: unknown) => {
           reject(error);
-          this.recordBackgroundFailure("curation_run_failed", error, {});
+          console.warn("[owl-core] curation run failed", { kind: input.kind, error });
+          return { kind: input.kind, run: null };
         },
       );
+      if (collect) collect(finished);
+      else void finished.then((entry) => this.sendCurationNoticeFor([entry]));
     });
     return { run: await row, started: true };
   }
@@ -1970,20 +2019,12 @@ export class Core {
       const summarized = { ...summarizeCurationReport(input.kind, report, run.id, language), report };
       const failure = curationReportFailure(input.kind, report, language);
       if (!failure) return await this.curationRuns.finish(run.id, summarized);
-      const failed = await this.curationRuns.fail(run.id, failure, summarized);
-      this.alertScheduledCurationFailure(input, run.id, failure);
-      return failed;
+      return await this.curationRuns.fail(run.id, failure, summarized);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       console.warn("[owl-core] curation run failed", { kind: input.kind, run_id: run.id, message });
-      this.alertScheduledCurationFailure(input, run.id, message);
       return this.curationRuns.fail(run.id, message);
     }
-  }
-
-  /** Advisor-requested runs are reported by the advisor's own notice (t.curationFailed); only unattended runs need an alert. */
-  private alertScheduledCurationFailure(input: { kind: CurationKind; trigger: CurationTrigger }, runId: string, reason: string): void {
-    if (input.trigger === "scheduled") this.recordBackgroundFailure("curation_run_failed", new Error(`${input.kind} run ${runId}: ${reason}`), {});
   }
 
   /** How much the librarian still has to read: pending conversation logs, clippings without 使いどころ, and the age of the oldest of them. */
@@ -2034,6 +2075,7 @@ export class Core {
       projects: { get: (id) => this.db.get<{ id: string; name: string }>("SELECT id, name FROM projects WHERE id = ?", id) ?? null },
       now: this.options.now ? () => new Date(this.options.now!()) : undefined,
     });
+    this.indexBuilder = builder;
     return new PageLibrarian({
       vault: {
         isAvailable: () => this.knowledgeLocation.isAvailable(),
@@ -2053,7 +2095,7 @@ export class Core {
       workExists: (number) => this.db.get("SELECT 1 AS found FROM works WHERE display_number = ? LIMIT 1", number) !== undefined,
       conversationExists: (name) => this.memory.index.resolvePageRef(name) !== null,
       pathMissing: (projectId, path) => this.repoPathMissing(projectId, path),
-      model: () => this.memorySettings().memory_librarian,
+      model: () => requireRoleModel(this.db, "librarian"),
       batch: () => this.memorySettings().memory_librarian_batch,
       rebuildIndexes: async (scopes, backup) => {
         backupBeforeWrite = backup;
@@ -5875,7 +5917,7 @@ export class Core {
         const { paths: attachmentPaths, notes } = this.resolveAttachmentPaths(message.id);
         await this.advisorRuntime.ensureSessionAndEnqueue(conversation.owner_id, conversationId, message.id, {
           turn_id: createUlid(),
-          text: notes.length > 0 ? `${message.body}\n\n<owl-attachment-notes>${JSON.stringify(notes)}</owl-attachment-notes>` : message.body,
+          text: notes.length > 0 ? `${message.body}\n\n${externalJsonBlock("owl-attachment-notes", notes)}` : message.body,
           origin: origin ?? { channel: "web" },
           attachment_paths: attachmentPaths,
         });
@@ -6025,7 +6067,7 @@ export class Core {
       language === "en"
         ? "Owl's language setting is English: reply to the operator in English and write every Work title and summary in English, even when the operator writes in another language."
         : "Owl's language setting is Japanese: reply to the operator in Japanese (日本語) and write every Work title and summary in Japanese, even when the operator writes in another language. Code, commands, paths, and identifiers stay as they are.",
-    ].join(" ") + "\n\n" + workSummaryInstruction(language) + "\n\n" + ADVISOR_CURATION_INSTRUCTION;
+    ].join(" ") + "\n\n" + workSummaryInstruction(language) + "\n\n" + ADVISOR_CURATION_INSTRUCTION + "\n\n" + EXTERNAL_DATA_POLICY;
     // No Work context here, so only Rule Store lines apply. A rule reload
     // changes this prompt; the Advisor runtime sends the updated prompt to the
     // live session with its next turn instead of restarting it.
@@ -6398,6 +6440,8 @@ export class Core {
     const notices: string[] = [];
     const handledIndexes = new Set<number>();
     const curatedKinds = new Set<CurationKind>();
+    // Curations this reply started: their outcomes go out as one notice once all of them have ended.
+    const finishedCurations: Promise<CurationNoticeEntry>[] = [];
     const t = ADVISOR_TEXT[ownerLanguage(this.db)];
     const inheritedProject = this.db.get<{ project_id: string | null }>(
       `SELECT work.project_id
@@ -6425,7 +6469,7 @@ export class Core {
             actor: "advisor",
             actor_ref: turnId,
             request_key: `advisor-curation:${turnId}:${index}`,
-          });
+          }, (finished) => finishedCurations.push(finished));
           notices.push(t.curationStarted(kind, run.id, !started));
         } catch (error) {
           notices.push(t.curationFailed(kind, error instanceof Error ? error.message.slice(0, 300) : t.unknownCause));
@@ -6519,6 +6563,7 @@ export class Core {
           : t.createFailed(detail));
       }
     }
+    if (finishedCurations.length > 0) void Promise.all(finishedCurations).then((entries) => this.sendCurationNoticeFor(entries));
     return { notices, handledIndexes };
   }
 
@@ -8111,7 +8156,7 @@ export class Core {
         }
         if (outcome === "repair_requested") {
           qualityRepairs += 1;
-          feedback = { kind: "quality_repair", errors: [], warnings };
+          feedback = { kind: "quality_repair", errors: [], warnings: repairableWarnings(warnings, quality) };
           continue;
         }
       }
@@ -9039,7 +9084,7 @@ export class Core {
           qualityFeedback = { kind: "quality_rejected", errors: [], warnings: blocking };
         } else if (outcome === "repair_requested") {
           qualityRepairs += 1;
-          feedback = { kind: "quality_repair", errors: [], warnings };
+          feedback = { kind: "quality_repair", errors: [], warnings: repairableWarnings(warnings, quality) };
           continue;
         } else {
         plan = validated;
@@ -9496,7 +9541,7 @@ export class Core {
   }
 
   /** Read at every call. `memory_mode` is always `pages`: a `legacy` value saved by an older build is read as `pages`. */
-  private memorySettings(): { mode: MemoryMode; folder_kinds: MemoryFolderKinds; memory_librarian: MemoryLibrarian; memory_librarian_batch: MemoryLibrarianBatch } {
+  private memorySettings(): { mode: MemoryMode; folder_kinds: MemoryFolderKinds; memory_librarian_batch: MemoryLibrarianBatch } {
     const read = (key: string): unknown => {
       try {
         const row = this.db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", key);
@@ -9509,7 +9554,6 @@ export class Core {
     return {
       mode: readMemoryMode(read(MEMORY_MODE_SETTINGS_KEY)),
       folder_kinds: readMemoryFolderKinds(read(MEMORY_FOLDER_KINDS_SETTINGS_KEY), (message) => console.warn(`[owl-core] ${message}`)),
-      memory_librarian: readMemoryLibrarian(read(MEMORY_LIBRARIAN_SETTINGS_KEY), (message) => console.warn(`[owl-core] ${message}`)),
       memory_librarian_batch: readMemoryLibrarianBatch(read(MEMORY_LIBRARIAN_BATCH_SETTINGS_KEY), (message) => console.warn(`[owl-core] ${message}`)),
     };
   }
@@ -9581,46 +9625,12 @@ export class Core {
     }
   }
 
-  public async getMemorySettings(): Promise<{ mode: MemoryMode; folder_kinds: MemoryFolderKinds; memory_librarian: MemoryLibrarian }> {
-    return this.memorySettings();
-  }
-
-  /** Owner-only. Model for the migration LLM calls; read again at every migration request. */
-  public async setMemoryLibrarian(input: unknown): Promise<{ mode: MemoryMode; folder_kinds: MemoryFolderKinds; memory_librarian: MemoryLibrarian }> {
-    let normalized: MemoryLibrarian;
-    try {
-      normalized = validateMemoryLibrarian(input);
-    } catch (error) {
-      if (error instanceof MemorySettingsValidationError) throw validationError(error.message, { field: "memory_librarian" });
-      throw error;
-    }
-    await this.writeLane.write({
-      mutateState: (transaction) => {
-        const now = utcNow();
-        ensureOwner(transaction, DEFAULT_OWNER_ID, now);
-        transaction.run(
-          `INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at)
-           VALUES (?, ?, '1.0.0', ?, ?)
-           ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
-          MEMORY_LIBRARIAN_SETTINGS_KEY,
-          DEFAULT_OWNER_ID,
-          JSON.stringify(normalized),
-          now,
-        );
-        return normalized;
-      },
-      event: {
-        idempotencyKey: `settings-memory-librarian:${createUlid()}`,
-        type: "settings.memory_librarian_updated",
-        payload: { provider: normalized.provider, model: normalized.model, effort: normalized.effort },
-      },
-      outbox: [{ provider: "websocket" }],
-    });
+  public async getMemorySettings(): Promise<{ mode: MemoryMode; folder_kinds: MemoryFolderKinds }> {
     return this.memorySettings();
   }
 
   /** Owner-only. `memory_mode` is not written here. */
-  public async setMemoryFolderKinds(input: unknown): Promise<{ mode: MemoryMode; folder_kinds: MemoryFolderKinds; memory_librarian: MemoryLibrarian }> {
+  public async setMemoryFolderKinds(input: unknown): Promise<{ mode: MemoryMode; folder_kinds: MemoryFolderKinds }> {
     let normalized: MemoryFolderKinds;
     try {
       normalized = validateMemoryFolderKinds(input);
@@ -9977,9 +9987,12 @@ export class Core {
     } catch {
       // Some runtimes do not expose an IANA time zone.
     }
+    const nextRunAt = this.librarianScheduler.nextRunAt()?.toISOString() ?? null;
     return {
       ...settings,
-      next_librarian_run_at: this.librarianScheduler.nextRunAt()?.toISOString() ?? null,
+      next_librarian_run_at: nextRunAt,
+      next_skill_curation_run_at: nextRunAt,
+      next_rule_curation_run_at: nextRunAt,
       time_zone: timeZone,
     };
   }
@@ -10898,6 +10911,13 @@ const MODEL_SETTINGS_KEY = "model_settings";
 const MODEL_PRESETS_KEY = "model_presets";
 const KNOWLEDGE_SETTINGS_KEY = "knowledge";
 const LEGACY_EXECUTOR_CONFIG_SETTINGS_KEY = "executor_config";
+
+/** For callers whose model type requires effort: a role saved without one is a settings error, not a value to guess. */
+function requireRoleModel(db: CoreDatabase, role: string): { model: string; provider: string; effort: string } {
+  const resolved = resolveRoleModelFromDb(db, role);
+  if (!resolved?.effort) throw validationError(`No ${role} model with an effort is configured.`, { role });
+  return { ...resolved, effort: resolved.effort };
+}
 
 function resolveRoleModelFromDb(db: CoreDatabase, role: string): { model: string; provider: string; effort?: string } | undefined {
   const row = db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", MODEL_SETTINGS_KEY);
@@ -11894,7 +11914,7 @@ function validateSkillSettings(value: unknown): SkillSettings {
   const fields = ["mode", "confidence_threshold", "stale_days", "archived_days", "max_items", "max_characters"] as const;
   if (!isRecord(value)) throw validationError("Skill settings must be an object.", { field: "settings" });
   const missing = fields.filter((field) => !Object.prototype.hasOwnProperty.call(value, field));
-  const extra = Object.keys(value).filter((field) => field !== "feedback_weights" && !fields.includes(field as typeof fields[number]));
+  const extra = Object.keys(value).filter((field) => field !== "feedback_weights" && field !== "trial_unused_days" && !fields.includes(field as typeof fields[number]));
   if (missing.length > 0 || extra.length > 0) {
     throw validationError("Skill settings fields do not match the supported settings.", { missing, extra });
   }
@@ -11904,7 +11924,8 @@ function validateSkillSettings(value: unknown): SkillSettings {
   if (typeof value.confidence_threshold !== "number" || !Number.isFinite(value.confidence_threshold) || value.confidence_threshold < 0 || value.confidence_threshold > 1) {
     throw validationError("confidence_threshold must be between 0 and 1.", { field: "confidence_threshold" });
   }
-  for (const field of ["stale_days", "archived_days"] as const) {
+  for (const field of ["stale_days", "archived_days", "trial_unused_days"] as const) {
+    if (field === "trial_unused_days" && value[field] === undefined) continue;
     if (!Number.isSafeInteger(value[field]) || Number(value[field]) < 1 || Number(value[field]) > 3650) {
       throw validationError(`${field} must be an integer between 1 and 3650.`, { field });
     }
@@ -11926,6 +11947,7 @@ function validateSkillSettings(value: unknown): SkillSettings {
     confidence_threshold: value.confidence_threshold,
     stale_days: Number(value.stale_days),
     archived_days: Number(value.archived_days),
+    ...(value.trial_unused_days === undefined ? {} : { trial_unused_days: Number(value.trial_unused_days) }),
     max_items: Number(value.max_items),
     max_characters: Number(value.max_characters),
   };

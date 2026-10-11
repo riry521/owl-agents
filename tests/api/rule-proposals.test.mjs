@@ -83,7 +83,21 @@ test("rule proposal routes require Owner access, create from notes, approve, rej
     level: "system",
   });
   assert.equal(createResponse.status, 201);
-  const created = (await createResponse.json()).data;
+  assert.equal((await createResponse.json()).data.status, "pending", "one source is below the minimum of two");
+  const secondSource = await seedNote(notes, {
+    topic: "Rule proposal API second source",
+    kind: "fact",
+    text,
+    work_id: createUlid(),
+    project_id: null,
+    tags: ["rules"],
+  });
+  const secondResponse = await api.write("POST", "/rule-proposals", {
+    note_id: secondSource.note_id,
+    claim_fingerprint: (await notes.get(secondSource.note_id)).claims[0].fingerprint,
+    level: "system",
+  }, { suffix: "second-source" });
+  const created = (await secondResponse.json()).data;
   assert.equal(created.status, "awaiting_approval");
   const createdEvent = api.db.get(
     "SELECT status FROM events WHERE type = ? AND json_extract(payload_json, '$.proposal_id') = ?",
@@ -121,7 +135,21 @@ test("rule proposal routes require Owner access, create from notes, approve, rej
     role: "worker",
   });
   assert.equal(rejectedCreateResponse.status, 201);
-  const rejectedProposal = (await rejectedCreateResponse.json()).data;
+  const rejectedSecond = await seedNote(notes, {
+    topic: "Rule proposal API rejection second source",
+    kind: "pitfall",
+    text: "Keep the rejection available for review.",
+    work_id: createUlid(),
+    project_id: null,
+    tags: ["rules"],
+  });
+  const rejectedProposal = (await (await api.write("POST", "/rule-proposals", {
+    note_id: rejectedSecond.note_id,
+    claim_fingerprint: (await notes.get(rejectedSecond.note_id)).claims[0].fingerprint,
+    level: "role",
+    role: "worker",
+  }, { suffix: "rejected-second-source" })).json()).data;
+  assert.equal(rejectedProposal.status, "awaiting_approval");
   const rejectResponse = await api.write("POST", `/rule-proposals/${rejectedProposal.proposal_id}/reject`, {});
   assert.equal(rejectResponse.status, 200);
   assert.equal((await rejectResponse.json()).data.status, "rejected");

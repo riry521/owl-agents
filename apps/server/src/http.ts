@@ -17,7 +17,7 @@ import { KnowledgeBase, type KnowledgeSearchResult } from "../../../packages/cor
 import { RuleStore } from "../../../packages/core/dist/rule-store.js";
 import { assertValidPage, PageRejectedError } from "../../../packages/core/dist/memory/page-format.js";
 import { KnowledgeAutomationValidationError, validateKnowledgeAutomationSettings } from "../../../packages/shared/dist/knowledge-automation.js";
-import { MemorySettingsValidationError, validateMemoryFolderKinds, validateMemoryLibrarian, type MemoryFolderKinds, type MemoryLibrarian } from "../../../packages/shared/dist/memory-settings.js";
+import { MemorySettingsValidationError, validateMemoryFolderKinds, type MemoryFolderKinds } from "../../../packages/shared/dist/memory-settings.js";
 import { PlanUsageSettingsValidationError, validatePlanUsageSettings } from "../../../packages/shared/dist/plan-usage-settings.js";
 import { DependencySummarySettingsValidationError, validateDependencySummarySettings } from "../../../packages/shared/dist/dependency-summary-settings.js";
 import type { DependencySummarySettings } from "../../../packages/shared/dist/dependency-summary-settings.js";
@@ -348,7 +348,6 @@ interface PlanUsageApiPort {
 interface MemorySettingsApiPort {
   getMemorySettings(): Promise<unknown>;
   setMemoryFolderKinds(input: unknown): Promise<unknown>;
-  setMemoryLibrarian(input: unknown): Promise<unknown>;
 }
 
 interface AdvisorSessionReadDatabase {
@@ -2087,8 +2086,7 @@ function requirePlanUsageApi(core: CorePort): PlanUsageApiPort {
 function requireMemorySettingsApi(core: CorePort): MemorySettingsApiPort {
   const has = (value: unknown): value is MemorySettingsApiPort => isObject(value)
     && typeof value.getMemorySettings === "function"
-    && typeof value.setMemoryFolderKinds === "function"
-    && typeof value.setMemoryLibrarian === "function";
+    && typeof value.setMemoryFolderKinds === "function";
   const wrapped = core as CorePort & { core?: unknown };
   const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
   if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support memory settings.");
@@ -2101,18 +2099,6 @@ function validatedMemoryFolderKinds(value: unknown): MemoryFolderKinds {
   } catch (error) {
     if (error instanceof MemorySettingsValidationError) {
       throw new ApiError(400, "validation_error", error.message, { field: "folder_kinds" });
-    }
-    throw error;
-  }
-}
-
-
-function validatedMemoryLibrarian(value: unknown): MemoryLibrarian {
-  try {
-    return validateMemoryLibrarian(value);
-  } catch (error) {
-    if (error instanceof MemorySettingsValidationError) {
-      throw new ApiError(400, "validation_error", error.message, { field: "memory_librarian" });
     }
     throw error;
   }
@@ -3479,21 +3465,19 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
-  // Only folder_kinds and memory_librarian are writable here; memory_mode is always pages.
+  // Only folder_kinds is writable here; memory_mode is always pages.
   if (pathname === `${API_PREFIX}/settings/memory` && method === "PUT") {
     requireOwner(request);
     const command = commandEnvelope(await readRequestBody(request));
-    exactKeys(command.payload, [], "Memory settings payload", ["folder_kinds", "memory_librarian"]);
+    exactKeys(command.payload, [], "Memory settings payload", ["folder_kinds"]);
     if (Object.keys(command.payload).length === 0) {
-      throw new ApiError(400, "validation_error", "folder_kinds or memory_librarian is required.");
+      throw new ApiError(400, "validation_error", "folder_kinds is required.");
     }
     const folderKinds = command.payload.folder_kinds === undefined ? undefined : validatedMemoryFolderKinds(command.payload.folder_kinds);
-    const librarian = command.payload.memory_librarian === undefined ? undefined : validatedMemoryLibrarian(command.payload.memory_librarian);
     const api = requireMemorySettingsApi(context.core);
     const result = await runCommand(context, pathname, command, 200, async () => {
       let data: unknown;
       if (folderKinds) data = await api.setMemoryFolderKinds(folderKinds);
-      if (librarian) data = await api.setMemoryLibrarian(librarian);
       return { data: data as JsonObject, version: 0 };
     });
     sendJson(response, 200, result);

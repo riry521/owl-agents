@@ -24,6 +24,8 @@ export interface KnowledgeAutomationSettings {
 
 export interface KnowledgeAutomationSnapshot extends KnowledgeAutomationSettings {
   readonly next_librarian_run_at: string | null;
+  readonly next_skill_curation_run_at: string | null;
+  readonly next_rule_curation_run_at: string | null;
   readonly time_zone: string;
 }
 

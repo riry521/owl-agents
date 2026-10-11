@@ -176,6 +176,8 @@ test("a base_branch condition is released by the periodic check, and the base is
   assert.equal(ctx.runner.state.pageFormatPresent[1], true, "the Task worktree already holds the base's file");
   assert.equal(git(ctx.project, "show", `owl/work/${workId}/work:src/page-format.ts`), "export const fmt = 1;");
   assert.equal(eventCount(ctx.db, workId, "task.prerequisite_satisfied"), 1);
+  // The pipeline keeps writing under ctx.root until the Task completes; the fixture removes root right after the test.
+  assert.ok(await until(() => task(ctx.db, workId).status === "completed"), "the Task finishes before cleanup");
 });
 
 test("prerequisite_sync_base=false releases the wait without merging the base", async (t) => {
@@ -191,6 +193,7 @@ test("prerequisite_sync_base=false releases the wait without merging the base", 
   assert.ok(await until(() => ctx.runner.state.workerCalls >= 2));
   assert.equal(ctx.runner.state.pageFormatPresent[1], false, "the base was not merged");
   assert.throws(() => git(ctx.project, "show", `owl/work/${workId}/work:src/page-format.ts`));
+  assert.ok(await until(() => task(ctx.db, workId).status === "completed"), "the Task finishes before cleanup");
 });
 
 test("a base sync conflict opens a sync_conflict Decision and keeps the Task from starting", async (t) => {

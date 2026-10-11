@@ -89,6 +89,13 @@ function roundTripDifference(expected: RuleFile, actual: RuleFile, fallbackId: s
   return isDeepStrictEqual(expected, actual) ? null : { id: fallbackId, field: "rules" };
 }
 
+const GIT_TRACKED_DEFAULT_FILES: ReadonlySet<string> = new Set([
+  "system/defaults.yaml",
+  "system/owl-defaults.yaml",
+  "system/safety.yaml",
+  "role/advisor-defaults.yaml",
+]);
+
 export class RuleWriter {
   private readonly fs: RuleWriterFileSystem;
   private readonly logger: NonNullable<RuleWriterOptions["logger"]>;
@@ -154,7 +161,15 @@ export class RuleWriter {
     }
 
     const directory = input.level === "system" ? "system" : "role";
-    const filename = input.level === "system" ? "owl-approved.yaml" : `owl-approved-${input.role}.yaml`;
+    // role は Owner 個人用の git 対象外ファイル rules/role/<role>.yaml に書く。
+    // 既存ファイルは renderRuleFile で全体を書き直すためコメントは消えるが、id・text・kind は往復検証で保つ。
+    // コメントを残す追記方式は YAML の末尾構造に依存して壊れやすいので採らなかった。
+    const filename = input.level === "system" ? "owl-approved.yaml" : `${input.role}.yaml`;
+    if (GIT_TRACKED_DEFAULT_FILES.has(`${directory}/${filename}`) || filename.endsWith("-defaults.yaml")) {
+      throw new RuleWriteError("managed_file_invalid", `Refusing to write to git-tracked default rule file '${directory}/${filename}'.`, {
+        path: `${directory}/${filename}`,
+      });
+    }
     const directoryPath = join(this.rulesDir, directory);
     const path = join(directoryPath, filename);
     await this.fs.mkdir(directoryPath, { recursive: true });

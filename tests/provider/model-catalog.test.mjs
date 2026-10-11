@@ -71,11 +71,11 @@ function updateRoles(core, change) {
 test("Anthropic catalog reads only current Claude API IDs", () => {
   const markdown = [
     "| Feature | Fable | Opus | Sonnet | Haiku |",
-    "| Claude API ID | `claude-fable-5-1` | `claude-opus-5-5` | `claude-sonnet-5` | `claude-haiku-4-5-20251001` |",
+    "| Claude API ID | `claude-fable-5-1` | `claude-opus-5-5` | `claude-sonnet-5` | `claude-haiku-5-5` |",
     "Legacy models: `claude-opus-4-8`",
   ].join("\n");
   assert.deepEqual(parseAnthropicModels(markdown), [
-    "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5", "claude-haiku-4-5-20251001",
+    "claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5", "claude-haiku-5-5",
   ]);
 });
 
@@ -129,7 +129,7 @@ test("default role and child-agent models are real harness models", async (t) =>
     assert.ok(CODEX_BUILTIN_MODELS.includes(DEFAULT_HARNESS_MODELS.codex));
     const curator = core.getModelSettings().roles.find(({ role }) => role === "curator");
     assert.equal(curator.provider, "anthropic");
-    assert.equal(curator.model, "claude-haiku-4-5-20251001");
+    assert.equal(curator.model, "claude-haiku-5-5");
     assert.equal(curator.effort, "low");
     assert.equal(core.getChildRunSettings().default_model, DEFAULT_HARNESS_MODELS.claude);
   });
@@ -157,7 +157,7 @@ test("a stored setting without a librarian role uses the stored advisor model fo
     const librarian = settings.find(({ role }) => role === "librarian");
     assert.equal(librarian.model, "claude-sonnet-5");
     assert.equal(librarian.effort, "medium");
-    assert.equal(settings.find(({ role }) => role === "curator").model, "claude-haiku-4-5-20251001");
+    assert.equal(settings.find(({ role }) => role === "curator").model, "claude-haiku-5-5");
   });
 });
 
@@ -210,7 +210,7 @@ test("Core warns at startup about saved models its harness no longer offers, wit
   // test, so the permissive list must still cover them for the save to pass.
   // Default child-agent Claude models are saved too, so they must be covered.
   const defaultClaudeModels = [
-    DEFAULT_HARNESS_MODELS.claude, "claude-opus-5", "claude-fable-5-1", "claude-haiku-4-5-20251001",
+    DEFAULT_HARNESS_MODELS.claude, "claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-haiku-5-5",
     ...DEFAULT_CHILD_RUN_SETTINGS.allowed_models.filter(({ provider }) => provider === "claude").map(({ model }) => model),
   ];
   const permissiveKnownModels = (harness) =>
@@ -260,7 +260,7 @@ test("Core does not warn at startup when saved models are known or unchecked", a
 });
 
 test("an injected model list replaces the built-in one", async (t) => {
-  const knownModels = (harness) => harness === "codex" ? new Set(["gpt-7-nova"]) : new Set(["claude-sonnet-5", "claude-haiku-4-5-20251001"]);
+  const knownModels = (harness) => harness === "codex" ? new Set(["gpt-7-nova"]) : new Set(["claude-sonnet-5", "claude-haiku-5-5"]);
   await withCore(t, { knownModels }, async (core) => {
     await assert.rejects(() => updateRoles(core, { worker: { model: "gpt-5.6-terra" }, manager: { model: "claude-sonnet-5" } }), (error) => error?.code === "validation_error");
     await assert.rejects(() => updateRoles(core, { worker: { model: "gpt-7-nova" }, manager: { model: "claude-opus-5" } }), (error) => error?.code === "validation_error");

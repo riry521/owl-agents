@@ -74,7 +74,7 @@ export {
   type TokenUsageTotals,
   type TokenUsageWorkTotals,
 } from "./token-usage-report.js";
-export { MINIMAL_CODE_RULES, WORKER_OWN_SUBAGENT_RULES, WORKER_SUBAGENT_RULES, WORKING_STYLE_RULES, workerOwnSubagentRules, workerSubagentRules, type ResearcherPromptRef } from "./agent-rules.js";
+export { EXTERNAL_DATA_POLICY, KNOWLEDGE_EXTERNAL_COMMAND_RULE, MINIMAL_CODE_RULES, WORKER_OWN_SUBAGENT_RULES, WORKER_SUBAGENT_RULES, WORKING_STYLE_RULES, workerOwnSubagentRules, workerSubagentRules, type ResearcherPromptRef } from "./agent-rules.js";
 export * from "./research-subagent.js";
 export { PROCESS_SKILLS_INSTALL_COMMANDS, PROCESS_SKILLS_PROMPT_FILES, PROCESS_SKILLS_SETTINGS_KEY, renderProcessSkills, type ProcessSkillsHarness, type ProcessSkillsInstallCommand, type ProcessSkillsPackForPrompt, type ProcessSkillsRole, type ProcessSkillsSettings } from "./process-skills.js";
 export { designDocumentPath, taskReportPath } from "./design-documents.js";
@@ -100,15 +100,12 @@ export {
   readMemoryArchive,
   type MemoryArchive,
   DEFAULT_MEMORY_FOLDER_KINDS,
-  DEFAULT_MEMORY_LIBRARIAN,
   DEFAULT_MEMORY_LIBRARIAN_BATCH,
+  MEMORY_LIBRARIAN_MAX_BATCHES_LIMIT,
   DEFAULT_MEMORY_MODE,
   FOLDER_KIND_TYPES,
   MEMORY_FOLDER_KINDS_SETTINGS_KEY,
   MEMORY_LIBRARIAN_BATCH_SETTINGS_KEY,
-  MEMORY_LIBRARIAN_EFFORTS,
-  MEMORY_LIBRARIAN_PROVIDERS,
-  MEMORY_LIBRARIAN_SETTINGS_KEY,
   MEMORY_MODE_SETTINGS_KEY,
   MEMORY_RECALL_LIMIT_SETTINGS_KEY,
   MEMORY_RECALL_MIN_SIMILARITY_SETTINGS_KEY,
@@ -118,15 +115,12 @@ export {
   readMemoryRecallLimit,
   readMemoryRecallMinSimilarity,
   readMemoryFolderKinds,
-  readMemoryLibrarian,
   readMemoryLibrarianBatch,
   readMemoryMode,
   validateMemoryFolderKinds,
-  validateMemoryLibrarian,
   type FolderKindRule,
   type FolderKindType,
   type MemoryFolderKinds,
-  type MemoryLibrarian,
   type MemoryLibrarianBatch,
   type MemoryMode,
 } from "./memory-settings.js";
@@ -644,3 +638,5 @@ export {
   type DesignBlockCauseKind,
   type DesignBlockedReport,
 } from "./design-blocked.js";
+
+export { defuseTags, EXTERNAL_DATA_ATTR, externalJsonBlock } from "./external-data.js";

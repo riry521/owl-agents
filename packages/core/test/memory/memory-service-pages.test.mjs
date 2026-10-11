@@ -5,7 +5,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { MemoryReadLedger } from "../../dist/memory/memory-read-ledger.js";
 import { MemoryService } from "../../dist/memory/memory-service.js";
-import { estimatePageTokens } from "../../dist/memory/page-format.js";
+import { IndexBuilder } from "../../dist/memory/index-builder.js";
+import { estimatePageTokens, parsePage } from "../../dist/memory/page-format.js";
 
 const fixture = (kind) => readFileSync(new URL(`./fixtures/pages/${kind}.md`, import.meta.url), "utf8");
 const PROJECT = "01HZZZZZZZZZZZZZZZZZZZZZZP";
@@ -157,5 +158,56 @@ test("an unconnected vault answers from the index with stale: true", async () =>
       assert.equal((await offline.readIndex({}, ctx())).stale, true);
       assert.equal(offline.mode(), "pages");
     } finally { await offline.stop(); }
+  } finally { await t.cleanup(); }
+});
+
+test("append puts one 会話 line on the named theme page and creates a listed page when none fits", async () => {
+  const { PageRouter } = await import("../../dist/memory/page-router.js");
+  const { createHash } = await import("node:crypto");
+  const holder = {};
+  const router = { route: (input) => holder.router.route(input) };
+  const now = () => new Date("2026-10-10T03:00:00Z");
+  const rebuildProjectIndex = (project_id) => new IndexBuilder({
+    index: holder.t.service.index,
+    writer: { read: async (path) => { try { return read(path); } catch { return null; } }, write: async (path, text) => { mkdirSync(dirname(join(holder.t.vault, path)), { recursive: true }); writeFileSync(join(holder.t.vault, path), text); return { path, written: true }; } },
+    projects: { get: (id) => ({ id, name: "ことり家計簿" }) },
+  }).rebuildAll([{ kind: "project", project_id }]);
+  const t = await setup({ extra: { router, now, rebuildProjectIndex } });
+  holder.t = t;
+  holder.router = new PageRouter({ knowledgeDir: () => t.vault, withWrite: (fn) => fn(), now });
+  const read = (rel) => readFileSync(join(t.vault, rel), "utf8");
+  const advisor = ctx({ caller: "advisor" });
+  try {
+    const before = read("projects/kotori/第一.md").split("\n");
+    const out = await t.service.append({ project_id: PROJECT, section: "落とし穴", text: "月末は固定日時を渡す", theme: "第一" }, advisor);
+    assert.equal(out.status, "appended");
+    assert.equal(out.section, "落とし穴");
+    const after = read("projects/kotori/第一.md").split("\n");
+    assert.ok(after.some((line) => /^- 月末は固定日時を渡す（会話2026-10-10-1） <!-- owl:new /u.test(line)));
+    assert.deepEqual(before.filter((line) => !after.includes(line)), ["updated: 2026-10-03"], "only the updated date changes; no existing line is rewritten");
+    assert.equal((await t.service.append({ project_id: PROJECT, section: "落とし穴", text: "月末は固定日時を渡す", theme: "第一" }, advisor)).status, "duplicate");
+    // A duplicate never rewrites the stored line's sources, and a second conversation of the day gets the next number.
+    mkdirSync(join(t.vault, "conversations/2026-10"), { recursive: true });
+    writeFileSync(join(t.vault, "conversations/2026-10/2026-10-10-1.md"), "x");
+    const kept = read("projects/kotori/第一.md");
+    assert.equal((await t.service.append({ project_id: PROJECT, section: "落とし穴", text: "月末は固定日時を渡す", theme: "第一" }, advisor)).status, "duplicate");
+    assert.equal(read("projects/kotori/第一.md"), kept);
+    await t.service.append({ project_id: PROJECT, section: "概要", text: "二つ目の会話の記録", theme: "第一" }, advisor);
+    assert.match(read("projects/kotori/第一.md"), /二つ目の会話の記録（会話2026-10-10-2）/u);
+
+    const created = await t.service.append({ project_id: PROJECT, section: "決まりごと", text: "請求は月初にまとめて出す", theme: "請求の扱い" }, advisor);
+    assert.equal(created.status, "appended");
+    assert.match(created.page, /請求の扱い/u);
+    // append itself rebuilds the Project index, so the new page is listed without a librarian run.
+    await t.service.reindex({ mode: "diff" });
+    const index = await t.service.readIndex({ project_id: PROJECT }, ctx());
+    assert.ok(parsePage(index.text).sections.find((s) => s.heading === "テーマ").lines.some((line) => line.includes("[[請求の扱い]]")), index.text);
+
+    const hash = createHash("sha256").update(read("projects/kotori/第一.md")).digest("hex");
+    for (const input of [{ section: "関連ページ", text: "x" }, { section: "更新履歴", text: "x" }, { section: "toString", text: "x" }, { section: "概要", text: "   " }]) {
+      assert.ok((await t.service.append({ project_id: PROJECT, theme: "第一", ...input }, advisor)).error, JSON.stringify(input));
+    }
+    assert.equal((await t.service.append({ section: "概要", text: "x" }, ctx({ caller: "advisor", project_id: null }))).error, "project_required");
+    assert.equal(createHash("sha256").update(read("projects/kotori/第一.md")).digest("hex"), hash);
   } finally { await t.cleanup(); }
 });

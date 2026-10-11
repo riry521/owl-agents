@@ -70,7 +70,8 @@ test("an approved legacy policy Decision creates one rule proposal per lesson an
   const proposals = db.all("SELECT id, text, rationale, origin, status FROM rule_proposals ORDER BY created_at, id");
   assert.equal(proposals.length, 2, "same text and scope merge into one proposal");
   assert.deepEqual(proposals.map(({ text }) => text), ["Reuse a validated result.", "Keep source files intact."]);
-  assert.ok(proposals.every((proposal) => proposal.origin === "legacy_policy" && proposal.status === "awaiting_approval"));
+  assert.ok(proposals.every((proposal) => proposal.origin === "legacy_policy"));
+  assert.deepEqual(proposals.map(({ status }) => status), ["awaiting_approval", "pending"], "two sources await approval, one source stays pending");
   assert.equal(proposals[0].rationale, "The review found this was reliable.");
 
   const sources = db.all(
@@ -95,13 +96,13 @@ test("an invalid legacy Decision block is rejected without blocking valid blocks
   const created = await core.createWork(commandEnvelope({ title: "Legacy policy", summary: "x", size: "normal", project_id: null }, "invalid-create"));
   const workId = created.data.work_id;
   const tried = [
-    "- Keep the first valid rule.",
+    "- Prefer small commits.",
     "  Basis: Evidence.",
     "",
     `- ${"x".repeat(301)}`,
     "  Basis: Too long.",
     "",
-    "- Keep the final valid rule.",
+    "- Document every public endpoint.",
     "  Basis: Evidence.",
   ].join("\n");
   const opened = await openLegacyPolicyDecision(core, workId, tried);
@@ -114,11 +115,11 @@ test("an invalid legacy Decision block is rejected without blocking valid blocks
 
   const proposals = db.all("SELECT text, status, last_error FROM rule_proposals ORDER BY created_at, id");
   assert.equal(proposals.length, 3);
-  assert.equal(proposals.find((proposal) => proposal.text === "Keep the first valid rule.").status, "awaiting_approval");
+  assert.equal(proposals.find((proposal) => proposal.text === "Prefer small commits.").status, "pending");
   const invalid = proposals.find((proposal) => proposal.text === "x".repeat(301));
   assert.equal(invalid.status, "rejected");
   assert.ok(invalid.last_error);
-  assert.equal(proposals.find((proposal) => proposal.text === "Keep the final valid rule.").status, "awaiting_approval");
+  assert.equal(proposals.find((proposal) => proposal.text === "Document every public endpoint.").status, "pending");
 });
 
 test("learning job enqueue rolls back with Work completion and commits atomically", async (t) => {

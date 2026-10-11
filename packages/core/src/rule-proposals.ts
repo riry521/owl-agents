@@ -3,14 +3,25 @@ import { isRuleRole } from "@owl/shared";
 import { HumanReadableError, invalidStateTransition, notFound } from "./errors.js";
 import { fingerprint, ruleKeyFingerprint } from "./learning-fingerprint.js";
 import { parseRuleYaml, renderRuleFile, type PromptRule, type RuleRole, type RuleStore } from "./rule-store.js";
-import { curateRuleProposals, type RuleCurationResult } from "./rule-curation.js";
+import { curateRuleProposals, dice, NEAR_DUPLICATE, type RuleCurationResult } from "./rule-curation.js";
+import { curationNoticeWrite, ruleAddedNotice } from "./curation-summary.js";
+import { ownerLanguage } from "./owner-language.js";
+import type { RulePairJudge } from "./rule-judge.js";
+import { coApply } from "./rule-curation.js";
 import type { KnowledgeNotes, NotePromotion } from "./knowledge-notes.js";
 import type { RuleWriter } from "./rule-writer.js";
 import type { CoreDatabase, CoreWriteLaneTransaction } from "./types.js";
 
-export const RULE_PROPOSAL_MIN_SOURCES = 1;
+export const RULE_PROPOSAL_MIN_SOURCES = 2;
+export const RULE_PROPOSAL_SETTINGS_KEY = "rule_proposals";
+export const RULE_PROPOSAL_EXPIRE_DAYS = 30;
 
-export type RuleProposalStatus = "pending" | "awaiting_approval" | "applied" | "rejected";
+export type RuleProposalStatus = "pending" | "awaiting_approval" | "applied" | "rejected" | "expired" | "merged";
+
+export interface RuleProposalTidyResult {
+  readonly merged: Array<{ id: string; merged_into: string; similarity: number }>;
+  readonly expired: Array<{ id: string; text: string }>;
+}
 export type RuleProposalOrigin = "lesson" | "note" | "legacy_policy" | "metrics";
 export type RuleProposalSourceKind = "work" | "note" | "legacy_policy" | "decision" | "metrics_snapshot";
 
@@ -80,6 +91,8 @@ export interface RuleProposalsOptions {
   readonly now?: () => string;
   readonly logger?: Pick<Console, "warn" | "error">;
   readonly min_sources?: number;
+  /** Makes a judge per create; undefined (or a judge that cannot answer) leaves only the fingerprint check. */
+  readonly judge?: () => RulePairJudge | undefined;
 }
 
 interface ProposalRow {
@@ -128,6 +141,7 @@ type CreateDecision =
   | { readonly kind: "invalid"; readonly error: string }
   | { readonly kind: "applied"; readonly proposal_id: string }
   | { readonly kind: "duplicate_rule"; readonly rule_id: string }
+  | { readonly kind: "conflict"; readonly rule_id: string }
   | { readonly kind: "rejected"; readonly proposal_id: string }
   | { readonly kind: "open"; readonly target: { readonly id: string; readonly status: RuleProposalStatus; readonly decision_json: string | null } }
   | { readonly kind: "simulated_open" }
@@ -142,6 +156,7 @@ export class RuleProposals {
   private readonly notes: Pick<KnowledgeNotes, "recordPromotion">;
   private readonly now: () => string;
   private readonly minSources: number;
+  private readonly makeJudge?: () => RulePairJudge | undefined;
   private readonly logger: Pick<Console, "warn">;
   private queue: Promise<void> = Promise.resolve();
 
@@ -154,6 +169,7 @@ export class RuleProposals {
     this.now = options.now ?? utcNow;
     this.minSources = positiveInteger(options.min_sources, RULE_PROPOSAL_MIN_SOURCES);
     this.logger = options.logger ?? console;
+    this.makeJudge = options.judge;
   }
 
   public create(input: RuleProposalCreateInput): Promise<RuleProposalCreateResult> {
@@ -167,7 +183,7 @@ export class RuleProposals {
     const prepared = prepareCreateInput(input);
     const decision = decideCreate(prepared, this.db, this.ruleStore, simulatedOpenKeys);
     if (decision.kind === "new") simulatedOpenKeys.add(proposalKey(prepared));
-    return decision.kind === "invalid" || decision.kind === "duplicate_rule" || decision.kind === "new";
+    return decision.kind === "invalid" || decision.kind === "duplicate_rule" || decision.kind === "conflict" || decision.kind === "new";
   }
 
   public list(status?: RuleProposalStatus): RuleProposalRecord[] {
@@ -193,9 +209,96 @@ export class RuleProposals {
   }
 
   /** Read-only: judge open proposals and the current rules; never writes rules or proposal rows. */
-  public curate(): RuleCurationResult {
+  public curate(judge?: RulePairJudge): Promise<RuleCurationResult> {
     const proposals = [...this.list("pending"), ...this.list("awaiting_approval")];
-    return curateRuleProposals({ proposals, rules: this.ruleStore.rules });
+    return curateRuleProposals({ proposals, rules: this.ruleStore.rules, judge });
+  }
+
+  /**
+   * Merge same-meaning open proposals into the older one and expire stale ones; never approves, rejects or writes rules.
+   * Without a judge only identical texts merge.
+   */
+  public tidy(judge?: RulePairJudge): Promise<RuleProposalTidyResult> {
+    const operation = this.queue.then(() => this.tidyNow(judge));
+    this.queue = operation.then(() => undefined, () => undefined);
+    return operation;
+  }
+
+  private expireDays(): number {
+    const row = this.db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", RULE_PROPOSAL_SETTINGS_KEY);
+    // Why not throw: an unparseable setting falls back to the default so the nightly run keeps working.
+    const value = parseJson(row?.value_json ?? null);
+    return positiveInteger(isRecord(value) ? value.expire_days as number | undefined : undefined, RULE_PROPOSAL_EXPIRE_DAYS);
+  }
+
+  private async tidyNow(judge?: RulePairJudge): Promise<RuleProposalTidyResult> {
+    if (judge) {
+      // Why before the transaction: the write lane callback is synchronous and a model call must not hold it.
+      const open = this.db.all<ProposalRow>("SELECT * FROM rule_proposals WHERE status IN ('pending', 'awaiting_approval') ORDER BY created_at, id");
+      const pairs: Array<readonly [string, string]> = [];
+      for (let i = 0; i < open.length; i += 1) {
+        for (let j = i + 1; j < open.length; j += 1) {
+          const [a, b] = [open[i] as ProposalRow, open[j] as ProposalRow];
+          if (a.level === b.level && a.role === b.role && fingerprint(a.text) !== fingerprint(b.text) && judge.isCandidate(a.text, b.text)) pairs.push([a.text, b.text]);
+        }
+      }
+      await judge.judge(pairs);
+    }
+    const now = this.now();
+    const days = this.expireDays();
+    const cutoff = new Date(Date.parse(now) - days * 86_400_000).toISOString();
+    return this.writeLane.transact((transaction: CoreWriteLaneTransaction): RuleProposalTidyResult => {
+      const open = transaction.all<ProposalRow>(
+        "SELECT * FROM rule_proposals WHERE status IN ('pending', 'awaiting_approval') ORDER BY created_at, id",
+      );
+      const survivors: ProposalRow[] = [];
+      // Why not read updated_at after merging: refreshing the target would push stale proposals past the cutoff.
+      const touched = new Map(open.map((proposal) => [proposal.id, proposal.updated_at]));
+      const merged: RuleProposalTidyResult["merged"] = [];
+      for (const proposal of open) {
+        let best: { row: ProposalRow; similarity: number } | undefined;
+        for (const older of survivors) {
+          if (older.level !== proposal.level || older.role !== proposal.role) continue;
+          const exact = fingerprint(proposal.text) === fingerprint(older.text);
+          if (!exact && judge?.get(proposal.text, older.text) !== "same") continue;
+          const similarity = exact ? 1 : dice(proposal.text, older.text);
+          if (similarity > (best?.similarity ?? -1)) best = { row: older, similarity };
+        }
+        if (!best) { survivors.push(proposal); continue; }
+        transaction.run("UPDATE rule_proposal_sources SET proposal_id=? WHERE proposal_id=?", best.row.id, proposal.id);
+        transaction.run(
+          "UPDATE rule_proposals SET status='merged', decision_json=?, updated_at=? WHERE id=?",
+          JSON.stringify({ reason: "merged_near_duplicate", decided_by: "curation", merged_into: best.row.id, similarity: best.similarity }),
+          now,
+          proposal.id,
+        );
+        if (proposal.updated_at > touched.get(best.row.id)!) touched.set(best.row.id, proposal.updated_at);
+        const sourceCount = refreshDerivedSources(transaction, best.row.id, now);
+        if (best.row.status === "pending" && sourceCount >= this.minSources) {
+          transaction.run(
+            "UPDATE rule_proposals SET status='awaiting_approval', decision_json=NULL, last_error=NULL WHERE id=?",
+            best.row.id,
+          );
+        }
+        merged.push({ id: proposal.id, merged_into: best.row.id, similarity: best.similarity });
+      }
+      // Merging refreshed the target's updated_at to now; put back the newest real source time so a later run still ages it.
+      for (const target of new Set(merged.map((entry) => entry.merged_into))) {
+        transaction.run("UPDATE rule_proposals SET updated_at=? WHERE id=?", touched.get(target)!, target);
+      }
+      const expired: RuleProposalTidyResult["expired"] = [];
+      for (const proposal of survivors) {
+        if (touched.get(proposal.id)! >= cutoff) continue;
+        transaction.run(
+          "UPDATE rule_proposals SET status='expired', decision_json=?, updated_at=? WHERE id=?",
+          JSON.stringify({ reason: "expired", decided_by: "curation", days }),
+          now,
+          proposal.id,
+        );
+        expired.push({ id: proposal.id, text: proposal.text });
+      }
+      return { merged, expired };
+    });
   }
 
   public approve(proposalId: string): Promise<RuleProposalCommandResult> {
@@ -259,6 +362,8 @@ export class RuleProposals {
       proposalId,
     ));
     await this.recordPromotion(proposal, { date: appliedAt.slice(0, 10), proposal_id: proposalId, status: "applied", path: written.path });
+    // The rule is already written; a failed notice must not turn the approval into an error.
+    await this.writeLane.write(curationNoticeWrite(ruleAddedNotice(ownerLanguage(this.db)))).catch((error: unknown) => console.warn("[owl-core] Could not record curation_notice", error));
     return { proposal_id: proposalId, status: "applied", applied_rule_id: appliedRuleId, applied_path: written.path };
   }
 
@@ -291,13 +396,37 @@ export class RuleProposals {
     }
   }
 
+  /** Why before the transaction: the write lane callback is synchronous and a model call must not hold it. */
+  private async judgeCreate(prepared: PreparedCreateInput): Promise<RulePairJudge | undefined> {
+    const judge = this.makeJudge?.();
+    if (!judge) return undefined;
+    const { text, level, role } = prepared;
+    const pairs: Array<readonly [string, string]> = [];
+    for (const rule of this.ruleStore.rules.promptRules) {
+      if (coApply(rule, { level, role }) && judge.isCandidate(text, rule.text)) pairs.push([text, rule.text]);
+    }
+    const open = this.db.all<{ text: string }>(
+      "SELECT text FROM rule_proposals WHERE level=? AND role IS ? AND status IN ('pending', 'awaiting_approval')",
+      level,
+      role,
+    );
+    for (const row of open) if (fingerprint(row.text) !== prepared.textFingerprint && judge.isCandidate(text, row.text)) pairs.push([text, row.text]);
+    try {
+      await judge.judge(pairs);
+    } catch (error) {
+      this.logger.warn("Rule proposal judgment failed; only exact matches were checked.", { error: error instanceof Error ? error.message : String(error) });
+    }
+    return judge;
+  }
+
   private async createNow(input: RuleProposalCreateInput): Promise<RuleProposalCreateResult> {
     const prepared = prepareCreateInput(input);
     const { text, level, role, textFingerprint, inputFingerprint } = prepared;
     const now = this.now();
+    const judge = await this.judgeCreate(prepared);
 
     const outcome = await this.writeLane.transact((transaction: CoreWriteLaneTransaction): CreateTransactionResult => {
-      const decision = decideCreate(prepared, transaction, this.ruleStore);
+      const decision = decideCreate(prepared, transaction, this.ruleStore, undefined, judge);
       if (decision.kind === "recorded") {
         const existing = transaction.get<Pick<ProposalRow, "status" | "last_error">>(
           "SELECT status, last_error FROM rule_proposals WHERE id=?",
@@ -351,6 +480,17 @@ export class RuleProposals {
           notify: false,
           updated_at: now,
         };
+      }
+
+      if (decision.kind === "conflict") {
+        const lastError = `conflicts_with_existing_rule:${decision.rule_id}`;
+        const proposalId = insertProposal(transaction, input, {
+          id: createUlid(), now, fingerprint: textFingerprint, text, level, role,
+          status: "rejected", lastError,
+        });
+        insertSource(transaction, input, inputFingerprint, textFingerprint, proposalId, now);
+        refreshDerivedSources(transaction, proposalId, now);
+        return { result: { proposal_id: proposalId, status: "rejected", already_recorded: false, last_error: lastError }, notify: false, updated_at: now };
       }
 
       if (decision.kind === "rejected") {
@@ -451,9 +591,10 @@ function proposalKey(input: PreparedCreateInput): string {
 
 function decideCreate(
   input: PreparedCreateInput,
-  reader: Pick<CoreDatabase, "get">,
+  reader: Pick<CoreDatabase, "get" | "all">,
   ruleStore: Pick<RuleStore, "rules">,
   simulatedOpenKeys?: ReadonlySet<string>,
+  judge?: RulePairJudge,
 ): CreateDecision {
   const { input: original, text, level, role, textFingerprint, inputFingerprint } = input;
   const previousSource = reader.get<SourceRow>(
@@ -491,6 +632,15 @@ function decideCreate(
   );
   if (rejected) return { kind: "rejected", proposal_id: rejected.id };
 
+  // Why before open: a proposal that contradicts or repeats an existing rule must not gain sources or reach approval.
+  if (judge) {
+    const scoped = ruleStore.rules.promptRules.filter((rule) => coApply(rule, { level, role }));
+    const conflicting = scoped.find((rule) => judge.get(text, rule.text) === "conflict");
+    if (conflicting) return { kind: "conflict", rule_id: conflicting.id };
+    const same = scoped.find((rule) => judge.get(text, rule.text) === "same");
+    if (same) return { kind: "duplicate_rule", rule_id: same.id };
+  }
+
   const target = reader.get<{ id: string; status: RuleProposalStatus; decision_json: string | null }>(
     `SELECT id, status, decision_json FROM rule_proposals
       WHERE fingerprint=? AND level=? AND role IS ? AND status IN ('pending', 'awaiting_approval')
@@ -500,6 +650,27 @@ function decideCreate(
     role,
   );
   if (target) return { kind: "open", target };
+  // Why not exact-only: reworded lessons from other Works would each become a separate open proposal.
+  const near = reader.all<{ id: string; status: RuleProposalStatus; decision_json: string | null; text: string }>(
+    `SELECT id, status, decision_json, text FROM rule_proposals
+      WHERE level=? AND role IS ? AND status IN ('pending', 'awaiting_approval')
+      ORDER BY created_at, id`,
+    level,
+    role,
+  ).map((row) => ({ row, similarity: dice(text, row.text) }))
+    .filter((entry) => entry.similarity >= NEAR_DUPLICATE)
+    .sort((a, b) => b.similarity - a.similarity)[0];
+  if (near) return { kind: "open", target: { id: near.row.id, status: near.row.status, decision_json: near.row.decision_json } };
+  if (judge) {
+    const open = reader.all<{ id: string; status: RuleProposalStatus; decision_json: string | null; text: string }>(
+      `SELECT id, status, decision_json, text FROM rule_proposals
+        WHERE level=? AND role IS ? AND status IN ('pending', 'awaiting_approval')
+        ORDER BY created_at, id`,
+      level,
+      role,
+    ).find((row) => judge.get(text, row.text) === "same");
+    if (open) return { kind: "open", target: { id: open.id, status: open.status, decision_json: open.decision_json } };
+  }
   if (simulatedOpenKeys?.has(proposalKey(input))) return { kind: "simulated_open" };
   return { kind: "new" };
 }
@@ -652,7 +823,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isProposalStatus(value: string): value is RuleProposalStatus {
-  return value === "pending" || value === "awaiting_approval" || value === "applied" || value === "rejected";
+  return ["pending", "awaiting_approval", "applied", "rejected", "expired", "merged"].includes(value);
 }
 
 function positiveInteger(value: number | undefined, fallback: number): number {

@@ -127,7 +127,7 @@ test("Slack file_upload: two files register/PUT/complete in order, one inbound m
   }
 });
 
-test("Slack file_upload: a download failure rejects, sends no Core request, and leaves no temp directory", async () => {
+test("Slack file_upload: a download failure sends no Core request, notifies the channel, and leaves no temp directory", async () => {
   const before = await leftoverUploadDirs();
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => { throw new Error("network unreachable"); };
@@ -148,7 +148,7 @@ test("Slack file_upload: a download failure rejects, sends no Core request, and 
     connector.core.requestPage = async () => ({ data: [], cursor: null, has_more: false });
     connector.core.request = request;
 
-    await assert.rejects(() => connector.handleMessage({
+    await connector.handleMessage({
       user: "U-FILE-UPLOAD-FAIL",
       text: "",
       channel: "C-FILE-UPLOAD-FAIL",
@@ -156,10 +156,11 @@ test("Slack file_upload: a download failure rejects, sends no Core request, and 
       files: [
         { id: "F1", name: "file1.txt", size: 10, mimetype: "text/plain", url_private_download: "https://files.slack.example/unreachable.txt" },
       ],
-    }));
+    });
 
     assert.equal(calls.length, 0, "no Core request is made when the download itself fails");
-    assert.equal(posts.length, 0);
+    assert.equal(posts.length, 1);
+    assert.match(posts[0].text, /file1\.txt/u);
 
     const after = await leftoverUploadDirs();
     assert.deepEqual(after, before, "no temp upload directory is left behind after a download failure");
@@ -385,6 +386,112 @@ test("Discord file_upload: a download failure rejects, sends no Core request, an
 
     const after = await leftoverUploadDirs();
     assert.deepEqual(after, before, "no temp upload directory is left behind after a download failure");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+function newSlackConnector(request, posts) {
+  const connector = new SlackConnector({
+    botToken: "xoxb-attach-test",
+    appToken: "xapp-attach-test",
+    conversationChannelId: "C-ATTACH",
+    notificationChannelId: "C-ATTACH-NOTIFICATIONS",
+    coreApiBase: "http://127.0.0.1:1/api/v1",
+    accountId: "ACCT-SLACK-ATTACH",
+    maxFileSize: 100,
+  });
+  connector.web.chat.postMessage = async (message) => { posts.push(message); return { ok: true }; };
+  connector.core.requestPage = async () => ({ data: [], cursor: null, has_more: false });
+  connector.core.request = request;
+  return connector;
+}
+
+test("Slack: an image shared with ordinary text is uploaded and sent once with the text and attachment_ids", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(Buffer.from("png-bytes"), { status: 200 });
+  const { calls, request } = coreRequestFake();
+  const posts = [];
+  try {
+    const connector = newSlackConnector(request, posts);
+    await connector.handleMessage({
+      subtype: "file_share",
+      user: "U-ATTACH",
+      text: "この画像を見てください",
+      channel: "C-ATTACH",
+      ts: "1712400200.000100",
+      files: [{ id: "F9", name: "shot.png", size: 9, mimetype: "image/png", url_private_download: "https://files.slack.example/shot.png" }],
+    });
+    const inbound = calls.filter((c) => c.path === "/inbound/messages");
+    assert.equal(inbound.length, 1);
+    assert.equal(inbound[0].body.text, "この画像を見てください");
+    assert.deepEqual(inbound[0].body.attachment_ids, ["UPLOAD1"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Slack: a failing file is logged and announced (files:read hint on 403 / missing URL) while the other file and the text still go through", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => String(url).endsWith("denied.png")
+    ? new Response("no", { status: 403 })
+    : new Response(Buffer.from("ok-bytes"), { status: 200 });
+  const { calls, request } = coreRequestFake();
+  const posts = [];
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  try {
+    const connector = newSlackConnector(request, posts);
+    await connector.handleMessage({
+      user: "U-ATTACH",
+      text: "まとめて送ります",
+      channel: "C-ATTACH",
+      ts: "1712400300.000100",
+      files: [
+        { id: "F1", name: "denied.png", size: 3, mimetype: "image/png", url_private_download: "https://files.slack.example/denied.png" },
+        { id: "F2", name: "nourl.png", size: 3, mimetype: "image/png" },
+        { id: "F3", name: "huge.png", size: 999, mimetype: "image/png", url_private_download: "https://files.slack.example/huge.png" },
+        { id: "F4", name: "good.png", size: 3, mimetype: "image/png", url_private_download: "https://files.slack.example/good.png" },
+      ],
+    });
+    const failed = (name) => posts.find((p) => p.text.includes(name) && p.text.includes("⚠"));
+    assert.match(failed("denied.png").text, /files:read/u);
+    assert.match(failed("nourl.png").text, /files:read/u);
+    assert.doesNotMatch(failed("huge.png").text, /files:read/u);
+    assert.ok(warnings.some((w) => w.includes("denied.png") && w.includes("403")));
+    assert.ok(warnings.some((w) => w.includes("nourl.png")));
+    const inbound = calls.filter((c) => c.path === "/inbound/messages");
+    assert.equal(inbound.length, 1);
+    assert.equal(inbound[0].body.text, "まとめて送ります");
+    assert.equal(inbound[0].body.attachment_ids.length, 1, "only good.png is registered");
+  } finally {
+    console.warn = originalWarn;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Slack: an uploadAttachment failure is announced and the text is still sent without that attachment", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(Buffer.from("x"), { status: 200 });
+  const { calls, request } = coreRequestFake();
+  const posts = [];
+  try {
+    const connector = newSlackConnector(async (path, options) => {
+      if (path === "/inbound/uploads") throw new Error("core down");
+      return request(path, options);
+    }, posts);
+    await connector.handleMessage({
+      user: "U-ATTACH",
+      text: "本文だけでも届けて",
+      channel: "C-ATTACH",
+      ts: "1712400400.000100",
+      files: [{ id: "F1", name: "a.png", size: 1, mimetype: "image/png", url_private_download: "https://files.slack.example/a.png" }],
+    });
+    assert.ok(posts.some((p) => p.text.includes("a.png") && p.text.includes("core down")));
+    const inbound = calls.filter((c) => c.path === "/inbound/messages");
+    assert.equal(inbound.length, 1);
+    assert.deepEqual(inbound[0].body.attachment_ids, []);
   } finally {
     globalThis.fetch = originalFetch;
   }

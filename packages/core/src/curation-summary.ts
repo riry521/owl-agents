@@ -1,3 +1,4 @@
+import { createUlid } from "../../db/dist/index.js";
 import type { CurationKind } from "./curation-runs";
 import type { OwnerLanguage } from "@owl/shared";
 
@@ -91,8 +92,82 @@ export function curationReportFailure(kind: CurationKind, report: unknown, langu
     : `No pages were organized and ${remaining} items remain (${rejected} rejected)`;
 }
 
-/** One alert line for a finished run: outcome, counts and error. An empty counts object means the run produced none (e.g. it threw). */
-export function curationCompletionMessage(kind: CurationKind, run: { id: string; status: string; summary: string; counts: Record<string, number>; error: string | null }): string {
-  const counts = Object.keys(run.counts).length ? JSON.stringify(run.counts) : "counts unavailable";
-  return `${kind} run ${run.id} ${run.status === "succeeded" ? "succeeded" : `failed: ${run.error ?? "unknown"}`} (${counts}) ${run.summary}`.trim();
+/** Report arrays that mean "this kind changed something", per kind. Rule curation never rewrites rules, so its only news is proposals awaiting approval. */
+const CHANGE_ARRAYS: Record<CurationKind, readonly string[]> = {
+  librarian: ["actions_taken", "merged", "pages"],
+  skill_curation: ["state_changes", "applied", "trials_ended"],
+  rule_curation: ["awaiting_approval"],
+};
+
+const NOTICE_TEXT: Record<OwnerLanguage, {
+  changed: Record<CurationKind, string>;
+  failed: Record<CurationKind, string>;
+  pendingRules: (count: number) => string;
+  ruleAdded: string;
+}> = {
+  ja: {
+    changed: { librarian: "ナレッジを整理しました", skill_curation: "スキルを整理しました", rule_curation: "" },
+    failed: { librarian: "ナレッジ整理に失敗しました", skill_curation: "スキル整理に失敗しました", rule_curation: "ルール整理に失敗しました" },
+    pendingRules: (count) => `承認待ちのルール提案があります（${count}件）`,
+    ruleAdded: "ルールを追加しました",
+  },
+  en: {
+    changed: { librarian: "Knowledge was organized", skill_curation: "Skills were organized", rule_curation: "" },
+    failed: { librarian: "Knowledge curation failed", skill_curation: "Skill curation failed", rule_curation: "Rule curation failed" },
+    pendingRules: (count) => `Rule proposals are awaiting approval (${count})`,
+    ruleAdded: "A rule was added",
+  },
+};
+
+/** The notice for an approved rule proposal that was written to the rule files. */
+export function ruleAddedNotice(language: OwnerLanguage = "ja"): CurationNotice {
+  return { severity: "info", message: NOTICE_TEXT[language].ruleAdded };
+}
+
+export interface CurationNotice {
+  severity: "info" | "warning";
+  message: string;
+}
+
+/** The write-lane request that records a notice as a plain system.alert (kind curation_notice), pushed over the websocket. */
+export function curationNoticeWrite(notice: CurationNotice) {
+  const eventId = createUlid();
+  return {
+    mutateState: () => null,
+    event: {
+      id: eventId,
+      idempotencyKey: `curation_notice:${eventId}`,
+      type: "system.alert",
+      payload: { kind: "curation_notice", schema_version: "1.0.0", severity: notice.severity, message: notice.message, cause: null },
+    },
+    outbox: [{ provider: "websocket" as const }],
+  };
+}
+
+/** One finished curation; `run` is null when the run could not even be recorded. */
+export interface CurationNoticeEntry {
+  kind: CurationKind;
+  run: { status: string; counts: Record<string, number> } | null;
+}
+
+/**
+ * Plain-language lines for the runs that finished together: one line per kind that failed or changed
+ * something, nothing for a kind that changed nothing. Null when there is nothing to tell. Never names
+ * a run id, error text or path: the Owner opens the screen for details.
+ */
+export function buildCurationNotice(entries: readonly CurationNoticeEntry[], language: OwnerLanguage = "ja"): CurationNotice | null {
+  const text = NOTICE_TEXT[language];
+  const lines: string[] = [];
+  let failed = false;
+  for (const { kind, run } of entries) {
+    if (!run || run.status !== "succeeded") {
+      failed = true;
+      lines.push(text.failed[kind]);
+      continue;
+    }
+    const changes = CHANGE_ARRAYS[kind].reduce((sum, key) => sum + (run.counts[key] ?? 0), 0);
+    if (changes === 0) continue;
+    lines.push(kind === "rule_curation" ? text.pendingRules(changes) : text.changed[kind]);
+  }
+  return lines.length === 0 ? null : { severity: failed ? "warning" : "info", message: lines.join("\n") };
 }

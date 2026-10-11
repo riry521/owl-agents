@@ -46,8 +46,9 @@ const RULES = {
 test("the Advisor system prompt carries its Rule Store rules before the persona", async (t) => {
   const { core } = await startCore(t, RULES, "Speak like a pirate.");
   const prompt = core.getAdvisorSettingsSnapshot().systemPrompt;
-  assert.match(prompt, /\n\n--- BEGIN OWL RULES ---\nThe operator's Rule Store sets these rules for you\. .*\n\[system\] Hard resets are forbidden\.\n\[system\] Say when you are unsure\.\n\[role\] advisor-rule-marker\n--- END OWL RULES ---\n\n/);
+  assert.match(prompt, /\n\n--- BEGIN OWL RULES ---\nThe operator's Rule Store sets these rules for you\. .*\n\[system\] Dangerous commands and operations on secret files are blocked mechanically at run time; a blocked call returns its reason\.\n\[system\] Say when you are unsure\.\n\[role\] advisor-rule-marker\n--- END OWL RULES ---\n\n/);
   assert.equal(prompt.includes("worker-rule-marker"), false);
+  assert.equal(prompt.includes("Hard resets are forbidden"), false);
   assert.ok(prompt.indexOf("--- END OWL RULES ---") < prompt.indexOf("--- BEGIN OPERATOR PERSONA ---"));
   assert.ok(prompt.startsWith("You are the Owl Advisor"));
 });

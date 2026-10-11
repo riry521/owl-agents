@@ -1,10 +1,10 @@
 import { ApiError } from "./errors.js";
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
 import type { MemoryNoteType, MemoryRequestContext } from "../../../packages/core/dist/memory/memory-types.js";
-import type { MemoryHealth, MemoryExpandOutput, MemoryRecallOutput, MemoryReindexOutput, MemorySearchOutput, PageReadOutput, PageSearchOutput } from "../../../packages/core/dist/memory/memory-service.js";
+import type { MemoryAppendOutput, MemoryHealth, MemoryExpandOutput, MemoryRecallOutput, MemoryReindexOutput, MemorySearchOutput, PageReadOutput, PageSearchOutput } from "../../../packages/core/dist/memory/memory-service.js";
 import type { MemorySearchInput } from "../../../packages/core/dist/memory/memory-search.js";
 
-export const MEMORY_OPERATIONS: ReadonlySet<string> = new Set(["search", "expand", "recall", "health", "reindex", "index", "page", "pages/search", "mode"]);
+export const MEMORY_OPERATIONS: ReadonlySet<string> = new Set(["search", "expand", "recall", "health", "reindex", "index", "page", "pages/search", "mode", "append"]);
 /** Operations answered to GET; the rest are POST. */
 export const MEMORY_GET_OPERATIONS: ReadonlySet<string> = new Set(["health", "mode"]);
 
@@ -19,6 +19,7 @@ interface MemoryApiPort {
   mode?(): "pages";
   readIndex?(input: { project_id?: string | null }, ctx: MemoryRequestContext): Promise<PageReadOutput>;
   page?(input: { page: string; sections?: readonly string[] }, ctx: MemoryRequestContext): Promise<PageReadOutput>;
+  append?(input: { project_id?: string; section: string; text: string; theme?: string; procedure?: string }, ctx: MemoryRequestContext): Promise<MemoryAppendOutput>;
   searchPages?(input: { query: string; include_work_log?: boolean }, ctx: MemoryRequestContext): Promise<PageSearchOutput>;
 }
 
@@ -84,6 +85,17 @@ export async function runMemoryOperation(core: unknown, op: string, rawBody: unk
   if (typeof rawBody !== "object" || rawBody === null || Array.isArray(rawBody)) throw bad("本文はJSON objectで指定してください。");
   const body = rawBody as Record<string, unknown>;
   if (op === "reindex") return api.reindex({ mode: field(body, "mode", isMode) ?? "diff" });
+  if (op === "append") {
+    // Only the Advisor writes knowledge directly; every other caller, the owner included, is refused.
+    if (ctx.caller !== "advisor") throw new ApiError(403, "forbidden", "ナレッジへの追記は Advisor だけができます。");
+    const section = field(body, "section", isString);
+    const text = field(body, "text", isString);
+    if (!section || text === undefined) throw bad("sectionとtextを指定してください。");
+    if (!api.append) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support the append tool.");
+    const out = await api.append({ project_id: field(body, "project_id", isString), section, text, theme: field(body, "theme", isString), procedure: field(body, "procedure", isString) }, ctx);
+    if ("error" in out) throw out.error === "append_unavailable" ? new ApiError(503, "dependency_unavailable", "追記先を使えません。") : bad(`追記できません: ${out.error}`);
+    return out;
+  }
   if (op === "index" || op === "page" || op === "pages/search") {
     const unsupported = (): never => { throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support the page tools."); };
     if (op === "index") {

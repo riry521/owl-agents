@@ -262,7 +262,7 @@ test("completed Work lessons are routed through the learning pipeline without a 
   assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "completed");
   const result = JSON.parse(job.result_json);
   const proposal = db.get("SELECT * FROM rule_proposals WHERE id = ?", result.rule_proposal_ids[0]);
-  assert.equal(proposal.status, "awaiting_approval");
+  assert.equal(proposal.status, "pending", "a single source stays pending");
   assert.equal(proposal.origin, "lesson");
   assert.equal(proposal.text, "policy-marker");
   assert.equal(proposal.rationale, "The Work showed it.");

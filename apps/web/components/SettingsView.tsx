@@ -1325,11 +1325,15 @@ export function KnowledgeAutomationSection() {
             </div>
           </div>
           {timesInvalid && <p className="error" style={{ marginTop: '8px' }}>{t('settings.librarianTimesInvalid')}</p>}
-          <p className="page__sub" style={{ margin: '12px 0' }}>
-            {settings.next_librarian_run_at
-              ? t('settings.librarianNextRun', { time: new Date(settings.next_librarian_run_at).toLocaleString() })
-              : t('settings.librarianNextRunNone')}
-          </p>
+          {([
+            ['settings.librarianNextRun', settings.next_librarian_run_at],
+            ['settings.skillCurationNextRun', settings.next_skill_curation_run_at],
+            ['settings.ruleCurationNextRun', settings.next_rule_curation_run_at],
+          ] as const).map(([key, at]) => (
+            <p key={key} className="page__sub" style={{ margin: '12px 0' }}>
+              {at ? t(key, { time: new Date(at).toLocaleString() }) : t('settings.librarianNextRunNone')}
+            </p>
+          ))}
           <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '16px' }}>
             <input
               type="checkbox"

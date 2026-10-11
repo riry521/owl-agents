@@ -45,6 +45,7 @@ export interface ConnectorText {
   readonly decisionCancelledReasonTaskSuperseded: string;
   readonly fileReceived: (name: string, size: string, knownFormat: boolean) => string;
   readonly executableNotRun: string;
+  readonly fileFailed: (name: string, reason: string, checkScope: boolean) => string;
   readonly notificationSubject: (sequence: number, type: string, shortDecisionId: string | null) => string;
   readonly notificationFailed: (subject: string, detail: string) => string;
   readonly nextActions: string;
@@ -89,6 +90,7 @@ const TEXT: Readonly<Record<OwlLanguage, ConnectorText>> = {
       ? `ファイルを受け取りました: ${name}（${size}）`
       : `ファイルを受け取りました: ${name}（${size}）— この形式はAIが中身を読めません。パスだけ渡します`,
     executableNotRun: "⚠ 実行ファイルのため実行はしません。",
+    fileFailed: (name, reason, checkScope) => `⚠ ファイルを取り込めませんでした: ${name}（${reason}）${checkScope ? " Slack アプリの files:read スコープを確かめてください。" : ""}`,
     notificationSubject: (sequence, type, decisionId) => `イベント #${sequence} ${type}${decisionId ? `, Decision ${decisionId}` : ""}`,
     notificationFailed: (subject, detail) => `⚠ 通知を送信できませんでした（${subject}）。${detail}`,
     nextActions: "次のアクション案:",
@@ -131,6 +133,7 @@ const TEXT: Readonly<Record<OwlLanguage, ConnectorText>> = {
       ? `File received: ${name} (${size})`
       : `File received: ${name} (${size}) — the AI cannot read this format, so only its path is passed on.`,
     executableNotRun: "⚠ This is an executable, so it will not be run.",
+    fileFailed: (name, reason, checkScope) => `⚠ Could not import the file: ${name} (${reason})${checkScope ? " Check that the Slack app has the files:read scope." : ""}`,
     notificationSubject: (sequence, type, decisionId) => `event #${sequence} ${type}${decisionId ? `, Decision ${decisionId}` : ""}`,
     notificationFailed: (subject, detail) => `⚠ Could not send a notification (${subject}). ${detail}`,
     nextActions: "Suggested next actions:",

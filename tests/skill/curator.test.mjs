@@ -670,3 +670,11 @@ test("curate() reports proposals created during the run even when now() is in th
   assert.deepEqual(report.proposals.map((p) => [p.id, p.to]).sort(), [["created-during-run", "rejected"], ["seed-proposal", "rejected"]]);
   assert.equal(report.pending_remaining, 0);
 });
+
+test("the server's external agent runner hands runRuleJudgments to the runtime instead of reporting it unavailable", async (t) => {
+  const root = await tempDir(t, "owl-external-runner-");
+  const runner = await createExternalAgentRunner(root, false);
+  const result = await runner.runRuleJudgments({ model: { provider: "no-such-provider", model: "m", effort: "low" }, pairs: [] });
+  assert.equal(result.ok, false);
+  assert.notEqual(result.error, "rule_judgments_unavailable");
+});

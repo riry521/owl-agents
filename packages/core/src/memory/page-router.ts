@@ -6,7 +6,7 @@ import { fingerprint } from "../learning-fingerprint.js";
 import { slugifyKnowledgeName } from "../knowledge-naming.js";
 import {
   assertValidPage, bodySha256, emptyThemePage, estimatePageTokens, findSecretPatterns, INDEX_SECTIONS, SOURCE_LABEL, parsePage, renderPage, themeTitleKey, uniqueFilename,
-  PageRejectedError, type ParsedPage,
+  pageSize, PageRejectedError, type ParsedPage,
 } from "./page-format.js";
 
 export type RouteSection = "概要" | "決まりごと" | "落とし穴" | "手順";
@@ -21,6 +21,8 @@ export interface RouteInput {
   readonly theme?: string;
   readonly project_id: string | null;
   readonly cross_project?: boolean;
+  /** A duplicate leaves the stored line untouched (no source tag is added to it). */
+  readonly append_only?: boolean;
   /** Pages the caller wrote with an earlier route and the hash it left on each; the router reports the ones that differ when it takes the write lease. */
   readonly own_hashes?: Readonly<Record<string, string>>;
   readonly source: { readonly work_number: number | null; readonly work_id: string | null; readonly actor: string; /** Source label used when there is no Work number (e.g. 会話2026-10-04-1). */ readonly label?: string };
@@ -57,8 +59,12 @@ const OWL_MARK = /\s*<!-- owl:new[^>]*-->/gu;
 const INDEX_FILE = "_index.md";
 const MAX_PROCEDURE_STEPS = 5;
 const MAX_ARCHIVE_HOPS = 5;
+const OVERFLOW_SUFFIX = /（\d+）$/u;
+const MAX_THEME_TITLE_CHARS = 40;
 const PLACEHOLDERS = new Set(["（なし）", "- （なし）"]);
 const SECTION_OF: Readonly<Record<RouteInput["kind"], RouteSection>> = { pitfall: "落とし穴", decision: "決まりごと", fact: "概要", procedure: "手順" };
+/** Section name -> kind, for callers that name the template section. */
+export const KIND_OF_SECTION: Readonly<Record<string, RouteInput["kind"]>> = Object.fromEntries(Object.entries(SECTION_OF).map(([kind, section]) => [section, kind as RouteInput["kind"]]));
 const LINE = new RegExp(`^(\\s*- )(.*?)(?:（(${SOURCE_LABEL}(?:, ${SOURCE_LABEL})*)）)?(\\s*<!-- owl:new[^>]*-->)?\\s*$`, "u");
 const PROCEDURE_HEADING = /^### (.*?)(?:\s*<!-- owl:new[^>]*-->)?\s*$/u;
 
@@ -129,6 +135,7 @@ export class PageRouter {
       }
       if (!changed) return false;
       const { page } = target;
+      if (exceedsLimits({ ...page, sections })) return false;
       const frontmatter = "updated" in page.frontmatter ? { ...page.frontmatter, updated: this.today() } : page.frontmatter;
       try {
         await writePage(join(root, target.path), renderPage({ ...page, frontmatter, sections }));
@@ -175,26 +182,56 @@ export class PageRouter {
 
     const root = this.options.knowledgeDir();
     const scope = await this.scopeFor(root, input);
-    const target = await this.pickPage(root, scope, input.theme ?? "");
     const label = input.source.work_number === null ? input.source.label ?? null : `W${input.source.work_number}`;
+    const mark = `<!-- owl:new ${this.today()} ${label ?? "-"} -->`;
+    const appendTo = (current: readonly string[]): string[] => {
+      const kept = current.filter((line) => !PLACEHOLDERS.has(line.trim()));
+      if (isProcedure) {
+        if (kept.length > 0) kept.push("");
+        kept.push(`### ${procedureHeading(text)} ${mark}`, ...steps);
+      } else {
+        kept.push(`- ${text}${label ? `（${label}）` : ""} ${mark}`);
+      }
+      return kept;
+    };
+    // Why not create the page first and check after: an input too big even for an empty page would leave empty pages behind on every rejection.
+    const fitsEmpty = (title: string): boolean => {
+      const fresh = emptyThemePage({ id: createUlid(), title, summary: title, scope: scope.projectId ? "project" : "common", project_id: scope.projectId, today: this.today() });
+      return !exceedsLimits(withSection(fresh, section, appendTo([])));
+    };
+    const target = await this.pickPage(root, scope, input.theme ?? "", fitsEmpty);
     const lines = [...(target.page.sections.find((candidate) => candidate.heading === section)?.lines ?? [])];
 
     const existing = findLine(lines, isProcedure ? procedureHeading(text) : text, isProcedure);
     if (existing >= 0) {
-      if (!isProcedure && addSource(lines, existing, label)) await this.save(root, target, section, lines);
+      // A source tag is only worth keeping when the page stays within its limits; the line is already stored either way.
+      if (!input.append_only && !isProcedure && addSource(lines, existing, label) && !exceedsLimits(withSection(target.page, section, lines))) await this.save(root, target, section, lines);
       return { status: "duplicate", page: target.path, section };
     }
 
-    const mark = `<!-- owl:new ${this.today()} ${label ?? "-"} -->`;
-    const kept = lines.filter((line) => !PLACEHOLDERS.has(line.trim()));
-    if (isProcedure) {
-      if (kept.length > 0) kept.push("");
-      kept.push(`### ${procedureHeading(text)} ${mark}`, ...steps);
-    } else {
-      kept.push(`- ${text}${label ? `（${label}）` : ""} ${mark}`);
+    // Why not write to the picked page and let a librarian split it later: the write is the only point where the limit is cheap to keep.
+    // Why not pick another existing theme: the line would land on a page about something else. A numbered page of the same title keeps the topic.
+    const base = titleOf(target).replace(OVERFLOW_SUFFIX, "");
+    let file = target;
+    for (let n = 1; ; n += 1) {
+      const next = appendTo(file.page.sections.find((candidate) => candidate.heading === section)?.lines ?? []);
+      if (!exceedsLimits(withSection(file.page, section, next))) {
+        await this.save(root, file, section, next);
+        return { status: "appended", page: file.path, section };
+      }
+      // The suffix is part of the title, so the base is cut to keep the title within createTheme's length limit.
+      const suffix = `（${n + 1}）`;
+      const title = `${Array.from(base).slice(0, MAX_THEME_TITLE_CHARS - Array.from(suffix).length).join("")}${suffix}`;
+      const overflow = await this.overflowPage(root, scope, title, () => fitsEmpty(title));
+      if (!overflow) return { status: "rejected", reason: "over_limit" };
+      file = overflow;
     }
-    await this.save(root, target, section, kept);
-    return { status: "appended", page: target.path, section };
+  }
+
+  /** The active page titled `title` in the scope, created when missing; null when the title cannot be a page. */
+  private async overflowPage(root: string, scope: Scope, title: string, fitsEmpty: () => boolean): Promise<ThemeFile | null> {
+    const existing = (await listThemes(root, scope.folder)).find((file) => file.page.frontmatter.status !== "archived" && titleOf(file) === title);
+    return existing ?? (fitsEmpty() ? this.createTheme(root, scope, title) : null);
   }
 
   private today(): string {
@@ -203,9 +240,7 @@ export class PageRouter {
 
   private async save(root: string, target: ThemeFile, heading: RouteSection, lines: readonly string[]): Promise<void> {
     const { page } = target;
-    const sections = page.sections.some((section) => section.heading === heading)
-      ? page.sections.map((section) => (section.heading === heading ? { ...section, lines } : section))
-      : [...page.sections, { heading, lines }];
+    const { sections } = withSection(page, heading, lines);
     const frontmatter = "updated" in page.frontmatter ? { ...page.frontmatter, updated: this.today() } : page.frontmatter;
     await writePage(join(root, target.path), renderPage({ ...page, frontmatter, sections }));
     this.options.onChanged?.([target.path]);
@@ -250,14 +285,33 @@ export class PageRouter {
   private async ensureTheme(root: string, scope: Scope, title: string, summary: string): Promise<void> {
     await mkdir(join(root, scope.folder), { recursive: true });
     const page = emptyThemePage({ id: createUlid(), title, summary, scope: scope.projectId ? "project" : "common", project_id: scope.projectId, today: this.today() });
-    await createFile(join(root, scope.folder, `${title}.md`), renderPage(page));
+    await createFile(join(root, scope.folder, `${slugifyKnowledgeName(title)}.md`), renderPage(page));
+  }
+
+  /** A new theme page for a title no page answers to; null when the title cannot be a file name or fails the template, so the caller falls back to 「その他の注意」. */
+  private async createTheme(root: string, scope: Scope, title: string): Promise<ThemeFile | null> {
+    // The title stays the page title; only the file name is slugified, so "CI/CD" cannot become a folder or a hidden file.
+    if (Array.from(title).length > MAX_THEME_TITLE_CHARS || !/[\p{L}\p{N}]/u.test(title)) return null;
+    const content = renderPage(emptyThemePage({ id: createUlid(), title, summary: title, scope: scope.projectId ? "project" : "common", project_id: scope.projectId, today: this.today() }));
+    try {
+      assertValidPage(content);
+    } catch (error) {
+      if (error instanceof PageRejectedError) return null;
+      throw error;
+    }
+    await mkdir(join(root, scope.folder), { recursive: true });
+    const taken = new Set((await readdir(join(root, scope.folder))).map((name) => name.toLowerCase()));
+    const filename = uniqueFilename(`${slugifyKnowledgeName(title)}.md`, (candidate) => taken.has(candidate.toLowerCase()));
+    await createFile(join(root, scope.folder, filename), content);
+    return (await listThemes(root, scope.folder)).find((file) => `${file.name}.md` === filename) ?? null;
   }
 
   /** The active page titled `theme`, following `merged_into` of archived pages; else the fallback page. */
-  private async pickPage(root: string, scope: Scope, theme: string): Promise<ThemeFile> {
+  private async pickPage(root: string, scope: Scope, theme: string, fitsEmpty: (title: string) => boolean = () => true): Promise<ThemeFile> {
     const inScope = await listThemes(root, scope.folder);
-    const named = (file: ThemeFile, key: string) => themeTitleKey(titleOf(file)) === key || themeTitleKey(file.name) === key;
-    let key = themeTitleKey(theme);
+    const keyOf = (title: string) => themeTitleKey(title).toLowerCase();
+    const named = (file: ThemeFile, key: string) => keyOf(titleOf(file)) === key || keyOf(file.name) === key;
+    let key = keyOf(theme);
     let archived: ThemeFile[] | null = null;
     for (let hop = 0; key && hop <= MAX_ARCHIVE_HOPS; hop += 1) {
       const active = inScope.find((file) => file.page.frontmatter.status !== "archived" && named(file, key));
@@ -266,7 +320,11 @@ export class PageRouter {
       const old = [...inScope, ...archived].find((file) => file.page.frontmatter.status === "archived" && named(file, key));
       const mergedInto = old?.page.frontmatter.merged_into;
       const merged = typeof mergedInto === "string" ? /^\[\[([^\]|]+)/u.exec(mergedInto)?.[1] : undefined;
-      key = merged ? themeTitleKey(merged) : "";
+      key = merged ? keyOf(merged) : "";
+    }
+    if (themeTitleKey(theme) && fitsEmpty(oneLine(theme))) {
+      const created = await this.createTheme(root, scope, oneLine(theme));
+      if (created) return created;
     }
     const fallback = inScope.find((file) => file.name === OTHER_NOTES_TITLE && file.page.frontmatter.status !== "archived");
     if (fallback) return fallback;
@@ -296,6 +354,19 @@ function dropBlock(lines: readonly string[]): string[] {
   }
   while (out.length > 0 && out[out.length - 1].trim() === "") out.pop();
   return out;
+}
+
+function withSection(page: ParsedPage, heading: string, lines: readonly string[]): ParsedPage {
+  const sections = page.sections.some((section) => section.heading === heading)
+    ? page.sections.map((section) => (section.heading === heading ? { ...section, lines } : section))
+    : [...page.sections, { heading, lines }];
+  return { ...page, sections };
+}
+
+/** Whether the page is over its token limit or a section line limit, as page-format measures them (the same numbers the librarian's limitCheck uses). */
+function exceedsLimits(page: ParsedPage): boolean {
+  const size = pageSize(page);
+  return size !== null && (size.tokens > size.token_limit || size.sections.some((section) => section.lines > section.limit));
 }
 
 function titleOf(file: ThemeFile): string {

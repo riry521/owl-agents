@@ -129,7 +129,7 @@ async function setupCore(t) {
 test("run_librarian (manual) and the nightly run do the same page run: intake, merge, metabolism and linking in one librarian run", async (t) => {
   const core = await setupCore(t);
   const runs = [];
-  core.pageLibrarian.run = async (input) => { runs.push(input.mode); return { run_id: input.run_id, mode: input.mode, pages: [], applied: 0, rejected: [], warnings: [], remaining: 0, llm_calls: 1, input_tokens: 1, backup_dir: null }; };
+  core.pageLibrarian.run = async (input) => { runs.push(input.mode); return { run_id: input.run_id, mode: input.mode, pages: [], applied: 0, rejected: [], warnings: [], remaining: 0, llm_calls: 1, input_tokens: 1 }; };
   const manual = await core.runCuration({ kind: "librarian", trigger: "manual_api", actor: "owner" });
   assert.equal(manual.status, "succeeded");
   const nightly = await core.runCuration({ kind: "librarian", trigger: "scheduled", actor: "system" });
@@ -139,7 +139,7 @@ test("run_librarian (manual) and the nightly run do the same page run: intake, m
   assert.equal(core.getCurationRun(nightly.id).report.mode, "nightly");
 });
 
-const reportOf = (input, extra) => ({ run_id: input.run_id, mode: input.mode, pages: [], applied: 0, rejected: [], warnings: [], remaining: 0, llm_calls: 1, input_tokens: 1, backup_dir: null, ...extra });
+const reportOf = (input, extra) => ({ run_id: input.run_id, mode: input.mode, pages: [], applied: 0, rejected: [], warnings: [], remaining: 0, llm_calls: 1, input_tokens: 1, ...extra });
 
 test("a librarian report with an error, or with remaining items and no organized page, is recorded as failed", async (t) => {
   const core = await setupCore(t);
@@ -160,26 +160,25 @@ test("a librarian report with an error, or with remaining items and no organized
   }
 });
 
-test("a failed scheduled librarian run records one system.alert naming the run", async (t) => {
+const runAlerts = (core) => core.db.all("SELECT payload_json FROM events WHERE type = 'system.alert'").map((r) => JSON.parse(r.payload_json)).filter((p) => p.kind === "curation_run_failed" || p.kind === "curation_run_finished");
+const settleWrites = async () => { for (let i = 0; i < 200; i += 1) await new Promise((resolve) => setImmediate(resolve)); };
+
+test("a failed scheduled librarian run is recorded as failed and raises no per-run system.alert", async (t) => {
   const core = await setupCore(t);
   core.pageLibrarian.run = async (input) => reportOf(input, { error: "propose_failed" });
   const run = await core.runCuration({ kind: "librarian", trigger: "scheduled", actor: "system" });
   assert.equal(core.getCurationRun(run.id).status, "failed");
-  const alerts = () => core.db.all("SELECT payload_json FROM events WHERE type = 'system.alert'").map((r) => JSON.parse(r.payload_json)).filter((p) => p.kind === "curation_run_failed");
-  for (let i = 0; i < 200 && alerts().length === 0; i += 1) await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(alerts().length, 1);
-  assert.match(alerts()[0].message, new RegExp(`${run.id}.*propose_failed`));
+  await settleWrites();
+  assert.equal(runAlerts(core).length, 0);
 });
 
-test("a scheduled librarian run that throws is recorded as failed with one system.alert", async (t) => {
+test("a scheduled librarian run that throws is recorded as failed (error boom) and raises no per-run system.alert", async (t) => {
   const core = await setupCore(t);
   core.pageLibrarian.run = async () => { throw new Error("boom"); };
   const run = await core.runCuration({ kind: "librarian", trigger: "scheduled", actor: "system" });
   const stored = core.getCurationRun(run.id);
   assert.equal(stored.status, "failed");
   assert.equal(stored.error, "boom");
-  const alerts = () => core.db.all("SELECT payload_json FROM events WHERE type = 'system.alert'").map((r) => JSON.parse(r.payload_json)).filter((p) => p.kind === "curation_run_failed");
-  for (let i = 0; i < 200 && alerts().length === 0; i += 1) await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(alerts().length, 1);
-  assert.match(alerts()[0].message, new RegExp(`${run.id}.*boom`));
+  await settleWrites();
+  assert.equal(runAlerts(core).length, 0);
 });

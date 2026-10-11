@@ -173,29 +173,40 @@ export class SlackConnector {
         const attachmentIds: string[] = [];
         try {
           for (const file of intent.files) {
-            if (this.config.maxFileSize !== undefined && file.size > this.config.maxFileSize) {
-              console.warn(`[slack] Skipping ${file.name}: ${file.size} bytes exceeds maxFileSize ${this.config.maxFileSize}`);
-              continue;
-            }
-            const result = await downloadFile(this.config.botToken, file, tempDir, this.config.maxFileSize);
+            // One failing file must not stop the other files or the message
+            // text, so each is caught, logged and reported to the channel.
             try {
-              const bytes = await readFile(result.path);
-              const uploaded = await uploadAttachment(this.core, {
-                provider: "slack",
-                account_id: this.config.accountId,
-                external_attachment_id: file.id,
-                conversation_hint: conversationHint,
-                work_id: null,
-                file: { name: file.name, mime: result.mime, bytes },
-              });
-              attachmentIds.push(uploaded.upload_id);
-              const notice = t.fileReceived(file.name, formatBytes(result.size), result.knownFormat);
+              if (this.config.maxFileSize !== undefined && file.size > this.config.maxFileSize) {
+                throw new Error(`${file.size} bytes exceeds maxFileSize ${this.config.maxFileSize}`);
+              }
+              const result = await downloadFile(this.config.botToken, file, tempDir, this.config.maxFileSize);
+              try {
+                const bytes = await readFile(result.path);
+                const uploaded = await uploadAttachment(this.core, {
+                  provider: "slack",
+                  account_id: this.config.accountId,
+                  external_attachment_id: file.id,
+                  conversation_hint: conversationHint,
+                  work_id: null,
+                  file: { name: file.name, mime: result.mime, bytes },
+                });
+                attachmentIds.push(uploaded.upload_id);
+                const notice = t.fileReceived(file.name, formatBytes(result.size), result.knownFormat);
+                await postSlackMessage(this.web, {
+                  channel: message.channel,
+                  text: uploaded.status === "quarantined" ? `${notice}\n${t.executableNotRun}` : notice,
+                });
+              } finally {
+                await unlink(result.path).catch(() => undefined);
+              }
+            } catch (error) {
+              const reason = error instanceof Error ? error.message : String(error);
+              console.warn(`[slack] Could not import ${file.name}: ${reason}`);
+              const checkScope = !file.url_private_download || /: (401|403)$/u.test(reason);
               await postSlackMessage(this.web, {
                 channel: message.channel,
-                text: uploaded.status === "quarantined" ? `${notice}\n${t.executableNotRun}` : notice,
-              });
-            } finally {
-              await unlink(result.path).catch(() => undefined);
+                text: t.fileFailed(file.name, reason, checkScope),
+              }).catch(() => undefined);
             }
           }
         } finally {

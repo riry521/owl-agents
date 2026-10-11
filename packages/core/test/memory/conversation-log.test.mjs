@@ -9,7 +9,7 @@ import { ConversationLogWriter } from "../../dist/memory/conversation-log-writer
 import { CONVERSATION_COMPACT_INSTRUCTIONS, parseConversationSummary } from "../../dist/memory/conversation-log.js";
 import { IndexInjector } from "../../dist/memory/index-injector.js";
 import { MemoryIndex } from "../../dist/memory/memory-index.js";
-import { buildIntegrationRequest } from "../../dist/memory/page-integration.js";
+import { newLinesOf } from "../../dist/memory/page-integration.js";
 import { assertValidPage, parsePage } from "../../dist/memory/page-format.js";
 import { PageRouter } from "../../dist/memory/page-router.js";
 
@@ -116,10 +116,10 @@ test("list items inside code fences are not sent to the theme pages", () => {
   assert.deepEqual(parsed.items.map((i) => i.text), ["採用する", "本物"]);
 });
 
-test("the integration request reads a conversation source from the owl:new mark", () => {
+test("newLinesOf reads a conversation source from the owl:new mark", () => {
   const text = "---\nid: x\ntype: theme\ntitle: t\n---\n# t\n\n## 概要\n- 事実（会話2030-01-02-1） <!-- owl:new 2030-01-02 会話2030-01-02-1 -->\n";
-  const request = buildIntegrationRequest({ run_id: "r", reason: "size", page: { path: "common/t.md", title: "t", page_scope: "common", project_id: null, token_estimate: 10 }, text, siblings: [], model: {} });
-  assert.equal(request.new_lines[0]?.work_label, "会話2030-01-02-1");
+  const lines = newLinesOf(text);
+  assert.equal(lines[0]?.work_label, "会話2030-01-02-1");
 });
 
 test("conversation logs stay out of the catalog and the injected text of every role", async (t) => {

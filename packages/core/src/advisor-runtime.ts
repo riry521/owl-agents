@@ -9,7 +9,7 @@
 
 import { createHash } from "node:crypto";
 import { createUlid, utcNow } from "../../db/dist/index.js";
-import { applyAdvisorInterfaceInstructions, formatAdvisorMalformed, parseAdvisorResponse, parseSlackAdvisorResponse } from "@owl/shared";
+import { applyAdvisorInterfaceInstructions, externalJsonBlock, formatAdvisorMalformed, parseAdvisorResponse, parseSlackAdvisorResponse } from "@owl/shared";
 import type { AdvisorSessionDirectory, AdvisorTurnRequest, AdvisorWorkspacePreparation, CoreDatabase, CoreWriteLaneTransaction, GitGateway } from "./types";
 import type { AdvisorSession, AdvisorSessionManager } from "./advisor-session";
 import type { MemorySaver } from "./memory-saver";
@@ -1088,7 +1088,7 @@ export class AdvisorSessionRuntime {
     const { paths: attachmentPaths, notes } = this.config.resolveAttachmentPaths(turnRow.user_message_id);
     return {
       turn_id: turnRow.id,
-      text: notes.length > 0 ? `${message.body}\n\n<owl-attachment-notes>${JSON.stringify(notes)}</owl-attachment-notes>` : message.body,
+      text: notes.length > 0 ? `${message.body}\n\n${externalJsonBlock("owl-attachment-notes", notes)}` : message.body,
       origin: this.resolveTurnOrigin(turnRow),
       attachment_paths: attachmentPaths,
     };

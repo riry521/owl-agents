@@ -240,6 +240,7 @@ test("skill routes list, inspect, restore, update, and expose proposals and sett
     confidence_threshold: 0.7,
     stale_days: 45,
     archived_days: 20,
+    trial_unused_days: 14,
     max_items: 40,
     max_characters: 8000,
   };

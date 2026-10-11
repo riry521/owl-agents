@@ -244,35 +244,49 @@ test("completed Work learning flows through HTTP proposals and applies rules onl
   );
   assert.equal(completedWork.state, "completed");
 
+  // One source leaves a proposal pending; a second Work with the same lessons adds the second source that sends it to the Owner.
+  const secondResponse = await post("/works", { title: "Second Work with the same lessons", summary: "Repeat the lessons.", size: "normal", project_id: null });
+  const secondWorkId = secondResponse.data.work_id;
+  await post(`/works/${secondWorkId}/start`, { mode: "normal" }, secondResponse.version);
+  await waitUntil(
+    async () => (await get(`/works/${secondWorkId}`)).data,
+    (work) => work.state === "completed",
+    `Work ${secondWorkId} completion`,
+  );
+
   const outputs = await waitUntil(async () => {
-    const [jobs, works, policies, skills, rules] = await Promise.all([
+    const [jobs, works, policies, skills, rules, pending] = await Promise.all([
       get("/learning-jobs?status=done"),
       get("/knowledge?folder=works"),
       get("/knowledge?folder=policies"),
       get("/skill-proposals"),
       get("/rule-proposals?status=awaiting_approval"),
+      get("/rule-proposals?status=pending"),
     ]);
     return {
       job: jobs.data.find((item) => item.work_id === workId),
       works: works.data,
       policies: policies.data,
       skills: skills.data.filter((item) => item.source_work_id === workId),
-      // A metrics proposal's source is the aggregate, not this Work.
-      rules: rules.data.filter((item) => item.source_work_ids?.includes(workId) || item.origin === "metrics"),
+      rules: rules.data.filter((item) => item.source_work_ids?.includes(workId)),
+      // A metrics proposal's source is the aggregate, not this Work, so it has one source and stays pending.
+      metrics: pending.data.filter((item) => item.origin === "metrics"),
     };
   }, (value) => value.job?.status === "done"
     && value.works.length >= 1
     && value.skills.length >= 1
-    && value.rules.length >= 3,
+    && value.rules.length >= 2
+    && value.metrics.length >= 1,
   `learning outputs for Work ${workId}`);
 
   assert.equal(outputs.job.status, "done");
   assert.equal(outputs.skills.length, 1);
-  assert.equal(outputs.rules.length, 3, "two lesson proposals and one from Runtime metrics");
-  const metricsProposal = outputs.rules.find((proposal) => proposal.origin === "metrics");
-  assert.equal(metricsProposal.status, "awaiting_approval", "a metrics proposal waits for the Owner");
+  assert.equal(outputs.rules.length, 2, "two lesson proposals backed by both Works");
+  assert.equal(outputs.metrics.length, 1, "one pending proposal from Runtime metrics");
+  const metricsProposal = outputs.metrics[0];
+  assert.equal(metricsProposal.status, "pending", "a metrics proposal with one source is not yet with the Owner");
   assert.equal(metricsProposal.applies_to, "research");
-  assert.equal(outputs.works.length, 1, "the Work log page");
+  assert.equal(outputs.works.length, 2, "one Work log page per Work");
   assert.deepEqual(outputs.policies, [], "rule candidates must not be saved as legacy knowledge/policies files");
   const noteDetails = await Promise.all(outputs.works.map(async (note) => (await get(`/knowledge/${encodeURIComponent(note.path)}`)).data));
   const sourcedNotes = noteDetails.filter((note) => note.body.includes("End to end Work completion learning"));
@@ -300,7 +314,7 @@ test("completed Work learning flows through HTTP proposals and applies rules onl
   assert.equal(rejectedResponse.data.status, "rejected");
   const rulesAfterRejection = await rulesSnapshot(rulesDir);
   assert.deepEqual(rulesAfterRejection, rulesAfterApproval, "rejecting a proposal must not change rules");
-  assert.equal((await get("/rule-proposals?status=awaiting_approval")).data.some((proposal) => proposal.id === metricsProposal.id), true, "the metrics proposal is still not applied");
+  assert.equal((await get("/rule-proposals?status=pending")).data.some((proposal) => proposal.id === metricsProposal.id), true, "the metrics proposal is still not applied");
   const rejectedList = await get("/rule-proposals?status=rejected");
   assert.equal(rejectedList.data.some((proposal) => proposal.id === workerProposal.id), true);
   t.diagnostic(JSON.stringify({

@@ -330,3 +330,58 @@ test("procedure and rule lessons are stored with basis and applies_to as separat
   const rule = f.db.get("SELECT text, rationale, applies_to FROM rule_proposals");
   assert.deepEqual({ ...rule }, { text: "Do not deploy without checking the release state.", rationale: "Observed in this Work", applies_to: "future Work" });
 });
+
+test("a rule_candidate with a generic rule_text becomes a rule proposal even when the lesson names a file and Task", async (t) => {
+  const f = await fixture(t);
+  await f.jobs.enqueue(f.workId, null, null, [lesson("rule_candidate", {
+    lesson: "attempt-policy.ts in T3 retried without a limit", rule_text: "Cap the retry count of any retry loop; read the .yaml file via the loader.",
+  })]);
+  await f.pipeline.processPending();
+  assert.equal(JSON.parse(f.row().result_json).rule_proposal_ids.length, 1);
+  assert.equal(f.notes.records.length, 0);
+});
+
+test("a rule_candidate whose rule_text names a file, Task, Work or the Project goes to Project knowledge, not a rule proposal", async (t) => {
+  const f = await fixture(t);
+  const now = new Date().toISOString();
+  await f.writeLane.transact((tx) => {
+    tx.run(
+      `INSERT INTO projects (id, owner_id, name, canonical_path, base_branch, allowed_roots_json, verification_plan_json, worktree_prepare_argv_json, created_at, updated_at)
+       VALUES ('proj-1', 'owner:default', 'Zeta Product', '/tmp/zeta', 'main', '[]', '{}', '[]', ?, ?)`,
+      now, now,
+    );
+  });
+  let created = 0;
+  f.ruleProposals.create = async () => { created += 1; throw new Error("must not be called"); };
+  const routedInputs = [];
+  const route = f.notes.route.bind(f.notes);
+  f.notes.route = async (input) => { routedInputs.push(input); return route(input); };
+  const texts = [
+    "Do not edit attempt-policy.ts without its tests.",
+    "Run src/core/lib/check before merging.",
+    "Do not skip T3 verification.",
+    "Do not repeat the mistake of Work #12.",
+    "Always rebuild Zeta Product before release.",
+    "設定.xml を確認する",
+    "Update README.rst when behavior changes.",
+    "Check config/settings before deploying.",
+    "Never change /etc on the host.",
+    "main.c を変更する前に確認する",
+    "header.h を更新する",
+    "Edit a.ts first.",
+    "Compile x.c again.",
+    "Remove foo.longextension from the bundle.",
+  ];
+  await f.jobs.enqueue(f.workId, null, "proj-1", texts.map((rule_text, i) => lesson("rule_candidate", { lesson: `specific ${i}`, rule_text })));
+  await f.pipeline.processPending();
+  assert.equal(created, 0);
+  assert.deepEqual(routedInputs.map((r) => [r.text, r.kind, r.project_id]), texts.map((text) => [text, "pitfall", "proj-1"]));
+  assert.equal(JSON.parse(f.row().result_json).rule_proposal_ids.length, 0);
+});
+
+test("isSpecificRuleText separates concrete names from generic wording", () => {
+  const specific = ["a.ts", "x.c", "main.c", "header.h", "設定.xml", "README.rst", "foo.longextension", "/etc", "config/settings", "T3", "#12", "Zeta Product", "e.g.ts", "i.e.ts", "foo.e.g.ts", "/e.g.", "/@cache", "~/@cache", "./@cache", "config/@cache"];
+  const general = [".yaml ファイル", "e.g. this", "i.e. that", "and/or", "1.2", "etc."];
+  for (const text of specific) assert.equal(pipelineModule.isSpecificRuleText(`Check ${text} first`, "Zeta Product"), true, text);
+  for (const text of general) assert.equal(pipelineModule.isSpecificRuleText(`Check the ${text} first`, "Zeta Product"), false, text);
+});

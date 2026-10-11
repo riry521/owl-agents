@@ -87,7 +87,7 @@ test("Advisor turn carries the memory catalog instead of a grep instruction", as
     await ctx.core.memoryReindex({ mode: "full" });
   });
   assert.match(text, /<owl-project-search>/u);
-  assert.match(text, /<owl-memory scope="advisor" generated=/u);
+  assert.match(text, /<owl-memory scope="advisor" generated="[^"]+" data="external/u);
   assert.match(text, /目的の要約/u);
   assert.doesNotMatch(text, /<owl-knowledge-reference>/u);
   assert.doesNotMatch(text, new RegExp(SUMMARY, "u"));

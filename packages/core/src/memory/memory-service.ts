@@ -6,7 +6,8 @@ import type { MemoryMode } from "@owl/shared";
 import { advisorKey, MemoryReadLedger } from "./memory-read-ledger.js";
 import { estimatePageTokens, PAGE_LIMITS, SEARCHABLE_PAGE_KINDS, parsePage, setFrontmatter, type PageSection, type StoredKind } from "./page-format.js";
 import { buildFilter, MemorySearch, type MemorySearchInput } from "./memory-search.js";
-import { writeAtomic } from "./page-router.js";
+import { nextConversationName } from "./conversation-log-writer.js";
+import { KIND_OF_SECTION, writeAtomic, type PageRouter, type RouteResult } from "./page-router.js";
 import type { KnowledgeSearchResult } from "../knowledge-base.js";
 import { MEMORY_TYPES, type MemoryLogger, type MemoryNoteRow, type MemoryNoteStatus, type MemoryNoteType, type MemoryRequestContext, type MemoryStoragePort } from "./memory-types.js";
 
@@ -165,7 +166,14 @@ export interface MemoryServiceOptions {
   readonly sourceWorksUpdated?: (projectId: string | null, numbers: readonly number[]) => string | null;
   /** Pages the page librarian gave up on (health `pages.integration_failed`). */
   readonly integrationFailed?: () => MemoryPagesHealth["integration_failed"];
+  /** Where `append` writes; without it the Advisor append tool is unavailable. */
+  readonly router?: Pick<PageRouter, "route">;
+  /** Rebuilds the Project's index after an append, so a new theme page is listed without waiting for the librarian. */
+  readonly rebuildProjectIndex?: (projectId: string) => Promise<unknown>;
 }
+
+export type MemoryAppendError = "invalid_section" | "empty_text" | "project_required" | "append_unavailable";
+export type MemoryAppendOutput = RouteResult | { readonly error: MemoryAppendError };
 
 const UNAVAILABLE_NOTE = "索引を利用できません。health で確認";
 const DAY_MS = 86_400_000;
@@ -350,6 +358,27 @@ export class MemoryService {
   private async pageNear(query: string): Promise<Ref[]> {
     const similar = await this.searcher.search({ query, limit: 5, include_raw: true, include_archived: true, include_superseded: true, ...this.templateOnly() });
     return similar.hits.map((h) => ({ id: h.row.id, path: h.row.path, title: h.row.title }));
+  }
+
+  /**
+   * Appends one line to a Project theme page through the PageRouter, the way a compacted conversation does (label 会話<日付>-<n>, n numbered as ConversationLogWriter does).
+   * Only the template sections the router writes are accepted; nothing is deleted or rewritten.
+   */
+  public async append(input: { project_id?: string | null; section: string; text: string; theme?: string; procedure?: string }, ctx: MemoryRequestContext): Promise<MemoryAppendOutput> {
+    if (!this.options.router) return { error: "append_unavailable" };
+    const kind = Object.hasOwn(KIND_OF_SECTION, input.section) ? KIND_OF_SECTION[input.section] : undefined;
+    if (!kind) return { error: "invalid_section" };
+    if (input.text.trim() === "") return { error: "empty_text" };
+    const projectId = input.project_id ?? ctx.project_id;
+    if (!projectId) return { error: "project_required" };
+    const day = this.now().toISOString().slice(0, 10);
+    const label = `会話${(await nextConversationName(this.storage.activeDir(), day)).replace(/\.md$/u, "")}`;
+    const routed = await this.options.router.route({
+      kind, text: input.text, procedure: input.procedure, theme: input.theme ?? "", project_id: projectId, append_only: true,
+      source: { work_number: null, work_id: null, actor: "advisor", label },
+    });
+    if (routed.status === "appended") await this.options.rebuildProjectIndex?.(projectId);
+    return routed;
   }
 
   /** The Project's index page (the common one when `project_id` is null). Not counted against the read budget. */
