@@ -215,6 +215,8 @@ function legacyAdvisorBranchFor(conversationId: string): string {
   return `owl/advisor/${safeSegment(conversationId)}`;
 }
 
+const COMMIT_SUBJECT_MAX_LENGTH = 72;
+const DEFAULT_COMMIT_SUBJECT = "Apply Work changes";
 const SHARED_ADVISOR_BRANCH_PREFIX = "owl/advisor/shared/";
 
 function sharedAdvisorBranchFor(key: string): string {
@@ -1067,7 +1069,7 @@ export class GitWorktreeGateway implements GitGateway {
    * only if it has not moved and the Work is still running at the expected
    * state version.
    */
-  public async mergeWorkIntoBase(request: { readonly work_id: string; readonly expected_state_version?: number; readonly verified_commit?: string }): Promise<GitWorkMergeResult> {
+  public async mergeWorkIntoBase(request: { readonly work_id: string; readonly expected_state_version?: number; readonly verified_commit?: string; readonly commit_subject?: string }): Promise<GitWorkMergeResult> {
     // Keyed by project_id, not by the git lane: the lane is released while the
     // verification commands run, which is exactly when another merge would move
     // the base. Holding the lane through verification would block every other
@@ -1087,12 +1089,12 @@ export class GitWorktreeGateway implements GitGateway {
 
   private readonly mergeQueues = new Map<string, Promise<void>>();
 
-  private async mergeWorkIntoBaseNow(request: { readonly work_id: string; readonly expected_state_version?: number; readonly verified_commit?: string }): Promise<GitWorkMergeResult> {
+  private async mergeWorkIntoBaseNow(request: { readonly work_id: string; readonly expected_state_version?: number; readonly verified_commit?: string; readonly commit_subject?: string }): Promise<GitWorkMergeResult> {
     try {
       const project = this.projectFor(request.work_id, true);
       if (!project) return workMergeError("A Project is required to merge a Work into its base branch.");
       const canonical = await this.validProjectPath(project.canonical_path, project.allowed_roots_json);
-      const prepared = await this.workLane(request.work_id, canonical, () => this.prepareWorkMergeNow(request.work_id, project, canonical));
+      const prepared = await this.workLane(request.work_id, canonical, () => this.prepareWorkMergeNow(request.work_id, project, canonical, request.commit_subject));
       if (prepared.kind === "result") return prepared.result;
       // The plan already passed on a commit whose tree equals the squash
       // commit's tree, so the same plan would run on identical files. Comparing
@@ -1614,9 +1616,17 @@ export class GitWorktreeGateway implements GitGateway {
       : ["-c", "user.name=Owl Agent", "-c", "user.email=owl-agent@localhost"];
   }
 
-  private async workCommitArgs(integrationPath: string, workId: string): Promise<string[]> {
-    const title = this.db.get<{ title: string | null }>("SELECT title FROM works WHERE id = ?", workId)?.title ?? "";
-    const subject = title.split(/\r?\n/u).map((line) => line.trim()).find((line) => line.length > 0) ?? "Apply Work changes";
+  private async workCommitArgs(integrationPath: string, workId: string, commitSubject?: string): Promise<string[]> {
+    const row = this.db.get<{ title: string | null; commit_language: string | null }>(
+      "SELECT works.title AS title, projects.commit_language AS commit_language FROM works LEFT JOIN projects ON projects.id = works.project_id WHERE works.id = ?",
+      workId,
+    );
+    // An English Project never falls back to the (Japanese) Work title: a
+    // missing or invalid subject degrades to the default instead of failing the merge.
+    const trimmed = commitSubject?.trim() ?? "";
+    const subject = row?.commit_language === "en"
+      ? (trimmed.length > 0 && trimmed.length <= COMMIT_SUBJECT_MAX_LENGTH && /^[\x20-\x7e]+$/u.test(trimmed) ? trimmed : DEFAULT_COMMIT_SUBJECT)
+      : (row?.title ?? "").split(/\r?\n/u).map((line) => line.trim()).find((line) => line.length > 0) ?? DEFAULT_COMMIT_SUBJECT;
     return [
       ...(await this.ownerIdentityArgs(integrationPath)),
       // The Work's content already passed the hooks when its Tasks were
@@ -1629,7 +1639,7 @@ export class GitWorktreeGateway implements GitGateway {
    * Build the Work's single commit on top of the latest base in the
    * integration worktree: detach at the base, then squash the Work branch.
    */
-  private async prepareWorkMergeNow(workId: string, project: ProjectRow, canonical: string): Promise<PreparedWorkMerge> {
+  private async prepareWorkMergeNow(workId: string, project: ProjectRow, canonical: string, commitSubject?: string): Promise<PreparedWorkMerge> {
     const workBranch = branchName("work", workId, null);
     const integrationPath = this.layout.integrationPath(workId);
     const baseBranch = project.base_branch;
@@ -1699,7 +1709,7 @@ export class GitWorktreeGateway implements GitGateway {
       return stop(workMergeError(`Could not check out ${baseBranch} in the integration worktree: ${detached.message}`, detached.exit_code, context));
     }
     const squashed = await this.git(integrationPath, ["merge", "--squash", workCommit]);
-    const merged = squashed.ok ? await this.git(integrationPath, await this.workCommitArgs(integrationPath, workId)) : squashed;
+    const merged = squashed.ok ? await this.git(integrationPath, await this.workCommitArgs(integrationPath, workId, commitSubject)) : squashed;
     if (!merged.ok) {
       const unresolved = await this.git(integrationPath, ["diff", "--name-only", "--diff-filter=U", "-z"]);
       const conflictingFiles = unresolved.ok && unresolved.message !== "git operation completed"

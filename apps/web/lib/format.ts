@@ -92,6 +92,7 @@ const ROLE_DISPLAY: Record<string, string> = {
   designer: 'Designer',
   lead_designer: 'Lead Designer',
   worker: 'Worker',
+  fixer: 'Fixer',
   reviewer: 'Reviewer',
   librarian: 'Librarian',
   curator: 'Curator',

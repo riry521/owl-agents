@@ -4,7 +4,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { detectTestRun, markerReader } from "../../packages/core/dist/test-detection.js";
+import { detectTestRun, markerReader, reportCheckCommands, resolveTestRun } from "../../packages/core/dist/test-detection.js";
 import { DEFAULT_TEST_DETECTION_RULES } from "../../packages/core/dist/test-detection-rules.js";
 import { validateTestRunSettings } from "../../packages/shared/dist/test-run-settings.js";
 
@@ -19,7 +19,7 @@ test("detection picks the run style, prepare command and mode per language fixtu
     ["node-runner", "node-test-runner", { mode: "per_file", prepare_argv: ["npm", "run", "build"] }],
     ["node-jest", "node-script", { mode: "whole", prepare_argv: ["npm", "run", "build"], whole_argv: ["npm", "test"] }],
     ["node-yarn", "node-script", { mode: "whole", prepare_argv: ["yarn", "run", "build"], whole_argv: ["yarn", "test"] }],
-    ["python", "pytest", { mode: "whole", prepare_argv: [], whole_argv: ["python3", "-m", "pytest"] }],
+    ["python", "pytest", { mode: "whole", prepare_argv: [], whole_argv: ["{python}", "-m", "pytest"] }],
     ["go", "go", { mode: "whole", prepare_argv: [], whole_argv: ["go", "test", "./..."] }],
     ["rust", "cargo", { mode: "whole", prepare_argv: [], whole_argv: ["cargo", "test"] }],
   ];
@@ -124,4 +124,57 @@ test("npm, pnpm and yarn results are unchanged by the bun rules", () => {
 test("mode whole needs whole_argv when settings are written", () => {
   assert.deepEqual(validateTestRunSettings({ mode: "whole", whole_argv: ["go", "test"] }), []);
   assert.deepEqual(validateTestRunSettings({ mode: "whole" }), ["test_run.whole_argv is required when mode is whole"]);
+});
+
+const readyRecord = (testRun, overrides = {}) => ({
+  status: "ready", test_run: testRun, executables: { python: { path: "/saved/venv/bin/python", version: "3.12.0" } }, sources: [],
+  digests: { layout: "l", tests: "t", sources: "s", settings: "c" }, explicit_digest: null, confirmed_at: null,
+  attempts: [], outside_installs: [], missing: [], trigger: "test", investigated_at: "2026-01-01T00:00:00.000Z", ...overrides,
+});
+const NOW = "2026-01-01T00:00:00.000Z";
+const pythonRoot = join(fixtures, "python");
+
+test("resolveTestRun: Owner's test_run beats a saved record, which beats marker detection", () => {
+  const record = readyRecord({ mode: "whole", whole_argv: ["{python}", "-m", "unittest"] });
+  const setup = { setup: record, match: "exact" };
+  const explicit = resolveTestRun({ explicit_json: JSON.stringify({ file_argv: ["x", "{file}"] }), detected_json: null, root: pythonRoot, now: NOW, setup });
+  assert.equal(explicit.source, "explicit");
+  const recorded = resolveTestRun({ explicit_json: null, detected_json: null, root: pythonRoot, now: NOW, setup });
+  assert.equal(recorded.source, "setup");
+  assert.deepEqual(recorded.settings.whole_argv, ["/saved/venv/bin/python", "-m", "unittest"]);
+  const detected = resolveTestRun({ explicit_json: null, detected_json: null, root: pythonRoot, now: NOW, setup: null });
+  assert.equal(detected.source, "detected");
+});
+
+test("resolveTestRun: {python} comes from the record, else from default_executables, and setup_argvs go first", () => {
+  const record = readyRecord({ mode: "whole", whole_argv: ["{python}", "-m", "pytest"], setup_argvs: [["{python}", "-m", "venv", ".venv"]] });
+  const withRecord = resolveTestRun({ explicit_json: null, detected_json: null, root: pythonRoot, now: NOW, setup: { setup: record, match: "exact" } });
+  assert.deepEqual(withRecord.settings.setup_argvs, [["/saved/venv/bin/python", "-m", "venv", ".venv"]]);
+  const fallback = resolveTestRun({ explicit_json: null, detected_json: null, root: pythonRoot, now: NOW, default_executables: { python: "/default/python" } });
+  assert.deepEqual(fallback.settings.whole_argv, ["/default/python", "-m", "pytest"]);
+  const reported = reportCheckCommands({ configured: [], explicit_json: null, detected_json: null, root: pythonRoot, setup: { setup: record, match: "exact" } });
+  assert.match(reported[0], /venv \.venv$/u);
+  assert.equal(reported.some((line) => line.includes("python3")), false);
+});
+
+test("resolveTestRun: gate and adoption follow how the record matched", () => {
+  const record = readyRecord({ mode: "whole", whole_argv: ["{python}", "-m", "pytest"], setup_argvs: [["{python}", "-m", "venv", ".venv"]] });
+  const exact = resolveTestRun({ explicit_json: null, detected_json: null, root: pythonRoot, now: NOW, setup: { setup: record, match: "exact" } });
+  assert.deepEqual([exact.gate, exact.adopt_on_pass, exact.setup_match], ["all", false, "exact"]);
+  const stale = resolveTestRun({ explicit_json: null, detected_json: null, root: pythonRoot, now: NOW, setup: { setup: record, match: "stale" } });
+  assert.deepEqual([stale.gate, stale.adopt_on_pass], ["all", false]);
+  const repair = readyRecord({ setup_argvs: [["{python}", "-m", "pip", "install", "pytest"]] }, { explicit_digest: "d" });
+  const repaired = resolveTestRun({ explicit_json: JSON.stringify({ mode: "whole", whole_argv: ["{python}", "-m", "pytest"] }), detected_json: null, root: pythonRoot, now: NOW, setup: { setup: repair, match: "explicit" } });
+  assert.deepEqual(repaired.gate, { only: [["/saved/venv/bin/python", "-m", "pip", "install", "pytest"]] });
+  assert.deepEqual(repaired.settings.setup_argvs, repaired.gate.only);
+  const none = readyRecord(null, { status: "no_language" });
+  assert.deepEqual(pick(resolveTestRun({ explicit_json: null, detected_json: null, root: pythonRoot, now: NOW, setup: { setup: none, match: "exact" } }), { enabled: false, reason: "setup_no_language" }), { enabled: false, reason: "setup_no_language" });
+  const noTests = resolveTestRun({ explicit_json: null, detected_json: null, root: pythonRoot, now: NOW, setup: { setup: readyRecord(null, { status: "no_tests" }), match: "exact" } });
+  assert.equal(noTests.reason, "setup_no_tests");
+  const firstTests = resolveTestRun({ explicit_json: null, detected_json: null, root: pythonRoot, now: NOW, setup: { setup: readyRecord({ mode: "whole", whole_argv: ["{python}", "-m", "pytest"] }, { status: "no_tests" }), match: "tests_changed" } });
+  assert.deepEqual([firstTests.enabled, firstTests.source, firstTests.settings.whole_argv[0], firstTests.adopt_on_pass], [true, "setup", "/saved/venv/bin/python", true]);
+  const failing = resolveTestRun({ explicit_json: null, detected_json: null, root: pythonRoot, now: NOW, setup: { setup: readyRecord({ mode: "whole", whole_argv: ["{python}", "-m", "pytest"] }, { status: "tests_failing" }), match: "exact" } });
+  assert.equal(failing.adopt_on_pass, true);
+  const plainRepair = resolveTestRun({ explicit_json: JSON.stringify({ mode: "whole", whole_argv: ["make", "test"] }), detected_json: null, root: pythonRoot, now: NOW, setup: null });
+  assert.deepEqual(plainRepair.gate, { only: [] });
 });

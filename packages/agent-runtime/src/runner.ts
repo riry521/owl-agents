@@ -25,6 +25,7 @@ import {
   buildClippingTagsPrompt, buildLibrarianOperationsPrompt, buildRuleJudgmentsPrompt, parseClippingTagsResponse, parseRuleJudgmentsResponse, parseLibrarianOperationsResponse,
   type ClippingTagsRequest, type RuleJudgmentsRequest, type LibrarianModelSetting, type LibrarianOperationsRequest, type LibrarianRunResult,
 } from "./page-integration";
+import { buildTestSetupInvestigationPrompt, parseTestSetupResponse, testSetupProviderSchema, type TestSetupInvestigationRequest, type TestSetupInvestigationRunResult } from "./test-setup-investigation";
 import { buildProjectInvestigationPrompt, parseProjectInvestigationResponse, projectInvestigationProviderSchema, type ProjectInvestigationRequest, type ProjectInvestigationRunResult } from "./project-investigation";
 import { buildCuratorPrompt, curatorProviderSchema, parseCuratorResponse } from "./curator";
 import {
@@ -1426,6 +1427,53 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     }
   };
 
+  const runTestSetupInvestigation = async (input: TestSetupInvestigationRequest): Promise<TestSetupInvestigationRunResult> => {
+    const invocationId = input.invocation_id;
+    const controller = new AbortController();
+    try {
+      if (!isAbsolute(input.checkout) || !statSync(input.checkout, { throwIfNoEntry: false })?.isDirectory()) {
+        return { ok: false, error: "checkout_invalid", invocation_id: invocationId };
+      }
+      const overrides = resolveOverrides(input as unknown as Record<string, unknown>, options);
+      const request = requestForProvider(
+        input.role,
+        invocationId,
+        buildTestSetupInvestigationPrompt(input),
+        options,
+        undefined,
+        overrides.model,
+        overrides.adapter,
+        overrides.effort,
+        input.checkout,
+        { ...overrides.env, ...input.env, OWL_PROVIDER_TIMEOUT_MS: String(input.timeout_ms) },
+        testSetupProviderSchema(),
+      );
+      activeControllers.set(invocationId, { controller });
+      const signalled = { ...request, signal: controller.signal };
+      const response = await executeProviderWithPlanUsage(signalled);
+      const outcome = await runAndParse(
+        signalled,
+        response,
+        (answer) => parseTestSetupResponse(answer, { mode: input.mode }),
+        resubmitLimitFor(),
+        executeProviderWithPlanUsage,
+      );
+      if (!outcome.ok) {
+        if (outcome.error instanceof OutputFormatError) return { ok: false, error: `invalid_output:${outcome.error.problem}`, invocation_id: invocationId };
+        throw outcome.error;
+      }
+      return { ok: true, investigation: outcome.value, invocation_id: invocationId };
+    } catch (error) {
+      const reason = error instanceof AgentRuntimeError ? error.reason : error instanceof Error ? error.message : String(error);
+      const failure = controller.signal.aborted ? "cancelled"
+        : /provider_timeout/u.test(reason) ? "timeout"
+          : `provider_failed:${reason.slice(0, 200)}`;
+      return { ok: false, error: failure, invocation_id: invocationId };
+    } finally {
+      activeControllers.delete(invocationId);
+    }
+  };
+
   return {
     runManagerPlan,
     runDesigner,
@@ -1438,6 +1486,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     runClippingTags,
     runRuleJudgments,
     runProjectInvestigation,
+    runTestSetupInvestigation,
     provider: observedProvider,
     cancelAgent: async (invocationId: string, force?: boolean) => {
       const active = activeControllers.get(invocationId);

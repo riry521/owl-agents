@@ -8,6 +8,7 @@ import type {
   WorkerRunRequest as CoreWorkerRunRequest,
   SkillFeedback,
 } from "@owl/shared";
+import type { TestSetupInvestigationRequest, TestSetupInvestigationRunResult } from "./test-setup-investigation";
 import type { ProjectInvestigationRequest, ProjectInvestigationRunResult } from "./project-investigation";
 import type {
   AdvisorRequest,
@@ -64,4 +65,5 @@ export interface RuntimeAgentRunner extends CoreAgentRunner {
   runAdvisor(request: CoreAdvisorRunRequest): Promise<AdvisorRunResult>;
   runAdvisor(request: AdvisorRequest): Promise<AdvisorResponse>;
   runProjectInvestigation?(request: ProjectInvestigationRequest): Promise<ProjectInvestigationRunResult>;
+  runTestSetupInvestigation?(request: TestSetupInvestigationRequest): Promise<TestSetupInvestigationRunResult>;
 }

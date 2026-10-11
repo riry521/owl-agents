@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.2.0 - 2026-10-11
+
+Per-Project test setup that the agent investigates and verifies, a Fixer role for repeatedly rejected Tasks, and a per-Project commit language.
+
+### Projects
+
+- The agent now investigates which test method suits each Project, confirms it runs, and saves it (on registration, on change, and when a run fails because of the environment)
+- The investigation can install what it needs itself, accepts partial test failures and records them as known failures, and cleans up test leftovers
+- A "re-investigate" button in the Project edit form (backed by a new API) reruns the investigation manually
+- Checkout snapshots used by the investigation exclude gitignored files
+- A Project can set `commit_language` (ja / en); for en Projects, Work completion commits are written in English
+
+### Workflow
+
+- A Worker Task rejected twice in review is promoted to a higher-model Fixer role, which makes the fix
+- When test running is turned off for a Project, Task verification no longer runs the test runner either
+
+### Advisor
+
+- Fixed a bug where already-delivered `owl-action-results` were attached again to the Advisor's next turn
+
 ## 0.1.3 - 2026-10-10
 
 Knowledge that stays organized, curation that runs on its own, and stronger handling of external data.

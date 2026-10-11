@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { runCoreTests } from "../../packages/core/dist/core-test-run.js";
+import { WHOLE_RUN_FILE } from "../../packages/core/dist/test-runs.js";
 import { quarantinedFiles } from "../../packages/core/dist/test-quarantine.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { DEFAULT_TEST_RUN_SETTINGS } from "../../packages/shared/dist/test-run-settings.js";
@@ -136,4 +137,62 @@ test("a file that also has a new failure is not quarantined, so the Work-level r
   const second = await ctx.coreRun("work", { run });
   assert.equal(second.status, "failed");
   assert.ok(second.failed_files.includes("tests/b.test.mjs"));
+});
+
+test("a file holding a known failure is neither quarantined nor skipped, even when the nightly run names the same failure", async (t) => {
+  let newFailure = false;
+  const ctx = await setup(t, () => false);
+  await ctx.known(["b"]);
+  const knownFailures = [{ file: "tests/b.test.mjs", name: "b works", line: 3, message: "expected 1 to equal 2 in b" }];
+  const notOk = (cwd, file, n, name) => [
+    `# Subtest: ${name}`, `not ok ${n} - ${name}`, "  ---", `  location: '${join(cwd, file)}:${n + 2}:1'`,
+    "  failureType: 'testCodeFailure'", `  error: 'failed ${name}'`, "  ...",
+  ];
+  const run = async (argv, cwd) => {
+    const file = argv[argv.length - 1];
+    if (file !== "tests/b.test.mjs") return { exit_code: 0, timed_out: false, stdout: "TAP version 13\nok 1 - x\n", stderr: "", duration_ms: 1 };
+    const stdout = ["TAP version 13", ...notOk(cwd, file, 1, "b works"), ...(newFailure ? notOk(cwd, file, 2, "b new behaviour") : [])].join("\n");
+    return { exit_code: 1, timed_out: false, stdout, stderr: "", duration_ms: 1 };
+  };
+
+  const first = await ctx.coreRun("work", { run, known_failures: knownFailures });
+  assert.equal(first.status, "passed");
+  assert.deepEqual(quarantinedFiles(ctx.db, ctx.projectId), []);
+
+  // A file quarantined before the failure was recorded as known still runs, so a new failure in it is caught.
+  await ctx.coreRun("work", { run });
+  assert.deepEqual(quarantinedFiles(ctx.db, ctx.projectId), ["tests/b.test.mjs"]);
+  newFailure = true;
+  const second = await ctx.coreRun("work", { run, known_failures: knownFailures });
+  assert.equal(second.selection.quarantined, undefined);
+  assert.equal(second.status, "failed");
+  assert.deepEqual(second.in_scope.map((f) => f.name), ["b new behaviour"]);
+});
+
+test("a whole-command run treats a recorded known failure as old and a failure outside the record as new", async (t) => {
+  const ctx = await setup(t, () => false);
+  const wholeSettings = { ...settings, mode: "whole", whole_argv: ["suite"], cwd: "." };
+  const tap = (...names) => ["TAP version 13", ...names.flatMap((name, i) => [`not ok ${i + 1} - ${name}`, "  ---", "  error: 'boom'", "  ..."])].join("\n");
+  const known = [{ file: WHOLE_RUN_FILE, name: "b works" }];
+  const runWith = (stdout) => async () => ({ exit_code: 1, timed_out: false, stdout, stderr: "", duration_ms: 1 });
+
+  const old = await ctx.coreRun("work", { settings: wholeSettings, run: runWith(tap("b works")), known_failures: known });
+  assert.equal(old.status, "passed");
+  assert.deepEqual(old.pre_existing.map((f) => f.name), ["b works"]);
+
+  const fresh = await ctx.coreRun("work", { settings: wholeSettings, run: runWith(tap("b works", "c works")), known_failures: known });
+  assert.equal(fresh.status, "failed");
+  assert.deepEqual(fresh.in_scope.map((f) => f.name), ["c works"]);
+
+  // The real Workflow call passes environment signals; a recorded failure that reads like an environment problem is still old.
+  const signals = { exit_codes: [127], patterns: ["Cannot find module"] };
+  const envLike = tap("b works").replace("error: 'boom'", "error: 'Cannot find module x'");
+  const recorded = await ctx.coreRun("work", { settings: wholeSettings, run: runWith(envLike), known_failures: known, environment_signals: signals });
+  assert.equal(recorded.status, "passed");
+  const unrecorded = await ctx.coreRun("work", { settings: wholeSettings, run: runWith(envLike), environment_signals: signals });
+  assert.equal(unrecorded.status, "error");
+  // A new failure next to a recorded one is still new, not an environment problem read from the recorded one's output.
+  const mixed = await ctx.coreRun("work", { settings: wholeSettings, run: runWith(tap("b works", "c works").replace("error: 'boom'", "error: 'Cannot find module x'")), known_failures: known, environment_signals: signals });
+  assert.equal(mixed.status, "failed");
+  assert.deepEqual(mixed.in_scope.map((f) => f.name), ["c works"]);
 });

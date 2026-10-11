@@ -17,12 +17,12 @@ async function fixture(t, verificationPlan = []) {
   await writeFile(join(project, "README.md"), "base\n");
   git(project, "add", ".");
   git(project, "commit", "-m", "initial");
-  const work = { state: "running", state_version: 1, title: null };
+  const work = { state: "running", state_version: 1, title: null, commit_language: null };
   const db = {
     get(sql) {
       if (sql.includes("SELECT project_id FROM works")) return { project_id: "project-1" };
       if (sql.includes("SELECT state, state_version FROM works")) return { ...work };
-      if (sql.includes("SELECT title FROM works")) return { title: work.title };
+      if (sql.includes("projects.commit_language")) return { title: work.title, commit_language: work.commit_language };
       if (sql.includes("FROM projects")) {
         return {
           canonical_path: project,
@@ -356,6 +356,43 @@ test("mergeWorkIntoBase lands the Work as one commit titled by the Work and coun
   assert.equal(again.kind, "merged", again.message);
   assert.equal(again.merge_commit, null);
   assert.equal(git(project, "rev-parse", "refs/heads/main"), again.old_base_commit);
+});
+
+test("mergeWorkIntoBase titles the commit with the Manager's English subject when commit_language is en", async (t) => {
+  const { project, work, gateway } = await fixture(t);
+  work.title = "日本語のタイトル";
+  work.commit_language = "en";
+  await addWorkChange(gateway);
+  const result = await gateway.mergeWorkIntoBase({ work_id: "W", commit_subject: "  Add commit language setting  " });
+  assert.equal(result.kind, "merged", result.message);
+  const subject = git(project, "log", "--format=%s", "-1", result.merge_commit);
+  assert.equal(subject, "Add commit language setting");
+  assert.match(subject, /^[\x20-\x7e]+$/u);
+});
+
+test("mergeWorkIntoBase uses the English default when an en Project's commit_subject is missing or invalid", async (t) => {
+  const invalid = [undefined, "", "   ", "Add\nsecond line", "日本語の件名", "x".repeat(73)];
+  for (const [index, commit_subject] of invalid.entries()) {
+    const { project, work, gateway } = await fixture(t);
+    work.title = "日本語のタイトル";
+    work.commit_language = "en";
+    await addWorkChange(gateway);
+    const result = await gateway.mergeWorkIntoBase({ work_id: "W", ...(commit_subject === undefined ? {} : { commit_subject }) });
+    assert.equal(result.kind, "merged", `case ${index}: ${result.message}`);
+    assert.equal(git(project, "log", "--format=%s", "-1", result.merge_commit), "Apply Work changes", `case ${index}`);
+  }
+});
+
+test("mergeWorkIntoBase keeps the Work title as subject for ja and unset commit_language even when commit_subject is given", async (t) => {
+  for (const language of ["ja", null]) {
+    const { project, work, gateway } = await fixture(t);
+    work.title = "Work title\nsecond line";
+    work.commit_language = language;
+    await addWorkChange(gateway);
+    const result = await gateway.mergeWorkIntoBase({ work_id: "W", commit_subject: "Ignored English subject" });
+    assert.equal(result.kind, "merged", result.message);
+    assert.equal(git(project, "log", "--format=%s", "-1", result.merge_commit), "Work title");
+  }
 });
 
 // ---- Core activity reports: merge verification, base merge and the wait for the Git lane ----

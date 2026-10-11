@@ -118,6 +118,7 @@ export class DecisionService {
       source?: "web" | "slack" | "discord" | "advisor";
       to_manager?: boolean;
       rerun_review?: boolean;
+      rerun_verification?: boolean;
       option_note?: boolean;
     }>,
   ): Promise<CommandResponse<{ decision_id: string; status: "resolved"; winner: boolean; resumed_task_ids: readonly string[] }>> {
@@ -158,6 +159,7 @@ export class DecisionService {
             source_message_id: request.payload.source_message_id,
             to_manager: request.payload.to_manager,
             rerun_review: request.payload.rerun_review,
+            rerun_verification: request.payload.rerun_verification,
             option_note: request.payload.option_note,
           } satisfies ResolveDecisionInput);
           const response: CommandResponse<{ decision_id: string; status: "resolved"; winner: boolean; resumed_task_ids: readonly string[] }> = {

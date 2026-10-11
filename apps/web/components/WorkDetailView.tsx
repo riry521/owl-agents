@@ -516,6 +516,9 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
                             </div>
                           </>
                         )}
+                        {tk.fixer_escalation && (
+                          <div className="row__sub">{t('work.fixerEscalated', { count: tk.fixer_escalation.rejections })}</div>
+                        )}
                         {tk.status === 'judgement_waiting' && tk.stop_reason && (
                           <div className="row__sub">{t('work.stopReason', { reason: tk.stop_reason })}</div>
                         )}

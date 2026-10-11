@@ -28,6 +28,7 @@ import type {
   ProjectFolderBrowserResult,
   ProjectFolderInspection,
   ProjectSetupInput,
+  TestSetupInvestigationState,
   UpdateProjectInput,
   Report,
   RoleModelSetting,
@@ -59,6 +60,7 @@ import type {
   AdvisorFolders,
   AdvisorFoldersInput,
   RemakeLimitSettings,
+  FixerEscalationSettings,
   KnowledgeStorageStatus,
   DirectoryListing,
   SkillActivity,
@@ -985,6 +987,18 @@ export async function getProjectDeletionImpact(id: string): Promise<ProjectDelet
   return response.data;
 }
 
+/** POST /api/v1/projects/{id}/test-setup/investigate (202 accepted; 409 test_setup_unavailable carries details.reason). */
+export async function investigateTestSetup(id: string): Promise<{ project_id: string; trigger: string; accepted: boolean }> {
+  const response = await requestJson<ApiEnvelope<{ project_id: string; trigger: string; accepted: boolean }>>(`/projects/${encodeURIComponent(id)}/test-setup/investigate`, { method: 'POST' });
+  return response.data;
+}
+
+/** GET /api/v1/projects/{id}/test-setup/investigation: running, and how the latest run ended (outcome null after a restart or when none ran). */
+export async function getTestSetupInvestigation(id: string): Promise<TestSetupInvestigationState> {
+  const response = await requestJson<ApiEnvelope<TestSetupInvestigationState>>(`/projects/${encodeURIComponent(id)}/test-setup/investigation`);
+  return response.data;
+}
+
 /** DELETE /api/v1/projects/{id} with the command envelope. */
 export async function deleteProject(id: string, confirmedWorkCount: number): Promise<DeleteProjectResult> {
   const response = await command<DeleteProjectResult>(
@@ -1336,6 +1350,11 @@ export async function getRemakeLimitSettings(): Promise<RemakeLimitSettings> {
 
 export async function putRemakeLimitSettings(input: RemakeLimitSettings): Promise<RemakeLimitSettings> {
   const response = await command<RemakeLimitSettings>('/settings/remake-limits', input, 0, 'PUT');
+  return response.data;
+}
+
+export async function putFixerEscalationSettings(input: FixerEscalationSettings): Promise<FixerEscalationSettings> {
+  const response = await command<FixerEscalationSettings>('/settings/fixer-escalation', input, 0, 'PUT');
   return response.data;
 }
 

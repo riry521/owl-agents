@@ -3,9 +3,9 @@
 import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { ApiRequestError, browseProjectFolders, deleteProject, getActiveConversation, getProjectDeletionImpact, inspectProjectFolder, listProjects, postMessage, setupProject, updateProject } from '@/lib/api-client';
-import type { DeleteProjectResult, Project, ProjectDeletionImpact, ProjectFolderBrowserResult, ProjectFolderInspection, ProjectRunningWork, ProjectSetupInput, UpdateProjectInput } from '@/lib/types';
-import { buildProjectUpdateInput, deletionDialogModel, formatCommandLine, impactFromError, isProjectAutoPushEnabled, postMergeCommandPlaceholder, projectEditForm, projectErrorKey, type ProjectEditForm } from '@/lib/project-management';
+import { ApiRequestError, browseProjectFolders, deleteProject, getActiveConversation, getProjectDeletionImpact, inspectProjectFolder, getTestSetupInvestigation, investigateTestSetup, listProjects, postMessage, setupProject, updateProject } from '@/lib/api-client';
+import type { DeleteProjectResult, Project, ProjectDeletionImpact, ProjectFolderBrowserResult, ProjectFolderInspection, ProjectRunningWork, ProjectSetupInput } from '@/lib/types';
+import { buildProjectUpdateInput, deletionDialogModel, formatCommandLine, impactFromError, INVESTIGATE_POLL_INTERVAL_MS, INVESTIGATE_POLL_TIMEOUT_MS, investigateNoticeKey, investigateOutcome, isProjectAutoPushEnabled, postMergeCommandPlaceholder, projectEditForm, projectErrorKey, type ProjectEditForm, type TestRunMode } from '@/lib/project-management';
 import { workStateLabels } from '@/lib/format';
 import { useLocale, type Locale, type TFunction } from '@/lib/i18n';
 
@@ -13,13 +13,23 @@ type RegistrationMode = 'existing' | 'new';
 type PickerTarget = 'register' | 'edit';
 const EMPTY_FORM = { name: '', path: '' };
 
-export function ProjectsView() {
+type InvestigationState = { projectId: string; phase: 'loading' | 'loadFailed' | 'sending' | 'investigating' | 'done' | 'failed' | 'timeout' | 'error'; message: string };
+
+export function ProjectsView({ pollIntervalMs = INVESTIGATE_POLL_INTERVAL_MS, pollTimeoutMs = INVESTIGATE_POLL_TIMEOUT_MS }: { pollIntervalMs?: number; pollTimeoutMs?: number } = {}) {
   const { t, locale } = useLocale();
   // t returns the key itself when missing, so an unknown reason falls back to the raw identifier.
   const testRunReasonLabel = (reason: string) => {
     const key = `projects.testRunReason_${reason}`;
     const label = t(key);
     return label === key ? reason : label;
+  };
+  // t returns the key itself when missing, so an unknown reason falls back to the raw identifier.
+  const failReasonLabel = (reason: string) => {
+    for (const key of [`projects.testSetupFailReason_${reason}`, `projects.testSetupStatus_${reason}`]) {
+      const label = t(key);
+      if (label !== key) return label;
+    }
+    return reason;
   };
   const router = useRouter();
   const [projects, setProjects] = useState<Project[] | null>(null);
@@ -47,7 +57,10 @@ export function ProjectsView() {
   const [pickerTarget, setPickerTarget] = useState<PickerTarget>('register');
   const [projectNotice, setProjectNotice] = useState<string | null>(null);
   const [projectNoticeError, setProjectNoticeError] = useState(false);
+  const [investigation, setInvestigation] = useState<InvestigationState | null>(null);
   const deleteCancelRef = useRef<HTMLButtonElement>(null);
+  // Identifies the investigation the form currently shows; a POST answer or poll result for any other one is dropped.
+  const investigationToken = useRef<object | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -63,6 +76,81 @@ export function ProjectsView() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => () => {
+    investigationToken.current = null;
+  }, []);
+
+  // The server answers 202 and investigates in the background, so the result is read back by polling the investigation state.
+  useEffect(() => {
+    if (investigation?.phase !== 'investigating') return;
+    const { projectId } = investigation;
+    const startedAt = Date.now();
+    let stopped = false;
+    const timer = setInterval(() => {
+      void (async () => {
+        try {
+          const outcome = investigateOutcome(await getTestSetupInvestigation(projectId));
+          if (stopped) return;
+          if (outcome.state !== 'pending') {
+            setProjects(await listProjects());
+            if (!stopped) setInvestigation(endedInvestigation(projectId, outcome));
+            return;
+          }
+        } catch (error) {
+          console.error('[Owl] Test setup polling failed', error);
+        }
+        if (!stopped && Date.now() - startedAt >= pollTimeoutMs) setInvestigation({ projectId, phase: 'timeout', message: t('projects.testSetupInvestigateTimeout') });
+      })();
+    }, pollIntervalMs);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [investigation, pollIntervalMs, pollTimeoutMs, t]);
+
+  function endedInvestigation(projectId: string, outcome: Exclude<ReturnType<typeof investigateOutcome>, { state: 'pending' }>): InvestigationState {
+    return outcome.state === 'done'
+      ? { projectId, phase: 'done', message: t('projects.testSetupInvestigateDone') }
+      : { projectId, phase: 'failed', message: t('projects.testSetupInvestigateFailed', { reason: failReasonLabel(outcome.reason) }) };
+  }
+
+  /** Shows the server's latest investigation when the form opens: polling resumes for one still running, an ended one shows its result. */
+  async function loadInvestigation(projectId: string) {
+    const token = {};
+    investigationToken.current = token;
+    // The button stays locked until the state is known, so a running investigation is not started twice.
+    setInvestigation({ projectId, phase: 'loading', message: t('projects.testSetupStateLoading') });
+    try {
+      const state = await getTestSetupInvestigation(projectId);
+      if (investigationToken.current !== token) return;
+      const outcome = investigateOutcome(state);
+      if (outcome.state === 'pending') setInvestigation({ projectId, phase: 'investigating', message: t('projects.testSetupInvestigateAccepted') });
+      // No outcome means nothing ran since the server started, so there is no result to show.
+      else setInvestigation(state.outcome ? endedInvestigation(projectId, outcome) : null);
+    } catch (error) {
+      console.error('[Owl] Test setup state load failed', error);
+      if (investigationToken.current === token) setInvestigation({ projectId, phase: 'loadFailed', message: t('projects.testSetupStateLoadFailed', { reason: t(projectErrorKey(error, 'load')) }) });
+    }
+  }
+
+  async function investigate(project: Project) {
+    const token = {};
+    investigationToken.current = token;
+    setInvestigation({ projectId: project.id, phase: 'sending', message: t('projects.testSetupInvestigating') });
+    try {
+      await investigateTestSetup(project.id);
+      if (investigationToken.current === token) setInvestigation({ projectId: project.id, phase: 'investigating', message: t(investigateNoticeKey(null)) });
+    } catch (error) {
+      console.error('[Owl] Test setup investigation failed', error);
+      if (investigationToken.current === token) setInvestigation({ projectId: project.id, phase: 'error', message: t(investigateNoticeKey(error)) });
+    }
+  }
+
+  function clearInvestigation() {
+    investigationToken.current = null;
+    setInvestigation(null);
+  }
 
   function changeMode(next: RegistrationMode) {
     setMode(next);
@@ -180,10 +268,12 @@ export function ProjectsView() {
     setEditBlockImpact(null);
     setProjectNotice(null);
     setProjectNoticeError(false);
+    void loadInvestigation(project.id);
   }
 
   function cancelEdit() {
     if (busyProjectId !== null) return;
+    clearInvestigation();
     setEditingId(null);
     setEditError(null);
     setEditBlockImpact(null);
@@ -191,14 +281,14 @@ export function ProjectsView() {
 
   async function saveEdit(ev: FormEvent<HTMLFormElement>, project: Project) {
     ev.preventDefault();
-    const input: UpdateProjectInput | null | { error: 'nameRequired' | 'pathRequired' | 'commandInvalid' } = buildProjectUpdateInput(project, editForm);
+    const input = buildProjectUpdateInput(project, editForm);
     setEditBlockImpact(null);
     if (input === null) {
       setEditError(t('projects.editNoChanges'));
       return;
     }
     if ('error' in input) {
-      setEditError(t(input.error === 'commandInvalid' ? 'projects.worktreeCommandInvalid' : 'projects.allFieldsRequired'));
+      setEditError(t(input.error === 'commandInvalid' ? 'projects.worktreeCommandInvalid' : input.error === 'testCommandRequired' ? 'projects.testRunCommandRequired' : 'projects.allFieldsRequired'));
       return;
     }
 
@@ -209,6 +299,7 @@ export function ProjectsView() {
     try {
       await updateProject(project.id, input);
       setEditingId(null);
+      clearInvestigation();
       setProjectNotice(t('projects.editSuccess'));
       setProjectNoticeError(false);
       await refresh();
@@ -476,6 +567,19 @@ export function ProjectsView() {
                         />
                         <p className="note">{t('projects.autoPushHelp')}</p>
                       </div>
+                      <label className="form-field">
+                        <span>{t('projects.commitLanguageLabel')}</span>
+                        <select
+                          className="input"
+                          value={editForm.commitLanguage ?? ''}
+                          onChange={(ev) => setEditForm((current) => ({ ...current, commitLanguage: ev.target.value === '' ? null : (ev.target.value as 'ja' | 'en') }))}
+                          disabled={busyProjectId !== null}
+                        >
+                          <option value="">{t('projects.commitLanguageUnset')}</option>
+                          <option value="ja">{t('projects.commitLanguageJa')}</option>
+                          <option value="en">{t('projects.commitLanguageEn')}</option>
+                        </select>
+                      </label>
                       <div className="form-grid">
                         <label className="form-field">
                           <span>{t('projects.worktreeSetupLabel')}</span>
@@ -537,6 +641,39 @@ export function ProjectsView() {
                             disabled={busyProjectId !== null || editForm.installDisabled}
                           />
                         </label>
+                        <label className="form-field">
+                          <span>{t('projects.testRunModeLabel')}</span>
+                          <select
+                            className="input"
+                            value={editForm.testRunMode ?? 'auto'}
+                            onChange={(ev) => {
+                              setEditForm((current) => ({ ...current, testRunMode: ev.target.value as TestRunMode }));
+                              setEditError(null);
+                            }}
+                            disabled={busyProjectId !== null}
+                          >
+                            <option value="auto">{t('projects.testRunModeAuto')}</option>
+                            <option value="command">{t('projects.testRunModeCommand')}</option>
+                            <option value="off">{t('projects.testRunModeOff')}</option>
+                            {editForm.testRunMode === 'custom' && <option value="custom">{t('projects.testRunModeCustom')}</option>}
+                          </select>
+                        </label>
+                        {editForm.testRunMode === 'command' && (
+                          <label className="form-field">
+                            <span>{t('projects.testRunCommandLabel')}</span>
+                            <input
+                              className="input mono"
+                              value={editForm.testRunCommand ?? ''}
+                              onChange={(ev) => {
+                                setEditForm((current) => ({ ...current, testRunCommand: ev.target.value }));
+                                setEditError(null);
+                              }}
+                              placeholder={t('projects.testRunCommandPlaceholder')}
+                              maxLength={8192}
+                              disabled={busyProjectId !== null}
+                            />
+                          </label>
+                        )}
                         <div className="form-row">
                           <span id={`post-merge-install-disabled-label-${project.id}`}>{t('projects.postMergeInstallDisabledLabel')}</span>
                           <button
@@ -565,6 +702,29 @@ export function ProjectsView() {
                       <p className="note">{t('projects.worktreeCommandsHelp')}</p>
                       <p className="note">{t('projects.postMergeHelp')}</p>
                       <p className="note">{t('projects.postMergeInstallHelp')}</p>
+                      <p className="note">{t('projects.testRunModeHelp')}</p>
+                      {project.test_run_status && (
+                        <p className="note">
+                          {t(project.test_run_status.enabled ? 'projects.testRunOn' : 'projects.testRunOff', {
+                            source: t(project.test_run_status.source === 'explicit' ? 'projects.testRunSourceExplicit' : project.test_run_status.source === 'setup' ? 'projects.testRunSourceSetup' : 'projects.testRunSourceDetected'),
+                          })}
+                          {project.test_run_status.reason !== null && ` / ${t('projects.testRunReason', { reason: testRunReasonLabel(project.test_run_status.reason) })}`}
+                          {project.test_run_status.command !== null && ` / ${t('projects.testRunCommand', { command: formatCommandLine(project.test_run_status.command) })}`}
+                        </p>
+                      )}
+                      <div className="btn-row">
+                        <button type="button" className="btn" onClick={() => void investigate(project)} disabled={busyProjectId !== null || (investigation !== null && !['done', 'failed', 'error'].includes(investigation.phase))}>
+                          {t('projects.testSetupInvestigate')}
+                        </button>
+                        {(investigation?.phase === 'loadFailed' || investigation?.phase === 'timeout') && (
+                          <button type="button" className="btn" onClick={() => void loadInvestigation(project.id)}>
+                            {t('projects.testSetupStateReload')}
+                          </button>
+                        )}
+                      </div>
+                      {investigation?.projectId === project.id && (
+                        <div className={['failed', 'error', 'loadFailed'].includes(investigation.phase) ? 'error' : 'note'} role={['failed', 'error', 'loadFailed'].includes(investigation.phase) ? 'alert' : 'status'}>{investigation.message}</div>
+                      )}
                       {editError && <div className="error" role="alert">{editError}</div>}
                       {editBlockImpact && <BlockingWorks impact={editBlockImpact} t={t} locale={locale} />}
                       <div className="btn-row">
@@ -587,15 +747,6 @@ export function ProjectsView() {
                           )}
                         </div>
                         <div className="row__sub mono">{project.canonical_path}</div>
-                        {project.test_run_status && (
-                          <div className="row__sub">
-                            {t(project.test_run_status.enabled ? 'projects.testRunOn' : 'projects.testRunOff', {
-                              source: t(project.test_run_status.source === 'explicit' ? 'projects.testRunSourceExplicit' : 'projects.testRunSourceDetected'),
-                            })}
-                            {project.test_run_status.reason !== null && ` / ${t('projects.testRunReason', { reason: testRunReasonLabel(project.test_run_status.reason) })}`}
-                            {project.test_run_status.command !== null && ` / ${t('projects.testRunCommand', { command: formatCommandLine(project.test_run_status.command) })}`}
-                          </div>
-                        )}
                       </div>
                       <div className="row__end">
                         <button type="button" className="btn btn--small" onClick={() => startEdit(project)} disabled={projectActionsDisabled} aria-label={t('projects.editAria', { name: project.name })}>

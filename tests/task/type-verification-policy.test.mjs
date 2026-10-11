@@ -6,6 +6,10 @@ import { test } from "node:test";
 
 import { matchesGlobWithDots } from "../../packages/core/dist/glob.js";
 import { evaluateTaskTypePolicy } from "../../packages/core/dist/task-verification-policy.js";
+import { DEFAULT_TEST_DETECTION_RULES } from "../../packages/core/dist/test-detection-rules.js";
+import { testDetectionRulesVersion } from "../../packages/core/dist/test-detection.js";
+import { testSetupDigests } from "../../packages/core/dist/test-setup.js";
+import { DEFAULT_TEST_SETUP_SETTINGS } from "../../packages/shared/dist/test-setup-settings.js";
 import { DEFAULT_VERIFICATION_POLICY_SETTINGS, readVerificationPolicySettings } from "../../packages/shared/dist/verification-policy-settings.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { createTestCore } from "../helpers/core.mjs";
@@ -300,7 +304,7 @@ test("glob: representative patterns keep their answers", () => {
 });
 
 /** A Project with an explicit whole-command test setting and no verification plan; the Worker changes only src/a.ts. */
-async function tsOnlyTaskWithWholeRun(t, { wholePasses }) {
+async function tsOnlyTaskWithWholeRun(t, { wholePasses, testRun = { mode: "whole", whole_argv: ["bun", "test"] }, written = ["src/a.ts"] }) {
   const argvs = [];
   const runner = async (argv) => {
     argvs.push(argv);
@@ -313,16 +317,18 @@ async function tsOnlyTaskWithWholeRun(t, { wholePasses }) {
       : { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [plannedTask("T1")] } },
     runWorker: async (request) => {
       ran = true;
-      await mkdir(join(request.context.worktree, "src"), { recursive: true });
-      await writeFile(join(request.context.worktree, "src/a.ts"), "export const a = 1;\n");
-      return { outcome: "success", report_valid: true, report: projectWorkerReport(request.invocation_id, ["src/a.ts"]) };
+      for (const name of written) {
+        await mkdir(dirname(join(request.context.worktree, name)), { recursive: true });
+        await writeFile(join(request.context.worktree, name), "x = 1\n");
+      }
+      return { outcome: "success", report_valid: true, report: projectWorkerReport(request.invocation_id, written) };
     },
     runReviewer: async (request) => ({ outcome: "success", report_valid: true, report: { kind: "review", invocation_id: request.invocation_id }, review: { verdict: "pass", findings: [], tests: {} } }),
     runAdvisor: async () => ({ reply: "" }),
   };
   const { db, core, projectId, envelope } = await openTestRunCore(t, {
     agentRunner, runner, prefix: "owl-ts-whole-", emptyPlan: true, files: { "README.md": "x\n" },
-    testRun: { mode: "whole", whole_argv: ["bun", "test"] },
+    testRun,
   });
   const created = await core.createWork(envelope({ title: "ts", summary: "x", size: "normal", project_id: projectId }, "work"));
   await core.startWork(created.data.work_id, { ...envelope({ mode: "normal" }, "start"), expected_version: created.version });
@@ -343,4 +349,127 @@ test("code: a failing whole test run fails the .ts-only Task as a test failure",
   assert.deepEqual(argvs.at(-1), ["bun", "test"]);
   assert.equal(payload.outcome, "fail");
   assert.equal(payload.verification.error_key, "test_failed");
+});
+
+const offInput = { enabled: false, reason: "explicit_off" };
+const runnersOn = { ...DEFAULT_VERIFICATION_POLICY_SETTINGS, code: { ...DEFAULT_VERIFICATION_POLICY_SETTINGS.code, run_test_runners: true } };
+
+async function policyWithRecordedArgv(t, { type, files, spec = {}, projectTestRun }) {
+  const argvs = [];
+  const runCommand = async (argv) => { argvs.push(argv); return { passed: true, exit_code: 0, stdout: "" }; };
+  const root = await tempDir(t, "owl-off-policy-");
+  for (const name of files) await writeFile(join(root, name), "x = 1\n");
+  const result = await evaluateTaskTypePolicy({ type, root, files, claimedChanges: [], spec, mode: "sole", settings: runnersOn, runCommand, projectTestRun });
+  return { argvs, result };
+}
+
+test("Project test_run explicit off: a code Task skips test.runners, still runs code.checkers, and passes", async (t) => {
+  const { argvs, result } = await policyWithRecordedArgv(t, { type: "code", files: ["test_a.py", "a.py"], projectTestRun: offInput });
+  assert.equal(result.passed, true);
+  assert.equal(argvs.some((argv) => argv.includes("pytest")), false);
+  assert.ok(argvs.length > 0);
+});
+
+test("Project test_run explicit off: a test Task, with or without required_tests, passes with a check saying tests were stopped", async (t) => {
+  for (const spec of [{}, { required_tests: ["test_a.py"] }]) {
+    const { argvs, result } = await policyWithRecordedArgv(t, { type: "test", files: ["test_a.py"], spec, projectTestRun: offInput });
+    assert.deepEqual(argvs, []);
+    assert.equal(result.passed, true);
+    assert.notEqual(result.error_key, "test_not_executed");
+    assert.notEqual(result.error_key, "test_required_not_executed");
+    assert.ok(result.checks.some((check) => check.command_id === "policy:test" && check.passed && /explicit_off/u.test(check.detail)));
+  }
+});
+
+test("without the off input, code and test Tasks pass test.runners to runCommand", async (t) => {
+  for (const type of ["code", "test"]) {
+    const { argvs } = await policyWithRecordedArgv(t, { type, files: ["test_a.py"] });
+    assert.ok(argvs.some((argv) => argv.includes("pytest")), type);
+  }
+});
+
+test("Core: a Project with test_run off passes a code Task changing test_*.py and .py without starting test runners", async (t) => {
+  const { payload } = await tsOnlyTaskWithWholeRun(t, { testRun: { mode: "off" }, written: ["test_a.py", "a.py"] });
+  assert.equal(payload.outcome, "pass");
+  const checks = payload.verification.commands;
+  assert.ok(checks.some((check) => check.command_id === "policy:code_check"));
+  // Every command Core's verification runner started is recorded with its argv, so this is the runner's side.
+  const executed = checks.filter((check) => Array.isArray(check.argv));
+  assert.ok(executed.length > 0);
+  assert.equal(executed.some((check) => check.argv.includes("pytest")), false);
+  assert.ok(checks.some((check) => check.command_id === "policy:test" && /explicit_off/u.test(check.detail)));
+});
+
+const SAVED_PYTHON = "/saved/venv/bin/python";
+const SETTING_PYTHON = "/settings/bin/python";
+
+test("test: test_*.py runs with the executables passed in, and no argv keeps python3", async (t) => {
+  const argvs = [];
+  const runCommand = async (argv) => { argvs.push(argv); return { passed: true, exit_code: 0, stdout: "" }; };
+  const root = await tempDir(t, "owl-executables-");
+  await writeFile(join(root, "test_a.py"), "x = 1\n");
+  const result = await evaluateTaskTypePolicy({
+    type: "test", root, files: ["test_a.py"], claimedChanges: [], spec: {}, mode: "sole", settings: runnersOn, runCommand,
+    executables: { python: SAVED_PYTHON },
+  });
+  assert.equal(result.passed, true);
+  assert.ok(argvs.length > 0);
+  assert.equal(argvs.every((argv) => argv[0] === SAVED_PYTHON), true);
+  assert.equal(argvs.some((argv) => argv.includes("python3")), false);
+});
+
+/** A Project without test_run, optionally holding a ready test_setup_json; the Worker adds test_a.py to a "test" Task. */
+async function pythonTaskCore(t, { savedPython, settingPython }) {
+  const written = ["test_a.py"];
+  const agentRunner = {
+    runManagerPlan: async (request) => request.mode === "finalize"
+      ? { outcome: "success", report_valid: true, report: { tasks: [], event: null, verdict: { verdict: "complete", summary: "Done.", missing: [], lessons: [] } } }
+      : { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [{ ...plannedTask("T1"), type: "test" }] } },
+    runWorker: async (request) => {
+      for (const name of written) await writeFile(join(request.context.worktree, name), "x = 1\n");
+      return { outcome: "success", report_valid: true, report: projectWorkerReport(request.invocation_id, written) };
+    },
+    runReviewer: async (request) => ({ outcome: "success", report_valid: true, report: { kind: "review", invocation_id: request.invocation_id }, review: { verdict: "pass", findings: [], tests: {} } }),
+    runAdvisor: async () => ({ reply: "" }),
+  };
+  const runner = async () => ({ exit_code: 0, timed_out: false, stdout: "", stderr: "", duration_ms: 1 });
+  const { db, core, repo, projectId, envelope } = await openTestRunCore(t, {
+    agentRunner, runner, prefix: "owl-python-setup-", emptyPlan: true, files: { "README.md": "x\n" }, testRun: null,
+  });
+  const lane = db.createWriteLane();
+  if (savedPython !== undefined) {
+    const digests = await testSetupDigests({ root: repo, rules_version: testDetectionRulesVersion(DEFAULT_TEST_DETECTION_RULES), settings: DEFAULT_TEST_SETUP_SETTINGS });
+    const record = {
+      status: "ready", test_run: { mode: "whole", whole_argv: ["{python}", "-m", "pytest", "-q"] },
+      executables: { python: { path: savedPython, version: "3.12.0" } }, sources: [], digests, explicit_digest: null,
+      confirmed_at: new Date().toISOString(), attempts: [], outside_installs: [], missing: [], trigger: "test", investigated_at: new Date().toISOString(),
+    };
+    await lane.transact((tx) => { tx.run("UPDATE projects SET test_setup_json = ? WHERE id = ?", JSON.stringify(record), projectId); });
+  }
+  if (settingPython !== undefined) {
+    await lane.transact((tx) => {
+      tx.run(
+        "INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at) VALUES ('test_setup', 'owner:default', '1.0.0', ?, ?)",
+        JSON.stringify({ default_executables: { python: settingPython } }), new Date().toISOString(),
+      );
+    });
+  }
+  const created = await core.createWork(envelope({ title: "py", summary: "x", size: "normal", project_id: projectId }, "work"));
+  await core.startWork(created.data.work_id, { ...envelope({ mode: "normal" }, "start"), expected_version: created.version });
+  await waitFor(() => db.all("SELECT id FROM events WHERE type = 'verification.completed'").length >= 1, { timeoutMs: 30_000, message: "the Task verification" });
+  const event = db.all("SELECT payload_json FROM events WHERE type = 'verification.completed' ORDER BY rowid")[0];
+  return JSON.parse(event.payload_json);
+}
+
+const policyTestArgv = (payload) => payload.verification.commands.find((check) => check.command_id === "policy:test")?.argv;
+
+test("Core: a ready test_setup_json of the Project passes its Python to policy:test", async (t) => {
+  const payload = await pythonTaskCore(t, { savedPython: SAVED_PYTHON, settingPython: SETTING_PYTHON });
+  assert.equal(policyTestArgv(payload)?.[0], SAVED_PYTHON);
+  assert.equal(policyTestArgv(payload).includes("python3"), false);
+});
+
+test("Core: without a record, test_setup.default_executables.python is used", async (t) => {
+  const payload = await pythonTaskCore(t, { settingPython: SETTING_PYTHON });
+  assert.equal(policyTestArgv(payload)?.[0], SETTING_PYTHON);
 });

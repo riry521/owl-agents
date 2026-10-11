@@ -28,5 +28,9 @@ export const OUTPUT_FORMAT_INVALID_ERROR_KEY = "output_format_invalid";
 /** Decision option key for "run only the Reviewer again" after its output kept breaking the format. */
 export const REVIEW_RERUN_OPTION_KEY = "rerun_review";
 
+/** Decision option keys for a test environment that could not be fixed: approve the installs outside the Project, or run the verification again. */
+export const TEST_SETUP_APPROVE_OPTION_KEY = "approve_test_setup_installs";
+export const TEST_SETUP_RETRY_OPTION_KEY = "retry_test_setup";
+
 /** Settings key for output-only resubmissions per run (all roles); report_resubmit_limit is read when this one is unset. */
 export const OUTPUT_RESUBMIT_LIMIT_SETTINGS_KEY = "output_resubmit_limit";

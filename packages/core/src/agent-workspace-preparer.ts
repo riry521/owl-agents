@@ -6,7 +6,7 @@ import { resolveRoleModel } from "./workflow-engine.js";
 import { describeServers, type Harness, type ToolingProblem, type WorkspaceSetupCommands, type WorkspaceTooling } from "./workspace-tooling.js";
 
 /** Roles whose agents run inside a Task worktree. */
-const WORKTREE_ROLES = ["worker", "designer", "lead_designer", "reviewer"] as const;
+const WORKTREE_ROLES = ["worker", "fixer", "designer", "lead_designer", "reviewer"] as const;
 
 interface ProjectTooling {
   readonly id: string;

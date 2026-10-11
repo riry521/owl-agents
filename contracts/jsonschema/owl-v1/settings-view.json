@@ -10,6 +10,7 @@
     "child_runs",
     "language",
     "remake_limits",
+    "fixer_escalation",
     "knowledge_automation",
     "advisor_persona",
     "advisor_folders",
@@ -35,6 +36,9 @@
       "type": "object"
     },
     "remake_limits": {
+      "type": "object"
+    },
+    "fixer_escalation": {
       "type": "object"
     },
     "knowledge_automation": {

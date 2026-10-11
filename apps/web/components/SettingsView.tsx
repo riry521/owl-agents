@@ -1,8 +1,8 @@
 'use client';
 
 import { Fragment, type FormEvent, useEffect, useRef, useState } from 'react';
-import { getModelSettings, getSettingsView, updateModelSettings, saveIntegration, testIntegration, deleteIntegration, setHybridMode, setChildRunSettings, createProvider, deleteProvider, testProvider, saveProvider, getProviderModels, setProviderModels as setProviderModelsApi, setTypesafeApiKey, setAdvisorPersona, putAdvisorFolders, putRemakeLimitSettings, getKnowledgeStorage, putKnowledgeStorage, setOwnerLanguage, setKnowledgeAutomationSettings, ApiRequestError } from '@/lib/api-client';
-import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ChildRunSettings, ProviderInfo, SaveProviderPayload, AdvisorFolders, RemakeLimitSettings, KnowledgeStorageStatus, KnowledgeAutomationSettingsData, KnowledgeAutomationSettingsInput } from '@/lib/types';
+import { getModelSettings, getSettingsView, updateModelSettings, saveIntegration, testIntegration, deleteIntegration, setHybridMode, setChildRunSettings, createProvider, deleteProvider, testProvider, saveProvider, getProviderModels, setProviderModels as setProviderModelsApi, setTypesafeApiKey, setAdvisorPersona, putAdvisorFolders, putRemakeLimitSettings, putFixerEscalationSettings, getKnowledgeStorage, putKnowledgeStorage, setOwnerLanguage, setKnowledgeAutomationSettings, ApiRequestError } from '@/lib/api-client';
+import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ChildRunSettings, ProviderInfo, SaveProviderPayload, AdvisorFolders, RemakeLimitSettings, FixerEscalationSettings, KnowledgeStorageStatus, KnowledgeAutomationSettingsData, KnowledgeAutomationSettingsInput } from '@/lib/types';
 import { roleDisplayName } from '@/lib/format';
 import { useLocale, type Locale } from '@/lib/i18n';
 import { REMAKE_TASK_TYPES, remakeLimitsToDraft, draftToRemakeLimits } from '@/lib/remake-limits.mjs';
@@ -20,6 +20,7 @@ interface SettingsData {
   child_runs: ChildRunSettings;
   language: { language: Locale };
   remake_limits: RemakeLimitSettings;
+  fixer_escalation: FixerEscalationSettings;
   knowledge_automation: KnowledgeAutomationSettingsData;
   advisor_persona: { advisor_persona: string };
   advisor_folders: AdvisorFolders;
@@ -38,7 +39,7 @@ function useSettings() {
 }
 
 /** Fixed role order shown regardless of what the GET response returns them in. */
-const ROLE_ORDER: RoleModelSettingInput['role'][] = ['advisor', 'manager', 'designer', 'lead_designer', 'worker', 'reviewer', 'librarian', 'curator'];
+const ROLE_ORDER: RoleModelSettingInput['role'][] = ['advisor', 'manager', 'designer', 'lead_designer', 'worker', 'fixer', 'reviewer', 'librarian', 'curator'];
 const EFFORT_OPTIONS: RoleModelSettingInput['effort'][] = ['low', 'medium', 'high', 'xhigh', 'max'];
 const CHILD_PROVIDER_ORDER: ChildRunSettings['default_provider'][] = ['claude', 'codex'];
 const CHILD_PARENT_HARNESSES: ChildRunSettings['default_provider'][] = ['claude', 'codex'];
@@ -72,6 +73,11 @@ const ROLE_META: Record<string, { gradient: string; desc: string; icon: string }
   worker: {
     gradient: 'role-card__icon--worker',
     desc: 'コード・調査',
+    icon: '<path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/>',
+  },
+  fixer: {
+    gradient: 'role-card__icon--worker',
+    desc: '差し戻しが続いた修正',
     icon: '<path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/>',
   },
   reviewer: {
@@ -596,6 +602,7 @@ export function SettingsView() {
       <AdvisorPersonaSection />
       <AdvisorFoldersSection />
       <RemakeLimitsSection />
+      <FixerEscalationSection />
       <KnowledgeStorageSection />
       <KnowledgeAutomationSection />
       <ProviderManagementSection providerModels={providerModels} onModelsUpdate={(id, models) => setProviderModels(prev => ({ ...prev, [id]: models }))} />
@@ -965,7 +972,77 @@ export function AdvisorFoldersSection() {
   );
 }
 
-const REMAKE_NUMBER_FIELDS = ['lineage_review_attempts', 'lineage_worker_runs', 'non_functional_remakes', 'base_sync_lineage_review_attempts', 'base_sync_lineage_worker_runs', 'lead_review_rejections'] as const;
+export function FixerEscalationSection() {
+  const { t } = useLocale();
+  const [loaded, setLoaded] = useState<FixerEscalationSettings | null>(null);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const settingsView = useSettings();
+
+  const savedValue = settingsView.data?.fixer_escalation?.after_review_rejections;
+  useEffect(() => {
+    if (savedValue === undefined) return;
+    setLoaded({ after_review_rejections: savedValue });
+    setDraft(String(savedValue));
+  }, [savedValue]);
+
+  useEffect(() => {
+    if (settingsView.error && !settingsView.data) setError(t('settings.fixerEscalationError'));
+  }, [settingsView.error, settingsView.data, t]);
+
+  async function handleSave() {
+    setSaving(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const saved = await putFixerEscalationSettings({ after_review_rejections: Number(draft) });
+      setLoaded(saved);
+      setDraft(String(saved.after_review_rejections));
+      setNotice(t('settings.fixerEscalationSaved'));
+    } catch (err) {
+      // Validation messages come from the API; surface them verbatim.
+      setError(err instanceof ApiRequestError && err.code === 'validation_error' ? err.rawMessage : humanizeError(err, t));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const changed = loaded !== null && draft.trim() !== '' && Number(draft) !== loaded.after_review_rejections;
+
+  return (
+    <section className="panel advisor-persona-panel" aria-labelledby="sec-fixer-escalation">
+      <div className="settings-disclosure__body">
+        <strong id="sec-fixer-escalation">{t('settings.fixerEscalation')}</strong>
+        <p className="settings-disclosure__hint">{t('settings.fixerEscalationDescription')}</p>
+        {loaded && (
+          <label className="form-field">
+            <span>{t('settings.fixerEscalation_after_review_rejections')}</span>
+            <input
+              className="input"
+              type="number"
+              name="after_review_rejections"
+              value={draft}
+              onChange={(ev) => setDraft(ev.target.value)}
+              disabled={saving}
+            />
+          </label>
+        )}
+        <div className="btn-row" style={{ marginTop: '16px' }}>
+          <button type="button" className="btn btn--primary btn--small" onClick={handleSave} disabled={saving || !changed}>
+            {saving ? t('common.saving') : t('settings.fixerEscalationSave')}
+          </button>
+          {notice && <span className="note note--success">{notice}</span>}
+        </div>
+        {error && <div className="error" style={{ marginTop: '12px' }}>{error}</div>}
+      </div>
+    </section>
+  );
+}
+
+const REMAKE_NUMBER_FIELDS =['lineage_review_attempts', 'lineage_worker_runs', 'non_functional_remakes', 'base_sync_lineage_review_attempts', 'base_sync_lineage_worker_runs', 'lead_review_rejections'] as const;
 
 export function RemakeLimitsSection() {
   const { t } = useLocale();

@@ -131,6 +131,9 @@ function normalizeTasks(value, workId) {
       depends_on: Array.isArray(task.depends_on) ? task.depends_on.filter((dep) => typeof dep === 'string') : [],
       prerequisite: normalizePrerequisite(task.prerequisite),
       stop_reason: nullableString(task.stop_reason),
+      fixer_escalation: isRecord(task.fixer_escalation) && Number.isSafeInteger(task.fixer_escalation.rejections) && task.fixer_escalation.rejections >= 1
+        ? { rejections: task.fixer_escalation.rejections }
+        : null,
     };
   });
 }

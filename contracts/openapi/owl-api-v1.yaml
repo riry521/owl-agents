@@ -1877,6 +1877,121 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/projects/{project_id}/test-setup/investigate:
+    parameters:
+      - in: path
+        name: project_id
+        required: true
+        schema:
+          $ref: '#/components/schemas/ULID'
+    post:
+      operationId: investigateProjectTestSetup
+      summary: Re-run the test setup investigation for a Project (trigger manual)
+      security:
+        - ownerBearer: []
+      responses:
+        '202':
+          description: The investigation was accepted and runs in the background.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [request_id, data]
+                properties:
+                  request_id:
+                    type: string
+                  data:
+                    type: object
+                    required: [project_id, trigger, accepted]
+                    properties:
+                      project_id:
+                        $ref: '#/components/schemas/ULID'
+                      trigger:
+                        type: string
+                        enum: [manual]
+                      accepted:
+                        type: boolean
+                        enum: [true]
+                    additionalProperties: false
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: project_not_found
+          x-error-codes:
+            - project_not_found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: test_setup_unavailable. error.details.reason is explicit_test_run, runner_unavailable or provider_paused.
+          x-error-codes:
+            - test_setup_unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/projects/{project_id}/test-setup/investigation:
+    parameters:
+      - in: path
+        name: project_id
+        required: true
+        schema:
+          $ref: '#/components/schemas/ULID'
+    get:
+      operationId: getProjectTestSetupInvestigation
+      summary: Read whether the Project's latest test setup investigation is running and how it ended (kept in memory; null outcome after a restart or when none ran)
+      security:
+        - ownerBearer: []
+      responses:
+        '200':
+          description: The investigation state.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [request_id, data]
+                properties:
+                  request_id:
+                    type: string
+                  data:
+                    type: object
+                    required: [project_id, running, outcome]
+                    properties:
+                      project_id:
+                        $ref: '#/components/schemas/ULID'
+                      running:
+                        type: boolean
+                      outcome:
+                        type: [object, 'null']
+                        required: [saved, status, reason]
+                        properties:
+                          saved:
+                            type: boolean
+                          status:
+                            type: [string, 'null']
+                          reason:
+                            type: [string, 'null']
+                        additionalProperties: false
+                    additionalProperties: false
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: project_not_found
+          x-error-codes:
+            - project_not_found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/projects/{project_id}:
     parameters:
       - in: path
@@ -4792,6 +4907,7 @@ components:
         - child_runs
         - language
         - remake_limits
+        - fixer_escalation
         - knowledge_automation
         - advisor_persona
         - advisor_folders
@@ -5247,6 +5363,18 @@ components:
         stop_reason:
           type: [string, 'null']
           description: For a judgement_waiting Task, the reason of the open Decision that blocks it (for example the no-progress limit).
+        fixer_escalation:
+          oneOf:
+            - type: object
+              required:
+                - rejections
+              properties:
+                rejections:
+                  type: integer
+                  minimum: 1
+              additionalProperties: false
+            - type: 'null'
+          description: Set once a rejected Worker Task moved to the Fixer; rejections is the review rejection count at that point.
       additionalProperties: false
     TaskPrerequisite:
       type: object
@@ -5378,6 +5506,18 @@ components:
         stop_reason:
           type: [string, 'null']
           description: For a judgement_waiting Task, the reason of the open Decision that blocks it (for example the no-progress limit).
+        fixer_escalation:
+          oneOf:
+            - type: object
+              required:
+                - rejections
+              properties:
+                rejections:
+                  type: integer
+                  minimum: 1
+              additionalProperties: false
+            - type: 'null'
+          description: Set once a rejected Worker Task moved to the Fixer; rejections is the review rejection count at that point.
       additionalProperties: false
     TaskListResponse:
       allOf:
@@ -5866,11 +6006,24 @@ components:
         auto_push:
           type: boolean
           description: Push the base branch to its upstream after a Work completes.
+        commit_language:
+          type: [string, 'null']
+          enum: [ja, en, null]
+          description: Language of the commit messages Core writes. null means not set.
         post_merge_command:
           type: [array, 'null']
           items:
             type: string
           description: Command (argv, no shell) run in canonical_path after a Work is merged. null uses the default; [] disables it.
+        test_run:
+          $ref: '#/components/schemas/TestRunSettingsInput'
+        test_run_status:
+          $ref: '#/components/schemas/TestRunStatus'
+        test_setup:
+          oneOf:
+            - $ref: '#/components/schemas/TestSetupView'
+            - type: 'null'
+          description: The test setup an agent found in the canonical checkout and Core confirmed; null until one is saved.
         allowed_roots:
           type: array
           items:
@@ -5879,6 +6032,113 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/VerificationCommand'
+      additionalProperties: false
+    TestRunSettingsInput:
+      type: [object, 'null']
+      description: Owner's test settings (TestRunSettings keys, all optional). null = Core uses the saved setup or marker detection; { mode off } = Core runs no tests.
+      properties:
+        mode:
+          type: string
+          enum: [per_file, whole, 'off']
+        whole_argv:
+          type: array
+          items: { type: string, maxLength: 4096 }
+        file_argv:
+          type: array
+          items: { type: string, maxLength: 4096 }
+        prepare_argv:
+          type: array
+          items: { type: string, maxLength: 4096 }
+        setup_argvs:
+          type: array
+          items:
+            type: array
+            items: { type: string, maxLength: 4096 }
+        cwd:
+          type: string
+        test_patterns:
+          type: array
+          items: { type: string }
+      additionalProperties: true
+    TestRunStatus:
+      type: object
+      required: [enabled, reason, command, source]
+      properties:
+        enabled:
+          type: boolean
+        reason:
+          type: [string, 'null']
+        command:
+          type: [array, 'null']
+          items: { type: string }
+        source:
+          type: string
+          enum: [explicit, setup, detected]
+      additionalProperties: false
+    TestSetupView:
+      type: object
+      required: [status, command, setup_commands, prepare_command, cwd, executables, sources, confirmed_at, attempts, outside_installs, missing, trigger, investigated_at]
+      properties:
+        status:
+          type: string
+          enum: [ready, tests_failing, no_tests, no_language, needs_approval, unresolved]
+        command:
+          type: [array, 'null']
+          items: { type: string }
+        setup_commands:
+          type: array
+          items:
+            type: array
+            items: { type: string }
+        prepare_command:
+          type: [array, 'null']
+          items: { type: string }
+        cwd:
+          type: string
+        executables:
+          type: object
+          additionalProperties:
+            type: object
+            required: [path, version]
+            properties:
+              path: { type: string }
+              version: { type: [string, 'null'] }
+            additionalProperties: false
+        sources:
+          type: array
+          items: { type: string }
+        confirmed_at:
+          type: [string, 'null']
+        attempts:
+          type: array
+          items:
+            type: object
+            required: [by, argv, exit_code, result, summary, at]
+            properties:
+              by: { type: string, enum: [agent, core] }
+              argv: { type: array, items: { type: string } }
+              exit_code: { type: [integer, 'null'] }
+              result: { type: string }
+              summary: { type: string }
+              at: { type: string }
+            additionalProperties: false
+        outside_installs:
+          type: array
+          items:
+            type: object
+            required: [argv, reason, approved_at]
+            properties:
+              argv: { type: array, items: { type: string } }
+              reason: { type: string }
+              approved_at: { type: [string, 'null'] }
+            additionalProperties: false
+        missing:
+          type: array
+          items: { type: string }
+        trigger:
+          type: string
+        investigated_at:
+          type: string
       additionalProperties: false
     ProjectListResponse:
       allOf:
@@ -6061,12 +6321,18 @@ components:
           maxLength: 4096
         auto_push:
           type: boolean
+        commit_language:
+          type: [string, 'null']
+          enum: [ja, en, null]
+          description: Language of the commit messages Core writes. null means not set.
         post_merge_command:
           type: [array, 'null']
           maxItems: 64
           items:
             type: string
             maxLength: 4096
+        test_run:
+          $ref: '#/components/schemas/TestRunSettingsInput'
       additionalProperties: false
     UpdateProjectCommand:
       allOf:
@@ -6203,7 +6469,7 @@ components:
       properties:
         role:
           type: string
-          enum: [advisor, manager, designer, lead_designer, worker, reviewer, librarian, curator]
+          enum: [advisor, manager, designer, lead_designer, worker, fixer, reviewer, librarian, curator]
         provider:
           type: string
         model:
@@ -6229,6 +6495,7 @@ components:
             - designer
             - lead_designer
             - worker
+            - fixer
             - reviewer
             - librarian
             - curator

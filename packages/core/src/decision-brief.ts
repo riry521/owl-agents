@@ -1,8 +1,9 @@
-import { OUTPUT_FORMAT_INVALID_ERROR_KEY, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_OPTION_KEY, REVIEW_RERUN_OPTION_KEY, type DesignBlockCauseKind, type DesignBlockedReport } from "@owl/shared";
+import { OUTPUT_FORMAT_INVALID_ERROR_KEY, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_OPTION_KEY, REVIEW_RERUN_OPTION_KEY, TEST_SETUP_APPROVE_OPTION_KEY, TEST_SETUP_RETRY_OPTION_KEY, type DesignBlockCauseKind, type DesignBlockedReport } from "@owl/shared";
 import { DEFAULT_TEST_RUN_SETTINGS } from "../../shared/dist/test-run-settings.js";
 import { validationError } from "./errors";
 import { formatMissingList } from "./final-verdict";
 import type { OwnerLanguage } from "./owner-language";
+import type { TestEnvironmentBlock } from "./test-environment";
 import type { JsonObject } from "./types";
 
 /**
@@ -212,6 +213,27 @@ const TEXT = {
         description: "Workを再開し、Managerがもう一度計画を立て直します。下の欄に指示を書くと、それもManagerに渡ります。",
       },
     },
+    testEnvironment: {
+      subject: { task: (title: string) => `タスク「${title}」`, work: "統合したWorkブランチ" },
+      reason: (subject: string, signal: string) => `${subject}のテストを動かせませんでした。原因はコードではなく、テストを動かす環境です（${signal}）。調べ直しましたが、直りませんでした。`,
+      explicit: "このProjectのテストコマンドはOwnerが指定したものです。コマンドは変えず、環境だけを直そうとしました。",
+      question: (subject: string, approval: boolean) => (approval ? `Projectの外へのインストールを承認して、${subject}の検証をもう一度実行しますか？` : `${subject}の検証をもう一度実行しますか？`),
+      taskState: "Workerの作業は変更していません。タスクは判断待ちで止まっています。",
+      workState: "個々のタスクは検証に合格しています。統合した結果のテストが動かず、Workは判断待ちで止まっています。",
+      failed: (argv: string, evidence: string) => `動かなかったコマンド: ${argv}\n出力の末尾: ${evidence}`,
+      tried: (lines: string) => `調べた内容:\n${lines}`,
+      noTried: "調べた内容は記録されていません。",
+      missing: (lines: string) => `足りないもの:\n${lines}`,
+      approval: (lines: string) => `承認が必要なインストール:\n${lines}`,
+      approve: {
+        label: "インストールを承認して再実行する",
+        description: (commands: string) => `次のコマンドの実行を承認し、検証をもう一度実行します: ${commands}`,
+      },
+      retry: {
+        label: "もう一度実行する",
+        description: "環境を直した後などに、検証をもう一度実行します。下の欄に書いた内容は記録されます。",
+      },
+    },
   },
   en: {
     cancelWork: {
@@ -337,6 +359,27 @@ const TEXT = {
       workRetry: {
         label: "Replan",
         description: "Resumes the Work and the Manager replans. Anything you write below is passed to the Manager as well.",
+      },
+    },
+    testEnvironment: {
+      subject: { task: (title: string) => `The Task "${title}"`, work: "The integrated Work branch" },
+      reason: (subject: string, signal: string) => `${subject} could not run its tests. The cause is the environment the tests run in, not the code (${signal}). Core investigated again, but the problem remains.`,
+      explicit: "The Project's test command was set by the Owner. Core kept the command and tried to repair only the environment.",
+      question: (subject: string, approval: boolean) => (approval ? `Approve the installs outside the Project and run the verification of ${subject.toLowerCase()} again?` : `Run the verification of ${subject.toLowerCase()} again?`),
+      taskState: "The Worker's work is unchanged. The Task is stopped, waiting for your decision.",
+      workState: "Each Task passed its verification. The tests of the integrated result could not run, so the Work is stopped, waiting for your decision.",
+      failed: (argv: string, evidence: string) => `Command that did not run: ${argv}\nEnd of its output: ${evidence}`,
+      tried: (lines: string) => `What was tried:\n${lines}`,
+      noTried: "Nothing tried was recorded.",
+      missing: (lines: string) => `What is missing:\n${lines}`,
+      approval: (lines: string) => `Installs that need your approval:\n${lines}`,
+      approve: {
+        label: "Approve the installs and run again",
+        description: (commands: string) => `Approves running these commands, then runs the verification again: ${commands}`,
+      },
+      retry: {
+        label: "Run again",
+        description: "Runs the verification again, for example after you fixed the environment. Anything you write below is recorded.",
       },
     },
   },
@@ -551,6 +594,40 @@ export function coreTaskDecisionBrief(taskTitle: string, payload: JsonObject, la
     tried: errorKey ? t.errorKey(errorKey) : t.noErrorKey,
     options: [option("retry", t.retry), cancelWorkOption(language)],
     recommended: null,
+  };
+}
+
+export interface TestEnvironmentBriefInput {
+  readonly subject: { readonly kind: "task"; readonly title: string } | { readonly kind: "work" };
+  readonly block: TestEnvironmentBlock;
+}
+
+/**
+ * The Decision Core opens when a test failure came from the environment and the re-investigations did not fix it.
+ * The approve option exists only while an install outside the Project waits for approval.
+ */
+export function testEnvironmentBrief(input: TestEnvironmentBriefInput, language: OwnerLanguage): DecisionBrief {
+  const t = TEXT[language].testEnvironment;
+  const { block } = input;
+  const subject = input.subject.kind === "task" ? t.subject.task(input.subject.title) : t.subject.work;
+  const approval = block.outside_installs.length > 0;
+  const commands = block.outside_installs.map((install) => install.argv.join(" "));
+  const bullets = (lines: readonly string[]): string => lines.map((line) => `- ${line}`).join("\n");
+  const tried = [
+    t.failed(block.argv.join(" "), tailChars(block.evidence)),
+    block.tried.length > 0 ? t.tried(bullets(block.tried)) : t.noTried,
+    block.missing.length > 0 ? t.missing(bullets(block.missing)) : "",
+    approval ? t.approval(bullets(block.outside_installs.map((install) => `${install.argv.join(" ")} (${install.reason})`))) : "",
+  ].filter(Boolean).join("\n");
+  const retry = option(TEST_SETUP_RETRY_OPTION_KEY, t.retry);
+  const approve = { ...option(TEST_SETUP_APPROVE_OPTION_KEY, { label: t.approve.label, description: t.approve.description(commands.join(", ")) }), installs: block.outside_installs.map((install) => ({ argv: [...install.argv], reason: install.reason })) };
+  return {
+    reason: [t.reason(subject, block.signal), block.explicit ? t.explicit : ""].filter(Boolean).join("\n"),
+    question: t.question(subject, approval),
+    current_state: input.subject.kind === "task" ? t.taskState : t.workState,
+    tried,
+    options: approval ? [approve, retry, cancelWorkOption(language)] : [retry, cancelWorkOption(language)],
+    recommended: approval ? TEST_SETUP_APPROVE_OPTION_KEY : TEST_SETUP_RETRY_OPTION_KEY,
   };
 }
 

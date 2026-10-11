@@ -237,7 +237,7 @@ test("OpenAPI TaskDetail declares prerequisite and stop_reason with the same typ
   const detail = yamlBlock(openapi, "    TaskDetail:");
   const summary = yamlBlock(openapi, "    TaskSummary:");
   assert.match(detail, /additionalProperties: false/u);
-  for (const name of ["prerequisite", "stop_reason"]) {
+  for (const name of ["prerequisite", "stop_reason", "fixer_escalation"]) {
     const field = (block) => block.match(new RegExp(`\\n        ${name}:\\n(?:          .*\\n?)+`, "u"))?.[0];
     assert.ok(field(detail), name);
     assert.equal(field(detail), field(summary), name);
@@ -277,6 +277,16 @@ test("a real GET /tasks/{task_id} response fits the OpenAPI TaskDetail (required
     if (ref === "Version") assert.ok(Number.isInteger(data[name]), name);
   }
   assert.ok(Array.isArray(data.depends_on) && data.depends_on.every((id) => typeof id === "string"));
+
+  // fixer_escalation is null until the Task moved to the Fixer, then carries the rejection count, in both TaskDetail and TaskSummary.
+  assert.ok(properties.includes("fixer_escalation"));
+  assert.equal(data.fixer_escalation, null);
+  await db.createWriteLane().transact((tx) => tx.run("UPDATE tasks SET fixer_escalated_rejections = 2 WHERE id = ?", taskId));
+  const escalated = (await (await server.request("GET", `/api/v1/tasks/${taskId}`)).json()).data;
+  assert.deepEqual(escalated.fixer_escalation, { rejections: 2 });
+  assert.deepEqual(Object.keys(escalated).filter((key) => !properties.includes(key)), []);
+  const listed = (await (await server.request("GET", `/api/v1/works/${created.data.work_id}/tasks`)).json()).data;
+  assert.deepEqual(listed.find((task) => task.id === taskId).fixer_escalation, { rejections: 2 });
 });
 
 test("OpenAPI documents POST /advisor/workspace and AdvisorWorkspacePreparation, and the server serves it", () => {

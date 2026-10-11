@@ -21,7 +21,7 @@ function loadProjectManagementModule() {
   return loaded.exports;
 }
 
-const { buildProjectUpdateInput, deletionDialogModel, formatCommandLine, impactFromError, isProjectAutoPushEnabled, parseCommandLine, postMergeCommandPlaceholder, projectEditForm, projectErrorKey } = loadProjectManagementModule();
+const { buildProjectUpdateInput, deletionDialogModel, formatCommandLine, impactFromError, isProjectAutoPushEnabled, parseCommandLine, postMergeCommandPlaceholder, projectEditForm, investigateNoticeKey, investigateOutcome, projectErrorKey } = loadProjectManagementModule();
 
 function project(overrides = {}) {
   return { id: 'project-id', name: 'Project', canonical_path: '/projects/project', ...overrides };
@@ -76,6 +76,16 @@ test('buildProjectUpdateInput includes a boolean auto_push only when the toggle 
     path: '/projects/project',
     autoPush: true,
   }), null);
+});
+
+test('buildProjectUpdateInput sends commit_language as ja, en or null only when it changes', () => {
+  const base = { name: 'Project', path: '/projects/project' };
+  assert.deepEqual(buildProjectUpdateInput(project(), { ...base, commitLanguage: 'ja' }), { commit_language: 'ja' });
+  assert.deepEqual(buildProjectUpdateInput(project({ commit_language: 'ja' }), { ...base, commitLanguage: 'en' }), { commit_language: 'en' });
+  assert.deepEqual(buildProjectUpdateInput(project({ commit_language: 'en' }), { ...base, commitLanguage: null }), { commit_language: null });
+  assert.equal(buildProjectUpdateInput(project({ commit_language: 'en' }), { ...base, commitLanguage: 'en' }), null);
+  assert.equal(projectEditForm(project({ commit_language: 'en' })).commitLanguage, 'en');
+  assert.equal(projectEditForm(project()).commitLanguage, null);
 });
 
 test('buildProjectUpdateInput rejects empty required fields', () => {
@@ -342,7 +352,7 @@ test('deleteProject DELETEs /projects/{id} with confirmed_work_count and getProj
 // Minimal render harness: hooks live in slots that survive re-renders, effects
 // run after each render when their deps change, and the patched JSX runtime
 // records every element so tests can call the handlers React would call.
-function createView() {
+function createView(props = {}) {
   const slots = [];
   let index = 0;
   let elements = [];
@@ -372,8 +382,13 @@ function createView() {
     useEffect(fn, deps) {
       const i = index++;
       if (slots[i] && sameDeps(slots[i].deps, deps)) return;
-      slots[i] = { deps };
-      pendingEffects.push(fn);
+      // The holder outlives re-renders so a queued effect always cleans up the one before it.
+      const holder = slots[i]?.holder ?? {};
+      slots[i] = { deps, holder };
+      pendingEffects.push(() => {
+        holder.cleanup?.();
+        holder.cleanup = fn();
+      });
     },
   };
 
@@ -410,7 +425,7 @@ function createView() {
   function renderOnce() {
     index = 0;
     elements = [];
-    view.html = renderToStaticMarkup(React.createElement(loaded.exports.ProjectsView));
+    view.html = renderToStaticMarkup(React.createElement(loaded.exports.ProjectsView, props));
   }
   const view = {
     html: '',
@@ -557,6 +572,38 @@ test('ProjectsView links each running Work that blocks deletion to its Work deta
   }
 });
 
+test('テストの実行方法の3つの選択肢は test_run: null / { mode: whole, whole_argv } / { mode: off } を送り、per_file の指定は変えない限り送らない', () => {
+  const build = (projectOverrides, formOverrides) => buildProjectUpdateInput(project(projectOverrides), { ...projectEditForm(project(projectOverrides)), ...formOverrides });
+  assert.deepEqual(build({ test_run: { mode: 'off' } }, { testRunMode: 'auto' }), { test_run: null });
+  assert.deepEqual(build({}, { testRunMode: 'command', testRunCommand: 'make "test all"' }), { test_run: { mode: 'whole', whole_argv: ['make', 'test all'] } });
+  assert.deepEqual(build({}, { testRunMode: 'off' }), { test_run: { mode: 'off' } });
+  assert.equal(build({ test_run: { mode: 'whole', whole_argv: ['make', 'test'] } }, {}), null);
+  assert.deepEqual(build({ test_run: { mode: 'whole', whole_argv: ['make', 'test'] } }, { testRunCommand: 'make check' }), { test_run: { mode: 'whole', whole_argv: ['make', 'check'] } });
+  const perFile = { mode: 'per_file', file_argv: ['node', '--test', '{file}'] };
+  assert.equal(projectEditForm(project({ test_run: perFile })).testRunMode, 'custom');
+  assert.equal(build({ test_run: perFile }, {}), null);
+  assert.deepEqual(build({ test_run: perFile }, { name: 'Renamed' }), { name: 'Renamed' });
+  assert.deepEqual(build({ test_run: perFile }, { testRunMode: 'auto' }), { test_run: null });
+  assert.deepEqual(build({}, { testRunMode: 'command', testRunCommand: '  ' }), { error: 'testCommandRequired' });
+  assert.deepEqual(build({}, { testRunMode: 'command', testRunCommand: "make 'x" }), { error: 'commandInvalid' });
+});
+
+test('テストの実行方法と調べた設定の文言が ja/en にそろっている', () => {
+  const statuses = ['ready', 'tests_failing', 'no_tests', 'no_language', 'needs_approval', 'unresolved'];
+  const keys = [
+    'testRunModeLabel', 'testRunModeAuto', 'testRunModeCommand', 'testRunModeOff', 'testRunModeCustom', 'testRunCommandLabel', 'testRunCommandRequired', 'testRunModeHelp',
+    'testSetupInvestigate', 'testSetupInvestigating', ...['not_a_git_checkout', 'investigation_unavailable', 'investigation_failed', 'unknown'].map((reason) => `testSetupFailReason_${reason}`), 'testSetupInvestigateAccepted', 'testSetupInvestigateDone', 'testSetupInvestigateFailed', 'testSetupInvestigateTimeout',
+    ...['explicit_test_run', 'runner_unavailable', 'provider_paused'].map((reason) => `testSetupInvestigateUnavailable_${reason}`),
+    ...statuses.map((status) => `testSetupStatus_${status}`),
+  ];
+  for (const lang of ['ja', 'en']) {
+    const projects = JSON.parse(readFileSync(join(repoRoot, `apps/web/lib/i18n/${lang}.json`), 'utf8')).projects;
+    for (const key of keys) assert.ok(projects[key], `${lang}: ${key}`);
+  }
+  const ja = JSON.parse(readFileSync(join(repoRoot, 'apps/web/lib/i18n/ja.json'), 'utf8')).projects;
+  assert.equal(ja.testRunSourceSetup, '調べて確かめた設定');
+});
+
 test('test_run_status.reason の識別子はすべて ja/en の辞書に説明がある', () => {
   const coreSrc = ['test-detection-rules.ts', 'test-detection.ts']
     .map((f) => readFileSync(join(repoRoot, 'packages/core/src', f), 'utf8')).join('\n');
@@ -573,5 +620,263 @@ test('test_run_status.reason の識別子はすべて ja/en の辞書に説明�
       assert.ok(text, `${lang}: ${reason}`);
       assert.notEqual(text, reason);
     }
+  }
+});
+
+test('investigateNoticeKey は 202 を受け付け表示に、409 test_setup_unavailable を reason ごとの表示にする', () => {
+  assert.equal(investigateNoticeKey(null), 'projects.testSetupInvestigateAccepted');
+  for (const reason of ['explicit_test_run', 'runner_unavailable', 'provider_paused']) {
+    assert.equal(investigateNoticeKey({ code: 'test_setup_unavailable', details: { reason } }), `projects.testSetupInvestigateUnavailable_${reason}`);
+  }
+  assert.equal(investigateNoticeKey({ code: 'project_not_found' }), 'projects.errorNotFound');
+});
+
+const detailedSetup = (overrides = {}) => ({
+  status: 'ready', command: ['pytest'], setup_commands: [['uv', 'sync-marker']], prepare_command: null, cwd: 'cwd-marker',
+  executables: {}, sources: ['sources-marker.md'], confirmed_at: null,
+  attempts: [{ by: 'agent', argv: ['attempt-marker'], exit_code: 0, result: 'passed', summary: '', at: '2026-10-10T00:00:00Z' }],
+  outside_installs: [{ argv: ['outside-marker'], reason: 'r', approved_at: null }], missing: ['missing-marker'],
+  trigger: 'manual', investigated_at: '2026-10-10T00:00:00Z', ...overrides,
+});
+const testRunStatus = { enabled: true, reason: null, command: ['run-marker'], source: 'setup' };
+
+test('investigateOutcome はサーバーの調査状態から、調査中・完了・失敗（記録なしの終了を含む）を決める', () => {
+  assert.deepEqual(investigateOutcome({ running: true, outcome: null }), { state: 'pending' });
+  assert.deepEqual(investigateOutcome({ running: false, outcome: { saved: true, status: 'ready', reason: null } }), { state: 'done' });
+  assert.deepEqual(investigateOutcome({ running: false, outcome: { saved: true, status: 'unresolved', reason: null } }), { state: 'failed', reason: 'unresolved' });
+  assert.deepEqual(investigateOutcome({ running: false, outcome: { saved: false, status: null, reason: 'not_a_git_checkout' } }), { state: 'failed', reason: 'not_a_git_checkout' });
+  assert.deepEqual(investigateOutcome({ running: false, outcome: null }), { state: 'failed', reason: 'unknown' });
+});
+
+test('ProjectsView の一覧にはテスト調査の表示もボタンも出ず、編集画面の中に設定とボタンがあり詳しいログは出ない', async () => {
+  const api = fakeProjectServer([project({ id: 'p1', name: 'Alpha', test_setup: detailedSetup(), test_run_status: testRunStatus })]);
+  try {
+    const view = createView();
+    await view.render();
+    assert.match(view.html, /Alpha/);
+    assert.match(view.html, /projects\.editAria/);
+    assert.doesNotMatch(view.html, /testSetup|testRunOn|testRunOff|run-marker/);
+
+    await view.click('button', byAria('projects.editAria{"name":"Alpha"}'));
+    assert.match(view.html, /projects\.testRunModeLabel/);
+    assert.match(view.html, /projects\.testRunOn/);
+    assert.match(view.html, /run-marker/);
+    assert.match(view.html, /projects\.testSetupInvestigate/);
+    assert.equal(view.find('button', byText('projects.testSetupInvestigate')).type, 'button');
+    assert.doesNotMatch(view.html, /sync-marker|cwd-marker|sources-marker|attempt-marker|outside-marker|missing-marker|testSetupAttempts|testSetupMissing|testSetupOutside/);
+  } finally {
+    api.restore();
+  }
+});
+
+function investigateServer(stateFor, initial = { running: false, outcome: null }) {
+  // stateFor receives how many state reads happened since the POST; before it the server answers `initial`.
+  let reads = 0;
+  let posted = false;
+  return installFakeApi((method, pathname) => {
+    if (method === 'POST') {
+      posted = true;
+      return { request_id: 'r', data: { project_id: 'p1', trigger: 'manual', accepted: true } };
+    }
+    if (pathname.endsWith('/test-setup/investigation')) {
+      if (!posted) return { request_id: 'r', data: { project_id: 'p1', ...initial } };
+      reads += 1;
+      return { request_id: 'r', data: { project_id: 'p1', ...stateFor(reads) } };
+    }
+    return { request_id: 'r', data: [project({ id: 'p1', name: 'Alpha', test_setup: detailedSetup() })], has_more: false };
+  });
+}
+const finished = (outcome) => ({ running: false, outcome });
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 40));
+const formHtml = (html) => {
+  const start = html.indexOf('class="project-edit"');
+  return html.slice(start, html.indexOf('</form>', start));
+};
+
+test('ProjectsView の調べ直しボタンは編集フォームの中で POST を1回だけ送り、受け付け・調査中のあと調査が終わると完了を出す', async () => {
+  const api = investigateServer((reads) => (reads >= 2 ? finished({ saved: true, status: 'ready', reason: null }) : { running: true, outcome: null }));
+  try {
+    const view = createView({ pollIntervalMs: 5, pollTimeoutMs: 10000 });
+    await view.render();
+    await view.click('button', byAria('projects.editAria{"name":"Alpha"}'));
+    await view.click('button', byText('projects.testSetupInvestigate'));
+    const posts = requestsOf(api, 'POST');
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].pathname, '/api/v1/projects/p1/test-setup/investigate');
+    assert.equal(requestsOf(api, 'PATCH').length, 0);
+    assert.match(formHtml(view.html), /projects\.testSetupInvestigateAccepted/);
+    assert.equal(view.find('button', byText('projects.testSetupInvestigate')).disabled, true);
+    await view.render();
+    await settle();
+    await view.render();
+    assert.match(formHtml(view.html), /projects\.testSetupInvestigateDone/);
+    assert.equal(view.find('button', byText('projects.testSetupInvestigate')).disabled, false);
+  } finally {
+    api.restore();
+  }
+});
+
+test('ProjectsView は記録の status が ready 以外、または記録を残さず終わった調査を失敗と理由で出す', async () => {
+  const cases = [
+    [{ saved: true, status: 'unresolved', reason: null }, 'unresolved'],
+    [{ saved: false, status: null, reason: 'not_a_git_checkout' }, 'not_a_git_checkout'],
+  ];
+  for (const [outcome, label] of cases) {
+    const api = investigateServer((reads) => (reads >= 1 ? finished(outcome) : { running: true, outcome: null }));
+    try {
+      const view = createView({ pollIntervalMs: 5, pollTimeoutMs: 10000 });
+      await view.render();
+      await view.click('button', byAria('projects.editAria{"name":"Alpha"}'));
+      await view.click('button', byText('projects.testSetupInvestigate'));
+      await view.render();
+      await settle();
+      await view.render();
+      assert.match(formHtml(view.html), /projects\.testSetupInvestigateFailed/);
+      assert.ok(formHtml(view.html).includes(label), label);
+    } finally {
+      api.restore();
+    }
+  }
+});
+
+test('ProjectsView は打ち切り時間を過ぎると調査中の文言を出し、調査の終了が分かるまでボタンを押せないままにする', async () => {
+  const api = investigateServer(() => ({ running: true, outcome: null }));
+  try {
+    const view = createView({ pollIntervalMs: 5, pollTimeoutMs: 20 });
+    await view.render();
+    await view.click('button', byAria('projects.editAria{"name":"Alpha"}'));
+    await view.click('button', byText('projects.testSetupInvestigate'));
+    await view.render();
+    await settle();
+    await view.render();
+    assert.match(formHtml(view.html), /projects\.testSetupInvestigateTimeout/);
+    assert.equal(view.find('button', byText('projects.testSetupInvestigate')).disabled, true);
+  } finally {
+    api.restore();
+  }
+});
+
+test('ProjectsView は POST の応答を待つあいだに編集をやめたら、応答のあとで状態も読み直しも始めない', async () => {
+  const api = investigateServer(() => ({ running: true, outcome: null }));
+  const okFetch = globalThis.fetch;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  globalThis.fetch = async (input, init = {}) => {
+    if (init.method === 'POST') await gate;
+    return okFetch(input, init);
+  };
+  try {
+    const view = createView({ pollIntervalMs: 5, pollTimeoutMs: 10000 });
+    await view.render();
+    await view.click('button', byAria('projects.editAria{"name":"Alpha"}'));
+    const stateReads = () => api.requests.filter((request) => request.pathname.endsWith('/test-setup/investigation')).length;
+    const readsOnOpen = stateReads();
+    const clicking = view.click('button', byText('projects.testSetupInvestigate'));
+    await view.click('button', byText('common.cancel'));
+    release();
+    await clicking;
+    await settle();
+    await view.render();
+    assert.equal(stateReads(), readsOnOpen);
+    assert.doesNotMatch(view.html, /testSetupInvestigateAccepted/);
+  } finally {
+    globalThis.fetch = okFetch;
+    api.restore();
+  }
+});
+
+test('ProjectsView は編集を開いたとき、調査中ならボタンを押せないまま読み直しを再開し、終わっていれば完了または失敗と理由を出す', async () => {
+  const cases = [
+    [{ running: true, outcome: null }, finished({ saved: true, status: 'ready', reason: null }), /projects\.testSetupInvestigateDone/],
+    [finished({ saved: false, status: null, reason: 'not_a_git_checkout' }), null, /projects\.testSetupInvestigateFailed.*not_a_git_checkout/],
+  ];
+  for (const [initial, later, expected] of cases) {
+    // The first read is the one made when the form opens; later reads come from the resumed polling.
+    let reads = 0;
+    const api = installFakeApi((method, pathname) => {
+      if (pathname.endsWith('/test-setup/investigation')) {
+        reads += 1;
+        return { request_id: 'r', data: { project_id: 'p1', ...(reads > 1 && later ? later : initial) } };
+      }
+      return { request_id: 'r', data: [project({ id: 'p1', name: 'Alpha', test_setup: detailedSetup() })], has_more: false };
+    });
+    try {
+      const view = createView({ pollIntervalMs: 5, pollTimeoutMs: 10000 });
+      await view.render();
+      await view.click('button', byAria('projects.editAria{"name":"Alpha"}'));
+      if (initial.running) {
+        assert.match(formHtml(view.html), /projects\.testSetupInvestigateAccepted/);
+        assert.equal(view.find('button', byText('projects.testSetupInvestigate')).disabled, true);
+        await view.render();
+        await settle();
+        await view.render();
+      }
+      assert.match(formHtml(view.html), expected);
+      assert.equal(view.find('button', byText('projects.testSetupInvestigate')).disabled, false);
+      assert.equal(requestsOf(api, 'POST').length, 0);
+    } finally {
+      api.restore();
+    }
+  }
+});
+
+test('ProjectsView は編集を開いて調査状態を読み終えるまでボタンを押せず、読めなかったときは理由と読み直しのボタンを出して押せないままにする', async () => {
+  const api = installFakeApi(() => ({ request_id: 'r', data: [project({ id: 'p1', name: 'Alpha', test_setup: detailedSetup() })], has_more: false }));
+  const okFetch = globalThis.fetch;
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  // The first state read is held until released and then fails; the next one finds that nothing ran.
+  let stateReads = 0;
+  globalThis.fetch = async (input, init = {}) => {
+    if (!String(input.url ?? input).endsWith('/test-setup/investigation')) return okFetch(input, init);
+    stateReads += 1;
+    if (stateReads === 1) {
+      await gate;
+      return new Response(JSON.stringify({ error: { code: 'internal_error', message: 'x' } }), { status: 500 });
+    }
+    return new Response(JSON.stringify({ request_id: 'r', data: { project_id: 'p1', running: false, outcome: null } }), { status: 200 });
+  };
+  try {
+    const view = createView({ pollIntervalMs: 5, pollTimeoutMs: 10000 });
+    await view.render();
+    await view.click('button', byAria('projects.editAria{"name":"Alpha"}'));
+    assert.match(formHtml(view.html), /projects\.testSetupStateLoading/);
+    assert.equal(view.find('button', byText('projects.testSetupInvestigate')).disabled, true);
+
+    release();
+    await settle();
+    await view.render();
+    assert.match(formHtml(view.html), /projects\.testSetupStateLoadFailed.*projects\.errorDefault/);
+    assert.equal(view.find('button', byText('projects.testSetupInvestigate')).disabled, true);
+
+    await view.click('button', byText('projects.testSetupStateReload'));
+    await view.render();
+    assert.equal(stateReads, 2);
+    assert.doesNotMatch(formHtml(view.html), /testSetupState/);
+    assert.equal(view.find('button', byText('projects.testSetupInvestigate')).disabled, false);
+    assert.equal(requestsOf(api, 'POST').length, 0);
+  } finally {
+    globalThis.fetch = okFetch;
+    api.restore();
+  }
+});
+
+test('ProjectsView は 409 test_setup_unavailable の reason ごとの文言を編集フォームの中に出す', async () => {
+  const api = investigateServer(() => ({ running: true, outcome: null }));
+  const okFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init = {}) => (init.method === 'POST' && !String(input.url ?? input).includes('runtime-config')
+    ? new Response(JSON.stringify({ error: { code: 'test_setup_unavailable', message: 'x', details: { reason: 'provider_paused' } } }), { status: 409 })
+    : okFetch(input, init));
+  try {
+    const view = createView({ pollIntervalMs: 5, pollTimeoutMs: 10000 });
+    await view.render();
+    await view.click('button', byAria('projects.editAria{"name":"Alpha"}'));
+    await view.click('button', byText('projects.testSetupInvestigate'));
+    assert.match(formHtml(view.html), /projects\.testSetupInvestigateUnavailable_provider_paused/);
+    assert.equal(view.find('button', byText('projects.testSetupInvestigate')).disabled, false);
+  } finally {
+    globalThis.fetch = okFetch;
+    api.restore();
   }
 });

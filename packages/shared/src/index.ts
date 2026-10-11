@@ -619,7 +619,7 @@ export * from "./acceptance-criteria.js";
 export * from "./test-policy.js";
 export * from "./advisor-api-policy.js";
 export { OWL_API_MCP_SERVER_NAME, OWL_API_MCP_TOOL_TIMEOUT_MS, OWL_API_MCP_ENV_NAMES, buildOwlApiMcpArgs } from "./owl-api-mcp-args.js";
-export { DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, OUTPUT_RESUBMIT_LIMIT_SETTINGS_KEY, REVIEW_RERUN_OPTION_KEY,REPORT_FORMAT_INVALID_ERROR_KEY, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_OPTION_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY } from "./report-resubmit.js";
+export { DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, OUTPUT_RESUBMIT_LIMIT_SETTINGS_KEY, REVIEW_RERUN_OPTION_KEY, TEST_SETUP_APPROVE_OPTION_KEY, TEST_SETUP_RETRY_OPTION_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_OPTION_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY } from "./report-resubmit.js";
 export * from "./role-schema.js";
 export {
   EXTERNAL_BLOCKER_EVENT,
@@ -640,3 +640,12 @@ export {
 } from "./design-blocked.js";
 
 export { defuseTags, EXTERNAL_DATA_ATTR, externalJsonBlock } from "./external-data.js";
+export {
+  DEFAULT_TEST_SETUP_SETTINGS,
+  TEST_SETUP_ROLES,
+  TEST_SETUP_SETTINGS_KEY,
+  readTestSetupSettings,
+  type TestSetupBootstrap,
+  type TestSetupRole,
+  type TestSetupSettings,
+} from "./test-setup-settings.js";

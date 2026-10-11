@@ -3,6 +3,8 @@ import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 
 import { DEFAULT_TEST_RUN_SETTINGS, readTestRunSettings, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
+import { DEFAULT_TEST_SETUP_SETTINGS } from "../../shared/dist/test-setup-settings.js";
+import { testExecutables, withExecutables, type TestSetupMatch, type TestSetupSelection } from "./test-setup.js";
 import { testRunSettingsFromJson } from "./test-runs.js";
 
 import {
@@ -133,9 +135,21 @@ export interface StoredTestDetection extends TestDetection {
   readonly detected_at: string;
 }
 
+/** Which commands a run counts: "all" = the whole run; { only } = just these setup commands (an Owner test_run repaired by a setup). */
+export type TestRunGate = "all" | { readonly only: readonly (readonly string[])[] };
+
+interface ResolutionExtras {
+  readonly save: StoredTestDetection | null;
+  /** How the used record matched this checkout; null when none was used. */
+  readonly setup_match: TestSetupMatch | null;
+  /** True when a passing run should make the used record "ready" for this checkout. */
+  readonly adopt_on_pass: boolean;
+  readonly gate: TestRunGate;
+}
+
 export type TestRunResolution =
-  | { readonly enabled: true; readonly source: "explicit" | "detected"; readonly settings: TestRunSettings; readonly save: StoredTestDetection | null }
-  | { readonly enabled: false; readonly source: "explicit" | "detected"; readonly reason: string; readonly save: StoredTestDetection | null };
+  | ({ readonly enabled: true; readonly source: "explicit" | "setup" | "detected"; readonly settings: TestRunSettings } & ResolutionExtras)
+  | ({ readonly enabled: false; readonly source: "explicit" | "setup" | "detected"; readonly reason: string } & ResolutionExtras);
 
 function storedDetection(json: string | null): StoredTestDetection | null {
   if (json === null) return null;
@@ -147,9 +161,24 @@ function storedDetection(json: string | null): StoredTestDetection | null {
   }
 }
 
+/** Every argv of the settings with "{name}" replaced by its executable, and the setup commands put first. */
+function withSetupExecutables(settings: TestRunSettings, executables: Readonly<Record<string, string>>, setupArgvs: readonly (readonly string[])[]): TestRunSettings {
+  const replace = (argv: readonly string[]): string[] => withExecutables(argv, executables);
+  return {
+    ...settings,
+    prepare_argv: replace(settings.prepare_argv),
+    file_argv: replace(settings.file_argv),
+    whole_argv: replace(settings.whole_argv),
+    setup_argvs: [...setupArgvs, ...settings.setup_argvs].map(replace),
+  };
+}
+
+const NONE = { save: null, setup_match: null, adopt_on_pass: false, gate: "all" } as const;
+
 /**
- * How to run a Project's tests in `root`: the Owner's explicit test_run first, then the saved detection while the
- * rules and the marker files are unchanged, otherwise a fresh detection (returned in `save` for the caller to store).
+ * How to run a Project's tests in `root`: the Owner's explicit test_run first, then a saved setup record, then the saved
+ * detection while the rules and the marker files are unchanged, otherwise a fresh detection (returned in `save`).
+ * "{python}" and other "{name}" executables are replaced from the record, else from default_executables.
  */
 export function resolveTestRun(input: {
   readonly explicit_json: string | null;
@@ -158,21 +187,48 @@ export function resolveTestRun(input: {
   readonly rules?: TestDetectionRules;
   readonly now: string;
   readonly warn?: (message: string) => void;
+  /** The record selected for this checkout (null = none). */
+  readonly setup?: TestSetupSelection | null;
+  readonly default_executables?: Readonly<Record<string, string>>;
 }): TestRunResolution {
   const rules = input.rules ?? DEFAULT_TEST_DETECTION_RULES;
+  const selection = input.setup ?? null;
+  const executables = testExecutables(selection?.setup ?? null, input.root, input.default_executables ?? DEFAULT_TEST_SETUP_SETTINGS.default_executables);
+  const recorded = selection === null ? null : readTestRunSettings(selection.setup.test_run ?? {}, input.warn);
   if (input.explicit_json !== null) {
     const settings = testRunSettingsFromJson(input.explicit_json, input.warn);
-    if (settings === null) return { enabled: false, source: "explicit", reason: "invalid_settings", save: null };
-    if (settings.mode === "off") return { enabled: false, source: "explicit", reason: "explicit_off", save: null };
-    return { enabled: true, source: "explicit", settings, save: null };
+    if (settings === null) return { enabled: false, source: "explicit", reason: "invalid_settings", ...NONE };
+    if (settings.mode === "off") return { enabled: false, source: "explicit", reason: "explicit_off", ...NONE };
+    const repair = selection !== null && selection.match === "explicit" && recorded !== null ? recorded.setup_argvs : [];
+    return {
+      enabled: true,
+      source: "explicit",
+      settings: withSetupExecutables(settings, executables, repair),
+      save: null,
+      setup_match: repair.length > 0 ? "explicit" : null,
+      adopt_on_pass: false,
+      gate: { only: repair.map((argv) => withExecutables(argv, executables)) },
+    };
+  }
+  if (selection !== null && recorded !== null) {
+    const { status } = selection.setup;
+    const adopt_on_pass = status === "tests_failing" || selection.match === "tests_changed";
+    const extras = { save: null, setup_match: selection.match, adopt_on_pass, gate: "all" } as const;
+    if (status === "no_language") return { enabled: false, source: "setup", reason: "setup_no_language", ...extras };
+    if (status === "no_tests" && selection.match !== "tests_changed") return { enabled: false, source: "setup", reason: "setup_no_tests", ...extras };
+    if (status === "ready" || status === "tests_failing" || status === "no_tests") {
+      if (recorded.mode === "off") return { enabled: false, source: "setup", reason: "setup_off", ...extras };
+      return { enabled: true, source: "setup", settings: withSetupExecutables(recorded, executables, []), ...extras };
+    }
   }
   const read = markerReader(input.root, rules.max_file_bytes);
   const saved = storedDetection(input.detected_json);
   const current = saved !== null && saved.rules_version === testDetectionRulesVersion(rules) && saved.marker_digest === testDetectionMarkerDigest(read, rules);
   const detection = current ? saved : detectTestRun(read, rules);
   const save = current ? null : { ...detection, detected_at: input.now };
-  if (!detection.enabled || detection.settings === null) return { enabled: false, source: "detected", reason: detection.reason ?? "no_test_marker", save };
-  return { enabled: true, source: "detected", settings: readTestRunSettings(detection.settings, input.warn), save };
+  const extras = { save, setup_match: null, adopt_on_pass: false, gate: "all" } as const;
+  if (!detection.enabled || detection.settings === null) return { enabled: false, source: "detected", reason: detection.reason ?? "no_test_marker", ...extras };
+  return { enabled: true, source: "detected", settings: withSetupExecutables(readTestRunSettings(detection.settings, input.warn), executables, []), ...extras };
 }
 
 /** One argv as a shell command line; an argument with other characters is single-quoted. */
@@ -191,12 +247,14 @@ export function reportCheckCommands(input: {
   readonly detected_json: string | null;
   readonly root: string;
   readonly rules?: TestDetectionRules;
+  readonly setup?: TestSetupSelection | null;
+  readonly default_executables?: Readonly<Record<string, string>>;
 }): string[] {
   if (input.configured.length > 0) return [...input.configured];
   const resolved = resolveTestRun({ ...input, now: new Date().toISOString() });
   if (!resolved.enabled) return [];
   const { settings } = resolved;
-  return [settings.prepare_argv, settings.mode === "whole" ? settings.whole_argv : settings.file_argv]
+  return [...settings.setup_argvs, settings.prepare_argv, settings.mode === "whole" ? settings.whole_argv : settings.file_argv]
     .filter((argv) => argv.length > 0)
     .map(shellLine);
 }

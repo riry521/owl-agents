@@ -21,6 +21,8 @@ import { reviewLimits } from "./review-limits";
 import { previousFixSpots, reviewFocusSettings, reviewSpots, type ReviewSpot } from "./review-focus";
 import type { ReviewFocusSettings } from "../../shared/dist/review-focus-settings.js";
 import { remakeLimits } from "./remake-limits";
+import { fixerEscalation } from "./fixer-escalation";
+import type { FixerEscalationSettings } from "../../shared/dist/fixer-escalation-settings.js";
 import { progressGuard } from "./progress-guard";
 import { assignReplacementLineageInTransaction, lineageExternalBlockerReports, lineageGenerationCount, lineageReviewAttemptsExcluding, lineageUsage, parseLineageReset, restartLineageBudgetInTransaction } from "./task-lineage";
 import type { RemakeLimitSettings } from "../../shared/dist/remake-limit-settings.js";
@@ -122,6 +124,8 @@ export const TASK_TRANSITION_TABLE = [
   { row: 37, current: "waiting", guard: "prerequisite set and Core found it expired, unreachable or in sync conflict; mark kept for the Decision brief", event: "decision.opened", next: "judgement_waiting" },
   { row: 38, current: "waiting", guard: "prerequisite set and every condition holds; mark cleared, no_progress_count kept", event: "task.prerequisite_satisfied", next: "waiting" },
   { row: 39, current: "waiting/paused(paused_from=waiting)", guard: "prerequisite set and the Owner resumed it; mark cleared, no_progress_count=0", event: "task.prerequisite_resumed", next: "same state" },
+  { row: 40, current: "verifying", guard: "Core's test run failed for the test environment and the re-investigation did not fix it; the Task is not remade", event: "decision.opened", next: "judgement_waiting" },
+  { row: 41, current: "judgement_waiting", guard: "decision winner chose to run the verification again", event: "decision.resolved", next: "verifying" },
 ] as const;
 
 /**
@@ -155,6 +159,7 @@ export interface AgentRunRecordInput {
   readonly effort?: string | null;
   readonly invocation_id?: string;
   readonly design_tier?: "standard" | "lead" | null;
+  readonly worker_tier?: "standard" | "fixer" | null;
   /** The Task's base-sync-only mark (0/1) when this run was launched. */
   readonly base_sync_only?: number;
 }
@@ -343,6 +348,7 @@ function attemptPolicyConfig(options: TaskReducerOptions): AttemptPolicy.Attempt
     ...AttemptPolicy.DEFAULT_ATTEMPT_POLICY_CONFIG,
     reviewLimits: options.reviewLimits ?? AttemptPolicy.DEFAULT_ATTEMPT_POLICY_CONFIG.reviewLimits,
     reviewFocus: options.reviewFocus ?? AttemptPolicy.DEFAULT_ATTEMPT_POLICY_CONFIG.reviewFocus,
+    fixerAfterRejections: options.fixerEscalation?.after_review_rejections ?? AttemptPolicy.DEFAULT_ATTEMPT_POLICY_CONFIG.fixerAfterRejections,
     lineageLimits: options.lineage
       ? { reviewAttempts: options.lineage.limit, baseSyncReviewAttempts: options.lineage.baseSyncLimit, leadReviewRejections: options.lineage.leadRejectionLimit }
       : null,
@@ -505,6 +511,7 @@ export function reduceWork(row: WorkRow, command: WorkReducerCommand): Reduction
 export interface TaskReducerOptions {
     readonly reviewLimits?: ReviewLimitSettings;
     readonly reviewFocus?: ReviewFocusSettings;
+    readonly fixerEscalation?: FixerEscalationSettings;
     /** The fix_required reviews just before this one, newest first; read from the reviews table by reduceTaskInTransaction. */
     readonly fixHistory?: readonly (readonly ReviewSpot[])[];
     /** External blocker reports earlier in the lineage and the progress_guard limit; used only for EXTERNAL_BLOCKER_EVENT. */
@@ -830,6 +837,14 @@ export function reduceTask(
     return decided(taskResult(row, withTaskVersion(row, "judgement_waiting", now), ["decision_opened"]), payload.issuer === "manager" ? "manager_cannot_continue" : "core_cannot_continue");
   }
 
+  // Task row 40: the test environment is broken, not the code; the Owner decides before anything is remade.
+  if (row.status === "verifying" && event === "decision.opened") {
+    if (payload.issuer !== "core") {
+      reject(row, event, "A verifying Task can only be blocked by a Core Decision.");
+    }
+    return decided(taskResult(row, withTaskVersion(row, "judgement_waiting", now), ["decision_opened"]), "test_environment_blocked");
+  }
+
   // Task row 36: Core stops a launchable Task that reached the no-progress limit.
   if ((row.status === "ready" || row.status === "review_fix_waiting") && event === "decision.opened") {
     if (payload.issuer !== "core") {
@@ -881,6 +896,10 @@ export function reduceTask(
     // "Run only the Reviewer again": back to verifying, where Core launches a Reviewer for the unchanged report.
     if (payload.rerun_review === true) {
       return decided(taskResult(row, { ...withTaskVersion(row, "verifying", now), design_stop_json: null }, []), "owner_rerun_review");
+    }
+    // Task row 41: back to verifying, where Core runs the verification again on the unchanged report.
+    if (payload.rerun_verification === true) {
+      return decided(taskResult(row, { ...withTaskVersion(row, "verifying", now), design_stop_json: null }, []), "owner_rerun_verification");
     }
     const target: TaskState = requiredBoolean(payload, "dependencies_completed") && ownerAnsweredRemainder(row.prerequisite_json) === null ? "ready" : "waiting";
     return decided(taskResult(
@@ -1000,7 +1019,7 @@ function persistTaskRow(transaction: CoreWriteLaneTransaction, row: TaskRow): vo
            last_error_key = ?, last_error_generation = ?, review_round = ?, lead_designer_start_round = ?, reviewer_failure_count = ?, total_review_attempts = ?, base_sync_review_attempts = ?, lineage_generation = ?,
            worker_generation = ?, worktree_path = ?, worktree_state = ?,
            last_failure_class = ?, paused_from = ?, retry_no = ?, next_attempt_at = ?,
-           failed_by_dependency_task_id = ?, lead_review_rejections = ?, design_stop_json = ?, design_escalated = ?, review_attempts_refunded = ?, updated_at = ?
+           failed_by_dependency_task_id = ?, lead_review_rejections = ?, design_stop_json = ?, design_escalated = ?, review_attempts_refunded = ?, review_rejections = ?, fixer_escalated_rejections = ?, updated_at = ?
      WHERE id = ? AND state_version = ?`,
     row.status,
     row.state_version,
@@ -1026,6 +1045,8 @@ function persistTaskRow(transaction: CoreWriteLaneTransaction, row: TaskRow): vo
     row.design_stop_json ?? null,
     row.design_escalated ?? 0,
     row.review_attempts_refunded ?? 0,
+    row.review_rejections ?? 0,
+    row.fixer_escalated_rejections ?? null,
     row.updated_at,
     row.id,
     row.state_version - 1,
@@ -1216,6 +1237,21 @@ export function openRemakeLimitDecisionInTransaction(
     });
   }
   return decisionId;
+}
+
+/**
+ * Stop at a broken test environment: the Decision is opened for the Owner and the Work waits.
+ * A Task (verifying) goes to judgement_waiting without counting a remake (row 40); a Work-level
+ * failure has no Task to block (blockedTaskIds is empty).
+ */
+export function openTestEnvironmentDecisionInTransaction(
+  transaction: CoreWriteLaneTransaction,
+  input: { readonly workId: string; readonly taskId: string | null; readonly brief: DecisionBrief; readonly now: string },
+): string {
+  if (input.taskId !== null) {
+    reduceTaskInTransaction(transaction, input.taskId, { event: "decision.opened", payload: { blocks_task: true, issuer: "core", reason: input.brief.reason } });
+  }
+  return openRemakeLimitDecisionInTransaction(transaction, { workId: input.workId, blockedTaskIds: input.taskId === null ? [] : [input.taskId], brief: input.brief, now: input.now });
 }
 
 /**
@@ -1526,7 +1562,8 @@ export function reduceTaskInTransaction(
   const fixHistory = command.event === "review.failed" && objectPayload(command).verdict === "fix_required"
     ? previousFixSpots(transaction, row.id, reviewFocus.same_spot_threshold - 1)
     : undefined;
-  let result = reduceTask(row, command, { reviewLimits: reviewLimits(transaction), reviewFocus, fixHistory, lineage, externalBlocker, reviewAttemptsBase: reset?.review_attempts, refundedBase: reset?.review_attempts_refunded });
+  const fixerSettings = fixerEscalation(transaction);
+  let result = reduceTask(row, command, { reviewLimits: reviewLimits(transaction), reviewFocus, fixerEscalation: fixerSettings, fixHistory, lineage, externalBlocker, reviewAttemptsBase: reset?.review_attempts, refundedBase: reset?.review_attempts_refunded });
   if (row.manager_task_id?.startsWith(QUARANTINE_FIX_TASK_PREFIX) && result.side_effects.includes("core_decision_required")) {
     // A quarantine fix Task that cannot be fixed ends failed: no Decision, and the Work goes on.
     result = { ...taskResult(row, { ...result.next, status: "failed" }), changed: true };
@@ -1560,6 +1597,9 @@ export function reduceTaskInTransaction(
           same_error: result.next.same_error_count,
           retry_no: result.next.retry_no,
         },
+        ...(row.fixer_escalated_rejections == null && result.next.fixer_escalated_rejections != null
+          ? { fixer_escalation: { rejections: result.next.fixer_escalated_rejections, threshold: fixerSettings.after_review_rejections } }
+          : {}),
         ...(result.review_same_spot ? { same_spot_findings: result.review_same_spot } : {}),
         ...(result.review_budget ? { budget: { review_budget: result.review_budget } } : result.lineage_budget ? { budget: { lineage_budget: result.lineage_budget } } : result.design_block ? { budget: { design_block: { trigger: result.design_block.trigger, rejections: result.design_block.rejections, limit: result.design_block.limit } } } : {}),
       },
@@ -1613,6 +1653,7 @@ export function reduceTaskInTransaction(
       effort: typeof payload.effort === "string" ? payload.effort : null,
       invocation_id: invocationId,
       design_tier: row.type === "design" ? (row.lead_designer_start_round == null ? "standard" : "lead") : null,
+      worker_tier: row.type === "design" ? null : (row.fixer_escalated_rejections == null ? "standard" : "fixer"),
       base_sync_only: row.base_sync_only ?? 0,
     },
     result.next.updated_at);
@@ -2021,9 +2062,9 @@ function insertAgentRun(
   const id = input.id ?? createUlid();
   transaction.run(
     `INSERT INTO agent_runs
-       (id, work_id, task_id, role, provider, model, effort, design_tier, status,
+       (id, work_id, task_id, role, provider, model, effort, design_tier, worker_tier, status,
         fencing_token, base_sync_only, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'launch_pending', ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'launch_pending', ?, ?, ?, ?)`,
     id,
     input.work_id,
     input.task_id,
@@ -2032,6 +2073,7 @@ function insertAgentRun(
     input.model ?? "unknown",
     input.effort ?? null,
     input.design_tier ?? null,
+    input.worker_tier ?? null,
     input.invocation_id ?? id,
     input.base_sync_only ?? 0,
     now,
@@ -2803,6 +2845,7 @@ export interface ResolveDecisionInput {
   /** Hand the blocked Tasks to the Manager's replan instead of resuming their Workers. */
   readonly to_manager?: boolean;
   readonly rerun_review?: boolean;
+  readonly rerun_verification?: boolean;
   /** The answer is the Owner's instruction attached to the chosen option, so it need not equal the option label. */
   readonly option_note?: boolean;
   /** The Owner's instruction to a waiting Work answers the Decision, so a free-text answer is accepted even where the Decision offers only options. */
@@ -2928,7 +2971,7 @@ export function resolveDecisionInTransaction(
     if (row.status === "judgement_waiting") {
       reduceTaskInTransaction(transaction, taskId, {
         event: "decision.resolved",
-        payload: { winner_commit: true, dependencies_completed: dependenciesCompleted, ...(input.to_manager === true ? { to_manager: true } : {}), ...(input.rerun_review === true ? { rerun_review: true } : {}) },
+        payload: { winner_commit: true, dependencies_completed: dependenciesCompleted, ...(input.to_manager === true ? { to_manager: true } : {}), ...(input.rerun_review === true ? { rerun_review: true } : {}), ...(input.rerun_verification === true ? { rerun_verification: true } : {}) },
       });
       resumedTaskIds.push(taskId);
     }

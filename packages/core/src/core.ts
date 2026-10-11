@@ -122,6 +122,13 @@ import {
   type DependencySummarySettings,
 } from "../../shared/dist/dependency-summary-settings.js";
 import { remakeLimits } from "./remake-limits.js";
+import { fixerEscalation } from "./fixer-escalation.js";
+import {
+  FixerEscalationSettingsValidationError,
+  FIXER_ESCALATION_SETTINGS_KEY,
+  validateFixerEscalationSettings,
+  type FixerEscalationSettings,
+} from "../../shared/dist/fixer-escalation-settings.js";
 import { progressGuard } from "./progress-guard.js";
 import { metricsRuleCandidates, proposeFromMetrics } from "./learning-metrics.js";
 import { learningMetrics } from "./learning-metrics-settings.js";
@@ -281,15 +288,23 @@ import { createProviderPauseController, rethrowUnlessRateLimited, type ProviderP
 // Imported from the agent-runtime "types" submodule (not the package barrel) for the
 // same reason advisor-runtime.ts does: the barrel re-exports core-contract.d.ts, which
 // imports back from "../../core/dist/types.js" and trips TS5055 mid-compile.
-import { coreTestRunBrief } from "./core-test-run";
+import { coreTestRunBrief, workTestRunner } from "./core-test-run";
+import { TEST_SETUP_MANUAL_TRIGGER, TestSetupService } from "./test-setup-service.js";
 import { QUARANTINE_FIX_TASK_PREFIX } from "./test-quarantine";
 import type { BaseMergeConflict, ManagerTrigger, WorkerQuestion } from "@owl/shared";
 import { acceptanceCriteriaProblems, formatAdvisorMalformed, parseTaskNecessity, readStoredAcceptanceCriteria, renderAcceptanceCriteria, renderTaskNecessity, type AcceptanceCriterion, type TaskPlanContext, resolveInstanceId, type AdvisorSuggestedAction, type ProcessSkillsInstallCommand, type ProviderClient } from "@owl/shared";
 import { MEMORY_FOLDER_KINDS_SETTINGS_KEY, MEMORY_LIBRARIAN_BATCH_SETTINGS_KEY, MEMORY_MODE_SETTINGS_KEY, MEMORY_RECALL_LIMIT_SETTINGS_KEY, MEMORY_RECALL_MIN_SIMILARITY_SETTINGS_KEY, MemorySettingsValidationError, readMemoryFolderKinds, readMemoryLibrarianBatch, readMemoryMode, readMemoryRecallLimit, readMemoryRecallMinSimilarity, validateMemoryFolderKinds, type MemoryFolderKinds, type MemoryLibrarianBatch, type MemoryMode } from "@owl/shared";
-import { EXTERNAL_DATA_POLICY, externalJsonBlock, MEMORY_ARCHIVE_SETTINGS_KEY, readMemoryArchive, REVIEW_RERUN_OPTION_KEY } from "@owl/shared";
+import { EXTERNAL_DATA_POLICY, externalJsonBlock, MEMORY_ARCHIVE_SETTINGS_KEY, readMemoryArchive, REVIEW_RERUN_OPTION_KEY, TEST_SETUP_APPROVE_OPTION_KEY, TEST_SETUP_RETRY_OPTION_KEY } from "@owl/shared";
+import { approveOutsideInstalls } from "./test-environment";
+
+const isTestSetupOptionKey = (key: string | null): key is string => key === TEST_SETUP_APPROVE_OPTION_KEY || key === TEST_SETUP_RETRY_OPTION_KEY;
 import { validateTestRunSettings } from "../../shared/dist/test-run-settings.js";
 import { readTestPolicy, validateTestPolicy } from "../../shared/dist/test-policy.js";
 import { resolveTestRun } from "./test-detection.js";
+import { explicitTestRunDigest, readStoredTestSetup, testSetupView } from "./test-setup.js";
+import { testSetupSettings } from "./test-setup-settings.js";
+import { classifyInstallCommand, execInstallQuery, outsideWriteTargets, resolveInstallTarget, TestSetupRunRegistry, type InstallQuery, type TestSetupRunEntry } from "./test-setup-install-guard.js";
+import { GUARD_PATH_KEYS, GUARD_SHELL_COMMAND_KEYS, GUARD_SHELL_TOOL_NAMES, READ_ONLY_TOOL_NAMES } from "../../shared/dist/guard-inputs.js";
 import { matchDeniedCommand, reviewerDeniedCommands, REVIEWER_TEST_COMMAND_DENIED_MESSAGE, type ReviewerTestCommandCheck } from "./reviewer-test-guard.js";
 import { createChildRunScheduler, type ChildRunScheduler } from "./child-run-scheduler.js";
 import { TRANSIENT_RETRY_LIMIT } from "./attempt-policy.js";
@@ -555,6 +570,7 @@ interface TaskDbRow {
   prerequisite_json: string | null;
   prerequisite_since: string | null;
   stop_reason: string | null;
+  fixer_escalated_rejections: number | null;
   parent_task_id: string | null;
   acceptance: string;
   review_round: number;
@@ -586,6 +602,7 @@ interface AgentDbRow {
   task_id: string | null;
   role: string;
   design_tier: "standard" | "lead" | null;
+  worker_tier: "standard" | "fixer" | null;
   provider: string;
   model: string;
   effort: string | null;
@@ -608,6 +625,7 @@ interface ProjectDbRow {
   canonical_path: string;
   base_branch: string;
   auto_push: number;
+  commit_language: "ja" | "en" | null;
   allowed_roots_json: string;
   verification_plan_json: string;
   worktree_prepare_argv_json: string;
@@ -617,6 +635,7 @@ interface ProjectDbRow {
   required_test_argv_json: string | null;
   test_run_json: string | null;
   test_run_detected_json: string | null;
+  test_setup_json: string | null;
   test_policy_json: string | null;
   report_check_commands_json: string | null;
 }
@@ -649,6 +668,8 @@ interface StoredModelPresetsValue extends JsonObject {
 export class Core {
   private readonly db: CoreDatabase;
   private readonly writeLane;
+  private readonly testSetupRuns = new TestSetupRunRegistry();
+  private readonly testSetup: TestSetupService;
   private readonly coreActivity: CoreActivityRegistry;
   private readonly providerPauseStore: ProviderPauseStore;
   private readonly providerPauseController: ProviderPauseController;
@@ -1116,7 +1137,20 @@ export class Core {
         language: () => ownerLanguage(this.db),
       })
       : null;
+    this.testSetup = new TestSetupService({
+      db: this.db,
+      writeLane: this.writeLane,
+      agentRunner: () => this.options.agentRunner,
+      commandRunner: (projectId, envAllowlist) =>
+        options.testCommandRunner ?? workTestRunner({ workId: projectId, envAllowlist, extraEnv: testSetupSettings(this.db).run_env, instanceId: resolveInstanceId(this.dataDir) }),
+      registerRun: (invocationId, entry) => this.registerTestSetupRun(invocationId, entry),
+      isPaused: (provider) => this.providerPauseController.isPaused(provider),
+      roleModel: (role) => resolveRoleModelFromDb(this.db, role),
+      now: () => this.options.now?.() ?? new Date().toISOString(),
+      log: (message) => console.warn(`[owl-core] ${message}`),
+    });
     this.workflow = new WorkflowEngine({
+      testSetup: this.testSetup,
       db: options.db,
       agentRunner: workspacePreparer ? withWorkspacePreparation(options.agentRunner, workspacePreparer) : options.agentRunner,
       onWorktreeCreated: workspacePreparer ? (worktreePath) => workspacePreparer.markCreated(worktreePath) : undefined,
@@ -1263,23 +1297,17 @@ export class Core {
 
   /** Whether a Reviewer's shell command runs the Project's tests; a denial is recorded as reviewer.test_command_denied. */
   public async checkReviewerTestCommand(input: { readonly agent_run_id: string; readonly command: string }): Promise<ReviewerTestCommandCheck> {
-    const row = this.db.get<{ task_id: string; work_id: string; worktree_path: string | null; project_id: string | null; canonical_path: string | null; test_run_json: string | null; test_run_detected_json: string | null; test_policy_json: string | null }>(
+    const row = this.db.get<{ task_id: string; work_id: string; worktree_path: string | null; project_id: string | null; canonical_path: string | null; test_policy_json: string | null }>(
       `SELECT tasks.id AS task_id, tasks.work_id, tasks.worktree_path, projects.id AS project_id, projects.canonical_path,
-              projects.test_run_json, projects.test_run_detected_json, projects.test_policy_json
+              projects.test_policy_json
          FROM agent_runs JOIN tasks ON tasks.id = agent_runs.task_id
          JOIN works ON works.id = tasks.work_id JOIN projects ON projects.id = works.project_id
         WHERE agent_runs.id = ? AND agent_runs.role = 'reviewer'`,
       input.agent_run_id,
     );
     if (!row || row.project_id === null || row.canonical_path === null) return { denied: false };
-    const resolved = resolveTestRun({
-      explicit_json: row.test_run_json,
-      detected_json: row.test_run_detected_json,
-      root: row.worktree_path ?? row.canonical_path,
-      now: utcNow(),
-      warn: (message) => console.warn(`[owl-core] ${message}`),
-    });
-    const matched = matchDeniedCommand(input.command, reviewerDeniedCommands(resolved.enabled ? resolved.settings : null, readTestPolicy(row.test_policy_json)));
+    const resolved = await this.workflow.resolveTaskTestRun(row.work_id, row.task_id, row.worktree_path);
+    const matched = matchDeniedCommand(input.command, reviewerDeniedCommands(resolved?.enabled ? resolved.settings : null, readTestPolicy(row.test_policy_json)));
     if (matched === null) return { denied: false };
     const matchedText = matched.join(" ");
     await this.writeLane.write({
@@ -1294,6 +1322,99 @@ export class Core {
       outbox: [{ provider: "websocket" }],
     });
     return { denied: true, matched: matchedText, message: REVIEWER_TEST_COMMAND_DENIED_MESSAGE };
+  }
+
+  /** Starts a manual test-environment investigation; returns why nothing started instead of staying silent like schedule. */
+  public investigateTestSetup(input: { project_id: string }) {
+    const result = this.testSetup.start(input.project_id, { trigger: TEST_SETUP_MANUAL_TRIGGER });
+    if (!result.started && result.reason === "project_not_found") {
+      throw new HumanReadableError({ code: "not_found", message: `project ${input.project_id} was not found.`, remediation: "Verify the project id.", details: { resource: "project", id: input.project_id } });
+    }
+    return result.started ? { ...result, trigger: TEST_SETUP_MANUAL_TRIGGER } : result;
+  }
+
+  /** Whether the latest test-environment investigation of a Project is running, and how it ended; null if none ran since Core started. */
+  public testSetupRunState(input: { project_id: string }) {
+    return this.testSetup.runState(input.project_id);
+  }
+
+  /** Resolves when every scheduled test-environment investigation has finished. */
+  public whenTestSetupIdle(): Promise<void> {
+    return this.testSetup.idle();
+  }
+
+  /** Marks an agent run as a test-environment investigation, so guard/check judges its installs and writes. Returns the function that ends it. */
+  public registerTestSetupRun(invocationId: string, entry: TestSetupRunEntry): () => void {
+    return this.testSetupRuns.register(invocationId, entry);
+  }
+
+  /**
+   * Whether a tool call of a registered investigation installs or writes outside its checkouts.
+   * Runs that are not registered are never denied here. `query` is replaceable in tests.
+   */
+  public recordTestSetupInstalls(agentRunId: string, installs: readonly (readonly string[])[]): void {
+    this.testSetupRuns.get(agentRunId)?.installs.push(...installs);
+  }
+
+  public async checkTestSetupTool(input: {
+    readonly agent_run_id: string;
+    readonly tool_name: string;
+    readonly tool_input: Readonly<Record<string, unknown>>;
+    readonly cwd: string;
+    readonly query?: InstallQuery;
+  }): Promise<{ readonly denied: false; readonly installs?: readonly (readonly string[])[] } | { readonly denied: true; readonly reason: string; readonly message: string }> {
+    const run = this.testSetupRuns.get(input.agent_run_id);
+    if (run === undefined) return { denied: false };
+    const settings = testSetupSettings(this.db);
+    const toolName = input.tool_name.toLowerCase();
+    let reason: string | null = null;
+    let installs: (readonly string[])[] = [];
+    let subject = toolName;
+    if (GUARD_SHELL_TOOL_NAMES.has(toolName)) {
+      const key = GUARD_SHELL_COMMAND_KEYS.find((candidate) => typeof input.tool_input[candidate] === "string");
+      const command = key === undefined ? "" : String(input.tool_input[key]);
+      subject = command;
+      const classified = await classifyInstallCommand(command, {
+        cwd: input.cwd,
+        roots: run.roots,
+        env: run.env,
+        approved: run.approved,
+        settings: settings.install,
+        query: input.query ?? execInstallQuery(settings.probe_timeout_seconds * 1000),
+      });
+      const bad = classified.segments.find((segment) => segment.denied === true);
+      if (bad !== undefined) reason = bad.reason;
+      else {
+        const writes = outsideWriteTargets(command, { cwd: input.cwd, roots: run.roots, writable: settings.install.writable_outside });
+        if (writes.length > 0) reason = `writes outside the Project: ${writes.join(", ")}`;
+        // Not recorded here: the caller records them with recordTestSetupInstalls once the rule-store guard has also let the call through.
+        else installs = classified.segments.filter((segment) => segment.scope === "outside").map((segment) => segment.argv);
+      }
+    } else if (!READ_ONLY_TOOL_NAMES.has(toolName)) {
+      const paths = GUARD_PATH_KEYS.flatMap((key) => {
+        const value = input.tool_input[key];
+        return typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+      });
+      const bad = paths.find((path) => resolveInstallTarget(path, input.cwd, [...run.roots, ...settings.install.writable_outside]) === "outside");
+      if (bad !== undefined) {
+        subject = bad;
+        reason = `writes outside the Project: ${bad}`;
+      }
+    }
+    if (reason === null) return { denied: false, installs };
+    await this.writeLane.write({
+      mutateState: () => ({}),
+      event: {
+        idempotencyKey: `test-setup-install-denied:${input.agent_run_id}:${createUlid()}`,
+        type: "test_setup.install_denied",
+        payload: { schema_version: "1.0.0", project_id: run.project_id, invocation_id: input.agent_run_id, command: subject.slice(0, 500), reason },
+      },
+      outbox: [{ provider: "websocket" }],
+    });
+    const message = ownerLanguage(this.db) === "ja"
+      ? `このコマンドは実行できません（${reason}）。認証情報が要るコマンドと Project の外への書き込みは、自動では実行しません。別の方法を探し、見つからなければ needs_owner で報告してください。`
+      : `This command was not run (${reason}). Commands that need credentials and writes outside the Project are never run automatically. Look for another way, and report needs_owner only if there is none.`;
+    return { denied: true, reason, message };
   }
 
   public listSkills(filter: { query?: string; state?: string; scope?: string; trial?: boolean } = {}) {
@@ -3825,7 +3946,7 @@ export class Core {
     const rows = this.db.all<TaskDbRow>(
       `SELECT id, work_id, title, status, type, state_version, updated_at, created_at,
               (SELECT json_group_array(depends_on_task_id) FROM task_dependencies WHERE task_id = tasks.id) AS depends_on_json,
-              prerequisite_json, prerequisite_since,
+              prerequisite_json, prerequisite_since, fixer_escalated_rejections,
               CASE WHEN status = 'judgement_waiting' THEN (
                 SELECT reason FROM decisions
                  WHERE status = 'open' AND EXISTS (SELECT 1 FROM json_each(blocked_task_ids_json) WHERE value = tasks.id)
@@ -3849,7 +3970,7 @@ export class Core {
     const row = this.db.get<TaskDbRow>(
       `SELECT id, work_id, title, status, type, state_version, updated_at, created_at,
               (SELECT json_group_array(depends_on_task_id) FROM task_dependencies WHERE task_id = tasks.id) AS depends_on_json,
-              prerequisite_json, prerequisite_since,
+              prerequisite_json, prerequisite_since, fixer_escalated_rejections,
               CASE WHEN status = 'judgement_waiting' THEN (
                 SELECT reason FROM decisions
                  WHERE status = 'open' AND EXISTS (SELECT 1 FROM json_each(blocked_task_ids_json) WHERE value = tasks.id)
@@ -3913,7 +4034,7 @@ export class Core {
     const tasks = this.db.all<TaskDbRow>(
       `SELECT id, work_id, title, status, type, state_version, updated_at, created_at,
               (SELECT json_group_array(depends_on_task_id) FROM task_dependencies WHERE task_id = tasks.id) AS depends_on_json,
-              prerequisite_json, prerequisite_since,
+              prerequisite_json, prerequisite_since, fixer_escalated_rejections,
               CASE WHEN status = 'judgement_waiting' THEN (
                 SELECT reason FROM decisions
                  WHERE status = 'open' AND EXISTS (SELECT 1 FROM json_each(blocked_task_ids_json) WHERE value = tasks.id)
@@ -3922,7 +4043,7 @@ export class Core {
       workId,
     ).map(toTaskSummary);
     const runs = this.db.all<AgentDbRow>(
-      `SELECT id, work_id, task_id, role, design_tier, provider, model, effort, status, outcome, pid, started_at, ended_at, last_output_at, parent_agent_id, phase, subtask_count, label, origin
+      `SELECT id, work_id, task_id, role, design_tier, worker_tier, provider, model, effort, status, outcome, pid, started_at, ended_at, last_output_at, parent_agent_id, phase, subtask_count, label, origin
          FROM agent_runs WHERE work_id = ? ORDER BY id ASC`,
       workId,
     ).map(toAgentRun);
@@ -4069,11 +4190,14 @@ export class Core {
     const replanText = designStop ? this.designStopReplanAnswer(decisionId, request.payload.option_key, request.payload.answer) : request.payload.answer;
     const response = await this.decisions.resolve({
       ...request,
-      payload: { ...request.payload, decision_id: decisionId, ...(toManager ? { to_manager: true } : {}), ...(request.payload.option_key === REVIEW_RERUN_OPTION_KEY ? { rerun_review: true } : {}) },
+      payload: { ...request.payload, decision_id: decisionId, ...(toManager ? { to_manager: true } : {}), ...(request.payload.option_key === REVIEW_RERUN_OPTION_KEY ? { rerun_review: true } : {}), ...(isTestSetupOptionKey(request.payload.option_key) ? { rerun_verification: true } : {}) },
     });
     await this.dispatcher.replayPending();
     if (request.payload.option_key === REVIEW_RERUN_OPTION_KEY) this.workflow.rerunPendingReviews();
     await this.handlePolicyDecisionResolved(decisionId, request.payload.option_key);
+    if (response.data.winner && isTestSetupOptionKey(request.payload.option_key)) {
+      await this.handleTestSetupDecisionResolved(decisionId, request.payload.option_key, response.data.resumed_task_ids);
+    }
     const resumedWork = this.db.get<{ work_id: string; state: WorkState; state_version: number; scope: string; issuer_role: "core" | "advisor" | "manager" }>(
       `SELECT decisions.work_id, works.state, works.state_version, decisions.scope, decisions.issuer_role
          FROM decisions JOIN works ON works.id = decisions.work_id
@@ -4182,6 +4306,31 @@ export class Core {
     return [`Question: ${decision.question}`, `Chosen option: ${chosen.label ?? optionKey} - ${chosen.description ?? ""}`, ...(answer.trim() === chosen.label ? [] : [`Owner's words: ${answer}`])].join("\n");
   }
 
+  /**
+   * The Owner answered a test environment Decision: an approval is written on the installs that name it, then the
+   * stopped verification runs again. A Work goes back to running, and the driver redoes its integration verification.
+   */
+  private async handleTestSetupDecisionResolved(decisionId: string, optionKey: string, resumedTaskIds: readonly string[]): Promise<void> {
+    if (optionKey === TEST_SETUP_APPROVE_OPTION_KEY) {
+      const workId = this.db.get<{ work_id: string }>("SELECT work_id FROM decisions WHERE id = ?", decisionId)?.work_id;
+      if (workId !== undefined) {
+        const at = new Date().toISOString();
+        await this.writeLane.write({
+          mutateState: (transaction: CoreWriteLaneTransaction) => ({ changed: approveOutsideInstalls(transaction, workId, decisionId, at) }),
+          outbox: [{ provider: "websocket" }],
+          event: {
+            idempotencyKey: `test-setup-installs-approved:${decisionId}`,
+            type: "test_setup.installs_approved",
+            workId,
+            taskId: null,
+            payload: { decision_id: decisionId, approved_at: at },
+          },
+        });
+      }
+    }
+    this.workflow.rerunVerifications(resumedTaskIds);
+  }
+
   private async handlePolicyDecisionResolved(decisionId: string, optionKey: string | null): Promise<void> {
     // Keep resolving policy Decisions opened before policy lessons became automatic saves.
     if (optionKey !== "approve") return;
@@ -4279,7 +4428,7 @@ export class Core {
   public listAgentRuns(query: AgentListQuery = {}): ListResponse<AgentRun> {
     const limit = boundLimit(query.limit ?? 50);
     const rows = this.db.all<AgentDbRow>(
-      `SELECT id, work_id, task_id, role, design_tier, provider, model, effort, status, outcome, pid, started_at, ended_at, last_output_at, parent_agent_id, phase, subtask_count, label, origin
+      `SELECT id, work_id, task_id, role, design_tier, worker_tier, provider, model, effort, status, outcome, pid, started_at, ended_at, last_output_at, parent_agent_id, phase, subtask_count, label, origin
          FROM agent_runs
         WHERE (? IS NULL OR status = ?)
           AND (? IS NULL OR work_id = ?)
@@ -4305,7 +4454,7 @@ export class Core {
     const recentLimit = Math.max(0, Math.floor(query.recent_limit ?? DEFAULT_AGENTS_VIEW_RECENT));
     const live = [...AGENT_LIVE_STATUSES];
     const marks = (n: number) => Array(n).fill("?").join(",");
-    const runColumns = "id, work_id, task_id, role, design_tier, provider, model, effort, status, outcome, pid, started_at, ended_at, last_output_at, parent_agent_id, phase, subtask_count, label, origin";
+    const runColumns = "id, work_id, task_id, role, design_tier, worker_tier, provider, model, effort, status, outcome, pid, started_at, ended_at, last_output_at, parent_agent_id, phase, subtask_count, label, origin";
     const topLevel = `(parent_agent_id IS NULL OR parent_agent_id = id
                        OR NOT EXISTS (SELECT 1 FROM agent_runs p WHERE p.id = agent_runs.parent_agent_id))`;
     const running = this.db.all<AgentDbRow>(
@@ -4335,7 +4484,7 @@ export class Core {
     const taskRows = taskIds.length === 0 ? [] : this.db.all<TaskDbRow>(
       `SELECT id, work_id, title, status, type, state_version, updated_at, created_at,
               (SELECT json_group_array(depends_on_task_id) FROM task_dependencies WHERE task_id = tasks.id) AS depends_on_json,
-              prerequisite_json, prerequisite_since,
+              prerequisite_json, prerequisite_since, fixer_escalated_rejections,
               CASE WHEN status = 'judgement_waiting' THEN (
                 SELECT reason FROM decisions
                  WHERE status = 'open' AND EXISTS (SELECT 1 FROM json_each(blocked_task_ids_json) WHERE value = tasks.id)
@@ -4401,8 +4550,8 @@ export class Core {
   public listProjects(query: ProjectListQuery = {}): ListResponse<Project> {
     const limit = boundLimit(query.limit ?? 50);
     const rows = this.db.all<ProjectDbRow>(
-      `SELECT id, name, canonical_path, base_branch, auto_push, allowed_roots_json, verification_plan_json,
-                worktree_prepare_argv_json, worktree_refresh_argv_json, post_merge_argv_json, post_merge_install_argv_json, required_test_argv_json, test_run_json, test_run_detected_json, test_policy_json, report_check_commands_json
+      `SELECT id, name, canonical_path, base_branch, auto_push, commit_language, allowed_roots_json, verification_plan_json,
+                worktree_prepare_argv_json, worktree_refresh_argv_json, post_merge_argv_json, post_merge_install_argv_json, required_test_argv_json, test_run_json, test_run_detected_json, test_setup_json, test_policy_json, report_check_commands_json
          FROM projects
         WHERE (? IS NULL OR id > ?)
         ORDER BY id ASC LIMIT ?`,
@@ -4410,7 +4559,7 @@ export class Core {
       query.cursor ?? null,
       limit + 1,
     );
-    return listResponse(query.request_id, rows.slice(0, limit).map(toProject), rows.length > limit, limit);
+    return listResponse(query.request_id, rows.slice(0, limit).map((row) => toProject(row, testSetupSettings(this.db).default_executables)), rows.length > limit, limit);
   }
 
   /** Every Project, following the list cursor so no page is dropped. */
@@ -4440,6 +4589,7 @@ export class Core {
       return { data: project, version: 0 };
     });
     this.projectOverviews.schedule(response.data.id, { kind: "project_created" });
+    this.testSetup.schedule(response.data.id, { trigger: "project_registered" });
     return response;
   }
 
@@ -4447,14 +4597,15 @@ export class Core {
     projectId: string,
     request: CommandRequest<UpdateProjectPayload>,
   ): Promise<CommandResponse<Project>> {
-    return this.runCommand(request, {
+    const pathBefore = this.db.get<{ canonical_path: string }>("SELECT canonical_path FROM projects WHERE id = ?", projectId)?.canonical_path;
+    const response = await this.runCommand(request, {
       type: "project.updated",
       resourceKey: projectId,
       payload: { kind: "project_updated", schema_version: "1.0.0", project_id: projectId },
     }, (transaction) => {
       const row = transaction.get<ProjectDbRow>(
-        `SELECT id, name, canonical_path, base_branch, auto_push, allowed_roots_json, verification_plan_json,
-                worktree_prepare_argv_json, worktree_refresh_argv_json, post_merge_argv_json, post_merge_install_argv_json, required_test_argv_json, test_run_json, test_run_detected_json, test_policy_json, report_check_commands_json
+        `SELECT id, name, canonical_path, base_branch, auto_push, commit_language, allowed_roots_json, verification_plan_json,
+                worktree_prepare_argv_json, worktree_refresh_argv_json, post_merge_argv_json, post_merge_install_argv_json, required_test_argv_json, test_run_json, test_run_detected_json, test_setup_json, test_policy_json, report_check_commands_json
            FROM projects WHERE id = ?`,
         projectId,
       );
@@ -4467,6 +4618,10 @@ export class Core {
       const hasAutoPush = Object.prototype.hasOwnProperty.call(payload, "auto_push");
       if (hasAutoPush && typeof payload.auto_push !== "boolean") {
         throw validationError(ownerLanguage(transaction) === "ja" ? "自動pushはtrueかfalseで指定してください。" : "auto_push must be true or false.", { field: "auto_push" });
+      }
+      const hasCommitLanguage = Object.prototype.hasOwnProperty.call(payload, "commit_language");
+      if (hasCommitLanguage && payload.commit_language !== null && payload.commit_language !== "ja" && payload.commit_language !== "en") {
+        throw validationError(ownerLanguage(transaction) === "ja" ? "コミットメッセージの言語はja、en、nullのいずれかで指定してください。" : "commit_language must be \"ja\", \"en\" or null.", { field: "commit_language" });
       }
       if (hasPath !== hasBaseBranch) {
         throw validationError("canonical_path and base_branch must be provided together.", { fields: ["canonical_path", "base_branch"] });
@@ -4513,6 +4668,7 @@ export class Core {
       let baseBranch = row.base_branch;
       let autoPush = row.auto_push === 1;
       if (hasAutoPush) autoPush = payload.auto_push as boolean;
+      const commitLanguage = hasCommitLanguage ? payload.commit_language as "ja" | "en" | null : row.commit_language;
       let allowedRoots = JSON.parse(row.allowed_roots_json) as string[];
       if (hasPath) {
         const candidate = payload.canonical_path;
@@ -4552,6 +4708,7 @@ export class Core {
         && reportChecksJson === row.report_check_commands_json
         && canonicalPath === row.canonical_path
         && autoPush === (row.auto_push === 1)
+        && commitLanguage === row.commit_language
         && setupJson === row.worktree_prepare_argv_json
         && refreshJson === row.worktree_refresh_argv_json
         && postMergeJson === row.post_merge_argv_json
@@ -4559,18 +4716,21 @@ export class Core {
         && requiredTestJson === row.required_test_argv_json
         && verificationPlanJson === row.verification_plan_json
       ) {
-        return { data: toProject(row), version: 0 };
+        return { data: toProject(row, testSetupSettings(this.db).default_executables), version: 0 };
       }
+      // A saved test setup describes the checkout at the old path.
+      const testSetupJson = canonicalPath === row.canonical_path ? row.test_setup_json : null;
       const now = utcNow();
       transaction.run(
         `UPDATE projects
-            SET name = ?, canonical_path = ?, base_branch = ?, auto_push = ?, allowed_roots_json = ?,
-                worktree_prepare_argv_json = ?, worktree_refresh_argv_json = ?, post_merge_argv_json = ?, post_merge_install_argv_json = ?, required_test_argv_json = ?, test_run_json = ?, test_policy_json = ?, report_check_commands_json = ?, verification_plan_json = ?, updated_at = ?
+            SET name = ?, canonical_path = ?, base_branch = ?, auto_push = ?, commit_language = ?, allowed_roots_json = ?,
+                worktree_prepare_argv_json = ?, worktree_refresh_argv_json = ?, post_merge_argv_json = ?, post_merge_install_argv_json = ?, required_test_argv_json = ?, test_run_json = ?, test_policy_json = ?, report_check_commands_json = ?, verification_plan_json = ?, test_setup_json = ?, updated_at = ?
           WHERE id = ?`,
         name,
         canonicalPath,
         baseBranch,
         autoPush ? 1 : 0,
+        commitLanguage,
         JSON.stringify(allowedRoots),
         setupJson,
         refreshJson,
@@ -4581,6 +4741,7 @@ export class Core {
         testPolicyJson,
         reportChecksJson,
         verificationPlanJson,
+        testSetupJson,
         now,
         projectId,
       );
@@ -4591,6 +4752,7 @@ export class Core {
           canonical_path: canonicalPath,
           base_branch: baseBranch,
           auto_push: autoPush ? 1 : 0,
+          commit_language: commitLanguage,
           allowed_roots_json: JSON.stringify(allowedRoots),
           worktree_prepare_argv_json: setupJson,
           worktree_refresh_argv_json: refreshJson,
@@ -4601,10 +4763,13 @@ export class Core {
           test_policy_json: testPolicyJson,
           report_check_commands_json: reportChecksJson,
           verification_plan_json: verificationPlanJson,
-        }),
+          test_setup_json: testSetupJson,
+        }, testSetupSettings(this.db).default_executables),
         version: 0,
       };
     });
+    if (pathBefore !== undefined && response.data.canonical_path !== pathBefore) this.testSetup.schedule(projectId, { trigger: "project_path_changed" });
+    return response;
   }
 
   public async getProjectDeletionImpact(projectId: string): Promise<ProjectDeletionImpact> {
@@ -5023,7 +5188,7 @@ export class Core {
   public getModelPresets(): { version: number; presets: readonly ModelPreset[] } {
     const row = this.db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", MODEL_PRESETS_KEY);
     const stored = row ? parseModelPresetsValue(row.value_json) : emptyModelPresets();
-    return { version: stored.version, presets: stored.presets };
+    return { version: stored.version, presets: stored.presets.map((preset) => ({ ...preset, roles: withRoleDefaults(preset.roles) })) };
   }
 
   public async createModelPreset(request: CommandRequest<CreateModelPresetPayload>): Promise<CommandResponse<{ preset: ModelPreset; presets: readonly ModelPreset[] }>> {
@@ -7090,6 +7255,7 @@ export class Core {
                       work_id: workId,
                       expected_state_version: expected?.state_version,
                       ...(verified.status === "passed" && verified.work_commit !== null ? { verified_commit: verified.work_commit } : {}),
+                      ...(verdict.commit_subject !== undefined ? { commit_subject: verdict.commit_subject } : {}),
                     });
                     if (merge.kind !== "base_moved" || baseMovedRetries >= TRANSIENT_RETRY_LIMIT) break;
                     baseMovedRetries += 1;
@@ -7425,8 +7591,12 @@ export class Core {
     if (!this.started) return { kind: "routed" };
     const coreFailed = coreTests !== null && (coreTests.outcome.status === "failed" || coreTests.outcome.status === "error");
     const failing = commandsFailing || coreFailed;
+    // A broken test environment goes to the Owner; a Manager replan cannot fix it.
+    const environmentBlocked = coreFailed ? coreTests?.environment_blocked ?? null : null;
     let routedTo: "final_manager" | "manager" | "owner" = "final_manager";
-    if (failing) {
+    if (environmentBlocked !== null) {
+      routedTo = "owner";
+    } else if (failing) {
       const repairs = this.db.get<{ n: number }>(
         `SELECT COUNT(*) AS n FROM events
           WHERE work_id = ? AND type = 'work.integration_verification_completed'
@@ -7473,6 +7643,11 @@ export class Core {
       outbox: [{ provider: "websocket" }],
     });
     if (routedTo === "final_manager") return { kind: "proceed", verification };
+    if (environmentBlocked !== null) {
+      await this.workflow.openWorkTestEnvironmentDecision(workId, environmentBlocked);
+      if (this.started) await this.dispatcher.replayPending();
+      return { kind: "routed" };
+    }
     if (routedTo === "manager") {
       await this.triggerManagerReplan(
         workId,
@@ -9363,6 +9538,7 @@ export class Core {
         trigger: { kind: "final_check" } as const,
         mode: "finalize" as const,
         memory_mode: "pages" as const,
+        commit_language: this.db.get<{ commit_language: "ja" | "en" | null }>("SELECT projects.commit_language FROM works JOIN projects ON projects.id = works.project_id WHERE works.id = ?", workId)?.commit_language ?? null,
         context: { mode: "finalize", trigger: { kind: "final_check" }, work_id: workId, tasks: managerTasks, reports, work_verification: workVerificationContext, design_documents: this.completedDesignDocuments(workId), backlog_items: listInProgressBacklogItemsOfWork(this.db, workId).map(({ id, file, line, problem, suggestion }) => ({ id, file, line, problem, suggestion })), ...this.processSkillsRequestContext() },
       };
       const outcome = await this.attemptFinalManager(workId, roleRequest);
@@ -9891,6 +10067,45 @@ export class Core {
       outbox: [{ provider: "websocket" }],
     });
     return remakeLimits(this.db);
+  }
+
+  public async getFixerEscalationSettings(): Promise<FixerEscalationSettings> {
+    return fixerEscalation(this.db);
+  }
+
+  public async setFixerEscalationSettings(input: FixerEscalationSettings): Promise<FixerEscalationSettings> {
+    let normalized: FixerEscalationSettings;
+    try {
+      normalized = validateFixerEscalationSettings(input);
+    } catch (error) {
+      if (error instanceof FixerEscalationSettingsValidationError) {
+        throw validationError(error.message, { field: error.field });
+      }
+      throw error;
+    }
+    await this.writeLane.write({
+      mutateState: (transaction) => {
+        const now = utcNow();
+        ensureOwner(transaction, DEFAULT_OWNER_ID, now);
+        transaction.run(
+          `INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at)
+           VALUES (?, ?, '1.0.0', ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
+          FIXER_ESCALATION_SETTINGS_KEY,
+          DEFAULT_OWNER_ID,
+          JSON.stringify(normalized),
+          now,
+        );
+        return normalized;
+      },
+      event: {
+        idempotencyKey: `settings-fixer-escalation:${createUlid()}`,
+        type: "settings.fixer_escalation_updated",
+        payload: normalized as unknown as JsonObject,
+      },
+      outbox: [{ provider: "websocket" }],
+    });
+    return fixerEscalation(this.db);
   }
 
   public async getPlanQualitySettings(): Promise<PlanQualitySettings> {
@@ -10615,7 +10830,7 @@ function parseAdvisorBacklog(json: string | null): WorkAdvisorBacklog | null {
 }
 
 function toTaskSummary(row: TaskDbRow): TaskSummary {
-  return { id: row.id, work_id: row.work_id, title: row.title, status: row.status, type: row.type, state_version: row.state_version, updated_at: row.updated_at, created_at: row.created_at, depends_on: JSON.parse(row.depends_on_json) as string[], prerequisite: toPrerequisiteView(row), stop_reason: row.stop_reason };
+  return { id: row.id, work_id: row.work_id, title: row.title, status: row.status, type: row.type, state_version: row.state_version, updated_at: row.updated_at, created_at: row.created_at, depends_on: JSON.parse(row.depends_on_json) as string[], prerequisite: toPrerequisiteView(row), stop_reason: row.stop_reason, fixer_escalation: row.fixer_escalated_rejections == null ? null : { rejections: row.fixer_escalated_rejections } };
 }
 
 function processTarget(condition: PrerequisiteSpec["conditions"][number]): string | null | undefined {
@@ -10686,7 +10901,9 @@ function toAgentRun(row: AgentDbRow): AgentRun {
     id: row.id,
     work_id: row.work_id,
     task_id: row.task_id,
-    role: row.role === "designer" && row.design_tier === "lead" ? "lead_designer" : row.role,
+    role: row.role === "designer" && row.design_tier === "lead" ? "lead_designer"
+      : row.role === "worker" && row.worker_tier === "fixer" ? "fixer"
+      : row.role,
     provider: row.provider,
     model: row.model,
     effort: row.effort,
@@ -10705,32 +10922,40 @@ function toAgentRun(row: AgentDbRow): AgentRun {
 }
 
 /** What Core's test check does for this Project: explicit test_run first, else the saved or fresh detection (never written here). */
-function projectTestRunStatus(row: Pick<ProjectDbRow, "canonical_path" | "test_run_json" | "test_run_detected_json">): TestRunStatus {
+function projectTestRunStatus(row: Pick<ProjectDbRow, "canonical_path" | "test_run_json" | "test_run_detected_json" | "test_setup_json">, defaultExecutables?: Readonly<Record<string, string>>): TestRunStatus {
+  // Display only: the Project's own record is shown as saved; its digests are checked when tests run.
+  const stored = readStoredTestSetup(row.test_setup_json);
+  const repair = stored !== null && row.test_run_json !== null && stored.explicit_digest === explicitTestRunDigest(row.test_run_json) && (stored.status === "ready" || stored.status === "tests_failing");
+  const record = row.test_run_json === null || repair ? stored : null;
   const resolved = resolveTestRun({
     explicit_json: row.test_run_json,
     detected_json: row.test_run_detected_json,
     root: row.canonical_path,
     now: new Date().toISOString(),
+    setup: record === null ? null : { setup: record, match: row.test_run_json === null ? "stale" : "explicit" },
+    default_executables: defaultExecutables,
   });
   const settings = resolved.enabled ? resolved.settings : null;
   const command = settings === null ? null : settings.mode === "whole" ? settings.whole_argv : settings.file_argv;
   return { enabled: resolved.enabled, reason: resolved.enabled ? null : resolved.reason, command, source: resolved.source };
 }
 
-function toProject(row: ProjectDbRow): Project {
+function toProject(row: ProjectDbRow, defaultExecutables: Readonly<Record<string, string>>): Project {
   return {
     id: row.id,
     name: row.name,
     canonical_path: row.canonical_path,
     base_branch: row.base_branch,
     auto_push: row.auto_push === 1,
+    commit_language: row.commit_language,
     worktree_setup_command: parseStringArray(row.worktree_prepare_argv_json, "worktree_setup_command", row.id, "Project"),
     worktree_refresh_command: parseStringArray(row.worktree_refresh_argv_json, "worktree_refresh_command", row.id, "Project"),
     post_merge_command: row.post_merge_argv_json === null ? null : parseStringArray(row.post_merge_argv_json, "post_merge_command", row.id, "Project"),
     post_merge_install_command: row.post_merge_install_argv_json === null ? null : parseStringArray(row.post_merge_install_argv_json, "post_merge_install_command", row.id, "Project"),
     required_test_command: row.required_test_argv_json === null ? null : parseStringArray(row.required_test_argv_json, "required_test_command", row.id, "Project"),
     test_run: row.test_run_json === null ? null : parseStoredJsonObject(row.test_run_json, "test_run", row.id),
-    test_run_status: projectTestRunStatus(row),
+    test_run_status: projectTestRunStatus(row, defaultExecutables),
+    test_setup: testSetupView(readStoredTestSetup(row.test_setup_json), row.canonical_path, defaultExecutables),
     test_policy: readTestPolicy(row.test_policy_json),
     report_check_commands: row.report_check_commands_json === null ? [] : parseStringArray(row.report_check_commands_json, "report_check_commands", row.id, "Project"),
     allowed_roots: parseStringArray(row.allowed_roots_json, "allowed_roots", row.id, "Project"),
@@ -11010,7 +11235,7 @@ function validateModelPresetName(value: unknown, presets: readonly ModelPreset[]
 // Model ids are checked against the harness model lists (CoreOptions.knownModels), which are
 // not versioned, so every role setting carries the same catalog_version.
 const DEFAULT_CATALOG_VERSION = "1.0.0";
-const MODEL_SETTING_ROLES: readonly RoleModelSetting["role"][] = ["advisor", "manager", "designer", "lead_designer", "worker", "reviewer", "librarian", "curator"];
+const MODEL_SETTING_ROLES: readonly RoleModelSetting["role"][] = ["advisor", "manager", "designer", "lead_designer", "worker", "fixer", "reviewer", "librarian", "curator"];
 const MODEL_SETTING_EFFORTS = new Set<RoleModelSetting["effort"]>(["low", "medium", "high", "xhigh", "max"]);
 const DEFAULT_MODEL_SETTINGS: readonly RoleModelSetting[] = Object.entries(DEFAULT_ROLE_MODELS).map(([role, setting]) => ({
   role: role as RoleModelSetting["role"],
@@ -11057,7 +11282,7 @@ function validateModelSettingsRoles(
     }
     const role = candidate.role;
     if (typeof role !== "string" || !MODEL_SETTING_ROLES.includes(role as RoleModelSetting["role"])) {
-      throw validationError("Model settings role must be one of advisor, manager, designer, lead_designer, worker, reviewer, librarian, curator.", { field: "roles", index });
+      throw validationError("Model settings role must be one of advisor, manager, designer, lead_designer, worker, fixer, reviewer, librarian, curator.", { field: "roles", index });
     }
     if (seenRoles.has(role)) {
       throw validationError(`Model settings role ${role} is duplicated.`, { field: "roles", role });
@@ -11281,6 +11506,7 @@ function createProjectInTransaction(transaction: CoreWriteLaneTransaction, paylo
     canonical_path: canonicalPath,
     base_branch: baseBranch,
     auto_push: false,
+    commit_language: null,
     worktree_setup_command: [],
     worktree_refresh_command: [],
     post_merge_command: postMergeCommand,
@@ -11291,7 +11517,9 @@ function createProjectInTransaction(transaction: CoreWriteLaneTransaction, paylo
       canonical_path: canonicalPath,
       test_run_json: testRun === null ? null : JSON.stringify(testRun),
       test_run_detected_json: null,
+      test_setup_json: null,
     }),
+    test_setup: null,
     test_policy: readTestPolicy(testPolicy === null ? null : JSON.stringify(testPolicy)),
     report_check_commands: [],
     allowed_roots: allowedRoots as readonly string[],
@@ -12438,6 +12666,7 @@ function requireManagerVerdict(value: unknown, workId: string): FinalManagerVerd
   return {
     verdict: value.verdict,
     summary: value.summary,
+    ...(typeof value.commit_subject === "string" ? { commit_subject: value.commit_subject } : {}),
     missing: value.missing,
     unaddressed_backlog_items: (Array.isArray(value.unaddressed_backlog_items) ? value.unaddressed_backlog_items : []).flatMap(
       (entry: unknown) => isRecord(entry) && typeof entry.item_id === "string" && typeof entry.reason === "string" ? [{ item_id: entry.item_id, reason: entry.reason }] : [],

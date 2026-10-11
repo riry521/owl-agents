@@ -271,6 +271,7 @@ test("an injected model list replaces the built-in one", async (t) => {
       advisor: { model: "claude-sonnet-5" },
       designer: { model: "claude-sonnet-5" },
       lead_designer: { model: "claude-sonnet-5" },
+      fixer: { model: "claude-sonnet-5" },
       librarian: { model: "claude-sonnet-5" },
     });
     assert.equal(updated.data.roles.find(({ role }) => role === "worker").model, "gpt-7-nova");

@@ -117,6 +117,8 @@ export interface TaskSummary {
   prerequisite?: TaskPrerequisite | null;
   /** For a judgement_waiting Task: the reason of the Decision that blocks it. */
   stop_reason?: string | null;
+  /** Set once a rejected Worker Task moved to the Fixer. */
+  fixer_escalation?: { rejections: number } | null;
 }
 
 export interface TaskPrerequisite {
@@ -203,6 +205,7 @@ export interface Project {
   canonical_path: string;
   base_branch: string;
   auto_push: boolean;
+  commit_language?: "ja" | "en" | null;
   worktree_setup_command: string[];
   worktree_refresh_command: string[];
   post_merge_command: string[] | null;
@@ -232,6 +235,7 @@ export interface UpdateProjectInput {
   canonical_path?: string;
   base_branch?: string;
   auto_push?: boolean;
+  commit_language?: "ja" | "en" | null;
   worktree_setup_command?: string[];
   worktree_refresh_command?: string[];
   post_merge_command?: string[] | null;
@@ -277,7 +281,7 @@ export interface DeleteProjectResult {
   }>;
 }
 
-export type ActorRole = "advisor" | "manager" | "designer" | "lead_designer" | "worker" | "reviewer" | "librarian" | "curator";
+export type ActorRole = "advisor" | "manager" | "designer" | "lead_designer" | "worker" | "fixer" | "reviewer" | "librarian" | "curator";
 export type ModelEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface RoleModelSetting {

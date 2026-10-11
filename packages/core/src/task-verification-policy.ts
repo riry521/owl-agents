@@ -40,6 +40,8 @@ export interface PolicyCheck {
   argv?: string[];
   exit_code?: number | null;
   timed_out?: boolean;
+  /** CommandOutcome.error: the command did not start (its exit_code is then -1, not null). */
+  spawn_error?: string;
   detail: string;
   stdout?: string;
   stderr?: string;
@@ -82,7 +84,11 @@ export interface TypePolicyInput {
   /** "sole": no Project plan, so these checks are the only ones. "supplement": the Project plan decides; only static checks and test runs are added. */
   mode: "sole" | "supplement";
   runCommand: (argv: string[], cwd: string) => Promise<CommandOutcome>;
+  /** Saved executables by name; "{name}" in a policy argv becomes its path (e.g. "{python}"). Nothing is replaced when absent. */
+  executables?: Readonly<Record<string, string>>;
   /** Files Core's own test run already judged; those are not started again and carry no output. */
+  /** Set only when the Project's own test_run resolved to an explicit off; no test runner is started then. */
+  projectTestRun?: { enabled: false; reason: string };
   coreTestRun?: { run_id: string | null; mode?: "full" | "selected"; passed_files: readonly string[]; failed_files: readonly string[] };
 }
 
@@ -97,7 +103,8 @@ const LOCKFILE_PATTERNS: readonly string[] = [
 
 const matchesAny = (file: string, patterns: readonly string[]): boolean => patterns.some((pattern) => matchesGlobWithDots(file, pattern));
 const firstRunner = (file: string, runners: readonly PolicyCommand[]): PolicyCommand | undefined => runners.find((runner) => matchesGlobWithDots(file, runner.pattern));
-const expand = (argv: readonly string[], file: string): string[] => argv.map((part) => part.replaceAll("{file}", file));
+const expand = (argv: readonly string[], file: string, executables: Readonly<Record<string, string>> = {}): string[] =>
+  argv.map((part) => Object.entries(executables).reduce((text, [name, path]) => text.replaceAll(`{${name}}`, path), part.replaceAll("{file}", file)));
 
 function insideRoot(root: string, file: string): string | null {
   if (file.length === 0 || isAbsolute(file)) return null;
@@ -155,7 +162,7 @@ export async function evaluateTaskTypePolicy(input: TypePolicyInput): Promise<Ty
     return files.slice(0, limits.max_files_per_check);
   };
   const run = async (id: string, command: PolicyCommand, file: string, key: PolicyErrorKey): Promise<{ ok: boolean; stdout: string }> => {
-    const argv = expand(command.argv, file);
+    const argv = expand(command.argv, file, input.executables);
     const core = id === "policy:test" ? input.coreTestRun : undefined;
     if (core?.passed_files.includes(file) || core?.failed_files.includes(file)) {
       const ok = core.passed_files.includes(file);
@@ -166,7 +173,7 @@ export async function evaluateTaskTypePolicy(input: TypePolicyInput): Promise<Ty
     const detail = outcome.passed
       ? `${argv.join(" ")} passed.`
       : `${argv.join(" ")} ${outcome.timed_out ? "timed out" : outcome.error ?? `exited with code ${outcome.exit_code ?? "unknown"}`}${outcome.stderr?.trim() ? `: ${outcome.stderr.trim().slice(-500)}` : ""}`;
-    const ok = record({ command_id: id, passed: outcome.passed, file, argv, exit_code: outcome.exit_code ?? null, timed_out: outcome.timed_out === true, detail, stdout: outcome.stdout, stderr: outcome.stderr }, outcome.passed ? undefined : key);
+    const ok = record({ command_id: id, passed: outcome.passed, file, argv, exit_code: outcome.exit_code ?? null, timed_out: outcome.timed_out === true, ...(outcome.error === undefined ? {} : { spawn_error: outcome.error }), detail, stdout: outcome.stdout, stderr: outcome.stderr }, outcome.passed ? undefined : key);
     return { ok, stdout: outcome.stdout ?? "" };
   };
 
@@ -273,8 +280,14 @@ export async function evaluateTaskTypePolicy(input: TypePolicyInput): Promise<Ty
     return result;
   }
 
+  // Why not look at the global settings: only the Owner's explicit off for this Project is meant to stop tests;
+  // no_test_marker or invalid_settings must keep running them.
+  const testsOff = input.projectTestRun?.reason === "explicit_off";
+  const testsOffDetail = "Project test_run is off (explicit_off); test runners were not started.";
+
   const runTests = async (files: readonly string[]): Promise<{ executed: string[] }> => {
     const executed: string[] = [];
+    if (testsOff) return { executed };
     for (const file of limited(files)) {
       const runner = firstRunner(file, settings.test.runners);
       if (!runner) continue;
@@ -289,6 +302,10 @@ export async function evaluateTaskTypePolicy(input: TypePolicyInput): Promise<Ty
     for (const name of spec.required_tests ?? []) {
       const absolute = insideRoot(root, name);
       if (absolute !== null && firstRunner(name, settings.test.runners) && (await lstat(absolute).catch(() => null))?.isFile()) named.push(name);
+    }
+    if (testsOff) {
+      record({ command_id: "policy:test", passed: true, detail: testsOffDetail });
+      return result;
     }
     const { executed } = await runTests([...new Set([...input.files, ...named])]);
     for (const required of spec.required_tests ?? []) {
@@ -308,7 +325,10 @@ export async function evaluateTaskTypePolicy(input: TypePolicyInput): Promise<Ty
     executed += 1;
     await run("policy:code_check", checker, file, "code_check_failed");
   }
-  if (settings.code.run_test_runners) {
+  if (testsOff && settings.code.run_test_runners) {
+    record({ command_id: "policy:test", passed: true, detail: testsOffDetail });
+    executed += 1;
+  } else if (settings.code.run_test_runners) {
     const tests = await runTests(input.files.filter((file) => firstRunner(file, settings.test.runners)));
     executed += tests.executed.length;
   }

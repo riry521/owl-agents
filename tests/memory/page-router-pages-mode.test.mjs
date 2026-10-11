@@ -251,6 +251,31 @@ test("the Final Manager schema has theme and cross_project only for memory_mode 
   assert.equal(buildManagerPrompt({ ...request, memory_mode: "pages" }, "en").includes("cross_project"), true);
 });
 
+test("the Final Manager asks for commit_subject only when commit_language is en", async () => {
+  const { managerOutputSchema, buildManagerPrompt } = await import("../../packages/agent-runtime/dist/manager.js");
+  const verdictKeys = (request) => managerOutputSchema(request).properties.verdict.properties;
+  const request = { work: { id: "w", title: "t" }, mode: "finalize", memory_mode: "pages", context: {} };
+  for (const commit_language of [undefined, null, "ja"]) {
+    assert.equal("commit_subject" in verdictKeys({ ...request, commit_language }), false);
+    assert.equal(buildManagerPrompt({ ...request, commit_language }, "en").includes("commit_subject"), false);
+  }
+  const en = managerOutputSchema({ ...request, commit_language: "en" });
+  assert.equal(en.properties.verdict.required.includes("commit_subject"), true);
+  assert.equal(buildManagerPrompt({ ...request, commit_language: "en" }, "en").includes("commit_subject"), true);
+  assert.equal("theme" in en.properties.verdict.properties.lessons.items.properties, true);
+});
+
+test("an en finalize verdict without a usable commit_subject is still accepted with commit_subject null", async () => {
+  const { parseManagerPlanWithFeedback } = await import("../../packages/agent-runtime/dist/manager.js");
+  const request = { work: { id: "w", title: "t" }, mode: "finalize", commit_language: "en", context: {} };
+  const base = { skills_used: [], skill_proposals: [], verdict: { verdict: "complete", summary: "s", missing: [], unaddressed_backlog_items: [], lessons: [] } };
+  for (const commit_subject of [undefined, null, 5]) {
+    const payload = { ...base, verdict: { ...base.verdict, ...(commit_subject === undefined ? {} : { commit_subject }) } };
+    const { result } = parseManagerPlanWithFeedback(payload, request);
+    assert.equal(result.verdict.commit_subject, null);
+  }
+});
+
 test("a theme page for a title with 「・」 is created under the slugified file name and keeps its title", async (t) => {
   const { root, router } = await vault(t);
   await router.route(input("pitfall", "最初の落とし穴"));

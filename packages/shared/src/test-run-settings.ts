@@ -33,6 +33,10 @@ export interface TestRunSettings {
   /** argv run once in the checkout root for mode "whole" (no {file}). */
   readonly whole_argv: readonly string[];
   readonly whole_timeout_seconds: number;
+  /** argv run in order in cwd (relative paths are cwd-relative; "{name}" executables become absolute) before prepare_argv; the first failure stops the run ([] = nothing). Builds the test environment. */
+  readonly setup_argvs: readonly (readonly string[])[];
+  /** Working directory of the test command, relative to the checkout root without ".."; per_file only accepts ".". */
+  readonly cwd: string;
 }
 
 /** The one place the defaults live; a Project's test_run JSON overrides it per key. */
@@ -57,6 +61,8 @@ export const DEFAULT_TEST_RUN_SETTINGS: TestRunSettings = {
   mode: "per_file",
   whole_argv: [],
   whole_timeout_seconds: 1800,
+  setup_argvs: [],
+  cwd: ".",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -82,6 +88,10 @@ const sourceMap = (value: unknown): boolean =>
 const mode = (value: unknown): boolean => value === "per_file" || value === "whole" || value === "off";
 const wholeArgv = (value: unknown): boolean => nonEmptyStrings(value) && !(value as string[]).includes("{file}");
 
+const setupArgvs = (value: unknown): boolean => Array.isArray(value) && value.every((argv) => nonEmptyStrings(argv) && (argv as string[]).length > 0);
+const relativeCwd = (value: unknown): boolean =>
+  typeof value === "string" && value.length > 0 && !value.startsWith("/") && !value.split(/[\\/]/u).includes("..");
+
 const VALIDATORS: Readonly<Record<keyof TestRunSettings, (value: unknown) => boolean>> = {
   test_patterns: nonEmptyStrings,
   prepare_argv: nonEmptyStrings,
@@ -100,6 +110,8 @@ const VALIDATORS: Readonly<Record<keyof TestRunSettings, (value: unknown) => boo
   mode,
   whole_argv: wholeArgv,
   whole_timeout_seconds: integerAtLeast(1),
+  setup_argvs: setupArgvs,
+  cwd: relativeCwd,
 };
 
 /** For reads: each invalid or missing key falls back to its default; invalid ones are reported through warn. */
@@ -111,7 +123,12 @@ export function readTestRunSettings(value: unknown, warn?: (message: string) => 
     if (VALIDATORS[key](source[key])) result[key] = source[key];
     else warn?.(`Invalid test_run.${key}; using default.`);
   }
-  return result as unknown as TestRunSettings;
+  const settings = result as unknown as TestRunSettings;
+  if (settings.mode === "per_file" && settings.cwd !== ".") {
+    warn?.('Invalid test_run.cwd; per_file only accepts "."; using default.');
+    return { ...settings, cwd: "." };
+  }
+  return settings;
 }
 
 /** For writes: one message per invalid key ([] = valid). */
@@ -123,6 +140,7 @@ export function validateTestRunSettings(value: unknown): string[] {
     if (valid === undefined) errors.push(`test_run.${key} is not a known key`);
     else if (!valid(item)) errors.push(`test_run.${key} is invalid`);
   }
+  if ((value.mode ?? DEFAULT_TEST_RUN_SETTINGS.mode) === "per_file" && typeof value.cwd === "string" && value.cwd !== ".") errors.push('test_run.cwd must be "." when mode is per_file');
   if (value.mode === "whole" && !(Array.isArray(value.whole_argv) && value.whole_argv.length > 0)) errors.push("test_run.whole_argv is required when mode is whole");
   return errors;
 }

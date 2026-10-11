@@ -2,10 +2,26 @@ import type {
   Project,
   ProjectDeletionImpact,
   ProjectRunningWork,
+  TestRunInput,
+  TestSetupInvestigationState,
+  TestSetupView,
   UpdateProjectInput,
 } from '@/lib/types';
 
-export type ProjectEditForm = { name: string; path: string; autoPush: boolean; setupCommand: string; refreshCommand: string; postMergeCommand: string; postMergeDisabled: boolean; installCommand: string; installDisabled: boolean };
+/** auto = test_run null; command = { mode: whole, whole_argv }; off = { mode: off }; custom = a setting the form cannot express (per_file, extra keys), kept as is. */
+export type TestRunMode = 'auto' | 'command' | 'off' | 'custom';
+
+export type ProjectEditForm = { name: string; path: string; autoPush: boolean; commitLanguage?: 'ja' | 'en' | null; setupCommand: string; refreshCommand: string; postMergeCommand: string; postMergeDisabled: boolean; installCommand: string; installDisabled: boolean; testRunMode?: TestRunMode; testRunCommand?: string };
+
+function testRunFormValue(testRun: TestRunInput | null | undefined): { mode: TestRunMode; command: string } {
+  if (testRun == null) return { mode: 'auto', command: '' };
+  const keys = Object.keys(testRun);
+  if (testRun.mode === 'off' && keys.length === 1) return { mode: 'off', command: '' };
+  if (testRun.mode === 'whole' && Array.isArray(testRun.whole_argv) && keys.every((key) => key === 'mode' || key === 'whole_argv')) {
+    return { mode: 'command', command: formatCommandLine(testRun.whole_argv) };
+  }
+  return { mode: 'custom', command: '' };
+}
 
 export function isProjectAutoPushEnabled(project: Project): boolean {
   return project.auto_push === true;
@@ -16,12 +32,15 @@ export function projectEditForm(project: Project): ProjectEditForm {
     name: project.name,
     path: project.canonical_path,
     autoPush: isProjectAutoPushEnabled(project),
+    commitLanguage: project.commit_language ?? null,
     setupCommand: formatCommandLine(project.worktree_setup_command ?? []),
     refreshCommand: formatCommandLine(project.worktree_refresh_command ?? []),
     postMergeCommand: formatCommandLine(project.post_merge_command ?? []),
     postMergeDisabled: project.post_merge_command?.length === 0,
     installCommand: formatCommandLine(project.post_merge_install_command ?? []),
     installDisabled: project.post_merge_install_command?.length === 0,
+    testRunMode: testRunFormValue(project.test_run).mode,
+    testRunCommand: testRunFormValue(project.test_run).command,
   };
 }
 
@@ -84,7 +103,7 @@ function sameArgv(left: readonly string[], right: readonly string[]): boolean {
 export function buildProjectUpdateInput(
   project: Project,
   form: ProjectEditForm,
-): UpdateProjectInput | null | { error: 'nameRequired' | 'pathRequired' | 'commandInvalid' } {
+): UpdateProjectInput | null | { error: 'nameRequired' | 'pathRequired' | 'commandInvalid' | 'testCommandRequired' } {
   const name = form.name.trim();
   if (!name) return { error: 'nameRequired' };
   if (!form.path.trim()) return { error: 'pathRequired' };
@@ -97,11 +116,19 @@ export function buildProjectUpdateInput(
   const installCommand = form.installDisabled ? [] : installText === '' ? null : parseCommandLine(installText);
   if (setupCommand === null || refreshCommand === null || (postMergeCommand === null && postMergeText !== '' && !form.postMergeDisabled) || (installCommand === null && installText !== '' && !form.installDisabled)) return { error: 'commandInvalid' };
 
+  // A form without a test_run choice, or "custom", leaves the stored setting alone.
+  const testRunMode = form.testRunMode ?? 'custom';
+  const testRunCommand = testRunMode === 'command' ? parseCommandLine(form.testRunCommand ?? '') : null;
+  if (testRunMode === 'command' && testRunCommand === null) return { error: 'commandInvalid' };
+  if (testRunMode === 'command' && testRunCommand?.length === 0) return { error: 'testCommandRequired' };
+
   const input: UpdateProjectInput = {};
   if (name !== project.name) input.name = name;
   if (form.path !== project.canonical_path) input.canonical_path = form.path;
   const autoPush = form.autoPush === true;
   if (autoPush !== isProjectAutoPushEnabled(project)) input.auto_push = autoPush;
+  // A form without a commitLanguage choice leaves the stored setting alone.
+  if (form.commitLanguage !== undefined && form.commitLanguage !== (project.commit_language ?? null)) input.commit_language = form.commitLanguage;
   if (!sameArgv(setupCommand, project.worktree_setup_command ?? [])) input.worktree_setup_command = setupCommand;
   if (!sameArgv(refreshCommand, project.worktree_refresh_command ?? [])) input.worktree_refresh_command = refreshCommand;
   const currentPostMerge = project.post_merge_command ?? null;
@@ -110,7 +137,24 @@ export function buildProjectUpdateInput(
   const currentInstall = project.post_merge_install_command ?? null;
   const installChanged = installCommand === null || currentInstall === null ? installCommand !== currentInstall : !sameArgv(installCommand, currentInstall);
   if (installChanged) input.post_merge_install_command = installCommand;
+  const currentTestRun = testRunFormValue(project.test_run);
+  if (testRunMode !== 'custom' && (testRunMode !== currentTestRun.mode || (testRunMode === 'command' && formatCommandLine(testRunCommand ?? []) !== currentTestRun.command))) {
+    input.test_run = testRunMode === 'auto' ? null : testRunMode === 'off' ? { mode: 'off' } : { mode: 'whole', whole_argv: testRunCommand ?? [] };
+  }
   return Object.keys(input).length ? input : null;
+}
+
+/** How often the edit form re-reads the Project list while an investigation runs, and when it stops waiting. */
+export const INVESTIGATE_POLL_INTERVAL_MS = 3000;
+export const INVESTIGATE_POLL_TIMEOUT_MS = 10 * 60 * 1000;
+
+/** Why not read investigated_at: a run that ends without saving a record (not a git checkout, an error) leaves it unchanged, so only the server knows the run ended. */
+export function investigateOutcome(state: TestSetupInvestigationState): { state: 'pending' } | { state: 'done' } | { state: 'failed'; reason: string } {
+  if (state.running) return { state: 'pending' };
+  const { outcome } = state;
+  if (!outcome) return { state: 'failed', reason: 'unknown' };
+  if (!outcome.saved) return { state: 'failed', reason: outcome.reason ?? 'unknown' };
+  return outcome.status === 'ready' ? { state: 'done' } : { state: 'failed', reason: outcome.status ?? 'unknown' };
 }
 
 export type DeletionDialogModel =
@@ -168,6 +212,15 @@ export function impactFromError(error: unknown): ProjectDeletionImpact | null {
   const details = error.details;
   if (!isRecord(details) || !isProjectDeletionImpact(details.impact)) return null;
   return details.impact;
+}
+
+/** i18n key shown after the re-investigate button: accepted when error is null, the 409 reason for test_setup_unavailable, otherwise the generic Project error. */
+export function investigateNoticeKey(error: unknown): string {
+  if (error === null) return 'projects.testSetupInvestigateAccepted';
+  const record = isRecord(error) ? error : {};
+  const details = isRecord(record.details) ? record.details : {};
+  if (record.code === 'test_setup_unavailable' && typeof details.reason === 'string') return `projects.testSetupInvestigateUnavailable_${details.reason}`;
+  return projectErrorKey(error, 'load');
 }
 
 export function projectErrorKey(error: unknown, context: 'load' | 'edit' | 'delete'): string {

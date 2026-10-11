@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { availableParallelism } from "node:os";
-import { dirname, posix } from "node:path";
+import { dirname, posix, resolve } from "node:path";
 import { matchesGlobWithDots } from "./glob.js";
 import { promisify } from "node:util";
 import { createUlid } from "../../db/dist/index.js";
@@ -61,11 +61,22 @@ export interface TestExecution {
   readonly error: string | null;
   readonly files: readonly TestFileResult[];
   readonly duration_ms: number;
+  /** The setup or prepare step that failed (status error only). */
+  readonly prepare_failure?: PrepareFailure;
+}
+
+export interface PrepareFailure {
+  readonly phase: "setup" | "prepare";
+  readonly argv: readonly string[];
+  readonly exit_code: number | null;
+  readonly timed_out: boolean;
+  readonly error: string | null;
+  readonly output_tail: string;
 }
 
 export interface ClassifiedFailure extends TestFailure {
   readonly classification: "in_scope" | "pre_existing";
-  readonly pre_existing_by: "nightly" | "baseline" | null;
+  readonly pre_existing_by: "nightly" | "baseline" | "known" | null;
 }
 
 export interface TestRunRecord {
@@ -225,15 +236,37 @@ async function runOneFile(file: string, root: string, settings: TestRunSettings,
   return { ...base, status: "failed", failures };
 }
 
-/** Runs prepare_argv once in the checkout; returns the error text, or null when it passed or there is nothing to run. */
+/** Runs setup_argvs in order, then prepare_argv, once in settings.cwd of the checkout; stops at the first failure. Returns the error text, or null when all passed or there is nothing to run. */
 export async function prepareCheckout(input: { root: string; settings: TestRunSettings; run: TestCommandRunner }): Promise<string | null> {
-  const { root, settings, run } = input;
-  if (settings.prepare_argv.length === 0) return null;
-  const prepared = await run(settings.prepare_argv, root, settings.prepare_timeout_seconds * 1000, settings.output_limit_bytes);
-  if (prepared.error === undefined && !prepared.timed_out && prepared.exit_code === 0) return null;
-  const why = prepared.error ?? (prepared.timed_out ? "timed out" : `exit ${prepared.exit_code}`);
-  return `prepare failed (${why}): ${lastLine(prepared.stderr)}`.trimEnd();
+  return (await prepareCheckoutStep(input))?.message ?? null;
 }
+
+/** prepareCheckout with the failing step kept, so a caller can tell a missing tool from a bad test. */
+export async function prepareCheckoutStep(input: { root: string; settings: TestRunSettings; run: TestCommandRunner }): Promise<(PrepareFailure & { readonly message: string }) | null> {
+  const { settings, run } = input;
+  const cwd = resolve(input.root, settings.cwd);
+  const steps = [
+    ...settings.setup_argvs.map((argv) => ({ argv, phase: "setup" as const })),
+    ...(settings.prepare_argv.length === 0 ? [] : [{ argv: settings.prepare_argv, phase: "prepare" as const }]),
+  ];
+  for (const { argv, phase } of steps) {
+    const prepared = await run(argv, cwd, settings.prepare_timeout_seconds * 1000, settings.output_limit_bytes);
+    if (prepared.error === undefined && !prepared.timed_out && prepared.exit_code === 0) continue;
+    const why = prepared.error ?? (prepared.timed_out ? "timed out" : `exit ${prepared.exit_code}`);
+    return {
+      phase,
+      argv,
+      exit_code: prepared.exit_code,
+      timed_out: prepared.timed_out,
+      error: prepared.error ?? null,
+      output_tail: `${prepared.stdout}${prepared.stderr}`.slice(-settings.output_tail_chars),
+      message: `${phase} failed (${why}): ${lastLine(prepared.stderr)}`.trimEnd(),
+    };
+  }
+  return null;
+}
+
+const stepOf = ({ message: _message, ...step }: PrepareFailure & { readonly message: string }): PrepareFailure => step;
 
 /** The one row a whole-command run records in test_run_files. */
 export const WHOLE_RUN_FILE = "*";
@@ -243,11 +276,11 @@ export async function runWholeSuite(input: { root: string; settings: TestRunSett
   const { root, settings, run, signal } = input;
   const started = Date.now();
   const done = (status: TestExecution["status"], error: string | null, files: readonly TestFileResult[] = []): TestExecution => ({ status, error, files, duration_ms: Date.now() - started });
-  const prepareError = await prepareCheckout({ root, settings, run });
-  if (prepareError !== null) return done("error", prepareError);
+  const prepareError = await prepareCheckoutStep({ root, settings, run });
+  if (prepareError !== null) return { ...done("error", prepareError.message), prepare_failure: stepOf(prepareError) };
   if (signal?.aborted === true) return done("error", "aborted");
   const file = WHOLE_RUN_FILE;
-  const result = await run(settings.whole_argv, root, settings.whole_timeout_seconds * 1000, settings.output_limit_bytes);
+  const result = await run(settings.whole_argv, resolve(root, settings.cwd), settings.whole_timeout_seconds * 1000, settings.output_limit_bytes);
   const base = { file, duration_ms: result.duration_ms, exit_code: result.exit_code, attempts: 1, output_tail: `${result.stdout}${result.stderr}`.slice(-settings.output_tail_chars) };
   const synthetic = (message: string): TestFailure[] => [{ file, name: "", line: 0, message: message.slice(0, SYNTHETIC_MESSAGE_CHARS) }];
   if (result.timed_out) return done("completed", null, [{ ...base, status: "timed_out", failures: synthetic(`timed out after ${settings.whole_timeout_seconds}s`) }]);
@@ -269,8 +302,8 @@ export async function runTestFiles(input: {
   const { root, files, settings, run, signal } = input;
   const started = Date.now();
   const fail = (error: string, results: readonly TestFileResult[] = []): TestExecution => ({ status: "error", error, files: results, duration_ms: Date.now() - started });
-  const prepareError = await prepareCheckout({ root, settings, run });
-  if (prepareError !== null) return fail(prepareError);
+  const prepareError = await prepareCheckoutStep({ root, settings, run });
+  if (prepareError !== null) return { ...fail(prepareError.message), prepare_failure: stepOf(prepareError) };
   const aborted = (): boolean => signal?.aborted === true;
   const results: TestFileResult[] = [];
   const queue = [...files];

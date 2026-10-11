@@ -4,6 +4,7 @@ import { EXTERNAL_BLOCKER_EVENT } from "../../shared/dist/external-blocker.js";
 import type { DesignBlockedReport } from "../../shared/dist/design-blocked.js";
 import { DEFAULT_PROGRESS_GUARD_SETTINGS } from "../../shared/dist/progress-guard-settings.js";
 import { DEFAULT_REVIEW_LIMIT_SETTINGS, type ReviewLimitSettings } from "../../shared/dist/review-limit-settings.js";
+import { DEFAULT_FIXER_ESCALATION_SETTINGS } from "../../shared/dist/fixer-escalation-settings.js";
 import { DEFAULT_REVIEW_FOCUS_SETTINGS, type ReviewFocusSettings } from "../../shared/dist/review-focus-settings.js";
 import { repeatedSpots, type ReviewSpot } from "./review-focus";
 import type { ReductionResult, TaskRow, TaskState } from "./types";
@@ -30,7 +31,7 @@ export type AttemptReason =
   | "external_blocker" | "external_blocker_limit"
   | "integration_conflict" | "integration_commit_failed" | "work_sync_conflict"
   | "process_wait" | "dependency_failed" | "dependency_restored" | "dependency_incomplete"
-  | "replanned" | "owner_answer" | "owner_to_manager" | "owner_rerun_review"
+  | "replanned" | "owner_answer" | "owner_to_manager" | "owner_rerun_review" | "owner_rerun_verification" | "test_environment_blocked"
   | "no_progress_limit" | "prerequisite_unreachable" | "manager_cannot_continue" | "core_cannot_continue" | "blocked_by_decision"
   | "verified_without_review" | "review_passed";
 
@@ -46,7 +47,7 @@ export interface AttemptDecision {
  * owner_rerun_review は review、owner_to_manager は replan に固定する（後者は manager_trigger が false のまま failed になる）。
  */
 export function attemptAction(next: TaskState, managerTrigger: boolean, reason: AttemptReason): AttemptAction | null {
-  if (reason === "owner_rerun_review") return "review";
+  if (reason === "owner_rerun_review" || reason === "owner_rerun_verification") return "review";
   if (reason === "owner_to_manager") return "replan";
   switch (next) {
     case "ready": return "retry";
@@ -72,7 +73,7 @@ export type AttemptTaskSnapshot = Readonly<Pick<TaskRow,
   | "failure_count" | "same_error_count" | "last_error_key" | "last_error_generation"
   | "reviewer_failure_count" | "review_round" | "lead_designer_start_round" | "design_escalated"
   | "total_review_attempts" | "review_attempts_refunded" | "base_sync_only" | "base_sync_review_attempts" | "lead_review_rejections"
-  | "design_stop_json"
+  | "review_rejections" | "fixer_escalated_rejections" | "design_stop_json"
 >>;
 
 /** row 18d / 18e: 同じ系譜の他の Task の回数。 */
@@ -102,6 +103,8 @@ export interface AttemptPolicyConfig {
   readonly lineageLimits: AttemptLineageLimits | null;
   readonly noProgressLimit: number;
   readonly externalBlockerLimit: number;
+  /** Review rejections of a non-design Task after which the Fixer takes over. */
+  readonly fixerAfterRejections: number;
 }
 
 export const DEFAULT_ATTEMPT_POLICY_CONFIG: AttemptPolicyConfig = {
@@ -114,6 +117,7 @@ export const DEFAULT_ATTEMPT_POLICY_CONFIG: AttemptPolicyConfig = {
   lineageLimits: null,
   noProgressLimit: DEFAULT_PROGRESS_GUARD_SETTINGS.no_progress_limit,
   externalBlockerLimit: DEFAULT_PROGRESS_GUARD_SETTINGS.external_blocker_limit,
+  fixerAfterRejections: DEFAULT_FIXER_ESCALATION_SETTINGS.after_review_rejections,
 };
 
 /** design_stop_json の中身（at を除く）。 */
@@ -197,7 +201,7 @@ export type AttemptRowPatch = Readonly<Partial<Pick<TaskRow,
   | "retry_no" | "next_attempt_at" | "reviewer_failure_count"
   | "review_round" | "lead_designer_start_round" | "design_escalated"
   | "total_review_attempts" | "base_sync_review_attempts" | "lead_review_rejections"
-  | "paused_from" | "worktree_state"
+  | "review_rejections" | "fixer_escalated_rejections" | "paused_from" | "worktree_state"
 >>>;
 
 // Why not extra fields on AttemptDecision itself: task.attempt_decided spreads ...result.decision into its payload,
@@ -292,11 +296,16 @@ function evaluateReviewFailed(o: Extract<AttemptTaskObservation, { kind: "review
   const baseSyncAttempts = (task.base_sync_review_attempts ?? 0) + (baseSync ? 1 : 0);
   // Why not lead_designer_start_round != null: design_mode=lead sets it to 0 at creation, and replans reset it to 0, so it cannot tell "began at Lead" from "escalated".
   const lead = task.type === "design" && task.design_escalated === 1;
-  // Every outcome carries these three columns: the counts are recorded whatever the verdict leads to.
+  const rejections = (task.review_rejections ?? 0) + 1;
+  // Why not reset on replan: the Fixer stays until the Task completes, so a value once set is never overwritten.
+  const fixer = task.type !== "design" && (task.fixer_escalated_rejections ?? null) === null && rejections >= c.fixerAfterRejections;
+  // Every outcome carries these columns: the counts are recorded whatever the verdict leads to.
   const counted = {
     total_review_attempts: totalAttempts,
     base_sync_review_attempts: baseSyncAttempts,
     lead_review_rejections: (task.lead_review_rejections ?? 0) + (lead ? 1 : 0),
+    review_rejections: rejections,
+    ...(fixer ? { fixer_escalated_rejections: rejections } : {}),
   };
   const fix = ["replacement_worker_reserved"];
   const trigger = ["manager_trigger_required"];

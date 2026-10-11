@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 
-import { baselineTestRun, latestTestRun, listTestFiles, recordTestRunInTransaction, runTestFiles, runWholeSuite, selectTests } from "../../packages/core/dist/test-runs.js";
+import { baselineTestRun, latestTestRun, listTestFiles, prepareCheckout, recordTestRunInTransaction, runTestFiles, runWholeSuite, selectTests } from "../../packages/core/dist/test-runs.js";
 import { runCoreTests } from "../../packages/core/dist/core-test-run.js";
 import { resolveTestRun } from "../../packages/core/dist/test-detection.js";
 import { testFailureKey } from "../../packages/core/dist/nightly-tests.js";
@@ -154,11 +157,12 @@ const baselineOf = (failures, status = "failed") => ({
   id: "b", project_id: "p", work_id: null, task_id: null, scope: "baseline", mode: "selected", commit_sha: "c", status, finished_at: "x",
   files: failures.length === 0 ? [] : [{ file: target, status: "failed", failures: failures.map((f) => ({ ...f, classification: "in_scope", pre_existing_by: null })) }],
 });
-const triage = (failure, { nightly = [], baseline = null, changed = [] } = {}) => triageTestFailures({
+const triage = (failure, { nightly = [], baseline = null, changed = [], known = [] } = {}) => triageTestFailures({
   files: [{ file: target, status: "failed", duration_ms: 1, exit_code: 1, attempts: 1, failures: [failure], output_tail: "" }],
   nightlyKeys: new Set(nightly.map(testFailureKey)),
   baseline,
   workChangedFiles: new Set(changed),
+  knownKeys: new Set(known.map(testFailureKey)),
 }).get(target)[0];
 
 test("triage marks a failure that the nightly run already has as pre_existing by nightly", () => {
@@ -171,6 +175,14 @@ test("triage marks a failure that the baseline also has as pre_existing by basel
   const f = failureOf("t");
   const result = triage(f, { baseline: baselineOf([f]) });
   assert.deepEqual([result.classification, result.pre_existing_by], ["pre_existing", "baseline"]);
+});
+
+test("triage marks a failure recorded as known pre_existing by known, and keeps others and changed files in_scope", () => {
+  const f = failureOf("t");
+  const result = triage(f, { known: [f] });
+  assert.deepEqual([result.classification, result.pre_existing_by], ["pre_existing", "known"]);
+  assert.equal(triage(failureOf("other"), { known: [f] }).classification, "in_scope");
+  assert.equal(triage(f, { known: [f], changed: [target] }).classification, "in_scope");
 });
 
 test("triage keeps a failure in_scope when the Work changed the test file", () => {
@@ -279,4 +291,40 @@ test("a baseline file already run at a commit is not run again, even after other
   const again = await ensure(["tests/b.test.mjs"]);
   assert.deepEqual(ran, []);
   assert.ok(again.files.some((entry) => entry.file === "tests/b.test.mjs" && entry.status === "failed"));
+});
+
+test("prepareCheckout runs setup_argvs in order, then prepare, in test_run.cwd, and stops at the first failure", async () => {
+  const calls = [];
+  const runWith = (failing) => async (argv, cwd) => {
+    calls.push({ argv: argv.join(" "), cwd });
+    return { exit_code: argv[0] === failing ? 3 : 0, timed_out: false, stdout: "", stderr: argv[0] === failing ? "no luck\n" : "", duration_ms: 1 };
+  };
+  const settings = readTestRunSettings({ mode: "whole", whole_argv: ["suite"], setup_argvs: [["one"], ["two"], ["three"]], prepare_argv: ["prep"], cwd: "sub/dir" });
+  const root = join(tmpdir(), "owl-prepare-root");
+  assert.equal(await prepareCheckout({ root, settings, run: runWith(null) }), null);
+  assert.deepEqual(calls.map((call) => call.argv), ["one", "two", "three", "prep"]);
+  assert.deepEqual([...new Set(calls.map((call) => call.cwd))], [join(root, "sub/dir")]);
+  calls.length = 0;
+  const error = await prepareCheckout({ root, settings, run: runWith("two") });
+  assert.match(error, /^setup failed \(exit 3\): no luck/u);
+  assert.deepEqual(calls.map((call) => call.argv), ["one", "two"]);
+});
+
+test("setup_argvs read cwd-relative paths in a subfolder, and a checkout-relative path is not doubled", async () => {
+  const root = await mkdtemp(join(tmpdir(), "owl-setup-root-"));
+  await mkdir(join(root, "backend"));
+  await writeFile(join(root, "backend", "requirements.txt"), "x\n");
+  const read = (path) => [process.execPath, "-e", `require('node:fs').readFileSync(${JSON.stringify(path)})`];
+  const settingsFor = (path) => readTestRunSettings({ mode: "whole", whole_argv: ["suite"], cwd: "backend", setup_argvs: [read(path)] });
+  assert.equal(await prepareCheckout({ root, settings: settingsFor("requirements.txt"), run: nodeRunner }), null);
+  assert.match(await prepareCheckout({ root, settings: settingsFor("backend/requirements.txt"), run: nodeRunner }), /^setup failed/u);
+  await rm(root, { recursive: true, force: true });
+});
+
+test("test_run.cwd is relative without .., and per_file only accepts the root", () => {
+  assert.equal(readTestRunSettings({ mode: "whole", whole_argv: ["suite"], cwd: "a/b" }).cwd, "a/b");
+  assert.equal(readTestRunSettings({ mode: "whole", whole_argv: ["suite"], cwd: "../x" }).cwd, ".");
+  assert.equal(readTestRunSettings({ mode: "whole", whole_argv: ["suite"], cwd: "/abs" }).cwd, ".");
+  assert.equal(readTestRunSettings({ cwd: "a" }).cwd, ".");
+  assert.deepEqual(validateTestRunSettings({ mode: "per_file", cwd: "a" }), ['test_run.cwd must be "." when mode is per_file']);
 });

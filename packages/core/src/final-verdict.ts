@@ -61,6 +61,8 @@ export interface LessonBlock {
 export interface FinalManagerVerdict {
   readonly verdict: "complete" | "incomplete";
   readonly summary: string;
+  /** English commit subject; present only for Projects with commit_language "en". */
+  readonly commit_subject?: string;
   readonly missing: readonly FinalMissingItem[];
   /** Backlog items the Manager judged not addressed; malformed entries are dropped. */
   readonly unaddressed_backlog_items: readonly { readonly item_id: string; readonly reason: string }[];

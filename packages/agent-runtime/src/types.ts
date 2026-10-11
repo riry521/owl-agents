@@ -167,6 +167,8 @@ export interface ManagerPlanRequest {
   readonly mode?: "plan" | "replan" | "finalize";
   /** "pages" adds theme/cross_project to the finalize lessons; absent keeps the legacy output byte-identical. */
   readonly memory_mode?: "pages";
+  /** "en" makes the finalize verdict carry commit_subject; absent or "ja" keeps the output unchanged. */
+  readonly commit_language?: "ja" | "en" | null;
   /** Additional Manager context after work/tasks/reports/trigger are mapped to their typed fields. */
   readonly context?: Readonly<Record<string, unknown> & { readonly knowledge?: string | null }>;
 }
@@ -204,6 +206,8 @@ interface LegacyManagerLesson {
 export interface ManagerVerdict {
   readonly verdict: "complete" | "incomplete";
   readonly summary: string;
+  /** Only when the request had commit_language "en". */
+  readonly commit_subject?: string;
   readonly missing: readonly ManagerMissingItem[];
   /** Absent in verdicts recorded before backlog items were tied to Works. */
   readonly unaddressed_backlog_items?: readonly { readonly item_id: string; readonly reason: string }[];

@@ -379,6 +379,7 @@ test("backlog, tokens and settings views return what the existing GET routes ret
     child_runs: "/settings/child-runs",
     language: "/settings/language",
     remake_limits: "/settings/remake-limits",
+    fixer_escalation: "/settings/fixer-escalation",
     knowledge_automation: "/settings/knowledge-automation",
     advisor_persona: "/settings/advisor-persona",
     advisor_folders: "/settings/advisor-folders",

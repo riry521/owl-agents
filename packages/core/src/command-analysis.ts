@@ -4,9 +4,17 @@ import { realpathSync, statSync } from "node:fs";
 const HOME_TOKEN = "__OWL_HOME__";
 const UNKNOWN_ENV_PREFIX = "__OWL_ENV_";
 const UNKNOWN_COMMAND_SUBSTITUTION = "__OWL_COMMAND_SUBSTITUTION__";
+/**
+ * Unquoted `(` and `)` reach the segments as these markers.
+ * Why not the plain characters: a quoted `')'` is an argument, and no shell word can hold a NUL byte.
+ */
+export const SUBSHELL_OPEN = "\0(";
+export const SUBSHELL_CLOSE = "\0)";
 
 export interface ShellCommandAnalysis {
   readonly segments: readonly (readonly string[])[];
+  /** The first `top_level_count` segments are written at the top level; the rest come from `sh -c`, `eval` and `$(...)`. */
+  readonly top_level_count: number;
 }
 
 /** Tokenize shell commands without executing them; operators and substitutions are analyzed separately. */
@@ -14,7 +22,8 @@ export function analyzeShellCommand(command: string): ShellCommandAnalysis | nul
   const nestedSegments: string[][] = [];
   const segments = tokenize(command, nestedSegments, 0);
   if (segments === null) return null;
-  const allSegments = [...segments, ...nestedSegments].filter((segment) => segment.length > 0);
+  const topLevel = segments.filter((segment) => segment.length > 0);
+  const allSegments = [...topLevel, ...nestedSegments.filter((segment) => segment.length > 0)];
   const expanded: string[][] = [];
   for (const segment of allSegments) {
     // `env -S <string>` has no command token of its own, so check it before the effective command.
@@ -36,7 +45,7 @@ export function analyzeShellCommand(command: string): ShellCommandAnalysis | nul
     if (nested === null) return null;
     expanded.push(...nested);
   }
-  return { segments: [...allSegments, ...expanded] };
+  return { segments: [...allSegments, ...expanded], top_level_count: topLevel.length };
 }
 
 function analyzeNestedShell(command: string, depth: number): string[][] | null {
@@ -80,7 +89,7 @@ function environmentSplitStringCommand(tokens: readonly string[]): string | null
 }
 
 function tokenize(command: string, nestedSegments: string[][], depth: number, allowHeredoc = true): string[][] | null {
-  if (depth > 12) return null;
+  if (depth > 12 || command.includes("\0")) return null;
   const segments: string[][] = [];
   let segment: string[] = [];
   let current = "";
@@ -92,6 +101,14 @@ function tokenize(command: string, nestedSegments: string[][], depth: number, al
     if (tokenStarted) segment.push(current);
     current = "";
     tokenStarted = false;
+  };
+  // Why: the `2` of `2>&1` or `2>file` is a descriptor number, not an argument; a quoted or spaced `2` stays one.
+  const pushRedirectToken = (index: number): void => {
+    if (tokenStarted && /^\d+$/u.test(current) && (index === current.length || /\s/u.test(command[index - current.length - 1] ?? ""))) {
+      current = "";
+      tokenStarted = false;
+    }
+    pushToken();
   };
   const pushSegment = (): void => {
     pushToken();
@@ -183,6 +200,14 @@ function tokenize(command: string, nestedSegments: string[][], depth: number, al
       pushSegment();
       continue;
     }
+    if (character === "&" && command[index + 1] === ">") {
+      // `&> file` and `&>> file` write both streams to the file, like `>` and `>>`.
+      pushToken();
+      const append = command[index + 2] === ">";
+      segment.push(append ? ">>" : ">");
+      index += append ? 2 : 1;
+      continue;
+    }
     if (character === "&" || character === "|") {
       pushSegment();
       if (command[index + 1] === character) index += 1;
@@ -199,8 +224,19 @@ function tokenize(command: string, nestedSegments: string[][], depth: number, al
       index = heredoc.end;
       continue;
     }
+    if (character === ">" && (command[index + 1] === "&" || command[index + 1] === "|")) {
+      // `>| file` forces the write and `>& file` writes both streams; `>&2` and `>&-` only duplicate or close a descriptor, so they write nothing.
+      pushRedirectToken(index);
+      const descriptor = command[index + 1] === "&" ? /^&\s*(\d+|-)(?=\s|$|[;&|)])/u.exec(command.slice(index + 1)) : null;
+      if (descriptor !== null) index += descriptor[0].length;
+      else {
+        segment.push(">");
+        index += 1;
+      }
+      continue;
+    }
     if (character === ">" || character === "<") {
-      pushToken();
+      pushRedirectToken(index);
       if (command[index + 1] === character) {
         segment.push(character + character);
         index += 1;
@@ -211,6 +247,11 @@ function tokenize(command: string, nestedSegments: string[][], depth: number, al
     }
     if (/\s/u.test(character)) {
       pushToken();
+      continue;
+    }
+    if (character === "(" || character === ")") {
+      pushToken();
+      segment.push(character === "(" ? SUBSHELL_OPEN : SUBSHELL_CLOSE);
       continue;
     }
     current += character;
@@ -469,7 +510,7 @@ export function effectiveCommand(tokens: readonly string[]): EffectiveCommand | 
   return { executable, args, wrappers };
 }
 
-function isEnvironmentAssignment(value: string): boolean {
+export function isEnvironmentAssignment(value: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value);
 }
 

@@ -91,6 +91,7 @@ process.stdin.on("end", () => {
     agentRunner,
     version: "plan-usage-ingest-test",
     owlRoot: root,
+    now: () => observedAt.toISOString(),
     planUsageSources: {
       claude: {
         harness: "claude",

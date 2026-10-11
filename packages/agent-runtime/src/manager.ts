@@ -153,7 +153,7 @@ const PAGES_LESSON_PROPERTIES = {
   cross_project: { type: "boolean", description: "true only if the lesson applies across Projects, not just this one; otherwise false" },
 } as const;
 
-function finalizeOutputSchema(pages: boolean): RoleSchema {
+function finalizeOutputSchema(pages: boolean, commitSubject = false): RoleSchema {
   return objectSchema({
   skills_used: SKILLS_USED_SCHEMA,
   skill_proposals: SKILL_PROPOSALS_SCHEMA,
@@ -164,6 +164,7 @@ function finalizeOutputSchema(pages: boolean): RoleSchema {
       description: "complete if the reports show the Work's goal was achieved, otherwise incomplete",
     },
     summary: { type: "string", description: "one sentence describing what the Work accomplished" },
+    ...(commitSubject ? { commit_subject: { type: ["string", "null"], description: "English, imperative-mood, one-line summary of the Work for its commit subject (ASCII only, at most 72 characters); null if you cannot write one" } } : {}),
     missing: {
       type: "array",
       items: objectSchema({
@@ -221,9 +222,10 @@ export const MANAGER_FINALIZE_OUTPUT_SCHEMA: RoleSchema = finalizeOutputSchema(f
 /** The finalize output when memory_mode is "pages": lessons also carry theme and cross_project. */
 export const MANAGER_FINALIZE_PAGES_OUTPUT_SCHEMA: RoleSchema = finalizeOutputSchema(true);
 
-export function managerOutputSchema(request: Pick<ManagerPlanRequest, "mode" | "memory_mode">): RoleSchema {
+export function managerOutputSchema(request: Pick<ManagerPlanRequest, "mode" | "memory_mode" | "commit_language">): RoleSchema {
   return request.mode === "finalize"
-    ? request.memory_mode === "pages" ? MANAGER_FINALIZE_PAGES_OUTPUT_SCHEMA : MANAGER_FINALIZE_OUTPUT_SCHEMA
+    ? request.commit_language === "en" ? finalizeOutputSchema(request.memory_mode === "pages", true)
+    : request.memory_mode === "pages" ? MANAGER_FINALIZE_PAGES_OUTPUT_SCHEMA : MANAGER_FINALIZE_OUTPUT_SCHEMA
     : request.mode === "replan"
       ? MANAGER_REPLAN_OUTPUT_SCHEMA
       : MANAGER_PLAN_OUTPUT_SCHEMA;
@@ -411,6 +413,7 @@ function buildFinalizeManagerPrompt(request: ManagerPlanRequest, language: Owner
       "Include in lessons only insights reusable in future Works. Exclude one-off circumstances, facts unique to this Work, and points that can be readily derived again.",
       "Use kind=procedure with procedure text for reusable steps. Use fact/decision/pitfall with topic for durable facts, reasoned decisions, and failure patterns. Use rule_candidate with rule_text/rule_scope only for short binding instructions; a rule_candidate becomes a rule only after Owner approval. Write rule_text in general wording that applies to any Project and Work: never put file names, paths, Project names, Task numbers (T3) or Work numbers (#12) in it. If the lesson cannot be stated without them, use pitfall or decision instead of rule_candidate.",
       ...(request.memory_mode === "pages" ? [PAGES_THEME_INSTRUCTION] : []),
+      ...(request.commit_language === "en" ? ["Put in verdict.commit_subject an English, imperative-mood, one-line summary of what this Work changed, in ASCII only and at most 72 characters (for example \"Add commit_language setting\"). It becomes the subject of the Work's commit."] : []),
     ],
     processSkills,
     output: managerOutputSchema(request),
@@ -480,6 +483,10 @@ export function parseManagerPlanWithFeedback(
       ? raw.filter((entry) => isRecord(entry) && typeof entry.item_id === "string" && entry.item_id !== "" && typeof entry.reason === "string")
       : raw;
     payload = { ...payload, verdict: { ...payload.verdict, unaddressed_backlog_items: items } };
+  }
+  if (request.mode === "finalize" && request.commit_language === "en" && isRecord(payload.verdict)) {
+    // A missing or mistyped subject must not fail the verdict; the git gateway falls back to its English default.
+    payload = { ...payload, verdict: { ...payload.verdict, commit_subject: typeof payload.verdict.commit_subject === "string" ? payload.verdict.commit_subject : null } };
   }
   if (request.mode === "finalize" && request.memory_mode === "pages" && isRecord(payload.verdict) && Array.isArray(payload.verdict.lessons)) {
     // theme and cross_project are optional for the model; absent means no theme and not cross-project.

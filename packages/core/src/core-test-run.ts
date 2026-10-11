@@ -1,8 +1,10 @@
 import { OWL_INSTANCE_ID_ENV } from "@owl/shared";
 import { createUlid } from "../../db/dist/index.js";
 import type { TestRunSettings } from "../../shared/dist/test-run-settings.js";
+import type { TestSetupSettings } from "../../shared/dist/test-setup-settings.js";
 import { spawnTestCommand, testFailureKey, type TestFailure } from "./nightly-tests";
 import { ownerLanguage } from "./owner-language";
+import { executionEnvironmentFailure, type TestEnvironmentFailure } from "./test-environment";
 import {
   registerQuarantineBacklogInTransaction,
   pruneMissingQuarantineInTransaction,
@@ -50,8 +52,12 @@ export interface CoreTestRunRequest {
   readonly dirty?: boolean;
   readonly change_digest?: Readonly<Record<string, string>>;
   readonly settings: TestRunSettings;
+  /** Failures the Project's test setup recorded as already failing. */
+  readonly known_failures?: readonly { readonly file: string; readonly name: string }[];
   readonly run: TestCommandRunner;
   readonly signal?: AbortSignal;
+  /** Tells an environment failure from a code failure; without it nothing is classified. */
+  readonly environment_signals?: TestSetupSettings["environment"];
 }
 
 export interface CoreTestRunOutcome {
@@ -67,6 +73,8 @@ export interface CoreTestRunOutcome {
   readonly in_scope: readonly ClassifiedFailure[];
   readonly pre_existing: readonly ClassifiedFailure[];
   readonly error: string | null;
+  /** The failure came from the test environment, not the code: the baseline was not consulted. */
+  readonly environment: TestEnvironmentFailure | null;
   /** Why no tests ran (not_applicable only). */
   readonly reason?: string | null;
 }
@@ -124,30 +132,41 @@ export async function runCoreTests(deps: CoreTestRunDeps, req: CoreTestRunReques
       settings: req.settings,
     });
   // Only the Work-level run skips quarantined files, and never one the Work touched (it may have fixed it).
+  // A file holding a known failure always runs: the known failure only hides itself, and skipping the file would hide new failures in it too.
   const workChangedSet = new Set(req.work_changed_files);
-  const skipped = whole || req.scope !== "work" ? [] : quarantinedFiles(deps.db, req.project_id).filter((file) => selected.files.includes(file) && !workChangedSet.has(file));
+  const knownFiles = new Set(whole ? [] : (req.known_failures ?? []).map((failure) => failure.file));
+  const skipped = whole || req.scope !== "work" ? [] : quarantinedFiles(deps.db, req.project_id).filter((file) => selected.files.includes(file) && !workChangedSet.has(file) && !knownFiles.has(file));
   const selection: TestSelection = {
     ...selected,
     ...(skipped.length > 0 ? { files: selected.files.filter((file) => !skipped.includes(file)), quarantined: skipped } : {}),
     ...(req.dirty ? { dirty: true } : {}), ...(req.change_digest ? { change_digest: req.change_digest } : {}),
   };
   if (selection.files.length === 0) {
-    return { run_id: null, status: "skipped", mode: selection.mode, selection, passed_files: [], failed_files: [], in_scope: [], pre_existing: [], error: null };
+    return { run_id: null, status: "skipped", mode: selection.mode, selection, passed_files: [], failed_files: [], in_scope: [], pre_existing: [], error: null, environment: null };
   }
 
   const startedAt = new Date().toISOString();
-  const execution = whole
+  const ran = whole
     ? await runWholeSuite({ root: req.root, settings: req.settings, run: req.run, signal: req.signal })
     : await runTestFiles({ root: req.root, files: selection.files, settings: req.settings, run: req.run, signal: req.signal });
+  // Before the baseline: a missing tool fails the base commit the same way, and would read as an old failure.
+  const environment = req.environment_signals === undefined ? null : executionEnvironmentFailure(
+    ran,
+    (file) => (whole ? req.settings.whole_argv : req.settings.file_argv.map((arg) => (arg === "{file}" ? file.file : arg))),
+    req.environment_signals,
+    new Set((req.known_failures ?? []).map(testFailureKey)),
+  );
+  const execution = environment === null || ran.status === "error" ? ran : { ...ran, status: "error" as const, error: `test environment: ${environment.signal}` };
   // A whole-command run is judged by its exit code alone: no nightly or baseline triage.
   const nightlyKeys = whole ? new Set<string>() : latestNightlyKeys(deps.db, req.project_id);
   const workChanged = new Set(req.work_changed_files);
+  const knownKeys = new Set((req.known_failures ?? []).map(testFailureKey));
   // A baseline is only worth taking for failures that could be old ones: not in the latest nightly, in a test file the Work left alone.
   const candidates = [...new Set(execution.files.flatMap((file) => file.failures
-    .filter((failure) => failure.name !== "" && !nightlyKeys.has(testFailureKey(failure)) && !workChanged.has(failure.file))
+    .filter((failure) => failure.name !== "" && !nightlyKeys.has(testFailureKey(failure)) && !knownKeys.has(testFailureKey(failure)) && !workChanged.has(failure.file))
     .map((failure) => failure.file)))];
   let baseline = null;
-  if (!whole && execution.status === "completed" && candidates.length > 0 && req.base_commit !== null) {
+  if (!whole && environment === null && execution.status === "completed" && candidates.length > 0 && req.base_commit !== null) {
     baseline = await ensureBaselineRun({
       db: deps.db,
       writeLane: deps.writeLane,
@@ -164,7 +183,7 @@ export async function runCoreTests(deps: CoreTestRunDeps, req: CoreTestRunReques
       return null;
     });
   }
-  const classified = triageTestFailures({ files: execution.files, nightlyKeys, baseline, workChangedFiles: workChanged });
+  const classified = triageTestFailures({ files: execution.files, nightlyKeys, baseline, workChangedFiles: workChanged, knownKeys });
   const status = testRunStatus(execution, classified);
   const runId = createUlid();
   const passedFiles: string[] = [];
@@ -198,12 +217,14 @@ export async function runCoreTests(deps: CoreTestRunDeps, req: CoreTestRunReques
       recordTestRunInTransaction(tx, record, new Date().toISOString());
       // Files that fail on the base too are quarantined (and listed in one backlog item per Project); a whole-command run cannot name files.
       // A file that also has a new failure stays out: quarantining it would hide that failure from the next Work-level run.
-      if (!whole) {
+      if (!whole && environment === null) {
         const now = new Date().toISOString();
         const entries = execution.files.flatMap((file) => {
           const failures = classified.get(file.file) ?? [];
           const old = failures.filter((f) => f.classification === "pre_existing");
-          return file.status !== "passed" && old.length > 0 && old.length === failures.length ? [{ file: file.file, classified_by: old[0].pre_existing_by ?? "baseline", failures: old }] : [];
+          // Matched by the recorded files, not pre_existing_by: a known failure the nightly run also names is triaged as nightly.
+          if (knownFiles.has(file.file)) return [];
+          return file.status !== "passed" && old.length > 0 && old.length === failures.length ? [{ file: file.file, classified_by: old[0].pre_existing_by === "nightly" ? "nightly" as const : "baseline" as const, failures: old }] : [];
         });
         quarantineFilesInTransaction(tx, req.project_id, entries, now);
         if (entries.length > 0) {
@@ -240,7 +261,7 @@ export async function runCoreTests(deps: CoreTestRunDeps, req: CoreTestRunReques
     },
     outbox: [{ provider: "websocket" }],
   });
-  return { run_id: runId, status, mode: selection.mode, selection, passed_files: passedFiles, failed_files: failedFiles, in_scope: inScope, pre_existing: preExisting, error: execution.error };
+  return { run_id: runId, status, mode: selection.mode, selection, passed_files: passedFiles, failed_files: failedFiles, in_scope: inScope, pre_existing: preExisting, error: execution.error, environment };
 }
 
 /** The shape an agent (and the event log) gets: names and message summaries, never raw output. */
@@ -261,7 +282,7 @@ export function coreTestRunBrief(outcome: CoreTestRunOutcome, settings: TestRunS
 /** No test ran because the Project has none (or Core is told not to run them); nothing is recorded in test_runs. */
 export function notApplicableTestRun(reason: string): CoreTestRunOutcome {
   const selection: TestSelection = { mode: "full", files: [], previous_failed: [], changed_tests: [], related: [], required: [], full_reason: null, changed_files_count: 0 };
-  return { run_id: null, status: "not_applicable", mode: "full", selection, passed_files: [], failed_files: [], in_scope: [], pre_existing: [], error: null, reason };
+  return { run_id: null, status: "not_applicable", mode: "full", selection, passed_files: [], failed_files: [], in_scope: [], pre_existing: [], error: null, environment: null, reason };
 }
 
 /** The run could not start (Git failed); it counts as failing, never as skipped. */
@@ -269,16 +290,22 @@ export function coreTestErrorOutcome(error: unknown): CoreTestRunOutcome {
   return { ...notApplicableTestRun(""), status: "error", reason: null, error: error instanceof Error ? error.message : String(error) };
 }
 
+/** The environment a Core child process gets: PATH, HOME and the allowlisted variables from Core's own, then the settings' run_env on top. */
+export function childEnv(envAllowlist: readonly string[], extraEnv: Readonly<Record<string, string>> = {}): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of new Set(["PATH", "HOME", ...envAllowlist])) {
+    const value = process.env[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return { ...env, ...extraEnv };
+}
+
 /**
  * A runner that starts real processes for a Work-level or baseline run. The marker env
  * lets the workspace sweeper reclaim them after a crash.
  */
-export function workTestRunner(input: { readonly workId: string; readonly envAllowlist: readonly string[]; readonly instanceId: string; readonly signal?: AbortSignal }): TestCommandRunner {
-  const env: Record<string, string> = {};
-  for (const key of new Set(["PATH", "HOME", ...input.envAllowlist])) {
-    const value = process.env[key];
-    if (value !== undefined) env[key] = value;
-  }
+export function workTestRunner(input: { readonly workId: string; readonly envAllowlist: readonly string[]; readonly extraEnv?: Readonly<Record<string, string>>; readonly instanceId: string; readonly signal?: AbortSignal }): TestCommandRunner {
+  const env = childEnv(input.envAllowlist, input.extraEnv);
   env[OWL_INSTANCE_ID_ENV] = input.instanceId;
   env.OWL_AGENT_RUN_ID = workVerificationMarker(input.workId);
   return (argv, cwd, timeoutMs, outputLimitBytes, onOutput) => spawnTestCommand(argv, cwd, env, timeoutMs, outputLimitBytes, input.signal, onOutput);

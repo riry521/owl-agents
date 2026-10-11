@@ -24,6 +24,8 @@ import type { DependencySummarySettings } from "../../../packages/shared/dist/de
 import { ReviewLimitSettingsValidationError, validateReviewLimitSettings } from "../../../packages/shared/dist/review-limit-settings.js";
 import type { ReviewLimitSettings } from "../../../packages/shared/dist/review-limit-settings.js";
 import { REMAKE_LIMIT_SETTINGS_KEYS, RemakeLimitSettingsValidationError, validateRemakeLimitSettings } from "../../../packages/shared/dist/remake-limit-settings.js";
+import { FixerEscalationSettingsValidationError, validateFixerEscalationSettings } from "../../../packages/shared/dist/fixer-escalation-settings.js";
+import type { FixerEscalationSettings } from "../../../packages/shared/dist/fixer-escalation-settings.js";
 import type { RemakeLimitSettings } from "../../../packages/shared/dist/remake-limit-settings.js";
 import { ReviewRoutingSettingsValidationError, validateReviewRoutingSettings } from "../../../packages/shared/dist/review-routing-settings.js";
 import type { ReviewRoutingSettings } from "../../../packages/shared/dist/review-routing-settings.js";
@@ -266,6 +268,11 @@ interface ProjectOverviewInvestigateApiPort {
   investigateProjectOverview(input: { project_id: string }): Promise<unknown>;
 }
 
+interface TestSetupInvestigateApiPort {
+  investigateTestSetup(input: { project_id: string }): { started: true; trigger: string } | { started: false; reason: string };
+  testSetupRunState(input: { project_id: string }): { running: true } | { running: false; outcome: { saved: boolean; status: string | null; reason: string | null } } | null;
+}
+
 interface KnowledgeStorageApiPort {
   activeKnowledgeDir(): string;
   getKnowledgeStorage(): { custom: boolean; state: string };
@@ -321,6 +328,11 @@ interface ReviewMetricsApiPort {
 interface ReviewRoutingApiPort {
   getReviewRoutingSettings(): Promise<ReviewRoutingSettings>;
   setReviewRoutingSettings(input: ReviewRoutingSettings): Promise<ReviewRoutingSettings>;
+}
+
+interface FixerEscalationApiPort {
+  getFixerEscalationSettings(): Promise<FixerEscalationSettings>;
+  setFixerEscalationSettings(input: FixerEscalationSettings): Promise<FixerEscalationSettings>;
 }
 
 interface RemakeLimitApiPort {
@@ -1307,7 +1319,7 @@ export function validateIntegrationPayload(
   return result;
 }
 
-const MODEL_SETTING_ROLES = new Set(["advisor", "manager", "designer", "lead_designer", "worker", "reviewer", "librarian", "curator"]);
+const MODEL_SETTING_ROLES = new Set(["advisor", "manager", "designer", "lead_designer", "worker", "fixer", "reviewer", "librarian", "curator"]);
 const MODEL_SETTING_EFFORTS = new Set(["low", "medium", "high", "xhigh", "max"]);
 
 function validateVerificationCommand(value: unknown, index: number): VerificationCommand {
@@ -1415,7 +1427,7 @@ async function assertProjectPathNotRegistered(core: CorePort, canonicalPath: str
 }
 
 function validateProjectUpdatePayload(payload: JsonObject): UpdateProjectInput {
-  const allowed = ["name", "canonical_path", "auto_push", "worktree_setup_command", "worktree_refresh_command", "post_merge_command", "post_merge_install_command", "required_test_command", "test_run", "test_policy", "report_check_commands", "verification_plan"];
+  const allowed = ["name", "canonical_path", "auto_push", "commit_language", "worktree_setup_command", "worktree_refresh_command", "post_merge_command", "post_merge_install_command", "required_test_command", "test_run", "test_policy", "report_check_commands", "verification_plan"];
   const extra = Object.keys(payload).filter((key) => !allowed.includes(key));
   if (extra.length > 0) {
     throw new ApiError(400, "validation_error", "UpdateProject payloadの項目が契約と一致しません。必須項目と余分な項目を確認してください。", { missing: [], extra });
@@ -1438,6 +1450,10 @@ function validateProjectUpdatePayload(payload: JsonObject): UpdateProjectInput {
   if (Object.prototype.hasOwnProperty.call(payload, "auto_push")) {
     if (typeof payload.auto_push !== "boolean") throw new ApiError(400, "validation_error", "自動pushはtrueかfalseで指定してください。");
     input.auto_push = payload.auto_push;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "commit_language")) {
+    if (payload.commit_language !== null && payload.commit_language !== "ja" && payload.commit_language !== "en") throw new ApiError(400, "validation_error", "コミットメッセージの言語はja、en、nullのいずれかで指定してください。");
+    input.commit_language = payload.commit_language;
   }
   if (Object.prototype.hasOwnProperty.call(payload, "worktree_setup_command")) {
     input.worktree_setup_command = worktreeCommandField(payload.worktree_setup_command, "worktree_setup_command");
@@ -1630,7 +1646,7 @@ function validateRoleModelSettingInput(value: unknown, index: number): RoleModel
   }
   exactKeys(value, ["role", "provider", "model", "effort"], `roles[${index}]`);
   if (typeof value.role !== "string" || !MODEL_SETTING_ROLES.has(value.role)) {
-    throw new ApiError(400, "validation_error", `roles[${index}].roleが不正です。advisor、manager、designer、lead_designer、worker、reviewer、librarian、curatorのいずれかを指定してください。`);
+    throw new ApiError(400, "validation_error", `roles[${index}].roleが不正です。advisor、manager、designer、lead_designer、worker、fixer、reviewer、librarian、curatorのいずれかを指定してください。`);
   }
   const provider = stringField(value.provider, `roles[${index}].provider`, 1, 200);
   const model = stringField(value.model, `roles[${index}].model`, 1, 200);
@@ -1828,6 +1844,11 @@ interface ReviewerTestGuardApiPort {
   checkReviewerTestCommand(input: { readonly agent_run_id: string; readonly command: string }): Promise<{ readonly denied: false } | { readonly denied: true; readonly matched: string; readonly message: string }>;
 }
 
+interface TestSetupGuardApiPort {
+  checkTestSetupTool(input: { readonly agent_run_id: string; readonly tool_name: string; readonly tool_input: Readonly<Record<string, unknown>>; readonly cwd: string }): Promise<{ readonly denied: false; readonly installs?: readonly (readonly string[])[] } | { readonly denied: true; readonly message: string }>;
+  recordTestSetupInstalls?(agentRunId: string, installs: readonly (readonly string[])[]): void;
+}
+
 function requireReviewerTestGuardApi(core: CorePort): ReviewerTestGuardApiPort {
   const has = (value: unknown): value is ReviewerTestGuardApiPort => isObject(value) && typeof value.checkReviewerTestCommand === "function";
   const wrapped = core as CorePort & { core?: unknown };
@@ -1968,6 +1989,14 @@ function requireProjectOverviewInvestigateApi(core: CorePort): ProjectOverviewIn
   const has = (value: unknown): value is ProjectOverviewInvestigateApiPort => isObject(value) && typeof value.investigateProjectOverview === "function";
   const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
   if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support project overview investigation.");
+  return candidate;
+}
+
+function requireTestSetupInvestigateApi(core: CorePort): TestSetupInvestigateApiPort {
+  const wrapped = core as CorePort & { core?: unknown };
+  const has = (value: unknown): value is TestSetupInvestigateApiPort => isObject(value) && typeof value.investigateTestSetup === "function" && typeof value.testSetupRunState === "function";
+  const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
+  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support test setup investigation.");
   return candidate;
 }
 
@@ -2158,6 +2187,28 @@ function validatedRemakeLimitSettings(value: unknown): RemakeLimitSettings {
     return validateRemakeLimitSettings(value);
   } catch (error) {
     if (error instanceof RemakeLimitSettingsValidationError) {
+      throw new ApiError(400, "validation_error", error.message, { field: error.field });
+    }
+    throw error;
+  }
+}
+
+
+function requireFixerEscalationApi(core: CorePort): FixerEscalationApiPort {
+  const has = (value: unknown): value is FixerEscalationApiPort => isObject(value)
+    && typeof value.getFixerEscalationSettings === "function"
+    && typeof value.setFixerEscalationSettings === "function";
+  const wrapped = core as CorePort & { core?: unknown };
+  const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
+  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support Fixer escalation.");
+  return candidate;
+}
+
+function validatedFixerEscalationSettings(value: unknown): FixerEscalationSettings {
+  try {
+    return validateFixerEscalationSettings(value);
+  } catch (error) {
+    if (error instanceof FixerEscalationSettingsValidationError) {
       throw new ApiError(400, "validation_error", error.message, { field: error.field });
     }
     throw error;
@@ -2877,10 +2928,11 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     requireOwner(request);
     // Same Core calls and shaping as each settings GET route; secrets stay masked.
     const remakeLimits = requireRemakeLimitApi(context.core);
+    const fixerEscalationApi = requireFixerEscalationApi(context.core);
     const childRuns = requireChildRunApi(context.core);
     const knowledgeStorage = requireKnowledgeStorageApi(context.core);
     const core = context.core;
-    const [models, providers, hybrid_mode, language, knowledgeAutomation, advisor_persona, advisorFolders, integrations, typesafeKey, remake_limits, child_runs] = await Promise.all([
+    const [models, providers, hybrid_mode, language, knowledgeAutomation, advisor_persona, advisorFolders, integrations, typesafeKey, remake_limits, fixer_escalation, child_runs] = await Promise.all([
       core.getModelSettings(),
       core.listProviders(),
       core.getHybridMode(),
@@ -2891,6 +2943,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       core.getIntegrations(),
       core.getTypesafeApiKey(),
       remakeLimits.getRemakeLimitSettings(),
+      fixerEscalationApi.getFixerEscalationSettings(),
       childRunCall(() => childRuns.getChildRunSettings()),
     ]);
     const data = {
@@ -2900,6 +2953,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       child_runs,
       language: { language },
       remake_limits,
+      fixer_escalation,
       knowledge_automation: { ...knowledgeAutomation, time_zone: hostTimeZone() },
       advisor_persona: { advisor_persona },
       advisor_folders: advisorFolders,
@@ -3188,6 +3242,29 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
+  const projectTestSetupInvestigateMatch = pathname.match(new RegExp(`^${API_PREFIX}/projects/([^/]+)/test-setup/investigate$`));
+  if (projectTestSetupInvestigateMatch && method === "POST") {
+    requireOwner(request);
+    const projectId = pathId(projectTestSetupInvestigateMatch[1], "project_id");
+    const api = requireTestSetupInvestigateApi(context.core);
+    await requireRegisteredProject(context.core, projectId);
+    const result = api.investigateTestSetup({ project_id: projectId });
+    if (!result.started) throw new ApiError(409, "test_setup_unavailable", `Test setup investigation did not start: ${result.reason}.`, { reason: result.reason });
+    sendJson(response, 202, { request_id: requestIdValue, data: { project_id: projectId, trigger: result.trigger, accepted: true } });
+    return;
+  }
+
+  const projectTestSetupInvestigationMatch = pathname.match(new RegExp(`^${API_PREFIX}/projects/([^/]+)/test-setup/investigation$`));
+  if (projectTestSetupInvestigationMatch && method === "GET") {
+    requireOwner(request);
+    const projectId = pathId(projectTestSetupInvestigationMatch[1], "project_id");
+    const api = requireTestSetupInvestigateApi(context.core);
+    await requireRegisteredProject(context.core, projectId);
+    const state = api.testSetupRunState({ project_id: projectId });
+    sendJson(response, 200, { request_id: requestIdValue, data: { project_id: projectId, running: state?.running ?? false, outcome: state && !state.running ? state.outcome : null } });
+    return;
+  }
+
   if (projectMatch && method === "PATCH") {
     requireOwner(request);
     const projectId = pathId(projectMatch[1], "project_id");
@@ -3198,6 +3275,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       const update: UpdateProjectInput = {};
       if (input.name !== undefined) update.name = input.name;
       if (input.auto_push !== undefined) update.auto_push = input.auto_push;
+      if (input.commit_language !== undefined) update.commit_language = input.commit_language;
       if (input.worktree_setup_command !== undefined) update.worktree_setup_command = input.worktree_setup_command;
       if (input.worktree_refresh_command !== undefined) update.worktree_refresh_command = input.worktree_refresh_command;
       if (input.post_merge_command !== undefined) update.post_merge_command = input.post_merge_command;
@@ -3399,6 +3477,26 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     const api = requireRemakeLimitApi(context.core);
     const result = await runCommand(context, pathname, command, 200, async () => ({
       data: await api.setRemakeLimitSettings(input) as unknown as JsonObject,
+      version: 0,
+    }));
+    sendJson(response, 200, result);
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/settings/fixer-escalation` && method === "GET") {
+    requireOwner(request);
+    const data = await requireFixerEscalationApi(context.core).getFixerEscalationSettings();
+    sendJson(response, 200, { request_id: requestIdValue, data, version: 0 });
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/settings/fixer-escalation` && method === "PUT") {
+    requireOwner(request);
+    const command = commandEnvelope(await readRequestBody(request));
+    const input = validatedFixerEscalationSettings(command.payload);
+    const api = requireFixerEscalationApi(context.core);
+    const result = await runCommand(context, pathname, command, 200, async () => ({
+      data: await api.setFixerEscalationSettings(input) as unknown as JsonObject,
       version: 0,
     }));
     sendJson(response, 200, result);
@@ -4766,6 +4864,23 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
         }
       }
     }
+    let setupGuard: TestSetupGuardApiPort | null = null;
+    let setupCheck: Awaited<ReturnType<TestSetupGuardApiPort["checkTestSetupTool"]>> | null = null;
+    if (agent) {
+      // Optional: a Core without the check (a fake in a test) leaves every agent's decision as it was.
+      const wrappedCore = context.core as CorePort & { core?: unknown };
+      const hasCheck = (value: unknown): value is TestSetupGuardApiPort => isObject(value) && typeof value.checkTestSetupTool === "function";
+      setupGuard = hasCheck(context.core) ? context.core : hasCheck(wrappedCore.core) ? wrappedCore.core : null;
+      setupCheck = setupGuard === null ? null : await setupGuard.checkTestSetupTool({ agent_run_id: agent.agent_run_id, tool_name: toolName, tool_input: toolInput, cwd });
+      if (setupCheck?.denied) {
+        sendJson(response, 200, {
+          request_id: command.request_id,
+          data: { allowed: false, rule_id: "test-setup-install", scope: "role", message: setupCheck.message },
+          version: command.expected_version,
+        });
+        return;
+      }
+    }
     const result = context.ruleStore.checkGuard({
       role,
       toolName,
@@ -4774,6 +4889,9 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       home: process.env.HOME,
       ...(agent?.role === "designer" ? { designerWritePath } : {}),
     });
+    if (agent && result.allowed && setupCheck?.denied === false && setupCheck.installs !== undefined && setupCheck.installs.length > 0) {
+      setupGuard?.recordTestSetupInstalls?.(agent.agent_run_id, setupCheck.installs);
+    }
     sendJson(response, 200, {
       request_id: command.request_id,
       data: result,

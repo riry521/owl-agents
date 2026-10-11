@@ -129,6 +129,7 @@ const componentTranslations = {
   'work.prerequisiteDeadline': ({ time }) => `Deadline: ${time}`,
   'work.prerequisiteResume': 'Stop waiting and resume',
   'work.stopReason': ({ reason }) => `Why it stopped: ${reason}`,
+  'work.fixerEscalated': ({ count }) => `Fixer took over after ${count} review rejections`,
   'work.designDocuments': 'Design documents',
   'work.errorDesignDocumentsLoad': 'Could not load the design documents.',
   'work.errorDesignDocumentLoad': 'Could not load this design document.',
@@ -810,6 +811,34 @@ test('Work detail shows why a Task waits, what it waits for and why a Task stopp
     for (const expected of ['page-format.ts has not landed', 'page-format.ts on main', 'Stop waiting and resume']) {
       assert.ok(pausedScreen.html.includes(expected), `a paused Work should still show: ${expected}`);
     }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Work detail says a Task was taken over by the Fixer, and ignores a malformed fixer_escalation', async () => {
+  const client = loadApiClient();
+  const originalFetch = globalThis.fetch;
+  const id = 'work-with-fixer';
+  try {
+    const base = { work_id: id, type: 'code', status: 'running', state_version: 1, updated_at: '2026-09-23T00:00:00.000Z' };
+    const taskRows = [
+      { ...base, id: 'task-fixer', title: 'Fixer task', fixer_escalation: { rejections: 2 } },
+      { ...base, id: 'task-null', title: 'Worker task', fixer_escalation: null },
+      { ...base, id: 'task-zero', title: 'Zero task', fixer_escalation: { rejections: 0 } },
+      { ...base, id: 'task-fraction', title: 'Fraction task', fixer_escalation: { rejections: 1.5 } },
+      { ...base, id: 'task-text', title: 'Text task', fixer_escalation: { rejections: '2' } },
+      { ...base, id: 'task-missing', title: 'Missing task' },
+    ];
+    const byId = Object.fromEntries(normalizeWorkDetailData({ work: { id }, tasks: taskRows }, id).tasks.map((task) => [task.id, task.fixer_escalation]));
+    assert.deepEqual(byId['task-fixer'], { rejections: 2 });
+    for (const taskId of ['task-null', 'task-zero', 'task-fraction', 'task-text', 'task-missing']) assert.equal(byId[taskId], null, taskId);
+
+    globalThis.fetch = (input) => successfulApiFetch(input, { state: 'running', title: 'Fixer work', taskRows });
+    const board = renderBoardWorkLink({ id, title: 'Fixer work', state: 'running', updated_at: '2026-09-23T00:00:00.000Z' });
+    const screen = await renderDetailFromRoute(board.href, client);
+    assert.equal(screen.html.split('Fixer took over after 2 review rejections').length - 1, 1);
+    assert.equal(screen.html.split('Fixer took over after').length - 1, 1, 'only the escalated Task shows the line');
   } finally {
     globalThis.fetch = originalFetch;
   }

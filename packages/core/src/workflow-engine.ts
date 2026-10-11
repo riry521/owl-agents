@@ -30,6 +30,7 @@ import {
   createTaskPlanInTransaction,
   isTerminalTaskState,
   openRemakeLimitDecisionInTransaction,
+  openTestEnvironmentDecisionInTransaction,
   reduceTaskInTransaction,
   reduceWorkInTransaction,
   stopTaskForNoProgressInTransaction,
@@ -53,13 +54,18 @@ import { clearPausedReviewerWait, readPausedReviewerWait, recordPausedReviewerWa
 import { agentCliNames, installedAgentCliMatches, listProcesses, planSubagentReconciliation } from "./subagent-watcher.js";
 import { evaluateWorkerCompletion, type WorkerChild } from "./task-completion-gate.js";
 import { NO_CORE_ACTIVITY, type CoreActivityReporter } from "./core-activity.js";
-import { coreTestErrorOutcome, coreTestRunBrief, notApplicableTestRun, runCoreTests, workTestRunner, type CoreTestRunDeps, type CoreTestRunOutcome } from "./core-test-run.js";
+import { childEnv, coreTestErrorOutcome, coreTestRunBrief, notApplicableTestRun, runCoreTests, workTestRunner, type CoreTestRunDeps, type CoreTestRunOutcome } from "./core-test-run.js";
 import { DEFAULT_TEST_RUN_SETTINGS, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
 import { DEFAULT_TEST_DETECTION_RULES, type TestDetectionRules } from "./test-detection-rules.js";
-import { reportCheckCommands, resolveTestRun, type TestRunResolution } from "./test-detection.js";
+import { markerReader, reportCheckCommands, resolveTestRun, testDetectionMarkerDigest, testDetectionRulesVersion, type TestRunResolution } from "./test-detection.js";
+import { explicitTestRunDigest, readStoredTestSetup, selectTestSetupInCheckout, testExecutables, testSetupDigests, type KnownFailure, type StoredTestSetup, type TestSetupSelection } from "./test-setup.js";
+import { testSetupSettings } from "./test-setup-settings.js";
+import type { TestSetupSettings } from "../../shared/dist/test-setup-settings.js";
+import type { TestSetupService } from "./test-setup-service.js";
+import { execInstallQuery, gatedTestRunner } from "./test-setup-install-guard.js";
 import { latestTestRun, testRunSettingsFromJson, type TestCommandRunner } from "./test-runs.js";
 import { QUARANTINE_FIX_TASK_PREFIX } from "./test-quarantine.js";
-import { evaluateTaskTypePolicy, verificationPolicySettings, type TaskVerificationSpec } from "./task-verification-policy.js";
+import { evaluateTaskTypePolicy, verificationPolicySettings, type TaskVerificationSpec, type TypePolicyResult } from "./task-verification-policy.js";
 import { reviewRouting } from "./assurance-settings.js";
 import { insertRequestUsageRows } from "./token-usage-report.js";
 import type { HookRequestUsage } from "../../shared/dist/token-relay.js";
@@ -78,7 +84,8 @@ import type {
   WorkflowSnapshot,
 } from "./types";
 import { ownerLanguage } from "./owner-language";
-import { prerequisiteExpiredBrief } from "./decision-brief";
+import { approvedInstallArgvs, policyTestEnvironment, tagOutsideInstalls,type TestEnvironmentBlock, type TestEnvironmentFailure } from "./test-environment";
+import { prerequisiteExpiredBrief, testEnvironmentBrief } from "./decision-brief";
 import type { ReplanPlan } from "./replan-plan";
 import type { SkillBox } from "./skill-box";
 import { defaultOwlRoot } from "./workspace-layout.js";
@@ -181,6 +188,32 @@ export type HookSubagentInput =
   | { readonly event: "start" | "stop"; readonly agentId: string; readonly agentType: string | null }
   | { readonly event: "usage"; readonly agentId: string; readonly agentType: string | null; readonly requests: readonly HookRequestUsage[] };
 
+type TestRunResolutionWithExecutables = TestRunResolution & {
+  readonly executables: Record<string, string>;
+  /** Commands outside the Project that the Owner has approved in the saved setup. */
+  readonly approved_installs: readonly (readonly string[])[];
+  /** The record a passing run makes the record of this place; null when none is to be adopted. */
+  readonly adopt_record: StoredTestSetup | null;
+  /** Failures the used record knows were already failing. */
+  readonly known_failures: readonly KnownFailure[];
+};
+
+/** Where a test run happens: the Task worktree or the Work checkout. */
+interface TestRunPlace {
+  readonly scope: "work" | "task";
+  readonly work_id: string;
+  readonly task_id: string | null;
+}
+
+interface ProjectTestRunRow {
+  readonly id: string;
+  readonly canonical_path: string;
+  readonly test_run_json: string | null;
+  readonly test_run_detected_json: string | null;
+  readonly report_check_commands_json: string | null;
+  readonly setup_records: readonly StoredTestSetup[];
+}
+
 export interface ManagerReplanNeededInput {
   readonly work_id: string;
   readonly failed_task_ids: readonly string[];
@@ -227,6 +260,8 @@ export interface WorkflowEngineOptions {
   /** Where Core test runs report their start, end and output. */
   readonly coreActivity?: CoreActivityReporter;
   readonly testDetectionRules?: TestDetectionRules;
+  /** Investigates how to run a Project's tests; without it the test run uses only the Owner's command, a saved record and detection. */
+  readonly testSetup?: TestSetupService;
 }
 
 /**
@@ -237,6 +272,16 @@ export interface WorkflowEngineOptions {
  */
 
 const WF_MODEL_SETTINGS_KEY = "model_settings";
+
+/** The model role of a Task. Prompts, context and rules keep using "worker" for a Fixer. */
+export function taskModelRole(task: {
+  type: string;
+  lead_designer_start_round: number | null;
+  fixer_escalated_rejections?: number | null;
+}): "designer" | "lead_designer" | "worker" | "fixer" {
+  if (task.type === "design") return task.lead_designer_start_round != null ? "lead_designer" : "designer";
+  return task.fixer_escalated_rejections != null ? "fixer" : "worker";
+}
 
 export function resolveRoleModel(db: Pick<CoreDatabase, "get">, role: string): { model: string; provider: string; effort?: string } | undefined {
   const row = db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", WF_MODEL_SETTINGS_KEY);
@@ -259,6 +304,7 @@ export function resolveRoleModel(db: Pick<CoreDatabase, "get">, role: string): {
   // Settings stored before the Designer existed have no designer entry.
   if (!found && role === "designer") return DEFAULT_ROLE_MODELS.designer;
   if (!found && role === "lead_designer") return DEFAULT_ROLE_MODELS.lead_designer;
+  if (!found && role === "fixer") return DEFAULT_ROLE_MODELS.fixer;
   if (!found || typeof found.model !== "string" || found.model.trim().length === 0 || typeof found.provider !== "string" || found.provider.trim().length === 0) {
     throw validationError(`Stored model settings are missing a valid ${role} provider/model.`, { key: WF_MODEL_SETTINGS_KEY, role });
   }
@@ -326,6 +372,7 @@ export class WorkflowEngine {
   private readonly testCommandRunner?: TestCommandRunner;
   private readonly coreActivity: CoreActivityReporter;
   private readonly testDetectionRules: TestDetectionRules;
+  private readonly testSetup?: TestSetupService;
   /** Serialises baseline checkouts per Project (one path each). */
   private readonly baselineLocks = new Map<string, Promise<unknown>>();
   private running = false;
@@ -368,6 +415,7 @@ export class WorkflowEngine {
     this.testCommandRunner = options.testCommandRunner;
     this.coreActivity = options.coreActivity ?? NO_CORE_ACTIVITY;
     this.testDetectionRules = options.testDetectionRules ?? DEFAULT_TEST_DETECTION_RULES;
+    this.testSetup = options.testSetup;
     this.git = options.git ?? new GitWorktreeGateway(options.db, this.owlRoot);
     this.ruleStore = options.ruleStore;
     this.skillBox = options.skillBox;
@@ -1051,11 +1099,11 @@ export class WorkflowEngine {
       // Pause, cancel, a blocking Decision or engine shutdown can land while
       // an earlier iteration awaited the worktree or the WriteLane.
       if (!this.running || !this.isWorkRunning(workId)) break;
-      const leadStart = this.db.get<{ lead_designer_start_round: number | null }>(
-        "SELECT lead_designer_start_round FROM tasks WHERE id = ?", taskId,
-      )?.lead_designer_start_round ?? null;
+      const modelRoleRow = this.db.get<{ type: string; lead_designer_start_round: number | null; fixer_escalated_rejections: number | null }>(
+        "SELECT type, lead_designer_start_round, fixer_escalated_rejections FROM tasks WHERE id = ?", taskId,
+      );
       const role = type === "design" ? "designer" : "worker";
-      const roleModel = resolveRoleModel(this.db, type === "design" && leadStart !== null ? "lead_designer" : role);
+      const roleModel = resolveRoleModel(this.db, taskModelRole(modelRoleRow ?? { type, lead_designer_start_round: null }));
       const roleProvider = this.providerForRoleModel(roleModel);
       if (this.providerPauseController?.isPaused(roleProvider)) {
         // A stop-report run must not wait for the provider: the Owner is asked without the Designer's report.
@@ -1087,10 +1135,10 @@ export class WorkflowEngine {
       try {
         writeResult = await this.writeLane.write({
           mutateState: (transaction: CoreWriteLaneTransaction) => {
-            const leadStart = transaction.get<{ lead_designer_start_round: number | null }>(
-              "SELECT lead_designer_start_round FROM tasks WHERE id = ?", taskId,
-            )?.lead_designer_start_round ?? null;
-            const roleModel = resolveRoleModel(transaction, type === "design" && leadStart !== null ? "lead_designer" : role);
+            const modelRoleRow = transaction.get<{ type: string; lead_designer_start_round: number | null; fixer_escalated_rejections: number | null }>(
+              "SELECT type, lead_designer_start_round, fixer_escalated_rejections FROM tasks WHERE id = ?", taskId,
+            );
+            const roleModel = resolveRoleModel(transaction, taskModelRole(modelRoleRow ?? { type, lead_designer_start_round: null }));
             const roleProvider = this.providerForRoleModel(roleModel);
             if (this.providerPauseController?.isPaused(roleProvider)) {
               throw new HumanReadableError({ code: "provider_paused", message: "The Task provider is paused.", remediation: "The Task will start when the provider resumes." });
@@ -1431,7 +1479,7 @@ export class WorkflowEngine {
     const processSkillsPack = this.getProcessSkillsPack?.() ?? null;
     const research = isDesigner ? null : this.researchSubagentSettings();
     const runModel = this.db.get<{ provider: string; model: string }>("SELECT provider, model FROM agent_runs WHERE id = ?", agentRunId);
-    const workerRoleModel = resolveRoleModel(this.db, isDesigner && designTier === "lead" ? "lead_designer" : role);
+    const workerRoleModel = resolveRoleModel(this.db, taskRow ? taskModelRole(taskRow) : role);
     const workerProvider = this.providerForRoleModel(workerRoleModel);
     const workerHarness = builtinProviderHarness(runModel?.provider ?? workerProvider) ?? builtinProviderHarness(workerProvider) ?? "claude";
     const designPath = isDesigner ? designDocumentPath(this.dataDir, workId, taskId) : null;
@@ -1458,7 +1506,7 @@ export class WorkflowEngine {
         ...(designStop ? { design_stop: { ...designStop, review_history: lineageReviewHistory(this.db, taskId) as unknown as JsonObject[] } } : {}),
         ...(processSkillsPack ? { process_skills_dir: processSkillsPack.skills_dir, process_skills_source: processSkillsPack.source } : {}),
         ...(research ? { research_subagent: research as unknown as JsonObject } : {}),
-        ...(isDesigner ? {} : { report_check_commands: this.workerReportCheckCommands(workId, taskRow?.worktree_path ?? null) }),
+        ...(isDesigner ? {} : { report_check_commands: await this.workerReportCheckCommands(workId, taskId, taskRow?.worktree_path ?? null) }),
         ...workerContext,
       },
       ...(workerRoleModel ? {
@@ -2312,10 +2360,12 @@ export class WorkflowEngine {
     if (!task) {
       throw validationError("The Task disappeared before Core verification started.", { task_id: taskId });
     }
+    // A verification the Owner released from a test environment Decision runs again on the same Worker run.
+    const startedBefore = this.db.get<{ count: number }>("SELECT COUNT(*) AS count FROM events WHERE type = 'verification.started' AND task_id = ? AND agent_run_id = ?", taskId, agentRunId)?.count ?? 0;
     await this.writeLane.write({
       mutateState: () => ({ task_id: taskId, verification: "started" }),
       event: {
-        idempotencyKey: `verification-started:${agentRunId}`,
+        idempotencyKey: startedBefore === 0 ? `verification-started:${agentRunId}` : `verification-started:${agentRunId}:${startedBefore}`,
         type: "verification.started",
         workId,
         taskId,
@@ -2341,6 +2391,10 @@ export class WorkflowEngine {
       };
     }
     if (this.stopping) return;
+    if (verification.error_key === "test_environment" && typeof verification.test_environment === "object" && verification.test_environment !== null) {
+      await this.blockOnTestEnvironment({ workId, taskId, agentRunId, block: verification.test_environment as unknown as TestEnvironmentBlock });
+      return;
+    }
     const passed = verification.passed === true;
     // Core decides the review after verification, from what the Task changed.
     // A routing failure must not skip the Reviewer, so it falls back to required.
@@ -2789,6 +2843,7 @@ export class WorkflowEngine {
       type_policy: policy.type_policy,
       error_key: !coreChecksPassed ? "project_check_failed" : policy.error_key,
       error: policy.error,
+      ...(coreChecksPassed && policy.test_environment !== undefined ? { test_environment: policy.test_environment } : {}),
       ...(policy.test_run !== undefined ? { test_run: policy.test_run } : {}),
     };
   }
@@ -2821,8 +2876,11 @@ export class WorkflowEngine {
       const failed = checks.find((check) => check.passed !== true);
       return { passed: false, worker_verification_passed: workerPassed, source: "check_commands", core_checks: "executed", commands: checks, check_commands: checks, error_key: "check_failed", error: `Check command failed: ${String(failed?.command_id)}` };
     }
-    const coreTests = hasProject && root !== null && task.type !== "design" ? await this.runTaskCoreTests(workId, task, root, files, spec, agentRunId) : null;
-    const policy = await evaluateTaskTypePolicy({
+    // The test setup is resolved for each run (a re-investigation changes it); Core's test run and the type policy's test commands use the last one's executables.
+    const project = hasProject && root !== null ? this.projectTestRunRow(workId, task.id) : undefined;
+    const last: { resolved: TestRunResolutionWithExecutables | null } = { resolved: null };
+    type CoreTests = { outcome: CoreTestRunOutcome; settings: TestRunSettings } | null;
+    const evaluate = (coreTests: CoreTests, resolved: TestRunResolutionWithExecutables | null): Promise<TypePolicyResult> => evaluateTaskTypePolicy({
       type: task.type,
       root,
       files,
@@ -2832,6 +2890,8 @@ export class WorkflowEngine {
       spec,
       settings,
       mode,
+      executables: resolved?.executables ?? testSetupSettings(this.db).default_executables,
+      projectTestRun: coreTests?.outcome.status === "not_applicable" && coreTests.outcome.reason === "explicit_off" ? { enabled: false, reason: "explicit_off" } : undefined,
       coreTestRun: coreTests && coreTests.outcome.status !== "not_applicable" ? { run_id: coreTests.outcome.run_id, mode: coreTests.outcome.mode, passed_files: coreTests.outcome.passed_files, failed_files: coreTests.outcome.failed_files } : undefined,
       runCommand: async (argv, cwd) => {
         const outcome = await this.runVerificationCommand(task.id, argv, cwd, limits.env_allowlist, limits.timeout_seconds * 1000, limits.stdout_limit_bytes, limits.stderr_limit_bytes, [0]);
@@ -2845,9 +2905,36 @@ export class WorkflowEngine {
         };
       },
     });
+    let coreTests: CoreTests = null;
+    let blocked: TestEnvironmentBlock | null = null;
+    let policy: TypePolicyResult;
+    if (project !== undefined && root !== null) {
+      const place: TestRunPlace = { scope: "task", work_id: workId, task_id: task.id };
+      const signals = this.environmentSignals();
+      const recovered = await this.withTestSetupRecovery({
+        project,
+        place,
+        checkout: root,
+        run: async () => {
+          const row = this.projectTestRunRow(workId, task.id) ?? project;
+          last.resolved = await this.resolveProjectTestRun(row, root, { investigate: true, place });
+          const core = task.type !== "design" ? await this.runTaskCoreTests(workId, task, root, files, spec, agentRunId, last.resolved) : null;
+          return { core, policy: await evaluate(core, last.resolved) };
+        },
+        // The Task's default tests (policy:test) run outside Core's test run, so their failures are classified too.
+        environmentOf: (result) => result.core?.outcome.environment ?? (signals === undefined ? null : policyTestEnvironment(result.policy, signals)),
+      });
+      coreTests = recovered.result.core;
+      policy = recovered.result.policy;
+      blocked = recovered.blocked;
+    } else {
+      policy = await evaluate(null, null);
+    }
     // Pre-existing failures and an empty selection never fail the Task; only in_scope failures and a run that could not go through do.
     const coreFailed = coreTests !== null && (coreTests.outcome.status === "failed" || coreTests.outcome.status === "error");
     const coreErrorKey = coreTests?.outcome.status === "error" ? "test_not_executed" : "test_failed";
+    // In whole mode the environment-failed Core run is also recorded as a policy:test failure, which must not hide the block.
+    const environmentBlocked = blocked !== null && workerPassed && policy.checks.every((check) => check.passed || check.command_id === "policy:test") ? blocked : null;
     const coreError = coreTests === null ? null : coreTests.outcome.status === "error"
       ? coreTests.outcome.error
       : `Core test run failed: ${coreTests.outcome.in_scope.length} test(s) in ${coreTests.outcome.failed_files.length} file(s)`;
@@ -2859,8 +2946,9 @@ export class WorkflowEngine {
       commands: policy.checks as unknown as JsonObject[],
       check_commands: checks,
       type_policy: policy as unknown as JsonObject,
-      error_key: !workerPassed ? "worker_verification_failed" : policy.error_key ?? (coreFailed ? coreErrorKey : null),
-      error: policy.error ?? (coreFailed ? coreError : null),
+      error_key: !workerPassed ? "worker_verification_failed" : environmentBlocked !== null ? "test_environment" : policy.error_key ?? (coreFailed ? coreErrorKey : null),
+      error: environmentBlocked !== null ? `test environment: ${environmentBlocked.signal}` : policy.error ?? (coreFailed ? coreError : null),
+      ...(environmentBlocked !== null ? { test_environment: environmentBlocked as unknown as JsonObject } : {}),
       ...(coreTests ? { test_run: coreTestRunBrief(coreTests.outcome, coreTests.settings) as unknown as JsonObject } : {}),
     };
   }
@@ -2872,11 +2960,11 @@ export class WorkflowEngine {
   private async removeUnrequestedTests(workId: string, task: TaskRow, root: string): Promise<{ error: string | null; removed: string[] }> {
     const none = { error: null, removed: [] };
     if (requestsSpecTest(readStoredAcceptanceCriteria(task.acceptance_criteria_json, task.acceptance ?? ""))) return none;
-    const project = this.projectTestRunRow(workId);
+    const project = this.projectTestRunRow(workId, task.id);
     if (!project) return none;
     // test_patterns apply even when the Owner turned the Core test run off.
     const explicit = project.test_run_json === null ? null : testRunSettingsFromJson(project.test_run_json);
-    const resolved = explicit === null ? await this.resolveProjectTestRun(project, root) : null;
+    const resolved = explicit === null ? await this.resolveProjectTestRun(project, root, { investigate: false }) : null;
     const patterns = explicit?.test_patterns ?? (resolved?.enabled ? resolved.settings.test_patterns : []);
     if (patterns.length === 0) return none;
     const added = await this.git.addedPaths?.({ work_id: workId, task_id: task.id, worktree_path: root }) ?? null;
@@ -2918,8 +3006,8 @@ export class WorkflowEngine {
    * Core's own run of the tests related to what the Task changed (and the ones that failed last time).
    * null when the Project has no test_run settings; a non-Git checkout runs without a commit record.
    */
-  private async runTaskCoreTests(workId: string, task: TaskRow, root: string, files: readonly string[], spec: TaskVerificationSpec, agentRunId: string | null): Promise<{ outcome: CoreTestRunOutcome; settings: TestRunSettings } | null> {
-    const project = this.projectTestRunRow(workId);
+  private async runTaskCoreTests(workId: string, task: TaskRow, root: string, files: readonly string[], spec: TaskVerificationSpec, agentRunId: string | null, preResolved: TestRunResolutionWithExecutables | null = null): Promise<{ outcome: CoreTestRunOutcome; settings: TestRunSettings } | null> {
+    const project = this.projectTestRunRow(workId, task.id);
     if (!project) return null;
     const git =(args: string[]): Promise<string> => execFileAsync("git", args, { cwd: root }).then((result) => result.stdout.trim());
     let commit: string;
@@ -2943,7 +3031,7 @@ export class WorkflowEngine {
         return { outcome: { ...notApplicableTestRun(message), status: "error", error: message, reason: undefined }, settings: DEFAULT_TEST_RUN_SETTINGS };
       }
     }
-    const resolved = await this.resolveProjectTestRun(project, root);
+    const resolved = preResolved ?? await this.resolveProjectTestRun(project, root, { investigate: true, place: { scope: "task", work_id: workId, task_id: task.id } });
     if (!resolved.enabled) return { outcome: notApplicableTestRun(resolved.reason), settings: DEFAULT_TEST_RUN_SETTINGS };
     const settings = resolved.settings;
     let baseCommit: string | null = null;
@@ -2953,7 +3041,7 @@ export class WorkflowEngine {
     } catch (error) {
       return { outcome: coreTestErrorOutcome(error), settings };
     }
-    const run: TestCommandRunner = this.testCommandRunner ?? (async (argv, cwd, timeoutMs, limit) => {
+    const baseRun: TestCommandRunner = this.testCommandRunner ?? (async (argv, cwd, timeoutMs, limit) => {
       const started = Date.now();
       const result = await this.runVerificationCommand(task.id, argv, cwd, [...settings.env_allowlist, "HOME"], timeoutMs, limit, limit, [0]);
       const error = typeof result.error === "string" ? result.error : undefined;
@@ -2966,6 +3054,7 @@ export class WorkflowEngine {
         ...(error !== undefined ? { error } : {}),
       };
     });
+    const run = this.gateTestRunner(baseRun, resolved, [...settings.env_allowlist, "HOME"], () => [root]);
     // Selection follows what changed since the previous check (committed or not); the Work-level change set stays cumulative.
     const digest: Record<string, string> = {};
     for (const file of files) {
@@ -2975,7 +3064,7 @@ export class WorkflowEngine {
     const previousRow = previousRun ? this.db.get<{ selection_json: string }>("SELECT selection_json FROM test_runs WHERE id = ?", previousRun.id) : undefined;
     const before = previousRow ? (JSON.parse(previousRow.selection_json) as { change_digest?: Record<string, string> }).change_digest : undefined;
     const sinceChecked = before === undefined ? files : [...new Set([...Object.keys(digest), ...Object.keys(before)])].filter((file) => digest[file] !== before[file]);
-    const outcome = await runCoreTests(this.coreTestRunDeps(workId, settings), {
+    const outcome = await runCoreTests(this.coreTestRunDeps(workId, settings, (runner) => this.gateTestRunner(runner, resolved, settings.env_allowlist, (cwd) => [cwd])), {
       scope: "task",
       project_id: project.id,
       work_id: workId,
@@ -2993,8 +3082,11 @@ export class WorkflowEngine {
       force_full: null,
       dirty,
       settings,
+      known_failures: resolved.known_failures,
       run,
+      environment_signals: this.environmentSignals(),
     });
+    await this.adoptPassedSetup(resolved, outcome, settings, project.id, root, { scope: "task", work_id: workId, task_id: task.id });
     return { outcome, settings };
   }
 
@@ -3004,19 +3096,51 @@ export class WorkflowEngine {
    * that failed last time plus those related to what changed since. Pre-existing failures are triaged and
    * backlogged inside runCoreTests. null when the Project has no test_run settings or the checkout is unavailable.
    */
-  public async runWorkCoreTests(workId: string): Promise<{ outcome: CoreTestRunOutcome; settings: TestRunSettings } | null> {
-    const project = this.projectTestRunRow(workId);
+  public async runWorkCoreTests(workId: string): Promise<{ outcome: CoreTestRunOutcome; settings: TestRunSettings; environment_blocked: TestEnvironmentBlock | null } | null> {
+    const project = this.projectTestRunRow(workId, null);
     const gateway = this.git;
     if (!project || !gateway.withWorkCheckout || !gateway.diffPaths) return null;
     const previous = latestTestRun(this.db, { scope: "work", work_id: workId });
     let settings: TestRunSettings = DEFAULT_TEST_RUN_SETTINGS;
+    let blocked: TestEnvironmentBlock | null = null;
     // A checkout that cannot be prepared or restored is an error outcome, never a skipped run that lets the Work proceed.
     const outcome = await gateway.withWorkCheckout({ work_id: workId }, async (checkout) => {
-      const resolved = await this.resolveProjectTestRun(project, checkout.path);
+      // The re-investigation and the run again finish here, before the checkout is cleaned up.
+      const place: TestRunPlace = { scope: "work", work_id: workId, task_id: null };
+      const recovered = await this.withTestSetupRecovery({
+        project,
+        place,
+        checkout: checkout.path,
+        run: () => this.runWorkCoreTestsIn(workId, this.projectTestRunRow(workId, null) ?? project, checkout, previous, (value) => { settings = value; }),
+        environmentOf: (result) => result.environment,
+      });
+      blocked = recovered.blocked;
+      return recovered.result;
+    }).catch(coreTestErrorOutcome);
+    return outcome === null ? null : { outcome, settings, environment_blocked: blocked };
+  }
+
+  private async runWorkCoreTestsIn(
+    workId: string,
+    project: ProjectTestRunRow,
+    checkout: Parameters<NonNullable<GitWorktreeGateway["withWorkCheckout"]>>[1] extends (checkout: infer C) => unknown ? C : never,
+    previous: ReturnType<typeof latestTestRun>,
+    useSettings: (settings: TestRunSettings) => void,
+  ): Promise<CoreTestRunOutcome> {
+    const gateway = this.git;
+    {
+      const resolved = await this.resolveProjectTestRun(project, checkout.path, { investigate: true, place: { scope: "work", work_id: workId, task_id: null } });
       if (!resolved.enabled) return notApplicableTestRun(resolved.reason);
-      settings = resolved.settings;
-      const baseDeps = this.coreTestRunDeps(workId, settings);
-      const baseRun: TestCommandRunner = this.testCommandRunner ?? workTestRunner({ workId, envAllowlist: settings.env_allowlist, instanceId: resolveInstanceId(this.dataDir) });
+      const settings = resolved.settings;
+      useSettings(settings);
+      // The baseline run happens in another checkout, so its roots are the place it runs in.
+      const baseDeps = this.coreTestRunDeps(workId, settings, (runner) => this.gateTestRunner(runner, resolved, settings.env_allowlist, (cwd) => [cwd]));
+      const baseRun: TestCommandRunner = this.gateTestRunner(
+        this.testCommandRunner ?? workTestRunner({ workId, envAllowlist: settings.env_allowlist, extraEnv: testSetupSettings(this.db).run_env, instanceId: resolveInstanceId(this.dataDir) }),
+        resolved,
+        settings.env_allowlist,
+        () => [checkout.path],
+      );
       const activity = this.coreActivity(workId, "core_tests");
       // The baseline run (failure triage) is also Core's test command; report it so the activity does not look stalled.
       const deps: CoreTestRunDeps = {
@@ -3039,6 +3163,7 @@ export class WorkflowEngine {
         activity.command(argv);
         return baseRun(argv, cwd, timeoutMs, limit, () => activity.output());
       };
+      const place: TestRunPlace = { scope: "work", work_id: workId, task_id: null };
       return runCoreTests(deps, {
         scope: "work",
         project_id: project.id,
@@ -3054,37 +3179,239 @@ export class WorkflowEngine {
         required_tests: [],
         force_full: previous === null ? "first_work_run" : sincePrevious === null ? "diff_unavailable" : null,
         settings,
+        known_failures: resolved.known_failures,
         run,
+        environment_signals: this.environmentSignals(),
       }).then(
-        async (result) => { await activity.end(result.status === "passed" || result.status === "failed" || result.status === "error" ? result.status : "done"); return result; },
+        async (result) => {
+          await this.adoptPassedSetup(resolved, result, settings, project.id, checkout.path, place);
+          await activity.end(result.status === "passed" || result.status === "failed" || result.status === "error" ? result.status : "done");
+          return result;
+        },
         async (error: unknown) => { await activity.end("error"); throw error; },
       );
-    }).catch(coreTestErrorOutcome);
-    return outcome === null ? null : { outcome, settings };
+    }
   }
 
-  private projectTestRunRow(workId: string): { id: string; canonical_path: string; test_run_json: string | null; test_run_detected_json: string | null; report_check_commands_json: string | null } | undefined {
-    return this.db.get(
-      "SELECT p.id, p.canonical_path, p.test_run_json, p.test_run_detected_json, p.report_check_commands_json FROM projects p JOIN works w ON w.project_id = p.id WHERE w.id = ?",
+  /**
+   * The Project row with the setup records of this place, in the order they are tried: for a Task its own record, the Work's,
+   * the Work's other Tasks', then the Project's; for the Work (taskId null) its own, its Tasks', then the Project's.
+   */
+  private projectTestRunRow(workId: string, taskId: string | null): ProjectTestRunRow | undefined {
+    const project = this.db.get<Omit<ProjectTestRunRow, "setup_records"> & { test_setup_json: string | null }>(
+      "SELECT p.id, p.canonical_path, p.test_run_json, p.test_run_detected_json, p.report_check_commands_json, p.test_setup_json FROM projects p JOIN works w ON w.project_id = p.id WHERE w.id = ?",
       workId,
     );
+    if (!project) return undefined;
+    const warn = (message: string): void => console.warn(`[owl-core] ${message}`);
+    const own = taskId === null ? undefined : this.db.get<{ test_setup_json: string | null }>("SELECT test_setup_json FROM tasks WHERE id = ?", taskId);
+    const work = this.db.get<{ test_setup_json: string | null }>("SELECT test_setup_json FROM works WHERE id = ?", workId);
+    const others = this.db.all<{ test_setup_json: string | null }>(
+      "SELECT test_setup_json FROM tasks WHERE work_id = ? AND id IS NOT ? AND test_setup_json IS NOT NULL ORDER BY updated_at DESC, id",
+      workId,
+      taskId,
+    );
+    const json = taskId === null
+      ? [work?.test_setup_json, ...others.map((row) => row.test_setup_json), project.test_setup_json]
+      : [own?.test_setup_json, work?.test_setup_json, ...others.map((row) => row.test_setup_json), project.test_setup_json];
+    const setup_records = json.flatMap((text) => {
+      const record = readStoredTestSetup(text ?? null, warn);
+      return record === null ? [] : [record];
+    });
+    const { test_setup_json: _ignored, ...row } = project;
+    return { ...row, setup_records };
+  }
+
+  /** The signals that mark a test failure as the environment's; absent without an investigation service, so nothing is classified then. */
+  private environmentSignals(): TestSetupSettings["environment"] | undefined {
+    return this.testSetup?.available() === true ? testSetupSettings(this.db).environment : undefined;
+  }
+
+  /**
+   * Runs the tests; a failure that came from the environment is investigated again and the tests run again, up to
+   * `max_reinvestigations` times in this one verification (the count is not stored). `blocked` is set when the
+   * environment is still broken, or an install outside the Project waits for the Owner.
+   */
+  private async withTestSetupRecovery<T>(input: {
+    readonly project: ProjectTestRunRow;
+    readonly place: TestRunPlace;
+    readonly checkout: string;
+    readonly run: () => Promise<T>;
+    readonly environmentOf: (result: T) => TestEnvironmentFailure | null;
+  }): Promise<{ result: T; blocked: TestEnvironmentBlock | null }> {
+    const { project, place } = input;
+    const tried: string[] = [];
+    const missing: string[] = [];
+    const installs = new Map<string, { argv: readonly string[]; reason: string }>();
+    const maxRounds = testSetupSettings(this.db).max_reinvestigations;
+    let rounds = 0;
+    let result = await input.run();
+    for (;;) {
+      const failure = input.environmentOf(result);
+      const service = this.testSetup;
+      if (failure === null || service === undefined || !service.available()) return { result, blocked: null };
+      const current = this.projectTestRunRow(place.work_id, place.task_id) ?? project;
+      const explicit = current.test_run_json !== null;
+      const block = (): TestEnvironmentBlock => ({ ...failure, explicit, tried: [...tried], missing: [...missing], outside_installs: [...installs.values()] });
+      if (failure.signal === "needs_approval") {
+        for (const record of current.setup_records) {
+          for (const entry of record.outside_installs) {
+            if (typeof entry.approved_at !== "string" || entry.approved_at === "") installs.set(entry.argv.join("\0"), { argv: entry.argv, reason: entry.reason });
+          }
+        }
+        // The refused command itself is what the Owner approves, even when no investigation recorded it.
+        if (!installs.has(failure.argv.join("\0"))) installs.set(failure.argv.join("\0"), { argv: failure.argv, reason: failure.evidence });
+        return { result, blocked: block() };
+      }
+      if (rounds >= maxRounds) return { result, blocked: block() };
+      rounds += 1;
+      const outcome = await service.investigate({
+        project_id: project.id,
+        scope: place.scope,
+        place_id: place.scope === "task" ? place.task_id ?? "" : place.work_id,
+        work_id: place.work_id,
+        ...(place.task_id === null ? {} : { task_id: place.task_id }),
+        checkout: input.checkout,
+        trigger: "environment_failure",
+        mode: explicit ? "repair_explicit" : "find",
+        failure: { argv: failure.argv, exit_code: null, signal: failure.signal, evidence: failure.evidence },
+      }).catch((error: unknown) => ({ saved: false as const, reason: error instanceof Error ? error.message : String(error) }));
+      if (!outcome.saved) {
+        tried.push(`investigation did not run: ${outcome.reason}`);
+      } else {
+        tried.push(...outcome.tried);
+        missing.push(...outcome.missing);
+        for (const install of outcome.outside_installs) installs.set(install.argv.join("\0"), install);
+        if (outcome.code_problem) return { result, blocked: null };
+        if (outcome.status === "needs_approval") return { result, blocked: block() };
+      }
+      result = await input.run();
+    }
+  }
+
+  /** The Owner Decision for a Task whose test environment could not be fixed; the Task waits in judgement_waiting without a remake. */
+  private async blockOnTestEnvironment(input: { readonly workId: string; readonly taskId: string; readonly agentRunId: string; readonly block: TestEnvironmentBlock }): Promise<void> {
+    const round = this.db.get<{ count: number }>("SELECT COUNT(*) AS count FROM events WHERE type = 'verification.environment_blocked' AND task_id = ? AND json_extract(payload_json, '$.agent_run_id') = ?", input.taskId, input.agentRunId)?.count ?? 0;
+    await this.writeLane.write({
+      mutateState: (transaction: CoreWriteLaneTransaction) => {
+        const title = transaction.get<{ title: string }>("SELECT title FROM tasks WHERE id = ?", input.taskId)?.title ?? input.taskId;
+        const brief = testEnvironmentBrief({ subject: { kind: "task", title }, block: input.block }, ownerLanguage(transaction));
+        const decisionId = openTestEnvironmentDecisionInTransaction(transaction, { workId: input.workId, taskId: input.taskId, brief, now: utcNow() });
+        tagOutsideInstalls(transaction, input.workId, decisionId, input.block.outside_installs);
+        appendEventInTransaction(transaction, {
+          type: "decision.opened",
+          idempotencyKey: `decision-opened:test-environment:${decisionId}`,
+          workId: input.workId,
+          taskId: null,
+          payload: { work_id: input.workId, scope: "work", blocked_task_ids: [input.taskId], ...brief, allow_free_text: true, issuer_role: "core", decision_id: decisionId, language: ownerLanguage(transaction) } as unknown as JsonObject,
+        });
+      },
+      event: {
+        idempotencyKey: `verification-environment-blocked:${input.agentRunId}:${round}`,
+        type: "verification.environment_blocked",
+        workId: input.workId,
+        taskId: input.taskId,
+        agentRunId: input.agentRunId,
+        payload: { task_id: input.taskId, agent_run_id: input.agentRunId, signal: input.block.signal, argv: [...input.block.argv] },
+      },
+      outbox: [{ provider: "websocket" }],
+    });
+  }
+
+  /** The Owner Decision for a Work-level test run whose environment could not be fixed; there is no Task to block. */
+  public async openWorkTestEnvironmentDecision(workId: string, block: TestEnvironmentBlock): Promise<void> {
+    await this.writeLane.transact((transaction: CoreWriteLaneTransaction) => {
+        const brief = testEnvironmentBrief({ subject: { kind: "work" }, block }, ownerLanguage(transaction));
+        const decisionId = openTestEnvironmentDecisionInTransaction(transaction, { workId, taskId: null, brief, now: utcNow() });
+        tagOutsideInstalls(transaction, workId, decisionId, block.outside_installs);
+        appendEventInTransaction(transaction, {
+          type: "decision.opened",
+          idempotencyKey: `decision-opened:test-environment:${decisionId}`,
+          workId,
+          taskId: null,
+          payload: { work_id: workId, scope: "work", blocked_task_ids: [], ...brief, allow_free_text: true, issuer_role: "core", decision_id: decisionId, language: ownerLanguage(transaction) } as unknown as JsonObject,
+        });
+    });
+  }
+
+  /** Runs verification again for Tasks the Owner released from a test environment Decision, on each Task's latest Worker report. */
+  public rerunVerifications(taskIds: readonly string[]): void {
+    for (const taskId of taskIds) {
+      const row = this.db.get<{ work_id: string; agent_run_id: string; payload_json: string }>(
+        `SELECT tasks.work_id, run.id AS agent_run_id, reports.payload_json
+           FROM tasks
+           JOIN agent_runs AS run ON run.id = (
+             SELECT latest.id FROM agent_runs AS latest
+              WHERE latest.task_id = tasks.id AND latest.role IN ('worker','designer') AND latest.report_id IS NOT NULL
+              ORDER BY latest.created_at DESC LIMIT 1
+           )
+           JOIN reports ON reports.id = run.report_id
+          WHERE tasks.id = ? AND tasks.status = 'verifying'`,
+        taskId,
+      );
+      if (row === undefined || this.reviewerRetriesInFlight.has(taskId)) continue;
+      let report: unknown;
+      try { report = JSON.parse(row.payload_json) as unknown; } catch (error) {
+        console.warn(`[owl-core] Task ${taskId} is not verified again: its Worker report payload is unreadable:`, error);
+        continue;
+      }
+      if (!report || typeof report !== "object" || Array.isArray(report)) continue;
+      this.reviewerRetriesInFlight.add(taskId);
+      void this.runVerification(row.work_id, taskId, row.agent_run_id, report as JsonObject)
+        .catch((error: unknown) => console.error(`[owl-core] Could not verify Task ${taskId} again`, error))
+        .finally(() => this.reviewerRetriesInFlight.delete(taskId));
+    }
+  }
+
+  /** The test run Core uses for a Task's worktree, read-only (nothing is investigated or stored); null without a Project. */
+  public async resolveTaskTestRun(workId: string, taskId: string, worktree: string | null): Promise<TestRunResolution | null> {
+    const project = this.projectTestRunRow(workId, taskId);
+    return project ? this.resolveProjectTestRun(project, worktree ?? project.canonical_path, { investigate: false }) : null;
   }
 
   /** Commands the Worker runs before reporting, resolved in the Task worktree; [] without a Project. */
-  private workerReportCheckCommands(workId: string, worktree: string | null): string[] {
-    const project = this.projectTestRunRow(workId);
+  private async workerReportCheckCommands(workId: string, taskId: string, worktree: string | null): Promise<string[]> {
+    const project = this.projectTestRunRow(workId, taskId);
     if (!project) return [];
+    const root = worktree ?? project.canonical_path;
+    const settings = testSetupSettings(this.db);
+    const setup = await this.selectProjectTestSetup(project, root);
     return reportCheckCommands({
       configured: project.report_check_commands_json === null ? [] : JSON.parse(project.report_check_commands_json) as string[],
       explicit_json: project.test_run_json,
       detected_json: project.test_run_detected_json,
-      root: worktree ?? project.canonical_path,
+      root,
       rules: this.testDetectionRules,
+      setup,
+      default_executables: settings.default_executables,
     });
   }
 
-  /** Explicit test_run > saved detection > detection now (stored for the next check). */
-  private async resolveProjectTestRun(project: { id: string; test_run_json: string | null; test_run_detected_json: string | null }, root: string): Promise<TestRunResolution> {
+  /** The record this checkout uses (null = none), by the digests of the checkout. */
+  private async selectProjectTestSetup(project: ProjectTestRunRow, root: string): Promise<TestSetupSelection | null> {
+    if (project.setup_records.length === 0) return null;
+    const rules = this.testDetectionRules;
+    return selectTestSetupInCheckout({
+      root,
+      records: project.setup_records,
+      rules_version: testDetectionRulesVersion(rules),
+      settings: testSetupSettings(this.db),
+      marker_digest: testDetectionMarkerDigest(markerReader(root, rules.max_file_bytes), rules),
+      explicitDigest: project.test_run_json === null ? null : explicitTestRunDigest(project.test_run_json),
+      max_file_bytes: rules.max_file_bytes,
+    });
+  }
+
+  /**
+   * Owner's test_run > saved setup record > saved detection > detection now (stored for the next check).
+   * `investigate` is the hook for finding a setup when none matches; no investigation exists yet, so it changes nothing.
+   */
+  private async resolveProjectTestRun(project: ProjectTestRunRow, root: string, options: { readonly investigate: boolean; readonly place?: TestRunPlace } = { investigate: true }): Promise<TestRunResolutionWithExecutables> {
+    const settings = testSetupSettings(this.db);
+    if (options.investigate && options.place !== undefined && project.test_run_json === null) {
+      project = await this.ensureTestSetup(project, root, options.place);
+    }
+    const setup = await this.selectProjectTestSetup(project, root);
     const resolved = resolveTestRun({
       explicit_json: project.test_run_json,
       detected_json: project.test_run_detected_json,
@@ -3092,21 +3419,99 @@ export class WorkflowEngine {
       rules: this.testDetectionRules,
       now: new Date().toISOString(),
       warn: (message) => console.warn(`[owl-core] ${message}`),
+      setup,
+      default_executables: settings.default_executables,
     });
-    if (resolved.save !== null) {
+    if (options.investigate && resolved.save !== null) {
       await this.writeLane.transact((tx) => {
         tx.run("UPDATE projects SET test_run_detected_json = ? WHERE id = ? AND test_run_json IS NULL", JSON.stringify(resolved.save), project.id);
       });
     }
-    return resolved;
+    const approved_installs = options.place === undefined
+      ? (setup?.setup.outside_installs ?? []).filter((entry) => typeof entry.approved_at === "string" && entry.approved_at !== "").map((entry) => entry.argv)
+      : approvedInstallArgvs(this.db, options.place.work_id);
+    return { ...resolved, executables: testExecutables(setup?.setup ?? null, root, settings.default_executables), approved_installs, adopt_record: resolved.adopt_on_pass ? setup?.setup ?? null : null, known_failures: resolved.setup_match !== null || (resolved.source === "explicit" && setup?.match === "explicit") ? setup?.setup.known_failures ?? [] : [] };
   }
 
-  private coreTestRunDeps(workId: string, settings: TestRunSettings): CoreTestRunDeps {
+  /**
+   * Origin 2 of the test setup: the Project record is re-investigated (not waited for) when the canonical checkout's
+   * inputs changed; a checkout whose inputs differ from the canonical ones and that has no matching record waits for an
+   * investigation at its own place. Returns the row with the records read again.
+   */
+  private async ensureTestSetup(project: ProjectTestRunRow, root: string, place: TestRunPlace): Promise<ProjectTestRunRow> {
+    const service = this.testSetup;
+    if (service === undefined || !service.available()) return project;
+    const settings = testSetupSettings(this.db);
+    const rules = this.testDetectionRules;
+    const projectRecord = readStoredTestSetup(this.db.get<{ test_setup_json: string | null }>("SELECT test_setup_json FROM projects WHERE id = ?", project.id)?.test_setup_json ?? null);
+    const sources = projectRecord?.sources ?? [];
+    const digestsOf = (dir: string) => testSetupDigests({
+      root: dir,
+      rules_version: testDetectionRulesVersion(rules),
+      settings,
+      sources,
+      marker_digest: testDetectionMarkerDigest(markerReader(dir, rules.max_file_bytes), rules),
+      max_file_bytes: rules.max_file_bytes,
+    });
+    const sameKey = (a: { layout: string; sources: string; settings: string }, b: { layout: string; sources: string; settings: string }): boolean =>
+      a.layout === b.layout && a.sources === b.sources && a.settings === b.settings;
+    const canonical = await digestsOf(project.canonical_path);
+    if (canonical === null) return project;
+    if (projectRecord === null || !sameKey(projectRecord.digests, canonical)) service.schedule(project.id, { trigger: "inputs_changed" });
+    if (root === project.canonical_path) return project;
+    const here = await digestsOf(root);
+    if (here === null || sameKey(here, canonical)) return project;
+    const selected = await this.selectProjectTestSetup(project, root);
+    if (selected !== null && selected.match !== "stale") return project;
+    await service.investigate({
+      project_id: project.id,
+      scope: place.scope,
+      place_id: place.scope === "task" ? place.task_id ?? "" : place.work_id,
+      work_id: place.work_id,
+      ...(place.task_id === null ? {} : { task_id: place.task_id }),
+      checkout: root,
+      trigger: "inputs_changed",
+    });
+    return this.projectTestRunRow(place.work_id, place.task_id) ?? project;
+  }
+
+  /** A passing run of a setup that was never confirmed for this checkout (tests changed, or it had failed before) is written as this place's record. */
+  private async adoptPassedSetup(resolved: TestRunResolutionWithExecutables, outcome: CoreTestRunOutcome, settings: TestRunSettings, projectId: string, root: string, place: TestRunPlace): Promise<void> {
+    if (this.testSetup === undefined || resolved.adopt_record === null || outcome.status !== "passed") return;
+    await this.testSetup.adopt({
+      project_id: projectId,
+      scope: place.scope,
+      place_id: place.scope === "task" ? place.task_id ?? "" : place.work_id,
+      work_id: place.work_id,
+      ...(place.task_id === null ? {} : { task_id: place.task_id }),
+      checkout: root,
+      record: resolved.adopt_record,
+      argv: settings.mode === "whole" ? settings.whole_argv : settings.file_argv,
+    }).catch((error: unknown) => console.warn(`[owl-core] Could not save the confirmed test setup: ${error instanceof Error ? error.message : String(error)}`));
+  }
+
+  /**
+   * Stops an install outside the Project that the Owner has not approved before it starts a process.
+   * The environment the judgement assumes is the one the child process gets.
+   */
+  private gateTestRunner(run: TestCommandRunner, resolved: TestRunResolutionWithExecutables, envAllowlist: readonly string[], roots: (cwd: string) => readonly string[]): TestCommandRunner {
+    const setupSettings = testSetupSettings(this.db);
+    return gatedTestRunner(run, {
+      gate: resolved.gate,
+      roots,
+      env: childEnv(envAllowlist, setupSettings.run_env),
+      approved: resolved.approved_installs,
+      settings: setupSettings.install,
+      query: execInstallQuery(setupSettings.probe_timeout_seconds * 1000),
+    });
+  }
+
+  private coreTestRunDeps(workId: string, settings: TestRunSettings, wrap: (runner: TestCommandRunner) => TestCommandRunner = (runner) => runner): CoreTestRunDeps {
     return {
       db: this.db,
       writeLane: this.writeLane,
       workspaceRoot: this.workspaceRoot,
-      baselineRunner: this.testCommandRunner ?? workTestRunner({ workId, envAllowlist: settings.env_allowlist, instanceId: resolveInstanceId(this.dataDir) }),
+      baselineRunner: wrap(this.testCommandRunner ?? workTestRunner({ workId, envAllowlist: settings.env_allowlist, extraEnv: testSetupSettings(this.db).run_env, instanceId: resolveInstanceId(this.dataDir) })),
       baselineLocks: this.baselineLocks,
     };
   }
@@ -3143,6 +3548,7 @@ export class WorkflowEngine {
       const value = process.env[key];
       if (value !== undefined) env[key] = value;
     }
+    Object.assign(env, testSetupSettings(this.db).run_env);
     env[OWL_INSTANCE_ID_ENV] = resolveInstanceId(this.dataDir);
     env.OWL_AGENT_RUN_ID = taskVerificationMarker(taskId);
     return new Promise<JsonObject>((resolveResult) => {

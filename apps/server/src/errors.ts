@@ -24,6 +24,7 @@ export type ApiErrorCode =
   | "project_deletion_impact_changed"
   | "model_preset_not_found"
   | "project_path_conflict"
+  | "test_setup_unavailable"
   | "conversation_not_found"
   | "work_not_found"
   | "backlog_item_not_found"
@@ -148,6 +149,7 @@ const HTTP_ERROR_TEXT: Partial<Record<ApiErrorCode, string>> = {
   project_deletion_impact_changed: "The Project's Works changed after confirmation.",
   model_preset_not_found: "The model preset was not found.",
   project_path_conflict: "This folder is already registered as a Project.",
+  test_setup_unavailable: "The test setup investigation could not be started.",
   conversation_not_found: "The conversation was not found.",
   work_not_found: "The Work was not found.",
   backlog_item_not_found: "The backlog item was not found.",

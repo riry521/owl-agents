@@ -140,6 +140,8 @@ export interface TaskSummary {
   prerequisite?: TaskPrerequisite | null;
   /** For a judgement_waiting Task: why Core stopped it (for example the no-progress limit). */
   stop_reason?: string | null;
+  /** Set once the Task moved from the Worker to the Fixer; `rejections` is the review rejection count at that point. */
+  fixer_escalation?: { rejections: number } | null;
 }
 
 export interface TaskPrerequisite {
@@ -263,7 +265,7 @@ export interface RoleModelSetting {
 
 /** PUT /api/v1/settings/models payload row. */
 export interface RoleModelSettingInput {
-  role: 'advisor' | 'manager' | 'designer' | 'lead_designer' | 'worker' | 'reviewer' | 'librarian' | 'curator';
+  role: 'advisor' | 'manager' | 'designer' | 'lead_designer' | 'worker' | 'fixer' | 'reviewer' | 'librarian' | 'curator';
   provider: string;
   model: string;
   effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
@@ -374,13 +376,39 @@ export interface SaveProviderPayload {
   apiKeySource?: string;
 }
 
-/** Whether Core's test check runs for a Project (source: explicit = Owner's test_run, detected = automatic). */
+/** Whether Core's test check runs for a Project (source: explicit = Owner's test_run, setup = a setup an agent found and Core confirmed, detected = automatic). */
 export interface TestRunStatus {
   enabled: boolean;
   reason: string | null;
   command: string[] | null;
-  source: 'explicit' | 'detected';
+  source: 'explicit' | 'setup' | 'detected';
 }
+
+/** What the Project screen shows of the saved test setup (the Project's own record). */
+export interface TestSetupView {
+  status: 'ready' | 'tests_failing' | 'no_tests' | 'no_language' | 'needs_approval' | 'unresolved';
+  command: string[] | null;
+  setup_commands: string[][];
+  prepare_command: string[] | null;
+  cwd: string;
+  executables: Record<string, { path: string; version: string | null }>;
+  sources: string[];
+  confirmed_at: string | null;
+  attempts: { by: 'agent' | 'core'; argv: string[]; exit_code: number | null; result: string; summary: string; at: string }[];
+  outside_installs: { argv: string[]; reason: string; approved_at: string | null }[];
+  missing: string[];
+  trigger: string;
+  investigated_at: string;
+}
+
+/** GET /api/v1/projects/:id/test-setup/investigation. */
+export interface TestSetupInvestigationState {
+  running: boolean;
+  outcome: { saved: boolean; status: TestSetupView['status'] | null; reason: string | null } | null;
+}
+
+/** The Owner's test settings (TestRunSettings keys, all optional). */
+export type TestRunInput = { mode?: 'per_file' | 'whole' | 'off'; whole_argv?: string[]; [key: string]: unknown };
 
 /** GET/POST /api/v1/projects. */
 export interface Project {
@@ -388,12 +416,15 @@ export interface Project {
   name: string;
   canonical_path: string;
   auto_push?: boolean;
+  commit_language?: 'ja' | 'en' | null;
   worktree_setup_command?: string[];
   worktree_refresh_command?: string[];
   post_merge_command?: string[] | null;
   effective_post_merge_command?: string[];
   post_merge_install_command?: string[] | null;
+  test_run?: TestRunInput | null;
   test_run_status?: TestRunStatus;
+  test_setup?: TestSetupView | null;
   base_branch: string;
   allowed_roots: string[];
   verification_plan: unknown[];
@@ -404,10 +435,13 @@ export interface UpdateProjectInput {
   name?: string;
   canonical_path?: string;
   auto_push?: boolean;
+  commit_language?: 'ja' | 'en' | null;
   worktree_setup_command?: string[];
   worktree_refresh_command?: string[];
   post_merge_command?: string[] | null;
   post_merge_install_command?: string[] | null;
+  /** null = automatic, { mode: 'whole', whole_argv } = this command, { mode: 'off' } = no tests. */
+  test_run?: TestRunInput | null;
 }
 
 export type ProjectBlocker = 'running_works' | 'active_agents';
@@ -584,6 +618,11 @@ export interface KnowledgeStorageStatus {
   reason: string | null;
   checked_at: string | null;
   move: { target: string; stage: string; files_total: number | null; files_done: number } | null;
+}
+
+/** GET/PUT /api/v1/settings/fixer-escalation. */
+export interface FixerEscalationSettings {
+  after_review_rejections: number;
 }
 
 /** GET/PUT /api/v1/settings/remake-limits. */

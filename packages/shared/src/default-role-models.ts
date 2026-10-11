@@ -7,6 +7,8 @@ export const DEFAULT_ROLE_MODELS = {
   designer: { provider: "anthropic", model: "claude-fable-5-1", effort: "high" },
   lead_designer: { provider: "anthropic", model: "claude-fable-5-1", effort: "high" },
   worker: { provider: "openai", model: DEFAULT_HARNESS_MODELS.codex, effort: "high" },
+  // Why not xhigh: the Fixer only runs Tasks the Worker failed twice, so it runs rarely and high costs little more, and Lead Designer also uses high.
+  fixer: { provider: "anthropic", model: CLAUDE_OPUS_5_5_MODEL, effort: "high" },
   reviewer: { provider: "anthropic", model: DEFAULT_HARNESS_MODELS.claude, effort: "high" },
   librarian: { provider: "anthropic", model: CLAUDE_OPUS_5_5_MODEL, effort: "high" },
   curator: { provider: "anthropic", model: CLAUDE_HAIKU_5_5_MODEL, effort: "low" },

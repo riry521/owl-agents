@@ -515,7 +515,7 @@ export interface GitGateway {
    * parent), verify it, then advance the base while the Work is still
    * running at expected_state_version.
    */
-  mergeWorkIntoBase(request: { readonly work_id: string; readonly expected_state_version?: number; readonly verified_commit?: string }): Promise<GitWorkMergeResult>;
+  mergeWorkIntoBase(request: { readonly work_id: string; readonly expected_state_version?: number; readonly verified_commit?: string; readonly commit_subject?: string }): Promise<GitWorkMergeResult>;
   /**
    * Run the Project's verification plan on the Work branch as it stands after
    * every Task was merged into it (before the Final Manager and the base merge).
@@ -996,6 +996,8 @@ export interface TaskSummary extends JsonObject {
   readonly prerequisite: TaskPrerequisiteView | null;
   /** For a judgement_waiting Task: the reason of the open Decision that blocks it (for example the no-progress limit). */
   readonly stop_reason: string | null;
+  /** Set once a rejected Worker Task moved to the Fixer: the rejection count at that point. */
+  readonly fixer_escalation: { readonly rejections: number } | null;
 }
 
 export interface TaskPrerequisiteView extends JsonObject {
@@ -1268,6 +1270,10 @@ export interface TaskRow extends JsonObject {
   prerequisite_since?: string | null;
   /** Reviewer rejections of Lead Designer output this Task received (lineage totals: task-lineage.ts). */
   lead_review_rejections?: number;
+  /** Reviewer rejections (fix_required and replan_required) this Task received; never reset (migration 066). */
+  review_rejections?: number;
+  /** The rejection count at which the Task moved to the Fixer; null while the Worker has it, never cleared once set. */
+  fixer_escalated_rejections?: number | null;
   /** Set once Core stopped remaking a design (or the Designer reported design_blocked); see migration 054. */
   design_stop_json?: string | null;
   created_at: string;
@@ -1366,14 +1372,32 @@ export interface VerificationCommand extends JsonObject {
   readonly executor: "core" | "reviewer";
 }
 
-/** Whether Core's test check runs for a Project, and why. source: explicit = the Owner's test_run, detected = Core's marker table. */
+/** Whether Core's test check runs for a Project, and why. source: explicit = the Owner's test_run, setup = a setup an agent found and Core confirmed, detected = Core's marker table. */
 export interface TestRunStatus extends JsonObject {
   readonly enabled: boolean;
   /** null when enabled. */
   readonly reason: string | null;
   /** argv Core runs; null when disabled. */
   readonly command: readonly string[] | null;
-  readonly source: "explicit" | "detected";
+  readonly source: "explicit" | "setup" | "detected";
+}
+
+/** What the Project screen shows of a saved test setup (the Project's own record). */
+export interface TestSetupView extends JsonObject {
+  readonly status: "ready" | "tests_failing" | "no_tests" | "no_language" | "needs_approval" | "unresolved";
+  /** whole_argv or file_argv with the saved executables put in; null without a test_run. */
+  readonly command: readonly string[] | null;
+  readonly setup_commands: readonly (readonly string[])[];
+  readonly prepare_command: readonly string[] | null;
+  readonly cwd: string;
+  readonly executables: Readonly<Record<string, { readonly path: string; readonly version: string | null }>>;
+  readonly sources: readonly string[];
+  readonly confirmed_at: string | null;
+  readonly attempts: readonly { readonly by: "agent" | "core"; readonly argv: readonly string[]; readonly exit_code: number | null; readonly result: string; readonly summary: string; readonly at: string }[];
+  readonly outside_installs: readonly { readonly argv: readonly string[]; readonly reason: string; readonly approved_at: string | null }[];
+  readonly missing: readonly string[];
+  readonly trigger: string;
+  readonly investigated_at: string;
 }
 
 export interface Project extends JsonObject {
@@ -1382,6 +1406,8 @@ export interface Project extends JsonObject {
   readonly canonical_path: string;
   readonly base_branch: string;
   readonly auto_push: boolean;
+  /** Language of the commit messages Core writes. null when unset. */
+  readonly commit_language: "ja" | "en" | null;
   /** Command (argv, no shell) run in each newly created worktree before its first agent. Empty when unset. */
   readonly worktree_setup_command: readonly string[];
   /** Command (argv, no shell) run in the worktree before every agent launch. Empty when unset. */
@@ -1395,6 +1421,8 @@ export interface Project extends JsonObject {
   /** Test-run settings (TestRunSettings keys, all optional); null = Core does not run tests. */
   readonly test_run: JsonObject | null;
   readonly test_run_status: TestRunStatus;
+  /** The Project's saved test setup (found in its canonical checkout); null = none yet. */
+  readonly test_setup: TestSetupView | null;
   /** Test handling; DEFAULT_TEST_POLICY when unset. */
   readonly test_policy: TestPolicy;
   /** Shell command strings the Worker runs before reporting; [] = not set (Core falls back to test detection). */
@@ -1421,6 +1449,7 @@ export interface UpdateProjectPayload extends JsonObject {
   readonly canonical_path?: string;
   readonly base_branch?: string;
   readonly auto_push?: boolean;
+  readonly commit_language?: "ja" | "en" | null;
   readonly worktree_setup_command?: readonly string[];
   readonly worktree_refresh_command?: readonly string[];
   readonly post_merge_command?: readonly string[] | null;
@@ -1472,7 +1501,7 @@ export interface DeleteProjectResult extends JsonObject {
 
 export interface ProjectListQuery extends ListQuery {}
 
-export type ActorRole = "advisor" | "manager" | "designer" | "lead_designer" | "worker" | "reviewer" | "librarian" | "curator";
+export type ActorRole = "advisor" | "manager" | "designer" | "lead_designer" | "worker" | "fixer" | "reviewer" | "librarian" | "curator";
 export type ModelEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface RoleModelSetting extends JsonObject {

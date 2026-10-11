@@ -46,7 +46,7 @@ test("preset lifecycle preserves creation order and applies roles through model 
   assert.equal(first.status, 201);
   assert.equal(first.body.version, 1);
   assert.equal(first.body.data.preset.name, "First");
-  assert.equal(first.body.data.preset.roles.length, 8);
+  assert.equal(first.body.data.preset.roles.length, settings.data.roles.length);
   assert.match(first.body.data.preset.id, /^[0-9A-HJKMNP-TV-Z]{26}$/);
   assert.ok(first.body.data.preset.created_at);
   const id = first.body.data.preset.id;
@@ -159,3 +159,38 @@ function raw(root) {
   const Database = createRequire(new URL("../../packages/core/package.json", import.meta.url))("better-sqlite3");
   return new Database(join(root, "owl.db"));
 }
+
+test("fixer escalation settings round-trip, reject bad values and return a Fixer role in presets saved without one", async (t) => {
+  const server = await startServer(t);
+  if (!server) return t.skip("localhost listen is unavailable");
+  const { request, db } = server;
+  const initial = await request("GET", "/fixer-escalation");
+  assert.equal(initial.status, 200);
+  assert.deepEqual(initial.body.data, { after_review_rejections: 2 });
+  const saved = await request("PUT", "/fixer-escalation", { after_review_rejections: 3 });
+  assert.equal(saved.status, 200);
+  assert.deepEqual((await request("GET", "/fixer-escalation")).body.data, { after_review_rejections: 3 });
+  for (const payload of [{ after_review_rejections: 0 }, { after_review_rejections: 101 }, { after_review_rejections: 1.5 }, { after_review_rejections: "2" }, { after_review_rejections: 2, extra: 1 }]) {
+    const rejected = await request("PUT", "/fixer-escalation", payload);
+    assert.equal(rejected.status, 400, JSON.stringify(payload));
+    assert.equal(rejected.body.error.code, "validation_error");
+    assert.ok(rejected.body.error.details.field, JSON.stringify(payload));
+  }
+  assert.equal((await request("PUT", "/fixer-escalation", {})).body.error.details.field, "payload");
+  assert.equal((await request("PUT", "/fixer-escalation", { after_review_rejections: 0 })).body.error.details.field, "after_review_rejections");
+  assert.deepEqual((await request("GET", "/fixer-escalation")).body.data, { after_review_rejections: 3 });
+
+  const models = (await request("GET", "/models")).body.data.roles;
+  assert.ok(models.some(({ role }) => role === "fixer"));
+  const created = await request("POST", "/model-presets", { name: "Full", roles: inputRoles(models) }, 0);
+  assert.equal(created.status, 201);
+  await db.createWriteLane().transact((tx) => {
+    const row = tx.get("SELECT value_json FROM settings WHERE key = 'model_presets'");
+    const value = JSON.parse(row.value_json);
+    for (const preset of value.presets) preset.roles = preset.roles.filter(({ role }) => role !== "fixer");
+    tx.run("UPDATE settings SET value_json = ? WHERE key = 'model_presets'", JSON.stringify(value));
+  });
+  const listed = (await request("GET", "/model-presets")).body.data.presets;
+  assert.equal(listed[0].roles.length, models.length);
+  assert.ok(listed[0].roles.some(({ role }) => role === "fixer"));
+});

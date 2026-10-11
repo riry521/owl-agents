@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { copyFile, mkdir, readFile, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -647,6 +647,27 @@ test("post_merge_command saves, reads back, resets, and rejects invalid values",
   }
 });
 
+test("commit_language defaults to null, PATCH persists ja/en/null, and other values are rejected", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "commit-language-project");
+  if (!repo) return;
+  const existing = await createProject(api, "commit-language-existing", { path: repo });
+  assert.equal(existing.commit_language, null);
+  assert.equal((await listProjects(api)).find((project) => project.id === existing.id).commit_language, null);
+  for (const value of ["en", "ja", null]) {
+    const response = await sendCommand(api, "PATCH", `/projects/${existing.id}`, { commit_language: value }, `commit-language:${String(value)}`);
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).data.commit_language, value);
+    assert.equal((await listProjects(api)).find((project) => project.id === existing.id).commit_language, value);
+  }
+  await sendCommand(api, "PATCH", `/projects/${existing.id}`, { commit_language: "en" }, "commit-language:keep");
+  for (const value of ["fr", 1, ""]) {
+    await assertApiError(await sendCommand(api, "PATCH", `/projects/${existing.id}`, { commit_language: value }, `commit-language-invalid:${String(value)}`), 400, "validation_error");
+  }
+  assert.equal((await listProjects(api)).find((project) => project.id === existing.id).commit_language, "en");
+});
+
 test("auto_push defaults off, PATCH persists booleans, and non-booleans are rejected", async (t) => {
   const api = await setup(t);
   if (!api) return;
@@ -819,6 +840,57 @@ test("Project responses carry test_run_status: detected when unset, explicit aft
   assert.deepEqual(listedAfter.test_run_status, expected);
 });
 
+test("PATCH test_run saves and null clears it, and GET /projects returns test_setup with test_run_status source setup", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "test-run-patch-project");
+  if (!repo) return;
+  const project = await createProject(api, "test-run-patch", { path: repo });
+  const patch = (value, key) => sendCommand(api, "PATCH", `/projects/${project.id}`, { test_run: value }, `test-run-patch:${key}`);
+  const read = async () => (await listProjects(api)).find((item) => item.id === project.id);
+  assert.deepEqual((await (await patch({ mode: "off" }, "off")).json()).data.test_run, { mode: "off" });
+  assert.deepEqual((await read()).test_run, { mode: "off" });
+  assert.equal((await (await patch(null, "clear")).json()).data.test_run, null);
+  assert.equal((await read()).test_run, null);
+  await assertApiError(await patch("make test", "bad"), 400, "validation_error");
+
+  const record = {
+    schema_version: 1, scope: "project", status: "ready", explicit_digest: null, digests: { layout: "l", tests: "t", sources: "s", settings: "c" },
+    commit: "abc", executables: { python: { path: "/saved/py", relative_to: null, version: "Python 3.12", probe: null } },
+    test_run: { mode: "whole", whole_argv: ["{python}", "-m", "pytest"], setup_argvs: [["uv", "sync"]], prepare_argv: [], cwd: ".", test_patterns: ["**/test_*.py"] },
+    confirmed: { by: "core", argv: ["/saved/py"], cwd: ".", files: ["*"], exit_code: 0, at: "2026-01-01T00:00:00.000Z" }, candidate: null, probes: [],
+    sources: ["README.md"], attempts: [], installed: [], outside_installs: [], missing: [], trigger: "project_registered", agent_run: null, investigated_at: "2026-01-01T00:00:00.000Z",
+  };
+  await api.db.createWriteLane().transact((transaction) => transaction.run("UPDATE projects SET test_setup_json = ? WHERE id = ?", JSON.stringify(record), project.id));
+  const listed = await read();
+  assert.equal(listed.test_run_status.source, "setup");
+  assert.equal(listed.test_setup.status, "ready");
+  assert.deepEqual(listed.test_setup.setup_commands, [["uv", "sync"]]);
+  assert.equal(listed.test_setup.executables.python.path, "/saved/py");
+});
+
+test("test_run_status uses a repair record only while its explicit_digest matches the current test_run", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "repair-status-project");
+  if (!repo) return;
+  const project = await createProject(api, "repair-status", { path: repo });
+  const response = await sendCommand(api, "PATCH", `/projects/${project.id}`, { test_run: { mode: "whole", whole_argv: ["{python}", "-m", "pytest"] } }, "patch-repair-run");
+  assert.equal(response.status, 200);
+  const stored = api.db.get("SELECT test_run_json FROM projects WHERE id = ?", project.id).test_run_json;
+  const record = (digest) => JSON.stringify({
+    status: "ready", test_run: null, executables: { python: { path: "/saved/py", version: "3.12" } }, sources: [],
+    digests: { layout: "l", tests: "t", sources: "s", settings: "c" }, explicit_digest: digest, confirmed_at: null,
+    attempts: [], outside_installs: [], missing: [], trigger: "test", investigated_at: "2026-01-01T00:00:00.000Z",
+  });
+  const commandWith = async (digest) => {
+    await api.db.createWriteLane().transact((transaction) => transaction.run("UPDATE projects SET test_setup_json = ? WHERE id = ?", record(digest), project.id));
+    return (await listProjects(api)).find((item) => item.id === project.id).test_run_status.command;
+  };
+  assert.deepEqual(await commandWith(createHash("sha256").update(stored).digest("hex")), ["/saved/py", "-m", "pytest"]);
+  assert.notEqual((await commandWith("stale-digest"))[0], "/saved/py");
+});
+
 test("post_merge_install_command saves, reads back, resets, and rejects invalid values over HTTP", async (t) => {
   const api = await setup(t);
   if (!api) return;
@@ -865,4 +937,39 @@ test("an Advisor guard token alone can register a Project with POST /projects", 
     body: JSON.stringify(command({ name: "Advisor created", canonical_path: path, base_branch: "main", allowed_roots: [path], verification_plan: [] }, "advisor-create")),
   });
   assert.equal(response.status, 201);
+});
+
+test("Project responses carry test_setup; changing canonical_path resets the record, other edits keep it", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const oldRepo = await makeRepo(t, api.root, "setup-old");
+  const newRepo = await makeRepo(t, api.root, "setup-new", "develop");
+  if (!oldRepo || !newRepo) return;
+  const project = await createProject(api, "test-setup", { path: oldRepo });
+  assert.equal(project.test_setup, null);
+
+  const record = {
+    status: "ready", test_run: { mode: "whole", whole_argv: ["{python}", "-m", "pytest", "-q"], setup_argvs: [["{python}", "-m", "venv", ".venv"]], cwd: "." },
+    executables: { python: { path: ".venv/bin/python", version: "3.12.1" } }, sources: ["requirements.txt"],
+    digests: { layout: "l", tests: "t", sources: "s", settings: "c" }, explicit_digest: null, confirmed_at: "2026-01-01T00:00:00.000Z",
+    attempts: [], outside_installs: [], missing: [], trigger: "test", investigated_at: "2026-01-01T00:00:00.000Z",
+  };
+  await api.db.createWriteLane().transact((transaction) => transaction.run("UPDATE projects SET test_setup_json = ? WHERE id = ?", JSON.stringify(record), project.id));
+
+  const listed = (await listProjects(api)).find((item) => item.id === project.id);
+  assert.equal(listed.test_setup.status, "ready");
+  const python = join(listed.canonical_path, ".venv/bin/python");
+  assert.deepEqual(listed.test_setup.command, [python, "-m", "pytest", "-q"]);
+  assert.deepEqual(listed.test_setup.setup_commands, [[python, "-m", "venv", ".venv"]]);
+  assert.deepEqual(listed.test_setup.executables, record.executables);
+
+  const renamed = await sendCommand(api, "PATCH", `/projects/${project.id}`, { name: "Renamed" }, "patch-keep-setup");
+  assert.equal((await renamed.json()).data.test_setup.status, "ready");
+  assert.notEqual(api.db.get("SELECT test_setup_json FROM projects WHERE id = ?", project.id).test_setup_json, null);
+
+  const moved = await sendCommand(api, "PATCH", `/projects/${project.id}`, { canonical_path: newRepo }, "patch-reset-setup");
+  assert.equal(moved.status, 200);
+  assert.equal((await moved.json()).data.test_setup, null);
+  assert.equal(api.db.get("SELECT test_setup_json FROM projects WHERE id = ?", project.id).test_setup_json, null);
+  assert.equal((await listProjects(api)).find((item) => item.id === project.id).test_setup, null);
 });

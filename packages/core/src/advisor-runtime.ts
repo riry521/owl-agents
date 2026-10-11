@@ -889,7 +889,7 @@ export class AdvisorSessionRuntime {
 
   private dequeueOldestQueuedTurn(sessionId: string): AdvisorTurnRow | undefined {
     return this.config.db.get<AdvisorTurnRow>(
-      `SELECT * FROM advisor_turns WHERE session_id = ? AND status = 'queued' ORDER BY queued_at ASC LIMIT 1`,
+      `SELECT * FROM advisor_turns WHERE session_id = ? AND status = 'queued' ORDER BY queued_at ASC, rowid ASC LIMIT 1`,
       sessionId,
     );
   }
@@ -907,9 +907,15 @@ export class AdvisorSessionRuntime {
     this.pendingTurnPayloads.delete(turnRow.id);
     // Read at send time, from the persisted event, so a message queued before the previous reply
     // finished and a turn recovered after a restart both still carry that reply's action results.
+    // Keyed by the preceding turn, not the conversation's latest reply: when that turn left no reply
+    // (failed, dropped), an older reply's results were already handed over and must not come back.
     const previousReply = this.config.db.get<{ payload_json: string }>(
-      `SELECT payload_json FROM events WHERE type = 'advisor.responded' AND json_extract(payload_json, '$.conversation_id') = ? ORDER BY rowid DESC LIMIT 1`,
-      turnRow.conversation_id,
+      `SELECT payload_json FROM events WHERE type = 'advisor.responded'
+         AND json_extract(payload_json, '$.turn_id') = (
+           SELECT id FROM advisor_turns WHERE conversation_id = ? AND (queued_at, rowid) < (SELECT queued_at, rowid FROM advisor_turns WHERE id = ?)
+           ORDER BY queued_at DESC, rowid DESC LIMIT 1)
+       ORDER BY rowid DESC LIMIT 1`,
+      turnRow.conversation_id, turnRow.id,
     );
     let actionResults = "";
     try {

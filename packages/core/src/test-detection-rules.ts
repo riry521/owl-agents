@@ -99,7 +99,7 @@ export const DEFAULT_TEST_DETECTION_RULES: TestDetectionRules = {
     },
     wholeRule("pytest-uv", [{ file: "uv.lock" }, pytestMarker], ["uv", "run", "pytest"]),
     wholeRule("pytest-poetry", [{ file: "poetry.lock" }, pytestMarker], ["poetry", "run", "pytest"]),
-    wholeRule("pytest", [pytestMarker], ["python3", "-m", "pytest"]),
+    wholeRule("pytest", [pytestMarker], ["{python}", "-m", "pytest"]),
     wholeRule("go", [{ file: "go.mod" }], ["go", "test", "./..."]),
     wholeRule("cargo", [{ file: "Cargo.toml" }], ["cargo", "test"]),
     offRule("node-no-test", [{ file: "package.json" }], "node_no_test_script"),

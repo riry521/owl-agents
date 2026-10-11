@@ -51,7 +51,7 @@ export const DEFAULT_VERIFICATION_POLICY_SETTINGS: VerificationPolicySettings = 
   test: {
     runners: [
       { pattern: "**/*.test.{mjs,js,cjs}", argv: ["node", "--test", "{file}"] },
-      { pattern: "**/{test_*,*_test}.py", argv: ["python3", "-m", "pytest", "-q", "{file}"] },
+      { pattern: "**/{test_*,*_test}.py", argv: ["{python}", "-m", "pytest", "-q", "{file}"] },
     ],
   },
   code: {

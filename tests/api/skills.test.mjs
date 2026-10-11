@@ -434,7 +434,7 @@ test("model settings API returns and accepts the Curator role", async (t) => {
   assert.equal(withoutCurator.status, 400);
   const withoutCuratorBody = await withoutCurator.json();
   assert.equal(withoutCuratorBody.error.code, "validation_error");
-  assert.match(withoutCuratorBody.error.message, /8つのrole/u);
+  assert.match(withoutCuratorBody.error.message, new RegExp(`${initial.length}つのrole`, "u"));
 });
 
 test("skill routes show broken skills and reject invalid requests", async (t) => {

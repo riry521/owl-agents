@@ -12,6 +12,9 @@ export const OWL_GIT_EXCLUDES: readonly string[] = [
   ".pytest_cache/",
   ".mypy_cache/",
   ".ruff_cache/",
+  ".venv/",
+  "venv/",
+  "node_modules/",
 ];
 
 export const OWL_GIT_EXCLUDES_CONTENT = `${OWL_GIT_EXCLUDES.join("\n")}\n`;

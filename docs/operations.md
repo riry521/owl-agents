@@ -52,7 +52,7 @@ rejected to prevent a Slack account from being sent to Discord or vice versa.
 
 Rules live in `<OWL_ROOT>/rules/**/*.yaml`. Each file has `level` (`absolute`,
 `system` or `role`), `role` only when `level: role` (one of `advisor`, `manager`,
-`designer`, `worker`, `reviewer`, `librarian`), and a `rules` list. A rule is a
+`designer`, `worker`, `reviewer`, `librarian`, `curator`), and a `rules` list. A rule is a
 `block_command` (`id`, `pattern`, optional `message`), a `block_path` (`id`,
 `pattern`, optional `mode` of `read`, `write` or `both`, optional `message`) or an
 `instruction` (`id`, `text`). Unknown keys, a `block_command` pattern that is more
@@ -121,7 +121,7 @@ judgement to the Reviewer. Do not ask the Reviewer for deterministic checks or C
 A Task is completed in only two places (`packages/core/src/state-reducer.ts`):
 
 1. `reduceTask` on `verification.completed` (pass, and no review required).
-2. `review.passed` followed by a successful merge (`integratedTaskResult`).
+2. `review.passed` followed by a successful merge (`integrationResult`).
 
 The engine only writes events; it never decides completion.
 
@@ -199,6 +199,23 @@ is counted and the count survives a replan. When a non-pass verdict makes the co
 limit, the Task fails and goes to the Manager. When it exceeds the limit, the Task moves to
 `judgement_waiting` and a Core decision is opened for the Owner (the Work waits too only when no other Task can proceed; see "Progress guard and prerequisite waits"). The Task is never passed
 automatically (`packages/core/src/state-reducer.ts`, rows 18b/18c).
+
+### Fixer escalation
+
+Settings key `fixer_escalation` (`packages/shared/src/fixer-escalation-settings.ts`; read by
+`fixerEscalation` in `packages/core/src/fixer-escalation.ts`; `GET`/`PUT /api/v1/settings/fixer-escalation`):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `after_review_rejections` | 2 | Reviewer rejections (`fix_required` or `replan_required`) of a non-design Task after which the Fixer role takes the next fix (integer 1–100) |
+
+The Task records the rejection count in `tasks.review_rejections` and the count at which it moved
+to the Fixer in `tasks.fixer_escalated_rejections`; its Agent runs record `agent_runs.worker_tier`
+(`standard` or `fixer`). Once set, the Fixer keeps the Task until it completes: replans, refunds and
+Owner answers do not return it to the Worker. The next Task starts with the Worker again. Design Tasks
+are never moved to the Fixer (they escalate to the Lead Designer). The Fixer's model and effort are
+the `fixer` role in the model settings (default `claude-opus-5-5`, effort `high`). An invalid stored
+value falls back to the default with a warning.
 
 ### Remake limits
 
@@ -519,6 +536,31 @@ Core runs these steps itself, without an agent. The Work page shows the current 
 ## Automatic build after merge
 
 After a Work is merged into the base branch, Core runs the Project's post-merge command in the Project directory. The default `pnpm build` (real provider mode only) applies only to the Project whose directory is `OWL_ROOT` (Owl itself); any other Project runs nothing unless `post_merge_command` (and optionally `post_merge_install_command`) is set on it. Setting `post_merge_command` also overrides the default for the `OWL_ROOT` Project. When a dependency file (`package.json`, a lockfile such as `pnpm-lock.yaml`) changed in the merge, the install command runs first. Merges that arrive while a build runs are coalesced into one run, and each run has a 15-minute timeout. A failure of either step creates a `system.alert` for the Owner with the redacted output tail; success is recorded as `work.post_merge_command_succeeded`. The server is not restarted by this step.
+
+## Project test setup and commit language
+
+**Test setup.** Core has an agent work out how to run each Project's tests and stores the result
+(`test_setup` on the Project; settings key `test_setup`, role `worker` by default). The investigation
+runs in the background when a Project is registered (`project_registered`), when its path changes
+(`project_path_changed`) or its test inputs change (`inputs_changed`), and when a test run fails for an
+environment problem (`environment_failure`, at most `max_reinvestigations` times, default 2). The Owner
+can also start one by hand with the re-investigation button in the Projects edit form
+(`POST /api/v1/projects/{project_id}/test-setup/investigate`, Owner only, answers 202, or 409
+`test_setup_unavailable`; `GET /api/v1/projects/{project_id}/test-setup/investigation` shows whether it is running and its outcome).
+The agent may install the missing test dependencies inside the Project (installs outside it are refused or
+recorded as needing approval), confirms the runner with probe commands, and removes the untracked files its
+runs left. The record has a `status` (`ready`, `tests_failing`, `no_tests`, `no_language`, `needs_approval`
+or `unresolved`) and `known_failures`: tests that already failed when the setup was confirmed. Later Core
+test runs treat those as pre-existing and do not fail a Task for them.
+
+**Test run off.** When the Project's `test_run` is explicitly off, Core starts no test runner for that
+Project, and the per-Task type verification (`doc`, `config`, `test`, `code`) does not start one either;
+it records `policy:test` as passed with the detail `Project test_run is off (explicit_off); test runners were not started.`. Other reasons
+(a Project with no test marker, invalid settings) keep running tests.
+
+**Commit language.** `commit_language` on a Project (`ja`, `en` or `null`; set with `POST /api/v1/projects`, `PATCH /api/v1/projects/{project_id}`)
+chooses the language of the Work's completion commit. With `en` the Manager writes an English
+imperative one-line subject (ASCII, at most 72 characters) in `verdict.commit_subject`; `ja` or `null` keeps the default.
 
 ## owl-memory
 

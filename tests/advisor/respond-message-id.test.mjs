@@ -140,6 +140,7 @@ test("the next Advisor turn's input carries the previous reply's owl-actions res
       "```",
     ].join("\n"),
     "Second reply.",
+    "Third reply.",
   ];
   let currentTurn;
   let readySent = false;
@@ -196,4 +197,12 @@ test("the next Advisor turn's input carries the previous reply's owl-actions res
   assert.ok(noticeLines.some((line) => !line.includes(workId)), "the failed pause_work notice is a separate line");
   assert.ok(secondText.indexOf("<owl-action-results>") < secondText.indexOf("Second request"));
   assert.equal(sentTurns[0].text.includes("owl-action-results"), false);
+
+  await waitFor(() => db.get("SELECT 1 AS x FROM advisor_turns WHERE id = ? AND status = 'completed'", currentTurn.turn_id));
+  // A turn that left no reply event must not make the first reply's results come back.
+  await db.createWriteLane().transact((tx) => tx.run("DELETE FROM events WHERE type = 'advisor.responded' AND json_extract(payload_json, '$.turn_id') = ?", currentTurn.turn_id));
+  const third = await insertMessage(db, conversation.conversation_id, webAccount.id, "Third request");
+  await core.advisorRespond(conversation.conversation_id, third, { channel: "web" });
+  await waitFor(() => sentTurns.length === 3);
+  assert.equal(sentTurns[2].text.includes("owl-action-results"), false, "results already handed over are not sent again after a reply without actions");
 });

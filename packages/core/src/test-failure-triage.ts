@@ -20,6 +20,8 @@ export interface TriageInput {
   readonly baseline: TestRunRecord | null;
   /** Files the Work changed from the base. */
   readonly workChangedFiles: ReadonlySet<string>;
+  /** Failure keys recorded in the Project's test setup when it was confirmed. */
+  readonly knownKeys?: ReadonlySet<string>;
 }
 
 /** Pure. file -> classified failures. A failure of a whole file (no test name) is pre-existing only through the nightly run. */
@@ -31,6 +33,9 @@ export function triageTestFailures(input: TriageInput): Map<string, ClassifiedFa
     result.set(file.file, file.failures.map((failure): ClassifiedFailure => {
       const key = testFailureKey(failure);
       if (input.nightlyKeys.has(key)) return { ...failure, classification: "pre_existing", pre_existing_by: "nightly" };
+      if (failure.name !== "" && !input.workChangedFiles.has(failure.file) && input.knownKeys?.has(key) === true) {
+        return { ...failure, classification: "pre_existing", pre_existing_by: "known" };
+      }
       if (failure.name !== "" && !input.workChangedFiles.has(failure.file) && baselineKeys.get(failure.file)?.has(key) === true) {
         return { ...failure, classification: "pre_existing", pre_existing_by: "baseline" };
       }

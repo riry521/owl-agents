@@ -63,6 +63,7 @@ flowchart LR
 | Manager | Splits a Work into tasks, coordinates them, and makes the final call |
 | Worker | Implements tasks. Several Workers run in parallel |
 | Reviewer | Verifies each Worker's result |
+| Fixer | Takes over a Task after the Reviewer has rejected it twice, using a stronger model |
 | Designer / Lead Designer | Designs the work: architecture, data model, API, and implementation approach |
 | Librarian / Curator | Organizes and improves knowledge and skills learned from work |
 
@@ -213,6 +214,10 @@ Details are in [docs/operations.md](docs/operations.md).
 - **Rate limits.** When a provider answers with a rate limit (for example HTTP 429), Owl pauses that provider and resumes automatically after the reset time, or after a backoff of 15, 30 and 60 minutes when none is given.
 - **Core background work.** While Core itself runs integration verification, tests, pre-merge re-verification, a wait for the Git lane or a base merge, the Work detail page shows what Core is doing and for how long.
 - **Build after merge.** After a Work is merged, Owl runs the Project's post-merge command (the build). If a dependency file such as `package.json` or `pnpm-lock.yaml` changed, the install command runs first. If either fails, the Owner is notified. Both commands are per-Project settings.
+- **Fixer.** When the Reviewer rejects a non-design Task twice (`after_review_rejections`, default 2), the Fixer role takes the next fix and keeps the Task until it completes. Set its model under the `fixer` role in Settings. See [docs/operations.md](docs/operations.md#fixer-escalation).
+- **Test setup per Project.** When you register or change a Project, or when a test fails because of the environment, an agent investigates how to run that Project's tests, Core confirms the command works, and the result is saved with the Project. In the Projects view, edit a Project and use the re-investigation button to run it again by hand.
+- **Turn off tests.** Set the Project's test run to "Don't run tests" (`test_run` mode `off`) and Core does not run the test runner during Task verification either.
+- **Commit language.** Set `commit_language` (`ja` or `en`) on a Project. For `en`, the commit that completes a Work is written in English.
 
 ### Memory and rules
 

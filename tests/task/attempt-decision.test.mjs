@@ -748,3 +748,74 @@ test("review_focus: the reducer reads the settings, tells the Manager about the 
   const again = await reduce("review.failed", { verdict: "fix_required", review: { findings: [{ ...spot("src/tags.ts", 44), severity: "major" }] } });
   assert.equal(again.decision.reason, "review_fix_required");
 });
+
+test("review failure: the Fixer takes over at the configured rejection count and keeps the Task", () => {
+  const rejected = (task, over) => decisionOf(evaluate(reviewFailed(task, over), cfg(over?.config)));
+  const first = rejected({});
+  assert.equal(first.patch.review_rejections, 1);
+  assert.ok(!("fixer_escalated_rejections" in first.patch));
+  const second = rejected({ review_rejections: 1 });
+  assert.deepEqual([second.patch.review_rejections, second.patch.fixer_escalated_rejections], [2, 2]);
+  const kept = rejected({ review_rejections: 2, fixer_escalated_rejections: 2 });
+  assert.equal(kept.patch.review_rejections, 3);
+  assert.ok(!("fixer_escalated_rejections" in kept.patch));
+  const replanned = rejected({ review_rejections: 2, fixer_escalated_rejections: 2 }, { verdict: "replan_required" });
+  assert.equal(replanned.patch.review_rejections, 3);
+  assert.ok(!("fixer_escalated_rejections" in replanned.patch));
+  const budget = DEFAULT_REVIEW_LIMIT_SETTINGS.plan_review_rounds;
+  assert.equal(rejected({ review_rejections: 1, review_round: budget }, { verdict: "replan_required" }).patch.fixer_escalated_rejections, 2);
+});
+
+test("review failure: the rejection count for the Fixer is configurable and ignores design Tasks", () => {
+  const withThreshold = cfg({ fixerAfterRejections: 3 });
+  const at = (rejections, task = {}) => decisionOf(evaluate(reviewFailed({ review_rejections: rejections, ...task }), withThreshold));
+  assert.ok(!("fixer_escalated_rejections" in at(1).patch));
+  assert.equal(at(2).patch.fixer_escalated_rejections, 3);
+  const design = at(5, { type: "design", review_round: DEFAULT_REVIEW_LIMIT_SETTINGS.plan_review_rounds - 1 });
+  assert.ok(!("fixer_escalated_rejections" in design.patch));
+  assert.equal(design.reason, "design_escalated_to_lead");
+  assert.equal(design.patch.review_rejections, 6);
+});
+
+test("task.attempt_decided carries fixer_escalation only on the decision that moved the Task to the Fixer", async (t) => {
+  const { root, db } = await openTestDatabase(t, { prefix: "owl-fixer-escalation-" });
+  const core = createCore({ db, version: "t", owlRoot: root, dataDir: root, agentRunner: {} });
+  t.after(async () => { await core.stop({ force: true }).catch(() => {}); });
+  const lane = db.createWriteLane();
+  const now = new Date().toISOString();
+  await lane.transact((tx) => {
+    tx.run("INSERT OR IGNORE INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Owner', ?, ?)", now, now);
+    tx.run(
+      `INSERT INTO works (id, owner_id, project_id, title, summary, size, state, rules_json, related_work_ids_json, created_at, updated_at)
+       VALUES ('W', 'owner:default', NULL, 'W', 'x', 'normal', 'running', '[]', '[]', ?, ?)`,
+      now, now,
+    );
+    tx.run(
+      `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, state_version, failure_count, same_error_count,
+         review_round, worker_generation, created_at, updated_at, retry_no, manager_task_id)
+       VALUES ('T1', 'W', 'T1', 'code', 'verifying', 'normal', '', 'Done.', 0, 0, 0, 0, 0, ?, ?, 0, 'T1')`,
+      now, now,
+    );
+  });
+  const reject = async () => {
+    await lane.transact((tx) => tx.run("UPDATE tasks SET status = 'verifying' WHERE id = 'T1'"));
+    await lane.transact((tx) => reduceTaskInTransaction(tx, "T1", { event: "review.failed", payload: { verdict: "fix_required" } }));
+    return JSON.parse(db.get("SELECT payload_json FROM events WHERE type = 'task.attempt_decided' ORDER BY rowid DESC").payload_json);
+  };
+  const column = () => db.get("SELECT review_rejections AS rejections, fixer_escalated_rejections AS escalated FROM tasks WHERE id = 'T1'");
+  const threshold = DEFAULT_ATTEMPT_POLICY_CONFIG.fixerAfterRejections;
+  for (let rejections = 1; rejections < threshold; rejections += 1) {
+    assert.equal("fixer_escalation" in await reject(), false);
+    assert.deepEqual(column(), { rejections, escalated: null });
+  }
+  assert.deepEqual((await reject()).fixer_escalation, { rejections: threshold, threshold });
+  assert.deepEqual(column(), { rejections: threshold, escalated: threshold });
+  assert.equal("fixer_escalation" in await reject(), false);
+  assert.deepEqual(column(), { rejections: threshold + 1, escalated: threshold });
+
+  await lane.transact((tx) => tx.run("UPDATE tasks SET status = 'ready' WHERE id = 'T1'"));
+  await lane.transact((tx) => reduceTaskInTransaction(tx, "T1", {
+    event: "task.started", payload: { capacity_acquired: true, launch_lease_acquired: true, role: "worker", provider: "p", model: "m", invocation_id: "i1" },
+  }));
+  assert.equal(db.get("SELECT worker_tier FROM agent_runs WHERE task_id = 'T1'").worker_tier, "fixer");
+});

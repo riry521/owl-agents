@@ -63,6 +63,7 @@ flowchart LR
 | Manager | Work をタスクに分けて計画し、最後に完了を判定する |
 | Worker | タスクを実装する。複数の Worker が並行で動く |
 | Reviewer | Worker の結果を検証する |
+| Fixer | Reviewer に2回差し戻されたタスクを、より強いモデルで引き継いで直す |
 | Designer / Lead Designer | 設計を担当する。アーキテクチャ・データモデル・API・実装方針などを決める |
 | Librarian / Curator | 仕事で得た知識やスキルを整理・改善する |
 
@@ -208,6 +209,10 @@ curl http://localhost:3787/api/v1/works
 - **レート制限**：providerがレート制限（429など）を返すと、そのproviderを一時停止し、リセット時刻の後に自動で再開します。時刻が分からないときは15分、30分、60分と間隔を延ばして再開します。
 - **Core自身の処理の表示**：Coreが統合検証、テスト、マージ前の再検証、Gitの順番待ち、ベースの取り込みを行っている間、Work詳細ページに処理の種類と経過時間が出ます。
 - **マージ後のビルド**：Workがマージされると、Projectのマージ後コマンド（ビルド）を実行します。`package.json`や`pnpm-lock.yaml`など依存ファイルが変わっていれば、先にインストールコマンドを実行します。どちらかが失敗するとOwnerに通知します。どちらもProjectごとの設定です。
+- **Fixer**：設計以外のタスクが Reviewer に2回（`after_review_rejections`、既定は2）差し戻されると、Fixer 役が次の修正を担当し、タスクが完了するまで続けます。モデルは設定画面の`fixer`役で選びます。詳しくは[docs/operations.md](docs/operations.md#fixer-escalation)を見てください。
+- **Projectごとのテスト方法**：Projectの登録時・変更時、または環境の問題でテストが落ちたときに、エージェントがそのProjectのテストの動かし方を調べ、Coreが動くことを確かめて、結果をProjectに保存します。Projects画面でProjectを編集し、再調査ボタンを押すと手動でやり直せます。
+- **テスト実行をoffにする**：Projectのテスト実行を「テストを実行しない」（`test_run`の`mode`を`off`）にすると、Taskの検証でもCoreはテストランナーを動かしません。
+- **コミットメッセージの言語**：Projectに`commit_language`（`ja`または`en`）を設定できます。`en`のProjectでは、Workの完了コミットを英語で書きます。
 
 ### メモリとルール
 
