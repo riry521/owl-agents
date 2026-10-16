@@ -80,7 +80,7 @@ test("provider pause and resume events reach Slack and the provider pauses API",
     resets_at: "2030-01-02T03:05:05.000Z",
     role: "worker",
   });
-  assert.equal(pause.resume_at, "2030-01-02T03:05:35.000Z");
+  assert.equal(pause.resume_at, "2030-01-02T03:06:35.000Z");
 
   const listed = await requestPauses();
   assert.equal(listed.length, 1);
@@ -104,7 +104,7 @@ test("provider pause and resume events reach Slack and the provider pauses API",
   );
   assert.deepEqual(pauseOutbox, { provider: "websocket", status: "delivered" });
 
-  t.mock.timers.tick(90_000);
+  t.mock.timers.tick(150_000);
   for (let i = 0; i < 10; i += 1) await new Promise((resolvePromise) => setImmediate(resolvePromise));
 
   assert.deepEqual(received.map((event) => event.type), ["provider.paused", "provider.resumed"]);

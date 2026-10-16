@@ -5,6 +5,7 @@ export type ApiErrorCode =
   | "core_not_ready"
   | "curation_failed"
   | "validation_error"
+  | "verification_policy_storage_invalid"
   | "knowledge_target_invalid"
   | "knowledge_storage_busy"
   | "knowledge_move_failed"
@@ -20,6 +21,7 @@ export type ApiErrorCode =
   | "idempotency_conflict"
   | "provider_pause_not_found"
   | "project_not_found"
+  | "work_project_already_set"
   | "project_has_running_works"
   | "project_deletion_impact_changed"
   | "model_preset_not_found"
@@ -34,6 +36,8 @@ export type ApiErrorCode =
   | "skill_proposal_not_found"
   | "task_not_found"
   | "design_document_not_found"
+  | "design_mock_not_found"
+  | "design_mock_write_failed"
   | "decision_not_found"
   | "decision_already_resolved"
   | "agent_run_not_found"
@@ -145,6 +149,7 @@ const HTTP_ERROR_TEXT: Partial<Record<ApiErrorCode, string>> = {
   version_conflict: "The version has changed. Refresh and try again.",
   idempotency_conflict: "This idempotency key was used with different content. Use a new key.",
   project_not_found: "The Project was not found.",
+  work_project_already_set: "The Work already belongs to a Project.",
   project_has_running_works: "The Project has running Works or active Agents.",
   project_deletion_impact_changed: "The Project's Works changed after confirmation.",
   model_preset_not_found: "The model preset was not found.",
@@ -159,6 +164,8 @@ const HTTP_ERROR_TEXT: Partial<Record<ApiErrorCode, string>> = {
   skill_proposal_not_found: "The skill proposal was not found.",
   task_not_found: "The task was not found.",
   design_document_not_found: "The design document was not found.",
+  design_mock_not_found: "The design mock was not found.",
+  design_mock_write_failed: "The design mock could not be written.",
   decision_not_found: "The Decision was not found.",
   decision_already_resolved: "The Decision has already been resolved.",
   agent_run_not_found: "The agent run was not found.",

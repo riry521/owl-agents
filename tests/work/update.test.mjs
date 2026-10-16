@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { TEST_SETUP_RETRY_OPTION_KEY } from "../../packages/shared/dist/index.js";
+
 import { WORK_TRANSITION_TABLE } from "../../packages/core/dist/state-reducer.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { command as baseCommand, createTestCore } from "../helpers/core.mjs";
@@ -191,7 +193,37 @@ test("resumeWorkOrRetryDecision answers an open work retry Decision in judgement
   assert.deepEqual(response.data, { work_id: workId, state: "running", resumed_by: "retry_decision", decision_id: decisionId });
   assert.deepEqual(replay, response);
   assert.equal(db.get("SELECT status FROM decisions WHERE id = ?", decisionId).status, "resolved");
+  assert.equal(JSON.parse(db.get("SELECT answer_json FROM decision_answers WHERE decision_id = ?", decisionId).answer_json).option_key, "retry");
   assert.equal(db.get("SELECT source FROM decision_answers WHERE decision_id = ?", decisionId).source, "advisor");
+  assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "running");
+});
+
+test("resumeWorkOrRetryDecision answers a test setup retry Decision in judgement_waiting", async (t) => {
+  const { db, core } = await setup(t);
+  const workId = await createWorkInState(core, db, "judgement_waiting", "resume-test-setup");
+  const decisionId = createUlid();
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run(
+      `INSERT INTO decisions
+         (id, work_id, scope, status, blocked_task_ids_json, reason, question, tried, current_state,
+          options_json, recommended, allow_free_text, issuer_role, state_version, created_at)
+       VALUES (?, ?, 'work', 'open', '[]', 'retry', 'Try again?', '', 'judgement_waiting',
+               ?, 'retry', 1, 'core', 0, ?)`,
+      decisionId,
+      workId,
+      JSON.stringify([{ key: TEST_SETUP_RETRY_OPTION_KEY, label: "Retry test setup" }]),
+      new Date().toISOString(),
+    );
+  });
+
+  const request = command({ source: "advisor" }, "resume-test-setup", 1);
+  const response = await core.resumeWorkOrRetryDecision(workId, request);
+  const replay = await core.resumeWorkOrRetryDecision(workId, { ...request, request_id: createUlid() });
+
+  assert.deepEqual(response.data, { work_id: workId, state: "running", resumed_by: "retry_decision", decision_id: decisionId });
+  assert.deepEqual(replay, response);
+  assert.equal(db.get("SELECT status FROM decisions WHERE id = ?", decisionId).status, "resolved");
+  assert.equal(JSON.parse(db.get("SELECT answer_json FROM decision_answers WHERE decision_id = ?", decisionId).answer_json).option_key, TEST_SETUP_RETRY_OPTION_KEY);
   assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "running");
 });
 

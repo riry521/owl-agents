@@ -39,6 +39,7 @@ import type {
   RuntimeConfig,
   TaskSummary,
   ULID,
+  MoveWorkToProjectResult,
   UnarchiveWorkResult,
   WorkDetail,
   WorkDetailView,
@@ -522,6 +523,26 @@ export interface WorkDesignDetail {
   updated_at: string;
 }
 
+export interface WorkDesignMockSummary {
+  task_id: ULID;
+  task_title: string;
+  name: string;
+  updated_at: string;
+  size_bytes: number;
+}
+
+/** GET /api/v1/works/{id}/design-mocks. */
+export async function getWorkDesignMocks(id: ULID): Promise<{ mocks: WorkDesignMockSummary[] }> {
+  const response = await requestJson<{ data?: { mocks?: WorkDesignMockSummary[] } }>(`/works/${encodeURIComponent(id)}/design-mocks`);
+  return { mocks: response.data?.mocks ?? [] };
+}
+
+/** iframe src of one mock; the API serves the HTML itself, so the browser loads it directly. */
+export async function designMockUrl(id: ULID, taskId: ULID, name: string): Promise<string> {
+  const config = await runtimeConfig();
+  return resolveApiUrl(config.api_base, `/works/${encodeURIComponent(id)}/design-mocks/${encodeURIComponent(taskId)}/${encodeURIComponent(name)}`);
+}
+
 /** GET /api/v1/works/{id}/designs. */
 export async function getWorkDesigns(id: ULID): Promise<{ designs: WorkDesignSummary[] }> {
   const response = await requestJson<{ data?: { designs?: WorkDesignSummary[] } }>(`/works/${encodeURIComponent(id)}/designs`);
@@ -835,6 +856,20 @@ export async function unarchiveWork(workId: ULID, expectedVersion: number): Prom
   const response = await command<UnarchiveWorkResult>(
     `/works/${encodeURIComponent(workId)}/unarchive`,
     {},
+    expectedVersion,
+  );
+  return response.data;
+}
+
+/** POST /api/v1/works/{id}/project with the command envelope. */
+export async function moveWorkToProject(
+  workId: ULID,
+  expectedVersion: number,
+  projectId: ULID,
+): Promise<MoveWorkToProjectResult> {
+  const response = await command<MoveWorkToProjectResult>(
+    `/works/${encodeURIComponent(workId)}/project`,
+    { project_id: projectId },
     expectedVersion,
   );
   return response.data;

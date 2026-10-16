@@ -3,6 +3,7 @@ import { lstat, mkdir, readFile, readdir, realpath, rm, rmdir, writeFile } from 
 import { promisify } from "node:util";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { chooseBaseBranch, currentBranch } from "../../../packages/core/dist/repository-inspection.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_PREVIEW_FILES = 2_000;
@@ -159,35 +160,6 @@ async function initialFilePreview(root: string): Promise<{ initial_files: string
   return { initial_files: initialFiles, excluded_files: excludedFiles, total_files: totalFiles, truncated };
 }
 
-async function currentBranch(root: string): Promise<string> {
-  const result = await git(root, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
-  return result.ok ? result.stdout.trim() : "";
-}
-
-async function chooseBaseBranch(root: string): Promise<string | null> {
-  const remoteHead = await git(root, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
-  if (remoteHead.ok) {
-    const remoteRef = remoteHead.stdout.trim();
-    const slash = remoteRef.indexOf("/");
-    if (slash > 0) {
-      const localName = remoteRef.slice(slash + 1);
-      const localExists = await git(root, ["show-ref", "--verify", "--quiet", `refs/heads/${localName}`]);
-      if (localExists.ok) return localName;
-      const remoteExists = await git(root, ["show-ref", "--verify", "--quiet", `refs/remotes/${remoteRef}`]);
-      if (remoteExists.ok) return remoteRef;
-    }
-  }
-
-  for (const branch of ["main", "master"]) {
-    const local = await git(root, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
-    if (local.ok) return branch;
-  }
-  const active = await currentBranch(root);
-  if (active) return active;
-  const branches = await git(root, ["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
-  return branches.ok ? branches.stdout.trim().split("\n").find(Boolean) ?? null : null;
-}
-
 export async function inspectProjectFolder(inputPath: string): Promise<ProjectFolderInspection> {
   if (!isAbsolute(inputPath.trim())) throw new Error("Project folder path must be absolute.");
   const path = normalizedGitPath(inputPath);
@@ -216,10 +188,10 @@ export async function inspectProjectFolder(inputPath: string): Promise<ProjectFo
   const head = await git(root, ["rev-parse", "--verify", "HEAD"]);
   if (!head.ok) {
     const preview = await initialFilePreview(root);
-    return { kind: "git_needs_initial_commit", canonical_path: root, current_branch: await currentBranch(root) || "main", ...preview };
+    return { kind: "git_needs_initial_commit", canonical_path: root, current_branch: await currentBranch(git, root) || "main", ...preview };
   }
 
-  const baseBranch = await chooseBaseBranch(root);
+  const baseBranch = await chooseBaseBranch(git, root);
   if (!baseBranch) {
     throw new Error("Git repository has a commit but no branch can be selected as its starting point.");
   }
@@ -256,7 +228,7 @@ async function commitInitialSnapshot(root: string, branch: string): Promise<void
   if (!added.ok) throw new Error(added.stderr.trim() || "Could not prepare the initial project snapshot.");
   const committed = await git(root, ["-c", "user.name=Owl Agent", "-c", "user.email=owl-agent@localhost", "commit", "--allow-empty", "-m", "Initialize Owl project"]);
   if (!committed.ok) throw new Error(committed.stderr.trim() || "Could not create the initial project snapshot.");
-  const branchNow = await currentBranch(root);
+  const branchNow = await currentBranch(git, root);
   if (branchNow !== branch) throw new Error("The project branch changed during Git setup. Inspect the repository and retry.");
 }
 
@@ -308,7 +280,7 @@ export async function initializeExistingProjectFolder(inputPath: string): Promis
     const initialized = await git(root, ["init", "--initial-branch=main"]);
     if (!initialized.ok) throw new Error(initialized.stderr.trim() || "Git could not be initialized for this folder.");
   } else {
-    branch = await currentBranch(root) || "main";
+    branch = await currentBranch(git, root) || "main";
   }
   await commitInitialSnapshot(root, branch);
   const result = await inspectProjectFolder(root);

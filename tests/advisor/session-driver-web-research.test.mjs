@@ -77,6 +77,22 @@ test("Advisor emits WebFetch research before the completed turn and prefers tool
   assert.equal(events[completeIndex].reply, "Done.");
 });
 
+test("Advisor captures WebFetch results emitted by Claude subagent frames", async (t) => {
+  const subagentTurns = [
+    [
+      { type: "assistant", message: { content: [{ type: "tool_use", id: "web-sub-1", name: "WebFetch", input: { url: "https://example.com/page", prompt: "summarize" } }] }, parent_tool_use_id: "task-1" },
+      { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "web-sub-1", content: "Subagent result" }] }, parent_tool_use_id: "task-1" },
+      { type: "result", subtype: "success", is_error: false, result: "Done." },
+    ],
+  ];
+  const driver = await createDriver(t, subagentTurns);
+  await driver.send({ turn_id: "turn-subagent", text: "Research" });
+  const events = await collectTurn(driver, "turn-subagent");
+  const capture = events.find((event) => event.type === "tool.web_research")?.capture;
+  assert.equal(capture?.url, "https://example.com/page");
+  assert.equal(capture?.content, "Subagent result");
+});
+
 test("Advisor extracts WebSearch links from Links text in tool_result", async (t) => {
   const driver = await createDriver(t, [[
     { type: "assistant", message: { content: [{ type: "tool_use", id: "search-1", name: "WebSearch", input: { query: "owl agents" } }] } },

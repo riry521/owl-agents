@@ -758,6 +758,37 @@ test("Worker requires structured remaining issues and verification and rejects a
   assert.equal(noMethod.error_key, "runtime:report_invalid:worker_output_schema:verification.method:missing");
 });
 
+test("Manager prompts tell the Manager to set assigned_designer and to hand mock copying to a separate Task", async () => {
+  for (const mode of ["plan", "replan"]) {
+    const calls = [];
+    await runnerAnswering((template) => fillTemplate(template), calls).runManagerPlan(managerRequest(mode));
+    assert.match(calls[0].prompt, /Set assigned_designer on every design Task\. Use lead_designer only when/u);
+    assert.match(calls[0].prompt, /add a doc or code Task that depends on that design Task and copies the mocks there/u);
+    assert.match(calls[0].prompt, /and a lead_designer Task saves its mocks through Owl/u);
+  }
+  const replan = [];
+  await runnerAnswering((template) => fillTemplate(template), replan).runManagerPlan(managerRequest("replan"));
+  assert.match(replan[0].prompt, /type, review, assigned_designer, required_sections and required_tests/u);
+});
+
+test("a Designer run with design_mock_dir carries the mock directory, the skill and the owl-design flag; others do not", async () => {
+  const run = async (context) => {
+    const calls = [];
+    const request = { invocation_id: "designer-mock", work_id: "work-1", task_id: "task-1", attempt: 1, context: { task: { ...task, type: "design" }, design_document_path: "/tmp/owl-data/designs/work-1/task-1.md", ...context } };
+    const result = await runnerAnswering((template) => fillTemplate(template), calls).runDesigner(request);
+    assert.equal(result.outcome, "success", result.message);
+    return calls[0];
+  };
+  const screen = await run({ design_tier: "lead", design_mock_dir: "/tmp/owl-data/designs/work-1/task-1.mocks", design_skill: "example-ui-skill" });
+  assert.equal(screen.env.OWL_DESIGN_MOCK_MCP, "1");
+  assert.match(screen.prompt, /save_design_mock/u);
+  assert.match(screen.prompt, /Use the example-ui-skill skill/u);
+  assert.equal(renderedSlots(screen.prompt).Task.design_mock_dir, "/tmp/owl-data/designs/work-1/task-1.mocks");
+  const plain = await run({ design_tier: "lead" });
+  assert.equal(plain.env.OWL_DESIGN_MOCK_MCP, undefined);
+  assert.doesNotMatch(plain.prompt, /save_design_mock/u);
+});
+
 test("Designer uses the Worker report contract, its own provider role and the document path", async () => {
   const calls = [];
   const request = {
@@ -778,7 +809,7 @@ test("Designer uses the Worker report contract, its own provider role and the do
   assert.equal(result.report_valid, true);
   assert.equal(calls[0].role, "designer");
   assert.equal(calls[0].env.OWL_AGENT_ROLE, "designer");
-  assert.deepEqual(calls[0].structured_output_schema.required, WORKER_REPORT_SCHEMA.required.filter((key) => key !== "external_blocker"));
+  assert.deepEqual(calls[0].structured_output_schema.required, Object.keys(DESIGNER_REPORT_SCHEMA.properties));
   assert.match(calls[0].prompt, /You are the Owl Designer/u);
   assert.match(calls[0].prompt, /design_document_path/u);
   assert.match(calls[0].prompt, /self-reviewed against the Task's acceptance criteria/u);
@@ -1107,6 +1138,50 @@ test("Worker and Designer provider schemas carry the success rules only when ask
     assert.deepEqual(rule.then.properties.verification.properties.checks.items.properties.status, { const: "passed" });
     assert.ok(!JSON.stringify(ruled.properties).includes("allOf"));
   }
+});
+
+test("Manager plan and replan require assigned_designer, copy only designer values onto the Task, and reject other strings", async () => {
+  for (const mode of ["plan", "replan"]) {
+    const calls = [];
+    const answer = (value) => (template) => ({ tasks: [{ ...fillTemplate(template.tasks[0]), type: "design", assigned_designer: value }] });
+    const lead = await runnerAnswering(answer("lead_designer"), calls).runManagerPlan(managerRequest(mode));
+    assert.equal(lead.outcome, "success", `${mode}: ${lead.message}`);
+    assert.equal(lead.report.tasks[0].assigned_designer, "lead_designer");
+    const schema = calls[0].structured_output_schema.properties.tasks.items;
+    assert.ok(schema.required.includes("assigned_designer"));
+    assert.deepEqual(schema.properties.assigned_designer.enum, ["designer", "lead_designer", null]);
+    assert.equal((await runnerAnswering(answer("designer")).runManagerPlan(managerRequest(mode))).report.tasks[0].assigned_designer, "designer");
+    assert.equal((await runnerAnswering(answer(null)).runManagerPlan(managerRequest(mode))).report.tasks[0].assigned_designer, undefined);
+    const code = await runnerAnswering((template) => ({ tasks: [{ ...fillTemplate(template.tasks[0]), type: "code", assigned_designer: "lead_designer" }] })).runManagerPlan(managerRequest(mode));
+    assert.equal(code.report.tasks[0].assigned_designer, undefined);
+    const wrong = await runnerAnswering(answer("lead")).runManagerPlan(managerRequest(mode));
+    assert.equal(wrong.outcome, "failed");
+    assert.match(wrong.error_key, /^runtime:manager_plan_invalid:manager_output_schema:tasks\[0\]\.assigned_designer:not_one_of_/u);
+    // An answer from before the field existed means no designation.
+    const old = await runnerAnswering((template) => {
+      const { assigned_designer: _drop, ...rest } = fillTemplate(template.tasks[0]);
+      return { tasks: [rest] };
+    }).runManagerPlan(managerRequest(mode));
+    assert.equal(old.outcome, "success", old.message);
+  }
+});
+
+test("provider schemas list every property of a closed object as required (OpenAI strict outputs), while omitted optional fields still validate", () => {
+  const closedObjects = (node, path = "$") => {
+    if (!node || typeof node !== "object") return [];
+    const own = node.properties && node.additionalProperties === false ? [{ path, node }] : [];
+    return [
+      ...own,
+      ...Object.entries(node.properties ?? {}).flatMap(([key, child]) => closedObjects(child, `${path}.${key}`)),
+      ...(node.items ? closedObjects(node.items, `${path}[]`) : []),
+    ];
+  };
+  for (const schema of [WORKER_REPORT_SCHEMA, DESIGNER_REPORT_SCHEMA, REVIEW_OUTPUT_SCHEMA, MANAGER_PLAN_OUTPUT_SCHEMA]) {
+    for (const { path, node } of closedObjects(providerSchema(schema))) {
+      assert.deepEqual([...node.required].sort(), Object.keys(node.properties).sort(), path);
+    }
+  }
+  assert.deepEqual(WORKER_REPORT_SCHEMA.properties.delegation.required, ["decomposition", "delegated", "retained"]);
 });
 
 test("validateRoleOutput ignores the success rules for success and partial reports", () => {

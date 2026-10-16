@@ -142,10 +142,10 @@ test("a reported rate limit preserves Task counters and completes automatically 
   await workflow.drainPipelines();
   const paused = temp.db.get("SELECT status, retry_no, failure_count, same_error_count FROM tasks WHERE id = ?", taskId);
   assert.deepEqual(paused, { status: "ready", retry_no: 0, failure_count: 0, same_error_count: 0 });
-  assert.equal(store.list()[0].resume_at, "2030-01-02T03:05:05.000Z");
+  assert.equal(store.list()[0].resume_at, "2030-01-02T03:06:05.000Z");
   assert.deepEqual(replans, []);
 
-  await clock.advance(60_000);
+  await clock.advance(120_000);
   await waitUntil(() => attempts === 2, "Task retry at the reported resume time");
   await workflow.drainPipelines();
   const completed = temp.db.get("SELECT status, retry_no, failure_count, same_error_count FROM tasks WHERE id = ?", taskId);
@@ -192,16 +192,16 @@ test("a Claude session limit pauses until its reset, waits out a late reset, the
   await workflow.drainPipelines();
   assert.equal(temp.db.get("SELECT status FROM tasks WHERE id = ?", taskId).status, "ready");
   assert.equal(store.list()[0].provider, "anthropic");
-  assert.equal(store.list()[0].resume_at, "2030-01-02T04:00:30.000Z");
+  assert.equal(store.list()[0].resume_at, "2030-01-02T04:02:30.000Z");
 
   // The provider still refuses just after the reset it reported: retry in a minute, not tomorrow.
-  await advance(Date.parse("2030-01-02T04:00:30.000Z") - Date.parse(clock.now()));
+  await advance(Date.parse("2030-01-02T04:02:30.000Z") - Date.parse(clock.now()));
   await waitUntil(() => attempts === 2, "Claude retry at the reported reset");
   await workflow.drainPipelines();
   assert.equal(temp.db.get("SELECT status FROM tasks WHERE id = ?", taskId).status, "ready");
-  assert.equal(store.list()[0].resume_at, "2030-01-02T04:02:00.000Z");
+  assert.equal(store.list()[0].resume_at, "2030-01-02T04:05:00.000Z");
 
-  await advance(90_000);
+  await advance(150_000);
   await waitUntil(() => attempts === 3, "Claude retry after the late reset");
   await workflow.drainPipelines();
   assert.equal(temp.db.get("SELECT status FROM tasks WHERE id = ?", taskId).status, "completed");
@@ -263,7 +263,7 @@ test("Core restart preserves a paused Task and its deadline, then resumes it", a
   await firstCore.workflow.drainPipelines();
   const savedPause = createProviderPauseStore(temp.db, clock.now).list()[0];
   assert.equal(savedPause.state, "paused");
-  assert.equal(savedPause.resume_at, "2030-01-02T03:05:05.000Z");
+  assert.equal(savedPause.resume_at, "2030-01-02T03:06:05.000Z");
   assert.equal(temp.db.get("SELECT status FROM tasks WHERE id = ?", taskId).status, "ready");
 
   await firstCore.stop({ force: true });
@@ -272,7 +272,7 @@ test("Core restart preserves a paused Task and its deadline, then resumes it", a
   assert.deepEqual(createProviderPauseStore(temp.db, clock.now).list(), [savedPause]);
   assert.equal(temp.db.get("SELECT status FROM tasks WHERE id = ?", taskId).status, "ready");
 
-  t.mock.timers.tick(60_000);
+  t.mock.timers.tick(120_000);
   await waitUntil(() => attempts === 2, "Task retry after Core restart");
   await firstCore.workflow.drainPipelines();
   assert.equal(temp.db.get("SELECT status FROM tasks WHERE id = ?", taskId).status, "completed");
@@ -358,7 +358,7 @@ test("a rate-limited initial Manager plan is retried after resume without failin
   assert.equal(temp.db.get("SELECT COUNT(*) AS count FROM tasks WHERE work_id = ?", workId).count, 0);
   assert.equal(temp.db.get("SELECT COUNT(*) AS count FROM events WHERE type = 'manager.failed'").count, 0);
 
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(90_000);
   await waitUntil(() => managerCalls === 2, "initial Manager plan after Provider resume");
   assert.equal(temp.db.get("SELECT COUNT(*) AS count FROM tasks WHERE work_id = ?", workId).count, 1);
   assert.equal(temp.db.get("SELECT state FROM works WHERE id = ?", workId).state, "running");
@@ -397,7 +397,7 @@ test("a thrown Manager rate limit pauses the Provider without a Decision, then t
   assert.equal(temp.db.get("SELECT COUNT(*) AS count FROM events WHERE type IN ('decision.opened', 'manager.failed')").count, 0);
   assert.equal(createProviderPauseStore(temp.db).list().find((pause) => pause.provider === "anthropic")?.state, "paused");
 
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(90_000);
   await waitUntil(() => managerCalls === 2, "Manager plan after Provider resume");
 });
 

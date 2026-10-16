@@ -42,7 +42,7 @@ export interface ProviderPauseStore {
 }
 
 const BACKOFF_MINUTES = [15, 30, 60] as const;
-const RESUME_GRACE_MS = 30_000;
+const RESUME_GRACE_MS = 90_000;
 
 export function createProviderPauseStore(
   db: Pick<CoreDatabase, "get" | "all" | "createWriteLane">,

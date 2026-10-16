@@ -93,6 +93,23 @@ test("buildArgv does not register owl-dispatch for reviewer, manager, or a disab
   });
 });
 
+test("buildArgv registers owl-design only for a flagged designer, in both adapters", async (t) => {
+  await withDispatchServer(t, async ({ owlRoot, env }) => {
+    await writeFile(join(owlRoot, "apps", "server", "dist", "design-mock-mcp.js"), "");
+    const flagged = { ...env, OWL_DESIGN_MOCK_MCP: "1" };
+    const claude = argvFor("claude-cli/v1", "designer", flagged);
+    const configPath = claude[claude.indexOf("--mcp-config") + 1];
+    try {
+      assert.ok(Object.hasOwn(JSON.parse(await readFile(configPath, "utf8")).mcpServers, "owl-design"));
+    } finally {
+      await rm(configPath, { force: true });
+    }
+    assert.ok(argvFor("codex-cli/v1", "designer", flagged).some((arg) => arg.startsWith("mcp_servers.owl-design.command=")));
+    assert.equal(argvFor("codex-cli/v1", "designer", env).some((arg) => arg.includes("mcp_servers.owl-design.")), false);
+    assert.equal(argvFor("codex-cli/v1", "worker", flagged).some((arg) => arg.includes("mcp_servers.owl-design.")), false);
+  });
+});
+
 function researcherOf(argv) {
   const at = argv.indexOf("--agents");
   return at < 0 ? null : JSON.parse(argv[at + 1])["owl-researcher"];

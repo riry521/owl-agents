@@ -24,6 +24,7 @@ export class WorkDriver {
   private readonly maxConcurrent: number;
   private readonly workIds = new Set<string>();
   private readonly inFlight = new Map<string, Promise<void>>();
+  private readonly exclusiveTails = new Map<string, Promise<unknown>>();
   /** Works woken while their tick was in flight; each ticks once more after it. */
   private readonly wakeRequested = new Set<string>();
   private pumpScheduled = false;
@@ -60,7 +61,7 @@ export class WorkDriver {
 
   public async stop(): Promise<void> {
     this.stopScheduling();
-    const pending = [...this.inFlight.values()];
+    const pending = [...this.inFlight.values(), ...this.exclusiveTails.values()];
     const results = await Promise.allSettled(pending);
     const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
     if (failure) {
@@ -108,6 +109,26 @@ export class WorkDriver {
     this.schedulePump();
   }
 
+  /** Run an operation after the current tick and prevent new ticks for this Work until it finishes. */
+  public async exclusive<T>(workId: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.exclusiveTails.get(workId) ?? Promise.resolve();
+    const running = previous.catch(() => undefined).then(async () => {
+      const tick = this.inFlight.get(workId);
+      if (tick) await tick;
+      return operation();
+    });
+    this.exclusiveTails.set(workId, running);
+    try {
+      return await running as T;
+    } finally {
+      if (this.exclusiveTails.get(workId) === running) {
+        this.exclusiveTails.delete(workId);
+        this.wakeRequested.delete(workId);
+        this.schedulePump();
+      }
+    }
+  }
+
   private schedulePump(): void {
     if (this.pumpScheduled) {
       return;
@@ -138,6 +159,7 @@ export class WorkDriver {
     let visited = 0;
     for (; visited < candidates.length && this.inFlight.size < this.maxConcurrent; visited += 1) {
       const workId = candidates[(startIndex + visited) % candidates.length];
+      if (this.exclusiveTails.has(workId)) continue;
       if (this.inFlight.has(workId)) {
         continue;
       }

@@ -164,9 +164,14 @@ export function providerSchema(schema: RoleSchema, withRules = false): Readonly<
   // providerRules (one if/then, spread at the top level) is opt-in: OpenAI strict structured outputs
   // (Codex) reject if/then. It is never wrapped in allOf: the Anthropic API rejects
   // allOf/anyOf/oneOf at the top level of a tool input_schema (Claude CLI --json-schema).
+  // A closed object lists every property as required here even when the role schema
+  // leaves some optional: OpenAI strict structured outputs (Codex) reject a `required`
+  // that omits a property. The role schema keeps its own `required`, so
+  // validateRoleOutput still accepts answers that omit the optional fields.
   const { example: _example, minLength: _minLength, providerRules, properties, items, ...rest } = schema;
   return {
     ...rest,
+    ...(properties && schema.additionalProperties === false ? { required: Object.keys(properties) } : {}),
     ...(withRules && providerRules ? providerRules : {}),
     ...(properties
       ? { properties: Object.fromEntries(Object.entries(properties).map(([key, value]) => [key, providerSchema(value, withRules)])) }

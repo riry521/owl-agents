@@ -133,6 +133,9 @@ const componentTranslations = {
   'work.designDocuments': 'Design documents',
   'work.errorDesignDocumentsLoad': 'Could not load the design documents.',
   'work.errorDesignDocumentLoad': 'Could not load this design document.',
+  'work.designMocks': 'Screen mocks',
+  'work.errorDesignMocksLoad': 'Could not load the screen mocks.',
+  'work.designMockFrameTitle': ({ name }) => `Screen mock: ${name}`,
   'board.backToChat': 'Back',
 };
 
@@ -181,6 +184,8 @@ const componentApiClient = {
   subscribeToUpdates: () => () => {},
   getWorkDesigns: async () => ({ designs: [] }),
   getWorkDesign: async () => { throw new Error('design document should not load during static render'); },
+  getWorkDesignMocks: async () => ({ mocks: [] }),
+  designMockUrl: async (id, taskId, name) => `/api/v1/works/${id}/design-mocks/${taskId}/${name}`,
 };
 
 // Stand-in for '@/lib/view-loader': each useView call reads (and, when its effect runs, fills) one entry of the harness's `views`.
@@ -262,6 +267,12 @@ const boardComponentModule = compileWebComponent(join(repoRoot, 'apps/web/compon
 const workSummaryBlockModule = compileWebComponent(join(repoRoot, 'apps/web/components/WorkSummaryBlock.tsx'), {
   '@/lib/i18n': componentI18n,
 });
+const designMocksSectionModule = compileWebComponent(join(repoRoot, 'apps/web/components/DesignMocksSection.tsx'), {
+  '@/lib/api-client': componentApiClient,
+  '@/lib/format': componentFormat,
+  '@/lib/skill-diff': actualSkillDiffModule,
+  '@/lib/i18n': componentI18n,
+});
 const designDocumentsSectionModule = compileWebComponent(join(repoRoot, 'apps/web/components/DesignDocumentsSection.tsx'), {
   '@/lib/api-client': componentApiClient,
   '@/lib/format': componentFormat,
@@ -292,6 +303,8 @@ const boardPageModule = compileWebComponent(join(repoRoot, 'apps/web/app/board/p
   '@/components/AdvisorView': advisorStub,
   '@/components/WorkPreviewPanel': previewComponentModule,
 });
+const moveHelpers = await import('../../apps/web/lib/work-project-move.mjs');
+const workProjectMoveStub = { WorkProjectMove: ({ work }) => React.createElement('span', { 'data-move': String(work.project_id === null) }) };
 const detailComponentModule = compileWebComponent(join(repoRoot, 'apps/web/components/WorkDetailView.tsx'), {
   '@/lib/view-loader': componentViewLoader,
   'next/link': linkModule,
@@ -304,11 +317,13 @@ const detailComponentModule = compileWebComponent(join(repoRoot, 'apps/web/compo
   '@/lib/format': componentFormat,
   '@/components/StateBadge': stateBadgeModule,
   '@/components/WorkArchiveActions': archiveActionsModule,
+  '@/components/WorkProjectMove': workProjectMoveStub,
   '@/lib/i18n': componentI18n,
   '@/lib/work-detail-safety.mjs': { asReportEnvelope, humanizeWorkDetailError, normalizeWorkDetailData },
   '@/components/WorkSummaryBlock': workSummaryBlockModule,
   '@/components/CoreActivityRows': coreActivityRowsModule,
   '@/components/DesignDocumentsSection': designDocumentsSectionModule,
+  '@/components/DesignMocksSection': designMocksSectionModule,
   '@/components/WorkBacklogSection': { WorkBacklogSection: () => null },
   '@/components/ActivityLog': { WorkPostMergeEvents: () => null },
   '@/components/WorkConversation': { WorkConversation: () => null },
@@ -908,6 +923,21 @@ test('the design documents section hides itself when there are no design documen
   } finally {
     componentApiClient.getWorkDesigns = originalGetWorkDesigns;
   }
+});
+
+test('the design mocks section groups mocks by Task and shows the chosen one in a script-only sandbox iframe', () => {
+  const mock = { task_id: 'task-1', task_title: 'Screen design', name: '01-sign-in.html', updated_at: '2026-01-01T00:00:00.000Z', size_bytes: 2048 };
+  const props = { workId: 'work-1', refreshToken: 0, now: Date.parse('2026-01-02T00:00:00.000Z'), locale: 'en', t: translateForComponent };
+  const src = '/api/v1/works/work-1/design-mocks/task-1/01-sign-in.html';
+  const listOnly = createHookHarness([[mock], null, null, null]).render(designMocksSectionModule.DesignMocksSection, props);
+  assert.ok(listOnly.html.includes('Screen design') && listOnly.html.includes('01-sign-in.html') && listOnly.html.includes('2.0 KB'));
+  assert.ok(!listOnly.html.includes('<iframe'), 'no iframe before a mock is chosen');
+  const shown = createHookHarness([[mock], null, mock, src]).render(designMocksSectionModule.DesignMocksSection, props);
+  assert.ok(shown.html.includes('sandbox="allow-scripts"'));
+  assert.ok(!shown.html.includes('allow-same-origin'));
+  assert.ok(shown.html.includes(`src="${src}"`));
+  const empty = createHookHarness([[], null, null, null]).render(designMocksSectionModule.DesignMocksSection, props);
+  assert.equal(empty.html, '', 'the section stays hidden with no mocks');
 });
 
 test('Board shows the Advisor chat by default and previews a clicked Work in the left column', () => {
@@ -1741,4 +1771,193 @@ test('asReportEnvelope logs the error and does not report success for an unreada
   }
   assert.equal(envelope.result, 'failed');
   assert.ok(logged.some((args) => args[1] instanceof Error && args[1].message === 'boom'));
+});
+
+// ---- Work → Project move (apps/web/components/WorkProjectMove.tsx) ----
+const moveEn = JSON.parse(readFileSync(join(repoRoot, 'apps/web/lib/i18n/en.json'), 'utf8'));
+const moveJa = JSON.parse(readFileSync(join(repoRoot, 'apps/web/lib/i18n/ja.json'), 'utf8'));
+const moveT = (key, values = {}) => String(moveEn.work[key.replace(/^work\./u, '')] ?? key)
+  .replace(/\{\{(\w+)\}\}/gu, (_, name) => values[name]);
+const moveApi = {
+  listProjects: async () => [],
+  moveWorkToProject: async () => { throw new Error('move was not configured'); },
+};
+const projectMoveModule = compileWebComponent(join(repoRoot, 'apps/web/components/WorkProjectMove.tsx'), {
+  '@/lib/api-client': moveApi,
+  '@/lib/i18n': { useLocale: () => ({ locale: 'en', t: moveT }) },
+  '../lib/work-project-move.mjs': moveHelpers,
+});
+const moveProjects = [
+  { id: '01J00000000000000000000001', name: 'alpha', canonical_path: '/repo/alpha' },
+  { id: '01J00000000000000000000002', name: 'beta', canonical_path: '/repo/beta' },
+];
+const moveWork = { id: '01J000000000000000000000W1', state: 'paused', state_version: 4, project_id: null, display_number: 3 };
+
+function findElements(node, predicate, found = []) {
+  if (Array.isArray(node)) node.forEach((child) => findElements(child, predicate, found));
+  else if (node && typeof node === 'object' && node.props) {
+    if (predicate(node)) found.push(node);
+    findElements(node.props.children, predicate, found);
+  }
+  return found;
+}
+
+// Renders WorkProjectMove with hooks, returning the element tree plus its effects so tests can call handlers.
+function renderMove(harness, work, onMoved = () => {}) {
+  let tree = null;
+  const { html, effects } = harness.render(() => {
+    tree = projectMoveModule.WorkProjectMove({ work, onMoved });
+    return tree;
+  });
+  return { html, effects, tree };
+}
+
+async function loadedMove(work, { projects = moveProjects, onMoved } = {}) {
+  moveApi.listProjects = async () => projects;
+  const harness = createHookHarness();
+  await Promise.all(harness.runEffects(renderMove(harness, work).effects));
+  await new Promise((resolveNext) => setImmediate(resolveNext));
+  return { harness, ...renderMove(harness, work, onMoved) };
+}
+
+async function withConfirm(confirm, run) {
+  const originalWindow = globalThis.window;
+  globalThis.window = { confirm };
+  try {
+    await run();
+  } finally {
+    globalThis.window = originalWindow;
+  }
+}
+
+test('Project move offers a select of "name (canonical_path)" and a button for a movable Work without a Project', async () => {
+  const { html } = await loadedMove(moveWork);
+  assert.match(html, /<option[^>]*value="01J00000000000000000000001"[^>]*>alpha \(\/repo\/alpha\)<\/option>/u);
+  assert.match(html, /<option[^>]*value="01J00000000000000000000002"[^>]*>beta \(\/repo\/beta\)<\/option>/u);
+  assert.match(html, /<button[^>]*>Move to Project<\/button>/u);
+});
+
+test('Project move controls follow the Work state and Project membership', () => {
+  for (const state of ['memo', 'ready', 'paused', 'judgement_waiting']) {
+    assert.equal(moveHelpers.canMoveWorkToProject({ state, project_id: null }), true, state);
+  }
+  for (const state of ['running', 'completed', 'cancelled']) {
+    assert.equal(moveHelpers.canMoveWorkToProject({ state, project_id: null }), false, state);
+  }
+  assert.equal(moveHelpers.canMoveWorkToProject({ state: 'paused', project_id: 'p1' }), false);
+  const render = (work) => renderMove(createHookHarness(), work).html;
+  assert.match(render({ ...moveWork, state: 'running' }), /Pause the Work to move it into a Project\./u);
+  for (const state of ['completed', 'cancelled']) {
+    const html = render({ ...moveWork, state });
+    assert.ok(!html.includes('<select') && !html.includes('<button') && !html.includes('Pause the Work'), state);
+    assert.match(html, /—/u);
+  }
+  const attached = render({ ...moveWork, project_id: 'p1' });
+  assert.ok(!attached.includes('<select') && !attached.includes('<button'));
+  assert.match(attached, /p1/u);
+});
+
+test('Project move confirms with the Work number, Project name and path, then sends project_id and the current version', async () => {
+  const calls = [];
+  moveApi.moveWorkToProject = async (...args) => { calls.push(args); return { display_number: 1 }; };
+  const confirms = [];
+  let moved = 0;
+  await withConfirm((message) => { confirms.push(message); return true; }, async () => {
+    const { harness, tree } = await loadedMove(moveWork);
+    findElements(tree, (n) => n.type === 'select')[0].props.onChange({ target: { value: moveProjects[1].id } });
+    const rerendered = renderMove(harness, moveWork, () => { moved += 1; });
+    await findElements(rerendered.tree, (n) => n.type === 'button')[0].props.onClick();
+    assert.deepEqual(calls, [[moveWork.id, 4, moveProjects[1].id]]);
+    assert.equal(confirms.length, 1);
+    assert.match(confirms[0], /Work #3.*"beta".*\/repo\/beta/u);
+    assert.equal(moved, 1);
+    assert.match(renderMove(harness, moveWork).html, /role="status"[^>]*>Moved into Project &quot;beta&quot;\. The new number is Work #1\./u);
+  });
+});
+
+test('Project move does nothing when the confirmation is cancelled', async () => {
+  let called = false;
+  moveApi.moveWorkToProject = async () => { called = true; return { display_number: 1 }; };
+  await withConfirm(() => false, async () => {
+    const { tree } = await loadedMove(moveWork);
+    await findElements(tree, (n) => n.type === 'button')[0].props.onClick();
+    assert.equal(called, false);
+  });
+});
+
+test('Project move disables the controls while sending and ignores a second click', async () => {
+  let release;
+  let calls = 0;
+  moveApi.moveWorkToProject = () => { calls += 1; return new Promise((resolveMove) => { release = resolveMove; }); };
+  await withConfirm(() => true, async () => {
+    const { harness, tree } = await loadedMove(moveWork);
+    const first = findElements(tree, (n) => n.type === 'button')[0].props.onClick();
+    const sending = renderMove(harness, moveWork);
+    assert.match(sending.html, /<select[^>]*disabled/u);
+    assert.match(sending.html, /<button[^>]*disabled[^>]*>Move to Project/u);
+    await findElements(sending.tree, (n) => n.type === 'button')[0].props.onClick();
+    assert.equal(calls, 1);
+    release({ display_number: 2 });
+    await first;
+    assert.ok(!/<select[^>]*disabled/u.test(renderMove(harness, moveWork).html));
+  });
+});
+
+test('Project move tells an empty Project list and a failed list load apart', async () => {
+  const empty = await loadedMove(moveWork, { projects: [] });
+  assert.match(empty.html, /No Projects are registered\./u);
+  assert.ok(!empty.html.includes('<button'));
+  moveApi.listProjects = async () => { throw new Error('down'); };
+  const harness = createHookHarness();
+  await Promise.all(harness.runEffects(renderMove(harness, moveWork).effects));
+  await new Promise((resolveNext) => setImmediate(resolveNext));
+  const failed = renderMove(harness, moveWork);
+  assert.match(failed.html, /role="alert"[^>]*>Could not load the Project list\./u);
+  assert.ok(!failed.html.includes('No Projects are registered'));
+});
+
+test('Project move shows the design 7.3 message for each API error in role=alert', async () => {
+  const cases = [
+    [{ code: 'work_project_already_set' }, 'This Work already belongs to a Project.'],
+    [{ code: 'project_not_found' }, 'The selected Project was not found.'],
+    [{ code: 'work_has_active_agents' }, 'Some Agents are still running.'],
+    [{ code: 'invalid_state_transition', details: { reason: 'task_fix_pending' } }, 'A Task is waiting for a fix.'],
+    [{ code: 'invalid_state_transition', details: {} }, 'cannot be moved in its current state'],
+    [{ code: 'version_conflict' }, moveEn.work.errorVersionConflict],
+    [{ code: 'network_error', kind: 'network_error' }, moveEn.work.errorNetwork],
+    [{ code: 'server_error', kind: 'server_error' }, moveEn.work.errorOperation],
+  ];
+  await withConfirm(() => true, async () => {
+    for (const [error, expected] of cases) {
+      moveApi.moveWorkToProject = async () => { throw error; };
+      let moved = false;
+      const { harness, tree } = await loadedMove(moveWork, { onMoved: () => { moved = true; } });
+      await findElements(tree, (n) => n.type === 'button')[0].props.onClick();
+      const html = renderMove(harness, moveWork).html;
+      assert.match(html, /role="alert"/u, error.code);
+      assert.ok(html.includes(expected), `${error.code}: ${expected}`);
+      assert.equal(moved, false);
+    }
+  });
+});
+
+test('Project move translation keys exist in both ja and en and every error key resolves', () => {
+  const moveKeys = Object.keys(moveEn.work).filter((key) => key.startsWith('move'));
+  assert.ok(moveKeys.length >= 10);
+  assert.deepEqual(Object.keys(moveJa.work).filter((key) => key.startsWith('move')).sort(), moveKeys.sort());
+  for (const code of ['work_project_already_set', 'project_not_found', 'work_has_active_agents', 'invalid_state_transition', 'version_conflict', 'x']) {
+    const key = moveHelpers.projectMoveErrorKey(code).replace(/^work\./u, '');
+    assert.ok(moveEn.work[key] && moveJa.work[key], key);
+  }
+  assert.equal(moveHelpers.projectMoveErrorKey('invalid_state_transition', { reason: 'task_fix_pending' }), 'work.moveErrorFixPending');
+});
+
+test('Work detail mounts the Project move part in the Project row', () => {
+  const base = { ...moveWork, title: 't', owner_id: 'o', summary: 's', size: 'small', plan_revision: 0, updated_at: '2026-09-23T00:00:00.000Z' };
+  for (const work of [base, { ...base, project_id: '01JPROJECT' }]) {
+    const data = normalizeWorkDetailData({ work, tasks: [], runs: [], child_runs: [], reports: [], decisions: [], messages: [] });
+    const harness = createHookHarness([], [{ data }]);
+    const { html } = harness.render(detailComponentModule.WorkDetailView);
+    assert.ok(html.includes(`data-move="${work.project_id === null}"`));
+  }
 });

@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { access, lstat, realpath } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { builtinProviderHarness } from "@owl/shared";
 import type { OwnerLanguage } from "./owner-language";
 import type { AgentRunner, AgentRunRequest, CoreDatabase, CoreWriteLaneTransaction, JsonObject } from "./types";
@@ -74,13 +75,32 @@ function remediationFor(problems: readonly ToolingProblem[], language: OwnerLang
   return lines.join(" ");
 }
 
+async function rejectExternalPythonEnvironments(worktree: string): Promise<void> {
+  const worktreeRealPath = await realpath(worktree).catch(() => resolve(worktree));
+  for (const name of [".venv", "venv"]) {
+    const path = resolve(worktree, name);
+    const entry = await lstat(path).catch(() => null);
+    if (!entry?.isSymbolicLink()) continue;
+    const target = await realpath(path).catch(() => null);
+    if (!target) continue;
+    const targetStat = await lstat(target).catch(() => null);
+    if (!targetStat?.isDirectory()) continue;
+    const relativeTarget = relative(worktreeRealPath, target);
+    const outsideWorktree = relativeTarget === ".." || relativeTarget.startsWith(`..${sep}`) || isAbsolute(relativeTarget);
+    if (!outsideWorktree) continue;
+    if (await access(resolve(target, "pyvenv.cfg")).then(() => true, () => false)) {
+      throw new Error(`Task worktree ${worktree} has a Python virtual environment symlink ${name} pointing outside the worktree`);
+    }
+  }
+}
+
 /**
  * Gets a Task worktree ready for the agent about to run in it: a new worktree
  * gets the Project's setup command and an MCP rehearsal, and every later run
  * gets the refresh command, so indexes the agents rely on match the files.
  * What those commands create is recorded as the Project's tool state, which
- * Git operations keep out of commits. Problems become Owner alerts; they
- * never stop the agent from running.
+ * Git operations keep out of commits. Tooling problems become Owner alerts;
+ * an external Python environment symlink stops the agent from running.
  */
 export class AgentWorkspacePreparer {
   private readonly created = new Set<string>();
@@ -94,6 +114,7 @@ export class AgentWorkspacePreparer {
   public async beforeAgentRun(workId: string, worktree: unknown): Promise<void> {
     if (typeof worktree !== "string" || worktree.trim().length === 0) return;
     const path = resolve(worktree);
+    await rejectExternalPythonEnvironments(path);
     const project = this.projectForWork(workId);
     if (!project) {
       this.created.delete(path);
@@ -113,6 +134,8 @@ export class AgentWorkspacePreparer {
       await this.report(project, "refresh", failed ? [{ harness: null, server: null, kind: "refresh_failed", detail }] : []);
     } catch (error) {
       console.error(`[owl-core] Could not prepare agent tools in ${path}`, error);
+    } finally {
+      await rejectExternalPythonEnvironments(path);
     }
   }
 

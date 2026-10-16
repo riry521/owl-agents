@@ -26,7 +26,7 @@ export const PAGE_TOOLS: readonly Tool[] = [
   },
   {
     name: "search", route: "pages/search", method: "POST",
-    description: "切り抜き資料を探す。作業記録も探すなら include_work_log。目次に無い話だけに使う。",
+    description: "切り抜き資料と、保管庫の materials/（壁打ちのまとめ・調査結果）を探す。作業記録も探すなら include_work_log。目次に無い話だけに使う。",
     inputSchema: { type: "object", required: ["query"], properties: { query: { type: "string" }, include_work_log: { type: "boolean" } } },
   },
 ];
@@ -34,7 +34,7 @@ export const PAGE_TOOLS: readonly Tool[] = [
 /** Advisor only: appends one line to a theme page with no approval step. Listed and callable only when OWL_ROLE is advisor. */
 export const APPEND_TOOL: Tool = {
   name: "append", method: "POST",
-  description: "会話で決まったことを Project のテーマページに1行追記する。section はテンプレートの概要・決まりごと・落とし穴・手順。",
+  description: "教訓・決まりごと・落とし穴だけを Project のテーマページに1行追記する。構想や設計のまとめは append せず、materials/ にファイルとして書く。section はテンプレートの概要・決まりごと・落とし穴・手順。",
   inputSchema: {
     type: "object", required: ["project_id", "section", "text"],
     properties: { project_id: { type: "string" }, section: { type: "string", enum: Object.keys(KIND_OF_SECTION) }, text: { type: "string" }, theme: { type: "string" }, procedure: { type: "string" } },

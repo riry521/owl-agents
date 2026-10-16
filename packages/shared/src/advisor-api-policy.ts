@@ -7,6 +7,7 @@ export const ADVISOR_WORKSPACE_API_PATH = `${OWL_API_PREFIX}/advisor/workspace`;
 export type AdvisorAlternativeAction =
   | "create_work" | "send_work_instruction" | "update_work" | "pause_work" | "resume_work"
   | "cancel_work" | "delete_work" | "run_librarian" | "run_skill_curation" | "run_rule_curation"
+  | "move_work_to_project"
   | "call_api";
 type DedicatedAction = Exclude<AdvisorAlternativeAction, "call_api">;
 
@@ -50,6 +51,7 @@ export const ADVISOR_BLOCKED_APIS: readonly AdvisorBlockedApi[] = [
     "cancel_work", "delete_work", "run_librarian", "run_skill_curation", "run_rule_curation",
   ]),
   callApi("POST", "/decisions/{decision_id}/answer", "Answering a Decision acts for the Owner."),
+  dedicated("POST", "/works/{work_id}/project", "Moving a Work into a Project changes where its future Tasks run.", ["move_work_to_project"]),
   callApi("DELETE", "/projects/{project_id}", "Deleting a Project is irreversible."),
   callApi("POST", "/backlog/delete", "Deleting backlog items is irreversible."),
   callApi("DELETE", "/backlog/{item_id}", "Deleting a backlog item is irreversible."),

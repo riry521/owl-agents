@@ -30,7 +30,7 @@ export interface ReplanSnapshot {
 /** A dependency of a retried Task: an existing Task, or a new Task of the same replan (by its local id). */
 export type ReplanDependency = { readonly task_id: string } | { readonly new_task: string };
 
-export type TaskRevision = Pick<TaskPlanItem, "title" | "acceptance" | "acceptance_criteria" | "context" | "plan_context" | "type" | "review" | "required_sections" | "required_tests" | "base_sync_only"> & {
+export type TaskRevision = Pick<TaskPlanItem, "title" | "acceptance" | "acceptance_criteria" | "context" | "plan_context" | "type" | "review" | "required_sections" | "required_tests" | "base_sync_only" | "assigned_designer"> & {
   /**
    * The retried Task's dependencies as the Manager listed them; they replace
    * its current task_dependencies edges. Absent: the edges are kept.
@@ -272,6 +272,7 @@ function validatePlanAgainst(
         required_sections: item.required_sections,
         required_tests: item.required_tests,
         base_sync_only: item.base_sync_only,
+        assigned_designer: item.assigned_designer,
       });
       retried.push({ item, localId, taskId: match.id });
       return;

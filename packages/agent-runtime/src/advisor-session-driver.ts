@@ -606,9 +606,22 @@ export class AdvisorSessionDriver implements ProviderSession {
     }
     const record = parsed as ClaudeStreamLine;
 
-    // Subagent output (for example a background task that keeps running after
-    // the turn) is never part of an Owl turn and never a protocol failure.
-    if (typeof record.parent_tool_use_id === "string") {
+    // Subagent output is never part of an Owl turn and never a protocol
+    // failure. Keep its pending WebFetch / WebSearch tools so the existing
+    // user-frame branch can capture their results during the parent turn.
+    if (typeof record.parent_tool_use_id === "string" && record.type !== "user") {
+      if (record.type === "assistant") {
+        for (const part of Array.isArray(record.message?.content) ? record.message.content : []) {
+          if (
+            part &&
+            part.type === "tool_use" &&
+            (part.name === "WebFetch" || part.name === "WebSearch") &&
+            typeof part.id === "string"
+          ) {
+            this.pendingWebTools.set(part.id, { name: part.name, input: part.input });
+          }
+        }
+      }
       return [];
     }
 

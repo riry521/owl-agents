@@ -6,6 +6,9 @@ import { test } from "node:test";
 import { createAgentRunner } from "../../packages/agent-runtime/dist/index.js";
 import { isPlanRejection, validatePlan, validateReplan } from "../../packages/core/dist/replan-plan.js";
 import { createUlid } from "../../packages/db/dist/index.js";
+import { createTaskPlanInTransaction, createWorkInTransaction } from "../../packages/core/dist/index.js";
+import { applyReplanInTransaction } from "../../packages/core/dist/state-reducer.js";
+import { openTestDatabase } from "../helpers/db.mjs";
 import { createTestCore, command } from "../helpers/core.mjs";
 import { withNecessity, necessityFor, criteriaFor } from "../helpers/necessity.mjs";
 import { waitFor } from "../helpers/wait.mjs";
@@ -736,4 +739,61 @@ test("first plan: a Task depending on a design Task gets plan_rejected feedback 
   assert.equal(feedbacks[0], null);
   assert.equal(feedbacks[1].kind, "plan_rejected");
   assert.match(feedbacks[1].errors.join(" "), /I1.*D1.*after the design is completed/);
+});
+
+/** Retry one failed Task with a revision that changes its type or designation, and read back its designer state. */
+async function retryDesignerState(t, { designMode, from, revision }) {
+  const { db } = await openTestDatabase(t, { prefix: "owl-replan-designer-" });
+  const created = await db.createWriteLane().transact((tx) => {
+    const work = createWorkInTransaction(tx, { title: "Designer retry", summary: "x", size: "normal", project_id: null, design_mode: designMode });
+    tx.run("UPDATE works SET state = 'running' WHERE id = ?", work.id);
+    const [task] = createTaskPlanInTransaction(tx, work.id, [
+      { id: "T1", title: "Task", type: from.type, assigned_designer: from.assigned_designer, acceptance: "Done", depends_on: [] },
+    ]);
+    tx.run("UPDATE tasks SET status = 'failed', design_escalated = ? WHERE id = ?", from.escalated ?? 0, task.id);
+    return { work_id: work.id, id: task.id };
+  });
+  await db.createWriteLane().transact((tx) => {
+    applyReplanInTransaction(tx, created.work_id, {
+      newItems: [],
+      revisions: new Map([[created.id, { title: "Task", acceptance: "Done", ...revision }]]),
+      reopenIds: [created.id],
+      supersessions: new Map(),
+      waits: new Map(),
+      actions: new Map(),
+    }, { base_plan_revision: 0, root_statuses: new Map() }, "test");
+  });
+  return db.get("SELECT type, assigned_designer, lead_designer_start_round AS start, design_escalated AS escalated FROM tasks WHERE id = ?", created.id);
+}
+
+test("a retried design Task given designer returns to the standard Designer", async (t) => {
+  const state = await retryDesignerState(t, { designMode: "auto", from: { type: "design", assigned_designer: "lead_designer" }, revision: { type: "design", assigned_designer: "designer" } });
+  assert.deepEqual(state, { type: "design", assigned_designer: "designer", start: null, escalated: 0 });
+});
+
+test("a retried design Task given null keeps its designation", async (t) => {
+  const state = await retryDesignerState(t, { designMode: "auto", from: { type: "design", assigned_designer: "lead_designer" }, revision: { type: "design" } });
+  assert.deepEqual(state, { type: "design", assigned_designer: "lead_designer", start: 0, escalated: 0 });
+});
+
+test("a design_mode=lead Work keeps Lead when a retry names designer", async (t) => {
+  const state = await retryDesignerState(t, { designMode: "lead", from: { type: "design" }, revision: { type: "design", assigned_designer: "designer" } });
+  assert.deepEqual(state, { type: "design", assigned_designer: "designer", start: 0, escalated: 0 });
+});
+
+test("a design_mode=lead Work makes a code Task retried as design a Lead Task", async (t) => {
+  const state = await retryDesignerState(t, { designMode: "lead", from: { type: "code" }, revision: { type: "design" } });
+  assert.deepEqual(state, { type: "design", assigned_designer: null, start: 0, escalated: 0 });
+});
+
+test("a design_mode=auto Work decides a code Task retried as design by its designation", async (t) => {
+  const standard = await retryDesignerState(t, { designMode: "auto", from: { type: "code" }, revision: { type: "design" } });
+  assert.deepEqual(standard, { type: "design", assigned_designer: null, start: null, escalated: 0 });
+  const lead = await retryDesignerState(t, { designMode: "auto", from: { type: "code" }, revision: { type: "design", assigned_designer: "lead_designer" } });
+  assert.deepEqual(lead, { type: "design", assigned_designer: "lead_designer", start: 0, escalated: 0 });
+});
+
+test("an escalated design Task retried as code loses every designer state", async (t) => {
+  const state = await retryDesignerState(t, { designMode: "auto", from: { type: "design", escalated: 1 }, revision: { type: "code" } });
+  assert.deepEqual(state, { type: "code", assigned_designer: null, start: null, escalated: 0 });
 });

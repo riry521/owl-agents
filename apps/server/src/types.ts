@@ -105,6 +105,18 @@ export interface WorkDesignList {
   designs: WorkDesignSummary[];
 }
 
+export interface WorkDesignMockSummary {
+  task_id: string;
+  task_title: string;
+  name: string;
+  updated_at: string;
+  size_bytes: number;
+}
+
+export interface WorkDesignMockList {
+  mocks: WorkDesignMockSummary[];
+}
+
 export interface TaskSummary {
   id: string;
   work_id: string;

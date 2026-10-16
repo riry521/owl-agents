@@ -2,7 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, mkdirSync, writeFileSync, type Dirent } from "node:fs";
 import { tmpdir } from "node:os";
-import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type {
@@ -39,6 +39,7 @@ import { OWL_INSTANCE_ID_ENV, reapProcessGroup, resolveInstanceId } from "@owl/s
 import { workVerificationMarker } from "./workspace-process-sweeper.js";
 import { ADVISOR_HOME_DIRNAME, ADVISOR_SHARED_DIRNAME, safeSegment, WorkspaceLayout } from "./workspace-layout.js";
 import { commitExcludePathspecs } from "./workspace-tooling.js";
+import { inspectRepositoryRoot, type RepositoryRootInspection } from "./repository-inspection.js";
 
 export { safeSegment } from "./workspace-layout.js";
 
@@ -300,6 +301,40 @@ export class GitWorktreeGateway implements GitGateway {
   /** Registers where the start, end and progress of a Work's merge and verification steps are reported. */
   public onCoreActivity(reporter: CoreActivityReporter | null): void {
     this.reportActivity = reporter ?? NO_CORE_ACTIVITY;
+  }
+
+  /** Reads the repository root and the settings needed for Project registration. */
+  public async inspectRepositoryRoot(path: string): Promise<RepositoryRootInspection> {
+    return inspectRepositoryRoot(async (cwd, args) => {
+      const stdout = await this.gitStdout(cwd, args);
+      return { ok: stdout !== null, stdout: stdout ?? "" };
+    }, path);
+  }
+
+  /** Finds the user's Git template in the same precedence order Git uses. */
+  public async userTemplateDir(): Promise<string | null> {
+    const configured = [process.env.GIT_TEMPLATE_DIR, ...await Promise.all(["--global", "--system"].map(async (scope) => {
+      try {
+        const result = await execFileAsync("git", ["config", scope, "--path", "--get", "init.templateDir"], { timeout: 10_000, maxBuffer: 64 * 1024 });
+        return String(result.stdout ?? "").trim() || null;
+      } catch {
+        return null;
+      }
+    }))];
+    for (const path of configured) {
+      if (!path) continue;
+      try {
+        if ((await stat(path)).isDirectory()) return path;
+      } catch {
+        // A missing configured template is ignored as Git does.
+      }
+    }
+    return null;
+  }
+
+  /** Adds Owl's marker to the generated template config while retaining copied user settings. */
+  public async setTemplateConfig(file: string, key: string, value: string): Promise<void> {
+    await execFileAsync("git", ["config", "--file", file, key, value], { timeout: 10_000, maxBuffer: 64 * 1024 });
   }
 
   /** Runs `run` between a started and a completed activity; an exception ends it as "error". */

@@ -23,6 +23,8 @@ async function setup({ available = true, extra = {} } = {}) {
   for (const [i, title] of ["第一", "第二", "第三", "第四"].entries()) write(`projects/kotori/${title}.md`, theme(title, String(i + 1)));
   write("projects/kotori/_index.md", fixture("project-index"));
   write("works/2026-10/W815-月末.md", fixture("work-log"));
+  write("materials/common/構想.md", "---\ntype: theme\ntitle: 構想\n---\n馬の予測方式の作り替え\n");
+  write("materials/projects/kotori/メモ.md", "馬の予測方式のメモ\n");
   write("research/2026-10-01-日付.md", fixture("clipping"));
   write("research/2026-10-02-長い資料.md", fixture("clipping").replace(/^id: \w{25}\w$/mu, "id: 01HZZZZZZZZZZZZZZZZZZZZZZD").replace("バンドルサイズは最大で 10 倍違う", "日付の扱いに関する長い説明。".repeat(400)));
   const storage = {
@@ -109,6 +111,16 @@ test("search covers clippings, adds work logs on request, and stays within 5 ite
     await t.service.searchPages({ query: "日付" }, ctx({ agent_run_id: "run-5" }));
     await t.service.searchPages({ query: "日付" }, ctx({ agent_run_id: "run-5" }));
     assert.equal((await t.service.searchPages({ query: "日付" }, ctx({ agent_run_id: "run-5" }))).error, "search_budget_exceeded");
+  } finally { await t.cleanup(); }
+});
+
+test("search finds materials/ files with or without frontmatter, with and without work logs", async () => {
+  const t = await setup();
+  try {
+    for (const include_work_log of [false, true]) {
+      const found = await t.service.searchPages({ query: "馬の予測方式", include_work_log }, ctx({ caller: "owner" }));
+      assert.deepEqual(found.items.map((i) => i.path).sort(), ["materials/common/構想.md", "materials/projects/kotori/メモ.md"]);
+    }
   } finally { await t.cleanup(); }
 });
 

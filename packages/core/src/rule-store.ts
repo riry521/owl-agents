@@ -21,6 +21,8 @@ import {
 import { HumanReadableError } from "./errors";
 import { isSecretPath } from "./project-overview-note";
 
+const DESIGNER_WRITE_DENIED = "Designer can write only its assigned external design document; a screen design Task saves its HTML mocks with the save_design_mock tool.";
+
 class YamlSyntaxError extends Error {
   public constructor(message: string, public readonly line: number) {
     super(message);
@@ -404,7 +406,7 @@ export class RuleStore {
       allowed: false,
       rule_id: "designer-write-path",
       scope: "role" as const,
-      message: "Designer can write only its assigned external design document.",
+      message: DESIGNER_WRITE_DENIED,
     });
     const tool = toolName.toLowerCase();
     const record = isRecord(toolInput) ? toolInput : {};
@@ -502,9 +504,9 @@ export class RuleStore {
       if (mode === "write" && designerWriteScope) {
         const candidate = resolvePathCandidate(path, cwd, home);
         if (designerWritePath === null || candidate === null || candidate !== resolve(designerWritePath)) {
-          return guardDeny("Designer can write only its assigned external design document.", {
+          return guardDeny(DESIGNER_WRITE_DENIED, {
             id: "designer-write-path", level: "role", role: "designer", pattern: designerWritePath ?? "", mode: "write", matcher: /$^/u,
-            message: "Designer can write only its assigned external design document.",
+            message: DESIGNER_WRITE_DENIED,
           });
         }
       }
@@ -586,7 +588,7 @@ export class RuleStore {
             return {
               rule: {
                 id: "designer-write-path", level: "role", role: "designer", pattern: designerWritePath ?? "", mode: "write", matcher: /$^/u,
-                message: "Designer can write only its assigned external design document.",
+                message: DESIGNER_WRITE_DENIED,
               },
             };
           }

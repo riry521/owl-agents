@@ -105,6 +105,25 @@ test("Advisor research includes Work attribution only for Work-linked conversati
   assert.match(unlinked, /^work_title: ""$/mu);
 });
 
+test("Advisor research captures honor the autosave setting and auth-page guard", async (t) => {
+  const enabled = await fixture(t, { withAdvisor: true });
+  enabled.core.advisorRuntime.config.onWebResearch(
+    { ...capture("https://example.com/sign-in"), auth_form_detected: true },
+    { conversation_id: "C1", turn_id: "turn-auth" },
+  );
+  await enabled.core.researchRecorder.idle();
+  assert.deepEqual(await enabled.core.knowledge.list("research"), []);
+
+  const disabled = await fixture(t, { researchAutosave: false, withAdvisor: true });
+  const disabledResult = await disabled.core.recordAgentResearch(
+    { agent_run_id: "run-not-needed", role: "advisor" },
+    capture(),
+  );
+  await disabled.core.researchRecorder.idle();
+  assert.deepEqual(disabledResult, { accepted: false, reason: "disabled" });
+  assert.deepEqual(await disabled.core.knowledge.list("research"), []);
+});
+
 test("Core updates the existing research note when the same URL is recorded again", async (t) => {
   const state = await fixture(t);
   await state.core.recordAgentResearch({ agent_run_id: "run-worker-1", role: "worker" }, capture("First result has enough detail for a useful note."));

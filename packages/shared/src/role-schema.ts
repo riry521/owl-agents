@@ -7,7 +7,7 @@ export type RoleSchemaType = "object" | "array" | "string" | "integer" | "number
 export interface RoleSchema {
   readonly type: RoleSchemaType | readonly RoleSchemaType[];
   readonly description?: string;
-  readonly enum?: readonly string[];
+  readonly enum?: readonly (string | null)[];
   readonly properties?: Readonly<Record<string, RoleSchema>>;
   readonly required?: readonly string[];
   readonly additionalProperties?: false;

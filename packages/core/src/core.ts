@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { createHash as createFileHash } from "node:crypto";
 import { constants, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { copyFile, lstat, mkdir, readFile, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, rename, rm, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createUlid, utcNow } from "../../db/dist/index.js";
 import { DecisionService, type OpenDecisionPayload } from "./decision";
+import { DesignMockStore, type DesignMockSummary } from "./design-mocks";
 import { DECISION_CANCEL_OPTION_KEY, managerReplanFailureBrief, prerequisiteExpiredBrief, RESOLVE_CONFLICT_OPTION_KEY } from "./decision-brief";
 import { evaluatePrerequisite, type PrerequisiteFacts } from "./prerequisite-monitor";
 import { isFinalLesson, isFinalMissingItem, normalizeLesson, parseLessonBlocks, type FinalManagerVerdict } from "./final-verdict";
@@ -13,7 +14,7 @@ import { outputResubmitLimit } from "./report-resubmit";
 import { DEFAULT_OWNER_LANGUAGE, OWNER_LANGUAGE_SETTINGS_KEY, ownerLanguage, storedOwnerLanguage, type OwnerLanguage, type SettingsReader } from "./owner-language";
 import { finalAutoContinueLimit } from "./final-continue-limit";
 import { EventDispatcher } from "./event-dispatcher";
-import { HumanReadableError, dependencyUnavailable, idempotencyConflict, invalidStateTransition, notFound, projectDeletionImpactChanged, projectHasRunningWorks, projectNotFound, providerPauseNotFound, projectPathConflict, validationError, versionConflict, workCancelled, workReopenRequired } from "./errors";
+import { HumanReadableError, dependencyUnavailable, idempotencyConflict, invalidStateTransition, notFound, projectDeletionImpactChanged, projectHasRunningWorks, projectNotFound, providerPauseNotFound, projectPathConflict, validationError, versionConflict, workCancelled, workProjectAlreadySet, workReopenRequired } from "./errors";
 import {
   appendEventInTransaction,
   createWorkInTransaction,
@@ -45,6 +46,10 @@ import {
 } from "./work-summary-history";
 import { getWorkAssurance, type WorkAssurance } from "./work-assurance";
 import { WorkDriver } from "./work-driver";
+import { saveProjectlessWorkOutputs } from "./outputs-store.js";
+import { attachWorkToProjectInTransaction } from "./state-reducer";
+import { fixPendingTaskIds } from "./fix-pending-tasks.js";
+import { detectNewRepositories, type NewRepositoryCandidate } from "./new-repository-detection.js";
 import { WorkflowEngine, type HookSubagentInput } from "./workflow-engine";
 import { isPlanRejection, validatePlan, validateReplan, type PlanRejection, type ReplanAction, type ReplanPlan, type ReplanSnapshot } from "./replan-plan";
 import type { PlanWaitFor, PrerequisiteCondition, PrerequisiteSpec } from "../../shared/dist/prerequisite.js";
@@ -121,6 +126,14 @@ import {
   validateDependencySummarySettings,
   type DependencySummarySettings,
 } from "../../shared/dist/dependency-summary-settings.js";
+import {
+  VerificationPolicySettingsValidationError,
+  VERIFICATION_POLICY_SETTINGS_KEY,
+  validateVerificationPolicyPatch,
+  readVerificationPolicySettings,
+  type VerificationPolicyPatch,
+  type VerificationPolicySettings,
+} from "../../shared/dist/verification-policy-settings.js";
 import { remakeLimits } from "./remake-limits.js";
 import { fixerEscalation } from "./fixer-escalation.js";
 import {
@@ -195,6 +208,7 @@ import { CHILD_RUN_SETTINGS_KEY, HYBRID_MODE_SETTINGS_KEY } from "./types";
 import type { AdvisorWorkspacePreparation } from "./types";
 import { CoreActivityRegistry } from "./core-activity.js";
 import { GitWorktreeGateway } from "./git-gateway.js";
+import { clearWorkGitTemplates } from "./work-git-template.js";
 import { defaultOwlRoot, safeSegment, WorkspaceLayout } from "./workspace-layout.js";
 import { parseVerificationMarker, WorkspaceProcessSweeper, type SweepRunInfo, type WorkspaceActivity } from "./workspace-process-sweeper.js";
 import { WorkspaceTooling, runCommand } from "./workspace-tooling.js";
@@ -300,6 +314,7 @@ import { approveOutsideInstalls } from "./test-environment";
 const isTestSetupOptionKey = (key: string | null): key is string => key === TEST_SETUP_APPROVE_OPTION_KEY || key === TEST_SETUP_RETRY_OPTION_KEY;
 import { validateTestRunSettings } from "../../shared/dist/test-run-settings.js";
 import { readTestPolicy, validateTestPolicy } from "../../shared/dist/test-policy.js";
+import { verificationPolicySettings } from "./task-verification-policy.js";
 import { resolveTestRun } from "./test-detection.js";
 import { explicitTestRunDigest, readStoredTestSetup, testSetupView } from "./test-setup.js";
 import { testSetupSettings } from "./test-setup-settings.js";
@@ -410,6 +425,7 @@ function advisorWorkKeyForType(type: AdvisorWorkOperationType): string {
     case "resume_work": return "resume";
     case "cancel_work": return "cancel";
     case "delete_work": return "delete";
+    case "move_work_to_project": return "project";
   }
 }
 
@@ -421,6 +437,7 @@ function advisorWorkTypeForKey(key: string): AdvisorWorkOperationType | null {
     case "resume": return "resume_work";
     case "cancel": return "cancel_work";
     case "delete": return "delete_work";
+    case "project": return "move_work_to_project";
     default: return null;
   }
 }
@@ -668,6 +685,7 @@ interface StoredModelPresetsValue extends JsonObject {
 export class Core {
   private readonly db: CoreDatabase;
   private readonly writeLane;
+  private readonly designMocks: DesignMockStore;
   private readonly testSetupRuns = new TestSetupRunRegistry();
   private readonly testSetup: TestSetupService;
   private readonly coreActivity: CoreActivityRegistry;
@@ -718,6 +736,10 @@ export class Core {
   private readonly projectReader: ProjectSourceReader;
   private readonly overviewRuns = new Set<Promise<unknown>>();
   private readonly worktreeReconciles = new Set<Promise<unknown>>();
+  /** Per Work, the chain of new-repository detections in flight; its presence holds Task launches. */
+  private readonly repositoryDetections = new Map<string, Promise<void>>();
+  /** Works with exactly one auto-registered Project waiting to be attached by the next tick. */
+  private readonly pendingRepositoryAttach = new Map<string, { projectId: string; detectionEventId: string }>();
   private investigationTail: Promise<unknown> = Promise.resolve();
   private investigationPending = 0;
   private readonly investigationQueued = new Map<string, "queued" | "running">();
@@ -1101,6 +1123,7 @@ export class Core {
       readSettings: () => this.readPlanUsageSettings(),
       now: () => new Date(options.now?.() ?? utcNow()),
     });
+    this.designMocks = new DesignMockStore({ db: this.db, writeLane: this.writeLane, dataDir: this.dataDir, now: () => options.now?.() ?? utcNow() });
     this.learningJobs = new LearningJobs({ db: this.db, writeLane: this.writeLane, now: options.now });
     this.ruleProposals = new RuleProposals({
       db: this.db,
@@ -1150,6 +1173,7 @@ export class Core {
       log: (message) => console.warn(`[owl-core] ${message}`),
     });
     this.workflow = new WorkflowEngine({
+      designSkill: options.designSkill ?? null,
       testSetup: this.testSetup,
       db: options.db,
       agentRunner: workspacePreparer ? withWorkspacePreparation(options.agentRunner, workspacePreparer) : options.agentRunner,
@@ -1158,7 +1182,14 @@ export class Core {
       maxParallel: options.max_parallel,
       globalMaxParallel: options.dispatcher?.global_max_parallel,
       onTaskSettled: (workId) => this.onTaskSettled(workId),
+      externalOutputs: (workId, files) => this.externalRepositoryFiles(workId, files),
+      launchHold: (workId) => {
+        if (this.repositoryDetections.has(workId)) return { allowedTaskIds: new Set() };
+        if (this.pendingRepositoryAttach.has(workId)) return { allowedTaskIds: new Set(fixPendingTaskIds(this.db, workId)) };
+        return null;
+      },
       onTaskPipelineSettled: (workId, taskId) => {
+        this.trackRepositoryDetection(workId, taskId);
         // sweep() never rejects and logs its own failures.
         void this.workspaceSweeper.sweep({ workId: safeSegment(workId), path: this.workspaceLayout.taskPath(workId, taskId) });
       },
@@ -1930,6 +1961,12 @@ export class Core {
     if (this.db.migrate) {
       this.db.migrate();
     }
+    try {
+      const removed = await clearWorkGitTemplates(this.dataDir);
+      if (removed > 0) console.log(`[owl-core] Removed ${removed} stale Work Git templates`);
+    } catch (error) {
+      console.warn("[owl-core] Could not clear stale Work Git templates", error);
+    }
     await this.migrateAppSettingsExecutorConfig();
     await this.curationRuns.recoverInterrupted();
     this.refreshProcessSkillsPack();
@@ -2032,6 +2069,7 @@ export class Core {
     await this.dispatcher.start();
     await this.announceCoreDecisions();
     await this.announceDecisionCancellations();
+    this.restoreRepositoryAttachState();
     this.workflow.start();
     this.workflow.startStaleDetection();
     this.processLearningPending("startup");
@@ -2670,7 +2708,7 @@ export class Core {
     await this.workflow.stop();
     // Ticks already in flight must finish before the DB closes; stopScheduling only stops new ones.
     await this.workDriver.stop();
-    await Promise.allSettled([...this.worktreeReconciles]);
+    await Promise.allSettled([...this.worktreeReconciles, ...this.repositoryDetections.values()]);
     await this.learningTask;
     await this.projectOverviews.idle();
     await Promise.allSettled([...this.overviewRuns]);
@@ -2800,6 +2838,44 @@ export class Core {
         version: row.state_version,
       };
     });
+  }
+
+  public async moveWorkToProject(
+    workId: string,
+    request: CommandRequest<{ project_id: string }>,
+    source: "owner" | "advisor" = "owner",
+  ): Promise<CommandResponse<{ work_id: string; project_id: string; display_number: number; previous_display_number: number; state: WorkState }>> {
+    return this.workDriver.exclusive(workId, () => this.attachProjectToWork(workId, request, source));
+  }
+
+  private async attachProjectToWork(
+    workId: string,
+    request: CommandRequest<{ project_id: string }>,
+    source: "owner" | "advisor" | "auto_registration",
+  ): Promise<CommandResponse<{ work_id: string; project_id: string; display_number: number; previous_display_number: number; state: WorkState }>> {
+    const event = { type: "work.project.move", workId };
+    const cached = this.storedCommandResponse<{ work_id: string; project_id: string; display_number: number; previous_display_number: number; state: WorkState }>(request, event);
+    if (cached) return cached;
+    const work = this.db.get<{ state: WorkState; project_id: string | null; state_version: number }>("SELECT state, project_id, state_version FROM works WHERE id = ?", workId);
+    if (!work) throw notFound("work", workId);
+    if (request.expected_version !== undefined && request.expected_version !== work.state_version) throw versionConflict(request.expected_version, work.state_version);
+    if (work.project_id !== null) throw workProjectAlreadySet(workId, work.project_id);
+    if (!this.db.get("SELECT id FROM projects WHERE id = ?", request.payload.project_id)) throw notFound("project", request.payload.project_id);
+    const allowedStates: readonly WorkState[] = source === "auto_registration" ? ["memo", "ready", "running", "paused", "judgement_waiting"] : ["memo", "ready", "paused", "judgement_waiting"];
+    if (!allowedStates.includes(work.state)) throw invalidStateTransition("This Work cannot be moved into a Project in its current state.", { work_id: workId, state: work.state });
+    const activeAgents = this.db.get<{ count: number }>("SELECT COUNT(*) AS count FROM agent_runs WHERE work_id = ? AND status IN ('launch_pending', 'spawned', 'running', 'cancel_requested')", workId);
+    const activeTasks = this.db.get<{ count: number }>("SELECT COUNT(*) AS count FROM tasks WHERE work_id = ? AND status IN ('running', 'verifying')", workId);
+    if (Number(activeAgents?.count ?? 0) > 0 || Number(activeTasks?.count ?? 0) > 0) throw new HumanReadableError({ code: "work_has_active_agents", message: "Stop active Agents before moving this Work.", remediation: "Wait for the Agents to stop, then retry the move.", details: { work_id: workId } });
+    const fixPending = fixPendingTaskIds(this.db, workId);
+    if (fixPending.length > 0) throw invalidStateTransition("A Task must finish its pending fix before this Work can be moved.", { work_id: workId, reason: "task_fix_pending", task_ids: fixPending });
+    const saved = await saveProjectlessWorkOutputs({ db: this.db, owlRoot: this.owlRoot, dataDir: this.dataDir, layout: this.workspaceLayout }, workId);
+    if (!saved) throw worktreeCleanupError(workId, { message: "Could not preserve the isolated workspace outputs.", details: { path: this.workspaceLayout.workDir(workId), stage: "projectless_output_save" } });
+    const response = await this.runConditionalWorkCommand(request, event, (transaction) => {
+      const data = attachWorkToProjectInTransaction(transaction, { workId, projectId: request.payload.project_id, expectedVersion: request.expected_version, allowedStates, source, now: utcNow() });
+      return { data, version: work.state_version, events: [] };
+    });
+    await this.dispatcher.replayPending();
+    return response;
   }
 
   public listBacklogItems(filter: BacklogListFilter = {}): BacklogListResult {
@@ -2932,6 +3008,23 @@ export class Core {
       designs.push({ task_id: task.id, title: task.title, updated_at: details.mtime.toISOString(), size_bytes: details.size });
     }
     return { designs };
+  }
+
+  public saveDesignMock(agentRunId: string, name: string, html: string): Promise<{ task_id: string; name: string; size_bytes: number; updated_at: string }> {
+    return this.designMocks.saveDesignMock(agentRunId, name, html);
+  }
+
+  public deleteDesignMock(agentRunId: string, name: string): Promise<{ task_id: string; name: string; deleted: boolean }> {
+    return this.designMocks.deleteDesignMock(agentRunId, name);
+  }
+
+  public async listWorkDesignMocks(workId: string): Promise<{ mocks: DesignMockSummary[] }> {
+    if (!this.db.get<{ id: string }>("SELECT id FROM works WHERE id = ?", workId)) throw notFound("work", workId);
+    return { mocks: this.designMocks.listWorkDesignMocks(workId) };
+  }
+
+  public async readWorkDesignMock(workId: string, taskId: string, name: string): Promise<string | null> {
+    return this.designMocks.readWorkDesignMock(workId, taskId, name);
   }
 
   public async getWorkDesign(workId: string, taskId: string): Promise<{ task_id: string; title: string; markdown: string; updated_at: string } | null> {
@@ -3103,16 +3196,17 @@ export class Core {
         workId,
         work.state,
       );
-      let retryDecision: { id: string; state_version: number; label: string | null } | null = null;
+      let retryDecision: { id: string; state_version: number; key: string; label: string | null } | null = null;
       for (const decision of decisions) {
         try {
           const options = JSON.parse(decision.options_json) as unknown;
           if (!Array.isArray(options)) continue;
-          const option = options.find((candidate) => isRecord(candidate) && candidate.key === "retry");
+          const option = options.find((candidate) => isRecord(candidate) && (candidate.key === "retry" || candidate.key === TEST_SETUP_RETRY_OPTION_KEY));
           if (option && isRecord(option)) {
             retryDecision = {
               id: decision.id,
               state_version: decision.state_version,
+              key: option.key as string,
               label: typeof option.label === "string" ? option.label : null,
             };
             break;
@@ -3130,9 +3224,9 @@ export class Core {
           idempotency_key: request.idempotency_key,
           expected_version: retryDecision.state_version,
           payload: {
-            // The body is the Owner's instruction; the answer stays the "retry" option so routing to the Manager is kept.
-            answer: request.payload.body ?? retryDecision.label ?? "retry",
-            option_key: "retry",
+            // Keep the selected option so the Owner's instruction does not change retry routing.
+            answer: request.payload.body ?? retryDecision.label ?? retryDecision.key,
+            option_key: retryDecision.key,
             ...(request.payload.body === undefined ? {} : { option_note: true }),
             source: "advisor",
             source_message_id: null,
@@ -3532,6 +3626,7 @@ export class Core {
         detachWorkBacklogOnDeleteInTransaction(transaction, workId, now);
         transaction.run("DELETE FROM backlog_items WHERE work_id = ?", workId);
         transaction.run("DELETE FROM reviews WHERE task_id IN (SELECT value FROM json_each(?))", taskJson);
+        transaction.run("DELETE FROM design_mocks WHERE task_id IN (SELECT value FROM json_each(?))", taskJson);
         transaction.run("DELETE FROM decision_answers WHERE decision_id IN (SELECT value FROM json_each(?))", decisionJson);
         transaction.run(
           `DELETE FROM agent_activity
@@ -6220,7 +6315,7 @@ export class Core {
       "You are the Owl Advisor, the operator's front door to Owl. Answer questions and discuss ideas directly. By default, every concrete request to perform work (make, fix, change, investigate, or build something), regardless of size, must become an Owl Work that you dispatch; ordinary wording like 'please do this' does not authorize you to do it yourself. In Japanese, 'これやっといて' is a normal Work request; phrases like '直接やって', 'Workにせず直接', or 'Advisor自身で実装して' explicitly ask you to bypass Work. Only bypass Work when the operator explicitly asks you to do the work directly yourself or without creating a Work. For that explicit exception, first prepare your Advisor workspace as described under Advisor workspace, do the work only there, and do not create a Work. Never claim you lack permission to create a Work.",
       "When you issue a Work for a concrete request without an explicit direct-work instruction (the rules below decide when), append exactly one ```owl-actions``` fenced JSON array containing {type:\"create_work\", description, payload:{title,summary,size,project_id}}. Core will create the Work and start it, unless payload.draft is true. When the operator says \"draft\", \"just register it\", \"don't run it yet\", '下書き', '登録だけ', or 'まだ動かさないで' (for example a Work to be issued after another Work finishes), set the optional payload.draft to true: Core then creates the Work as a memo and does not start it, and the operator starts it with the Start button on the Work detail page. Omit draft otherwise. Use size \"small\" for a focused, lightweight change so it goes directly to the Worker; use \"normal\" or \"large\" for work that needs Manager planning. Before returning create_work, compare the full request and conversation context against the complete current Project catalog in context. Set the exact project_id when one Project matches, use null only when none matches, and ask which Project to use if multiple are plausible. Project registration is optional. The payload may also carry the optional backlog_item_ids (IDs of open backlog items from GET /api/v1/backlog (status=open) to link to the new Work; they become in_progress) and dismiss_backlog_item_ids (backlog item IDs to dismiss); every ID must belong to the same Project as the Work. Example: ```owl-actions\n[{\"type\":\"create_work\",\"description\":\"Fix the label\",\"payload\":{\"title\":\"Fix the label\",\"summary\":\"" + exampleSummary + "\",\"size\":\"small\",\"project_id\":null}}]\n```.",
       "First classify every request as small, normal, or large.",
-      "When the operator explicitly asks for the strongest or Lead Designer to handle the design from the start, set create_work payload.design_mode to \"lead\" and size to \"normal\" or \"large\" so Manager plans a design Task. Otherwise omit design_mode (automatic routing). Never infer this override merely from Work size.",
+      "When the operator explicitly asks for the strongest or Lead Designer to handle the design from the start, set create_work payload.design_mode to \"lead\" and size to \"normal\" or \"large\" so Manager plans a design Task. When the operator asks the Lead Designer only for the screen design, omit design_mode and keep that request in the Work summary; Manager then assigns the screen design Task to the Lead Designer. Otherwise omit design_mode (automatic routing). Never infer this override merely from Work size.",
       "For a small request whose goal, target, and completion condition are unambiguous, you may emit create_work in that turn.",
       "Otherwise, do not emit create_work in that turn. Clarify the goal, who it serves, and what success means; identify constraints; state what the conversation and existing context already establish and confirm it; ask one question at a time, preferably with choices; present two or three approaches with pros and cons and recommend one when there are alternatives; then summarize the proposed Work—request, approach, acceptance criteria, and exclusions—and ask whether to issue it.",
       "Emit create_work in the turn when the operator agrees, including \"sounds good\", \"OK\", \"go ahead\", \"issue it\", 'それで', 'OK', '進めて', or '発行して'. Include the agreed details in summary: background, chosen approach and constraints, acceptance criteria, and exclusions or known pitfalls.",
@@ -6257,8 +6352,10 @@ export class Core {
     const foldersBlock = folders ? [
       "## Owner folders",
       `- Shared folder: ${folders.sharedDir}`,
-      "  Files the Owner shares with you, including Slack/Discord attachments, are here. When the Owner mentions a file they put or shared without a full path, look here first. Save files meant for the Owner here, and tell the Owner the file name.",
+      "  Files the Owner shares with you, including Slack/Discord attachments, are here. When the Owner mentions a file they put or shared without a full path, look here first. This folder is for files you receive; do not save files you make here.",
       "  This folder is not tracked by git; never copy its contents into a repository unless the Owner asks.",
+      `- Materials folder: ${join(this.knowledgeLocation.path, "materials")}`,
+      `  Save files you make for the Owner (design and concept summaries, research results, documents) here by default, and tell the Owner the file path. Put project files in ${join(this.knowledgeLocation.path, "materials", "projects")}/<slug>/ and all other files in ${join(this.knowledgeLocation.path, "materials", "common")}/.`,
       `- Screenshot folder: ${folders.screenshotDir}`,
       '  When the Owner asks you to look at a screenshot ("スクショ見て", "look at the screenshot") without a path, list the image files in this folder sorted by modification time and open the newest one. If they mention several ("the last 2 screenshots"), open that many, newest first. Do not modify or delete files here.',
     ].join("\n") : null;
@@ -6752,6 +6849,7 @@ export class Core {
     let pauseReason = "Advisor requested pause.";
     let cancelReason: string | undefined;
     let resumeBody: string | undefined;
+    let projectId = "";
 
     if (type === "send_work_instruction") {
       const rawBody = payload?.body;
@@ -6785,6 +6883,10 @@ export class Core {
       const reason = payload?.reason;
       if (typeof reason !== "string" || reason.trim().length < 1 || reason.trim().length > 1_000) return t.workActionIncomplete(type);
       cancelReason = reason.trim();
+    } else if (type === "move_work_to_project") {
+      const rawProjectId = payload?.project_id;
+      if (typeof rawProjectId !== "string" || rawProjectId.trim().length < 1 || rawProjectId.trim().length > 128) return t.workActionIncomplete(type);
+      projectId = rawProjectId.trim();
     }
 
     const language = ownerLanguage(this.db);
@@ -6828,6 +6930,11 @@ export class Core {
         case "delete_work":
           await this.deleteWork(workId, { ...request, payload: {} });
           return t.workDeletedNotice(ref);
+        case "move_work_to_project": {
+          const result = await this.moveWorkToProject(workId, { ...request, payload: { project_id: projectId } }, "advisor");
+          const projectName = this.db.get<{ name: string }>("SELECT name FROM projects WHERE id = ?", projectId)?.name ?? projectId;
+          return t.workMovedToProject(ref, projectName, result.data.display_number);
+        }
       }
     } catch (error) {
       const code = isRecord(error) && typeof error.code === "string" ? error.code : null;
@@ -6838,6 +6945,16 @@ export class Core {
         if (code === "work_reopen_required") return t.instructionReopenRequired(ref);
         if (code === "invalid_state_transition" && (currentState === "memo" || currentState === "ready")) {
           return t.instructionNotStarted(ref);
+        }
+      }
+      if (type === "move_work_to_project") {
+        if (code === "work_project_already_set") return t.workProjectAlreadySet(ref);
+        if (code === "project_not_found") return t.projectNotFoundForMove(projectId);
+        if (code === "work_has_active_agents") return t.workBusyForMove(ref);
+        const details = isRecord(error) && isRecord(error.details) ? error.details : null;
+        if (code === "invalid_state_transition" && details?.reason === "task_fix_pending") {
+          const taskIds = Array.isArray(details.task_ids) ? details.task_ids.filter((id): id is string => typeof id === "string") : [];
+          return t.workFixPendingForMove(ref, taskIds);
         }
       }
       if (code === "invalid_state_transition") return t.notAllowedInState(type, ref, currentState);
@@ -7112,6 +7229,244 @@ export class Core {
     return undefined;
   }
 
+  private repositoryAttachGate(workId: string): "open" | "held" {
+    const work = this.db.get<{ project_id: string | null }>("SELECT project_id FROM works WHERE id = ?", workId);
+    if (!work || work.project_id !== null) return "open";
+    if (this.repositoryDetections.has(workId) || this.pendingRepositoryAttach.has(workId)) return "held";
+    // Only a completed Task whose agent runs are over can still be about to report a new repository; any other pipeline cannot lead to the final check.
+    const settling = this.workflow.activePipelineTasks().some((pipeline) => pipeline.workId === workId
+      && this.db.get<{ status: string }>("SELECT status FROM tasks WHERE id = ?", pipeline.taskId)?.status === "completed"
+      && this.db.get("SELECT 1 FROM agent_runs WHERE task_id = ? AND status IN ('launch_pending', 'spawned', 'running', 'cancel_requested')", pipeline.taskId) === undefined);
+    return settling ? "held" : "open";
+  }
+
+  /** Runs `job` after the Work's earlier detections; Task launches stay held until the chain ends. */
+  private enqueueRepositoryDetection(workId: string, job: () => Promise<void>): void {
+    const previous = this.repositoryDetections.get(workId) ?? Promise.resolve();
+    const run: Promise<void> = previous
+      .then(job)
+      .catch((error) => { console.error(`[owl-core] New repository detection failed for Work ${workId}`, error); })
+      .then(() => {
+        if (this.repositoryDetections.get(workId) === run) this.repositoryDetections.delete(workId);
+        this.workDriver.wake(workId);
+      });
+    this.repositoryDetections.set(workId, run);
+  }
+
+  private trackRepositoryDetection(workId: string, taskId: string): void {
+    if (!this.started) return;
+    const work = this.db.get<{ project_id: string | null; state: string }>("SELECT project_id, state FROM works WHERE id = ?", workId);
+    if (!work || work.project_id !== null || work.state === "completed" || work.state === "cancelled") return;
+    if (this.db.get<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId)?.status !== "completed") return;
+    this.enqueueRepositoryDetection(workId, () => this.runRepositoryDetection(workId, taskId));
+  }
+
+  private async recordAutoRegistrationEvent(type: string, idempotencyKey: string, workId: string, taskId: string | null, payload: JsonObject): Promise<string> {
+    const existing = this.db.get<{ id: string }>("SELECT id FROM events WHERE idempotency_key = ?", idempotencyKey);
+    if (existing) return existing.id;
+    await this.writeLane.write({
+      mutateState: () => null,
+      event: { idempotencyKey, type, workId, ...(taskId === null ? {} : { taskId }), payload: { kind: type.replace(/\./gu, "_"), schema_version: "1.0.0", work_id: workId, ...payload } },
+      outbox: [{ provider: "websocket" }],
+    });
+    return this.db.get<{ id: string }>("SELECT id FROM events WHERE idempotency_key = ?", idempotencyKey)?.id ?? idempotencyKey;
+  }
+
+  private detectRepositoriesIn(workId: string, reports: readonly unknown[]) {
+    return detectNewRepositories({
+      inspect: async (path) => {
+        let existing = path;
+        for (;;) {
+          try {
+            if ((await stat(existing)).isDirectory()) break;
+          } catch { /* climb to the nearest existing folder */ }
+          const parent = dirname(existing);
+          if (parent === existing) break;
+          existing = parent;
+        }
+        return this.git instanceof GitWorktreeGateway ? this.git.inspectRepositoryRoot(existing) : { kind: "not_repository" as const };
+      },
+      birthtimeMs: async (path) => (await stat(path)).birthtimeMs,
+    }, {
+      workId,
+      reports,
+      workStartedAtMs: () => {
+        const startedAt = this.db.get<{ created_at: string | null }>("SELECT MIN(created_at) AS created_at FROM events WHERE work_id = ? AND type = 'work.started'", workId)?.created_at;
+        const parsed = startedAt ? Date.parse(startedAt) : Number.NaN;
+        return Number.isNaN(parsed) ? null : parsed;
+      },
+      excludedRoots: [...this.workspaceLayout.roots(), this.owlRoot, this.dataDir],
+      registeredProjectPaths: this.db.all<{ canonical_path: string }>("SELECT canonical_path FROM projects").map((row) => row.canonical_path),
+    });
+  }
+
+  /** The reported absolute files that lie in a marked, new repository of this Work; the verification accepts them as the Task's output. */
+  private async externalRepositoryFiles(workId: string, files: readonly string[]): Promise<readonly string[]> {
+    const { repositories } = await this.detectRepositoriesIn(workId, [{ changes: files.map((file) => ({ file })) }]);
+    return files.filter((file) => repositories.some((repository) => {
+      const rel = relative(repository.canonical_path, file);
+      return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+    }));
+  }
+
+  private async runRepositoryDetection(workId: string, taskId: string): Promise<void> {
+    if (this.db.get<{ project_id: string | null }>("SELECT project_id FROM works WHERE id = ?", workId)?.project_id !== null) return;
+    const detectedKey = `new-repositories-detected:${taskId}`;
+    const recorded = this.db.get<{ id: string; payload_json: string }>("SELECT id, payload_json FROM events WHERE idempotency_key = ?", detectedKey);
+    if (recorded) {
+      await this.completeRepositoryDetection(workId, { id: recorded.id, taskId, candidates: JSON.parse(recorded.payload_json).candidates as NewRepositoryCandidate[] });
+      return;
+    }
+    const reports = this.db.all<{ payload_json: string }>(
+      "SELECT r.payload_json FROM agent_runs a JOIN reports r ON r.id = a.report_id WHERE a.task_id = ? AND a.role = 'worker'",
+      taskId,
+    ).map((row) => JSON.parse(row.payload_json) as unknown);
+    const result = await this.detectRepositoriesIn(workId, reports);
+    if (result.repositories.length === 0) return;
+    const id = await this.recordAutoRegistrationEvent("work.new_repositories_detected", detectedKey, workId, taskId, {
+      task_id: taskId,
+      candidates: result.repositories as unknown as JsonObject[],
+      skipped: result.skipped as unknown as JsonObject[],
+    });
+    await this.completeRepositoryDetection(workId, { id, taskId, candidates: result.repositories });
+  }
+
+  /** Registers the recorded candidates and decides the attach; reads no file system, so a restart can resume it. */
+  private async completeRepositoryDetection(
+    workId: string,
+    detection: { id: string; taskId: string; candidates: readonly NewRepositoryCandidate[] },
+  ): Promise<void> {
+    const failures: { path: string; reason: string }[] = [];
+    for (const candidate of detection.candidates) {
+      const digest = createHash("sha256").update(candidate.canonical_path).digest("hex");
+      const registeredKey = `project-auto-registered:${detection.id}:${digest}`;
+      if (this.db.get("SELECT id FROM events WHERE idempotency_key = ?", registeredKey)) continue;
+      const payload: CreateProjectPayload = {
+        name: candidate.name,
+        canonical_path: candidate.canonical_path,
+        base_branch: candidate.base_branch,
+        allowed_roots: [candidate.canonical_path],
+        verification_plan: [],
+      };
+      const request: CommandRequest<CreateProjectPayload> = { request_id: createUlid(), idempotency_key: `auto-project:${workId}:${digest}`, expected_version: 0, payload };
+      let projectId: string;
+      // A stored response means createProject already ran; calling it again would schedule the Project investigations twice.
+      const stored = this.storedCommandResponse<Project>(request, { type: "project.created" });
+      if (stored && this.db.get("SELECT id FROM projects WHERE id = ?", stored.data.id)) projectId = stored.data.id;
+      else if (this.db.get("SELECT id FROM projects WHERE canonical_path = ?", candidate.canonical_path)) {
+        failures.push({ path: candidate.canonical_path, reason: "already_registered" });
+        continue;
+      } else {
+        try {
+          projectId = (await this.createProject(request)).data.id;
+        } catch (error) {
+          const code = (error as { code?: unknown }).code;
+          failures.push({ path: candidate.canonical_path, reason: code === "project_path_conflict" ? "already_registered" : typeof code === "string" ? code : "registration_failed" });
+          continue;
+        }
+      }
+      await this.recordAutoRegistrationEvent("work.project_auto_registered", registeredKey, workId, detection.taskId, {
+        task_id: detection.taskId, detection_event_id: detection.id, project_id: projectId, canonical_path: candidate.canonical_path, base_branch: candidate.base_branch,
+      });
+    }
+    const skip = (detectionId: string, payload: JsonObject) =>
+      this.recordAutoRegistrationEvent("work.project_auto_attach_skipped", `project-auto-attach-skipped:${detectionId}`, workId, null, { detection_event_id: detectionId, ...payload });
+    if (this.db.get<{ project_id: string | null }>("SELECT project_id FROM works WHERE id = ?", workId)?.project_id !== null) {
+      await skip(detection.id, { reason: "work_already_has_project" });
+      return;
+    }
+    if (failures.length > 0) {
+      await skip(detection.id, { reason: "registration_failed", failures });
+      // An attach requested by an earlier detection must not go ahead once a later one failed to register.
+      const waiting = this.pendingRepositoryAttach.get(workId);
+      if (waiting) {
+        await skip(waiting.detectionEventId, { reason: "registration_failed", failures });
+        this.pendingRepositoryAttach.delete(workId);
+      }
+      return;
+    }
+    const projectIds = this.db.all<{ project_id: string }>(
+      "SELECT DISTINCT json_extract(payload_json, '$.project_id') AS project_id FROM events WHERE type = 'work.project_auto_registered' AND work_id = ?",
+      workId,
+    ).map((row) => row.project_id);
+    if (projectIds.length === 1) {
+      await this.recordAutoRegistrationEvent("work.project_auto_attach_requested", `project-auto-attach-requested:${detection.id}`, workId, null, { detection_event_id: detection.id, project_id: projectIds[0] });
+      this.pendingRepositoryAttach.set(workId, { projectId: projectIds[0], detectionEventId: detection.id });
+      return;
+    }
+    await skip(detection.id, { reason: "multiple_repositories", project_ids: projectIds });
+    const waiting = this.pendingRepositoryAttach.get(workId);
+    if (waiting) {
+      await skip(waiting.detectionEventId, { reason: "multiple_repositories", project_ids: projectIds });
+      this.pendingRepositoryAttach.delete(workId);
+    }
+  }
+
+  /** Called from the Work's tick, so it never overlaps a Task launch of the same Work. */
+  private async attachPendingRepository(workId: string): Promise<void> {
+    const pending = this.pendingRepositoryAttach.get(workId);
+    if (!pending || this.repositoryDetections.has(workId)) return;
+    const busy = this.workflow.activePipelineTasks().some((pipeline) => pipeline.workId === workId)
+      || this.replansInFlight.has(workId)
+      || Number(this.db.get<{ count: number }>(
+        `SELECT (SELECT COUNT(*) FROM agent_runs WHERE work_id = ? AND status IN ('launch_pending', 'spawned', 'running', 'cancel_requested'))
+              + (SELECT COUNT(*) FROM tasks WHERE work_id = ? AND status IN ('running', 'verifying')) AS count`,
+        workId, workId,
+      )?.count ?? 0) > 0;
+    if (busy || fixPendingTaskIds(this.db, workId).length > 0) return;
+    const version = this.db.get<{ state_version: number }>("SELECT state_version FROM works WHERE id = ?", workId)?.state_version ?? 0;
+    try {
+      await this.attachProjectToWork(workId, {
+        request_id: createUlid(),
+        idempotency_key: `auto-attach:${pending.detectionEventId}`,
+        expected_version: version,
+        payload: { project_id: pending.projectId },
+      }, "auto_registration");
+    } catch (error) {
+      const code = (error as { code?: unknown }).code;
+      const reason = (error as { details?: { reason?: unknown } }).details?.reason;
+      if (code === "work_has_active_agents" || code === "version_conflict" || (code === "invalid_state_transition" && reason === "task_fix_pending")) return;
+      await this.recordAutoRegistrationEvent("work.project_auto_attach_skipped", `project-auto-attach-skipped:${pending.detectionEventId}`, workId, null, {
+        detection_event_id: pending.detectionEventId,
+        reason: typeof code === "string" ? code : "attach_failed",
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+    this.pendingRepositoryAttach.delete(workId);
+    this.workDriver.wake(workId);
+  }
+
+  /** Resumes detections and attaches that an earlier process recorded but did not finish. */
+  private restoreRepositoryAttachState(): void {
+    const rows = this.db.all<{ id: string; work_id: string; type: string; payload_json: string }>(
+      `SELECT id, work_id, type, payload_json FROM events
+        WHERE type IN ('work.new_repositories_detected', 'work.project_auto_attach_requested', 'work.project_auto_attach_skipped')
+          AND work_id IN (SELECT id FROM works WHERE project_id IS NULL AND state NOT IN ('completed', 'cancelled'))
+        ORDER BY sequence ASC`,
+    );
+    const byWork = new Map<string, typeof rows>();
+    for (const row of rows) byWork.set(row.work_id, [...(byWork.get(row.work_id) ?? []), row]);
+    for (const [workId, events] of byWork) {
+      const finished = new Set<string>();
+      const requested = new Map<string, string>();
+      for (const event of events) {
+        const payload = JSON.parse(event.payload_json) as { detection_event_id?: string; project_id?: string };
+        if (event.type === "work.project_auto_attach_skipped" && payload.detection_event_id) finished.add(payload.detection_event_id);
+        if (event.type === "work.project_auto_attach_requested" && payload.detection_event_id && payload.project_id) requested.set(payload.detection_event_id, payload.project_id);
+      }
+      for (const event of events) {
+        if (event.type !== "work.new_repositories_detected" || finished.has(event.id)) continue;
+        const projectId = requested.get(event.id);
+        if (projectId) {
+          this.pendingRepositoryAttach.set(workId, { projectId, detectionEventId: event.id });
+          continue;
+        }
+        const payload = JSON.parse(event.payload_json) as { task_id: string; candidates: NewRepositoryCandidate[] };
+        this.enqueueRepositoryDetection(workId, () => this.completeRepositoryDetection(workId, { id: event.id, taskId: payload.task_id, candidates: payload.candidates }));
+      }
+    }
+  }
+
   public async tick(workId: string): Promise<WorkflowSnapshot> {
     if (!this.started) return this.workflow.snapshot(workId);
     const taskCount = this.db.get<{ count: number }>("SELECT COUNT(*) AS count FROM tasks WHERE work_id = ?", workId);
@@ -7130,6 +7485,8 @@ export class Core {
       }
       if (!this.started) return this.workflow.snapshot(workId);
     }
+    await this.attachPendingRepository(workId);
+    if (!this.started) return this.workflow.snapshot(workId);
     await this.checkPrerequisites(workId);
     if (!this.started) return this.workflow.snapshot(workId);
     try {
@@ -7168,6 +7525,15 @@ export class Core {
     if (newDesigns.length > 0) {
       await this.triggerManagerReplan(workId, [], { kind: "design_completed", design_task_ids: newDesigns });
       if (this.started) await this.announceCoreDecisions(workId);
+      return this.workflow.snapshot(workId);
+    }
+    // A Work without a Project waits here while a new repository may still be
+    // registered, or it would complete before it can be attached. An Owner
+    // request still reaches the Manager meanwhile.
+    const attachHeld = this.repositoryAttachGate(workId) === "held";
+    if (attachHeld && !this.hasQueuedOwnerReplan(workId)) {
+      if (this.started) await this.announceCoreDecisions(workId);
+      if (this.started) await this.dispatcher.replayPending();
       return this.workflow.snapshot(workId);
     }
     const terminalCheck = this.checkTerminalTasks(workId);
@@ -7211,7 +7577,7 @@ export class Core {
         if (this.started) await this.announceCoreDecisions(workId);
         return this.workflow.snapshot(workId);
       }
-      if (work.state === "running" && terminalCheck.allTerminal) {
+      if (work.state === "running" && terminalCheck.allTerminal && !attachHeld) {
         if (terminalCheck.anyFailed) {
           await this.recordTickFailure(workId, new Error("One or more tasks failed. Manual intervention required."));
         } else {
@@ -9991,6 +10357,97 @@ export class Core {
     return dependencySummarySettings(this.db);
   }
 
+  public async getVerificationPolicySettings(): Promise<VerificationPolicySettings> {
+    return verificationPolicySettings(this.db);
+  }
+
+  public async updateVerificationPolicySettings(input: unknown): Promise<VerificationPolicySettings> {
+    let patch: VerificationPolicyPatch;
+    try {
+      patch = validateVerificationPolicyPatch(input);
+    } catch (error) {
+      if (error instanceof VerificationPolicySettingsValidationError) {
+        throw validationError(error.message, { field: error.field });
+      }
+      throw error;
+    }
+
+    const result = await this.writeLane.write({
+      mutateState: (transaction) => {
+        const stored = transaction.get<{ value_json: string }>(
+          "SELECT value_json FROM settings WHERE key = ?",
+          VERIFICATION_POLICY_SETTINGS_KEY,
+        );
+        let raw: unknown = {};
+        if (stored) {
+          try {
+            raw = JSON.parse(stored.value_json) as unknown;
+          } catch {
+            throw new HumanReadableError({
+              code: "verification_policy_storage_invalid",
+              message: "保存済みの検証ポリシーを読み取れません。",
+              remediation: "保存値を確認してから、もう一度更新してください。",
+            });
+          }
+          if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+            throw new HumanReadableError({
+              code: "verification_policy_storage_invalid",
+              message: "保存済みの検証ポリシーの形式が不正です。",
+              remediation: "保存値を確認してから、もう一度更新してください。",
+            });
+          }
+        }
+
+        const candidate = { ...(raw as Record<string, unknown>) };
+        for (const [group, leaves] of Object.entries(patch)) {
+          if (Object.hasOwn(candidate, group)) {
+            const current = candidate[group];
+            if (typeof current !== "object" || current === null || Array.isArray(current)) {
+              throw new HumanReadableError({
+                code: "verification_policy_storage_invalid",
+                message: `保存済みの検証ポリシー ${group} の形式が不正です。`,
+                remediation: "保存値を確認してから、もう一度更新してください。",
+                details: { field: group },
+              });
+            }
+            candidate[group] = { ...(current as Record<string, unknown>), ...leaves };
+          } else {
+            candidate[group] = { ...leaves };
+          }
+        }
+
+        const valueJson = JSON.stringify(candidate);
+        if (valueJson === undefined) {
+          throw new HumanReadableError({
+            code: "verification_policy_storage_invalid",
+            message: "検証ポリシーを保存用 JSON に変換できません。",
+            remediation: "入力を確認してから、もう一度更新してください。",
+          });
+        }
+        const effective = readVerificationPolicySettings(candidate);
+        const now = utcNow();
+        ensureOwner(transaction, DEFAULT_OWNER_ID, now);
+        transaction.run(
+          `INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at)
+           VALUES (?, ?, '1.0.0', ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
+          VERIFICATION_POLICY_SETTINGS_KEY,
+          DEFAULT_OWNER_ID,
+          valueJson,
+          now,
+        );
+        return effective;
+      },
+      event: {
+        idempotencyKey: `settings-verification-policy:${createUlid()}`,
+        type: "settings.verification_policy_updated",
+        payload: patch,
+      },
+      outbox: [{ provider: "websocket" }],
+    });
+    return result.state;
+  }
+
   public async getProgressGuardSettings(): Promise<ProgressGuardSettings> {
     return progressGuard(this.db);
   }
@@ -10631,6 +11088,17 @@ export class Core {
       payload: request.payload,
     });
     return { scopedKey, requestHash };
+  }
+
+  private storedCommandResponse<D extends JsonObject>(
+    request: CommandRequest<JsonObject>,
+    event: { type: string; workId?: string },
+  ): CommandResponse<D> | null {
+    const { scopedKey, requestHash } = this.commandScope(request, event);
+    const cached = this.db.get<StoredIdempotencyRow>("SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?", scopedKey);
+    if (!cached) return null;
+    if (cached.request_hash !== requestHash) throw idempotencyConflict(scopedKey);
+    return parseCommandResponse<D>(cached.response_json, scopedKey);
   }
 
   private async runCommand<P extends JsonObject, D extends JsonObject>(
@@ -12692,7 +13160,7 @@ function managerTaskActions(value: unknown): readonly ReplanAction[] {
   });
 }
 
-function managerTasksToPlanItems(
+export function managerTasksToPlanItems(
   value: unknown,
   workId: string,
   { allowEmpty }: { readonly allowEmpty: boolean },
@@ -12758,6 +13226,7 @@ function managerTasksToPlanItems(
     if (!Array.isArray(replaces) || replaces.some((replaced) => typeof replaced !== "string" || replaced.trim().length === 0)) {
       throw validationError("The Manager plan Task replaces must be an array of Task ids.", { work_id: workId, task_id: id });
     }
+    const assignedDesigner = parseAssignedDesigner(candidate.assigned_designer, type, index);
     const necessity = parseTaskNecessity(candidate.necessity);
     // Structured criteria are kept as written; plan quality checks their fields. Only a Task that comes without any is read from its free-text acceptance.
     const criteria = Array.isArray(candidate.acceptance_criteria) ? candidate.acceptance_criteria as AcceptanceCriterion[] : undefined;
@@ -12782,9 +13251,17 @@ function managerTasksToPlanItems(
       // Shape-checked by validateReplan (validateWaitFor); here it only travels with the item.
       ...(candidate.wait_for === undefined || candidate.wait_for === null ? {} : { wait_for: candidate.wait_for as unknown as PlanWaitFor }),
       ...(candidate.base_sync_only === undefined || candidate.base_sync_only === null ? {} : { base_sync_only: baseSyncOnly(candidate.base_sync_only, index) }),
+      ...(assignedDesigner === null ? {} : { assigned_designer: assignedDesigner }),
     };
     return item;
   });
+}
+
+function parseAssignedDesigner(value: unknown, type: string, index: number): "designer" | "lead_designer" | null {
+  if (value !== undefined && value !== null && value !== "designer" && value !== "lead_designer") {
+    throw validationError("The Manager plan Task assigned_designer must be designer, lead_designer or null.", { field: "assigned_designer", index });
+  }
+  return type === "design" && typeof value === "string" ? value : null;
 }
 
 function baseSyncOnly(value: unknown, index: number): boolean {

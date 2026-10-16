@@ -328,6 +328,72 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/works/{work_id}/design-mocks:
+    parameters:
+      - $ref: '#/components/parameters/WorkId'
+    get:
+      operationId: listWorkDesignMocks
+      summary: List the HTML mocks of a Work's screen design Tasks
+      security:
+        - ownerBearer: []
+      responses:
+        '200':
+          description: Saved mocks in Task order, read from the database only.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkDesignMockListResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: work_not_found
+          x-error-codes:
+            - work_not_found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/works/{work_id}/design-mocks/{task_id}/{name}:
+    parameters:
+      - $ref: '#/components/parameters/WorkId'
+      - $ref: '#/components/parameters/TaskId'
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9-]{0,63}\.html$'
+    get:
+      operationId: getWorkDesignMock
+      summary: Serve one saved HTML mock
+      description: Served with a Content-Security-Policy that sandboxes the document into an opaque origin.
+      security:
+        - ownerBearer: []
+      responses:
+        '200':
+          description: The mock HTML as saved.
+          content:
+            text/html:
+              schema:
+                type: string
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: design_mock_not_found (also for a malformed name, another Work's Task or a Task that is not a screen design)
+          x-error-codes:
+            - design_mock_not_found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/works/{work_id}/conversation:
     parameters:
       - $ref: '#/components/parameters/WorkId'
@@ -736,6 +802,68 @@ paths:
           description: dependency_unavailable
           x-error-codes:
             - dependency_unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/works/{work_id}/project:
+    parameters:
+      - $ref: '#/components/parameters/WorkId'
+    post:
+      operationId: moveWorkToProject
+      summary: Move a projectless Work into a Project
+      security:
+        - ownerBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MoveWorkToProjectCommand'
+      responses:
+        '200':
+          description: Work moved to the Project.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MoveWorkToProjectResponse'
+        '400':
+          description: Invalid command envelope or project_id.
+          x-error-codes: [validation_error]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Owner authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Origin or CSRF check failed, or Advisor action required.
+          x-error-codes: [advisor_action_required, forbidden]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Work or Project not found.
+          x-error-codes: [work_not_found, project_not_found]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: State, version, ownership, active agent, or idempotency conflict.
+          x-error-codes: [invalid_state_transition, work_project_already_set, work_has_active_agents, version_conflict, idempotency_conflict]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Move dependency unavailable or projectless outputs could not be saved.
+          x-error-codes: [dependency_unavailable, worktree_cleanup_failed]
           content:
             application/json:
               schema:
@@ -3891,6 +4019,92 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/agent/design-mocks:
+    post:
+      operationId: saveAgentDesignMock
+      summary: Save one HTML mock from a screen design Task's Designer run
+      security:
+        - agentToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SaveAgentDesignMockCommand'
+      responses:
+        '200':
+          description: Mock saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SaveAgentDesignMockResponse'
+        '400':
+          description: validation_error (malformed name, empty html or expected_version other than 0)
+          x-error-codes:
+            - validation_error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: agent_scope_denied (not a Designer token, or the Task is not a screen design)
+          x-error-codes:
+            - agent_scope_denied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: design_mock_write_failed; nothing was stored.
+          x-error-codes:
+            - design_mock_write_failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/agent/design-mocks/delete:
+    post:
+      operationId: deleteAgentDesignMock
+      summary: Delete one HTML mock from a screen design Task's Designer run
+      security:
+        - agentToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteAgentDesignMockCommand'
+      responses:
+        '200':
+          description: Mock deleted, or already absent.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteAgentDesignMockResponse'
+        '400':
+          description: validation_error
+          x-error-codes:
+            - validation_error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: agent_scope_denied
+          x-error-codes:
+            - agent_scope_denied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: design_mock_write_failed
+          x-error-codes:
+            - design_mock_write_failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/guard/check:
     post:
       operationId: checkGuard
@@ -5086,6 +5300,117 @@ components:
         updated_at:
           $ref: '#/components/schemas/RFC3339'
       additionalProperties: false
+    WorkDesignMockListResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          properties:
+            data:
+              type: object
+              required:
+                - mocks
+              properties:
+                mocks:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/WorkDesignMockSummary'
+              additionalProperties: false
+    WorkDesignMockSummary:
+      type: object
+      required:
+        - task_id
+        - task_title
+        - name
+        - updated_at
+        - size_bytes
+      properties:
+        task_id:
+          $ref: '#/components/schemas/ULID'
+        task_title:
+          type: string
+        name:
+          type: string
+          pattern: '^[a-z0-9][a-z0-9-]{0,63}\.html$'
+        updated_at:
+          $ref: '#/components/schemas/RFC3339'
+        size_bytes:
+          type: integer
+          minimum: 0
+      additionalProperties: false
+    SaveAgentDesignMockCommand:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+        - type: object
+          properties:
+            payload:
+              type: object
+              required:
+                - name
+                - html
+              properties:
+                name:
+                  type: string
+                  pattern: '^[a-z0-9][a-z0-9-]{0,63}\.html$'
+                html:
+                  type: string
+                  minLength: 1
+              additionalProperties: false
+    SaveAgentDesignMockResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          properties:
+            data:
+              type: object
+              required:
+                - task_id
+                - name
+                - size_bytes
+                - updated_at
+              properties:
+                task_id:
+                  $ref: '#/components/schemas/ULID'
+                name:
+                  type: string
+                size_bytes:
+                  type: integer
+                  minimum: 1
+                updated_at:
+                  $ref: '#/components/schemas/RFC3339'
+              additionalProperties: false
+    DeleteAgentDesignMockCommand:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+        - type: object
+          properties:
+            payload:
+              type: object
+              required:
+                - name
+              properties:
+                name:
+                  type: string
+                  pattern: '^[a-z0-9][a-z0-9-]{0,63}\.html$'
+              additionalProperties: false
+    DeleteAgentDesignMockResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          properties:
+            data:
+              type: object
+              required:
+                - task_id
+                - name
+                - deleted
+              properties:
+                task_id:
+                  $ref: '#/components/schemas/ULID'
+                name:
+                  type: string
+                deleted:
+                  type: boolean
+              additionalProperties: false
     WorkListResponse:
       allOf:
         - $ref: '#/components/schemas/ListResponse'
@@ -5116,6 +5441,43 @@ components:
                     - ready
                 state_version:
                   $ref: '#/components/schemas/Version'
+              additionalProperties: false
+    MoveWorkToProjectPayload:
+      type: object
+      required: [project_id]
+      properties:
+        project_id:
+          $ref: '#/components/schemas/ULID'
+      additionalProperties: false
+    MoveWorkToProjectCommand:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+        - type: object
+          properties:
+            payload:
+              $ref: '#/components/schemas/MoveWorkToProjectPayload'
+    MoveWorkToProjectResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [work_id, project_id, display_number, previous_display_number, state]
+              properties:
+                work_id:
+                  $ref: '#/components/schemas/ULID'
+                project_id:
+                  $ref: '#/components/schemas/ULID'
+                display_number:
+                  type: integer
+                  minimum: 1
+                previous_display_number:
+                  type: integer
+                  minimum: 1
+                state:
+                  type: string
+                  enum: [memo, ready, paused, judgement_waiting]
               additionalProperties: false
     StartWorkPayload:
       type: object

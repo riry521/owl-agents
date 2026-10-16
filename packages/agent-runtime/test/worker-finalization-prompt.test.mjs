@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { buildReviewerPrompt } from "../dist/reviewer.js";
 import { buildDesignerRolePrompt, buildWorkerPrompt } from "../dist/worker.js";
 
 const request = {
@@ -9,6 +10,33 @@ const request = {
     acceptance: "Complete the feature", review_round: 0, failure_count: 0, worker_generation: 1, depends_on: [],
   },
 };
+
+const designTask = { ...request.task, type: "design" };
+const mockDir = "/tmp/owl-data/designs/work-1/task-1.mocks";
+
+test("a screen design Designer prompt gets the mock instruction and, when configured, the skill sentence", () => {
+  const configured = buildDesignerRolePrompt({ task: designTask, context: { design_tier: "lead", design_mock_dir: mockDir, design_skill: "example-ui-skill" } });
+  assert.match(configured, /save_design_mock tool of the owl-design MCP server/);
+  assert.match(configured, /Use the example-ui-skill skill for this screen design/);
+  const unconfigured = buildDesignerRolePrompt({ task: designTask, context: { design_tier: "lead", design_mock_dir: mockDir } });
+  assert.match(unconfigured, /save_design_mock tool of the owl-design MCP server/);
+  assert.doesNotMatch(unconfigured, /skill for this screen design/);
+});
+
+test("a regular Designer prompt gets neither the mock instruction nor the skill sentence", () => {
+  for (const context of [{}, { design_tier: "lead" }, { design_skill: "example-ui-skill" }]) {
+    const prompt = buildDesignerRolePrompt({ task: designTask, context });
+    assert.doesNotMatch(prompt, /save_design_mock/);
+    assert.doesNotMatch(prompt, /skill for this screen design/);
+  }
+});
+
+test("the dependency sentence and the design Reviewer sentence mention HTML mocks", () => {
+  assert.match(buildWorkerPrompt(request), /When an entry has a design_mock_dir, that directory holds the design's HTML screen mocks\./);
+  const review = buildReviewerPrompt({ task: designTask, report: {}, review_round: 0 });
+  assert.match(review, /design_document\.mocks lists its HTML mocks/);
+  assert.doesNotMatch(buildReviewerPrompt({ task: request.task, report: {}, review_round: 0 }), /design_document\.mocks/);
+});
 
 test("the Worker prompt no longer treats created files or untestable work as a pass", () => {
   for (const prompt of [buildWorkerPrompt(request), buildDesignerRolePrompt(request)]) {

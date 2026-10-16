@@ -454,7 +454,7 @@ export class MemoryService {
     try {
       const result = await this.searcher.search({
         query: input.query, limit: PAGE_LIMITS.search_items, include_raw: true, ...this.templateOnly(),
-        page_types: input.include_work_log ? ["clipping", "work-log"] : ["clipping"],
+        page_types: input.include_work_log ? ["clipping", "work-log", "material"] : ["clipping", "material"],
         ...(input.include_work_log && ctx.project_id ? { work_log_project_id: ctx.project_id } : {}),
       });
       const items = result.hits.slice(0, PAGE_LIMITS.search_items).map((h): PageSearchItem => ({

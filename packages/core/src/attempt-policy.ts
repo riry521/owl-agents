@@ -242,11 +242,11 @@ export function normalizeErrorKey(key: string): string {
   return createHash("sha256").update(key).digest("hex");
 }
 
-// Why not compare against normalizeErrorKey(errorKey): last_error_key holds the hash, so comparing it with the raw key
-// makes same_error_count almost always 1 unless the key is 64 chars. Copied as is: fixing it would change retry counts.
+// last_error_key holds the hash written by failureBase, so the new key is normalized before comparing; a raw compare
+// never matched and let the same failure rerun up to DETERMINISTIC_FAILURE_LIMIT.
 export function deterministicCounters(task: AttemptTaskSnapshot, errorKey: string): { same: number; total: number } {
   return {
-    same: task.last_error_key === errorKey && task.last_error_generation === task.worker_generation ? task.same_error_count + 1 : 1,
+    same: task.last_error_key === normalizeErrorKey(errorKey) && task.last_error_generation === task.worker_generation ? task.same_error_count + 1 : 1,
     total: task.failure_count + 1,
   };
 }
@@ -294,7 +294,7 @@ function evaluateReviewFailed(o: Extract<AttemptTaskObservation, { kind: "review
   const planRounds = c.reviewLimits.plan_review_rounds;
   const baseSync = task.base_sync_only === 1;
   const baseSyncAttempts = (task.base_sync_review_attempts ?? 0) + (baseSync ? 1 : 0);
-  // Why not lead_designer_start_round != null: design_mode=lead sets it to 0 at creation, and replans reset it to 0, so it cannot tell "began at Lead" from "escalated".
+  // Why not lead_designer_start_round != null: design_mode=lead and assigned_designer=lead_designer set it to 0 at creation, and replans reset it to 0, so it cannot tell "began at Lead" from "escalated".
   const lead = task.type === "design" && task.design_escalated === 1;
   const rejections = (task.review_rejections ?? 0) + 1;
   // Why not reset on replan: the Fixer stays until the Task completes, so a value once set is never overwritten.

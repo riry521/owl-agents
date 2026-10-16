@@ -174,29 +174,35 @@ function parseLocalClock(text: string, now: Date, defaultTimeZone: string): Date
   const monthPattern = "Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?";
   const weekday = "(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:day)?\\.?[,]?\\s*)?";
   const monthDate = new RegExp(
-    `(?:${weekday})(${monthPattern})\\s+(\\d{1,2})(?:st|nd|rd|th)?[,]?\\s*(?:(\\d{4})[,]?\\s*)?(\\d{1,2})(?::(\\d{2}))?\\s*(AM|PM)`,
+    `(?:${weekday})(${monthPattern})\\s+(\\d{1,2})(?:st|nd|rd|th)?[,]?\\s*(?:(\\d{4})[,]?\\s*)?(\\d{1,2})(?::(\\d{2}))?(?::(\\d{2}))?\\s*(AM|PM)`,
     "iu",
   ).exec(source);
   if (monthDate) {
     const month = MONTHS[monthDate[1].toLowerCase()];
     const day = Number(monthDate[2]);
     const year = monthDate[3] === undefined ? nowLocal.year : Number(monthDate[3]);
-    const hour = to24Hour(Number(monthDate[4]), monthDate[6]);
+    const hour = to24Hour(Number(monthDate[4]), monthDate[7]);
     const minute = Number(monthDate[5] ?? 0);
-    if (month === undefined || hour === null || day < 1 || day > 31 || minute > 59) return null;
+    const second = Number(monthDate[6] ?? 0);
+    if (month === undefined || hour === null || day < 1 || day > 31 || minute > 59 || second > 59) return null;
     let date = localDateTime(year, month, day, hour, minute, zone);
     if (date === null) return null;
+    date = new Date(date.getTime() + second * 1000);
     if (monthDate[3] === undefined && date.getTime() <= now.getTime()) {
       date = localDateTime(year + 1, month, day, hour, minute, zone);
+      if (date !== null) date = new Date(date.getTime() + second * 1000);
     }
-    return date;
+    if (date === null) return null;
+    if (monthDate[6] !== undefined) return date;
+    return date.getTime() <= now.getTime() ? date : new Date(date.getTime() + 60_000);
   }
 
-  const clock = /(?:resets|try\s+again\s+at)\s+(?:on\s+)?(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?\b/iu.exec(source);
+  const clock = /(?:resets|try\s+again\s+at)\s+(?:on\s+)?(\d{1,2})(?::(\d{2}))?(?::(\d{2}))?\s*(AM|PM)?\b/iu.exec(source);
   if (!clock) return null;
-  const hour = to24Hour(Number(clock[1]), clock[3]);
+  const hour = to24Hour(Number(clock[1]), clock[4]);
   const minute = Number(clock[2] ?? 0);
-  if (hour === null || minute > 59) return null;
+  const second = Number(clock[3] ?? 0);
+  if (hour === null || minute > 59 || second > 59) return null;
   let date = localDateTime(nowLocal.year, nowLocal.month, nowLocal.day, hour, minute, zone);
   // Providers report whole minutes and can stay limited a little past them, so a
   // time that passed within the hour is the reset still under way, not tomorrow's.
@@ -204,7 +210,10 @@ function parseLocalClock(text: string, now: Date, defaultTimeZone: string): Date
     const tomorrow = new Date(Date.UTC(nowLocal.year, nowLocal.month - 1, nowLocal.day + 1));
     date = localDateTime(tomorrow.getUTCFullYear(), tomorrow.getUTCMonth() + 1, tomorrow.getUTCDate(), hour, minute, zone);
   }
-  return date;
+  if (date === null) return null;
+  if (clock[3] !== undefined) return new Date(date.getTime() + second * 1000);
+  // Keep expired clocks on the existing now + 60 seconds fallback.
+  return date.getTime() <= now.getTime() ? date : new Date(date.getTime() + 60_000);
 }
 
 function parseRelativeWait(text: string, now: Date): Date | null {

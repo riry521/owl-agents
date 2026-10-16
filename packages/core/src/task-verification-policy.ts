@@ -79,6 +79,8 @@ export interface TypePolicyInput {
   removedTests?: readonly string[];
   /** The Worker report's `changes[]` entries. */
   claimedChanges: ReadonlyArray<{ file: string; action: string }>;
+  /** Absolute claimed files that Core confirmed lie in a repository the Work created; they are output outside the worktree. */
+  externalFiles?: readonly string[];
   spec: TaskVerificationSpec;
   settings: VerificationPolicySettings;
   /** "sole": no Project plan, so these checks are the only ones. "supplement": the Project plan decides; only static checks and test runs are added. */
@@ -88,7 +90,7 @@ export interface TypePolicyInput {
   executables?: Readonly<Record<string, string>>;
   /** Files Core's own test run already judged; those are not started again and carry no output. */
   /** Set only when the Project's own test_run resolved to an explicit off; no test runner is started then. */
-  projectTestRun?: { enabled: false; reason: string };
+  projectTestRun?: { enabled: false; reason: string } | { enabled: true; cwd: string; file_argv?: readonly string[]; whole_argv?: readonly string[]; test_patterns?: readonly string[] };
   coreTestRun?: { run_id: string | null; mode?: "full" | "selected"; passed_files: readonly string[]; failed_files: readonly string[] };
 }
 
@@ -161,15 +163,15 @@ export async function evaluateTaskTypePolicy(input: TypePolicyInput): Promise<Ty
     if (files.length > limits.max_files_per_check) unchecked("verification_limit_exceeded", `${files.length} files changed, more than the ${limits.max_files_per_check} that can be checked.`);
     return files.slice(0, limits.max_files_per_check);
   };
-  const run = async (id: string, command: PolicyCommand, file: string, key: PolicyErrorKey): Promise<{ ok: boolean; stdout: string }> => {
-    const argv = expand(command.argv, file, input.executables);
+  const run = async (id: string, command: PolicyCommand, file: string, key: PolicyErrorKey, cwd = root, argumentFile = file): Promise<{ ok: boolean; stdout: string }> => {
+    const argv = expand(command.argv, argumentFile, input.executables);
     const core = id === "policy:test" ? input.coreTestRun : undefined;
     if (core?.passed_files.includes(file) || core?.failed_files.includes(file)) {
       const ok = core.passed_files.includes(file);
       const detail = `Core test run ${core.run_id ?? ""}`.trimEnd();
       return { ok: record({ command_id: id, passed: ok, file, detail }, ok ? undefined : key), stdout: "" };
     }
-    const outcome = await runCommand(argv, root);
+    const outcome = await runCommand(argv, cwd);
     const detail = outcome.passed
       ? `${argv.join(" ")} passed.`
       : `${argv.join(" ")} ${outcome.timed_out ? "timed out" : outcome.error ?? `exited with code ${outcome.exit_code ?? "unknown"}`}${outcome.stderr?.trim() ? `: ${outcome.stderr.trim().slice(-500)}` : ""}`;
@@ -188,9 +190,10 @@ export async function evaluateTaskTypePolicy(input: TypePolicyInput): Promise<Ty
 
   // Every claimed change must exist: a Worker that says it wrote a file it did not write is caught here.
   const deleted = new Set(input.deletedFiles ?? []);
+  const externalFiles = new Set(input.externalFiles ?? []);
   for (const change of input.claimedChanges) {
     if (DELETE_ACTIONS.has(change.action.toLowerCase()) || deleted.has(change.file)) continue;
-    const absolute = insideRoot(root, change.file);
+    const absolute = externalFiles.has(change.file) ? change.file : insideRoot(root, change.file);
     const exists = absolute !== null && (await lstat(absolute).catch(() => null)) !== null;
     if (!exists) record({ command_id: "policy:claimed_changes", passed: false, file: change.file, detail: `The report lists ${change.file} as changed, but it is not in the Task worktree.` }, "verification_claimed_change_missing");
   }
@@ -198,6 +201,10 @@ export async function evaluateTaskTypePolicy(input: TypePolicyInput): Promise<Ty
   if (!types.includes(input.type)) return result;
   if (input.files.length === 0 && deleted.size > 0) {
     record({ command_id: "policy:output", passed: true, detail: `The Task deleted ${deleted.size} file(s) and changed nothing else, so nothing is left to check.` });
+    return result;
+  }
+  if (input.files.length === 0 && externalFiles.size > 0) {
+    record({ command_id: "policy:output", passed: true, detail: `The Task created ${externalFiles.size} file(s) in a new repository outside its worktree, so nothing is left to check here.` });
     return result;
   }
   if (input.files.length === 0 && (input.removedTests?.length ?? 0) > 0) {
@@ -282,7 +289,7 @@ export async function evaluateTaskTypePolicy(input: TypePolicyInput): Promise<Ty
 
   // Why not look at the global settings: only the Owner's explicit off for this Project is meant to stop tests;
   // no_test_marker or invalid_settings must keep running them.
-  const testsOff = input.projectTestRun?.reason === "explicit_off";
+  const testsOff = input.projectTestRun?.enabled === false && input.projectTestRun.reason === "explicit_off";
   const testsOffDetail = "Project test_run is off (explicit_off); test runners were not started.";
 
   const runTests = async (files: readonly string[]): Promise<{ executed: string[] }> => {
@@ -291,7 +298,24 @@ export async function evaluateTaskTypePolicy(input: TypePolicyInput): Promise<Ty
     for (const file of limited(files)) {
       const runner = firstRunner(file, settings.test.runners);
       if (!runner) continue;
-      const outcome = await run("policy:test", runner, file, "test_failed");
+      const project = input.projectTestRun;
+      let command = runner;
+      let cwd = root;
+      let argumentFile = file;
+      if (project?.enabled) {
+        const projectCwd = resolve(root, project.cwd);
+        const cwdRelative = relative(root, projectCwd);
+        const fileRelative = relative(projectCwd, resolve(root, file));
+        const argv = project.file_argv ?? (project.whole_argv?.length ? [...project.whole_argv, "{file}"] : undefined);
+        if (!isAbsolute(cwdRelative) && !cwdRelative.split(/[\\/]/u).includes("..")
+          && fileRelative !== "" && !isAbsolute(fileRelative) && !fileRelative.split(/[\\/]/u).includes("..")
+          && (!project.test_patterns || matchesAny(fileRelative, project.test_patterns)) && argv?.length) {
+          command = { ...runner, argv: [...argv] };
+          cwd = projectCwd;
+          argumentFile = fileRelative;
+        }
+      }
+      const outcome = await run("policy:test", command, file, "test_failed", cwd, argumentFile);
       if (outcome.ok) executed.push(file);
     }
     return { executed };

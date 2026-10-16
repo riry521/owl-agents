@@ -5,7 +5,9 @@ import { isValidUlid } from "@owl/shared";
 /** Parser, renderer and validator for the four page templates (design §2, §6). Flat frontmatter only. */
 
 export type PageKind = "theme" | "project-index" | "work-log" | "clipping" | "conversation-log";
-export type StoredKind = PageKind | "legacy" | "archive";
+export type StoredKind = PageKind | "legacy" | "archive" | "material";
+/** Vault-root folder for reference documents: searchable, but never organised, listed in indexes or injected. */
+export const MATERIALS_DIR = "materials";
 export type FrontmatterValue = string | number | boolean | null | readonly string[];
 
 export interface PageSection {

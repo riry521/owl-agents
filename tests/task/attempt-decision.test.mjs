@@ -377,6 +377,15 @@ test("deterministic failure: retry_not_allowed wins, thresholds decide retry or 
   assert.equal(decisionOf(evaluate(observe(repeated), cfg({ deterministicSameErrorLimit: 3 }))).reason, "deterministic_failure");
 });
 
+test("deterministic failure: the same error_key stored as a hash counts up; another key or generation resets to 1", () => {
+  const stored = { failure_count: 1, same_error_count: 1, last_error_key: normalizeErrorKey("design_document_missing"), last_error_generation: 1 };
+  const observe = (task, errorKey) => ({ kind: "deterministic_failure", task: taskRow(task), errorKey, retryAllowed: true, escalatedFromTransient: false });
+  const same = decisionOf(evaluate(observe(stored, "design_document_missing"), cfg()));
+  assert.deepEqual([same.patch.same_error_count, same.to, same.reason, same.managerTrigger], [2, "failed", "deterministic_threshold", true]);
+  assert.equal(decisionOf(evaluate(observe(stored, "other_error"), cfg())).patch.same_error_count, 1);
+  assert.equal(decisionOf(evaluate(observe({ ...stored, last_error_generation: 0 }, "design_document_missing"), cfg())).patch.same_error_count, 1);
+});
+
 test("worker crash: retry below the threshold, crash_threshold at it, counters land in the patch", () => {
   const observe = (task) => ({ kind: "worker_crash", task: taskRow(task), errorKey: "c" });
   const retry = decisionOf(evaluate(observe({ failure_count: 1 }), cfg()));

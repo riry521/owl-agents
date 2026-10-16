@@ -467,6 +467,100 @@ test("a reviewed design Task goes back to the Designer when its document is blan
   assert.equal(db.get("SELECT COUNT(*) AS count FROM events WHERE type = 'system.alert' AND task_id = ?", taskId).count, 0);
 });
 
+test("two design_document_missing failures in a row send the Task to the Manager before the third Designer run", async (t) => {
+  let designerAttempts = 0;
+  const managerTriggers = [];
+  const agentRunner = {
+    runManagerPlan: async (request) => {
+      if (request.context?.mode === "plan") {
+        return { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [
+          { id: "T1", title: "Design the approach", type: "design", acceptance: "Document exists.", depends_on: [], required_sections: [], required_tests: [], replaces: [], necessity: TEST_NECESSITY, acceptance_criteria: criteriaFor("Document exists.") },
+        ] } };
+      }
+      managerTriggers.push(request.context?.trigger ?? request.trigger);
+      return { outcome: "success", report_valid: true, report: { event: "work.completed", summary: "Stopped." } };
+    },
+    runDesigner: async (request) => {
+      designerAttempts += 1;
+      return { outcome: "success", report_valid: true, report: workerReport(request.invocation_id, []) };
+    },
+    runWorker: async () => { throw new Error("design Task must not run as Worker"); },
+    runReviewer: async (request) => ({ outcome: "success", report_valid: true, report: { kind: "review", invocation_id: request.invocation_id }, review: { verdict: "pass", findings: [], tests: {} } }),
+    runAdvisor: async () => ({ reply: "" }),
+  };
+  const { db, workId } = await startProjectlessWork(t, "owl-task-design-same-error-", agentRunner, "design-same-error");
+  const stopped = await waitFor(() => managerTriggers.length > 0, { timeoutMs: 15_000, message: "the Manager to be called" }).catch(() => JSON.stringify({ designerAttempts, tasks: db.all("SELECT status, failure_count, same_error_count, last_error_key, last_error_generation, worker_generation FROM tasks WHERE work_id = ?", workId), ev: db.all("SELECT type FROM events WHERE work_id = ? ORDER BY sequence", workId).map((r) => r.type) }));
+  assert.equal(stopped, true, JSON.stringify({ designerAttempts, managerTriggers, tasks: db.all("SELECT status, failure_count, same_error_count, last_error_key FROM tasks WHERE work_id = ?", workId) }));
+  assert.equal(designerAttempts, 2);
+  assert.equal(db.get("SELECT COUNT(*) AS count FROM events WHERE work_id = ? AND type = 'task.failure.classified' AND json_extract(payload_json, '$.error_key') = 'design_document_missing'", workId).count, 2);
+  assert.equal(managerTriggers.length, 1);
+  assert.equal(managerTriggers[0].kind, "task_failed");
+  assert.equal(managerTriggers[0].tasks[0].kind, "failure_threshold");
+  assert.equal(managerTriggers[0].tasks[0].error_key, "design_document_missing");
+});
+
+// Designer run n writes steps[n - 1] (a string, or null to leave the file alone) and reports design_unchanged from run unchangedFromRun on (0 = never); the first review rejects when rejectFirstReview is set.
+async function runDesignRerun(t, prefix, steps, unchangedFromRun, rejectFirstReview) {
+  let designerAttempts = 0;
+  const reports = [];
+  let reviews = 0;
+  const agentRunner = {
+    runManagerPlan: async (request) => request.context?.mode === "plan"
+      ? { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [
+          { id: "T1", title: "Design the approach", type: "design", acceptance: "Document exists.", depends_on: [], required_sections: [], required_tests: [], replaces: [], necessity: TEST_NECESSITY, acceptance_criteria: criteriaFor("Document exists."), review: true },
+        ] } }
+      : { outcome: "success", report_valid: true, report: { verdict: { verdict: "complete", summary: "Done.", missing: [], lessons: [] } } },
+    runDesigner: async (request) => {
+      const content = steps[designerAttempts];
+      designerAttempts += 1;
+      const documentPath = request.context.design_document_path;
+      if (content !== null) {
+        await mkdir(dirname(documentPath), { recursive: true });
+        await writeFile(documentPath, content);
+      }
+      const report = workerReport(request.invocation_id, []);
+      const declared = unchangedFromRun > 0 && designerAttempts >= unchangedFromRun ? { ...report, design_unchanged: true } : report;
+      reports.push(declared);
+      return { outcome: "success", report_valid: true, report: declared };
+    },
+    runWorker: async () => { throw new Error("design Task must not run as Worker"); },
+    runReviewer: async (request) => {
+      reviews += 1;
+      const review = reviews === 1 && rejectFirstReview
+        ? { verdict: "fix_required", summary: "Rework.", findings: [{ severity: "major", pre_existing: false, file: "design.md", problem: "Gap.", fix: "Fill it." }], tests: {} }
+        : { verdict: "pass", findings: [], tests: {} };
+      return { outcome: review.verdict === "pass" ? "success" : "failed", report_valid: true, report: { kind: "review", invocation_id: request.invocation_id, ...review }, review };
+    },
+    runAdvisor: async () => ({ reply: "" }),
+  };
+  const { db, workId } = await startProjectlessWork(t, prefix, agentRunner, prefix);
+  return { db, workId, attempts: () => designerAttempts, reports };
+}
+
+const designMissingCount = (db, workId) => db.get("SELECT COUNT(*) AS count FROM events WHERE type = 'task.failure.classified' AND work_id = ? AND json_extract(payload_json, '$.error_key') = 'design_document_missing'", workId).count;
+
+test("a Designer rerun that declares design_unchanged keeps the earlier document and the Task completes", async (t) => {
+  const { db, workId, attempts } = await runDesignRerun(t, "owl-design-unchanged-", ["# Design\n\nGood.\n", null], 2, true);
+  const completed = await waitFor(() => db.get("SELECT status FROM tasks WHERE work_id = ? AND manager_task_id = 'T1'", workId)?.status === "completed", { timeoutMs: 15_000, message: "the design Task to complete" });
+  assert.equal(completed, true, JSON.stringify(db.all("SELECT status, last_error_key FROM tasks WHERE work_id = ?", workId)));
+  assert.equal(attempts(), 2);
+  assert.equal(designMissingCount(db, workId), 0);
+  const taskId = db.get("SELECT id FROM tasks WHERE work_id = ?", workId).id;
+  assert.ok(db.get("SELECT 1 AS found FROM events WHERE type = 'verification.started' AND task_id = ?", taskId));
+  assert.equal(db.all("SELECT 1 FROM agent_runs WHERE task_id = ? AND role = 'reviewer'", taskId).length, 2);
+});
+
+test("design_unchanged does not excuse an empty document or a first run that wrote nothing", async (t) => {
+  // (a) the rerun empties the document; (b) a first run writes nothing.
+  const empty = await runDesignRerun(t, "owl-design-unchanged-empty-", ["# Design\n", ""], 2, true);
+  await waitFor(() => designMissingCount(empty.db, empty.workId) > 0, { timeoutMs: 15_000, message: "design_document_missing for the emptied document" });
+  const none = await runDesignRerun(t, "owl-design-unchanged-none-", [null, null], 1, false);
+  await waitFor(() => designMissingCount(none.db, none.workId) > 0, { timeoutMs: 15_000, message: "design_document_missing for the missing document" });
+  const first = none.db.get("SELECT payload_json FROM events WHERE type = 'task.failure.classified' AND work_id = ? AND json_extract(payload_json, '$.error_key') = 'design_document_missing'", none.workId);
+  assert.equal(none.reports[0].design_unchanged, true);
+  assert.equal(JSON.parse(first.payload_json).failure_class, "deterministic");
+});
+
 test("a design report that asks for replanning reaches the Manager without a document check", async (t) => {
   const agentRunner = {
     runManagerPlan: async (request) => request.context?.mode === "plan"

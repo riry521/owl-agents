@@ -63,6 +63,11 @@ const MANAGER_TASK_SCHEMA: RoleSchema = objectSchema({
     items: { type: "string", minLength: 1 },
     description: "for a test Task: worktree-relative test files Core must run and see pass (at most 20); [] if none",
   },
+  assigned_designer: {
+    type: ["string", "null"],
+    enum: ["designer", "lead_designer", null],
+    description: "design Tasks only: lead_designer for the screen design (the look, layout and HTML mocks of screens) that the Work's request leaves to the Lead Designer; designer for any other design Task; null for Tasks that are not design Tasks. In a replan, null on a retried design Task keeps its current value; on a retried Task that becomes a design Task, null leaves it to the Work's design mode",
+  },
   replaces: {
     type: "array",
     items: { type: "string", minLength: 1 },
@@ -290,6 +295,7 @@ function taskFromOutput(value: Record<string, unknown>): TaskDetail {
     wait_for?: PlanWaitFor;
     base_sync_only?: boolean;
     necessity?: TaskNecessity;
+    assigned_designer?: "designer" | "lead_designer";
   } = {
     id: value.id as string,
     work_id: "",
@@ -315,6 +321,7 @@ function taskFromOutput(value: Record<string, unknown>): TaskDetail {
   if (Array.isArray(value.required_sections)) task.required_sections = value.required_sections as readonly string[];
   if (Array.isArray(value.required_tests)) task.required_tests = value.required_tests as readonly string[];
   if (isRecord(value.wait_for)) task.wait_for = value.wait_for as unknown as PlanWaitFor;
+  if (value.type === "design" && (value.assigned_designer === "designer" || value.assigned_designer === "lead_designer")) task.assigned_designer = value.assigned_designer;
   if (typeof value.base_sync_only === "boolean") task.base_sync_only = value.base_sync_only;
   if (isRecord(value.necessity)) task.necessity = value.necessity as unknown as TaskNecessity;
   return task;
@@ -338,7 +345,7 @@ const MODE_INSTRUCTIONS: Readonly<Record<"plan" | "replan", readonly string[]>> 
     "This is a REPLAN. \"tasks\" lists the root failed Tasks (may be empty). context.current_plan lists every Task in the Work with id, manager_task_id, status, depends_on, required_sections / required_tests (only when stored) and failed_by_dependency (true = it failed only because a dependency failed; do not retry or replace it, it resumes on its own).",
     [
       "Replan protocol:",
-      "- To retry a failed Task, include it with its existing id and replaces: [] (you may revise title, acceptance_criteria, context, type, review, required_sections and required_tests; restate the last two, [] clears them). Its depends_on replaces the Task's current dependencies: copy them from current_plan to keep them, or change them (existing Task ids or ids of new Tasks in this replan; not itself and not a cancelled Task).",
+      "- To retry a failed Task, include it with its existing id and replaces: [] (you may revise title, acceptance_criteria, context, type, review, assigned_designer, required_sections and required_tests; restate the last two, [] clears them). Its depends_on replaces the Task's current dependencies: copy them from current_plan to keep them, or change them (existing Task ids or ids of new Tasks in this replan; not itself and not a cancelled Task).",
       "- A failed task with failure.kind \"acceptance_defect\" has criteria that cannot be proven inside the Task (listed in acceptance_defects). Retry that same Task with its existing id and replaces: [], rewrite only those criteria into checks the Task itself can run (text and check of each), keep the other criteria (restate the whole acceptance_criteria array, ids AC1, AC2, ... in order), and do not set wait_for or supersede it.",
       "- A failed task with failure.kind \"external_blocker\" stopped on a problem outside its own scope: one that already exists on the base branch (cause pre_existing) or a gap in the Project environment (cause environment); see its summary, evidence and suggested_fix. Fix it inside this Work: add a NEW Task that removes the cause (suggested_fix is a starting point, not a requirement) and retry the failed Task with its existing id, replaces: [] and depends_on including the new Task's id. Do not use wait_for for it. Do not change its acceptance criteria to hide the problem.",
       "- If a Task failed because of a prerequisite this Work cannot meet itself (another Work's completion, a merge into the base branch, an Owner decision), do not retry it unchanged: retry it with wait_for {reason, conditions[{kind, target, paths, description}]}. Core watches the conditions and runs the Task again once they hold. Use depends_on, not wait_for, to wait for a Task of this Work. context.failed_tasks[].no_progress holds the count of consecutive no-progress results and the limit; at the limit the Work goes to the Owner. Use wait_for only on a retried Task (replaces: []); everywhere else it is null.",
@@ -380,9 +387,12 @@ const NECESSITY_GUIDANCE =
 
 const DESIGN_TASK_GUIDANCE: readonly string[] = [
   "Use type design for a Task whose deliverable is a design: architecture, data model, API, UX, or implementation approach. The Designer writes an external design document and changes no repository files.",
+  "Set assigned_designer on every design Task. Use lead_designer only when the Work's request asks for the screen design to be left to the Lead Designer: plan that screen design (the look, layout and HTML mocks of each screen) as its own design Task with lead_designer, and plan the design of the content (data model, API, behavior) as separate design Tasks with designer. Use designer for every other design Task, and null for Tasks that are not design Tasks. In a replan, restate assigned_designer on a retried or replacement design Task; null on a retried design Task keeps its current value, and null on a retried Task that becomes a design Task leaves it to the Work's design mode.",
+  "A lead_designer design Task also saves one HTML mock per screen, which Owl writes into its mock directory; a Task that depends on it sees that directory as design_mock_dir in its dependencies. If the request names where the mocks should be saved, add a doc or code Task that depends on that design Task and copies the mocks there; do not put that copy in the design Task's acceptance criteria.",
   "When the Work asks for a design or design document, plan design Tasks and research Tasks if useful.",
   "For implementation, plan a design Task only for heavy work: a new subsystem or feature spanning several components; API, data model, or cross-cutting changes; or work split into three or more implementation Tasks. For small or straightforward changes, plan implementation Tasks directly.",
   "In the first plan, when you plan a design Task, do not yet create implementation Tasks (any type other than design) that depend on it. The first plan holds the design Task and only Tasks that can proceed regardless of the design, such as research or cleanup of existing code. When the design is complete, Core calls you with trigger kind design_completed; then split the implementation Tasks from the design documents in context.design_documents, decide their acceptance criteria and dependencies, and add them to the plan. The same applies to a Work with work.design_mode lead.",
+  "Write a design Task's acceptance criteria so that the design document (and, on a lead_designer Task, its HTML mocks) alone decides pass or fail, and do not include copying or placing the document anywhere other than its design document path: the Designer can write only to that path (designer-write-path), and a lead_designer Task saves its mocks through Owl. Do not put in a design Task's acceptance criteria a condition the Designer cannot check by reading the design document, such as a condition about another repository or about files outside the Task's scope: the Reviewer returns such a criterion as acceptance_defect and the Task stops. When a design document must be placed elsewhere, split that into a separate Task that a Worker runs, such as type doc or code.",
   "Use type doc only for documentation that belongs in the repository, such as a README or user documentation. Design documents never go in the repository.",
   "context.design_documents lists the design documents of completed design Tasks as task_id, title and path ([] if none).",
 ];
@@ -495,6 +505,8 @@ export function parseManagerPlanWithFeedback(
     payload = { ...payload, verdict: { ...payload.verdict, lessons } };
   }
   if ((request.mode === "plan" || request.mode === "replan") && Array.isArray(payload.tasks)) {
+    // Plans from before assigned_designer lack it; absent means no designation.
+    payload = { ...payload, tasks: payload.tasks.map((task) => isRecord(task) ? { ...task, assigned_designer: task.assigned_designer ?? null } : task) };
   }
   if (request.mode === "replan") {
     // Answers from before the title/summary fields lack them; absent means unchanged.

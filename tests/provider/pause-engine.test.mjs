@@ -269,7 +269,7 @@ test("rate-limited Task keeps its counters and worktree while another provider r
 
   await workflow.launchReady(workId);
   assert.equal(designerAttempts, 1, "a second Anthropic Task attempt is withheld during its pause");
-  await clock.advance(60_000);
+  await clock.advance(120_000);
   await flush();
   await workflow.drainPipelines();
   assert.equal(designerAttempts, 2, "the Task is retried when the provider timer resumes");
@@ -386,7 +386,7 @@ test("a rate-limited Reviewer resumes without consuming Reviewer failures", asyn
   assert.equal(db.get("SELECT COUNT(*) AS count FROM events WHERE type = 'review.failed'").count, 0);
   assert.equal(db.get("SELECT status FROM agent_runs WHERE role = 'reviewer'").status, "exited");
 
-  await clock.advance(30_000);
+  await clock.advance(90_000);
   for (let i = 0; i < 30 && db.get("SELECT status FROM tasks WHERE id = ?", taskId).status !== "completed"; i += 1) {
     await new Promise((resolvePromise) => setImmediate(resolvePromise));
   }
@@ -479,7 +479,7 @@ test("an Advisor rate limit replies with the reset time, pauses the provider and
   assert.deepEqual(errors, []);
   assert.equal(sent.length, 1);
 
-  await clock.advance(35_000);
+  await clock.advance(120_000);
   await flush();
   assert.equal(providerPauseController.isPaused("anthropic"), false);
   assert.equal(sent.length, 1, "the rate-limited request must not be resent after the provider resumes");
@@ -535,7 +535,7 @@ test("a Manager replan rate limit is requeued and retried after persisted pause 
   assert.equal(db.get("SELECT COUNT(*) AS count FROM decisions WHERE status = 'open'").count, 0);
   assert.equal(JSON.parse(db.get("SELECT response_json FROM idempotency_keys WHERE key = ?", `manager-trigger:${taskId}`).response_json).status, "queued");
 
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(90_000);
   await flushUntil(() => db.get("SELECT status FROM tasks WHERE manager_task_id = 'REPLACEMENT'")?.status === "waiting", "requeued replan");
   assert.equal(managerCalls, 2, "the Work driver retries the queued replan when provider.resumed fires");
   assert.equal(db.get("SELECT status FROM tasks WHERE manager_task_id = 'REPLACEMENT'").status, "waiting");
@@ -588,7 +588,7 @@ test("an initial Manager plan rate limit leaves the Work running and retries aft
   assert.equal(db.get("SELECT COUNT(*) AS count FROM tasks WHERE work_id = ?", workId).count, 0);
   assert.equal(db.get("SELECT COUNT(*) AS count FROM decisions WHERE status = 'open'").count, 0);
 
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(90_000);
   await flushUntil(() => db.get("SELECT COUNT(*) AS count FROM tasks WHERE work_id = ?", workId).count === 1, "resumed Manager plan");
   assert.equal(managerCalls, 2);
   assert.equal(db.get("SELECT COUNT(*) AS count FROM tasks WHERE work_id = ?", workId).count, 1);

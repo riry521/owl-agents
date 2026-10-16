@@ -17,8 +17,9 @@ export interface AgentGuardConfiguration {
   readonly tokenRelay?: boolean;
 }
 
-/** Work roles whose Claude sessions may save WebFetch and WebSearch results. */
+/** Agent roles whose Claude sessions may save WebFetch and WebSearch results. */
 export const RESEARCH_CAPTURE_ROLES: ReadonlySet<AgentPermissionRole> = new Set([
+  "advisor",
   "manager",
   "designer",
   "worker",

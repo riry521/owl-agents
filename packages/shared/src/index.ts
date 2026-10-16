@@ -51,6 +51,7 @@ export { GUARD_TOKEN_FILE_ENV, type GuardTokenAgent, type GuardTokenIssuer, type
 export { buildCodexCustomProviderArgs, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV } from "./codex-provider.js";
 export { compareClaudeEntries, compareSemver, parseSemver, type ClaudePluginEntry, type Semver } from "./semver.js";
 export { agentUserInstructionEnv, buildAgentPermissionArgs, buildPreToolUseHookArgs, RESEARCH_CAPTURE_ROLES, type AgentPermissionAdapter, type AgentPermissionRole, type AgentGuardConfiguration } from "./permission-args.js";
+export { DESIGN_MOCK_MCP_ENABLE_ENV, DESIGN_MOCK_MCP_SERVER_NAME, DESIGN_MOCK_MCP_TOOL_TIMEOUT_MS, DESIGN_MOCK_MCP_ENV_NAMES, buildDesignMockMcpArgs } from "./design-mock-mcp-args.js";
 export { DISPATCH_MCP_ENABLE_ENV, DISPATCH_MCP_SERVER_NAME, DISPATCH_MCP_TOOL_TIMEOUT_MS, DISPATCH_MCP_ENV_NAMES, buildDispatchMcpArgs } from "./dispatch-mcp-args.js";
 export {
   extractWebResearchCapture,
@@ -77,7 +78,14 @@ export {
 export { EXTERNAL_DATA_POLICY, KNOWLEDGE_EXTERNAL_COMMAND_RULE, MINIMAL_CODE_RULES, WORKER_OWN_SUBAGENT_RULES, WORKER_SUBAGENT_RULES, WORKING_STYLE_RULES, workerOwnSubagentRules, workerSubagentRules, type ResearcherPromptRef } from "./agent-rules.js";
 export * from "./research-subagent.js";
 export { PROCESS_SKILLS_INSTALL_COMMANDS, PROCESS_SKILLS_PROMPT_FILES, PROCESS_SKILLS_SETTINGS_KEY, renderProcessSkills, type ProcessSkillsHarness, type ProcessSkillsInstallCommand, type ProcessSkillsPackForPrompt, type ProcessSkillsRole, type ProcessSkillsSettings } from "./process-skills.js";
-export { designDocumentPath, taskReportPath } from "./design-documents.js";
+export {
+  DESIGN_MOCK_FILE_PATTERN,
+  DESIGN_SKILL_NAME_PATTERN,
+  designDocumentPath,
+  designMockDirectory,
+  isScreenDesignTask,
+  taskReportPath,
+} from "./design-documents.js";
 export {
   DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS,
   DEFAULT_LIBRARIAN_TIMES,
@@ -125,6 +133,17 @@ export {
   type MemoryMode,
 } from "./memory-settings.js";
 export { renderWorkspaceToolsNote } from "./workspace-tools-note.js";
+export {
+  DEFAULT_VERIFICATION_POLICY_SETTINGS,
+  VERIFICATION_POLICY_SETTINGS_KEY,
+  readVerificationPolicySettings,
+  validateVerificationPolicyPatch,
+  VerificationPolicySettingsValidationError,
+  type PolicyCommand,
+  type SectionMatch,
+  type VerificationPolicyPatch,
+  type VerificationPolicySettings,
+} from "./verification-policy-settings.js";
 export { DEFAULT_ROLE_MODELS } from "./default-role-models.js";
 export {
   builtinProviderHarness,
@@ -184,7 +203,7 @@ export interface AgentRunRequest {
   readonly language?: OwnerLanguage;
 }
 export interface ManagerPlanRequest extends AgentRunRequest { readonly task_id: null; }
-export interface WorkerRunRequest extends AgentRunRequest { readonly task_id: string; }
+export interface WorkerRunRequest extends AgentRunRequest { readonly task_id: string; readonly git_template_dir?: string; }
 export interface ReviewerRunRequest extends AgentRunRequest { readonly task_id: string; readonly review_round: number; }
 export interface CuratorProposal {
   readonly id: string;

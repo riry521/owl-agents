@@ -119,6 +119,18 @@ test("pages mode: Manager, Designer, Worker and Reviewer get the project index w
   assert.ok(!found.reviewer.includes("## 概要") && found.reviewer.includes("## 必読"));
 });
 
+test("materials/ pages are not listed as themes, so indexes and injection never carry them", async (t) => {
+  const { index } = await indexOf(t, { "materials/projects/p/構想.md": fixture("theme", "M"), "projects/p/テストの落とし穴.md": fixture("theme") });
+  assert.deepEqual(index.listPages({ types: ["theme"], status: ["active"] }).map((r) => r.path), ["projects/p/テストの落とし穴.md"]);
+  const title = "構想メモ資料";
+  const material = fixture("theme", "M", (page) => ({ ...page, frontmatter: { ...page.frontmatter, title }, title }));
+  const withIndex = await indexOf(t, { "projects/p/_index.md": fixture("project-index"), "materials/projects/p/構想.md": material });
+  for (const role of ["manager", "worker", "reviewer"]) {
+    const text = await injectorOf(withIndex.index, withIndex.available).compose({ role, query: [], project_id: PROJECT_ID });
+    assert.ok(text && !text.includes(title) && !text.includes("materials/"), role);
+  }
+});
+
 test("pages mode: a Work without a Project gets the common index; the Curator gets nothing", async (t) => {
   const { core, roles } = await coreWithPages(t);
   const found = await roles(null);
@@ -160,6 +172,7 @@ test("Advisor: first turn lists project index titles; later turns are empty unti
   assert.match(first, /^<owl-memory scope="advisor" /u);
   assert.ok(first.includes("Project をまたぐ決まりごと") && first.includes("## Project 目次の一覧\n- ことり家計簿 の目次"));
   assert.ok(tokens(first) <= 1600, `${tokens(first)} tokens`);
+  assert.ok(first.includes("教訓・決まりごと・落とし穴だけ") && first.includes("materials/") && !first.includes("会話で決まったことは append"));
   assert.equal(await turn("s1"), null);
 
   // The session opened the theme page and the project index through MCP; the common index was injected. All three change on disk.

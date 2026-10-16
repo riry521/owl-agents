@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, readlink, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { createUlid, utcNow } from "../../db/dist/index.js";
-import { OUTPUT_FORMAT_INVALID_ERROR_KEY, readDesignBlocked, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, readStoredAcceptanceCriteria, readStoredTaskPlanContext, requestsSpecTest, AGENT_STALE_THRESHOLD_MS, builtinProviderHarness, DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, designDocumentPath, OWL_INSTANCE_ID_ENV, reapProcessGroup, resolveInstanceId, tokenUsageOf, usageJson, type DelegationMismatchKind, type ResearchSubagentSettings, type TaskReplanTrigger, type TokenUsage } from "@owl/shared";
+import { OUTPUT_FORMAT_INVALID_ERROR_KEY, readDesignBlocked, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, readStoredAcceptanceCriteria, readStoredTaskPlanContext, requestsSpecTest, AGENT_STALE_THRESHOLD_MS, builtinProviderHarness, DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, designDocumentPath, designMockDirectory, isScreenDesignTask, OWL_INSTANCE_ID_ENV, reapProcessGroup, resolveInstanceId, tokenUsageOf, usageJson, type DelegationMismatchKind, type ResearchSubagentSettings, type TaskReplanTrigger, type TokenUsage } from "@owl/shared";
 import { matchesAnyGlob } from "../../shared/dist/glob.js";
 import { taskVerificationMarker } from "./workspace-process-sweeper.js";
 import { TRANSIENT_RETRY_DELAYS_MS, TRANSIENT_RETRY_LIMIT } from "./attempt-policy";
@@ -41,6 +41,7 @@ import { lineageReviewHistory, recordTaskChangeMeasurementInTransaction } from "
 import { progressGuard } from "./progress-guard";
 import { HYBRID_MODE_SETTINGS_KEY } from "./types";
 import { GitWorktreeGateway } from "./git-gateway.js";
+import { prepareWorkGitTemplate, removeWorkGitTemplate } from "./work-git-template.js";
 import { processIdentityMatches, readProcessIdentity } from "./process-identity.js";
 import { formatRuntimeFailure } from "./error-display.js";
 import { rethrowUnlessRateLimited, type ProviderPauseController } from "./provider-pause-controller";
@@ -220,6 +221,11 @@ export interface ManagerReplanNeededInput {
   readonly trigger: TaskReplanTrigger;
 }
 
+export interface LaunchHold {
+  /** These Tasks may still launch; an empty set holds them all. */
+  readonly allowedTaskIds: ReadonlySet<string>;
+}
+
 export interface WorkflowEngineOptions {
   readonly db: CoreDatabase;
   readonly agentRunner: AgentRunner;
@@ -237,6 +243,10 @@ export interface WorkflowEngineOptions {
   readonly onTaskSettled?: (workId: string) => void;
   /** Called after a Task's pipeline settled, with the Work and Task that ran it. */
   readonly onTaskPipelineSettled?: (workId: string, taskId: string) => void;
+  /** Tasks of a Work that must not launch yet; null launches normally. Read synchronously. */
+  readonly launchHold?: (workId: string) => LaunchHold | null;
+  /** Of the absolute files a Project-less Task reported, those inside a repository the Work newly created; they count as the Task's output. */
+  readonly externalOutputs?: (workId: string, files: readonly string[]) => Promise<readonly string[]>;
   /** Called when prepareWorktree created a new Task worktree, before its first agent run. */
   readonly onWorktreeCreated?: (worktreePath: string) => void;
   readonly providerPauseController?: ProviderPauseController;
@@ -245,6 +255,8 @@ export interface WorkflowEngineOptions {
   readonly owlRoot?: string;
   /** Durable runtime data directory. Defaults to `<owlRoot>/data`. */
   readonly dataDir?: string;
+  /** Skill the Lead Designer uses for screen design Tasks; null or unset names none. */
+  readonly designSkill?: string | null;
   readonly ruleStore?: RuleStore;
   readonly skillBox?: SkillBox;
   readonly memoryInjector?: Pick<IndexInjector, "compose">;
@@ -353,6 +365,8 @@ export class WorkflowEngine {
   private readonly onManagerReplanNeeded?: (input: ManagerReplanNeededInput) => Promise<void>;
   private readonly onTaskSettled?: (workId: string) => void;
   private readonly onTaskPipelineSettled?: (workId: string, taskId: string) => void;
+  private readonly launchHold?: (workId: string) => LaunchHold | null;
+  private readonly externalOutputs?: (workId: string, files: readonly string[]) => Promise<readonly string[]>;
   private readonly onWorktreeCreated?: (worktreePath: string) => void;
   private readonly providerPauseController?: ProviderPauseController;
   private readonly childRuns?: ChildRunScheduler;
@@ -362,6 +376,7 @@ export class WorkflowEngine {
   private readonly pipelineTasks = new Map<string, { readonly workId: string; readonly taskId: string }>();
   private readonly owlRoot: string;
   private readonly dataDir: string;
+  private readonly designSkill: string | null;
   private readonly ruleStore?: RuleStore;
   private readonly skillBox?: SkillBox;
   private readonly memoryInjector?: Pick<IndexInjector, "compose">;
@@ -406,11 +421,14 @@ export class WorkflowEngine {
     this.onManagerReplanNeeded = options.onManagerReplanNeeded;
     this.onTaskSettled = options.onTaskSettled;
     this.onTaskPipelineSettled = options.onTaskPipelineSettled;
+    this.launchHold = options.launchHold;
+    this.externalOutputs = options.externalOutputs;
     this.onWorktreeCreated = options.onWorktreeCreated;
     this.providerPauseController = options.providerPauseController;
     this.childRuns = options.childRuns;
     this.owlRoot = options.owlRoot ?? defaultOwlRoot();
     this.dataDir = options.dataDir ?? join(this.owlRoot, "data");
+    this.designSkill = options.designSkill ?? null;
     this.workspaceRoot = options.workspaceRoot ?? join(this.owlRoot, ".owl-workspaces");
     this.testCommandRunner = options.testCommandRunner;
     this.coreActivity = options.coreActivity ?? NO_CORE_ACTIVITY;
@@ -1063,6 +1081,11 @@ export class WorkflowEngine {
     return [...this.pipelineTasks.values()];
   }
 
+  private launchHeld(workId: string, taskId: string): boolean {
+    const hold = this.launchHold?.(workId) ?? null;
+    return hold !== null && !hold.allowedTaskIds.has(taskId);
+  }
+
   private isWorkRunning(workId: string): boolean {
     return this.db.get<{ state: string }>("SELECT state FROM works WHERE id = ?", workId)?.state === "running";
   }
@@ -1099,6 +1122,7 @@ export class WorkflowEngine {
       // Pause, cancel, a blocking Decision or engine shutdown can land while
       // an earlier iteration awaited the worktree or the WriteLane.
       if (!this.running || !this.isWorkRunning(workId)) break;
+      if (this.launchHeld(workId, taskId)) continue;
       const modelRoleRow = this.db.get<{ type: string; lead_designer_start_round: number | null; fixer_escalated_rejections: number | null }>(
         "SELECT type, lead_designer_start_round, fixer_escalated_rejections FROM tasks WHERE id = ?", taskId,
       );
@@ -1142,6 +1166,15 @@ export class WorkflowEngine {
             const roleProvider = this.providerForRoleModel(roleModel);
             if (this.providerPauseController?.isPaused(roleProvider)) {
               throw new HumanReadableError({ code: "provider_paused", message: "The Task provider is paused.", remediation: "The Task will start when the provider resumes." });
+            }
+            // Checked again here: a detection can begin while the worktree is being prepared.
+            if (this.launchHeld(workId, taskId)) {
+              throw new HumanReadableError({
+                code: "launch_held",
+                message: "The Task launch is held while the Work's new repository is being registered.",
+                remediation: "The Task starts after the Work is attached to the Project.",
+                details: { work_id: workId, task_id: taskId },
+              });
             }
             // A Task that reached the no-progress limit by any path must not
             // start; the catch below stops it for the Owner.
@@ -1201,6 +1234,7 @@ export class WorkflowEngine {
           continue;
         }
         if (typeof error === "object" && error !== null && (error as { code?: unknown }).code === "provider_paused") continue;
+        if (typeof error === "object" && error !== null && (error as { code?: unknown }).code === "launch_held") continue;
         if (typeof error === "object" && error !== null && (error as { code?: unknown }).code === "no_progress_limit_reached") {
           await this.writeLane.transact((transaction) => {
             stopTaskForNoProgressInTransaction(transaction, { taskId, gate: "worker", now: utcNow() });
@@ -1503,6 +1537,9 @@ export class WorkflowEngine {
         [REPORT_RESUBMIT_LIMIT_CONTEXT_KEY]: reportResubmitLimit(this.db),
         ...(resubmitSession ? { [REPORT_RESUBMIT_SESSION_CONTEXT_KEY]: resubmitSession } : {}),
         ...(designPath ? { design_document_path: designPath, design_tier: designTier } : {}),
+        ...(taskRow && isScreenDesignTask(taskRow)
+          ? { design_mock_dir: designMockDirectory(this.dataDir, workId, taskId), ...(this.designSkill ? { design_skill: this.designSkill } : {}) }
+          : {}),
         ...(designStop ? { design_stop: { ...designStop, review_history: lineageReviewHistory(this.db, taskId) as unknown as JsonObject[] } } : {}),
         ...(processSkillsPack ? { process_skills_dir: processSkillsPack.skills_dir, process_skills_source: processSkillsPack.source } : {}),
         ...(research ? { research_subagent: research as unknown as JsonObject } : {}),
@@ -1540,9 +1577,22 @@ export class WorkflowEngine {
       });
       await this.recordWorktreeBaseline(workId, taskRow);
       let workerReturned = false;
+      const projectId = this.projectIdOf(workId).project_id;
+      let gitTemplateDir: string | null = null;
+      if (!projectId && this.git.userTemplateDir && this.git.setTemplateConfig) {
+        try {
+          gitTemplateDir = await prepareWorkGitTemplate({
+            userTemplateDir: () => this.git.userTemplateDir!(),
+            setTemplateConfig: (file, key, value) => this.git.setTemplateConfig!(file, key, value),
+          }, { dataDir: this.dataDir, agentRunId, workId });
+        } catch (error) {
+          console.warn(`[owl-core] Could not prepare Git template for Worker run ${agentRunId}`, error);
+        }
+      }
       try {
         result = await this.agentRunner.runWorker({
           ...runRequest,
+          ...(gitTemplateDir ? { git_template_dir: gitTemplateDir } : {}),
           context: { ...runRequest.context, dispatch_enabled: this.childRuns !== undefined },
         }).catch(rethrowUnlessRateLimited);
         workerReturned = true;
@@ -1554,6 +1604,11 @@ export class WorkflowEngine {
           }
         }
       } finally {
+        if (gitTemplateDir) {
+          await removeWorkGitTemplate(gitTemplateDir).catch((error) => {
+            console.warn(`[owl-core] Could not remove Git template for Worker run ${agentRunId}`, error);
+          });
+        }
         await this.childRuns?.releaseParent(agentRunId, workerReturned ? "parent_ended" : "parent_cancelled");
       }
     }
@@ -1943,7 +1998,7 @@ export class WorkflowEngine {
       }
       const artifactTask = this.db.get<{ type: string; worktree_path: string | null }>("SELECT type, worktree_path FROM tasks WHERE id = ?", taskId);
       if (artifactTask?.type === "design") {
-        if (!await this.acceptDesignDocument(workId, taskId, agentRunId, artifactTask.worktree_path, designBaseline ?? null, usage)) return;
+        if (!await this.acceptDesignDocument(workId, taskId, agentRunId, artifactTask.worktree_path, designBaseline ?? null, result.report.design_unchanged === true, usage)) return;
       } else {
         await this.captureArtifacts(workId, taskId, agentRunId, artifactTask?.worktree_path ?? null);
       }
@@ -2295,6 +2350,7 @@ export class WorkflowEngine {
     agentRunId: string,
     worktreePath: string | null,
     baseline: DesignDocumentFingerprint | null,
+    declaredUnchanged: boolean,
     usage: JsonObject,
   ): Promise<boolean> {
     const projectId = this.db.get<{ project_id: string | null }>("SELECT project_id FROM works WHERE id = ?", workId)?.project_id ?? null;
@@ -2335,7 +2391,8 @@ export class WorkflowEngine {
     }
     const documentPath = designDocumentPath(this.dataDir, workId, taskId);
     const current = await designDocumentFingerprint(documentPath);
-    const written = current !== null && current.size > 0n && (baseline === null || !sameFingerprint(baseline, current));
+    // A rerun may declare the earlier run's non-empty document final; a first run or an empty document never passes this way.
+    const written = current !== null && current.size > 0n && (baseline === null || !sameFingerprint(baseline, current) || declaredUnchanged);
     if (!written) {
       await this.writeFailureEvent(workId, taskId, agentRunId, {
         failure_class: "deterministic",
@@ -2870,6 +2927,8 @@ export class WorkflowEngine {
     const claimedChanges = (Array.isArray(report.changes) ? report.changes : [])
       .filter((change): change is JsonObject => change !== null && typeof change === "object" && !Array.isArray(change))
       .flatMap((change) => typeof change.file === "string" && !removedTests.includes(change.file) ? [{ file: change.file, action: typeof change.action === "string" ? change.action : "" }] : []);
+    const absoluteClaims = hasProject ? [] : claimedChanges.filter((change) => isAbsolute(change.file)).map((change) => change.file);
+    const externalFiles = absoluteClaims.length === 0 ? [] : [...await (this.externalOutputs?.(workId, absoluteClaims) ?? [])];
     const { limits } = settings;
     const checks = hasProject && root !== null ? await this.runCheckCommands(workId, task, root) : [];
     if (checks.some((check) => check.passed !== true)) {
@@ -2880,31 +2939,47 @@ export class WorkflowEngine {
     const project = hasProject && root !== null ? this.projectTestRunRow(workId, task.id) : undefined;
     const last: { resolved: TestRunResolutionWithExecutables | null } = { resolved: null };
     type CoreTests = { outcome: CoreTestRunOutcome; settings: TestRunSettings } | null;
-    const evaluate = (coreTests: CoreTests, resolved: TestRunResolutionWithExecutables | null): Promise<TypePolicyResult> => evaluateTaskTypePolicy({
-      type: task.type,
-      root,
-      files,
-      deletedFiles,
-      removedTests,
-      claimedChanges,
-      spec,
-      settings,
-      mode,
-      executables: resolved?.executables ?? testSetupSettings(this.db).default_executables,
-      projectTestRun: coreTests?.outcome.status === "not_applicable" && coreTests.outcome.reason === "explicit_off" ? { enabled: false, reason: "explicit_off" } : undefined,
-      coreTestRun: coreTests && coreTests.outcome.status !== "not_applicable" ? { run_id: coreTests.outcome.run_id, mode: coreTests.outcome.mode, passed_files: coreTests.outcome.passed_files, failed_files: coreTests.outcome.failed_files } : undefined,
-      runCommand: async (argv, cwd) => {
-        const outcome = await this.runVerificationCommand(task.id, argv, cwd, limits.env_allowlist, limits.timeout_seconds * 1000, limits.stdout_limit_bytes, limits.stderr_limit_bytes, [0]);
-        return {
-          passed: outcome.passed === true,
-          exit_code: typeof outcome.exit_code === "number" ? outcome.exit_code : null,
-          timed_out: outcome.timed_out === true,
-          stdout: typeof outcome.stdout === "string" ? outcome.stdout : undefined,
-          stderr: typeof outcome.stderr === "string" ? outcome.stderr : undefined,
-          error: typeof outcome.error === "string" ? outcome.error : undefined,
-        };
-      },
-    });
+    const evaluate = (coreTests: CoreTests, resolved: TestRunResolutionWithExecutables | null): Promise<TypePolicyResult> => {
+      const explicit = resolved?.enabled && resolved.source === "explicit"
+        ? JSON.parse(this.projectTestRunRow(workId, task.id)?.test_run_json ?? "{}") as Record<string, unknown> : {};
+      return evaluateTaskTypePolicy({
+        type: task.type,
+        root,
+        files,
+        deletedFiles,
+        removedTests,
+        claimedChanges,
+        externalFiles,
+        spec,
+        settings,
+        mode,
+        executables: {
+          ...(resolved?.executables ?? testSetupSettings(this.db).default_executables),
+          owl_node: process.execPath,
+          owl_toml_checker: require.resolve("./toml-checker.js"),
+          owl_max_read_bytes: String(settings.limits.max_read_bytes),
+        },
+        projectTestRun: resolved?.enabled && resolved.source === "explicit" ? {
+          enabled: true,
+          cwd: resolved.settings.cwd,
+          ...(Object.hasOwn(explicit, "file_argv") ? { file_argv: resolved.settings.file_argv } : {}),
+          whole_argv: resolved.settings.whole_argv,
+          ...(Object.hasOwn(explicit, "test_patterns") ? { test_patterns: resolved.settings.test_patterns } : {}),
+        } : coreTests?.outcome.status === "not_applicable" && coreTests.outcome.reason === "explicit_off" ? { enabled: false, reason: "explicit_off" } : undefined,
+        coreTestRun: coreTests && coreTests.outcome.status !== "not_applicable" ? { run_id: coreTests.outcome.run_id, mode: coreTests.outcome.mode, passed_files: coreTests.outcome.passed_files, failed_files: coreTests.outcome.failed_files } : undefined,
+        runCommand: async (argv, cwd) => {
+          const outcome = await this.runVerificationCommand(task.id, argv, cwd, limits.env_allowlist, limits.timeout_seconds * 1000, limits.stdout_limit_bytes, limits.stderr_limit_bytes, [0]);
+          return {
+            passed: outcome.passed === true,
+            exit_code: typeof outcome.exit_code === "number" ? outcome.exit_code : null,
+            timed_out: outcome.timed_out === true,
+            stdout: typeof outcome.stdout === "string" ? outcome.stdout : undefined,
+            stderr: typeof outcome.stderr === "string" ? outcome.stderr : undefined,
+            error: typeof outcome.error === "string" ? outcome.error : undefined,
+          };
+        },
+      });
+    };
     let coreTests: CoreTests = null;
     let blocked: TestEnvironmentBlock | null = null;
     let policy: TypePolicyResult;
@@ -3746,7 +3821,7 @@ export class WorkflowEngine {
     ) as JsonObject;
     // A design Task has no changed files; the Reviewer reads its document.
     // Without one there is nothing to review, so the Designer runs again.
-    let designDocument: { path: string; markdown: string } | null = null;
+    let designDocument: { path: string; markdown: string; mocks?: Array<{ name: string; path: string }> } | null = null;
     if (task.type === "design") {
       const path = designDocumentPath(this.dataDir, workId, taskId);
       const markdown = await readFile(path, "utf8").catch(() => null);
@@ -3755,6 +3830,12 @@ export class WorkflowEngine {
         return;
       }
       designDocument = { path, markdown };
+      if (isScreenDesignTask(task)) {
+        const mockDirectory = designMockDirectory(this.dataDir, workId, taskId);
+        designDocument.mocks = this.db
+          .all<{ name: string }>("SELECT name FROM design_mocks WHERE task_id = ? ORDER BY name ASC", taskId)
+          .map(({ name }) => ({ name, path: join(mockDirectory, name) }));
+      }
     }
     const reviewerAgentRunId = createUlid();
     const reviewerRoleModel = resolveRoleModel(this.db, "reviewer");

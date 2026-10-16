@@ -48,7 +48,7 @@ test("Claude unifiedWindows is used only when the event has no direct reset", ()
   assert.deepEqual(allowed, { resets_at: null, source: null });
 
   const text = runtime.resolveRateLimitReset([{ kind: "text", text: "5-hour limit reached · resets 3pm (Asia/Tokyo)" }], now, { harness: "claude" });
-  assert.deepEqual(text, { resets_at: "2026-09-27T06:00:00.000Z", source: "text" });
+  assert.deepEqual(text, { resets_at: "2026-09-27T06:01:00.000Z", source: "text" });
 });
 
 test("Claude result wrapper status and usage-limit epoch provide a reset", () => {
@@ -74,10 +74,10 @@ test("Claude CLI 'You've hit your … limit' messages are rate limits with their
   const tokyoEvening = new Date("2026-09-28T11:40:00.000Z");
   const classify = (fields) => runtime.classifyProviderFailure("claude-cli/v1", failed(fields), "en", tokyoEvening);
   const cases = [
-    [{ harness_status: 429, error: "You've hit your session limit · resets 9pm (Asia/Tokyo)" }, "2026-09-28T12:00:00.000Z"],
-    [{ harness_status: 429, error: "You've hit your session limit · resets 9:30pm (Asia/Tokyo) · progress saved" }, "2026-09-28T12:30:00.000Z"],
-    [{ harness_status: 429, error: "You've hit your weekly limit · resets Oct 3, 9am (Asia/Tokyo)" }, "2026-10-03T00:00:00.000Z"],
-    [{ error: "You've hit your limit · resets 9pm (Asia/Tokyo)" }, "2026-09-28T12:00:00.000Z"],
+    [{ harness_status: 429, error: "You've hit your session limit · resets 9pm (Asia/Tokyo)" }, "2026-09-28T12:01:00.000Z"],
+    [{ harness_status: 429, error: "You've hit your session limit · resets 9:30pm (Asia/Tokyo) · progress saved" }, "2026-09-28T12:31:00.000Z"],
+    [{ harness_status: 429, error: "You've hit your weekly limit · resets Oct 3, 9am (Asia/Tokyo)" }, "2026-10-03T00:01:00.000Z"],
+    [{ error: "You've hit your limit · resets 9pm (Asia/Tokyo)" }, "2026-09-28T12:01:00.000Z"],
   ];
   for (const [fields, resetsAt] of cases) {
     const failure = classify(fields);
@@ -88,7 +88,7 @@ test("Claude CLI 'You've hit your … limit' messages are rate limits with their
   // A parenthesis elsewhere in the output is not taken for the zone.
   assert.deepEqual(
     runtime.resolveRateLimitReset([{ kind: "text", text: "spawn (os error 2)\nYou've hit your usage limit. Try again at 9:30 PM." }], tokyoEvening, { harness: "codex", timeZone: "Asia/Tokyo" }),
-    { resets_at: "2026-09-28T12:30:00.000Z", source: "text" },
+    { resets_at: "2026-09-28T12:31:00.000Z", source: "text" },
   );
 });
 
@@ -110,7 +110,7 @@ test("Codex usage-limit error and local try-again time are parsed", () => {
 
   assert.equal(failure.failure_class, "rate_limited");
   assert.deepEqual(failure.rate_limit, localReset);
-  assert.deepEqual(losAngelesReset, { resets_at: "2026-09-28T22:05:00.000Z", source: "text" });
+  assert.deepEqual(losAngelesReset, { resets_at: "2026-09-28T22:06:00.000Z", source: "text" });
 });
 
 test("a clock time that just passed is the reset still under way, not tomorrow's", () => {
@@ -130,7 +130,7 @@ test("a clock time that just passed is the reset still under way, not tomorrow's
   // 23:00 in Tokyo: 1:00 AM is tomorrow.
   assert.deepEqual(
     runtime.resolveRateLimitReset([{ kind: "text", text: "You've hit your usage limit. Try again at 1:00 AM." }], new Date("2026-09-28T14:00:00.000Z"), { ...tokyo, harness: "codex" }),
-    { resets_at: "2026-09-28T16:00:00.000Z", source: "text" },
+    { resets_at: "2026-09-28T16:01:00.000Z", source: "text" },
   );
 });
 
@@ -203,4 +203,39 @@ test("a 100% rate-limit snapshot does not override a final network error", () =>
   assert.equal(failure.failure_class, "transient");
   assert.equal(failure.retry_allowed, true);
   assert.equal(failure.rate_limit, undefined);
+});
+
+test("minute-only reset clocks use the end of the reported minute", () => {
+  const beforeReset = new Date("2026-10-13T10:20:00.000Z");
+  const options = { harness: "codex", timeZone: "Asia/Tokyo" };
+  for (const clock of ["8:36 PM", "Oct 13, 8:36 PM", "Oct 13 8:36 PM"]) {
+    assert.deepEqual(
+      runtime.resolveRateLimitReset([{ kind: "text", text: `try again at ${clock}` }], beforeReset, options),
+      { resets_at: "2026-10-13T11:37:00.000Z", source: "text" },
+      clock,
+    );
+  }
+  for (const clock of ["8:36:59 PM", "Oct 13, 8:36:59 PM"]) {
+    assert.deepEqual(
+      runtime.resolveRateLimitReset([{ kind: "text", text: `try again at ${clock}` }], beforeReset, options),
+      { resets_at: "2026-10-13T11:36:59.000Z", source: "text" },
+      clock,
+    );
+  }
+  assert.deepEqual(
+    runtime.resolveRateLimitReset(
+      [{ kind: "text", text: "try again at Oct 13, 8:36:59 PM" }],
+      new Date("2026-10-13T11:36:30.000Z"),
+      options,
+    ),
+    { resets_at: "2026-10-13T11:36:59.000Z", source: "text" },
+  );
+  const preciseReset = new Date("2026-10-13T11:36:59.000Z");
+  for (const input of [
+    { kind: "event", event: { resets_at: preciseReset.getTime() / 1000 } },
+    { kind: "event", event: { resets_at: preciseReset.toISOString() } },
+    { kind: "text", text: `usage limit reached | ${preciseReset.getTime() / 1000}` },
+  ]) {
+    assert.equal(runtime.resolveRateLimitReset([input], beforeReset, options).resets_at, preciseReset.toISOString());
+  }
 });

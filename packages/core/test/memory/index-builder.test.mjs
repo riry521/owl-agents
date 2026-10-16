@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { MemoryIndex } from "../../dist/memory/memory-index.js";
 import { IndexBuilder } from "../../dist/memory/index-builder.js";
 import { bodySha256, estimatePageTokens, parsePage, validatePage } from "../../dist/memory/page-format.js";
 
@@ -238,4 +242,29 @@ test("compose: links point at the real file name while the title stays the label
   assert.ok(sections["テーマ"].some((l) => l.startsWith("- [[同名テーマ-2|同名テーマ]]")));
   assert.ok(sections["テーマ"].some((l) => l.startsWith("- [[別テーマ]]")));
   assert.deepEqual(sections["必読（決まりごと・落とし穴）"], ["- 決まり → [[同名テーマ-2|同名テーマ]]"]);
+});
+
+test("rebuildAll: materials/ pages (even type: theme) appear in no generated index nor Home.md", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "owl-index-builder-"));
+  const vault = join(root, "vault");
+  mkdirSync(join(root, "data"), { recursive: true });
+  const put = (rel, text) => {
+    mkdirSync(dirname(join(vault, rel)), { recursive: true });
+    writeFileSync(join(vault, rel), text);
+  };
+  put("projects/ことり家計簿/通常テーマ.md", themeFile("通常テーマ", "project"));
+  put("materials/projects/ことり家計簿/構想資料.md", themeFile("構想資料", "project").replace("ZT\n", "ZM\n"));
+  put("materials/common/共通資料.md", themeFile("共通資料", "common").replace("ZT\n", "ZN\n"));
+  const storage = { isAvailable: () => true, activeDir: () => vault, withRead: async (op) => op(), status: () => ({ available: true, dir: vault, since: null }) };
+  const index = new MemoryIndex({ dataDir: join(root, "data"), storage, watch: false });
+  await index.start();
+  await index.rebuild("manual");
+  t.after(async () => { await index.stop(); rmSync(root, { recursive: true, force: true }); });
+  const written = new Map();
+  const writer = { read: async (path) => written.get(path) ?? null, write: async (path, text) => { written.set(path, text); return { path, written: true }; } };
+  const builder = new IndexBuilder({ index, writer, projects: { get: (id) => (id === PID ? { id, name: "ことり家計簿" } : null) }, now: () => NOW, newId: () => IID });
+  await builder.rebuildAll();
+  const all = [...written.values()].join("\n");
+  assert.ok(all.includes("通常テーマ"));
+  for (const hidden of ["構想資料", "共通資料", "materials"]) assert.ok(!all.includes(hidden), hidden);
 });

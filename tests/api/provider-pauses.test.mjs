@@ -45,7 +45,7 @@ test("provider pause route lists paused providers and their planned retry times"
     },
     {
       provider: "anthropic", label: "Claude", state: "paused",
-      paused_at: NOW, resume_at: "2030-01-02T04:00:30.000Z", resume_source: "reported",
+      paused_at: NOW, resume_at: "2030-01-02T04:01:30.000Z", resume_source: "reported",
       reported_resets_at: "2030-01-02T04:00:00.000Z", backoff_step: 0,
       last_error: null, last_role: null,
     },

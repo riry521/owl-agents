@@ -1,6 +1,6 @@
 {
   "name": "@owl-agent/connectors",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Standalone Slack and Discord connectors for Owl, reusing the full notification and decision-routing implementations.",

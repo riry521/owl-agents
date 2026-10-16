@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
+import { mkdir, realpath, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { createCore } from "../../packages/core/dist/index.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import * as advisorResponse from "../../packages/shared/dist/advisor-response.js";
 import { command } from "../helpers/core.mjs";
+import { git } from "../helpers/git.mjs";
 import { createTestDatabase } from "../helpers/db.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 
@@ -311,11 +314,11 @@ test("the Advisor system prompt explains Work operations and the confirmation ru
   const { core } = await setup(t);
   const prompt = core.buildAdvisorSystemPrompt("codex");
 
-  for (const type of ["send_work_instruction", "update_work", "pause_work", "resume_work", "cancel_work", "delete_work"]) {
+  for (const type of ["send_work_instruction", "update_work", "pause_work", "resume_work", "cancel_work", "delete_work", "move_work_to_project"]) {
     assert.ok(prompt.includes(type), `prompt should document ${type}`);
   }
   assert.match(prompt, /send_work_instruction \(without reopen\), pause_work and resume_work in the same turn/u);
-  assert.match(prompt, /Never emit cancel_work, delete_work or update_work before the operator confirms/u);
+  assert.match(prompt, /Never emit cancel_work, delete_work, update_work or move_work_to_project before the operator confirms/u);
   assert.match(prompt, /Adding reopen:true to an instruction for a completed Work also needs the operator's explicit approval/u);
   assert.match(prompt, /every turn carries an <owl-work-search> list/u);
   assert.match(prompt, /If several Works match or none does, ask which Work/u);
@@ -433,4 +436,116 @@ test("call_api unknown results are not retried and not_sent is a failure", async
   assert.equal(calls, 2);
   const outcomes = callApiEvents(ctx.db, "advisor.api_call_finished").map((row) => JSON.parse(row.payload_json).outcome).sort();
   assert.deepEqual(outcomes, ["failed", "unknown"]);
+});
+
+async function createMoveTarget(t, core) {
+  const repo = await realpath(await tempDir(t, "owl-advisor-move-repo-"));
+  git(repo, "init", "--initial-branch=main");
+  await writeFile(join(repo, "README.md"), "test\n");
+  git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "add", "README.md");
+  git(repo, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "initial");
+  return (await core.createProject(command({
+    name: "Move target", canonical_path: repo, base_branch: "main", allowed_roots: [repo], verification_plan: [],
+  }, `advisor-move:project:${createUlid()}`))).data;
+}
+
+function projectAttachedEvents(db, workId) {
+  return db.all("SELECT payload_json FROM events WHERE work_id = ? AND type = 'work.project_attached'", workId).map((row) => JSON.parse(row.payload_json));
+}
+
+test("move_work_to_project moves a Project-less Work once and answers in the Owner's language", async (t) => {
+  const { db, core, respond } = await setup(t);
+  const project = await createMoveTarget(t, core);
+  const workId = await createWorkInState(core, db, "paused", "move");
+
+  const { body } = await respond([action("move_work_to_project", { work_id: workId, project_id: project.id })]);
+
+  assert.equal(db.get("SELECT project_id FROM works WHERE id = ?", workId).project_id, project.id);
+  assert.match(body, /Move target/u);
+  assert.match(body, /移しました/u);
+  const events = projectAttachedEvents(db, workId);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].source, "advisor");
+
+  const again = await respond([action("move_work_to_project", { work_id: workId, project_id: project.id })]);
+  assert.equal(projectAttachedEvents(db, workId).length, 1);
+  assert.match(again.body, /すでにProjectに属している/u);
+});
+
+test("move_work_to_project reports missing input, unknown Project and running Works", async (t) => {
+  const { db, core, respond } = await setup(t);
+  const project = await createMoveTarget(t, core);
+  const workId = await createWorkInState(core, db, "paused", "move-errors");
+
+  const incomplete = await respond([action("move_work_to_project", { work_id: workId })]);
+  assert.match(incomplete.body, /Project への移動を実行できませんでした/u);
+
+  const missing = await respond([action("move_work_to_project", { work_id: workId, project_id: "no-such-project" })]);
+  assert.match(missing.body, /no-such-project/u);
+
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run("UPDATE works SET state = 'running', state_version = state_version + 1 WHERE id = ?", workId);
+  });
+  const running = await respond([action("move_work_to_project", { work_id: workId, project_id: project.id })]);
+  assert.match(running.body, /実行中/u);
+  assert.equal(db.get("SELECT project_id FROM works WHERE id = ?", workId).project_id, null);
+  assert.equal(projectAttachedEvents(db, workId).length, 0);
+});
+
+test("move_work_to_project reports busy Agents and pending fixes in both languages without changing the Work", async (t) => {
+  const { db, core, respond } = await setup(t);
+  const project = await createMoveTarget(t, core);
+  const busyId = await createWorkInState(core, db, "paused", "move-busy");
+  const fixId = await createWorkInState(core, db, "paused", "move-fix");
+  const projectedId = await createWorkInState(core, db, "paused", "move-projected");
+  const taskId = createUlid();
+  const taskPath = core.workspaceLayout.taskPath(fixId, taskId);
+  await mkdir(taskPath, { recursive: true });
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((tx) => {
+    tx.run("INSERT INTO agent_runs (id, work_id, role, provider, model, status, created_at, updated_at) VALUES (?, ?, 'worker', 'test', 'test', 'running', ?, ?)", createUlid(), busyId, now, now);
+    tx.run(`INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, worktree_path, paused_from, created_at, updated_at)
+      VALUES (?, ?, 'fix', 'code', 'paused', 'normal', '', '', ?, 'review_fix_waiting', ?, ?)`, taskId, fixId, taskPath, now, now);
+    tx.run("UPDATE works SET project_id = ? WHERE id = ?", project.id, projectedId);
+  });
+  const move = (workId, payload = { project_id: project.id }) => respond([action("move_work_to_project", { work_id: workId, ...payload })]);
+  const assertUnmoved = () => {
+    for (const id of [busyId, fixId]) assert.equal(db.get("SELECT project_id FROM works WHERE id = ?", id).project_id, null);
+    assert.equal(projectAttachedEvents(db, busyId).length + projectAttachedEvents(db, fixId).length, 0);
+  };
+
+  assert.match((await move(busyId)).body, /Agentが動作中/u);
+  assert.match((await move(fixId)).body, new RegExp(`修正待ち.*${taskId}`, "u"));
+  assert.match((await move(projectedId)).body, /すでにProjectに属している/u);
+  assertUnmoved();
+
+  await core.setLanguage("en");
+  assert.match((await move(busyId)).body, /has running Agents/u);
+  assert.match((await move(fixId)).body, new RegExp(`waiting for a fix.*${taskId}`, "u"));
+  assert.match((await move(projectedId)).body, /already belongs to a Project/u);
+  assert.match((await move(busyId, { project_id: undefined })).body, /Could not run the move to a Project/u);
+  assert.match((await move(busyId, { project_id: "no-such-project" })).body, /No Project has the ID no-such-project/u);
+  assertUnmoved();
+
+  const englishId = await createWorkInState(core, db, "paused", "move-en");
+  assert.match((await move(englishId)).body, /Moved Work .* into the Project "Move target"/u);
+  assert.equal(db.get("SELECT project_id FROM works WHERE id = ?", englishId).project_id, project.id);
+  const events = projectAttachedEvents(db, englishId);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].source, "advisor");
+  await move(englishId);
+  assert.equal(projectAttachedEvents(db, englishId).length, 1);
+});
+
+test("the Advisor prompt describes move_work_to_project and its confirmation rule", async (t) => {
+  const { core } = await setup(t);
+  const prompt = core.getAdvisorSettingsSnapshot().systemPrompt;
+  assert.ok(advisorResponse.isAdvisorWorkOperationType("move_work_to_project"));
+  assert.match(prompt, /\{type:"move_work_to_project",description,payload:\{work_id,project_id\}\}/u);
+  assert.match(prompt, /Get project_id from GET \/api\/v1\/projects/u);
+  assert.match(prompt, /Moving between Projects is not possible/u);
+  assert.match(prompt, /a Work whose Task is still being fixed in its isolated folder must wait/u);
+  assert.match(prompt, /Never emit cancel_work, delete_work, update_work or move_work_to_project before the operator confirms/u);
+  assert.match(prompt, /destination Project \(name, canonical_path\)/u);
+  assert.match(prompt, /delete_work, move_work_to_project, run_librarian/u);
 });

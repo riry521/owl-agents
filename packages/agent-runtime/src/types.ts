@@ -103,6 +103,8 @@ export interface ReportEnvelope {
   readonly external_blocker?: Readonly<Record<string, unknown>>;
   /** Designer only: the design cannot be produced; Core stops the Work and asks the Owner. */
   readonly design_blocked?: Record<string, unknown>;
+  /** Designer only: a rerun found nothing to change in the existing design document. */
+  readonly design_unchanged?: true;
 }
 
 /** A stored schema 1.0.0 report: the same envelope with the legacy verification. */
@@ -248,6 +250,10 @@ export interface WorkerContext {
   /** Absolute destination for a design Task's Markdown deliverable. */
   readonly design_document_path?: string;
   readonly design_tier?: "standard" | "lead";
+  /** Directory where Owl writes the HTML mocks of a screen design Task. */
+  readonly design_mock_dir?: string;
+  /** Skill the Lead Designer uses for screen design. */
+  readonly design_skill?: string;
   /** Per completed dependency: what it did, what it changed, what it left open. */
   readonly dependency_reports?: readonly DependencyReport[];
   /** Recorded code/generated artifact paths of the completed dependencies. */
@@ -329,7 +335,7 @@ export interface ReviewerRequest {
   /** Files the Task added, when Core could determine them; null when unknown. */
   readonly added_files?: readonly string[] | null;
   /** A design Task's external document, which the Reviewer reads instead of changed files. */
-  readonly design_document?: { readonly path: string; readonly markdown: string } | null;
+  readonly design_document?: { readonly path: string; readonly markdown: string; readonly mocks?: readonly { readonly name: string; readonly path: string }[] } | null;
   /** The previous review round's minor findings; null on the first round. */
   readonly previous_minor_findings?: readonly ReviewFinding[] | null;
   /** Core's test run for this Task (failed test names and error points); null when there is none. */

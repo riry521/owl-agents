@@ -13,6 +13,7 @@ import { listHostDirectories } from "./fs-directories.js";
 import { createUlid, isUlid } from "./ids.js";
 import { resolveDataDir, type ContractManifest } from "./contracts.js";
 import { configuredApiToken } from "./config.js";
+import { externalError } from "./core.js";
 import { KnowledgeBase, type KnowledgeSearchResult } from "../../../packages/core/dist/knowledge-base.js";
 import { RuleStore } from "../../../packages/core/dist/rule-store.js";
 import { assertValidPage, PageRejectedError } from "../../../packages/core/dist/memory/page-format.js";
@@ -21,6 +22,8 @@ import { MemorySettingsValidationError, validateMemoryFolderKinds, type MemoryFo
 import { PlanUsageSettingsValidationError, validatePlanUsageSettings } from "../../../packages/shared/dist/plan-usage-settings.js";
 import { DependencySummarySettingsValidationError, validateDependencySummarySettings } from "../../../packages/shared/dist/dependency-summary-settings.js";
 import type { DependencySummarySettings } from "../../../packages/shared/dist/dependency-summary-settings.js";
+import { VerificationPolicySettingsValidationError, validateVerificationPolicyPatch } from "../../../packages/shared/dist/verification-policy-settings.js";
+import type { VerificationPolicySettings } from "../../../packages/shared/dist/verification-policy-settings.js";
 import { ReviewLimitSettingsValidationError, validateReviewLimitSettings } from "../../../packages/shared/dist/review-limit-settings.js";
 import type { ReviewLimitSettings } from "../../../packages/shared/dist/review-limit-settings.js";
 import { REMAKE_LIMIT_SETTINGS_KEYS, RemakeLimitSettingsValidationError, validateRemakeLimitSettings } from "../../../packages/shared/dist/remake-limit-settings.js";
@@ -35,6 +38,7 @@ import { SUBAGENT_USAGE_BATCH_MAX, type HookRequestUsage } from "../../../packag
 import { ADVISOR_CURATION_ACTION_TYPES, ADVISOR_WORKSPACE_API_PATH, advisorAlternativeActions, advisorCurationKind, matchAdvisorBlockedApi, builtinProviderHarness, designDocumentPath, isRuleRole, RULE_ROLES } from "../../../packages/shared/dist/index.js";
 import type { AdvisorBlockedApi } from "../../../packages/shared/dist/advisor-api-policy.js";
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
+import { DESIGN_MOCK_FILE_PATTERN } from "../../../packages/shared/dist/design-documents.js";
 import { GUARD_SHELL_COMMAND_KEYS, GUARD_SHELL_TOOL_NAMES } from "../../../packages/shared/dist/guard-inputs.js";
 import { RESEARCH_CAPTURE_ROLES } from "../../../packages/shared/dist/permission-args.js";
 import { extractWebResearchCapture } from "../../../packages/shared/dist/web-research.js";
@@ -42,7 +46,7 @@ import { CHILD_RUN_EFFORTS, CHILD_RUN_LIMITS, CHILD_RUN_PROVIDERS } from "../../
 import type { ChildDispatchRequest, ChildDispatchResponse, ChildRunEffort, ChildRunListFilter, ChildRunProvider, ChildRunRecord, ChildRunSettings, ChildWaitRequest, ChildWaitResponse } from "../../../packages/shared/dist/child-runs.js";
 import { parseTokenUsagePeriod } from "../../../packages/shared/dist/token-usage-report.js";
 import type { TokenUsagePeriod, TokenUsageReport } from "../../../packages/shared/dist/token-usage-report.js";
-import type { CoreEvent, CorePort, CreateProjectInput, DeleteProjectInput, InboundMessageInput, IntegrationConfigPatch, IntegrationProvider, JsonObject, PostMessageInput, Project, WorkInstructionInput, BacklogStatus, RoleModelSettingInput, ProcessSkillsSettingsInput, RuntimeConfig, UpdateProjectInput, VerificationCommand, WorkConversation, WorkAssurance } from "./types.js";
+import type { CoreEvent, CorePort, CreateProjectInput, DeleteProjectInput, InboundMessageInput, IntegrationConfigPatch, IntegrationProvider, JsonObject, PostMessageInput, Project, WorkInstructionInput, BacklogStatus, RoleModelSettingInput, ProcessSkillsSettingsInput, RuntimeConfig, UpdateProjectInput, VerificationCommand, WorkConversation, WorkAssurance, WorkDesignMockList } from "./types.js";
 import type { KnowledgeAutomationSettings } from "../../../packages/shared/dist/knowledge-automation.js";
 import { browseProjectFolders, initializeExistingProjectFolder, initializeNewProjectFolder, inspectProjectFolder } from "./project-registration.js";
 
@@ -256,8 +260,19 @@ interface ChildRunApiPort {
   setChildRunSettings(settings: ChildRunSettings): ChildRunSettings | Promise<ChildRunSettings>;
 }
 
+interface DesignMockApiPort {
+  saveDesignMock(agentRunId: string, name: string, html: string): Promise<JsonObject>;
+  deleteDesignMock(agentRunId: string, name: string): Promise<JsonObject>;
+  listWorkDesignMocks(workId: string): Promise<WorkDesignMockList>;
+  readWorkDesignMock(workId: string, taskId: string, name: string): Promise<string | null>;
+}
+
 interface AdvisorWorkspaceApiPort {
   prepareAdvisorWorkspaceForSession(request: { session_id: string; project_id: string | null }): Promise<unknown>;
+}
+
+interface WorkProjectMoveApiPort {
+  moveWorkToProject(workId: string, input: { project_id: string }, command: { request_id: string; idempotency_key: string; expected_version: number }): Promise<{ data: JsonObject; version: number }>;
 }
 
 interface KnowledgeRetagApiPort {
@@ -343,6 +358,11 @@ interface RemakeLimitApiPort {
 interface DependencySummaryApiPort {
   getDependencySummarySettings(): Promise<DependencySummarySettings>;
   setDependencySummarySettings(input: DependencySummarySettings): Promise<DependencySummarySettings>;
+}
+
+interface VerificationPolicyApiPort {
+  getVerificationPolicySettings(): Promise<VerificationPolicySettings>;
+  updateVerificationPolicySettings(input: unknown): Promise<VerificationPolicySettings>;
 }
 
 interface ReviewLimitApiPort {
@@ -1888,6 +1908,73 @@ function requireChildRunApi(core: CorePort): ChildRunApiPort {
   return candidate;
 }
 
+function requireDesignMockApi(core: CorePort): DesignMockApiPort {
+  const has = (value: unknown): value is DesignMockApiPort => isObject(value)
+    && ["saveDesignMock", "deleteDesignMock", "listWorkDesignMocks", "readWorkDesignMock"].every((method) => typeof value[method] === "function");
+  const wrapped = core as CorePort & { core?: unknown };
+  const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
+  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support design mocks.");
+  return candidate;
+}
+
+/** Core reports design mock failures with a domain code; give them their HTTP status. */
+async function designMockCall<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    const code = isObject(error) && typeof error.code === "string" ? error.code : "";
+    const message = error instanceof Error ? error.message : code;
+    const details = isObject((error as { details?: unknown }).details) ? (error as { details: Record<string, unknown> }).details : {};
+    if (code === "design_mock_scope_denied") throw new ApiError(403, "agent_scope_denied", message, details, { cause: error });
+    if (code === "design_mock_write_failed") throw new ApiError(500, "design_mock_write_failed", message, details, { cause: error });
+    if (code === "validation_error") throw new ApiError(400, "validation_error", message, details, { cause: error });
+    throw error;
+  }
+}
+
+/** Only a Designer's guard token may save or delete mocks; Core then checks the run belongs to a screen design Task. */
+function requireDesignMockAgent(request: IncomingMessage, context: RequestContext): GuardTokenAgent {
+  const denied = () => new ApiError(403, "agent_scope_denied", "design mockの保存と削除はDesignerのguard tokenでのみ呼び出せます。");
+  let agent: GuardTokenAgent | null;
+  try {
+    agent = requireGuard(request, context.guardTokens);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401) throw new ApiError(403, "agent_scope_denied", denied().message, {}, { cause: error });
+    throw error;
+  }
+  if (!agent || agent.role !== "designer") throw denied();
+  return agent;
+}
+
+/** The mock is agent-written HTML: sandbox it into an opaque origin even when opened directly. */
+const DESIGN_MOCK_HEADERS: Readonly<Record<string, string>> = {
+  "content-type": "text/html; charset=utf-8",
+  "content-security-policy": "sandbox allow-scripts; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "SAMEORIGIN",
+  "cache-control": "no-store",
+  "referrer-policy": "no-referrer",
+  "cross-origin-resource-policy": "same-origin",
+};
+
+function sendDesignMock(response: ServerResponse, html: string): void {
+  response.writeHead(200, { ...DESIGN_MOCK_HEADERS, "content-length": Buffer.byteLength(html, "utf8") });
+  response.end(html, "utf8");
+}
+
+function designMockPayload(payload: JsonObject, keys: readonly string[]): { name: string; html: string } {
+  exactKeys(payload, keys, "design mock payload");
+  const { name, html } = payload;
+  if (typeof name !== "string" || !DESIGN_MOCK_FILE_PATTERN.test(name)) {
+    throw new ApiError(400, "validation_error", "nameが不正です。小文字の英数字とハイフンで、拡張子は.htmlにしてください。");
+  }
+  if (keys.includes("html") && (typeof html !== "string" || html.length === 0)) {
+    throw new ApiError(400, "validation_error", "htmlは1文字以上の文字列で指定してください。");
+  }
+  return { name, html: typeof html === "string" ? html : "" };
+}
+
 /** Legacy executor provider names mapped to child-run harnesses. */
 const HARNESS_PROVIDER_ALIASES: Readonly<Record<string, ChildRunProvider>> = { anthropic: "claude", openai: "codex" };
 
@@ -1973,6 +2060,31 @@ function requireAdvisorWorkspaceApi(core: CorePort): AdvisorWorkspaceApiPort {
   const has = (value: unknown): value is AdvisorWorkspaceApiPort => isObject(value) && typeof value.prepareAdvisorWorkspaceForSession === "function";
   const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
   if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support Advisor workspaces.");
+  return candidate;
+}
+
+function requireWorkProjectMoveApi(core: CorePort): WorkProjectMoveApiPort {
+  const wrapped = core as CorePort & { core?: unknown };
+  const has = (value: unknown): value is WorkProjectMoveApiPort => isObject(value) && typeof value.moveWorkToProject === "function";
+  const rawCoreApi = (value: unknown): WorkProjectMoveApiPort | null => {
+    if (!isObject(value) || typeof value.moveWorkToProject !== "function") return null;
+    const move = value.moveWorkToProject as (workId: string, request: JsonObject) => Promise<{ data: JsonObject; version: number }>;
+    return {
+      moveWorkToProject: async (workId, input, command) => {
+        try {
+          const response = await move.call(value, workId, { ...command, payload: input });
+          const { version: _version, ...data } = response.data;
+          return { data, version: response.version };
+        } catch (error) {
+          throw externalError(error, "moveWorkToProject");
+        }
+      },
+    };
+  };
+  const candidate = isObject(wrapped.core)
+    ? has(core) ? core : rawCoreApi(wrapped.core)
+    : rawCoreApi(core);
+  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support moving a Work into a Project.");
   return candidate;
 }
 
@@ -2151,11 +2263,32 @@ function requireDependencySummaryApi(core: CorePort): DependencySummaryApiPort {
   return candidate;
 }
 
+function requireVerificationPolicyApi(core: CorePort): VerificationPolicyApiPort {
+  const has = (value: unknown): value is VerificationPolicyApiPort => isObject(value)
+    && typeof value.getVerificationPolicySettings === "function"
+    && typeof value.updateVerificationPolicySettings === "function";
+  const wrapped = core as CorePort & { core?: unknown };
+  const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
+  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support verification policy settings.");
+  return candidate;
+}
+
 function validatedDependencySummarySettings(value: unknown): DependencySummarySettings {
   try {
     return validateDependencySummarySettings(value);
   } catch (error) {
     if (error instanceof DependencySummarySettingsValidationError) {
+      throw new ApiError(400, "validation_error", error.message, { field: error.field });
+    }
+    throw error;
+  }
+}
+
+function validatedVerificationPolicyPatch(value: unknown): unknown {
+  try {
+    return validateVerificationPolicyPatch(value);
+  } catch (error) {
+    if (error instanceof VerificationPolicySettingsValidationError) {
       throw new ApiError(400, "validation_error", error.message, { field: error.field });
     }
     throw error;
@@ -2661,6 +2794,34 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
+  const workDesignMocksMatch = pathname.match(new RegExp(`^${API_PREFIX}/works/([^/]+)/design-mocks$`));
+  if (workDesignMocksMatch && method === "GET") {
+    requireOwner(request);
+    const workId = pathId(workDesignMocksMatch[1], "work_id");
+    const data = await requireDesignMockApi(context.core).listWorkDesignMocks(workId);
+    sendJson(response, 200, { request_id: requestIdValue, data: data as unknown as JsonObject });
+    return;
+  }
+
+  const workDesignMockMatch = pathname.match(new RegExp(`^${API_PREFIX}/works/([^/]+)/design-mocks/([^/]+)/([^/]+)$`));
+  if (workDesignMockMatch && method === "GET") {
+    requireOwner(request);
+    const workId = pathId(workDesignMockMatch[1], "work_id");
+    const taskId = pathId(workDesignMockMatch[2], "task_id");
+    const notFound = () => new ApiError(404, "design_mock_not_found", "指定されたdesign mockが見つかりません。");
+    let name: string;
+    try {
+      name = decodeURIComponent(workDesignMockMatch[3]);
+    } catch (error) {
+      throw new ApiError(404, "design_mock_not_found", notFound().message, {}, { cause: error });
+    }
+    if (!DESIGN_MOCK_FILE_PATTERN.test(name)) throw notFound();
+    const html = await requireDesignMockApi(context.core).readWorkDesignMock(workId, taskId, name);
+    if (html === null) throw notFound();
+    sendDesignMock(response, html);
+    return;
+  }
+
   const workConversationMatch = pathname.match(new RegExp(`^${API_PREFIX}/works/([^/]+)/conversation$`));
   if (workConversationMatch && method === "GET") {
     requireOwner(request);
@@ -2746,6 +2907,24 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     const workId = pathId(workMatch[1], "work_id");
     const data = await context.core.getWork(workId);
     sendJson(response, 200, { request_id: requestIdValue, data, version: data.state_version });
+    return;
+  }
+
+  const workProjectMoveMatch = pathname.match(new RegExp(`^${API_PREFIX}/works/([^/]+)/project$`));
+  if (workProjectMoveMatch && method === "POST") {
+    requireOwner(request);
+    const workId = pathId(workProjectMoveMatch[1]!, "work_id");
+    const command = commandEnvelope(await readRequestBody(request));
+    exactKeys(command.payload, ["project_id"], "Work Project move payload");
+    const projectId = stringField(command.payload.project_id, "project_id", 26, 26);
+    if (!isUlid(projectId)) throw new ApiError(400, "validation_error", "project_idはULIDで指定してください。", { field: "project_id" });
+    const routeKey = "work.project.move";
+    const result = await runCommand(context, routeKey, command, 200, async () => {
+      const moved = await requireWorkProjectMoveApi(context.core).moveWorkToProject(workId, { project_id: projectId }, command);
+      await invalidateWorkCommandCache(context, workId, `${routeKey}:${command.idempotency_key}`);
+      return { data: moved.data, version: moved.version };
+    }, workId);
+    sendJson(response, 200, result);
     return;
   }
 
@@ -3441,6 +3620,32 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
+  if (pathname === `${API_PREFIX}/settings/verification-policy` && method === "GET") {
+    requireOwner(request);
+    const data = await requireVerificationPolicyApi(context.core).getVerificationPolicySettings();
+    sendJson(response, 200, { request_id: requestIdValue, data, version: 0 });
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/settings/verification-policy` && method === "PATCH") {
+    requireOwner(request);
+    assertSameOriginWrite(request, context);
+    const patch = validatedVerificationPolicyPatch(await readRequestBody(request));
+    try {
+      const data = await requireVerificationPolicyApi(context.core).updateVerificationPolicySettings(patch);
+      sendJson(response, 200, { request_id: requestIdValue, data, version: 0 });
+    } catch (error) {
+      if (isObject(error) && error.code === "validation_error") {
+        throw new ApiError(400, "validation_error", error instanceof Error ? error.message : "Invalid verification policy settings.", isObject(error.details) ? error.details : {});
+      }
+      if (isObject(error) && error.code === "verification_policy_storage_invalid") {
+        throw new ApiError(409, "verification_policy_storage_invalid", error instanceof Error ? error.message : "保存済みの検証ポリシーが不正です。", isObject(error.details) ? error.details : {});
+      }
+      throw error;
+    }
+    return;
+  }
+
   if (pathname === `${API_PREFIX}/settings/review-limits` && method === "GET") {
     requireOwner(request);
     const data = await requireReviewLimitApi(context.core).getReviewLimitSettings();
@@ -4026,6 +4231,30 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     }
     const payload = dispatchRequest(command.payload);
     const data = await childRunCall(() => requireChildRunApi(context.core).dispatchChildRun(agent.agent_run_id, payload, command.idempotency_key));
+    sendJson(response, 200, { request_id: command.request_id, data });
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/agent/design-mocks` && method === "POST") {
+    const agent = requireDesignMockAgent(request, context);
+    const command = commandEnvelope(await readRequestBody(request));
+    if (command.expected_version !== 0) {
+      throw new ApiError(400, "validation_error", "expected_versionは0で指定してください。");
+    }
+    const { name, html } = designMockPayload(command.payload, ["name", "html"]);
+    const data = await designMockCall(() => requireDesignMockApi(context.core).saveDesignMock(agent.agent_run_id, name, html));
+    sendJson(response, 200, { request_id: command.request_id, data });
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/agent/design-mocks/delete` && method === "POST") {
+    const agent = requireDesignMockAgent(request, context);
+    const command = commandEnvelope(await readRequestBody(request));
+    if (command.expected_version !== 0) {
+      throw new ApiError(400, "validation_error", "expected_versionは0で指定してください。");
+    }
+    const { name } = designMockPayload(command.payload, ["name"]);
+    const data = await designMockCall(() => requireDesignMockApi(context.core).deleteDesignMock(agent.agent_run_id, name));
     sendJson(response, 200, { request_id: command.request_id, data });
     return;
   }
@@ -4918,7 +5147,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   if (pathname === `${API_PREFIX}/research/capture` && method === "POST") {
     const agent = requireGuard(request, context.guardTokens);
     if (!agent || !RESEARCH_CAPTURE_ROLES.has(agent.role)) {
-      throw new ApiError(403, "agent_scope_denied", "research capture はWorkエージェントのguard tokenでのみ受け付けます。");
+      throw new ApiError(403, "agent_scope_denied", "research capture はAdvisorとWorkエージェントのguard tokenでのみ受け付けます。");
     }
     const command = commandEnvelope(await readRequestBody(request));
     if (command.expected_version !== 0) {

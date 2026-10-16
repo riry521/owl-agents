@@ -64,15 +64,18 @@ test("pause controller resumes at the stored deadline, advances backoff after an
   controller.start();
 
   const first = await controller.recordRateLimit({ provider: "anthropic", resets_at: "2030-01-02T04:00:00.000Z" });
-  assert.equal(first.resume_at, "2030-01-02T04:00:30.000Z");
+  assert.equal(first.resume_at, "2030-01-02T04:01:30.000Z");
   assert.equal(controller.isPaused("claude"), true);
   assert.equal(events[0].type, "provider.paused");
   assert.deepEqual(events[0].payload, {
-    provider: "anthropic", provider_label: "Anthropic", resume_at: "2030-01-02T04:00:30.000Z",
+    provider: "anthropic", provider_label: "Anthropic", resume_at: "2030-01-02T04:01:30.000Z",
     resume_source: "reported", reported_resets_at: "2030-01-02T04:00:00.000Z", backoff_step: 0, repeat: false,
   });
 
-  await clock.advance(56 * 60_000 + 25_000);
+  await clock.advance(57 * 60_000 + 24_999);
+  assert.equal(store.list()[0].state, "paused");
+  assert.deepEqual(resumed, []);
+  await clock.advance(1);
   assert.equal(store.list()[0].state, "probing");
   assert.equal(controller.isPaused("anthropic"), false);
   assert.deepEqual(resumed, ["anthropic"]);
@@ -80,7 +83,7 @@ test("pause controller resumes at the stored deadline, advances backoff after an
 
   const second = await controller.recordRateLimit({ provider: "claude", resets_at: null });
   assert.equal(second.backoff_step, 1);
-  assert.equal(second.resume_at, "2030-01-02T04:30:30.000Z");
+  assert.equal(second.resume_at, "2030-01-02T04:31:30.000Z");
   assert.equal(events[2].payload.repeat, true);
 
   controller.stop();

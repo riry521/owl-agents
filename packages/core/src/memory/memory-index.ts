@@ -4,7 +4,7 @@ import { lstat, readdir, readFile, realpath } from "node:fs/promises";
 import { basename, join, relative, sep } from "node:path";
 import Database from "better-sqlite3";
 
-import { bodyOf, bodySha256, PAGE_KINDS, parsePage, validatePage, estimatePageTokens, themeTitleKey, PAGE_LIMITS, type PageIssue, type StoredKind } from "./page-format.js";
+import { bodyOf, bodySha256, PAGE_KINDS, MATERIALS_DIR, parsePage, validatePage, estimatePageTokens, themeTitleKey, PAGE_LIMITS, type PageIssue, type StoredKind } from "./page-format.js";
 import { parseMemoryNote, normalizeVaultPath, memoryIdForPath } from "./memory-note-reader.js";
 import { CHUNKS_DDL, embedPending, hasVectors, knn, loadVec, removeVectors } from "./memory-vectors.js";
 import type { Embedder, RetrievalProfile } from "./embedder.js";
@@ -12,6 +12,13 @@ import { type MemoryLogger, type MemoryNoteRow, type MemoryStoragePort, type Pag
 
 export const MEMORY_INDEX_FILE = "memory-index.sqlite";
 export const MEMORY_INDEX_SCHEMA_VERSION = 2;
+/**
+ * Bump whenever `pageColumns()` starts returning something else for the same file. The diff scan reuses a row while its
+ * mtime, size and sha256 match, so without this the rows keep the page_type of the older rule for ever.
+ * Raising MEMORY_INDEX_SCHEMA_VERSION instead would discard the whole index and embed every note again; recomputing the
+ * columns of the rows in place is far cheaper.
+ */
+export const PAGE_RULES_VERSION = 1;
 /** Last day each page was opened; kept apart from `notes` so a replaced note row does not lose it. */
 const PAGE_OPENS_DDL = "CREATE TABLE IF NOT EXISTS page_opens (path TEXT PRIMARY KEY, last_opened TEXT NOT NULL)";
 const MARKER_FILE = ".owl-knowledge";
@@ -342,35 +349,51 @@ export class MemoryIndex {
     const storage = this.options.storage;
     const result = { added: 0, updated: 0, removed: 0, unchanged: 0, scanned: 0 };
     const errors: { path: string; message: string }[] = [];
+    // Set when a row that had to be recomputed could not even be read; the rules version is then left unsaved.
+    let retypeFailed = false;
     const markerId = await this.readMoveId(storage);
     const dir = await storage.withRead(async () => {
       const root = storage.activeDir();
       const files = new Map<string, FileInfo>();
       await walk(root, root, files);
       result.scanned = files.size;
-      const known = new Map<string, { rowid: number; mtime: number; size_bytes: number; sha256: string }>();
-      for (const row of db.prepare("SELECT rowid, path, mtime, size_bytes, sha256 FROM notes").all() as { rowid: number; path: string; mtime: number; size_bytes: number; sha256: string }[]) known.set(row.path, row);
+      const known = new Map<string, { rowid: number; mtime: number; size_bytes: number; sha256: string; page_type: string }>();
+      for (const row of db.prepare("SELECT rowid, path, mtime, size_bytes, sha256, page_type FROM notes").all() as { rowid: number; path: string; mtime: number; size_bytes: number; sha256: string; page_type: string }[]) known.set(row.path, row);
 
       // Rows typed by the old folder rules are read again once ("folder_kinds_hash" is only a marker now).
       const force = getMeta(db, "folder_kinds_hash") !== "none";
+      // An index written before PAGE_RULES_VERSION existed has no value, so its rows are read again as well.
+      const rulesStale = getMeta(db, "page_rules_version") !== String(PAGE_RULES_VERSION);
       const upserts: { rowid: number | null; parsed: ReturnType<typeof parseMemoryNote>; mtime: number; sha: string; size: number; page: PageColumns }[] = [];
       const touch: { rowid: number; mtime: number }[] = [];
+      const retype: { rowid: number; page: PageColumns }[] = [];
       for (const [path, info] of [...files].sort(([a], [b]) => (a < b ? -1 : 1))) {
         const old = known.get(path);
-        if (!force && old && old.mtime === info.mtime && old.size_bytes === info.size) { result.unchanged += 1; continue; }
+        const stale = force || rulesStale;
+        if (!stale && old && old.mtime === info.mtime && old.size_bytes === info.size) { result.unchanged += 1; continue; }
         try {
           let content = "";
           let sha = "too_large";
           if (info.size <= MAX_FILE_BYTES) {
             const data = await readFile(info.abs);
             sha = sha256(data);
-            if (!force && old && old.sha256 === sha) { touch.push({ rowid: old.rowid, mtime: info.mtime }); result.unchanged += 1; continue; }
+            // The file itself did not change. The row keeps its chunks, vectors and FTS text, so only the page columns may need
+            // to move; without the rules version changing this is the plain "keep the mtime fresh" path.
+            if (old && old.sha256 === sha) {
+              touch.push({ rowid: old.rowid, mtime: info.mtime });
+              if (stale) retype.push({ rowid: old.rowid, page: pageColumns(path, data.toString("utf8")) });
+              result.unchanged += 1;
+              continue;
+            }
             content = data.toString("utf8");
           }
           const parsed = parseMemoryNote(path, content, { mtimeMs: info.mtime });
           upserts.push({ rowid: old?.rowid ?? null, parsed, mtime: info.mtime, sha, size: info.size, page: pageColumns(path, content) });
           if (old) result.updated += 1; else result.added += 1;
         } catch (error) {
+          // A stale row that cannot be read keeps the old rules' columns. Recording the failure below keeps the rules
+          // version back, so the next scan reads it again instead of trusting an mtime that matches.
+          if (stale && old) retypeFailed = true;
           errors.push({ path, message: (error as Error).message });
         }
       }
@@ -380,6 +403,7 @@ export class MemoryIndex {
       const write = db.transaction(() => {
         for (const rowid of removed) removeNote(db, rowid);
         for (const t of touch) db.prepare("UPDATE notes SET mtime = ? WHERE rowid = ?").run(t.mtime, t.rowid);
+        for (const r of retype) updatePageColumns(db, r.rowid, r.page);
       });
       write();
       for (let i = 0; i < upserts.length; i += BATCH) {
@@ -390,6 +414,9 @@ export class MemoryIndex {
     });
     const nowIso = this.now().toISOString();
     setMeta(db, "folder_kinds_hash", "none");
+    // Saved only once every row was recomputed, so the next diff scan reuses them again. A row that failed above keeps the
+    // old version, and the next scan retries it instead of skipping it on a matching mtime.
+    if (!retypeFailed) setMeta(db, "page_rules_version", String(PAGE_RULES_VERSION));
     setMeta(db, "last_scan_at", nowIso);
     if (!getMeta(db, "built_at")) setMeta(db, "built_at", nowIso);
     setMeta(db, "move_id", markerId);
@@ -642,7 +669,7 @@ export class MemoryIndex {
   public pageStats(): { by_type: Record<StoredKind, number>; template_invalid: number; theme_over_budget: number; index_over_budget: number; pending_integration: number; unresolved_links: number } {
     const db = this.db();
     const count = (where: string): number => (db.prepare(`SELECT count(*) AS n FROM notes WHERE ${where}`).get() as { n: number }).n;
-    const by_type: Record<StoredKind, number> = { theme: 0, "project-index": 0, "work-log": 0, clipping: 0, "conversation-log": 0, legacy: 0, archive: 0 };
+    const by_type: Record<StoredKind, number> = { theme: 0, "project-index": 0, "work-log": 0, clipping: 0, "conversation-log": 0, legacy: 0, archive: 0, material: 0 };
     for (const [type, n] of Object.entries(this.pageReport().by_page_type)) by_type[type as StoredKind] = n;
     return {
       by_type,
@@ -706,8 +733,38 @@ function removeNote(db: Database.Database, rowid: number): void {
   removeVectors(db, rowid);
 }
 
+/**
+ * Rewrites the columns `pageColumns()` owns on a row whose file did not change. The row is kept, so its chunks and
+ * vectors stay valid; the FTS row holds content-derived text, which is unchanged too.
+ */
+function updatePageColumns(db: Database.Database, rowid: number, page: PageColumns): void {
+  const row = db.prepare("SELECT invalid_reasons_json FROM notes WHERE rowid = ?").get(rowid) as { invalid_reasons_json: string } | undefined;
+  if (!row) return;
+  const reasons = [...(JSON.parse(row.invalid_reasons_json) as string[]).filter((r) => !r.startsWith("template:")), ...page.template_errors.map((e) => `template:${e.code}${e.key ? `:${e.key}` : e.section ? `:${e.section}` : ""}`)];
+  db.prepare(
+    `UPDATE notes SET page_type = @page_type, page_type_source = @page_type_source, body_sha256 = @body_sha256,
+      integrated_hash = @integrated_hash, integrated_at = @integrated_at, token_estimate = @token_estimate,
+      template_valid = @template_valid, template_errors_json = @template_errors_json, template_warnings_json = @template_warnings_json,
+      links_optional = @links_optional, page_scope = @page_scope, page_project_id = @page_project_id,
+      related_projects_json = @related_projects_json, title_key = @title_key, merged_into = @merged_into,
+      source_hash = @source_hash, generated_at = @generated_at, owl_new_count = @owl_new_count,
+      work_id = @work_id, work_number = @work_number, source_url = @source_url, retrieved_at = @retrieved_at,
+      valid = @valid, invalid_reasons_json = @invalid_reasons_json WHERE rowid = @rowid`,
+  ).run({
+    rowid, page_type: page.page_type, page_type_source: page.page_type_source, body_sha256: page.body_sha256,
+    integrated_hash: page.integrated_hash, integrated_at: page.integrated_at, token_estimate: page.token_estimate,
+    template_valid: page.template_valid, template_errors_json: JSON.stringify(page.template_errors),
+    template_warnings_json: JSON.stringify(page.template_warnings), links_optional: page.links_optional,
+    page_scope: page.page_scope, page_project_id: page.page_project_id, related_projects_json: JSON.stringify(page.related_projects),
+    title_key: page.title_key, merged_into: page.merged_into, source_hash: page.source_hash, generated_at: page.generated_at,
+    owl_new_count: page.owl_new_count, work_id: page.work_id, work_number: page.work_number,
+    source_url: page.source_url, retrieved_at: page.retrieved_at,
+    valid: reasons.length === 0 ? 1 : 0, invalid_reasons_json: JSON.stringify(reasons),
+  });
+}
+
 interface PageColumns {
-  page_type: PageType | "legacy" | "archive"; page_type_source: "frontmatter" | "folder" | "default"; body_sha256: string;
+  page_type: PageType | "legacy" | "archive" | "material"; page_type_source: "frontmatter" | "folder" | "default"; body_sha256: string;
   integrated_hash: string | null; integrated_at: string | null; token_estimate: number; template_valid: number | null;
   template_errors: PageIssue[]; template_warnings: string[]; links_optional: number;
   page_scope: "project" | "common" | null; page_project_id: string | null; related_projects: string[]; title_key: string | null;
@@ -721,23 +778,27 @@ function pageColumns(path: string, content: string): PageColumns {
   const declared = typeof page.frontmatter.type === "string" ? page.frontmatter.type : "";
   const fromFrontmatter = (PAGE_KINDS as readonly string[]).includes(declared) ? (declared as PageType) : null;
   const archived = /^(?:archive|_history)\//u.test(path);
+  const material = path.startsWith(`${MATERIALS_DIR}/`);
   const [page_type, page_type_source] = archived ? (["archive", "default"] as const)
+    : material ? (["material", "default"] as const)
     : fromFrontmatter ? ([fromFrontmatter, "frontmatter"] as const) : (["legacy", "default"] as const);
   const str = (key: string): string | null => (typeof page.frontmatter[key] === "string" && page.frontmatter[key] !== "" ? (page.frontmatter[key] as string) : null);
   let template_valid: number | null = null;
   let template_errors: PageIssue[] = [];
   let template_warnings: string[] = [];
-  if (!archived && (PAGE_KINDS as readonly string[]).includes(declared)) {
+  if (!archived && !material && (PAGE_KINDS as readonly string[]).includes(declared)) {
     const result = validatePage(page, { writer: "owner" });
     template_valid = result.ok ? 1 : 0;
     template_errors = [...result.errors];
     template_warnings = result.warnings.map((w) => w.code);
   }
+  // Materials have no template; mark them valid so search's template_valid_only filter keeps them.
+  if (material) template_valid = 1;
   const body = bodyOf(content);
   const related = page.frontmatter.related_projects;
   const num = page.frontmatter.work_number;
   const scope = str("scope");
-  const isPage = !archived && (PAGE_KINDS as readonly string[]).includes(declared);
+  const isPage = !archived && !material && (PAGE_KINDS as readonly string[]).includes(declared);
   return {
     page_type, page_type_source, body_sha256: bodySha256(content), integrated_hash: str("integrated_hash"), integrated_at: str("integrated_at"),
     token_estimate: estimatePageTokens(body), template_valid, template_errors, template_warnings,
@@ -745,7 +806,7 @@ function pageColumns(path: string, content: string): PageColumns {
     page_scope: isPage && (scope === "project" || scope === "common") ? scope : null,
     page_project_id: isPage ? str("project_id") : null,
     related_projects: Array.isArray(related) ? related.map(String) : [],
-    title_key: declared === "theme" ? themeTitleKey(str("title") ?? "") : null,
+    title_key: declared === "theme" && !material ? themeTitleKey(str("title") ?? "") : null,
     merged_into: str("merged_into"), source_hash: str("source_hash"), generated_at: str("generated_at"),
     owl_new_count: (body.match(/<!--\s*owl:new\b/gu) ?? []).length,
     work_id: str("work_id"), work_number: typeof num === "number" ? num : null, source_url: str("source_url"), retrieved_at: str("retrieved_at"),

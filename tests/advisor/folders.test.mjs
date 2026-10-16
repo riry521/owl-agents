@@ -169,6 +169,15 @@ test("Advisor prompt contains both configured folders", async (t) => {
   assert.match(prompt, /## Owner folders/u);
   assert.ok(prompt.includes(join(root, "shared")));
   assert.ok(prompt.includes(join(root, "screenshots")));
+  const materials = join(core.knowledgeLocation.path, "materials");
+  assert.ok(prompt.includes(`${join(materials, "projects")}/<slug>/`) && prompt.includes(`${join(materials, "common")}/`));
+  assert.ok(prompt.includes("files you receive") && !prompt.includes("Save files meant for the Owner here"));
+});
+
+test("append tool description limits knowledge to lessons and sends summaries to materials/", async () => {
+  const { APPEND_TOOL } = await import("../../apps/server/dist/memory-mcp.js");
+  assert.match(APPEND_TOOL.description, /教訓・決まりごと・落とし穴だけ/u);
+  assert.ok(APPEND_TOOL.description.includes("materials/") && !APPEND_TOOL.description.includes("会話で決まったこと"));
 });
 
 test("uploads copy with collision names, resolve to shared paths, and quarantine executables", async (t) => {

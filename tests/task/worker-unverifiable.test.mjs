@@ -377,8 +377,8 @@ test("a partial after a side effect with nothing to escalate is retried with its
   assert.equal(runner.state.replanRequests.length, 0);
 });
 
-test("a resumable partial past the deterministic failure limit waits for the Owner", async (t) => {
-  const limit = DEFAULT_ATTEMPT_POLICY_CONFIG.deterministicFailureLimit;
+test("a resumable partial repeating the same error up to the same-error limit waits for the Owner", async (t) => {
+  const limit = DEFAULT_ATTEMPT_POLICY_CONFIG.deterministicSameErrorLimit;
   const runner = blockerRunner(Array.from({ length: limit + 1 }, () => resumable()));
   const { db, core } = await openCore(t, runner);
   runner.state.db = db;

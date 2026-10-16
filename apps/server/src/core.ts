@@ -70,6 +70,7 @@ import type {
   SaveProviderInput,
   AdvisorSessionsPort,
 } from "./types.js";
+import { configuredDesignSkill } from "./config.js";
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
 import type { WebResearchCapture } from "../../../packages/shared/dist/web-research.js";
 import type { ChildDispatchRequest, ChildDispatchResponse, ChildRunListFilter, ChildRunRecord, ChildRunSettings, ChildWaitRequest, ChildWaitResponse } from "../../../packages/shared/dist/child-runs.js";
@@ -1428,6 +1429,7 @@ interface ExternalCore {
   getTokensView?(input: { period: "today" | "7d" | "30d"; top: number }): Promise<JsonObject>;
   getWorkDesign?(workId: string, taskId: string): Promise<WorkDesignDetail | null>;
   startWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
+  moveWorkToProject?(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   pauseWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   resumeWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   resumeWorkOrRetryDecision(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
@@ -1643,7 +1645,7 @@ function displayNumberOrNull(value: unknown): number | null {
   return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : null;
 }
 
-function externalError(error: unknown, operation: string): ApiError {
+export function externalError(error: unknown, operation: string): ApiError {
   if (error instanceof ApiError) return error;
   if (isRecord(error) && typeof error.code === "string") {
     const code = error.code;
@@ -1663,6 +1665,7 @@ function externalError(error: unknown, operation: string): ApiError {
       "decision_not_found",
       "decision_already_resolved",
       "project_not_found",
+      "work_project_already_set",
       "provider_pause_not_found",
       "write_paths_invalid",
       "model_not_allowed",
@@ -1905,6 +1908,17 @@ export class ExternalCoreAdapter implements CorePort {
       return { data: data as { work_id: string; state: "running"; started: boolean }, version: response.version };
     } catch (error) {
       throw externalError(error, "startWork");
+    }
+  }
+
+  async moveWorkToProject(workId: string, input: { project_id: string }, command: CommandMeta): Promise<CommandResult<JsonObject>> {
+    try {
+      if (!this.core.moveWorkToProject) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support moving a Work into a Project.");
+      const response = await this.core.moveWorkToProject(workId, { ...command, payload: input });
+      const { version: _version, ...data } = response.data;
+      return { data, version: response.version };
+    } catch (error) {
+      throw externalError(error, "moveWorkToProject");
     }
   }
 
@@ -3156,6 +3170,7 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
     knowledgeStorage: knowledgeStorageOptions(appSettings),
     getTypesafeApiKey: () => appSettings.getTypesafeApiKey(),
     getAdvisorPersona: () => appSettings.getAdvisorPersona(),
+    designSkill: configuredDesignSkill() ?? null,
     getAdvisorFolders: () => {
       const defaults = advisorFolderDefaults(options.dataDir ?? resolveDataDir(owlRoot));
       const sharedDir = appSettings.getAdvisorSharedDir() || defaults.sharedDir;

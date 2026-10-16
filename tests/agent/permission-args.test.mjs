@@ -319,7 +319,7 @@ test("Claude instruction environment does not override the child environment", (
 
 test("Claude Work roles install the optional Web research PostToolUse hook", async (t) => {
   await withResearchHook(t, (root, researchHook) => {
-    for (const role of ["manager", "designer", "worker", "reviewer"]) {
+    for (const role of ["advisor", "manager", "designer", "worker", "reviewer"]) {
       const args = buildAgentPermissionArgs(role, "claude", { owlRoot: root });
       const settings = JSON.parse(args[3]);
       assert.equal(settings.hooks.PostToolUse[0].matcher, "WebFetch|WebSearch", role);
@@ -330,9 +330,9 @@ test("Claude Work roles install the optional Web research PostToolUse hook", asy
   });
 });
 
-test("Advisor and Curator Claude sessions do not install the research hook", async (t) => {
+test("Curator Claude sessions do not install the research hook", async (t) => {
   await withResearchHook(t, (root) => {
-    for (const role of ["advisor", "curator"]) {
+    for (const role of ["curator"]) {
       const args = buildAgentPermissionArgs(role, "claude", { owlRoot: root });
       const settings = JSON.parse(args[3]);
       assert.equal(settings.hooks.PostToolUse, undefined, role);

@@ -30,7 +30,7 @@ test("records reported and backoff resume times", async (t) => {
   assert.equal(reported.state, "paused");
   assert.equal(reported.resume_source, "reported");
   assert.equal(reported.reported_resets_at, "2030-01-02T04:00:00.000Z");
-  assert.equal(reported.resume_at, "2030-01-02T04:00:30.000Z");
+  assert.equal(reported.resume_at, "2030-01-02T04:01:30.000Z");
 
   const backoff = await store.recordRateLimit({ provider: "openai", resets_at: null });
   assert.equal(backoff.resume_source, "backoff");

@@ -693,7 +693,7 @@ test("a rate-limited final check pauses the Provider without a Decision, keeps i
     assert.ok(db.get("SELECT provider FROM provider_pauses WHERE resume_at IS NOT NULL"), `${label}: the Provider is paused`);
     assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "running", label);
 
-    t.mock.timers.tick(30_000);
+    t.mock.timers.tick(90_000);
     for (let i = 0; i < 500 && db.get("SELECT state FROM works WHERE id = ?", workId).state !== "completed"; i += 1) await new Promise((r) => setImmediate(r));
     assert.equal(finalCalls, 2, `${label}: the final check runs again after the pause`);
     assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "completed", label);

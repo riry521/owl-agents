@@ -9,7 +9,8 @@ import {
   initializeNewProjectFolder,
   inspectProjectFolder,
 } from "../../apps/server/dist/project-registration.js";
-import { git } from "../helpers/git.mjs";
+import { inspectRepositoryRoot } from "../../packages/core/dist/repository-inspection.js";
+import { createTestRepo, git } from "../helpers/git.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 
 test("existing repositories get their base branch detected without modifying their checkout", async (t) => {
@@ -29,6 +30,79 @@ test("existing repositories get their base branch detected without modifying the
   assert.equal(inspection.has_uncommitted_changes, true);
   assert.equal(inspection.uncommitted_file_count, 1);
   assert.equal(git(project, "status", "--short").includes("draft.txt"), true);
+});
+
+test("shared repository inspection returns the top-level folder, preferred base branch, and creator Work", async (t) => {
+  const parent = await tempDir(t, "owl-repository-inspection-");
+  const project = join(parent, "repo");
+  await mkdir(project);
+  git(project, "init", "--initial-branch=feature");
+  await writeFile(join(project, "README.md"), "hello\n");
+  git(project, "add", "README.md");
+  git(project, "commit", "-m", "initial");
+  git(project, "branch", "main");
+  git(project, "branch", "release");
+  git(project, "update-ref", "refs/remotes/origin/release", "HEAD");
+  git(project, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/release");
+  git(project, "config", "owl.createdByWork", "work-created-this-repository");
+
+  const inspection = await inspectRepositoryRoot(async (cwd, args) => {
+    try {
+      const stdout = git(cwd, ...args);
+      return { ok: true, stdout };
+    } catch {
+      return { ok: false, stdout: "" };
+    }
+  }, project);
+  assert.deepEqual(inspection, {
+    kind: "repository",
+    root: await realpath(project),
+    base_branch: "release",
+    created_by_work: "work-created-this-repository",
+  });
+  const gateway = new GitWorktreeGateway({ get: () => undefined }, parent);
+  assert.deepEqual(await gateway.inspectRepositoryRoot(project), inspection);
+});
+
+test("shared repository inspection excludes bare, linked worktree, submodule, and no-commit repositories", async (t) => {
+  const parent = await tempDir(t, "owl-repository-inspection-exclusions-");
+  const repo = await createTestRepo(t, { prefix: "owl-inspection-main-" });
+  const bare = join(parent, "bare.git");
+  git(parent, "clone", "--bare", repo, bare);
+  const linked = join(parent, "linked");
+  git(repo, "worktree", "add", "-b", "linked-branch", linked);
+  const child = await createTestRepo(t, { prefix: "owl-inspection-child-" });
+  git(repo, "-c", "protocol.file.allow=always", "submodule", "add", child, "submodule");
+  const uncommitted = join(parent, "uncommitted");
+  await mkdir(uncommitted);
+  git(uncommitted, "init", "--initial-branch=main");
+
+  const inspect = async (path) => inspectRepositoryRoot(async (cwd, args) => {
+    try {
+      return { ok: true, stdout: git(cwd, ...args) };
+    } catch {
+      return { ok: false, stdout: "" };
+    }
+  }, path);
+  assert.equal((await inspect(bare)).kind, "bare");
+  assert.equal((await inspect(linked)).kind, "linked_worktree");
+  assert.equal((await inspect(join(repo, "submodule"))).kind, "submodule");
+  assert.equal((await inspect(uncommitted)).kind, "no_commit");
+});
+
+test("shared repository inspection reports when no base branch can be selected", async (t) => {
+  const root = await tempDir(t, "owl-repository-no-branch-");
+  await mkdir(join(root, ".git"));
+  const inspection = await inspectRepositoryRoot(async (_cwd, args) => {
+    if (args[0] === "rev-parse" && args[1] === "--show-toplevel") return { ok: true, stdout: root };
+    if (args[0] === "rev-parse" && args[1] === "--is-bare-repository") return { ok: true, stdout: "false" };
+    if (args[0] === "rev-parse" && args[1] === "--show-superproject-working-tree") return { ok: true, stdout: "" };
+    if (args[0] === "rev-parse" && args[1] === "--absolute-git-dir") return { ok: true, stdout: join(root, ".git") };
+    if (args[0] === "rev-parse" && args[1] === "--git-common-dir") return { ok: true, stdout: ".git" };
+    if (args[0] === "rev-parse" && args[1] === "--verify") return { ok: true, stdout: "commit" };
+    return { ok: false, stdout: "" };
+  }, root);
+  assert.deepEqual(inspection, { kind: "no_branch", root });
 });
 
 test("initializing an existing folder creates a local snapshot and excludes common secrets", async (t) => {

@@ -93,5 +93,5 @@ test("advisor session route counts queued and running turns and reports the prov
 
   await createProviderPauseStore(db, () => NOW).recordRateLimit({ provider: "anthropic", resets_at: "2030-01-02T04:00:00.000Z" });
   const paused = await getSession();
-  assert.equal(paused.provider_paused_until, "2030-01-02T04:00:30.000Z");
+  assert.equal(paused.provider_paused_until, "2030-01-02T04:01:30.000Z");
 });

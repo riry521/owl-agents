@@ -2,6 +2,7 @@ import { cliText } from "./cli-language.js";
 import { isIP } from "node:net";
 
 import { loadOwlEnv } from "../../../packages/shared/dist/env.js";
+import { DESIGN_SKILL_NAME_PATTERN } from "../../../packages/shared/dist/design-documents.js";
 import { AgentTimeoutSettingError, agentIdleTimeoutMs, agentWallTimeoutMs } from "../../../packages/shared/dist/index.js";
 
 // Every server entry point imports this module before reading process.env.
@@ -28,6 +29,23 @@ export function configuredApiToken(): string | undefined {
 export function configuredIdempotencyTtlMs(): number | undefined {
   const value = Number(process.env.OWL_IDEMPOTENCY_TTL_MS);
   return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+const warnedDesignSkills = new Set<string>();
+
+/**
+ * OWL_DESIGN_SKILL: skill the Lead Designer uses for screen design; undefined (unset or blank) names no skill.
+ * An invalid name is warned about once and ignored: the value goes into a prompt verbatim.
+ */
+export function configuredDesignSkill(): string | undefined {
+  const skill = process.env.OWL_DESIGN_SKILL?.trim();
+  if (!skill) return undefined;
+  if (DESIGN_SKILL_NAME_PATTERN.test(skill)) return skill;
+  if (!warnedDesignSkills.has(skill)) {
+    warnedDesignSkills.add(skill);
+    console.warn("OWL_DESIGN_SKILL is not a valid skill name (letters, digits, : _ . - only, up to 128 characters); it is ignored.");
+  }
+  return undefined;
 }
 
 function positiveIntegerEnv(name: string): number | undefined {

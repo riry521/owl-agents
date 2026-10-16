@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { designDocumentPath } from "../../packages/shared/dist/index.js";
+import { DESIGN_MOCK_FILE_PATTERN, DESIGN_SKILL_NAME_PATTERN, designDocumentPath, designMockDirectory, isScreenDesignTask } from "../../packages/shared/dist/index.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { createTestCore, command } from "../helpers/core.mjs";
 import { necessityFor, criteriaFor } from "../helpers/necessity.mjs";
@@ -164,4 +164,17 @@ test("a Lead Designer design Task that completes through the normal path trigger
   const design = db.get("SELECT id FROM tasks WHERE work_id = ? AND type = 'design'", workId);
   assert.deepEqual(calls[1].ids, [design.id]);
   assert.deepEqual(calls[1].documents.map((document) => document.task_id), [design.id]);
+});
+
+test("design mock helpers fix the mock directory, file names, skill names and screen design Tasks", () => {
+  assert.equal(designMockDirectory("/var/lib/owl/data", "01WORK", "01TASK"), "/var/lib/owl/data/designs/01WORK/01TASK.mocks");
+  assert.equal(designMockDirectory("/var/lib/owl/data", "../x", "a.b"), "/var/lib/owl/data/designs/___x/a_b.mocks");
+  for (const name of ["01-sign-in.html", "a.html"]) assert.equal(DESIGN_MOCK_FILE_PATTERN.test(name), true, name);
+  for (const name of ["../x.html", "A.html", ".hidden.html", "a/b.html", "a.htm", "-a.html", `${"a".repeat(65)}.html`]) assert.equal(DESIGN_MOCK_FILE_PATTERN.test(name), false, name);
+  for (const name of ["example-ui-skill", "plugin:skill_1.0"]) assert.equal(DESIGN_SKILL_NAME_PATTERN.test(name), true, name);
+  for (const name of ["", "-x", "a b", "a\nb", "a".repeat(129)]) assert.equal(DESIGN_SKILL_NAME_PATTERN.test(name), false, JSON.stringify(name));
+  assert.equal(isScreenDesignTask({ type: "design", assigned_designer: "lead_designer" }), true);
+  assert.equal(isScreenDesignTask({ type: "design", assigned_designer: "designer" }), false);
+  assert.equal(isScreenDesignTask({ type: "design" }), false);
+  assert.equal(isScreenDesignTask({ type: "code", assigned_designer: "lead_designer" }), false);
 });

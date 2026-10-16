@@ -54,6 +54,17 @@ test("OpenAPI documents POST /works/{work_id}/reopen with an optional non-blank 
   assert.match(payload, /additionalProperties: false/u);
 });
 
+test("OpenAPI documents moving a Project-less Work into a Project", () => {
+  const route = yamlBlock(openapi, "  /api/v1/works/{work_id}/project:");
+  assert.match(route, /operationId: moveWorkToProject/u);
+  assert.match(route, /MoveWorkToProjectCommand/u);
+  assert.match(route, /MoveWorkToProjectResponse/u);
+  assert.match(route, /work_project_already_set/u);
+  assert.match(route, /worktree_cleanup_failed/u);
+  assert.match(yamlBlock(openapi, "    MoveWorkToProjectPayload:"), /additionalProperties: false/u);
+  assert.match(http, /requireWorkProjectMoveApi\(context\.core\)\.moveWorkToProject/u);
+});
+
 test("OpenAPI archive and delete work routes match the server actions", () => {
   const works = yamlBlock(openapi, "  /api/v1/works:");
   assert.match(works, /name: archived\n\s+required: false\n\s+schema:\n\s+type: string\n\s+enum:\n\s+- exclude\n\s+- include\n\s+- only\n\s+default: exclude/u);
@@ -122,6 +133,22 @@ test("OpenAPI and server routes expose design document list and detail endpoints
   assert.match(http, /works\/\(\[\^\/\]\+\)\/designs/u);
   assert.match(http, /getWorkDesigns\(workId\)/u);
   assert.match(http, /getWorkDesign\(workId, taskId\)/u);
+});
+
+test("OpenAPI and server routes expose design mock endpoints", () => {
+  const list = yamlBlock(openapi, "  /api/v1/works/{work_id}/design-mocks:");
+  const detail = yamlBlock(openapi, "  /api/v1/works/{work_id}/design-mocks/{task_id}/{name}:");
+  const save = yamlBlock(openapi, "  /api/v1/agent/design-mocks:");
+  const remove = yamlBlock(openapi, "  /api/v1/agent/design-mocks/delete:");
+  assert.match(list, /operationId: listWorkDesignMocks/u);
+  assert.match(detail, /operationId: getWorkDesignMock/u);
+  assert.match(detail, /text\/html/u);
+  assert.match(detail, /design_mock_not_found/u);
+  assert.match(save, /operationId: saveAgentDesignMock/u);
+  assert.match(remove, /operationId: deleteAgentDesignMock/u);
+  assert.match(http, /works\/\(\[\^\/\]\+\)\/design-mocks\$/u);
+  assert.match(http, /agent\/design-mocks`/u);
+  assert.match(http, /agent\/design-mocks\/delete`/u);
 });
 
 test("OpenAPI documents provider pause listing", () => {

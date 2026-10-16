@@ -43,7 +43,7 @@ const planTask = (extra = {}) => ({ id: "T1", title: "A", type: "code", acceptan
  * started while it is set until `release()` is called.
  */
 function makeRunner() {
-  const state = { workerCalls: 0, replans: 0, gate: null, worktrees: [], contexts: [], wait: () => null };
+  const state = { workerCalls: 0, replans: 0, gate: null, worktrees: [], contexts: [], wait: () => null, gated: 0 };
   return {
     state,
     runManagerPlan: async (request) => {
@@ -58,6 +58,7 @@ function makeRunner() {
     runWorker: async (request) => {
       const gate = state.gate;
       if (gate) {
+        state.gated += 1;
         await gate;
         await mkdir(join(request.context.worktree, "src"), { recursive: true });
         await writeFile(join(request.context.worktree, "src/other.mjs"), "export const o = 1;\n");
@@ -133,6 +134,8 @@ async function startGatedOtherWork(ctx) {
   const workId = await startWork(ctx, "other");
   const taskId = await until(() => ctx.db.get("SELECT id FROM tasks WHERE work_id = ? AND status = 'running'", workId)?.id);
   assert.ok(taskId, "the other Work's Task runs");
+  // The Task is marked running before runWorker reads the gate; clearing it earlier lets this Worker through.
+  assert.ok(await until(() => ctx.runner.state.gated >= 1), "the other Work's Worker is held at the gate");
   ctx.runner.state.gate = null;
   return { workId, taskId, release };
 }

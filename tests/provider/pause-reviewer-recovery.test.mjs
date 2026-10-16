@@ -139,7 +139,7 @@ test("a thrown Reviewer rate limit pauses the Provider without a Decision and re
   assert.equal(db.get("SELECT reviewer_failure_count FROM tasks WHERE id = ?", taskId).reviewer_failure_count, 0);
   assert.equal(createProviderPauseStore(db).list().find((pause) => pause.provider === "anthropic")?.state, "paused");
 
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(90_000);
   await waitUntil(() => agent.reviewerAttempts === 2 && db.get("SELECT status FROM tasks WHERE id = ?", taskId).status === "completed", "Reviewer retry after provider resume");
 });
 
@@ -166,7 +166,7 @@ test("Core restart preserves a rate-limited Reviewer wait and retries it when th
   assert.equal(db.get("SELECT reviewer_failure_count FROM tasks WHERE id = ?", taskId).reviewer_failure_count, 0);
   assert.equal(db.get("SELECT status FROM tasks WHERE id = ?", taskId).status, "verifying");
 
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(90_000);
   await waitUntil(() => agent.reviewerAttempts === 2 && db.get("SELECT status FROM tasks WHERE id = ?", taskId).status === "completed", "Reviewer retry after provider resume");
   assert.equal(db.get("SELECT reviewer_failure_count FROM tasks WHERE id = ?", taskId).reviewer_failure_count, 0);
   assert.equal(db.get("SELECT COUNT(*) AS count FROM agent_runs WHERE role = 'reviewer' AND task_id = ?", taskId).count, 2);
@@ -269,7 +269,7 @@ test("restart preserves every Reviewer wait for one paused Provider, including T
   assert.deepEqual(taskIds.map((taskId) => db.get("SELECT reviewer_failure_count FROM tasks WHERE id = ?", taskId).reviewer_failure_count), [0, 0]);
   assert.equal(db.get("SELECT COUNT(*) AS count FROM idempotency_keys WHERE key LIKE 'paused-reviewer-wait:%'").count, 2);
 
-  t.mock.timers.tick(30_000);
+  t.mock.timers.tick(90_000);
   await waitUntil(() => reviewerAttempts === 3, "both Reviewers to restart");
   assert.equal(db.get("SELECT COUNT(*) AS count FROM idempotency_keys WHERE key LIKE 'paused-reviewer-wait:%'").count, 0);
   releaseResumedReviewers();

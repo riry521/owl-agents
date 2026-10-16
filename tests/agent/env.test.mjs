@@ -114,6 +114,36 @@ test("a custom provider key reaches only that provider's process, under the harn
   for (const call of calls) assert.equal(call.env.OWL_PROVIDER_ORCA_API_KEY, undefined);
 });
 
+test("worker git template directory reaches the provider process only when supplied", async () => {
+  const calls = [];
+  const runner = createAgentRunner({
+    adapter: "claude-cli/v1",
+    outputLogDir: null,
+    env: { PATH: "/usr/bin", HOME: "/home/owl" },
+    provider: {
+      execute: async (request) => {
+        calls.push(request);
+        return { adapter: request.adapter, stdout: "{}", stderr: "", exit_code: 0, signal: null, format: "plain-text" };
+      },
+    },
+  });
+  const workerRequest = (git_template_dir) => ({
+    invocation_id: "worker-template-1",
+    work_id: "work-template-1",
+    task_id: "task-template-1",
+    attempt: 1,
+    ...(git_template_dir === undefined ? {} : { git_template_dir }),
+    context: { task: { id: "task-template-1", title: "T", acceptance: "A" } },
+  });
+
+  await runner.runWorker(workerRequest("/tmp/owl-git-template"));
+  await runner.runWorker(workerRequest(undefined));
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].env.GIT_TEMPLATE_DIR, "/tmp/owl-git-template");
+  assert.equal(calls[1].env.GIT_TEMPLATE_DIR, undefined);
+});
+
 test("claude args swap superpowers for a hook-free view of its skills and leave other plugins and settings alone", async (t) => {
   const home = await tempDir(t, "owl-sp-home-");
   const previousHome = process.env.HOME;

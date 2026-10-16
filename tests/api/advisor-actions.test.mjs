@@ -218,9 +218,9 @@ test("/advisor/actions rejects invalid payloads and state violations without cha
   });
 });
 
-test("ふさぐ API の一覧: 31 行を照合し、Project 登録・start・GET は通す", async () => {
+test("ふさぐ API の一覧: 32 行を照合し、Work 移動は専用 action に誘導する", async () => {
   const policy = await import("../../packages/shared/dist/advisor-api-policy.js");
-  assert.equal(policy.ADVISOR_BLOCKED_APIS.length, 31);
+  assert.equal(policy.ADVISOR_BLOCKED_APIS.length, 32);
   for (const row of policy.ADVISOR_BLOCKED_APIS) {
     const pathname = `/api/v1${row.path.replace(/\{[a-z_]+\*\}/, "a/b").replace(/\{[a-z_]+\}/g, "x1")}`;
     assert.equal(policy.matchAdvisorBlockedApi(row.method, pathname), row, `${row.method} ${row.path}`);
@@ -239,6 +239,9 @@ test("ふさぐ API の一覧: 31 行を照合し、Project 登録・start・GET
   ]) {
     assert.equal(policy.matchAdvisorBlockedApi(method, path), null, `${method} ${path}`);
   }
+  const move = policy.matchAdvisorBlockedApi("POST", "/api/v1/works/w1/project");
+  assert.ok(move);
+  assert.deepEqual(policy.advisorAlternativeActions(move), ["move_work_to_project"]);
 });
 
 test("validateOwnApiPath は外部 URL・正規化で変わるパス・クエリ（allowQuery=false）を拒む", async () => {
@@ -281,6 +284,7 @@ test("Advisor guard token reads as Owner, is refused on irreversible APIs with 4
   const before = await snapshot();
   const cases = [
     ["POST", `/works/${workId}/cancel`, ["cancel_work"]],
+    ["POST", `/works/${workId}/project`, ["move_work_to_project"], { request_id: createUlid(), idempotency_key: "advisor-direct-move", expected_version: 0, payload: { project_id: createUlid() } }],
     ["DELETE", `/works/${workId}`, ["delete_work"]],
     ["PUT", "/settings/models", ["call_api"]],
     ["POST", "/advisor/actions", null, { type: "update_work", work_id: workId, title: "changed" }],

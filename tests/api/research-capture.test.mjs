@@ -10,7 +10,7 @@ function requestBody(payload) {
   return { request_id: "request", idempotency_key: "capture-key", expected_version: 0, payload };
 }
 
-test("research capture accepts Work agent tokens and validates the payload boundary", async (t) => {
+test("research capture accepts Advisor and Work agent tokens", async (t) => {
   const root = await tempDir(t, "owl-api-research-");
   const guardTokens = GuardTokenRegistry.open(join(root, "guard-tokens"));
   const calls = [];
@@ -58,7 +58,13 @@ test("research capture accepts Work agent tokens and validates the payload bound
   assert.equal(authFlag.status, 202);
   assert.equal(calls[1].capture.auth_form_detected, true);
 
-  for (const role of ["advisor", "curator"]) {
+  const advisorToken = await tokenFor("advisor");
+  const advisorAccepted = await post(`Bearer ${advisorToken}`);
+  assert.equal(advisorAccepted.status, 202);
+  assert.deepEqual((await advisorAccepted.json()).data, { accepted: true });
+  assert.deepEqual(calls[2].agent, { agent_run_id: "run-advisor", role: "advisor" });
+
+  for (const role of ["curator"]) {
     const token = await tokenFor(role);
     const response = await post(`Bearer ${token}`);
     assert.equal(response.status, 403, role);
@@ -76,6 +82,6 @@ test("research capture accepts Work agent tokens and validates the payload bound
   assert.equal(invalidAuthFlag.status, 400);
   const bashTool = await post(`Bearer ${workerToken}`, requestBody({ ...payload, tool_name: "Bash" }));
   assert.equal(bashTool.status, 400);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 3);
   for (const lease of leases) lease.release();
 });

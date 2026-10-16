@@ -5,6 +5,9 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import test from "node:test";
 import { tempDir } from "../helpers/temp.mjs";
+import { createTestCore } from "../helpers/core.mjs";
+import { startTestHttpServer } from "../helpers/http.mjs";
+import { GuardTokenRegistry } from "../../apps/server/dist/guard-tokens.js";
 import { GUARD_TOKEN_FILE_ENV } from "../../packages/shared/dist/guard-token.js";
 
 const hookPath = path.resolve("apps/server/dist/research-hook.js");
@@ -23,9 +26,9 @@ function close(server) {
   return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
 }
 
-function runHook(input, { apiBase, tokenFile } = {}) {
+function runHook(input, { apiBase, tokenFile, role = "worker" } = {}) {
   return new Promise((resolve, reject) => {
-    const env = { ...process.env, OWL_AGENT_ROLE: "worker" };
+    const env = { ...process.env, OWL_AGENT_ROLE: role };
     if (apiBase === undefined) delete env.OWL_GUARD_API_BASE;
     else env.OWL_GUARD_API_BASE = apiBase;
     if (tokenFile === undefined) delete env[GUARD_TOKEN_FILE_ENV];
@@ -89,6 +92,85 @@ test("research hook sends PostToolUse data with Bearer auth and keeps stdout emp
   assert.equal(typeof body.request_id, "string");
   assert.equal(typeof body.idempotency_key, "string");
   assert.deepEqual(body.payload, { tool_name: input.tool_name, tool_input: input.tool_input, tool_response: input.tool_response });
+});
+
+test("research hook sends Advisor PostToolUse data with Bearer auth", async (t) => {
+  const root = await tempDir(t, "owl-research-hook-advisor-");
+  const tokenFile = path.join(root, "guard-token");
+  await writeFile(tokenFile, "test-guard-token\n", { mode: 0o600 });
+  const { apiBase, requests } = await receiver(t);
+  const input = {
+    hook_event_name: "PostToolUse",
+    tool_name: "WebSearch",
+    tool_input: { query: "advisor research" },
+    tool_response: { results: [] },
+  };
+
+  const result = await runHook(input, { apiBase, tokenFile, role: "advisor" });
+  assert.equal(result.code, 0);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, "/api/v1/research/capture");
+  assert.equal(requests[0].authorization, "Bearer test-guard-token");
+  assert.equal(JSON.parse(requests[0].body).payload.tool_name, "WebSearch");
+});
+
+test("Advisor WebFetch and WebSearch results become research notes through the hook, API, and Core recorder", async (t) => {
+  const { root, core } = await createTestCore(t, {}, { prefix: "owl-research-hook-advisor-e2e-" });
+  const guardTokens = GuardTokenRegistry.open(path.join(root, "guard-tokens"));
+  t.after(() => guardTokens.clear());
+  const server = await startTestHttpServer(t, { core, webOut: root, owlRoot: root, guardTokens });
+  if (!server) {
+    t.skip("localhost listen is unavailable");
+    return;
+  }
+  const lease = guardTokens.issue({ agent_run_id: "advisor-session-1", role: "advisor" });
+  t.after(() => lease.release());
+  const options = { apiBase: server.baseUrl, tokenFile: lease.file, role: "advisor" };
+
+  for (const input of [
+    {
+      hook_event_name: "PostToolUse",
+      tool_name: "WebFetch",
+      tool_input: { url: "https://example.com/advisor-article", prompt: "summarize the article" },
+      tool_response: { code: 200, result: "# Advisor Article\nThe article explains how the advisor stores web research for later search." },
+    },
+    {
+      hook_event_name: "PostToolUse",
+      tool_name: "WebSearch",
+      tool_input: { query: "advisor knowledge search" },
+      tool_response: {
+        results: [
+          "Search summary: advisor research notes are searchable from the knowledge vault.",
+          { content: [{ title: "Advisor guide", url: "https://example.com/advisor-guide" }] },
+        ],
+      },
+    },
+    {
+      hook_event_name: "PostToolUse",
+      tool_name: "WebFetch",
+      tool_input: { url: "https://example.com/sign-in" },
+      tool_response: { code: 200, result: '<form><input type="password" autocomplete="current-password"></form>' },
+    },
+  ]) {
+    const result = await runHook(input, options);
+    assert.equal(result.code, 0);
+    assert.equal(result.stderr, "");
+  }
+  await core.researchRecorder.idle();
+
+  const notes = await core.knowledge.list("research");
+  const markdowns = await Promise.all(notes.map((note) => readFile(path.join(root, "knowledge", note.path), "utf8")));
+  assert.equal(markdowns.length, 2);
+  const fetched = markdowns.find((markdown) => /^url: https:\/\/example\.com\/advisor-article$/mu.test(markdown));
+  const searched = markdowns.find((markdown) => /^query: advisor knowledge search$/mu.test(markdown));
+  assert.ok(fetched);
+  assert.ok(searched);
+  for (const markdown of [fetched, searched]) assert.match(markdown, /^agent_role: advisor$/mu);
+  assert.match(fetched, /how the advisor stores web research/u);
+  assert.match(searched, /\[Advisor guide\]\(https:\/\/example\.com\/advisor-guide\)/u);
+  assert.doesNotMatch(markdowns.join("\n"), /sign-in/u);
 });
 
 test("research hook truncates oversized WebFetch results and refuses bodies over one megabyte", async (t) => {

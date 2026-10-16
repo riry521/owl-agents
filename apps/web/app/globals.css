@@ -2329,6 +2329,15 @@ a.card:hover {
   color: var(--ink);
 }
 
+.design-mock-frame {
+  display: block;
+  width: 100%;
+  height: 70vh;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
 .kb-editor {
   min-height: 320px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;

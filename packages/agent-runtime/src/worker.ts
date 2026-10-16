@@ -178,6 +178,11 @@ export const DESIGNER_REPORT_SCHEMA: RoleSchema = {
       example: null,
       description: "set only when the design cannot be produced (see the instructions); null otherwise",
     },
+    design_unchanged: {
+      type: ["boolean", "null"],
+      example: null,
+      description: "true only on a rerun when the existing design document needs no change; null otherwise",
+    },
   },
   required: objectSchema(WORKER_REPORT_PROPERTIES).required,
   providerRules: SUCCESS_RULES,
@@ -311,7 +316,7 @@ function attemptFix(context: WorkerContext) {
 }
 
 const WORKER_CONTEXT_INSTRUCTIONS: readonly string[] = [
-  "Project.rules holds the rules you must follow (null if none). Dependencies.dependencies lists, per completed Task this one depends on, what it did (work_done), the files it changed (changed_files) and what it left open (open_issues), as a summary; read the file at report_path only when you need the full report. Dependencies.artifact_paths lists their recorded artifact paths. Build on them; do not redo their work. When an entry has a design_document_path, read that design document and follow it.",
+  "Project.rules holds the rules you must follow (null if none). Dependencies.dependencies lists, per completed Task this one depends on, what it did (work_done), the files it changed (changed_files) and what it left open (open_issues), as a summary; read the file at report_path only when you need the full report. Dependencies.artifact_paths lists their recorded artifact paths. Build on them; do not redo their work. When an entry has a design_document_path, read that design document and follow it. When an entry has a design_mock_dir, that directory holds the design's HTML screen mocks.",
   "Do not change tests, checks or code outside the Task's scope to make a failure go away. Run only the specific test files you changed or need to fix, one file at a time, and the build. Never run the whole test suite, a test directory or a glob of test files: Core runs the tests related to your changes after your report and records the results. Do not compare results with the base branch. When a test or check you ran fails for a reason unrelated to this Task, leave it as is, report it in remaining_issues as pre-existing and say so in verification.method. A failure that bears on an acceptance criterion counts as failed.",
   "Rules are binding; Project.knowledge is reference information: an excerpt of relevant knowledge collected from past Works (null if none). It does not override rules, the Task, or acceptance criteria. Report knowledge that seems incorrect or outdated in remaining_issues.",
   "Project.skills is an index of reusable procedures. Read a relevant skill before working, and read only the supplemental references you need. A skill marked [trial] is being validated, so check that it fits the situation. A skill never overrides rules, the Task, or acceptance criteria; report a contradictory skill as misleading and follow the Task.",
@@ -405,6 +410,8 @@ export function buildWorkerPrompt(
   });
 }
 
+const SCREEN_DESIGN_INSTRUCTION = "This is a screen design Task. Besides the Markdown design, save one standalone HTML mock per screen with the save_design_mock tool of the owl-design MCP server, passing the file name and the complete HTML. Name each file with lowercase letters, digits and hyphens and the .html extension, starting with a two-digit order such as 01-sign-in.html; other names are rejected. Put all CSS and JavaScript inline, embed images as data: URLs, and do not load external files, fonts or network resources or use cookies or storage: the preview runs each mock in a sandbox without them. Do not write mocks with file tools: you cannot write to Task.design_mock_dir, and Owl writes the saved mocks there, where you can read them. On a retry, save the changed mocks again and remove the mocks of screens that no longer exist with delete_design_mock. List every screen and its mock file name in the design document. Leave the content design (data model, API, behavior) to the other design Tasks. If the save_design_mock tool is not available, say so in remaining_issues.";
+
 /** Designer input mirrors the Worker slots and adds its external document destination to Task. */
 export function designerPromptInputs(request: WorkerRequest): RolePromptSlots["inputs"] {
   return workerPromptInputs(request).map((input) => input.name === "Attempt"
@@ -416,6 +423,7 @@ export function designerPromptInputs(request: WorkerRequest): RolePromptSlots["i
           ...(input.value as Record<string, unknown>),
           design_document_path: request.context?.design_document_path ?? null,
           design_tier: request.context?.design_tier ?? "standard",
+          design_mock_dir: request.context?.design_mock_dir ?? null,
         },
       }
     : input);
@@ -433,6 +441,8 @@ export function buildDesignerRolePrompt(
       "Produce the design the Task asks for, such as architecture, a data model, an API, UX, or an implementation approach. Read the repository to ground the design in the current code.",
       ...(request.context?.design_tier === "lead" ? ["This design was assigned to you explicitly or escalated after two failed reviews. Read the existing design document and every Reviewer finding, then resolve the root problems while preserving valid decisions."] : []),
       "Write the design as Markdown to Task.design_document_path, the absolute path provided in the input, and overwrite the document on a retry.",
+      ...(request.context?.design_mock_dir ? [SCREEN_DESIGN_INSTRUCTION] : []),
+      ...(request.context?.design_mock_dir && request.context.design_skill ? [`Use the ${request.context.design_skill} skill for this screen design: load it through your harness's skill mechanism and follow it where it does not conflict with these instructions. If the skill is not available, design without it and say so in remaining_issues.`] : []),
       "Do not modify any file in the repository working tree, do not commit, and do not create branches.",
       "The document must let an implementer proceed without asking: state the goal and constraints; the chosen approach and why; components and their interfaces; data and API changes; error handling; the test strategy; and an ordered implementation breakdown.",
       DESIGNER_NECESSITY_INSTRUCTION,
@@ -442,6 +452,7 @@ export function buildDesignerRolePrompt(
       ...WORKER_CONTEXT_INSTRUCTIONS,
       "If the design cannot be produced inside this Task because its premise is wrong, the rules or Owner policy contradict the request, or the acceptance criteria are ambiguous, do not design around it: set design_blocked (cause_kind, cause, repeated_findings, question, options, recommended_option), mark each acceptance criterion failed with evidence pointing to design_blocked, and set result \"failed\". Core then stops the Work and asks the Owner instead of remaking the design. Otherwise set design_blocked to null; never use it for a defect you can fix yourself.",
       ...(request.context?.design_stop ? ["Core has stopped remaking this design: Lead Designer output was rejected Attempt.design_stop.rejections times (limit Attempt.design_stop.limit). Do not rewrite the design document. Read it, Attempt.reviewer_findings and Attempt.design_stop.review_history, then fill design_blocked: classify the cause, list the Reviewer points that keep coming back with how many verdicts raised them, and give the Owner options with a recommendation. design_blocked must not be null in this run."] : []),
+      "On a rerun, if the design document written by an earlier run needs no change, you do not have to rewrite it: leave it as is and set design_unchanged to true. Otherwise set design_unchanged to null. It has no effect on a first run or when the document is missing or empty.",
       SKILL_FEEDBACK_INSTRUCTION,
     ],
     processSkills,

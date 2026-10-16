@@ -78,6 +78,7 @@ import {
 } from "./types";
 import {
   DEFAULT_OWNER_LANGUAGE,
+  DESIGN_MOCK_MCP_ENABLE_ENV,
   DISPATCH_MCP_ENABLE_ENV,
   formatAdvisorMalformed,
   generateUlid,
@@ -328,6 +329,10 @@ function resolveOverrides(
     const value = input[field];
     if (typeof value === "string" && value.length > 0) env[name] = value;
   }
+  const gitTemplateDir = input.git_template_dir;
+  if (typeof gitTemplateDir === "string" && gitTemplateDir.length > 0) {
+    env.GIT_TEMPLATE_DIR = gitTemplateDir;
+  }
   return { model, adapter: resolvedAdapter, effort, env };
 }
 
@@ -534,6 +539,8 @@ function coreWorkerRequestAsLocal(input: CoreWorkerRunRequest): WorkerRequest {
   const workerContext: NonNullable<WorkerRequest["context"]> = {
     ...(typeof context.design_document_path === "string" ? { design_document_path: context.design_document_path } : {}),
     ...(context.design_tier === "lead" ? { design_tier: "lead" as const } : {}),
+    ...(typeof context.design_mock_dir === "string" ? { design_mock_dir: context.design_mock_dir } : {}),
+    ...(typeof context.design_skill === "string" ? { design_skill: context.design_skill } : {}),
     ...(typeof context.rules === "string" ? { rules: context.rules } : {}),
     ...(typeof context.knowledge === "string" ? { knowledge: context.knowledge } : {}),
     ...(typeof context.skills === "string" ? { skills: context.skills } : {}),
@@ -615,7 +622,7 @@ function coreReviewerRequestAsLocal(input: CoreReviewerRunRequest): ReviewerRequ
     review_round: input.review_round,
     ...(typeof context.worktree === "string" ? { worktree: context.worktree } : {}),
     ...(isRecord(context.design_document) && typeof context.design_document.path === "string" && typeof context.design_document.markdown === "string"
-      ? { design_document: { path: context.design_document.path, markdown: context.design_document.markdown } }
+      ? { design_document: { path: context.design_document.path, markdown: context.design_document.markdown, ...(Array.isArray(context.design_document.mocks) ? { mocks: context.design_document.mocks as { name: string; path: string }[] } : {}) } }
       : {}),
     ...(isRecord(context.core_tests) ? { core_tests: context.core_tests } : context.core_tests === null ? { core_tests: null } : {}),
     ...(isRecord(context.core_checks) ? { core_checks: context.core_checks } : context.core_checks === null ? { core_checks: null } : {}),
@@ -1083,6 +1090,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
           {
             ...overrides.env,
             ...(hybridMode ? { [DISPATCH_MCP_ENABLE_ENV]: "1" } : {}),
+            ...(role === "designer" && typeof input.context.design_mock_dir === "string" ? { [DESIGN_MOCK_MCP_ENABLE_ENV]: "1" } : {}),
           },
           providerSchema(reportSchema, isClaudeAdapterId(overrides.adapter ?? options.adapter)),
           researcher && researchSettings ? researchSettings : undefined,

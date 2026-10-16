@@ -30,6 +30,31 @@ test("a Designer token can write only its assigned external document", async (t)
   assert.equal(check("worker", "Write", { file_path: join(root, "repo", "src", "x.ts") }, target).allowed, true);
 });
 
+test("a Designer cannot write the mock folder with file tools, and may call save_design_mock", async (t) => {
+  const root = await tempDir(t, "owl-design-guard-mock-");
+  const store = new RuleStore(root);
+  await store.ensureDirectories();
+  await store.load();
+  const target = join(root, "data", "designs", "W1", "T1.md");
+  const mockFile = join(root, "data", "designs", "W1", "T1.mocks", "top.html");
+  const check = (toolName, toolInput) => store.checkGuard({
+    role: "designer", toolName, toolInput, cwd: join(root, "repo"), designerWritePath: target,
+  });
+
+  for (const [toolName, toolInput] of [
+    ["Write", { file_path: mockFile, content: "<p>x</p>" }],
+    ["Edit", { file_path: mockFile, old_string: "a", new_string: "b" }],
+    ["Bash", { command: `printf x > ${mockFile}` }],
+  ]) {
+    const decision = check(toolName, toolInput);
+    assert.equal(decision.allowed, false, toolName);
+    assert.equal(decision.rule_id, "designer-write-path", toolName);
+    assert.match(decision.message, /save_design_mock/u, toolName);
+  }
+  assert.equal(check("mcp__owl-design__save_design_mock", { name: "top.html", html: "<p>x</p>" }).allowed, true);
+  assert.equal(check("mcp__owl-design__delete_design_mock", { name: "top.html" }).allowed, true);
+});
+
 test("a Designer token cannot mutate git state through global options but may read it", async (t) => {
   const root = await tempDir(t, "owl-design-guard-git-");
   const store = new RuleStore(root);

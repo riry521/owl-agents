@@ -30,6 +30,7 @@ const REPORT_ENVELOPE_FIELDS = new Set([
   "question_for_manager",
   "pending_process",
   "design_blocked",
+  "design_unchanged",
   "external_blocker",
 ]);
 
@@ -284,6 +285,10 @@ function validateEnvelope(value: unknown, version: string): ReportEnvelope | Leg
   if (designBlocked !== undefined && designBlocked !== null && !isRecord(designBlocked)) {
     throw reportInvalid("report_design_blocked_invalid");
   }
+  const designUnchanged = value.design_unchanged;
+  if (designUnchanged !== undefined && designUnchanged !== null && typeof designUnchanged !== "boolean") {
+    throw reportInvalid("report_design_unchanged_invalid");
+  }
   const externalBlocker = value.external_blocker;
   if (externalBlocker !== undefined && externalBlocker !== null && !isRecord(externalBlocker)) {
     throw reportInvalid("report_external_blocker_invalid");
@@ -303,6 +308,7 @@ function validateEnvelope(value: unknown, version: string): ReportEnvelope | Leg
     question_for_manager: question,
     ...(isRecord(pendingProcess) ? { pending_process: pendingProcess } : {}),
     ...(isRecord(designBlocked) ? { design_blocked: designBlocked } : {}),
+    ...(designUnchanged === true ? { design_unchanged: true } : {}),
     ...(isRecord(externalBlocker) ? { external_blocker: externalBlocker } : {}),
   } as ReportEnvelope | LegacyReportEnvelope;
 }

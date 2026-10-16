@@ -7,7 +7,7 @@ import type { PageQuery, PageRow } from "./memory-types.js";
 import { bodySha256, estimatePageTokens, findSecretPatterns, lineHash, maskSecrets, PAGE_LIMITS, pageSize, type PageSize, parsePage, setFrontmatter, UPDATES_SECTION, validatePage } from "./page-format.js";
 import { newLinesOf, type MemoryLibrarianSetting } from "./page-integration.js";
 import type { RouteInput, RouteResult } from "./page-router.js";
-import { applyOperations, itemsOf, parseOperationsOutput, stripNew, type PageOpsContext, type PageOpsState } from "./page-operations.js";
+import { applyOperations, itemsOf, parseOperationsOutput, stripNew, type PageOpsContext, type PageOpsState, type PageOpsWarning } from "./page-operations.js";
 import { OTHER_NOTES_TITLE, writeAtomic } from "./page-router.js";
 import { normalizeOp, type OpDefinitions } from "../op-shape.js";
 
@@ -73,7 +73,7 @@ export interface LibrarianOpsRequest {
   readonly pages: readonly {
     readonly path: string; readonly title: string; readonly summary: string; readonly scope: "project" | "common"; readonly project_id: string | null;
     readonly status: string; readonly new_lines: number;
-    /** Some `free` value is negative: its items are always sent, and it is to be split. */
+    /** Some `free` value is negative: its items are sent as long as they fit the batch, and it is to be split. */
     readonly over_limit: boolean;
     /** Pages of the same scope and project (not this page): the only destinations split `into` and move may use. */
     readonly move_to: readonly string[];
@@ -194,6 +194,14 @@ interface PendingScan {
   readonly conversations: readonly Timed<LibrarianOpsRequest["conversations"][number]>[];
   readonly clippings: readonly Timed<LibrarianOpsRequest["clippings"][number]>[];
 }
+/** One batch: the request, the entries in it (needed again to settle them), the item count `size` and what was left out of the request. */
+interface BuiltRequest {
+  readonly request: LibrarianOpsRequest;
+  readonly conversations: LibrarianOpsRequest["conversations"];
+  readonly clippings: LibrarianOpsRequest["clippings"];
+  readonly size: number;
+  readonly warnings: readonly PageOpsWarning[];
+}
 const modifiedAt = async (path: string): Promise<number> => (await stat(path).catch(() => null))?.mtimeMs ?? 0;
 
 class WriteError extends Error {
@@ -293,9 +301,11 @@ export class PageLibrarian {
       if (rows.length === 0 && pending.conversations.length === 0 && pending.clippings.length === 0) return report;
       const candidates = new Set((await this.options.dormantCandidates?.() ?? []).map((c) => normalizePath(c.path)));
       const limit = this.options.batch?.().max_input_tokens ?? Number.POSITIVE_INFINITY;
-      // An output over the limit is not thrown away: the same batch is asked again with half of the items it actually held (conversations, clippings and detailed pages together) until one is left.
+      // An output over the limit is not thrown away: the same batch is asked again with half of the items it actually held (pages sent in full, conversations and clippings together) until one is left.
       let built = await this.buildRequest(input, rows, candidates, pending);
       for (;;) {
+        // What was left out of this request (a page too big for it) stays on the report on every way out, `applyAll` appending its own.
+        report.warnings = built.warnings;
         report.input_tokens = estimatePageTokens(JSON.stringify(built.request));
         if (report.input_tokens > limit) {
           return { ...report, error: "input_over_limit" };
@@ -307,7 +317,7 @@ export class PageLibrarian {
             : parseOperationsOutput(proposed.output);
         if (!("error" in parsed) || parsed.error !== "output_over_limit" || built.size <= 1) break;
         const smaller = await this.buildRequest(input, rows, candidates, pending, Math.floor(built.size / 2));
-        if (smaller.size >= built.size) break; // over-limit pages stay in whatever the cap: the same input would only fail again
+        if (smaller.size >= built.size) break; // fewer items is the only way a retry helps: the same input would only fail again
         built = smaller;
       }
       const { conversations, clippings } = built;
@@ -362,21 +372,26 @@ export class PageLibrarian {
   }
 
   /**
-   * One batch: the oldest pending conversations and clippings up to the item and token limits (the request's fixed part counts too;
-   * an entry too long for what is left is skipped, never cut, so it is never marked done unread), then pages with new lines first, then those that may go
-   * dormant, then the rest, with what budget remains.
+   * One batch, always within `max_input_tokens`: pages are ranked with the ones to split first, then the pages with new lines, then the rest
+   * (pages that may go dormant last), then the entries (conversations and clippings) up to the item and token limits, each taking room
+   * before the next. An entry too long for what is left is skipped, never cut, so it is never marked done unread; a page too long is sent
+   * without items and reported in `warnings`, so the biggest page can never stop the batch from being sent at all.
+   *
+   * An over-limit page's items used to go in whatever the room was, on the grounds that the page the run is about must not be left unsplit.
+   * That could push the request past `max_input_tokens`, so `runBatch` refused to call the model at all and the whole batch — conversations
+   * and every other page too — stayed unread, which left the over-limit page unread as well. Ranking the pages first gives such a page the
+   * room it needs whenever the batch can hold it; when it cannot, it is sent without items like any other page over the limit and the
+   * warning tells the next run (with a larger room, or after a split) to come back to it. Only the over-limit pages are moved ahead
+   * of the entries; the run's own `input_tokens` limit stays on the pages it always held back, which the entries never obeyed either.
    */
-  private async buildRequest(input: PageRunInput, rows: readonly PageRow[], candidates: ReadonlySet<string>, pending: PendingScan, cap = Number.POSITIVE_INFINITY): Promise<{ request: LibrarianOpsRequest; conversations: LibrarianOpsRequest["conversations"]; clippings: LibrarianOpsRequest["clippings"]; size: number }> {
+  private async buildRequest(input: PageRunInput, rows: readonly PageRow[], candidates: ReadonlySet<string>, pending: PendingScan, cap = Number.POSITIVE_INFINITY): Promise<BuiltRequest> {
     const batch = this.options.batch?.() ?? { max_items: Number.POSITIVE_INFINITY, max_input_tokens: Number.POSITIVE_INFINITY };
     const root = this.options.vault.activeDir();
     const wanted = input.paths ? new Set(input.paths.map(normalizePath)) : null;
     const loaded = await Promise.all(rows.map(async (row) => ({ row, text: await readText(join(root, row.path)) })));
     const usable = loaded.filter((entry): entry is { row: PageRow; text: string } => entry.text !== null);
-    // Over-limit pages are ranked first and their items always go in, so a big page without new lines is never left unsplit.
     const free = new Map(usable.map((entry) => [entry.row.path, freeOf(sizeOf(entry.text))]));
     const over = new Map([...free].map(([path, f]) => [path, f !== null && (f.tokens < 0 || Object.values(f.lines).some((v) => v < 0))]));
-    const rank = (entry: { row: PageRow; text: string }): number => (over.get(entry.row.path) || newLinesOf(entry.text).length > 0 ? 0 : candidates.has(entry.row.path) ? 1 : 2);
-    usable.sort((a, b) => rank(a) - rank(b) || a.row.path.localeCompare(b.row.path));
     const meta = (row: PageRow, text: string) => ({
       over_limit: over.get(row.path) === true,
       move_to: usable.filter((o) => o.row.path !== row.path && o.row.page_scope === row.page_scope && o.row.project_id === row.project_id).map((o) => o.row.path),
@@ -388,35 +403,63 @@ export class PageLibrarian {
       run_id: input.run_id, pages: usable.map(({ row, text }) => ({ ...meta(row, text), items: null })), dormant_candidates: [...candidates], previous_rejections: this.loadRejections(), conversations: [], clippings: [],
       rules: LIBRARIAN_RULES, model: this.options.model(), max_output_tokens: this.limits.output_tokens,
     };
-    let room = batch.max_input_tokens - estimatePageTokens(JSON.stringify(fixed));
+    // The room the pages' items and the entries use comes out of this one pool: what is left of `max_input_tokens` once the fixed
+    // part (`rules`, the page metadata) is paid for. The over-limit pages take their room from it first, so the page the run is
+    // about is never pushed out by the entries; the entries take theirs next, skipped and never cut when they do not fit, so one is
+    // never marked done unread; the other pages take what is left under the run's own input limit, as before.
+    let room = Math.max(0, batch.max_input_tokens - estimatePageTokens(JSON.stringify(fixed)));
+    const warnings: PageOpsWarning[] = [];
+    const itemsOfPage = (row: PageRow, text: string): LibrarianOpsRequest["pages"][number]["items"] =>
+      itemsOf(text).map((s) => ({ section: s.section, items: s.items.map((i) => ({ ref: { page: row.path, section: s.section, h: i.h }, text: i.text })) }));
+    // Ranked so the pages to split come first, then the ones with new lines, then the dormant candidates and the rest: this is the
+    // order the model reads, and `kind === 0` (over-limit) is also the only kind that takes its room before the entries.
+    const ranked = usable.map(({ row, text }) => {
+      const items = itemsOfPage(row, text);
+      return { row, text, items, cost: estimatePageTokens(JSON.stringify(items)), kind: over.get(row.path) === true ? 0 : newLinesOf(text).length > 0 ? 1 : candidates.has(row.path) ? 3 : 2 };
+    });
+    ranked.sort((a, b) => a.kind - b.kind || a.row.path.localeCompare(b.row.path));
+    const inBatch = (row: PageRow): boolean => row.status === "active" && (wanted === null || wanted.has(row.path));
+    // `cap` is the shared item count of a retry after an output over the limit: an over-limit page ignores it, because dropping it
+    // would leave the very page the run is about unread.
+    const taken = new Set<string>();
+    let size = 0;
+    for (const { row, cost, kind } of ranked) {
+      if (kind !== 0 || !inBatch(row)) continue;
+      if (cost > room) {
+        warnings.push({ page: row.path, code: "page_items_over_input_limit", message: `items が入力の上限に入らないため、行を送らずに分割を頼んだ: ${row.title}` });
+        continue;
+      }
+      room -= cost;
+      size += 1;
+      taken.add(row.path);
+    }
     const queue = [
       ...pending.conversations.map((item) => ({ kind: "conversation" as const, item })),
       ...pending.clippings.map((item) => ({ kind: "clipping" as const, item })),
     ].sort((a, b) => a.item.at - b.item.at);
-    // `cap` is the shared item count (entries first, then detailed pages) of a retry after an output over the limit.
-    queue.splice(Math.max(1, Math.min(batch.max_items, cap)));
+    // `cap` counts the pages sent in full too, so a retry really is smaller: once the pages have taken the cap, no entry is added.
+    queue.splice(Math.max(0, Math.min(batch.max_items, cap - size)));
     const conversations: LibrarianOpsRequest["conversations"][number][] = [];
     const clippings: LibrarianOpsRequest["clippings"][number][] = [];
     for (const { kind, item: { at: _at, ...item } } of queue) {
       const cost = estimatePageTokens(JSON.stringify(item));
       if (cost > room) continue; // never cut an entry: it stays pending for a larger limit, and smaller ones behind it still go
       room -= cost;
+      size += 1;
       if (kind === "conversation") conversations.push(item as LibrarianOpsRequest["conversations"][number]);
       else clippings.push(item as LibrarianOpsRequest["clippings"][number]);
     }
-    let budget = Math.min(this.limits.input_tokens, Math.max(0, room));
-    let size = conversations.length + clippings.length;
-    const pages = usable.map(({ row, text }) => {
-      const base = meta(row, text);
-      const detailed = row.status === "active" && (wanted === null || wanted.has(row.path)) && (size < cap || base.over_limit); // over-limit pages ignore a retry's cap too
-      const items = itemsOf(text).map((s) => ({ section: s.section, items: s.items.map((i) => ({ ref: { page: row.path, section: s.section, h: i.h }, text: i.text })) }));
-      const cost = estimatePageTokens(JSON.stringify(items));
-      if (!detailed || (cost > budget && !base.over_limit)) return { ...base, items: null };
-      budget = Math.max(0, budget - cost);
+    // The run's own input limit stays on the pages it always applied to; the entries and the over-limit pages never obeyed it.
+    let budget = Math.min(this.limits.input_tokens, room);
+    for (const { row, cost, kind } of ranked) {
+      if (kind === 0 || !inBatch(row) || size >= cap) continue;
+      if (cost > budget) continue;
+      budget -= cost;
       size += 1;
-      return { ...base, items };
-    });
-    return { request: { ...fixed, pages, conversations, clippings }, conversations, clippings, size };
+      taken.add(row.path);
+    }
+    const pages = ranked.map(({ row, text, items }) => ({ ...meta(row, text), items: taken.has(row.path) ? items : null }));
+    return { request: { ...fixed, pages, conversations, clippings }, conversations, clippings, size, warnings };
   }
 
   /** What the librarian still has to read, with each file's modified time (`at`). */
@@ -653,7 +696,7 @@ export class PageLibrarian {
       ...fit.dropped.map((d) => ({ index: d.index, code: "target_over_limit", ...describeRejectedOp(d.op) })),
       ...result.rejected.map((r) => ({ index: fit.origin[r.index], code: r.code, ...describeRejectedOp(r.op), ...(r.detail ? { detail: r.detail } : {}) })),
     ].sort((a, b) => a.index - b.index);
-    report.warnings = result.warnings;
+    report.warnings = [...report.warnings, ...result.warnings];
 
     const files = new Map<string, string>();
     for (const path of result.touched) files.set(path, result.state.pages.get(path) ?? result.state.histories.get(path)!);

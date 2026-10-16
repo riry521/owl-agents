@@ -112,6 +112,7 @@ export interface ManagerPlanRequest extends AgentRunRequest {
 
 export interface WorkerRunRequest extends AgentRunRequest {
   readonly task_id: string;
+  readonly git_template_dir?: string;
 }
 
 export interface ReviewerRunRequest extends AgentRunRequest {
@@ -478,6 +479,8 @@ export interface WorkBranchVerification {
 }
 
 export interface GitGateway {
+  userTemplateDir?(): Promise<string | null>;
+  setTemplateConfig?(file: string, key: string, value: string): Promise<void>;
   prepareWorktree(request: GitOperationRequest): Promise<GitOperationResult>;
   /** The Project's base branch head and which of `paths` are missing from it (prerequisite waits). */
   baseBranchFacts?(request: { readonly work_id: string; readonly paths: readonly string[] }): Promise<
@@ -716,6 +719,8 @@ export type OwnApiResult =
   | { readonly kind: "unknown"; readonly error: string };
 
 export interface CoreOptions {
+  /** Skill the Lead Designer uses for screen design Tasks; null or unset names none. */
+  readonly designSkill?: string | null;
   readonly db: CoreDatabase;
   readonly agentRunner: AgentRunner;
   readonly git?: GitGateway;
@@ -1232,6 +1237,8 @@ export interface TaskRow extends JsonObject {
   lead_designer_start_round: number | null;
   /** 1 once a standard Designer Task was escalated to Lead (kept through replans and replacements); 0 for Tasks that began at Lead. */
   design_escalated?: number;
+  /** Manager's designation of a design Task; null leaves it to the Work's design_mode. */
+  assigned_designer?: "designer" | "lead_designer" | null;
   /** Reviewer (not Worker) failures since the last replan, Decision, restore or completion. */
   reviewer_failure_count: number;
   /** Valid Reviewer verdicts across Manager replans; task.replanned keeps it. */
@@ -1327,6 +1334,7 @@ export interface ReductionResult<S extends JsonObject> {
 
 export interface TaskPlanItem {
   readonly id?: string;
+  readonly assigned_designer?: "designer" | "lead_designer" | null;
   readonly title: string;
   readonly type: string;
   /** Display text rendered from acceptance_criteria; Core never reads criteria back from it. */

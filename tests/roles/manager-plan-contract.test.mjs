@@ -10,7 +10,7 @@ import { waitFor } from "../helpers/wait.mjs";
 const criterion = { id: "AC1", text: "Migration applies cleanly.", check: "node --test tests/db/migration.test.mjs", serves: "archiving", if_omitted: "no archive", check_weight: "light", weight_reason: "", kind: "work_check" };
 const promptCompliantPlan = {
   tasks: [
-    { id: "T1", title: "Add archived_at migration", type: "code", acceptance_criteria: [criterion], necessity: { serves: "archiving", if_omitted: "no archive" }, depends_on: [], required_sections: [], required_tests: [], wait_for: null, base_sync_only: null, replaces: [], context: "", notes: "", review: null },
+    { id: "T1", title: "Add archived_at migration", type: "code", acceptance_criteria: [criterion], necessity: { serves: "archiving", if_omitted: "no archive" }, depends_on: [], required_sections: [], required_tests: [], wait_for: null, base_sync_only: null, assigned_designer: null, replaces: [], context: "", notes: "", review: null },
   ],
 };
 

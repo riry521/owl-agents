@@ -124,6 +124,15 @@ export function projectNotFound(id: string, language: OwnerLanguage): HumanReada
   });
 }
 
+export function workProjectAlreadySet(workId: string, projectId: string): HumanReadableError {
+  return new HumanReadableError({
+    code: "work_project_already_set",
+    message: "このWorkはすでにProjectに入っています。",
+    remediation: "Project間の移動はできません。",
+    details: { work_id: workId, project_id: projectId },
+  });
+}
+
 export function projectHasRunningWorks(
   projectId: string,
   operation: "delete" | "path_change",

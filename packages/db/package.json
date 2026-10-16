@@ -1,6 +1,6 @@
 {
   "name": "@owl/db",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "SQLite schema, migrations, and single-writer persistence lane for Owl core.",
   "type": "commonjs",

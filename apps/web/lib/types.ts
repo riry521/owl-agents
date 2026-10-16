@@ -121,6 +121,14 @@ export interface UnarchiveWorkResult {
   archived_at: null;
 }
 
+export interface MoveWorkToProjectResult {
+  work_id: ULID;
+  project_id: ULID;
+  display_number: number;
+  previous_display_number: number | null;
+  state: string;
+}
+
 export interface DeleteWorkResult {
   work_id: ULID;
   deleted: true;

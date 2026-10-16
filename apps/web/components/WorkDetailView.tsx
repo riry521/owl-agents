@@ -32,8 +32,10 @@ import {
   workDisplayNumber,
 } from '@/lib/format';
 import { AgentRunTree, AgentStatusBadge, ArchivedBadge, ChildRunList, HybridPhaseBadge, ResultBadge, TaskStateBadge, WorkStateBadge } from '@/components/StateBadge';
+import { WorkProjectMove } from '@/components/WorkProjectMove';
 import { WorkArchiveActions } from '@/components/WorkArchiveActions';
 import { DesignDocumentsSection } from '@/components/DesignDocumentsSection';
+import { DesignMocksSection } from '@/components/DesignMocksSection';
 import { WorkBacklogSection } from '@/components/WorkBacklogSection';
 import { WorkPostMergeEvents } from '@/components/ActivityLog';
 // Relative on purpose: the node component tests stub the `@/` modules.
@@ -322,7 +324,7 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
               <dt>{t('work.owner')}</dt>
               <dd>{work.owner_id}</dd>
               <dt>{t('work.project')}</dt>
-              <dd className="mono">{work.project_id ?? '—'}</dd>
+              <dd><WorkProjectMove work={work} onMoved={retry} /></dd>
               <dt>{t('work.planRevision')}</dt>
               <dd>{work.plan_revision}</dd>
               <dt>{t('work.designRole')}</dt>
@@ -544,6 +546,7 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
             locale={locale}
             t={t}
           />
+          <DesignMocksSection workId={work.id} refreshToken={designsRefreshToken} now={now} locale={locale} t={t} />
           <WorkSummaryHistory workId={work.id} refreshToken={designsRefreshToken} now={now} locale={locale} t={t} />
           <WorkBacklogSection workId={work.id} dismissed={work.advisor_backlog?.dismissed ?? []}refreshToken={designsRefreshToken} t={t} />
           <WorkPostMergeEvents workId={work.id} refreshToken={designsRefreshToken} />

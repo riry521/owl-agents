@@ -8,6 +8,8 @@ import { resolveRoleModel } from "../../packages/core/dist/workflow-engine.js";
 import { buildDesignerRolePrompt, DESIGNER_REPORT_SCHEMA, normalizeWorkerResponseWithFeedback } from "../../packages/agent-runtime/dist/worker.js";
 import { readDesignBlocked } from "../../packages/shared/dist/index.js";
 import { createUlid } from "../../packages/db/dist/index.js";
+import { managerTasksToPlanItems } from "../../packages/core/dist/core.js";
+import { dependencyContext } from "../../packages/core/dist/context-builder.js";
 import { DEFAULT_REMAKE_LIMIT_SETTINGS } from "../../packages/shared/dist/remake-limit-settings.js";
 import { createTestCore } from "../helpers/core.mjs";
 import { openTestDatabase } from "../helpers/db.mjs";
@@ -120,6 +122,7 @@ test("the Designer prompt always carries the design_blocked instruction", () => 
   const prompt = buildDesignerRolePrompt(designRequest());
   assert.match(prompt, /set design_blocked \(cause_kind, cause, repeated_findings, question, options, recommended_option\)/);
   assert.doesNotMatch(prompt, /Core has stopped remaking this design/);
+  assert.match(prompt, /set design_unchanged to true/);
 });
 
 test("a stopped design asks the Designer to fill design_blocked without rewriting", () => {
@@ -137,6 +140,9 @@ test("DESIGNER_REPORT_SCHEMA accepts design_blocked and WORKER_REPORT_SCHEMA doe
   assert.equal(normalizeWorkerResponseWithFeedback(respond({ ...template, design_blocked: null }), "run-1", false, undefined, DESIGNER_REPORT_SCHEMA).report.design_blocked, undefined);
   assert.throws(() => normalizeWorkerResponseWithFeedback(respond({ ...template, design_blocked: { ...blocked, cause_kind: "other" } }), "run-1", false, undefined, DESIGNER_REPORT_SCHEMA));
   assert.throws(() => normalizeWorkerResponseWithFeedback(respond({ ...template, design_blocked: blocked }), "run-1"));
+  assert.equal(normalizeWorkerResponseWithFeedback(respond({ ...template, design_unchanged: true }), "run-1", false, undefined, DESIGNER_REPORT_SCHEMA).report.design_unchanged, true);
+  assert.equal(normalizeWorkerResponseWithFeedback(respond({ ...template, design_unchanged: null }), "run-1", false, undefined, DESIGNER_REPORT_SCHEMA).report.design_unchanged, undefined);
+  assert.equal(DESIGNER_REPORT_SCHEMA.required.includes("design_unchanged"), false);
 });
 
 test("readDesignBlocked rejects an out-of-range recommended_option", () => {
@@ -255,4 +261,80 @@ test("with the limit set to 2 the first Lead rejection is remade and the second 
   });
   assert.equal(db.get("SELECT lead_review_rejections AS n FROM tasks WHERE work_id = ?", workId).n, 2);
   assert.equal(calls.tiers.filter((tier) => tier === "lead").length >= 2, true, "a second Lead run happened before the stop");
+});
+
+for (const designSkill of ["example-ui-skill", null]) {
+  test(`a mixed plan starts only the lead_designer Task as lead (design skill ${designSkill ?? "unset"})`, async (t) => {
+    const { root, db } = await openTestDatabase(t, { prefix: "owl-designer-mixed-" });
+    let release;
+    const gate = new Promise((resolveGate) => { release = resolveGate; });
+    const requests = [];
+    const workflow = new WorkflowEngine({
+      db, owlRoot: root, dataDir: root, git: new NoopGitGateway(), designSkill,
+      agentRunner: { runDesigner: async (request) => { requests.push(request); return gate; } },
+    });
+    t.after(async () => {
+      release({ outcome: "failed", report_valid: false, message: "test stopped", skill_feedback: null });
+      await workflow.stop();
+    });
+    const workId = await db.createWriteLane().transact((tx) => {
+      const work = createWorkInTransaction(tx, { title: "Mixed", summary: "x", size: "normal", project_id: null });
+      tx.run("UPDATE works SET state = 'running' WHERE id = ?", work.id);
+      createTaskPlanInTransaction(tx, work.id, [
+        { id: "D1", title: "Screens", type: "design", assigned_designer: "lead_designer", acceptance: "Doc", depends_on: [] },
+        { id: "D2", title: "Content", type: "design", assigned_designer: "designer", acceptance: "Doc", depends_on: [] },
+        { id: "D3", title: "Plain", type: "design", acceptance: "Doc", depends_on: [] },
+        { id: "C1", title: "Code", type: "code", assigned_designer: "lead_designer", acceptance: "Code", depends_on: [] },
+      ]);
+      return work.id;
+    });
+    assert.deepEqual(db.all("SELECT manager_task_id AS id, assigned_designer AS who, lead_designer_start_round AS start FROM tasks WHERE work_id = ? ORDER BY manager_task_id", workId), [
+      { id: "C1", who: null, start: null },
+      { id: "D1", who: "lead_designer", start: 0 },
+      { id: "D2", who: "designer", start: null },
+      { id: "D3", who: null, start: null },
+    ]);
+    workflow.start();
+    await workflow.resolveDependencies(workId);
+    await workflow.launchReady(workId);
+    await waitFor(() => requests.length === 3);
+    assert.deepEqual(db.all("SELECT tasks.manager_task_id AS id, agent_runs.design_tier AS tier FROM agent_runs JOIN tasks ON tasks.id = agent_runs.task_id WHERE agent_runs.work_id = ? AND tasks.type = 'design' ORDER BY tasks.manager_task_id", workId), [
+      { id: "D1", tier: "lead" }, { id: "D2", tier: "standard" }, { id: "D3", tier: "standard" },
+    ]);
+    const contextOf = (title) => requests.find((request) => request.task_id === db.get("SELECT id FROM tasks WHERE work_id = ? AND title = ?", workId, title).id).context;
+    assert.match(contextOf("Screens").design_mock_dir, /\.mocks$/u);
+    assert.equal(contextOf("Screens").design_skill, designSkill ?? undefined);
+    for (const title of ["Content", "Plain"]) {
+      assert.equal("design_mock_dir" in contextOf(title), false);
+      assert.equal("design_skill" in contextOf(title), false);
+    }
+  });
+}
+
+test("a dependency on a screen design Task carries its design_mock_dir", async (t) => {
+  const { root, db } = await openTestDatabase(t, { prefix: "owl-designer-dep-" });
+  const ids = await db.createWriteLane().transact((tx) => {
+    const work = createWorkInTransaction(tx, { title: "Dep", summary: "x", size: "normal", project_id: null });
+    const [screen, plain, code] = createTaskPlanInTransaction(tx, work.id, [
+      { id: "D1", title: "Screens", type: "design", assigned_designer: "lead_designer", acceptance: "Doc", depends_on: [] },
+      { id: "D2", title: "Plain", type: "design", acceptance: "Doc", depends_on: [] },
+      { id: "C1", title: "Code", type: "code", acceptance: "Code", depends_on: ["D1", "D2"] },
+    ]);
+    tx.run("UPDATE tasks SET status = 'completed' WHERE id IN (?, ?)", screen.id, plain.id);
+    return { screen: screen.id, code: code.id };
+  });
+  const reports = dependencyContext(db, ids.code, root).dependency_reports;
+  const withMocks = reports.filter((report) => "design_mock_dir" in report);
+  assert.equal(reports.length, 2);
+  assert.equal(withMocks.length, 1);
+  assert.match(withMocks[0].design_mock_dir, new RegExp(`${ids.screen}\\.mocks$`, "u"));
+});
+
+test("Manager plan items normalize assigned_designer and reject invalid values", () => {
+  const item = (fields) => ({ id: "T1", title: "t", type: "design", acceptance: "a", depends_on: [], replaces: [], ...fields });
+  const plan = (fields) => managerTasksToPlanItems([item(fields)], "w", { allowEmpty: false })[0];
+  assert.equal(plan({ assigned_designer: "lead_designer" }).assigned_designer, "lead_designer");
+  assert.equal(plan({ assigned_designer: null }).assigned_designer, undefined);
+  assert.equal(plan({ type: "code", assigned_designer: "lead_designer" }).assigned_designer, undefined);
+  assert.throws(() => plan({ assigned_designer: "lead" }), (error) => error.details?.field === "assigned_designer");
 });

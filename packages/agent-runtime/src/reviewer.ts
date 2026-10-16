@@ -161,6 +161,7 @@ export function buildReviewerPrompt(
       designer
         ? "design_document contains the external Markdown design (path and contents); review it directly because the Task has no changed repository files."
         : "changed_files lists the files the Worker changed (null when unknown); read those files in the workspace.",
+      ...(designer ? ["On a screen design Task, design_document.mocks lists its HTML mocks (name and path); open them and check them against the design document and the acceptance criteria. A screen design Task with no mocks is a finding."] : []),
       designer
         ? "unreported_new_files is null for a design Task."
         : "unreported_new_files lists the files the Task added that the Worker's report does not list in its changes (an empty array when there are none, null when unknown). Check that each of them belongs in the deliverable; report any that is machine-local tool output or otherwise does not belong as a finding.",

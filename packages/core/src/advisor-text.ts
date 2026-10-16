@@ -29,6 +29,11 @@ export interface AdvisorText {
   readonly workRetried: (ref: string) => string;
   readonly workCancelledNotice: (ref: string) => string;
   readonly workDeletedNotice: (ref: string) => string;
+  readonly workMovedToProject: (ref: string, projectName: string, displayNumber: number) => string;
+  readonly workProjectAlreadySet: (ref: string) => string;
+  readonly projectNotFoundForMove: (projectId: string) => string;
+  readonly workBusyForMove: (ref: string) => string;
+  readonly workFixPendingForMove: (ref: string, taskIds: readonly string[]) => string;
   readonly workActionIncomplete: (action: string) => string;
   readonly actionsMalformed: string;
   readonly workNotFound: (workId: string) => string;
@@ -63,6 +68,7 @@ const WORK_ACTION_LABEL: Record<OwnerLanguage, Record<string, string>> = {
     resume_work: "再開",
     cancel_work: "キャンセル",
     delete_work: "削除",
+    move_work_to_project: "Project への移動",
   },
   en: {
     send_work_instruction: "sending the instruction",
@@ -71,6 +77,7 @@ const WORK_ACTION_LABEL: Record<OwnerLanguage, Record<string, string>> = {
     resume_work: "resume",
     cancel_work: "cancellation",
     delete_work: "deletion",
+    move_work_to_project: "move to a Project",
   },
 };
 
@@ -145,6 +152,11 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     workRetried: (ref) => `✓ エラーで止まっていたWork${ref}に再試行を指示しました。`,
     workCancelledNotice: (ref) => `✓ Work${ref}をキャンセルしました。`,
     workDeletedNotice: (ref) => `✓ Work${ref}を削除しました。`,
+    workMovedToProject: (ref, projectName, displayNumber) => `✓ Work${ref}をProject「${projectName}」へ移しました。移動後の番号は Work #${displayNumber} です。`,
+    workProjectAlreadySet: (ref) => `⚠ Work${ref}はすでにProjectに属しているため、移していません。Project間の移動はできません。`,
+    projectNotFoundForMove: (projectId) => `⚠ ID ${projectId} のProjectが見つからないため、Workを移していません。`,
+    workBusyForMove: (ref) => `⚠ Work${ref}のAgentが動作中のため、移していません。Agentが止まってからもう一度依頼してください。`,
+    workFixPendingForMove: (ref, taskIds) => `⚠ Work${ref}には修正待ちのTask（${taskIds.join("、")}）があるため、移していません。そのTaskが終わってからもう一度依頼してください。`,
     workActionIncomplete: (action) => `⚠ ${workActionLabel("ja", action)}を実行できませんでした。AdvisorのWork指定（work_idなど）が不足しているか形式が違います。Workは変更していません。`,
     actionsMalformed: "⚠ owl-actions の一部が不正で破棄されたため、そのアクション（Work 作成など）を実行できませんでした。",
     workNotFound: (workId) => `⚠ ID ${workId} のWorkが見つからないため、何も変更していません。`,
@@ -204,6 +216,11 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     workRetried: (ref) => `✓ Told Work ${ref}, which had stopped on an error, to retry.`,
     workCancelledNotice: (ref) => `✓ Cancelled Work ${ref}.`,
     workDeletedNotice: (ref) => `✓ Deleted Work ${ref}.`,
+    workMovedToProject: (ref, projectName, displayNumber) => `✓ Moved Work ${ref} into the Project "${projectName}". Its number there is Work #${displayNumber}.`,
+    workProjectAlreadySet: (ref) => `⚠ Work ${ref} already belongs to a Project, so it was not moved. Moving between Projects is not possible.`,
+    projectNotFoundForMove: (projectId) => `⚠ No Project has the ID ${projectId}; the Work was not moved.`,
+    workBusyForMove: (ref) => `⚠ Work ${ref} has running Agents, so it was not moved. Ask again after they stop.`,
+    workFixPendingForMove: (ref, taskIds) => `⚠ Work ${ref} has Tasks waiting for a fix (${taskIds.join(", ")}), so it was not moved. Ask again after those Tasks finish.`,
     workActionIncomplete: (action) => `⚠ Could not run the ${workActionLabel("en", action)}: the Advisor's Work details (such as work_id) were missing or malformed. No Work was changed.`,
     actionsMalformed: "⚠ Part of the owl-actions was malformed and discarded, so that action (such as creating a Work) could not be run.",
     workNotFound: (workId) => `⚠ No Work has the ID ${workId}; nothing was changed.`,

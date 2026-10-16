@@ -393,6 +393,7 @@ test("Slack and web Advisor turns parse owl-actions and create Works end to end"
     assert.match(slackTurn.text, /owl-actions fence format is unchanged/u);
     assert.match(slackTurn.text, /Whenever creating a Work, still emit the required action/u);
     assert.doesNotMatch(sessionRequest.system_prompt, /Write user-visible text in Slack mrkdwn/u, "the shared system prompt must stay channel-neutral");
+    assert.match(sessionRequest.system_prompt, /asks the Lead Designer only for the screen design, omit design_mode and keep that request in the Work summary/u);
 
     const slackEvent = await waitFor(
       () => advisorEvents.find((event) => event.payload.conversation_id === slackConversation.id),

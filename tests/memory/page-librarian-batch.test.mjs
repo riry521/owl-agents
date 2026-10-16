@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, utimes, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { createUlid } from "../../packages/db/dist/index.js";
@@ -66,7 +66,17 @@ created: 2026-10-01
 `;
 
 /** A vault with `conversations` pending logs and `clippings` unused clippings; each file is `ageSeconds(i)` old. */
-async function setup(t, { conversations, clippings = 0, batch, propose, rebuildIndexes, themeRow, themeRows, router }) {
+test("a large type: theme page under materials/ is not sent to the librarian and does not stop the run", async (t) => {
+  const path = "materials/projects/horse-ai/big.md";
+  const batch = { current: { max_items: 20, max_input_tokens: 60000 } };
+  const env = await setup(t, { conversations: 2, batch, materials: { [path]: `---\ntype: theme\ntitle: 大きな構想\n---\n${"あ".repeat(67000)}\n` }, propose: async () => ({ ok: true, output: { operations: [] } }) });
+  const report = await env.run();
+  assert.notEqual(report.error, "input_over_limit");
+  assert.ok(env.requests.length > 0);
+  assert.ok(!JSON.stringify(env.requests).includes(path));
+});
+
+async function setup(t, { conversations, clippings = 0, materials = {}, batch, limits, propose, rebuildIndexes, themeRow, themeRows, router }) {
   const parent = await tempDir(t, "owl-librarian-batch-");
   const vault = join(parent, "vault");
   const dataDir = join(parent, "data");
@@ -83,6 +93,7 @@ async function setup(t, { conversations, clippings = 0, batch, propose, rebuildI
   };
   for (let i = 0; i < conversations; i += 1) await write(`conversations/2026-10/${i}.md`, conversation(i), i);
   for (let i = 0; i < clippings; i += 1) await write(`research/c${i}.md`, clipping(i), conversations + i);
+  for (const [rel, text] of Object.entries(materials)) { await mkdir(dirname(join(vault, rel)), { recursive: true }); await writeFile(join(vault, rel), text); }
   const storage = { isAvailable: () => true, activeDir: () => vault, withRead: async (op) => op(), status: () => ({ available: true, dir: vault, since: null }) };
   const index = new MemoryIndex({ dataDir, storage, watch: false });
   const requests = [];
@@ -92,7 +103,7 @@ async function setup(t, { conversations, clippings = 0, batch, propose, rebuildI
     rebuildIndexes,
     router: router ?? { route: async () => ({ status: "appended", page: null }) },
     propose: async (request) => { requests.push(request); return propose(request, requests.length); },
-    model: () => ({ provider: "claude", model: "m", effort: "low" }), batch: () => batch.current, now: () => NOW, logger: { warn: () => undefined },
+    model: () => ({ provider: "claude", model: "m", effort: "low" }), batch: () => batch.current, limits, now: () => NOW, logger: { warn: () => undefined },
   });
   t.after(async () => { await index.stop(); });
   await index.start();
@@ -229,6 +240,128 @@ test("manual run with paths is one batch; manual without paths loops like nightl
 
   await env.librarian.run({ run_id: createUlid(), mode: "manual" });
   assert.equal(env.requests.length, 1 + Math.ceil(3 / batch.current.max_items));
+});
+
+/** A theme page whose `決まりごと` carries `lines`; long lines leave the template valid but can push the page past its own size limit. */
+const withFacts = (page, lines) => page.replace("## 決まりごと\n（なし）\n", `## 決まりごと\n${lines.join("\n")}\n`);
+
+/** What `MemoryIndex` says about a theme page written by hand: the request only reads the scope, the project, the path and the status from it. */
+const themeRowOf = (path, title) => ({ path, title, summary: `${title}の要約`, page_scope: "common", project_id: null, status: "active", owl_new_count: 0 });
+
+/** Lines long enough to push a theme page past its own size limit, short enough for one request to still hold their items. */
+const overLimitLines = (count, length) => Array.from({ length: count }, (_, i) => `- 決まりごとその${i}：${"あ".repeat(length)}`);
+
+test("an over-limit page too big for max_input_tokens goes in without its items and into warnings, and the batch is still sent", async (t) => {
+  const themePath = "themes/over_input_limit.md";
+  const title = "上限を超えるテーマ";
+  // 400 lines of 200 characters: the page's items alone are several times max_input_tokens, so no request within the limit can carry them.
+  const lines = overLimitLines(400, 200);
+  const batch = { current: { max_items: 200, max_input_tokens: 60000 } };
+  const env = await setup(t, {
+    conversations: 5, batch,
+    propose: async () => ({ ok: true, output: { operations: [] } }),
+    themeRows: () => [themeRowOf(themePath, title)],
+  });
+  await mkdir(join(env.vault, "themes"), { recursive: true });
+  await writeFile(join(env.vault, themePath), withFacts(themePage(createUlid(), title), lines));
+
+  const report = await env.run();
+  assert.notEqual(report.error, "input_over_limit");
+  assert.ok(env.requests.length >= 1, "the model is still called");
+  const request = env.requests[0];
+  const page = request.pages.find((p) => p.path === themePath);
+  assert.equal(page.over_limit, true, "the page really is over its own limit");
+  assert.equal(page.items, null, "a page too big for the request is sent without its items");
+  assert.ok(request.conversations.length > 0, "the waiting logs are sent all the same");
+  assert.equal(request.conversations.length, 5, "the room the page could not use goes to the logs");
+  assert.deepEqual(report.warnings.filter((w) => w.page === themePath).map((w) => w.code), ["page_items_over_input_limit"], "the page is reported once");
+});
+
+test("over-limit pages whose items fit max_input_tokens keep them, and the entries that do not fit are left out instead", async (t) => {
+  const themePath = "themes/over_theme_limit.md";
+  const title = "上限のテーマ";
+  // Three long lines: enough to push the page over its own limit, small enough for one request to hold the items.
+  const lines = overLimitLines(3, 1200);
+  const pending = 4 + 3;
+  const batch = { current: { max_items: 1, max_input_tokens: 60000 } };
+  const env = await setup(t, {
+    conversations: 4, clippings: 3, batch,
+    propose: async () => ({ ok: true, output: { operations: [] } }),
+    themeRows: () => [themeRowOf(themePath, title)],
+  });
+  await mkdir(join(env.vault, "themes"), { recursive: true });
+  await writeFile(join(env.vault, themePath), withFacts(themePage(createUlid(), title), lines));
+
+  // One entry, everything else left out: the room this request takes is the page's items plus a single entry.
+  await env.run();
+  const room = estimatePageTokens(JSON.stringify(env.requests[0]));
+  batch.current = { max_items: 20, max_input_tokens: room };
+  const report = await env.run();
+  assert.notEqual(report.error, "input_over_limit");
+  const request = env.requests[1];
+  const page = request.pages.find((p) => p.path === themePath);
+  assert.equal(page.over_limit, true);
+  assert.equal(page.items?.find((s) => s.section === "決まりごと")?.items.length, lines.length, "the items of an over-limit page that fit are sent");
+  assert.ok(estimatePageTokens(JSON.stringify(request)) <= room, "the whole request stays within max_input_tokens");
+  assert.ok(
+    sent(request).length > 0 && sent(request).length < pending,
+    `the entries take only the room left after the page, never the page's own room: ${sent(request).length} of ${pending}`,
+  );
+});
+
+test("the run's own input limit never takes the room of an over-limit page or of the entries", async (t) => {
+  const themePath = "themes/over_run_limit.md";
+  const title = "実行上限のテーマ";
+  const lines = overLimitLines(3, 1200);
+  // `limits.input_tokens: 1` is smaller than any single item here: a page or an entry measured against it alone would be left out.
+  const batch = { current: { max_items: 20, max_input_tokens: 60000, max_batches: 1 } };
+  const env = await setup(t, {
+    conversations: 3, batch, limits: { input_tokens: 1 },
+    propose: async () => ({ ok: true, output: { operations: [] } }),
+    themeRows: () => [themeRowOf(themePath, title)],
+  });
+  await mkdir(join(env.vault, "themes"), { recursive: true });
+  await writeFile(join(env.vault, themePath), withFacts(themePage(createUlid(), title), lines));
+
+  const report = await env.run();
+  assert.notEqual(report.error, "input_over_limit");
+  const request = env.requests[0];
+  const page = request.pages.find((p) => p.path === themePath);
+  assert.equal(page.over_limit, true);
+  assert.equal(page.items?.find((s) => s.section === "決まりごと")?.items.length, lines.length, "a page over its own limit keeps the items a roomy max_input_tokens can hold");
+  assert.equal(request.conversations.length, 3, "and the entries never had that limit applied to them either");
+  assert.deepEqual(report.warnings, []);
+});
+
+test("the entries waiting for the librarian take their room before a page with nothing to do", async (t) => {
+  const themePath = "themes/quiet.md";
+  const title = "静かなテーマ";
+  const batch = { current: { max_items: 20, max_input_tokens: 60000, max_batches: 1 } };
+  const env = await setup(t, {
+    conversations: 3, batch,
+    propose: async () => ({ ok: true, output: { operations: [] } }),
+    themeRows: () => [themeRowOf(themePath, title)],
+  });
+  await mkdir(join(env.vault, "themes"), { recursive: true });
+  await writeFile(join(env.vault, themePath), withFacts(themePage(createUlid(), title), overLimitLines(8, 300)));
+
+  // A roomy request shows what everything costs: what the request pays without items and entries is fixed, the rest is the page's items.
+  await env.run();
+  const whole = env.requests[0];
+  const page = whole.pages.find((p) => p.path === themePath);
+  assert.equal(page.over_limit, false, "the page is inside its own limits: it is an ordinary page with nothing new");
+  const fixed = estimatePageTokens(JSON.stringify({ ...whole, pages: whole.pages.map((p) => ({ ...p, items: null })), conversations: [], clippings: [] }));
+  const items = estimatePageTokens(JSON.stringify(page.items));
+
+  // One token more than the page's items: the entries fit, the page and the entries together do not.
+  const room = fixed + items + 1;
+  batch.current = { max_items: 20, max_input_tokens: room, max_batches: 1 };
+  const report = await env.run();
+  const request = env.requests[1];
+  assert.notEqual(report.error, "input_over_limit");
+  assert.equal(request.conversations.length, 3, "the logs waiting to be read are sent before a page that has nothing new");
+  assert.equal(request.pages.find((p) => p.path === themePath).items, null, "the room the page cannot have goes unsent, not the entries");
+  assert.ok(estimatePageTokens(JSON.stringify(request)) <= room, "the whole request stays within max_input_tokens");
 });
 
 const themePage = (id, title) => `---

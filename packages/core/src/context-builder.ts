@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { DEFAULT_DEPENDENCY_SUMMARY_SETTINGS } from "../../shared/dist/dependency-summary-settings.js";
-import { designDocumentPath, readTestPolicy, taskReportPath } from "@owl/shared";
+import { designDocumentPath, designMockDirectory, isScreenDesignTask, readTestPolicy, taskReportPath } from "@owl/shared";
 import { readStoredAcceptanceCriteria } from "../../shared/dist/acceptance-criteria.js";
 import { readStoredTaskPlanContext } from "../../shared/dist/task-necessity.js";
 import { uniqueSorted } from "./context-canonical";
@@ -171,8 +171,8 @@ export function dependencyContext(
   const dependsOn = taskDependencyIds(db, taskId);
   if (dependsOn.length === 0) return { depends_on: [], dependency_reports: [], artifact_paths: [] };
   const placeholders = dependsOn.map(() => "?").join(",");
-  const completed = db.all<{ id: string; work_id: string; manager_task_id: string | null; title: string; type: string }>(
-    `SELECT id, work_id, manager_task_id, title, type FROM tasks
+  const completed = db.all<{ id: string; work_id: string; manager_task_id: string | null; title: string; type: string; assigned_designer: string | null }>(
+    `SELECT id, work_id, manager_task_id, title, type, assigned_designer FROM tasks
       WHERE id IN (${placeholders}) AND status = 'completed'
       ORDER BY id ASC`,
     ...dependsOn,
@@ -191,6 +191,7 @@ export function dependencyContext(
       changed_files: uniqueSorted(changes.map((change) => (typeof change.file === "string" ? change.file : ""))),
       open_issues: remainingIssues.map((item) => (isRecord(item) ? item.issue : item)).filter((issue): issue is string => typeof issue === "string"),
       design_document_path: dependency.type === "design" ? designDocumentPath(dataDir, dependency.work_id, dependency.id) : null,
+      ...(isScreenDesignTask(dependency) ? { design_mock_dir: designMockDirectory(dataDir, dependency.work_id, dependency.id) } : {}),
       report_path: report === null ? null : writeDependencyReport(dataDir, dependency.work_id, dependency.id, report),
     });
   }

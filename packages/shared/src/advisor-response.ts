@@ -18,7 +18,8 @@ export type AdvisorWorkOperationType =
   | "pause_work"
   | "resume_work"
   | "cancel_work"
-  | "delete_work";
+  | "delete_work"
+  | "move_work_to_project";
 
 /** Work-operation action types from owl-actions. Use `.has` for untrusted action types. */
 export const ADVISOR_WORK_OPERATION_ACTION_TYPES: ReadonlySet<string> = new Set<AdvisorWorkOperationType>([
@@ -28,6 +29,7 @@ export const ADVISOR_WORK_OPERATION_ACTION_TYPES: ReadonlySet<string> = new Set<
   "resume_work",
   "cancel_work",
   "delete_work",
+  "move_work_to_project",
 ]);
 
 export function isAdvisorWorkOperationType(type: string): type is AdvisorWorkOperationType {

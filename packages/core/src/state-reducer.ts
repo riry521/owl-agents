@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { createUlid, utcNow } from "../../db/dist/index.js";
 import { OUTPUT_FORMAT_INVALID_ERROR_KEY, readDesignBlocked, usageJson } from "@owl/shared";
 import type { ReviewLimitSettings } from "../../shared/dist/review-limit-settings.js";
-import { HumanReadableError, invalidStateTransition, notFound, validationError, versionConflict } from "./errors";
+import { HumanReadableError, invalidStateTransition, notFound, validationError, versionConflict, workProjectAlreadySet } from "./errors";
 import {
   DECISION_CANCEL_OPTION_KEY,
   assertDecisionBrief,
@@ -17,6 +17,7 @@ import {
 import * as AttemptPolicy from "./attempt-policy";
 import { attemptAction, type AttemptDecision, type AttemptReason } from "./attempt-policy";
 import { ownerLanguage } from "./owner-language";
+import { fixPendingTaskIds } from "./fix-pending-tasks.js";
 import { reviewLimits } from "./review-limits";
 import { previousFixSpots, reviewFocusSettings, reviewSpots, type ReviewSpot } from "./review-focus";
 import type { ReviewFocusSettings } from "../../shared/dist/review-focus-settings.js";
@@ -28,6 +29,7 @@ import { assignReplacementLineageInTransaction, lineageExternalBlockerReports, l
 import type { RemakeLimitSettings } from "../../shared/dist/remake-limit-settings.js";
 import { findDependencyCycle, type ReplanPlan } from "./replan-plan";
 import { PROCESS_WAIT_EVENT, validatePrerequisiteSpec, type PrerequisiteSpec } from "../../shared/dist/prerequisite.js";
+import { designerStateAfterRetry, designerStateAtCreation, type AssignedDesigner } from "./designer-assignment.js";
 import { ACCEPTANCE_DEFECT_EVENT, workerAcceptanceDefects } from "../../shared/dist/acceptance-defect.js";
 import { EXTERNAL_BLOCKER_EVENT } from "../../shared/dist/external-blocker.js";
 import type {
@@ -91,7 +93,7 @@ export const TASK_TRANSITION_TABLE = [
   { row: 18, current: "verifying", guard: "review fix_required and review_round >= review_limits.plan_review_rounds", event: "review.failed", next: "failed" },
   { row: 19, current: "review_fix_waiting", guard: "replacement lease", event: "task.started", next: "running" },
   { row: "18b", current: "verifying", guard: "review not passed and total_review_attempts reached review_limits.total_review_attempts", event: "review.failed", next: "failed" },
-  { row: "18e", current: "verifying", guard: "design Task escalated from the standard Designer to Lead (not one that began at Lead under design_mode=lead) and lineage-wide lead rejections reached remake_limits.lead_review_rejections (only Owner answers to a Decision restart the count; Manager replans, replacements and Owner-initiated replans carry it over)", event: "review.failed", next: "review_fix_waiting (stop-report run, then judgement_waiting)" },
+  { row: "18e", current: "verifying", guard: "design Task escalated from the standard Designer to Lead (not one that began at Lead under design_mode=lead or assigned_designer=lead_designer) and lineage-wide lead rejections reached remake_limits.lead_review_rejections (only Owner answers to a Decision restart the count; Manager replans, replacements and Owner-initiated replans carry it over)", event: "review.failed", next: "review_fix_waiting (stop-report run, then judgement_waiting)" },
   { row: "32d", current: "running", guard: "design Task: the Designer reported design_blocked, or the stop-report run (design_stop_json set) ended; no remake", event: "task.design_blocked -> decision.opened", next: "judgement_waiting" },
   { row: "32e", current: "running", guard: "stop-report run (design_stop_json set) crashed, failed or was rate limited", event: "task.failure.classified | agent.crashed | task.rate_limited", next: "judgement_waiting" },
   { row: "32f", current: "ready | review_fix_waiting", guard: "design Task with design_stop_json set and its Designer provider paused", event: "task.design_blocked", next: "judgement_waiting" },
@@ -608,8 +610,12 @@ export function reduceTask(
     if (!requiredBoolean(payload, "capacity_acquired") || !requiredBoolean(payload, "launch_lease_acquired")) {
       reject(row, event, "The Task cannot start without both capacity and a launch lease.");
     }
+    // Why not always resetSameErrorCounter: a retry from ready is the rerun the same-error limit counts, so the counters
+    // survive and last_error_generation follows the new generation. Other starts begin a fresh count.
+    const retrying = row.status === "ready" && row.last_error_generation === row.worker_generation;
     const next = {
-      ...withTaskVersion(resetSameErrorCounter(row), "running", now),
+      ...withTaskVersion(retrying ? row : resetSameErrorCounter(row), "running", now),
+      ...(retrying ? { last_error_generation: row.worker_generation + 1 } : {}),
       worker_generation: row.worker_generation + 1,
       worktree_path: typeof payload.worktree_path === "string" ? payload.worktree_path : row.worktree_path,
       worktree_state: typeof payload.worktree_path === "string" ? "active" : row.worktree_state,
@@ -2127,6 +2133,37 @@ export function detachProjectWorksInTransaction(
   return detached;
 }
 
+export function attachWorkToProjectInTransaction(
+  transaction: CoreWriteLaneTransaction,
+  input: { workId: string; projectId: string; expectedVersion?: number; allowedStates: readonly WorkState[]; source: "owner" | "advisor" | "auto_registration"; now: string },
+): { work_id: string; project_id: string; display_number: number; previous_display_number: number; state: WorkState } {
+  const row = transaction.get<WorkRow>("SELECT * FROM works WHERE id = ?", input.workId);
+  if (!row) throw notFound("work", input.workId);
+  assertVersion(row.state_version, input.expectedVersion);
+  if (row.project_id !== null) throw workProjectAlreadySet(row.id, row.project_id);
+  if (!transaction.get("SELECT id FROM projects WHERE id = ?", input.projectId)) throw notFound("project", input.projectId);
+  if (!input.allowedStates.includes(row.state)) throw invalidStateTransition("This Work cannot be moved into a Project in its current state.", { work_id: row.id, state: row.state });
+  const activeAgents = transaction.get<{ count: number }>(
+    `SELECT COUNT(*) AS count FROM agent_runs WHERE work_id = ? AND status IN ('launch_pending', 'spawned', 'running', 'cancel_requested')`, row.id,
+  );
+  const activeTasks = transaction.get<{ count: number }>("SELECT COUNT(*) AS count FROM tasks WHERE work_id = ? AND status IN ('running', 'verifying')", row.id);
+  if (Number(activeAgents?.count ?? 0) > 0 || Number(activeTasks?.count ?? 0) > 0) {
+    throw new HumanReadableError({ code: "work_has_active_agents", message: "Stop active Agents before moving this Work.", remediation: "Wait for the Agents to stop, then retry the move.", details: { work_id: row.id } });
+  }
+  const fixPending = fixPendingTaskIds(transaction, row.id);
+  if (fixPending.length > 0) throw invalidStateTransition("A Task must finish its pending fix before this Work can be moved.", { work_id: row.id, reason: "task_fix_pending", task_ids: fixPending });
+  const displayNumber = smallestFreeDisplayNumber(transaction, input.projectId);
+  const previousDisplayNumber = row.display_number ?? displayNumber;
+  transaction.run("UPDATE works SET project_id = ?, display_number = ?, updated_at = ? WHERE id = ? AND project_id IS NULL", input.projectId, displayNumber, input.now, row.id);
+  appendEventInTransaction(transaction, {
+    type: "work.project_attached", idempotencyKey: `work-project-attached:${row.id}:${input.projectId}`,
+    workId: row.id, taskId: null,
+    payload: { kind: "work_project_attached", schema_version: "1.0.0", work_id: row.id, project_id: input.projectId, previous_project_id: null, previous_display_number: previousDisplayNumber, display_number: displayNumber, source: input.source },
+    now: input.now,
+  });
+  return { work_id: row.id, project_id: input.projectId, display_number: displayNumber, previous_display_number: previousDisplayNumber, state: row.state };
+}
+
 export function createWorkInTransaction(
   transaction: CoreWriteLaneTransaction,
   payload: CreateWorkPayload,
@@ -2345,7 +2382,7 @@ export function createTaskPlanInTransaction(
       last_error_key: null,
       last_error_generation: null,
       review_round: 0,
-      lead_designer_start_round: item.type === "design" && work.design_mode === "lead" ? 0 : null,
+      ...designerStateAtCreation(item.type, item.assigned_designer, work.design_mode),
       reviewer_failure_count: 0,
       total_review_attempts: 0,
       base_sync_only: item.base_sync_only === true ? 1 : 0,
@@ -2372,8 +2409,9 @@ export function createTaskPlanInTransaction(
           acceptance, acceptance_criteria_json, plan_context_json, state_version, failure_count, same_error_count, last_error_key,
           last_error_generation, review_round, lead_designer_start_round, worker_generation, worktree_path,
           worktree_state, last_failure_class, paused_from, created_at, updated_at,
-          manager_task_id, retry_no, next_attempt_at, verification_spec_json, base_sync_only, base_sync_generations)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          manager_task_id, retry_no, next_attempt_at, verification_spec_json, base_sync_only, base_sync_generations,
+          assigned_designer)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       row.id,
       row.work_id,
       row.parent_task_id,
@@ -2406,6 +2444,7 @@ export function createTaskPlanInTransaction(
       row.verification_spec_json,
       row.base_sync_only ?? 0,
       row.base_sync_generations ?? 0,
+      row.assigned_designer ?? null,
     );
     rows.push(row);
   }
@@ -2516,7 +2555,7 @@ export function applyReplanInTransaction(
   /** Resolved wait_for of each retried Task (Core resolves targets and base_head before the write). */
   prerequisites: ReadonlyMap<string, PrerequisiteSpec> = new Map(),
 ): ReplanApplyResult {
-  const work = transaction.get<{ state: string; plan_revision: number }>("SELECT state, plan_revision FROM works WHERE id = ?", workId);
+  const work = transaction.get<{ state: string; plan_revision: number; design_mode: "auto" | "lead" }>("SELECT state, plan_revision, design_mode FROM works WHERE id = ?", workId);
   if (!work) {
     throw new HumanReadableError({
       code: "work_not_found",
@@ -2642,6 +2681,8 @@ export function applyReplanInTransaction(
 
   // Rows 20/20b: retry, with the Manager's revised instructions.
   for (const taskId of plan.reopenIds) {
+    const before = transaction.get<{ type: string; assigned_designer: AssignedDesigner | null; design_escalated: number }>(
+      "SELECT type, assigned_designer, design_escalated FROM tasks WHERE id = ?", taskId) as { type: string; assigned_designer: AssignedDesigner | null; design_escalated: number };
     reduceTaskInTransaction(transaction, taskId, {
       event: "task.replanned",
       payload: {
@@ -2667,6 +2708,17 @@ export function applyReplanInTransaction(
         verificationSpecFor(revision),
         now,
         taskId,
+      );
+    }
+    const designer = designerStateAfterRetry(
+      before,
+      { type: revision?.type ?? before.type, assigned_designer: revision?.assigned_designer },
+      work.design_mode,
+    );
+    if (designer) {
+      transaction.run(
+        "UPDATE tasks SET assigned_designer = ?, lead_designer_start_round = ?, design_escalated = ? WHERE id = ?",
+        designer.assigned_designer, designer.lead_designer_start_round, designer.design_escalated, taskId,
       );
     }
     // The mark belongs to this generation only: restated on every retry, never carried over.

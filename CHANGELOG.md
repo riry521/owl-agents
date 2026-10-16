@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.3.0 - 2026-10-16
+
+Design mock previews with per-Task Designer assignment, automatic Project registration for new repositories, and sturdier Codex and verification handling.
+
+### Projects
+
+- New repositories that Works start in are registered as Projects automatically
+- A Work that has no Project can be moved to a Project from the Work detail page (backed by a new API)
+- The external worktree no longer follows Python virtualenv symlinks out of the checkout
+
+### Workflow
+
+- The Manager assigns a Lead Designer to each design Task, and HTML design mocks can be previewed on the Work detail page
+- Design Tasks are no longer retried when the design document is unchanged or the same error repeats
+- Verification policy settings can be updated, and a TOML checker validates TOML files
+- File tests use the Project's `test_run` setting, and test setup retries resume where they stopped
+
+### Providers
+
+- Codex resumes after a rate limit wait with minute precision plus a 90-second grace period
+- Provider output schemas list every property of closed objects, as Codex requires
+
+### Knowledge
+
+- Page columns are recomputed when rules change, and oversized page items are skipped
+- Web research done by the Advisor and its subagents is saved to research notes
+- A new `materials/` folder in the vault is excluded from the Librarian and from indexes
+
 ## 0.2.0 - 2026-10-11
 
 Per-Project test setup that the agent investigates and verifies, a Fixer role for repeatedly rejected Tasks, and a per-Project commit language.

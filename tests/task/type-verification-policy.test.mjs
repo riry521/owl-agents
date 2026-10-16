@@ -1,16 +1,17 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { matchesGlobWithDots } from "../../packages/core/dist/glob.js";
-import { evaluateTaskTypePolicy } from "../../packages/core/dist/task-verification-policy.js";
+import { evaluateTaskTypePolicy, verificationPolicySettings } from "../../packages/core/dist/task-verification-policy.js";
 import { DEFAULT_TEST_DETECTION_RULES } from "../../packages/core/dist/test-detection-rules.js";
 import { testDetectionRulesVersion } from "../../packages/core/dist/test-detection.js";
 import { testSetupDigests } from "../../packages/core/dist/test-setup.js";
 import { DEFAULT_TEST_SETUP_SETTINGS } from "../../packages/shared/dist/test-setup-settings.js";
-import { DEFAULT_VERIFICATION_POLICY_SETTINGS, readVerificationPolicySettings } from "../../packages/shared/dist/verification-policy-settings.js";
+import { DEFAULT_VERIFICATION_POLICY_SETTINGS, readVerificationPolicySettings, VERIFICATION_POLICY_SETTINGS_KEY } from "../../packages/shared/dist/verification-policy-settings.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { createTestCore } from "../helpers/core.mjs";
 import { withNecessity } from "../helpers/necessity.mjs";
@@ -34,8 +35,9 @@ function workerReport(invocationId, files) {
  * Run one Task of `type` in a Work without a Project. The Worker writes `files`, claims `claimed`
  * (default: the same files) and reports a passed verification. Returns the first verification.completed payload.
  */
-async function verify(t, { type, files, claimed = Object.keys(files), spec = {}, storedSpecJson }) {
+async function verify(t, { type, files, claimed = Object.keys(files), spec = {}, storedSpecJson, policySettings, beforeWorkerReturns }) {
   let db;
+  let core;
   const agentRunner = withNecessity({
     runManagerPlan: async (request) => request.context?.mode === "plan"
       ? { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [
@@ -56,6 +58,7 @@ async function verify(t, { type, files, claimed = Object.keys(files), spec = {},
         await mkdir(dirname(join(request.context.worktree, name)), { recursive: true });
         await writeFile(join(request.context.worktree, name), content);
       }
+      await beforeWorkerReturns?.({ core, db });
       return { outcome: "success", report_valid: true, report: workerReport(request.invocation_id, claimed) };
     },
     runReviewer: async (request) => ({
@@ -65,11 +68,15 @@ async function verify(t, { type, files, claimed = Object.keys(files), spec = {},
     runAdvisor: async () => ({ reply: "" }),
   });
   const made = await createTestCore(t, { agentRunner, dispatcher: { tick_interval_ms: 25 } }, { prefix: "owl-type-policy-" });
-  const { core } = made;
+  core = made.core;
   db = made.db;
   const now = new Date().toISOString();
   await db.createWriteLane().transact((transaction) => {
     transaction.run("INSERT INTO owners (id, display_name, created_at, updated_at) VALUES (?, ?, ?, ?)", "owner:default", "Owner", now, now);
+    if (policySettings) transaction.run(
+      "INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at) VALUES ('verification_policy', 'owner:default', '1.0.0', ?, ?)",
+      JSON.stringify(policySettings), now,
+    );
   });
   await core.start();
   const created = await core.createWork({
@@ -83,6 +90,150 @@ async function verify(t, { type, files, claimed = Object.keys(files), spec = {},
 }
 
 const outcomeOf = (payload) => [payload.outcome, payload.verification.source, payload.verification.error_key];
+
+test("TOML checker validates syntax and confines bounded reads to regular files", async (t) => {
+  const root = await tempDir(t, "owl-toml-checker-");
+  const checker = new URL("../../packages/core/dist/toml-checker.js", import.meta.url).pathname;
+  const invoke = (file, max = "128") => spawnSync(process.execPath, [checker, file, max], { cwd: root, encoding: "utf8" });
+  await writeFile(join(root, "valid file.toml"), 'name = "worker"\n');
+  assert.equal(invoke("valid file.toml").status, 0);
+  assert.equal(invoke("valid file.toml").stdout, "");
+  await writeFile(join(root, "..valid.toml"), 'name = "worker"\n');
+  assert.equal(invoke("..valid.toml").status, 0);
+  await writeFile(join(root, "invalid.toml"), 'name = "unterminated\n');
+  const syntax = invoke("invalid.toml");
+  assert.equal(syntax.status, 1);
+  assert.equal(syntax.stdout, "");
+  assert.doesNotMatch(syntax.stderr, /unterminated/u);
+  await writeFile(join(root, "invalid-utf8.toml"), Buffer.from([0x78, 0x20, 0x3d, 0x20, 0x22, 0xff, 0x22]));
+  const invalidUtf8 = invoke("invalid-utf8.toml");
+  assert.equal(invalidUtf8.status, 1);
+  assert.equal(invalidUtf8.stdout, "");
+  assert.doesNotMatch(invalidUtf8.stderr, /�/u);
+  assert.equal(invoke().status, 2);
+  assert.equal(invoke("missing.toml").status, 2);
+  assert.equal(invoke("valid file.toml", "0").status, 2);
+  assert.equal(invoke("valid file.toml", "1.5").status, 2);
+  await writeFile(join(root, "large.toml"), "x".repeat(129));
+  assert.equal(invoke("large.toml").status, 2);
+  assert.equal(invoke("../outside.toml").status, 2);
+  await mkdir(join(root, "parent"));
+  const outside = await tempDir(t, "owl-toml-outside-");
+  await writeFile(join(outside, "outside.toml"), "x = 1\n");
+  await symlink(outside, join(root, "parent", "link"));
+  assert.equal(invoke("parent/link/outside.toml").status, 2);
+});
+
+test("Core passes its TOML checker executable and size limit after Project executables", async (t) => {
+  const payload = await verify(t, {
+    type: "config",
+    files: { "wrangler.toml": 'name = "worker"\n' },
+    policySettings: { config: { checkers: [{ pattern: "**/*.toml", argv: ["{owl_node}", "{owl_toml_checker}", "{file}", "{owl_max_read_bytes}"] }] } },
+  });
+  const command = payload.verification.commands.find((entry) => entry.command_id === "policy:config_checker");
+  assert.ok(command);
+  assert.equal(command.argv[0], process.execPath);
+  assert.equal(command.argv[1], new URL("../../packages/core/dist/toml-checker.js", import.meta.url).pathname);
+  assert.equal(command.argv[2], "wrangler.toml");
+  assert.ok(Number.isSafeInteger(Number(command.argv[3])) && Number(command.argv[3]) > 0);
+});
+
+test("Core verification policy updates preserve raw settings and commit through WriteLane atomically", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  const { root, core, db } = await createTestCore(t, {}, { prefix: "owl-verification-policy-core-" });
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run("INSERT INTO owners (id, display_name, created_at, updated_at) VALUES (?, ?, ?, ?)", "owner:default", "Owner", now, now);
+    transaction.run(
+      "INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at) VALUES (?, ?, ?, ?, ?)",
+      VERIFICATION_POLICY_SETTINGS_KEY, "owner:default", "1.0.0",
+      JSON.stringify({ config: { checkers: [{ pattern: "**/*.toml", argv: ["old", "{file}"] }], skip_patterns: ["**/.env*"] }, limits: { timeout_seconds: 60 }, future: { keep: true } }), now,
+    );
+    transaction.run("INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at) VALUES (?, ?, ?, ?, ?)", "dependency_summary", "owner:default", "1.0.0", "{\"max_chars\":600}", now);
+  });
+  const before = db.get("SELECT key, owner_id, schema_version, value_json, updated_at FROM settings WHERE key = ?", VERIFICATION_POLICY_SETTINGS_KEY);
+  const otherBefore = db.get("SELECT key, owner_id, schema_version, value_json FROM settings WHERE key = 'dependency_summary'");
+  const eventCount = db.get("SELECT COUNT(*) AS count FROM events").count;
+  const outboxCount = db.get("SELECT COUNT(*) AS count FROM outbox_deliveries").count;
+  const updated = await core.updateVerificationPolicySettings({ limits: { timeout_seconds: 30 } });
+  const stored = db.get("SELECT key, owner_id, schema_version, value_json, updated_at FROM settings WHERE key = ?", VERIFICATION_POLICY_SETTINGS_KEY);
+  const raw = JSON.parse(stored.value_json);
+  assert.equal(raw.config.checkers[0].argv[0], "old");
+  assert.deepEqual(raw.config.skip_patterns, ["**/.env*"]);
+  assert.deepEqual(raw.limits, { timeout_seconds: 30 });
+  assert.deepEqual(raw.future, { keep: true });
+  assert.deepEqual(db.get("SELECT key, owner_id, schema_version, value_json FROM settings WHERE key = 'dependency_summary'"), otherBefore);
+  assert.equal(stored.owner_id, before.owner_id);
+  assert.equal(stored.schema_version, before.schema_version);
+  assert.equal(updated.limits.timeout_seconds, 30);
+  assert.deepEqual(await core.getVerificationPolicySettings(), updated);
+  assert.deepEqual(verificationPolicySettings(db), updated);
+  assert.equal(db.get("SELECT COUNT(*) AS count FROM events").count, eventCount + 1);
+  assert.equal(db.get("SELECT COUNT(*) AS count FROM outbox_deliveries").count, outboxCount + 1);
+  const event = db.get("SELECT payload_json FROM events WHERE type = 'settings.verification_policy_updated' ORDER BY rowid DESC LIMIT 1");
+  assert.deepEqual(JSON.parse(event.payload_json), { limits: { timeout_seconds: 30 } });
+  const { core: otherCore } = await createTestCore(t, { db, owlRoot: root });
+  assert.deepEqual(await otherCore.getVerificationPolicySettings(), updated);
+
+  const snapshot = () => ({
+    rows: db.all("SELECT key, owner_id, schema_version, value_json, updated_at FROM settings ORDER BY key"),
+    events: db.all("SELECT id, sequence, idempotency_key, type, payload_json FROM events ORDER BY rowid"),
+    outbox: db.all("SELECT * FROM outbox_deliveries ORDER BY rowid"),
+  });
+  const prior = snapshot();
+  await assert.rejects(core.updateVerificationPolicySettings({ limits: { timeout_seconds: 0 }, code: { run_test_runners: false } }), (error) => error.code === "validation_error");
+  assert.deepEqual(snapshot(), prior);
+  await db.createWriteLane().transact((transaction) => transaction.run("CREATE TRIGGER fail_verification_policy_update BEFORE UPDATE ON settings WHEN OLD.key = 'verification_policy' BEGIN SELECT RAISE(ABORT, 'injected settings failure'); END"));
+  await assert.rejects(core.updateVerificationPolicySettings({ limits: { timeout_seconds: 20 } }));
+  await db.createWriteLane().transact((transaction) => transaction.run("DROP TRIGGER fail_verification_policy_update"));
+  assert.deepEqual(snapshot(), prior);
+  assert.deepEqual(await core.getVerificationPolicySettings(), updated);
+  await db.createWriteLane().transact((transaction) => transaction.run("CREATE TRIGGER fail_verification_policy_event BEFORE INSERT ON events WHEN NEW.type = 'settings.verification_policy_updated' BEGIN SELECT RAISE(ABORT, 'injected event failure'); END"));
+  await assert.rejects(core.updateVerificationPolicySettings({ limits: { timeout_seconds: 20 } }));
+  await db.createWriteLane().transact((transaction) => transaction.run("DROP TRIGGER fail_verification_policy_event"));
+  assert.deepEqual(snapshot(), prior);
+  assert.deepEqual(await core.getVerificationPolicySettings(), updated);
+  await db.createWriteLane().transact((transaction) => transaction.run("CREATE TRIGGER fail_verification_policy_outbox BEFORE INSERT ON outbox_deliveries BEGIN SELECT RAISE(ABORT, 'injected outbox failure'); END"));
+  await assert.rejects(core.updateVerificationPolicySettings({ limits: { timeout_seconds: 20 } }));
+  await db.createWriteLane().transact((transaction) => transaction.run("DROP TRIGGER fail_verification_policy_outbox"));
+  assert.deepEqual(snapshot(), prior);
+  assert.deepEqual(await core.getVerificationPolicySettings(), updated);
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run("CREATE TABLE verification_policy_commit_failure (owner_id TEXT NOT NULL REFERENCES owners(id) DEFERRABLE INITIALLY DEFERRED)");
+    transaction.run("CREATE TRIGGER fail_verification_policy_commit AFTER UPDATE ON settings WHEN OLD.key = 'verification_policy' BEGIN INSERT INTO verification_policy_commit_failure(owner_id) VALUES ('missing-owner'); END");
+  });
+  await assert.rejects(core.updateVerificationPolicySettings({ limits: { timeout_seconds: 20 } }));
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run("DROP TRIGGER fail_verification_policy_commit");
+    transaction.run("DROP TABLE verification_policy_commit_failure");
+  });
+  assert.deepEqual(snapshot(), prior);
+  assert.deepEqual(await core.getVerificationPolicySettings(), updated);
+  for (const broken of ["not json", "[]", JSON.stringify({ limits: [] })]) {
+    await db.createWriteLane().transact((transaction) => {
+      transaction.run("PRAGMA ignore_check_constraints = ON");
+      transaction.run("UPDATE settings SET value_json = ? WHERE key = ?", broken, VERIFICATION_POLICY_SETTINGS_KEY);
+      transaction.run("PRAGMA ignore_check_constraints = OFF");
+    });
+    const damaged = snapshot();
+    const effectiveBefore = await core.getVerificationPolicySettings();
+    await assert.rejects(core.updateVerificationPolicySettings({ limits: { timeout_seconds: 10 } }), (error) => error.code === "verification_policy_storage_invalid");
+    assert.deepEqual(snapshot(), damaged);
+    assert.deepEqual(await core.getVerificationPolicySettings(), effectiveBefore);
+    await db.createWriteLane().transact((transaction) => transaction.run("UPDATE settings SET value_json = ? WHERE key = ?", before.value_json, VERIFICATION_POLICY_SETTINGS_KEY));
+  }
+});
+
+test("the next verification on the same Core reads the updated policy", async (t) => {
+  const payload = await verify(t, {
+    type: "config",
+    files: { "broken.json": "{" },
+    beforeWorkerReturns: ({ core }) => core.updateVerificationPolicySettings({
+      config: { checkers: [{ pattern: "**/*.json", argv: [process.execPath, "-e", "process.exit(0)", "{file}"] }] },
+    }),
+  });
+  assert.deepEqual(outcomeOf(payload), ["pass", "task_type_policy", null]);
+});
 
 test("code: the Worker's claim alone does not pass; a file that passes the syntax check does", async (t) => {
   assert.deepEqual(outcomeOf(await verify(t, { type: "code", files: {}, claimed: ["a.mjs"] })), ["fail", "task_type_policy", "verification_claimed_change_missing"]);
@@ -356,12 +507,37 @@ const runnersOn = { ...DEFAULT_VERIFICATION_POLICY_SETTINGS, code: { ...DEFAULT_
 
 async function policyWithRecordedArgv(t, { type, files, spec = {}, projectTestRun }) {
   const argvs = [];
-  const runCommand = async (argv) => { argvs.push(argv); return { passed: true, exit_code: 0, stdout: "" }; };
+  const calls = [];
+  const runCommand = async (argv, cwd) => { argvs.push(argv); calls.push({ argv, cwd }); return { passed: true, exit_code: 0, stdout: "" }; };
   const root = await tempDir(t, "owl-off-policy-");
-  for (const name of files) await writeFile(join(root, name), "x = 1\n");
+  for (const name of files) {
+    await mkdir(dirname(join(root, name)), { recursive: true });
+    await writeFile(join(root, name), "x = 1\n");
+  }
   const result = await evaluateTaskTypePolicy({ type, root, files, claimedChanges: [], spec, mode: "sole", settings: runnersOn, runCommand, projectTestRun });
-  return { argvs, result };
+  return { argvs, calls, root, result };
 }
+
+test("Project test_run: file commands use the Project cwd and cwd-relative file", async (t) => {
+  for (const file_argv of [undefined, ["{python}", "-m", "pytest", "{file}", "-q"]]) {
+    const projectTestRun = { enabled: true, cwd: "backend", whole_argv: [".venv/bin/python", "-m", "pytest", "-q"], test_patterns: ["tests/test_*.py"], ...(file_argv ? { file_argv } : {}) };
+    const { calls, root, result } = await policyWithRecordedArgv(t, { type: "test", files: ["backend/tests/test_x.py"], projectTestRun });
+    assert.equal(result.passed, true);
+    assert.deepEqual(calls, [{ argv: file_argv ? ["{python}", "-m", "pytest", "tests/test_x.py", "-q"] : [".venv/bin/python", "-m", "pytest", "-q", "tests/test_x.py"], cwd: join(root, "backend") }]);
+  }
+});
+
+test("Project test_run: files outside cwd or explicit patterns and absent argv use the default runner", async (t) => {
+  for (const [file, projectTestRun] of [
+    ["test_x.py", { enabled: true, cwd: "backend", whole_argv: ["custom"] }],
+    ["backend/tests/test_x.py", { enabled: true, cwd: "backend", whole_argv: ["custom"], test_patterns: ["other/**"] }],
+    ["backend/tests/test_x.py", { enabled: true, cwd: "backend" }],
+    ["test_x.py", undefined],
+  ]) {
+    const { calls, root } = await policyWithRecordedArgv(t, { type: "test", files: [file], projectTestRun });
+    assert.deepEqual(calls, [{ argv: ["{python}", "-m", "pytest", "-q", file], cwd: root }]);
+  }
+});
 
 test("Project test_run explicit off: a code Task skips test.runners, still runs code.checkers, and passes", async (t) => {
   const { argvs, result } = await policyWithRecordedArgv(t, { type: "code", files: ["test_a.py", "a.py"], projectTestRun: offInput });

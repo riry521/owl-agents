@@ -16,7 +16,7 @@ const ADVISOR_START_BYTE_BUDGET = 5400;
 const PROJECT_LIST = "(project-list)";
 const OMITTED = "(上限超過のため省略 — MCP の index で取得)";
 const GUIDE = "テーマページは owl-memory の page で開く（[[ページ名]] を渡す）。\n外部の資料は search で探す。Work の記録は普段は読まない。";
-const ADVISOR_GUIDE = "Project の目次は owl-memory の index（project に名前を渡す）で開く。テーマページは page で開く（[[ページ名]] を渡す）。\n外部の資料は search で探す。Work の記録は普段は読まない。\n会話で決まったことは append で、テンプレートのセクション（概要・決まりごと・落とし穴・手順）に沿って書く。";
+const ADVISOR_GUIDE = "Project の目次は owl-memory の index（project に名前を渡す）で開く。テーマページは page で開く（[[ページ名]] を渡す）。\n外部の資料は search で探す。Work の記録は普段は読まない。\nappend でナレッジに書くのは教訓・決まりごと・落とし穴だけ。構想や設計のまとめは append せず、materials/ にファイルとして書く。\n壁打ちのまとめや調査結果は、保管庫の materials/（common/ または projects/<slug>/）にファイルとして書く。Work を作るときは summary にそのパスを書く。materials/ は search で探せるが、目次には出ない。";
 /** Sections dropped when the block is over its limit, first to last. 必読 is never dropped. */
 const COLLAPSE_ORDER = ["Project 目次の一覧", "共通テーマ", "概要", "テーマ"];
 
