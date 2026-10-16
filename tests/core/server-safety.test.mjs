@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { cp, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { execFileSync, spawn } from "node:child_process";
+import { chmodSync, existsSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createConnection, createServer } from "node:net";
 import { once } from "node:events";
 import { tmpdir } from "node:os";
@@ -522,10 +522,10 @@ test("connector tokens use .env and an unconfigured connector is a normal state"
   }
 });
 
-test("stub doctor is successful without Claude, Codex, or Tailscale", async (t) => {
+test("stub doctor warns that no AI is used", async (t) => {
   const root = await tempDir(t, "owl-doctor-");
   const port = 65534;
-  const result = execFileSync(process.execPath, [cliPath, "doctor", "--json"], {
+  const result = spawnSync(process.execPath, [cliPath, "doctor", "--json"], {
     cwd: repoRoot,
     env: envWith({
       OWL_ROOT: root,
@@ -538,36 +538,77 @@ test("stub doctor is successful without Claude, Codex, or Tailscale", async (t) 
     }),
     encoding: "utf8",
   });
-  const payload = JSON.parse(result);
-  assert.equal(payload.status, "ok");
-  assert.equal(payload.checks.find((check) => check.check_id === "provider").status, "pass");
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.status, "warning");
+  const provider = payload.checks.find((check) => check.check_id === "provider");
+  assert.equal(provider.status, "warn");
+  assert.match(provider.remediation, /OWL_PROVIDER=real/);
   assert.equal(payload.checks.some((check) => check.check_id === "claude-cli"), false);
   assert.equal(payload.checks.find((check) => check.check_id === "sqlite").status, "warn");
   assert.equal(payload.checks.find((check) => check.check_id === "sqlite").message.startsWith("not_initialized"), true);
 });
 
-test("real doctor checks the selected Codex adapter without requiring Claude", async (t) => {
+async function realDoctor(t, adapter, executables) {
   const root = await tempDir(t, "owl-provider-");
-  const result = execFileSync(process.execPath, [cliPath, "doctor", "--json"], {
+  const home = join(root, "home");
+  await mkdir(home);
+  const result = spawnSync(process.execPath, [cliPath, "doctor", "--json"], {
     cwd: repoRoot,
     env: envWith({
+      HOME: home,
       OWL_ROOT: root,
       OWL_DATA_DIR: join(root, "data"),
       OWL_PROVIDER: "real",
-      OWL_PROVIDER_ADAPTER: "codex-cli/v1",
-      OWL_CODEX_EXECUTABLE: process.execPath,
-      OWL_CLAUDE_EXECUTABLE: "/definitely/not-installed/claude",
+      OWL_PROVIDER_ADAPTER: adapter,
       OWL_BIND: "127.0.0.1",
       OWL_PORT: "65533",
       OWL_TAILSCALE_SERVE: "",
       OWL_SECRET_PASSPHRASE: "",
+      ...executables,
     }),
     encoding: "utf8",
   });
-  const payload = JSON.parse(result);
-  const provider = payload.checks.find((check) => check.check_id === "provider");
-  assert.equal(provider.status, "pass");
-  assert.match(provider.message, /codex-cli\/v1/);
+  const payload = JSON.parse(result.stdout);
+  return (id) => payload.checks.find((check) => check.check_id === id);
+}
+
+async function fakeCli(t, loggedIn) {
+  const dir = await tempDir(t, "owl-fake-cli-");
+  const path = join(dir, "fake-cli");
+  await writeFile(path, `#!/bin/sh\n[ "$1" = "--version" ] && exit 0\nexit ${loggedIn ? 0 : 1}\n`);
+  chmodSync(path, 0o755);
+  return path;
+}
+
+test("real doctor checks the selected Codex adapter and warns that Claude is missing", async (t) => {
+  const codex = await fakeCli(t, true);
+  const check = await realDoctor(t, "codex-cli/v1", {
+    OWL_CODEX_EXECUTABLE: codex,
+    OWL_CLAUDE_EXECUTABLE: "/definitely/not-installed/claude",
+  });
+  assert.equal(check("provider").status, "pass");
+  assert.match(check("provider").message, /codex-cli\/v1/);
+  assert.equal(check("claude-cli").status, "warn");
+  assert.equal(check("codex-login").status, "pass");
+});
+
+test("real doctor warns with login instructions for logged-out CLIs and passes logged-in ones", async (t) => {
+  const loggedIn = await fakeCli(t, true);
+  const loggedOut = await fakeCli(t, false);
+  const check = await realDoctor(t, "claude-cli/v1", {
+    OWL_CLAUDE_EXECUTABLE: loggedOut,
+    OWL_CODEX_EXECUTABLE: loggedIn,
+  });
+  assert.equal(check("claude-login").status, "warn");
+  assert.match(check("claude-login").remediation, /claude auth login/);
+  assert.equal(check("codex-login").status, "pass");
+  const swapped = await realDoctor(t, "codex-cli/v1", {
+    OWL_CLAUDE_EXECUTABLE: loggedIn,
+    OWL_CODEX_EXECUTABLE: loggedOut,
+  });
+  assert.equal(swapped("claude-login").status, "pass");
+  assert.equal(swapped("codex-login").status, "warn");
+  assert.match(swapped("codex-login").remediation, /codex login/);
 });
 
 test("start rejects an external bind before listening when token is absent", async (t) => {

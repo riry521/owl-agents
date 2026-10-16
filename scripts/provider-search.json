@@ -1,0 +1,17 @@
+{
+  "description": "setup が claude・codex を探す場所。~ は HOME、* は1階層のワイルドカード。OWL_PROVIDER_SEARCH_CONFIG で別ファイルに差し替えられる。",
+  "loginShell": true,
+  "dirs": [
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "~/.local/bin",
+    "~/.npm-global/bin",
+    "~/.volta/bin",
+    "~/.nvm/versions/node/*/bin"
+  ],
+  "providers": [
+    { "name": "claude", "adapter": "claude-cli/v1", "executableEnv": "OWL_CLAUDE_EXECUTABLE" },
+    { "name": "codex", "adapter": "codex-cli/v1", "executableEnv": "OWL_CODEX_EXECUTABLE" }
+  ],
+  "installGuide": "claude (https://docs.claude.com/en/docs/claude-code) か codex (https://github.com/openai/codex) を入れて ./setup.sh を再実行してください。 / Install claude or codex, then re-run ./setup.sh."
+}

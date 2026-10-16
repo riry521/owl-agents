@@ -109,6 +109,26 @@ owl status
 owl doctor
 ```
 
+### claude・codexの自動検出
+
+`./setup.sh`は、`claude`と`codex`のCLIを、`PATH`、`scripts/provider-search.json`の`dirs`に書かれたディレクトリ、ログインシェルの順に探します。見つかると、`.env`に`OWL_PROVIDER=real`、`OWL_PROVIDER_ADAPTER`（最初に見つかったCLI）、`OWL_CLAUDE_EXECUTABLE`・`OWL_CODEX_EXECUTABLE`を書きます。
+
+- 空の値と`OWL_PROVIDER=stub`は書き換えます。ほかの値が入っているキーは、確認で`y`と答えない限り変えません。端末がない場合は、`scripts/setup-provider-discovery.mjs`に`--approve-overwrite`を付けると承認したことになります。
+- 探す場所を変えるには、`scripts/provider-search.json`の`dirs`を編集します（`~`はホームディレクトリ、`*`は1階層のワイルドカードです）。別のファイルを使う場合は`OWL_PROVIDER_SEARCH_CONFIG=/path/to/file.json`を指定します。
+
+`owl doctor`は次の場合に警告を出します。
+
+- `stub` providerが選ばれていて、AIが使われない。
+- 選んでいない側のCLI（`claude-cli`または`codex-cli`）が見つからない。
+- 選んだCLIにログインしていない。
+
+### 自動で見つからないとき
+
+1. `claude`または`codex`をインストールします。
+2. 置き場所のディレクトリを`scripts/provider-search.json`の`dirs`に足して`./setup.sh`をもう一度実行するか、`.env`にフルパスを書きます。例: `OWL_CLAUDE_EXECUTABLE=/path/to/claude`、`OWL_CODEX_EXECUTABLE=/path/to/codex`。あわせて`OWL_PROVIDER=real`と、`OWL_PROVIDER_ADAPTER=claude-cli/v1`または`codex-cli/v1`を設定します。
+3. ログインします: `claude auth login`または`codex login`。
+4. `owl doctor`を実行し、警告が出ないことを確かめます。
+
 `setup.sh`は、リポジトリの`bin/`をシェルの起動ファイルで`PATH`に追加します。
 これで、どのディレクトリからでも`owl`コマンドが使えます。
 

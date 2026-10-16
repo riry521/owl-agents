@@ -76,6 +76,26 @@ With `OWL_PROVIDER=stub`, offline smoke testing is possible without any
 provider CLI. Setup never installs external CLIs on its own; when one is
 missing, it warns with instructions for configuring real mode.
 
+### Automatic detection of `claude` and `codex`
+
+`./setup.sh` looks for the `claude` and `codex` CLIs in `PATH`, in the directories listed in `scripts/provider-search.json`, and in your login shell. When it finds one, it writes these keys to `.env`: `OWL_PROVIDER=real`, `OWL_PROVIDER_ADAPTER` (the first CLI found), and `OWL_CLAUDE_EXECUTABLE` / `OWL_CODEX_EXECUTABLE`.
+
+- Empty values and `OWL_PROVIDER=stub` are filled in. Keys that already have another value are kept unless you answer `y` at the prompt. Without a terminal, pass `--approve-overwrite` to `scripts/setup-provider-discovery.mjs` to approve.
+- To change where setup looks, edit `dirs` in `scripts/provider-search.json` (`~` is your home directory, `*` matches one directory level). To use another file, set `OWL_PROVIDER_SEARCH_CONFIG=/path/to/file.json`.
+
+`owl doctor` warns about these cases:
+
+- The `stub` provider is selected, so no AI runs.
+- A CLI that is not selected (`claude-cli` or `codex-cli`) is missing.
+- The selected CLI is not logged in.
+
+### When setup cannot find a CLI
+
+1. Install `claude` or `codex`.
+2. Either add its directory to `dirs` in `scripts/provider-search.json` and run `./setup.sh` again, or write the full path in `.env`, for example `OWL_CLAUDE_EXECUTABLE=/path/to/claude` or `OWL_CODEX_EXECUTABLE=/path/to/codex`. Also set `OWL_PROVIDER=real` and `OWL_PROVIDER_ADAPTER=claude-cli/v1` or `codex-cli/v1`.
+3. Log in: `claude auth login` or `codex login`.
+4. Run `owl doctor` and confirm there are no warnings.
+
 ## What `setup.sh` installs
 
 ```text

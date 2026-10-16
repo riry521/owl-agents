@@ -4,10 +4,11 @@
 // command stops optional standalone helpers first (when they belong to this
 // project), then the server recorded in the data-directory state file.
 
-import { closeSync, openSync } from "node:fs";
+import { closeSync, constants, openSync } from "node:fs";
 import { access, appendFile, mkdir, readFile, rename, rm, stat } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
+import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -22,6 +23,7 @@ import { isProcessAlive } from "./process-state.js";
 import { startServer, type RunningServer, type ServerOptions } from "./server.js";
 import { configuredBind, configuredPort, deprecatedConfigurationWarnings, serverExposureError, tailscaleServeEnabled } from "./config.js";
 import { connectorConfigStatus, prepareConnectorConfig } from "./secret-config.js";
+import { resolveAgentExecutables } from "./agent-runner.js";
 import { providerConfigurationError, providerSelection, resolveExecutableForSelection } from "./provider-selection.js";
 
 interface ServerState {
@@ -41,8 +43,12 @@ interface ParsedStart extends ServerOptions {
   foreground: boolean;
 }
 
-interface ParsedAdvisor {
+// A long Advisor turn (tool use, Work creation) can take minutes, so the default is well above 2 minutes.
+const ADVISOR_DEFAULT_TIMEOUT_SECONDS = 600;
+
+export interface ParsedAdvisor {
   conversationId: string | null;
+  timeoutSeconds: number;
 }
 
 interface AdvisorEvent {
@@ -105,9 +111,16 @@ function parseStatusArgs(argv: readonly string[]): { json: boolean } {
 
 function parseAdvisorArgs(argv: readonly string[]): ParsedAdvisor {
   let conversationId: string | null = null;
+  let timeoutSeconds = ADVISOR_DEFAULT_TIMEOUT_SECONDS;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
-    if (argument === "--conversation") {
+    if (argument === "--timeout") {
+      const value = argv[++index];
+      if (!value || !/^\d+$/.test(value) || Number(value) < 1) {
+        throw new CliError(2, cliText('--timeoutは1以上の整数秒で指定してください。', 'Specify --timeout as an integer number of seconds, 1 or more.'));
+      }
+      timeoutSeconds = Number(value);
+    } else if (argument === "--conversation") {
       const value = argv[++index];
       if (!value) throw new CliError(2, cliText('--conversationには値が必要です。', '--conversation requires a value.'));
       conversationId = value;
@@ -115,7 +128,7 @@ function parseAdvisorArgs(argv: readonly string[]): ParsedAdvisor {
       throw new CliError(2, cliText(`advisorのargvが契約と一致しません: ${argument}`, `Invalid advisor arguments: ${argument}`));
     }
   }
-  return { conversationId };
+  return { conversationId, timeoutSeconds };
 }
 
 function parseStopArgs(argv: readonly string[]): { force: boolean; timeoutSeconds: number } {
@@ -181,8 +194,8 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
-async function fetchAdvisorEvents(baseUrl: string, cursor: number): Promise<AdvisorEvent[]> {
-  const body = await fetchJson(`${baseUrl}/events?after=${cursor}&limit=200`);
+async function fetchAdvisorEvents(baseUrl: string, query: string, signal?: AbortSignal): Promise<AdvisorEvent[]> {
+  const body = await fetchJson(`${baseUrl}/events?${query}`, { signal });
   const data = asRecord(body.data);
   if (!data || !Array.isArray(data.events)) {
     throw new CliError(4, cliText('eventsの応答が契約と一致しません。server versionを確認してください。', 'The events response does not match the contract. Check the server version.'));
@@ -197,24 +210,43 @@ async function fetchAdvisorEvents(baseUrl: string, cursor: number): Promise<Advi
 }
 
 async function latestAdvisorEventCursor(baseUrl: string): Promise<number> {
-  const events = await fetchAdvisorEvents(baseUrl, 0);
+  const events = await fetchAdvisorEvents(baseUrl, "order=desc&limit=1");
   return events.reduce((cursor, event) => Math.max(cursor, event.sequence), 0);
 }
 
-async function postAdvisorMessage(baseUrl: string, text: string): Promise<void> {
+function newAdvisorRef(): string {
+  return `terminal:${randomUUID()}`;
+}
+
+function isAdvisorReplyFor(event: AdvisorEvent, conversationId: string, ref: string): boolean {
+  const origin = asRecord(event.payload.origin);
+  return event.type === "advisor.responded"
+    && event.payload.conversation_id === conversationId
+    && origin?.channel === "terminal"
+    && origin.ref === ref;
+}
+
+function formatAdvisorReply(event: AdvisorEvent, reply: string): string {
+  const results = event.payload.action_results;
+  return typeof results === "string" && results.trim() && !reply.includes(results.trim())
+    ? `${reply}\n\n${results.trim()}`
+    : reply;
+}
+
+async function postAdvisorMessage(baseUrl: string, text: string, ref: string): Promise<void> {
   await fetchJson(`${baseUrl}/messages`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       source: "terminal",
       text,
-      origin: { channel: "terminal" },
+      origin: { channel: "terminal", ref },
     }),
   });
 }
 
-async function fetchAdvisorReply(baseUrl: string, conversationId: string, messageId: string): Promise<string | null> {
-  const body = await fetchJson(`${baseUrl}/conversations/${encodeURIComponent(conversationId)}/messages?limit=200`);
+async function fetchAdvisorReply(baseUrl: string, conversationId: string, messageId: string, signal?: AbortSignal): Promise<string | null> {
+  const body = await fetchJson(`${baseUrl}/conversations/${encodeURIComponent(conversationId)}/messages?limit=200`, { signal });
   const candidates = Array.isArray(body.data)
     ? body.data
     : asRecord(body.data)?.data && Array.isArray(asRecord(body.data)?.data)
@@ -228,38 +260,47 @@ async function fetchAdvisorReply(baseUrl: string, conversationId: string, messag
 async function waitForAdvisorReply(
   baseUrl: string,
   conversationId: string,
+  ref: string,
   initialCursor: number,
-): Promise<{ reply: string; cursor: number }> {
-  const deadline = Date.now() + 120_000;
+  timeoutSeconds: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  const deadline = Date.now() + timeoutSeconds * 1000;
   let cursor = initialCursor;
-  let responseEvent: AdvisorEvent | null = null;
 
   while (Date.now() < deadline) {
-    const events = await fetchAdvisorEvents(baseUrl, cursor);
+    if (signal?.aborted) throw new Error("advisor wait aborted");
+    const events = await fetchAdvisorEvents(baseUrl, `after=${cursor}&limit=200`, signal);
+    if (signal?.aborted) throw new Error("advisor wait aborted");
     for (const event of events) {
       cursor = Math.max(cursor, event.sequence);
-      if (event.type === "advisor.responded" && event.payload.conversation_id === conversationId) {
-        responseEvent = event;
-      }
-    }
-
-    if (responseEvent) {
-      const directReply = responseEvent.payload.reply;
-      if (typeof directReply === "string") return { reply: directReply, cursor };
-      const messageId = responseEvent.payload.message_id;
+      if (!isAdvisorReplyFor(event, conversationId, ref)) continue;
+      const directReply = event.payload.reply;
+      if (typeof directReply === "string") return formatAdvisorReply(event, directReply);
+      const messageId = event.payload.message_id;
       if (typeof messageId === "string") {
-        const reply = await fetchAdvisorReply(baseUrl, conversationId, messageId);
-        if (reply !== null) return { reply, cursor };
+        const reply = await fetchAdvisorReply(baseUrl, conversationId, messageId, signal);
+        if (signal?.aborted) throw new Error("advisor wait aborted");
+        if (reply !== null) return formatAdvisorReply(event, reply);
       }
     }
 
     await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 250));
   }
 
-  throw new CliError(5, cliText('Advisorの応答が指定時間内に届きませんでした。server statusとeventsを確認してください。', 'The Advisor did not respond in time. Check server status and events.'));
+  throw new CliError(5, cliText('Advisorの応答が指定時間内に届きませんでした。server statusとeventsを確認するか、--timeoutで待ち時間を延ばしてください。', 'The Advisor did not respond in time. Check server status and events, or raise --timeout.'));
 }
 
-async function runAdvisor(args: ParsedAdvisor): Promise<Record<string, unknown>> {
+export interface AdvisorIo {
+  input: NodeJS.ReadableStream;
+  output: NodeJS.WritableStream;
+  terminal: boolean;
+}
+
+export async function runAdvisor(
+  args: ParsedAdvisor,
+  io: AdvisorIo = { input: process.stdin, output: process.stdout, terminal: Boolean(process.stdin.isTTY && process.stdout.isTTY) },
+): Promise<Record<string, unknown>> {
   const state = await readState();
   if (!state || !isAlive(state.pid)) {
     throw new CliError(4, cliText('owl-coreは起動していません。startを実行してからadvisorを実行してください。', 'owl-core is not running. Run start before advisor.'));
@@ -273,21 +314,71 @@ async function runAdvisor(args: ParsedAdvisor): Promise<Record<string, unknown>>
     }
     conversationId = activeConversation.conversation_id;
   }
-  const isTTY = Boolean(process.stdin.isTTY && process.stdout.isTTY);
-  const rl = createInterface({ input: process.stdin, output: process.stdout, terminal: isTTY, prompt: "> " });
+  const { input, output, terminal: isTTY } = io;
+  const rl = createInterface({ input, output, terminal: isTTY, prompt: "> " });
   let responses = 0;
-  process.stdout.write(cliText('Owl Advisor (Ctrl+D で終了)\n', 'Owl Advisor (Ctrl+D to exit)\n'));
-  if (isTTY) rl.prompt();
+  let pending: string[] = [];
+  let waiting: AbortController | null = null;
+  let closed = false;
+  const prompt = () => {
+    if (!isTTY || closed) return;
+    rl.setPrompt(pending.length ? "… " : "> ");
+    rl.prompt();
+  };
+  // Ctrl+C abandons the wait or the half-typed input; it never ends the CLI (Ctrl+D does).
+  rl.on("SIGINT", () => {
+    if (waiting) {
+      waiting.abort();
+      return;
+    }
+    pending = [];
+    rl.write(null, { ctrl: true, name: "u" });
+    output.write("\n");
+    prompt();
+  });
+  // Ctrl+D in a terminal ends the CLI even mid-wait. Piped input is not aborted: its EOF follows the last
+  // line right away, and the reply to that line must still be printed.
+  rl.on("close", () => {
+    closed = true;
+    if (isTTY) waiting?.abort();
+  });
+  output.write(cliText('Owl Advisor (Ctrl+D で終了)\n', 'Owl Advisor (Ctrl+D to exit)\n'));
+  prompt();
   try {
     for await (const line of rl) {
-      const text = line.trim();
-      if (!text) continue;
+      // A trailing backslash continues the message on the next line.
+      if (line.endsWith("\\")) {
+        pending.push(line.slice(0, -1));
+        prompt();
+        continue;
+      }
+      const text = [...pending, line].join("\n").trim();
+      pending = [];
+      if (!text) {
+        prompt();
+        continue;
+      }
       const cursor = await latestAdvisorEventCursor(baseUrl);
-      await postAdvisorMessage(baseUrl, text);
-      const result = await waitForAdvisorReply(baseUrl, conversationId, cursor);
-      process.stdout.write(`${result.reply}\n`);
-      responses += 1;
-      if (isTTY) rl.prompt();
+      const ref = newAdvisorRef();
+      await postAdvisorMessage(baseUrl, text, ref);
+      output.write(cliText('考え中…', 'Thinking...'));
+      const controller = new AbortController();
+      waiting = controller;
+      let reply: string | null = null;
+      try {
+        reply = await waitForAdvisorReply(baseUrl, conversationId, ref, cursor, args.timeoutSeconds, controller.signal);
+      } catch (error) {
+        if (!controller.signal.aborted) throw error;
+      } finally {
+        waiting = null;
+        output.write(isTTY ? "\r\x1b[K" : "\n");
+      }
+      if (reply === null || controller.signal.aborted) output.write(`${cliText('返事を待つのをやめました。', 'Stopped waiting for the reply.')}\n`);
+      else {
+        output.write(`${reply}\n`);
+        responses += 1;
+      }
+      prompt();
     }
   } finally {
     rl.close();
@@ -742,12 +833,15 @@ function safeProviderCheckReason(error: unknown): string {
   return safe || cliText('実行ファイルの起動に失敗しました。', 'The executable could not be started.');
 }
 
-function runCommandVersion(command: string): Promise<{ ok: boolean; reason?: string }> {
+// Login checks talk to an external CLI, so a hung command must not hang doctor.
+const LOGIN_CHECK_TIMEOUT_MS = 15_000;
+
+function runCommandVersion(command: string, args: readonly string[] = ["--version"], timeout?: number): Promise<{ ok: boolean; reason?: string }> {
   return new Promise((resolvePromise) => {
     let settled = false;
     let child;
     try {
-      child = spawn(command, ["--version"], { stdio: "ignore" });
+      child = spawn(command, [...args], { stdio: "ignore", ...(timeout ? { timeout } : {}) });
     } catch (error) {
       resolvePromise({ ok: false, reason: safeProviderCheckReason(error) });
       return;
@@ -774,10 +868,10 @@ async function checkProvider(): Promise<DoctorCheckResult> {
     if (selection.mode === "stub") {
       return {
         check_id: "provider",
-        severity: "required",
-        status: "pass",
-        message: cliText('stub providerが選択されています。外部provider CLIは不要です。', 'The stub Provider is selected. No external Provider CLI is needed.'),
-        remediation: null,
+        severity: "optional",
+        status: "warn",
+        message: cliText('stub providerが選択されています。AIは使われず、Workは実際には実行されません。', 'The stub Provider is selected. No AI is used and Works are not actually executed.'),
+        remediation: cliText('setup.shを再実行するか、.envにOWL_PROVIDER=realとOWL_PROVIDER_ADAPTER（claude-cli/v1またはcodex-cli/v1）を設定してください。', 'Re-run setup.sh, or set OWL_PROVIDER=real and OWL_PROVIDER_ADAPTER (claude-cli/v1 or codex-cli/v1) in .env.'),
       };
     }
     const executable = await resolveExecutableForSelection(selection);
@@ -818,6 +912,51 @@ async function checkProvider(): Promise<DoctorCheckResult> {
       message: cliText(`provider設定を読み込めませんでした。原因: ${safeProviderCheckReason(error)}`, `Could not read Provider settings. Cause: ${safeProviderCheckReason(error)}`),
       remediation: cliText('OWL_PROVIDER=stubでoffline実行するか、OWL_PROVIDER_ADAPTERと対応するCLIを設定してください。', 'Use OWL_PROVIDER=stub for offline operation, or configure OWL_PROVIDER_ADAPTER and its CLI.'),
     };
+  }
+}
+
+const CLI_LOGIN: Record<"claude" | "codex", { args: string[]; login: string; executableEnv: string }> = {
+  claude: { args: ["auth", "status"], login: "claude auth login", executableEnv: "OWL_CLAUDE_EXECUTABLE" },
+  codex: { args: ["login", "status"], login: "codex login", executableEnv: "OWL_CODEX_EXECUTABLE" },
+};
+
+async function checkCliTools(): Promise<DoctorCheckResult[]> {
+  try {
+    const selection = providerSelection(resolveOwlRoot());
+    if (selection.mode !== "real") return [];
+    const selected = await resolveExecutableForSelection(selection);
+    const executables = await resolveAgentExecutables(selection, selected, process.env.PATH ?? "");
+    const results: DoctorCheckResult[] = [];
+    for (const name of ["claude", "codex"] as const) {
+      const { args, login: loginCommand, executableEnv } = CLI_LOGIN[name];
+      const executable = executables[name];
+      const usable = executable ? await access(executable, constants.X_OK).then(() => true, () => false) : false;
+      if (!executable || !usable) {
+        // The selected CLI is already reported as a failure by checkProvider.
+        if (selection.harness === name) continue;
+        results.push({
+          check_id: `${name}-cli`,
+          severity: "optional",
+          status: "warn",
+          message: cliText(`${name}が見つかりません。${name}を使うTaskは実行できません。`, `${name} was not found. Tasks that use ${name} cannot run.`),
+          remediation: cliText(`${name}をインストールするか、${executableEnv}へ絶対パスを設定してください。`, `Install ${name}, or set ${executableEnv} to its absolute path.`),
+        });
+        continue;
+      }
+      const login = await runCommandVersion(executable, args, LOGIN_CHECK_TIMEOUT_MS);
+      results.push(login.ok
+        ? { check_id: `${name}-login`, severity: "optional", status: "pass", message: cliText(`${name}はログイン済みです。`, `${name} is logged in.`), remediation: null }
+        : {
+          check_id: `${name}-login`,
+          severity: "optional",
+          status: "warn",
+          message: cliText(`${name}にログインしていません。`, `${name} is not logged in.`),
+          remediation: cliText(`${loginCommand} を実行してログインしてください。`, `Run ${loginCommand} to log in.`),
+        });
+    }
+    return results;
+  } catch {
+    return [];
   }
 }
 
@@ -1045,17 +1184,18 @@ function parseDoctorArgs(argv: readonly string[]): { json: boolean; strict: bool
 }
 
 export async function runDoctor(args: { json: boolean; strict: boolean }): Promise<{ exitCode: number; output: string }> {
-  const checks = await Promise.all([
+  const checks = (await Promise.all([
     checkNode(),
     checkEnvironment(),
     checkEnvFilePermissions(),
     checkNetworkAuth(),
     checkProvider(),
+    checkCliTools(),
     checkSecretStore(),
     checkSqlite(),
     checkPort(),
     checkTailscale(),
-  ]);
+  ])).flat();
   const hasRequiredFailure = checks.some((check) => check.severity === "required" && check.status !== "pass");
   const hasOptionalIssue = checks.some((check) => check.severity === "optional" && check.status !== "pass" && check.blocking !== false);
   let status: "ok" | "warning" | "error";

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 - 2026-10-16
+
+Setup finds `claude` and `codex` on its own, and `owl advisor` works as a plain terminal conversation.
+
+### Setup
+
+- `setup.sh` searches for the `claude` and `codex` commands and writes their paths to the settings automatically
+- `owl doctor` warns when a provider command is missing or cannot run
+
+### CLI
+
+- `owl advisor` shows only the replies to the message you sent, so you can talk with the Advisor from the terminal alone
+
 ## 0.3.0 - 2026-10-16
 
 Design mock previews with per-Task Designer assignment, automatic Project registration for new repositories, and sturdier Codex and verification handling.

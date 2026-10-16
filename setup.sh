@@ -181,6 +181,10 @@ pnpm --filter web rebuild sharp --pending
 echo "$(msg '全workspaceをビルド中...' 'Building all workspaces...')"
 pnpm run build
 
+# Look for installed claude/codex CLIs (search locations: scripts/provider-search.json)
+# and fill the provider settings in .env. Never fails setup.
+node scripts/setup-provider-discovery.mjs .env || warn "$(msg 'provider CLIの検出に失敗しました' 'Provider CLI discovery failed')"
+
 # Provider CLIs are external executables, not npm dependencies. Do not install
 # them implicitly because they require separate accounts/authentication. The
 # built doctor loads .env and reports the selected provider without printing
