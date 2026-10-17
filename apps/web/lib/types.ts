@@ -322,17 +322,14 @@ export interface ExecutorConfig {
   timeout_ms: number;
 }
 
+export interface ChildRunHarnessChoice {
+  model: string | null;
+  effort: ChildRunEffort | null;
+}
+
 export interface ChildRunSettings {
-  default_provider: ChildRunProvider;
-  default_model: string;
-  default_effort: ChildRunEffort | null;
-  defaults_by_parent_harness: Record<ChildRunProvider, {
-    provider: ChildRunProvider;
-    model: string;
-    effort: ChildRunEffort | null;
-  }>;
-  allowed_models: { provider: ChildRunProvider; model: string }[];
-  allowed_efforts: ChildRunEffort[];
+  executor_harness: ChildRunProvider;
+  executor_by_harness: Record<ChildRunProvider, ChildRunHarnessChoice>;
   timeout_minutes: number;
   max_timeout_minutes: number;
   max_attempts: number;
@@ -659,7 +656,7 @@ export type HybridPhase = 'plan' | 'executing' | 'verdict';
  */
 export type AgentRunOrigin = 'spawned' | 'observed';
 
-export type ChildRunProvider = 'claude' | 'codex';
+export type ChildRunProvider = 'claude' | 'codex' | 'opencode';
 export type ChildRunEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type ChildRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | (string & {});
 

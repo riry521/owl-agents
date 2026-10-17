@@ -181,6 +181,7 @@ test("owl advisor's message origin is accepted by the real HTTP server and comes
   const result = await runAdvisor(t, Number(new URL(api.baseUrl).port), "ping from terminal\n", ["--timeout", "30"]);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Acknowledged: ping from terminal/u);
+  assert.doesNotMatch(result.stdout, /instructions were updated/u, "a new session's first turn carries no instructions update");
 });
 
 /** Runs the advisor REPL in-process on a PassThrough input that readline treats as a terminal. */

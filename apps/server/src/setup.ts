@@ -9,10 +9,12 @@ import { detectProcessSkillsPack } from "../../../packages/core/dist/process-ski
 import {
   PROCESS_SKILLS_INSTALL_COMMANDS,
   PROCESS_SKILLS_SETTINGS_KEY,
+  type ModelHarness,
   type ProcessSkillsSettings,
 } from "../../../packages/shared/dist/index.js";
 import { resolveOwlRoot, resolveDataDir, serverPackageRoot } from "./contracts.js";
 import { IntegrationStore } from "./integration-store.js";
+import { opencodeCliStatus, opencodeUnsupportedMessage } from "./opencode-status.js";
 import { providerConfigurationError, providerSelection, resolveExecutableForSelection } from "./provider-selection.js";
 
 interface StoredSetupMetadata {
@@ -69,6 +71,20 @@ function readStoredProcessSkillsSettings(dataDir: string): ProcessSkillsSettings
   }
 }
 
+/**
+ * The selected harness plus opencode when its executable is found at a supported version. An older opencode is left
+ * out with the same warning doctor shows; the process skills install commands never include opencode.
+ */
+export async function availableHarnesses(
+  selected: readonly ModelHarness[],
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<{ harnesses: ModelHarness[]; warning: string | null }> {
+  const harnesses = [...selected];
+  const status = await opencodeCliStatus(env);
+  if (status.state === "ok" && !harnesses.includes("opencode")) harnesses.push("opencode");
+  return { harnesses, warning: status.state === "unsupported" ? opencodeUnsupportedMessage(status.version) : null };
+}
+
 export async function runSetup(): Promise<{ command: string; status: string; configured: string[] }> {
   const rl = createInterface({ input: stdin, output: stdout });
   const owlRoot = resolveOwlRoot();
@@ -106,6 +122,10 @@ export async function runSetup(): Promise<{ command: string; status: string; con
     stdout.write(cliText(`Provider: ${provider.providerId} / ${provider.adapter}（実行ファイル確認済み）\n\n`, `Provider: ${provider.providerId} / ${provider.adapter} (executable verified)\n\n`));
   }
 
+  const harnesses = await availableHarnesses(provider.harness && provider.mode !== "stub" && !providerIssue ? [provider.harness] : []);
+  if (harnesses.warning) stdout.write(`⚠ ${harnesses.warning}\n\n`);
+  else if (harnesses.harnesses.includes("opencode")) stdout.write(cliText('opencodeも使えます。\n\n', 'opencode is also available.\n\n'));
+
   const processSkillsSettings = readStoredProcessSkillsSettings(dataDir);
   const processSkillsPack = detectProcessSkillsPack({ env: process.env, settings: processSkillsSettings, homedir: homedir() });
   if (!processSkillsSettings.enabled) {
@@ -115,9 +135,9 @@ export async function runSetup(): Promise<{ command: string; status: string; con
     const version = processSkillsPack.version ? ` ${processSkillsPack.version}` : "";
     stdout.write(cliText(`プロセススキル: superpowers${version}（${source}）を使います\n\n`, `Process skills: using superpowers${version} (${source})\n\n`));
   } else {
-    const availableHarnesses = provider.mode !== "stub" && !providerIssue && provider.harness ? [provider.harness] : (["claude", "codex"] as const);
+    const installable = provider.mode !== "stub" && !providerIssue && provider.harness && provider.harness !== "opencode" ? [provider.harness] : (["claude", "codex"] as const);
     stdout.write(cliText('superpowers が入っていないため、プロセススキルは使いません。使う場合は次のコマンドで導入してください（導入後は自動で検出します）:\n', 'Process skills are unavailable because superpowers is not installed. Install it with the following command to enable automatic detection:\n'));
-    for (const harness of availableHarnesses) {
+    for (const harness of installable) {
       stdout.write(`  ${PROCESS_SKILLS_INSTALL_COMMANDS[harness]}\n`);
     }
     stdout.write("\n");

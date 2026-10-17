@@ -2,7 +2,7 @@
 
 import { Fragment, type FormEvent, useEffect, useRef, useState } from 'react';
 import { getModelSettings, getSettingsView, updateModelSettings, saveIntegration, testIntegration, deleteIntegration, setHybridMode, setChildRunSettings, createProvider, deleteProvider, testProvider, saveProvider, getProviderModels, setProviderModels as setProviderModelsApi, setTypesafeApiKey, setAdvisorPersona, putAdvisorFolders, putRemakeLimitSettings, putFixerEscalationSettings, getKnowledgeStorage, putKnowledgeStorage, setOwnerLanguage, setKnowledgeAutomationSettings, ApiRequestError } from '@/lib/api-client';
-import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ChildRunSettings, ProviderInfo, SaveProviderPayload, AdvisorFolders, RemakeLimitSettings, FixerEscalationSettings, KnowledgeStorageStatus, KnowledgeAutomationSettingsData, KnowledgeAutomationSettingsInput } from '@/lib/types';
+import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ChildRunSettings, ChildRunHarnessChoice, ProviderInfo, SaveProviderPayload, AdvisorFolders, RemakeLimitSettings, FixerEscalationSettings, KnowledgeStorageStatus, KnowledgeAutomationSettingsData, KnowledgeAutomationSettingsInput } from '@/lib/types';
 import { roleDisplayName } from '@/lib/format';
 import { useLocale, type Locale } from '@/lib/i18n';
 import { REMAKE_TASK_TYPES, remakeLimitsToDraft, draftToRemakeLimits } from '@/lib/remake-limits.mjs';
@@ -41,9 +41,10 @@ function useSettings() {
 /** Fixed role order shown regardless of what the GET response returns them in. */
 const ROLE_ORDER: RoleModelSettingInput['role'][] = ['advisor', 'manager', 'designer', 'lead_designer', 'worker', 'fixer', 'reviewer', 'librarian', 'curator'];
 const EFFORT_OPTIONS: RoleModelSettingInput['effort'][] = ['low', 'medium', 'high', 'xhigh', 'max'];
-const CHILD_PROVIDER_ORDER: ChildRunSettings['default_provider'][] = ['claude', 'codex'];
-const CHILD_PARENT_HARNESSES: ChildRunSettings['default_provider'][] = ['claude', 'codex'];
-const CHILD_PROVIDER_MODEL_SOURCE: Record<ChildRunSettings['default_provider'], string> = { claude: 'anthropic', codex: 'openai' };
+const CHILD_PROVIDER_ORDER: ChildRunSettings['executor_harness'][] = ['claude', 'codex', 'opencode'];
+const CHILD_PROVIDER_LABEL: Record<ChildRunSettings['executor_harness'], string> = { claude: 'Claude', codex: 'Codex', opencode: 'opencode' };
+const CHILD_PROVIDER_MODEL_SOURCE: Record<ChildRunSettings['executor_harness'], string> = { claude: 'anthropic', codex: 'openai', opencode: 'opencode' };
+const CHILD_EFFORTS: NonNullable<ChildRunHarnessChoice['effort']>[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 const DEFAULT_BASE_URL_BY_HARNESS: Record<string, string> = {
   claude: 'https://api.anthropic.com',
   codex: 'https://api.openai.com/v1',
@@ -134,8 +135,8 @@ export function SettingsView() {
   const [hybridMode, setHybridModeState] = useState<boolean | null>(null);
   const [hybridToggling, setHybridToggling] = useState(false);
   const [childSettings, setChildSettings] = useState<ChildRunSettings | null>(null);
-  const [childDefaults, setChildDefaults] = useState<ChildRunSettings['defaults_by_parent_harness'] | null>(null);
-  const [childAllowedModels, setChildAllowedModels] = useState<ChildRunSettings['allowed_models']>([]);
+  const [childExecutorHarness, setChildExecutorHarness] = useState<ChildRunSettings['executor_harness'] | null>(null);
+  const [childExecutorByHarness, setChildExecutorByHarness] = useState<ChildRunSettings['executor_by_harness'] | null>(null);
   const [childTimeoutMinutes, setChildTimeoutMinutes] = useState(60);
   const [childMaxAttempts, setChildMaxAttempts] = useState(2);
   const [childSettingsLoading, setChildSettingsLoading] = useState(true);
@@ -191,8 +192,8 @@ export function SettingsView() {
     if (!data) return;
     const settings = data.child_runs;
     setChildSettings(settings);
-    setChildDefaults(settings.defaults_by_parent_harness);
-    setChildAllowedModels(settings.allowed_models);
+    setChildExecutorHarness(settings.executor_harness);
+    setChildExecutorByHarness(settings.executor_by_harness);
     setChildTimeoutMinutes(settings.timeout_minutes);
     setChildMaxAttempts(settings.max_attempts);
     setChildSettingsLoading(false);
@@ -268,41 +269,25 @@ export function SettingsView() {
     }
   }
 
-  function updateChildDefault(
-    parentHarness: ChildRunSettings['default_provider'],
-    patch: Partial<ChildRunSettings['defaults_by_parent_harness'][ChildRunSettings['default_provider']]>,
-  ) {
-    setChildDefaults((current) => current ? {
+  function updateChildChoice(harness: ChildRunSettings['executor_harness'], patch: Partial<ChildRunHarnessChoice>) {
+    setChildExecutorByHarness((current) => current ? {
       ...current,
-      [parentHarness]: { ...current[parentHarness], ...patch },
+      [harness]: { ...current[harness], ...patch },
     } : current);
   }
 
   async function handleChildSettingsSave() {
-    if (!childSettings || !childDefaults) return;
+    if (!childSettings || !childExecutorHarness || !childExecutorByHarness) return;
     setChildSettingsSaving(true);
     setChildSettingsNotice(null);
     setChildSettingsError(null);
     try {
-      const requiredModels = [
-        { provider: childSettings.default_provider, model: childSettings.default_model },
-        ...CHILD_PARENT_HARNESSES.map((harness) => ({
-          provider: childDefaults[harness].provider,
-          model: childDefaults[harness].model.trim(),
-        })),
-      ];
-      if (requiredModels.some((choice) => !choice.model)) {
-        setChildSettingsError(t('settings.allFieldsRequired'));
-        return;
-      }
-      const allowedModels = [...childAllowedModels];
-      for (const choice of requiredModels) {
-        if (!allowedModels.some((item) => item.provider === choice.provider && item.model === choice.model)) {
-          allowedModels.push(choice);
-        }
-      }
-      if (allowedModels.length > 20) {
-        setChildSettingsError(t('settings.childRunTooManyAllowedModels'));
+      const executorByHarness = Object.fromEntries(CHILD_PROVIDER_ORDER.map((harness) => {
+        const model = childExecutorByHarness[harness].model?.trim() || null;
+        return [harness, { ...childExecutorByHarness[harness], model }];
+      })) as ChildRunSettings['executor_by_harness'];
+      if (!executorByHarness[childExecutorHarness].model) {
+        setChildSettingsError(t('settings.childRunModelRequired'));
         return;
       }
       // Spread the loaded settings first so fields this form has no inputs for (token_relay, research_subagent) are kept.
@@ -312,15 +297,15 @@ export function SettingsView() {
       ) as unknown as ChildRunSettings;
       const config: ChildRunSettings = {
         ...kept,
-        defaults_by_parent_harness: childDefaults,
-        allowed_models: allowedModels,
+        executor_harness: childExecutorHarness,
+        executor_by_harness: executorByHarness,
         timeout_minutes: childTimeoutMinutes,
         max_attempts: childMaxAttempts,
       };
       const saved = await setChildRunSettings(config);
       setChildSettings(saved);
-      setChildDefaults(saved.defaults_by_parent_harness);
-      setChildAllowedModels(saved.allowed_models);
+      setChildExecutorHarness(saved.executor_harness);
+      setChildExecutorByHarness(saved.executor_by_harness);
       setChildTimeoutMinutes(saved.timeout_minutes);
       setChildMaxAttempts(saved.max_attempts);
       void settingsView.refresh();
@@ -332,19 +317,6 @@ export function SettingsView() {
       setChildSettingsSaving(false);
     }
   }
-
-  const childModelChoices = CHILD_PROVIDER_ORDER.flatMap((provider) => {
-    const source = CHILD_PROVIDER_MODEL_SOURCE[provider];
-    const models = [
-      ...(providerModels[source] ?? []),
-      ...childAllowedModels.filter((choice) => choice.provider === provider).map((choice) => choice.model),
-      ...CHILD_PARENT_HARNESSES
-        .filter((harness) => childDefaults?.[harness].provider === provider)
-        .map((harness) => childDefaults![harness].model),
-    ];
-    return [...new Set(models.filter((model) => model.trim().length > 0))]
-      .map((model) => ({ provider, model }));
-  });
 
   if (!rows) return loadError ? <div className="error">{loadError}</div> : <p className="empty">{t('common.loading')}</p>;
 
@@ -467,102 +439,72 @@ export function SettingsView() {
                   <p className="empty">{t('common.loading')}</p>
                 ) : childSettingsError && !childSettings ? (
                   <div className="error" role="alert">{childSettingsError}</div>
-              ) : childSettings && childDefaults && (
+              ) : childSettings && childExecutorHarness && childExecutorByHarness && (
                 <>
                   <h3 className="role-card__name" style={{ margin: '0 0 12px' }}>{t('settings.childRunSettings')}</h3>
                   <p className="settings-disclosure__hint">{t('settings.childRunSettingsDescription')}</p>
-                  {CHILD_PARENT_HARNESSES.map((harness) => {
-                    const defaults = childDefaults[harness];
-                    const models = [...new Set(childModelChoices.filter((choice) => choice.provider === defaults.provider).map((choice) => choice.model))];
-                    const providerId = `child-default-${harness}-provider`;
-                    const modelId = `child-default-${harness}-model`;
-                    const effortId = `child-default-${harness}-effort`;
+                  <div className="role-card__field" style={{ marginTop: '16px' }}>
+                    <label htmlFor="child-executor-harness">{t('settings.childRunExecutorHarness')}</label>
+                    <select
+                      id="child-executor-harness"
+                      className="select"
+                      value={childExecutorHarness}
+                      disabled={childSettingsSaving}
+                      onChange={(ev) => setChildExecutorHarness(ev.target.value as ChildRunSettings['executor_harness'])}
+                    >
+                      {CHILD_PROVIDER_ORDER.map((harness) => <option key={harness} value={harness}>{CHILD_PROVIDER_LABEL[harness]}</option>)}
+                    </select>
+                  </div>
+                  {CHILD_PROVIDER_ORDER.map((harness) => {
+                    const choice = childExecutorByHarness[harness];
+                    const current = choice.model ?? '';
+                    const listed = providerModels[CHILD_PROVIDER_MODEL_SOURCE[harness]] ?? [];
+                    const models = [...new Set([...(current ? [current] : []), ...listed])];
+                    const modelId = `child-executor-${harness}-model`;
+                    const effortId = `child-executor-${harness}-effort`;
                     return (
                       <fieldset key={harness} className="form-field" style={{ border: 0, padding: 0, margin: '16px 0 0' }} disabled={childSettingsSaving}>
-                        <legend>{t(`settings.childRunParent${harness === 'claude' ? 'Claude' : 'Codex'}`)}</legend>
+                        <legend>{CHILD_PROVIDER_LABEL[harness]}</legend>
                         <div className="role-card__fields">
                           <div className="role-card__field">
-                            <label htmlFor={providerId}>{t('settings.childRunDefaultProvider')}</label>
-                            <select
-                              id={providerId}
-                              className="select"
-                              value={defaults.provider}
-                              onChange={(ev) => {
-                                const provider = ev.target.value as ChildRunSettings['default_provider'];
-                                const model = defaults.provider === provider
-                                  ? defaults.model
-                                  : childModelChoices.find((choice) => choice.provider === provider)?.model
-                                    ?? providerModels[CHILD_PROVIDER_MODEL_SOURCE[provider]]?.[0]
-                                    ?? '';
-                                updateChildDefault(harness, { provider, model });
-                              }}
-                            >
-                              <option value="claude">Claude</option>
-                              <option value="codex">Codex</option>
-                            </select>
-                          </div>
-                          <div className="role-card__field">
-                            <label htmlFor={modelId}>{t('settings.childRunDefaultModel')}</label>
+                            <label htmlFor={modelId}>{t('settings.childRunHarnessModel')}</label>
                             {models.length > 0 ? (
                               <select
                                 id={modelId}
                                 className="select"
-                                value={defaults.model}
-                                onChange={(ev) => updateChildDefault(harness, { model: ev.target.value })}
+                                value={current}
+                                onChange={(ev) => updateChildChoice(harness, { model: ev.target.value || null })}
                               >
+                                {harness === 'opencode' && <option value="">{t('settings.childRunModelUnset')}</option>}
                                 {models.map((model) => <option key={model} value={model}>{model}</option>)}
                               </select>
                             ) : (
                               <input
                                 id={modelId}
                                 className="input"
-                                value={defaults.model}
-                                onChange={(ev) => updateChildDefault(harness, { model: ev.target.value })}
-                                placeholder="model-id"
+                                value={current}
+                                onChange={(ev) => updateChildChoice(harness, { model: ev.target.value || null })}
+                                placeholder={harness === 'opencode' ? 'providerID/modelID' : 'model-id'}
                                 maxLength={200}
                               />
                             )}
                           </div>
                           <div className="role-card__field role-card__field--effort">
-                            <label htmlFor={effortId}>{t('settings.childRunDefaultEffort')}</label>
+                            <label htmlFor={effortId}>{t('settings.childRunHarnessEffort')}</label>
                             <select
                               id={effortId}
                               className="select"
-                              value={defaults.effort ?? ''}
-                              onChange={(ev) => updateChildDefault(harness, { effort: ev.target.value ? ev.target.value as NonNullable<ChildRunSettings['default_effort']> : null })}
+                              value={choice.effort ?? ''}
+                              onChange={(ev) => updateChildChoice(harness, { effort: ev.target.value ? ev.target.value as NonNullable<ChildRunHarnessChoice['effort']> : null })}
                             >
                               <option value="">{t('common.none')}</option>
-                              {childSettings.allowed_efforts.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
+                              {CHILD_EFFORTS.map((effort) => <option key={effort} value={effort}>{effort}</option>)}
                             </select>
                           </div>
                         </div>
                       </fieldset>
                     );
                   })}
-
-                    <fieldset className="form-field" style={{ border: 0, padding: 0, margin: '16px 0 0' }} disabled={childSettingsSaving}>
-                      <legend>{t('settings.childRunAllowedModels')}</legend>
-                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '6px 16px', marginTop: '8px' }}>
-                        {childModelChoices.map((choice) => {
-                          const selected = childAllowedModels.some((model) => model.provider === choice.provider && model.model === choice.model);
-                          const isDefault = (choice.provider === childSettings.default_provider && choice.model === childSettings.default_model)
-                            || CHILD_PARENT_HARNESSES.some((harness) => childDefaults[harness].provider === choice.provider && childDefaults[harness].model === choice.model);
-                          return (
-                          <label key={`${choice.provider}/${choice.model}`} style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                              <input
-                                type="checkbox"
-                                checked={selected || isDefault}
-                                disabled={isDefault || (!selected && childAllowedModels.length >= 20)}
-                                onChange={() => setChildAllowedModels((current) => selected
-                                  ? current.filter((model) => model.provider !== choice.provider || model.model !== choice.model)
-                                  : [...current, choice])}
-                              />
-                              <span><code>{choice.provider}</code> / {choice.model}</span>
-                            </label>
-                          );
-                        })}
-                      </div>
-                    </fieldset>
 
                     <div className="role-card__fields" style={{ marginTop: '16px' }}>
                       <label className="role-card__field">
@@ -1434,7 +1376,7 @@ export function KnowledgeAutomationSection() {
   );
 }
 
-const PROVIDER_HARNESS_OPTIONS = ['claude', 'codex'];
+const PROVIDER_HARNESS_OPTIONS = ['claude', 'codex', 'opencode'];
 
 function ProviderManagementSection({ providerModels, onModelsUpdate }: { providerModels: Record<string, string[]>; onModelsUpdate: (providerId: string, models: string[]) => void }) {
   const { t } = useLocale();

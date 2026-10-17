@@ -1,5 +1,6 @@
-import { cliTokenUsage, UNVERIFIABLE_STATUS } from "@owl/shared";
+import { cliTokenUsage, harnessOfAdapter, UNVERIFIABLE_STATUS } from "@owl/shared";
 import { providerFailed, reportInvalid } from "./errors";
+import { opencodeFailureDetail, opencodeTokenUsage, parseOpencodeResult, unwrapOpencodeResult } from "./opencode-result";
 import { claudeRateLimitEvidence, codexRateLimitEvidence, type RateLimitResetInput } from "./rate-limit";
 import {
   LEGACY_REPORT_SCHEMA_VERSION,
@@ -409,13 +410,9 @@ export function extractReportPayload(
     return withReportDefaults(payload, invocationId);
   }
   if (format === "provider-json") {
-    if (adapter === "codex" || adapter.startsWith("codex")) {
-      const payload = parseSingleJsonObject(unwrapCodexCliResult(rawStdout), "codex_result_not_single_json_object");
-      return withReportDefaults(payload, invocationId);
-    }
     const payload = parseSingleJsonObject(
-      unwrapClaudeCliResult(rawStdout),
-      "claude_result_not_single_json_object",
+      unwrapCliResult(adapter, rawStdout),
+      harnessOfAdapter(adapter) === "codex" ? "codex_result_not_single_json_object" : "claude_result_not_single_json_object",
     );
     return withReportDefaults(payload, invocationId);
   }
@@ -455,6 +452,8 @@ export function extractReportPayload(
 export interface HarnessFailureDetail {
   readonly harness_status?: number;
   readonly harness_code?: string;
+  /** The harness's own verdict on whether a retry can help; see ProviderFailureCause. */
+  readonly harness_transient?: boolean;
   readonly error?: string;
   readonly rate_limit_evidence?: readonly RateLimitResetInput[];
 }
@@ -490,6 +489,10 @@ function claudeWrapperFailure(wrapper: Record<string, unknown>): HarnessFailureD
  * yields null rather than a guess from the text.
  */
 export function harnessFailureDetail(adapter: string, rawStdout: string): HarnessFailureDetail | null {
+  if (harnessOfAdapter(adapter) === "opencode") {
+    const error = parseOpencodeResult(rawStdout)?.error;
+    return error ? opencodeFailureDetail(error) : null;
+  }
   if (adapter === "codex" || adapter.startsWith("codex")) {
     const message = codexFailureMessage(rawStdout);
     const evidence = codexRateLimitEvidence(rawStdout);
@@ -568,6 +571,17 @@ function codexFailureMessage(rawStdout: string): string | null {
  * `turn.failed`, or an error with no final agent message, fails the run; the
  * collected error messages are attached to the failure cause.
  */
+/** Unwrap a finished provider-json run by adapter; opencode output is never read as Claude's. */
+export function unwrapCliResult(adapter: string, rawStdout: string): string {
+  const harness = harnessOfAdapter(adapter);
+  if (harness === "opencode") {
+    const text = unwrapOpencodeResult(rawStdout);
+    if (text === null) throw reportInvalid("opencode_result_missing");
+    return text;
+  }
+  return harness === "codex" ? unwrapCodexCliResult(rawStdout) : unwrapClaudeCliResult(rawStdout);
+}
+
 export function unwrapCodexCliResult(rawStdout: string): string {
   let finalText: string | null = null;
   let turnFailed = false;
@@ -635,6 +649,7 @@ export function unwrapCodexCliResult(rawStdout: string): string {
  */
 export function extractProviderUsage(response: { readonly adapter: string; readonly stdout: string; readonly format?: string }): TokenUsage | null {
   if ((response.format ?? "provider-json") !== "provider-json") return null;
+  if (harnessOfAdapter(response.adapter) === "opencode") return opencodeTokenUsage(response.stdout);
   const codex = response.adapter === "codex" || response.adapter.startsWith("codex");
   return cliTokenUsage(codex ? "codex" : "claude", response.stdout);
 }
@@ -709,9 +724,7 @@ export function normalizeProviderOutput(
     return validateReportEnvelope(withReportDefaults(payload, invocationId));
   }
   if (format === "provider-json") {
-    const text = adapter === "codex" || adapter.startsWith("codex")
-      ? unwrapCodexCliResult(rawStdout)
-      : unwrapClaudeCliResult(rawStdout);
+    const text = unwrapCliResult(adapter, rawStdout);
     const payload = parseSingleJsonObject(text, "provider_result_not_single_json_object");
     return validateReportEnvelope(withReportDefaults(payload, invocationId));
   }
@@ -724,6 +737,7 @@ export function normalizeProviderOutput(
  * empty or non-JSON stdout, Codex) returns false and keeps its classification.
  */
 export function isClaudeReportFormatFailure(adapter: string, rawStdout: string): boolean {
+  if (harnessOfAdapter(adapter) === "opencode") return false;
   if (adapter.startsWith("codex")) return false;
   // stream-json emits one event per line; the final result event decides.
   for (const line of rawStdout.split("\n").reverse()) {

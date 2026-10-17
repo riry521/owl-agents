@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { AdvisorSuggestedAction } from "./advisor-response.js";
+import type { ModelHarness } from "./harness-models.js";
 import type { OwnerLanguage } from "./owner-language.js";
 import type { WebResearchCapture } from "./web-research.js";
 import type { ChildRunFailureKind, ExecutorRelayConfig, ResearchSubagentSettings } from "./child-runs.js";
@@ -50,7 +51,7 @@ export { GUARD_COMMAND_KEYS, GUARD_CONTENT_KEYS, GUARD_NAMED_TOOLS, GUARD_PATH_K
 export { GUARD_TOKEN_FILE_ENV, type GuardTokenAgent, type GuardTokenIssuer, type GuardTokenLease } from "./guard-token.js";
 export { buildCodexCustomProviderArgs, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV } from "./codex-provider.js";
 export { compareClaudeEntries, compareSemver, parseSemver, type ClaudePluginEntry, type Semver } from "./semver.js";
-export { agentUserInstructionEnv, buildAgentPermissionArgs, buildPreToolUseHookArgs, RESEARCH_CAPTURE_ROLES, type AgentPermissionAdapter, type AgentPermissionRole, type AgentGuardConfiguration } from "./permission-args.js";
+export { agentUserInstructionEnv, buildAgentPermissionArgs, buildPreToolUseHookArgs, permissionHookCommand, PRE_TOOL_USE_HOOK_TIMEOUT_MS, RESEARCH_CAPTURE_ROLES, type AgentPermissionAdapter, type AgentPermissionRole, type AgentGuardConfiguration } from "./permission-args.js";
 export { DESIGN_MOCK_MCP_ENABLE_ENV, DESIGN_MOCK_MCP_SERVER_NAME, DESIGN_MOCK_MCP_TOOL_TIMEOUT_MS, DESIGN_MOCK_MCP_ENV_NAMES, buildDesignMockMcpArgs } from "./design-mock-mcp-args.js";
 export { DISPATCH_MCP_ENABLE_ENV, DISPATCH_MCP_SERVER_NAME, DISPATCH_MCP_TOOL_TIMEOUT_MS, DISPATCH_MCP_ENV_NAMES, buildDispatchMcpArgs } from "./dispatch-mcp-args.js";
 export {
@@ -147,6 +148,7 @@ export {
 export { DEFAULT_ROLE_MODELS } from "./default-role-models.js";
 export {
   builtinProviderHarness,
+  harnessOfAdapter,
   CLAUDE_HAIKU_5_5_MODEL,
   CODEX_BUILTIN_MODELS,
   CODEX_GPT_6_LUNA_MODEL,
@@ -321,7 +323,7 @@ export type PromptMode = "fresh" | "resumed" | "handoff" | "report_resubmit";
 export type PromptObserver = (invocationId: string, record: { readonly fingerprint: PromptFingerprint; readonly mode: PromptMode }) => void;
 /** Identifies the lifetime of the one-shot CLI process backing a logical AgentRun. */
 export type AgentProcessEvent =
-  | { readonly type: "spawned"; readonly pid: number }
+  | { readonly type: "spawned"; readonly pid: number; readonly harness?: ModelHarness }
   | { readonly type: "exited"; readonly pid: number };
 /** What one Hybrid Executor needs from its Task; every key is always present. */
 export interface ExecutorTaskContext {
@@ -340,6 +342,35 @@ export interface ExecutorTaskContext {
 export interface ExecutorTask { readonly subtask_id: string; /** Ids of the Task this subtask belongs to; they become OWL_WORK_ID, OWL_TASK_ID and OWL_PROJECT_ID. */ readonly work_id?: string; readonly task_id?: string; readonly project_id?: string; readonly instruction: string; readonly workspace_dir: string; readonly task: ExecutorTaskContext; /** Relative paths this Executor may edit; omitted means whole-workspace scope. */ readonly write_paths?: readonly string[]; readonly process_skills_dir?: string; /** Where process_skills_dir was detected; decides whether the Executor's own harness can invoke a skill natively. */ readonly process_skills_source?: "setting" | "claude" | "codex"; /** The Task's git worktree, when workspace_dir is one; null/omitted when it is not (e.g. the Owl workspace fallback). */ readonly worktree?: string | null; }
 export interface ExecutorResult { readonly subtask_id: string; readonly success: boolean; readonly output: string; readonly exit_code: number; readonly duration_ms: number; /** Set when the process failed; a missing kind on a failure means it never started. */ readonly failure_kind?: ChildRunFailureKind; readonly rate_limit?: { readonly resets_at: string | null }; /** Set when a relay-watched child handed off or was stopped at the prompt-size limit. */ readonly relay?: { readonly reason: "handoff" | "kill"; readonly memo: HandoffMemo | null; readonly peak_prompt_tokens: number }; }
 export interface ExecutorConfig { readonly provider: "claude" | "codex" | string; readonly model: string; readonly effort?: string; readonly timeout_ms: number; /** Prompt-size limits; only for Claude children Owl watches. */ readonly relay?: ExecutorRelayConfig; }
+/** One opencode child run: Core assembles it, the server's agent runtime executes it. */
+export interface OpencodeChildRun {
+  /** Invocation id and run directory name. */
+  readonly agent_run_id: string;
+  /** providerID/modelID */
+  readonly model: string;
+  /** Sent as the model variant. */
+  readonly effort?: string;
+  readonly prompt: string;
+  readonly cwd: string;
+  readonly env: Readonly<Record<string, string>>;
+  readonly guard_token_file?: string;
+  /** Wall limit; 0 means none. */
+  readonly timeout_ms: number;
+  /** 0 = no idle limit. */
+  readonly idle_timeout_ms: number;
+  readonly signal?: AbortSignal;
+  readonly on_spawn?: (pid: number) => void;
+  readonly on_output?: () => void;
+}
+export interface OpencodeChildOutcome {
+  readonly success: boolean;
+  /** The final assistant text on success; the failure reason otherwise. */
+  readonly output: string;
+  readonly exit_code: number;
+  readonly failure_kind?: ChildRunFailureKind;
+  readonly usage: TokenUsage | null;
+  readonly rate_limit?: { readonly resets_at: string | null };
+}
 export interface ProviderExecutionRequest {
   readonly adapter: string;
   readonly role: "manager" | "worker" | "reviewer" | "advisor" | "curator" | "librarian";
@@ -637,6 +668,7 @@ export * from "./manager-trigger.js";
 export * from "./acceptance-criteria.js";
 export * from "./test-policy.js";
 export * from "./advisor-api-policy.js";
+export { MEMORY_MCP_SERVER_NAME, owlMcpServers, claudeMcpArgs, codexMcpArgs, opencodeMcpConfig, type McpServerSpec } from "./owl-mcp-servers.js";
 export { OWL_API_MCP_SERVER_NAME, OWL_API_MCP_TOOL_TIMEOUT_MS, OWL_API_MCP_ENV_NAMES, buildOwlApiMcpArgs } from "./owl-api-mcp-args.js";
 export { DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, OUTPUT_RESUBMIT_LIMIT_SETTINGS_KEY, REVIEW_RERUN_OPTION_KEY, TEST_SETUP_APPROVE_OPTION_KEY, TEST_SETUP_RETRY_OPTION_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_OPTION_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY } from "./report-resubmit.js";
 export * from "./role-schema.js";
@@ -668,3 +700,26 @@ export {
   type TestSetupRole,
   type TestSetupSettings,
 } from "./test-setup-settings.js";
+export {
+  OPENCODE_API_KEY_ENV_ENV,
+  OPENCODE_BASE_URL_ENV,
+  OPENCODE_EVENT_STALL_MS,
+  OPENCODE_EXECUTABLE_ENV,
+  OPENCODE_MIN_SUPPORTED_VERSION,
+  OPENCODE_RETRY_WAIT_LIMIT_MS,
+  OPENCODE_STARTUP_TIMEOUT_MS,
+  OPENCODE_TOOL_LOOKUP_WAIT_MS,
+  isSupportedOpencodeVersion,
+  normalizeOpencodeToolCall,
+  OPENCODE_HARNESS_GAPS,
+  type OpencodeHarnessGap,
+  opencodeConfigContent,
+  opencodePermissionRules,
+  opencodeServeEnv,
+  parseOpencodeVersion,
+  splitOpencodeModel,
+  type OpencodeConfigInput,
+  type OpencodePermissionRule,
+  type OpencodeToolCall,
+  type OpencodeServeEnvInput,
+} from "./opencode-harness.js";

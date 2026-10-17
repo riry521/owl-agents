@@ -154,3 +154,35 @@ test("a non-zero exit reads the failure the harness reported in its structured o
   assert.equal(failure.retry_allowed, false);
   assert.match(failure.message, /認証に失敗しました（HTTP 401）/u);
 });
+
+test("harness_transient decides transient or deterministic without reading the message", () => {
+  const transient = classifyProviderFailure("opencode-serve/v1", exited({ harness_transient: true, error: "the upstream said no" }));
+  assert.equal(transient.failure_class, "transient");
+  assert.equal(transient.retry_allowed, true);
+  const deterministic = classifyProviderFailure("opencode-serve/v1", exited({ harness_transient: false, error: "request timeout while reading" }));
+  assert.equal(deterministic.failure_class, "deterministic");
+  assert.equal(deterministic.retry_allowed, false);
+});
+
+test("an HTTP status decides before harness_transient", () => {
+  const failure = classifyProviderFailure("opencode-serve/v1", exited({ harness_status: 401, harness_transient: true }));
+  assert.equal(failure.failure_class, "deterministic");
+  assert.equal(failure.retry_allowed, false);
+});
+
+test("providerFailureCause reads harness_transient only when it is a boolean", () => {
+  const read = (value) => providerFailureCause(providerFailed("provider_reported_error", { harness_transient: value }));
+  assert.equal(read(true).harness_transient, true);
+  assert.equal(read(false).harness_transient, false);
+  assert.equal(read("true").harness_transient, undefined);
+});
+
+test("opencode errors map to the classes of design 2.5", async () => {
+  const { opencodeFailureDetail } = await import("../../packages/agent-runtime/dist/index.js");
+  const classify = (error) => classifyProviderFailure("opencode-serve/v1", exited({ ...opencodeFailureDetail(error) }));
+  assert.equal(classify({ type: "provider.transport", message: "bad request" }).failure_class, "transient");
+  assert.equal(classify({ type: "provider.timeout", message: "invalid" }).retry_allowed, true);
+  assert.equal(classify({ type: "context-overflow", message: "timeout in the prompt" }).failure_class, "deterministic");
+  assert.equal(classify({ type: "provider.auth", message: "x" }).failure_class, "deterministic");
+  assert.equal(classify({ type: "provider.rate-limit", message: "slow down" }).failure_class, "rate_limited");
+});

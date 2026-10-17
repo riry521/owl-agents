@@ -430,7 +430,7 @@ test("inspectAdvisorWorkspace reports the shared worktree as dirty with its path
   assert.equal(inspection.worktree_path, prepared.worktree_path);
 });
 
-test("sweepAdvisorWorkspaces never removes the shared worktree, its branch or the home directory", async (t) => {
+test("sweepAdvisorWorkspaces removes a clean shared worktree and its branch but keeps the home directory", async (t) => {
   const { projectPath, writeLane, gateway } = await fixture(t);
   await insertConversation(writeLane, "conv-keep", { workId: "work:1" });
   const prepared = await gateway.prepareAdvisorWorkspace({ conversation_id: "conv-keep" });
@@ -438,10 +438,106 @@ test("sweepAdvisorWorkspaces never removes the shared worktree, its branch or th
 
   const result = await gateway.sweepAdvisorWorkspaces();
 
-  assert.deepEqual(result, { removed_workspaces: [], removed_branches: [] });
-  await access(prepared.worktree_path);
+  assert.deepEqual(result, { removed_workspaces: [prepared.worktree_path], removed_branches: [] });
+  await assert.rejects(access(prepared.worktree_path));
   await access(directory.cwd);
+  assert.deepEqual(advisorBranches(projectPath), []);
+});
+
+test("sweepAdvisorWorkspaces keeps a shared worktree with uncommitted files or content not in base", async (t) => {
+  const { projectPath, writeLane, gateway } = await fixture(t);
+  await insertConversation(writeLane, "conv-shared-keep", { workId: "work:1" });
+  const prepared = await gateway.prepareAdvisorWorkspace({ conversation_id: "conv-shared-keep" });
+  await writeFile(join(prepared.worktree_path, "draft.txt"), "uncommitted\n");
+
+  assert.deepEqual((await gateway.sweepAdvisorWorkspaces()).removed_workspaces, []);
+  await access(join(prepared.worktree_path, "draft.txt"));
+
+  git(prepared.worktree_path, "add", "draft.txt");
+  git(prepared.worktree_path, "commit", "-m", "advisor commit");
+  assert.deepEqual((await gateway.sweepAdvisorWorkspaces()).removed_workspaces, []);
+  await access(prepared.worktree_path);
   assert.deepEqual(advisorBranches(projectPath), [prepared.branch]);
+});
+
+test("sweepAdvisorWorkspaces removes legacy and orphan advisor branches squashed into a non-main base, and keeps unmerged ones", async (t) => {
+  const fx = await fixture(t);
+  const { projectPath, writeLane, gateway } = fx;
+  git(projectPath, "branch", "-m", "main", "trunk");
+  await writeLane.transact((tx) => tx.run("UPDATE projects SET base_branch = 'trunk'"));
+  for (const id of ["conv-squash", "conv-orphan-squash", "conv-ahead"]) await insertConversation(writeLane, id);
+  const worktrees = {};
+  for (const id of ["conv-squash", "conv-orphan-squash", "conv-ahead"]) {
+    const path = join(fx.owlRoot, ".owl-workspaces", "advisor", id);
+    git(projectPath, "worktree", "add", "-b", `owl/advisor/${id}`, path, "trunk");
+    await writeFile(join(path, `${id}.txt`), `${id}\n`);
+    git(path, "add", ".");
+    git(path, "commit", "-m", id);
+    worktrees[id] = path;
+  }
+  for (const id of ["conv-squash", "conv-orphan-squash"]) {
+    git(projectPath, "merge", "--squash", `owl/advisor/${id}`);
+    git(projectPath, "commit", "-m", `Release ${id}`);
+  }
+  git(projectPath, "worktree", "remove", "--force", worktrees["conv-orphan-squash"]);
+
+  const result = await gateway.sweepAdvisorWorkspaces();
+
+  assert.deepEqual(result.removed_workspaces, [worktrees["conv-squash"]]);
+  assert.deepEqual(result.removed_branches, ["owl/advisor/conv-orphan-squash"]);
+  await assert.rejects(access(worktrees["conv-squash"]));
+  await access(worktrees["conv-ahead"]);
+  assert.deepEqual(advisorBranches(projectPath), ["owl/advisor/conv-ahead"]);
+});
+
+test("sweepAdvisorWorkspaces removes a shared worktree whose commits were squashed into base", async (t) => {
+  const { projectPath, writeLane, gateway } = await fixture(t);
+  await insertConversation(writeLane, "conv-shared-squash", { workId: "work:1" });
+  const prepared = await gateway.prepareAdvisorWorkspace({ conversation_id: "conv-shared-squash" });
+  await writeFile(join(prepared.worktree_path, "note.txt"), "note\n");
+  git(prepared.worktree_path, "add", "note.txt");
+  git(prepared.worktree_path, "commit", "-m", "advisor commit");
+  git(projectPath, "merge", "--squash", prepared.branch);
+  git(projectPath, "commit", "-m", "Release");
+
+  const result = await gateway.sweepAdvisorWorkspaces();
+
+  assert.deepEqual(result.removed_workspaces, [prepared.worktree_path]);
+  assert.deepEqual(advisorBranches(projectPath), []);
+});
+
+test("sweepAdvisorWorkspaces keeps an orphan shared branch with content not in base and removes a merged one", async (t) => {
+  const { projectPath, writeLane, gateway } = await fixture(t);
+  await insertConversation(writeLane, "conv-shared-orphan", { workId: "work:1" });
+  const prepared = await gateway.prepareAdvisorWorkspace({ conversation_id: "conv-shared-orphan" });
+  await writeFile(join(prepared.worktree_path, "note.txt"), "note\n");
+  git(prepared.worktree_path, "add", "note.txt");
+  git(prepared.worktree_path, "commit", "-m", "advisor commit");
+  git(projectPath, "worktree", "remove", "--force", prepared.worktree_path);
+
+  assert.deepEqual((await gateway.sweepAdvisorWorkspaces()).removed_branches, []);
+  assert.deepEqual(advisorBranches(projectPath), [prepared.branch]);
+
+  git(projectPath, "merge", "--squash", prepared.branch);
+  git(projectPath, "commit", "-m", "Release");
+  assert.deepEqual((await gateway.sweepAdvisorWorkspaces()).removed_branches, [prepared.branch]);
+});
+
+test("sweepAdvisorWorkspaces keeps a legacy worktree whose content conflicts with base", async (t) => {
+  const fx = await fixture(t);
+  const { projectPath, writeLane, gateway } = fx;
+  await insertConversation(writeLane, "conv-conflict", { workId: "work:1" });
+  const legacy = addLegacyAdvisorWorktree(fx, "conv-conflict");
+  await writeFile(join(legacy.worktree_path, "README.md"), "advisor\n");
+  git(legacy.worktree_path, "commit", "-am", "advisor edit");
+  await writeFile(join(projectPath, "README.md"), "other\n");
+  git(projectPath, "commit", "-am", "base edit");
+
+  const result = await gateway.sweepAdvisorWorkspaces();
+
+  assert.deepEqual(result.removed_workspaces, []);
+  await access(legacy.worktree_path);
+  assert.deepEqual(advisorBranches(projectPath), ["owl/advisor/conv-conflict"]);
 });
 
 test("sweepAdvisorWorkspaces keeps a legacy branch that is not an ancestor of base", async (t) => {
@@ -492,4 +588,188 @@ test("prepareAdvisorWorkspace uses a non-Git Project directory directly", async 
   assert.equal(prepared.worktree_path, await realpath(plainPath));
   assert.equal(prepared.synced, true);
   assert.match(prepared.message, /not a Git repository/);
+});
+
+test("sweepAdvisorWorkspaces keeps a shared worktree and its branch when Projects on one repository disagree on the base branch", async (t) => {
+  const { projectPath, parent, writeLane, gateway } = await fixture(t);
+  await insertConversation(writeLane, "conv-shared-ambiguous", { workId: "work:1" });
+  const prepared = await gateway.prepareAdvisorWorkspace({ conversation_id: "conv-shared-ambiguous" });
+  await writeFile(join(prepared.worktree_path, "note.txt"), "note\n");
+  git(prepared.worktree_path, "add", "note.txt");
+  git(prepared.worktree_path, "commit", "-m", "advisor commit");
+  git(projectPath, "branch", "dev", "main");
+  git(projectPath, "merge", "--squash", prepared.branch);
+  git(projectPath, "commit", "-m", "Release squashed");
+  const secondCheckout = join(parent, "second-checkout");
+  git(projectPath, "worktree", "add", "--detach", secondCheckout, "main");
+  await insertProject(writeLane, "project:2", secondCheckout, [parent, secondCheckout]);
+  await writeLane.transact((tx) => tx.run("UPDATE projects SET base_branch = 'dev' WHERE id = 'project:2'"));
+
+  assert.deepEqual(await gateway.sweepAdvisorWorkspaces(), { removed_workspaces: [], removed_branches: [] });
+  await access(prepared.worktree_path);
+  assert.deepEqual(advisorBranches(projectPath), [prepared.branch]);
+});
+
+async function preparedWithCommit(t, conversation, file = "note.txt") {
+  const f = await fixture(t);
+  await insertConversation(f.writeLane, conversation, { workId: "work:1" });
+  const prepared = await f.gateway.prepareAdvisorWorkspace({ conversation_id: conversation });
+  await writeFile(join(prepared.worktree_path, file), "advisor\n");
+  git(prepared.worktree_path, "add", file);
+  git(prepared.worktree_path, "commit", "-m", "advisor commit");
+  return { ...f, prepared, conversation };
+}
+
+const exists = (path) => access(path).then(() => true, () => false);
+
+test("finishAdvisorWorkspace fast-forwards base and removes the worktree and branch", async (t) => {
+  const f = await preparedWithCommit(t, "conv-finish-ff");
+  const { projectPath, prepared } = f;
+
+  const finished = await f.gateway.finishAdvisorWorkspace({ conversation_id: f.conversation });
+
+  assert.equal(finished.ok, true, finished.message);
+  assert.equal(git(projectPath, "show", "main:note.txt"), "advisor");
+  assert.equal(git(projectPath, "rev-parse", "main"), finished.base_head);
+  assert.equal(await exists(prepared.worktree_path), false);
+  assert.equal(git(projectPath, "branch", "--list", prepared.branch), "");
+  assert.equal(git(projectPath, "status", "--porcelain"), "");
+});
+
+test("finishAdvisorWorkspace merges into a moved base that is not named main, without a base checkout", async (t) => {
+  const f = await fixture(t);
+  const { projectPath, writeLane, gateway } = f;
+  git(projectPath, "branch", "-m", "main", "trunk");
+  git(projectPath, "checkout", "-b", "elsewhere");
+  await writeLane.transact((tx) => tx.run("UPDATE projects SET base_branch = 'trunk' WHERE id = 'project:1'"));
+  await insertConversation(writeLane, "conv-finish-merge", { workId: "work:1" });
+  const prepared = await gateway.prepareAdvisorWorkspace({ conversation_id: "conv-finish-merge" });
+  await writeFile(join(prepared.worktree_path, "advisor.txt"), "advisor\n");
+  git(prepared.worktree_path, "add", "advisor.txt");
+  git(prepared.worktree_path, "commit", "-m", "advisor commit");
+  git(projectPath, "checkout", "trunk");
+  await writeFile(join(projectPath, "owner.txt"), "owner\n");
+  git(projectPath, "add", "owner.txt");
+  git(projectPath, "commit", "-m", "owner commit");
+  git(projectPath, "checkout", "elsewhere");
+  const before = git(projectPath, "rev-parse", "trunk");
+
+  const finished = await gateway.finishAdvisorWorkspace({ conversation_id: "conv-finish-merge" });
+
+  assert.equal(finished.ok, true, finished.message);
+  assert.equal(git(projectPath, "show", "trunk:advisor.txt"), "advisor");
+  assert.equal(git(projectPath, "show", "trunk:owner.txt"), "owner");
+  assert.equal(git(projectPath, "rev-list", "--parents", "-n", "1", "trunk").split(" ").length, 3);
+  git(projectPath, "merge-base", "--is-ancestor", before, "trunk");
+  assert.equal(await exists(prepared.worktree_path), false);
+  assert.equal(git(projectPath, "branch", "--list", prepared.branch), "");
+});
+
+test("finishAdvisorWorkspace keeps base, worktree and branch on a merge conflict", async (t) => {
+  const f = await preparedWithCommit(t, "conv-finish-conflict", "README.md");
+  const { projectPath, prepared } = f;
+  await writeFile(join(projectPath, "README.md"), "owner\n");
+  git(projectPath, "commit", "-am", "owner edit");
+  const before = git(projectPath, "rev-parse", "main");
+
+  const finished = await f.gateway.finishAdvisorWorkspace({ conversation_id: f.conversation });
+
+  assert.equal(finished.ok, false);
+  assert.equal(finished.error_code, "merge_conflict");
+  assert.ok(finished.message.length > 0);
+  assert.equal(git(projectPath, "rev-parse", "main"), before);
+  assert.equal(await exists(prepared.worktree_path), true);
+  assert.equal(git(projectPath, "branch", "--list", prepared.branch).includes(prepared.branch), true);
+});
+
+test("finishAdvisorWorkspace keeps everything when the worktree has an untracked file", async (t) => {
+  const f = await preparedWithCommit(t, "conv-finish-untracked");
+  const { projectPath, prepared } = f;
+  await writeFile(join(prepared.worktree_path, "stray.txt"), "stray\n");
+  const before = git(projectPath, "rev-parse", "main");
+
+  const finished = await f.gateway.finishAdvisorWorkspace({ conversation_id: f.conversation });
+
+  assert.equal(finished.ok, false);
+  assert.equal(finished.error_code, "uncommitted_changes");
+  assert.equal(git(projectPath, "rev-parse", "main"), before);
+  assert.equal(await exists(prepared.worktree_path), true);
+  assert.equal(git(projectPath, "branch", "--list", prepared.branch).includes(prepared.branch), true);
+});
+
+test("finishAdvisorWorkspace leaves only the Owner's non-overlapping change in the base checkout", async (t) => {
+  const f = await fixture(t);
+  await insertConversation(f.writeLane, "conv-finish-checkout", { workId: "work:1" });
+  const prepared = await f.gateway.prepareAdvisorWorkspace({ conversation_id: "conv-finish-checkout" });
+  await writeFile(join(prepared.worktree_path, "advisor.txt"), "advisor\n");
+  git(prepared.worktree_path, "add", "advisor.txt");
+  git(prepared.worktree_path, "commit", "-m", "advisor commit");
+  await writeFile(join(f.projectPath, "README.md"), "owner wip\n");
+
+  const finished = await f.gateway.finishAdvisorWorkspace({ conversation_id: "conv-finish-checkout" });
+
+  assert.equal(finished.ok, true, finished.message);
+  assert.equal(git(f.projectPath, "status", "--porcelain"), "M README.md");
+  assert.equal(await readFile(join(f.projectPath, "advisor.txt"), "utf8"), "advisor\n");
+  assert.equal(await readFile(join(f.projectPath, "README.md"), "utf8"), "owner wip\n");
+});
+
+test("finishAdvisorWorkspace refuses and changes nothing when the base checkout has overlapping changes", async (t) => {
+  const f = await fixture(t);
+  await insertConversation(f.writeLane, "conv-finish-overlap", { workId: "work:1" });
+  const prepared = await f.gateway.prepareAdvisorWorkspace({ conversation_id: "conv-finish-overlap" });
+  await writeFile(join(prepared.worktree_path, "README.md"), "advisor\n");
+  git(prepared.worktree_path, "commit", "-am", "advisor commit");
+  await writeFile(join(f.projectPath, "README.md"), "owner wip\n");
+  const before = git(f.projectPath, "rev-parse", "main");
+
+  const finished = await f.gateway.finishAdvisorWorkspace({ conversation_id: "conv-finish-overlap" });
+
+  assert.equal(finished.ok, false);
+  assert.equal(finished.error_code, "checkout_conflict");
+  assert.equal(git(f.projectPath, "rev-parse", "main"), before);
+  assert.equal(await exists(prepared.worktree_path), true);
+  assert.equal(await readFile(join(f.projectPath, "README.md"), "utf8"), "owner wip\n");
+  assert.equal(git(f.projectPath, "status", "--porcelain"), "M README.md");
+});
+
+test("finishAdvisorWorkspace refuses when the base checkout already stages the integrated content", async (t) => {
+  const f = await fixture(t);
+  await insertConversation(f.writeLane, "conv-finish-staged", { workId: "work:1" });
+  const prepared = await f.gateway.prepareAdvisorWorkspace({ conversation_id: "conv-finish-staged" });
+  await writeFile(join(prepared.worktree_path, "README.md"), "advisor\n");
+  git(prepared.worktree_path, "commit", "-am", "advisor commit");
+  await writeFile(join(f.projectPath, "README.md"), "advisor\n");
+  git(f.projectPath, "add", "README.md");
+  const before = git(f.projectPath, "rev-parse", "main");
+
+  const finished = await f.gateway.finishAdvisorWorkspace({ conversation_id: "conv-finish-staged" });
+
+  assert.equal(finished.ok, false);
+  assert.equal(finished.error_code, "checkout_conflict");
+  assert.equal(git(f.projectPath, "rev-parse", "main"), before);
+  assert.equal(await exists(prepared.worktree_path), true);
+  assert.equal(git(f.projectPath, "status", "--porcelain"), "M  README.md");
+});
+
+test("finishAdvisorWorkspace refuses when the base checkout stages the integrated content but its file is back at HEAD", async (t) => {
+  const f = await fixture(t);
+  await insertConversation(f.writeLane, "conv-finish-staged-reverted", { workId: "work:1" });
+  const prepared = await f.gateway.prepareAdvisorWorkspace({ conversation_id: "conv-finish-staged-reverted" });
+  const original = await readFile(join(f.projectPath, "README.md"), "utf8");
+  await writeFile(join(prepared.worktree_path, "README.md"), "advisor\n");
+  git(prepared.worktree_path, "commit", "-am", "advisor commit");
+  await writeFile(join(f.projectPath, "README.md"), "advisor\n");
+  git(f.projectPath, "add", "README.md");
+  await writeFile(join(f.projectPath, "README.md"), original);
+  const before = git(f.projectPath, "rev-parse", "main");
+
+  const finished = await f.gateway.finishAdvisorWorkspace({ conversation_id: "conv-finish-staged-reverted" });
+
+  assert.equal(finished.ok, false);
+  assert.equal(finished.error_code, "checkout_conflict");
+  assert.equal(git(f.projectPath, "rev-parse", "main"), before);
+  assert.equal(await exists(prepared.worktree_path), true);
+  assert.equal(await readFile(join(f.projectPath, "README.md"), "utf8"), original);
+  assert.equal(git(f.projectPath, "status", "--porcelain"), "MM README.md");
 });

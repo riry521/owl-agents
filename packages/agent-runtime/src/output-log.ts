@@ -16,13 +16,18 @@ export const OUTPUT_LOG_TAIL_CHARS = 20_000;
  */
 export function resolveOutputLogDir(options: AgentRunnerOptions): string | null {
   if (options.outputLogDir !== undefined) return options.outputLogDir;
-  const owlRoot = options.env?.OWL_ROOT;
+  const dataDir = resolveOwlDataDir(options.env);
+  return dataDir === null ? null : join(dataDir, "logs", "agent-output");
+}
+
+/** The server's data directory (`$OWL_DATA_DIR`, else `OWL_ROOT/data`); null without an absolute OWL_ROOT. */
+export function resolveOwlDataDir(env: Readonly<Record<string, string | undefined>> | undefined): string | null {
+  const owlRoot = env?.OWL_ROOT;
   if (!owlRoot || !isAbsolute(owlRoot)) return null;
-  const configured = options.env?.OWL_DATA_DIR ?? process.env.OWL_DATA_DIR;
-  const dataDir = !configured
+  const configured = env?.OWL_DATA_DIR ?? process.env.OWL_DATA_DIR;
+  return !configured
     ? join(owlRoot, "data")
     : isAbsolute(configured) ? resolve(configured) : resolve(owlRoot, configured);
-  return join(dataDir, "logs", "agent-output");
 }
 
 export { redactProviderOutput };

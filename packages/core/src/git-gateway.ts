@@ -736,6 +736,114 @@ export class GitWorktreeGateway implements GitGateway {
   }
 
   /**
+   * Finish a direct Advisor job: bring the shared worktree's commits into the
+   * base branch, then remove the worktree and its branch. Nothing is removed
+   * unless the content really reached base, and an error leaves base, the
+   * worktree and the branch exactly as they were.
+   */
+  public async finishAdvisorWorkspace(request: AdvisorWorkspaceRequest): Promise<AdvisorWorkspacePreparation> {
+    const resolved = await this.resolveAdvisorTarget(request);
+    if (!resolved.ok) return { ...EMPTY_PREPARATION, ok: false, error_code: resolved.error_code, message: resolved.message };
+    const { target } = resolved;
+    if (target.kind === "direct") {
+      return { ...EMPTY_PREPARATION, kind: "direct", worktree_path: target.directory, synced: true, message: "The Project is not a Git repository; there is no Advisor worktree to finish." };
+    }
+    return this.inLane(target.identity.repositoryRoot, () => this.finishSharedAdvisorWorkspaceNow(target));
+  }
+
+  private async finishSharedAdvisorWorkspaceNow(target: AdvisorRepositoryTarget): Promise<AdvisorWorkspacePreparation> {
+    const { identity, worktreePath, branch, baseBranch, baseRef } = target;
+    const source = identity.sourceRoot;
+    const outcome = (fields: Partial<AdvisorWorkspacePreparation> & { readonly message: string }): AdvisorWorkspacePreparation => ({
+      ...EMPTY_PREPARATION,
+      kind: "worktree",
+      repository_root: source,
+      branch,
+      base_branch: baseBranch,
+      ...fields,
+    });
+    const failed = (error_code: AdvisorWorkspaceErrorCode, message: string, fields: Partial<AdvisorWorkspacePreparation> = {}) =>
+      outcome({ ok: false, worktree_path: worktreePath, error_code, message, ...fields });
+
+    if (baseRef === "HEAD") return failed("sync_failed", "The base is a detached HEAD, not a branch, so nothing can be integrated into it.");
+    const baseHead = await this.git(source, ["rev-parse", "--verify", `${baseRef}^{commit}`]);
+    if (!baseHead.ok) return failed("base_not_found", baseHead.message);
+    const base = baseHead.message.trim();
+    if (!(await lstat(worktreePath).catch(() => null)) || !(await this.isRegisteredWorktree(source, worktreePath))) {
+      return outcome({ synced: true, base_head: base, head: base, message: "There is no Advisor worktree to finish." });
+    }
+
+    const status = await this.git(worktreePath, ["status", "--porcelain=v1", "--untracked-files=all"]);
+    if (!status.ok) return failed("sync_failed", status.message, { base_head: base });
+    if (status.message !== "git operation completed" && status.message.trim().length > 0) {
+      return failed("uncommitted_changes", "The Advisor worktree has uncommitted or untracked changes. Commit them (or discard them) and finish again.", { base_head: base });
+    }
+    const headResult = await this.git(worktreePath, ["rev-parse", "HEAD"]);
+    if (!headResult.ok) return failed("sync_failed", headResult.message, { base_head: base });
+    const head = headResult.message.trim();
+
+    // Why not fast-forward only: base moves while the Advisor works (Works merge, the Owner commits), and a refusal would strand the work.
+    let integrated = base;
+    if ((await this.git(source, ["merge-base", "--is-ancestor", head, base])).exit_code === 0) {
+      integrated = base;
+    } else if ((await this.git(source, ["merge-base", "--is-ancestor", base, head])).exit_code === 0) {
+      integrated = head;
+    } else {
+      const merged = await this.git(source, ["merge-tree", "--write-tree", base, head]);
+      if (merged.exit_code === 1) return failed("merge_conflict", `Merging the Advisor work into ${baseBranch} conflicts; ${baseBranch} was not changed. Resolve it in the worktree by merging ${baseBranch} there.\n${merged.message}`, { base_head: base, head });
+      if (!merged.ok) return failed("sync_failed", merged.message, { base_head: base, head });
+      const commit = await this.git(source, [
+        ...(await this.ownerIdentityArgs(source)),
+        "commit-tree", firstLine(merged.message), "-p", base, "-p", head, "-m", `Merge Advisor work into ${baseBranch}`,
+      ]);
+      if (!commit.ok) return failed("sync_failed", commit.message, { base_head: base, head });
+      integrated = commit.message.trim();
+    }
+
+    if (integrated !== base) {
+      // Why not move the ref alone: the Owner's checkout of base would keep the old index and files, and its next commit would revert this work.
+      const listed = await this.git(source, ["worktree", "list", "--porcelain"]);
+      const checkout = listed.ok
+        ? parseWorktrees(listed.message).find((entry) => entry.branch === baseBranch && entry.path !== resolve(worktreePath))
+        : undefined;
+      if (checkout) {
+        // Why not rely on read-tree alone: it accepts staged changes identical to the integrated content, which would then be silently absorbed.
+        const touched = await this.git(source, ["diff", "--name-only", "-z", "--no-renames", base, integrated]);
+        // Why not one `diff HEAD`: a staged change whose file was reverted to HEAD cancels out there but still differs from both trees.
+        const staged = await this.git(checkout.path, ["diff", "--cached", "--name-only", "-z", "--no-renames", "HEAD"]);
+        const unstaged = await this.git(checkout.path, ["diff", "--name-only", "-z", "--no-renames"]);
+        const untracked = await this.git(checkout.path, ["ls-files", "-z", "--others", "--exclude-standard"]);
+        const broken = [touched, staged, unstaged, untracked].find((r) => !r.ok);
+        if (broken) return failed("sync_failed", broken.message, { base_head: base, head });
+        const names = (r: { message: string }) => r.message.split("\0").filter((n) => n.length > 0 && n !== "git operation completed");
+        const owned = new Set([...names(staged), ...names(unstaged), ...names(untracked)]);
+        const overlap = names(touched).filter((n) => owned.has(n));
+        if (overlap.length > 0) {
+          return failed("checkout_conflict", `The checkout of ${baseBranch} at ${checkout.path} has uncommitted changes that overlap this integration (${overlap.slice(0, 5).join(", ")}); ${baseBranch} was not changed.`, { base_head: base, head });
+        }
+        // Two-tree merge: touches only files that differ between the trees and refuses when the Owner's changes overlap them.
+        const synced = await this.git(checkout.path, ["read-tree", "-m", "-u", base, integrated]);
+        if (!synced.ok) return failed("checkout_conflict", `The checkout of ${baseBranch} at ${checkout.path} has uncommitted changes that overlap this integration; ${baseBranch} was not changed.\n${synced.message}`, { base_head: base, head });
+      }
+      const updated = await this.git(source, ["update-ref", baseRef, integrated, base]);
+      if (!updated.ok) {
+        const reverted = checkout ? await this.git(checkout.path, ["read-tree", "-m", "-u", integrated, base]) : undefined;
+        const note = reverted && !reverted.ok ? `\nThe checkout at ${checkout?.path} could not be restored: ${reverted.message}` : "";
+        return failed("sync_failed", `${updated.message}${note}`, { base_head: base, head });
+      }
+    }
+
+    const removal = await this.git(source, ["worktree", "remove", "--force", worktreePath]);
+    if (!removal.ok) return failed("sync_failed", `Integrated into ${baseBranch} (${integrated.slice(0, 12)}) but the worktree could not be removed: ${removal.message}`, { base_head: integrated, head });
+    const branchExists = (await this.git(source, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])).exit_code === 0;
+    if (branchExists) {
+      if (await this.contentInBase(source, `refs/heads/${branch}`, integrated)) await this.git(source, ["branch", "-D", branch]);
+      else console.warn(`[owl-core] Advisor finish kept branch ${branch}: it has changes not in ${baseBranch}.`);
+    }
+    return outcome({ ok: true, synced: true, base_head: integrated, head: integrated, message: `Advisor work is in ${baseBranch} (${integrated.slice(0, 12)}); the worktree and branch were removed.` });
+  }
+
+  /**
    * Reclaim Advisor worktrees/branches left behind by a replaced or
    * conversation-switched session (see prepareAdvisorWorkspace). Every entry
    * under `.owl-workspaces/advisor` whose realpath is not some non-ended
@@ -761,9 +869,18 @@ export class GitWorktreeGateway implements GitGateway {
       const entries = await readdir(advisorRoot, { withFileTypes: true }).catch(() => []);
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
-        // The shared worktrees and the scratch home are in use by design; only per-conversation leftovers are swept.
-        if (entry.name === ADVISOR_SHARED_DIRNAME || entry.name === ADVISOR_HOME_DIRNAME) continue;
-        await this.sweepAdvisorEntry(resolve(advisorRoot, entry.name), entry.name, removedWorkspaces);
+        // The scratch home is in use by design and never swept.
+        if (entry.name === ADVISOR_HOME_DIRNAME) continue;
+        if (entry.name === ADVISOR_SHARED_DIRNAME) {
+          // A swept shared worktree is recreated from base by the next prepareAdvisorWorkspace.
+          const sharedRoot = resolve(advisorRoot, entry.name);
+          const shared = await readdir(sharedRoot, { withFileTypes: true }).catch(() => []);
+          for (const item of shared) {
+            if (item.isDirectory()) await this.sweepAdvisorEntry(resolve(sharedRoot, item.name), item.name, removedWorkspaces, true);
+          }
+          continue;
+        }
+        await this.sweepAdvisorEntry(resolve(advisorRoot, entry.name), entry.name, removedWorkspaces, false);
       }
     }
 
@@ -774,10 +891,10 @@ export class GitWorktreeGateway implements GitGateway {
     return { removed_workspaces: removedWorkspaces, removed_branches: removedBranches };
   }
 
-  private async sweepAdvisorEntry(entryPath: string, conversationId: string, removed: string[]): Promise<void> {
+  private async sweepAdvisorEntry(entryPath: string, name: string, removed: string[], shared: boolean): Promise<void> {
     const real = await realpath(entryPath).catch(() => null);
     if (real === null) return; // already gone
-    if (!this.isKnownAdvisorConversation(conversationId)) return;
+    if (!shared && !this.isKnownAdvisorConversation(name)) return;
     if (await this.isLiveAdvisorWorkspace(real)) return;
 
     const registration = await this.registeredAdvisorWorktree(entryPath);
@@ -786,7 +903,7 @@ export class GitWorktreeGateway implements GitGateway {
       return;
     }
     const wasRemoved = await this.inLane(registration.repositoryRoot, () =>
-      this.sweepAdvisorWorktreeNow(entryPath, conversationId, registration.repositoryRoot),
+      this.sweepAdvisorWorktreeNow(entryPath, name, registration.repositoryRoot, shared),
     );
     if (wasRemoved) removed.push(entryPath);
   }
@@ -805,10 +922,10 @@ export class GitWorktreeGateway implements GitGateway {
    * re-checked here, under the repository's lane, so a session that started
    * concurrently for this same conversation is never removed out from under it.
    */
-  private async sweepAdvisorWorktreeNow(entryPath: string, conversationId: string, repositoryRoot: string): Promise<boolean> {
+  private async sweepAdvisorWorktreeNow(entryPath: string, name: string, repositoryRoot: string, shared: boolean): Promise<boolean> {
     const real = await realpath(entryPath).catch(() => null);
     if (real === null) return false;
-    if (!this.isKnownAdvisorConversation(conversationId)) return false;
+    if (!shared && !this.isKnownAdvisorConversation(name)) return false;
     if (await this.isLiveAdvisorWorkspace(real)) return false;
 
     const status = await this.git(entryPath, ["status", "--porcelain"]);
@@ -821,11 +938,20 @@ export class GitWorktreeGateway implements GitGateway {
       return false;
     }
 
-    const branch = legacyAdvisorBranchFor(conversationId);
-    const base = await this.resolveAdvisorBaseBranch(conversationId, repositoryRoot);
-    const merged = await this.git(repositoryRoot, ["merge-base", "--is-ancestor", branch, base]);
-    if (!merged.ok) {
-      console.warn(`[owl-core] Advisor workspace sweep is keeping ${entryPath}: branch ${branch} has commits not in ${base}.`);
+    const branch = shared ? sharedAdvisorBranchFor(name) : legacyAdvisorBranchFor(name);
+    const base = shared ? await this.resolveRepositoryBaseBranch(repositoryRoot) : await this.resolveAdvisorBaseBranch(name, repositoryRoot);
+    if (base === null) {
+      console.warn(`[owl-core] Advisor workspace sweep is keeping ${entryPath}: Projects on this repository have different base branches.`);
+      return false;
+    }
+    const head = await this.git(entryPath, ["rev-parse", "HEAD"]);
+    if (!head.ok || !(await this.contentInBase(repositoryRoot, head.message.trim(), base))) {
+      console.warn(`[owl-core] Advisor workspace sweep is keeping ${entryPath}: its HEAD has changes not in ${base}.`);
+      return false;
+    }
+    const branchExists = (await this.git(repositoryRoot, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`])).exit_code === 0;
+    if (branchExists && !(await this.contentInBase(repositoryRoot, `refs/heads/${branch}`, base))) {
+      console.warn(`[owl-core] Advisor workspace sweep is keeping ${entryPath}: branch ${branch} has changes not in ${base}.`);
       return false;
     }
 
@@ -901,15 +1027,22 @@ export class GitWorktreeGateway implements GitGateway {
           .map((line) => line.slice("branch ".length).replace(/^refs\/heads\//u, "")),
       );
       for (const branch of refs.message.split(/\r?\n/u).filter((line) => line.length > 0)) {
-        if (branch.startsWith(SHARED_ADVISOR_BRANCH_PREFIX)) continue; // the shared worktree's branch is never swept
         if (worktreeBranches.has(branch)) continue; // still in use; the entry sweep owns it
-        const conversationId = branch.slice("owl/advisor/".length);
-        if (!this.isKnownAdvisorConversation(conversationId)) continue;
-        if (this.isLiveAdvisorConversation(conversationId)) continue;
-        const base = await this.resolveAdvisorBaseBranch(conversationId, repositoryRoot);
-        const merged = await this.git(repositoryRoot, ["merge-base", "--is-ancestor", branch, base]);
-        if (!merged.ok) {
-          console.warn(`[owl-core] Advisor branch sweep is keeping ${branch}: it has commits not in ${base}.`);
+        let base: string | null;
+        if (branch.startsWith(SHARED_ADVISOR_BRANCH_PREFIX)) {
+          base = await this.resolveRepositoryBaseBranch(repositoryRoot);
+          if (base === null) {
+            console.warn(`[owl-core] Advisor branch sweep is keeping ${branch}: Projects on this repository have different base branches.`);
+            continue;
+          }
+        } else {
+          const conversationId = branch.slice("owl/advisor/".length);
+          if (!this.isKnownAdvisorConversation(conversationId)) continue;
+          if (this.isLiveAdvisorConversation(conversationId)) continue;
+          base = await this.resolveAdvisorBaseBranch(conversationId, repositoryRoot);
+        }
+        if (!(await this.contentInBase(repositoryRoot, `refs/heads/${branch}`, base))) {
+          console.warn(`[owl-core] Advisor branch sweep is keeping ${branch}: it has changes not in ${base}.`);
           continue; // unmerged; left for the owner to look at
         }
         const deleted = await this.git(repositoryRoot, ["branch", "-D", branch]);
@@ -951,6 +1084,38 @@ export class GitWorktreeGateway implements GitGateway {
     );
     const project = conversation?.work_id ? this.projectFor(conversation.work_id) : undefined;
     return project?.base_branch ?? await this.currentBranchOrHead(repositoryRoot);
+  }
+
+  /**
+   * Same resolution as resolveAdvisorTarget for a repository with no conversation: its Project's base branch,
+   * else its current branch. Null when Projects on this repository disagree on the base branch: the shared
+   * worktree's creator is unknown, so picking one would risk deleting work that its own base lacks.
+   */
+  private async resolveRepositoryBaseBranch(repositoryRoot: string): Promise<string | null> {
+    const identity = await this.advisorRepositoryIdentity(repositoryRoot);
+    const bases = new Set<string>();
+    for (const project of this.db.all<ProjectRow>("SELECT canonical_path, base_branch, allowed_roots_json FROM projects")) {
+      try {
+        const projectIdentity = await this.advisorRepositoryIdentity(await this.validProjectPath(project.canonical_path, project.allowed_roots_json));
+        if (identity && projectIdentity?.commonDir === identity.commonDir) bases.add(project.base_branch);
+      } catch {
+        continue;
+      }
+    }
+    if (bases.size > 1) return null;
+    return bases.values().next().value ?? await this.currentBranchOrHead(repositoryRoot);
+  }
+
+  /**
+   * Whether merging `ref` into `base` would change nothing, i.e. base already has its content.
+   * Why not `merge-base --is-ancestor`: a push squashes commits into one Release commit, so merged
+   * work is never an ancestor of base.
+   */
+  private async contentInBase(repositoryRoot: string, ref: string, base: string): Promise<boolean> {
+    const merged = await this.git(repositoryRoot, ["merge-tree", "--write-tree", base, ref]);
+    if (!merged.ok) return false; // conflict (exit 1) or unrelated histories
+    const baseTree = await this.git(repositoryRoot, ["rev-parse", `${base}^{tree}`]);
+    return baseTree.ok && firstLine(merged.message) === firstLine(baseTree.message);
   }
 
   /**

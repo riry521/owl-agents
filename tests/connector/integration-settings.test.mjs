@@ -652,6 +652,9 @@ test("persistent Advisor actions create and start a Work through Core", async (t
   assert.match(sessionRequest.system_prompt, /For that explicit exception, first prepare your Advisor workspace as described under Advisor workspace, do the work only there, and do not create a Work/u);
   assert.match(sessionRequest.system_prompt, /Before returning create_work, compare the full request and conversation context against the complete current Project catalog/u);
   assert.match(sessionRequest.system_prompt, /## Advisor workspace/u);
+  assert.match(sessionRequest.system_prompt, /commit every change in the worktree, then call POST \/api\/v1\/advisor\/workspace\/finish/u);
+  assert.match(sessionRequest.system_prompt, /tell the operator the error_code and message/u);
+  assert.match(sessionRequest.system_prompt, /next direct job starts again from POST \/api\/v1\/advisor\/workspace;/u);
   assert.ok(sessionRequest.system_prompt.includes(projectRoot));
   assert.ok(sessionRequest.system_prompt.includes(`git -C ${projectRoot} show main:`));
   assert.doesNotMatch(sessionRequest.system_prompt, /## Workspace tools\n- You are working in the git worktree/u);

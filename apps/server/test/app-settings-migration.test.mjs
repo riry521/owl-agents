@@ -51,15 +51,12 @@ test("legacy app-settings executor config migrates through Core and survives a r
 
   await first.start();
   const migrated = first.getChildRunSettings();
-  assert.equal(migrated.default_provider, "codex");
-  assert.equal(migrated.default_model, "gpt-5.6-luna");
-  assert.equal(migrated.default_effort, "xhigh");
+  assert.equal(migrated.executor_harness, "codex");
+  assert.deepEqual(migrated.executor_by_harness, {
+    ...DEFAULT_CHILD_RUN_SETTINGS.executor_by_harness,
+    codex: { model: "gpt-5.6-luna", effort: "xhigh" },
+  });
   assert.equal(migrated.timeout_minutes, 11);
-  assert.deepEqual(migrated.allowed_models, [
-    { provider: "codex", model: "gpt-5.6-luna" },
-    ...DEFAULT_CHILD_RUN_SETTINGS.allowed_models.filter(({ provider, model }) => provider !== "codex" || model !== "gpt-5.6-luna"),
-  ]);
-  assert.deepEqual(migrated.allowed_efforts, ["low", "medium", "high", "xhigh"]);
   assert.equal(env.hasChildSettings(), true);
 
   await first.stop();
@@ -75,7 +72,10 @@ test("saved child settings take precedence over app-settings executor_config", a
   const core = env.makeCore();
   const saved = await core.setChildRunSettings({
     ...DEFAULT_CHILD_RUN_SETTINGS,
-    default_effort: null,
+    executor_by_harness: {
+      ...DEFAULT_CHILD_RUN_SETTINGS.executor_by_harness,
+      codex: { ...DEFAULT_CHILD_RUN_SETTINGS.executor_by_harness.codex, effort: null },
+    },
     timeout_minutes: 25,
   });
 

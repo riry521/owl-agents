@@ -8,15 +8,15 @@ export interface ProcessSkillsSettings {
 }
 
 export type ProcessSkillsRole = "manager_plan" | "manager_finalize" | "designer" | "worker" | "reviewer" | "executor";
-export type ProcessSkillsHarness = "claude" | "codex";
+export type ProcessSkillsHarness = "claude" | "codex" | "opencode";
 
 export interface ProcessSkillsInstallCommand {
-  readonly harness: ProcessSkillsHarness;
+  readonly harness: Exclude<ProcessSkillsHarness, "opencode">;
   readonly command: string;
 }
 
 /** The command that installs the superpowers plugin for each harness. Owl only shows these; it never runs them. */
-export const PROCESS_SKILLS_INSTALL_COMMANDS: Readonly<Record<ProcessSkillsHarness, string>> = {
+export const PROCESS_SKILLS_INSTALL_COMMANDS: Readonly<Record<Exclude<ProcessSkillsHarness, "opencode">, string>> = {
   claude: "claude plugin install superpowers@claude-plugins-official",
   codex: "codex plugin add superpowers@openai-curated-remote",
 };
@@ -149,8 +149,9 @@ export function renderProcessSkills(
     const path = join(pack.skills_dir, entry.file);
     lines.push(`- ${entry.text} ${invocationFor(entry.file, path, pack, harness)}`);
   }
-  const toolsFile = `${BOOTSTRAP_NAME}/references/${harness === "claude" ? "claude-code" : "codex"}-tools.md`;
-  if (hasFile(toolsFile)) {
+  // opencode has no tool-name reference file in the pack.
+  const toolsFile = harness === "opencode" ? null : `${BOOTSTRAP_NAME}/references/${harness === "claude" ? "claude-code" : "codex"}-tools.md`;
+  if (toolsFile !== null && hasFile(toolsFile)) {
     lines.push(`- Harness tool names: Read ${join(pack.skills_dir, toolsFile)} when selecting harness-specific tools.`);
   }
   return lines;

@@ -114,6 +114,31 @@ test("a custom provider key reaches only that provider's process, under the harn
   for (const call of calls) assert.equal(call.env.OWL_PROVIDER_ORCA_API_KEY, undefined);
 });
 
+test("an opencode custom provider passes its endpoint and key name through opencode's variables, not Anthropic's", async () => {
+  const calls = [];
+  const runner = createAgentRunner({
+    adapter: "claude-cli/v1",
+    outputLogDir: null,
+    env: { PATH: "/usr/bin", HOME: "/home/owl" },
+    providers: { orca: { adapter: "opencode-serve/v1", backend_url: "https://orca.test", api_key_env: "OWL_PROVIDER_ORCA_API_KEY" } },
+    providerApiKeys: { OWL_PROVIDER_ORCA_API_KEY: "orca-key" },
+    provider: {
+      execute: async (request) => {
+        calls.push(request);
+        return { adapter: request.adapter, stdout: JSON.stringify({ reply: "ok" }), stderr: "", exit_code: 0, signal: null, format: "plain-text" };
+      },
+    },
+  });
+  await runner.runAdvisor({ conversation_id: "c1", messages: [{ role: "user", content: "hi" }], system_prompt: "s", provider: "orca" }).catch(() => undefined);
+  assert.equal(calls.length, 1);
+  const { env } = calls[0];
+  assert.equal(env.OWL_OPENCODE_BASE_URL, "https://orca.test");
+  assert.equal(env.OWL_OPENCODE_API_KEY_ENV, "OWL_PROVIDER_ORCA_API_KEY");
+  assert.equal(env.OWL_PROVIDER_ORCA_API_KEY, "orca-key");
+  assert.equal(env.ANTHROPIC_BASE_URL, undefined);
+  assert.equal(env.ANTHROPIC_API_KEY, undefined);
+});
+
 test("worker git template directory reaches the provider process only when supplied", async () => {
   const calls = [];
   const runner = createAgentRunner({

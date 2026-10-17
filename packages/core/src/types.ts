@@ -8,6 +8,7 @@ import type { NormalizedLesson } from "./final-verdict.js";
 import type { DesignBlockedReport } from "../../shared/dist/design-blocked.js";
 import type { PlanWaitFor } from "../../shared/dist/prerequisite.js";
 import type { PlanUsageSource } from "../../shared/dist/plan-usage.js";
+import type { ModelHarness } from "../../shared/dist/harness-models.js";
 
 export type JsonObject = Record<string, unknown>;
 
@@ -403,7 +404,10 @@ export type AdvisorWorkspaceErrorCode =
   | "project_unavailable"
   | "base_not_found"
   | "workspace_conflict"
-  | "sync_failed";
+  | "sync_failed"
+  | "uncommitted_changes"
+  | "merge_conflict"
+  | "checkout_conflict";
 
 export interface AdvisorWorkspacePreparation {
   readonly ok: boolean;
@@ -494,6 +498,8 @@ export interface GitGateway {
   resolveAdvisorSessionDirectory?(request: { readonly conversation_id: string }): Promise<AdvisorSessionDirectory>;
   /** Prepare or reuse the repository's single shared Advisor worktree and fast-forward it to the latest base when it is clean. */
   prepareAdvisorWorkspace?(request: AdvisorWorkspaceRequest): Promise<AdvisorWorkspacePreparation>;
+  /** Merge the shared Advisor worktree into the base branch, then remove the worktree and its branch; on any error nothing is changed. */
+  finishAdvisorWorkspace?(request: AdvisorWorkspaceRequest): Promise<AdvisorWorkspacePreparation>;
   /** Inspect the repository's shared Advisor worktree without changing it. */
   inspectAdvisorWorkspace?(request: AdvisorWorkspaceInspectionRequest): Promise<AdvisorWorkspaceInspection>;
   /**
@@ -805,7 +811,7 @@ export interface CoreOptions {
   readonly getAdvisorFolders?: () => { sharedDir: string; screenshotDir: string } | null;
   readonly getAdvisorSharedDir?: () => string | null;
   /** Resolves a configured provider id to its harness without guessing between harnesses. */
-  readonly getProviderHarness?: (providerId: string) => "claude" | "codex" | undefined;
+  readonly getProviderHarness?: (providerId: string) => ModelHarness | undefined;
   /**
    * Environment overrides (base URL and API key variables) the Advisor's
    * provider process needs to reach a custom provider's endpoint. Empty for
@@ -821,7 +827,7 @@ export interface CoreOptions {
    * model are rejected. Undefined for a harness means its models are not
    * checked. Defaults to the built-in Codex list; Claude models are not checked.
    */
-  readonly knownModels?: (harness: "claude" | "codex") => ReadonlySet<string> | undefined;
+  readonly knownModels?: (harness: ModelHarness) => ReadonlySet<string> | undefined;
 }
 
 export interface ProcessSkillsSettingsSnapshot extends ProcessSkillsSettings {

@@ -37,11 +37,13 @@ class ChangedPathsGit extends NoopGitGateway {
 
 async function runRejectedTask(t, { db, owlRoot, settings, modelSettings } = {}) {
   const git = new ChangedPathsGit();
+  // A restarted Core on a shared DB also resumes the earlier Works, so only a replan request of this run's own Work counts.
+  let workId = null;
   let replans = 0;
   const agentRunner = withNecessity({
     runManagerPlan: async (request) => (request.mode ?? request.context?.mode) === "plan"
       ? { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [{ id: "T1", title: "Code", type: "code", acceptance: "Done; verified by the test.", depends_on: [], required_sections: [], required_tests: [], replaces: [], review: true }] } }
-      : (replans += 1, { outcome: "failed", message: "no replan" }),
+      : (request.work_id === workId && (replans += 1), { outcome: "failed", message: "no replan" }),
     runWorker: async (request) => {
       await mkdir(join(request.context.worktree, "out"), { recursive: true });
       await writeFile(join(request.context.worktree, "out/a.mjs"), "export const x = 1;\n");
@@ -60,7 +62,7 @@ async function runRejectedTask(t, { db, owlRoot, settings, modelSettings } = {})
   });
   const created = await built.core.createWork(envelope({ title: "fixer", summary: "x", size: "normal", project_id: null }, "create"));
   await built.core.startWork(created.data.work_id, envelope({ mode: "normal" }, "start", created.version));
-  const workId = created.data.work_id;
+  workId = created.data.work_id;
   await waitFor(() => replans > 0, { timeoutMs: 20_000, message: "the Task is rejected until the Manager is asked to replan" });
   await built.core.stop({ force: true });
   return { ...built, workId };

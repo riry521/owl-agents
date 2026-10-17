@@ -3,21 +3,27 @@ import { access } from "node:fs/promises";
 import { constants } from "node:fs";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 
-import { DEFAULT_HARNESS_MODELS } from "../../../packages/shared/dist/index.js";
+import { OPENCODE_EXECUTABLE_ENV, builtinProviderHarness, DEFAULT_HARNESS_MODELS, type ModelHarness } from "../../../packages/shared/dist/index.js";
 
 import { AppSettingsStore } from "./app-settings-store.js";
 import { providerMode } from "./config.js";
 import { resolveDataDir } from "./contracts.js";
 
-export type ProviderHarness = "claude" | "codex";
+export type ProviderHarness = ModelHarness;
+
+const HARNESS_LAUNCH = {
+  claude: { adapter: "claude-cli/v1", executableEnv: "OWL_CLAUDE_EXECUTABLE" },
+  codex: { adapter: "codex-cli/v1", executableEnv: "OWL_CODEX_EXECUTABLE" },
+  opencode: { adapter: "opencode-serve/v1", executableEnv: OPENCODE_EXECUTABLE_ENV },
+} as const satisfies Record<ProviderHarness, { adapter: string; executableEnv: string }>;
 
 export interface ProviderSelection {
   readonly mode: "stub" | "real" | "invalid";
   readonly providerId: string;
   readonly harness: ProviderHarness | null;
-  readonly adapter: "claude-cli/v1" | "codex-cli/v1" | null;
-  readonly executableEnv: "OWL_CLAUDE_EXECUTABLE" | "OWL_CODEX_EXECUTABLE" | null;
-  readonly binaryName: "claude" | "codex" | null;
+  readonly adapter: typeof HARNESS_LAUNCH[ProviderHarness]["adapter"] | null;
+  readonly executableEnv: typeof HARNESS_LAUNCH[ProviderHarness]["executableEnv"] | null;
+  readonly binaryName: ProviderHarness | null;
   readonly model: string;
   readonly source: string;
 }
@@ -28,16 +34,14 @@ function harnessForAdapter(value: string | undefined): ProviderHarness | null {
   if (!normalized) return null;
   if (normalized === "claude" || normalized === "claude-cli/v1") return "claude";
   if (normalized === "codex" || normalized === "codex-cli/v1") return "codex";
+  if (normalized === "opencode" || normalized === HARNESS_LAUNCH.opencode.adapter) return "opencode";
   return null;
 }
 
 function harnessForProviderId(providerId: string, customHarnessId?: string): ProviderHarness | null {
   const custom = harnessForAdapter(customHarnessId);
   if (custom) return custom;
-  const normalized = providerId.trim().toLowerCase();
-  if (normalized === "codex" || normalized === "openai" || normalized === "openai/codex") return "codex";
-  if (normalized === "claude" || normalized === "anthropic") return "claude";
-  return null;
+  return builtinProviderHarness(providerId);
 }
 
 export function providerSelection(owlRoot: string): ProviderSelection {
@@ -104,14 +108,15 @@ export function providerSelection(owlRoot: string): ProviderSelection {
       source: rawAdapter ? "OWL_PROVIDER_ADAPTER" : "OWL_PROVIDER_ID",
     };
   }
+  // opencode has no default model: its model ids are provider/model pairs the user's opencode setup defines.
   const model = process.env.OWL_PROVIDER_MODEL?.trim()
-    || DEFAULT_HARNESS_MODELS[explicitHarness];
-  const executableEnv = explicitHarness === "claude" ? "OWL_CLAUDE_EXECUTABLE" : "OWL_CODEX_EXECUTABLE";
+    || (explicitHarness === "opencode" ? "" : DEFAULT_HARNESS_MODELS[explicitHarness]);
+  const { adapter, executableEnv } = HARNESS_LAUNCH[explicitHarness];
   return {
     mode,
     providerId: configuredProviderId,
     harness: explicitHarness,
-    adapter: explicitHarness === "claude" ? "claude-cli/v1" : "codex-cli/v1",
+    adapter,
     executableEnv,
     binaryName: explicitHarness,
     model,
@@ -160,6 +165,9 @@ export function providerConfigurationError(selection: ProviderSelection, executa
     return process.env.OWL_PROVIDER_ADAPTER?.trim()
       ? cliText('OWL_PROVIDER_ADAPTERはclaude-cli/v1またはcodex-cli/v1で指定してください。', 'Set OWL_PROVIDER_ADAPTER to claude-cli/v1 or codex-cli/v1.')
       : cliText('real providerのadapter設定を解決できません。OWL_PROVIDER_ADAPTER=claude-cli/v1またはcodex-cli/v1を指定してください。', 'Could not resolve the real Provider adapter. Set OWL_PROVIDER_ADAPTER to claude-cli/v1 or codex-cli/v1.');
+  }
+  if (selection.harness === "opencode" && !selection.model) {
+    return cliText('opencodeにはデフォルトのモデルがありません。OWL_PROVIDER_MODELへprovider/modelの形式で指定してください。', 'opencode has no default model. Set OWL_PROVIDER_MODEL to a provider/model id.');
   }
   const configured = providerExecutableFromEnvironment(selection);
   if (configured && !isAbsolute(configured)) {

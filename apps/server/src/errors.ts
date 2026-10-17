@@ -61,8 +61,6 @@ export type ApiErrorCode =
   | "action_rejected"
   | "action_id_conflict"
   | "write_paths_invalid"
-  | "model_not_allowed"
-  | "effort_not_allowed"
   | "timeout_out_of_range"
   | "parent_not_active"
   | "too_many_children"

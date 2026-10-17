@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { createOwnApiCaller } from "../../apps/server/dist/own-api-caller.js";
 import { createCore as createMemoryCore, ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { GuardTokenRegistry } from "../../apps/server/dist/guard-tokens.js";
+import { GitWorktreeGateway } from "../../packages/core/dist/git-gateway.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { command, createTestCore } from "../helpers/core.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
@@ -408,6 +409,14 @@ test("POST /advisor/workspace prepares the shared worktree only for a running Ad
   assert.equal(prepared.ok, true);
   assert.ok(git(root, "worktree", "list", "--porcelain").includes(`worktree ${prepared.worktree_path}`));
 
+  const swept = await new GitWorktreeGateway(db, root).sweepAdvisorWorkspaces();
+  assert.deepEqual(swept.removed_workspaces, [prepared.worktree_path]);
+  assert.ok(!git(root, "worktree", "list", "--porcelain").includes(prepared.worktree_path));
+  const recreated = (await (await call(await tokenFor("advisor", "session-running"))).json()).data;
+  assert.equal(recreated.ok, true);
+  assert.equal(recreated.worktree_path, prepared.worktree_path);
+  assert.ok(git(root, "worktree", "list", "--porcelain").includes(`worktree ${recreated.worktree_path}`));
+
   assert.ok([401, 403].includes((await call("test-owner-api-token")).status));
   assert.ok([401, 403].includes((await call(await tokenFor("worker", "session-running"))).status));
   const ended = await call(await tokenFor("advisor", "session-ended"));
@@ -432,4 +441,50 @@ test("POST /advisor/workspace is 503 dependency_unavailable on a Core without Ad
   });
   assert.equal(response.status, 503);
   assert.equal((await response.json()).error.code, "dependency_unavailable");
+});
+
+test("POST /advisor/workspace/finish merges the worktree into base, 409s with error_code when it cannot, and a later prepare starts from the new base", async (t) => {
+  const { root, db, core } = await createTestCore(t, { version: "api-advisor-finish-test", providerClient: { createSession: async () => { throw new Error("unused"); } }, dispatcher: { tick_interval_ms: 60_000 } }, { prefix: "owl-api-advisor-finish-" });
+  const dataDir = join(root, "data");
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(join(root, "README.md"), "base\n");
+  git(root, "init", "--initial-branch=main");
+  git(root, "add", "README.md");
+  git(root, "commit", "-m", "initial");
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((tx) => {
+    tx.run("INSERT INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Owner', ?, ?)", now, now);
+    tx.run("INSERT INTO conversations (id, owner_id, work_id, channel, is_active, created_at, updated_at) VALUES ('conversation:fin', 'owner:default', NULL, 'web', 1, ?, ?)", now, now);
+    tx.run("INSERT INTO advisor_sessions (id, status, conversation_id, last_activity_at, created_at, updated_at) VALUES ('session-fin', 'running', 'conversation:fin', ?, ?, ?)", now, now, now);
+  });
+  const guardTokens = GuardTokenRegistry.open(join(root, "guard-tokens"));
+  t.after(() => guardTokens.clear());
+  const api = await startTestHttpServer(t, { core: new ExternalCoreAdapter(core, db, root, dataDir), db, webOut: root, owlRoot: root, dataDir, guardTokens }, { token: "test-owner-api-token" });
+  if (!api) return t.skip("localhost listen is not permitted in this environment");
+  const token = (await readFile(guardTokens.issue({ agent_run_id: "session-fin", role: "advisor" }).file, "utf8")).trim();
+  const call = (path) => fetch(`${api.baseUrl}/api/v1/advisor/workspace${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: "{}",
+  });
+
+  const prepared = (await (await call("")).json()).data;
+  await writeFile(join(prepared.worktree_path, "stray.txt"), "stray\n");
+  const dirty = await call("/finish");
+  assert.equal(dirty.status, 409);
+  const dirtyBody = await dirty.json();
+  assert.equal(dirtyBody.error.details.error_code, "uncommitted_changes");
+
+  await writeFile(join(prepared.worktree_path, "note.txt"), "advisor\n");
+  git(prepared.worktree_path, "add", "-A");
+  git(prepared.worktree_path, "commit", "-m", "advisor commit");
+  const finished = await call("/finish");
+  assert.equal(finished.status, 200);
+  assert.equal(git(root, "show", "main:note.txt"), "advisor");
+  assert.ok(!git(root, "worktree", "list", "--porcelain").includes(prepared.worktree_path));
+
+  const again = (await (await call("")).json()).data;
+  assert.equal(again.ok, true);
+  assert.ok(git(root, "worktree", "list", "--porcelain").includes(`worktree ${again.worktree_path}`));
+  assert.equal(git(again.worktree_path, "rev-parse", "HEAD"), git(root, "rev-parse", "main"));
 });

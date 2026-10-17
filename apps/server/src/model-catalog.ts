@@ -10,6 +10,8 @@ import {
   type CodexCatalogModel,
 } from "../../../packages/shared/dist/index.js";
 
+import { opencodeCliStatus, withPrivateOpencodeServe } from "./opencode-status.js";
+
 /** Public model catalogs used by the built-in provider selectors. */
 const SOURCES = {
   anthropic: "https://platform.claude.com/docs/en/models/overview.md",
@@ -102,6 +104,8 @@ export async function mergeOfficialModels(
     const listed = codex.filter((model) => model.listed).map(({ slug }) => slug);
     result.openai = [...new Set([...listed, ...(result.openai ?? [])])];
   }
+  const opencode = opencodeKnownModels();
+  if (opencode) result.opencode = [...new Set([...opencode, ...(result.opencode ?? [])])];
   await Promise.all((Object.keys(SOURCES) as BuiltinProvider[]).map(async (provider) => {
     try {
       const official = await getOfficialModels(provider);
@@ -214,4 +218,66 @@ export function refreshCodexModelCatalog(options: CodexRefreshOptions = {}): Pro
     }
   })();
   return codexRefresh;
+}
+
+export interface OpencodeCatalogModel {
+  readonly providerID: string;
+  readonly modelID: string;
+  readonly name: string;
+  readonly variants: readonly string[];
+  readonly limit: unknown;
+}
+
+/** Keeps only the fields Owl needs; `headers` (organisation ids) and `settings` are dropped on purpose. */
+export function parseOpencodeModels(body: unknown): OpencodeCatalogModel[] {
+  const data = body && typeof body === "object" ? (body as { data?: unknown }).data : undefined;
+  if (!Array.isArray(data)) return [];
+  const models: OpencodeCatalogModel[] = [];
+  for (const entry of data) {
+    if (!entry || typeof entry !== "object") continue;
+    const { providerID, modelID, name, variants, limit, enabled, status } = entry as Record<string, unknown>;
+    if (typeof providerID !== "string" || typeof modelID !== "string" || !providerID || !modelID) continue;
+    if (enabled !== true || (status !== undefined && status !== "active")) continue;
+    models.push({
+      providerID,
+      modelID,
+      name: typeof name === "string" ? name : modelID,
+      variants: Array.isArray(variants)
+        ? variants.flatMap((variant) => typeof (variant as { id?: unknown } | null)?.id === "string" ? [(variant as { id: string }).id] : [])
+        : [],
+      limit,
+    });
+  }
+  return models;
+}
+
+let refreshedOpencodeCatalog: OpencodeCatalogModel[] | null = null;
+let opencodeRefresh: Promise<boolean> | null = null;
+
+/** `providerID/modelID` ids from the last refresh; undefined until one succeeds, so setting-time checks are skipped. */
+export function opencodeKnownModels(): ReadonlySet<string> | undefined {
+  return refreshedOpencodeCatalog
+    ? new Set(refreshedOpencodeCatalog.map(({ providerID, modelID }) => `${providerID}/${modelID}`))
+    : undefined;
+}
+
+/** Reads the model list from a private serve (the same conditions as a run) and keeps it for the model selectors. */
+export function refreshOpencodeModelCatalog(options: { executable?: string; env?: NodeJS.ProcessEnv } = {}): Promise<boolean> {
+  if (opencodeRefresh) return opencodeRefresh;
+  const env = options.env ?? process.env;
+  opencodeRefresh = (async () => {
+    try {
+      const status = options.executable ? { state: "ok" as const, executable: options.executable } : await opencodeCliStatus(env);
+      if (status.state !== "ok") throw new Error("a supported opencode executable was not found");
+      const body = await withPrivateOpencodeServe(status.executable, env, (server) => server.client.request<unknown>("GET", "/api/model"));
+      refreshedOpencodeCatalog = parseOpencodeModels(body);
+      return true;
+    } catch (error) {
+      console.warn("[owl-server] Could not refresh opencode model catalog", error instanceof Error ? error.message : String(error));
+      return false;
+    } finally {
+      opencodeRefresh = null;
+    }
+  })();
+  return opencodeRefresh;
 }

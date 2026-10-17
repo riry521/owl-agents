@@ -3782,6 +3782,80 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/advisor/workspace/finish:
+    post:
+      operationId: finishAdvisorWorkspace
+      summary: Merge the calling Advisor session's worktree into base, then remove the worktree and its branch
+      security:
+        - advisorServiceToken: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                project_id:
+                  type:
+                    - string
+                    - 'null'
+              additionalProperties: false
+      responses:
+        '200':
+          description: The work is in base (head is the new base commit) and the worktree and branch are removed.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Response'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/AdvisorWorkspacePreparation'
+        '400':
+          description: Request validation failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: forbidden — the caller is not a running Advisor session.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: advisor_session_not_found, project_not_found or conversation_not_found.
+          x-error-codes:
+            - advisor_session_not_found
+            - project_not_found
+            - conversation_not_found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: advisor_workspace_unavailable — nothing was changed. details.error_code is uncommitted_changes, merge_conflict, checkout_conflict, base_not_found or sync_failed; details include message.
+          x-error-codes:
+            - advisor_workspace_unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: dependency_unavailable
+          x-error-codes:
+            - dependency_unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/inbound/messages:
     post:
       operationId: receiveInboundMessage
@@ -8459,6 +8533,9 @@ components:
             - base_not_found
             - workspace_conflict
             - sync_failed
+            - uncommitted_changes
+            - merge_conflict
+            - checkout_conflict
             - null
         message:
           type: string

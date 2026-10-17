@@ -12,6 +12,7 @@ import {
   type ChildRunBlockedReason,
   type ChildRunFailureKind,
   type ChildRunListFilter,
+  type ChildRunProvider,
   type ChildRunRecord,
   type ChildRunSettings,
   type ChildRunSummary,
@@ -37,7 +38,6 @@ export interface ChildRunParentContext {
   readonly work_id: string;
   readonly task_id: string;
   readonly project_id?: string;
-  readonly harness: "claude" | "codex";
   readonly workspace_dir: string;
   readonly worktree: string | null;
   readonly task: ExecutorTaskContext;
@@ -70,7 +70,7 @@ export interface ChildRunSchedulerOptions {
 
 interface ChildRow {
   id: string; work_id: string; task_id: string; parent_agent_run_id: string; seq: number; title: string;
-  instruction: string; write_paths_json: string; workspace_dir: string; provider: "claude" | "codex"; model: string;
+  instruction: string; write_paths_json: string; workspace_dir: string; provider: ChildRunProvider; model: string;
   effort: ChildRunRecord["effort"]; timeout_ms: number; max_attempts: number; attempt: number; rate_limit_requeues: number;
   status: ChildRunRecord["status"]; blocked_reason: ChildRunBlockedReason | null; current_agent_run_id: string | null;
   summary_json: string | null; report_text: string | null; failure_kind: ChildRunFailureKind | null;
@@ -208,32 +208,27 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
 
   function readSettings(): ChildRunSettings {
     const settings = options.settings();
-    const isProvider = (value: unknown): value is ChildRunSettings["default_provider"] =>
-      typeof value === "string" && (CHILD_RUN_PROVIDERS as readonly string[]).includes(value);
-    const isEffort = (value: unknown): value is NonNullable<ChildRunSettings["default_effort"]> =>
-      typeof value === "string" && (CHILD_RUN_EFFORTS as readonly string[]).includes(value);
-    const models = settings?.allowed_models;
-    const efforts = settings?.allowed_efforts;
-    const defaults = settings?.defaults_by_parent_harness;
+    const isEffort = (value: unknown): boolean => typeof value === "string" && (CHILD_RUN_EFFORTS as readonly string[]).includes(value);
+    const harness = settings?.executor_harness;
+    if (typeof harness !== "string" || !(CHILD_RUN_PROVIDERS as readonly string[]).includes(harness)) {
+      throw childError("child_run_settings_invalid", "Child run settings contain an unknown Executor harness.");
+    }
+    const rows = settings.executor_by_harness;
+    const row = rows?.[harness];
+    if (!row || typeof row.model !== "string" || row.model.trim().length === 0) {
+      throw childError("child_run_settings_invalid", `Choose a model for the ${harness} Executor in Settings before starting child runs.`);
+    }
     if (
-      !Array.isArray(models) || models.length === 0 || models.length > 20 || models.some((item) =>
-        !item || !isProvider(item.provider) || typeof item.model !== "string" || item.model.length === 0 || item.model !== item.model.trim(),
-      ) || !isProvider(settings.default_provider) || typeof settings.default_model !== "string" ||
-      !models.some((item) => item.provider === settings.default_provider && item.model === settings.default_model) ||
-      !Array.isArray(efforts) || efforts.length < 1 || efforts.length > 5 || efforts.some((effort) => !isEffort(effort)) ||
-      (settings.default_effort !== null && (!isEffort(settings.default_effort) || !efforts.includes(settings.default_effort))) ||
-      !defaults || !(CHILD_RUN_PROVIDERS as readonly string[]).every((harness) => {
-        const choice = defaults[harness as keyof typeof defaults];
-        return choice && isProvider(choice.provider) && typeof choice.model === "string" &&
-          models.some((item) => item.provider === choice.provider && item.model === choice.model) &&
-          (choice.effort === null || (isEffort(choice.effort) && efforts.includes(choice.effort)));
+      !(CHILD_RUN_PROVIDERS as readonly string[]).every((name) => {
+        const choice = rows[name as keyof typeof rows];
+        return choice && (choice.effort === null || isEffort(choice.effort));
       }) ||
       !Number.isSafeInteger(settings.timeout_minutes) || settings.timeout_minutes < 5 ||
       !Number.isSafeInteger(settings.max_timeout_minutes) || settings.max_timeout_minutes < settings.timeout_minutes || settings.max_timeout_minutes > 1440 ||
       !Number.isSafeInteger(settings.max_attempts) || settings.max_attempts < 1 || settings.max_attempts > 3 ||
       !settings.token_relay || tokenRelaySettingsProblem(settings.token_relay) !== null
     ) {
-      throw childError("child_run_settings_invalid", "Child run settings contain invalid defaults, limits or allowlists.");
+      throw childError("child_run_settings_invalid", "Child run settings contain invalid limits or Executor choices.");
     }
     return settings;
   }
@@ -607,26 +602,6 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
     max_attempts: r.max_attempts,
   });
 
-  function resolveChoice(request: ChildDispatchRequest, parent: ChildRunParentContext, settings: ChildRunSettings): { provider: "claude" | "codex"; model: string; effort: ChildRunRecord["effort"] } {
-    const allowed = settings.allowed_models;
-    if (request.provider !== undefined && !(CHILD_RUN_PROVIDERS as readonly string[]).includes(request.provider)) {
-      throw childError("model_not_allowed", `Provider ${request.provider} is not in the allowed list.`);
-    }
-    const parentDefault = settings.defaults_by_parent_harness[parent.harness];
-    const choice = {
-      provider: request.provider ?? parentDefault.provider,
-      model: request.model ?? parentDefault.model,
-      effort: request.effort ?? parentDefault.effort,
-    };
-    if (!allowed.some((item) => item.provider === choice.provider && item.model === choice.model)) {
-      throw childError("model_not_allowed", `The provider/model ${request.provider ?? "(default)"}/${request.model ?? "(default)"} is not in the allowed list.`);
-    }
-    if (choice.effort !== null && (!(CHILD_RUN_EFFORTS as readonly string[]).includes(choice.effort) || !settings.allowed_efforts.includes(choice.effort))) {
-      throw childError("effort_not_allowed", `Effort ${request.effort} is not in the allowed list.`);
-    }
-    return choice;
-  }
-
   return {
     registerParent(context) { parents.set(context.agent_run_id, context); },
 
@@ -654,7 +629,8 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
         request.write_paths.some((path) => typeof path !== "string")
       ) throw validationError("title, instruction and write_paths are required and must be within their size limits.");
       const settings = readSettings();
-      const { provider, model, effort } = resolveChoice(request, parent, settings);
+      const provider = settings.executor_harness;
+      const { model, effort } = settings.executor_by_harness[provider] as { model: string; effort: ChildRunRecord["effort"] };
       const timeoutMinutes = request.timeout_minutes ?? settings.timeout_minutes;
       if (!Number.isInteger(timeoutMinutes) || timeoutMinutes < 5 || timeoutMinutes > settings.max_timeout_minutes) {
         throw childError("timeout_out_of_range", `timeout_minutes must be an integer from 5 to ${settings.max_timeout_minutes}.`);

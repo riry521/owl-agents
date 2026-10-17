@@ -43,7 +43,7 @@ const planTask = (extra = {}) => ({ id: "T1", title: "A", type: "code", acceptan
  * started while it is set until `release()` is called.
  */
 function makeRunner() {
-  const state = { workerCalls: 0, replans: 0, gate: null, worktrees: [], contexts: [], wait: () => null, gated: 0 };
+  const state = { workerCalls: 0, replans: 0, gate: null, worktrees: [], contexts: [], wait: () => null, gated: 0, gatedDone: 0 };
   return {
     state,
     runManagerPlan: async (request) => {
@@ -62,6 +62,7 @@ function makeRunner() {
         await gate;
         await mkdir(join(request.context.worktree, "src"), { recursive: true });
         await writeFile(join(request.context.worktree, "src/other.mjs"), "export const o = 1;\n");
+        state.gatedDone += 1;
         return { outcome: "success", report_valid: true, report: workerReport(request.invocation_id, null) };
       }
       state.workerCalls += 1;
@@ -137,7 +138,12 @@ async function startGatedOtherWork(ctx) {
   // The Task is marked running before runWorker reads the gate; clearing it earlier lets this Worker through.
   assert.ok(await until(() => ctx.runner.state.gated >= 1), "the other Work's Worker is held at the gate");
   ctx.runner.state.gate = null;
-  return { workId, taskId, release };
+  // Resolves once the released Worker has finished writing under ctx.root, which the fixture removes right after the test.
+  const releaseAndSettle = async () => {
+    release();
+    assert.ok(await until(() => ctx.runner.state.gatedDone >= 1), "the released Worker finished writing");
+  };
+  return { workId, taskId, release, releaseAndSettle };
 }
 
 test("a task condition releases the wait the moment the other Task completes, and the Worker starts once", async (t) => {
@@ -251,7 +257,7 @@ test("a target that is cancelled makes the wait unreachable: Decision, no Worker
   const expired = JSON.parse(ctx.db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = 'task.prerequisite_expired'", workId).payload_json);
   assert.equal(expired.kind, "unreachable");
   assert.equal(ctx.runner.state.workerCalls, 1);
-  other.release();
+  await other.releaseAndSettle();
 });
 
 test("the Owner resumes an owner wait: mark cleared, count 0, the message reaches the Worker, repeat is idempotent", async (t) => {
@@ -295,6 +301,8 @@ test("resumePrerequisiteWait rejects a Task that does not wait on a prerequisite
     () => ctx.core.resumePrerequisiteWait("no-such-task", { message: null, idempotencyKey: `resume:${createUlid()}`, actor: "owner" }),
     (error) => error.code === "not_found" || /not found/i.test(error.message),
   );
+  // The pipeline keeps writing under ctx.root until the Task completes; the fixture removes root right after the test.
+  assert.ok(await until(() => task(ctx.db, workId).status === "completed"), "the Task finishes before cleanup");
 });
 
 test("completions of different Tasks of one Work each wake the waiter without waiting for the interval", async (t) => {
@@ -329,7 +337,8 @@ test("completions of different Tasks of one Work each wake the waiter without wa
   ctx.core.wakePrerequisiteWaiters(other.workId, false);
   assert.ok(await until(() => ctx.runner.state.workerCalls >= 2), "the second completion woke the waiter (interval is 1h)");
   assert.equal(eventCount(ctx.db, workId, "task.prerequisite_satisfied"), 1);
-  other.release();
+  assert.ok(await until(() => task(ctx.db, workId).status === "completed"), "the waiter's Task finishes before cleanup");
+  await other.releaseAndSettle();
 });
 
 for (const [name, result, expectDecision] of [

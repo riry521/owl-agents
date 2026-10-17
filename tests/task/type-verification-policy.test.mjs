@@ -86,6 +86,8 @@ async function verify(t, { type, files, claimed = Object.keys(files), spec = {},
   await core.startWork(created.data.work_id, { request_id: createUlid(), idempotency_key: "test:start", expected_version: created.version, payload: { mode: "normal" } });
   const event = await waitFor(() => db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = 'verification.completed' ORDER BY rowid LIMIT 1", created.data.work_id));
   assert.ok(event, "verification.completed was recorded");
+  // The pipeline keeps writing under the Core root after this event; the fixture removes the root right after the test.
+  await core.workflowEngine().drainPipelines();
   return JSON.parse(event.payload_json);
 }
 

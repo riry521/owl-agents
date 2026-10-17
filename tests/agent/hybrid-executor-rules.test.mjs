@@ -161,6 +161,8 @@ test("Hybrid Tasks use one Worker session to dispatch, wait, verify, then send i
 
   await core.start();
   await disablePlanQuality(db);
+  // These tests only provide a fake claude executable, so children must run on the claude Executor.
+  await core.setChildRunSettings({ ...core.getChildRunSettings(), executor_harness: "claude" });
   await core.setHybridMode(true);
   await writeCommonIndex(core.knowledgeLocation.activeDir(), "knowledge-marker is useful when implementing hybrid delegation.");
   await core.memory.reindex({ mode: "full" });

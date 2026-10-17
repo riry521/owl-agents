@@ -35,7 +35,7 @@ import type { ReviewRoutingSettings } from "../../../packages/shared/dist/review
 import type { PlanUsageSettings, PlanUsageView } from "../../../packages/shared/dist/plan-usage-settings.js";
 import { isOwnerLanguage, type OwnerLanguage } from "../../../packages/shared/dist/owner-language.js";
 import { SUBAGENT_USAGE_BATCH_MAX, type HookRequestUsage } from "../../../packages/shared/dist/token-relay.js";
-import { ADVISOR_CURATION_ACTION_TYPES, ADVISOR_WORKSPACE_API_PATH, advisorAlternativeActions, advisorCurationKind, matchAdvisorBlockedApi, builtinProviderHarness, designDocumentPath, isRuleRole, RULE_ROLES } from "../../../packages/shared/dist/index.js";
+import { ADVISOR_CURATION_ACTION_TYPES, ADVISOR_WORKSPACE_API_PATH, ADVISOR_WORKSPACE_FINISH_API_PATH, advisorAlternativeActions, advisorCurationKind, matchAdvisorBlockedApi, builtinProviderHarness, designDocumentPath, isRuleRole, RULE_ROLES } from "../../../packages/shared/dist/index.js";
 import type { AdvisorBlockedApi } from "../../../packages/shared/dist/advisor-api-policy.js";
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
 import { DESIGN_MOCK_FILE_PATTERN } from "../../../packages/shared/dist/design-documents.js";
@@ -269,6 +269,7 @@ interface DesignMockApiPort {
 
 interface AdvisorWorkspaceApiPort {
   prepareAdvisorWorkspaceForSession(request: { session_id: string; project_id: string | null }): Promise<unknown>;
+  finishAdvisorWorkspaceForSession(request: { session_id: string; project_id: string | null }): Promise<unknown>;
 }
 
 interface WorkProjectMoveApiPort {
@@ -1979,7 +1980,7 @@ function designMockPayload(payload: JsonObject, keys: readonly string[]): { name
 const HARNESS_PROVIDER_ALIASES: Readonly<Record<string, ChildRunProvider>> = { anthropic: "claude", openai: "codex" };
 
 const CHILD_RUN_ERROR_STATUS: Readonly<Record<string, number>> = {
-  validation_error: 400, write_paths_invalid: 400, model_not_allowed: 400, effort_not_allowed: 400, timeout_out_of_range: 400,
+  validation_error: 400, write_paths_invalid: 400, timeout_out_of_range: 400,
   parent_not_active: 409, too_many_children: 409, child_not_found: 404,
 };
 
@@ -2026,7 +2027,7 @@ function boundedInteger(value: unknown, label: string, min: number, max: number)
 }
 
 function dispatchRequest(payload: JsonObject): ChildDispatchRequest {
-  exactKeys(payload, ["title", "instruction", "write_paths"], "dispatch payload", ["provider", "model", "effort", "timeout_minutes"]);
+  exactKeys(payload, ["title", "instruction", "write_paths"], "dispatch payload", ["timeout_minutes"]);
   const writePaths = payload.write_paths;
   if (!Array.isArray(writePaths) || writePaths.length < 1 || writePaths.length > CHILD_RUN_LIMITS.write_paths_max) {
     throw new ApiError(400, "validation_error", `write_pathsが不正です。1〜${CHILD_RUN_LIMITS.write_paths_max}件の配列を指定してください。`);
@@ -2035,9 +2036,6 @@ function dispatchRequest(payload: JsonObject): ChildDispatchRequest {
     title: stringField(payload.title, "title", 1, CHILD_RUN_LIMITS.title_max_chars),
     instruction: stringField(payload.instruction, "instruction", 1, CHILD_RUN_LIMITS.instruction_max_chars),
     write_paths: writePaths.map((path) => stringField(path, "write_paths[]", 1, 300)),
-    ...(payload.provider === undefined ? {} : { provider: optionalField<ChildRunProvider>(payload.provider, "provider", CHILD_RUN_PROVIDERS) }),
-    ...(payload.model === undefined ? {} : { model: stringField(payload.model, "model", 1, 100) }),
-    ...(payload.effort === undefined ? {} : { effort: optionalField<ChildRunEffort>(payload.effort, "effort", CHILD_RUN_EFFORTS) }),
     ...(payload.timeout_minutes === undefined ? {} : { timeout_minutes: boundedInteger(payload.timeout_minutes, "timeout_minutes", 5, 1440) }),
   };
 }
@@ -2057,7 +2055,7 @@ function waitRequest(payload: JsonObject): ChildWaitRequest {
 
 function requireAdvisorWorkspaceApi(core: CorePort): AdvisorWorkspaceApiPort {
   const wrapped = core as CorePort & { core?: unknown };
-  const has = (value: unknown): value is AdvisorWorkspaceApiPort => isObject(value) && typeof value.prepareAdvisorWorkspaceForSession === "function";
+  const has = (value: unknown): value is AdvisorWorkspaceApiPort => isObject(value) && typeof value.prepareAdvisorWorkspaceForSession === "function" && typeof value.finishAdvisorWorkspaceForSession === "function";
   const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
   if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support Advisor workspaces.");
   return candidate;
@@ -3156,10 +3154,10 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
-  if (pathname === ADVISOR_WORKSPACE_API_PATH && method === "POST") {
+  if ((pathname === ADVISOR_WORKSPACE_API_PATH || pathname === ADVISOR_WORKSPACE_FINISH_API_PATH) && method === "POST") {
     // セッションは guard token の agent_run_id で決まるので、Advisor 本人以外は呼べない
     const agent = requireGuard(request, context.guardTokens);
-    if (agent?.role !== "advisor") throw new ApiError(403, "forbidden", "Only a running Advisor session can prepare its workspace.");
+    if (agent?.role !== "advisor") throw new ApiError(403, "forbidden", "Only a running Advisor session can prepare or finish its workspace.");
     const body = await readRequestBody(request);
     if (!isObject(body)) throw new ApiError(400, "validation_error", "リクエスト本文はJSON objectで指定してください。");
     exactKeys(body, [], "AdvisorWorkspace payload", ["project_id"]);
@@ -3167,7 +3165,10 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     const api = requireAdvisorWorkspaceApi(context.core);
     let data: unknown;
     try {
-      data = await api.prepareAdvisorWorkspaceForSession({ session_id: agent.agent_run_id, project_id: projectId });
+      const session = { session_id: agent.agent_run_id, project_id: projectId };
+      data = pathname === ADVISOR_WORKSPACE_FINISH_API_PATH
+        ? await api.finishAdvisorWorkspaceForSession(session)
+        : await api.prepareAdvisorWorkspaceForSession(session);
     } catch (error) {
       if (error instanceof Error && error.name === "AdvisorSessionNotFoundError") throw new ApiError(404, "advisor_session_not_found", error.message);
       throw error;
@@ -4310,7 +4311,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   if (pathname === `${API_PREFIX}/settings/executor` && method === "GET") {
     requireOwner(request);
     const s = await childRunCall(() => requireChildRunApi(context.core).getChildRunSettings());
-    sendJson(response, 200, { request_id: requestIdValue, data: { ...s, provider: s.default_provider, model: s.default_model, effort: s.default_effort, timeout_ms: s.timeout_minutes * 60_000 } });
+    sendJson(response, 200, { request_id: requestIdValue, data: { ...s, provider: s.executor_harness, model: s.executor_by_harness[s.executor_harness].model, effort: s.executor_by_harness[s.executor_harness].effort, timeout_ms: s.timeout_minutes * 60_000 } });
     return;
   }
 
@@ -4318,10 +4319,10 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     requireOwner(request);
     const cmd = commandEnvelope(await readRequestBody(request));
     const p = cmd.payload;
-    if (p.defaults_by_parent_harness !== undefined) {
+    if (p.executor_harness !== undefined || p.defaults_by_parent_harness !== undefined) {
       const result = await runCommand(context, pathname, cmd, 200, async () => {
         const saved = await childRunCall(() => requireChildRunApi(context.core).setChildRunSettings(p as unknown as ChildRunSettings));
-        return { data: { ...saved, provider: saved.default_provider, model: saved.default_model, effort: saved.default_effort, timeout_ms: saved.timeout_minutes * 60_000 } as unknown as JsonObject, version: 0 };
+        return { data: { ...saved, provider: saved.executor_harness, model: saved.executor_by_harness[saved.executor_harness].model, effort: saved.executor_by_harness[saved.executor_harness].effort, timeout_ms: saved.timeout_minutes * 60_000 } as unknown as JsonObject, version: 0 };
       });
       sendJson(response, 200, result);
       return;
@@ -4341,22 +4342,15 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     const result = await runCommand(context, pathname, cmd, 200, async () => {
       const api = requireChildRunApi(context.core);
       const s = await childRunCall(() => api.getChildRunSettings());
-      const effort = p.effort === undefined ? s.default_effort : p.effort as ChildRunEffort | null;
+      const effort = p.effort === undefined ? s.executor_by_harness[provider].effort : p.effort as ChildRunEffort | null;
       const next: ChildRunSettings = {
         ...s,
-        default_provider: provider,
-        default_model: model,
-        default_effort: effort,
-        defaults_by_parent_harness: {
-          claude: { provider, model, effort },
-          codex: { provider, model, effort },
-        },
-        allowed_models: s.allowed_models.some((m) => m.provider === provider && m.model === model) ? s.allowed_models : [{ provider, model }, ...s.allowed_models],
-        allowed_efforts: effort === null || s.allowed_efforts.includes(effort) ? s.allowed_efforts : [...s.allowed_efforts, effort],
+        executor_harness: provider,
+        executor_by_harness: { ...s.executor_by_harness, [provider]: { model, effort } },
         timeout_minutes: timeoutMs === 0 ? s.timeout_minutes : Math.ceil(timeoutMs / 60_000),
       };
       const saved = await childRunCall(() => api.setChildRunSettings(next));
-      return { data: { ...saved, provider: saved.default_provider, model: saved.default_model, effort: saved.default_effort, timeout_ms: saved.timeout_minutes * 60_000 } as unknown as JsonObject, version: 0 };
+      return { data: { ...saved, provider: saved.executor_harness, model: saved.executor_by_harness[saved.executor_harness].model, effort: saved.executor_by_harness[saved.executor_harness].effort, timeout_ms: saved.timeout_minutes * 60_000 } as unknown as JsonObject, version: 0 };
     });
     sendJson(response, 200, result);
     return;
@@ -4875,7 +4869,9 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
         ? ["anthropic", "claude"]
         : providerId === "openai" || providerId === "codex" || providerId === "openai/codex"
           ? ["openai", "codex", "openai/codex"]
-          : [providerId];
+          : providerId === "opencode"
+            ? ["opencode"]
+            : [providerId];
       const pause = (await context.core.listProviderPauses()).find(
         (entry) => entry.state === "paused" && pauseAliases.includes(entry.provider.toLowerCase()),
       );

@@ -1,12 +1,15 @@
 /** Agent CLIs Owl runs models through. */
-export type ModelHarness = "claude" | "codex";
+export type ModelHarness = "claude" | "codex" | "opencode";
+
+/** Harnesses that have a default model; opencode has none and always needs an explicit one. */
+export type DefaultModelHarness = "claude" | "codex";
 
 export const CLAUDE_SONNET_5_5_MODEL = "claude-sonnet-5-5";
 export const CLAUDE_HAIKU_5_5_MODEL = "claude-haiku-5-5";
 export const CLAUDE_OPUS_5_5_MODEL = "claude-opus-5-5";
 
 /** Model each harness uses when no role or Executor setting names one. */
-export const DEFAULT_HARNESS_MODELS: Readonly<Record<ModelHarness, string>> = {
+export const DEFAULT_HARNESS_MODELS: Readonly<Record<DefaultModelHarness, string>> = {
   claude: CLAUDE_SONNET_5_5_MODEL,
   codex: "gpt-5.6-terra",
 };
@@ -37,6 +40,17 @@ export function builtinProviderHarness(providerId: string): ModelHarness | null 
   const normalized = providerId.trim().toLowerCase();
   if (normalized === "anthropic" || normalized === "claude") return "claude";
   if (normalized === "openai" || normalized === "codex" || normalized === "openai/codex") return "codex";
+  if (normalized === "opencode") return "opencode";
+  return null;
+}
+
+/** Harness an adapter id (`claude-cli/v1`, `codex`, `opencode-serve/v1`, ...) runs on; null when unknown. */
+export function harnessOfAdapter(adapter: string | undefined): ModelHarness | null {
+  const normalized = adapter?.trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized === "claude" || normalized.startsWith("claude-cli/") || normalized.startsWith("claude/")) return "claude";
+  if (normalized === "codex" || normalized.startsWith("codex-cli/") || normalized.startsWith("codex/")) return "codex";
+  if (normalized === "opencode" || normalized.startsWith("opencode-serve/") || normalized.startsWith("opencode/")) return "opencode";
   return null;
 }
 

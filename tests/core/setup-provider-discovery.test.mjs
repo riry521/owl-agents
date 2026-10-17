@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 
 import { tempDir } from "../helpers/temp.mjs";
 import { run } from "../../scripts/setup-provider-discovery.mjs";
+import { availableHarnesses } from "../../apps/server/dist/setup.js";
 
 const baseEnv = "OWL_PROVIDER=stub\nOWL_PROVIDER_MODEL=m\n";
 const custom = "OWL_PROVIDER=real\nOWL_PROVIDER_ADAPTER=codex-cli/v1\nOWL_CLAUDE_EXECUTABLE=/custom/claude\n";
@@ -115,6 +116,27 @@ test("ログインシェルには渡した HOME が届く", async (t) => {
   await writeFile(s.env.OWL_PROVIDER_SEARCH_CONFIG, JSON.stringify({ ...cfg, loginShell: true, dirs: [] }));
   const r = await run({ ...s, env: { ...s.env, SHELL: sh } });
   assert.equal(r.found.length, 1);
+});
+
+async function fakeOpencodeVersion(t, version) {
+  const dir = await tempDir(t);
+  const executable = join(dir, "opencode");
+  await writeFile(executable, `#!/bin/sh\necho ${version}\n`);
+  await chmod(executable, 0o755);
+  return { OWL_OPENCODE_EXECUTABLE: executable, PATH: "/usr/bin:/bin" };
+}
+
+test("setup は対応する版の opencode だけを使える harness に足す", async (t) => {
+  const supported = await availableHarnesses(["claude"], await fakeOpencodeVersion(t, "2.0.30"));
+  assert.deepEqual(supported, { harnesses: ["claude", "opencode"], warning: null });
+
+  const old = await availableHarnesses(["claude"], await fakeOpencodeVersion(t, "1.9.0"));
+  assert.deepEqual(old.harnesses, ["claude"]);
+  assert.match(old.warning, /1\.9\.0/u);
+  assert.match(old.warning, /2\.0\.0/u);
+
+  const missing = await availableHarnesses(["claude"], { PATH: "/nonexistent" });
+  assert.deepEqual(missing, { harnesses: ["claude"], warning: null });
 });
 
 test("どちらも無ければ案内を出して .env を変えない", async (t) => {

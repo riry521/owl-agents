@@ -24,6 +24,10 @@ import { startServer, type RunningServer, type ServerOptions } from "./server.js
 import { configuredBind, configuredPort, deprecatedConfigurationWarnings, serverExposureError, tailscaleServeEnabled } from "./config.js";
 import { connectorConfigStatus, prepareConnectorConfig } from "./secret-config.js";
 import { resolveAgentExecutables } from "./agent-runner.js";
+import { OPENCODE_HARNESS_GAPS, splitOpencodeModel } from "../../../packages/shared/dist/index.js";
+import type { OpencodeServer } from "../../../packages/agent-runtime/dist/index.js";
+import { parseOpencodeModels } from "./model-catalog.js";
+import { opencodeCliStatus, opencodeRoles, opencodeUnsupportedMessage, withPrivateOpencodeServe } from "./opencode-status.js";
 import { providerConfigurationError, providerSelection, resolveExecutableForSelection } from "./provider-selection.js";
 
 interface ServerState {
@@ -960,6 +964,122 @@ async function checkCliTools(): Promise<DoctorCheckResult[]> {
   }
 }
 
+interface OpencodeServeFacts {
+  readonly loggedIn: ReadonlySet<string>;
+  readonly models: ReadonlySet<string>;
+  readonly savedPermissions: number;
+  readonly configPaths: readonly string[];
+}
+
+/** Reads provider logins, models, saved permissions and config paths from one private serve; no credential API, database or credential file is read. */
+async function readOpencodeServeFacts(server: OpencodeServer): Promise<OpencodeServeFacts> {
+  const get = async (path: string): Promise<unknown[]> => {
+    const body = await server.client.request<{ data?: unknown }>("GET", path);
+    return Array.isArray(body?.data) ? body.data : [];
+  };
+  const [providers, integrations, models, saved, config] = await Promise.all([
+    get("/api/provider"), get("/api/integration"), get("/api/model"), get("/api/permission/saved"), get("/api/config"),
+  ]);
+  const connected = new Set(integrations.flatMap((entry) => {
+    const { id, connections } = entry as { id?: unknown; connections?: unknown };
+    return typeof id === "string" && Array.isArray(connections) && connections.length > 0 ? [id] : [];
+  }));
+  return {
+    loggedIn: new Set(providers.flatMap((entry) => {
+      const { id, integrationID } = entry as { id?: unknown; integrationID?: unknown };
+      return typeof id === "string" && typeof integrationID === "string" && connected.has(integrationID) ? [id] : [];
+    })),
+    models: new Set(parseOpencodeModels({ data: models }).map(({ providerID, modelID }) => `${providerID}/${modelID}`)),
+    savedPermissions: saved.length,
+    configPaths: config.flatMap((entry) => typeof (entry as { path?: unknown })?.path === "string" ? [(entry as { path: string }).path] : []),
+  };
+}
+
+async function checkOpencode(): Promise<DoctorCheckResult[]> {
+  try {
+    const root = resolveOwlRoot();
+    if (providerSelection(root).mode !== "real") return [];
+    const roles = opencodeRoles(root);
+    const roleNames = roles.map(({ role }) => role).join(", ");
+    const status = await opencodeCliStatus();
+    const cli: DoctorCheckResult = status.state === "ok"
+      ? { check_id: "opencode-cli", severity: "optional", status: "pass", message: cliText(`opencode ${status.version} を使えます。`, `opencode ${status.version} is available.`), remediation: null }
+      : {
+        check_id: "opencode-cli",
+        severity: "optional",
+        status: "warn",
+        message: status.state === "missing"
+          ? cliText(`opencodeが見つかりません。opencodeを使うTaskは実行できません。${roleNames ? `使うロール: ${roleNames}` : ""}`, `opencode was not found. Tasks that use opencode cannot run.${roleNames ? ` Roles using it: ${roleNames}` : ""}`)
+          : opencodeUnsupportedMessage(status.version),
+        remediation: status.state === "missing"
+          ? cliText('opencodeをインストールするか、OWL_OPENCODE_EXECUTABLEへ絶対パスを設定してください。', 'Install opencode, or set OWL_OPENCODE_EXECUTABLE to its absolute path.')
+          : cliText('opencodeを更新してください。', 'Update opencode.'),
+      };
+    const gapLines = OPENCODE_HARNESS_GAPS.map((gap) => `- ${cliText(gap.ja, gap.en)}`).join("\n");
+    const gaps = (extra: string): DoctorCheckResult => roles.length === 0
+      ? { check_id: "opencode-harness-gaps", severity: "optional", status: "pass", message: cliText('opencodeを使うロールはありません。', 'No role uses opencode.'), remediation: null }
+      : {
+        check_id: "opencode-harness-gaps",
+        severity: "optional",
+        status: "warn",
+        message: `${cliText('opencodeではClaude・Codexと同じ強さでかけられない部分があります:', 'opencode cannot apply some things as strongly as Claude and Codex:')}\n${gapLines}${extra}`,
+        remediation: cliText('opencodeを使うロールを、これらの違いを理解したうえで割り当ててください。', 'Assign opencode to roles only after reviewing these differences.'),
+      };
+    if (status.state !== "ok") {
+      return [cli, {
+        check_id: "opencode-login",
+        severity: "optional",
+        status: "warn",
+        message: cliText('opencode-cliが使えないため、ログインの確認を省きました。', 'Skipped the login check because opencode-cli is not usable.'),
+        remediation: cliText('先にopencode-cliの警告を直してください。', 'Fix the opencode-cli warning first.'),
+      }, gaps("")];
+    }
+    let facts: OpencodeServeFacts;
+    try {
+      facts = await Promise.race([
+        withPrivateOpencodeServe(status.executable, process.env, readOpencodeServeFacts),
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timed out")), LOGIN_CHECK_TIMEOUT_MS).unref()),
+      ]);
+    } catch (error) {
+      const login: DoctorCheckResult = {
+        check_id: "opencode-login",
+        severity: "optional",
+        status: "warn",
+        message: cliText(`opencodeのログイン状態を確認できませんでした。原因: ${safeProviderCheckReason(error)}`, `Could not check the opencode login state. Cause: ${safeProviderCheckReason(error)}`),
+        remediation: cliText('opencodeを単体で起動できるか確認してください。', 'Check that opencode starts on its own.'),
+      };
+      return [cli, login, gaps("")];
+    }
+    const unusable = roles.filter(({ model }) => {
+      const split = splitOpencodeModel(model);
+      return !split || !facts.loggedIn.has(split.providerID) || !facts.models.has(model);
+    });
+    const login: DoctorCheckResult = unusable.length > 0 || (roles.length === 0 && facts.loggedIn.size === 0)
+      ? {
+        check_id: "opencode-login",
+        severity: "optional",
+        status: "warn",
+        message: unusable.length > 0
+          ? cliText(`次のロールのopencodeのモデルは、ログインしていないか使えません: ${unusable.map(({ role }) => role).join(", ")}`, `The opencode model of these roles is not logged in or not available: ${unusable.map(({ role }) => role).join(", ")}`)
+          : cliText('opencodeにログイン済みのproviderがありません。', 'opencode has no logged-in provider.'),
+        remediation: cliText('opencode auth を実行してログインしてください。', 'Run opencode auth to log in.'),
+      }
+      : {
+        check_id: "opencode-login",
+        severity: "optional",
+        status: "pass",
+        message: roles.length > 0
+          ? cliText('opencodeを使うロールのモデルはログイン済みで使えます。', 'The opencode models of the roles are logged in and available.')
+          : cliText(`ログイン済みのprovider: ${[...facts.loggedIn].join(", ") || "なし"}`, `Logged-in providers: ${[...facts.loggedIn].join(", ") || "none"}`),
+        remediation: null,
+      };
+    const extra = `\n${cliText(`保存された許可: ${facts.savedPermissions}件`, `Saved permissions: ${facts.savedPermissions}`)}\n${cliText('読み込んだ設定の場所', 'Loaded config locations')}: ${facts.configPaths.join(", ") || "-"}`;
+    return [cli, login, gaps(extra)];
+  } catch {
+    return [];
+  }
+}
+
 async function checkSecretStore(): Promise<DoctorCheckResult> {
   try {
     const root = resolveOwlRoot();
@@ -1191,6 +1311,7 @@ export async function runDoctor(args: { json: boolean; strict: boolean }): Promi
     checkNetworkAuth(),
     checkProvider(),
     checkCliTools(),
+    checkOpencode(),
     checkSecretStore(),
     checkSqlite(),
     checkPort(),

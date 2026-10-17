@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.0 - 2026-10-17
+
+opencode can now run every role and every child, and the Advisor can finish its own work in a Git workspace.
+
+### Executors
+
+- opencode can be chosen as the model harness for every role, next to Claude and Codex
+- Child tasks can also run on opencode
+- Settings now choose one executor harness for all children, with its own model and effort, whatever harness the parent Worker uses
+- The old per-parent default and allowed model lists for children are gone
+- `owl doctor` checks that opencode is installed and logged in, and lists what opencode cannot enforce as strongly as Claude and Codex
+- opencode children now answer permission prompts correctly, so they no longer fail in real Works
+- When a child fails, its original error is kept (with secrets hidden) and shown in the Task
+
+### Advisor
+
+- The Advisor can finish a direct job: Owl merges its commits into the base branch and removes the worktree and branch
+- If the merge cannot be done safely, nothing is changed and the Advisor tells you the reason
+- Unused Advisor worktrees are cleaned up by their content, so work that has not reached the base is not lost
+
 ## 0.4.0 - 2026-10-16
 
 Setup finds `claude` and `codex` on its own, and `owl advisor` works as a plain terminal conversation.

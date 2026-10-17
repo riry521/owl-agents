@@ -131,6 +131,7 @@ function providerAliases(provider: string): string[] {
   const normalized = provider.trim().toLowerCase();
   if (normalized === "anthropic" || normalized === "claude") return ["anthropic", "claude"];
   if (normalized === "openai" || normalized === "codex" || normalized === "openai/codex") return ["openai", "codex", "openai/codex"];
+  if (normalized === "opencode") return ["opencode"];
   return [provider];
 }
 
@@ -766,6 +767,18 @@ export class AdvisorSessionRuntime {
     return prepared;
   }
 
+  /** Merge the session's shared worktree into base and remove it; `projectId` null targets the session's own repository. */
+  public async finishWorkspace(sessionId: string, projectId: string | null): Promise<AdvisorWorkspacePreparation> {
+    const session = this.config.db.get<{ conversation_id: string }>(
+      "SELECT conversation_id FROM advisor_sessions WHERE id = ? AND status != 'ended'",
+      sessionId,
+    );
+    if (!session) throw new AdvisorSessionNotFoundError(sessionId);
+    const finish = this.config.git?.finishAdvisorWorkspace;
+    if (!finish) throw new Error("The configured Git gateway does not support Advisor workspaces.");
+    return finish.call(this.config.git, { conversation_id: session.conversation_id, project_id: projectId });
+  }
+
   private async includeWorkspaceNotice(conversationId: string, sessionId: string, reply: string): Promise<string> {
     const notice = await this.getWorkspaceNotice(conversationId, sessionId);
     return notice ? `${reply.trimEnd()}\n\n${notice}` : reply;
@@ -1200,6 +1213,7 @@ export class AdvisorSessionRuntime {
             `SELECT provider_id FROM advisor_sessions WHERE id = ?`, sessionId,
           )?.provider_id;
           if (sessionProvider && startedAt) await this.config.onProviderSucceeded?.(sessionProvider, startedAt);
+          this.sweepAdvisorWorkspacesInBackground();
           return;
         }
 
@@ -1213,6 +1227,7 @@ export class AdvisorSessionRuntime {
           } else {
             await this.failTurn(turnRow, event.error);
           }
+          this.sweepAdvisorWorkspacesInBackground();
           return;
         }
 

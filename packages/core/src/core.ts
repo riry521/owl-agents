@@ -199,6 +199,7 @@ import {
   DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS,
   KNOWLEDGE_AUTOMATION_SETTINGS_KEY,
   KnowledgeAutomationValidationError,
+  OPENCODE_HARNESS_GAPS,
   readKnowledgeAutomationSettings as parseKnowledgeAutomationSettings,
   validateKnowledgeAutomationSettings,
   type KnowledgeAutomationSettings,
@@ -266,8 +267,10 @@ import {
   addAdvisorReplyTargetInstruction,
   advisorCurationKind,
   builtinProviderHarness,
+  type ModelHarness,
   CHILD_RUN_EFFORTS,
   CHILD_RUN_PROVIDERS,
+  splitOpencodeModel,
   CODEX_BUILTIN_MODELS,
   DEFAULT_CHILD_RUN_SETTINGS,
   CHILD_RUN_LIMITS,
@@ -289,7 +292,10 @@ import {
   type WebResearchCapture,
   type ChildDispatchRequest,
   type ChildDispatchResponse,
+  type ChildRunEffort,
+  type ChildRunHarnessChoice,
   type ChildRunListFilter,
+  type ChildRunProvider,
   type ChildRunRecord,
   type ChildRunSettings,
   type ChildWaitRequest,
@@ -1261,6 +1267,7 @@ export class Core {
             pid,
             process_start_time: identity.process_start_time,
             process_cmdline_sha256: identity.process_cmdline_sha256,
+            ...(processEvent.harness === "opencode" ? { harness: "opencode", harness_gaps: OPENCODE_HARNESS_GAPS.map((gap) => gap.key) } : {}),
           },
         },
         outbox: [{ provider: "websocket" }],
@@ -5048,25 +5055,21 @@ export class Core {
     return storedOwnerLanguage(this.db) ?? this.setLanguage(language);
   }
 
-  /** Read persisted child-agent settings, deriving legacy Executor defaults without writing them. */
+  /** Read persisted child-agent settings, deriving legacy Executor defaults without writing them. Never throws. */
   public getChildRunSettings(): ChildRunSettings {
-    const row = this.db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", CHILD_RUN_SETTINGS_KEY);
-    if (row) {
+    const read = (key: string, parse: (parsed: unknown) => ChildRunSettings): ChildRunSettings | null => {
+      const row = this.db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", key);
+      if (!row) return null;
       try {
-        return normalizeChildRunSettings(JSON.parse(row.value_json) as unknown, this.knownModels);
+        return parse(JSON.parse(row.value_json) as unknown);
       } catch (error) {
-        if (error instanceof HumanReadableError) throw error;
-        throw validationError("Stored child-agent settings are invalid.", { key: CHILD_RUN_SETTINGS_KEY });
+        console.warn(`[owl-core] Stored settings '${key}' could not be read, using the defaults.`, error);
+        return DEFAULT_CHILD_RUN_SETTINGS;
       }
-    }
-    const legacy = this.db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", LEGACY_EXECUTOR_CONFIG_SETTINGS_KEY);
-    if (!legacy) return DEFAULT_CHILD_RUN_SETTINGS;
-    try {
-      return deriveChildRunSettings(JSON.parse(legacy.value_json) as unknown);
-    } catch (error) {
-      if (error instanceof HumanReadableError) throw error;
-      throw validationError("Stored Executor configuration is invalid.", { key: LEGACY_EXECUTOR_CONFIG_SETTINGS_KEY });
-    }
+    };
+    return read(CHILD_RUN_SETTINGS_KEY, loadChildRunSettings)
+      ?? read(LEGACY_EXECUTOR_CONFIG_SETTINGS_KEY, deriveChildRunSettings)
+      ?? DEFAULT_CHILD_RUN_SETTINGS;
   }
 
   /** Migrate the retired server-side Executor setting once, without replacing an explicit child setting. */
@@ -5211,8 +5214,8 @@ export class Core {
     for (const role of this.getModelSettings().roles) {
       warnIfUnknown(role.role, role.provider, role.model);
     }
-    for (const choice of this.getChildRunSettings().allowed_models) {
-      warnIfUnknown("child agent", choice.provider, choice.model);
+    for (const [harness, choice] of Object.entries(this.getChildRunSettings().executor_by_harness)) {
+      if (choice.model !== null) warnIfUnknown("child agent", harness, choice.model);
     }
   }
 
@@ -6267,6 +6270,15 @@ export class Core {
     return this.advisorRuntime.prepareWorkspace(request.session_id, request.project_id);
   }
 
+  /** Merge a running Advisor session's shared worktree into base and remove the worktree and branch. */
+  public async finishAdvisorWorkspaceForSession(request: {
+    readonly session_id: string;
+    readonly project_id: string | null;
+  }): Promise<AdvisorWorkspacePreparation> {
+    if (!this.advisorRuntime) throw new AdvisorSessionNotFoundError(request.session_id);
+    return this.advisorRuntime.finishWorkspace(request.session_id, request.project_id);
+  }
+
   /** The settings snapshot AdvisorSessionRuntime uses to (re)start an Advisor ProviderSession. */
   private getAdvisorSettingsSnapshot(): AdvisorSettingsSnapshot {
     const setting = resolveRoleModelFromDb(this.db, "advisor");
@@ -6291,22 +6303,21 @@ export class Core {
     };
   }
 
-  private advisorHarness(provider: string): "claude" | "codex" {
+  private advisorHarness(provider: string): "claude" | "codex" | "opencode" {
     const normalizedProvider = provider.trim().toLowerCase();
     const harness = this.options.getProviderHarness?.(provider)
-      ?? (normalizedProvider === "anthropic" || normalizedProvider === "claude" ? "claude" : undefined)
-      ?? (normalizedProvider === "openai" || normalizedProvider === "codex" || normalizedProvider === "openai/codex" ? "codex" : undefined);
+      ?? builtinProviderHarness(normalizedProvider);
     if (!harness) {
       throw validationError(`Advisor provider '${provider}' is not mapped to a supported harness. Configure the provider harness before starting the Advisor.`, {
         role: "advisor",
         provider,
-        supported_harnesses: ["claude", "codex"],
+        supported_harnesses: ["claude", "codex", "opencode"],
       });
     }
     return harness;
   }
 
-  private buildAdvisorSystemPrompt(harness: "claude" | "codex"): string {
+  private buildAdvisorSystemPrompt(harness: "claude" | "codex" | "opencode"): string {
     const language = ownerLanguage(this.db);
     const exampleSummary = language === "en"
       ? "Request: Correct the requested label.\\n\\nAcceptance:\\n- The label reads as requested."
@@ -6362,7 +6373,7 @@ export class Core {
     return [base, rulesBlock, personaBlock, foldersBlock].filter((part): part is string => part !== null).join("\n\n");
   }
 
-  private advisorProcessSkillsLines(harness: "claude" | "codex"): string[] {
+  private advisorProcessSkillsLines(harness: "claude" | "codex" | "opencode"): string[] {
     const pack = this.processSkillsPack;
     if (!pack) return [];
     const brainstormingFile = join(pack.skills_dir, "brainstorming", "SKILL.md");
@@ -6375,8 +6386,9 @@ export class Core {
     const lines = [
       `For requests that need clarifying (requests you may not issue in the same turn), read and follow ${brainstormingFile}, with these limits: treat this conversation as the design dialogue, skip the visual companion, the spec file, the spec review, and writing-plans, and treat create_work carrying the agreed design as the terminal state.`,
     ];
+    // No tools reference exists for opencode (design 3.2), so its prompt omits this line.
     const toolsSuffix = harness === "claude" ? "claude-code-tools.md" : "codex-tools.md";
-    const toolsFile = PROCESS_SKILLS_PROMPT_FILES.find((path) => path.endsWith(toolsSuffix));
+    const toolsFile = harness === "opencode" ? undefined : PROCESS_SKILLS_PROMPT_FILES.find((path) => path.endsWith(toolsSuffix));
     if (toolsFile) {
       try {
         if (statSync(join(pack.skills_dir, toolsFile)).isFile()) {
@@ -11779,11 +11791,11 @@ function validateModelSettingsRoles(
   });
 }
 
-type KnownModels = (harness: "claude" | "codex") => ReadonlySet<string> | undefined;
+type KnownModels = (harness: ModelHarness) => ReadonlySet<string> | undefined;
 
 const CODEX_BUILTIN_MODEL_SET: ReadonlySet<string> = new Set(CODEX_BUILTIN_MODELS);
 
-function defaultKnownModels(harness: "claude" | "codex"): ReadonlySet<string> | undefined {
+function defaultKnownModels(harness: ModelHarness): ReadonlySet<string> | undefined {
   return harness === "codex" ? CODEX_BUILTIN_MODEL_SET : undefined;
 }
 
@@ -12326,7 +12338,7 @@ const CHILD_RUN_EFFORT_SET: ReadonlySet<string> = new Set(CHILD_RUN_EFFORTS);
 function normalizeLegacyExecutorConfig(value: unknown): {
   readonly provider: "claude" | "codex";
   readonly model: string;
-  readonly effort?: ChildRunSettings["default_effort"] & string;
+  readonly effort?: ChildRunEffort;
   readonly timeout_ms: number;
 } {
   if (!isRecord(value)) {
@@ -12351,149 +12363,126 @@ function normalizeLegacyExecutorConfig(value: unknown): {
   return {
     provider: LEGACY_EXECUTOR_PROVIDERS[provider.trim().toLowerCase()],
     model: model.trim(),
-    ...(typeof effort === "string" && effort.length > 0 ? { effort: effort as NonNullable<ChildRunSettings["default_effort"]> } : {}),
+    ...(typeof effort === "string" && effort.length > 0 ? { effort: effort as ChildRunEffort } : {}),
     timeout_ms: timeoutMs,
   };
 }
 
 function deriveChildRunSettings(value: unknown): ChildRunSettings {
   const legacy = normalizeLegacyExecutorConfig(value);
-  const modelChoices = [
-    { provider: legacy.provider, model: legacy.model },
-    ...DEFAULT_CHILD_RUN_SETTINGS.allowed_models,
-  ].filter((choice, index, all) => all.findIndex((candidate) => candidate.provider === choice.provider && candidate.model === choice.model) === index);
-  const efforts = [...new Set([
-    "low", "medium", "high", ...(legacy.effort ? [legacy.effort] : []),
-  ])] as NonNullable<ChildRunSettings["default_effort"]>[];
   const timeout = legacy.timeout_ms > 0
     ? Math.max(5, Math.min(180, Math.ceil(legacy.timeout_ms / 60_000)))
     : 60;
   return {
     ...DEFAULT_CHILD_RUN_SETTINGS,
-    default_provider: legacy.provider,
-    default_model: legacy.model,
-    default_effort: legacy.effort ?? "medium",
-    allowed_models: modelChoices,
-    allowed_efforts: efforts,
+    executor_harness: legacy.provider,
+    executor_by_harness: {
+      ...DEFAULT_CHILD_RUN_SETTINGS.executor_by_harness,
+      [legacy.provider]: { model: legacy.model, effort: legacy.effort ?? "medium" },
+    },
     timeout_minutes: timeout,
   };
 }
 
-function childProvider(value: unknown, field: string): ChildRunSettings["default_provider"] {
-  const provider = typeof value === "string" ? LEGACY_EXECUTOR_PROVIDERS[value.trim().toLowerCase()] : undefined;
-  if (!provider) throw validationError("Child-agent provider must be claude or codex.", { field });
-  return provider;
+/**
+ * Rewrite the retired child-run shape (defaults_by_parent_harness, allowed_*, default_*) into executor_harness /
+ * executor_by_harness. Only the Claude parent's default carries over: it was the one the old rules used for a Codex-less
+ * Executor, while default_* and allowed_* never chose a child's harness. Values that already use the new shape pass through.
+ */
+function upgradeChildRunSettings(value: JsonObject): JsonObject {
+  const {
+    default_provider: _p, default_model: _m, default_effort: _e, allowed_models: _am, allowed_efforts: _ae,
+    defaults_by_parent_harness: byParent, ...rest
+  } = value;
+  if (Object.hasOwn(value, "executor_harness")) return rest;
+  const claudeRow = isRecord(byParent) ? byParent.claude : undefined;
+  const provider = isRecord(claudeRow) && typeof claudeRow.provider === "string"
+    ? LEGACY_EXECUTOR_PROVIDERS[claudeRow.provider.trim().toLowerCase()]
+    : undefined;
+  if (!isRecord(claudeRow) || !provider) return rest;
+  return {
+    ...rest,
+    executor_harness: provider,
+    executor_by_harness: {
+      [provider]: {
+        ...(claudeRow.model !== undefined ? { model: claudeRow.model } : {}),
+        ...(claudeRow.effort !== undefined ? { effort: claudeRow.effort } : {}),
+      },
+    },
+  };
 }
 
-function normalizeChildRunSettings(value: unknown, knownModels: KnownModels): ChildRunSettings {
-  if (!isRecord(value)) throw validationError("Child-agent settings must be an object.", { field: "child_run_settings" });
-  const isLegacyShape = !["allowed_models", "allowed_efforts", "defaults_by_parent_harness"].some((field) => Object.hasOwn(value, field));
-  const legacyDefaultChoice = isLegacyShape && typeof value.default_model === "string" && value.default_model.trim().length > 0
-    ? { provider: childProvider(value.default_provider, "default_provider"), model: value.default_model.trim() }
-    : null;
-  const legacyAllowedModels = legacyDefaultChoice
-    ? [...DEFAULT_CHILD_RUN_SETTINGS.allowed_models, legacyDefaultChoice]
-      .filter((choice, index, all) => all.findIndex((candidate) => candidate.provider === choice.provider && candidate.model === choice.model) === index)
-    : DEFAULT_CHILD_RUN_SETTINGS.allowed_models;
-  const legacyEffort = value.default_effort;
-  const legacyAllowedEfforts = isLegacyShape && typeof legacyEffort === "string" && CHILD_RUN_EFFORT_SET.has(legacyEffort)
-    ? [...new Set([...DEFAULT_CHILD_RUN_SETTINGS.allowed_efforts, legacyEffort])]
-    : DEFAULT_CHILD_RUN_SETTINGS.allowed_efforts;
-  const hasParentDefaults = value.defaults_by_parent_harness !== undefined;
-  if (hasParentDefaults && !isRecord(value.defaults_by_parent_harness)) {
-    throw validationError("Per-parent-harness child defaults must be an object.", { field: "defaults_by_parent_harness" });
+const NO_KNOWN_MODELS: KnownModels = () => undefined;
+
+/** Strict mode throws; lenient mode (loading) warns and falls back so a broken group never stops Core. */
+function recoverGroup<T>(lenient: boolean, group: string, fallback: T, parse: () => T): T {
+  try {
+    return parse();
+  } catch (error) {
+    if (!lenient) throw error;
+    console.warn(`[owl-core] Stored child-agent settings: ${group} is invalid, using the defaults.`, error instanceof Error ? error.message : error);
+    return fallback;
   }
-  const settings = {
-    ...DEFAULT_CHILD_RUN_SETTINGS,
-    ...value,
-    ...(isLegacyShape ? { allowed_models: legacyAllowedModels, allowed_efforts: legacyAllowedEfforts } : {}),
-  };
-  const defaultProvider = childProvider(settings.default_provider, "default_provider");
-  if (typeof settings.default_model !== "string" || settings.default_model.trim().length === 0) {
-    throw validationError("The default child-agent model must be a non-empty string.", { field: "default_model" });
-  }
-  const rawModels = settings.allowed_models;
-  if (!Array.isArray(rawModels) || rawModels.length < 1 || rawModels.length > 20) {
-    throw validationError("Allowed child-agent models must contain 1 to 20 choices.", { field: "allowed_models" });
-  }
-  const allowedModels: { provider: ChildRunSettings["default_provider"]; model: string }[] = [];
-  rawModels.forEach((choice, index) => {
-    if (!isRecord(choice)) throw validationError("Allowed child-agent models must be provider/model objects.", { field: "allowed_models", index });
-    const provider = childProvider(choice.provider, "allowed_models");
-    if (typeof choice.model !== "string" || choice.model.trim().length === 0) {
-      throw validationError("Allowed child-agent model names must be non-empty strings.", { field: "allowed_models", index });
+}
+
+function parseHarnessChoice(harness: ChildRunProvider, raw: unknown, knownModels: KnownModels): ChildRunHarnessChoice {
+  const field = `executor_by_harness.${harness}`;
+  const standard = DEFAULT_CHILD_RUN_SETTINGS.executor_by_harness[harness];
+  if (raw !== undefined && !isRecord(raw)) throw validationError("Each Executor harness needs a model and effort.", { field });
+  const merged = { ...standard, ...Object.fromEntries(Object.entries(raw ?? {}).filter(([, item]) => item !== undefined)) };
+  let model: string | null = null;
+  if (merged.model !== null) {
+    model = typeof merged.model === "string" ? merged.model.trim() : "";
+    if (model.length === 0 || model.length > 200) {
+      throw validationError("The Executor model must be a non-empty string of at most 200 characters.", { field: `${field}.model` });
     }
-    const model = choice.model.trim();
-    if (allowedModels.some((candidate) => candidate.provider === provider && candidate.model === model)) {
-      throw validationError("Allowed child-agent models cannot contain duplicates.", { field: "allowed_models", index });
+    if (harness === "opencode" && !splitOpencodeModel(model)) {
+      throw validationError("An opencode model must look like providerID/modelID.", { field: `${field}.model` });
     }
-    assertKnownModel(knownModels, provider, model, { field: "allowed_models", index });
-    allowedModels.push({ provider, model });
+    assertKnownModel(knownModels, harness, model, { field: `${field}.model` });
+  } else if (harness !== "opencode") {
+    throw validationError("The claude and codex Executor models cannot be null.", { field: `${field}.model` });
+  }
+  const effort = merged.effort;
+  if (effort !== null && (typeof effort !== "string" || !CHILD_RUN_EFFORT_SET.has(effort))) {
+    throw validationError("The Executor effort must be null or a supported effort.", { field: `${field}.effort` });
+  }
+  return { model, effort: effort as ChildRunEffort | null };
+}
+
+function parseExecutorChoices(
+  value: JsonObject,
+  knownModels: KnownModels,
+  lenient: boolean,
+): Pick<ChildRunSettings, "executor_harness" | "executor_by_harness"> {
+  const standard = DEFAULT_CHILD_RUN_SETTINGS;
+  const rawHarness = value.executor_harness ?? standard.executor_harness;
+  const harness = recoverGroup(lenient, "executor_harness", standard.executor_harness, () => {
+    if (typeof rawHarness !== "string" || !(CHILD_RUN_PROVIDERS as readonly string[]).includes(rawHarness)) {
+      throw validationError("executor_harness must be claude, codex or opencode.", { field: "executor_harness" });
+    }
+    return rawHarness as ChildRunProvider;
   });
-  const defaultModel = settings.default_model.trim();
-  if (!allowedModels.some((choice) => choice.provider === defaultProvider && choice.model === defaultModel)) {
-    throw validationError("The default child-agent model must be in the allowed list.", { field: "default_model" });
-  }
-  const rawEfforts = settings.allowed_efforts;
-  if (!Array.isArray(rawEfforts) || rawEfforts.length < 1 || rawEfforts.length > 5) {
-    throw validationError("Allowed child-agent efforts must contain 1 to 5 choices.", { field: "allowed_efforts" });
-  }
-  const allowedEfforts = rawEfforts.map((effort, index) => {
-    if (typeof effort !== "string" || !CHILD_RUN_EFFORT_SET.has(effort)) {
-      throw validationError("Allowed child-agent efforts must be low, medium, high, xhigh, or max.", { field: "allowed_efforts", index });
+  const rawRows = recoverGroup<JsonObject>(lenient, "executor_by_harness", {}, () => {
+    if (value.executor_by_harness !== undefined && !isRecord(value.executor_by_harness)) {
+      throw validationError("executor_by_harness must be an object.", { field: "executor_by_harness" });
     }
-    if (rawEfforts.indexOf(effort) !== index) {
-      throw validationError("Allowed child-agent efforts cannot contain duplicates.", { field: "allowed_efforts", index });
-    }
-    return effort as NonNullable<ChildRunSettings["default_effort"]>;
+    return (value.executor_by_harness ?? {}) as JsonObject;
   });
-  if (!hasParentDefaults) {
-    for (const effort of ["low", "medium"] as const) {
-      if (!allowedEfforts.includes(effort)) allowedEfforts.push(effort);
-    }
+  const rows = Object.fromEntries(CHILD_RUN_PROVIDERS.map((name) => [
+    name,
+    recoverGroup(lenient, `executor_by_harness.${name}`, standard.executor_by_harness[name], () => parseHarnessChoice(name, rawRows[name], knownModels)),
+  ])) as Record<ChildRunProvider, ChildRunHarnessChoice>;
+  if (!lenient && rows[harness].model === null) {
+    throw validationError(`Choose a model for the ${harness} Executor.`, { field: `executor_by_harness.${harness}.model` });
   }
-  const defaultEffort = settings.default_effort;
-  if (defaultEffort !== null && (typeof defaultEffort !== "string" || !CHILD_RUN_EFFORT_SET.has(defaultEffort))) {
-    throw validationError("The default child-agent effort must be null or a supported effort.", { field: "default_effort" });
-  }
-  if (defaultEffort !== null && !allowedEfforts.includes(defaultEffort as NonNullable<ChildRunSettings["default_effort"]>)) {
-    throw validationError("The default child-agent effort must be in the allowed list.", { field: "default_effort" });
-  }
-  const rawDefaults = hasParentDefaults ? value.defaults_by_parent_harness as JsonObject : {};
-  const defaultsByParentHarness = Object.fromEntries(CHILD_RUN_PROVIDERS.map((harness) => {
-    const standard = DEFAULT_CHILD_RUN_SETTINGS.defaults_by_parent_harness[harness];
-    const isExplicit = Object.hasOwn(rawDefaults, harness);
-    const raw = isExplicit ? rawDefaults[harness] : standard;
-    if (!isRecord(raw)) throw validationError("Each parent harness must have a provider, model and effort default.", { field: "defaults_by_parent_harness", harness });
-    let provider = childProvider(raw.provider, "defaults_by_parent_harness");
-    if (typeof raw.model !== "string" || raw.model.trim().length === 0) {
-      throw validationError("A parent-harness default model must be a non-empty string.", { field: "defaults_by_parent_harness", harness });
-    }
-    let model = raw.model.trim();
-    if (!allowedModels.some((choice) => choice.provider === provider && choice.model === model)) {
-      if (isExplicit || provider !== standard.provider || model !== standard.model) {
-        throw validationError("Parent-harness provider/model defaults must be in the allowed list.", { field: "defaults_by_parent_harness", harness });
-      }
-      const replacement = allowedModels.find((choice) => choice.provider === provider) ?? allowedModels[0];
-      provider = replacement.provider;
-      model = replacement.model;
-    }
-    let effort = raw.effort;
-    if (effort !== null && (typeof effort !== "string" || !CHILD_RUN_EFFORT_SET.has(effort))) {
-      throw validationError("A parent-harness default effort must be null or a supported effort.", { field: "defaults_by_parent_harness", harness });
-    }
-    if (effort !== null && !allowedEfforts.includes(effort as NonNullable<ChildRunSettings["default_effort"]>)) {
-      if (isExplicit || effort !== standard.effort) {
-        throw validationError("Parent-harness default efforts must be in the allowed list.", { field: "defaults_by_parent_harness", harness });
-      }
-      effort = allowedEfforts.includes(settings.default_effort as NonNullable<ChildRunSettings["default_effort"]>)
-        ? settings.default_effort
-        : allowedEfforts[0];
-    }
-    return [harness, { provider, model, effort: effort as ChildRunSettings["default_effort"] }];
-  })) as ChildRunSettings["defaults_by_parent_harness"];
+  return { executor_harness: harness, executor_by_harness: rows };
+}
+
+function parseChildRunLimits(value: JsonObject): Pick<ChildRunSettings, "timeout_minutes" | "max_timeout_minutes" | "max_attempts"> {
+  const settings = { ...DEFAULT_CHILD_RUN_SETTINGS, ...value } as JsonObject;
   const integer = (field: string, minimum: number, maximum: number): number => {
-    const item = (settings as JsonObject)[field];
+    const item = settings[field];
     if (typeof item !== "number" || !Number.isSafeInteger(item) || item < minimum || item > maximum) {
       throw validationError(`${field} must be an integer from ${minimum} to ${maximum}.`, { field });
     }
@@ -12501,22 +12490,33 @@ function normalizeChildRunSettings(value: unknown, knownModels: KnownModels): Ch
   };
   const maxTimeout = integer("max_timeout_minutes", 5, 1440);
   const timeout = integer("timeout_minutes", 5, maxTimeout);
-  const attempts = integer("max_attempts", 1, 3);
-  const tokenRelay = normalizeTokenRelaySettings(value.token_relay, knownModels);
-  const researchSubagent = normalizeResearchSubagentSettings(value.research_subagent, knownModels);
+  return { timeout_minutes: timeout, max_timeout_minutes: maxTimeout, max_attempts: integer("max_attempts", 1, 3) };
+}
+
+/** Strict (saving) or lenient (loading, which never throws and skips the known-model check). */
+function parseChildRunSettings(value: JsonObject, knownModels: KnownModels, lenient: boolean): ChildRunSettings {
+  const standard = DEFAULT_CHILD_RUN_SETTINGS;
   return {
-    default_provider: defaultProvider,
-    default_model: defaultModel,
-    default_effort: defaultEffort as ChildRunSettings["default_effort"],
-    defaults_by_parent_harness: defaultsByParentHarness,
-    allowed_models: allowedModels,
-    allowed_efforts: allowedEfforts,
-    timeout_minutes: timeout,
-    max_timeout_minutes: maxTimeout,
-    max_attempts: attempts,
-    token_relay: tokenRelay,
-    research_subagent: researchSubagent,
+    ...parseExecutorChoices(value, knownModels, lenient),
+    ...recoverGroup(lenient, "the timeout and attempt limits", {
+      timeout_minutes: standard.timeout_minutes, max_timeout_minutes: standard.max_timeout_minutes, max_attempts: standard.max_attempts,
+    }, () => parseChildRunLimits(value)),
+    token_relay: recoverGroup(lenient, "token_relay", standard.token_relay, () => normalizeTokenRelaySettings(value.token_relay, knownModels)),
+    research_subagent: recoverGroup(lenient, "research_subagent", standard.research_subagent, () => normalizeResearchSubagentSettings(value.research_subagent, knownModels)),
   };
+}
+
+function normalizeChildRunSettings(value: unknown, knownModels: KnownModels): ChildRunSettings {
+  if (!isRecord(value)) throw validationError("Child-agent settings must be an object.", { field: "child_run_settings" });
+  return parseChildRunSettings(upgradeChildRunSettings(value), knownModels, false);
+}
+
+function loadChildRunSettings(value: unknown): ChildRunSettings {
+  if (!isRecord(value)) {
+    console.warn("[owl-core] Stored child-agent settings are not an object, using the defaults.");
+    return DEFAULT_CHILD_RUN_SETTINGS;
+  }
+  return parseChildRunSettings(upgradeChildRunSettings(value), NO_KNOWN_MODELS, true);
 }
 
 /** Merge a possibly partial stored value over the defaults so settings saved before these keys existed still load. */

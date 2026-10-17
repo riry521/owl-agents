@@ -108,3 +108,31 @@ test("a Worker agent_run with a dead pid is only reconciled as crashed on the se
   assert.equal(db.get("SELECT status FROM agent_runs WHERE id = ?", survivorRunId).status, "running");
   assert.equal(db.get("SELECT status FROM tasks WHERE id = ?", survivorTaskId).status, "running");
 });
+
+test("agent.started names the harness and its gaps only for an opencode run", async (t) => {
+  let observe;
+  const { db, core } = await createTestCore(t, {
+    agentRunner: { ...noopAgentRunner, setProcessObserver: (observer) => { observe = observer; } },
+  }, { prefix: "owl-agent-started-" });
+  const workId = await createRunningWork(core, db, "agent-started");
+  const claudeTaskId = createUlid();
+  const opencodeTaskId = createUlid();
+  const claudeRunId = createUlid();
+  const opencodeRunId = createUlid();
+  await db.createWriteLane().transact((transaction) => {
+    insertTask(transaction, workId, { id: claudeTaskId, status: "running", managerTaskId: "T1", title: "Claude" });
+    insertAgentRun(transaction, workId, claudeTaskId, { id: claudeRunId, pid: null });
+    insertTask(transaction, workId, { id: opencodeTaskId, status: "running", managerTaskId: "T2", title: "opencode" });
+    insertAgentRun(transaction, workId, opencodeTaskId, { id: opencodeRunId, pid: null });
+  });
+
+  await observe(claudeRunId, { type: "spawned", pid: process.pid, harness: "claude" });
+  await observe(opencodeRunId, { type: "spawned", pid: process.pid, harness: "opencode" });
+  const payload = (runId) => JSON.parse(db.get("SELECT payload_json FROM events WHERE type = 'agent.started' AND agent_run_id = ?", runId).payload_json);
+
+  assert.deepEqual(Object.keys(payload(claudeRunId)).sort(), ["agent_run_id", "pid", "process_cmdline_sha256", "process_start_time"]);
+  const started = payload(opencodeRunId);
+  assert.equal(started.harness, "opencode");
+  assert.ok(started.harness_gaps.length > 0);
+  assert.ok(started.harness_gaps.includes("process_skills_native"));
+});

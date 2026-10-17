@@ -195,6 +195,8 @@ test("the Hybrid Worker dispatches its own child and owns nested agent processes
   }));
   await core.start();
   await disablePlanQuality(db);
+  // These tests only provide a fake claude executable, so children must run on the claude Executor.
+  await core.setChildRunSettings({ ...core.getChildRunSettings(), executor_harness: "claude" });
   await core.setHybridMode(true);
   const created = await core.createWork(command({ title: "Hybrid visibility", summary: "x", size: "normal", project_id: null }, "sv-create"));
   const workId = created.data.work_id;

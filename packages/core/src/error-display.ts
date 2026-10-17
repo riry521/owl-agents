@@ -52,6 +52,13 @@ const RUNTIME_FAILURE_TEXT: Record<OwnerLanguage, RuntimeFailureText> = {
   },
 };
 
+/** Replaces credential-looking values (bearer, authorization, api key, sk-/xoxb- tokens) with [redacted]. */
+export function redactSecrets(text: string): string {
+  return text
+    .replace(/(bearer\s+|authorization\s*[:=]\s*(?:bearer\s+)?|api[-_ ]?key\s*[:=]\s*|access[_ -]?token\s*[:=]\s*|secret\s*[:=]\s*)[^\s,;]+/giu, "$1[redacted]")
+    .replace(/\b(?:sk|xoxb|xapp|ghp|github_pat)-[A-Za-z0-9_-]+\b/gu, "[redacted]");
+}
+
 /**
  * Build safe, actionable text for an error that crosses the Core boundary.
  * Provider/Harness stderr is deliberately used only for classification; it is
@@ -91,9 +98,6 @@ export function formatRuntimeFailure(error: unknown, subject = "Agent", language
   if (/\b5\d\d\b|internal server error|service unavailable|server_error/iu.test(text)) return t.provider(label);
   if (text.length === 0) return t.unknown(label);
 
-  const safe = message
-    .replace(/(bearer\s+|authorization\s*[:=]\s*|api[-_ ]?key\s*[:=]\s*|access[_ -]?token\s*[:=]\s*|secret\s*[:=]\s*)[^\s,;]+/giu, "$1[redacted]")
-    .replace(/\b(?:sk|xoxb|xapp|ghp|github_pat)-[A-Za-z0-9_-]+\b/gu, "[redacted]")
-    .slice(0, 1_000);
+  const safe = redactSecrets(message).slice(0, 1_000);
   return t.other(label, safe);
 }

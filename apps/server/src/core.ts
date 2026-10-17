@@ -95,8 +95,8 @@ import {
   ownerLanguageFromLocale,
   type OwnerLanguage,
 } from "../../../packages/shared/dist/owner-language.js";
-import { builtinProviderHarness, CODEX_BUILTIN_MODELS, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, PROCESS_SKILLS_INSTALL_COMMANDS } from "../../../packages/shared/dist/index.js";
-import { codexKnownModels, mergeOfficialModels } from "./model-catalog.js";
+import { builtinProviderHarness, type ModelHarness, CODEX_BUILTIN_MODELS, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, OPENCODE_API_KEY_ENV_ENV, OPENCODE_BASE_URL_ENV, DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, PROCESS_SKILLS_INSTALL_COMMANDS } from "../../../packages/shared/dist/index.js";
+import { codexKnownModels, mergeOfficialModels, opencodeKnownModels } from "./model-catalog.js";
 import { detectProviders, type BuiltinHarnessInfo, type BuiltinProviderInfo } from "./provider-detection.js";
 
 function coreText(language: OwnerLanguage, ja: string, en: string): string {
@@ -186,6 +186,7 @@ function validateMemoryPresetRoles(input: RoleModelSettingInput[], previous: Rol
 const BUILTIN_HARNESSES: readonly BuiltinHarnessInfo[] = [
   { id: "claude", binaryName: "claude" },
   { id: "codex", binaryName: "codex" },
+  { id: "opencode", binaryName: "opencode" },
 ];
 
 const BUILTIN_PROVIDER_PRESETS: readonly BuiltinProviderInfo[] = [
@@ -198,6 +199,11 @@ const BUILTIN_PROVIDER_PRESETS: readonly BuiltinProviderInfo[] = [
     id: "openai",
     displayName: "OpenAI",
     harnessId: "codex",
+  },
+  {
+    id: "opencode",
+    displayName: "opencode",
+    harnessId: "opencode",
   },
 ];
 
@@ -1668,8 +1674,6 @@ export function externalError(error: unknown, operation: string): ApiError {
       "work_project_already_set",
       "provider_pause_not_found",
       "write_paths_invalid",
-      "model_not_allowed",
-      "effort_not_allowed",
       "timeout_out_of_range",
       "parent_not_active",
       "too_many_children",
@@ -1693,7 +1697,7 @@ export function externalError(error: unknown, operation: string): ApiError {
       "upload_quota_exceeded",
     ]);
     const publicCode = allowedCodes.has(code) ? code as ApiError["code"] : "server_error";
-    const status = publicCode === "validation_error" || ["write_paths_invalid", "model_not_allowed", "effort_not_allowed", "timeout_out_of_range"].includes(publicCode) ? 400
+    const status = publicCode === "validation_error" || ["write_paths_invalid", "timeout_out_of_range"].includes(publicCode) ? 400
       : publicCode === "upload_too_large" || publicCode === "upload_quota_exceeded" ? 413
       : publicCode === "dependency_unavailable" || publicCode === "worktree_cleanup_failed" ? 503
         : publicCode === "parent_not_active" || publicCode === "too_many_children" ? 409
@@ -2812,8 +2816,8 @@ export class ExternalCoreAdapter implements CorePort {
     if (input.displayName.trim().length === 0 || input.displayName.length > 128) {
       throw new ApiError(400, "validation_error", "displayNameは1〜128文字で指定してください。");
     }
-    if (input.harnessId !== "claude" && input.harnessId !== "codex") {
-      throw new ApiError(400, "validation_error", "harnessIdはclaudeまたはcodexを指定してください。");
+    if (input.harnessId !== "claude" && input.harnessId !== "codex" && input.harnessId !== "opencode") {
+      throw new ApiError(400, "validation_error", "harnessIdはclaude、codex、opencodeのいずれかを指定してください。");
     }
     // A custom provider always names its endpoint; without it the harness
     // would send the provider's key to the harness's own default service.
@@ -3093,6 +3097,15 @@ export function customProviderConnectionEnv(
     throw new Error(`Custom provider '${providerId}' has no backend URL configured.`);
   }
   const useCodexVars = custom.harnessId === "codex";
+  if (custom.harnessId === "opencode") {
+    // opencode reads its endpoint from its own settings; the key stays in a variable of the configured name.
+    const keyEnv = custom.apiKeySource?.startsWith("env:") ? custom.apiKeySource.slice("env:".length) : undefined;
+    return {
+      [OPENCODE_BASE_URL_ENV]: custom.backendUrl,
+      ...(keyEnv ? { [OPENCODE_API_KEY_ENV_ENV]: keyEnv } : {}),
+      ...(keyEnv && source[keyEnv] ? { [keyEnv]: source[keyEnv] } : {}),
+    };
+  }
   const env: Record<string, string> = {
     [useCodexVars ? CODEX_PROVIDER_BASE_URL_ENV : "ANTHROPIC_BASE_URL"]: custom.backendUrl,
   };
@@ -3144,9 +3157,7 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
   const appSettings = new AppSettingsStore(owlRoot, options.dataDir);
   // A built-in provider id never has a custom-settings entry; both callbacks
   // below use this to decide whether a provider needs any override at all.
-  const isBuiltinProviderId = (normalized: string): boolean =>
-    normalized === "anthropic" || normalized === "claude"
-    || normalized === "openai" || normalized === "codex" || normalized === "openai/codex";
+  const isBuiltinProviderId = (normalized: string): boolean => builtinProviderHarness(normalized) !== null;
   const findCustomProvider = (providerId: string): CustomProviderConfig | undefined => {
     const normalized = providerId.trim().toLowerCase();
     return Object.entries(appSettings.getCustomProviders())
@@ -3178,14 +3189,13 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
       return { sharedDir, screenshotDir: appSettings.getAdvisorScreenshotDir() || defaults.screenshotDir };
     },
     getAdvisorSharedDir: () => appSettings.getAdvisorSharedDir() || advisorFolderDefaults(options.dataDir ?? resolveDataDir(owlRoot)).sharedDir,
-    knownModels: (harness: "claude" | "codex"): ReadonlySet<string> | undefined =>
-      harness === "codex" ? codexKnownModels() : undefined,
-    getProviderHarness: (providerId: string): "claude" | "codex" | undefined => {
-      const normalized = providerId.trim().toLowerCase();
-      if (normalized === "anthropic" || normalized === "claude") return "claude";
-      if (normalized === "openai" || normalized === "codex" || normalized === "openai/codex") return "codex";
+    knownModels: (harness: ModelHarness): ReadonlySet<string> | undefined =>
+      harness === "codex" ? codexKnownModels() : harness === "opencode" ? opencodeKnownModels() : undefined,
+    getProviderHarness: (providerId: string): ModelHarness | undefined => {
+      const builtin = builtinProviderHarness(providerId.trim().toLowerCase());
+      if (builtin) return builtin;
       const custom = findCustomProvider(providerId);
-      return custom?.harnessId === "claude" || custom?.harnessId === "codex" ? custom.harnessId : undefined;
+      return custom?.harnessId === "claude" || custom?.harnessId === "codex" || custom?.harnessId === "opencode" ? custom.harnessId : undefined;
     },
     // Same base-URL/API-key variables runner.ts's resolveOverrides sets for a
     // Worker/Manager/Reviewer run of this provider: read fresh so a Settings
@@ -3205,10 +3215,13 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
     if (!external || typeof external.start !== "function" || typeof external.stop !== "function" || typeof external.subscribe !== "function") {
       throw new Error("Core createCore returned an incompatible object");
     }
-    await external.start();
     // First start: store the language the OS locale implies (ja-JP -> "ja",
-    // anything else -> "en"). A stored setting is never overwritten.
+    // anything else -> "en"). A stored setting is never overwritten. This runs
+    // before start() because start() spawns the resident Advisor session, whose
+    // prompt embeds the language; storing it afterwards would make the first
+    // turn look like a prompt change.
     await external.initializeLanguage?.(ownerLanguageFromLocale(Intl.DateTimeFormat().resolvedOptions().locale));
+    await external.start();
   } catch (error) {
     throw externalError(error, "core startup");
   }

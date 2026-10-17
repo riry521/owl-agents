@@ -5,6 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { compareClaudeEntries } from "./semver.js";
 import { buildOwlApiMcpArgs } from "./owl-api-mcp-args.js";
+import { MEMORY_MCP_SERVER_NAME, mcpArgsFor } from "./owl-mcp-servers.js";
 
 export type AgentPermissionAdapter = "claude" | "codex";
 export type AgentPermissionRole = "advisor" | "manager" | "designer" | "worker" | "reviewer" | "curator" | "librarian";
@@ -33,6 +34,18 @@ const RESEARCH_HOOK_TIMEOUT_SECONDS = 10;
 const SUBAGENT_HOOK_TIMEOUT_SECONDS = 5;
 const RELAY_HOOK_TIMEOUT_SECONDS = 5;
 
+/** Upper bound for one PreToolUse hook run when a caller runs the hook itself (opencode). */
+export const PRE_TOOL_USE_HOOK_TIMEOUT_MS = 30_000;
+
+/** The node command that runs Owl's PreToolUse hook; throws when Owl is not built. */
+export function permissionHookCommand(owlRoot: string): { readonly executable: string; readonly script: string; readonly command: string } {
+  const script = resolve(owlRoot, "apps/server/dist/permission-hook.js");
+  if (!existsSync(script) || !statSync(script).isFile()) {
+    throw new Error(`Owl permission hook is missing at ${script}; build Owl before starting an agent.`);
+  }
+  return { executable: process.execPath, script, command: `${quoteShell(process.execPath)} ${quoteShell(script)}` };
+}
+
 /**
  * CLI arguments that install Owl's synchronous PreToolUse guard hook for
  * every tool. The hook only checks arguments against the block rules; it
@@ -42,11 +55,7 @@ export function buildPreToolUseHookArgs(
   adapter: AgentPermissionAdapter,
   configuration: AgentGuardConfiguration,
 ): string[] {
-  const hookPath = resolve(configuration.owlRoot, "apps/server/dist/permission-hook.js");
-  if (!existsSync(hookPath) || !statSync(hookPath).isFile()) {
-    throw new Error(`Owl permission hook is missing at ${hookPath}; build Owl before starting an agent.`);
-  }
-  const command = `${quoteShell(process.execPath)} ${quoteShell(hookPath)}`;
+  const { command } = permissionHookCommand(configuration.owlRoot);
   if (adapter === "claude") {
     const configDir = configuration.env?.CLAUDE_CONFIG_DIR || join(configuration.env?.HOME || homedir(), ".claude");
     const researchHookPath = resolve(configuration.owlRoot, "apps/server/dist/research-hook.js");
@@ -104,45 +113,6 @@ export function buildPreToolUseHookArgs(
   return ["--config", "features.hooks=true", "--config", "features.memories=false", "--config", hooks];
 }
 
-/** Environment the owl-memory MCP server needs to identify the agent and reach Owl's HTTP API. */
-const MEMORY_MCP_ENV_NAMES = [
-  "OWL_AGENT_RUN_ID",
-  "OWL_WORK_ID",
-  "OWL_TASK_ID",
-  "OWL_PROJECT_ID",
-  "OWL_API_BASE",
-  "OWL_GUARD_API_BASE",
-  "OWL_GUARD_TOKEN_FILE",
-] as const;
-
-/**
- * CLI arguments that register the read-only owl-memory MCP server. Claude gets
- * a temporary --mcp-config (never --strict-mcp-config, so user-scope MCP servers
- * stay available); Codex gets --config overrides. Empty when the server is not built.
- * OWL_ROLE is always set. The ids come from the launch path's env and are left out when the
- * role has none: an Advisor has no Work yet, a Curator no Task, and a Work may have no Project.
- */
-function buildMemoryMcpArgs(adapter: AgentPermissionAdapter, configuration: AgentGuardConfiguration): string[] {
-  const serverPath = resolve(configuration.owlRoot, "apps/server/dist/memory-mcp.js");
-  if (!existsSync(serverPath) || !statSync(serverPath).isFile()) return [];
-  const env: Record<string, string> = { OWL_ROLE: configuration.role };
-  for (const name of MEMORY_MCP_ENV_NAMES) {
-    const value = configuration.env?.[name];
-    if (value) env[name] = value;
-  }
-  if (adapter === "claude") {
-    const content = JSON.stringify({ mcpServers: { "owl-memory": { command: process.execPath, args: [serverPath], env } } });
-    const configPath = join(tmpdir(), `owl-memory-mcp-${createHash("sha256").update(content).digest("hex").slice(0, 16)}.json`);
-    writeFileSync(configPath, content, { mode: 0o600 });
-    return ["--mcp-config", configPath];
-  }
-  const envTable = `{${Object.entries(env).map(([name, value]) => `${name}=${tomlString(value)}`).join(",")}}`;
-  return [
-    "--config", `mcp_servers.owl-memory.command=${tomlString(process.execPath)}`,
-    "--config", `mcp_servers.owl-memory.args=[${tomlString(serverPath)}]`,
-    "--config", `mcp_servers.owl-memory.env=${envTable}`,
-  ];
-}
 
 /** Complete CLI permission configuration; the hooks remain the sole policy gate. */
 export function buildAgentPermissionArgs(
@@ -156,7 +126,7 @@ export function buildAgentPermissionArgs(
       "--permission-mode", "bypassPermissions",
       ...buildPreToolUseHookArgs(adapter, guardConfiguration),
       ...(role === "librarian" ? ["--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,Task"] : []),
-      ...buildMemoryMcpArgs(adapter, guardConfiguration),
+      ...mcpArgsFor(MEMORY_MCP_SERVER_NAME, adapter, guardConfiguration),
       ...buildOwlApiMcpArgs(adapter, guardConfiguration),
       ...superpowersWithoutHooksArgs(configuration.env, configuration.cwd),
     ];
@@ -169,7 +139,7 @@ export function buildAgentPermissionArgs(
     "--config",
     `approval_policy=${tomlString("never")}`,
     ...buildPreToolUseHookArgs(adapter, guardConfiguration),
-    ...buildMemoryMcpArgs(adapter, guardConfiguration),
+    ...mcpArgsFor(MEMORY_MCP_SERVER_NAME, adapter, guardConfiguration),
     ...buildOwlApiMcpArgs(adapter, guardConfiguration),
     "--config",
     `marketplaces.openai-bundled.source=${tomlString(codexBundledMarketplaceSource(configuration.env))}`,

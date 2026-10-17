@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
+import { chmod, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { createUlid } from "../../packages/db/dist/index.js";
 import { CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV } from "../../packages/shared/dist/index.js";
+import { resolveAgentExecutables } from "../../apps/server/dist/agent-runner.js";
 import { customProviderConnectionEnv } from "../../apps/server/dist/core.js";
 import { command, createTestCore } from "../helpers/core.mjs";
 import { tempDir } from "../helpers/temp.mjs";
@@ -235,4 +238,56 @@ test("a custom provider's connection env uses the Codex variables for a codex ha
     [CODEX_PROVIDER_BASE_URL_ENV]: "https://orca.example/v1",
   });
   assert.throws(() => customProviderConnectionEnv("orca", { ...codex, backendUrl: undefined }, source), /no backend URL/);
+});
+
+test("the opencode executable comes from OWL_OPENCODE_EXECUTABLE, then PATH, unless the selection names one", async (t) => {
+  const dir = await tempDir(t, "owl-opencode-bin-");
+  const onPath = join(dir, "opencode");
+  await writeFile(onPath, "#!/bin/sh\n");
+  await chmod(onPath, 0o755);
+  const saved = process.env.OWL_OPENCODE_EXECUTABLE;
+  t.after(() => {
+    if (saved === undefined) delete process.env.OWL_OPENCODE_EXECUTABLE;
+    else process.env.OWL_OPENCODE_EXECUTABLE = saved;
+  });
+  process.env.OWL_OPENCODE_EXECUTABLE = "/configured/opencode";
+  assert.equal((await resolveAgentExecutables({ harness: "claude" }, undefined, dir)).opencode, "/configured/opencode");
+  delete process.env.OWL_OPENCODE_EXECUTABLE;
+  assert.equal((await resolveAgentExecutables({ harness: "claude" }, undefined, dir)).opencode, onPath);
+  assert.equal((await resolveAgentExecutables({ harness: "opencode" }, "/selected/opencode", dir)).opencode, "/selected/opencode");
+});
+
+test("a custom opencode provider gets opencode's own connection variables and no Anthropic or Codex ones", () => {
+  const custom = { harnessId: "opencode", backendUrl: "https://orca.example/v1", apiKeySource: "env:OWL_PROVIDER_ORCA_API_KEY" };
+  assert.deepEqual(customProviderConnectionEnv("orca", custom, { OWL_PROVIDER_ORCA_API_KEY: "orca-secret-key" }), {
+    OWL_OPENCODE_BASE_URL: "https://orca.example/v1",
+    OWL_OPENCODE_API_KEY_ENV: "OWL_PROVIDER_ORCA_API_KEY",
+    OWL_PROVIDER_ORCA_API_KEY: "orca-secret-key",
+  });
+});
+
+test("an opencode Advisor model is accepted and its session is created with the opencode adapter", async (t) => {
+  const capturedRequests = [];
+  const providerClient = makeProviderClient(capturedRequests);
+
+  await withStartedCore(t, { providerClient }, async (core, db) => {
+    await updateAdvisorProvider(core, "opencode", "fake-provider/fake-model");
+    const snapshot = core.getAdvisorSettingsSnapshot();
+    assert.equal(snapshot.harnessId, "opencode");
+    assert.match(snapshot.systemPrompt, /Owl Advisor/u);
+    assert.doesNotMatch(snapshot.systemPrompt, /Harness tool names/u);
+
+    const conversation = await core.getActiveConversation();
+    const webAccount = db.get("SELECT id FROM connector_accounts WHERE owner_id = ? AND provider = 'web'", ownerId);
+    const messageId = await insertMessage(db, conversation.conversation_id, webAccount.id, "Hello from the opencode test.");
+    await core.advisorRespond(conversation.conversation_id, messageId, { channel: "web" });
+    await waitFor(() => {
+      const turn = db.get("SELECT status FROM advisor_turns WHERE conversation_id = ? ORDER BY queued_at DESC LIMIT 1", conversation.conversation_id);
+      return turn?.status === "completed" ? turn : null;
+    }, { message: "the Advisor turn to complete" });
+    const requests = capturedRequests.filter((request) => request.model === "fake-provider/fake-model");
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].adapter, "opencode");
+    assert.match(requests[0].system_prompt, /Owl Advisor/u);
+  });
 });

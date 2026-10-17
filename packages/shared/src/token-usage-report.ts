@@ -1,6 +1,6 @@
 export type TokenUsagePeriod = "today" | "7d" | "30d";
 export const TOKEN_USAGE_PERIODS: readonly TokenUsagePeriod[] = ["today", "7d", "30d"];
-export type TokenUsageHarness = "claude" | "codex" | "other";
+export type TokenUsageHarness = "claude" | "codex" | "opencode" | "other";
 export type TokenUsageRole = "advisor" | "manager" | "designer" | "worker" | "reviewer" | "executor";
 
 export interface TokenUsageTotals {

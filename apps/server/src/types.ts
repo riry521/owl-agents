@@ -1,6 +1,8 @@
 import type { OwnerLanguage } from "../../../packages/shared/dist/owner-language.js";
+import type { ModelHarness } from "../../../packages/shared/dist/harness-models.js";
 import type { GuardTokenIssuer } from "../../../packages/shared/dist/guard-token.js";
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
+import type { OpencodeChildOutcome, OpencodeChildRun } from "../../../packages/shared/dist/index.js";
 import type { KnowledgeAutomationSettings, KnowledgeAutomationSnapshot } from "../../../packages/shared/dist/knowledge-automation.js";
 import type { WebResearchCapture } from "../../../packages/shared/dist/web-research.js";
 import type {
@@ -862,7 +864,7 @@ export interface CreateCoreOptions {
   getAdvisorPersona?: () => string;
   getAdvisorFolders?: () => { sharedDir: string; screenshotDir: string } | null;
   getAdvisorSharedDir?: () => string | null;
-  getProviderHarness?: (providerId: string) => "claude" | "codex" | undefined;
+  getProviderHarness?: (providerId: string) => ModelHarness | undefined;
   /** Environment and CLI paths for Hybrid Executor processes, forwarded to @owl/core. */
   executorRuntime?: () => Promise<{
     readonly owlRoot: string;
@@ -870,6 +872,7 @@ export interface CreateCoreOptions {
     readonly executables: { readonly claude?: string; readonly codex?: string };
     readonly guardToken?: GuardTokenIssuer;
     readonly detectRateLimit?: (provider: string, stdout: string, stderr: string) => { resets_at: string | null } | null;
+    readonly runOpencode?: (run: OpencodeChildRun) => Promise<OpencodeChildOutcome>;
   }>;
 }
 

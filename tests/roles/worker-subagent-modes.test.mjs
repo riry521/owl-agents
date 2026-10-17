@@ -23,8 +23,8 @@ test("the prompt allows own subagents and passes Task rules on without dispatch 
 
 test("the prompt keeps dispatch rules and bans own subagents and fork when hybrid is on", () => {
   const p = buildWorkerPrompt(request, undefined, null, true);
-  assert.match(p, /use Owl's dispatch tool/);
-  assert.match(p, /Choose provider, model, and effort independently/);
+  assert.match(p, /use Owl's dispatch tools \(the dispatch and wait tools of the owl-dispatch MCP server\)/);
+  assert.match(p, /Owl starts every child with the Executor harness, model, and effort set in Owl's settings/);
   assert.match(p, /Use wait on every dispatched run/);
   assert.match(p, /integrate the work, and check it together/);
   assert.doesNotMatch(p, /you may use your own fork/);

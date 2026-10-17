@@ -11,7 +11,7 @@ export interface TokenUsageReportInput {
   readonly period: TokenUsagePeriod;
   readonly top: number;
   readonly now: Date;
-  readonly harnessOf: (provider: string) => "claude" | "codex" | undefined;
+  readonly harnessOf: (provider: string) => "claude" | "codex" | "opencode" | undefined;
 }
 
 interface RunAggregate {

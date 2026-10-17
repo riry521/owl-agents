@@ -336,6 +336,7 @@ function normalizeProviderId(provider: string): string {
   const normalized = provider.trim().toLowerCase();
   if (normalized === "claude" || normalized === "anthropic") return "anthropic";
   if (normalized === "codex" || normalized === "openai/codex" || normalized === "openai") return "openai";
+  if (normalized === "opencode") return "opencode";
   return normalized;
 }
 

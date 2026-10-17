@@ -12,6 +12,8 @@ import { providerConfigurationError, providerSelection, resolveExecutableForSele
 import type { AgentRunner } from "./types.js";
 import type { GuardTokenIssuer } from "../../../packages/shared/dist/guard-token.js";
 import type { PromptObserver } from "../../../packages/shared/dist/index.js";
+import { OPENCODE_EXECUTABLE_ENV, type OpencodeChildOutcome, type OpencodeChildRun } from "../../../packages/shared/dist/index.js";
+import { runOpencodeChild } from "./opencode-child.js";
 import type { PlanUsageSnapshot } from "../../../packages/shared/dist/plan-usage.js";
 
 interface AgentRuntimeModule {
@@ -20,7 +22,7 @@ interface AgentRuntimeModule {
 }
 
 type AgentProcessEvent =
-  | { readonly type: "spawned"; readonly pid: number }
+  | { readonly type: "spawned"; readonly pid: number; readonly harness?: string }
   | { readonly type: "exited"; readonly pid: number };
 
 async function loadAgentRuntimeModule(): Promise<AgentRuntimeModule> {
@@ -180,17 +182,21 @@ export async function resolveAgentExecutables(
   selection: ProviderSelection,
   selectedExecutable: string | undefined,
   pathValue: string,
-): Promise<{ claude?: string; codex?: string }> {
+): Promise<{ claude?: string; codex?: string; opencode?: string }> {
   const configuredClaude = process.env.OWL_CLAUDE_EXECUTABLE?.trim()
     ?? (selection.harness === "claude" ? process.env.OWL_PROVIDER_EXECUTABLE?.trim() : undefined);
   const configuredCodex = process.env.OWL_CODEX_EXECUTABLE?.trim();
+  const configuredOpencode = process.env[OPENCODE_EXECUTABLE_ENV]?.trim();
   const claude = selection.harness === "claude" && selectedExecutable
     ? selectedExecutable
     : configuredClaude && configuredClaude.startsWith("/") ? configuredClaude : await resolveBinary("claude", pathValue);
   const codex = selection.harness === "codex" && selectedExecutable
     ? selectedExecutable
     : configuredCodex && configuredCodex.startsWith("/") ? configuredCodex : await resolveBinary("codex", pathValue);
-  return { ...(claude ? { claude } : {}), ...(codex ? { codex } : {}) };
+  const opencode = selection.harness === "opencode" && selectedExecutable
+    ? selectedExecutable
+    : configuredOpencode && configuredOpencode.startsWith("/") ? configuredOpencode : await resolveBinary("opencode", pathValue);
+  return { ...(claude ? { claude } : {}), ...(codex ? { codex } : {}), ...(opencode ? { opencode } : {}) };
 }
 
 /** Environment variable names that hold custom provider API keys. */
@@ -207,8 +213,9 @@ function guardEnvironment(guard: AgentGuardConfiguration | undefined): Record<st
 export interface HybridExecutorRuntime {
   readonly owlRoot: string;
   readonly env: Readonly<Record<string, string>>;
-  readonly executables: { readonly claude?: string; readonly codex?: string };
+  readonly executables: { readonly claude?: string; readonly codex?: string; readonly opencode?: string };
   readonly guardToken?: GuardTokenIssuer;
+  readonly runOpencode?: (run: OpencodeChildRun) => Promise<OpencodeChildOutcome>;
 }
 
 /**
@@ -229,7 +236,7 @@ export function createHybridExecutorRuntime(
       deny: customProviderApiKeyEnvNames(owlRoot),
       extra: guardEnvironment(guard),
     });
-    return { owlRoot, env, executables, ...(guard ? { guardToken: guard.issueToken } : {}) };
+    return { owlRoot, env, executables, runOpencode: (run) => runOpencodeChild(run, { executable: executables.opencode }), ...(guard ? { guardToken: guard.issueToken } : {}) };
   };
 }
 
@@ -321,8 +328,10 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
         const executables = await resolveAgentExecutables(selection, executablePath, pathValue);
         delete env.OWL_CLAUDE_EXECUTABLE;
         delete env.OWL_CODEX_EXECUTABLE;
+        delete env[OPENCODE_EXECUTABLE_ENV];
         if (executables.claude) env.OWL_CLAUDE_EXECUTABLE = executables.claude;
         if (executables.codex) env.OWL_CODEX_EXECUTABLE = executables.codex;
+        if (executables.opencode) env[OPENCODE_EXECUTABLE_ENV] = executables.opencode;
 
         let model = selection.model;
         const appSettings = new AppSettingsStore(owlRoot, resolveDataDir(owlRoot));
@@ -339,8 +348,8 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
             if (normalizedId.length === 0) {
               throw new ApiError(503, "dependency_unavailable", "カスタムProvider設定に空のProvider IDがあります。設定を修正してください。", { provider: providerId });
             }
-            if (config.harnessId !== "claude" && config.harnessId !== "codex") {
-              throw new ApiError(503, "dependency_unavailable", `カスタムProvider ${providerId} のHarness '${config.harnessId}'は未対応です。claudeまたはcodexを指定してください。`, { provider: providerId, harness: config.harnessId });
+            if (config.harnessId !== "claude" && config.harnessId !== "codex" && config.harnessId !== "opencode") {
+              throw new ApiError(503, "dependency_unavailable", `カスタムProvider ${providerId} のHarness '${config.harnessId}'は未対応です。claude、codex、opencodeのいずれかを指定してください。`, { provider: providerId, harness: config.harnessId });
             }
             const apiKeyEnv = config.apiKeySource?.startsWith("env:")
               ? config.apiKeySource.slice("env:".length)
@@ -354,7 +363,7 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
               if (typeof process.env[apiKeyEnv] === "string") providerApiKeys[apiKeyEnv] = process.env[apiKeyEnv];
             }
             providerConfigs[normalizedId] = {
-              adapter: config.harnessId === "codex" ? "codex" : "claude-cli/v1",
+              adapter: config.harnessId === "codex" ? "codex" : config.harnessId === "opencode" ? "opencode-serve/v1" : "claude-cli/v1",
               ...(config.backendUrl ? { backend_url: config.backendUrl } : {}),
               ...(validApiKeyEnv ? { api_key_env: apiKeyEnv } : {}),
             };

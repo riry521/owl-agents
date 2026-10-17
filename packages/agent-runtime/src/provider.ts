@@ -2,8 +2,11 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { reapProcessGroup } from "@owl/shared";
+import { OPENCODE_API_KEY_ENV_ENV, OPENCODE_BASE_URL_ENV, harnessOfAdapter, reapProcessGroup } from "@owl/shared";
 import { providerConfigInvalid, providerFailed } from "./errors";
+import { executeOpencode } from "./opencode-execute";
+import { opencodeSessionId, opencodeToolNames } from "./opencode-result";
+import { OpencodeSessionDriver } from "./opencode-session-driver";
 import { AdvisorSessionDriver } from "./advisor-session-driver.js";
 import { CodexSessionDriver } from "./codex-session-driver.js";
 import {
@@ -61,6 +64,11 @@ function isCodexAdapter(adapter: string): boolean {
   return adapter === "codex" || adapter === "codex-cli/v1" || adapter.startsWith("codex/");
 }
 
+/** opencode never runs from an argv; failing here keeps it from being launched with a Claude or Codex one. */
+function assertAdapterSupported(adapter: string): void {
+  if (harnessOfAdapter(adapter) === "opencode") throw providerConfigInvalid("opencode_adapter_not_supported");
+}
+
 const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 const AGENT_IDENTITY_ENV_NAMES = ["OWL_AGENT_ROLE", "OWL_AGENT_RUN_ID", "OWL_AGENT_CWD"] as const;
 /** A custom provider's endpoint/key for the harness the session's adapter selects. */
@@ -69,6 +77,8 @@ const PROVIDER_CONNECTION_ENV_NAMES = [
   "ANTHROPIC_API_KEY",
   CODEX_PROVIDER_BASE_URL_ENV,
   CODEX_PROVIDER_API_KEY_ENV,
+  OPENCODE_BASE_URL_ENV,
+  OPENCODE_API_KEY_ENV_ENV,
 ] as const;
 
 /**
@@ -129,7 +139,7 @@ function killProcessGroup(child: ChildLike, signal: "SIGTERM" | "SIGKILL"): void
  */
 function processTimeouts(env: Readonly<Record<string, string>>, adapter: string): { wallMs: number; idleMs: number } {
   try {
-    return { wallMs: agentWallTimeoutMs(env, env.OWL_AGENT_ROLE), idleMs: (isCodexAdapter(adapter) || isClaudeAdapter(adapter)) ? agentIdleTimeoutMs(env, env.OWL_AGENT_ROLE) : 0 };
+    return { wallMs: agentWallTimeoutMs(env, env.OWL_AGENT_ROLE), idleMs: (isCodexAdapter(adapter) || isClaudeAdapter(adapter) || harnessOfAdapter(adapter) === "opencode") ? agentIdleTimeoutMs(env, env.OWL_AGENT_ROLE) : 0 };
   } catch (error) {
     if (error instanceof AgentTimeoutSettingError) throw providerConfigInvalid(`${error.setting.toLowerCase()}_invalid`);
     throw error;
@@ -138,6 +148,7 @@ function processTimeouts(env: Readonly<Record<string, string>>, adapter: string)
 
 export function buildArgv(request: ProviderExecutionRequest, outputSchemaPath?: string): string[] {
   const owlRoot = request.env.OWL_ROOT ?? process.env.OWL_ROOT ?? process.cwd();
+  assertAdapterSupported(request.adapter);
   if (isClaudeAdapter(request.adapter)) {
     return [
       request.env.OWL_CLAUDE_EXECUTABLE ?? "",
@@ -224,9 +235,11 @@ export function createCliProvider(options: AgentRunnerOptions): ProviderClient {
     if (typeof request.cwd !== "string" || request.cwd.trim().length === 0) {
       throw providerConfigInvalid("working_directory_required");
     }
+    const requestIsOpencode = harnessOfAdapter(request.adapter) === "opencode";
+    if (typeof request.adapter === "string" && !requestIsOpencode) assertAdapterSupported(request.adapter);
     const requestIsClaude = typeof request.adapter === "string" && isClaudeAdapter(request.adapter);
     const requestIsCodex = typeof request.adapter === "string" && isCodexAdapter(request.adapter);
-    if (!requestIsClaude && !requestIsCodex) {
+    if (!requestIsClaude && !requestIsCodex && !requestIsOpencode) {
       throw providerConfigInvalid("adapter_not_in_allowlist");
     }
     // This provider owns the agent environment and the resolved CLI paths.
@@ -245,10 +258,11 @@ export function createCliProvider(options: AgentRunnerOptions): ProviderClient {
       const value = request.env?.[key];
       if (typeof value === "string") sessionEnv[key] = value;
     }
-    const selectedExecutable = requestIsClaude
+    // opencode is found by the driver from OWL_OPENCODE_EXECUTABLE or PATH, so it needs no absolute path here.
+    const selectedExecutable = requestIsOpencode ? "" : requestIsClaude
       ? sessionEnv.OWL_CLAUDE_EXECUTABLE ?? (isClaudeAdapter(adapter) ? executablePath : undefined)
       : sessionEnv.OWL_CODEX_EXECUTABLE ?? (isCodexAdapter(adapter) ? executablePath : undefined);
-    if (selectedExecutable === undefined || !isAbsoluteExecutable(selectedExecutable) || selectedExecutable.length === 0) {
+    if (!requestIsOpencode && (selectedExecutable === undefined || !isAbsoluteExecutable(selectedExecutable) || selectedExecutable.length === 0)) {
       throw providerConfigInvalid("argv_executable_not_absolute");
     }
     mkdirSync(request.cwd, { recursive: true });
@@ -257,9 +271,11 @@ export function createCliProvider(options: AgentRunnerOptions): ProviderClient {
     const sessionRequest = { ...request, env: sessionEnv };
     let session: ProviderSession;
     try {
-      session = requestIsClaude
-        ? await AdvisorSessionDriver.create(sessionRequest, selectedExecutable, { reapGraceMs: options.reapGraceMs })
-        : await CodexSessionDriver.create(sessionRequest, selectedExecutable, { reapGraceMs: options.reapGraceMs });
+      session = requestIsOpencode
+        ? await OpencodeSessionDriver.create(sessionRequest, { reapGraceMs: options.reapGraceMs })
+        : requestIsClaude
+          ? await AdvisorSessionDriver.create(sessionRequest, selectedExecutable as string, { reapGraceMs: options.reapGraceMs })
+          : await CodexSessionDriver.create(sessionRequest, selectedExecutable as string, { reapGraceMs: options.reapGraceMs });
     } catch (error) {
       lease?.release();
       throw error;
@@ -281,6 +297,17 @@ export function createCliProvider(options: AgentRunnerOptions): ProviderClient {
       const requestCwd = typeof request.cwd === "string" ? request.cwd.trim() : "";
       if (requestCwd.length === 0) {
         throw providerConfigInvalid("working_directory_required");
+      }
+      if (harnessOfAdapter(requestAdapter) === "opencode") {
+        const lease = issueGuardToken(options.guardToken, request.role, request.env.OWL_AGENT_RUN_ID || request.invocation_id);
+        try {
+          return await executeOpencode(
+            { ...request, adapter: requestAdapter, model: requestModel, cwd: resolve(requestCwd) },
+            { env: env ?? {}, guardTokenFile: lease?.file, reapGraceMs: options.reapGraceMs, timeouts: processTimeouts({ ...env, ...request.env }, requestAdapter) },
+          );
+        } finally {
+          lease?.release();
+        }
       }
       const executionEnv = {
         ...env,
@@ -509,6 +536,7 @@ export function createCliProvider(options: AgentRunnerOptions): ProviderClient {
 }
 
 function providerSessionId(adapter: string, stdout: string): string | undefined {
+  if (harnessOfAdapter(adapter) === "opencode") return opencodeSessionId(stdout);
   for (const line of stdout.split(/\r?\n/u)) {
     try {
       const event: unknown = JSON.parse(line);
@@ -536,6 +564,7 @@ function parseRecord(line: string): Record<string, unknown> | null {
 export function toolNamesInLine(adapter: string, line: string): string[] {
   const event = parseRecord(line);
   if (!event) return [];
+  if (harnessOfAdapter(adapter) === "opencode") return opencodeToolNames(event);
   if (adapter === "codex" || adapter.startsWith("codex")) {
     const item = event.item as Record<string, unknown> | undefined;
     if (event.type !== "item.started" && event.type !== "item.completed" || !item || typeof item !== "object") return [];

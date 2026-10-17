@@ -9,10 +9,14 @@ import { createUlid } from "../../packages/db/dist/index.js";
 import {
   codexKnownModels,
   mergeOfficialModels,
+  opencodeKnownModels,
   parseAnthropicModels,
+  parseOpencodeModels,
   readCodexModelCatalog,
   refreshCodexModelCatalog,
+  refreshOpencodeModelCatalog,
 } from "../../apps/server/dist/model-catalog.js";
+import { readFakeOpencodeLog, writeFakeOpencode } from "../helpers/fake-opencode.mjs";
 import { CODEX_BUILTIN_MODELS, DEFAULT_HARNESS_MODELS } from "../../packages/shared/dist/index.js";
 import { DEFAULT_CHILD_RUN_SETTINGS } from "../../packages/shared/dist/child-runs.js";
 import { createTestCore } from "../helpers/core.mjs";
@@ -131,7 +135,7 @@ test("default role and child-agent models are real harness models", async (t) =>
     assert.equal(curator.provider, "anthropic");
     assert.equal(curator.model, "claude-haiku-5-5");
     assert.equal(curator.effort, "low");
-    assert.equal(core.getChildRunSettings().default_model, DEFAULT_HARNESS_MODELS.claude);
+    assert.equal(core.getChildRunSettings().executor_by_harness.claude.model, DEFAULT_HARNESS_MODELS.claude);
   });
 });
 
@@ -171,25 +175,17 @@ test("model settings reject Codex models the harness does not know", async (t) =
     const accepted = await updateRoles(core, { worker: { model: "gpt-6-luna" } });
     assert.equal(accepted.data.roles.find(({ role }) => role === "worker").model, "gpt-6-luna");
     const childSettings = core.getChildRunSettings();
-    const claudeModels = childSettings.allowed_models.filter(({ provider }) => provider !== "codex");
-    const defaultsByParentHarness = {
-      ...childSettings.defaults_by_parent_harness,
-      claude: { ...childSettings.defaults_by_parent_harness.claude, model: "gpt-6-luna" },
-    };
+    const withCodexModel = (model) => ({
+      ...childSettings,
+      executor_harness: "codex",
+      executor_by_harness: { ...childSettings.executor_by_harness, codex: { ...childSettings.executor_by_harness.codex, model } },
+    });
     await assert.rejects(
-      () => core.setChildRunSettings({
-        ...childSettings,
-        defaults_by_parent_harness: defaultsByParentHarness,
-        allowed_models: [...claudeModels, { provider: "codex", model: "luna" }],
-      }),
+      () => core.setChildRunSettings(withCodexModel("luna")),
       (error) => error?.code === "validation_error",
     );
-    const updatedChildSettings = await core.setChildRunSettings({
-      ...childSettings,
-      defaults_by_parent_harness: defaultsByParentHarness,
-      allowed_models: [...claudeModels, { provider: "codex", model: "gpt-6-luna" }],
-    });
-    assert.ok(updatedChildSettings.allowed_models.some(({ provider, model }) => provider === "codex" && model === "gpt-6-luna"));
+    const updatedChildSettings = await core.setChildRunSettings(withCodexModel("gpt-6-luna"));
+    assert.equal(updatedChildSettings.executor_by_harness.codex.model, "gpt-6-luna");
   });
 });
 
@@ -208,10 +204,10 @@ test("Core warns at startup about saved models its harness no longer offers, wit
   const root = await tempDir(t, "owl-model-warn-");
   // Every other role keeps its own default Claude model untouched by this
   // test, so the permissive list must still cover them for the save to pass.
-  // Default child-agent Claude models are saved too, so they must be covered.
+  // The default child-agent Claude model is saved too, so it must be covered.
   const defaultClaudeModels = [
     DEFAULT_HARNESS_MODELS.claude, "claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-haiku-5-5",
-    ...DEFAULT_CHILD_RUN_SETTINGS.allowed_models.filter(({ provider }) => provider === "claude").map(({ model }) => model),
+    DEFAULT_CHILD_RUN_SETTINGS.executor_by_harness.claude.model,
   ];
   const permissiveKnownModels = (harness) =>
     harness === "codex"
@@ -226,7 +222,11 @@ test("Core warns at startup about saved models its harness no longer offers, wit
     const db = createTestDatabase(root);
     const { core } = await createTestCore(t, { db, owlRoot: root, dataDir: root, knownModels: permissiveKnownModels });
     await updateRoles(core, { worker: { provider: "openai", model: "retired-worker-model" } });
-    await core.setChildRunSettings({ ...core.getChildRunSettings(), default_effort: "high" });
+    const settings = core.getChildRunSettings();
+    await core.setChildRunSettings({
+      ...settings,
+      executor_by_harness: { ...settings.executor_by_harness, codex: { ...settings.executor_by_harness.codex, effort: "high" } },
+    });
     db.close();
   }
 
@@ -234,7 +234,7 @@ test("Core warns at startup about saved models its harness no longer offers, wit
   const { core } = await createTestCore(t, { db, owlRoot: root, dataDir: root, knownModels: strictKnownModels });
   const warnMock = t.mock.method(console, "warn");
   await core.start();
-  assert.equal(core.getChildRunSettings().default_effort, "high");
+  assert.equal(core.getChildRunSettings().executor_by_harness.codex.effort, "high");
   await core.stop({ force: true }).catch(() => {});
   db.close();
 
@@ -339,4 +339,37 @@ test("a hung Codex app-server is killed once the refresh times out", async (t) =
 test("a missing Codex executable resolves false without throwing", async (t) => {
   t.mock.method(console, "warn", () => undefined);
   assert.equal(await refreshCodexModelCatalog({ executable: join(tmpdir(), "owl-no-such-codex") }), false);
+});
+
+test("a missing opencode executable resolves false without throwing", async (t) => {
+  t.mock.method(console, "warn", () => undefined);
+  assert.equal(await refreshOpencodeModelCatalog({ env: { PATH: "", HOME: tmpdir() } }), false);
+});
+
+test("the opencode model catalog comes from a private serve, drops disabled models and keeps no header values", async (t) => {
+  const warn = t.mock.method(console, "warn", () => undefined);
+  const log = t.mock.method(console, "log", () => undefined);
+  const dir = await tempDir(t, "owl-opencode-catalog-");
+  const executable = await writeFakeOpencode(dir);
+  const logPath = join(dir, "log.jsonl");
+  const models = [
+    { providerID: "anthropic", modelID: "claude-x", name: "Claude X", enabled: true, status: "active", variants: [{ id: "high" }], limit: { context: 1000 }, headers: { "x-org": "SECRET-ORG-ID" } },
+    { providerID: "openai", modelID: "off", name: "Off", enabled: false, status: "active", variants: [], limit: {} },
+  ];
+  const env = { ...process.env, FAKE_OPENCODE_MODELS: JSON.stringify(models), FAKE_OPENCODE_LOG: logPath };
+  assert.equal(await refreshOpencodeModelCatalog({ executable, env }), true);
+  assert.deepEqual([...opencodeKnownModels()], ["anthropic/claude-x"]);
+  assert.deepEqual((await mergeOfficialModels({}, env)).opencode, ["anthropic/claude-x"]);
+  assert.equal(JSON.stringify(parseOpencodeModels({ data: models })).includes("SECRET-ORG-ID"), false);
+  assert.equal(JSON.stringify([...warn.mock.calls, ...log.mock.calls]).includes("SECRET-ORG-ID"), false);
+  const starts = (await readFakeOpencodeLog(logPath)).filter((entry) => entry.type === "start");
+  assert.equal(starts.length, 1);
+
+  // The saved role model setting round-trips for the opencode provider.
+  await withCore(t, {}, async (core) => {
+    await updateRoles(core, { worker: { provider: "opencode", model: "anthropic/claude-x" } });
+    const worker = core.getModelSettings().roles.find(({ role }) => role === "worker");
+    assert.equal(worker.provider, "opencode");
+    assert.equal(worker.model, "anthropic/claude-x");
+  });
 });

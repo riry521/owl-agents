@@ -12,8 +12,8 @@ import {
 } from "./provider-error";
 import { asManagerRequest, buildManagerPrompt, managerOutputSchema, parseManagerPlanWithFeedback } from "./manager";
 import { statSync } from "node:fs";
-import { EXTERNAL_DATA_POLICY, AgentTimeoutSettingError, readStoredAcceptanceCriteria, DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, PROCESS_SKILLS_PROMPT_FILES, renderProcessSkills, parseResearchSubagentSettings, researchSubagentPromptRef, type CuratorRequest, type ResearcherPromptRef, type ResearchSubagentSettings, type CuratorRunResult, type ProcessSkillsRole, type PromptObserver, roleSessionContextLimit } from "@owl/shared";
-import { type ReportCorrection, extractProviderUsage, harnessFailureDetail, isClaudeReportFormatFailure, isRecord, parseSingleJsonObject, unwrapClaudeCliResult, unwrapCodexCliResult } from "./protocol";
+import { EXTERNAL_DATA_POLICY, AgentTimeoutSettingError, readStoredAcceptanceCriteria, DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, OPENCODE_API_KEY_ENV_ENV, OPENCODE_BASE_URL_ENV, PROCESS_SKILLS_PROMPT_FILES, renderProcessSkills, parseResearchSubagentSettings, researchSubagentPromptRef, type CuratorRequest, type ResearcherPromptRef, type ResearchSubagentSettings, type CuratorRunResult, type ProcessSkillsRole, type PromptObserver, type ModelHarness, harnessOfAdapter, roleSessionContextLimit } from "@owl/shared";
+import { type ReportCorrection, extractProviderUsage, harnessFailureDetail, isClaudeReportFormatFailure, isRecord, parseSingleJsonObject, unwrapCliResult } from "./protocol";
 import { extractRoleOutputObject, providerSchema } from "./role-contract";
 import { RoleSessionManager } from "./role-session-manager";
 import { resolveOutputLogDir, writeInvalidOutputLog } from "./output-log";
@@ -259,6 +259,7 @@ const PROVIDER_TO_ADAPTER: Record<string, string> = {
   "openai/codex": "codex",
   codex: "codex",
   claude: "claude-cli/v1",
+  opencode: "opencode-serve/v1",
 };
 
 function isCodexAdapterId(adapter: string | undefined): boolean {
@@ -287,7 +288,7 @@ function processSkillsFor(role: ProcessSkillsRole, context: unknown, adapter: st
     }
   });
   const source = processSkillsSourceOf(context);
-  return renderProcessSkills(role, { skills_dir: skillsDir, source, available_files: availableFiles }, isCodexAdapterId(adapter) ? "codex" : "claude");
+  return renderProcessSkills(role, { skills_dir: skillsDir, source, available_files: availableFiles }, harnessOfAdapter(adapter) ?? "claude");
 }
 
 /** The custom provider API key values the runner holds, so a provider error echoing one never reaches the owner. */
@@ -316,12 +317,15 @@ function resolveOverrides(
   }
   const env: Record<string, string> = {};
   const codexHarness = isCodexAdapterId(resolvedAdapter);
-  if (custom?.backend_url) {
-    env[codexHarness ? CODEX_PROVIDER_BASE_URL_ENV : "ANTHROPIC_BASE_URL"] = custom.backend_url;
-  }
   const apiKey = custom?.api_key_env ? options.providerApiKeys?.[custom.api_key_env] : undefined;
-  if (apiKey) {
-    env[codexHarness ? CODEX_PROVIDER_API_KEY_ENV : "ANTHROPIC_API_KEY"] = apiKey;
+  if (harnessOfAdapter(resolvedAdapter) === "opencode") {
+    // opencode takes its endpoint through its own settings, never the Anthropic variables; the key stays in a variable of its own name.
+    if (custom?.backend_url) env[OPENCODE_BASE_URL_ENV] = custom.backend_url;
+    if (custom?.api_key_env) env[OPENCODE_API_KEY_ENV_ENV] = custom.api_key_env;
+    if (custom?.api_key_env && apiKey) env[custom.api_key_env] = apiKey;
+  } else {
+    if (custom?.backend_url) env[codexHarness ? CODEX_PROVIDER_BASE_URL_ENV : "ANTHROPIC_BASE_URL"] = custom.backend_url;
+    if (apiKey) env[codexHarness ? CODEX_PROVIDER_API_KEY_ENV : "ANTHROPIC_API_KEY"] = apiKey;
   }
   // Ids of the Work/Task/Project the agent runs for, read by its owl-memory MCP server. A role without
   // one (the Curator has no Work, a Work without a Project) leaves the variable unset.
@@ -736,9 +740,7 @@ function reviewAsCoreResult(
 function extractInnerStdout(response: { readonly adapter: string; readonly stdout: string; readonly format?: string }): string {
   if (response.format === "plain-text") return response.stdout;
   if ((response.format ?? "provider-json") === "provider-json") {
-    return response.adapter === "codex" || response.adapter.startsWith("codex")
-      ? unwrapCodexCliResult(response.stdout)
-      : unwrapClaudeCliResult(response.stdout);
+    return unwrapCliResult(response.adapter, response.stdout);
   }
   return response.stdout;
 }
@@ -748,7 +750,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
   const invocationIdFactory = options.invocationIdFactory ?? defaultInvocationId;
   const activeControllers = new Map<string, { controller: AbortController; pid?: number }>();
   const lastOutputNotifiedAt = new Map<string, number>();
-  let processObserver: ((invocationId: string, event: { type: "spawned" | "exited"; pid: number }) => void | Promise<void>) | undefined;
+  let processObserver: ((invocationId: string, event: { type: "spawned" | "exited"; pid: number; harness?: ModelHarness }) => void | Promise<void>) | undefined;
   let outputObserver: ((invocationId: string) => void) | undefined;
   let promptObserver: PromptObserver | undefined;
   let planUsageObserver: ((observation: PlanUsageSnapshot) => void) | undefined;
@@ -785,7 +787,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     : provider;
   const notifyProcessObserver = async (
     invocationId: string,
-    event: { type: "spawned" | "exited"; pid: number },
+    event: { type: "spawned" | "exited"; pid: number; harness?: ModelHarness },
   ): Promise<void> => {
     try {
       await processObserver?.(invocationId, event);
@@ -864,7 +866,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
         signal: controller.signal,
         on_spawn: (pid) => {
           active.pid = pid;
-          if (pid > 0) void notifyProcessObserver(request.invocation_id, { type: "spawned", pid });
+          if (pid > 0) void notifyProcessObserver(request.invocation_id, { type: "spawned", pid, harness: harnessOfAdapter(request.adapter) ?? undefined });
         },
         on_output: () => {
           const now = Date.now();
@@ -1076,7 +1078,9 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
         const processSkills = processSkillsFor(role, input.context, overrides.adapter ?? options.adapter);
         const researchSettings = role === "worker" ? parseResearchSubagentSettings(input.context.research_subagent) : null;
         // The prompt and the argv both follow researcher: the Worker is never told to use a role it was not given.
-        const researcher = researchSettings ? researchSubagentPromptRef(isCodexAdapterId(overrides.adapter ?? options.adapter) ? "codex" : "claude") : null;
+        const workerHarness = harnessOfAdapter(overrides.adapter ?? options.adapter) ?? "claude";
+        // opencode gets no researcher: neither its prompt nor its argv mention one.
+        const researcher = researchSettings && workerHarness !== "opencode" ? researchSubagentPromptRef(workerHarness) : null;
         const workerRequest = requestForProvider(
           role,
           invocationId,
@@ -1504,7 +1508,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
         try { process.kill(-active.pid, "SIGKILL"); } catch { try { process.kill(active.pid, "SIGKILL"); } catch { /* exited */ } }
       }
     },
-    setProcessObserver: (observer: (invocationId: string, event: { type: "spawned" | "exited"; pid: number }) => void | Promise<void>) => {
+    setProcessObserver: (observer: (invocationId: string, event: { type: "spawned" | "exited"; pid: number; harness?: ModelHarness }) => void | Promise<void>) => {
       processObserver = observer;
     },
     setOutputObserver: (observer: (invocationId: string) => void) => {

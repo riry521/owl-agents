@@ -33,10 +33,12 @@ import {
   type GuardTokenIssuer,
   type GuardTokenLease,
   type HandoffMemo,
+  type OpencodeChildOutcome,
+  type OpencodeChildRun,
   type RequestTokenUsage,
   type TokenUsage,
 } from "@owl/shared";
-import { formatRuntimeFailure } from "./error-display.js";
+import { formatRuntimeFailure, redactSecrets } from "./error-display.js";
 
 export type { ExecutorConfig, ExecutorResult, ExecutorTask, ExecutorTaskContext } from "@owl/shared";
 
@@ -54,12 +56,17 @@ const EXECUTOR_RESULT_CAP_BYTES = 32 * 1024;
 const EXECUTOR_RESULT_TRUNCATION_MARKER = "\n[Executor result truncated to 32 KiB]\n";
 const KILL_GRACE_MS = 30_000;
 const activeExecutorChildren = new Set<ChildProcess>();
+// `opencode serve` is started inside agent-runtime, so its process group is tracked by pid here.
+const activeOpencodeServePids = new Set<number>();
 
 /** Kill every dispatched child Executor process group owned by this Core instance. */
 export function terminateActiveExecutorsImmediately(): void {
   for (const child of activeExecutorChildren) {
     if (child.pid === undefined || child.exitCode !== null || child.signalCode !== null) continue;
     signalProcessGroup(child, "SIGKILL");
+  }
+  for (const pid of activeOpencodeServePids) {
+    try { process.kill(-pid, "SIGKILL"); } catch { /* the group already exited */ }
   }
 }
 
@@ -77,6 +84,8 @@ export interface ExecutorRuntime {
   readonly guardToken?: GuardTokenIssuer;
   /** Classifies a failed process's output as a provider rate limit; null when it is not one. */
   readonly detectRateLimit?: (provider: string, stdout: string, stderr: string) => { resets_at: string | null } | null;
+  /** Runs one opencode child; Core cannot import agent-runtime, so the server injects it. */
+  readonly runOpencode?: (run: OpencodeChildRun) => Promise<OpencodeChildOutcome>;
 }
 
 /**
@@ -237,6 +246,7 @@ export function buildChildRunPrompt(
   processSkills: readonly string[] | null = null,
   retry: { readonly failure_kind: string; readonly failure_reason: string } | null = null,
   relay: { readonly budget: ExecutorRelayConfig; readonly previous: RelayResume | null } | null = null,
+  harness?: string,
 ): string {
   const { title, acceptance_criteria, context, manager_notes, necessity, rules, owner_guidance: guidance, knowledge } = task.task;
   const writePaths = task.write_paths?.length ? task.write_paths : ["*"];
@@ -246,6 +256,7 @@ export function buildChildRunPrompt(
     task.instruction,
     "Other child agents may run at the same time in this workspace with disjoint write_paths. Edit only files inside your write_paths; you may read anything. Do not depend on changes another child is making concurrently. Inspect relevant existing code before editing and preserve correct work already present. Do not commit, push, create branches, rebase, or reset; the Worker integrates and Owl commits. You cannot dispatch further agents.",
     `Your write_paths: ${writePaths.join(", ")}`,
+    ...(harness === "opencode" ? ["Owl checks this harness's tool use less strictly than Claude's or Codex's, so nothing may stop a write outside your write_paths. Before each edit, confirm that the path is inside your write_paths."] : []),
     ...(retry ? [`A previous attempt failed. Check the current state of your write_paths first and keep correct work. Previous attempt: ${JSON.stringify({ failure_kind: retry.failure_kind, failure_reason: retry.failure_reason.slice(0, 300) })}`] : []),
     ...(relay?.previous ? [
       "",
@@ -300,7 +311,7 @@ function executorProcessSkills(task: ExecutorTask, provider: string): string[] |
     }
   });
   const source = task.process_skills_source ?? "setting";
-  return renderProcessSkills("executor", { skills_dir: skillsDir, source, available_files: availableFiles }, provider === "codex" ? "codex" : "claude");
+  return renderProcessSkills("executor", { skills_dir: skillsDir, source, available_files: availableFiles }, provider === "codex" || provider === "opencode" ? provider : "claude");
 }
 
 function appendCapped(current: string, chunk: Buffer): string {
@@ -326,6 +337,42 @@ function safeExecutorFailure(reason: string, config: ExecutorConfig, details = "
     new Error(reason, { cause: details }),
     `${config.provider} Executor`,
   );
+}
+
+/** Cap on the original opencode error kept next to the display text. */
+export const OPENCODE_ORIGINAL_ERROR_MAX_CHARS = 2_000;
+
+/**
+ * Keeps the original error after the display text. formatRuntimeFailure alone
+ * collapses ENOENT/permission errors into one generic setup message, which hid
+ * the real cause. Not stored separately: child_runs.failure_reason is fed from
+ * the result output, so appending there reaches it without a schema change.
+ */
+export function withOriginalOpencodeError(display: string, original: string, maxChars = OPENCODE_ORIGINAL_ERROR_MAX_CHARS): string {
+  const kept = redactSecrets(original).trim().slice(0, maxChars);
+  return kept ? `${display}\n[original error] ${kept}` : display;
+}
+
+/** Cap on the end of the cause's stderr kept by opencodeErrorText. */
+export const OPENCODE_STDERR_TAIL_CHARS = 400;
+
+/**
+ * A thrown error's message, its cause's error text and the end of the cause's
+ * stderr, secrets redacted. Why not message alone: for ENOENT or a dead serve
+ * the reason lives in the cause. Why redact before cutting the stderr tail: a
+ * cut inside "Authorization: Bearer <value>" would drop the prefix that marks
+ * the value as a secret.
+ */
+export function opencodeErrorText(error: unknown, stderrTailChars = OPENCODE_STDERR_TAIL_CHARS): string {
+  const message = error instanceof Error ? error.message : String(error);
+  const cause: unknown = error instanceof Error ? error.cause : undefined;
+  const record = typeof cause === "object" && cause !== null && !(cause instanceof Error) ? cause as { error?: unknown; stderr?: unknown } : undefined;
+  const detail = record ? record.error : cause;
+  const detailText = detail === undefined ? "" : detail instanceof Error ? detail.message : typeof detail === "string" ? detail : (() => {
+    try { return JSON.stringify(detail); } catch { return ""; }
+  })();
+  const stderr = typeof record?.stderr === "string" ? redactSecrets(record.stderr).trim().slice(-stderrTailChars) : "";
+  return redactSecrets([message, detailText, stderr].filter((part, index, all) => part && all.indexOf(part) === index).join("\n"));
 }
 
 /**
@@ -408,7 +455,7 @@ export async function runExecutorProcess(
   }
   // Both one-shot CLIs stream progress events; long silence means the run is stuck.
   let idleTimeoutMs = 0;
-  if (config.provider === "codex" || config.provider === "claude") {
+  if (config.provider === "codex" || config.provider === "claude" || config.provider === "opencode") {
     try {
       idleTimeoutMs = agentIdleTimeoutMs(runtime.env);
     } catch (error) {
@@ -453,6 +500,10 @@ export async function runExecutorProcess(
     }
     const removeRelayDir = (): void => { if (relayDir) rmSync(relayDir, { recursive: true, force: true }); };
     const processEnv = environment(task, runtime, guardLease, observer.agent_run_id, config.provider, relayStateFile);
+    if (config.provider === "opencode") {
+      void runOpencodeChild(task, config, observer, sink, runtime, processEnv, guardLease, idleTimeoutMs, started).then(resolve);
+      return;
+    }
     let command: string[];
     try {
       command = argv(config, runtime, task.workspace_dir, processEnv);
@@ -713,6 +764,67 @@ export async function runExecutorProcess(
       });
     }
   });
+}
+
+/** The opencode branch of runExecutorProcess; it owns releasing the guard lease. */
+async function runOpencodeChild(
+  task: ExecutorTask,
+  config: ExecutorConfig,
+  observer: ExecutorRunObserver,
+  sink: { usage: TokenUsage | null },
+  runtime: ExecutorRuntime,
+  env: Record<string, string>,
+  guardLease: GuardTokenLease | undefined,
+  idleTimeoutMs: number,
+  started: number,
+): Promise<ExecutorResult> {
+  const pids = new Set<number>();
+  const failure = (reason: string, details = "", original = `${reason} ${details}`): ExecutorResult => ({
+    subtask_id: task.subtask_id,
+    success: false,
+    output: withOriginalOpencodeError(safeExecutorFailure(reason, config, details), original),
+    exit_code: -1,
+    duration_ms: Date.now() - started,
+    failure_kind: "spawn_error",
+  });
+  try {
+    if (!runtime.runOpencode) return failure("opencode Executor is not available in this runtime.");
+    const outcome = await runtime.runOpencode({
+      agent_run_id: observer.agent_run_id ?? task.subtask_id,
+      model: config.model,
+      ...(config.effort ? { effort: config.effort } : {}),
+      prompt: buildChildRunPrompt(task, executorProcessSkills(task, "opencode"), observer.retry ?? null, null, "opencode"),
+      cwd: task.workspace_dir,
+      env,
+      ...(guardLease ? { guard_token_file: guardLease.file } : {}),
+      timeout_ms: config.timeout_ms,
+      idle_timeout_ms: idleTimeoutMs,
+      ...(observer.signal ? { signal: observer.signal } : {}),
+      on_spawn: (pid) => {
+        pids.add(pid);
+        activeOpencodeServePids.add(pid);
+        observer.onSpawn?.(pid);
+      },
+      ...(observer.onOutput ? { on_output: observer.onOutput } : {}),
+    });
+    sink.usage = outcome.usage;
+    return {
+      subtask_id: task.subtask_id,
+      success: outcome.success,
+      output: outcome.success
+        ? compactExecutorOutput(outcome.output)
+        : withOriginalOpencodeError(safeExecutorFailure(outcome.output, config), outcome.output),
+      exit_code: outcome.exit_code,
+      duration_ms: Date.now() - started,
+      ...(outcome.failure_kind ? { failure_kind: outcome.failure_kind } : {}),
+      ...(outcome.rate_limit ? { rate_limit: outcome.rate_limit } : {}),
+    };
+  } catch (error) {
+    return failure("Executor process could not be started", error instanceof Error ? error.message : String(error), opencodeErrorText(error));
+  } finally {
+    for (const pid of pids) activeOpencodeServePids.delete(pid);
+    guardLease?.release();
+  }
 }
 
 export function normalizeWritePaths(task: { readonly write_paths?: readonly string[] }): readonly string[] {

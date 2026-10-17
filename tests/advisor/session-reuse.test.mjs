@@ -160,7 +160,7 @@ function fakeProviderSession(pid, { failSend = false, sendGate = null } = {}) {
   return session;
 }
 
-async function createLiveRuntime(t, providerSessions) {
+async function createLiveRuntime(t, providerSessions, { git } = {}) {
   const root = await tempDir(t, "owl-advisor-d1-");
   const db = createTestDatabase(root);
   const now = new Date().toISOString();
@@ -207,6 +207,7 @@ async function createLiveRuntime(t, providerSessions) {
       },
     },
     owlRoot: root,
+    git,
     getAdvisorSettings: () => settings,
     onReply: async (_conversationId, reply, turnId) => {
       replies.push({ reply, turnId });
@@ -305,6 +306,47 @@ test("a driver that exited while idle is replaced on the next turn, and a send f
     assert.equal(live.runtime.activeDriver, null, "the failed replacement is not kept for the next turn");
     assert.deepEqual(live.replies, []);
   }
+});
+
+test("a workspace sweep runs in the background after a completed and after a failed turn, and a sweep failure does not change the turn", async (t) => {
+  let sweeps = 0;
+  let rejectSweeps = false;
+  const git = {
+    resolveAdvisorSessionDirectory: async () => ({ kind: "direct", cwd: process.cwd() }),
+    async sweepAdvisorWorkspaces() {
+      sweeps += 1;
+      if (rejectSweeps) throw new Error("sweep failed");
+    },
+  };
+  const errorLog = t.mock.method(console, "error", () => {});
+
+  const okSession = fakeProviderSession(601);
+  const ok = await createLiveRuntime(t, [okSession], { git });
+  const session1 = await ok.runtime.ensureSession(ok.ownerId, ok.conversationId);
+  await waitFor(() => sweeps === 1, { message: "startup sweep" });
+  const completed = await ok.sendTurn(session1.id, "question");
+  await waitFor(() => sweeps === 2, { message: "sweep after a completed turn" });
+  assert.equal(ok.turnRow(completed).status, "completed");
+
+  rejectSweeps = true;
+  const completedAgain = await ok.sendTurn(session1.id, "question again");
+  await waitFor(() => sweeps === 3, { message: "rejecting sweep after a completed turn" });
+  await waitFor(() => ok.turnRow(completedAgain).status === "completed", { message: "turn completes despite sweep failure" });
+  assert.deepEqual(ok.errors, []);
+  await waitFor(() => errorLog.mock.callCount() >= 1, { message: "sweep failure is logged" });
+
+  rejectSweeps = false;
+  const failing = fakeProviderSession(602);
+  failing.send = async (turn) => {
+    failing.sent.push(turn);
+    setImmediate(() => failing.push({ type: "turn.failed", turn_id: turn.turn_id, error: "boom" }));
+  };
+  const bad = await createLiveRuntime(t, [failing], { git });
+  const session2 = await bad.runtime.ensureSession(bad.ownerId, bad.conversationId);
+  await waitFor(() => sweeps === 4, { message: "startup sweep of the second runtime" });
+  const failed = await bad.sendTurn(session2.id, "question");
+  await waitFor(() => sweeps === 5, { message: "sweep after a failed turn" });
+  assert.equal(bad.turnRow(failed).status, "failed");
 });
 
 test("concurrent ensureSession calls for the same owner create only one provider session", async (t) => {

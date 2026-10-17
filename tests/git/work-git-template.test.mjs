@@ -91,7 +91,7 @@ test("a Project-less Worker receives a temporary template and startup clears sta
 
   const created = await core.createWork(command({ title: "Template", summary: "x", size: "small", project_id: null }, "template-work"));
   await core.startWork(created.data.work_id, command({ mode: "small" }, "template-start", created.version));
-  await waitFor(() => requests.length > 0 ? true : null, { timeoutMs: 15_000, intervalMs: 25, message: "Worker request" });
+  await waitFor(() => templateConfigs.length > 0 ? true : null, { timeoutMs: 15_000, intervalMs: 25, message: "Worker request with its template config read" });
   const firstRequest = requests[0];
   assert.ok(firstRequest.git_template_dir);
   assert.match(templateConfigs[0], new RegExp(created.data.work_id));

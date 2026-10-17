@@ -84,3 +84,9 @@ export type {
   WorkerRequest,
 } from "./types";
 export { LEGACY_REPORT_SCHEMA_VERSION, REPORT_SCHEMA_VERSION } from "./types";
+export { OpencodePermissionResponder, type OpencodePermissionDecision, type OpencodePermissionResponderOptions } from "./opencode-permission";
+export { runOpencodeTurn, type OpencodeTurnError, type OpencodeTurnInput, type OpencodeTurnResult } from "./opencode-turn";
+export { OpencodeHttpError, OpencodeStartError, createOpencodeClient, startOpencodeServer, type OpencodeClient, type OpencodeEvent, type OpencodeServer, type StartOpencodeServerInput } from "./opencode-client";
+export { executeOpencode, type OpencodeExecuteDeps } from "./opencode-execute";
+export { OpencodeSessionDriver, type OpencodeSessionDeps } from "./opencode-session-driver";
+export { opencodeContextTokens, opencodeFailureDetail, opencodeTokenUsage, parseOpencodeResult, unwrapOpencodeResult } from "./opencode-result";

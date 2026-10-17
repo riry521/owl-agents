@@ -10,7 +10,7 @@ const TOOLS = [
   {
     name: "dispatch",
     description:
-      "Start a child agent for one independent, bounded part of your Task and return its child_id immediately (does not wait). Core runs the child as a separate process and automatically gives it the Task, Owl rules, Owner guidance and working rules; write only what is specific to this part. Children whose write_paths overlap run one after another. Provider, model, and effort can be specified independently; each field is optional. Omitted fields use the defaults for the harness different from the parent, as configured in child-run settings.",
+      "Start a child agent for one independent, bounded part of your Task and return its child_id immediately (does not wait). Core runs the child as a separate process and automatically gives it the Task, Owl rules, Owner guidance and working rules; write only what is specific to this part. Children whose write_paths overlap run one after another. Owl runs every child with the Executor harness, model, and effort set in Owl's settings.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -23,9 +23,6 @@ const TOOLS = [
           items: { type: "string", minLength: 1, maxLength: 300 },
           description: "Workspace-relative files or directories the child may edit. Use \"*\" only when the child must edit anywhere (it then runs alone).",
         },
-        provider: { type: "string", enum: ["claude", "codex"], description: "Optional; can be specified independently of model and effort." },
-        model: { type: "string", minLength: 1, maxLength: 100, description: "Optional; can be specified independently of provider and effort." },
-        effort: { type: "string", enum: ["low", "medium", "high", "xhigh", "max"], description: "Optional; can be specified independently of provider and model." },
         timeout_minutes: { type: "integer", minimum: 5, maximum: 1440 },
       },
     },

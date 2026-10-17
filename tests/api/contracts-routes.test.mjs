@@ -322,4 +322,8 @@ test("OpenAPI documents POST /advisor/workspace and AdvisorWorkspacePreparation,
   assert.match(route, /AdvisorWorkspacePreparation/u);
   assert.match(yamlBlock(openapi, "    AdvisorWorkspacePreparation:"), /- worktree_path/u);
   assert.match(http, /pathname === ADVISOR_WORKSPACE_API_PATH/u);
+  const finish = yamlBlock(openapi, "  /api/v1/advisor/workspace/finish:");
+  assert.match(finish, /^    post:/mu);
+  assert.match(finish, /merge_conflict|uncommitted_changes/u);
+  assert.match(http, /pathname === ADVISOR_WORKSPACE_FINISH_API_PATH/u);
 });

@@ -273,7 +273,7 @@ test("completed Work learning flows through HTTP proposals and applies rules onl
       metrics: pending.data.filter((item) => item.origin === "metrics"),
     };
   }, (value) => value.job?.status === "done"
-    && value.works.length >= 1
+    && value.works.length >= 2
     && value.skills.length >= 1
     && value.rules.length >= 2
     && value.metrics.length >= 1,

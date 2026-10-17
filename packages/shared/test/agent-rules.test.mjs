@@ -3,16 +3,17 @@ import test from "node:test";
 import { WORKER_OWN_SUBAGENT_RULES, WORKER_SUBAGENT_RULES, workerOwnSubagentRules, workerSubagentRules } from "../dist/agent-rules.js";
 import { isResearchSubagentType, researchToolDecision } from "../dist/research-subagent.js";
 
-test("worker rules explain choosing a child from another harness", () => {
-  const rules = WORKER_SUBAGENT_RULES.join(" ").toLowerCase();
-  assert.match(rules, /claude.*codex.*gpt-5\.6-luna/);
-  assert.match(rules, /provider, model, and effort.*independently/);
-  assert.match(rules, /omit.*configured default.*harness different from the parent/);
+test("worker rules say Owl starts children per its settings and name the dispatch and wait tools", () => {
+  const rules = WORKER_SUBAGENT_RULES.join(" ");
+  assert.match(rules, /Owl starts every child with the Executor harness, model, and effort set in Owl's settings/);
+  assert.match(rules, /dispatch and wait tools of the owl-dispatch MCP server/);
 });
 
-test("worker rules explain choosing a same-model child with a different effort", () => {
+test("worker rules no longer ask the Worker to choose a child's provider, model, or effort", () => {
   const rules = WORKER_SUBAGENT_RULES.join(" ").toLowerCase();
-  assert.match(rules, /sonnet 5\.5 medium.*sonnet 5\.5 low/);
+  assert.doesNotMatch(rules, /choose provider, model|provider, model, and effort.*independently/);
+  assert.doesNotMatch(rules, /harness different from the parent/);
+  assert.doesNotMatch(rules, /sonnet 5\.5 medium/);
 });
 
 const researcher = { reference: "REF", scope: "SCOPE" };

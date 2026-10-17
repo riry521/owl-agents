@@ -1,4 +1,5 @@
-import { CODEX_PROVIDER_BASE_URL_ENV, type PromptFingerprint, type PromptMode } from "@owl/shared";
+import { CODEX_PROVIDER_BASE_URL_ENV, harnessOfAdapter, type PromptFingerprint, type PromptMode } from "@owl/shared";
+import { opencodeContextTokens } from "./opencode-result";
 import { extractProviderUsage, isRecord } from "./protocol";
 import { extractRoleOutputObject, splitRolePrompt } from "./role-contract";
 import { promptFingerprint } from "./prompt-fingerprint";
@@ -104,6 +105,8 @@ function providerModelCalls(response: ProviderResponse, codex: boolean): number 
  * context size is estimated from the per-call average under linear growth.
  */
 function contextTokenCount(response: ProviderResponse): number | null {
+  // opencode reports each model call as its own message, so the last one already holds the context size.
+  if (harnessOfAdapter(response.adapter) === "opencode") return opencodeContextTokens(response.stdout);
   const usage = extractProviderUsage(response);
   if (!usage) return null;
   const codex = response.adapter === "codex" || response.adapter.startsWith("codex");

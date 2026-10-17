@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, readlink, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { createUlid, utcNow } from "../../db/dist/index.js";
-import { OUTPUT_FORMAT_INVALID_ERROR_KEY, readDesignBlocked, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, readStoredAcceptanceCriteria, readStoredTaskPlanContext, requestsSpecTest, AGENT_STALE_THRESHOLD_MS, builtinProviderHarness, DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, designDocumentPath, designMockDirectory, isScreenDesignTask, OWL_INSTANCE_ID_ENV, reapProcessGroup, resolveInstanceId, tokenUsageOf, usageJson, type DelegationMismatchKind, type ResearchSubagentSettings, type TaskReplanTrigger, type TokenUsage } from "@owl/shared";
+import { OUTPUT_FORMAT_INVALID_ERROR_KEY, readDesignBlocked, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, readStoredAcceptanceCriteria, readStoredTaskPlanContext, requestsSpecTest, AGENT_STALE_THRESHOLD_MS,DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, designDocumentPath, designMockDirectory, isScreenDesignTask, OWL_INSTANCE_ID_ENV, reapProcessGroup, resolveInstanceId, tokenUsageOf, usageJson, type DelegationMismatchKind, type ResearchSubagentSettings, type TaskReplanTrigger, type TokenUsage } from "@owl/shared";
 import { matchesAnyGlob } from "../../shared/dist/glob.js";
 import { taskVerificationMarker } from "./workspace-process-sweeper.js";
 import { TRANSIENT_RETRY_DELAYS_MS, TRANSIENT_RETRY_LIMIT } from "./attempt-policy";
@@ -111,6 +111,7 @@ function normalizeProviderId(provider: string): string {
   const value = provider.trim().toLowerCase();
   if (value === "anthropic" || value === "claude") return "anthropic";
   if (value === "openai" || value === "openai/codex" || value === "codex") return "openai";
+  if (value === "opencode") return "opencode";
   return value;
 }
 
@@ -392,6 +393,8 @@ export class WorkflowEngine {
   private readonly baselineLocks = new Map<string, Promise<unknown>>();
   private running = false;
   private stopping = false;
+  /** Git-template writes and removals still running; stop() waits so a caller can delete dataDir afterwards. */
+  private readonly gitTemplateOps = new Set<Promise<unknown>>();
   private staleCheckInterval: ReturnType<typeof setInterval> | null = null;
   private subagentScanInterval: ReturnType<typeof setInterval> | null = null;
   private subagentScanInFlight = false;
@@ -468,6 +471,7 @@ export class WorkflowEngine {
 
   public async stop(): Promise<void> {
     this.stopImmediately();
+    await Promise.allSettled([...this.gitTemplateOps]);
     await this.writeLane.drain();
   }
 
@@ -1515,7 +1519,6 @@ export class WorkflowEngine {
     const runModel = this.db.get<{ provider: string; model: string }>("SELECT provider, model FROM agent_runs WHERE id = ?", agentRunId);
     const workerRoleModel = resolveRoleModel(this.db, taskRow ? taskModelRole(taskRow) : role);
     const workerProvider = this.providerForRoleModel(workerRoleModel);
-    const workerHarness = builtinProviderHarness(runModel?.provider ?? workerProvider) ?? builtinProviderHarness(workerProvider) ?? "claude";
     const designPath = isDesigner ? designDocumentPath(this.dataDir, workId, taskId) : null;
     if (designPath) await mkdir(dirname(designPath), { recursive: true, mode: 0o700 });
     const designBaseline = designPath ? await designDocumentFingerprint(designPath) : null;
@@ -1562,7 +1565,6 @@ export class WorkflowEngine {
         work_id: workId,
         task_id: taskId,
         ...this.projectIdOf(workId),
-        harness: workerHarness,
         workspace_dir: taskRow?.worktree_path ?? this.owlRoot,
         worktree: taskRow?.worktree_path ?? null,
         task: {
@@ -1579,17 +1581,19 @@ export class WorkflowEngine {
       let workerReturned = false;
       const projectId = this.projectIdOf(workId).project_id;
       let gitTemplateDir: string | null = null;
-      if (!projectId && this.git.userTemplateDir && this.git.setTemplateConfig) {
+      if (!this.stopping && !projectId && this.git.userTemplateDir && this.git.setTemplateConfig) {
         try {
-          gitTemplateDir = await prepareWorkGitTemplate({
+          gitTemplateDir = await this.trackGitTemplateOp(prepareWorkGitTemplate({
             userTemplateDir: () => this.git.userTemplateDir!(),
             setTemplateConfig: (file, key, value) => this.git.setTemplateConfig!(file, key, value),
-          }, { dataDir: this.dataDir, agentRunId, workId });
+          }, { dataDir: this.dataDir, agentRunId, workId }));
         } catch (error) {
           console.warn(`[owl-core] Could not prepare Git template for Worker run ${agentRunId}`, error);
         }
       }
       try {
+        // stop() only waits for template writes already started, so a run resumed after stop must neither start one nor launch the Worker.
+        if (this.stopping) return;
         result = await this.agentRunner.runWorker({
           ...runRequest,
           ...(gitTemplateDir ? { git_template_dir: gitTemplateDir } : {}),
@@ -1605,7 +1609,7 @@ export class WorkflowEngine {
         }
       } finally {
         if (gitTemplateDir) {
-          await removeWorkGitTemplate(gitTemplateDir).catch((error) => {
+          await this.trackGitTemplateOp(removeWorkGitTemplate(gitTemplateDir)).catch((error) => {
             console.warn(`[owl-core] Could not remove Git template for Worker run ${agentRunId}`, error);
           });
         }
@@ -1614,6 +1618,13 @@ export class WorkflowEngine {
     }
     if (this.stopping) return;
     await this.recordWorkerResult(workId, taskId, agentRunId, result, generation, designBaseline, hybridMode);
+  }
+
+  private trackGitTemplateOp<T>(op: Promise<T>): Promise<T> {
+    this.gitTemplateOps.add(op);
+    const forget = () => void this.gitTemplateOps.delete(op);
+    op.then(forget, forget);
+    return op;
   }
 
   /** Compare the Worker's delegation report with durable child dispatches without blocking review. */

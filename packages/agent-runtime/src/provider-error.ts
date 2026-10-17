@@ -23,6 +23,14 @@ export interface ProviderFailureCause {
   /** Error type or subtype the harness reported for its API failure. */
   readonly harness_code?: string;
   readonly error_code?: string;
+  /**
+   * The harness's own verdict on whether a retry can help (opencode error
+   * types without an HTTP status). Why not a made-up status such as 503: the
+   * message and error_key would show a status the harness never returned. Why
+   * not network words added to the message: other words in it ("not allowed")
+   * could flip the string check to non-retryable.
+   */
+  readonly harness_transient?: boolean;
   readonly stdout?: string;
   readonly stderr?: string;
   readonly error?: unknown;
@@ -65,6 +73,7 @@ function providerLabel(harness: string): string {
   const normalized = harness.trim().toLowerCase();
   if (normalized.includes("claude") || normalized.includes("anthropic")) return "Claude";
   if (normalized.includes("codex") || normalized.includes("openai")) return "Codex";
+  if (normalized.includes("opencode")) return "opencode";
   if (normalized.length === 0) return "Provider";
   return harness.trim();
 }
@@ -356,6 +365,9 @@ function structuredVerdict(cause: ProviderFailureCause): FailureVerdict | null {
     if (status === 400 || status === 404 || status === 422) return deterministic(exitDescriptor(cause));
   }
   if (hasStructuredRateLimitSignal(cause)) return rateLimited();
+  if (cause.harness_transient !== undefined) {
+    return cause.harness_transient ? transient(exitDescriptor(cause)) : deterministic(exitDescriptor(cause));
+  }
   if (cause.signal !== null && cause.signal !== "SIGKILL" && cause.signal !== "SIGTERM") {
     return deterministic(exitDescriptor(cause));
   }
@@ -504,6 +516,7 @@ export function providerFailureCause(error: unknown): ProviderFailureCause | nul
     ...(cause.timeout_kind === "wall" || cause.timeout_kind === "idle" ? { timeout_kind: cause.timeout_kind } : {}),
     ...(typeof cause.harness_status === "number" && Number.isInteger(cause.harness_status) ? { harness_status: cause.harness_status } : {}),
     ...(typeof cause.harness_code === "string" ? { harness_code: cause.harness_code } : {}),
+    ...(typeof cause.harness_transient === "boolean" ? { harness_transient: cause.harness_transient } : {}),
     ...(typeof cause.code === "string" ? { error_code: cause.code } : {}),
     ...(rateLimitEvidence !== undefined ? { rate_limit_evidence: rateLimitEvidence } : {}),
     ...(typeof cause.stdout === "string" ? { stdout: cause.stdout } : {}),

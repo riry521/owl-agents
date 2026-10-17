@@ -106,12 +106,9 @@ test("owl-dispatch initializes, lists the tool schemas, and sends authenticated 
     assert.deepEqual(listed.map((tool) => tool.name), ["dispatch", "wait"]);
     assert.deepEqual(listed[0].inputSchema.required, ["title", "instruction", "write_paths"]);
     assert.equal(listed[0].inputSchema.additionalProperties, false);
-    assert.match(listed[0].description, /provider, model, and effort can be specified independently/i);
-    assert.match(listed[0].description, /omitted fields use the defaults for the harness different from the parent/i);
+    assert.match(listed[0].description, /Owl runs every child with the Executor harness, model, and effort set in Owl's settings/);
     for (const field of ["provider", "model", "effort"]) {
-      assert.equal(listed[0].inputSchema.required.includes(field), false);
-      assert.match(listed[0].inputSchema.properties[field].description, /optional/i);
-      assert.match(listed[0].inputSchema.properties[field].description, /independently/i);
+      assert.equal(field in listed[0].inputSchema.properties, false);
     }
     assert.deepEqual(listed[1].inputSchema.required, ["child_ids"]);
     assert.equal(listed[1].inputSchema.properties.timeout_seconds.maximum, 240);

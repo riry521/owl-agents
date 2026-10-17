@@ -41,51 +41,39 @@ test("child settings derive from legacy executor_config without saving the migra
   const core = await makeCore();
 
   const settings = core.getChildRunSettings();
-  assert.equal(settings.default_provider, "codex");
-  assert.equal(settings.default_model, "gpt-5.6-luna");
-  assert.equal(settings.default_effort, "xhigh");
-  assert.deepEqual(settings.allowed_models, [
-    { provider: "codex", model: "gpt-5.6-luna" },
-    { provider: "claude", model: "claude-sonnet-5-5" },
-    { provider: "claude", model: "claude-haiku-5-5" },
-  ]);
-  assert.deepEqual(settings.defaults_by_parent_harness, DEFAULT_CHILD_RUN_SETTINGS.defaults_by_parent_harness);
-  assert.deepEqual(settings.allowed_efforts, ["low", "medium", "high", "xhigh"]);
+  assert.equal(settings.executor_harness, "codex");
+  assert.deepEqual(settings.executor_by_harness, {
+    ...DEFAULT_CHILD_RUN_SETTINGS.executor_by_harness,
+    codex: { model: "gpt-5.6-luna", effort: "xhigh" },
+  });
+  //  assert.deepEqual(settings.allowed_efforts, ["low", "medium", "high", "xhigh"]);
   assert.equal(settings.timeout_minutes, 11);
   assert.equal(db.get("SELECT COUNT(*) AS count FROM settings WHERE key = 'child_run_settings'").count, 0);
 });
 
-test("child settings validate, normalize legacy provider names and persist across Core restart", async (t) => {
+test("child settings validate and persist across Core restart", async (t) => {
   const { db, makeCore } = await openCore(t);
   const core = await makeCore();
   const settings = {
     ...DEFAULT_CHILD_RUN_SETTINGS,
-    defaults_by_parent_harness: {
-      claude: { provider: "codex", model: "gpt-5.6-luna", effort: "low" },
-      codex: { provider: "claude", model: "claude-sonnet-5-5", effort: "high" },
+    executor_harness: "codex",
+    executor_by_harness: {
+      ...DEFAULT_CHILD_RUN_SETTINGS.executor_by_harness,
+      codex: { model: "gpt-5.6-luna", effort: "high" },
     },
-    default_provider: "openai",
-    default_model: "gpt-5.6-luna",
-    allowed_models: [
-      { provider: "openai", model: "gpt-5.6-luna" },
-      { provider: "anthropic", model: "claude-sonnet-5" },
-      { provider: "anthropic", model: "claude-sonnet-5-5" },
-    ],
-    default_effort: "high",
     timeout_minutes: 35,
   };
   const saved = await core.setChildRunSettings(settings);
-  assert.equal(saved.default_provider, "codex");
-  assert.deepEqual(saved.allowed_models, [
-    { provider: "codex", model: "gpt-5.6-luna" },
-    { provider: "claude", model: "claude-sonnet-5" },
-    { provider: "claude", model: "claude-sonnet-5-5" },
-  ]);
-  assert.deepEqual(saved.defaults_by_parent_harness, settings.defaults_by_parent_harness);
+  assert.equal(saved.executor_harness, "codex");
+  assert.deepEqual(saved.executor_by_harness.codex, { model: "gpt-5.6-luna", effort: "high" });
   assert.equal(db.get("SELECT COUNT(*) AS count FROM events WHERE type = 'settings.child_runs_updated'").count, 1);
 
   await assert.rejects(
-    () => core.setChildRunSettings({ ...settings, default_model: "not-a-model" }),
+    () => core.setChildRunSettings({ ...settings, executor_by_harness: { ...settings.executor_by_harness, codex: { model: "not-a-model", effort: "high" } } }),
+    (error) => error?.code === "validation_error",
+  );
+  await assert.rejects(
+    () => core.setChildRunSettings({ ...settings, executor_harness: "opencode" }),
     (error) => error?.code === "validation_error",
   );
   await core.stop();
@@ -93,13 +81,20 @@ test("child settings validate, normalize legacy provider names and persist acros
   assert.deepEqual(restarted.getChildRunSettings(), saved);
 });
 
-test("saved child settings without per-parent defaults are completed when read", async (t) => {
+test("stored pre-two-level child settings are upgraded when read and broken groups fall back to defaults", async (t) => {
   const { db, makeCore } = await openCore(t);
   const now = new Date().toISOString();
   const legacy = {
-    default_provider: DEFAULT_CHILD_RUN_SETTINGS.default_provider,
-    default_model: DEFAULT_CHILD_RUN_SETTINGS.default_model,
-    default_effort: DEFAULT_CHILD_RUN_SETTINGS.default_effort,
+    default_provider: "codex",
+    default_model: "gpt-5.6-luna",
+    default_effort: "high",
+    allowed_models: [{ provider: "codex", model: "gpt-5.6-luna" }],
+    allowed_efforts: ["high"],
+    defaults_by_parent_harness: {
+      claude: { provider: "codex", model: "gpt-5.6-luna", effort: "high" },
+      codex: { provider: "claude", model: "claude-sonnet-5-5", effort: "low" },
+    },
+    timeout_minutes: "soon",
   };
   await db.createWriteLane().transact((tx) => {
     tx.run("INSERT INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Test Owner', ?, ?)", now, now);
@@ -109,7 +104,16 @@ test("saved child settings without per-parent defaults are completed when read",
     );
   });
   const core = await makeCore();
-  assert.deepEqual(core.getChildRunSettings().defaults_by_parent_harness, DEFAULT_CHILD_RUN_SETTINGS.defaults_by_parent_harness);
+  const settings = core.getChildRunSettings();
+  assert.equal(settings.executor_harness, "codex");
+  assert.deepEqual(settings.executor_by_harness, {
+    ...DEFAULT_CHILD_RUN_SETTINGS.executor_by_harness,
+    codex: { model: "gpt-5.6-luna", effort: "high" },
+  });
+  assert.equal(settings.timeout_minutes, DEFAULT_CHILD_RUN_SETTINGS.timeout_minutes);
+  for (const key of ["default_provider", "default_model", "default_effort", "allowed_models", "allowed_efforts", "defaults_by_parent_harness"]) {
+    assert.equal(key in settings, false, key);
+  }
 });
 
 test("token relay and researcher settings have defaults and partial saved values are merged with them", async (t) => {
@@ -181,7 +185,7 @@ test("invalid token relay and researcher settings are rejected with the offendin
   assert.deepEqual(core.getChildRunSettings(), DEFAULT_CHILD_RUN_SETTINGS);
 });
 
-test("legacy executor PUT updates both parent defaults and dispatch uses the saved values", async (t) => {
+test("legacy executor PUT updates the Executor harness and dispatch uses the saved values", async (t) => {
   const { root, db, core } = await createTestCore(t, {}, { prefix: "owl-executor-settings-api-" });
   const token = randomUUID();
   const scheduler = createChildRunScheduler({
@@ -197,13 +201,6 @@ test("legacy executor PUT updates both parent defaults and dispatch uses the sav
   if (!api) return t.skip("localhost listen is unavailable");
   const request = (path, { method = "GET", body } = {}) => api.request(method, `/api/v1${path}`, body);
 
-  await core.setChildRunSettings({
-    ...core.getChildRunSettings(),
-    defaults_by_parent_harness: {
-      claude: { provider: "claude", model: "claude-sonnet-5-5", effort: "high" },
-      codex: { provider: "codex", model: "gpt-5.6-luna", effort: "medium" },
-    },
-  });
   const oldDefaults = { provider: "openai", model: "gpt-5.6-luna", effort: "low" };
   const update = await request("/settings/executor", {
     method: "PUT",
@@ -211,13 +208,8 @@ test("legacy executor PUT updates both parent defaults and dispatch uses the sav
   });
   assert.equal(update.status, 200);
   const updated = (await update.json()).data;
-  const resolvedDefaults = {
-    claude: { provider: "codex", model: "gpt-5.6-luna", effort: "low" },
-    codex: { provider: "codex", model: "gpt-5.6-luna", effort: "low" },
-  };
-  assert.deepEqual(updated.defaults_by_parent_harness, resolvedDefaults);
-  assert.ok(updated.allowed_models.some((item) => item.provider === "codex" && item.model === "gpt-5.6-luna"));
-  assert.ok(updated.allowed_efforts.includes("low"));
+  assert.equal(updated.executor_harness, "codex");
+  assert.deepEqual(updated.executor_by_harness.codex, { model: "gpt-5.6-luna", effort: "low" });
   assert.equal(updated.provider, "codex");
   assert.equal(updated.model, "gpt-5.6-luna");
   assert.equal(updated.effort, "low");
@@ -230,13 +222,11 @@ test("legacy executor PUT updates both parent defaults and dispatch uses the sav
   assert.equal((await invalidUpdate.json()).error.code, "validation_error");
 
   const childSettings = (await (await request("/settings/child-runs")).json()).data;
-  assert.deepEqual(childSettings.defaults_by_parent_harness, resolvedDefaults);
-  assert.deepEqual(childSettings.allowed_models, updated.allowed_models);
-  assert.deepEqual(childSettings.allowed_efforts, updated.allowed_efforts);
+  assert.equal(childSettings.executor_harness, "codex");
+  assert.deepEqual(childSettings.executor_by_harness, updated.executor_by_harness);
   const legacyGet = (await (await request("/settings/executor")).json()).data;
-  assert.deepEqual(legacyGet.defaults_by_parent_harness, resolvedDefaults);
-  assert.deepEqual(legacyGet.allowed_models, updated.allowed_models);
-  assert.deepEqual(legacyGet.allowed_efforts, updated.allowed_efforts);
+  assert.equal(legacyGet.executor_harness, "codex");
+  assert.deepEqual(legacyGet.executor_by_harness, updated.executor_by_harness);
 
   const now = new Date().toISOString();
   const ids = { work: createUlid(), task: createUlid(), claude: createUlid(), codex: createUlid() };
@@ -261,7 +251,7 @@ test("legacy executor PUT updates both parent defaults and dispatch uses the sav
   });
   for (const harness of ["claude", "codex"]) {
     scheduler.registerParent({
-      agent_run_id: ids[harness], work_id: ids.work, task_id: ids.task, harness,
+      agent_run_id: ids[harness], work_id: ids.work, task_id: ids.task,
       workspace_dir: root, worktree: root, task: { title: "Dispatch defaults", acceptance: "", context: "", rules: "", owner_guidance: [] },
     });
     const dispatched = await scheduler.dispatch(ids[harness], {

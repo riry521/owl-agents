@@ -4,10 +4,12 @@ import { chmodSync, existsSync } from "node:fs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createConnection, createServer } from "node:net";
 import { once } from "node:events";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { OPENCODE_HARNESS_GAPS } from "../../packages/shared/dist/index.js";
 import { loadOwlEnv, parseDotEnv } from "../../packages/shared/dist/env.js";
 import { AppSettingsStore, scrubLegacySettings } from "../../apps/server/dist/app-settings-store.js";
 import { createConfiguredCore } from "../../apps/server/dist/core.js";
@@ -19,6 +21,7 @@ import { providerConfigurationError, providerSelection } from "../../apps/server
 import { SecretStore } from "../../packages/core/dist/secret-store.js";
 import { createAgentRunner } from "../../packages/agent-runtime/dist/index.js";
 import { command } from "../helpers/core.mjs";
+import { readFakeOpencodeLog, writeFakeOpencode } from "../helpers/fake-opencode.mjs";
 import { createTestDatabase } from "../helpers/db.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
 import { migrationsDir, repoRoot } from "../helpers/paths.mjs";
@@ -430,6 +433,21 @@ test("a custom provider cannot be saved without a backend URL; a stored one with
   assert.equal(fixed.body.data.backendUrl, "https://orca.test");
 });
 
+test("a custom provider can use the opencode harness, and unknown harnesses are still rejected", async (t) => {
+  const root = await tempDir(t, "owl-provider-opencode-");
+  await mkdir(join(root, "data"), { recursive: true });
+  const call = await settingsApi(t, root);
+  if (call === null) return t.skip("localhost listen is unavailable");
+  const created = await call("POST", "/settings/providers", { id: "kite", displayName: "Kite", harnessId: "opencode", backendUrl: "https://kite.test" });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.data.harnessId, "opencode");
+  const rejected = await call("POST", "/settings/providers", { id: "owl2", displayName: "Owl2", harnessId: "gemini", backendUrl: "https://owl2.test" });
+  assert.equal(rejected.status, 400);
+  assert.equal(rejected.body.error.code, "validation_error");
+  const listed = await call("GET", "/settings/providers");
+  assert.ok(listed.body.data.some((provider) => provider.id === "opencode" || provider.harnessId === "opencode"));
+});
+
 test("a run on a custom provider without a backend URL stops before the harness starts", async () => {
   let executed = false;
   const runner = createAgentRunner({
@@ -548,10 +566,11 @@ test("stub doctor warns that no AI is used", async (t) => {
   assert.equal(payload.checks.find((check) => check.check_id === "sqlite").message.startsWith("not_initialized"), true);
 });
 
-async function realDoctor(t, adapter, executables) {
+async function realDoctor(t, adapter, executables, prepare) {
   const root = await tempDir(t, "owl-provider-");
   const home = join(root, "home");
   await mkdir(home);
+  await prepare?.(root);
   const result = spawnSync(process.execPath, [cliPath, "doctor", "--json"], {
     cwd: repoRoot,
     env: envWith({
@@ -609,6 +628,71 @@ test("real doctor warns with login instructions for logged-out CLIs and passes l
   assert.equal(swapped("claude-login").status, "pass");
   assert.equal(swapped("codex-login").status, "warn");
   assert.match(swapped("codex-login").remediation, /codex login/);
+});
+
+async function seedOpencodeRole(root, role, provider, model) {
+  const dataDir = join(root, "data");
+  await mkdir(dataDir, { recursive: true });
+  const Database = createRequire(join(repoRoot, "packages/db/package.json"))("better-sqlite3");
+  const db = new Database(join(dataDir, "owl.sqlite"));
+  db.exec("CREATE TABLE settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL)");
+  db.prepare("INSERT INTO settings (key, value_json) VALUES ('model_settings', ?)").run(JSON.stringify({ roles: [{ role, provider, model, effort: "high" }] }));
+  db.close();
+}
+
+test("real doctor warns when opencode is missing or older than the minimum, with both versions", async (t) => {
+  const missing = await realDoctor(t, "claude-cli/v1", { OWL_OPENCODE_EXECUTABLE: "/definitely/not-installed/opencode" });
+  assert.equal(missing("opencode-cli").status, "warn");
+  assert.equal(missing("opencode-cli").severity, "optional");
+  assert.match(missing("opencode-cli").message, /not found/);
+  assert.equal(missing("opencode-login").status, "warn");
+
+  const dir = await tempDir(t, "owl-fake-opencode-");
+  const executable = await writeFakeOpencode(dir);
+  const old = await realDoctor(t, "claude-cli/v1", { OWL_OPENCODE_EXECUTABLE: executable, FAKE_OPENCODE_VERSION: "1.9.0" });
+  assert.equal(old("opencode-cli").status, "warn");
+  assert.match(old("opencode-cli").message, /1\.9\.0/);
+  assert.match(old("opencode-cli").message, /2\.0\.0/);
+  assert.equal(old("opencode-login").status, "warn");
+  assert.match(old("opencode-login").message, /Skipped/);
+});
+
+test("real doctor passes opencode-cli and reads login state from one private serve", async (t) => {
+  const dir = await tempDir(t, "owl-fake-opencode-");
+  const executable = await writeFakeOpencode(dir);
+  const logPath = join(dir, "log.jsonl");
+  const ok = await realDoctor(t, "claude-cli/v1", { OWL_OPENCODE_EXECUTABLE: executable, FAKE_OPENCODE_LOG: logPath });
+  assert.equal(ok("opencode-cli").status, "pass");
+  assert.equal(ok("opencode-login").status, "pass");
+  assert.equal(ok("opencode-harness-gaps").status, "pass");
+  const starts = (await readFakeOpencodeLog(logPath)).filter((entry) => entry.type === "start");
+  assert.equal(starts.length, 1);
+
+  const loggedOut = await realDoctor(t, "claude-cli/v1", { OWL_OPENCODE_EXECUTABLE: executable, FAKE_OPENCODE_CONNECTIONS: "0" });
+  assert.equal(loggedOut("opencode-cli").status, "pass");
+  assert.equal(loggedOut("opencode-login").status, "warn");
+});
+
+test("real doctor lists the opencode harness gaps for a role that uses opencode, without config contents or the password", async (t) => {
+  const dir = await tempDir(t, "owl-fake-opencode-");
+  const executable = await writeFakeOpencode(dir);
+  const logPath = join(dir, "log.jsonl");
+  const check = await realDoctor(
+    t,
+    "claude-cli/v1",
+    { OWL_OPENCODE_EXECUTABLE: executable, FAKE_OPENCODE_LOG: logPath, FAKE_OPENCODE_SAVED: JSON.stringify([{ id: "p1" }, { id: "p2" }]) },
+    (root) => seedOpencodeRole(root, "worker", "opencode", "fake-provider/fake-model"),
+  );
+  const gaps = check("opencode-harness-gaps");
+  assert.equal(gaps.status, "warn");
+  assert.equal(gaps.severity, "optional");
+  for (const gap of OPENCODE_HARNESS_GAPS) assert.ok(gaps.message.includes(gap.en), gap.key);
+  assert.match(gaps.message, /Saved permissions: 2/);
+  assert.match(gaps.message, /fake-config/);
+  assert.equal(check("opencode-login").status, "pass");
+  const [start] = (await readFakeOpencodeLog(logPath)).filter((entry) => entry.type === "start");
+  assert.equal(start.env.password_present, true);
+  assert.equal(JSON.stringify(gaps).includes("mcpServers"), false);
 });
 
 test("start rejects an external bind before listening when token is absent", async (t) => {

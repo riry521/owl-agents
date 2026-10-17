@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, readFile, readlink, readdir, rm, symlink, unlink, 
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { agentUserInstructionEnv, buildAgentPermissionArgs } from "../../packages/shared/dist/index.js";
+import { agentUserInstructionEnv, buildAgentPermissionArgs, owlMcpServers, opencodeMcpConfig } from "../../packages/shared/dist/index.js";
 import { argv as executorArgv } from "../../packages/core/dist/executor.js";
 import { tempDir } from "../helpers/temp.mjs";
 
@@ -437,6 +437,33 @@ test("owl-api MCP is registered for the advisor only, without the token value in
       assert.equal(buildAgentPermissionArgs("advisor", adapter, { owlRoot: root, env: incomplete }).join(" ").includes("owl-api"), false);
     }
   });
+});
+
+test("owlMcpServers selects servers by role and env, opencodeMcpConfig shapes them", async (t) => {
+  const root = await tempDir(t, "owl-mcp-servers-");
+  const dist = path.join(root, "apps", "server", "dist");
+  await mkdir(dist, { recursive: true });
+  for (const file of ["memory-mcp.js", "owl-api-mcp.js", "dispatch-mcp.js", "design-mock-mcp.js"]) await writeFile(path.join(dist, file), "", "utf8");
+  const guard = { OWL_AGENT_RUN_ID: "run", OWL_GUARD_API_BASE: "http://x", OWL_GUARD_TOKEN_FILE: "/t" };
+  const names = (role, env) => owlMcpServers({ owlRoot: root, role, env }).map((server) => server.name);
+
+  assert.deepEqual(names("reviewer", guard), ["owl-memory"]);
+  assert.deepEqual(names("advisor", guard), ["owl-memory", "owl-api"]);
+  assert.deepEqual(names("advisor", {}), ["owl-memory"]);
+  assert.deepEqual(names("worker", guard), ["owl-memory"]);
+  assert.deepEqual(names("worker", { ...guard, OWL_DISPATCH_MCP: "1" }), ["owl-memory", "owl-dispatch"]);
+  assert.deepEqual(names("designer", { ...guard, OWL_DESIGN_MOCK_MCP: "1" }), ["owl-memory", "owl-design"]);
+
+  const config = opencodeMcpConfig(owlMcpServers({ owlRoot: root, role: "advisor", env: guard })).servers;
+  assert.deepEqual(config["owl-api"], {
+    type: "local",
+    command: [process.execPath, path.join(dist, "owl-api-mcp.js")],
+    environment: { OWL_ROLE: "advisor", ...guard },
+    codemode: false,
+    timeout: { startup: 20000, catalog: 20000, execution: 90000 },
+  });
+  assert.equal(config["owl-memory"].environment.OWL_ROLE, "advisor");
+  assert.deepEqual(config["owl-memory"].timeout, { startup: 20000, catalog: 20000 });
 });
 
 test("a relay-watched child fails to start when relay-hook.js is not built", async (t) => {

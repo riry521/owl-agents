@@ -43,18 +43,15 @@ function fakeCore() {
     async setChildRunSettings(value) { settings = structuredClone(value); return settings; },
     async dispatchChildRun(parentId, request, requestKey) {
       if (parentId !== "worker-run") throw Object.assign(new Error("The Worker is not active."), { code: "parent_not_active" });
-      const provider = request.provider ?? settings.default_provider;
-      const model = request.model ?? settings.default_model;
-      if (!settings.allowed_models.some((choice) => choice.provider === provider && choice.model === model)) {
-        throw Object.assign(new Error("The requested provider/model is not in the allowed list."), { code: "model_not_allowed" });
-      }
+      const provider = settings.executor_harness;
+      const { model, effort } = settings.executor_by_harness[provider];
       const key = `${parentId}:${requestKey}`;
       if (byKey.has(key)) return byKey.get(key);
       const child = {
         child_id: `child-${runs.length + 1}`, status: "running", blocked_reason: null,
         provider,
         model,
-        effort: request.effort ?? settings.default_effort,
+        effort,
         timeout_minutes: request.timeout_minutes ?? settings.timeout_minutes,
         max_attempts: settings.max_attempts,
       };
@@ -149,13 +146,13 @@ test("child-run HTTP routes use the adapter-wrapped Core, scope guard tokens, an
   if (!api) return;
 
   assert.equal(typeof api.adapter.dispatchChildRun, "function");
-  const payload = { title: "Test child", instruction: "Do the work", write_paths: ["src/a.ts"], provider: "codex", model: "gpt-5.6-luna", effort: "low" };
+  const payload = { title: "Test child", instruction: "Do the work", write_paths: ["src/a.ts"] };
   const first = await api.post("/agent/child-runs", payload, "dispatch-once");
   assert.equal(first.status, 200);
   const child = (await first.json()).data;
   assert.equal(child.provider, "codex");
   assert.equal(child.model, "gpt-5.6-luna");
-  assert.equal(child.effort, "low");
+  assert.equal(child.effort, "medium");
   const retry = await api.post("/agent/child-runs", payload, "dispatch-once");
   assert.equal(retry.status, 200);
   assert.equal((await retry.json()).data.child_id, child.child_id);
@@ -172,9 +169,11 @@ test("child-run HTTP routes use the adapter-wrapped Core, scope guard tokens, an
   assert.equal(executor.status, 409);
   assert.equal((await executor.json()).error.code, "parent_not_active");
 
-  const rejected = await api.post("/agent/child-runs", { ...payload, model: "not-allowed" }, "model-denied");
-  assert.equal(rejected.status, 400);
-  assert.equal((await rejected.json()).error.code, "model_not_allowed");
+  for (const field of [{ provider: "claude" }, { model: "any-model" }, { effort: "low" }]) {
+    const rejected = await api.post("/agent/child-runs", { ...payload, ...field }, `removed-${Object.keys(field)[0]}`);
+    assert.equal(rejected.status, 400, JSON.stringify(field));
+    assert.equal((await rejected.json()).error.code, "validation_error");
+  }
   assert.equal(api.fake.runs.length, 1);
 });
 
@@ -221,13 +220,14 @@ test("child settings APIs and the legacy executor route map defaults and timeout
   assert.equal(childUpdate.status, 200);
   assert.deepEqual((await childUpdate.json()).data, settings);
 
+  const codexRow = settings.executor_by_harness.codex;
   const legacy = await api.request("/settings/executor");
   assert.equal(legacy.status, 200);
   assert.deepEqual((await legacy.json()).data, {
     ...settings,
-    provider: settings.default_provider,
-    model: settings.default_model,
-    effort: settings.default_effort,
+    provider: "codex",
+    model: codexRow.model,
+    effort: codexRow.effort,
     timeout_ms: settings.timeout_minutes * 60_000,
   });
 
@@ -241,13 +241,8 @@ test("child settings APIs and the legacy executor route map defaults and timeout
   assert.equal(update.status, 200);
   const updatedSettings = {
     ...settings,
-    default_provider: "codex",
-    default_model: "gpt-5.6-luna",
-    default_effort: "high",
-    defaults_by_parent_harness: {
-      claude: { provider: "codex", model: "gpt-5.6-luna", effort: "high" },
-      codex: { provider: "codex", model: "gpt-5.6-luna", effort: "high" },
-    },
+    executor_harness: "codex",
+    executor_by_harness: { ...settings.executor_by_harness, codex: { model: "gpt-5.6-luna", effort: "high" } },
     timeout_minutes: 30,
   };
   assert.deepEqual((await update.json()).data, {
@@ -257,9 +252,8 @@ test("child settings APIs and the legacy executor route map defaults and timeout
     effort: "high",
     timeout_ms: 30 * 60_000,
   });
-  assert.equal(api.fake.settings().default_provider, "codex");
-  assert.equal(api.fake.settings().default_model, "gpt-5.6-luna");
-  assert.equal(api.fake.settings().default_effort, "high");
+  assert.equal(api.fake.settings().executor_harness, "codex");
+  assert.deepEqual(api.fake.settings().executor_by_harness.codex, { model: "gpt-5.6-luna", effort: "high" });
   assert.equal(api.fake.settings().timeout_minutes, 30);
 
   const unsetEffort = await api.request("/settings/executor", {
@@ -271,7 +265,15 @@ test("child settings APIs and the legacy executor route map defaults and timeout
   });
   assert.equal(unsetEffort.status, 200);
   assert.equal((await unsetEffort.json()).data.effort, null);
-  assert.equal(api.fake.settings().default_effort, null);
+  assert.equal(api.fake.settings().executor_by_harness.codex.effort, null);
+
+  const twoLevel = { ...api.fake.settings(), executor_harness: "claude" };
+  const direct = await api.request("/settings/executor", {
+    method: "PUT",
+    body: { request_id: "two-level", idempotency_key: "two-level", expected_version: 0, payload: twoLevel },
+  });
+  assert.equal(direct.status, 200);
+  assert.equal(api.fake.settings().executor_harness, "claude");
 });
 
 test("token relay and researcher settings PUT through HTTP are kept by GET, and invalid values name their field", async (t) => {
@@ -459,12 +461,11 @@ test("an adapter-wrapped Core dispatches through HTTP from its public Worker run
     runWorker: async (request) => {
       activeWorkerId = request.invocation_id;
       const rejected = await call("/agent/child-runs", {
-        title: "Disallowed child", instruction: "Must be rejected", write_paths: ["src/no.ts"], provider: "codex", model: "not-allowed",
+        title: "Disallowed child", instruction: "Must be rejected", write_paths: ["src/no.ts"], provider: "codex", model: "gpt-5.6-luna",
       }, "model-denied");
       const rejectedBody = await rejected.json();
       const dispatched = await call("/agent/child-runs", {
         title: "HTTP child", instruction: "Run through the fake provider", write_paths: ["src/http-child.ts"],
-        provider: "codex", model: "gpt-5.6-luna", effort: "low",
       }, "dispatch-child");
       const dispatchedBody = await dispatched.json();
       const child = dispatchedBody.data;
@@ -542,13 +543,13 @@ test("an adapter-wrapped Core dispatches through HTTP from its public Worker run
   const observed = await waitFor(() => workerObserved);
   assert.ok(observed, "Worker did not dispatch and wait for its child");
   assert.equal(observed.rejectedStatus, 400);
-  assert.equal(observed.rejected.error.code, "model_not_allowed");
+  assert.equal(observed.rejected.error.code, "validation_error");
   assert.equal(observed.dispatchedStatus, 200);
   assert.equal(observed.child.status === "queued" || observed.child.status === "running", true);
   assert.ok(observed.child.child_id);
   assert.equal(observed.child.provider, "codex");
   assert.equal(observed.child.model, "gpt-5.6-luna");
-  assert.equal(observed.child.effort, "low");
+  assert.equal(observed.child.effort, "medium");
   assert.equal(observed.waitedStatus, 200);
   assert.equal(observed.waited.done, false);
   assert.equal(observed.waited.children[0].status, "running");

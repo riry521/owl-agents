@@ -174,19 +174,18 @@ test('English and Japanese define the same settings.remakeLimits* keys', () => {
 });
 
 // SettingsView's useState() calls, by position: 0 rows, 9 hybridMode, 11 childSettings,
-// 12 childDefaults, 16 childSettingsLoading. Others keep their initial value.
-test('child-run settings have no concurrency-limit inputs and Save sends none', async () => {
-  const pair = { provider: 'claude', model: 'm1', effort: null };
+// 12 childExecutorHarness, 13 childExecutorByHarness, 16 childSettingsLoading. Others keep their initial value.
+test('child-run settings are two-level, have no concurrency-limit inputs and Save sends none', async () => {
+  const choice = { model: 'm1', effort: null };
   const child = {
-    default_provider: 'claude', default_model: 'm1', default_effort: null,
-    defaults_by_parent_harness: { claude: pair, codex: { ...pair, provider: 'codex' } },
-    allowed_models: [{ provider: 'claude', model: 'm1' }, { provider: 'codex', model: 'm1' }],
-    allowed_efforts: [], timeout_minutes: 60, max_timeout_minutes: 120, max_attempts: 2,
+    executor_harness: 'claude',
+    executor_by_harness: { claude: choice, codex: { ...choice }, opencode: { model: null, effort: null } },
+    timeout_minutes: 60, max_timeout_minutes: 120, max_attempts: 2,
     max_parallel_per_worker: 3, max_parallel_total: 6, // the API still returns them; Save must not echo them back
     token_relay: { models: [{ provider: 'claude', model: 'm1' }], handoff_tokens: 1000, kill_tokens: 2000, max_relays: 1, report_threshold_tokens: 3000 },
     research_subagent: { claude: { model: 'm1', max_turns: 4 }, codex: { model: 'm1', max_turns: 5 }, answer_max_chars: 700 },
   };
-  const preset = { 0: [], 9: true, 11: child, 12: child.defaults_by_parent_harness, 16: false };
+  const preset = { 0: [], 9: true, 11: child, 12: child.executor_harness, 13: child.executor_by_harness, 16: false };
   let index = 0;
   let saveButton = null;
   const wrap = (jsx) => (type, props, ...rest) => {
@@ -209,9 +208,19 @@ test('child-run settings have no concurrency-limit inputs and Save sends none', 
   assert.match(html, /settings\.childRunTimeoutMinutes/);
   assert.match(html, /settings\.childRunMaxAttempts/);
   assert.doesNotMatch(html, /childRunParallel|max_parallel/i);
+  assert.match(html, /settings\.childRunExecutorHarness/);
+  assert.match(html, /child-executor-harness/);
+  for (const harness of ['claude', 'codex', 'opencode']) {
+    assert.match(html, new RegExp(`child-executor-${harness}-model`));
+    assert.match(html, new RegExp(`child-executor-${harness}-effort`));
+  }
+  assert.doesNotMatch(html, /childRunAllowedModels|allowed_models|child-default-/);
   await saveButton.onClick();
   assert.ok(sent);
   assert.deepEqual(Object.keys(sent).filter((key) => key.startsWith('max_parallel')), []);
+  assert.equal(sent.executor_harness, 'claude');
+  assert.deepEqual(sent.executor_by_harness.opencode, { model: null, effort: null });
+  assert.deepEqual(Object.keys(sent).filter((key) => ['defaults_by_parent_harness', 'allowed_models', 'allowed_efforts'].includes(key)), []);
   assert.deepEqual(sent.token_relay, child.token_relay);
   assert.deepEqual(sent.research_subagent, child.research_subagent);
 });

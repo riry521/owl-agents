@@ -3,6 +3,9 @@ export const OWL_API_PREFIX = "/api/v1";
 /** Advisor が書き込み用の共有 worktree を用意・同期してもらうために呼ぶ API のパス */
 export const ADVISOR_WORKSPACE_API_PATH = `${OWL_API_PREFIX}/advisor/workspace`;
 
+/** Advisor が直接作業を base に統合し、作業用 worktree とブランチを消してもらうために呼ぶ API のパス */
+export const ADVISOR_WORKSPACE_FINISH_API_PATH = `${ADVISOR_WORKSPACE_API_PATH}/finish`;
+
 /** ふさいだ API の代わりに使える owl-action の type。値は既存の owl-action の type と同じ文字列 */
 export type AdvisorAlternativeAction =
   | "create_work" | "send_work_instruction" | "update_work" | "pause_work" | "resume_work"

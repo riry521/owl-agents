@@ -1,22 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DEFAULT_CHILD_RUN_SETTINGS } from "../dist/index.js";
+import { CHILD_RUN_PROVIDERS, DEFAULT_CHILD_RUN_SETTINGS } from "../dist/index.js";
 
-test("child run defaults are selected by parent harness and allow the configured model and effort choices", () => {
-  assert.deepEqual(DEFAULT_CHILD_RUN_SETTINGS.defaults_by_parent_harness, {
-    claude: { provider: "codex", model: "gpt-5.6-luna", effort: "medium" },
-    codex: { provider: "claude", model: "claude-sonnet-5-5", effort: "medium" },
+test("child run defaults pick one Executor harness with a model and effort row for every harness", () => {
+  assert.equal(DEFAULT_CHILD_RUN_SETTINGS.executor_harness, "codex");
+  assert.deepEqual(Object.keys(DEFAULT_CHILD_RUN_SETTINGS.executor_by_harness).sort(), [...CHILD_RUN_PROVIDERS].sort());
+  assert.deepEqual(DEFAULT_CHILD_RUN_SETTINGS.executor_by_harness, {
+    claude: { model: "claude-sonnet-5-5", effort: "medium" },
+    codex: { model: "gpt-5.6-luna", effort: "medium" },
+    opencode: { model: null, effort: null },
   });
-  assert.ok(DEFAULT_CHILD_RUN_SETTINGS.allowed_models.some((choice) => choice.provider === "claude" && choice.model === "claude-sonnet-5-5"));
-  assert.ok(DEFAULT_CHILD_RUN_SETTINGS.allowed_models.some((choice) => choice.provider === "codex" && choice.model === "gpt-5.6-luna"));
-  assert.ok(DEFAULT_CHILD_RUN_SETTINGS.allowed_efforts.includes("low"));
-  assert.ok(DEFAULT_CHILD_RUN_SETTINGS.allowed_efforts.includes("medium"));
 });
 
-test("each parent-harness child default is allowed by the configured model and effort lists", () => {
-  for (const preset of Object.values(DEFAULT_CHILD_RUN_SETTINGS.defaults_by_parent_harness)) {
-    assert.ok(DEFAULT_CHILD_RUN_SETTINGS.allowed_models.some((choice) => choice.provider === preset.provider && choice.model === preset.model));
-    assert.ok(preset.effort === null || DEFAULT_CHILD_RUN_SETTINGS.allowed_efforts.includes(preset.effort));
-  }
+test("only the opencode default row has no model, and the default Executor can run", () => {
+  const { executor_harness: harness, executor_by_harness: rows } = DEFAULT_CHILD_RUN_SETTINGS;
+  assert.notEqual(rows[harness].model, null);
+  for (const [name, row] of Object.entries(rows)) assert.equal(row.model === null, name === "opencode", name);
 });

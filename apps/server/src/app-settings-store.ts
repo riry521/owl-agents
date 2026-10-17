@@ -247,8 +247,8 @@ function parseCustomProviderConfig(id: string, value: unknown): CustomProviderCo
   if (typeof value.displayName !== "string" || value.displayName.trim().length === 0) {
     throw new Error(`custom_providers.${id}.displayName must be a non-empty string`);
   }
-  if (value.harnessId !== "claude" && value.harnessId !== "codex") {
-    throw new Error(`custom_providers.${id}.harnessId must be claude or codex`);
+  if (value.harnessId !== "claude" && value.harnessId !== "codex" && value.harnessId !== "opencode") {
+    throw new Error(`custom_providers.${id}.harnessId must be claude, codex or opencode`);
   }
   const config: CustomProviderConfig = {
     displayName: value.displayName,

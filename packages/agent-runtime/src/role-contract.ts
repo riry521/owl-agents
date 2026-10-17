@@ -1,4 +1,4 @@
-import { isRecord, parseSingleJsonObject, unwrapClaudeCliResult, unwrapCodexCliResult } from "./protocol";
+import { isRecord, parseSingleJsonObject, unwrapCliResult } from "./protocol";
 import type { ProviderResponse } from "./types";
 import {
   outputLanguageInstruction,
@@ -345,9 +345,7 @@ export function extractRoleOutputObject(
   if (format !== "provider-json") {
     return parseSingleJsonObject(response.stdout, reason);
   }
-  const text = response.adapter === "codex" || response.adapter.startsWith("codex")
-    ? unwrapCodexCliResult(response.stdout)
-    : unwrapClaudeCliResult(response.stdout);
+  const text = unwrapCliResult(response.adapter, response.stdout);
   // Some models put the answer in a ```json fence, sometimes after a sentence of prose, even when told not to;
   // only roles that opt in accept that (the last fenced block is taken).
   const fenced = options.allowCodeFence ? [...text.matchAll(/```(?:json)?[ \t]*\n([\s\S]*?)\n```/gu)].at(-1) : undefined;

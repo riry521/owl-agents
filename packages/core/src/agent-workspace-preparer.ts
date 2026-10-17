@@ -30,7 +30,8 @@ export function worktreeHarnesses(db: Pick<CoreDatabase, "get">): Harness[] {
     try {
       const provider = resolveRoleModel(db, role)?.provider;
       const harness = provider ? builtinProviderHarness(provider) : null;
-      if (harness) harnesses.add(harness);
+      // opencode reads no user MCP config, so there is nothing to rehearse for it.
+      if (harness === "claude" || harness === "codex") harnesses.add(harness);
     } catch {
       // Invalid model settings are reported where the role is launched.
     }

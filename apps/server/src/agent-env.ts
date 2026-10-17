@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { parseDotEnv } from "../../../packages/shared/dist/env.js";
+import { OPENCODE_EXECUTABLE_ENV } from "../../../packages/shared/dist/index.js";
 
 /**
  * Credentials that belong to Owl itself (connectors, the local API, the guard
@@ -64,6 +65,7 @@ const SHARED_CONFIGURATION_ENV_NAMES: ReadonlySet<string> = new Set([
   "OWL_INSTANCE_ID",
   "OWL_CLAUDE_EXECUTABLE",
   "OWL_CODEX_EXECUTABLE",
+  OPENCODE_EXECUTABLE_ENV,
   "OWL_PROVIDER_TIMEOUT_MS",
   "OWL_PROVIDER_IDLE_TIMEOUT_MS",
 ]);

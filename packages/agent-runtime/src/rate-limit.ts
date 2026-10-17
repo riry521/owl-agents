@@ -1,6 +1,6 @@
-import type { RateLimitInfo } from "@owl/shared";
+import { builtinProviderHarness, harnessOfAdapter, type RateLimitInfo } from "@owl/shared";
 
-export type RateLimitHarness = "claude" | "codex";
+export type RateLimitHarness = "claude" | "codex" | "opencode";
 
 export type RateLimitResetInput =
   | { readonly kind: "event"; readonly event: unknown }
@@ -252,19 +252,19 @@ const genericTextParsers: readonly TextResetParser[] = [
 export const RATE_LIMIT_EVENT_PARSERS: Readonly<Record<RateLimitHarness, readonly EventResetParser[]>> = {
   claude: [(event) => claudeEventReset(event)],
   codex: [(event, now) => codexEventReset(event, now)],
+  // The opencode driver reports resets itself through rate_limit_evidence.
+  opencode: [],
 };
 
 export const RATE_LIMIT_TEXT_PARSERS: Readonly<Record<RateLimitHarness | "generic", readonly TextResetParser[]>> = {
   claude: claudeTextParsers,
   codex: codexTextParsers,
+  opencode: genericTextParsers,
   generic: genericTextParsers,
 };
 
 export function rateLimitHarness(harnessOrAdapter: string): RateLimitHarness | null {
-  const normalized = harnessOrAdapter.trim().toLowerCase();
-  if (normalized === "claude" || normalized === "anthropic" || normalized.startsWith("claude-cli/")) return "claude";
-  if (normalized === "codex" || normalized === "openai" || normalized === "openai/codex" || normalized.startsWith("codex-cli/")) return "codex";
-  return null;
+  return builtinProviderHarness(harnessOrAdapter) ?? harnessOfAdapter(harnessOrAdapter);
 }
 
 function parseRetryAfter(value: string | number, now: Date): Date | null {

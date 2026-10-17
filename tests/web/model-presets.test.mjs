@@ -74,3 +74,10 @@ test('presetToRoleInputs strips catalog_version and keeps the four settings fiel
     assert.equal(typeof input.effort, 'string');
   }
 });
+
+test('the custom provider harness choices include opencode', () => {
+  const settingsView = readFileSync(join(repoRoot, 'apps/web/components/SettingsView.tsx'), 'utf8');
+  const options = /PROVIDER_HARNESS_OPTIONS[^=]*=\s*\[([^\]]*)\]/u.exec(settingsView);
+  assert.ok(options, 'PROVIDER_HARNESS_OPTIONS is defined');
+  assert.deepEqual([...options[1].matchAll(/'([a-z]+)'/gu)].map((match) => match[1]), ['claude', 'codex', 'opencode']);
+});

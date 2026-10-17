@@ -1,6 +1,6 @@
-import { CLAUDE_HAIKU_5_5_MODEL, CLAUDE_SONNET_5_5_MODEL, CODEX_GPT_6_LUNA_MODEL, DEFAULT_HARNESS_MODELS } from "./harness-models.js";
+import { CLAUDE_HAIKU_5_5_MODEL, CLAUDE_SONNET_5_5_MODEL, CODEX_GPT_6_LUNA_MODEL } from "./harness-models.js";
 
-export const CHILD_RUN_PROVIDERS = ["claude", "codex"] as const;
+export const CHILD_RUN_PROVIDERS = ["claude", "codex", "opencode"] as const;
 export type ChildRunProvider = (typeof CHILD_RUN_PROVIDERS)[number];
 export const CHILD_RUN_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 export type ChildRunEffort = (typeof CHILD_RUN_EFFORTS)[number];
@@ -39,7 +39,6 @@ export const CHILD_RUN_LIMITS = {
 
 export interface ChildDispatchRequest {
   readonly title: string; readonly instruction: string; readonly write_paths: readonly string[];
-  readonly provider?: ChildRunProvider; readonly model?: string; readonly effort?: ChildRunEffort;
   readonly timeout_minutes?: number;
 }
 export interface ChildDispatchResponse {
@@ -81,8 +80,8 @@ export interface ChildRunRecord {
   readonly relay_count: number;
 }
 
-export interface ChildRunModelChoice { readonly provider: ChildRunProvider; readonly model: string }
-export interface ChildRunHarnessDefault extends ChildRunModelChoice { readonly effort: ChildRunEffort | null }
+/** One harness's model and effort. model is null only for opencode, which has no built-in default model. */
+export interface ChildRunHarnessChoice { readonly model: string | null; readonly effort: ChildRunEffort | null }
 export interface TokenRelaySettings {
   /** Children whose prompt size Owl watches. Claude only: Owl reads Claude's stream-json usage and Claude hooks. */
   readonly models: readonly { readonly provider: "claude"; readonly model: string }[];
@@ -102,12 +101,8 @@ export interface ResearchSubagentSettings {
 /** Prompt-size limits the Executor enforces on one relay-watched child segment. */
 export interface ExecutorRelayConfig { readonly handoff_tokens: number; readonly kill_tokens: number }
 export interface ChildRunSettings {
-  readonly default_provider: ChildRunProvider;
-  readonly default_model: string;
-  readonly default_effort: ChildRunEffort | null;
-  readonly defaults_by_parent_harness: Readonly<Record<ChildRunProvider, ChildRunHarnessDefault>>;
-  readonly allowed_models: readonly ChildRunModelChoice[];
-  readonly allowed_efforts: readonly ChildRunEffort[];
+  readonly executor_harness: ChildRunProvider;
+  readonly executor_by_harness: Readonly<Record<ChildRunProvider, ChildRunHarnessChoice>>;
   readonly timeout_minutes: number;
   readonly max_timeout_minutes: number;
   readonly max_attempts: number;
@@ -115,19 +110,12 @@ export interface ChildRunSettings {
   readonly research_subagent: ResearchSubagentSettings;
 }
 export const DEFAULT_CHILD_RUN_SETTINGS: ChildRunSettings = {
-  default_provider: "claude",
-  default_model: DEFAULT_HARNESS_MODELS.claude,
-  default_effort: "medium",
-  defaults_by_parent_harness: {
-    claude: { provider: "codex", model: "gpt-5.6-luna", effort: "medium" },
-    codex: { provider: "claude", model: CLAUDE_SONNET_5_5_MODEL, effort: "medium" },
+  executor_harness: "codex",
+  executor_by_harness: {
+    claude: { model: CLAUDE_SONNET_5_5_MODEL, effort: "medium" },
+    codex: { model: "gpt-5.6-luna", effort: "medium" },
+    opencode: { model: null, effort: null },
   },
-  allowed_models: [
-    { provider: "claude", model: CLAUDE_SONNET_5_5_MODEL },
-    { provider: "codex", model: "gpt-5.6-luna" },
-    { provider: "claude", model: CLAUDE_HAIKU_5_5_MODEL },
-  ],
-  allowed_efforts: ["low", "medium", "high"],
   timeout_minutes: 60,
   max_timeout_minutes: 180,
   max_attempts: 2,

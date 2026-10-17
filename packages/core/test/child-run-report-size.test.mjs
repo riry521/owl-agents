@@ -64,12 +64,11 @@ async function setup(t) {
         return { file, release() {} };
       },
     }),
-    settings: () => ({ ...DEFAULT_CHILD_RUN_SETTINGS }),
+    settings: () => ({ ...DEFAULT_CHILD_RUN_SETTINGS, executor_harness: "claude" }),
     onParentActivity() {},
   });
   scheduler.registerParent({
     agent_run_id: ids.parent, work_id: ids.work, task_id: ids.task,
-    harness: "codex",
     workspace_dir: root, worktree: root,
     task: { title: "test", acceptance: "", context: "", rules: "", owner_guidance: [] },
   });
