@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { createUlid } from "../../db/dist/index.js";
 import { idempotencyConflict, validationError } from "./errors";
 import { ownerLanguage } from "./owner-language";
+import { toDecisionExplanation } from "./decision-explainer";
 import { openDecisionInTransaction, resolveDecisionInTransaction } from "./state-reducer";
 import type {
   CommandRequest,
@@ -132,10 +133,16 @@ export class DecisionService {
     // canonical event can carry work_id even though the state callback owns
     // the actual CAS/resolution transaction. The decision row is immutable in
     // its work association, so this read cannot redirect the event.
-    const decisionMetadata = this.db.get<{ work_id: string }>(
-      "SELECT work_id FROM decisions WHERE id = ?",
+    const decisionMetadata = this.db.get<{ work_id: string; options_json: string }>(
+      "SELECT work_id, options_json FROM decisions WHERE id = ?",
       request.payload.decision_id,
     );
+    // A chosen fix option carries its instruction and criteria rewrites into the Work's record.
+    const chosen = decisionMetadata
+      ? (JSON.parse(decisionMetadata.options_json) as { key?: string; label?: string; instruction?: string; criteria_rewrites?: unknown }[]).find(
+        (item) => item.key === request.payload.option_key && typeof item.instruction === "string" && item.instruction !== "",
+      )
+      : undefined;
     try {
       const result = await this.writeLane.write({
         mutateState: (transaction: CoreWriteLaneTransaction) => {
@@ -189,7 +196,11 @@ export class DecisionService {
           idempotencyKey: "decision-resolved:" + scopedKey,
           type: "decision.resolved",
           workId: decisionMetadata?.work_id ?? null,
-          payload: { decision_id: request.payload.decision_id, answer: request.payload.answer },
+          payload: {
+            decision_id: request.payload.decision_id,
+            answer: request.payload.answer,
+            ...(chosen ? { chosen_option: { key: chosen.key, label: chosen.label, instruction: chosen.instruction, criteria_rewrites: chosen.criteria_rewrites ?? [] } } : {}),
+          } as JsonObject,
         },
         outbox: [{ provider: "websocket" }],
       });
@@ -206,7 +217,7 @@ export class DecisionService {
     const boundedLimit = boundLimit(limit);
     const rows = this.db.all<DecisionDbRow>(
       `SELECT id, work_id, scope, status, blocked_task_ids_json, reason, question, current_state, tried,
-              options_json, recommended, allow_free_text, state_version, design_block_json
+              options_json, recommended, allow_free_text, state_version, design_block_json, explanation_json
          FROM decisions
         WHERE (? IS NULL OR status = ?)
           AND (? IS NULL OR id > ?)
@@ -250,6 +261,7 @@ interface DecisionDbRow {
   allow_free_text: number;
   state_version: number;
   design_block_json: string | null;
+  explanation_json: string | null;
 }
 
 function toDecision(row: DecisionDbRow): Decision {
@@ -273,6 +285,7 @@ function toDecision(row: DecisionDbRow): Decision {
     blocked_task_ids: blocked,
     state_version: row.state_version,
     design_block: row.design_block_json ? (JSON.parse(row.design_block_json) as Decision["design_block"]) : null,
+    explanation: toDecisionExplanation(row.explanation_json),
   };
 }
 

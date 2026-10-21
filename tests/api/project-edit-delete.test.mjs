@@ -433,11 +433,12 @@ test("confirmed deletion detaches Works and backlog, reassigns colliding numbers
   assert.equal(api.db.get("SELECT display_number FROM works WHERE id = ?", next).display_number, 6);
 });
 
-test("detachment fills the smallest free projectless number", async (t) => {
+test("detachment takes the highest remaining projectless number + 1", async (t) => {
   const api = await setup(t);
   if (!api) return;
   const first = await createWork(api, "Projectless retained number", null);
   const removed = await createWork(api, "Projectless deleted number", null);
+  const last = await createWork(api, "Projectless last number", null);
   await setWorkState(api.db, removed, "completed");
   await archiveWork(api, removed);
   await api.durableCore.deleteWork(removed, command({}, `delete-work:${removed}`, 1));
@@ -449,7 +450,8 @@ test("detachment fills the smallest free projectless number", async (t) => {
   const response = await sendCommand(api, "DELETE", `/projects/${project.id}`, { confirmed_work_count: 1 }, "delete-counter");
   assert.equal(response.status, 200);
   assert.equal(api.db.get("SELECT display_number FROM works WHERE id = ?", first).display_number, 1);
-  assert.equal(api.db.get("SELECT display_number FROM works WHERE id = ?", attached).display_number, 2);
+  assert.equal(api.db.get("SELECT display_number FROM works WHERE id = ?", attached).display_number, 4);
+  assert.equal(api.db.get("SELECT display_number FROM works WHERE id = ?", last).display_number, 3);
 });
 
 test("DELETE reports running blockers before a stale confirmed count and leaves the DB unchanged", async (t) => {

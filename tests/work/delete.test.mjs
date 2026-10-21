@@ -241,17 +241,130 @@ test("design documents that cannot be removed after a Work delete raise an alert
   assert.equal(payload.path, designDirectory);
 });
 
-test("deleteWork rejects non-terminal and missing Works before touching their workspace", async (t) => {
+test("deleteWork rejects running and missing Works before touching their workspace", async (t) => {
   const { root, db, core } = await setup(t);
   const created = await core.createWork(command({ title: "Running", summary: "", size: "small", project_id: null }, "running"));
+  const now = "2026-09-25T00:00:00.000Z";
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run("UPDATE works SET state = 'running', state_version = 1, updated_at = ? WHERE id = ?", now, created.data.work_id);
+  });
   const path = join(root, ".owl-workspaces", created.data.work_id, "keep");
   await mkdir(path, { recursive: true });
-  await assert.rejects(core.deleteWork(created.data.work_id, command({}, "delete-running")), (error) =>
-    error.code === "invalid_state_transition" && error.details.state === "memo",
+  await assert.rejects(core.deleteWork(created.data.work_id, command({}, "delete-running", 1)), (error) =>
+    error.code === "invalid_state_transition" && error.details.state === "running",
   );
   await access(path);
 
   await assert.rejects(core.deleteWork(createUlid(), command({}, "delete-missing")), (error) => error.code === "work_not_found");
+});
+
+test("deleteWork removes memo and ready Works together with their Tasks", async (t) => {
+  const { db, core } = await setup(t);
+  for (const state of ["memo", "ready"]) {
+    const created = await core.createWork(command({ title: `Direct ${state}`, summary: "", size: "small", project_id: null }, `direct-${state}`));
+    const workId = created.data.work_id;
+    const now = "2026-09-25T00:00:00.000Z";
+    await db.createWriteLane().transact((transaction) => {
+      transaction.run("UPDATE works SET state = ?, state_version = 1, updated_at = ? WHERE id = ?", state, now, workId);
+      transaction.run(
+        `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, created_at, updated_at)
+         VALUES (?, ?, 'T', 'code', 'ready', 'normal', '', '', ?, ?)`,
+        createUlid(), workId, now, now,
+      );
+    });
+    const deleted = await core.deleteWork(workId, command({}, `delete-${state}`, 1));
+    assert.deepEqual(deleted.data, { work_id: workId, deleted: true });
+    assert.equal(db.get("SELECT id FROM works WHERE id = ?", workId), undefined);
+    for (const table of ["tasks", "conversations", "events"]) {
+      assert.equal(db.get(`SELECT COUNT(*) AS n FROM ${table} WHERE work_id = ?`, workId).n, 0, table);
+    }
+  }
+});
+
+// Lists every "table.column:id" whose text value mentions one of the ids.
+export function rowsMentioning(db, ids) {
+  const found = [];
+  for (const { name } of db.all("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")) {
+    for (const { name: column } of db.all(`PRAGMA table_info(${name})`)) {
+      for (const id of ids) {
+        const n = db.get(`SELECT COUNT(*) AS n FROM ${name} WHERE instr(CAST("${column}" AS TEXT), ?) > 0`, id).n;
+        if (n > 0) found.push(`${name}.${column}:${id}`);
+      }
+    }
+  }
+  return found;
+}
+
+test("deleting a memo or ready Work leaves no row that mentions its ids", async (t) => {
+  const { db, core } = await setup(t);
+  for (const state of ["memo", "ready"]) {
+    const created = await core.createWork(command({ title: `Clean ${state}`, summary: "", size: "small", project_id: null }, `clean-${state}`));
+    const workId = created.data.work_id;
+    const taskId = createUlid();
+    const decisionId = createUlid();
+    const now = "2026-09-25T00:00:00.000Z";
+    await db.createWriteLane().transact((transaction) => {
+      transaction.run("UPDATE works SET state = ?, state_version = 1, updated_at = ? WHERE id = ?", state, now, workId);
+      transaction.run(
+        `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, created_at, updated_at)
+         VALUES (?, ?, 'T', 'code', 'ready', 'normal', '', '', ?, ?)`,
+        taskId, workId, now, now,
+      );
+      transaction.run(
+        `INSERT INTO decisions (id, work_id, scope, status, blocked_task_ids_json, reason, tried, current_state, options_json, allow_free_text, issuer_role, created_at, resolved_at)
+         VALUES (?, ?, 'work', 'resolved', '[]', 'r', 't', 'c', '[]', 0, 'core', ?, ?)`,
+        decisionId, workId, now, now,
+      );
+      transaction.run(
+        `INSERT INTO conversations (id, owner_id, work_id, channel, is_active, created_at, updated_at)
+         VALUES (?, ?, ?, 'web', 1, ?, ?)`,
+        createUlid(), db.get("SELECT owner_id FROM works WHERE id = ?", workId).owner_id, workId, now, now,
+      );
+      transaction.run(
+        `INSERT INTO events (id, sequence, idempotency_key, type, work_id, payload_json, status, created_at)
+         VALUES (?, (SELECT coalesce(max(sequence), 0) + 1 FROM events), ?, 'work.updated', ?, '{}', 'handled', ?)`,
+        createUlid(), `clean-event:${workId}`, workId, now,
+      );
+    });
+    const conversationIds = db.all("SELECT id FROM conversations WHERE work_id = ?", workId).map((row) => row.id);
+    const eventIds = db.all("SELECT id FROM events WHERE work_id = ?", workId).map((row) => row.id);
+    assert.ok(eventIds.length > 0 && conversationIds.length > 0, "the Work has events and a conversation before the delete");
+
+    await core.deleteWork(workId, command({}, `clean-delete-${state}`, 1));
+    assert.deepEqual(rowsMentioning(db, [workId, taskId, decisionId, ...conversationIds, ...eventIds]), [], state);
+  }
+});
+
+test("deleting a Work that a backlog item points at keeps the item and returns it to open", async (t) => {
+  const { db, core } = await setup(t);
+  const sourceId = (await core.createWork(command({ title: "Backlog source", summary: "", size: "small", project_id: null }, "backlog-source"))).data.work_id;
+  const draftId = (await core.createWork(command({ title: "Backlog draft", summary: "", size: "small", project_id: null }, "backlog-draft"))).data.work_id;
+  const taskId = createUlid();
+  const reviewId = createUlid();
+  const itemId = createUlid();
+  const now = "2026-09-25T00:00:00.000Z";
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run("UPDATE works SET state = 'memo', state_version = 1, updated_at = ? WHERE id = ?", now, draftId);
+    transaction.run(
+      `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, created_at, updated_at)
+       VALUES (?, ?, 'T', 'code', 'ready', 'normal', '', '', ?, ?)`,
+      taskId, sourceId, now, now,
+    );
+    transaction.run(
+      "INSERT INTO reviews (id, task_id, round, verdict, findings_json, verification_report_json, created_at) VALUES (?, ?, 0, 'pass', '[]', '{}', ?)",
+      reviewId, taskId, now,
+    );
+    transaction.run(
+      `INSERT INTO backlog_items (id, work_id, task_id, review_id, review_round, file, problem, status, issued_work_id, dedupe_key, created_at, updated_at)
+       VALUES (?, ?, ?, ?, 0, 'f', 'p', 'in_progress', ?, 'k', ?, ?)`,
+      itemId, sourceId, taskId, reviewId, draftId, now, now,
+    );
+  });
+
+  await core.deleteWork(draftId, command({}, "backlog-draft-delete", 1));
+  const item = db.get("SELECT status, issued_work_id FROM backlog_items WHERE id = ?", itemId);
+  assert.deepEqual({ ...item }, { status: "open", issued_work_id: null });
+  assert.deepEqual(rowsMentioning(db, [draftId]), []);
 });
 
 test("deleteWork accepts an archived cancelled Work", async (t) => {

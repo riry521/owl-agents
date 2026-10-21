@@ -28,7 +28,7 @@ export type AttemptReason =
   | "lineage_budget_exhausted" | "base_sync_lineage_budget_exhausted"
   | "design_escalated_to_lead" | "lead_rejections_exhausted" | "design_blocked"
   | "worker_replan_requested" | "worker_question" | "acceptance_defect"
-  | "external_blocker" | "external_blocker_limit"
+  | "external_blocker" | "external_blocker_limit" | "partial_limit"
   | "integration_conflict" | "integration_commit_failed" | "work_sync_conflict"
   | "process_wait" | "dependency_failed" | "dependency_restored" | "dependency_incomplete"
   | "replanned" | "owner_answer" | "owner_to_manager" | "owner_rerun_review" | "owner_rerun_verification" | "test_environment_blocked"
@@ -103,6 +103,7 @@ export interface AttemptPolicyConfig {
   readonly lineageLimits: AttemptLineageLimits | null;
   readonly noProgressLimit: number;
   readonly externalBlockerLimit: number;
+  readonly partialLimit: number;
   /** Review rejections of a non-design Task after which the Fixer takes over. */
   readonly fixerAfterRejections: number;
 }
@@ -117,6 +118,7 @@ export const DEFAULT_ATTEMPT_POLICY_CONFIG: AttemptPolicyConfig = {
   lineageLimits: null,
   noProgressLimit: DEFAULT_PROGRESS_GUARD_SETTINGS.no_progress_limit,
   externalBlockerLimit: DEFAULT_PROGRESS_GUARD_SETTINGS.external_blocker_limit,
+  partialLimit: DEFAULT_PROGRESS_GUARD_SETTINGS.partial_limit,
   fixerAfterRejections: DEFAULT_FIXER_ESCALATION_SETTINGS.after_review_rejections,
 };
 
@@ -150,6 +152,8 @@ export type AttemptTaskObservation =
       readonly escalatedFromTransient: boolean;
       /** What the Worker's report asks for when it reported result partial; absent or null for any other result. */
       readonly partialReport?: PartialReportObservation | null;
+      /** Partial reports recorded earlier in the same lineage (this run excluded); read only for a plain partial. */
+      readonly earlierPartials?: number;
     }
   | { readonly kind: "worker_crash"; readonly task: AttemptTaskSnapshot; readonly errorKey: string }
   | { readonly kind: "reviewer_crash"; readonly task: AttemptTaskSnapshot }
@@ -412,17 +416,24 @@ export function evaluate(observation: AttemptObservation, c: AttemptPolicyConfig
     }
     case "deterministic_failure": {
       const o = observation;
-      const counters = deterministicCounters(o.task, o.errorKey);
-      const base: AttemptRowPatch = { ...failureBase(o.task, o.errorKey, counters), next_attempt_at: null };
+      const p = o.partialReport;
+      if (p && !p.pendingProcess && !p.externalBlocker && !p.unverifiable && !p.needsReplanning) {
+        // Why not failureBase / the deterministic limits: a partial is work that stopped early, not a failure, so failure_count,
+        // same_error_count and last_error_key stay and progress_guard.partial_limit bounds it separately.
+        // Why also when retryAllowed is false: a side-effect tool (Bash) marks almost every partial non-retryable, yet a partial
+        // that asks nobody for anything only needs another run. Other side-effect failures stay with the Owner so a
+        // half-applied external action is not repeated unseen.
+        const patch: AttemptRowPatch = { next_attempt_at: null };
+        if ((o.earlierPartials ?? 0) + 1 <= c.partialLimit) {
+          return decide(o.task, "ready", "resumable_partial", ["deterministic_retry_scheduled"], false, patch);
+        }
+        return decide(o.task, "judgement_waiting", "partial_limit", ["core_decision_required"], false, { ...patch, paused_from: null });
+      }
+      // A partial that asks someone for something keeps this flow but never counts as a failure.
+      const counters = p ? { same: o.task.same_error_count, total: o.task.failure_count } : deterministicCounters(o.task, o.errorKey);
+      const base: AttemptRowPatch = { ...(p ? {} : failureBase(o.task, o.errorKey, counters)), next_attempt_at: null };
       const withinLimits = counters.same < c.deterministicSameErrorLimit && counters.total < c.deterministicFailureLimit;
       if (!o.retryAllowed) {
-        // Why not keep every non-retryable failure for the Owner: a side-effect tool (Bash) marks almost every partial report
-        // non-retryable, yet a partial that asks nobody for anything only needs another run of the same Task. Other
-        // side-effect failures stay with the Owner so a half-applied external action is not repeated unseen.
-        const p = o.partialReport;
-        if (p && !p.pendingProcess && !p.externalBlocker && !p.unverifiable && !p.needsReplanning && withinLimits) {
-          return decide(o.task, "ready", "resumable_partial", ["deterministic_retry_scheduled"], false, base);
-        }
         return decide(o.task, "judgement_waiting", "retry_not_allowed", ["core_decision_required"], false, { ...base, paused_from: null });
       }
       if (withinLimits) {

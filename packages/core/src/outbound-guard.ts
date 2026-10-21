@@ -6,6 +6,8 @@ import { join } from "node:path";
 export interface OutboundPolicy {
   readonly allowed_hosts: readonly string[];
   readonly blocked_hosts: readonly string[];
+  /** Exact "host:port" destinations that may be reached although the host is internal. */
+  readonly allowed_internal: readonly string[];
   readonly log_all: boolean;
 }
 
@@ -21,6 +23,7 @@ export interface OutboundAuditEntry {
 const DEFAULT_POLICY: OutboundPolicy = {
   allowed_hosts: [],
   blocked_hosts: [],
+  allowed_internal: [],
   log_all: true,
 };
 
@@ -70,7 +73,7 @@ export class OutboundGuard {
       return { allowed: false, rule: "blocked_host" };
     }
 
-    if (isInternalHostname(hostname)) {
+    if (isInternalHostname(hostname) && !this.isAllowedInternal(url)) {
       this.record(url, method, agentRunId, false, "internal_address");
       return { allowed: false, rule: "internal_address" };
     }
@@ -105,11 +108,20 @@ export class OutboundGuard {
       this.record(url, method, agentRunId, false, "dns_failed");
       return { allowed: false, rule: "dns_failed" };
     }
-    if (addresses.some(isInternalAddress)) {
+    if (addresses.some(isInternalAddress) && !this.isAllowedInternal(url)) {
       this.record(url, method, agentRunId, false, "internal_address");
       return { allowed: false, rule: "internal_address" };
     }
     return result;
+  }
+
+  /**
+   * Matches the whole "host:port" only. Letting allowed_hosts lift the internal check was rejected because
+   * it matches every port and subdomain; a port-less URL never matches, so the default port stays refused.
+   */
+  private isAllowedInternal(url: string): boolean {
+    const { hostname, port } = new URL(url);
+    return port !== "" && this.policy.allowed_internal.some((entry) => entry.toLowerCase() === `${normalizeHost(hostname)}:${port}`);
   }
 
   getAuditLog(limit = 100): readonly OutboundAuditEntry[] {
@@ -189,11 +201,12 @@ function expandIpv6(address: string): number[] {
   return [...left, ...fill, ...right].map((part) => parseInt(part, 16));
 }
 
-type HostSection= "allowed" | "blocked" | null;
+type HostSection = "allowed" | "blocked" | "internal" | null;
 
 function parseOutboundPolicy(raw: string, filePath: string): OutboundPolicy {
   const allowed: string[] = [];
   const blocked: string[] = [];
+  const internal: string[] = [];
   let section: HostSection = null;
   let logAll = true;
   const seen = new Set<string>();
@@ -202,14 +215,14 @@ function parseOutboundPolicy(raw: string, filePath: string): OutboundPolicy {
     const trimmed = stripYamlComment(line).trim();
     if (!trimmed) continue;
 
-    const hostListMatch = trimmed.match(/^(allowed_hosts|blocked_hosts):\s*(.*)$/);
+    const hostListMatch = trimmed.match(/^(allowed_hosts|blocked_hosts|allowed_internal):\s*(.*)$/);
     if (hostListMatch) {
       const key = hostListMatch[1];
       const value = hostListMatch[2].trim();
       if (seen.has(key)) throw invalidPolicy(filePath, index + 1, `duplicate key ${key}`);
       seen.add(key);
       if (value === "") {
-        section = key === "allowed_hosts" ? "allowed" : "blocked";
+        section = key === "allowed_hosts" ? "allowed" : key === "blocked_hosts" ? "blocked" : "internal";
       } else if (value === "[]") {
         section = null;
       } else {
@@ -235,14 +248,20 @@ function parseOutboundPolicy(raw: string, filePath: string): OutboundPolicy {
       const host = parseYamlScalar(trimmed.slice(2).trim(), filePath, index + 1);
       if (!host) throw invalidPolicy(filePath, index + 1, "host entries must not be empty");
       if (section === "allowed") allowed.push(host);
-      else blocked.push(host);
+      else if (section === "blocked") blocked.push(host);
+      else {
+        if (!/^(\[[0-9a-f:.]+\]|[^:\s[\]]+):\d+$/iu.test(host)) {
+          throw invalidPolicy(filePath, index + 1, "allowed_internal entries must be host:port");
+        }
+        internal.push(host);
+      }
       continue;
     }
 
     throw invalidPolicy(filePath, index + 1, "unsupported YAML construct");
   }
 
-  return { allowed_hosts: allowed, blocked_hosts: blocked, log_all: logAll };
+  return { allowed_hosts: allowed, blocked_hosts: blocked, allowed_internal: internal, log_all: logAll };
 }
 
 function parseYamlScalar(value: string, filePath: string, lineNumber: number): string {

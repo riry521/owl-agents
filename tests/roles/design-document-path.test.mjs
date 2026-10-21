@@ -174,7 +174,7 @@ test("design mock helpers fix the mock directory, file names, skill names and sc
   for (const name of ["example-ui-skill", "plugin:skill_1.0"]) assert.equal(DESIGN_SKILL_NAME_PATTERN.test(name), true, name);
   for (const name of ["", "-x", "a b", "a\nb", "a".repeat(129)]) assert.equal(DESIGN_SKILL_NAME_PATTERN.test(name), false, JSON.stringify(name));
   assert.equal(isScreenDesignTask({ type: "design", assigned_designer: "lead_designer" }), true);
-  assert.equal(isScreenDesignTask({ type: "design", assigned_designer: "designer" }), false);
-  assert.equal(isScreenDesignTask({ type: "design" }), false);
+  assert.equal(isScreenDesignTask({ type: "design", assigned_designer: "designer" }), true);
+  assert.equal(isScreenDesignTask({ type: "design" }), true);
   assert.equal(isScreenDesignTask({ type: "code", assigned_designer: "lead_designer" }), false);
 });

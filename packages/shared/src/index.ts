@@ -689,6 +689,27 @@ export {
   type DesignBlockCauseKind,
   type DesignBlockedReport,
 } from "./design-blocked.js";
+export {
+  DECISION_CAUSE_KINDS,
+  DECISION_EXPLANATION_KINDS,
+  DECISION_EXPLANATION_SCHEMA,
+  DECISION_FIX_OPTIONS_MAX,
+  DECISION_FIX_OPTIONS_MIN,
+  DECISION_FIX_OPTION_PREFIX,
+  DECISION_INTERNAL_TERM_PATTERNS,
+  DECISION_SUMMARY_MAX_SENTENCES,
+  findInternalTerms,
+  readDecisionExplanation,
+  type DecisionCauseKind,
+  type DecisionCriterionRewrite,
+  type DecisionExplanationCheckContext,
+  type DecisionExplanationKind,
+  type DecisionExplanationReport,
+  type DecisionExplanationRequest,
+  type DecisionExplanationRunResult,
+  type DecisionFixOption,
+  type StoredDecisionExplanation,
+} from "./decision-explanation.js";
 
 export { defuseTags, EXTERNAL_DATA_ATTR, externalJsonBlock } from "./external-data.js";
 export {

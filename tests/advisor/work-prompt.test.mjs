@@ -28,7 +28,7 @@ test("the built Advisor prompt explains Work operations and their confirmation r
   assert.match(prompt, /Confirmation rules:/u);
   assert.match(prompt, /Never emit cancel_work, delete_work, update_work or move_work_to_project before the operator confirms/u);
   assert.match(prompt, /deleted completely and cannot be undone/u);
-  assert.match(prompt, /only completed \/ cancelled Works qualify/u);
+  assert.match(prompt, /only memo \/ ready \/ completed \/ cancelled Works qualify/u);
   assert.match(prompt, /ask for approval, and emit the action only in a later turn after the operator agrees/u);
   assert.match(prompt, /Adding reopen:true to an instruction for a completed Work also needs the operator's explicit approval/u);
   assert.match(prompt, /If several Works match or none does, ask which Work before emitting the action/u);

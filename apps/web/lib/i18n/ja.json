@@ -415,7 +415,15 @@
     "choose": "これにする",
     "context": "今の状態とこれまでの経緯",
     "currentState": "今の状態",
-    "tried": "これまでの経緯"
+    "tried": "これまでの経緯",
+    "causeLabel": "原因",
+    "causeKind": { "work": "作業の問題", "criteria": "条件の問題", "external": "外の問題" },
+    "rewriteBefore": "元の条件",
+    "rewriteAfter": "読み替えた条件",
+    "rewriteCheck": "確かめ方",
+    "otherOptions": "ほかの答え方",
+    "detailsSummary": "詳しい記録（Worker の報告と検証の記録）",
+    "explanationPending": "止まった理由の説明を作っています。"
   },
   "agents": {
     "title": "Agents",
@@ -1028,6 +1036,7 @@
     "taskReady": "Task準備完了",
     "taskCompleted": "Task完了",
     "taskFailed": "Task失敗",
+    "taskPartial": "Task一部完了",
     "workerStarted": "Worker開始",
     "workerCompleted": "Worker完了",
     "workerFailed": "Worker失敗",

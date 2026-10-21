@@ -1,7 +1,7 @@
 import type { OwlEvent } from "../types";
 import { asOwlLanguage, type OwlLanguage } from "./language";
 import { createDecisionButtonId } from "./decision-button";
-import { decisionHeadings, decisionLanguage, decisionTitle } from "./decision-text";
+import { decisionHeadings, decisionLanguage, decisionTitle, formatDecisionExplanation } from "./decision-text";
 import { answerGuideHint, decisionShortId } from "./router";
 
 /** Events that can be represented by the shared notification card model. */
@@ -74,6 +74,7 @@ export interface DecisionOptionView {
   readonly label: string;
   readonly description: string | null;
   readonly recommended: boolean;
+  readonly criteriaRewrites: ReadonlyArray<{ readonly before: string; readonly after: string }>;
 }
 
 export interface DecisionAnswerGuideInput {
@@ -295,12 +296,21 @@ export function decisionOptionViews(payload: Record<string, unknown>): DecisionO
     const label = text(record.label);
     if (!label) return [];
     const key = typeof record.key === "string" && record.key.length > 0 ? record.key : null;
+    const criteriaRewrites = Array.isArray(record.criteria_rewrites)
+      ? record.criteria_rewrites.flatMap((rewrite) => {
+        const r = rewrite && typeof rewrite === "object" ? rewrite as Record<string, unknown> : {};
+        const before = text(r.before);
+        const after = text(r.after);
+        return before && after ? [{ before, after }] : [];
+      })
+      : [];
     return [{
       index,
       key,
       label,
       description: text(record.description),
       recommended: recommended !== null && key === recommended,
+      criteriaRewrites,
     }];
   });
 }
@@ -332,18 +342,26 @@ export function formatDecisionThreadDetail(payload: Record<string, unknown>, inp
   const reason = text(payload.reason);
   const currentState = text(payload.current_state);
   const tried = text(payload.tried);
-  if (reason) sections.push({ heading: headings.reason, body: reason });
+  const explanation = formatDecisionExplanation(payload);
+  if (explanation) sections.push({ heading: headings.reason, body: explanation });
+  else if (reason) sections.push({ heading: headings.reason, body: reason });
   if (input.question.source === "question" && input.question.shortened && input.question.full) {
     sections.push({ heading: headings.question, body: input.question.full });
   }
   if (options.length > 0) {
     const optionLines = options.map((option) =>
-      `• ${option.label}${option.recommended ? " ★" : ""}${option.description ? ` — ${option.description}` : ""}`);
+      [`• ${option.label}${option.recommended ? " ★" : ""}${option.description ? ` — ${option.description}` : ""}`,
+        ...option.criteriaRewrites.map((rewrite) => `  ${rewrite.before} → ${rewrite.after}`)].join("\n"));
     if (options.some((option) => option.recommended)) optionLines.push(t.recommendedLegend);
     sections.push({ heading: headings.options, body: optionLines.join("\n") });
   }
-  if (currentState) sections.push({ heading: headings.currentState, body: currentState });
-  if (tried) sections.push({ heading: headings.tried, body: tried });
+  if (explanation) {
+    const details = [reason, currentState, tried].filter(Boolean).join("\n");
+    if (details) sections.push({ heading: headings.details, body: details });
+  } else {
+    if (currentState) sections.push({ heading: headings.currentState, body: currentState });
+    if (tried) sections.push({ heading: headings.tried, body: tried });
+  }
   const guide = formatDecisionAnswerGuide({
     decisionId: input.decisionId,
     language: input.language,
@@ -468,7 +486,8 @@ function buildDecisionOpenedCard(event: OwlEvent, ctx: CardRenderContext): Notif
   const options = decisionOptionViews(payload);
   const optionList = formatDecisionOptionList(options, language);
   const workTitle = eventWorkTitle(event);
-  const body = joinLines(workTitle, `❓ ${question.line}${optionList ? `\n\n${optionList}` : ""}`) ?? "";
+  const explanation = formatDecisionExplanation(payload);
+  const body = joinLines(workTitle, `${explanation ? `💡 ${explanation}\n` : ""}❓ ${question.line}${optionList ? `\n\n${optionList}` : ""}`) ?? "";
   const decisionId = text(payload.decision_id);
   const targetId = decisionId ?? event.event_id;
   const actions = options.slice(0, MAX_CARD_ACTIONS).flatMap((option): CardAction[] => {

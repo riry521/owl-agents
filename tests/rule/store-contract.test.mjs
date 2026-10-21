@@ -209,3 +209,12 @@ test("an unresolvable path is denied with the unresolved-path rule", async (t) =
   assert.equal(result.blocked, true);
   assert.equal(result.rule.id, "guard-unresolved-path");
 });
+
+test("system/outbound.yaml (OutboundGuard's config) is not read as a rule file", async (t) => {
+  const { store } = await withRules(t, {
+    "system/safety.yaml": ABSOLUTE,
+    "system/outbound.yaml": "allowed_internal:\n  - 127.0.0.1:4400\n",
+  });
+  await store.load();
+  assert.deepEqual(store.getInstructionsForRole("worker"), [BLOCK_SUMMARY, "[absolute] Verify before reporting done."]);
+});

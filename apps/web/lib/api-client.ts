@@ -157,6 +157,8 @@ export type RealtimeStatus = 'connecting' | 'connected' | 'polling';
 const RUNTIME_CONFIG_PATH = '/api/v1/runtime-config.json';
 const POLL_INTERVAL_MS = 5_000;
 const WS_CONNECT_TIMEOUT_MS = 5_000;
+const WS_RECONNECT_INITIAL_MS = 5_000;
+const WS_RECONNECT_MAX_MS = 60_000;
 
 export type ApiRequestErrorKind = 'not_found' | 'server_error' | 'network_error' | 'bad_data' | 'request_error';
 
@@ -1154,6 +1156,7 @@ function withRunLineage(run: AgentRun): AgentRun {
 /**
  * Subscribe to WebSocket frames. A transport failure deliberately
  * switches to polling and reports that state to the screen in human language.
+ * While polling, it retries the WebSocket with a growing delay and resumes realtime updates once reconnected.
  */
 export function subscribeToUpdates(
   workIds: ULID[],
@@ -1165,6 +1168,8 @@ export function subscribeToUpdates(
   let socket: WebSocket | null = null;
   let pollTimer: ReturnType<typeof setInterval> | null = null;
   let connectTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  let reconnectDelay = WS_RECONNECT_INITIAL_MS;
 
   const safeUpdate = (frame?: EventFrame) => {
     try {
@@ -1181,16 +1186,29 @@ export function subscribeToUpdates(
     pollTimer = setInterval(() => safeUpdate(), POLL_INTERVAL_MS);
   };
 
+  const stopPolling = () => {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+  };
+
   const failWebSocket = (error: unknown) => {
     console.error('[Owl] WebSocket unavailable; polling fallback enabled', error);
+    if (connectTimer) clearTimeout(connectTimer);
     if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) {
       socket.close();
     }
+    socket = null;
     startPolling();
+    if (disposed || reconnectTimer) return;
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      void connect();
+    }, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, WS_RECONNECT_MAX_MS);
   };
 
   const connect = async () => {
-    onStatus('connecting');
+    if (!pollTimer) onStatus('connecting');
     let config: RuntimeConfig;
     try {
       config = await runtimeConfig();
@@ -1204,23 +1222,25 @@ export function subscribeToUpdates(
       return;
     }
 
+    let ws: WebSocket;
     try {
-      socket = new WebSocket(resolveWebSocketUrl(config.ws_url));
+      ws = new WebSocket(resolveWebSocketUrl(config.ws_url));
     } catch (error) {
       failWebSocket(error);
       return;
     }
+    socket = ws;
 
     connectTimer = setTimeout(() => {
-      if (socket && socket.readyState !== WebSocket.OPEN) {
+      if (socket === ws && ws.readyState !== WebSocket.OPEN) {
         failWebSocket(new ApiRequestError('websocket_timeout', 'リアルタイム接続が時間内に確立しませんでした。', null));
       }
     }, WS_CONNECT_TIMEOUT_MS);
 
-    socket.onopen = () => {
-      if (!socket || disposed) return;
+    ws.onopen = () => {
+      if (socket !== ws || disposed) return;
       if (connectTimer) clearTimeout(connectTimer);
-      socket.send(
+      ws.send(
         JSON.stringify({
           kind: 'subscribe',
           request_id: createRequestId(),
@@ -1230,7 +1250,8 @@ export function subscribeToUpdates(
       );
     };
 
-    socket.onmessage = (message) => {
+    ws.onmessage = (message) => {
+      if (socket !== ws) return;
       let frame: unknown;
       try {
         frame = JSON.parse(String(message.data)) as unknown;
@@ -1246,7 +1267,11 @@ export function subscribeToUpdates(
         if (frame.protocol_version !== 'owl-ws-1' || typeof frame.cursor !== 'string') {
           failWebSocket(new ApiRequestError('invalid_websocket_frame', 'WebSocketの準備応答が正しくありません。', null));
         } else {
+          reconnectDelay = WS_RECONNECT_INITIAL_MS;
+          const recovered = pollTimer !== null;
+          stopPolling();
           onStatus('connected');
+          if (recovered) safeUpdate();
         }
         return;
       }
@@ -1267,14 +1292,16 @@ export function subscribeToUpdates(
         return;
       }
       safeUpdate(frame as unknown as EventFrame);
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ kind: 'ack', request_id: createRequestId(), cursor: frame.cursor }));
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ kind: 'ack', request_id: createRequestId(), cursor: frame.cursor }));
       }
     };
 
-    socket.onerror = (error) => failWebSocket(error);
-    socket.onclose = (event) => {
-      if (!disposed) failWebSocket(event);
+    ws.onerror = (error) => {
+      if (socket === ws) failWebSocket(error);
+    };
+    ws.onclose = (event) => {
+      if (!disposed && socket === ws) failWebSocket(event);
     };
   };
 
@@ -1283,7 +1310,8 @@ export function subscribeToUpdates(
   return () => {
     disposed = true;
     if (connectTimer) clearTimeout(connectTimer);
-    if (pollTimer) clearInterval(pollTimer);
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    stopPolling();
     if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) socket.close();
     socket = null;
   };

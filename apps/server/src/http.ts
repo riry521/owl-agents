@@ -2941,12 +2941,9 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     const workId = pathId(workDeleteMatch[1], "work_id");
     const command = commandEnvelope(await readRequestBody(request));
     validateEmptyPayload(command.payload);
-    const commandKey = `${pathname}:${command.idempotency_key}`;
-    const result = await runCommand(context, pathname, command, 200, async () => {
-      const deleted = await context.core.deleteWork(workId, command);
-      await invalidateWorkCommandCache(context, workId, commandKey);
-      return deleted;
-    }, workId);
+    const result = await runCommand(context, pathname, command, 200, () => context.core.deleteWork(workId, command), workId);
+    // Why not keep this request's own key: its row carries the Work id, so a resent DELETE answers 404 instead of replaying.
+    await invalidateWorkCommandCache(context, workId, "");
     sendJson(response, 200, result);
     return;
   }

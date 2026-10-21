@@ -151,6 +151,24 @@ test("Activity Log labels automatic push alerts and shows their reasons", () => 
   }
 });
 
+test("Activity Log shows a partial report as partial completion and other failures as errors", () => {
+  const at = new Date().toISOString();
+  hookValues = [[
+    { event_id: "f-partial", type: "task.failure.classified", payload: { run_outcome: "partial", error_key: "report_result:partial" }, created_at: at },
+    { event_id: "f-blocker", type: "task.external_blocker_reported", payload: {}, created_at: at },
+    { event_id: "f-wait", type: "task.process_wait_started", payload: {}, created_at: at },
+    { event_id: "f-exit", type: "task.failure.classified", payload: { error_key: "exit_code" }, created_at: at },
+    { event_id: "f-nofinal", type: "task.failure.classified", payload: { error_key: "no_final_report" }, created_at: at },
+    { event_id: "f-timeout", type: "task.failure.classified", payload: { error_key: "timeout" }, created_at: at },
+  ], ""];
+
+  const markup = renderToStaticMarkup(React.createElement(ActivityLog));
+
+  assert.equal(markup.match(/activity\.taskPartial/g).length, 3);
+  assert.equal(markup.match(/activity\.taskFailed/g).length, 3);
+  assert.match(markup, /🟡/u);
+});
+
 test("Activity Log labels a successful push and shows its remote branch", () => {
   hookValues = [[{
     event_id: "push-event",

@@ -1950,7 +1950,7 @@ export class WorkflowEngine {
     // Consume needs_replanning/question_for_manager from the Worker report
     // regardless of outcome: a Worker can flag that its Task needs a new plan
     // even while otherwise reporting success or a classified failure.
-    // Outcome and error_key are not read: a partial after a side effect arrives as side_effect_failure:report_result:partial.
+    // Outcome and error_key are not read.
     const external = reportedExternalBlocker(reportObject, designTask?.type);
     if (external.ignored !== null) console.warn(`[owl-core] Ignoring external_blocker (${external.ignored}) in the report of Agent run ${agentRunId}`);
     if (external.blocker !== null && reportObject) {
@@ -2095,9 +2095,11 @@ export class WorkflowEngine {
     const event = result.signal ? "agent.crashed" : "task.failure.classified";
     const hasReport = !result.signal && result.report && typeof result.report === "object" && !Array.isArray(result.report);
     const reportResultValue = hasReport ? (result.report as JsonObject).result : null;
+    // A side effect wraps the key as side_effect_failure:report_result:<result>; the report itself is still a valid result.
+    // Why only partial after a side effect: a failed report there keeps its old record (status failed, no outcome).
     const reportRunOutcome = errorKey.startsWith("report_result:")
       ? reportResultValue === "failed" ? "not_achieved" : reportResultValue === "partial" ? "partial" : null
-      : null;
+      : errorKey === "side_effect_failure:report_result:partial" && reportResultValue === "partial" ? "partial" : null;
     const payload: JsonObject = result.signal
       ? {
         report_present: false,

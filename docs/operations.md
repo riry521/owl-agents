@@ -523,7 +523,7 @@ Besides `create_work`, the Advisor can act on an existing Work through these act
 
 - **Pause** stops new Task launches; Tasks waiting on a Decision (`judgement_waiting`) stay as they are. **Resume** continues the Work.
 - **Cancel** needs a reason (1–1000 characters), stops running agents and removes the Work's worktrees and files. The Work stays in the database as `cancelled`.
-- **Delete** works only on `completed` or `cancelled` Works with no open Decision. It removes the Work, its Tasks, runs, reports, events and conversations from the database, so the Work number becomes free again.
+- **Delete** works only on `memo`, `ready`, `completed` or `cancelled` Works with no open Decision. It removes the Work, its Tasks, runs, reports, events and conversations from the database, so the Work number becomes free again.
 
 ## Provider rate limits
 

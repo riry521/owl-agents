@@ -92,7 +92,7 @@ test("Manager replan prompt explains the design_completed trigger", async () => 
 for (const mode of ["plan", "replan"]) {
   test(`Manager ${mode} prompt limits design Task acceptance criteria to what the Designer can check`, async () => {
     const prompt = await managerPrompt(mode);
-    assert.match(prompt, /the design document \(and, on a lead_designer Task, its HTML mocks\) alone decides pass or fail/);
+    assert.match(prompt, /the design document \(and, on a Task that designs screens, its HTML mocks\) alone decides pass or fail/);
     assert.match(prompt, /do not include copying or placing the document anywhere other than its design document path/);
     assert.match(prompt, /condition the Designer cannot check by reading the design document, such as a condition about another repository or about files outside the Task's scope/);
     assert.match(prompt, /split that into a separate Task that a Worker runs, such as type doc or code/);

@@ -7,7 +7,7 @@ import type { TFunction } from '@/lib/i18n';
 
 export type RemovalKind = 'delete' | 'archive' | 'unarchive';
 
-export type RemovableWork = Pick<WorkSummary, 'id' | 'title' | 'state_version' | 'archived_at'>;
+export type RemovableWork = Pick<WorkSummary, 'id' | 'title' | 'state_version' | 'archived_at' | 'state'>;
 
 /** A transient error shown after a failed archive/unarchive/delete call. */
 export interface RemovalErrorMessage {
@@ -91,7 +91,8 @@ export function createWorkRemovalStore(options: WorkRemovalStoreOptions = {}): W
 
   async function commitWork(work: RemovableWork, kind: RemovalKind) {
     if (kind === 'delete') {
-      if (work.archived_at) {
+      // The server archives only completed/cancelled Works, so memo/ready go straight to DELETE.
+      if (work.archived_at || work.state === 'memo' || work.state === 'ready') {
         await api.deleteWork(work.id, work.state_version);
         return;
       }

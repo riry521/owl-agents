@@ -377,6 +377,28 @@ test("deterministic failure: retry_not_allowed wins, thresholds decide retry or 
   assert.equal(decisionOf(evaluate(observe(repeated), cfg({ deterministicSameErrorLimit: 3 }))).reason, "deterministic_failure");
 });
 
+test("deterministic failure: a plain partial has its own limit and leaves the failure counters alone", () => {
+  const plain = { pendingProcess: false, externalBlocker: false, unverifiable: false, needsReplanning: false };
+  const observe = (earlierPartials, partialReport = plain, over = {}) => ({
+    kind: "deterministic_failure", task: taskRow({ failure_count: 2, same_error_count: 1 }), errorKey: key64, retryAllowed: false, escalatedFromTransient: false, earlierPartials, partialReport, ...over,
+  });
+  assert.equal(DEFAULT_ATTEMPT_POLICY_CONFIG.partialLimit, DEFAULT_PROGRESS_GUARD_SETTINGS.partial_limit);
+  for (const retryAllowed of [true, false]) {
+    const within = decisionOf(evaluate(observe(1, plain, { retryAllowed }), cfg({ partialLimit: 2 })));
+    assert.deepEqual([within.to, within.reason, within.managerTrigger], ["ready", "resumable_partial", false]);
+    assert.ok(!("failure_count" in within.patch) && !("same_error_count" in within.patch) && !("last_error_key" in within.patch));
+  }
+  const past = decisionOf(evaluate(observe(2), cfg({ partialLimit: 2 })));
+  assert.deepEqual([past.to, past.reason, past.managerTrigger, past.patch.paused_from, past.sideEffects], ["judgement_waiting", "partial_limit", false, null, ["core_decision_required"]]);
+  // A partial that asks someone for something keeps the old flow but is not counted as a failure.
+  for (const flag of ["pendingProcess", "externalBlocker", "unverifiable", "needsReplanning"]) {
+    const kept = decisionOf(evaluate(observe(0, { ...plain, [flag]: true }), cfg()));
+    assert.deepEqual([kept.to, kept.reason], ["judgement_waiting", "retry_not_allowed"]);
+  }
+  const counted = decisionOf(evaluate(observe(0, { ...plain, needsReplanning: true }, { retryAllowed: true }), cfg()));
+  assert.ok(!("failure_count" in counted.patch) && !("same_error_count" in counted.patch) && !("last_error_key" in counted.patch));
+});
+
 test("deterministic failure: the same error_key stored as a hash counts up; another key or generation resets to 1", () => {
   const stored = { failure_count: 1, same_error_count: 1, last_error_key: normalizeErrorKey("design_document_missing"), last_error_generation: 1 };
   const observe = (task, errorKey) => ({ kind: "deterministic_failure", task: taskRow(task), errorKey, retryAllowed: true, escalatedFromTransient: false });

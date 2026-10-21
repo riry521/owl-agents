@@ -137,3 +137,69 @@ test('subscribeToUpdates hands the event frame to onUpdate', async () => {
     delete globalThis.window;
   }
 });
+
+test('subscribeToUpdates reconnects after a close, keeps polling while it fails, and stops everything on dispose', async (t) => {
+  const { subscribeToUpdates } = loadApiClient();
+  const sockets = [];
+  class FakeSocket {
+    static CONNECTING = 0;
+    static OPEN = 1;
+    readyState = 1;
+    constructor() { sockets.push(this); }
+    send() {}
+    close() { this.readyState = 3; }
+  }
+  const ready = { kind: 'ready', protocol_version: 'owl-ws-1', cursor: 'c0' };
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  const originalSocket = globalThis.WebSocket;
+  globalThis.WebSocket = FakeSocket;
+  globalThis.window = { location: { protocol: 'http:', host: 'owl.test' } };
+  t.mock.method(console, 'error', () => {});
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  try {
+    await withFetch(() => json({}), async () => {
+      let updates = 0;
+      const statuses = [];
+      const stop = subscribeToUpdates([], () => { updates += 1; }, (status) => statuses.push(status));
+      await flush();
+      sockets[0].onmessage({ data: JSON.stringify(ready) });
+      assert.deepEqual(statuses, ['connecting', 'connected']);
+
+      sockets[0].onclose({});
+      assert.deepEqual(statuses, ['connecting', 'connected', 'polling']);
+      assert.equal(updates, 1);
+
+      t.mock.timers.tick(5_000);
+      await flush();
+      assert.equal(sockets.length, 2);
+      assert.equal(updates, 2);
+      sockets[1].onclose({});
+      const afterFailure = updates;
+      t.mock.timers.tick(5_000);
+      assert.ok(updates > afterFailure);
+      assert.equal(sockets.length, 2);
+
+      t.mock.timers.tick(5_000);
+      await flush();
+      assert.equal(sockets.length, 3);
+      const beforeReady = updates;
+      sockets[2].onmessage({ data: JSON.stringify(ready) });
+      assert.equal(statuses.at(-1), 'connected');
+      assert.equal(updates, beforeReady + 1);
+      t.mock.timers.tick(30_000);
+      assert.equal(updates, beforeReady + 1);
+
+      sockets[2].onclose({});
+      const beforeDispose = updates;
+      stop();
+      t.mock.timers.tick(120_000);
+      await flush();
+      assert.equal(updates, beforeDispose);
+      assert.equal(sockets.length, 3);
+    });
+  } finally {
+    t.mock.timers.reset();
+    globalThis.WebSocket = originalSocket;
+    delete globalThis.window;
+  }
+});

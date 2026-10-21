@@ -241,13 +241,13 @@ test("a wait past its deadline opens an Owner Decision instead of waiting foreve
   assert.equal(runner.state.calls, 1, "no Worker was started");
 });
 
-test("an ordinary partial report still counts as a failure", async (t) => {
+test("an ordinary partial report is no wait and no failure count", async (t) => {
   const runner = runnerWith(["partial"]);
   const { db, core } = await openCore(t, runner);
   const workId = await startWork(core);
   assert.ok(await waitFor(() => eventCount(db, workId, "task.failure.classified") > 0));
   assert.equal(eventCount(db, workId, "task.process_wait_started"), 0);
-  assert.ok(task(db, workId).failure_count >= 1);
+  assert.equal(task(db, workId).failure_count, 0);
   assert.notEqual(task(db, workId).status, "waiting");
 });
 

@@ -219,3 +219,43 @@ test("provider.paused / provider.resumed cards are identical with and without wo
     }
   }
 });
+
+const explainedPayload = {
+  work_id: WORK_ID,
+  decision_id: DECISION_ID,
+  question: "どう進めますか？",
+  reason: "REASON_RECORD",
+  current_state: "STATE_RECORD",
+  tried: "TRIED_RECORD",
+  explanation: { summary: "測り方が合わず条件を満たせません。", cause_kind: "criteria" },
+  options: [
+    { key: "fix_1", label: "条件を読み替える", description: "読み替えてやり直す", criteria_rewrites: [{ criterion_id: "AC1", before: "元の条件X", after: "読み替えY", check: "c" }] },
+    { key: "retry", label: "やり直す" },
+    { key: "cancel", label: "中止する" },
+  ],
+  recommended: "fix_1",
+  allow_free_text: true,
+};
+const explainedOptions = { language: "ja", formatTime: () => "12:00", replyStyle: "thread" };
+
+test("decision.opened with an explanation shows summary, cause, ★ and orders thread sections", () => {
+  const card = buildNotificationCard(event("decision.opened", explainedPayload), explainedOptions);
+  assert.match(card.body, /測り方が合わず条件を満たせません。（原因: 条件の問題）/u);
+  assert.match(card.body, /• 条件を読み替える ★/u);
+  assert.equal(card.actions[0].label, "★ 条件を読み替える");
+  const detail = card.threadDetail;
+  const at = (s) => detail.indexOf(s);
+  assert.ok(at("なぜ止まったか") >= 0 && at("なぜ止まったか") < at("選択肢と、選ぶとどうなるか"));
+  assert.ok(at("選択肢と、選ぶとどうなるか") < at("詳しい記録"));
+  assert.ok(at("元の条件X → 読み替えY") > at("選択肢と、選ぶとどうなるか") && at("元の条件X → 読み替えY") < at("詳しい記録"));
+  assert.ok(at("REASON_RECORD") > at("詳しい記録"));
+  assert.doesNotMatch(detail, /AC1/u);
+});
+
+test("decision.opened without an explanation keeps the previous text", () => {
+  const { explanation, ...plain } = explainedPayload;
+  const card = buildNotificationCard(event("decision.opened", plain), explainedOptions);
+  assert.doesNotMatch(card.body, /💡|原因/u);
+  assert.match(card.threadDetail, /なぜ止まったか[\s\S]*REASON_RECORD/u);
+  assert.doesNotMatch(card.threadDetail, /詳しい記録/u);
+});

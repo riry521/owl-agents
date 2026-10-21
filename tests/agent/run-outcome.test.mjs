@@ -106,6 +106,26 @@ test("a Worker report with result failed completes the run as not_achieved and s
   assert.ok(calls >= 1);
 });
 
+for (const [label, errorKey, retryAllowed] of [["without a side effect", "report_result:partial", true], ["after a side effect", "side_effect_failure:report_result:partial", false]]) {
+  test(`a Worker report with result partial ${label} completes the run as partial and counts no failure`, async (t) => {
+    const { db, core } = await openCore(t, {
+      runManagerPlan: managerPlansThenStops,
+      runWorker: async (request) => ({
+        outcome: "partial", failure_class: "deterministic", error_key: errorKey, retry_allowed: retryAllowed, report_valid: true,
+        report: workerReport(request.invocation_id, { result: "partial" }), message: "The Worker reported partial.",
+      }),
+      runReviewer: async () => ({ outcome: "failed" }),
+      runAdvisor: async () => ({ reply: "" }),
+    });
+    const workId = await startWork(core, `worker-partial-${retryAllowed}`);
+    const run = await waitFor(() => db.get("SELECT status, outcome FROM agent_runs WHERE work_id = ? AND role = 'worker' AND status = 'completed'", workId));
+    assert.deepEqual(run, { status: "completed", outcome: "partial" });
+    assert.equal(db.get("SELECT COUNT(*) AS n FROM agent_runs WHERE work_id = ? AND role = 'worker' AND status = 'failed'", workId).n, 0);
+    const task = await waitFor(() => db.get("SELECT status, failure_count, same_error_count, last_error_key FROM tasks WHERE work_id = ? AND manager_task_id = 'T1' AND status = 'judgement_waiting'", workId));
+    assert.deepEqual([task.failure_count, task.same_error_count, task.last_error_key], [0, 0, null]);
+  });
+}
+
 test("a Worker that cannot produce a valid result fails with no outcome", async (t) => {
   const { db, core } = await openCore(t, {
     runManagerPlan: managerPlansThenStops,

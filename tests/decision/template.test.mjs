@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { DecisionService } from "../../packages/core/dist/index.js";
 import { coreTaskDecisionBrief, coreWorkDecisionBrief } from "../../packages/core/dist/decision-brief.js";
 import { openDatabase } from "../../packages/db/dist/index.js";
+import { findInternalTerms, readDecisionExplanation } from "../../packages/shared/dist/index.js";
 import { formatDecisionText, answerGuideHint } from "../../packages/plugin-sdk/dist/shared/index.js";
 import { openTestDatabase } from "../helpers/db.mjs";
 import { migrationsDir } from "../helpers/paths.mjs";
@@ -197,6 +198,17 @@ test("coreTaskDecisionBrief puts a partial report's words and a failed command's
   assert.match(partial.reason, /テスト環境が無く検証できなかった/u);
   assert.match(partial.reason, /pnpm test を実行できず未確認/u);
 
+  // Past partial_limit the Decision says the Task keeps ending partially, not that an error stopped it.
+  for (const [language, wording] of [["ja", /一部完了/u], ["en", /partial/u]]) {
+    const limit = coreTaskDecisionBrief("T", { error_key: "side_effect_failure:report_result:partial", report: { result: "partial", work_done: "half" } }, language);
+    assert.match(limit.reason, wording);
+    assert.match(limit.reason, /half/u);
+    assert.doesNotMatch(`${limit.reason}${limit.tried}`, /エラーの種類|Error kind|自動ではやり直せない|must not retry/u);
+    // Only this branch asks for an explanation; Core adds it after the Decision opens.
+    assert.deepEqual(limit.explanation, { kind: "partial_limit", status: "pending" });
+  }
+  assert.equal(coreTaskDecisionBrief("T", { error_key: "e" }, "en").explanation, undefined);
+
   const output = `${"x".repeat(5000)}FAILED: expected 1 to equal 2`;
   const failed = coreTaskDecisionBrief("T", {
     error_key: "e",
@@ -223,4 +235,22 @@ test("coreTaskDecisionBrief puts a partial report's words and a failed command's
     verification: { commands: [{ command_id: "ok", passed: true, detail: "" }], error: "No changed file matches a configured checker." },
   }, "en");
   assert.match(other.reason, /No changed file matches a configured checker/u);
+});
+
+test("readDecisionExplanation rejects internal terms and malformed explanations", () => {
+  const taskId = "01M5BGJJVBAN42ZCPPFANNMSN9";
+  const context = { criterion_ids: ["AC1"], forbidden_terms: [taskId] };
+  const option = (rewrites = []) => ({ label: "Reword it", description: "Retry with a reworded criterion.", instruction: "Retry AC1 reworded.", criteria_rewrites: rewrites });
+  const rewrite = { criterion_id: "AC1", after: "Time without startup is shorter.", check: "Measure three runs after startup." };
+  const report = (changes = {}) => ({ summary: "The measuring method cannot pass. The work itself is done.", cause_kind: "work", options: [option()], recommended_option: 0, ...changes });
+
+  assert.equal(readDecisionExplanation(report(), context).ok, true);
+  assert.equal(readDecisionExplanation(report({ cause_kind: "criteria", options: [option([rewrite])] }), context).ok, true);
+  for (const summary of ["It ended as a partial result.", "AC1 failed.", "Task 01ARZ3NDEKTSV4RRFFQ69G5FAV stopped.", `Task ${taskId} stopped.`]) {
+    assert.equal(readDecisionExplanation(report({ summary }), context).ok, false, summary);
+  }
+  assert.equal(readDecisionExplanation(report({ recommended_option: 1 }), context).ok, false);
+  assert.equal(readDecisionExplanation(report({ summary: "One. Two. Three." }), context).ok, false);
+  assert.equal(readDecisionExplanation(report({ cause_kind: "criteria" }), context).ok, false);
+  assert.deepEqual(findInternalTerms("The work was partially done.", []), []);
 });

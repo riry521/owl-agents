@@ -1,5 +1,6 @@
 import type { RemakeLimitSettings } from "../../shared/dist/remake-limit-settings.js";
 import { EXTERNAL_BLOCKER_EVENT } from "../../shared/dist/external-blocker.js";
+import { workerAcceptanceDefects } from "../../shared/dist/acceptance-defect.js";
 import { HumanReadableError } from "./errors";
 import { classifyRemakeUnit, nonFunctionalStreak, type MeasuredFile, type RemakeUnit, type RemakeUnitClass } from "./remake-gate";
 import type { ChangedFile, CoreSqlValue, CoreWriteLaneTransaction } from "./types";
@@ -379,6 +380,49 @@ export function lineageExternalBlockerReports(reader: LineageReader, taskId: str
         AND created_at >= COALESCE((SELECT json_extract(t.lineage_reset_json, '$.at') FROM tasks t WHERE t.id = events.task_id), '')`,
     ...members, EXTERNAL_BLOCKER_EVENT, excludeAgentRunId, excludeAgentRunId,
   )?.count ?? 0;
+}
+
+/** True for a partial report that asks nobody for anything (no pending process, blocker, unverifiable criterion or replan). */
+export function isPlainPartialReport(report: unknown): boolean {
+  if (report === null || typeof report !== "object" || Array.isArray(report)) return false;
+  const r = report as Record<string, unknown>;
+  return r.result === "partial" && r.pending_process == null && r.external_blocker == null && r.needs_replanning !== true && workerAcceptanceDefects(r).length === 0;
+}
+
+export interface PartialReportPayload {
+  readonly report: Record<string, unknown>;
+  readonly verification: Record<string, unknown> | null;
+}
+
+/** Plain partial reports of the lineage of taskId since each Task's last Owner answer, newest first, with the verification record of the same event. */
+function plainPartialReportRows(reader: LineageReader, taskId: string, excludeAgentRunId: string | null): PartialReportPayload[] {
+  const members = lineageChainIds(reader, taskId);
+  const placeholders = members.map(() => "?").join(",");
+  // Why filter in JS: workerAcceptanceDefects cannot be written in SQL.
+  return reader.all<{ report: string; verification: string | null }>(
+    `SELECT json_extract(payload_json, '$.report') AS report, json_extract(payload_json, '$.verification') AS verification FROM events
+      WHERE task_id IN (${placeholders}) AND type = 'task.failure.classified'
+        AND json_extract(payload_json, '$.report.result') = 'partial'
+        AND (? IS NULL OR agent_run_id IS NULL OR agent_run_id <> ?)
+        AND created_at >= COALESCE((SELECT json_extract(t.lineage_reset_json, '$.at') FROM tasks t WHERE t.id = events.task_id), '')
+      ORDER BY created_at DESC, rowid DESC`,
+    ...members, excludeAgentRunId, excludeAgentRunId,
+  ).flatMap((row) => {
+    const report = JSON.parse(row.report) as unknown;
+    return isPlainPartialReport(report)
+      ? [{ report: report as Record<string, unknown>, verification: row.verification ? (JSON.parse(row.verification) as Record<string, unknown>) : null }]
+      : [];
+  });
+}
+
+/** Worker runs of the lineage of taskId that ended with a plain partial report since each Task's last Owner answer, not counting the run excludeAgentRunId. */
+export function lineagePartialReports(reader: LineageReader, taskId: string, excludeAgentRunId: string | null): number {
+  return plainPartialReportRows(reader, taskId, excludeAgentRunId).length;
+}
+
+/** The newest `limit` plain partial reports of the lineage with their verification records, newest first. */
+export function lineagePartialReportPayloads(reader: LineageReader, taskId: string, limit: number): PartialReportPayload[] {
+  return plainPartialReportRows(reader, taskId, null).slice(0, limit);
 }
 
 /** What the lineage of taskId has used so far (Reviewer verdicts, Worker runs, non-functional remakes). */

@@ -13,12 +13,13 @@ import { waitFor } from "../../../tests/helpers/wait.mjs";
 const NOW = "2026-01-01T00:00:00.000Z";
 const sha = (text) => createHash("sha256").update(text).digest("hex");
 
-async function seed(t, { screen = true, workState = "running" } = {}) {
+async function seed(t, { assigned = "lead_designer", workState = "running" } = {}) {
   const { core, db, root } = await createTestCore(t, {}, { prefix: "owl-design-mocks-" });
   const workId = createUlid();
   const taskId = createUlid();
   const otherTaskId = createUlid();
   const runId = createUlid();
+  const workerRunId = createUlid();
   const otherRunId = createUlid();
   await db.createWriteLane().transact((tx) => {
     tx.run("INSERT INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Owner', ?, ?)", NOW, NOW);
@@ -30,14 +31,14 @@ async function seed(t, { screen = true, workState = "running" } = {}) {
     tx.run(
       `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, assigned_designer, created_at, updated_at)
        VALUES (?, ?, 'Screen design', 'design', 'running', 'normal', '', '', ?, ?, ?)`,
-      taskId, workId, screen ? "lead_designer" : null, NOW, NOW,
+      taskId, workId, assigned, NOW, NOW,
     );
     tx.run(
       `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, created_at, updated_at)
        VALUES (?, ?, 'Implementation', 'code', 'running', 'normal', '', '', ?, ?)`,
       otherTaskId, workId, NOW, NOW,
     );
-    for (const [id, task, role] of [[runId, taskId, "designer"], [otherRunId, otherTaskId, "designer"]]) {
+    for (const [id, task, role] of [[runId, taskId, "designer"], [otherRunId, otherTaskId, "designer"], [workerRunId, taskId, "worker"]]) {
       tx.run(
         `INSERT INTO agent_runs (id, work_id, task_id, role, provider, model, status, created_at, updated_at)
          VALUES (?, ?, ?, ?, 'claude', 'test-model', 'running', ?, ?)`,
@@ -46,7 +47,7 @@ async function seed(t, { screen = true, workState = "running" } = {}) {
     }
   });
   const dir = designMockDirectory(join(root, "data"), workId, taskId);
-  return { core, db, root, workId, taskId, otherTaskId, runId, otherRunId, dir };
+  return { core, db, root, workId, taskId, otherTaskId, runId, otherRunId, workerRunId, dir };
 }
 
 const rows = (db, taskId) => db.all("SELECT name, html, size_bytes FROM design_mocks WHERE task_id = ? ORDER BY name", taskId);
@@ -100,13 +101,23 @@ test("a mock directory replaced by a symlink fails with design_mock_write_failed
   assert.deepEqual(rows(db, taskId), []);
 });
 
-test("a run of a non-screen-design Task gets the scope error", async (t) => {
-  const { core, db, otherRunId, otherTaskId } = await seed(t);
+test("a Worker run and a run of a non-design Task get the scope error", async (t) => {
+  const { core, db, otherRunId, otherTaskId, workerRunId, taskId } = await seed(t);
+  await assert.rejects(core.saveDesignMock(workerRunId, "top.html", "<p>x</p>"), (error) => error.code === "design_mock_scope_denied");
+  await assert.rejects(core.deleteDesignMock(workerRunId, "top.html"), (error) => error.code === "design_mock_scope_denied");
+  assert.deepEqual(rows(db, taskId), []);
   await assert.rejects(core.saveDesignMock(otherRunId, "top.html", "<p>x</p>"), (error) => error.code === "design_mock_scope_denied");
   await assert.rejects(core.deleteDesignMock(otherRunId, "top.html"), (error) => error.code === "design_mock_scope_denied");
   assert.deepEqual(rows(db, otherTaskId), []);
-  const plain = await seed(t, { screen: false });
-  await assert.rejects(plain.core.saveDesignMock(plain.runId, "top.html", "<p>x</p>"), (error) => error.code === "design_mock_scope_denied");
+});
+
+test("a designer-assigned design Task saves, lists, reads and deletes mocks", async (t) => {
+  const { core, db, runId, taskId, workId } = await seed(t, { assigned: "designer" });
+  await core.saveDesignMock(runId, "top.html", "<h1>top</h1>");
+  assert.deepEqual((await core.listWorkDesignMocks(workId)).mocks.map((mock) => [mock.task_id, mock.name]), [[taskId, "top.html"]]);
+  assert.equal(await core.readWorkDesignMock(workId, taskId, "top.html"), "<h1>top</h1>");
+  await core.deleteDesignMock(runId, "top.html");
+  assert.deepEqual(rows(db, taskId), []);
 });
 
 test("delete removes the row and file; a link at the name is removed alone", async (t) => {
@@ -162,8 +173,9 @@ const designReport = (invocationId) => ({
   },
 });
 
-for (const [label, expectMocks] of [["a screen design Task", true], ["a plain design Task", false]]) {
-  test(`the Reviewer design_document lists mocks only for ${label}`, async (t) => {
+for (const [label, assigned] of [["a lead_designer design Task", "lead_designer"], ["a designer design Task", "designer"]]) {
+  const expectMocks = true;
+  test(`the Reviewer design_document lists mocks for ${label}`, async (t) => {
     const reviewerContexts = [];
     let coreRef;
     let dbRef;
@@ -172,7 +184,7 @@ for (const [label, expectMocks] of [["a screen design Task", true], ["a plain de
         outcome: "success", report_valid: true,
         report: { event: "work.planned", tasks: [{
           id: "D1", title: "Design", type: "design", necessity: necessityFor(), acceptance_criteria: criteriaFor("Done."),
-          depends_on: [], context: "", notes: "", review: true, ...(expectMocks ? { assigned_designer: "lead_designer" } : {}), required_sections: [], required_tests: [], wait_for: null, base_sync_only: null, replaces: [],
+          depends_on: [], context: "", notes: "", review: true, assigned_designer: assigned, required_sections: [], required_tests: [], wait_for: null, base_sync_only: null, replaces: [],
         }] },
       }),
       runDesigner: async (request) => {

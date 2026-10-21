@@ -1927,6 +1927,11 @@ a.card:hover {
   margin: 0;
 }
 
+.decision__subhead { margin: 16px 0 8px; font-size: 13px; font-weight: 700; color: var(--ink-2); }
+/* Why not .panel__title on summary: display:flex there hides the disclosure triangle in Chromium. */
+.decision__details > summary { cursor: pointer; font-size: 15px; font-weight: 700; }
+.decision__details[open] > summary { margin-bottom: 12px; }
+
 .option {
   display: flex;
   gap: 12px;

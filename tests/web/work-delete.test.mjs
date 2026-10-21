@@ -52,12 +52,26 @@ function deleteButton(tree) {
 
 const work = (state, title = 'My Work') => ({ id: 'w1', title, display_number: 7, state, state_version: 3, archived_at: null });
 
-test('delete button is shown only for completed and cancelled Works', () => {
+function buttonCount(tree) {
+  let n = 0;
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (Array.isArray(node)) return node.forEach(walk);
+    if (node.type === 'button') n++;
+    walk(node.props?.children);
+  };
+  walk(tree);
+  return n;
+}
+
+test('delete button is shown for memo, ready, completed and cancelled Works; archive only for terminal ones', () => {
   const Actions = load(async () => true);
-  for (const state of ['completed', 'cancelled']) {
-    assert.ok(deleteButton(Actions({ work: work(state), onDeleted() {} })), state);
+  for (const state of ['memo', 'ready', 'completed', 'cancelled']) {
+    const tree = Actions({ work: work(state), onDeleted() {} });
+    assert.ok(deleteButton(tree), state);
+    assert.equal(buttonCount(tree), state === 'memo' || state === 'ready' ? 1 : 2, state);
   }
-  for (const state of ['memo', 'ready', 'running', 'paused', 'judgement_waiting', 'failed']) {
+  for (const state of ['running', 'paused', 'judgement_waiting', 'failed']) {
     assert.equal(deleteButton(Actions({ work: work(state), onDeleted() {} })), null, state);
   }
 });
@@ -74,7 +88,7 @@ test('delete confirms naming the Work and only proceeds when approved', async ()
         return confirmResult;
       };
       const Actions = load(removeWorks);
-      deleteButton(Actions({ work: work('completed', ''), onDeleted() {} })).props.onClick();
+      deleteButton(Actions({ work: work(approve ? 'memo' : 'ready', ''), onDeleted() {} })).props.onClick();
       await new Promise((r) => setImmediate(r));
       assert.equal(confirmResult, approve);
       assert.match(messages[0], /Work #7/);
@@ -86,13 +100,13 @@ test('delete confirms naming the Work and only proceeds when approved', async ()
   }
 });
 
-function loadRemoval(calls) {
+function loadRemoval(calls, state) {
   const path = join(repoRoot, 'apps/web/lib/work-removal.ts');
   const { outputText } = ts.transpileModule(readFileSync(path, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   });
   const apiClient = {
-    archiveWork: async () => {},
+    archiveWork: async () => { if (!['completed', 'cancelled'].includes(state)) throw new Error('archive rejected'); },
     unarchiveWork: async () => {},
     getWorkBranchStatus: async () => 'absent',
     deleteWork: async (...args) => { calls.push(args); },
@@ -115,15 +129,17 @@ function loadRemoval(calls) {
 test('confirmed delete reaches deleteWork through work-removal exactly once', async () => {
   const originalWindow = globalThis.window;
   try {
-    for (const approve of [false, true]) {
-      const calls = [];
-      globalThis.window = { confirm: () => approve };
-      const Actions = load(null, loadRemoval(calls));
-      const button = deleteButton(Actions({ work: work('completed'), onDeleted() {} }));
-      assert.equal(calls.length, 0, 'before confirm');
-      button.props.onClick();
-      await new Promise((r) => setImmediate(r));
-      assert.deepEqual(calls, approve ? [['w1', 3]] : []);
+    for (const state of ['memo', 'ready', 'completed']) {
+      for (const approve of [false, true]) {
+        const calls = [];
+        globalThis.window = { confirm: () => approve };
+        const Actions = load(null, loadRemoval(calls, state));
+        const button = deleteButton(Actions({ work: work(state), onDeleted() {} }));
+        assert.equal(calls.length, 0, 'before confirm');
+        button.props.onClick();
+        await new Promise((r) => setImmediate(r));
+        assert.deepEqual(calls, approve ? [['w1', 3]] : [], `${state} approve=${approve}`);
+      }
     }
   } finally {
     globalThis.window = originalWindow;

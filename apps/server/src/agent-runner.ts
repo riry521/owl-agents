@@ -268,6 +268,7 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
       runRuleJudgments?(request: unknown): Promise<unknown>;
       runProjectInvestigation?(request: unknown): Promise<unknown>;
       runTestSetupInvestigation?(request: unknown): Promise<unknown>;
+      runDecisionExplanation?(request: unknown): Promise<unknown>;
       provider?: unknown;
       cancelAgent?: (invocationId: string, force?: boolean) => Promise<void>;
       setProcessObserver?: (observer: (invocationId: string, event: AgentProcessEvent) => void | Promise<void>) => void;
@@ -445,6 +446,16 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
           const delegateValue = await getDelegate();
           if (typeof delegateValue.runProjectInvestigation !== "function") return { ok: false, error: "project_investigation_unavailable" };
           return await delegateValue.runProjectInvestigation(request);
+        } catch (error) {
+          const message = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+          return { ok: false, error: `provider_failed:${message}` };
+        }
+      },
+      runDecisionExplanation: async (request: unknown) => {
+        try {
+          const delegateValue = await getDelegate();
+          if (typeof delegateValue.runDecisionExplanation !== "function") return { ok: false, error: "decision_explanation_unavailable" };
+          return await delegateValue.runDecisionExplanation(request);
         } catch (error) {
           const message = (error instanceof Error ? error.message : String(error)).slice(0, 200);
           return { ok: false, error: `provider_failed:${message}` };

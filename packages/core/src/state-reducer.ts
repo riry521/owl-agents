@@ -25,7 +25,7 @@ import { remakeLimits } from "./remake-limits";
 import { fixerEscalation } from "./fixer-escalation";
 import type { FixerEscalationSettings } from "../../shared/dist/fixer-escalation-settings.js";
 import { progressGuard } from "./progress-guard";
-import { assignReplacementLineageInTransaction, lineageExternalBlockerReports, lineageGenerationCount, lineageReviewAttemptsExcluding, lineageUsage, parseLineageReset, restartLineageBudgetInTransaction } from "./task-lineage";
+import { assignReplacementLineageInTransaction, lineageExternalBlockerReports, lineagePartialReports, lineageGenerationCount, lineageReviewAttemptsExcluding, lineageUsage, parseLineageReset, restartLineageBudgetInTransaction } from "./task-lineage";
 import type { RemakeLimitSettings } from "../../shared/dist/remake-limit-settings.js";
 import { findDependencyCycle, type ReplanPlan } from "./replan-plan";
 import { PROCESS_WAIT_EVENT, validatePrerequisiteSpec, type PrerequisiteSpec } from "../../shared/dist/prerequisite.js";
@@ -356,6 +356,7 @@ function attemptPolicyConfig(options: TaskReducerOptions): AttemptPolicy.Attempt
       : null,
     // Not defaulted by a missing lineage: only the external_blocker branch reads it, so the base-sync problem above cannot occur.
     externalBlockerLimit: options.externalBlocker?.limit ?? AttemptPolicy.DEFAULT_ATTEMPT_POLICY_CONFIG.externalBlockerLimit,
+    partialLimit: options.partial?.limit ?? AttemptPolicy.DEFAULT_ATTEMPT_POLICY_CONFIG.partialLimit,
   };
 }
 
@@ -518,6 +519,8 @@ export interface TaskReducerOptions {
     readonly fixHistory?: readonly (readonly ReviewSpot[])[];
     /** External blocker reports earlier in the lineage and the progress_guard limit; used only for EXTERNAL_BLOCKER_EVENT. */
     readonly externalBlocker?: { readonly earlierReports: number; readonly limit: number };
+    /** Partial reports earlier in the lineage and the progress_guard limit; used only for a deterministic failure event carrying a partial report. */
+    readonly partial?: { readonly earlierReports: number; readonly limit: number };
     /** total_review_attempts at the Owner's last answer (lineage_reset_json); rows 18b/18c count from there. */
     readonly reviewAttemptsBase?: number;
     readonly refundedBase?: number;
@@ -703,6 +706,7 @@ export function reduceTask(
       errorKey,
       retryAllowed,
       escalatedFromTransient: payload.escalated_from === "transient",
+      earlierPartials: options.partial?.earlierReports,
       partialReport: report?.result === "partial"
         ? {
           pendingProcess: report.pending_process != null,
@@ -1194,8 +1198,8 @@ function ensureCoreDecision(
     `INSERT INTO decisions
        (id, work_id, scope, status, blocked_task_ids_json, reason, question, tried,
         current_state, options_json, recommended, allow_free_text, issuer_role,
-        state_version, created_at, design_block_json)
-     VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, 1, 'core', 0, ?, ?)`,
+        state_version, created_at, design_block_json, explanation_json)
+     VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, 1, 'core', 0, ?, ?, ?)`,
     id,
     workId,
     scope,
@@ -1208,6 +1212,7 @@ function ensureCoreDecision(
     brief.recommended,
     now,
     brief.design_block ? JSON.stringify(brief.design_block) : null,
+    brief.explanation ? JSON.stringify(brief.explanation) : null,
   );
   return id;
 }
@@ -1564,12 +1569,17 @@ export function reduceTaskInTransaction(
   const externalBlocker = command.event === EXTERNAL_BLOCKER_EVENT
     ? { earlierReports: lineageExternalBlockerReports(transaction, row.id, typeof objectPayload(command).agent_run_id === "string" ? String(objectPayload(command).agent_run_id) : null), limit: progressGuard(transaction).external_blocker_limit }
     : undefined;
+  const partialPayload = objectPayload(command);
+  const partialReport = partialPayload.report;
+  const partial = command.event === "task.failure.classified" && partialPayload.failure_class === "deterministic" && typeof partialReport === "object" && partialReport !== null && (partialReport as JsonObject).result === "partial"
+    ? { earlierReports: lineagePartialReports(transaction, row.id, typeof partialPayload.agent_run_id === "string" ? partialPayload.agent_run_id : null), limit: progressGuard(transaction).partial_limit }
+    : undefined;
   const reviewFocus = reviewFocusSettings(transaction);
   const fixHistory = command.event === "review.failed" && objectPayload(command).verdict === "fix_required"
     ? previousFixSpots(transaction, row.id, reviewFocus.same_spot_threshold - 1)
     : undefined;
   const fixerSettings = fixerEscalation(transaction);
-  let result = reduceTask(row, command, { reviewLimits: reviewLimits(transaction), reviewFocus, fixerEscalation: fixerSettings, fixHistory, lineage, externalBlocker, reviewAttemptsBase: reset?.review_attempts, refundedBase: reset?.review_attempts_refunded });
+  let result = reduceTask(row, command, { reviewLimits: reviewLimits(transaction), reviewFocus, fixerEscalation: fixerSettings, fixHistory, lineage, externalBlocker, partial, reviewAttemptsBase: reset?.review_attempts, refundedBase: reset?.review_attempts_refunded });
   if (row.manager_task_id?.startsWith(QUARANTINE_FIX_TASK_PREFIX) && result.side_effects.includes("core_decision_required")) {
     // A quarantine fix Task that cannot be fixed ends failed: no Decision, and the Work goes on.
     result = { ...taskResult(row, { ...result.next, status: "failed" }), changed: true };
@@ -2089,24 +2099,18 @@ function insertAgentRun(
 }
 
 /**
- * Smallest positive number unused by the group's Works (archived ones included). Derived from the rows
- * inside the write transaction instead of a counter, so freed numbers are reused with nothing to keep in sync.
+ * Largest display number held by the group's Works (archived ones included) plus one. Derived from the rows
+ * inside the write transaction instead of a counter; numbers freed in the middle are never reused, so a `#N`
+ * written in a branch name or commit keeps pointing at one Work.
  */
-function smallestFreeDisplayNumber(transaction: CoreWriteLaneTransaction, projectId: string | null): number {
-  const used = projectId === null
-    ? transaction.all<{ display_number: number }>(
-      "SELECT display_number FROM works WHERE project_id IS NULL AND display_number IS NOT NULL ORDER BY display_number",
-    )
-    : transaction.all<{ display_number: number }>(
-      "SELECT display_number FROM works WHERE project_id = ? AND display_number IS NOT NULL ORDER BY display_number",
+function nextDisplayNumber(transaction: CoreWriteLaneTransaction, projectId: string | null): number {
+  const row = projectId === null
+    ? transaction.get<{ max_number: number | null }>("SELECT MAX(display_number) AS max_number FROM works WHERE project_id IS NULL")
+    : transaction.get<{ max_number: number | null }>(
+      "SELECT MAX(display_number) AS max_number FROM works WHERE project_id = ?",
       projectId,
     );
-  let candidate = 1;
-  for (const { display_number } of used) {
-    if (display_number > candidate) break;
-    if (display_number === candidate) candidate++;
-  }
-  return candidate;
+  return (row?.max_number ?? 0) + 1;
 }
 
 /** Move a Project's Works into the Project-less display-number group without violating its unique index. */
@@ -2122,7 +2126,7 @@ export function detachProjectWorksInTransaction(
   );
   const detached: DetachedWork[] = [];
   for (const row of rows) {
-    const displayNumber = row.display_number === null ? null : smallestFreeDisplayNumber(transaction, null);
+    const displayNumber = row.display_number === null ? null : nextDisplayNumber(transaction, null);
     if (displayNumber === null) {
       transaction.run("UPDATE works SET project_id = NULL, updated_at = ? WHERE id = ?", now, row.id);
     } else {
@@ -2152,7 +2156,7 @@ export function attachWorkToProjectInTransaction(
   }
   const fixPending = fixPendingTaskIds(transaction, row.id);
   if (fixPending.length > 0) throw invalidStateTransition("A Task must finish its pending fix before this Work can be moved.", { work_id: row.id, reason: "task_fix_pending", task_ids: fixPending });
-  const displayNumber = smallestFreeDisplayNumber(transaction, input.projectId);
+  const displayNumber = nextDisplayNumber(transaction, input.projectId);
   const previousDisplayNumber = row.display_number ?? displayNumber;
   transaction.run("UPDATE works SET project_id = ?, display_number = ?, updated_at = ? WHERE id = ? AND project_id IS NULL", input.projectId, displayNumber, input.now, row.id);
   appendEventInTransaction(transaction, {
@@ -2196,7 +2200,7 @@ export function createWorkInTransaction(
   }
   const row: WorkRow = {
     id: createUlid(),
-    display_number: smallestFreeDisplayNumber(transaction, payload.project_id),
+    display_number: nextDisplayNumber(transaction, payload.project_id),
     owner_id: ownerId,
     project_id: payload.project_id,
     title: payload.title,

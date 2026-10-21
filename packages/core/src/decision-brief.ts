@@ -1,4 +1,4 @@
-import { OUTPUT_FORMAT_INVALID_ERROR_KEY, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_OPTION_KEY, REVIEW_RERUN_OPTION_KEY, TEST_SETUP_APPROVE_OPTION_KEY, TEST_SETUP_RETRY_OPTION_KEY, type DesignBlockCauseKind, type DesignBlockedReport } from "@owl/shared";
+import { OUTPUT_FORMAT_INVALID_ERROR_KEY, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_OPTION_KEY, REVIEW_RERUN_OPTION_KEY, TEST_SETUP_APPROVE_OPTION_KEY, TEST_SETUP_RETRY_OPTION_KEY, type DecisionExplanationKind, type DesignBlockCauseKind, type DesignBlockedReport } from "@owl/shared";
 import { DEFAULT_TEST_RUN_SETTINGS } from "../../shared/dist/test-run-settings.js";
 import { validationError } from "./errors";
 import { formatMissingList } from "./final-verdict";
@@ -36,6 +36,8 @@ export interface DecisionBrief {
   readonly recommended: string | null;
   /** Structured cause of a design stop, stored beside the text (decisions.design_block_json). */
   readonly design_block?: { readonly cause_kind: DesignBlockCauseKind; readonly repeated_findings: readonly { readonly summary: string; readonly times: number }[] } | null;
+  /** Ask Core to add a plain explanation after the Decision opens; the brief itself is built inside the reducer, where no model can run. */
+  readonly explanation?: { readonly kind: DecisionExplanationKind; readonly status: "pending" } | null;
 }
 
 /** Option key whose answer cancels the Work (see isDecisionCancelAnswer). */
@@ -178,6 +180,12 @@ const TEXT = {
         label: "もう一度実行する",
         description: "同じタスクを最初から実行し直します。認証切れなどの原因があれば、先に直してから選んでください。",
       },
+    },
+    partialStopped: {
+      reason: (title: string) => `タスク「${title}」が、一部だけ完了した状態（一部完了）の報告で終わることが続きました。エラーではありません。`,
+      question: (title: string) => `タスク「${title}」をもう一度実行しますか？`,
+      currentState: "このタスクと、その結果を待つタスクは止まっています。一部完了までの変更は worktree に残っています。",
+      tried: "一部完了の報告は、失敗の回数には数えていません。",
     },
     reportFormat: {
       reason: (title: string) => `タスク「${title}」の作業は終わっていますが、最終報告の書式がスキーマに合わず受け取れませんでした（報告の書式違反）。`,
@@ -326,6 +334,12 @@ const TEXT = {
         label: "Run again",
         description: "Runs the same Task again from the start. If the cause is something like an expired login, fix it before choosing this.",
       },
+    },
+    partialStopped: {
+      reason: (title: string) => `The Task "${title}" keeps ending with a partial report (only part of the work is done). This is not an error.`,
+      question: (title: string) => `Run the Task "${title}" again?`,
+      currentState: "This Task and the Tasks waiting for its result are stopped. The changes made so far remain in the worktree.",
+      tried: "Partial reports are not counted as failures.",
     },
     reportFormat: {
       reason: (title: string) => `The Task "${title}" finished its work, but its final report did not match the schema and could not be accepted (report format violation).`,
@@ -585,6 +599,18 @@ export function coreTaskDecisionBrief(taskTitle: string, payload: JsonObject, la
       tried: t.errorKey(errorKey),
       options: [option(REVIEW_RERUN_OPTION_KEY, r.rerun), cancelWorkOption(language)],
       recommended: REVIEW_RERUN_OPTION_KEY,
+    };
+  }
+  if (isObject(payload.report) && payload.report.result === "partial") {
+    const r = TEXT[language].partialStopped;
+    return {
+      reason: [r.reason(taskTitle), text(payload.reason), ...taskStopLines(payload, language)].filter(Boolean).join("\n"),
+      question: r.question(taskTitle),
+      current_state: r.currentState,
+      tried: r.tried,
+      options: [option("retry", t.retry), cancelWorkOption(language)],
+      recommended: null,
+      explanation: { kind: "partial_limit", status: "pending" },
     };
   }
   return {

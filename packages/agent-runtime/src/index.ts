@@ -34,6 +34,7 @@ export type {
 export { WORKING_STYLE_HEADING } from "./role-contract";
 export { buildCuratorPrompt, CURATOR_OUTPUT_SCHEMA, parseCuratorOutput, parseCuratorResponse } from "./curator";
 export { buildProjectInvestigationPrompt, parseProjectInvestigationResponse, PROJECT_INVESTIGATION_OUTPUT_SCHEMA, projectInvestigationProviderSchema } from "./project-investigation";
+export { buildDecisionExplanationPrompt, decisionExplanationProviderSchema, parseDecisionExplanationResponse } from "./decision-explanation";
 export { buildTestSetupInvestigationPrompt, parseTestSetupResponse, TEST_SETUP_OUTPUT_SCHEMA, testSetupProviderSchema } from "./test-setup-investigation";
 export type { TestSetupFirstCandidate, TestSetupInvestigationOutput, TestSetupInvestigationRequest, TestSetupInvestigationRunResult, TestSetupTrigger, TestSetupVerdict } from "./test-setup-investigation";
 export type { ProjectInvestigationOutput, ProjectInvestigationRequest, ProjectInvestigationRunResult } from "./project-investigation";

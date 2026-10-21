@@ -143,6 +143,7 @@ import {
   type FixerEscalationSettings,
 } from "../../shared/dist/fixer-escalation-settings.js";
 import { progressGuard } from "./progress-guard.js";
+import { DecisionExplainer, toDecisionExplanation } from "./decision-explainer";
 import { metricsRuleCandidates, proposeFromMetrics } from "./learning-metrics.js";
 import { learningMetrics } from "./learning-metrics-settings.js";
 import {
@@ -617,6 +618,7 @@ interface DecisionDbRow {
   allow_free_text: number;
   state_version: number;
   design_block_json?: string | null;
+  explanation_json?: string | null;
 }
 
 interface AgentDbRow {
@@ -753,6 +755,8 @@ export class Core {
   public readonly ruleStore: RuleStore;
   public readonly skillBox: SkillBox;
   private processSkillsPack: DetectedProcessSkillsPack | null = null;
+
+  private readonly decisionExplainer: DecisionExplainer;
   private processSkillsMissingLogged = false;
   public readonly skillCurator: SkillCurator;
   public readonly advisorSessions: AdvisorSessionManager;
@@ -808,6 +812,16 @@ export class Core {
     this.knownModels = options.knownModels ?? defaultKnownModels;
     this.db = options.db;
     this.writeLane = options.db.createWriteLane();
+    this.decisionExplainer = new DecisionExplainer({
+      db: this.db,
+      writeLane: this.writeLane,
+      runner: () => this.options.agentRunner as ReturnType<ConstructorParameters<typeof DecisionExplainer>[0]["runner"]>,
+      roleModel: (role) => resolveRoleModelFromDb(this.db, role),
+      rules: (workId) => this.composeRulesForRole("manager", workId),
+      language: () => ownerLanguage(this.db),
+      timeoutSeconds: () => progressGuard(this.db).decision_explanation_timeout_seconds,
+      announce: (workId) => this.announceCoreDecisions(workId),
+    });
     this.coreActivity = new CoreActivityRegistry({
       write: (event) => this.writeLane.write({
         mutateState: () => undefined,
@@ -4113,7 +4127,7 @@ export class Core {
     const limit = boundLimit(query.limit ?? 50);
     const rows = this.db.all<DecisionDbRow>(
       `SELECT id, work_id, scope, status, blocked_task_ids_json, reason, question, current_state, tried,
-              options_json, recommended, allow_free_text, state_version, design_block_json
+              options_json, recommended, allow_free_text, state_version, design_block_json, explanation_json
          FROM decisions
         WHERE (? IS NULL OR status = ?)
           AND (? IS NULL OR id > ?)
@@ -4287,9 +4301,11 @@ export class Core {
     request: CommandRequest<{ answer: string; option_key: string | null; source_message_id: string | null } & JsonObject>,
   ): Promise<CommandResponse<{ decision_id: string; status: "resolved"; winner: boolean; resumed_task_ids: readonly string[] }>> {
     const designStop = this.designStopBelongsToManager(decisionId, request.payload.option_key);
-    const toManager = this.retryBelongsToManager(decisionId, request.payload.option_key) || designStop;
+    // A fix option the Owner picked is the Manager's instruction, so it goes to a replan like a design stop does.
+    const fix = this.fixOptionOf(decisionId, request.payload.option_key);
+    const toManager = this.retryBelongsToManager(decisionId, request.payload.option_key) || designStop || fix;
     // Read before resolving: the stored question and options are what the Manager needs to understand the answer.
-    const replanText = designStop ? this.designStopReplanAnswer(decisionId, request.payload.option_key, request.payload.answer) : request.payload.answer;
+    const replanText = fix || designStop ? this.chosenOptionReplanText(decisionId, request.payload.option_key, request.payload.answer) : request.payload.answer;
     const response = await this.decisions.resolve({
       ...request,
       payload: { ...request.payload, decision_id: decisionId, ...(toManager ? { to_manager: true } : {}), ...(request.payload.option_key === REVIEW_RERUN_OPTION_KEY ? { rerun_review: true } : {}), ...(isTestSetupOptionKey(request.payload.option_key) ? { rerun_verification: true } : {}) },
@@ -4400,12 +4416,37 @@ export class Core {
    * The Manager replans from the answer text alone, and the Web sends only the option label.
    * Add the question and the chosen option's label and description the design stop was written with.
    */
-  private designStopReplanAnswer(decisionId: string, optionKey: string | null, answer: string): string {
-    const decision = this.db.get<{ question: string; options_json: string }>("SELECT question, options_json FROM decisions WHERE id = ?", decisionId);
+  private chosenOptionReplanText(decisionId: string, optionKey: string | null, answer: string): string {
+    const decision = this.db.get<{ question: string; options_json: string; blocked_task_ids_json: string }>(
+      "SELECT question, options_json, blocked_task_ids_json FROM decisions WHERE id = ?",
+      decisionId,
+    );
     if (!decision || optionKey === null) return answer;
-    const chosen = (JSON.parse(decision.options_json) as readonly { key?: string; label?: string; description?: string }[]).find((item) => item.key === optionKey);
+    const chosen = (JSON.parse(decision.options_json) as readonly {
+      key?: string; label?: string; description?: string; instruction?: string;
+      criteria_rewrites?: readonly { criterion_id: string; before: string; after: string; check: string }[];
+    }[]).find((item) => item.key === optionKey);
     if (!chosen) return answer;
-    return [`Question: ${decision.question}`, `Chosen option: ${chosen.label ?? optionKey} - ${chosen.description ?? ""}`, ...(answer.trim() === chosen.label ? [] : [`Owner's words: ${answer}`])].join("\n");
+    const taskId = (JSON.parse(decision.blocked_task_ids_json) as string[])[0];
+    const task = taskId === undefined ? undefined : this.db.get<{ title: string }>("SELECT title FROM tasks WHERE id = ?", taskId);
+    const rewrites = chosen.criteria_rewrites ?? [];
+    return [
+      `Question: ${decision.question}`,
+      `Chosen option: ${chosen.label ?? optionKey} - ${chosen.description ?? ""}`,
+      ...(chosen.instruction ? [`Instruction: ${chosen.instruction}`] : []),
+      ...(rewrites.length > 0
+        ? [`Criteria rewrites for Task "${task?.title ?? ""}" (${taskId}):`, ...rewrites.map((r) => `- ${r.criterion_id}: "${r.before}" -> "${r.after}" (check: ${r.check})`)]
+        : []),
+      ...(answer.trim() === chosen.label ? [] : [`Owner's words: ${answer}`]),
+    ].join("\n");
+  }
+
+  /** Whether the picked option is a fix option Core added: an option of an open Core Decision that carries an instruction for the Manager. */
+  private fixOptionOf(decisionId: string, optionKey: string | null): boolean {
+    if (optionKey === null) return false;
+    const decision = this.db.get<{ options_json: string }>("SELECT options_json FROM decisions WHERE id = ? AND status = 'open' AND issuer_role = 'core'", decisionId);
+    return decision !== undefined &&
+      (JSON.parse(decision.options_json) as readonly { key?: string; instruction?: string }[]).some((item) => item.key === optionKey && typeof item.instruction === "string" && item.instruction !== "");
   }
 
   /**
@@ -7176,6 +7217,8 @@ export class Core {
   private onTaskSettled(workId: string): void {
     if (!this.started) return;
     this.workDriver.wake(workId);
+    // A Work stopped on a Decision is no longer ticked, so the Decision the settled Task opened is announced (and explained) here.
+    void this.announceCoreDecisions(workId).catch((error: unknown) => console.error(`[owl-core] Failed to announce Decisions of Work ${workId}`, error));
     const work = this.db.get<{ state: string }>("SELECT state FROM works WHERE id = ?", workId);
     if (work?.state === "cancelled") this.trackWorktreeReconcile(workId, "task_settled_after_cancel");
   }
@@ -7735,9 +7778,10 @@ export class Core {
     const rows = this.db.all<{
       id: string; work_id: string; scope: string; blocked_task_ids_json: string; reason: string; question: string;
       tried: string; current_state: string; options_json: string; recommended: string | null; allow_free_text: number;
+      explanation_json: string | null;
     }>(
       `SELECT id, work_id, scope, blocked_task_ids_json, reason, question, tried, current_state, options_json,
-              recommended, allow_free_text
+              recommended, allow_free_text, explanation_json
          FROM decisions
         WHERE status = 'open' AND issuer_role = 'core' AND (? IS NULL OR work_id = ?)
           AND NOT EXISTS (SELECT 1 FROM events WHERE events.idempotency_key = 'decision-opened:core:' || decisions.id)
@@ -7750,6 +7794,12 @@ export class Core {
       workId ?? null,
     );
     for (const row of rows) {
+      const explanation = toDecisionExplanation(row.explanation_json);
+      // Wait for the explanation so the first notice carries it; a Decision this run already tried goes out as it is.
+      if (explanation?.status === "pending" && !this.decisionExplainer.tried(row.id)) {
+        this.decisionExplainer.schedule(row.id, row.work_id);
+        continue;
+      }
       try {
         await this.writeLane.write({
           mutateState: () => null,
@@ -7771,6 +7821,7 @@ export class Core {
               allow_free_text: row.allow_free_text === 1,
               issuer_role: "core",
               language: ownerLanguage(this.db),
+              ...(explanation?.status === "ready" ? { explanation: { summary: explanation.summary, cause_kind: explanation.cause_kind } } : {}),
             },
           },
           outbox: [{ provider: "websocket" }],
@@ -11373,6 +11424,7 @@ function toDecision(row: DecisionDbRow): Decision {
     blocked_task_ids: blocked,
     state_version: row.state_version,
     design_block: row.design_block_json ? (JSON.parse(row.design_block_json) as Decision["design_block"]) : null,
+    explanation: toDecisionExplanation(row.explanation_json),
   };
 }
 
@@ -11453,7 +11505,7 @@ const AGENT_LIVE_STATUSES = ["launch_pending", "spawned", "running", "cancel_req
 export const DEFAULT_AGENTS_VIEW_RECENT = 8;
 /** Conversation messages the Work detail view returns when the caller does not say (same as the web client's request). */
 export const DEFAULT_WORK_VIEW_CONVERSATION_LIMIT = 100;
-const DECISION_COLUMNS = "id, work_id, scope, status, blocked_task_ids_json, reason, question, current_state, tried, options_json, recommended, allow_free_text, state_version, design_block_json";
+const DECISION_COLUMNS = "id, work_id, scope, status, blocked_task_ids_json, reason, question, current_state, tried, options_json, recommended, allow_free_text, state_version, design_block_json, explanation_json";
 const AGENT_IDLE_THRESHOLD_SECONDS = 1800;
 
 function computeProjectImpact(
@@ -12053,14 +12105,16 @@ function isRegularFile(path: string): boolean {
   try { return lstatSync(path).isFile(); } catch { return false; }
 }
 
+const DELETABLE_WORK_STATES: ReadonlySet<string> = new Set(["memo", "ready", "completed", "cancelled"]);
+
 function assertWorkDeletable(
   workId: string,
   work: { readonly state: string; readonly archived_at: string | null; readonly state_version: number } | undefined,
   expectedVersion: number,
 ): asserts work is { readonly state: string; readonly archived_at: string | null; readonly state_version: number } {
   if (!work) throw notFound("work", workId);
-  if (work.state !== "completed" && work.state !== "cancelled") {
-    throw invalidStateTransition("Only completed or cancelled Works can be deleted.", { work_id: workId, state: work.state });
+  if (!DELETABLE_WORK_STATES.has(work.state)) {
+    throw invalidStateTransition("Only memo, ready, completed or cancelled Works can be deleted.", { work_id: workId, state: work.state });
   }
   if (work.state_version !== expectedVersion) throw versionConflict(expectedVersion, work.state_version);
 }

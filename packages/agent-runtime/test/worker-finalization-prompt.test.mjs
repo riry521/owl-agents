@@ -17,17 +17,20 @@ const mockDir = "/tmp/owl-data/designs/work-1/task-1.mocks";
 test("a screen design Designer prompt gets the mock instruction and, when configured, the skill sentence", () => {
   const configured = buildDesignerRolePrompt({ task: designTask, context: { design_tier: "lead", design_mock_dir: mockDir, design_skill: "example-ui-skill" } });
   assert.match(configured, /save_design_mock tool of the owl-design MCP server/);
-  assert.match(configured, /Use the example-ui-skill skill for this screen design/);
+  assert.match(configured, /Use the example-ui-skill skill when this Task designs screens/);
+  assert.match(configured, /Do not write HTML mocks into the Markdown design document/);
+  const standard = buildDesignerRolePrompt({ task: designTask, context: { design_tier: "standard", design_mock_dir: mockDir } });
+  assert.match(standard, /save_design_mock tool of the owl-design MCP server/);
   const unconfigured = buildDesignerRolePrompt({ task: designTask, context: { design_tier: "lead", design_mock_dir: mockDir } });
   assert.match(unconfigured, /save_design_mock tool of the owl-design MCP server/);
-  assert.doesNotMatch(unconfigured, /skill for this screen design/);
+  assert.doesNotMatch(unconfigured, /when this Task designs screens: load/);
 });
 
 test("a regular Designer prompt gets neither the mock instruction nor the skill sentence", () => {
   for (const context of [{}, { design_tier: "lead" }, { design_skill: "example-ui-skill" }]) {
     const prompt = buildDesignerRolePrompt({ task: designTask, context });
     assert.doesNotMatch(prompt, /save_design_mock/);
-    assert.doesNotMatch(prompt, /skill for this screen design/);
+    assert.doesNotMatch(prompt, /when this Task designs screens: load/);
   }
 });
 

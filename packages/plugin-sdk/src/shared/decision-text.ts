@@ -20,6 +20,8 @@ const TEXT: Readonly<Record<DecisionLanguage, {
   readonly options: string;
   readonly currentState: string;
   readonly tried: string;
+  readonly details: string;
+  readonly cause: string;
 }>> = {
   ja: {
     title: "判断が必要です",
@@ -29,6 +31,8 @@ const TEXT: Readonly<Record<DecisionLanguage, {
     options: "選択肢と、選ぶとどうなるか",
     currentState: "今の状態",
     tried: "これまでの経緯",
+    details: "詳しい記録",
+    cause: "原因",
   },
   en: {
     title: "Decision needed",
@@ -38,6 +42,8 @@ const TEXT: Readonly<Record<DecisionLanguage, {
     options: "Options and what each one does",
     currentState: "Current state",
     tried: "What happened so far",
+    details: "Details",
+    cause: "Cause",
   },
 };
 
@@ -51,18 +57,38 @@ export function decisionTitle(payload: Record<string, unknown>): string {
   return TEXT[decisionLanguage(payload)].title;
 }
 
+/** Display names of `explanation.cause_kind`; plugin-sdk does not depend on @owl/shared, so keys are plain strings. */
+const DECISION_CAUSE_TEXT: Readonly<Record<DecisionLanguage, Readonly<Record<string, string>>>> = {
+  ja: { work: "作業の問題", criteria: "条件の問題", external: "外の問題" },
+  en: { work: "A problem in the work", criteria: "A problem in the criteria", external: "A problem outside the Task" },
+};
+
+/** "<summary>（原因: <kind>）" from a decision.opened payload's `explanation`; null when absent or malformed. */
+export function formatDecisionExplanation(payload: Record<string, unknown>): string | null {
+  const explanation = payload.explanation;
+  if (!explanation || typeof explanation !== "object") return null;
+  const record = explanation as Record<string, unknown>;
+  const summary = text(record.summary);
+  const kind = text(record.cause_kind);
+  const language = decisionLanguage(payload);
+  if (!summary || !kind || !Object.hasOwn(DECISION_CAUSE_TEXT[language], kind)) return null;
+  const cause = `${TEXT[language].cause}: ${DECISION_CAUSE_TEXT[language][kind]}`;
+  return language === "ja" ? `${summary}（${cause}）` : `${summary} (${cause})`;
+}
+
 export interface DecisionHeadings {
   readonly reason: string;
   readonly question: string;
   readonly options: string;
   readonly currentState: string;
   readonly tried: string;
+  readonly details: string;
 }
 
 /** Headings shared by detailed Decision notifications. */
 export function decisionHeadings(language: DecisionLanguage): DecisionHeadings {
-  const { reason, question, options, currentState, tried } = TEXT[language];
-  return { reason, question, options, currentState, tried };
+  const { reason, question, options, currentState, tried, details } = TEXT[language];
+  return { reason, question, options, currentState, tried, details };
 }
 
 function text(value: unknown): string | null {
@@ -88,13 +114,22 @@ function optionLines(options: unknown, recommended: string | null, mark: string)
  */
 export function formatDecisionText(payload: Record<string, unknown>): string {
   const t = TEXT[decisionLanguage(payload)];
-  const sections: Array<[string, string | null]> = [
-    [t.reason, text(payload.reason)],
-    [t.question, text(payload.question)],
-    [t.options, optionLines(payload.options, text(payload.recommended), t.recommended).join("\n") || null],
-    [t.currentState, text(payload.current_state)],
-    [t.tried, text(payload.tried)],
-  ];
+  const explanation = formatDecisionExplanation(payload);
+  const optionsBody = optionLines(payload.options, text(payload.recommended), t.recommended).join("\n") || null;
+  const sections: Array<[string, string | null]> = explanation
+    ? [
+      [t.reason, explanation],
+      [t.question, text(payload.question)],
+      [t.options, optionsBody],
+      [t.details, [text(payload.reason), text(payload.current_state), text(payload.tried)].filter(Boolean).join("\n") || null],
+    ]
+    : [
+      [t.reason, text(payload.reason)],
+      [t.question, text(payload.question)],
+      [t.options, optionsBody],
+      [t.currentState, text(payload.current_state)],
+      [t.tried, text(payload.tried)],
+    ];
   return sections
     .filter((section): section is [string, string] => section[1] !== null)
     .map(([heading, body]) => `■ ${heading}\n${body}`)

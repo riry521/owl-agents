@@ -29,6 +29,7 @@ const EVENT_ICONS: Record<string, string> = {
   'task.ready': '📝',
   'task.completed': '✔️',
   'task.failed': '⚠️',
+  'task.failure.classified': '⚠️',
   'worker.started': '🔧',
   'worker.completed': '🔧',
   'worker.failed': '💥',
@@ -105,7 +106,15 @@ const ALERT_LABEL_KEYS: Record<string, string> = {
   workspaces_root_inside_repository: 'activity.alertWorkspacesInsideRepository',
 };
 
+/** Events of a run that ended with a valid partial report (a blocker or a process wait reported with result partial) are partial completions, not errors. */
+function isPartialFailureEvent(ev: EventFrame): boolean {
+  if (ev.type === 'task.external_blocker_reported' || ev.type === 'task.process_wait_started') return true;
+  return ev.type === 'task.failure.classified' && ev.payload?.run_outcome === 'partial';
+}
+
 function eventLabelKey(ev: EventFrame): string {
+  if (isPartialFailureEvent(ev)) return 'activity.taskPartial';
+  if (ev.type === 'task.failure.classified') return 'activity.taskFailed';
   const kind = ev.type === 'system.alert' ? ev.payload?.kind : undefined;
   if (typeof kind === 'string' && ALERT_LABEL_KEYS[kind]) return ALERT_LABEL_KEYS[kind];
   return EVENT_LABEL_KEYS[ev.type] ?? ev.type;
@@ -179,7 +188,7 @@ function ActivityItem({ ev, t }: { ev: EventFrame; t: TFunction }) {
   const detail = eventDetail(ev, t);
   return (
     <div className="activity-item">
-      <span className="activity-icon">{EVENT_ICONS[ev.type] ?? '📌'}</span>
+      <span className="activity-icon">{isPartialFailureEvent(ev) ? '🟡' : EVENT_ICONS[ev.type] ?? '📌'}</span>
       <div className="activity-body">
         <span className="activity-label">{t(eventLabelKey(ev))}</span>
         {detail && <span className="activity-ref" style={{ whiteSpace: 'pre-wrap' }}>{detail}</span>}

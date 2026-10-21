@@ -448,3 +448,29 @@ test('Decision shows why it stopped, what to decide, and what each option does',
   }
   assert.equal(html.split(en.decision.choose).length - 1, 2, 'each option has its own answer button');
 });
+
+test('Decision with a ready explanation shows summary, fix options and the recommendation first, and folds the record', () => {
+  const options = [
+    { key: 'fix_1', label: 'Reword the criterion', description: 'Rerun with the new wording.', criteria_rewrites: [{ criterion_id: 'AC1', before: 'Old wording', after: 'New wording', check: 'Measure it twice' }] },
+    { key: 'retry', label: 'Run again', description: 'Run the Task again.' },
+    { key: 'cancel', label: 'Stop', description: 'The Work is cancelled.' },
+  ];
+  const state = decisionState({ allowFreeText: true, options });
+  state[0].decision.recommended = 'fix_1';
+  state[0].decision.explanation = { kind: 'partial_limit', status: 'ready', summary: 'The criterion cannot be met as written.', cause_kind: 'criteria' };
+  const { html } = renderWith(DecisionView, state);
+  const at = (s) => html.indexOf(s);
+  const detailsAt = at('<details');
+  assert.ok(at('The criterion cannot be met as written.') > 0 && at('The criterion cannot be met as written.') < detailsAt);
+  assert.ok(at('Reword the criterion') < at(en.decision.otherOptions));
+  assert.ok(at('New wording') < at(en.decision.otherOptions));
+  assert.match(html, /btn btn--primary"[^>]*>[^<]*<\/button>/);
+  assert.ok(html.indexOf('btn--primary') < at(en.decision.otherOptions));
+  assert.ok(at('The Work stopped') > detailsAt, 'reason is inside the details');
+  assert.doesNotMatch(html, /<details[^>]*\sopen/);
+  assert.doesNotMatch(html, /AC1/);
+
+  const plain = decisionState({ allowFreeText: true, options: options.slice(1) });
+  plain[0].decision.explanation = null;
+  assert.doesNotMatch(renderWith(DecisionView, plain).html, /<details/);
+});

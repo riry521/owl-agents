@@ -26,6 +26,7 @@ import {
   type ClippingTagsRequest, type RuleJudgmentsRequest, type LibrarianModelSetting, type LibrarianOperationsRequest, type LibrarianRunResult,
 } from "./page-integration";
 import { buildTestSetupInvestigationPrompt, parseTestSetupResponse, testSetupProviderSchema, type TestSetupInvestigationRequest, type TestSetupInvestigationRunResult } from "./test-setup-investigation";
+import { buildDecisionExplanationPrompt, decisionExplanationProviderSchema, parseDecisionExplanationResponse } from "./decision-explanation";
 import { buildProjectInvestigationPrompt, parseProjectInvestigationResponse, projectInvestigationProviderSchema, type ProjectInvestigationRequest, type ProjectInvestigationRunResult } from "./project-investigation";
 import { buildCuratorPrompt, curatorProviderSchema, parseCuratorResponse } from "./curator";
 import {
@@ -85,6 +86,8 @@ import {
   isOwnerLanguage,
   parseAdvisorResponse as parseSharedAdvisorResponse,
   type OwnerLanguage,
+  type DecisionExplanationRequest,
+  type DecisionExplanationRunResult,
 } from "@owl/shared";
 
 let invocationSequence = 0;
@@ -1486,6 +1489,45 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     }
   };
 
+  const runDecisionExplanation = async (input: DecisionExplanationRequest): Promise<DecisionExplanationRunResult> => {
+    const invocationId = input.invocation_id ?? invocationIdFactory();
+    let directory: string | undefined;
+    try {
+      const overrides = resolveOverrides(input as unknown as Record<string, unknown>, options);
+      directory = await mkdtemp(join(tmpdir(), "owl-decision-explanation-"));
+      const request = requestForProvider(
+        "manager",
+        invocationId,
+        buildDecisionExplanationPrompt(input),
+        options,
+        undefined,
+        overrides.model,
+        overrides.adapter,
+        overrides.effort,
+        directory,
+        { ...overrides.env, OWL_PROVIDER_TIMEOUT_MS: String(input.timeout_ms) },
+        decisionExplanationProviderSchema(),
+      );
+      const outcome = await runAndParse(
+        request,
+        await executeProviderWithPlanUsage(request),
+        (answer) => parseDecisionExplanationResponse(answer, input),
+        resubmitLimitFor(),
+        executeProviderWithPlanUsage,
+      );
+      if (!outcome.ok) {
+        if (outcome.error instanceof OutputFormatError) return { ok: false, error: outcome.error.problem };
+        throw outcome.error;
+      }
+      return { ok: true, explanation: outcome.value };
+    } catch (error) {
+      const reason = error instanceof AgentRuntimeError ? error.reason : error instanceof Error ? error.message : String(error);
+      return { ok: false, error: /provider_timeout/u.test(reason) ? "timeout" : `provider_failed:${reason.slice(0, 200)}` };
+    } finally {
+      if (directory) await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+    }
+  };
+
   return {
     runManagerPlan,
     runDesigner,
@@ -1499,6 +1541,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     runRuleJudgments,
     runProjectInvestigation,
     runTestSetupInvestigation,
+    runDecisionExplanation,
     provider: observedProvider,
     cancelAgent: async (invocationId: string, force?: boolean) => {
       const active = activeControllers.get(invocationId);

@@ -15,6 +15,10 @@ export interface ProgressGuardSettings {
   readonly process_wait_max_hours: number;
   /** Times one Task lineage may send a Worker-reported external blocker to the Manager before Core asks the Owner. */
   readonly external_blocker_limit: number;
+  /** Times one Task lineage may end a Worker run with a plain partial report (no wait, blocker or replan request) before Core asks the Owner. */
+  readonly partial_limit: number;
+  /** Seconds Core waits for the explanation of a waiting Decision before it notifies with the plain text. */
+  readonly decision_explanation_timeout_seconds: number;
 }
 
 export const DEFAULT_PROGRESS_GUARD_SETTINGS: ProgressGuardSettings = {
@@ -25,6 +29,8 @@ export const DEFAULT_PROGRESS_GUARD_SETTINGS: ProgressGuardSettings = {
   process_wait_max_count: 3,
   process_wait_max_hours: 6,
   external_blocker_limit: 2,
+  partial_limit: 3,
+  decision_explanation_timeout_seconds: 300,
 };
 export const PROGRESS_GUARD_RANGES = {
   no_progress_limit: { min: 1, max: 100 },
@@ -33,6 +39,8 @@ export const PROGRESS_GUARD_RANGES = {
   process_wait_max_count: { min: 0, max: 20 },
   process_wait_max_hours: { min: 1, max: 72 },
   external_blocker_limit: { min: 0, max: 20 },
+  partial_limit: { min: 1, max: 20 },
+  decision_explanation_timeout_seconds: { min: 30, max: 1800 },
 } as const;
 
 export class ProgressGuardSettingsValidationError extends Error {

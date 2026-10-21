@@ -415,7 +415,15 @@
     "choose": "Choose",
     "context": "Where things stand",
     "currentState": "Current state",
-    "tried": "What happened so far"
+    "tried": "What happened so far",
+    "causeLabel": "Cause",
+    "causeKind": { "work": "A problem in the work", "criteria": "A problem in the criteria", "external": "A problem outside the Task" },
+    "rewriteBefore": "Original criterion",
+    "rewriteAfter": "Reworded criterion",
+    "rewriteCheck": "How to check",
+    "otherOptions": "Other answers",
+    "detailsSummary": "Details (the Worker's report and the verification record)",
+    "explanationPending": "Writing a short explanation of the stop."
   },
   "agents": {
     "title": "Agents",
@@ -1028,6 +1036,7 @@
     "taskReady": "Task ready",
     "taskCompleted": "Task completed",
     "taskFailed": "Task failed",
+    "taskPartial": "Task partially completed",
     "workerStarted": "Worker started",
     "workerCompleted": "Worker completed",
     "workerFailed": "Worker failed",

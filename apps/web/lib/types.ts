@@ -243,6 +243,22 @@ export interface DecisionOption {
   key: string;
   label: string;
   description?: string;
+  instruction?: string;
+  criteria_rewrites?: DecisionCriterionRewrite[];
+}
+
+export interface DecisionCriterionRewrite {
+  criterion_id: string;
+  before: string;
+  after: string;
+  check: string;
+}
+
+export interface DecisionExplanation {
+  kind: string;
+  status: 'pending' | 'ready' | 'failed';
+  summary: string | null;
+  cause_kind: 'work' | 'criteria' | 'external' | null;
 }
 
 export interface Decision {
@@ -260,6 +276,7 @@ export interface Decision {
   allow_free_text: boolean;
   blocked_task_ids: ULID[];
   state_version: number;
+  explanation?: DecisionExplanation | null;
 }
 
 /** GET/PUT /api/v1/settings/models role-model row. */

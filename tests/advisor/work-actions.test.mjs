@@ -215,9 +215,9 @@ test("cancel_work cancels the selected Work and appends a success notice", async
   assert.match(body, /キャンセルしました/u);
 });
 
-test("delete_work removes completed and cancelled Works from the DB", async (t) => {
+test("delete_work removes memo, ready, completed and cancelled Works from the DB", async (t) => {
   const { db, core, respond } = await setup(t);
-  for (const state of ["completed", "cancelled"]) {
+  for (const state of ["memo", "ready", "completed", "cancelled"]) {
     const workId = await createWorkInState(core, db, state, `delete-${state}`);
     const { body } = await respond([action("delete_work", { work_id: workId })]);
     assert.equal(db.get("SELECT id FROM works WHERE id = ?", workId), undefined);

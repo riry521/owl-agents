@@ -203,8 +203,8 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
     delete:
       operationId: deleteWork
-      summary: Permanently delete a completed or cancelled work
-      description: Deletes only a work in completed or cancelled state; archiving is not required. The deletion is complete and leaves no trace (conversations, messages, learning jobs, backlog items, uploads, artifacts and worktrees are removed). Any other state returns 409 invalid_state_transition.
+      summary: Permanently delete a memo, ready, completed or cancelled work
+      description: Deletes only a work in memo, ready, completed or cancelled state; cancelling or archiving is not required. The deletion is complete and leaves no trace (conversations, messages, learning jobs, backlog items, uploads, artifacts and worktrees are removed). Any other state returns 409 invalid_state_transition.
       security:
         - ownerBearer: []
       requestBody:
@@ -8335,7 +8335,7 @@ components:
       description: >-
         Supported types and payloads: create_work; start_work; pause_work {work_id,
         reason?}; resume_work {work_id, body?} (body: 1-10000 chars, recorded as the answer to the retry Decision; ignored for a paused Work); reopen_work; cancel_work {work_id, reason?,
-        force?}; delete_work {work_id, reason?} (completed or cancelled Works only;
+        force?}; delete_work {work_id, reason?} (memo, ready, completed or cancelled Works only;
         permanently deletes); send_work_instruction {work_id, body, reopen?}; update_work {work_id,
         title?, summary?} (at least one); answer_decision; send_file; run_librarian /
         run_skill_curation / run_rule_curation. send_work_instruction requires a body

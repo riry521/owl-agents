@@ -17,6 +17,9 @@ import { validateReportEnvelope, validateReportSemantics } from "../../packages/
 import { createTestCore, command } from "../helpers/core.mjs";
 import { disablePlanQuality } from "../helpers/plan-quality.mjs";
 import { waitFor } from "../helpers/wait.mjs";
+import { startTestHttpServer } from "../helpers/http.mjs";
+import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
+import { findInternalTerms } from "../../packages/shared/dist/decision-explanation.js";
 
 // A Worker that reports a criterion as "unverifiable" must not be restarted and
 // its Task must not be replaced: Core asks the Manager to rewrite the criterion
@@ -97,11 +100,11 @@ function runnerWith(answers) {
 }
 
 async function openCore(t, runner, configure) {
-  const { db, core } = await createTestCore(t, { agentRunner: runner, dispatcher: { tick_interval_ms: 25 } }, { prefix: "owl-unverifiable-", start: true });
+  const { db, core, root } = await createTestCore(t, { agentRunner: runner, dispatcher: { tick_interval_ms: 25 } }, { prefix: "owl-unverifiable-", start: true });
   // The plan quality gate would reject the unprovable starting criterion before the path under test runs.
   await disablePlanQuality(db);
   if (configure) await configure(core);
-  return { db, core };
+  return { db, core, root };
 }
 
 async function startWork(core, suffix) {
@@ -377,8 +380,8 @@ test("a partial after a side effect with nothing to escalate is retried with its
   assert.equal(runner.state.replanRequests.length, 0);
 });
 
-test("a resumable partial repeating the same error up to the same-error limit waits for the Owner", async (t) => {
-  const limit = DEFAULT_ATTEMPT_POLICY_CONFIG.deterministicSameErrorLimit;
+test("resumable partials up to partial_limit are retried as completed/partial runs, then the Owner decides without a failure count", async (t) => {
+  const limit = DEFAULT_ATTEMPT_POLICY_CONFIG.partialLimit;
   const runner = blockerRunner(Array.from({ length: limit + 1 }, () => resumable()));
   const { db, core } = await openCore(t, runner);
   runner.state.db = db;
@@ -386,9 +389,14 @@ test("a resumable partial repeating the same error up to the same-error limit wa
 
   assert.ok(await waitFor(() => t1Of(db, workId)?.status === "judgement_waiting"), `T1 waits for the Owner (${JSON.stringify(tasksOf(db, workId))})`);
   assert.ok(await waitFor(() => openDecisions(db, workId) === 1));
-  assert.equal(runner.state.t1Calls, limit);
+  assert.equal(runner.state.t1Calls, limit + 1);
   const reasons = decidedReasons(db, workId);
-  assert.deepEqual([reasons.filter((r) => r === "resumable_partial").length, reasons.at(-1)], [limit - 1, "retry_not_allowed"]);
+  assert.deepEqual([reasons.filter((r) => r === "resumable_partial").length, reasons.at(-1)], [limit, "partial_limit"]);
+  const t1 = db.get("SELECT id, failure_count, same_error_count, last_error_key FROM tasks WHERE id = ?", t1Of(db, workId).id);
+  assert.deepEqual([t1.failure_count, t1.same_error_count, t1.last_error_key], [0, 0, null]);
+  const runs = db.all("SELECT status, outcome FROM agent_runs WHERE task_id = ? AND role = 'worker'", t1.id);
+  assert.equal(runs.length, limit + 1);
+  assert.ok(runs.every((run) => run.status === "completed" && run.outcome === "partial"), JSON.stringify(runs));
 });
 
 // A report whose result contradicts its own fields is repaired by lowering the result, never by raising it.
@@ -455,4 +463,155 @@ test("a lowered report with a question reaches the Manager and the correction is
   const payload = JSON.parse(db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = 'worker.report_corrected'", workId).payload_json);
   assert.deepEqual(payload.corrections, [{ rule: "success_with_question_for_manager", from_result: "success", to_result: "partial" }]);
   assert.ok(await waitFor(() => runner.state.replanRequests.length === 1), "the question went to the Manager");
+});
+
+// A plain partial that repeats up to progress_guard.partial_limit opens a Decision, and Core adds a plain explanation to it.
+
+const CRITERIA_AFTER = "The per-trial time without startup is shorter than before; verified by node --test tests/trial.test.mjs.";
+const CRITERIA_CHECK = "Run node --test tests/trial.test.mjs after startup and compare the mean with the earlier one.";
+
+// The work is done; the criterion cannot be met because of how it is measured.
+const criteriaPartial = (request) => partialAfterSideEffect({
+  ...passedReport(request.invocation_id),
+  work_done: "The work is finished; only the measurement of the criterion fails.",
+  verification: {
+    status: "failed",
+    method: "Ran the tests.",
+    acceptance: [{ criterion_id: "AC1", criterion: GOOD_ACCEPTANCE, status: "failed", evidence: "The criterion averages three trials, so the startup time of the first trial makes the mean longer than before." }],
+    checks: [],
+    integration_check: null,
+  },
+  external_blocker: null,
+});
+
+const goodExplanation = (patch = {}) => ({
+  summary: "The work is finished, but the criterion averages three trials, so the startup time makes it fail.",
+  cause_kind: "criteria",
+  options: [
+    { label: "Reword the criterion", description: "Measure the time without startup and retry the Task.", instruction: "Reword the criterion and retry the Task.", criteria_rewrites: [{ criterion_id: "AC1", after: CRITERIA_AFTER, check: CRITERIA_CHECK }] },
+    { label: "Speed up startup", description: "Keep the criterion and add work that shortens startup.", instruction: "Add work that shortens startup and retry the Task.", criteria_rewrites: [] },
+  ],
+  recommended_option: 0,
+  ...patch,
+});
+
+/** A blockerRunner whose Worker keeps returning criteriaPartial; `explain` answers runDecisionExplanation (undefined: the runner has none). */
+function explainingRunner(explain) {
+  const runner = blockerRunner([criteriaPartial, criteriaPartial, criteriaPartial]);
+  runner.state.explanationRequests = [];
+  if (explain) {
+    runner.runDecisionExplanation = async (request) => {
+      runner.state.explanationRequests.push(request);
+      return explain(request);
+    };
+  }
+  return runner;
+}
+
+const limitOne = (c) => c.setProgressGuardSettings({ ...DEFAULT_PROGRESS_GUARD_SETTINGS, partial_limit: 1 });
+const explanationOf = (db, workId) => {
+  const row = db.get("SELECT id, explanation_json, options_json, recommended FROM decisions WHERE work_id = ? AND blocked_task_ids_json != '[]'", workId);
+  return row && { id: row.id, explanation: JSON.parse(row.explanation_json), options: JSON.parse(row.options_json), recommended: row.recommended };
+};
+const openedEvents = (db, workId) => db.all("SELECT payload_json FROM events WHERE work_id = ? AND type = 'decision.opened'", workId).map((row) => JSON.parse(row.payload_json));
+
+test("two partial reports open one Decision, and the explanation, fix options and recommendation are added to it", async (t) => {
+  const runner = explainingRunner(() => ({ ok: true, explanation: goodExplanation() }));
+  const { db, core } = await openCore(t, runner, limitOne);
+  runner.state.db = db;
+  const workId = await startWork(core, "explained");
+
+  assert.ok(await waitFor(() => explanationOf(db, workId)?.explanation.status === "ready"), `the explanation is ready (${JSON.stringify(explanationOf(db, workId))})`);
+  const row = explanationOf(db, workId);
+  assert.equal(openDecisions(db, workId), 1);
+  assert.ok(row.explanation.summary.length > 0);
+  assert.ok(["work", "criteria", "external"].includes(row.explanation.cause_kind));
+  assert.deepEqual(row.options.map((option) => option.key), ["fix_1", "fix_2", "retry", "cancel"]);
+  assert.equal(row.recommended, "fix_1");
+  assert.deepEqual(findInternalTerms(row.explanation.summary, [t1Of(db, workId).id, workId, "T1", "AC1"]), []);
+  assert.equal(db.get("SELECT state_version FROM decisions WHERE id = ?", row.id).state_version, 0, "adding the explanation does not bump state_version");
+
+  assert.ok(await waitFor(() => openedEvents(db, workId).length === 1));
+  const opened = openedEvents(db, workId)[0];
+  assert.deepEqual(opened.explanation, { summary: row.explanation.summary, cause_kind: row.explanation.cause_kind });
+  assert.equal(opened.recommended, "fix_1");
+
+  assert.equal(runner.state.explanationRequests.length, 1, "one explanation job per Decision");
+  const request = runner.state.explanationRequests[0];
+  assert.equal(request.task.acceptance_criteria[0].text, GOOD_ACCEPTANCE);
+  assert.equal(request.reports.length, 2);
+  assert.match(request.reports[0].work_done, /finished/);
+  assert.ok(request.verification, "the verification record is passed");
+  assert.ok(request.forbidden_terms.includes("AC1"));
+});
+
+test("a criteria cause carries the reworded criterion with the original text copied from the Task", async (t) => {
+  const runner = explainingRunner(() => ({ ok: true, explanation: goodExplanation() }));
+  const { db, core } = await openCore(t, runner, limitOne);
+  runner.state.db = db;
+  const workId = await startWork(core, "criteria-cause");
+
+  assert.ok(await waitFor(() => explanationOf(db, workId)?.explanation.status === "ready"));
+  const row = explanationOf(db, workId);
+  assert.equal(row.explanation.cause_kind, "criteria");
+  const [rewrite] = row.options[0].criteria_rewrites;
+  assert.equal(rewrite.before, GOOD_ACCEPTANCE);
+  assert.equal(rewrite.after, CRITERIA_AFTER);
+  assert.equal(rewrite.check, CRITERIA_CHECK);
+});
+
+test("a Decision opens with the plain text when the explanation cannot be made", async (t) => {
+  const cases = {
+    "no runDecisionExplanation": [undefined, "runner_unavailable"],
+    "recommended_option out of range": [() => ({ ok: true, explanation: goodExplanation({ recommended_option: 5 }) }), "recommended_option out of range"],
+    "summary with an internal term": [() => ({ ok: true, explanation: goodExplanation({ summary: "A partial report came back twice." }) }), "internal_terms"],
+  };
+  for (const [name, [explain, error]] of Object.entries(cases)) {
+    const runner = explainingRunner(explain);
+    const { db, core } = await openCore(t, runner, limitOne);
+    runner.state.db = db;
+    const workId = await startWork(core, `failed-${name.replaceAll(" ", "-")}`);
+
+    assert.ok(await waitFor(() => explanationOf(db, workId)?.explanation.status === "failed"), `${name}: failed (${JSON.stringify(explanationOf(db, workId))})`);
+    const row = explanationOf(db, workId);
+    assert.equal(row.explanation.error, error, name);
+    assert.deepEqual(row.options.map((option) => option.key), ["retry", "cancel"], name);
+    assert.equal(row.recommended, null, name);
+    assert.ok(await waitFor(() => openedEvents(db, workId).length === 1), `${name}: decision.opened is emitted`);
+    assert.equal(openedEvents(db, workId)[0].explanation, undefined, name);
+  }
+});
+
+test("choosing the recommended fix option sends its instruction to the Manager, reruns the Task and records the rewrite", async (t) => {
+  const runner = explainingRunner(() => ({ ok: true, explanation: goodExplanation() }));
+  const replans = [];
+  runner.runManagerPlan = async (request) => {
+    const mode = request.mode ?? request.context?.mode;
+    if (mode === "plan") return { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [planTask(GOOD_ACCEPTANCE)] } };
+    replans.push(request);
+    return { outcome: "success", report_valid: true, report: { event: "task.replanned", tasks: [planTask(CRITERIA_AFTER)] } };
+  };
+  const { db, core, root } = await openCore(t, runner, limitOne);
+  runner.state.db = db;
+  const workId = await startWork(core, "choose-fix");
+  assert.ok(await waitFor(() => explanationOf(db, workId)?.explanation.status === "ready"));
+  const row = explanationOf(db, workId);
+  const callsBefore = runner.state.t1Calls;
+
+  const dataDir = join(root, "data");
+  await mkdir(dataDir, { recursive: true });
+  const api = await startTestHttpServer(t, { core: new ExternalCoreAdapter(core, db, root, dataDir), db, webOut: root, owlRoot: root, dataDir });
+  if (api === null) return t.skip("localhost listen is not permitted in this environment");
+  const response = await api.request("POST", `/api/v1/decisions/${row.id}/answer`, envelope({ answer: row.options[0].label, option_key: "fix_1", source: "web", source_message_id: null }, "answer-fix"));
+  assert.equal(response.status, 200, JSON.stringify(await response.clone().json()));
+
+  assert.ok(await waitFor(() => replans.length === 1), "the Manager was asked to replan");
+  const ownerRequests = JSON.stringify(replans[0].context.owner_requests);
+  assert.match(ownerRequests, /Instruction: Reword the criterion and retry the Task\./);
+  assert.ok(ownerRequests.includes(`\\"${GOOD_ACCEPTANCE}\\" -> \\"${CRITERIA_AFTER}\\"`), ownerRequests);
+  assert.ok(await waitFor(() => db.get("SELECT acceptance FROM tasks WHERE id = ?", t1Of(db, workId).id).acceptance === CRITERIA_AFTER), "the Task's criterion was rewritten");
+  assert.ok(await waitFor(() => runner.state.t1Calls > callsBefore), "the Worker ran the Task again");
+  const resolved = db.all("SELECT payload_json FROM events WHERE work_id = ? AND type = 'decision.resolved'", workId).map((event) => JSON.parse(event.payload_json));
+  assert.equal(resolved.length, 1);
+  assert.equal(resolved[0].chosen_option.criteria_rewrites[0].after, CRITERIA_AFTER);
 });

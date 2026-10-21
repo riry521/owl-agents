@@ -29,7 +29,7 @@ export function designMockDirectory(dataDir: string, workId: string, taskId: str
   return resolve(designDocumentPath(dataDir, workId), `${safePathSegment(taskId)}.mocks`);
 }
 
-/** A screen design Task is a design Task the Manager assigned to the Lead Designer. */
-export function isScreenDesignTask(task: { type: string; assigned_designer?: string | null }): boolean {
-  return task.type === "design" && task.assigned_designer === "lead_designer";
+/** Every design Task may save mocks, whichever Designer is assigned: Owl has no separate marker for screen design. */
+export function isScreenDesignTask(task: { type: string }): boolean {
+  return task.type === "design";
 }

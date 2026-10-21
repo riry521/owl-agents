@@ -25,7 +25,7 @@ export function WorkArchiveActions({
   const [error, setError] = useState<string | null>(null);
   const isTerminal = work.state === 'completed' || work.state === 'cancelled';
 
-  if (!isTerminal) return null;
+  if (!isTerminal && work.state !== 'memo' && work.state !== 'ready') return null;
 
   const run = async (operation: () => Promise<unknown>) => {
     setPending(true);
@@ -55,17 +55,19 @@ export function WorkArchiveActions({
 
   return (
     <>
-      <button
-        type="button"
-        className="btn"
-        disabled={disabled || pending}
-        onClick={() => void run(() => work.archived_at
-          ? unarchiveWork(work.id, work.state_version)
-          : archiveWork(work.id, work.state_version))}
-      >
-        {work.archived_at ? <RestoreIcon /> : <ArchiveBoxIcon />}
-        {work.archived_at ? t('work.unarchive') : t('work.archive')}
-      </button>
+      {isTerminal && (
+        <button
+          type="button"
+          className="btn"
+          disabled={disabled || pending}
+          onClick={() => void run(() => work.archived_at
+            ? unarchiveWork(work.id, work.state_version)
+            : archiveWork(work.id, work.state_version))}
+        >
+          {work.archived_at ? <RestoreIcon /> : <ArchiveBoxIcon />}
+          {work.archived_at ? t('work.unarchive') : t('work.archive')}
+        </button>
+      )}
       <button
         type="button"
         className="btn btn--danger"

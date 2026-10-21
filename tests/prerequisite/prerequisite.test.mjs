@@ -57,13 +57,16 @@ test("stored spec is validated: source, conditions and shape", () => {
 test("progress guard defaults and per-key ranges", () => {
   assert.deepEqual(DEFAULT_PROGRESS_GUARD_SETTINGS, {
     no_progress_limit: 3, prerequisite_check_interval_seconds: 60, prerequisite_max_wait_hours: 72, prerequisite_sync_base: true,
-    process_wait_max_count: 3, process_wait_max_hours: 6, external_blocker_limit: 2,
+    process_wait_max_count: 3, process_wait_max_hours: 6, external_blocker_limit: 2, partial_limit: 3,
+    decision_explanation_timeout_seconds: 300,
   });
+  assert.deepEqual(PROGRESS_GUARD_RANGES.decision_explanation_timeout_seconds, { min: 30, max: 1800 });
   assert.deepEqual(PROGRESS_GUARD_RANGES.prerequisite_check_interval_seconds, { min: 10, max: 86400 });
   assert.deepEqual(PROGRESS_GUARD_RANGES.prerequisite_max_wait_hours, { min: 1, max: 8760 });
   assert.deepEqual(PROGRESS_GUARD_RANGES.process_wait_max_count, { min: 0, max: 20 });
   assert.deepEqual(PROGRESS_GUARD_RANGES.process_wait_max_hours, { min: 1, max: 72 });
   assert.deepEqual(PROGRESS_GUARD_RANGES.external_blocker_limit, { min: 0, max: 20 });
+  assert.deepEqual(PROGRESS_GUARD_RANGES.partial_limit, { min: 1, max: 20 });
   for (const [key, { min, max }] of Object.entries(PROGRESS_GUARD_RANGES)) {
     for (const ok of [min, max]) assert.equal(validateProgressGuardSettings({ ...DEFAULT_PROGRESS_GUARD_SETTINGS, [key]: ok })[key], ok);
     for (const bad of [min - 1, max + 1, 1.5, "1", null]) {

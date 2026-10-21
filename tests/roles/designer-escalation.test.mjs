@@ -264,7 +264,7 @@ test("with the limit set to 2 the first Lead rejection is remade and the second 
 });
 
 for (const designSkill of ["example-ui-skill", null]) {
-  test(`a mixed plan starts only the lead_designer Task as lead (design skill ${designSkill ?? "unset"})`, async (t) => {
+  test(`a mixed plan starts only the lead_designer Task as lead and gives every design Task the mock directory (design skill ${designSkill ?? "unset"})`, async (t) => {
     const { root, db } = await openTestDatabase(t, { prefix: "owl-designer-mixed-" });
     let release;
     const gate = new Promise((resolveGate) => { release = resolveGate; });
@@ -305,8 +305,8 @@ for (const designSkill of ["example-ui-skill", null]) {
     assert.match(contextOf("Screens").design_mock_dir, /\.mocks$/u);
     assert.equal(contextOf("Screens").design_skill, designSkill ?? undefined);
     for (const title of ["Content", "Plain"]) {
-      assert.equal("design_mock_dir" in contextOf(title), false);
-      assert.equal("design_skill" in contextOf(title), false);
+      assert.match(contextOf(title).design_mock_dir, /\.mocks$/u);
+      assert.equal(contextOf(title).design_skill, designSkill ?? undefined);
     }
   });
 }
@@ -326,8 +326,8 @@ test("a dependency on a screen design Task carries its design_mock_dir", async (
   const reports = dependencyContext(db, ids.code, root).dependency_reports;
   const withMocks = reports.filter((report) => "design_mock_dir" in report);
   assert.equal(reports.length, 2);
-  assert.equal(withMocks.length, 1);
-  assert.match(withMocks[0].design_mock_dir, new RegExp(`${ids.screen}\\.mocks$`, "u"));
+  assert.equal(withMocks.length, 2);
+  assert.match(withMocks.find((report) => report.design_mock_dir.endsWith(`${ids.screen}.mocks`)).design_mock_dir, new RegExp(`${ids.screen}\\.mocks$`, "u"));
 });
 
 test("Manager plan items normalize assigned_designer and reject invalid values", () => {

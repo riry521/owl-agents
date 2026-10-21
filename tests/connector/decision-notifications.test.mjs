@@ -107,6 +107,8 @@ test("Slack and Discord decision notifications carry the stop reason built from 
   const slack = slackClient();
   await sendSlackNotification(slack.client, opened, [{ channelId: "C-NOTIFICATIONS" }]);
   assert.match(JSON.stringify(slack.posts), /依存パッケージが取得できず/u);
+  assert.match(JSON.stringify(slack.posts), /一部完了/u);
+  assert.doesNotMatch(JSON.stringify(slack.posts), /エラーの種類/u);
   const discord = discordClient();
   await sendDiscordNotification(discord.client, opened, "D-NOTIFICATIONS");
   assert.match(JSON.stringify(discord.sends.map((send) => send.message.embeds.map((embed) => (typeof embed.toJSON === "function" ? embed.toJSON() : embed.data)))), /依存パッケージが取得できず/u);
@@ -556,4 +558,26 @@ test("Slack and Discord connectors subscribe to work.paused and work.reopened, a
   await discord.handleCoreEvent(workReopened());
   assert.equal(sends.length, 2);
   await discord.stop();
+});
+
+test("Slack and Discord decision notifications carry the same explanation summary and recommended label", async () => {
+  const opened = decisionOpened({
+    explanation: { summary: "測り方が合わず条件を満たせません。", cause_kind: "criteria" },
+    options: [
+      { key: "fix_1", label: "条件を読み替える", description: "読み替えてやり直す" },
+      { key: "retry", label: "やり直す" },
+    ],
+    recommended: "fix_1",
+  });
+  const slack = slackClient();
+  await sendSlackNotification(slack.client, opened, [{ channelId: "C-NOTIFICATIONS" }]);
+  const discord = discordClient();
+  await sendDiscordNotification(discord.client, opened, "D-NOTIFICATIONS");
+  const slackText = JSON.stringify(slack.posts);
+  const discordText = JSON.stringify(discord.sends.map((send) => send.message.embeds.map((embed) => (typeof embed.toJSON === "function" ? embed.toJSON() : embed.data))));
+  for (const text of [slackText, discordText]) {
+    assert.match(text, /測り方が合わず条件を満たせません。/u);
+    assert.match(text, /条件の問題/u);
+    assert.match(text, /条件を読み替える/u);
+  }
 });

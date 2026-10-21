@@ -334,7 +334,7 @@ test("a guard token answers only for its own role and only until it is released"
 test("outbound guard checks WebFetch and curl/wget destinations in the PreToolUse hook", async (t) => {
   const root = await tempDir(t, "owl-outbound-hook-");
   await mkdir(path.join(root, "rules", "system"), { recursive: true });
-  await writeFile(path.join(root, "rules", "system", "outbound.yaml"), "blocked_hosts:\n  - blocked.example\n");
+  await writeFile(path.join(root, "rules", "system", "outbound.yaml"), "blocked_hosts:\n  - blocked.example\n  - 127.0.0.2\nallowed_internal:\n  - 127.0.0.1:4400\n  - 127.0.0.2:4400\n");
   // DNS never leaves the machine: a preload replaces dns.promises.lookup in the hook process.
   const preload = path.join(root, "dns-stub.mjs");
   await writeFile(preload, [
@@ -391,6 +391,14 @@ test("outbound guard checks WebFetch and curl/wget destinations in the PreToolUs
     assert.equal(await decide("Bash", { command }), "deny", command);
     if (/blocked\.example/i.test(command)) assertBlockedHost(command);
   }
+  for (const url of ["http://127.0.0.1:4401/", "http://127.0.0.1/", "http://localhost:4400/", "http://10.0.0.1:4400/", "http://127.0.0.2:4400/"]) {
+    assert.equal(await decide("WebFetch", { url, prompt: "p" }), "deny", url);
+    assert.equal(await decide("Bash", { command: `curl ${url}` }), "deny", url);
+  }
+  assert.equal(await decide("Bash", { command: "curl http://127.0.0.1:4401/" }), "deny");
+  assert.match(lastReason, /denied by the outbound guard \(internal_address\)/);
+  assert.equal(await decide("Bash", { command: "curl http://127.0.0.1:4400/" }), "allow");
+  assert.equal(await decide("WebFetch", { url: "http://127.0.0.1:4400/", prompt: "p" }), "allow");
   for (const url of ["https://rebind.example/", "https://meta.example/", "https://missing.example/"]) {
     assert.equal(await decide("WebFetch", { url, prompt: "p" }), "deny", url);
   }
@@ -490,6 +498,18 @@ test("outbound guard refuses names that resolve to internal addresses and lookup
   assert.equal((await guard.checkUrlResolved("https://rebind.example/", null, "GET", resolve)).rule, "internal_address");
   assert.equal((await guard.checkUrlResolved("https://meta.example/", null, "GET", resolve)).allowed, false);
   assert.equal((await guard.checkUrlResolved("https://missing.example/", null, "GET", resolve)).rule, "dns_failed");
+});
+
+test("allowed_internal is empty by default and rejects entries without a port", async (t) => {
+  const root = await tempDir(t, "owl-outbound-internal-");
+  assert.equal(new OutboundGuard(root).checkUrl("http://127.0.0.1:4400/").rule, "internal_address");
+  await mkdir(path.join(root, "rules", "system"), { recursive: true });
+  await writeFile(path.join(root, "rules", "system", "outbound.yaml"), "allowed_internal: []\n");
+  const guard = new OutboundGuard(root);
+  guard.load();
+  assert.equal(guard.checkUrl("http://127.0.0.1:4400/").rule, "internal_address");
+  await writeFile(path.join(root, "rules", "system", "outbound.yaml"), "allowed_internal:\n  - 127.0.0.1\n");
+  assert.throws(() => guard.load(), /host:port/);
 });
 
 test("opening the registry discards token files left by an earlier server", async (t) => {

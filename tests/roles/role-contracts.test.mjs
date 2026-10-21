@@ -764,7 +764,7 @@ test("Manager prompts tell the Manager to set assigned_designer and to hand mock
     await runnerAnswering((template) => fillTemplate(template), calls).runManagerPlan(managerRequest(mode));
     assert.match(calls[0].prompt, /Set assigned_designer on every design Task\. Use lead_designer only when/u);
     assert.match(calls[0].prompt, /add a doc or code Task that depends on that design Task and copies the mocks there/u);
-    assert.match(calls[0].prompt, /and a lead_designer Task saves its mocks through Owl/u);
+    assert.match(calls[0].prompt, /and a Task that designs screens saves its mocks through Owl/u);
   }
   const replan = [];
   await runnerAnswering((template) => fillTemplate(template), replan).runManagerPlan(managerRequest("replan"));

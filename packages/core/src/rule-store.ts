@@ -273,6 +273,7 @@ const EMPTY_RULE_SET: RuleSet = { files: [], blockRules: [], blockPaths: [], pro
 
 export class RuleStore {
   private readonly rulesDir: string;
+  private readonly outboundConfigPath: string;
   private currentRules: RuleSet = EMPTY_RULE_SET;
   private generation = 0;
   private loadedAt: string | null = null;
@@ -284,6 +285,8 @@ export class RuleStore {
 
   public constructor(owlRoot: string) {
     this.rulesDir = join(owlRoot, "rules");
+    // Same path OutboundGuard reads; built the same way so the two cannot drift.
+    this.outboundConfigPath = join(owlRoot, "rules", "system", "outbound.yaml");
   }
 
   public get rules(): RuleSet {
@@ -748,6 +751,10 @@ export class RuleStore {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) {
         await this.walkYaml(full, out);
+      } else if (full === this.outboundConfigPath) {
+        // OutboundGuard's config, not a rule file. Teaching parseYaml scalar lists instead
+        // would keep loading it as a rule and make a much larger change.
+        continue;
       } else if (entry.isFile() && (extname(entry.name) === ".yaml" || extname(entry.name) === ".yml")) {
         out.push(full);
       }

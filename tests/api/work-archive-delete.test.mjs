@@ -136,10 +136,26 @@ test("non-terminal Works reject archive, unarchive, and DELETE with their curren
   const runningId = await createWork(api.core, api.db, "API running state", "running");
   const waitingId = await createWork(api.core, api.db, "API waiting state", "judgement_waiting");
   const readyId = await createWork(api.core, api.db, "API ready state", "ready");
+  const pausedId = await createWork(api.core, api.db, "API paused state", "paused");
 
   await assertApiError(await archive(api.request, runningId), 409, "invalid_state_transition", { state: "running" });
   await assertApiError(await unarchive(api.request, waitingId), 409, "invalid_state_transition", { state: "judgement_waiting" });
-  await assertApiError(await deleteWork(api.request, readyId), 409, "invalid_state_transition", { state: "ready" });
+  for (const [id, state] of [[runningId, "running"], [pausedId, "paused"], [waitingId, "judgement_waiting"]]) {
+    await assertApiError(await deleteWork(api.request, id), 409, "invalid_state_transition", { state });
+    assert.equal((await api.request(`/works/${id}`)).status, 200);
+  }
+
+  for (const [state, id] of [["memo", await createWork(api.core, api.db, "API memo delete", "memo")], ["ready", readyId]]) {
+    const removed = await deleteWork(api.request, id, `delete-${state}`);
+    assert.equal(removed.status, 200, state);
+    // The delete leaves no idempotency row, so resending the same key answers 404 rather than replaying.
+    await assertApiError(await deleteWork(api.request, id, `delete-${state}`), 404, "work_not_found");
+    await assertApiError(await api.request(`/works/${id}`), 404, "work_not_found");
+    for (const [table, where] of [["works", "id = ?"], ["events", "work_id = ?"], ["idempotency_keys", "instr(key, ?) > 0 OR instr(response_json, ?) > 0"]]) {
+      const params = where.includes("response_json") ? [id, id] : [id];
+      assert.equal(api.db.get(`SELECT COUNT(*) AS n FROM ${table} WHERE ${where}`, ...params).n, 0, `${state}: ${table}`);
+    }
+  }
 
   const unarchivedTerminalId = await createWork(api.core, api.db, "API terminal but active", "completed");
   const deleted = await deleteWork(api.request, unarchivedTerminalId);

@@ -136,7 +136,7 @@ function legacyCoreFor(stored) {
   };
 }
 
-test("new Works take the smallest free number per project, reusing numbers freed by deletion", async (t) => {
+test("new Works take the highest remaining number + 1 per project, reusing only the freed latest number", async (t) => {
   const { core, createProject, createWork, number, removeWork } = await openCore(t, "owl-work-display-core-");
   const projectA = await createProject("A");
   const projectB = await createProject("B");
@@ -168,10 +168,10 @@ test("concurrent Work creation assigns distinct, contiguous numbers", async (t) 
   await removeWork(seeded[0]);
   await removeWork(seeded[2]);
   const ids = await Promise.all(Array.from({ length: 6 }, (_, index) => createWork(`Concurrent ${index}`, project.id)));
-  assert.deepEqual(ids.map(number).sort((a, b) => a - b), [1, 3, 5, 6, 7, 8]);
+  assert.deepEqual(ids.map(number).sort((a, b) => a - b), [5, 6, 7, 8, 9, 10]);
 });
 
-test("a project with numbers 1, 2 and 4 gets 3 and then 5, independent of other groups", async (t) => {
+test("a project with numbers 1, 2 and 4 gets 5 then 6, independent of other groups", async (t) => {
   const { createProject, createWork, number, removeWork } = await openCore(t, "owl-work-display-gap-");
   const project = await createProject("Gap");
   const other = await createProject("Other");
@@ -180,10 +180,33 @@ test("a project with numbers 1, 2 and 4 gets 3 and then 5, independent of other 
   const otherWork = await createWork("Other", other.id);
   const projectless = await createWork("Projectless", null);
   await removeWork(works[2]);
-  const three = await createWork("Fills 3", project.id);
-  const five = await createWork("Takes 5", project.id);
-  assert.deepEqual([number(three), number(five)], [3, 5]);
+  const three = await createWork("Takes 5", project.id);
+  const five = await createWork("Takes 6", project.id);
+  assert.deepEqual([number(three), number(five)], [5, 6]);
   assert.deepEqual([number(otherWork), number(projectless)], [1, 1]);
+});
+
+test("deleting the latest number frees it, deleting a middle one leaves a gap", async (t) => {
+  const { createProject, createWork, number, removeWork } = await openCore(t, "owl-work-display-latest-");
+  const project = await createProject("Latest");
+  const works = [];
+  for (let index = 0; index < 3; index++) works.push(await createWork(`Latest ${index}`, project.id));
+  await removeWork(works[2]);
+  const again = await createWork("Again 3", project.id);
+  assert.equal(number(again), 3);
+  await removeWork(works[1]);
+  assert.deepEqual([number(works[0]), number(again)], [1, 3]);
+  assert.equal(number(await createWork("After gap", project.id)), 4);
+});
+
+test("works without a project take the highest remaining number + 1 after a middle one is deleted", async (t) => {
+  const { createWork, number, removeWork } = await openCore(t, "owl-work-display-projectless-");
+  const works = [];
+  for (let index = 0; index < 3; index++) works.push(await createWork(`Projectless ${index}`, null));
+  await removeWork(works[1]);
+  const next = await createWork("After gap", null);
+  assert.equal(number(next), 4);
+  assert.deepEqual([number(works[0]), number(works[2])], [1, 3]);
 });
 
 test("display numbers reach the API, and Cores without them report null", async (t) => {

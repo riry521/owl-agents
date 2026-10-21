@@ -6,6 +6,7 @@ import type { KnowledgeStoragePersistence } from "./knowledge-location.js";
 import type { DetectedProcessSkillsPack, ProcessSkillsFileSystem } from "./process-skills-pack.js";
 import type { NormalizedLesson } from "./final-verdict.js";
 import type { DesignBlockedReport } from "../../shared/dist/design-blocked.js";
+import type { DecisionCauseKind } from "../../shared/dist/decision-explanation.js";
 import type { PlanWaitFor } from "../../shared/dist/prerequisite.js";
 import type { PlanUsageSource } from "../../shared/dist/plan-usage.js";
 import type { ModelHarness } from "../../shared/dist/harness-models.js";
@@ -15,6 +16,7 @@ export type JsonObject = Record<string, unknown>;
 /** Final Manager lessons and their source metadata passed to the durable learning queue. */
 export interface WorkLearningInput {
   readonly agent_run_id: string | null;
+  explanation_json?: string | null;
   readonly project_id: string | null;
   readonly lessons: readonly NormalizedLesson[];
 }
@@ -1057,6 +1059,8 @@ export interface Decision extends JsonObject {
   readonly state_version: number;
   /** Set when the Decision is a design stop with a Designer report: why the design cannot pass, as data. */
   readonly design_block: { readonly cause_kind: "wrong_premise" | "policy_conflict" | "ambiguous_criteria" | "simple_defect"; readonly repeated_findings: readonly { readonly summary: string; readonly times: number }[] } | null;
+  /** Set when Core adds a plain explanation of the stop; null for a Decision it does not explain. */
+  readonly explanation: { readonly kind: string; readonly status: "pending" | "ready" | "failed"; readonly summary: string | null; readonly cause_kind: DecisionCauseKind | null } | null;
 }
 
 export interface DecisionListQuery extends ListQuery {

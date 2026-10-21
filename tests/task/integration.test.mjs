@@ -455,7 +455,7 @@ test("a reviewed design Task goes back to the Designer when its document is blan
   const taskId = db.get("SELECT id FROM tasks WHERE work_id = ?", workId).id;
   const documentPath = join(root, "data", "designs", workId, `${taskId}.md`);
   assert.equal(designerAttempts, 2);
-  assert.deepEqual(reviewerDocuments, [{ path: documentPath, markdown: "# Design\n\nReviewed approach.\n" }]);
+  assert.deepEqual(reviewerDocuments, [{ path: documentPath, markdown: "# Design\n\nReviewed approach.\n", mocks: [] }]);
   const failedChecks = db.all("SELECT payload_json FROM events WHERE type = 'verification.completed' AND task_id = ? AND json_extract(payload_json, '$.outcome') = 'fail'", taskId)
     .map((row) => JSON.parse(row.payload_json).verification.error_key);
   assert.deepEqual(failedChecks, ["design_document_missing"]);

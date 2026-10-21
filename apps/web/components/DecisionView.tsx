@@ -5,7 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import { type FormEvent, useEffect, useState } from 'react';
 import { answerDecision, getDecision } from '@/lib/api-client';
 import { useView } from '@/lib/view-loader';
-import type { DecisionAnswerResult, DecisionView as DecisionData } from '@/lib/types';
+import type { DecisionAnswerResult, DecisionOption, DecisionView as DecisionData } from '@/lib/types';
 import { TaskStateBadge } from '@/components/StateBadge';
 import { workDisplayNumber } from '@/lib/format';
 import { useLocale } from '@/lib/i18n';
@@ -83,6 +83,96 @@ export function DecisionView() {
     void submit(text, null);
   }
 
+  const explanation = decision.explanation ?? null;
+  const ready = explanation?.status === 'ready' && explanation.summary !== null;
+  const causeKind = explanation?.cause_kind ?? null;
+  const fixOptions = ready ? decision.options.filter((o) => o.key.startsWith('fix_')) : [];
+  const otherOptions = ready ? decision.options.filter((o) => !o.key.startsWith('fix_')) : [];
+
+  function renderOption(o: DecisionOption, i: number) {
+    const recommended = o.key === decision.recommended;
+    return (
+      <div key={o.key} className={`option${recommended ? ' option--recommended' : ''}`}>
+        <span className="option__key">{String.fromCharCode(65 + i)}</span>
+        <div className="option__body">
+          <div className="option__label">
+            {o.label}
+            {recommended && <span className="badge badge--accent badge--ml">{t('decision.recommended')}</span>}
+          </div>
+          <div className="option__desc">{o.description || t('decision.effectMissing')}</div>
+          {o.criteria_rewrites?.map((r, n) => (
+            <dl key={n} className="kv kv--spaced">
+              <dt>{t('decision.rewriteBefore')}</dt>
+              <dd>{r.before}</dd>
+              <dt>{t('decision.rewriteAfter')}</dt>
+              <dd>{r.after}</dd>
+              <dt>{t('decision.rewriteCheck')}</dt>
+              <dd>{r.check}</dd>
+            </dl>
+          ))}
+        </div>
+        {!answered && (
+          <button type="button" className={`btn${recommended ? ' btn--primary' : ''}`} disabled={busy} onClick={() => void submit(o.label, o.key)}>
+            {t('decision.choose')}
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  const contextList = (
+    <dl className="kv kv--spaced">
+      {decision.current_state && (
+        <>
+          <dt>{t('decision.currentState')}</dt>
+          <dd className="decision__text">{decision.current_state}</dd>
+        </>
+      )}
+      {decision.tried && (
+        <>
+          <dt>{t('decision.tried')}</dt>
+          <dd className="decision__text">{decision.tried}</dd>
+        </>
+      )}
+    </dl>
+  );
+
+  const answerArea = answered ? (
+    <div className="answered mt-14">
+      <strong>{t('decision.answerSent')}</strong>
+      {result ? t('decision.resumedTasks', { count: String(result.resumed_task_ids.length) }) : t('decision.alreadyAnswered')}
+      <div className="mt-10">
+        <Link href={workHref} className="btn">
+          {t('decision.toWorkDetail')}
+        </Link>
+      </div>
+    </div>
+  ) : (
+    <>
+      {decision.allow_free_text && (
+        <form onSubmit={onFreeText} className="mt-14">
+          <label htmlFor="free-answer" className="note note--block">
+            {t('decision.freeTextLabel')}
+          </label>
+          <textarea
+            id="free-answer"
+            className="textarea"
+            value={freeText}
+            onChange={(e) => setFreeText(e.target.value)}
+            placeholder={t('decision.freeTextPlaceholder')}
+            disabled={busy}
+          />
+          <div className="btn-row mt-8">
+            <button type="submit" className="btn" disabled={busy}>
+              {t('decision.freeTextSubmit')}
+            </button>
+          </div>
+        </form>
+      )}
+      {error && <div className="error mt-10">{error}</div>}
+    </>
+  );
+
   return (
     <div className="decision">
       <div className="crumbs">
@@ -104,12 +194,18 @@ export function DecisionView() {
         <span className={statusBadge}>{statusText}</span>
       </div>
 
-      {/* The Decision template: why it stopped → what to decide → what each choice does → the facts. */}
+      {/* Ready explanation: summary → options with the recommendation → collapsed record. Otherwise the original template order. */}
       <section className="panel" aria-labelledby="sec-reason">
         <h2 className="panel__title" id="sec-reason">
           {t('decision.why')}
+          {ready && causeKind && (
+            <span className="badge badge--amber badge--ml">
+              {t('decision.causeLabel')}: {t(`decision.causeKind.${causeKind}`)}
+            </span>
+          )}
         </h2>
-        <p className="decision__text">{decision.reason}</p>
+        {explanation?.status === 'pending' && <p className="note note--block">{t('decision.explanationPending')}</p>}
+        <p className="decision__text">{ready ? explanation?.summary : decision.reason}</p>
         <dl className="kv kv--spaced">
           <dt>Work</dt>
           <dd>
@@ -137,101 +233,58 @@ export function DecisionView() {
         </dl>
       </section>
 
-      <section className="panel decision__ask" aria-labelledby="sec-question">
-        <h2 className="panel__title" id="sec-question">
-          {t('decision.question')}
-        </h2>
-        <p className="decision__question">{decision.question || t('decision.questionMissing')}</p>
-      </section>
-
-      <section className="panel" aria-labelledby="sec-options">
-        <h2 className="panel__title" id="sec-options">
-          {t('decision.options')}
-        </h2>
-        {decision.options.length === 0 && (
-          <p className="empty">{decision.allow_free_text ? t('decision.freeTextOnlyHint') : t('decision.noOptions')}</p>
-        )}
-        <div className="list">
-          {decision.options.map((o, i) => (
-            <div key={o.key} className={`option${o.key === decision.recommended ? ' option--recommended' : ''}`}>
-              <span className="option__key">{String.fromCharCode(65 + i)}</span>
-              <div className="option__body">
-                <div className="option__label">
-                  {o.label}
-                  {o.key === decision.recommended && <span className="badge badge--accent badge--ml">{t('decision.recommended')}</span>}
-                </div>
-                <div className="option__desc">{o.description || t('decision.effectMissing')}</div>
-              </div>
-              {!answered && (
-                <button
-                  type="button"
-                  className={`btn${o.key === decision.recommended ? ' btn--primary' : ''}`}
-                  disabled={busy}
-                  onClick={() => void submit(o.label, o.key)}
-                >
-                  {t('decision.choose')}
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-        {answered ? (
-          <div className="answered mt-14">
-            <strong>{t('decision.answerSent')}</strong>
-            {result ? t('decision.resumedTasks', { count: String(result.resumed_task_ids.length) }) : t('decision.alreadyAnswered')}
-            <div className="mt-10">
-              <Link href={workHref} className="btn">
-                {t('decision.toWorkDetail')}
-              </Link>
-            </div>
-          </div>
-        ) : (
-          <>
-            {decision.allow_free_text && (
-              <form onSubmit={onFreeText} className="mt-14">
-                <label htmlFor="free-answer" className="note note--block">
-                  {t('decision.freeTextLabel')}
-                </label>
-                <textarea
-                  id="free-answer"
-                  className="textarea"
-                  value={freeText}
-                  onChange={(e) => setFreeText(e.target.value)}
-                  placeholder={t('decision.freeTextPlaceholder')}
-                  disabled={busy}
-                />
-                <div className="btn-row mt-8">
-                  <button type="submit" className="btn" disabled={busy}>
-                    {t('decision.freeTextSubmit')}
-                  </button>
-                </div>
-              </form>
-            )}
-            {error && <div className="error mt-10">{error}</div>}
-          </>
-        )}
-      </section>
-
-      {(decision.current_state || decision.tried) && (
-        <section className="panel" aria-labelledby="sec-context">
-          <h2 className="panel__title" id="sec-context">
-            {t('decision.context')}
+      {ready ? (
+        <section className="panel decision__ask" aria-labelledby="sec-question">
+          <h2 className="panel__title" id="sec-question">
+            {t('decision.question')}
           </h2>
-          <dl className="kv kv--spaced">
-            {decision.current_state && (
-              <>
-                <dt>{t('decision.currentState')}</dt>
-                <dd className="decision__text">{decision.current_state}</dd>
-              </>
-            )}
-            {decision.tried && (
-              <>
-                <dt>{t('decision.tried')}</dt>
-                <dd className="decision__text">{decision.tried}</dd>
-              </>
-            )}
-          </dl>
+          <p className="decision__question">{decision.question || t('decision.questionMissing')}</p>
+          <div className="list mt-14">{fixOptions.map((o, i) => renderOption(o, i))}</div>
+          {otherOptions.length > 0 && (
+            <>
+              <h3 className="decision__subhead">{t('decision.otherOptions')}</h3>
+              <div className="list">{otherOptions.map((o, i) => renderOption(o, fixOptions.length + i))}</div>
+            </>
+          )}
+          {answerArea}
         </section>
+      ) : (
+        <>
+          <section className="panel decision__ask" aria-labelledby="sec-question">
+            <h2 className="panel__title" id="sec-question">
+              {t('decision.question')}
+            </h2>
+            <p className="decision__question">{decision.question || t('decision.questionMissing')}</p>
+          </section>
+
+          <section className="panel" aria-labelledby="sec-options">
+            <h2 className="panel__title" id="sec-options">
+              {t('decision.options')}
+            </h2>
+            {decision.options.length === 0 && (
+              <p className="empty">{decision.allow_free_text ? t('decision.freeTextOnlyHint') : t('decision.noOptions')}</p>
+            )}
+            <div className="list">{decision.options.map((o, i) => renderOption(o, i))}</div>
+            {answerArea}
+          </section>
+        </>
+      )}
+
+      {ready ? (
+        <details className="panel decision__details">
+          <summary>{t('decision.detailsSummary')}</summary>
+          <p className="decision__text">{decision.reason}</p>
+          {contextList}
+        </details>
+      ) : (
+        (decision.current_state || decision.tried) && (
+          <section className="panel" aria-labelledby="sec-context">
+            <h2 className="panel__title" id="sec-context">
+              {t('decision.context')}
+            </h2>
+            {contextList}
+          </section>
+        )
       )}
     </div>
   );

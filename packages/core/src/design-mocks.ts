@@ -85,7 +85,7 @@ export class DesignMockStore {
     return this.options.db.all<DesignMockSummary>(
       `SELECT design_mocks.task_id, tasks.title AS task_title, design_mocks.name, design_mocks.updated_at, design_mocks.size_bytes
          FROM design_mocks JOIN tasks ON tasks.id = design_mocks.task_id
-        WHERE tasks.work_id = ? AND tasks.type = 'design' AND tasks.assigned_designer = 'lead_designer'
+        WHERE tasks.work_id = ? AND tasks.type = 'design'
         ORDER BY tasks.created_at ASC, tasks.id ASC, design_mocks.name ASC`,
       workId,
     );
@@ -97,7 +97,7 @@ export class DesignMockStore {
       `SELECT design_mocks.html
          FROM design_mocks JOIN tasks ON tasks.id = design_mocks.task_id
         WHERE tasks.work_id = ? AND design_mocks.task_id = ? AND design_mocks.name = ?
-          AND tasks.type = 'design' AND tasks.assigned_designer = 'lead_designer'`,
+          AND tasks.type = 'design'`,
       workId, taskId, name,
     );
     return row?.html ?? null;
@@ -110,8 +110,8 @@ export class DesignMockStore {
   }
 
   private screenDesignRun(agentRunId: string): ScreenDesignRun {
-    const row = this.options.db.get<{ id: string; work_id: string; type: string; assigned_designer: string | null }>(
-      `SELECT tasks.id, tasks.work_id, tasks.type, tasks.assigned_designer
+    const row = this.options.db.get<{ id: string; work_id: string; type: string }>(
+      `SELECT tasks.id, tasks.work_id, tasks.type
          FROM agent_runs JOIN tasks ON tasks.id = agent_runs.task_id
         WHERE agent_runs.id = ? AND agent_runs.role = 'designer'`,
       agentRunId,
