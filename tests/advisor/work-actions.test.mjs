@@ -549,3 +549,34 @@ test("the Advisor prompt describes move_work_to_project and its confirmation rul
   assert.match(prompt, /destination Project \(name, canonical_path\)/u);
   assert.match(prompt, /delete_work, move_work_to_project, run_librarian/u);
 });
+
+test("a retried turn saves the prerequisites that were never stored and reports the wait", async (t) => {
+  for (const [language, waiting] of [["ja", /前提の Work がすべて完了したら/u], ["en", /prerequisite/iu]]) {
+    const { db, core, conversationId } = await setup(t);
+    if (language === "en") await core.setLanguage("en");
+    const prerequisiteId = await createWorkInState(core, db, "running", `prerequisite-${language}`);
+    const turnId = createUlid();
+    const actions = [action("create_work", {
+      title: `Waiting ${language}`,
+      summary: "Needs the prerequisite first.",
+      size: "small",
+      project_id: null,
+      prerequisite_work_ids: [prerequisiteId],
+    })];
+    const origin = { channel: "web" };
+    // The first attempt stops after createWork, before the prerequisites are stored.
+    const realReplace = core.replaceWorkPrerequisites;
+    core.replaceWorkPrerequisites = async () => { throw new Error("stopped"); };
+    await core.persistAdvisorReply(conversationId, "first", turnId, origin, actions);
+    core.replaceWorkPrerequisites = realReplace;
+    const work = db.get("SELECT id FROM works WHERE title = ?", `Waiting ${language}`);
+    assert.equal(db.get("SELECT COUNT(*) AS count FROM work_prerequisites WHERE work_id = ?", work.id).count, 0);
+
+    await core.persistAdvisorReply(conversationId, "second", turnId, origin, actions);
+    assert.equal(db.get("SELECT COUNT(*) AS count FROM work_prerequisites WHERE work_id = ?", work.id).count, 1);
+    assert.equal(db.get("SELECT state FROM works WHERE id = ?", work.id).state, "ready", "waiting for the prerequisite, not running");
+    const body = db.get("SELECT body FROM messages WHERE source_message_id LIKE ? ORDER BY rowid DESC LIMIT 1", `advisor:%:${turnId}%`).body;
+    assert.match(body, waiting);
+    assert.doesNotMatch(body, /開始しました|started it now/u);
+  }
+});

@@ -20,6 +20,7 @@ const TEXT: Readonly<Record<DecisionLanguage, {
   readonly options: string;
   readonly currentState: string;
   readonly tried: string;
+  readonly autoRecovery: string;
   readonly details: string;
   readonly cause: string;
 }>> = {
@@ -31,6 +32,7 @@ const TEXT: Readonly<Record<DecisionLanguage, {
     options: "選択肢と、選ぶとどうなるか",
     currentState: "今の状態",
     tried: "これまでの経緯",
+    autoRecovery: "自動で試したこと",
     details: "詳しい記録",
     cause: "原因",
   },
@@ -42,6 +44,7 @@ const TEXT: Readonly<Record<DecisionLanguage, {
     options: "Options and what each one does",
     currentState: "Current state",
     tried: "What happened so far",
+    autoRecovery: "Tried automatically",
     details: "Details",
     cause: "Cause",
   },
@@ -82,13 +85,14 @@ export interface DecisionHeadings {
   readonly options: string;
   readonly currentState: string;
   readonly tried: string;
+  readonly autoRecovery: string;
   readonly details: string;
 }
 
 /** Headings shared by detailed Decision notifications. */
 export function decisionHeadings(language: DecisionLanguage): DecisionHeadings {
-  const { reason, question, options, currentState, tried, details } = TEXT[language];
-  return { reason, question, options, currentState, tried, details };
+  const { reason, question, options, currentState, tried, autoRecovery, details } = TEXT[language];
+  return { reason, question, options, currentState, tried, autoRecovery, details };
 }
 
 function text(value: unknown): string | null {

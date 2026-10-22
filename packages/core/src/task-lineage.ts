@@ -420,6 +420,27 @@ export function lineagePartialReports(reader: LineageReader, taskId: string, exc
   return plainPartialReportRows(reader, taskId, excludeAgentRunId).length;
 }
 
+/**
+ * The result event right before the current run's, when it is a partial report of the same lineage (since the last Owner answer);
+ * null when a Reviewer rejection, another failure, a request for the Manager or a partial_repeated repair came in between, or when there is none.
+ */
+export function previousPartialReport(reader: LineageReader, taskId: string, excludeAgentRunId: string | null): { report: unknown; verification: unknown } | null {
+  const members = lineageChainIds(reader, taskId);
+  const placeholders = members.map(() => "?").join(",");
+  const row = reader.get<{ type: string; report: string | null; verification: string | null }>(
+    `SELECT type, json_extract(payload_json, '$.report') AS report, json_extract(payload_json, '$.verification') AS verification FROM events
+      WHERE task_id IN (${placeholders})
+        AND (type IN ('task.failure.classified', 'review.failed', 'task.replan_requested', 'task.acceptance_defect_reported', '${EXTERNAL_BLOCKER_EVENT}')
+             OR (type = 'recovery.started' AND json_extract(payload_json, '$.kind') = 'partial_repeated'))
+        AND (? IS NULL OR agent_run_id IS NULL OR agent_run_id <> ?)
+        AND created_at >= COALESCE((SELECT json_extract(t.lineage_reset_json, '$.at') FROM tasks t WHERE t.id = events.task_id), '')
+      ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    ...members, excludeAgentRunId, excludeAgentRunId,
+  );
+  if (!row || row.type !== "task.failure.classified" || row.report === null) return null;
+  return { report: JSON.parse(row.report) as unknown, verification: row.verification ? JSON.parse(row.verification) as unknown : null };
+}
+
 /** The newest `limit` plain partial reports of the lineage with their verification records, newest first. */
 export function lineagePartialReportPayloads(reader: LineageReader, taskId: string, limit: number): PartialReportPayload[] {
   return plainPartialReportRows(reader, taskId, null).slice(0, limit);

@@ -305,6 +305,87 @@ test("Core hands a real merge conflict to a conflict-resolution Task, opens no D
   assert.equal(git(project, "show", "main:README.md"), "resolved version");
 });
 
+/** A Work whose merge keeps conflicting: main is changed once, and each conflict-resolution Task resolves nothing. */
+async function openUnresolvedConflictFixture(t, { limit } = {}) {
+  let conflictCommitted = false;
+  let replans = 0;
+  const seen = [];
+  let ctx;
+  ctx = await openFixture(t, {
+    onWorker: async (request) => {
+      const cwd = request.context.worktree;
+      if (replans === 0) {
+        await writeFile(join(cwd, "README.md"), "Work version\n");
+        await writeFile(join(cwd, "check.mjs"), "export {};\n");
+        return;
+      }
+      await writeFile(join(cwd, `note-${replans}.md`), "No resolution.\n");
+    },
+    beforeFinalize: async () => {
+      if (conflictCommitted) return;
+      conflictCommitted = true;
+      await writeFile(join(ctx.project, "README.md"), "conflicting main version\n");
+      git(ctx.project, "add", "README.md");
+      git(ctx.project, "commit", "-m", "conflicting main edit");
+    },
+    onReplan: (request) => {
+      replans += 1;
+      seen.push({
+        openDecisions: ctx.db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ? AND status = 'open'", request.work_id).n,
+        started: ctx.db.all("SELECT payload_json FROM events WHERE work_id = ? AND type = 'recovery.started' ORDER BY sequence", request.work_id).map((row) => JSON.parse(row.payload_json)),
+        autoRecovery: request.context.auto_recovery,
+      });
+      const resolveTask = {
+        id: `resolve-conflict-${replans}`, title: `Resolve the base merge conflict ${replans}`, type: "doc", necessity: necessityFor(),
+        acceptance_criteria: criteriaFor("README.md is resolved against main."), depends_on: [], context: "", notes: "", review: false,
+        required_sections: [], required_tests: [], wait_for: null, base_sync_only: null, replaces: [],
+      };
+      return { outcome: "success", report_valid: true, report: { tasks: [...(request.tasks ?? []), resolveTask], event: "task.replanned" } };
+    },
+  });
+  if (limit !== undefined) await ctx.core.setAutoRecoverySettings({ limit });
+  return { ...ctx, seen };
+}
+
+test("Core starts an automatic recovery at the first merge conflict instead of opening a Decision", async (t) => {
+  const { db, core, projectId, seen } = await openUnresolvedConflictFixture(t);
+  const workId = await startSmallWork(core, projectId, "conflict-first");
+  await waitForTerminalDecision(db, workId);
+
+  assert.equal(seen[0].openDecisions, 0, "no Decision is open when the Manager is asked to resolve the first conflict");
+  assert.deepEqual(
+    { kind: seen[0].started[0].kind, attempt_no: seen[0].started[0].attempt_no, limit: seen[0].started[0].limit, counted: seen[0].started[0].counted },
+    { kind: "integration_conflict", attempt_no: 1, limit: 2, counted: true },
+  );
+  assert.equal(seen[0].autoRecovery.kind, "integration_conflict");
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'system.alert' AND json_extract(payload_json, '$.kind') = 'work_merge_conflict_auto_resolve' AND json_extract(payload_json, '$.round') = 1", workId).n, 1);
+});
+
+test("Core reads the number of automatic conflict recoveries from the auto_recovery setting", async (t) => {
+  const { db, core, projectId, seen } = await openUnresolvedConflictFixture(t, { limit: 1 });
+  const workId = await startSmallWork(core, projectId, "conflict-limit");
+  await waitForTerminalDecision(db, workId);
+
+  assert.equal(seen.length, 1, "the Manager is asked once");
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'recovery.started'", workId).n, 1);
+  const decision = db.get("SELECT tried FROM decisions WHERE work_id = ? AND status = 'open'", workId);
+  assert.ok(decision.tried.startsWith("自動で試したこと: 1回（上限 1回）"), decision.tried);
+});
+
+test("Core opens one Decision at the third conflict with the two automatic attempts listed", async (t) => {
+  const { db, core, projectId, mergeCalls } = await openUnresolvedConflictFixture(t);
+  const workId = await startSmallWork(core, projectId, "conflict-third");
+  await waitForTerminalDecision(db, workId);
+
+  assert.equal(mergeCalls.length, 3, "the merge ran for the original Work and after each of the two recoveries");
+  const decisions = db.all("SELECT tried FROM decisions WHERE work_id = ?", workId);
+  assert.equal(decisions.length, 1);
+  const lines = decisions[0].tried.split("\n");
+  assert.ok(lines[0].startsWith("自動で試したこと: 2回"), lines[0]);
+  assert.ok(lines[1].startsWith("1回目:"), lines[1]);
+  assert.ok(lines[2].startsWith("2回目:"), lines[2]);
+});
+
 test("Core keeps main unchanged and opens a Decision when Project verification fails", async (t) => {
   const verificationPlan = [{
     command_id: "fail-check",

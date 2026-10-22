@@ -32,7 +32,7 @@ function scopeDenied(): HumanReadableError {
   return new HumanReadableError({
     code: "design_mock_scope_denied",
     message: "Design mocks can be saved only from a Designer run of a screen design Task.",
-    remediation: "Save mocks from the Designer run of the Task the Manager assigned to the Lead Designer.",
+    remediation: "Save mocks from the Designer run of a design Task that designs the screen.",
   });
 }
 

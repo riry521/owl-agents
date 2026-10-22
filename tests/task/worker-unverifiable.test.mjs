@@ -67,16 +67,26 @@ const passedReport = (invocationId) => ({
   },
 });
 
-const planTask = (acceptance) => ({ id: "T1", title: "A", type: "code", acceptance, depends_on: [], required_sections: [], required_tests: [], replaces: [], review: false });
+const MANAGER = { kind: "manager", source: null, quote: "" };
+const OWNER = { kind: "owner", source: "summary", quote: "Exercise unverifiable reports" };
 
-/** The first Worker run reports BAD_CRITERION unverifiable; the Manager answers each replan with `answers[i]`. */
-function runnerWith(answers) {
+/** A Task whose only criterion is AC1 with the given origin; every answer carries the loosening record, which Core reads only when the text changed. */
+const planTask = (text, origin = MANAGER) => ({
+  id: "T1", title: "A", type: "code",
+  necessity: { serves: "test fixture", if_omitted: "test fixture" },
+  acceptance_criteria: [{ id: "AC1", text, check: "node --test tests/x.test.mjs", serves: "test fixture", if_omitted: "test fixture", check_weight: "light", weight_reason: "", kind: "work_check", ...(origin ? { origin } : {}) }],
+  auto_recovery: { criteria_relaxations: [{ criterion_id: "AC1", reason: REASON, keeps: "A copy made inside the Task is unchanged." }] },
+  depends_on: [], required_sections: [], required_tests: [], replaces: [], review: false,
+});
+
+/** The first Worker run reports BAD_CRITERION unverifiable (every run with alwaysUnverifiable); the Manager answers each replan with `answers[i]`. */
+function runnerWith(answers, { origin = MANAGER, alwaysUnverifiable = false } = {}) {
   const state = { workerCalls: 0, replanRequests: [] };
   return {
     state,
     runManagerPlan: async (request) => {
       const mode = request.mode ?? request.context?.mode;
-      if (mode === "plan") return { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [planTask(`${BAD_CRITERION} Verified by node --test tests/x.test.mjs.`)] } };
+      if (mode === "plan") return { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [planTask(BAD_CRITERION, origin)] } };
       if (mode === "replan") {
         state.replanRequests.push(request);
         const tasks = answers[Math.min(state.replanRequests.length - 1, answers.length - 1)](request);
@@ -86,7 +96,7 @@ function runnerWith(answers) {
     },
     runWorker: async (request) => {
       state.workerCalls += 1;
-      if (state.workerCalls === 1) return { outcome: "success", report_valid: true, report: unverifiableReport(request.invocation_id) };
+      if (alwaysUnverifiable || state.workerCalls === 1) return { outcome: "success", report_valid: true, report: unverifiableReport(request.invocation_id) };
       await mkdir(join(request.context.worktree, "src"), { recursive: true });
       await writeFile(join(request.context.worktree, "src/feature.mjs"), "export const f = 1;\n");
       return { outcome: "success", report_valid: true, report: passedReport(request.invocation_id) };
@@ -160,7 +170,7 @@ test("an unverifiable report goes to the Manager on the same Task, which then ru
   assert.ok(await waitFor(() => tasksOf(db, workId)[0]?.status === "completed"), `the Task completes (${JSON.stringify(tasksOf(db, workId))})`);
   const tasks = tasksOf(db, workId);
   assert.equal(tasks.length, 1, "no replacement Task was created");
-  assert.equal(tasks[0].acceptance, GOOD_ACCEPTANCE, "the Manager's rewritten acceptance is stored");
+  assert.match(tasks[0].acceptance, new RegExp(GOOD_ACCEPTANCE.slice(0, 30)), "the Manager's rewritten acceptance is stored");
   assert.equal(runner.state.workerCalls, 2, "one Worker run per acceptance version");
   assert.equal(runner.state.replanRequests.length, 1);
 
@@ -178,6 +188,30 @@ test("an unverifiable report goes to the Manager on the same Task, which then ru
   assert.equal(db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ? AND scope = 'task'", workId).n, 0, "no Task Decision (remake or no-progress limit) was opened");
   assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'task.no_progress_limited'", workId).n, 0);
   assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'task.superseded'", workId).n, 0);
+  // A partial report with an unverifiable criterion is the same kind 7 recovery as a Reviewer's defect.
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'recovery.started' AND json_extract(payload_json, '$.kind') = 'criteria_too_strict'", workId).n, 1);
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'criteria.relaxed'", workId).n, 1);
+});
+
+test("an unverifiable report on an Owner criterion opens the criteria Decision at once, without asking the Manager", async (t) => {
+  const runner = runnerWith([() => [planTask(GOOD_ACCEPTANCE, OWNER)]], { origin: OWNER });
+  const { db, core } = await openCore(t, runner);
+  const workId = await startWork(core, "owner-criterion");
+
+  assert.ok(await waitFor(() => db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ? AND status = 'open' AND blocked_task_ids_json != '[]'", workId).n === 1));
+  assert.equal(runner.state.replanRequests.length, 0);
+  assert.equal(runner.state.workerCalls, 1);
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'recovery.started'", workId).n, 0);
+});
+
+test("an unverifiable report after the recovery limit is used up opens the criteria Decision with what was tried", async (t) => {
+  const runner = runnerWith([() => [planTask(GOOD_ACCEPTANCE)]], { alwaysUnverifiable: true });
+  const { db, core } = await openCore(t, runner, (c) => c.setAutoRecoverySettings({ limit: 1 }));
+  const workId = await startWork(core, "exhausted");
+
+  assert.ok(await waitFor(() => db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ? AND status = 'open' AND blocked_task_ids_json != '[]'", workId).n === 1));
+  assert.equal(runner.state.replanRequests.length, 1);
+  assert.match(db.get("SELECT tried FROM decisions WHERE work_id = ? AND blocked_task_ids_json != '[]'", workId).tried, /自動で試したこと/);
 });
 
 test("a Manager answer that keeps the acceptance unchanged is sent back until it rewrites it", async (t) => {
@@ -186,7 +220,7 @@ test("a Manager answer that keeps the acceptance unchanged is sent back until it
   const workId = await startWork(core, "unchanged");
 
   assert.ok(await waitFor(() => tasksOf(db, workId)[0]?.status === "completed"), `the Task completes (${JSON.stringify(tasksOf(db, workId))})`);
-  assert.equal(tasksOf(db, workId)[0].acceptance, GOOD_ACCEPTANCE);
+  assert.match(tasksOf(db, workId)[0].acceptance, new RegExp(GOOD_ACCEPTANCE.slice(0, 30)));
   assert.equal(runner.state.workerCalls, 2, "the unchanged answer never started a Worker");
   assert.ok(runner.state.replanRequests.length >= 2);
   assert.match(JSON.stringify(runner.state.replanRequests[1]), /acceptance is unchanged/);
@@ -258,7 +292,7 @@ function blockerRunner(script) {
 }
 
 const blocked = (extra = {}) => (request) => partialAfterSideEffect({ ...unverifiableReport(request.invocation_id), external_blocker: BLOCKER, ...extra });
-const plain = () => (request) => plainPartial(unverifiableReport(request.invocation_id));
+const plain = () => (request) => plainPartial({ ...passedReport(request.invocation_id), work_done: "Half done; the run failed for an ordinary reason." });
 const openDecisions = (db, workId) => db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ? AND status = 'open' AND blocked_task_ids_json != '[]'", workId).n;
 const eventCount = (db, workId, type) => db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = ?", workId, type).n;
 const t1Of = (db, workId) => db.get("SELECT id, status FROM tasks WHERE work_id = ? AND manager_task_id = 'T1'", workId);
@@ -306,7 +340,8 @@ test("an external blocker past progress_guard.external_blocker_limit asks the Ow
 test("a partial without a usable external_blocker still waits for the Owner", async (t) => {
   const failedReport = (request) => ({ outcome: "failed", failure_class: "deterministic", error_key: "side_effect_failure:report_result:failed", retry_allowed: false, report_valid: true, report: { ...unverifiableReport(request.invocation_id), result: "failed", external_blocker: BLOCKER, pending_process: null } });
   const withProcess = (request) => ({ ...partialAfterSideEffect({ ...unverifiableReport(request.invocation_id), external_blocker: BLOCKER }), report: { ...unverifiableReport(request.invocation_id), result: "partial", external_blocker: BLOCKER, pending_process: { description: "d", command: "c", log_path: "l", done_path: null, pid: null, expected_minutes: 1 } } });
-  const cases = { "external_blocker null": blocked({ external_blocker: null }), "result failed": failedReport, "with pending_process": withProcess, "invalid record": blocked({ external_blocker: { ...BLOCKER, kind: "other" } }) };
+  // A partial with an unverifiable criterion and no usable blocker (none, or an invalid record) is a criteria defect now (see the tests above), so it is not a case here.
+  const cases = { "result failed": failedReport, "with pending_process": withProcess };
   for (const [name, step] of Object.entries(cases)) {
     const runner = blockerRunner([step]);
     const { db, core } = await openCore(t, runner);
@@ -508,7 +543,11 @@ function explainingRunner(explain) {
   return runner;
 }
 
-const limitOne = (c) => c.setProgressGuardSettings({ ...DEFAULT_PROGRESS_GUARD_SETTINGS, partial_limit: 1 });
+// The same partial twice is repaired automatically (kind 8) while a try is left; these tests are about partial_limit, so no try is left.
+const limitOne = async (c) => {
+  await c.setProgressGuardSettings({ ...DEFAULT_PROGRESS_GUARD_SETTINGS, partial_limit: 1 });
+  await c.setAutoRecoverySettings({ limit: 0 });
+};
 const explanationOf = (db, workId) => {
   const row = db.get("SELECT id, explanation_json, options_json, recommended FROM decisions WHERE work_id = ? AND blocked_task_ids_json != '[]'", workId);
   return row && { id: row.id, explanation: JSON.parse(row.explanation_json), options: JSON.parse(row.options_json), recommended: row.recommended };
@@ -609,7 +648,7 @@ test("choosing the recommended fix option sends its instruction to the Manager, 
   const ownerRequests = JSON.stringify(replans[0].context.owner_requests);
   assert.match(ownerRequests, /Instruction: Reword the criterion and retry the Task\./);
   assert.ok(ownerRequests.includes(`\\"${GOOD_ACCEPTANCE}\\" -> \\"${CRITERIA_AFTER}\\"`), ownerRequests);
-  assert.ok(await waitFor(() => db.get("SELECT acceptance FROM tasks WHERE id = ?", t1Of(db, workId).id).acceptance === CRITERIA_AFTER), "the Task's criterion was rewritten");
+  assert.ok(await waitFor(() => db.get("SELECT acceptance FROM tasks WHERE id = ?", t1Of(db, workId).id).acceptance.includes(CRITERIA_AFTER)), "the Task's criterion was rewritten");
   assert.ok(await waitFor(() => runner.state.t1Calls > callsBefore), "the Worker ran the Task again");
   const resolved = db.all("SELECT payload_json FROM events WHERE work_id = ? AND type = 'decision.resolved'", workId).map((event) => JSON.parse(event.payload_json));
   assert.equal(resolved.length, 1);

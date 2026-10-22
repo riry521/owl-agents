@@ -9,6 +9,8 @@ import { MANAGER_PLAN_OUTPUT_SCHEMA, MANAGER_REPLAN_OUTPUT_SCHEMA, MANAGER_FINAL
 import { DESIGNER_REPORT_SCHEMA, WORKER_REPORT_SCHEMA, buildDesignerRolePrompt, buildWorkerPrompt } from "../../packages/agent-runtime/dist/worker.js";
 import { buildReviewerPrompt, REVIEW_OUTPUT_SCHEMA } from "../../packages/agent-runtime/dist/reviewer.js";
 import { validateReportEnvelope } from "../../packages/agent-runtime/dist/protocol.js";
+import { autoRecoveryForManager, autoRecoveryForTask, recordAutoRecoveryInTransaction } from "../../packages/core/dist/auto-recovery.js";
+import { openTestDatabase } from "../helpers/db.mjs";
 import { reportCheckCommands } from "../../packages/core/dist/test-detection.js";
 import { tempDir } from "../helpers/temp.mjs";
 
@@ -235,7 +237,7 @@ test("Manager replan parses its rendered template as task.replanned with fixed i
   assert.deepEqual(Object.keys(input), ["mode", "work", "tasks", "reports", "notes", "trigger", "context"]);
   // hardcode-check-allow whole-list-equal: 契約として固定された一覧の完全一致を確かめるため、現状の値を意図して比べている
   assert.deepEqual(Object.keys(input.context), [
-    "start_mode", "failed_task_ids", "current_plan", "worker_questions", "base_merge_conflict", "owner_requests", "previous_output_feedback", "failed_tasks", "final_verdict", "work_verification", "backlog_items", "rules", "knowledge", "skills", "design_documents", "owner_replan_kind",
+    "start_mode", "failed_task_ids", "current_plan", "worker_questions", "base_merge_conflict", "owner_requests", "previous_output_feedback", "auto_recovery", "failed_tasks", "final_verdict", "work_verification", "backlog_items", "rules", "knowledge", "skills", "design_documents", "owner_replan_kind",
   ]);
   assert.deepEqual(input.context.failed_tasks, []);
   assert.equal(input.context.final_verdict, null);
@@ -437,6 +439,7 @@ test("Worker prompt input has fixed context keys with null or empty defaults, in
   assert.deepEqual(slots.Attempt, {
     review_round: 0,
     owner_guidance: [],
+    auto_recovery: null,
     previous_report: null,
     reviewer_findings: [],
     verification_failure: null,
@@ -1230,4 +1233,61 @@ test("the Librarian's page rules forbid copying outside commands into knowledge"
   const { LIBRARIAN_RULES } = await import("../../packages/core/dist/memory/page-librarian.js");
   const { KNOWLEDGE_EXTERNAL_COMMAND_RULE } = await import("../../packages/shared/dist/index.js");
   assert.ok(LIBRARIAN_RULES.includes(KNOWLEDGE_EXTERNAL_COMMAND_RULE));
+});
+
+test("auto_recovery reaches the Worker, Designer and Manager prompts only when a recovery.started exists", async (t) => {
+  const { db } = await openTestDatabase(t, { prefix: "owl-role-auto-recovery-" });
+  const lane = db.createWriteLane();
+  const now = "2026-09-24T00:00:00.000Z";
+  await lane.transact((tx) => {
+    tx.run("INSERT INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Owner', ?, ?)", now, now);
+    tx.run(`INSERT INTO works (id, owner_id, project_id, title, summary, size, state, rules_json, related_work_ids_json, created_at, updated_at)
+            VALUES ('W', 'owner:default', NULL, 'W', 'x', 'normal', 'running', '[]', '[]', ?, ?)`, now, now);
+    for (const id of ["T1", "T2"]) {
+      tx.run(
+        `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, state_version, failure_count, same_error_count,
+           review_round, worker_generation, created_at, updated_at, retry_no, manager_task_id)
+         VALUES (?, 'W', ?, 'code', 'ready', 'normal', '', 'Done.', 0, 0, 0, 0, 0, ?, ?, 0, ?)`,
+        id, id, now, now, id,
+      );
+    }
+  });
+  assert.equal(autoRecoveryForTask(db, "T1"), null);
+  assert.equal(autoRecoveryForManager(db, "W", ["T1"]), null);
+
+  await lane.transact((tx) => recordAutoRecoveryInTransaction(tx, {
+    kind: "budget_exhausted",
+    target: { kind: "task", id: "T1" },
+    workId: "W",
+    action: "fresh_rerun",
+    sourceEventId: "E1",
+    previousFailure: { summary: "ran out of budget", error_key: "budget", detail: "d" },
+  }));
+  const forTask = autoRecoveryForTask(db, "T1");
+  assert.deepEqual(
+    Object.keys(forTask),
+    ["kind", "attempt_no", "limit", "instruction", "previous_failure", "check_results", "relaxed_criteria"],
+  );
+  assert.equal(forTask.kind, "budget_exhausted");
+  assert.equal(forTask.attempt_no, 1);
+  assert.equal(autoRecoveryForTask(db, "T2"), null, "another Task of the Work has no recovery");
+  const forManager = autoRecoveryForManager(db, "W", ["T1"]);
+  assert.equal(forManager.previous_failures.length, 1);
+  assert.equal(forManager.previous_failures[0].summary, "ran out of budget");
+
+  const calls = [];
+  const runner = runnerAnswering((template) => fillTemplate(template), calls);
+  await runner.runWorker(workerRequest());
+  await runner.runWorker(workerRequest({ auto_recovery: forTask }));
+  assert.equal(renderedSlots(calls[0].prompt).Attempt.auto_recovery, null);
+  assert.deepEqual(renderedSlots(calls[1].prompt).Attempt.auto_recovery, forTask);
+  assert.match(instructionsSection(calls[1].prompt), /Attempt\.auto_recovery is non-null.*automatic recovery/su);
+
+  await runner.runManagerPlan(managerRequest("replan", { failed_task_ids: [], auto_recovery: forManager }));
+  const managerPrompt = calls[2].prompt;
+  assert.deepEqual(renderedInput(managerPrompt, "Manager input").context.auto_recovery, forManager);
+  const instructions = instructionsSection(managerPrompt);
+  assert.match(instructions, /context\.auto_recovery/u);
+  assert.match(instructions, /budget_exhausted/u);
+  assert.match(instructions, /partial_repeated/u);
 });

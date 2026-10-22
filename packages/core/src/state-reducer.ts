@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createUlid, utcNow } from "../../db/dist/index.js";
-import { OUTPUT_FORMAT_INVALID_ERROR_KEY, readDesignBlocked, usageJson } from "@owl/shared";
+import { OUTPUT_FORMAT_INVALID_ERROR_KEY, isReportFormatInvalidErrorKey, readDesignBlocked, usageJson } from "@owl/shared";
 import type { ReviewLimitSettings } from "../../shared/dist/review-limit-settings.js";
 import { HumanReadableError, invalidStateTransition, notFound, validationError, versionConflict, workProjectAlreadySet } from "./errors";
 import {
@@ -16,7 +16,10 @@ import {
 } from "./decision-brief";
 import * as AttemptPolicy from "./attempt-policy";
 import { attemptAction, type AttemptDecision, type AttemptReason } from "./attempt-policy";
-import { ownerLanguage } from "./owner-language";
+import { autoRecoveryLimit, autoRecoveryUsed, criteriaDecisionBrief, immediateDecisionReason, recordAutoRecoveryInTransaction, samePartialReport, withAutoRecoveryTried, type ImmediateDecisionReason } from "./auto-recovery";
+import { isManagerCriterion, readStoredAcceptanceCriteria, type StoredAcceptanceCriterion } from "../../shared/dist/acceptance-criteria.js";
+import { ownerLanguage, type OwnerLanguage } from "./owner-language";
+import { replaceWorkPrerequisitesInTransaction, resolveWorkPrerequisiteDecisionInTransaction } from "./work-prerequisites";
 import { fixPendingTaskIds } from "./fix-pending-tasks.js";
 import { reviewLimits } from "./review-limits";
 import { previousFixSpots, reviewFocusSettings, reviewSpots, type ReviewSpot } from "./review-focus";
@@ -25,12 +28,12 @@ import { remakeLimits } from "./remake-limits";
 import { fixerEscalation } from "./fixer-escalation";
 import type { FixerEscalationSettings } from "../../shared/dist/fixer-escalation-settings.js";
 import { progressGuard } from "./progress-guard";
-import { assignReplacementLineageInTransaction, lineageExternalBlockerReports, lineagePartialReports, lineageGenerationCount, lineageReviewAttemptsExcluding, lineageUsage, parseLineageReset, restartLineageBudgetInTransaction } from "./task-lineage";
+import { assignReplacementLineageInTransaction, lineageExternalBlockerReports, lineagePartialReports, previousPartialReport, lineageGenerationCount, lineageReviewAttemptsExcluding, lineageRootOf, lineageUsage, parseLineageReset, restartLineageBudgetInTransaction } from "./task-lineage";
 import type { RemakeLimitSettings } from "../../shared/dist/remake-limit-settings.js";
 import { findDependencyCycle, type ReplanPlan } from "./replan-plan";
 import { PROCESS_WAIT_EVENT, validatePrerequisiteSpec, type PrerequisiteSpec } from "../../shared/dist/prerequisite.js";
 import { designerStateAfterRetry, designerStateAtCreation, type AssignedDesigner } from "./designer-assignment.js";
-import { ACCEPTANCE_DEFECT_EVENT, workerAcceptanceDefects } from "../../shared/dist/acceptance-defect.js";
+import { ACCEPTANCE_DEFECT_EVENT, normalizeAcceptanceDefects, workerAcceptanceDefects } from "../../shared/dist/acceptance-defect.js";
 import { EXTERNAL_BLOCKER_EVENT } from "../../shared/dist/external-blocker.js";
 import type {
   CoreWriteLaneTransaction,
@@ -70,6 +73,8 @@ export const WORK_TRANSITION_TABLE = [
   { row: 14, current: "judgement_waiting", guard: "owner cancel", event: "work.cancelled", next: "cancelled" },
   { row: 15, current: "memo", guard: "owner cancel", event: "work.cancelled", next: "cancelled" },
   { row: 16, current: "ready", guard: "owner cancel", event: "work.cancelled", next: "cancelled" },
+  { row: 17, current: "ready", guard: "a prerequisite Work was cancelled or deleted", event: "decision.opened", next: "judgement_waiting" },
+  { row: 18, current: "judgement_waiting", guard: "prerequisite Decision answered and prerequisites remain", event: "work.prerequisite_wait_resumed", next: "ready" },
 ] as const;
 
 export const TASK_TRANSITION_TABLE = [
@@ -77,7 +82,7 @@ export const TASK_TRANSITION_TABLE = [
   { row: 2, current: "ready", guard: "capacity and launch lease", event: "task.started", next: "running" },
   { row: 3, current: "ready", guard: "work paused/cancelled", event: "work.paused/work.cancelled", next: "paused/cancelled" },
   { row: 4, current: "running", guard: "valid success report", event: "agent.exited", next: "verifying" },
-  { row: 5, current: "running", guard: "transient and retry_no <= 3", event: "task.failure.classified", next: "ready" },
+  { row: 5, current: "running", guard: "transient and (retry_no <= 3 or auto recovery granted)", event: "task.failure.classified", next: "ready" },
   { row: 6, current: "running", guard: "deterministic below same/total thresholds", event: "task.failure.classified", next: "ready" },
   { row: 7, current: "running", guard: "deterministic at same/total threshold", event: "task.failed", next: "failed" },
   { row: 8, current: "running", guard: "deterministic retry_allowed=false", event: "task.failed -> decision.opened", next: "judgement_waiting" },
@@ -357,6 +362,7 @@ function attemptPolicyConfig(options: TaskReducerOptions): AttemptPolicy.Attempt
     // Not defaulted by a missing lineage: only the external_blocker branch reads it, so the base-sync problem above cannot occur.
     externalBlockerLimit: options.externalBlocker?.limit ?? AttemptPolicy.DEFAULT_ATTEMPT_POLICY_CONFIG.externalBlockerLimit,
     partialLimit: options.partial?.limit ?? AttemptPolicy.DEFAULT_ATTEMPT_POLICY_CONFIG.partialLimit,
+    autoRecovery: options.autoRecovery ?? AttemptPolicy.DEFAULT_ATTEMPT_POLICY_CONFIG.autoRecovery,
   };
 }
 
@@ -424,6 +430,22 @@ export function reduceWork(row: WorkRow, command: WorkReducerCommand): Reduction
       reject(row, event, "The start idempotency key has already been processed.");
     }
     return workResult(row, withWorkVersion(row, "running", now));
+  }
+
+  // Work row 17: a prerequisite that can no longer complete stops the wait.
+  if (row.state === "ready" && event === "decision.opened") {
+    if (!requiredBoolean(payload, "prerequisite_unreachable")) {
+      reject(row, event, "A ready Work waits for the Owner only when a prerequisite can no longer complete.");
+    }
+    return workResult(row, withWorkVersion(row, "judgement_waiting", now));
+  }
+
+  // Work row 18: the Owner dropped the missing prerequisites but others are not completed yet.
+  if (row.state === "judgement_waiting" && event === "work.prerequisite_wait_resumed") {
+    if (!requiredBoolean(payload, "prerequisites_pending")) {
+      reject(row, event, "The Work returns to waiting only while prerequisites remain.");
+    }
+    return workResult(row, withWorkVersion(row, "ready", now));
   }
 
   // Work row 4: pause only while work is active.
@@ -519,8 +541,10 @@ export interface TaskReducerOptions {
     readonly fixHistory?: readonly (readonly ReviewSpot[])[];
     /** External blocker reports earlier in the lineage and the progress_guard limit; used only for EXTERNAL_BLOCKER_EVENT. */
     readonly externalBlocker?: { readonly earlierReports: number; readonly limit: number };
+    /** Who handles an acceptance defect (see acceptanceDefectRoute); absent means the Manager. */
+    readonly acceptanceRoute?: AttemptPolicy.AcceptanceDefectRoute;
     /** Partial reports earlier in the lineage and the progress_guard limit; used only for a deterministic failure event carrying a partial report. */
-    readonly partial?: { readonly earlierReports: number; readonly limit: number };
+    readonly partial?: { readonly earlierReports: number; readonly limit: number; readonly same?: boolean };
     /** total_review_attempts at the Owner's last answer (lineage_reset_json); rows 18b/18c count from there. */
     readonly reviewAttemptsBase?: number;
     readonly refundedBase?: number;
@@ -535,6 +559,8 @@ export interface TaskReducerOptions {
       readonly otherLeadRejections?: number;
       readonly leadRejectionLimit?: number;
     };
+    /** Which automatic recoveries still have a try left; read by reduceTaskInTransaction. */
+    readonly autoRecovery?: { readonly outputFormat: boolean; readonly budget: boolean; readonly partial?: boolean };
 }
 
 /** Pure Task state transition reducer implementing every Task row. */
@@ -685,7 +711,7 @@ export function reduceTask(
     const nextAttemptAt = payload.next_attempt_at === null || typeof payload.next_attempt_at === "string"
       ? payload.next_attempt_at ?? null
       : null;
-    return applyAttemptEvaluation(row, event, now, AttemptPolicy.evaluate({ kind: "transient_failure", task: row, retryNo, nextAttemptAt }, policy));
+    return applyAttemptEvaluation(row, event, now, AttemptPolicy.evaluate({ kind: "transient_failure", task: row, retryNo, nextAttemptAt, autoRecoveryAttemptNo: typeof payload.auto_recovery_attempt_no === "number" ? payload.auto_recovery_attempt_no : null }, policy));
   }
 
   // A provider quota pause is scheduling state, not a Task failure. Keep the
@@ -707,6 +733,7 @@ export function reduceTask(
       retryAllowed,
       escalatedFromTransient: payload.escalated_from === "transient",
       earlierPartials: options.partial?.earlierReports,
+      samePartial: options.partial?.same === true,
       partialReport: report?.result === "partial"
         ? {
           pendingProcess: report.pending_process != null,
@@ -735,7 +762,7 @@ export function reduceTask(
   // Manager must rewrite the criteria on the same Task.
   if (event === ACCEPTANCE_DEFECT_EVENT) {
     const source = requiredString(payload, "source");
-    return applyAttemptEvaluation(row, event, now, AttemptPolicy.evaluate({ kind: "acceptance_defect", task: row, source }, policy));
+    return applyAttemptEvaluation(row, event, now, AttemptPolicy.evaluate({ kind: "acceptance_defect", task: row, source, route: options.acceptanceRoute }, policy));
   }
 
   // Task row 32d: the Worker reported a problem outside the Task. Failure counters stay; the lineage count and limit decide Manager or Owner.
@@ -1088,6 +1115,34 @@ export function designCompletedKey(taskId: string): string {
 }
 
 /** Durable per-Task marker that a failed Task still needs a Manager replan. */
+function budgetRecoveryReason(reason: string, attempts: number, limit: number, language: OwnerLanguage): string {
+  const what = reason === "lineage_budget_exhausted" ? { ja: "作り直しの", en: "remake" } : { ja: "Reviewer の", en: "review" };
+  return language === "ja" ? `${what.ja}回数が上限に達しました（${attempts}/${limit}）` : `The ${what.en} budget ran out (${attempts}/${limit}).`;
+}
+
+/** The queued Manager trigger of this Task is a budget_exhausted replan: Core already recorded the recovery, so the remake gate lets it through. */
+export function markBudgetRecovery(transaction: CoreWriteLaneTransaction, taskId: string): void {
+  transaction.run("UPDATE idempotency_keys SET response_json = json_set(response_json, '$.budget_recovery', json('true')) WHERE key = ? AND json_valid(response_json)", managerTriggerKey(taskId));
+}
+
+/** Mark the Task's queued Manager trigger with a flag (partial_recovery) that the replan reads to tell the Manager why it was called. */
+export function markTriggerFlag(transaction: CoreWriteLaneTransaction, taskId: string, flag: "partial_recovery"): void {
+  transaction.run(`UPDATE idempotency_keys SET response_json = json_set(response_json, '$.${flag}', json('true')) WHERE key = ? AND json_valid(response_json)`, managerTriggerKey(taskId));
+}
+
+/** One sentence naming the criteria the repeated partial report left open; it is the result of the recovery before. */
+function partialRepeatedSummary(report: unknown, language: OwnerLanguage): string {
+  const open: string[] = [];
+  const verification = report !== null && typeof report === "object" ? (report as { verification?: { acceptance?: unknown } }).verification : undefined;
+  if (Array.isArray(verification?.acceptance)) {
+    for (const item of verification.acceptance as { criterion_id?: unknown; status?: unknown }[]) {
+      if (item && typeof item.criterion_id === "string" && item.status !== "passed") open.push(item.criterion_id);
+    }
+  }
+  const ids = open.length > 0 ? open.join(", ") : "-";
+  return language === "ja" ? `同じ途中報告が続きました（残った条件: ${ids}）` : `The same partial report came again (open criteria: ${ids})`;
+}
+
 export function managerTriggerKey(taskId: string): string {
   return `manager-trigger:${taskId}`;
 }
@@ -1163,7 +1218,7 @@ function ensureManagerTrigger(
  * must not retry). "cancel" cancels the Work; any other answer, including
  * free text, resumes it (see Core.answerDecision).
  */
-function ensureCoreDecision(
+export function ensureCoreDecision(
   transaction: CoreWriteLaneTransaction,
   workId: string,
   blockedTaskIds: readonly string[],
@@ -1225,8 +1280,9 @@ function ensureCoreDecision(
  */
 export function openRemakeLimitDecisionInTransaction(
   transaction: CoreWriteLaneTransaction,
-  input: { readonly workId: string; readonly blockedTaskIds: readonly string[]; readonly brief: DecisionBrief; readonly now: string },
+  input: { readonly workId: string; readonly blockedTaskIds: readonly string[]; readonly brief: DecisionBrief; readonly now: string; readonly immediate?: ImmediateDecisionReason | null },
 ): string {
+  const brief = withAutoRecoveryTried(transaction, input.brief, { workId: input.workId, taskIds: input.blockedTaskIds }, ownerLanguage(transaction), input.immediate ?? null);
   for (const taskId of input.blockedTaskIds) {
     const task = transaction.get<{ status: string; prerequisite_json: string | null }>("SELECT status, prerequisite_json FROM tasks WHERE id = ?", taskId);
     if (
@@ -1235,16 +1291,16 @@ export function openRemakeLimitDecisionInTransaction(
     ) {
       reduceTaskInTransaction(transaction, taskId, {
         event: "decision.opened",
-        payload: { blocks_task: true, issuer: "core", reason: input.brief.reason },
+        payload: { blocks_task: true, issuer: "core", reason: brief.reason },
       });
     }
   }
-  const decisionId = ensureCoreDecision(transaction, input.workId, input.blockedTaskIds, input.brief, input.now, "work");
+  const decisionId = ensureCoreDecision(transaction, input.workId, input.blockedTaskIds, brief, input.now, "work");
   const work = transaction.get<{ state: string }>("SELECT state FROM works WHERE id = ?", input.workId);
   if (work?.state === "running") {
     reduceWorkInTransaction(transaction, input.workId, {
       event: "decision.opened",
-      payload: { blocks_work: true, reason: input.brief.reason },
+      payload: { blocks_work: true, reason: brief.reason },
     });
   }
   return decisionId;
@@ -1336,7 +1392,10 @@ export function reduceWorkInTransaction(
     persistWorkRow(transaction, result.next);
   }
   if (result.side_effects.includes("core_decision_required")) {
-    ensureCoreDecision(transaction, row.id, [], coreWorkDecisionBrief(objectPayload(command), ownerLanguage(transaction)), result.next.updated_at);
+    const language = ownerLanguage(transaction);
+    const alert = objectPayload(command);
+    const brief = withAutoRecoveryTried(transaction, coreWorkDecisionBrief(alert, language), { workId: row.id, taskIds: [] }, language, immediateDecisionReason({ alert }));
+    ensureCoreDecision(transaction, row.id, [], brief, result.next.updated_at);
   }
   if (command.event === "work.cancelled") {
     // A cancelled Work can no longer act on an answer, so its open
@@ -1537,6 +1596,27 @@ function latestFindingProblems(findingsJson: string | undefined): string[] {
   }
 }
 
+/**
+ * Who handles a criteria defect: the Manager only when every criterion it names was made by a Manager (origin manager),
+ * automatic recovery is on, and its limit for this Task's lineage is not used up. Anything else goes to the Owner.
+ * A criterion the report does not name by id counts as every criterion of the Task; one with no origin counts as the Owner's.
+ */
+function acceptanceDefectRoute(transaction: CoreWriteLaneTransaction, row: TaskRow, payload: JsonObject): AttemptPolicy.AcceptanceDefectRoute {
+  const stored = readStoredAcceptanceCriteria(row.acceptance_criteria_json, row.acceptance);
+  const defects = normalizeAcceptanceDefects(payload.defects);
+  if (defects.length === 0) return "owner";
+  const named: StoredAcceptanceCriterion[] = defects.flatMap((defect) => {
+    if (defect.criterion_id === "") return stored;
+    const match = stored.find((criterion) => criterion.id === defect.criterion_id);
+    return match === undefined ? [{ ...stored[0], origin: undefined }] : [match];
+  });
+  if (named.some((criterion) => !isManagerCriterion(criterion))) return "owner";
+  const kind = "criteria_too_strict";
+  if (autoRecoveryLimit(transaction, kind) <= 0) return "disabled";
+  const target = { kind: "task", id: lineageRootOf(transaction, row.id) } as const;
+  return autoRecoveryUsed(transaction, kind, target) >= autoRecoveryLimit(transaction, kind) ? "exhausted" : "manager";
+}
+
 export function reduceTaskInTransaction(
   transaction: CoreWriteLaneTransaction,
   taskId: string,
@@ -1572,14 +1652,45 @@ export function reduceTaskInTransaction(
   const partialPayload = objectPayload(command);
   const partialReport = partialPayload.report;
   const partial = command.event === "task.failure.classified" && partialPayload.failure_class === "deterministic" && typeof partialReport === "object" && partialReport !== null && (partialReport as JsonObject).result === "partial"
-    ? { earlierReports: lineagePartialReports(transaction, row.id, typeof partialPayload.agent_run_id === "string" ? partialPayload.agent_run_id : null), limit: progressGuard(transaction).partial_limit }
+    ? {
+      earlierReports: lineagePartialReports(transaction, row.id, typeof partialPayload.agent_run_id === "string" ? partialPayload.agent_run_id : null),
+      limit: progressGuard(transaction).partial_limit,
+      // The result right before this one was a partial report that left the same criteria open.
+      same: ((previous) => previous !== null && samePartialReport(
+        { report: partialReport, verification: partialPayload.verification },
+        { report: previous.report, verification: previous.verification },
+      ))(previousPartialReport(transaction, row.id, typeof partialPayload.agent_run_id === "string" ? partialPayload.agent_run_id : null)),
+    }
     : undefined;
   const reviewFocus = reviewFocusSettings(transaction);
   const fixHistory = command.event === "review.failed" && objectPayload(command).verdict === "fix_required"
     ? previousFixSpots(transaction, row.id, reviewFocus.same_spot_threshold - 1)
     : undefined;
   const fixerSettings = fixerEscalation(transaction);
-  let result = reduceTask(row, command, { reviewLimits: reviewLimits(transaction), reviewFocus, fixerEscalation: fixerSettings, fixHistory, lineage, externalBlocker, partial, reviewAttemptsBase: reset?.review_attempts, refundedBase: reset?.review_attempts_refunded });
+  const acceptanceRoute = command.event === ACCEPTANCE_DEFECT_EVENT ? acceptanceDefectRoute(transaction, row, objectPayload(command)) : undefined;
+  // A quarantine fix Task never recovers automatically: it ends failed without a Decision (below).
+  const lineageTarget = { kind: "task", id: lineageRootOf(transaction, row.id) } as const;
+  const hasTry = (kind: "output_format" | "budget_exhausted" | "partial_repeated"): boolean =>
+    !row.manager_task_id?.startsWith(QUARANTINE_FIX_TASK_PREFIX) && autoRecoveryUsed(transaction, kind, lineageTarget) < autoRecoveryLimit(transaction, kind);
+  const autoRecovery = {
+    partial: partial?.same === true && hasTry("partial_repeated"),
+    outputFormat: command.event === "task.failure.classified" && isReportFormatInvalidErrorKey(objectPayload(command).error_key) && hasTry("output_format"),
+    budget: command.event === "review.failed" && hasTry("budget_exhausted"),
+  };
+  let result = reduceTask(row, command, { acceptanceRoute, reviewLimits: reviewLimits(transaction), reviewFocus, fixerEscalation: fixerSettings, fixHistory, lineage, externalBlocker, partial, autoRecovery, reviewAttemptsBase: reset?.review_attempts, refundedBase: reset?.review_attempts_refunded });
+  if (acceptanceRoute === "manager" && result.changed) {
+    // Kind 7 recovery: the Manager is asked to loosen the criteria it wrote. The attempt is counted here, once per defect report.
+    const defectPayload = objectPayload(command);
+    recordAutoRecoveryInTransaction(transaction, {
+      kind: "criteria_too_strict",
+      target: { kind: "task", id: lineageRootOf(transaction, row.id) },
+      workId: row.work_id,
+      action: "relax_criteria",
+      sourceEventId: typeof defectPayload.agent_run_id === "string" ? defectPayload.agent_run_id : `${row.id}:${row.updated_at}`,
+      previousFailure: { summary: typeof defectPayload.reason === "string" ? defectPayload.reason : "acceptance criteria cannot be verified", error_key: "acceptance_defect" },
+      now: result.next.updated_at,
+    });
+  }
   if (row.manager_task_id?.startsWith(QUARANTINE_FIX_TASK_PREFIX) && result.side_effects.includes("core_decision_required")) {
     // A quarantine fix Task that cannot be fixed ends failed: no Decision, and the Work goes on.
     result = { ...taskResult(row, { ...result.next, status: "failed" }), changed: true };
@@ -1787,12 +1898,39 @@ export function reduceTaskInTransaction(
   if (command.event === "task.prerequisite_resumed" && result.accepted) {
     transaction.run("UPDATE tasks SET no_progress_count = 0 WHERE id = ?", row.id);
   }
+  const recoverySource = typeof payload.agent_run_id === "string" ? payload.agent_run_id : createUlid();
+  if (result.decision?.reason === "output_format_recovery") {
+    // The same session can only resubmit while its worktree is still this Task's (pendingReportResubmit reads this record).
+    const sameSession = typeof payload.provider_session_id === "string" && payload.provider_session_id.length > 0 && payload.worktree_path === row.worktree_path;
+    const reason = typeof payload.reason === "string" ? payload.reason : String(payload.error_key);
+    recordAutoRecoveryInTransaction(transaction, {
+      kind: "output_format", target: lineageTarget, workId: row.work_id, action: sameSession ? "report_resubmit" : "fresh_rerun", sourceEventId: recoverySource,
+      previousFailure: { summary: reason, error_key: String(payload.error_key), detail: reason }, now: result.next.updated_at,
+    });
+  }
   if (result.manager_trigger) {
     ensureManagerTrigger(transaction, row, command.event, payload, result.next.updated_at);
+    const budget = result.lineage_budget ?? result.review_budget;
+    if (budget && (result.decision?.reason === "lineage_budget_exhausted" || result.decision?.reason === "review_budget_exceeded")) {
+      const reason = budgetRecoveryReason(result.decision.reason, budget.attempts, budget.limit, ownerLanguage(transaction));
+      recordAutoRecoveryInTransaction(transaction, {
+        kind: "budget_exhausted", target: lineageTarget, workId: row.work_id, action: "replan_different_approach", sourceEventId: recoverySource,
+        previousFailure: { summary: reason, error_key: result.decision.reason, detail: reason }, now: result.next.updated_at,
+      });
+      markBudgetRecovery(transaction, row.id);
+    }
+    if (result.decision?.reason === "partial_repeated") {
+      const summary = partialRepeatedSummary(payload.report, ownerLanguage(transaction));
+      recordAutoRecoveryInTransaction(transaction, {
+        kind: "partial_repeated", target: lineageTarget, workId: row.work_id, action: "repair_partial", sourceEventId: recoverySource,
+        previousFailure: { summary, error_key: "partial_repeated", detail: summary }, now: result.next.updated_at,
+      });
+      markTriggerFlag(transaction, row.id, "partial_recovery");
+    }
     // A fresh failure that needs a Manager replan is one more result that
     // did not move the Task forward. A criteria defect is the exception: the
     // Task cannot move until the Manager rewrites its criteria.
-    if (command.event !== ACCEPTANCE_DEFECT_EVENT && command.event !== EXTERNAL_BLOCKER_EVENT) transaction.run("UPDATE tasks SET no_progress_count = no_progress_count + 1 WHERE id = ?", row.id);
+    if (command.event !== ACCEPTANCE_DEFECT_EVENT && command.event !== EXTERNAL_BLOCKER_EVENT && result.decision?.reason !== "partial_repeated") transaction.run("UPDATE tasks SET no_progress_count = no_progress_count + 1 WHERE id = ?", row.id);
   } else if (
     (row.status !== "completed" && result.next.status === "completed") ||
     (command.event === "decision.resolved" && row.status === "judgement_waiting" && result.next.status !== "judgement_waiting")
@@ -1818,7 +1956,7 @@ export function reduceTaskInTransaction(
         { taskTitle: row.title, ...result.design_block, latestFindings: latestFindingProblems(latest?.findings_json) },
         language,
       );
-      openRemakeLimitDecisionInTransaction(transaction, { workId: row.work_id, blockedTaskIds: [row.id], brief, now: result.next.updated_at });
+      openRemakeLimitDecisionInTransaction(transaction, { workId: row.work_id, blockedTaskIds: [row.id], brief, now: result.next.updated_at, immediate: immediateDecisionReason({ designBlocked: true }) });
       return result;
     }
     if (result.lineage_budget) {
@@ -1828,10 +1966,28 @@ export function reduceTaskInTransaction(
       openRemakeLimitDecisionInTransaction(transaction, { workId: row.work_id, blockedTaskIds: [row.id], brief, now: result.next.updated_at });
       return result;
     }
+    if (command.event === ACCEPTANCE_DEFECT_EVENT && acceptanceRoute !== undefined && acceptanceRoute !== "manager") {
+      const stored = readStoredAcceptanceCriteria(row.acceptance_criteria_json, row.acceptance);
+      const defects = normalizeAcceptanceDefects(payload.defects);
+      const quotes: Record<string, string> = {};
+      for (const criterion of stored) if (criterion.origin?.quote) quotes[criterion.id] = criterion.origin.quote;
+      const criteriaBrief = criteriaDecisionBrief({ taskTitle: row.title, variant: acceptanceRoute === "exhausted" ? "exhausted" : "owner", defects, quotes }, language);
+      const criteriaTried = withAutoRecoveryTried(
+        transaction, criteriaBrief, { workId: row.work_id, taskIds: [row.id] }, language,
+        acceptanceRoute === "owner" ? "owner_criteria" : acceptanceRoute === "disabled" ? "recovery_disabled" : null,
+      );
+      ensureCoreDecision(transaction, row.work_id, [row.id], criteriaTried, result.next.updated_at);
+      blockWorkWhenNoTaskCanMoveInTransaction(transaction, row.work_id, criteriaBrief.reason);
+      return result;
+    }
     const brief = result.review_budget
       ? coreTaskDecisionBrief(row.title, { error_key: "review_budget_exhausted", reason: reviewBudgetReason(result.review_budget, language) }, language)
       : coreTaskDecisionBrief(row.title, payload, language);
-    ensureCoreDecision(transaction, row.work_id, [row.id], brief, result.next.updated_at);
+    const withTried = withAutoRecoveryTried(
+      transaction, brief, { workId: row.work_id, taskIds: [row.id] }, language,
+      immediateDecisionReason({ errorKey: typeof payload.error_key === "string" ? payload.error_key : null }),
+    );
+    ensureCoreDecision(transaction, row.work_id, [row.id], withTried, result.next.updated_at);
     blockWorkWhenNoTaskCanMoveInTransaction(transaction, row.work_id, brief.reason);
   }
   return result;
@@ -2239,6 +2395,7 @@ export function createWorkInTransaction(
     row.created_at,
     row.updated_at,
   );
+  if (payload.prerequisite_work_ids !== undefined) replaceWorkPrerequisitesInTransaction(transaction, row.id, payload.prerequisite_work_ids, now);
   return row;
 }
 
@@ -2489,6 +2646,10 @@ export interface ReplanApplyGuard {
   readonly root_statuses: ReadonlyMap<string, string>;
   /** An Owner-initiated replan: it may also run while the Work waits for a Decision and may stop open Tasks. */
   readonly owner_replan?: boolean;
+  /** The Manager run that wrote the plan; criteria.relaxed names it. */
+  readonly manager_agent_run_id?: string;
+  /** Tasks replanned because of a repeated partial report (kind 8); criteria.relaxed names partial_repeated as their trigger. */
+  readonly partial_repeated_task_ids?: readonly string[];
 }
 
 export interface ReplanApplyResult {
@@ -2697,6 +2858,7 @@ export function applyReplanInTransaction(
       },
     });
     const revision = plan.revisions.get(taskId);
+    const originalTask = transaction.get<{ acceptance: string; acceptance_criteria_json: string | null }>("SELECT acceptance, acceptance_criteria_json FROM tasks WHERE id = ?", taskId);
     if (revision) {
       transaction.run(
         "UPDATE tasks SET title = ?, acceptance = ?, acceptance_criteria_json = ?, context = COALESCE(?, context), plan_context_json = COALESCE(?, plan_context_json), type = ?, review_override = ?, verification_spec_json = CASE WHEN ? THEN ? ELSE verification_spec_json END, updated_at = ? WHERE id = ?",
@@ -2714,6 +2876,7 @@ export function applyReplanInTransaction(
         taskId,
       );
     }
+    if (revision && originalTask) recordCriteriaRelaxations(transaction, workId, taskId, originalTask, revision, guard, now);
     const designer = designerStateAfterRetry(
       before,
       { type: revision?.type ?? before.type, assigned_designer: revision?.assigned_designer },
@@ -2735,6 +2898,64 @@ export function applyReplanInTransaction(
   assertTaskDependencyGraph(transaction, workId, "The replan creates a dependency cycle.");
   if (work.state === "judgement_waiting") cancelledDecisionIds.push(...resumeWorkAfterOwnerReplanInTransaction(transaction, workId, now));
   return { registered, reopened: [...plan.reopenIds], replacements, cancelled_decision_ids: cancelledDecisionIds, stopped_task_ids: stoppedTaskIds };
+}
+
+/**
+ * criteria.relaxed for each criterion an automatic replan loosened, written in the replan's own transaction, and the recovery.step
+ * that hands the new wording to the Worker. validateReplan has already checked the relaxations; a change without a record is not written.
+ */
+function recordCriteriaRelaxations(
+  transaction: CoreWriteLaneTransaction,
+  workId: string,
+  taskId: string,
+  original: { readonly acceptance: string; readonly acceptance_criteria_json: string | null },
+  revision: NonNullable<ReplanPlan["revisions"] extends ReadonlyMap<string, infer R> ? R : never>,
+  guard: ReplanApplyGuard,
+  now: string,
+): void {
+  const relaxations = revision.criteria_relaxations ?? [];
+  if (relaxations.length === 0 || revision.acceptance_criteria === undefined) return;
+  const before = readStoredAcceptanceCriteria(original.acceptance_criteria_json, original.acceptance);
+  const lineageRoot = lineageRootOf(transaction, taskId);
+  const target = { kind: "task", id: lineageRoot } as const;
+  const detail = (criterion: { readonly text: string; readonly check: string; readonly check_weight: string | null; readonly kind?: string }): JsonObject =>
+    ({ text: criterion.text, check: criterion.check, check_weight: criterion.check_weight, kind: criterion.kind ?? "work_check" });
+  const relaxed: JsonObject[] = [];
+  for (const record of relaxations) {
+    const was = before.find((criterion) => criterion.id === record.criterion_id);
+    const now_ = revision.acceptance_criteria.find((criterion) => criterion.id === record.criterion_id);
+    if (!was || !now_ || (was.text === now_.text && was.check === now_.check)) continue;
+    appendEventInTransaction(transaction, {
+      type: "criteria.relaxed",
+      idempotencyKey: `criteria-relaxed:${taskId}:${record.criterion_id}:${workId}:${guard.base_plan_revision}`,
+      workId,
+      taskId,
+      payload: {
+        schema_version: 1,
+        task_id: taskId,
+        lineage_root_id: lineageRoot,
+        criterion_id: record.criterion_id,
+        original: detail(was),
+        relaxed: detail(now_),
+        reason: record.reason,
+        keeps: record.keeps,
+        trigger: guard.partial_repeated_task_ids?.includes(taskId) ? "partial_repeated" : "acceptance_defect",
+        attempt_no: autoRecoveryUsed(transaction, "criteria_too_strict", target),
+        manager_agent_run_id: guard.manager_agent_run_id ?? null,
+      },
+      now,
+    });
+    relaxed.push({ criterion_id: record.criterion_id, text: now_.text, check: now_.check, reason: record.reason, keeps: record.keeps });
+  }
+  if (relaxed.length === 0) return;
+  appendEventInTransaction(transaction, {
+    type: "recovery.step",
+    idempotencyKey: `criteria-relaxed-step:${taskId}:${workId}:${guard.base_plan_revision}`,
+    workId,
+    taskId,
+    payload: { schema_version: 1, kind: "criteria_too_strict", target_kind: "task", target_id: lineageRoot, relaxed_criteria: relaxed, check_results: [] },
+    now,
+  });
 }
 
 /**
@@ -3052,11 +3273,15 @@ export function resolveDecisionInTransaction(
       "SELECT COUNT(*) AS count FROM decisions WHERE work_id = ? AND status = 'open' AND scope = 'work'",
       decision.work_id,
     );
+    const prerequisites = resolveWorkPrerequisiteDecisionInTransaction(transaction, decision);
     if (work.state === "judgement_waiting" && Number(stillOpen?.count ?? 0) === 0) {
-      reduceWorkInTransaction(transaction, decision.work_id, {
-        event: "decision.resolved",
-        payload: { winner_commit: true },
-      });
+      reduceWorkInTransaction(
+        transaction,
+        decision.work_id,
+        prerequisites === "pending"
+          ? { event: "work.prerequisite_wait_resumed", payload: { prerequisites_pending: true } }
+          : { event: "decision.resolved", payload: { winner_commit: true } },
+      );
     }
   }
   if (decision.scope === "task" && !cancelAnswer && resumedTaskIds.length > 0) {

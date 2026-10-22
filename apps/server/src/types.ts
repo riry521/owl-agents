@@ -66,6 +66,20 @@ export interface WorkSummary {
   updated_at: string;
   archived_at: string | null;
   project_id: string | null;
+  prerequisite_wait: boolean;
+  waiting_on: WorkPrerequisite[];
+}
+
+/** A prerequisite Work as shown to the Owner; state is null once the Work was deleted. */
+export interface WorkPrerequisite {
+  work_id: string;
+  project_id: string | null;
+  project_name: string | null;
+  display_number: number | null;
+  title: string;
+  state: WorkState | null;
+  deleted: boolean;
+  satisfied: boolean;
 }
 
 export interface WorkProgress {
@@ -81,6 +95,7 @@ export interface WorkDetail extends WorkSummary {
   plan_revision: number;
   progress: WorkProgress;
   conversation_id: string | null;
+  prerequisites: WorkPrerequisite[];
 }
 
 /** Whether a Work's branches hold content outside its Project base branch. */
@@ -526,6 +541,7 @@ export interface WorkCreateInput {
   summary: string;
   size: "small" | "normal" | "large";
   project_id: string | null;
+  prerequisite_work_ids?: string[];
 }
 
 export interface CommandMeta {
@@ -680,8 +696,9 @@ export interface CorePort {
   getWorkDesign(workId: string, taskId: string): Promise<WorkDesignDetail | null>;
   startWork(workId: string, mode: "normal" | "small", command: CommandMeta): Promise<CommandResult<{
     work_id: string;
-    state: "running";
+    state: "running" | "ready" | "judgement_waiting";
     started: boolean;
+    waiting_for_prerequisites: boolean;
   }>>;
   pauseWork(workId: string, reason: string, command: CommandMeta): Promise<CommandResult<{
     work_id: string;

@@ -24,6 +24,7 @@ const workVersion = (db, workId) => db.get("SELECT state_version FROM works WHER
 async function openCore(t, agentRunner, settings) {
   const { db, core } = await createTestCore(t, { agentRunner, dispatcher: { tick_interval_ms: 25 } }, { prefix: "owl-owner-replan-", start: true });
   await disablePlanQuality(db);
+  await core.setAutoRecoverySettings({ limit: 0 }); // these tests check the Owner Decision a limit opens
   if (settings) await core.setRemakeLimitSettings({ ...DEFAULT_REMAKE_LIMIT_SETTINGS, ...settings });
   return { db, core };
 }

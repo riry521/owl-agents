@@ -5,6 +5,7 @@ import { test } from "node:test";
 
 import { AdvisorSessionManager, AdvisorSessionRuntime, createTaskPlanInTransaction, createWorkInTransaction, createProviderPauseController, createProviderPauseStore, NoopGitGateway, WorkflowEngine } from "../../packages/core/dist/index.js";
 import { createAgentRunner, toolNamesInLine } from "../../packages/agent-runtime/dist/index.js"; // helpers-exempt: the real runner decides the failure class under test
+import { autoRecoveryUsed } from "../../packages/core/dist/auto-recovery.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { DEFAULT_ROLE_MODELS } from "../../packages/shared/dist/index.js";
 import { createTestCore } from "../helpers/core.mjs";
@@ -595,4 +596,55 @@ test("an initial Manager plan rate limit leaves the Work running and retries aft
   assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "running");
   assert.equal(db.get("SELECT COUNT(*) AS count FROM events WHERE type = 'manager.failed'").count, 0);
   assert.equal(db.get("SELECT COUNT(*) AS count FROM decisions WHERE status = 'open'").count, 0);
+});
+
+test("five Manager 429s open no Decision: each is recorded as an uncounted wait and the used count stays 0", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.parse(NOW) });
+  const { root, db, onCleanup } = await dbInTemp(t);
+  const workId = await db.createWriteLane().transact((tx) => {
+    const work = createWorkInTransaction(tx, { title: "Repeated 429", summary: "Wait without a Decision", size: "normal", project_id: null });
+    tx.run("UPDATE works SET state = 'running' WHERE id = ?", work.id);
+    return work.id;
+  });
+  let managerCalls = 0;
+  const { core } = await createTestCore(t, {
+    db,
+    agentRunner: {
+      runManagerPlan: async () => {
+        managerCalls += 1;
+        return {
+          outcome: "failed", failure_class: "rate_limited", error_key: "rate_limited",
+          rate_limit: { resets_at: new Date().toISOString(), source: "event" }, message: "limit", skill_feedback: null,
+        };
+      },
+      runWorker: async () => ({ outcome: "failed", failure_class: "transient", error_key: "temporary", retry_allowed: true, skill_feedback: null }),
+      runReviewer: async () => ({ outcome: "failed", skill_feedback: null }),
+      runAdvisor: async () => ({ reply: "" }),
+    },
+    version: "provider-pause-429-count-test",
+    owlRoot: root,
+    dispatcher: { tick_interval_ms: 60_000 },
+    now: () => new Date().toISOString(),
+  });
+  onCleanup(async () => { await core.stop({ force: true }); await flush(); db.close(); });
+  await core.start();
+
+  await core.tick(workId);
+  // Each resume makes the Work driver ask the Manager again, which answers 429 again.
+  while (managerCalls < 5) {
+    const before = managerCalls;
+    // The resume timer is armed once the pause is recorded; advance the clock only after that.
+    await flushUntil(() => db.get("SELECT COUNT(*) AS count FROM events WHERE type = 'provider.paused'").count >= before && db.get("SELECT COUNT(*) AS count FROM events WHERE work_id = ? AND type = 'recovery.started'", workId).count === before, `pause ${before}`);
+    t.mock.timers.tick(90_000);
+    await flushUntil(() => managerCalls > before, `Manager call ${before + 1}`);
+  }
+  await flush();
+
+  assert.equal(db.get("SELECT COUNT(*) AS count FROM decisions WHERE work_id = ?", workId).count, 0);
+  assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "running");
+  const records = db.all("SELECT payload_json FROM events WHERE work_id = ? AND type = 'recovery.started' ORDER BY sequence", workId).map((row) => JSON.parse(row.payload_json));
+  assert.ok(managerCalls >= 5);
+  assert.equal(records.length, managerCalls, "every 429 is recorded once");
+  assert.ok(records.every((record) => record.counted === false && record.kind === "provider_transient" && record.action === "wait_rate_limit"));
+  assert.equal(autoRecoveryUsed(db, "provider_transient", { kind: "work", id: workId }), 0);
 });

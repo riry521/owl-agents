@@ -22,6 +22,8 @@ export type ApiErrorCode =
   | "provider_pause_not_found"
   | "project_not_found"
   | "work_project_already_set"
+  | "prerequisite_work_not_found"
+  | "prerequisite_cycle"
   | "project_has_running_works"
   | "project_deletion_impact_changed"
   | "model_preset_not_found"

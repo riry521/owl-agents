@@ -149,9 +149,10 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '404':
-          description: project_not_found
+          description: project_not_found or prerequisite_work_not_found
           x-error-codes:
             - project_not_found
+            - prerequisite_work_not_found
           content:
             application/json:
               schema:
@@ -864,6 +865,130 @@ paths:
         '503':
           description: Move dependency unavailable or projectless outputs could not be saved.
           x-error-codes: [dependency_unavailable, worktree_cleanup_failed]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/works/{work_id}/prerequisites:
+    parameters:
+      - $ref: '#/components/parameters/WorkId'
+    put:
+      operationId: replaceWorkPrerequisites
+      summary: Replace the prerequisite Works of a memo or ready Work
+      security:
+        - ownerBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceWorkPrerequisitesCommand'
+      responses:
+        '200':
+          description: Prerequisites replaced; a ready Work is judged again at once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplaceWorkPrerequisitesResponse'
+        '400':
+          description: Invalid command envelope, malformed or duplicated IDs, too many IDs, or the Work itself.
+          x-error-codes: [validation_error]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Owner authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Origin or CSRF check failed, or Advisor action required.
+          x-error-codes: [advisor_action_required, forbidden]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Work or prerequisite Work not found.
+          x-error-codes: [work_not_found, prerequisite_work_not_found]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: State, version, cycle, or idempotency conflict.
+          x-error-codes: [invalid_state_transition, prerequisite_cycle, version_conflict, idempotency_conflict]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Prerequisite dependency unavailable.
+          x-error-codes: [dependency_unavailable]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/works/{work_id}/prerequisites/release:
+    parameters:
+      - $ref: '#/components/parameters/WorkId'
+    post:
+      operationId: releaseWorkPrerequisiteWait
+      summary: Stop waiting for prerequisites and start the Work
+      security:
+        - ownerBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReleaseWorkPrerequisiteWaitCommand'
+      responses:
+        '200':
+          description: Wait released; the Work is running.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReleaseWorkPrerequisiteWaitResponse'
+        '400':
+          description: Invalid command envelope.
+          x-error-codes: [validation_error]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Owner authentication is required.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Origin or CSRF check failed, or Advisor action required.
+          x-error-codes: [advisor_action_required, forbidden]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Work or prerequisite Work not found.
+          x-error-codes: [work_not_found]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: State, version, cycle, or idempotency conflict.
+          x-error-codes: [invalid_state_transition, version_conflict, idempotency_conflict]
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Prerequisite dependency unavailable.
+          x-error-codes: [dependency_unavailable]
           content:
             application/json:
               schema:
@@ -4429,8 +4554,8 @@ components:
       type: string
       minLength: 1
       description: >-
-        Known values are memo, ready, running, paused, judgement_waiting,
-        completed, and cancelled. Servers may return future values, which
+        Known values are memo, ready (waiting for prerequisite Works), running,
+        paused, judgement_waiting, completed, and cancelled. Servers may return future values, which
         clients must preserve and render safely.
     WorkSize:
       type: string
@@ -4865,6 +4990,13 @@ components:
           type: string
           enum: [auto, lead]
           description: Optional. Lead assigns design Tasks to Lead Designer from their first run.
+        prerequisite_work_ids:
+          type: array
+          maxItems: 10
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/ULID'
+          description: Optional. Works that must be completed before this Work starts; it waits in state ready until then.
       additionalProperties: false
     CreateWorkCommand:
       allOf:
@@ -4884,6 +5016,8 @@ components:
         - updated_at
         - archived_at
         - project_id
+        - prerequisite_wait
+        - waiting_on
       properties:
         id:
           $ref: '#/components/schemas/ULID'
@@ -4908,6 +5042,14 @@ components:
           anyOf:
             - $ref: '#/components/schemas/ULID'
             - type: 'null'
+        prerequisite_wait:
+          type: boolean
+          description: True while the Work is ready and waits for its prerequisite Works.
+        waiting_on:
+          type: array
+          description: Unmet prerequisites while the state is memo or ready; empty otherwise.
+          items:
+            $ref: '#/components/schemas/WorkPrerequisite'
       additionalProperties: false
     WorkDetail:
       type: object
@@ -4927,6 +5069,9 @@ components:
         - plan_revision
         - progress
         - conversation_id
+        - prerequisite_wait
+        - waiting_on
+        - prerequisites
       properties:
         id:
           $ref: '#/components/schemas/ULID'
@@ -4968,6 +5113,51 @@ components:
           anyOf:
             - $ref: '#/components/schemas/ULID'
             - type: 'null'
+        prerequisite_wait:
+          type: boolean
+          description: True while the Work is ready and waits for its prerequisite Works.
+        waiting_on:
+          type: array
+          description: Unmet prerequisites while the state is memo or ready; empty otherwise.
+          items:
+            $ref: '#/components/schemas/WorkPrerequisite'
+        prerequisites:
+          type: array
+          description: All prerequisites in position order.
+          items:
+            $ref: '#/components/schemas/WorkPrerequisite'
+      additionalProperties: false
+    WorkPrerequisite:
+      type: object
+      required: [work_id, project_id, project_name, display_number, title, state, deleted, satisfied]
+      properties:
+        work_id:
+          $ref: '#/components/schemas/ULID'
+        project_id:
+          anyOf:
+            - $ref: '#/components/schemas/ULID'
+            - type: 'null'
+        project_name:
+          type:
+            - string
+            - 'null'
+        display_number:
+          anyOf:
+            - type: integer
+              minimum: 1
+            - type: 'null'
+        title:
+          type: string
+        state:
+          anyOf:
+            - $ref: '#/components/schemas/WorkState'
+            - type: 'null'
+          description: Null once the prerequisite Work was deleted.
+        deleted:
+          type: boolean
+        satisfied:
+          type: boolean
+          description: True when the prerequisite is completed, including one that was completed before it was deleted.
       additionalProperties: false
     WorkProgress:
       type: object
@@ -5196,6 +5386,7 @@ components:
         - language
         - remake_limits
         - fixer_escalation
+        - auto_recovery
         - knowledge_automation
         - advisor_persona
         - advisor_folders
@@ -5582,13 +5773,77 @@ components:
                 - work_id
                 - state
                 - started
+                - waiting_for_prerequisites
+              properties:
+                work_id:
+                  $ref: '#/components/schemas/ULID'
+                state:
+                  type: string
+                  enum: [running, ready, judgement_waiting]
+                started:
+                  type: boolean
+                waiting_for_prerequisites:
+                  type: boolean
+              additionalProperties: false
+    ReplaceWorkPrerequisitesPayload:
+      type: object
+      required: [prerequisite_work_ids]
+      properties:
+        prerequisite_work_ids:
+          type: array
+          maxItems: 10
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/ULID'
+      additionalProperties: false
+    ReplaceWorkPrerequisitesCommand:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+        - type: object
+          properties:
+            payload:
+              $ref: '#/components/schemas/ReplaceWorkPrerequisitesPayload'
+    ReplaceWorkPrerequisitesResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [work_id, state, prerequisites]
+              properties:
+                work_id:
+                  $ref: '#/components/schemas/ULID'
+                state:
+                  $ref: '#/components/schemas/WorkState'
+                prerequisites:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/WorkPrerequisite'
+              additionalProperties: false
+    ReleaseWorkPrerequisiteWaitCommand:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+        - type: object
+          properties:
+            payload:
+              type: object
+              additionalProperties: false
+    ReleaseWorkPrerequisiteWaitResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          properties:
+            data:
+              type: object
+              required: [work_id, state, started]
               properties:
                 work_id:
                   $ref: '#/components/schemas/ULID'
                 state:
                   const: running
                 started:
-                  type: boolean
+                  const: true
               additionalProperties: false
     PauseWorkPayload:
       type: object

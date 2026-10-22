@@ -6,6 +6,8 @@
  * actual API and WebSocket locations from runtime-config at browser startup.
  */
 import type {
+  WorkPrerequisite,
+  WorkState,
   AgentActivity,
   AgentRun,
   AgentsView,
@@ -62,6 +64,7 @@ import type {
   AdvisorFoldersInput,
   RemakeLimitSettings,
   FixerEscalationSettings,
+AutoRecoverySettings,
   KnowledgeStorageStatus,
   DirectoryListing,
   SkillActivity,
@@ -147,6 +150,7 @@ export type CreateWorkInput = {
   summary: string;
   size: 'small' | 'normal' | 'large';
   project_id: string | null;
+  prerequisite_work_ids?: string[];
 };
 
 export type CreateWorkResult = CreateWorkData & { version: number };
@@ -759,6 +763,7 @@ export async function createWork(input: CreateWorkInput): Promise<CreateWorkResu
       summary: input.summary.trim(),
       size: input.size,
       project_id: input.project_id,
+      ...(input.prerequisite_work_ids?.length ? { prerequisite_work_ids: input.prerequisite_work_ids } : {}),
     },
     0,
   );
@@ -872,6 +877,34 @@ export async function moveWorkToProject(
   const response = await command<MoveWorkToProjectResult>(
     `/works/${encodeURIComponent(workId)}/project`,
     { project_id: projectId },
+    expectedVersion,
+  );
+  return response.data;
+}
+
+/** PUT /api/v1/works/{id}/prerequisites: replace the whole list (memo and ready Works). */
+export async function replaceWorkPrerequisites(
+  workId: ULID,
+  expectedVersion: number,
+  prerequisiteWorkIds: ULID[],
+): Promise<{ work_id: ULID; state: WorkState; prerequisites: WorkPrerequisite[] }> {
+  const response = await command<{ work_id: ULID; state: WorkState; prerequisites: WorkPrerequisite[] }>(
+    `/works/${encodeURIComponent(workId)}/prerequisites`,
+    { prerequisite_work_ids: prerequisiteWorkIds },
+    expectedVersion,
+    'PUT',
+  );
+  return response.data;
+}
+
+/** POST /api/v1/works/{id}/prerequisites/release: stop waiting and start a ready Work. */
+export async function releaseWorkPrerequisiteWait(
+  workId: ULID,
+  expectedVersion: number,
+): Promise<{ work_id: ULID; state: 'running'; started: true }> {
+  const response = await command<{ work_id: ULID; state: 'running'; started: true }>(
+    `/works/${encodeURIComponent(workId)}/prerequisites/release`,
+    {},
     expectedVersion,
   );
   return response.data;
@@ -1418,6 +1451,11 @@ export async function putRemakeLimitSettings(input: RemakeLimitSettings): Promis
 
 export async function putFixerEscalationSettings(input: FixerEscalationSettings): Promise<FixerEscalationSettings> {
   const response = await command<FixerEscalationSettings>('/settings/fixer-escalation', input, 0, 'PUT');
+  return response.data;
+}
+
+export async function putAutoRecoverySettings(input: { limit: number }): Promise<AutoRecoverySettings> {
+  const response = await command<AutoRecoverySettings>('/settings/auto-recovery', input, 0, 'PUT');
   return response.data;
 }
 

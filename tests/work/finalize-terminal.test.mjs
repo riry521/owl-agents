@@ -240,6 +240,7 @@ test("repeated final lessons deduplicate rule proposals by text and scope", asyn
   const workId = await seedFinishedWork(core, db, [
     { id: done, status: "completed", managerTaskId: "T1", title: "done", withReport: true },
   ]);
+  await core.setAutoRecoverySettings({ limit: 0 });
   await core.start();
   await core.tick(workId);
   assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "judgement_waiting");
@@ -330,6 +331,46 @@ test("a Work with a superseded (cancelled) Task completes on a complete final ve
   await sleep(300);
   assert.equal(finalizeCalls, 1);
   assert.equal(db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ? AND status = 'open'", workId).n, 0);
+});
+
+test("work.completed and the Final Manager input carry the relaxed criteria and the automatic recoveries", async (t) => {
+  let finalizeContext = null;
+  const { db, core } = await openCore(t, () => ({
+    runManagerPlan: async (request) => {
+      if (request.mode !== "finalize") return { outcome: "failed", message: "unexpected" };
+      finalizeContext = request.context;
+      return { outcome: "success", report_valid: true, report: { tasks: request.tasks ?? [], event: null, verdict: completeVerdict.verdict } };
+    },
+    runWorker: async () => ({ outcome: "failed" }),
+    runReviewer: async () => ({ outcome: "failed" }),
+    runAdvisor: async () => ({ reply: "" }),
+  }));
+  const taskId = createUlid();
+  const workId = await seedFinishedWork(core, db, [{ id: taskId, status: "completed", managerTaskId: "T1", title: "done", withReport: true }]);
+  const addEvent = (type, payload, sequence) => db.createWriteLane().transact((tx) => {
+    tx.run(
+      `INSERT INTO events (id, sequence, idempotency_key, type, work_id, payload_json, status, attempt_no, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, 'handled', 0, ?)`,
+      createUlid(), sequence, `ft:${sequence}`, type, workId, JSON.stringify(payload), new Date().toISOString(),
+    );
+    return null;
+  });
+  await addEvent("recovery.started", { kind: "integration_conflict", target_kind: "work", target_id: workId, attempt_no: 1, limit: 2, counted: true }, 9000);
+  await addEvent("recovery.started", { kind: "provider_transient", target_kind: "work", target_id: workId, attempt_no: 1, limit: 2, counted: false }, 9002);
+  await addEvent("criteria.relaxed", {
+    task_id: taskId, criterion_id: "AC2",
+    original: { text: "all files", check: "run all" }, relaxed: { text: "three files", check: "run three" },
+    reason: "too many files", keeps: "three files are checked",
+  }, 9001);
+  await core.start();
+  await core.tick(workId);
+
+  assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "completed");
+  const relaxation = { task_id: taskId, task_title: "done", criterion_id: "AC2", original: { text: "all files", check: "run all" }, relaxed: { text: "three files", check: "run three" }, reason: "too many files", keeps: "three files are checked" };
+  assert.deepEqual(finalizeContext.criteria_relaxations.map(({ at, ...rest }) => rest), [relaxation]);
+  const completed = JSON.parse(db.get("SELECT payload_json FROM events WHERE type = 'work.completed' AND work_id = ?", workId).payload_json);
+  assert.deepEqual(completed.criteria_relaxations.map(({ at, ...rest }) => rest), [relaxation]);
+  assert.deepEqual(completed.auto_recoveries, { integration_conflict: 1 }, "only counted recoveries are totalled");
 });
 
 test("finalize input carries task_id per report, omits cancelled Tasks' reports, and survives a completed Task without a stored report", async (t) => {
@@ -484,6 +525,7 @@ test("an incomplete final verdict enqueues proposed rules while waiting for Owne
   const workId = await seedFinishedWork(core, db, [
     { id: done, status: "completed", managerTaskId: "T1", title: "done", withReport: true },
   ]);
+  await core.setAutoRecoverySettings({ limit: 0 });
   await core.start();
   await core.tick(workId);
 
@@ -618,6 +660,91 @@ test("automatic continuation stops at the configured limit and then waits for th
   assert.equal(alerts.at(-1).driver_stopped, true);
 });
 
+function autoFinalRunner(rounds, { summary = "Docs missing.", missing }) {
+  return ({ db }) => ({
+    runManagerPlan: async (request) => {
+      if (request.mode === "replan") {
+        rounds.push({
+          openDecisions: db.get("SELECT COUNT(*) AS n FROM decisions WHERE status = 'open'").n,
+          started: db.all("SELECT payload_json FROM events WHERE type = 'recovery.started'").map((row) => JSON.parse(row.payload_json)),
+          context: request.context,
+        });
+        return { outcome: "success", report_valid: true, report: { event: "task.replanned", tasks: [] } };
+      }
+      if (request.mode !== "finalize") return { outcome: "failed", message: "unexpected" };
+      return { outcome: "success", report_valid: true, report: { tasks: request.tasks ?? [], event: null, verdict: { verdict: "incomplete", summary, missing, lessons: [] } } };
+    },
+    runWorker: async () => ({ outcome: "failed" }),
+    runReviewer: async () => ({ outcome: "failed" }),
+    runAdvisor: async () => ({ reply: "" }),
+  });
+}
+
+async function seedFinished(core, db) {
+  const workId = await seedFinishedWork(core, db, [
+    { id: createUlid(), status: "completed", managerTaskId: "T1", title: "done", withReport: true },
+  ]);
+  await core.start();
+  await core.tick(workId);
+  return workId;
+}
+
+test("the first incomplete final verdict starts an automatic recovery without a Decision", async (t) => {
+  const rounds = [];
+  const { db, core } = await openCore(t, autoFinalRunner(rounds, { missing: [{ item: "docs", reason: "not written", fix: "write them" }] }));
+  await seedFinished(core, db);
+
+  assert.ok(await waitFor(() => rounds.length >= 1));
+  assert.equal(rounds[0].openDecisions, 0);
+  assert.deepEqual(rounds[0].started.map((entry) => [entry.kind, entry.attempt_no, entry.limit]), [["final_incomplete", 1, 2]]);
+  assert.equal(rounds[0].context.auto_recovery.kind, "final_incomplete");
+});
+
+test("an incomplete verdict whose fixes are empty still continues automatically", async (t) => {
+  const rounds = [];
+  const { db, core } = await openCore(t, autoFinalRunner(rounds, { missing: [{ item: "docs", reason: "not written", fix: "" }] }));
+  await seedFinished(core, db);
+
+  assert.ok(await waitFor(() => rounds.length >= 1));
+  assert.equal(rounds[0].openDecisions, 0);
+  assert.equal(rounds[0].started[0].kind, "final_incomplete");
+});
+
+test("the missing items of the previous round reach the next one as previous_failures", async (t) => {
+  const rounds = [];
+  const { db, core } = await openCore(t, autoFinalRunner(rounds, { missing: [{ item: "changelog-marker", reason: "not written", fix: "write it" }] }));
+  await seedFinished(core, db);
+
+  assert.ok(await waitFor(() => rounds.length >= 2));
+  assert.match(JSON.stringify(rounds[1].context.auto_recovery.previous_failures), /changelog-marker/u);
+});
+
+test("an incomplete verdict with neither missing items nor a summary opens a Decision at once", async (t) => {
+  const rounds = [];
+  const { db, core } = await openCore(t, autoFinalRunner(rounds, { summary: "", missing: [] }));
+  const workId = await seedFinished(core, db);
+
+  assert.ok(await waitFor(() => db.get("SELECT state FROM works WHERE id = ?", workId).state === "judgement_waiting"));
+  assert.equal(rounds.length, 0);
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'recovery.started'", workId).n, 0);
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ? AND status = 'open'", workId).n, 1);
+});
+
+test("after the limit an incomplete verdict opens a Decision with what was tried", async (t) => {
+  const rounds = [];
+  const { db, core } = await openCore(t, autoFinalRunner(rounds, { missing: [{ item: "docs", reason: "not written", fix: "write them" }] }));
+  const workId = await seedFinished(core, db);
+
+  assert.ok(await waitFor(() => db.get("SELECT state FROM works WHERE id = ?", workId).state === "judgement_waiting"));
+  assert.equal(rounds.length, 2);
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'recovery.started'", workId).n, 2);
+  const decisions = db.all("SELECT tried FROM decisions WHERE work_id = ? AND status = 'open'", workId);
+  assert.equal(decisions.length, 1);
+  assert.ok(decisions[0].tried.startsWith("自動で試したこと: 2回"), decisions[0].tried);
+  assert.match(decisions[0].tried, /1回目:/u);
+  assert.match(decisions[0].tried, /2回目:/u);
+});
+
 /** A runner whose Manager finalize call fails with a 529 after an optional tool call; returns the call counter. */
 function failingFinalRunner(toolName) {
   const state = { finalCalls: 0 };
@@ -641,6 +768,8 @@ test("a Final Manager failure after a side effect is not retried by Core, and on
   for (const [label, toolName] of [["side_effect", "mcp__slack__post_message"], ["none", null]]) {
     const { runner, state } = failingFinalRunner(toolName);
     const { db, core } = await openCore(t, () => runner);
+    // With no automatic recovery left the 529 goes straight to the alert this test is about.
+    await core.setAutoRecoverySettings({ limit: 0 });
     const workId = await seedFinishedWork(core, db, [
       { id: createUlid(), status: "completed", managerTaskId: "T1", title: "done", withReport: true },
     ]);

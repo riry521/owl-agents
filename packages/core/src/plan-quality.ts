@@ -1,5 +1,5 @@
 import type { PlanQualityCode, PlanQualitySettings } from "../../shared/dist/plan-quality-settings.js";
-import { acceptanceCriteriaProblems } from "../../shared/dist/acceptance-criteria.js";
+import { acceptanceCriteriaProblems, isManagerCriterion, type AcceptanceCriterion, type CriteriaRelaxation, type StoredAcceptanceCriterion } from "../../shared/dist/acceptance-criteria.js";
 import type { TaskPlanItem } from "./types";
 
 export type { PlanQualityCode };
@@ -31,8 +31,13 @@ export function planQualityOutcome(warnings: readonly PlanQualityWarning[], repa
   return warnings.some((warning) => settings.blocking_codes.includes(warning.code)) ? "rejected" : "accepted_with_warnings";
 }
 
-/** Pure quality check of the new and revised Tasks of a plan; reads the criteria fields only (content, check, weight), never splits text. */
-export function evaluatePlanQuality(items: readonly TaskPlanItem[], settings: PlanQualitySettings): PlanQualityWarning[] {
+const squeezed = (value: string): string => value.replace(/\s+/gu, "");
+
+/**
+ * Pure quality check of the new and revised Tasks of a plan; reads the criteria fields only (content, check, weight), never splits text.
+ * ownerTexts are the Owner's own words (Work summary, instructions, Decision answers) a criterion with origin owner must quote.
+ */
+export function evaluatePlanQuality(items: readonly TaskPlanItem[], settings: PlanQualitySettings, ownerTexts: readonly string[] = []): PlanQualityWarning[] {
   const warnings: PlanQualityWarning[] = [];
   items.forEach((item, index) => {
     const base = { task_ref: item.id ?? item.manager_task_id ?? `#${index}`, title: item.title };
@@ -50,7 +55,17 @@ export function evaluatePlanQuality(items: readonly TaskPlanItem[], settings: Pl
       return;
     }
     const fields = (criterion: { readonly text: string; readonly check: string }): string => `${criterion.text}\n${criterion.check}`;
-    const heavy = criteria.filter((criterion) => (criterion.check_weight === "heavy" || matchesAny(settings.heavy_check_patterns, fields(criterion))) && (criterion.weight_reason ?? "").trim() === "");
+    // The Owner asking for a heavy or external check is itself the reason, so only the quote is checked for those criteria.
+    const ownerSet = criteria.filter((criterion) => criterion.origin?.kind === "owner");
+    const unquoted = ownerSet.filter((criterion) => {
+      const quote = squeezed(criterion.origin?.quote ?? "");
+      return quote === "" || !ownerTexts.some((text) => squeezed(text).includes(quote));
+    });
+    if (unquoted.length > 0) {
+      warnings.push({ ...base, code: "criterion_origin_unquoted", detail: `A criterion marked origin owner does not quote the Owner (${unquoted.map((criterion) => criterion.id).join(", ")}). Copy the Owner's sentence from the Work summary, an instruction or a Decision answer into origin.quote, or mark the criterion origin manager.`, measured: unquoted.map((criterion) => criterion.id), threshold: null });
+    }
+    const forOwner = new Set<unknown>(ownerSet);
+    const heavy = criteria.filter((criterion) => !forOwner.has(criterion) && (criterion.check_weight === "heavy" || matchesAny(settings.heavy_check_patterns, fields(criterion))) && (criterion.weight_reason ?? "").trim() === "");
     if (heavy.length > 0) {
       warnings.push({ ...base, code: "heavy_check_unjustified", detail: `A criterion needs a heavy check without a reason (${heavy[0].text.slice(0, 200)}). Make it lighter (a small sample, a stub provider, a temporary copy with a few items), or, only if the request cannot be met otherwise, set check_weight heavy and give weight_reason.`, measured: heavy.length, threshold: 0 });
     }
@@ -62,7 +77,7 @@ export function evaluatePlanQuality(items: readonly TaskPlanItem[], settings: Pl
     if (chars > settings.max_acceptance_chars) {
       warnings.push({ ...base, code: "acceptance_chars_over", detail: `The acceptance is ${chars} characters (limit ${settings.max_acceptance_chars}). Shorten it or split the Task.`, measured: chars, threshold: settings.max_acceptance_chars });
     }
-    const external = criteria.map(fields).filter((text) => {
+    const external = criteria.filter((criterion) => !forOwner.has(criterion)).map(fields).filter((text) => {
       const remaining = withoutExempt(settings.external_state_exempt_patterns, text);
       return matchesAny(settings.external_state_patterns, remaining) && matchesAny(settings.state_comparison_patterns, remaining);
     });
@@ -71,6 +86,38 @@ export function evaluatePlanQuality(items: readonly TaskPlanItem[], settings: Pl
     }
   });
   return warnings;
+}
+
+/**
+ * The problems of an automatic replan that loosens Manager-made criteria of a retried Task, one sentence each; [] when it is allowed.
+ * Only the checking may get lighter: the criterion stays (id, kind), still says what is checked (text, check, keeps) and passes the blocking quality checks.
+ */
+export function evaluateCriteriaRelaxation(
+  current: readonly StoredAcceptanceCriterion[],
+  revised: readonly AcceptanceCriterion[],
+  relaxations: readonly CriteriaRelaxation[],
+  settings: PlanQualitySettings,
+): string[] {
+  const errors: string[] = [];
+  for (const before of current.filter(isManagerCriterion)) {
+    const after = revised.find((criterion) => criterion.id === before.id);
+    if (after === undefined) {
+      errors.push(`Criterion ${before.id} was removed; loosen it instead of deleting it, and keep the same criterion_id.`);
+      continue;
+    }
+    if (after.text === before.text && after.check === before.check) continue;
+    if (after.text.trim() === "" || after.check.trim() === "") errors.push(`Criterion ${before.id}: text and check must not be empty after loosening.`);
+    if ((after.kind ?? "work_check") !== (before.kind ?? "work_check")) errors.push(`Criterion ${before.id}: kind must stay ${before.kind ?? "work_check"} when loosening.`);
+    const record = relaxations.find((entry) => entry.criterion_id === before.id);
+    if (record === undefined) errors.push(`Criterion ${before.id} was changed but has no entry in auto_recovery.criteria_relaxations (criterion_id, reason, keeps).`);
+    else if (record.keeps.trim() === "") errors.push(`Criterion ${before.id}: criteria_relaxations.keeps must say what is still checked.`);
+    const blocking = evaluatePlanQuality(
+      [{ title: before.id, type: "code", acceptance: after.text, acceptance_criteria: [{ ...after, id: "AC1" }], necessity: { serves: "-", if_omitted: "-" } }],
+      settings,
+    ).filter((warning) => settings.blocking_codes.includes(warning.code));
+    if (blocking.length > 0) errors.push(`Criterion ${before.id}: the loosened criterion still fails the plan quality check.\n${formatPlanQualityReason(blocking)}`);
+  }
+  return errors;
 }
 
 export function formatPlanQualityReason(warnings: readonly PlanQualityWarning[]): string {

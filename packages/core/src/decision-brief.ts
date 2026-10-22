@@ -45,6 +45,8 @@ export const DECISION_CANCEL_OPTION_KEY = "cancel";
 
 /** Option key of a merge-conflict Decision that asks the Manager to resolve the conflict. */
 export const RESOLVE_CONFLICT_OPTION_KEY = "resolve_conflict";
+/** The option that marks the Decision a Work opens when a prerequisite Work can no longer complete. */
+export const DROP_MISSING_PREREQUISITES_OPTION_KEY = "drop_missing_prerequisites";
 
 /** Throw unless the Decision fills every field of the template. */
 export function assertDecisionBrief(brief: {
@@ -82,7 +84,7 @@ export function assertDecisionBrief(brief: {
   }
 }
 
-interface OptionText {
+export interface OptionText {
   readonly label: string;
   readonly description: string;
 }
@@ -399,11 +401,11 @@ const TEXT = {
   },
 } as const;
 
-function option(key: string, textOf: OptionText): DecisionOptionBrief {
+export function option(key: string, textOf: OptionText): DecisionOptionBrief {
   return { key, label: textOf.label, description: textOf.description };
 }
 
-function cancelWorkOption(language: OwnerLanguage): DecisionOptionBrief {
+export function cancelWorkOption(language: OwnerLanguage): DecisionOptionBrief {
   return option(DECISION_CANCEL_OPTION_KEY, TEXT[language].cancelWork);
 }
 
@@ -933,6 +935,53 @@ export function prerequisiteExpiredBrief(input: PrerequisiteExpiredBriefInput, l
     current_state: t.currentState,
     tried: [`${t.waitingFor}: ${input.reason}`, ...input.conditions.map((line) => `- ${line}`), `${t.detail}: ${input.detail}`].join("\n"),
     options: [option("retry", t.retry), cancelWorkOption(language)],
+    recommended: null,
+  };
+}
+
+export interface WorkPrerequisiteBriefItem {
+  /** "{Project name} Work #{N}" */
+  readonly name: string;
+  readonly title: string;
+  /** The Work state; null once the prerequisite was deleted. */
+  readonly state: string | null;
+  /** Set for a prerequisite that can no longer complete. */
+  readonly missing: "cancelled" | "deleted" | null;
+}
+
+const WORK_PREREQUISITE_TEXT = {
+  ja: {
+    reason: (missing: string) => `前提の Work が完了しなくなりました: ${missing}`,
+    cancelled: "中止",
+    deleted: "削除",
+    deletedState: "削除済み",
+    separator: "、",
+    question: "欠けた前提を外して待ちを続けますか。それとも、この Work を中止しますか。",
+    currentState: "この Work はまだ開始していません。Manager の計画もまだ作っていません。",
+    drop: { label: "欠けた前提を外して続ける", description: "欠けた前提を一覧から外します。残りの前提がすべて完了していれば開始し、未完了なら待ちを続けます。" },
+  },
+  en: {
+    reason: (missing: string) => `A prerequisite Work can no longer complete: ${missing}`,
+    cancelled: "cancelled",
+    deleted: "deleted",
+    deletedState: "deleted",
+    separator: ", ",
+    question: "Drop the missing prerequisites and keep waiting, or cancel this Work?",
+    currentState: "This Work has not started. The Manager has not planned it yet.",
+    drop: { label: "Drop the missing prerequisites and continue", description: "Removes the missing prerequisites from the list. The Work starts if the rest are completed, and keeps waiting otherwise." },
+  },
+} as const;
+
+/** The Decision opened when a prerequisite Work of a waiting Work was cancelled or deleted. */
+export function workPrerequisiteUnreachableBrief(items: readonly WorkPrerequisiteBriefItem[], language: OwnerLanguage): DecisionBrief {
+  const t = WORK_PREREQUISITE_TEXT[language];
+  const missing = items.filter((item) => item.missing !== null).map((item) => `${item.name} (${t[item.missing as "cancelled" | "deleted"]})`);
+  return {
+    reason: t.reason(missing.join(t.separator)),
+    question: t.question,
+    current_state: t.currentState,
+    tried: items.map((item) => `- ${item.name} ${item.title}: ${item.state ?? t.deletedState}`).join("\n"),
+    options: [option(DROP_MISSING_PREREQUISITES_OPTION_KEY, t.drop), cancelWorkOption(language)],
     recommended: null,
   };
 }

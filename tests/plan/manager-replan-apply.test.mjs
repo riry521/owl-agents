@@ -5,6 +5,8 @@ import { test } from "node:test";
 
 import { createAgentRunner } from "../../packages/agent-runtime/dist/index.js";
 import { isPlanRejection, validatePlan, validateReplan } from "../../packages/core/dist/replan-plan.js";
+import { evaluateCriteriaRelaxation } from "../../packages/core/dist/plan-quality.js";
+import { DEFAULT_PLAN_QUALITY_SETTINGS } from "../../packages/shared/dist/plan-quality-settings.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { createTaskPlanInTransaction, createWorkInTransaction } from "../../packages/core/dist/index.js";
 import { applyReplanInTransaction } from "../../packages/core/dist/state-reducer.js";
@@ -283,9 +285,13 @@ test("a second bad replan answer opens one Decision listing the errors and block
   await startWithoutDriving(core, db, workId);
   const baseline = writeState(db, workId);
 
+  // A plan_rejected final answer is recovered automatically twice (default limit); the third round opens the Decision.
+  await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
+  assert.equal(openDecisions(db, workId).length, 0, "no Decision on the first final rejection");
+  await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
   await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
 
-  assert.equal(prompts.filter(isReplan).length, 2);
+  assert.equal(prompts.filter(isReplan).length, 6);
   const decisions = openDecisions(db, workId);
   assert.equal(decisions.length, 1);
   assert.equal(decisions[0].issuer_role, "manager");
@@ -796,4 +802,135 @@ test("a design_mode=auto Work decides a code Task retried as design by its desig
 test("an escalated design Task retried as code loses every designer state", async (t) => {
   const state = await retryDesignerState(t, { designMode: "auto", from: { type: "design", escalated: 1 }, revision: { type: "code" } });
   assert.deepEqual(state, { type: "code", assigned_designer: null, start: null, escalated: 0 });
+});
+
+// Automatic recovery of a Manager call: a final quality rejection and a temporary provider error each get
+// a counted wait first, and only after the limit become a Decision.
+
+const recoveryRecords = (db, workId) =>
+  db.all("SELECT payload_json FROM events WHERE work_id = ? AND type = 'recovery.started' ORDER BY sequence", workId).map((row) => JSON.parse(row.payload_json));
+
+/** A Core whose Manager is `manage(request, callNo)`; the Work driver is not running. */
+async function openStubManagerCore(t, manage) {
+  const calls = [];
+  const agentRunner = {
+    runManagerPlan: async (request) => {
+      calls.push(request);
+      return manage(request, calls.length);
+    },
+    runWorker: async () => ({ outcome: "failed", failure_class: "transient", error_key: "x", retry_allowed: true, message: "x" }),
+    runReviewer: async () => ({ outcome: "failed" }),
+    runAdvisor: async () => ({ reply: "" }),
+  };
+  const opened = await createTestCore(t, { agentRunner, max_parallel: 4, dispatcher: { tick_interval_ms: 60_000, manager_retry_delay_ms: 1 } }, { prefix: "owl-replan-recovery-" });
+  return { ...opened, calls };
+}
+
+test("a replan the quality check finally rejects opens no Decision the first time and hands its feedback to the next Manager call", async (t) => {
+  const bad = { ...task("N1", { replaces: ["T2"] }), review: false, acceptance: "x", acceptance_criteria: criteriaFor("本番のデータが前後で変わらない") };
+  const { db, core, calls } = await openStubManagerCore(t, () => ({ outcome: "success", report_valid: true, report: { event: "task.replanned", tasks: [bad] } }));
+  const { workId, t2 } = await seedRepro2(core, db);
+  await startWithoutDriving(core, db, workId);
+
+  await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
+  const firstRoundCalls = calls.length;
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ?", workId).n, 0, "no Decision on the first final rejection");
+  const records = recoveryRecords(db, workId);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].kind, "plan_quality_rejected");
+  assert.equal(records[0].counted, true);
+  assert.equal(records[0].attempt_no, 1);
+  const feedback = JSON.parse(records[0].previous_failure.detail);
+  assert.equal(feedback.kind, "quality_rejected");
+  assert.equal(feedback.warnings[0].code, "external_state_comparison");
+
+  await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
+  assert.deepEqual(calls[firstRoundCalls].context.previous_output_feedback, feedback, "the next Manager call starts from the last feedback");
+
+  await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
+  assert.equal(recoveryRecords(db, workId).length, 2);
+  assert.equal(openDecisions(db, workId).length, 1, "after the limit a Decision opens");
+  assert.match(openDecisions(db, workId)[0].tried, /自動で試したこと|Tried automatically/);
+});
+
+test("a replan hit by a 503 waits for resume_at without calling the Manager, and after the limit opens a Decision", async (t) => {
+  const start = Date.parse("2030-01-02T03:04:05.000Z");
+  t.mock.timers.enable({ apis: ["Date"], now: start });
+  const { db, core, calls } = await openStubManagerCore(t, () => ({ outcome: "failed", failure_class: "transient", error_key: "provider_failed:harness_error:503", retry_allowed: true, message: "503 Service Unavailable" }));
+  const { workId, t2 } = await seedRepro2(core, db);
+  await startWithoutDriving(core, db, workId);
+  const queueTrigger = () => db.createWriteLane().transact((tx) => tx.run(
+    `INSERT INTO idempotency_keys (key, request_hash, response_json, status_code, created_at, expires_at)
+     VALUES (?, ?, ?, 202, ?, ?) ON CONFLICT(key) DO UPDATE SET response_json = excluded.response_json`,
+    `manager-trigger:${t2}`, "0".repeat(64), JSON.stringify({ status: "queued" }), new Date().toISOString(), "2031-01-02T03:04:05.000Z",
+  ));
+  await queueTrigger();
+
+  await core.tick(workId);
+  assert.equal(calls.length, 1);
+  assert.equal(openDecisions(db, workId).length, 0, "the first failure opens no Decision");
+  const first = recoveryRecords(db, workId);
+  assert.equal(first.length, 1);
+  assert.deepEqual([first[0].kind, first[0].counted, first[0].attempt_no], ["provider_transient", true, 1]);
+  assert.equal(first[0].resume_at, new Date(start + 15 * 60_000).toISOString());
+
+  t.mock.timers.setTime(start + 60_000);
+  await core.tick(workId);
+  assert.equal(calls.length, 1, "no Manager call before resume_at");
+
+  t.mock.timers.setTime(Date.parse(first[0].resume_at));
+  await core.tick(workId);
+  assert.equal(calls.length, 2);
+  const second = recoveryRecords(db, workId);
+  assert.equal(second.length, 2);
+  assert.equal(second[1].resume_at, new Date(Date.parse(first[0].resume_at) + 30 * 60_000).toISOString());
+  assert.equal(openDecisions(db, workId).length, 0);
+
+  t.mock.timers.setTime(Date.parse(second[1].resume_at));
+  await core.tick(workId);
+  assert.equal(calls.length, 3);
+  assert.equal(recoveryRecords(db, workId).length, 2, "no third recovery");
+  assert.equal(openDecisions(db, workId).length, 1, "after the limit a Decision opens");
+  assert.match(openDecisions(db, workId)[0].tried, /自動で試したこと|Tried automatically/);
+});
+
+const MANAGER = { kind: "manager", source: null, quote: "" };
+const OWNER = { kind: "owner", source: "summary", quote: "check it" };
+const stored = (id, origin, extra = {}) => ({ id, text: `${id} holds`, check: "node --test the file", kind: "work_check", check_weight: "light", weight_reason: "", serves: "test fixture", if_omitted: "test fixture", origin, ...extra });
+const loosened = (before, extra = {}) => ({ ...before, text: `${before.id} holds for a sample`, ...extra });
+const record = (id, extra = {}) => ({ criterion_id: id, reason: "too wide to prove", keeps: "the sample still holds", ...extra });
+
+test("evaluateCriteriaRelaxation accepts a recorded loosening of a Manager criterion and rejects each way of breaking the rules", () => {
+  const S = DEFAULT_PLAN_QUALITY_SETTINGS;
+  const before = stored("AC1", MANAGER);
+  const run = (revised, records) => evaluateCriteriaRelaxation([before], revised, records, S);
+  assert.deepEqual(run([loosened(before)], [record("AC1")]), []);
+  assert.match(run([], [record("AC1")]).join("\n"), /removed/);
+  assert.match(run([loosened(before, { text: "" })], [record("AC1")]).join("\n"), /empty/);
+  assert.match(run([loosened(before, { check: " " })], [record("AC1")]).join("\n"), /empty/);
+  assert.match(run([loosened(before, { kind: "spec_test" })], [record("AC1")]).join("\n"), /kind must stay/);
+  assert.match(run([loosened(before)], [record("AC1", { keeps: "" })]).join("\n"), /keeps/);
+  assert.match(run([loosened(before, { text: "Run it on 全件" })], [record("AC1")]).join("\n"), /plan quality/);
+  assert.match(run([loosened(before)], []).join("\n"), /no entry/);
+});
+
+test("validateReplan: an automatic replan loosens Manager criteria but never changes or removes an Owner (or origin-less) criterion; an Owner replan may", () => {
+  const snapshot = { tasks: [{ id: "T1", manager_task_id: "T1", status: "failed", failed_by_dependency: false }], edges: [] };
+  const retry = (criteria, relaxations) => ({
+    id: "T1", title: "A", type: "code", acceptance: "x", depends_on: [], replaces: [],
+    acceptance_criteria: criteria, auto_recovery: relaxations === undefined ? undefined : { criteria_relaxations: relaxations },
+  });
+  const validate = (current, criteria, relaxations, automatic = true) =>
+    validateReplan([retry(criteria, relaxations)], snapshot, ["T1"], { currentCriteria: new Map([["T1", current]]), automatic });
+  const owner = stored("AC1", OWNER);
+  const noOrigin = stored("AC1", undefined);
+  const manager = stored("AC1", MANAGER);
+  assert.ok(!isPlanRejection(validate([manager], [loosened(manager)], [record("AC1")])));
+  for (const protectedCriterion of [owner, noOrigin]) {
+    assert.ok(isPlanRejection(validate([protectedCriterion], [loosened(protectedCriterion)], [record("AC1")])), "text change");
+    assert.ok(isPlanRejection(validate([protectedCriterion], [{ ...protectedCriterion, check: "node --test other" }], [])), "check change");
+    assert.ok(isPlanRejection(validate([protectedCriterion], [stored("AC2", MANAGER)], [])), "removal");
+    assert.ok(!isPlanRejection(validate([protectedCriterion], [protectedCriterion], [])), "unchanged is fine");
+    assert.ok(!isPlanRejection(validate([protectedCriterion], [loosened(protectedCriterion)], [], false)), "an Owner replan may change it");
+  }
 });

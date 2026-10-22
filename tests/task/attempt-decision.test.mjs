@@ -242,6 +242,46 @@ test("task.attempt_decided is recorded once per decision, not for task.ready or 
   assert.equal(db.get("SELECT COUNT(*) AS n FROM outbox_deliveries WHERE event_id IN (SELECT id FROM events WHERE type = 'task.attempt_decided')").n, 0);
 });
 
+async function immediateDecisionSetup(t, type, stopJson) {
+  const { db } = await openTestDatabase(t, { prefix: "owl-immediate-decision-" });
+  const lane = db.createWriteLane();
+  const now = "2026-09-24T00:00:00.000Z";
+  await lane.transact((tx) => {
+    tx.run("INSERT OR IGNORE INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Owner', ?, ?)", now, now);
+    tx.run(`INSERT INTO works (id, owner_id, project_id, title, summary, size, state, rules_json, related_work_ids_json, created_at, updated_at)
+            VALUES ('W', 'owner:default', NULL, 'W', 'x', 'normal', 'running', '[]', '[]', ?, ?)`, now, now);
+    tx.run(
+      `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, state_version, failure_count, same_error_count,
+         review_round, worker_generation, created_at, updated_at, retry_no, manager_task_id, design_stop_json)
+       VALUES ('T1', 'W', 'T1', ?, 'running', 'normal', '', 'Done.', 0, 0, 0, 0, 1, ?, ?, 0, 'T1', ?)`,
+      type, now, now, stopJson,
+    );
+  });
+  return { db, lane };
+}
+
+function openedTried(db) {
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE type = 'recovery.started'").n, 0);
+  const rows = db.all("SELECT tried FROM decisions WHERE work_id = 'W'");
+  assert.equal(rows.length, 1);
+  return rows[0].tried;
+}
+
+test("a design_blocked Task opens a Decision at the first failure, saying nothing was tried automatically", async (t) => {
+  const { db, lane } = await immediateDecisionSetup(t, "design", stop);
+  await lane.transact((tx) => reduceTaskInTransaction(tx, "T1", { event: "task.rate_limited", payload: { provider: "p" } }));
+  assert.match(openedTried(db), /^自動では試していません（理由: .+）。/u);
+});
+
+test("a 401 from the harness opens a Decision at the first failure, saying nothing was tried automatically", async (t) => {
+  const { db, lane } = await immediateDecisionSetup(t, "code", null);
+  await lane.transact((tx) => reduceTaskInTransaction(tx, "T1", {
+    event: "task.failure.classified",
+    payload: { failure_class: "deterministic", error_key: "provider_failed:harness_error:401", retry_allowed: false },
+  }));
+  assert.match(openedTried(db), /^自動では試していません（理由: .+）。/u);
+});
+
 // AttemptPolicy.evaluate: the pure decision function. Observations carry the Task row as `task`.
 
 const cfg = (over = {}) => ({ ...DEFAULT_ATTEMPT_POLICY_CONFIG, ...over });
@@ -357,6 +397,16 @@ test("transient failure: bounds and the configured limit", () => {
   assert.deepEqual(atLimit.patch, { retry_no: TRANSIENT_RETRY_LIMIT, next_attempt_at: "2026-09-24T00:00:30.000Z" });
   assert.deepEqual(evaluate(observe(TRANSIENT_RETRY_LIMIT + 1), cfg()), { outcome: "reject", message: "The transient retry budget is exhausted." });
   assert.equal(evaluate(observe(2), cfg({ transientRetryLimit: 1 })).outcome, "reject");
+});
+
+test("transient failure past the limit: ready only when an automatic recovery was granted", () => {
+  const observe = (retryNo, extra) => ({ kind: "transient_failure", task: taskRow(), retryNo, nextAttemptAt: "2026-09-24T00:15:00.000Z", ...extra });
+  const retryNo = TRANSIENT_RETRY_LIMIT + 1;
+  assert.equal(evaluate(observe(retryNo, {}), cfg()).outcome, "reject");
+  assert.equal(evaluate(observe(retryNo, { autoRecoveryAttemptNo: null }), cfg()).outcome, "reject");
+  const granted = decisionOf(evaluate(observe(retryNo, { autoRecoveryAttemptNo: 1 }), cfg()));
+  assert.deepEqual([granted.to, granted.reason], ["ready", "transient_auto_recovery"]);
+  assert.deepEqual(granted.patch, { retry_no: retryNo, next_attempt_at: "2026-09-24T00:15:00.000Z" });
 });
 
 test("deterministic failure: retry_not_allowed wins, thresholds decide retry or fail, config moves the line", () => {

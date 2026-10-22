@@ -47,19 +47,33 @@ const passedReport = (invocationId, acceptance) => ({
   question_for_manager: null,
 });
 
-const planTask = (acceptance) => ({ id: "T1", title: "A", type: "code", acceptance, depends_on: [], required_sections: [], required_tests: [], replaces: [], review: true });
+const MANAGER = { kind: "manager", source: null, quote: "" };
+const OWNER = { kind: "owner", source: "summary", quote: "unprovable criterion" };
+const RELAX = { reason: "The live server is outside the Task.", keeps: "A copy made inside the Task is unchanged." };
 
-/** The first review reports BAD_CRITERION as unprovable; the Manager rewrites it; the next review passes. */
-function runner() {
+/** A Task whose only criterion is AC1 with the given origin (undefined: no origin). A loosening names its entry in auto_recovery. */
+const planTask = (text, origin, relax = false) => ({
+  id: "T1", title: "A", type: "code",
+  necessity: { serves: "test fixture", if_omitted: "test fixture" },
+  acceptance_criteria: [{ id: "AC1", text, check: "node --test tests/x.test.mjs", serves: "test fixture", if_omitted: "test fixture", check_weight: "light", weight_reason: "", kind: "work_check", ...(origin ? { origin } : {}) }],
+  auto_recovery: { criteria_relaxations: relax ? [{ criterion_id: "AC1", ...RELAX }] : [] },
+  depends_on: [], required_sections: [], required_tests: [], replaces: [], review: true,
+});
+
+/**
+ * The first review reports BAD_CRITERION as unprovable; the Manager rewrites it; the next review passes.
+ * With alwaysDefect every review reports it, so the recovery limit is what ends the loop.
+ */
+function runner({ origin = MANAGER, alwaysDefect = false } = {}) {
   const state = { workerCalls: 0, reviewCalls: 0, replanRequests: [] };
   return {
     state,
     runManagerPlan: async (request) => {
       const mode = request.mode ?? request.context?.mode;
-      if (mode === "plan") return { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [planTask(`${BAD_CRITERION} Verified by node --test tests/x.test.mjs.`)] } };
+      if (mode === "plan") return { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [planTask(BAD_CRITERION, origin)] } };
       if (mode === "replan") {
         state.replanRequests.push(request);
-        return { outcome: "success", report_valid: true, report: { event: "task.replanned", tasks: [planTask(GOOD_ACCEPTANCE)] } };
+        return { outcome: "success", report_valid: true, report: { event: "task.replanned", tasks: [planTask(GOOD_ACCEPTANCE, origin, true)] } };
       }
       return { outcome: "failed", message: `unexpected manager ${mode}` };
     },
@@ -71,7 +85,7 @@ function runner() {
     },
     runReviewer: async () => {
       state.reviewCalls += 1;
-      if (state.reviewCalls === 1) {
+      if (alwaysDefect || state.reviewCalls === 1) {
         const review = {
           verdict: "acceptance_defect",
           summary: "One criterion cannot be proven.",
@@ -90,8 +104,8 @@ function runner() {
 
 const tasksOf = (db, workId) => db.all("SELECT id, status, acceptance, review_round, total_review_attempts FROM tasks WHERE work_id = ? ORDER BY created_at", workId);
 
-async function run(t, configure) {
-  const fake = runner();
+async function run(t, configure, { until = (rows) => rows[0]?.status === "completed", ...options } = {}) {
+  const fake = runner(options);
   const { db, core } = await createTestCore(t, { agentRunner: fake, dispatcher: { tick_interval_ms: 25 } }, { prefix: "owl-reviewer-defect-", start: true });
   // The plan quality gate would reject the unprovable starting criterion before the path under test runs.
   await disablePlanQuality(db);
@@ -99,7 +113,7 @@ async function run(t, configure) {
   const created = await core.createWork(command({ title: "defect", summary: "Reviewer reports an unprovable criterion.", size: "normal", project_id: null }, "test:create"));
   await core.startWork(created.data.work_id, command({ mode: "normal" }, "test:start", created.version));
   const workId = created.data.work_id;
-  assert.ok(await waitFor(() => tasksOf(db, workId)[0]?.status === "completed", { message: "the Task to complete" }), `the Task completes (${JSON.stringify(tasksOf(db, workId))})`);
+  assert.ok(await waitFor(() => until(tasksOf(db, workId), db, workId), { message: "the expected state" }), `the expected state is reached (${JSON.stringify(tasksOf(db, workId))})`);
   return { fake, db, workId };
 }
 
@@ -107,7 +121,7 @@ test("an acceptance_defect review goes to the Manager on the same Task and is no
   const { fake, db, workId } = await run(t);
   const [task] = tasksOf(db, workId);
   assert.equal(tasksOf(db, workId).length, 1, "no replacement Task was created");
-  assert.equal(task.acceptance, GOOD_ACCEPTANCE);
+  assert.match(task.acceptance, new RegExp(GOOD_ACCEPTANCE.slice(0, 30)));
   assert.equal(fake.state.workerCalls, 2);
   assert.equal(fake.state.reviewCalls, 2);
 
@@ -129,6 +143,42 @@ test("an acceptance_defect review goes to the Manager on the same Task and is no
   assert.equal(brief.acceptance_defects[0].criterion, BAD_CRITERION);
   assert.equal(brief.acceptance_defects[0].reason, REASON);
   assert.equal(fake.state.replanRequests[0].trigger.kind, "task_failed");
+
+  // Kind 7 recovery: no Decision, one recovery.started, and the loosening is on record in the replan's transaction.
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ? AND blocked_task_ids_json != '[]'", workId).n, 0, "no Task Decision was opened");
+  const started = db.all("SELECT payload_json FROM events WHERE work_id = ? AND type = 'recovery.started'", workId).map((row) => JSON.parse(row.payload_json));
+  assert.deepEqual(started.map((entry) => entry.kind), ["criteria_too_strict"]);
+  const relaxed = db.all("SELECT payload_json FROM events WHERE work_id = ? AND type = 'criteria.relaxed'", workId).map((row) => JSON.parse(row.payload_json));
+  assert.equal(relaxed.length, 1);
+  assert.equal(relaxed[0].criterion_id, "AC1");
+  assert.equal(relaxed[0].original.text, BAD_CRITERION);
+  assert.equal(relaxed[0].relaxed.text, GOOD_ACCEPTANCE);
+  assert.equal(relaxed[0].reason, RELAX.reason);
+  assert.equal(relaxed[0].keeps, RELAX.keeps);
+  const stored = JSON.parse(db.get("SELECT acceptance_criteria_json AS json FROM tasks WHERE id = ?", task.id).json);
+  assert.equal(stored[0].text, GOOD_ACCEPTANCE, "the Task's criteria were rewritten");
+});
+
+const openDecisions = (db, workId) => db.all("SELECT reason, tried, options_json FROM decisions WHERE work_id = ? AND status = 'open' AND blocked_task_ids_json != '[]'", workId);
+const hasDecision = (_rows, db, workId) => openDecisions(db, workId).length > 0;
+
+for (const [label, origin] of [["an Owner criterion", OWNER], ["a criterion with no origin", null]]) {
+  test(`a defect on ${label} opens the criteria Decision at once and the Manager is not asked`, async (t) => {
+    const { fake, db, workId } = await run(t, undefined, { origin, until: hasDecision });
+    const [decision] = openDecisions(db, workId);
+    assert.match(decision.reason, /AC1/);
+    assert.ok(JSON.parse(decision.options_json).some((option) => option.key === "rewrite_criteria"), "the rewrite option is offered");
+    assert.equal(fake.state.replanRequests.length, 0, "no automatic replan");
+    assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type IN ('recovery.started', 'criteria.relaxed')", workId).n, 0);
+  });
+}
+
+test("a defect after the recovery limit is used up opens the criteria Decision with what was tried automatically", async (t) => {
+  const { fake, db, workId } = await run(t, async (core) => { await core.setAutoRecoverySettings({ limit: 1 }); }, { alwaysDefect: true, until: hasDecision });
+  assert.equal(fake.state.replanRequests.length, 1, "the Manager loosened the criterion once");
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'recovery.started'", workId).n, 1);
+  const [decision] = openDecisions(db, workId);
+  assert.match(decision.tried, /自動で試したこと/);
 });
 
 test("the tightest review, remake and no_progress limits do not stop the rewrite", async (t) => {

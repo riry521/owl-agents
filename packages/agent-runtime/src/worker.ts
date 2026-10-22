@@ -250,6 +250,7 @@ export function workerPromptInputs(request: WorkerRequest): RolePromptSlots["inp
       value: {
         review_round: task.review_round ?? 0,
         owner_guidance: context.owner_guidance ?? [],
+        auto_recovery: context.auto_recovery ?? null,
         ...attemptFix(context),
       },
     },
@@ -323,6 +324,7 @@ const WORKER_CONTEXT_INSTRUCTIONS: readonly string[] = [
   "If Attempt.verification_failure is non-null, the previous attempt failed Core verification: read source, commands and error and fix the cause. If Attempt.reviewer_findings is non-empty, it contains only major findings, each with an id (F1, F2, ...), and every one must be fixed; address all of them. The findings are a list of places to fix, not the scope of your verification: after fixing them, still verify the whole Task against its acceptance criteria. Minor findings are not passed to the Worker. When Attempt.verification_failure.test_failures is present, it lists the failed tests (file, name, line, message summary) from Core's test run; fix those failures, then run each failing file alone to confirm. Do not try to fix failures that are not listed. Only one of the two describes the latest attempt; Attempt.previous_report is that attempt's report (null if none).",
   "Keep a new test file only when a criterion's kind is spec_test; otherwise Core deletes the test files you add before merge, so check your work without leaving new test files. Before reporting, run every command in Project.check_commands and fix violations by comparing properties instead of copying current values; never delete or skip a test to pass them.",
   "If Attempt.owner_guidance is non-empty, the Owner answered earlier Decisions for this Work (newest first). Follow that guidance.",
+  "If Attempt.auto_recovery is non-null, Core started this run as an automatic recovery (kind, attempt_no of limit). previous_failure is what went wrong before, check_results are the checks Core already ran, and relaxed_criteria lists criteria the Manager relaxed. Follow instruction and do not repeat the previous failure.",
   "If Attempt.process_wait is non-null, you started that process in an earlier run and Core relaunched you because its done_path appeared or it exited: check its log_path and done_path first, then continue from Attempt.previous_report.",
 ];
 

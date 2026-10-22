@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { createUlid } from "../../db/dist/index.js";
 import { idempotencyConflict, validationError } from "./errors";
+import { autoRecoverySummary } from "./auto-recovery";
 import { ownerLanguage } from "./owner-language";
 import { toDecisionExplanation } from "./decision-explainer";
 import { openDecisionInTransaction, resolveDecisionInTransaction } from "./state-reducer";
@@ -58,6 +59,7 @@ export class DecisionService {
     // the event payload must receive the same identifier that the transaction
     // inserts rather than discovering a second identifier afterward.
     const decisionId = createUlid();
+    const language = ownerLanguage(this.db);
     try {
       const result = await this.writeLane.write({
         mutateState: (transaction: CoreWriteLaneTransaction) => {
@@ -96,7 +98,7 @@ export class DecisionService {
           type: "decision.opened",
           workId: request.payload.work_id,
           // Connectors word the notification in the Owner language.
-          payload: { ...request.payload, decision_id: decisionId, language: ownerLanguage(this.db) },
+          payload: { ...request.payload, decision_id: decisionId, language, auto_recovery_summary: autoRecoverySummary(request.payload.tried, language) },
         },
         outbox: [{ provider: "websocket" }],
       });

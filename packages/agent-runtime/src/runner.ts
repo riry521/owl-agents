@@ -561,6 +561,7 @@ function coreWorkerRequestAsLocal(input: CoreWorkerRunRequest): WorkerRequest {
     ...(isRecord(context.process_wait) ? { process_wait: context.process_wait } : {}),
     ...(Array.isArray(context.reviewer_findings) ? { reviewer_findings: context.reviewer_findings as NonNullable<WorkerRequest["context"]>["reviewer_findings"] } : {}),
     ...(isRecord(context.design_stop) ? { design_stop: context.design_stop } : {}),
+    ...(isRecord(context.auto_recovery) ? { auto_recovery: context.auto_recovery } : {}),
     ...(Array.isArray(context.owner_guidance) && context.owner_guidance.length > 0
       ? { owner_guidance: context.owner_guidance.filter(isRecord) }
       : {}),

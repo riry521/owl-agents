@@ -58,6 +58,9 @@
         "object",
         "null"
       ]
+    },
+    "auto_recovery": {
+      "type": "object"
     }
   }
 }

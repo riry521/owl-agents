@@ -388,13 +388,13 @@ function fallbackVerdict(cause: ProviderFailureCause, text: string): FailureVerd
   if (isArgumentSizeFailure(text)) return deterministic("argument_list_too_long");
   if (isInsufficientQuotaFailure(text)) return deterministic(exitDescriptor(cause));
   const status = statusFrom(text, { status: cause.harness_status ?? null });
+  // Authentication, permission and configuration come before 429, so "401 Unauthorized ... rate limit" is not hidden in a rate-limit wait.
+  const needsOwner = isAuthenticationFailure(text, status) || isPermissionFailure(text, status) || isConfigurationFailure(text, status);
+  if (needsOwner) return { failure_class: "deterministic", retry_allowed: false, key: exitDescriptor(cause) };
   if (isOverloadedFailure(text, status)) return transient(exitDescriptor(cause));
   if (isRateLimitFailure(text, status)) return rateLimited();
   const isTransient = isNetworkFailure(text) || isTimeoutFailure(text);
-  const retryDisallowed = isAuthenticationFailure(text, status)
-    || isPermissionFailure(text, status)
-    || isConfigurationFailure(text, status)
-    || isProtocolFailure(text);
+  const retryDisallowed = isProtocolFailure(text);
   return {
     failure_class: isTransient ? "transient" : "deterministic",
     retry_allowed: isTransient && !retryDisallowed,

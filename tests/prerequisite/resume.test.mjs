@@ -51,6 +51,7 @@ function makeRunner() {
       if (mode === "plan") return { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [planTask()] } };
       if (mode === "replan") {
         state.replans += 1;
+        if (request.context?.auto_recovery) return { outcome: "success", report_valid: true, report: { event: "task.replanned", tasks: [planTask({ id: "T2", title: "Resolve the conflict" })] } };
         return { outcome: "success", report_valid: true, report: { event: "task.replanned", tasks: [planTask({ wait_for: state.wait() })] } };
       }
       return { outcome: "success", report_valid: true, report: { tasks: [], event: null, verdict: { verdict: "complete", summary: "Done.", missing: [], lessons: [] } } };
@@ -205,8 +206,9 @@ test("prerequisite_sync_base=false releases the wait without merging the base", 
   assert.ok(await until(() => task(ctx.db, workId).status === "completed"), "the Task finishes before cleanup");
 });
 
-test("a base sync conflict opens a sync_conflict Decision and keeps the Task from starting", async (t) => {
+test("a base sync conflict opens a sync_conflict Decision and keeps the Task from starting once automatic recovery is off", async (t) => {
   const ctx = await openFixture(t, { withProject: true });
+  await ctx.core.setAutoRecoverySettings({ limit: 0 });
   ctx.core.gitGateway().mergeBaseIntoWorkBranch = async () => ({ ok: false, conflict: true, message: "CONFLICT in README.md" });
   ctx.runner.state.wait = () => ({ reason: "needs page-format.ts on main", conditions: [{ kind: "base_branch", target: "", paths: ["README.md"], description: "README on main" }] });
   // README.md exists already, so the condition holds at the first evaluation and the sync runs.
@@ -217,6 +219,20 @@ test("a base sync conflict opens a sync_conflict Decision and keeps the Task fro
   assert.equal(expired.kind, "sync_conflict");
   assert.equal(ctx.db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ? AND status = 'open'", workId).n, 1);
   assert.equal(ctx.runner.state.workerCalls, 1);
+});
+
+test("the first base sync conflict during the release hands the conflict to the Manager and keeps the wait, with no Decision", async (t) => {
+  const ctx = await openFixture(t, { withProject: true });
+  let merges = 0;
+  ctx.core.gitGateway().mergeBaseIntoWorkBranch = async () => (merges++ === 0 ? { ok: false, conflict: true, message: "CONFLICT (content): Merge conflict in README.md" } : { ok: true });
+  ctx.runner.state.wait = () => ({ reason: "needs page-format.ts on main", conditions: [{ kind: "base_branch", target: "", paths: ["README.md"], description: "README on main" }] });
+  const workId = await startWork(ctx, "conflict-first", ctx.projectId);
+  assert.ok(await until(() => eventCount(ctx.db, workId, "recovery.started") === 1), "the conflict starts an automatic recovery");
+  const started = JSON.parse(ctx.db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = 'recovery.started'", workId).payload_json);
+  assert.deepEqual([started.kind, started.attempt_no, started.limit], ["integration_conflict", 1, 2]);
+  assert.equal(eventCount(ctx.db, workId, "task.prerequisite_expired"), 0, "the wait is not expired");
+  assert.ok(await until(() => task(ctx.db, workId).status === "completed"), "the release is tried again and the Task runs");
+  assert.equal(ctx.db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ?", workId).n, 0);
 });
 
 test("an expired deadline opens a Decision; the Task and the Work are judgement_waiting", async (t) => {

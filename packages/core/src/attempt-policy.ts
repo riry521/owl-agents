@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isReportFormatInvalidErrorKey } from "@owl/shared";
 import { ACCEPTANCE_DEFECT_EVENT } from "../../shared/dist/acceptance-defect.js";
 import { EXTERNAL_BLOCKER_EVENT } from "../../shared/dist/external-blocker.js";
 import type { DesignBlockedReport } from "../../shared/dist/design-blocked.js";
@@ -20,15 +21,15 @@ export type AttemptAction = "retry" | "fix" | "review" | "replan" | "wait" | "ow
 
 /** 判断の理由。閉じた集合。 */
 export type AttemptReason =
-  | "transient_failure" | "transient_budget_exhausted" | "rate_limited"
-  | "deterministic_failure" | "deterministic_threshold" | "retry_not_allowed" | "resumable_partial"
+  | "transient_failure" | "transient_auto_recovery" | "transient_budget_exhausted" | "rate_limited"
+  | "deterministic_failure" | "deterministic_threshold" | "retry_not_allowed" | "output_format_recovery" | "resumable_partial"
   | "crash" | "crash_threshold" | "reviewer_crash" | "reviewer_crash_threshold" | "reviewer_output_invalid"
   | "verification_failed" | "verification_exhausted"
   | "review_fix_required" | "review_same_spot_repeated" | "review_replan_required" | "review_budget_reached" | "review_budget_exceeded"
   | "lineage_budget_exhausted" | "base_sync_lineage_budget_exhausted"
   | "design_escalated_to_lead" | "lead_rejections_exhausted" | "design_blocked"
-  | "worker_replan_requested" | "worker_question" | "acceptance_defect"
-  | "external_blocker" | "external_blocker_limit" | "partial_limit"
+  | "worker_replan_requested" | "worker_question" | "acceptance_defect" | "acceptance_defect_decision"
+  | "external_blocker" | "external_blocker_limit" | "partial_limit" | "partial_repeated"
   | "integration_conflict" | "integration_commit_failed" | "work_sync_conflict"
   | "process_wait" | "dependency_failed" | "dependency_restored" | "dependency_incomplete"
   | "replanned" | "owner_answer" | "owner_to_manager" | "owner_rerun_review" | "owner_rerun_verification" | "test_environment_blocked"
@@ -106,6 +107,8 @@ export interface AttemptPolicyConfig {
   readonly partialLimit: number;
   /** Review rejections of a non-design Task after which the Fixer takes over. */
   readonly fixerAfterRejections: number;
+  /** Which automatic recoveries still have a try left for this Task's lineage (recovery.started count below the limit). */
+  readonly autoRecovery: { readonly outputFormat: boolean; readonly budget: boolean; readonly partial?: boolean };
 }
 
 export const DEFAULT_ATTEMPT_POLICY_CONFIG: AttemptPolicyConfig = {
@@ -116,6 +119,7 @@ export const DEFAULT_ATTEMPT_POLICY_CONFIG: AttemptPolicyConfig = {
   reviewLimits: DEFAULT_REVIEW_LIMIT_SETTINGS,
   reviewFocus: DEFAULT_REVIEW_FOCUS_SETTINGS,
   lineageLimits: null,
+  autoRecovery: { outputFormat: false, budget: false },
   noProgressLimit: DEFAULT_PROGRESS_GUARD_SETTINGS.no_progress_limit,
   externalBlockerLimit: DEFAULT_PROGRESS_GUARD_SETTINGS.external_blocker_limit,
   partialLimit: DEFAULT_PROGRESS_GUARD_SETTINGS.partial_limit,
@@ -143,7 +147,7 @@ export interface PartialReportObservation {
 }
 
 export type AttemptTaskObservation =
-  | { readonly kind: "transient_failure"; readonly task: AttemptTaskSnapshot; readonly retryNo: number; readonly nextAttemptAt: string | null }
+  | { readonly kind: "transient_failure"; readonly task: AttemptTaskSnapshot; readonly retryNo: number; readonly nextAttemptAt: string | null; readonly autoRecoveryAttemptNo?: number | null }
   | {
       readonly kind: "deterministic_failure";
       readonly task: AttemptTaskSnapshot;
@@ -154,6 +158,8 @@ export type AttemptTaskObservation =
       readonly partialReport?: PartialReportObservation | null;
       /** Partial reports recorded earlier in the same lineage (this run excluded); read only for a plain partial. */
       readonly earlierPartials?: number;
+      /** The plain partial report leaves the same criteria open as the previous one (samePartialReport). */
+      readonly samePartial?: boolean;
     }
   | { readonly kind: "worker_crash"; readonly task: AttemptTaskSnapshot; readonly errorKey: string }
   | { readonly kind: "reviewer_crash"; readonly task: AttemptTaskSnapshot }
@@ -188,9 +194,13 @@ export type AttemptTaskObservation =
       readonly countReview: boolean;
     }
   | { readonly kind: "work_sync_conflict"; readonly task: AttemptTaskSnapshot; readonly taskBranch: string; readonly workBranch: string }
-  | { readonly kind: "acceptance_defect"; readonly task: AttemptTaskSnapshot; readonly source: string }
+  /** route: who handles the defect. Absent or "manager": the Manager replans (kind 7 recovery). Any other value: the Owner is asked through a Decision, without calling the Manager. */
+  | { readonly kind: "acceptance_defect"; readonly task: AttemptTaskSnapshot; readonly source: string; readonly route?: AcceptanceDefectRoute }
   /** earlierReports: external blocker reports recorded earlier in the same lineage (this run excluded). */
   | { readonly kind: "external_blocker"; readonly task: AttemptTaskSnapshot; readonly earlierReports: number };
+
+/** Who handles an acceptance defect: the Manager (automatic kind 7 recovery) or the Owner through a Decision. */
+export type AcceptanceDefectRoute = "manager" | "owner" | "disabled" | "exhausted";
 
 export interface NoProgressGateObservation {
   readonly kind: "no_progress_gate";
@@ -319,7 +329,8 @@ function evaluateReviewFailed(o: Extract<AttemptTaskObservation, { kind: "review
   if (o.lineage && c.lineageLimits) {
     const mainAttempts = o.lineage.otherReviewAttempts + totalAttempts - baseSyncAttempts;
     if (mainAttempts >= c.lineageLimits.reviewAttempts) {
-      return decide(task, "judgement_waiting", "lineage_budget_exhausted", owner, false, { ...counted, paused_from: null }, {
+      // Why failed + trigger instead of the Decision: the first budget stop is handed to the Manager once (auto recovery kind budget_exhausted).
+      return decide(task, c.autoRecovery.budget ? "failed" : "judgement_waiting", "lineage_budget_exhausted", c.autoRecovery.budget ? trigger : owner, c.autoRecovery.budget, { ...counted, paused_from: null }, {
         lineageBudget: { reason: "lineage_review_attempts", attempts: mainAttempts, limit: c.lineageLimits.reviewAttempts, generations: o.lineage.generations },
       });
     }
@@ -342,7 +353,7 @@ function evaluateReviewFailed(o: Extract<AttemptTaskObservation, { kind: "review
     }
   }
   if (attempts > limit) {
-    return decide(task, "judgement_waiting", "review_budget_exceeded", owner, false, { ...counted, paused_from: null }, { reviewBudget: { attempts, limit } });
+    return decide(task, c.autoRecovery.budget ? "failed" : "judgement_waiting", "review_budget_exceeded", c.autoRecovery.budget ? trigger : owner, c.autoRecovery.budget, { ...counted, paused_from: null }, { reviewBudget: { attempts, limit } });
   }
   if (attempts === limit) {
     return decide(task, "failed", "review_budget_reached", trigger, true, counted, { reviewBudget: { attempts, limit } });
@@ -411,7 +422,10 @@ export function evaluate(observation: AttemptObservation, c: AttemptPolicyConfig
     case "transient_failure": {
       const o = observation;
       if (!Number.isInteger(o.retryNo) || o.retryNo < 1) return { outcome: "reject", message: "The transient retry number must be a positive integer." };
-      if (o.retryNo > c.transientRetryLimit) return { outcome: "reject", message: "The transient retry budget is exhausted." };
+      if (o.retryNo > c.transientRetryLimit) {
+        if (o.autoRecoveryAttemptNo == null) return { outcome: "reject", message: "The transient retry budget is exhausted." };
+        return decide(o.task, "ready", "transient_auto_recovery", ["transient_auto_recovery_scheduled"], false, { retry_no: o.retryNo, next_attempt_at: o.nextAttemptAt });
+      }
       return decide(o.task, "ready", "transient_failure", ["transient_retry_scheduled"], false, { retry_no: o.retryNo, next_attempt_at: o.nextAttemptAt });
     }
     case "deterministic_failure": {
@@ -424,6 +438,10 @@ export function evaluate(observation: AttemptObservation, c: AttemptPolicyConfig
         // that asks nobody for anything only needs another run. Other side-effect failures stay with the Owner so a
         // half-applied external action is not repeated unseen.
         const patch: AttemptRowPatch = { next_attempt_at: null };
+        // The same partial twice: the Manager repairs it (kind 8) before partial_limit can stop it; with no try left, partial_limit decides as before.
+        if (o.samePartial && c.autoRecovery.partial) {
+          return decide(o.task, "failed", "partial_repeated", ["manager_trigger_required"], true, patch);
+        }
         if ((o.earlierPartials ?? 0) + 1 <= c.partialLimit) {
           return decide(o.task, "ready", "resumable_partial", ["deterministic_retry_scheduled"], false, patch);
         }
@@ -433,6 +451,9 @@ export function evaluate(observation: AttemptObservation, c: AttemptPolicyConfig
       const counters = p ? { same: o.task.same_error_count, total: o.task.failure_count } : deterministicCounters(o.task, o.errorKey);
       const base: AttemptRowPatch = { ...(p ? {} : failureBase(o.task, o.errorKey, counters)), next_attempt_at: null };
       const withinLimits = counters.same < c.deterministicSameErrorLimit && counters.total < c.deterministicFailureLimit;
+      if (!o.retryAllowed && c.autoRecovery.outputFormat && isReportFormatInvalidErrorKey(o.errorKey)) {
+        return decide(o.task, "ready", "output_format_recovery", ["deterministic_retry_scheduled"], false, base);
+      }
       if (!o.retryAllowed) {
         return decide(o.task, "judgement_waiting", "retry_not_allowed", ["core_decision_required"], false, { ...base, paused_from: null });
       }
@@ -491,6 +512,9 @@ export function evaluate(observation: AttemptObservation, c: AttemptPolicyConfig
     case "acceptance_defect": {
       const o = observation;
       if ((o.source === "worker" && o.task.status === "running") || (o.source === "reviewer" && o.task.status === "verifying")) {
+        if (o.route !== undefined && o.route !== "manager") {
+          return decide(o.task, "judgement_waiting", "acceptance_defect_decision", ["core_decision_required"], false, { paused_from: null, last_failure_class: "deterministic", next_attempt_at: null });
+        }
         return decide(o.task, "failed", "acceptance_defect", ["manager_trigger_required"], true, { last_failure_class: "deterministic", next_attempt_at: null });
       }
       return { outcome: "reject", message: `${ACCEPTANCE_DEFECT_EVENT} from ${o.source} is not valid while the Task is ${o.task.status}.` };

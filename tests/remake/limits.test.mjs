@@ -28,9 +28,11 @@ const envelope = (payload, suffix, expectedVersion = 0) => ({
 
 const settingsWith = (overrides) => ({ ...DEFAULT_REMAKE_LIMIT_SETTINGS, ...overrides });
 
-async function openCore(t, agentRunner, { settings } = {}) {
+// The older tests check how a lineage stops, so automatic recovery is off unless a test asks for it.
+async function openCore(t, agentRunner, { settings, autoRecovery = 0 } = {}) {
   const { root, db, core } = await createTestCore(t, { agentRunner: withNecessity(agentRunner), dispatcher: { tick_interval_ms: 25 } }, { prefix: "owl-remake-limits-", start: true });
   if (settings) await core.setRemakeLimitSettings(settings);
+  await core.setAutoRecoverySettings({ limit: autoRecovery });
   return { db, core, root };
 }
 
@@ -646,5 +648,78 @@ test("a remake gate whose transaction fails skips the replan, tells the Owner on
   broken = false;
   assert.ok(await waitFor(() => openDecision()), "the kept trigger is evaluated again and the limit opens the Owner Decision");
   assert.equal(runner.state.replans, 0, "still no replan");
+});
+
+test("the remake gate hands the first Worker-launch stop to the Manager as budget_exhausted instead of opening a Decision", async (t) => {
+  const triggers = [];
+  const runner = lineageRunner({
+    workerWrites: (root, n) => writeFileIn(root, "src/feature.mjs", `export const n = ${n};\n`),
+  });
+  const run = runner.runManagerPlan;
+  runner.runManagerPlan = async (request) => {
+    if ((request.mode ?? request.context?.mode) === "replan") triggers.push(request.trigger);
+    return run(request);
+  };
+  const { db, core } = await openCore(t, runner, {
+    autoRecovery: 2,
+    settings: settingsWith({ lineage_review_attempts: 1000, lineage_worker_runs: 3, non_functional_remakes: 100 }),
+  });
+  const workId = await startWork(core, "gate-recovery");
+
+  assert.ok(await waitFor(() => triggers.length >= 1), "the Manager was asked instead of the Owner");
+  const t1 = db.get("SELECT id FROM tasks WHERE work_id = ? AND manager_task_id = 'T1'", workId);
+  assert.deepEqual(triggers[0], { kind: "task_failed", tasks: [{ kind: "budget_exhausted", task_id: t1.id, require_different_approach: true }] });
+  const first = db.all("SELECT payload_json FROM events WHERE work_id = ? AND type = 'recovery.started'", workId).map((row) => JSON.parse(row.payload_json));
+  assert.equal(first[0].kind, "budget_exhausted");
+  assert.equal(first[0].action, "replan_different_approach");
+});
+
+test("the first budget stop goes to the Manager as budget_exhausted, a same-approach retry is rejected, the budget is restored once, and the 3rd stop opens one Decision", async (t) => {
+  const triggers = [];
+  const feedbacks = [];
+  let replans = 0;
+  const runner = {
+    runManagerPlan: async (request) => {
+      const mode = request.mode ?? request.context?.mode;
+      if (mode === "plan") return { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [planTask()] } };
+      if (mode !== "replan") return { outcome: "failed", message: `unexpected manager ${mode}` };
+      triggers.push(request.trigger);
+      feedbacks.push(request.context?.previous_output_feedback ?? null);
+      replans += 1;
+      // The first answer retries T1 exactly as it was planned; every later one changes the context.
+      const tasks = replans === 1 ? [planTask()] : [planTask({ context: `Another approach ${replans}.` })];
+      return { outcome: "success", report_valid: true, report: { event: "task.replanned", tasks } };
+    },
+    runWorker: async (request) => {
+      await writeFileIn(request.context.worktree, "src/feature.mjs", "export const f = 1;\n");
+      return { outcome: "success", report_valid: true, report: workerReport(request.invocation_id) };
+    },
+    runReviewer: async () => reviewFailed(),
+    runAdvisor: async () => ({ reply: "" }),
+  };
+  const { db, core } = await openCore(t, runner, {
+    autoRecovery: 2,
+    settings: settingsWith({ lineage_review_attempts: 3, lineage_worker_runs: 1000, non_functional_remakes: 100 }),
+  });
+  const workId = await startWork(core, "budget-recovery");
+  const decisions = () => db.all("SELECT reason, tried FROM decisions WHERE work_id = ? AND status = 'open'", workId);
+  const recoveries = () => db.all("SELECT payload_json FROM events WHERE work_id = ? AND type = 'recovery.started' ORDER BY sequence", workId).map((row) => JSON.parse(row.payload_json));
+
+  assert.ok(await waitFor(() => replans >= 1), "the first budget stop reached the Manager");
+  assert.equal(decisions().length, 0, "no Decision at the first stop");
+  const t1 = db.get("SELECT id FROM tasks WHERE work_id = ? AND manager_task_id = 'T1'", workId);
+  assert.deepEqual(triggers[0], { kind: "task_failed", tasks: [{ kind: "budget_exhausted", task_id: t1.id, require_different_approach: true }] });
+  assert.ok(await waitFor(() => replans >= 2), "the Manager is asked again after the rejection");
+  assert.equal(feedbacks[1]?.kind, "plan_rejected");
+  assert.match(JSON.stringify(feedbacks[1]), /前と同じやり方です。やり方を変えてください。/u);
+  assert.deepEqual(triggers[1], triggers[0], "the retry keeps the budget_exhausted trigger");
+
+  assert.ok(await waitFor(() => decisions().length === 1), "the 3rd stop opens the Decision");
+  await sleep(300);
+  assert.equal(decisions().length, 1, "exactly one Decision");
+  assert.match(decisions()[0].tried.split("\n")[0], /^自動で試したこと: 2回/u);
+  assert.deepEqual(recoveries().filter((r) => r.kind === "budget_exhausted").map((r) => r.action), ["replan_different_approach", "replan_different_approach"]);
+  const reset = JSON.parse(db.get("SELECT lineage_reset_json FROM tasks WHERE id = ?", t1.id).lineage_reset_json);
+  assert.ok(reset, "the budget was given back when a replan was applied");
 });
 

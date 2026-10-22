@@ -10,7 +10,9 @@
     "state",
     "state_version",
     "updated_at",
-    "project_id"
+    "project_id",
+    "prerequisite_wait",
+    "waiting_on"
   ],
   "properties": {
     "id": {
@@ -44,6 +46,13 @@
           "type": "null"
         }
       ]
+    },
+    "prerequisite_wait": {
+      "type": "boolean"
+    },
+    "waiting_on": {
+      "type": "array",
+      "items": { "$ref": "common.json#/$defs/WorkPrerequisite" }
     }
   },
   "additionalProperties": false

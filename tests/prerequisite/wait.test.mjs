@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { recordAutoRecoveryInTransaction } from "../../packages/core/dist/auto-recovery.js";
 import { Core } from "../../packages/core/dist/index.js";
 import { isPlanRejection, validatePlan, validateReplan } from "../../packages/core/dist/replan-plan.js";
 import { reduceTaskInTransaction } from "../../packages/core/dist/state-reducer.js";
@@ -275,6 +276,29 @@ test("an owner wait opens one Owner Decision and the answer releases the Task", 
   assert.equal(released.prerequisite_json, null, "the owner condition is met: the mark is gone");
   assert.notEqual(released.status, "judgement_waiting");
   assert.equal(db.get("SELECT COUNT(*) AS n FROM decision_answers WHERE decision_id = ?", decision.id).n, 1, "the answer stays as guidance");
+});
+
+test("an owner wait's decision.opened carries auto_recovery_summary and the stored tried", async (t) => {
+  const runner = runnerWith([{ wait_for: ownerWait }]);
+  const { db, core } = await openCore(t, runner, 5);
+  const plan = runner.runManagerPlan;
+  // A counted automatic recovery of the Work exists before the Manager asks to wait on the Owner.
+  runner.runManagerPlan = async (request) => {
+    if ((request.mode ?? request.context?.mode) === "replan") {
+      const workId = db.get("SELECT id FROM works").id;
+      await db.createWriteLane().transact((tx) => recordAutoRecoveryInTransaction(tx, {
+        kind: "output_format", target: { kind: "work", id: workId }, workId, action: "rerun", sourceEventId: "E1",
+        previousFailure: { summary: "bad format", error_key: "k", detail: "d" },
+      }));
+    }
+    return plan(request);
+  };
+  const workId = await startWork(core, "owner-summary");
+  assert.ok(await waitFor(() => db.get("SELECT 1 AS x FROM decisions WHERE work_id = ? AND status = 'open'", workId)), "the Decision opens");
+  const stored = db.get("SELECT tried FROM decisions WHERE work_id = ?", workId).tried;
+  const payload = JSON.parse(db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = 'decision.opened'", workId).payload_json);
+  assert.equal(payload.tried, stored);
+  assert.equal(typeof payload.auto_recovery_summary, "string", "a counted recovery gives a summary");
 });
 
 test("answering an owner wait keeps the unmet non-owner conditions waiting", async (t) => {

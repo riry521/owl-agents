@@ -9,10 +9,19 @@ import { DecisionService, type OpenDecisionPayload } from "./decision";
 import { DesignMockStore, type DesignMockSummary } from "./design-mocks";
 import { DECISION_CANCEL_OPTION_KEY, managerReplanFailureBrief, prerequisiteExpiredBrief, RESOLVE_CONFLICT_OPTION_KEY } from "./decision-brief";
 import { evaluatePrerequisite, type PrerequisiteFacts } from "./prerequisite-monitor";
+import {
+  evaluateWorkPrerequisitesInTransaction,
+  hasOpenWorkPrerequisiteDecision,
+  replaceWorkPrerequisitesInTransaction,
+  settleWorkPrerequisiteWaitInTransaction,
+  snapshotDeletedPrerequisiteInTransaction,
+  waitingWorkIds,
+  workPrerequisiteViews,
+} from "./work-prerequisites";
+import type { WorkPrerequisiteView } from "../../shared/dist/work-prerequisite.js";
 import { isFinalLesson, isFinalMissingItem, normalizeLesson, parseLessonBlocks, type FinalManagerVerdict } from "./final-verdict";
 import { outputResubmitLimit } from "./report-resubmit";
 import { DEFAULT_OWNER_LANGUAGE, OWNER_LANGUAGE_SETTINGS_KEY, ownerLanguage, storedOwnerLanguage, type OwnerLanguage, type SettingsReader } from "./owner-language";
-import { finalAutoContinueLimit } from "./final-continue-limit";
 import { EventDispatcher } from "./event-dispatcher";
 import { HumanReadableError, dependencyUnavailable, idempotencyConflict, invalidStateTransition, notFound, projectDeletionImpactChanged, projectHasRunningWorks, projectNotFound, providerPauseNotFound, projectPathConflict, validationError, versionConflict, workCancelled, workProjectAlreadySet, workReopenRequired } from "./errors";
 import {
@@ -26,6 +35,7 @@ import {
   managerTriggerKey,
   REPLAN_PLAN_STALE,
   REPLAN_WORK_NOT_RUNNING,
+  markBudgetRecovery,
   openRemakeLimitDecisionInTransaction,
   stopTaskForNoProgressInTransaction,
   reduceTaskInTransaction,
@@ -48,10 +58,15 @@ import { getWorkAssurance, type WorkAssurance } from "./work-assurance";
 import { WorkDriver } from "./work-driver";
 import { saveProjectlessWorkOutputs } from "./outputs-store.js";
 import { attachWorkToProjectInTransaction } from "./state-reducer";
+import {
+  activeAutoRecoveries, criteriaRelaxationsOfWork, autoRecoveryForManager, autoRecoveryLimit, autoRecoverySummary, autoRecoveryUsed, immediateDecisionReason,
+  recordAutoRecoveryInTransaction, startAutoRecoveryInTransaction, transientRecoveryPendingUntil,
+  transientRecoveryResumeAt, withAutoRecoveryTried,
+} from "./auto-recovery";
 import { fixPendingTaskIds } from "./fix-pending-tasks.js";
 import { detectNewRepositories, type NewRepositoryCandidate } from "./new-repository-detection.js";
-import { WorkflowEngine, type HookSubagentInput } from "./workflow-engine";
-import { isPlanRejection, validatePlan, validateReplan, type PlanRejection, type ReplanAction, type ReplanPlan, type ReplanSnapshot } from "./replan-plan";
+import { WorkflowEngine, mergeConflictPaths, type HookSubagentInput } from "./workflow-engine";
+import { isPlanRejection, validatePlan, validateReplan, type PlannedApproach, type PlanRejection, type ReplanAction, type ReplanPlan, type ReplanSnapshot } from "./replan-plan";
 import type { PlanWaitFor, PrerequisiteCondition, PrerequisiteSpec } from "../../shared/dist/prerequisite.js";
 import { isProcessGroupAlive } from "../../shared/dist/process-group.js";
 import { KnowledgeBase } from "./knowledge-base";
@@ -136,12 +151,20 @@ import {
 } from "../../shared/dist/verification-policy-settings.js";
 import { remakeLimits } from "./remake-limits.js";
 import { fixerEscalation } from "./fixer-escalation.js";
+import { autoRecoverySettings, openCriteriaStatuses } from "./auto-recovery.js";
+import { appendRuleSection, RULE_SECTION_HEADING, toJsonResults, type CriterionCheckResult } from "./criterion-checks";
 import {
   FixerEscalationSettingsValidationError,
   FIXER_ESCALATION_SETTINGS_KEY,
   validateFixerEscalationSettings,
   type FixerEscalationSettings,
 } from "../../shared/dist/fixer-escalation-settings.js";
+import {
+  AUTO_RECOVERY_SETTINGS_KEY,
+  AutoRecoverySettingsValidationError,
+  validateAutoRecoverySettings,
+  type AutoRecoverySettings,
+} from "../../shared/dist/auto-recovery-settings.js";
 import { progressGuard } from "./progress-guard.js";
 import { DecisionExplainer, toDecisionExplanation } from "./decision-explainer";
 import { metricsRuleCandidates, proposeFromMetrics } from "./learning-metrics.js";
@@ -153,7 +176,7 @@ import {
   type ProgressGuardSettings,
 } from "../../shared/dist/progress-guard-settings.js";
 import { evaluateRemakeGate } from "./remake-gate.js";
-import { lineageUsage } from "./task-lineage.js";
+import { lineagePartialReportPayloads, lineageRootOf, lineageUsage, restartLineageBudgetInTransaction } from "./task-lineage.js";
 import { remakeLimitBrief, type RemakeLimitReason } from "./decision-brief.js";
 import {
   RemakeLimitSettingsValidationError,
@@ -162,7 +185,7 @@ import {
   type RemakeLimitSettings,
 } from "../../shared/dist/remake-limit-settings.js";
 import { reviewRouting, workVerification } from "./assurance-settings.js";
-import { evaluatePlanQuality, formatPlanQualityReason, planQualityOutcome, repairableWarnings, type PlanQualityOutcome, type PlanQualityWarning, type PreviousOutputFeedback } from "./plan-quality.js";
+import { evaluateCriteriaRelaxation, evaluatePlanQuality, formatPlanQualityReason, planQualityOutcome, repairableWarnings, type PlanQualityOutcome, type PlanQualityWarning, type PreviousOutputFeedback } from "./plan-quality.js";
 import { planQualitySettings } from "./plan-quality-settings.js";
 import { projectInvestigationOutputSettings } from "./project-investigation-settings.js";
 import {
@@ -207,7 +230,7 @@ import {
   type KnowledgeAutomationSnapshot,
 } from "@owl/shared";
 import { CHILD_RUN_SETTINGS_KEY, HYBRID_MODE_SETTINGS_KEY } from "./types";
-import type { AdvisorWorkspacePreparation } from "./types";
+import type { AdvisorWorkspacePreparation, CriterionCheck, RuleApplicability } from "./types";
 import { CoreActivityRegistry } from "./core-activity.js";
 import { GitWorktreeGateway } from "./git-gateway.js";
 import { clearWorkGitTemplates } from "./work-git-template.js";
@@ -265,6 +288,7 @@ import {
 import {
   ADVISOR_CURATION_ACTION_TYPES,
   ADVISOR_CURATION_INSTRUCTION,
+validatePrerequisiteWorkIds,
   addAdvisorReplyTargetInstruction,
   advisorCurationKind,
   builtinProviderHarness,
@@ -313,7 +337,7 @@ import { coreTestRunBrief, workTestRunner } from "./core-test-run";
 import { TEST_SETUP_MANUAL_TRIGGER, TestSetupService } from "./test-setup-service.js";
 import { QUARANTINE_FIX_TASK_PREFIX } from "./test-quarantine";
 import type { BaseMergeConflict, ManagerTrigger, WorkerQuestion } from "@owl/shared";
-import { acceptanceCriteriaProblems, formatAdvisorMalformed, parseTaskNecessity, readStoredAcceptanceCriteria, renderAcceptanceCriteria, renderTaskNecessity, type AcceptanceCriterion, type TaskPlanContext, resolveInstanceId, type AdvisorSuggestedAction, type ProcessSkillsInstallCommand, type ProviderClient } from "@owl/shared";
+import { acceptanceCriteriaProblems, isManagerCriterion, formatAdvisorMalformed, parseTaskNecessity, readStoredAcceptanceCriteria, readStoredTaskPlanContext, renderAcceptanceCriteria, renderTaskNecessity, type AcceptanceCriterion, type CriteriaRelaxation, type StoredAcceptanceCriterion, type TaskPlanContext, resolveInstanceId, type AdvisorSuggestedAction, type ProcessSkillsInstallCommand, type ProviderClient } from "@owl/shared";
 import { MEMORY_FOLDER_KINDS_SETTINGS_KEY, MEMORY_LIBRARIAN_BATCH_SETTINGS_KEY, MEMORY_MODE_SETTINGS_KEY, MEMORY_RECALL_LIMIT_SETTINGS_KEY, MEMORY_RECALL_MIN_SIMILARITY_SETTINGS_KEY, MemorySettingsValidationError, readMemoryFolderKinds, readMemoryLibrarianBatch, readMemoryMode, readMemoryRecallLimit, readMemoryRecallMinSimilarity, validateMemoryFolderKinds, type MemoryFolderKinds, type MemoryLibrarianBatch, type MemoryMode } from "@owl/shared";
 import { EXTERNAL_DATA_POLICY, externalJsonBlock, MEMORY_ARCHIVE_SETTINGS_KEY, readMemoryArchive, REVIEW_RERUN_OPTION_KEY, TEST_SETUP_APPROVE_OPTION_KEY, TEST_SETUP_RETRY_OPTION_KEY } from "@owl/shared";
 import { approveOutsideInstalls } from "./test-environment";
@@ -718,6 +742,8 @@ export class Core {
   private readonly prerequisiteCheckedAt = new Map<string, number>();
   /** Works whose waiting Tasks must be evaluated on the next tick regardless of the interval. */
   private readonly prerequisiteRecheck = new Set<string>();
+  private workPrerequisiteTimer: ReturnType<typeof setTimeout> | null = null;
+  private workPrerequisiteSweeping = false;
   /** Wake keys already sent, so a finished source does not wake its waiters on every tick. */
   private readonly prerequisiteWoken = new Set<string>();
   private readonly logger: Pick<Console, "warn"> = { warn: (message) => console.warn(message) };
@@ -2097,6 +2123,8 @@ export class Core {
     const runningWorks = this.db.all<{ id: string; state: string }>("SELECT id, state FROM works WHERE state IN ('running', 'judgement_waiting')")
       .filter((work) => work.state === "running" || this.hasQueuedOwnerReplan(work.id));
     this.workDriver.start(runningWorks.map((work) => work.id));
+    await this.checkWorkPrerequisites();
+    this.scheduleWorkPrerequisiteCheck();
     this.providerPauseController.start();
     for (const provider of recovery.reviewerProvidersToResume) this.workflow.resumeProvider(provider);
     this.retryWorkAfterRoleChange();
@@ -2717,6 +2745,10 @@ export class Core {
       clearInterval(this.learningTimer);
       this.learningTimer = null;
     }
+    if (this.workPrerequisiteTimer !== null) {
+      clearTimeout(this.workPrerequisiteTimer);
+      this.workPrerequisiteTimer = null;
+    }
     await this.skillReconcilePromise;
     this.ruleStore.stopWatching();
     // Shutdown ends the Owl system, not the Work itself. Stop scheduling,
@@ -2985,7 +3017,7 @@ export class Core {
       query.cursor ?? null,
       limit + 1,
     );
-    return listResponse(query.request_id, rows.slice(0, limit).map(toWorkSummary), rows.length > limit, limit);
+    return listResponse(query.request_id, this.withPrerequisiteSummaries(rows.slice(0, limit).map(toWorkSummary)), rows.length > limit, limit);
   }
 
   public getWork(workId: string, query: { request_id?: string; include?: string | null } = {}): CommandResponse<WorkDetail> {
@@ -3007,11 +3039,23 @@ export class Core {
     if (!row) {
       throw notFound("work", workId);
     }
+    const detail = toWorkDetail(row);
+    const prerequisites = workPrerequisiteViews(this.db, [workId]).get(workId) ?? [];
     return {
       request_id: query.request_id ?? createUlid(),
-      data: toWorkDetail(row),
+      data: { ...this.withPrerequisiteSummaries([detail])[0], prerequisites },
       version: row.state_version,
     };
+  }
+
+  /** Fill prerequisite_wait and waiting_on from one query over the shown Works. */
+  private withPrerequisiteSummaries<T extends WorkSummary>(works: readonly T[]): T[] {
+    const views = workPrerequisiteViews(this.db, works.filter((work) => work.state === "memo" || work.state === "ready").map((work) => work.id));
+    return works.map((work) => {
+      const rows = views.get(work.id);
+      if (!rows) return work;
+      return { ...work, prerequisite_wait: work.state === "ready", waiting_on: rows.filter((row) => !row.satisfied) };
+    });
   }
 
   public async getWorkDesigns(workId: string): Promise<{ designs: Array<{ task_id: string; title: string; updated_at: string; size_bytes: number }> }> {
@@ -3083,21 +3127,145 @@ export class Core {
   public async startWork(
     workId: string,
     request: CommandRequest<StartWorkPayload>,
-  ): Promise<CommandResponse<{ work_id: string; state: "running"; started: boolean }>> {
-    const response: CommandResponse<{ work_id: string; state: "running"; started: boolean }> = await this.runCommand(request, {
+  ): Promise<CommandResponse<{ work_id: string; state: "running" | "ready" | "judgement_waiting"; started: boolean; waiting_for_prerequisites: boolean }>> {
+    type StartData = { work_id: string; state: "running" | "ready" | "judgement_waiting"; started: boolean; waiting_for_prerequisites: boolean };
+    const response: CommandResponse<StartData> = await this.runCommand<StartWorkPayload, StartData>(request, {
       type: "work.started",
       workId,
       payload: { work_id: workId, mode: request.payload.mode },
     }, (transaction) => {
+      const before = transaction.get<{ state: WorkState; state_version: number }>("SELECT state, state_version FROM works WHERE id = ?", workId);
+      const waiting = (before?.state === "memo" || before?.state === "ready") &&
+        evaluateWorkPrerequisitesInTransaction(transaction, workId).some((row) => row.verdict !== "satisfied");
+      if (before && waiting) {
+        // Starting a ready Work again must not release the wait (recoverAdvisorWorkActions does it on every restart).
+        if (request.expected_version !== undefined && request.expected_version !== before.state_version) throw versionConflict(request.expected_version, before.state_version);
+        const now = utcNow();
+        if (before.state === "memo") {
+          reduceWorkInTransaction(transaction, workId, { event: "work.ready", expected_version: request.expected_version, payload: { valid: true, now } });
+          appendEventInTransaction(transaction, {
+            type: "work.prerequisite_wait_started",
+            idempotencyKey: `work-prerequisite-wait-started:${workId}:${createUlid()}`,
+            workId,
+            taskId: null,
+            payload: { work_id: workId },
+            now,
+          });
+        }
+        settleWorkPrerequisiteWaitInTransaction(transaction, workId, ownerLanguage(transaction), now);
+        const after = transaction.get<{ state: "ready" | "judgement_waiting"; state_version: number }>("SELECT state, state_version FROM works WHERE id = ?", workId);
+        return { data: { work_id: workId, state: after?.state ?? "ready", started: false, waiting_for_prerequisites: true }, version: after?.state_version ?? before.state_version };
+      }
       const result = reduceWorkInTransaction(transaction, workId, {
         event: "work.started",
         expected_version: request.expected_version,
         payload: { ...request.payload, explicit_start: true, idempotency_processed: false },
       });
-      return { data: { work_id: workId, state: "running" as const, started: result.previous.state !== "running" }, version: result.next.state_version };
+      return { data: { work_id: workId, state: "running" as const, started: result.previous.state !== "running", waiting_for_prerequisites: false }, version: result.next.state_version };
+    });
+    await this.afterWorkPrerequisiteChange(workId, response.data.state);
+    return response;
+  }
+
+  /** Register a Work that started, or announce the Decision a Work waiting for the Owner just opened. */
+  private async afterWorkPrerequisiteChange(workId: string, state: WorkState): Promise<void> {
+    if (state === "running") this.workDriver.register(workId);
+    if (state === "judgement_waiting") {
+      await this.announceCoreDecisions(workId);
+      await this.dispatcher.replayPending();
+    }
+  }
+
+  /** Replace the prerequisites of a Work that has not started; a ready Work is judged again at once. */
+  public async replaceWorkPrerequisites(
+    workId: string,
+    request: CommandRequest<{ prerequisite_work_ids: string[] } & JsonObject>,
+  ): Promise<CommandResponse<{ work_id: string; state: WorkState; prerequisites: WorkPrerequisiteView[] }>> {
+    const response = await this.runCommand(request, {
+      type: "work.prerequisites_replaced",
+      workId,
+      payload: { work_id: workId, prerequisite_work_ids: request.payload.prerequisite_work_ids },
+    }, (transaction) => {
+      const work = transaction.get<{ state: WorkState; state_version: number }>("SELECT state, state_version FROM works WHERE id = ?", workId);
+      if (!work) throw notFound("work", workId);
+      if (work.state !== "memo" && work.state !== "ready") {
+        throw invalidStateTransition("Prerequisites can be changed only before the Work starts.", { work_id: workId, state: work.state });
+      }
+      if (request.expected_version !== undefined && request.expected_version !== work.state_version) throw versionConflict(request.expected_version, work.state_version);
+      const now = utcNow();
+      replaceWorkPrerequisitesInTransaction(transaction, workId, request.payload.prerequisite_work_ids, now);
+      if (work.state === "ready") settleWorkPrerequisiteWaitInTransaction(transaction, workId, ownerLanguage(transaction), now);
+      const after = transaction.get<{ state: WorkState; state_version: number }>("SELECT state, state_version FROM works WHERE id = ?", workId);
+      return {
+        data: { work_id: workId, state: after?.state ?? work.state, prerequisites: workPrerequisiteViews(transaction, [workId]).get(workId) ?? [] },
+        version: after?.state_version ?? work.state_version,
+      };
+    });
+    await this.afterWorkPrerequisiteChange(workId, response.data.state);
+    return response;
+  }
+
+  /** The Owner stops a Work's wait for its prerequisites; the Work starts at once. */
+  public async releaseWorkPrerequisiteWait(
+    workId: string,
+    request: CommandRequest<JsonObject>,
+  ): Promise<CommandResponse<{ work_id: string; state: "running"; started: true }>> {
+    const response: CommandResponse<{ work_id: string; state: "running"; started: true }> = await this.runCommand(request, {
+      type: "work.prerequisite_wait_released",
+      workId,
+      payload: { work_id: workId },
+    }, (transaction) => {
+      const work = transaction.get<{ state: WorkState }>("SELECT state FROM works WHERE id = ?", workId);
+      if (!work) throw notFound("work", workId);
+      if (work.state !== "ready") {
+        throw invalidStateTransition("Only a Work waiting for its prerequisites can be released.", { work_id: workId, state: work.state });
+      }
+      const result = reduceWorkInTransaction(transaction, workId, {
+        event: "work.started",
+        expected_version: request.expected_version,
+        payload: { explicit_start: true, idempotency_processed: false },
+      });
+      return { data: { work_id: workId, state: "running" as const, started: true as const }, version: result.next.state_version };
     });
     this.workDriver.register(workId);
     return response;
+  }
+
+  /** Judge every ready Work that waits on prerequisites. Runs at start, on an interval, and as a safety net for missed events. */
+  public async checkWorkPrerequisites(): Promise<void> {
+    if (this.workPrerequisiteSweeping) return;
+    this.workPrerequisiteSweeping = true;
+    try {
+      for (const workId of waitingWorkIds(this.db)) await this.settleWorkPrerequisites(workId);
+    } finally {
+      this.workPrerequisiteSweeping = false;
+    }
+  }
+
+  /** The Works waiting on this Work are judged now; call it after the Work completed, was cancelled or was deleted. */
+  private async wakeWorkDependents(workId: string): Promise<void> {
+    for (const waiter of waitingWorkIds(this.db, workId)) await this.settleWorkPrerequisites(waiter);
+  }
+
+  private async settleWorkPrerequisites(workId: string): Promise<void> {
+    try {
+      const state = await this.writeLane.transact((transaction) => {
+        settleWorkPrerequisiteWaitInTransaction(transaction, workId, ownerLanguage(transaction), utcNow());
+        return transaction.get<{ state: WorkState }>("SELECT state FROM works WHERE id = ?", workId)?.state ?? "ready";
+      });
+      await this.afterWorkPrerequisiteChange(workId, state);
+    } catch (error) {
+      console.warn("[owl-core] work prerequisite check failed", error);
+    }
+  }
+
+  private scheduleWorkPrerequisiteCheck(): void {
+    this.workPrerequisiteTimer = setTimeout(() => {
+      void this.checkWorkPrerequisites().finally(() => {
+        if (this.started) this.scheduleWorkPrerequisiteCheck();
+      });
+    }, progressGuard(this.db).prerequisite_check_interval_seconds * 1000);
+    this.workPrerequisiteTimer.unref();
   }
 
   public async pauseWork(
@@ -3315,6 +3483,7 @@ export class Core {
     });
     await this.announceDecisionCancellations(cancelledDecisionIds);
     this.workDriver.unregister(workId);
+    await this.wakeWorkDependents(workId);
     const unstopped = await this.stopWorkAgents(workId, closedLaunchRunIds, request.payload.force === true);
     if (unstopped.length > 0) return { ...response, data: { ...response.data, worktree_cleanup: agentStopFailure(unstopped) } };
     const project = this.db.get<{ project_id: string | null }>("SELECT project_id FROM works WHERE id = ?", workId);
@@ -3667,6 +3836,9 @@ export class Core {
         transaction.run("DELETE FROM tasks WHERE work_id = ?", workId);
         transaction.run("DELETE FROM decisions WHERE work_id = ?", workId);
         transaction.run("DELETE FROM work_summary_revisions WHERE work_id = ?", workId);
+        // Rows that wait on this Work keep a copy of it, so the wait can tell "deleted" from "never completed".
+        snapshotDeletedPrerequisiteInTransaction(transaction, workId);
+        transaction.run("DELETE FROM work_prerequisites WHERE work_id = ?", workId);
         transaction.run("DELETE FROM works WHERE id = ?", workId);
 
         const response: CommandResponse<{ work_id: string; deleted: true }> = {
@@ -3678,6 +3850,7 @@ export class Core {
         return response;
       });
       this.workDriver.unregister(workId);
+      await this.wakeWorkDependents(workId);
       for (const file of artifactFiles) {
         await rm(file, { recursive: true, force: true }).catch((error) => console.warn(`[owl-core] Deleted Work ${workId}, but ${file} could not be removed`, error));
       }
@@ -3803,8 +3976,10 @@ export class Core {
       const now = utcNow();
       const result = updateWorkFieldsInTransaction(transaction, workId, request.expected_version, { title, summary }, now);
       recordOwnerWorkSummaryRevisionInTransaction(transaction, { work_id: workId, before: result.before, after: result.after, changed_fields: result.changed_fields, now });
+      // A replan would make the WorkDriver plan a Work that still waits for its prerequisites.
       const replanQueued = result.changed_fields.length > 0 &&
-        (result.before.state === "running" || result.before.state === "paused" || result.before.state === "judgement_waiting");
+        (result.before.state === "running" || result.before.state === "paused" || result.before.state === "judgement_waiting") &&
+        !hasOpenWorkPrerequisiteDecision(transaction, workId);
       if (replanQueued) {
         mergeOwnerReplanInTransaction(transaction, workId, {
           kind: "work_update",
@@ -3851,7 +4026,7 @@ export class Core {
         workId,
       );
       if (!work) throw notFound("work", workId);
-      if (work.state === "memo" || work.state === "ready") {
+      if (work.state === "memo" || work.state === "ready" || hasOpenWorkPrerequisiteDecision(transaction, workId)) {
         throw invalidStateTransition("Start the Work before sending an instruction.", { work_id: workId, state: work.state });
       }
       if (work.state === "cancelled") throw workCancelled(workId);
@@ -4202,6 +4377,7 @@ export class Core {
       decisions,
       conversation: optional(() => this.getWorkConversation(workId, { limit: query.conversation_limit ?? DEFAULT_WORK_VIEW_CONVERSATION_LIMIT })) as unknown as WorkViewData["conversation"],
       assurance: optional(() => this.getWorkAssurance(workId)) as unknown as WorkViewData["assurance"],
+      auto_recovery: { active: optional(() => activeAutoRecoveries(this.db, workId)) ?? [], relaxations: optional(() => criteriaRelaxationsOfWork(this.db, workId)) ?? [] },
     };
   }
 
@@ -4231,7 +4407,7 @@ export class Core {
       ? this.db.all<DecisionDbRow>(`SELECT ${DECISION_COLUMNS} FROM decisions WHERE status = 'open' ORDER BY id ASC`).map(toDecision)
       : [];
     return {
-      works: page.map(toWorkSummary),
+      works: this.withPrerequisiteSummaries(page.map(toWorkSummary)),
       open_decisions,
       projects: this.listAllProjects(),
       next_cursor: rows.length > limit && last ? encodeViewCursor(query.archived === "only" ? [last.archived_at ?? "", last.id] : [last.id]) : null,
@@ -4336,6 +4512,11 @@ export class Core {
         expected_version: resumedWork.state_version,
         payload: { reason: `Owner chose to cancel the Work in Decision ${decisionId}.` },
       });
+      return response;
+    }
+    if (resumedWork?.state === "ready") {
+      // Dropped prerequisites may leave others that were cancelled meanwhile; judge them now.
+      await this.settleWorkPrerequisites(resumedWork.work_id);
       return response;
     }
     if (resumedWork?.state === "running") {
@@ -6365,7 +6546,7 @@ export class Core {
       : "依頼: Correct the requested label.\\n\\n受け入れ条件:\\n- The label reads as requested.";
     const base = [
       "You are the Owl Advisor, the operator's front door to Owl. Answer questions and discuss ideas directly. By default, every concrete request to perform work (make, fix, change, investigate, or build something), regardless of size, must become an Owl Work that you dispatch; ordinary wording like 'please do this' does not authorize you to do it yourself. In Japanese, 'これやっといて' is a normal Work request; phrases like '直接やって', 'Workにせず直接', or 'Advisor自身で実装して' explicitly ask you to bypass Work. Only bypass Work when the operator explicitly asks you to do the work directly yourself or without creating a Work. For that explicit exception, first prepare your Advisor workspace as described under Advisor workspace, do the work only there, and do not create a Work. Never claim you lack permission to create a Work.",
-      "When you issue a Work for a concrete request without an explicit direct-work instruction (the rules below decide when), append exactly one ```owl-actions``` fenced JSON array containing {type:\"create_work\", description, payload:{title,summary,size,project_id}}. Core will create the Work and start it, unless payload.draft is true. When the operator says \"draft\", \"just register it\", \"don't run it yet\", '下書き', '登録だけ', or 'まだ動かさないで' (for example a Work to be issued after another Work finishes), set the optional payload.draft to true: Core then creates the Work as a memo and does not start it, and the operator starts it with the Start button on the Work detail page. Omit draft otherwise. Use size \"small\" for a focused, lightweight change so it goes directly to the Worker; use \"normal\" or \"large\" for work that needs Manager planning. Before returning create_work, compare the full request and conversation context against the complete current Project catalog in context. Set the exact project_id when one Project matches, use null only when none matches, and ask which Project to use if multiple are plausible. Project registration is optional. The payload may also carry the optional backlog_item_ids (IDs of open backlog items from GET /api/v1/backlog (status=open) to link to the new Work; they become in_progress) and dismiss_backlog_item_ids (backlog item IDs to dismiss); every ID must belong to the same Project as the Work. Example: ```owl-actions\n[{\"type\":\"create_work\",\"description\":\"Fix the label\",\"payload\":{\"title\":\"Fix the label\",\"summary\":\"" + exampleSummary + "\",\"size\":\"small\",\"project_id\":null}}]\n```.",
+      "When you issue a Work for a concrete request without an explicit direct-work instruction (the rules below decide when), append exactly one ```owl-actions``` fenced JSON array containing {type:\"create_work\", description, payload:{title,summary,size,project_id}}. Core will create the Work and start it, unless payload.draft is true. When the operator says \"draft\", \"just register it\", \"don't run it yet\", '下書き', '登録だけ', or 'まだ動かさないで', set the optional payload.draft to true: Core then creates the Work as a memo and does not start it, and the operator starts it with the Start button on the Work detail page. Omit draft otherwise. Use size \"small\" for a focused, lightweight change so it goes directly to the Worker; use \"normal\" or \"large\" for work that needs Manager planning. Before returning create_work, compare the full request and conversation context against the complete current Project catalog in context. Set the exact project_id when one Project matches, use null only when none matches, and ask which Project to use if multiple are plausible. Project registration is optional. The payload may also carry the optional backlog_item_ids (IDs of open backlog items from GET /api/v1/backlog (status=open) to link to the new Work; they become in_progress), dismiss_backlog_item_ids (backlog item IDs to dismiss; every backlog ID must belong to the same Project as the Work), and prerequisite_work_ids (IDs of Works that must complete before this Work starts). Example: ```owl-actions\n[{\"type\":\"create_work\",\"description\":\"Fix the label\",\"payload\":{\"title\":\"Fix the label\",\"summary\":\"" + exampleSummary + "\",\"size\":\"small\",\"project_id\":null}}]\n```.",
       "First classify every request as small, normal, or large.",
       "When the operator explicitly asks for the strongest or Lead Designer to handle the design from the start, set create_work payload.design_mode to \"lead\" and size to \"normal\" or \"large\" so Manager plans a design Task. When the operator asks the Lead Designer only for the screen design, omit design_mode and keep that request in the Work summary; Manager then assigns the screen design Task to the Lead Designer. Otherwise omit design_mode (automatic routing). Never infer this override merely from Work size.",
       "For a small request whose goal, target, and completion condition are unambiguous, you may emit create_work in that turn.",
@@ -6480,7 +6661,7 @@ export class Core {
     const allSuggestedActions = isSlackReply
       ? mergeAdvisorSuggestedActions(suggestedActions, fencedActions)
       : [...suggestedActions];
-    const recovery = await this.recoverAdvisorWorkActions(turnId);
+    const recovery = await this.recoverAdvisorWorkActions(turnId, allSuggestedActions);
     recovery.notices.push(...await this.recoverAdvisorCallApis(turnId));
     const actionResult = await this.dispatchAdvisorWorkActions(conversationId, turnId, allSuggestedActions, recovery.recoveredIndexes);
     const trimmedReply = visibleReply.trimEnd();
@@ -6678,7 +6859,7 @@ export class Core {
    * an earlier attempt created but never started, and mark their index as
    * handled so the main loop below does not try to create them again.
    */
-  private async recoverAdvisorWorkActions(turnId: string): Promise<{ notices: string[]; recoveredIndexes: Set<number> }> {
+  private async recoverAdvisorWorkActions(turnId: string, actions: readonly AdvisorSuggestedAction[]): Promise<{ notices: string[]; recoveredIndexes: Set<number> }> {
     const notices: string[] = [];
     const recoveredIndexes = new Set<number>();
     const t = ADVISOR_TEXT[ownerLanguage(this.db)];
@@ -6726,13 +6907,32 @@ export class Core {
         continue;
       }
       try {
-        await this.startWork(workId, {
+        // An earlier attempt may have stopped between createWork and
+        // replaceWorkPrerequisites; saving again with the same key is a no-op
+        // when it already ran, and keeps the Work from starting without them.
+        const action = actions[index];
+        const requested = action?.type === "create_work" ? action.payload?.prerequisite_work_ids : undefined;
+        const prerequisiteIds = requested === undefined ? [] : validatePrerequisiteWorkIds(requested);
+        if (prerequisiteIds.length > 0) {
+          const missing = prerequisiteIds.find((id) => !this.db.get("SELECT id FROM works WHERE id = ?", id));
+          if (missing !== undefined) throw new Error(`Prerequisite Work ${missing} was not found.`);
+          await this.replaceWorkPrerequisites(workId, {
+            request_id: turnId,
+            idempotency_key: `advisor-work:${turnId}:${index}:prerequisites`,
+            expected_version: work.state_version,
+            payload: { prerequisite_work_ids: prerequisiteIds },
+          });
+        }
+        const current = this.db.get<{ state_version: number }>("SELECT state_version FROM works WHERE id = ?", workId);
+        const started = await this.startWork(workId, {
           request_id: turnId,
           idempotency_key: `advisor-work:${turnId}:${index}:start`,
-          expected_version: work.state_version,
+          expected_version: current?.state_version ?? work.state_version,
           payload: { mode: work.size === "small" ? "small" : "normal" },
         });
-        notices.push(t.createdRecovered(work.title, workId));
+        notices.push(started.data.waiting_for_prerequisites
+          ? t.createdWaiting(work.title, workId)
+          : t.createdRecovered(work.title, workId));
       } catch (error) {
         const detail = error instanceof Error ? error.message.slice(0, 300) : t.unknownCause;
         notices.push(t.createdNotStarted(work.title, workId, detail));
@@ -6842,6 +7042,15 @@ export class Core {
         notices.push(t.createFailed("backlog_item_ids and dismiss_backlog_item_ids must be arrays of strings."));
         continue;
       }
+      let prerequisiteIds: string[] = [];
+      try {
+        prerequisiteIds = payload?.prerequisite_work_ids === undefined ? [] : validatePrerequisiteWorkIds(payload.prerequisite_work_ids);
+        const missing = prerequisiteIds.find((id) => !this.db.get("SELECT id FROM works WHERE id = ?", id));
+        if (missing !== undefined) throw new Error(`Prerequisite Work ${missing} was not found.`);
+      } catch (error) {
+        notices.push(t.createFailed(error instanceof Error ? error.message.slice(0, 300) : t.unknownCause));
+        continue;
+      }
       const createKey = `advisor-work:${turnId}:${index}:create`;
       let createdWorkId: string | null = null;
       try {
@@ -6860,16 +7069,29 @@ export class Core {
           },
         });
         createdWorkId = created.data.work_id;
+        let version = created.version;
+        if (prerequisiteIds.length > 0) {
+          version = (await this.replaceWorkPrerequisites(createdWorkId, {
+            request_id: turnId,
+            idempotency_key: `advisor-work:${turnId}:${index}:prerequisites`,
+            expected_version: version,
+            payload: { prerequisite_work_ids: prerequisiteIds },
+          })).version;
+        }
         if (draft) {
           notices.push(t.createdDraft(title.trim(), createdWorkId));
           continue;
         }
-        await this.startWork(createdWorkId, {
+        const started = await this.startWork(createdWorkId, {
           request_id: turnId,
           idempotency_key: `advisor-work:${turnId}:${index}:start`,
-          expected_version: created.version,
+          expected_version: version,
           payload: { mode: size === "small" ? "small" : "normal" },
         });
+        if (started.data.waiting_for_prerequisites) {
+          notices.push(t.createdWaiting(title.trim(), createdWorkId));
+          continue;
+        }
         notices.push(t.created(title.trim(), size === "small" ? "Worker" : "Manager", createdWorkId));
       } catch (error) {
         const detail = error instanceof Error ? error.message.slice(0, 300) : t.unknownCause;
@@ -7632,7 +7854,7 @@ export class Core {
         if (this.started) await this.announceCoreDecisions(workId);
         return this.workflow.snapshot(workId);
       }
-      if (work.state === "running" && terminalCheck.allTerminal && !attachHeld) {
+      if (work.state === "running" && terminalCheck.allTerminal && !attachHeld && transientRecoveryPendingUntil(this.db, workId) === null) {
         if (terminalCheck.anyFailed) {
           await this.recordTickFailure(workId, new Error("One or more tasks failed. Manual intervention required."));
         } else {
@@ -7697,7 +7919,9 @@ export class Core {
                 if (merge.kind === "interrupted") return this.workflow.snapshot(workId);
                 if (merge.kind !== "merged") {
                   let autoAttempts = 0;
-                  const conflict = merge.kind === "conflict" ? merge : merge.kind === "error" ? asMergeConflict(merge.message, merge) : null;
+                  // Uncommitted changes in the base worktree are checked before a conflict and open a Decision at once.
+                  const uncommitted = merge.kind === "error" && immediateDecisionReason({ alert: { kind: "work_merge_failed", merge_kind: "error", overlap_files: [...(merge.overlap_files ?? [])], merge_message: merge.message } }) !== null;
+                  const conflict = merge.kind === "conflict" ? merge : merge.kind === "error" && !uncommitted ? asMergeConflict(merge.message, merge) : null;
                   if (conflict !== null) {
                     const auto = await this.tryAutoResolveMergeConflict(workId, conflict);
                     if (auto.handled) return this.workflow.snapshot(workId);
@@ -7764,6 +7988,7 @@ export class Core {
       }
     }
     this.wakePrerequisiteWaiters(workId, false);
+    if (this.started && this.db.get<{ state: string }>("SELECT state FROM works WHERE id = ?", workId)?.state === "completed") await this.wakeWorkDependents(workId);
     if (this.started) await this.announceCoreDecisions(workId);
     if (this.started) await this.dispatcher.replayPending();
     return this.workflow.snapshot(workId);
@@ -7793,6 +8018,7 @@ export class Core {
       workId ?? null,
       workId ?? null,
     );
+    const language = ownerLanguage(this.db);
     for (const row of rows) {
       const explanation = toDecisionExplanation(row.explanation_json);
       // Wait for the explanation so the first notice carries it; a Decision this run already tried goes out as it is.
@@ -7820,7 +8046,8 @@ export class Core {
               recommended: row.recommended,
               allow_free_text: row.allow_free_text === 1,
               issuer_role: "core",
-              language: ownerLanguage(this.db),
+              language,
+              auto_recovery_summary: autoRecoverySummary(row.tried, language),
               ...(explanation?.status === "ready" ? { explanation: { summary: explanation.summary, cause_kind: explanation.cause_kind } } : {}),
             },
           },
@@ -8192,25 +8419,30 @@ export class Core {
   }
 
   /**
-   * An incomplete final verdict whose every missing item names a fix goes to
-   * the Manager without asking the Owner: the same Owner replan a Decision
-   * answer queues, carrying the verdict as final_verdict. At most
-   * finalAutoContinueLimit rounds per Work, counted from the alerts recorded
-   * here. Returns true when the replan was queued.
+   * An incomplete final verdict that names what is missing (or at least a
+   * summary) goes to the Manager without asking the Owner: the same Owner
+   * replan a Decision answer queues, carrying the verdict as final_verdict.
+   * Each round is a `recovery.started` (final_incomplete); at most
+   * auto_recovery's limit rounds run per Work. Returns true when the replan
+   * was queued.
    */
   private async tryAutoContinueIncompleteFinal(workId: string, verdict: FinalManagerVerdict): Promise<boolean> {
-    if (verdict.missing.length === 0 || verdict.missing.some((item) => typeof item.fix !== "string" || item.fix.trim().length === 0)) return false;
-    const limit = finalAutoContinueLimit(this.db);
-    const countRounds = (reader: SettingsReader): number =>
+    // Without a missing item or a summary there is nothing the Manager could act on.
+    if (verdict.missing.length === 0 && verdict.summary.trim().length === 0) return false;
+    const target = { kind: "work", id: workId } as const;
+    const limit = autoRecoveryLimit(this.db, "final_incomplete");
+    const used = autoRecoveryUsed(this.db, "final_incomplete", target);
+    if (used >= limit) return false;
+    // The alert count over the Work's life keeps each round's idempotency key unique.
+    const countAlerts = (reader: SettingsReader): number =>
       Number(reader.get<{ total: number }>(
         `SELECT COUNT(*) AS total FROM events
           WHERE work_id = ? AND type = 'system.alert'
             AND json_extract(payload_json, '$.kind') = 'final_manager_incomplete' AND json_extract(payload_json, '$.auto_continue') = 1`,
         workId,
       )?.total ?? 0);
-    const rounds = countRounds(this.db);
-    if (rounds >= limit) return false;
-    const round = rounds + 1;
+    const lifeRound = countAlerts(this.db) + 1;
+    const round = used + 1;
     const english = ownerLanguage(this.db) === "en";
     const payload: JsonObject = {
       kind: "final_manager_incomplete",
@@ -8224,6 +8456,7 @@ export class Core {
       missing: verdict.missing as unknown as JsonObject[],
       lessons: verdict.lessons as unknown as JsonObject[],
     };
+    const missingItems = verdict.missing.map((item) => item.item).filter((item) => typeof item === "string" && item.length > 0);
     const skipped = new Error("auto continue skipped");
     try {
       await this.writeLane.write({
@@ -8234,13 +8467,21 @@ export class Core {
             "SELECT key FROM idempotency_keys WHERE key = ? AND json_extract(response_json, '$.status') = 'queued'",
             ownerReplanKey(workId),
           );
-          if (work?.state !== "running" || openDecision || pendingReplan || countRounds(transaction) !== round) throw skipped;
+          if (work?.state !== "running" || openDecision || pendingReplan || countAlerts(transaction) !== lifeRound) throw skipped;
+          recordAutoRecoveryInTransaction(transaction, {
+            kind: "final_incomplete",
+            target,
+            workId,
+            action: "final_continue",
+            sourceEventId: `final-incomplete:${lifeRound}`,
+            previousFailure: { summary: missingItems.length > 0 ? missingItems.join("; ") : verdict.summary, error_key: "final_incomplete", detail: verdict.summary },
+          });
           mergeOwnerReplanInTransaction(transaction, workId, { kind: "auto_final", answer: "Add the Tasks the final check's missing items need." });
           return null;
         },
         event: {
           id: createUlid(),
-          idempotencyKey: `final-manager-auto-continue:${workId}:${round}`,
+          idempotencyKey: `final-manager-auto-continue:${workId}:${lifeRound}`,
           type: "system.alert",
           workId,
           payload,
@@ -8310,35 +8551,30 @@ export class Core {
   /**
    * A Work merge that conflicted is first handed to the Manager without
    * asking the Owner: the same Owner replan the `resolve_conflict` answer
-   * queues, so the next tick adds the conflict-resolution Task. Only
-   * MAX_AUTO_CONFLICT_RESOLUTIONS rounds run per Work, counted from the
-   * alerts recorded here. `handled` means nothing more is to be recorded
+   * queues, so the next tick adds the conflict-resolution Task. Each round is
+   * a `recovery.started` (integration_conflict) and at most auto_recovery's
+   * limit rounds run per Work. `handled` means nothing more is to be recorded
    * (the replan was queued, or the Work is no longer in a state to act on).
    * Otherwise the caller opens the usual Decision, carrying `attempts`.
    */
   private async tryAutoResolveMergeConflict(
     workId: string,
-    merge: Extract<GitWorkMergeResult, { readonly kind: "conflict" }>,
+    merge: { readonly conflicting_files: readonly string[]; readonly base_branch: string | null; readonly message: string },
   ): Promise<{ readonly handled: true } | { readonly handled: false; readonly attempts: number }> {
-    // The limit counts rounds since the Work was last reopened; the total over
-    // the Work's life keeps each round's idempotency key unique.
-    const countRounds = (reader: { get<T extends object>(sql: string, ...parameters: (string | number)[]): T | undefined }): { current: number; total: number } => {
-      const row = reader.get<{ current: number; total: number }>(
-        `SELECT COUNT(*) AS total,
-                COALESCE(SUM(sequence > COALESCE((SELECT MAX(sequence) FROM events WHERE work_id = ? AND type = 'work.reopened'), 0)), 0) AS current
-           FROM events
-          WHERE work_id = ? AND type = 'system.alert' AND json_extract(payload_json, '$.kind') = ?`,
-        workId,
+    const target = { kind: "work", id: workId } as const;
+    // The alert count over the Work's life keeps each round's idempotency key unique;
+    // the limit counts only recoveries since the last Owner answer or reopen.
+    const countAlerts = (reader: { get<T extends object>(sql: string, ...parameters: (string | number)[]): T | undefined }): number =>
+      Number(reader.get<{ total: number }>(
+        "SELECT COUNT(*) AS total FROM events WHERE work_id = ? AND type = 'system.alert' AND json_extract(payload_json, '$.kind') = ?",
         workId,
         AUTO_CONFLICT_ALERT_KIND,
-      );
-      return { current: Number(row?.current ?? 0), total: Number(row?.total ?? 0) };
-    };
-    const before = countRounds(this.db);
-    const rounds = before.current;
-    if (rounds >= MAX_AUTO_CONFLICT_RESOLUTIONS) return { handled: false, attempts: rounds };
+      )?.total ?? 0);
+    const limit = autoRecoveryLimit(this.db, "integration_conflict");
+    const rounds = autoRecoveryUsed(this.db, "integration_conflict", target);
+    if (rounds >= limit) return { handled: false, attempts: rounds };
     const round = rounds + 1;
-    const lifeRound = before.total + 1;
+    const lifeRound = countAlerts(this.db) + 1;
     const english = ownerLanguage(this.db) === "en";
     const files = [...merge.conflicting_files];
     const listed = files.length > 0 ? files.join(", ") : english ? "not recorded" : "記録なし";
@@ -8346,13 +8582,13 @@ export class Core {
       kind: AUTO_CONFLICT_ALERT_KIND,
       merge_kind: "conflict",
       round,
-      max_rounds: MAX_AUTO_CONFLICT_RESOLUTIONS,
+      max_rounds: limit,
       conflicting_files: files,
       message: english
-        ? `Merging the Work into the Project base branch conflicted. The Manager is resolving it automatically (round ${round} of ${MAX_AUTO_CONFLICT_RESOLUTIONS}). Conflicting files: ${listed}`
-        : `Workのベースブランチへの統合でコンフリクトが発生しました。Managerが自動で解消します(${round}/${MAX_AUTO_CONFLICT_RESOLUTIONS}回目)。コンフリクトしたファイル: ${listed}`,
+        ? `Merging the Work into the Project base branch conflicted. The Manager is resolving it automatically (round ${round} of ${limit}). Conflicting files: ${listed}`
+        : `Workのベースブランチへの統合でコンフリクトが発生しました。Managerが自動で解消します(${round}/${limit}回目)。コンフリクトしたファイル: ${listed}`,
     };
-    if (merge.base_branch !== null) payload.base_branch = merge.base_branch;
+    if (merge.base_branch !== null && merge.base_branch !== "") payload.base_branch = merge.base_branch;
     const skipped = new Error("auto conflict resolution skipped");
     try {
       await this.writeLane.write({
@@ -8366,10 +8602,18 @@ export class Core {
             "SELECT key FROM idempotency_keys WHERE key = ? AND json_extract(response_json, '$.status') = 'queued'",
             ownerReplanKey(workId),
           );
-          // The alert row is inserted before this callback, so it counts as `round`.
+          // The alert row is inserted before this callback, so it counts as `lifeRound`.
           // Paused, cancelled, awaiting an Owner answer, or already being
           // resolved by an earlier trigger for this same failure: do nothing.
-          if (work?.state !== "running" || openDecision || pendingReplan || countRounds(transaction).total !== lifeRound) throw skipped;
+          if (work?.state !== "running" || openDecision || pendingReplan || countAlerts(transaction) !== lifeRound) throw skipped;
+          recordAutoRecoveryInTransaction(transaction, {
+            kind: "integration_conflict",
+            target,
+            workId,
+            action: "add_conflict_task",
+            sourceEventId: `merge-conflict:${lifeRound}`,
+            previousFailure: { summary: `${english ? "Merge conflict in" : "統合の衝突:"} ${listed}`, error_key: "git_conflict", detail: merge.message.slice(0, 2000) },
+          });
           mergeOwnerReplanInTransaction(transaction, workId, { kind: "auto_conflict", answer: "Resolve the merge conflict automatically." });
           return null;
         },
@@ -8708,6 +8952,59 @@ export class Core {
     }
   }
 
+  /**
+   * A Manager call that ended in a temporary provider error after its in-call retries: while a recovery is left,
+   * records a counted wait (no Decision) and returns true so the caller requeues; false escalates as before.
+   */
+  private async recoverManagerTransient(workId: string, result: AgentRunResult, runId: string): Promise<boolean> {
+    if (result.outcome === "success" || result.failure_class !== "transient") return false;
+    const errorKey = result.error_key ?? "provider_transient";
+    if (errorKey.startsWith("provider_failed:timeout:")) return false;
+    const started = await this.writeLane.transact((transaction: CoreWriteLaneTransaction) => startAutoRecoveryInTransaction(transaction, {
+      kind: "provider_transient",
+      target: { kind: "work", id: workId },
+      workId,
+      action: "wait_and_rerun",
+      sourceEventId: runId,
+      previousFailure: { summary: result.message ?? errorKey, error_key: errorKey, detail: result.message ?? null },
+      resumeAt: transientRecoveryResumeAt,
+    }));
+    return started !== null;
+  }
+
+  /** The plan feedback of a quality rejection that was turned into an automatic retry and has not been answered by a plan yet. */
+  private pendingPlanFeedback(workId: string): PreviousOutputFeedback | null {
+    const row = this.db.get<{ detail: string | null }>(
+      `SELECT json_extract(payload_json, '$.previous_failure.detail') AS detail FROM events
+        WHERE type = 'recovery.started' AND json_extract(payload_json, '$.kind') = 'plan_quality_rejected'
+          AND json_extract(payload_json, '$.target_kind') = 'work' AND json_extract(payload_json, '$.target_id') = ?
+          AND sequence > COALESCE((SELECT MAX(sequence) FROM events WHERE work_id = ? AND type IN ('work.planned', 'task.replanned')), 0)
+        ORDER BY sequence DESC LIMIT 1`,
+      workId,
+      workId,
+    );
+    if (!row?.detail) return null;
+    try {
+      return JSON.parse(row.detail) as PreviousOutputFeedback;
+    } catch {
+      return null;
+    }
+  }
+
+  /** A plan the quality check finally rejected: while a recovery is left, keeps the last feedback for the next Manager call instead of opening a Decision. */
+  private async recoverPlanQuality(workId: string, feedback: PreviousOutputFeedback | null, runId: string): Promise<boolean> {
+    if (feedback === null) return false;
+    const started = await this.writeLane.transact((transaction: CoreWriteLaneTransaction) => startAutoRecoveryInTransaction(transaction, {
+      kind: "plan_quality_rejected",
+      target: { kind: "work", id: workId },
+      workId,
+      action: "retry_plan",
+      sourceEventId: runId,
+      previousFailure: { summary: feedback.kind, error_key: feedback.kind, detail: JSON.stringify(feedback) },
+    }));
+    return started !== null;
+  }
+
   private async runInitialManagerPlan(workId: string, mode: StartWorkPayload["mode"]): Promise<void> {
     if (!this.started) return;
     const work = this.managerWorkContext(workId);
@@ -8717,7 +9014,7 @@ export class Core {
     // to the Owner through recordTickFailure with those reasons.
     // Quality repairs are counted apart from structural rejections: each one
     // buys one more attempt.
-    let feedback: PreviousOutputFeedback | null = null;
+    let feedback: PreviousOutputFeedback | null = this.pendingPlanFeedback(workId);
     let qualityRepairs = 0;
     const quality = planQualitySettings(this.db);
     for (let planAttempt = 1; planAttempt <= PLAN_MAX_ATTEMPTS + qualityRepairs; planAttempt += 1) {
@@ -8725,6 +9022,7 @@ export class Core {
       if (invoked === null || !this.started) return;
       const { result, runId } = invoked;
       if (result.failure_class === "rate_limited") return;
+      if (await this.recoverManagerTransient(workId, result, runId)) return;
       const report = requireManagerReport(result, "manager plan");
       const items = managerTasksToPlanItems(report.tasks, workId, { allowEmpty: false });
       const managerEvent = report.event;
@@ -8738,14 +9036,16 @@ export class Core {
           console.warn(`[owl-core] Manager plan for Work ${workId} was rejected (${plan.errors.join("; ")}); asking for a corrected plan.`);
           continue;
         }
+        if (await this.recoverPlanQuality(workId, feedback, runId)) return;
         throw validationError(`The Manager plan was rejected twice: ${plan.errors.join(" ")}`, { work_id: workId });
       }
-      const found = quality.enabled ? evaluatePlanQuality(items, quality) : [];
+      const found = quality.enabled ? evaluatePlanQuality(items, quality, this.ownerQuoteTexts(workId, null)) : [];
       // Missing fields are a format error: the Manager fixes the fields only, without redoing the plan or using a quality repair.
       const formatWarnings = found.filter((warning) => warning.code === "criterion_field_missing");
       if (formatWarnings.length > 0) {
         feedback = { kind: "fields_missing", errors: [], warnings: formatWarnings };
         if (planAttempt < PLAN_MAX_ATTEMPTS + qualityRepairs) continue;
+        if (await this.recoverPlanQuality(workId, feedback, runId)) return;
         throw validationError(`The Manager plan kept missing fields.\n${formatPlanQualityReason(formatWarnings)}`, { work_id: workId, codes: ["criterion_field_missing"] });
       }
       const warnings = found;
@@ -8756,6 +9056,7 @@ export class Core {
           const blocking = warnings.filter((warning) => quality.blocking_codes.includes(warning.code));
           feedback = { kind: "quality_rejected", errors: [], warnings: blocking };
           if (planAttempt < PLAN_MAX_ATTEMPTS + qualityRepairs) continue;
+          if (await this.recoverPlanQuality(workId, feedback, runId)) return;
           throw validationError(`The Manager plan was rejected by blocking plan quality checks (${blocking.map((warning) => warning.code).join(", ")}).\n${formatPlanQualityReason(blocking)}`, { work_id: workId, codes: blocking.map((warning) => warning.code) });
         }
         if (outcome === "repair_requested") {
@@ -8819,6 +9120,7 @@ export class Core {
             trigger: { kind: "initial_plan" },
             ...this.processSkillsRequestContext(),
             ...(feedback === null ? {} : { previous_output_feedback: feedback as unknown as JsonObject }),
+            auto_recovery: autoRecoveryForManager(this.db, workId, []),
           },
         },
         "manager.plan",
@@ -8901,6 +9203,8 @@ export class Core {
       if (failedTaskIds.length === 0) return;
     }
     this.replansInFlight.add(workId);
+    // Failed Tasks the budget stopped that this replan must plan differently; their lineage budget is restored when the plan is applied.
+    let budgetIds: readonly string[] = [];
     try {
       // An Owner-initiated replan bypasses the remake gate. When any Task is
       // blocked the Work is judgement_waiting and the Manager is not called;
@@ -8910,7 +9214,9 @@ export class Core {
       if (ownerReplan === null) {
         let gated: boolean;
         try {
-          gated = (await this.applyRemakeGate(workId, failedTaskIds)).length > 0 || (await this.applyNoProgressGate(workId, failedTaskIds)).length > 0;
+          const remake = await this.applyRemakeGate(workId, failedTaskIds);
+          budgetIds = remake.recovering;
+          gated = remake.blocked.length > 0 || (await this.applyNoProgressGate(workId, failedTaskIds)).length > 0;
         } catch (error) {
           await this.reportLoopGateFailure(workId, error);
           return;
@@ -8921,6 +9227,9 @@ export class Core {
           return;
         }
       }
+      if (budgetIds.length > 0) trigger = withBudgetExhaustedTrigger(trigger, budgetIds);
+      const partialIds = failedTaskIds.filter((id) => this.isTriggerFlagged(id, "partial_recovery"));
+      if (partialIds.length > 0) trigger = withPartialRepeatedTrigger(trigger, partialIds);
       const previousMarkers = await this.markReplanAttempted(failedTaskIds);
       const outcome = await this.runManagerReplan(workId, failedTaskIds, trigger, workerQuestions, finalVerdict, ownerReplan, workVerification, baseConflict);
       if (outcome === "requeue") await this.requeueManagerReplan(workId, previousMarkers, ownerReplan);
@@ -8988,10 +9297,18 @@ export class Core {
    * created, the Work waits for the Owner. Returns the blocked Task ids. A
    * failure of the gate itself throws: the caller skips the replan (fail-closed).
    */
-  private async applyRemakeGate(workId: string, failedTaskIds: readonly string[]): Promise<string[]> {
+  private async applyRemakeGate(workId: string, failedTaskIds: readonly string[]): Promise<{ blocked: string[]; recovering: string[] }> {
     const settings = remakeLimits(this.db);
     const blocked: { id: string; title: string; reason: RemakeLimitReason; usage: ReturnType<typeof lineageUsage> }[] = [];
+    // Tasks a budget stopped that go to the Manager once more instead of the Owner; `recorded` ones already have their recovery.started.
+    const recovering: { id: string; recorded: boolean; summary: string; reason: string }[] = [];
     for (const id of failedTaskIds) {
+      if (this.isBudgetRecoveryTrigger(id)) {
+        recovering.push({ id, recorded: true, summary: "", reason: "budget_exhausted" });
+        continue;
+      }
+      // The same partial report twice: its recovery.started is already written and the Manager repairs it; a remake limit does not stop it.
+      if (this.isTriggerFlagged(id, "partial_recovery")) continue;
       const row = this.db.get<{ title: string; status: string; failed_by_dependency_task_id: string | null }>(
         "SELECT title, status, failed_by_dependency_task_id FROM tasks WHERE id = ? AND work_id = ?",
         id,
@@ -9003,12 +9320,33 @@ export class Core {
       if (this.isQuestionOnlyTrigger(id)) continue;
       const usage = lineageUsage(this.db, id, settings);
       const verdict = evaluateRemakeGate(usage, settings);
-      if (verdict.blocked) blocked.push({ id, title: row.title, reason: verdict.reason, usage });
+      if (!verdict.blocked) continue;
+      const target = { kind: "task", id: lineageRootOf(this.db, id) } as const;
+      if (autoRecoveryUsed(this.db, "budget_exhausted", target) < autoRecoveryLimit(this.db, "budget_exhausted")) {
+        const summary = remakeLimitBrief({ taskTitle: row.title, reason: verdict.reason, usage, settings }, ownerLanguage(this.db)).reason;
+        recovering.push({ id, recorded: false, summary, reason: verdict.reason });
+      } else blocked.push({ id, title: row.title, reason: verdict.reason, usage });
     }
-    if (blocked.length === 0) return [];
+    const unrecorded = recovering.filter((item) => !item.recorded);
+    const recoveringIds = recovering.map((item) => item.id);
+    if (blocked.length === 0 && unrecorded.length === 0) return { blocked: [], recovering: recoveringIds };
     const language = ownerLanguage(this.db);
     await this.writeLane.transact((transaction) => {
       const now = utcNow();
+      for (const item of unrecorded) {
+        // The latest event of the Task names the failure this recovery answers, so a replay after a restart counts it once.
+        const source = transaction.get<{ id: string }>("SELECT id FROM events WHERE task_id = ? ORDER BY sequence DESC LIMIT 1", item.id)?.id ?? item.id;
+        recordAutoRecoveryInTransaction(transaction, {
+          kind: "budget_exhausted",
+          target: { kind: "task", id: lineageRootOf(transaction, item.id) },
+          workId,
+          action: "replan_different_approach",
+          sourceEventId: source,
+          previousFailure: { summary: item.summary, error_key: item.reason, detail: item.summary },
+          now,
+        });
+        markBudgetRecovery(transaction, item.id);
+      }
       for (const item of blocked) {
         transaction.run(
           "UPDATE idempotency_keys SET response_json = CASE WHEN json_valid(response_json) THEN json_set(response_json, '$.status', 'attempted') ELSE response_json END WHERE key = ?",
@@ -9019,7 +9357,29 @@ export class Core {
       }
       return null;
     });
-    return blocked.map((item) => item.id);
+    return { blocked: blocked.map((item) => item.id), recovering: recoveringIds };
+  }
+
+  /** True when the Task's queued Manager trigger carries this flag (see markTriggerFlag). */
+  private isTriggerFlagged(taskId: string, flag: "partial_recovery"): boolean {
+    const row = this.db.get<{ response_json: string }>("SELECT response_json FROM idempotency_keys WHERE key = ?", managerTriggerKey(taskId));
+    if (!row) return false;
+    try {
+      return (JSON.parse(row.response_json) as Record<string, unknown> | null)?.[flag] === true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** True when the Task's queued Manager trigger was marked as a budget_exhausted recovery (the replan must take a different approach). */
+  private isBudgetRecoveryTrigger(taskId: string): boolean {
+    const row = this.db.get<{ response_json: string }>("SELECT response_json FROM idempotency_keys WHERE key = ?", managerTriggerKey(taskId));
+    if (!row) return false;
+    try {
+      return (JSON.parse(row.response_json) as { budget_recovery?: unknown } | null)?.budget_recovery === true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -9150,6 +9510,8 @@ export class Core {
   ): Promise<void> {
     const sync = await this.syncBaseForPrerequisite(workId, spec);
     if (sync !== null && "conflict" in sync) {
+      // The first conflicts go to the Manager as a conflict-resolution Task; the wait stays and the release is tried again at the next evaluation.
+      if (await this.deferPrerequisiteForConflict(workId, sync.conflict)) return;
       await this.expirePrerequisite(workId, row, spec, "sync_conflict", sync.conflict);
       return;
     }
@@ -9179,6 +9541,26 @@ export class Core {
       outbox: [{ provider: "websocket" }],
     });
     this.workDriver.wake(workId);
+  }
+
+  /**
+   * The base branch conflicted with the Work branch while a prerequisite was released. While a
+   * conflict-resolution Task from an earlier round is still running the wait just goes on;
+   * otherwise the conflict is handed to the Manager. False when the limit is used up.
+   */
+  private async deferPrerequisiteForConflict(workId: string, message: string): Promise<boolean> {
+    const inFlight = this.db.get<{ found: number }>(
+      `SELECT 1 AS found FROM tasks
+        WHERE work_id = ? AND status NOT IN ('completed', 'failed', 'cancelled') AND prerequisite_json IS NULL
+          AND created_at > COALESCE((SELECT MAX(created_at) FROM events WHERE work_id = ? AND type = 'recovery.started'
+                                      AND json_extract(payload_json, '$.kind') = 'integration_conflict'
+                                      AND json_extract(payload_json, '$.target_kind') = 'work'), '9999')`,
+      workId,
+      workId,
+    );
+    if (inFlight) return true;
+    const result = await this.tryAutoResolveMergeConflict(workId, { conflicting_files: mergeConflictPaths(message), base_branch: null, message });
+    return result.handled;
   }
 
   private async expirePrerequisite(
@@ -9320,6 +9702,37 @@ export class Core {
   // the state_version to still match the value captured before the call
   // catches that case too (M1): any transition at all during the call,
   // including a pause immediately undone by a resume, discards the answer.
+  /** The Owner's own words for a Work: its summary, instruction messages and Decision answers (and the request being answered); an owner-origin criterion must quote one of them. */
+  private ownerQuoteTexts(workId: string, ownerReplan: OwnerReplanRequest | null): string[] {
+    const texts: string[] = [];
+    const summary = this.db.get<{ summary: string | null }>("SELECT summary FROM works WHERE id = ?", workId)?.summary;
+    if (typeof summary === "string") texts.push(summary);
+    for (const row of this.db.all<{ body: string }>(
+      "SELECT m.body AS body FROM messages m JOIN conversations c ON c.id = m.conversation_id WHERE c.work_id = ?",
+      workId,
+    )) texts.push(row.body);
+    const leaves = (value: unknown): void => {
+      if (typeof value === "string") texts.push(value);
+      else if (Array.isArray(value)) value.forEach(leaves);
+      else if (typeof value === "object" && value !== null) Object.values(value).forEach(leaves);
+    };
+    for (const row of this.db.all<{ answer_json: string }>(
+      "SELECT a.answer_json AS answer_json FROM decision_answers a JOIN decisions d ON d.id = a.decision_id WHERE d.work_id = ?",
+      workId,
+    )) {
+      try {
+        leaves(JSON.parse(row.answer_json));
+      } catch {
+        // A damaged answer cannot be quoted.
+      }
+    }
+    if (ownerReplan !== null) {
+      texts.push(ownerReplan.answer);
+      for (const request of ownerReplan.requests ?? []) if ("text" in request) texts.push(request.text);
+    }
+    return texts;
+  }
+
   private isReplanStillCurrent(workId: string, expectedVersion: number, ownerReplan = false): boolean {
     const work = this.db.get<Pick<WorkDbRow, "state" | "state_version">>(
       "SELECT state, state_version FROM works WHERE id = ?",
@@ -9504,8 +9917,47 @@ export class Core {
         final_verdict: finalVerdict,
         work_verification: workVerification,
         previous_output_feedback: feedback as unknown as JsonObject | null,
+        auto_recovery: autoRecoveryForManager(this.db, workId, failedTaskIds),
       },
     };
+  }
+
+  /**
+   * A Task that conflicted with the Work branch (at launch or when it was
+   * merged) is handed to the Manager with context.auto_recovery instead of
+   * opening a Decision. Each conflicted lineage is one `recovery.started`
+   * (integration_conflict). Returns the detail for the Decision once the
+   * limit is used up, otherwise null.
+   */
+  private async startTaskConflictRecovery(workId: string, trigger: ManagerTrigger): Promise<string | null> {
+    if (trigger.kind !== "task_failed") return null;
+    const english = ownerLanguage(this.db) === "en";
+    for (const entry of trigger.tasks) {
+      const conflict = entry.kind === "launch_conflict" || (entry.kind === "task_integration_failed" && entry.failure_kind === "merge_conflict");
+      if (!conflict) continue;
+      const root = lineageRootOf(this.db, entry.task_id);
+      const target = { kind: "task", id: root } as const;
+      const files = entry.merge_conflict_files;
+      const listed = files.length > 0 ? files.join(", ") : english ? "not recorded" : "記録なし";
+      const used = autoRecoveryUsed(this.db, "integration_conflict", target);
+      const sourceEventId = `task-conflict:${entry.task_id}:${this.db.get<{ failure_count: number }>("SELECT failure_count FROM tasks WHERE id = ?", entry.task_id)?.failure_count ?? 0}`;
+      if (used >= autoRecoveryLimit(this.db, "integration_conflict")) {
+        // A repeat of a failure that already started a recovery is not a new one.
+        if (this.db.get("SELECT 1 AS found FROM events WHERE idempotency_key = ?", `auto-recovery:integration_conflict:${root}:${sourceEventId}`)) continue;
+        return english ? `A Task still conflicts with the Work branch after ${used} automatic attempts. Conflicting files: ${listed}` : `Taskが自動で${used}回直しても、Workのブランチとの衝突が残っています。衝突したファイル: ${listed}`;
+      }
+      await this.writeLane.transact((transaction) => {
+        recordAutoRecoveryInTransaction(transaction, {
+          kind: "integration_conflict",
+          target,
+          workId,
+          action: "add_conflict_task",
+          sourceEventId,
+          previousFailure: { summary: `${english ? "Merge conflict in" : "統合の衝突:"} ${listed}`, error_key: "git_conflict", detail: JSON.stringify(entry).slice(0, 2000) },
+        });
+      });
+    }
+    return null;
   }
 
   private completedDesignDocuments(workId: string): JsonObject[] {
@@ -9588,11 +10040,18 @@ export class Core {
           outbox: [{ provider: "websocket" }],
       });
     };
+    const exhausted = await this.startTaskConflictRecovery(workId, trigger);
+    if (exhausted !== null) {
+      await fail(exhausted);
+      return "done";
+    }
     let plan: ReplanPlan | null = null;
     let prerequisites: ReadonlyMap<string, PrerequisiteSpec> = new Map();
     let planSnapshot: ReplanSnapshot | null = null;
     let rejection: readonly string[] = [];
-    let feedback: PreviousOutputFeedback | null = null;
+    // The feedback of an earlier final quality rejection goes first when that rejection was turned into an automatic retry.
+    let feedback: PreviousOutputFeedback | null = this.pendingPlanFeedback(workId);
+    let lastRequestId = "";
     // Set where a quality check, not the validator, produced the rejection.
     let qualityFeedback: PreviousOutputFeedback | null = null;
     let qualityRepairs = 0;
@@ -9600,6 +10059,7 @@ export class Core {
     let summaryUpdate: ManagerWorkSummaryUpdate | null = null;
     let summaryBase = { title: "", summary: "" };
     let managerRunId = "";
+    let planWorkVersion = 0;
     for (let attempt = 1; attempt <= REPLAN_MAX_ATTEMPTS + qualityRepairs && plan === null; attempt += 1) {
       const workBeforeCall = this.db.get<Pick<WorkDbRow, "state" | "state_version">>(
         "SELECT state, state_version FROM works WHERE id = ?",
@@ -9609,6 +10069,7 @@ export class Core {
       const snapshot = this.replanSnapshot(workId);
       const request = this.buildReplanRequest(workId, failedTaskIds, trigger, workerQuestions, attempt, finalVerdict, ownerReplan?.kind ?? null, workVerification, feedback, ownerReplan?.requests ?? [], baseConflict);
       let result: AgentRunResult;
+      lastRequestId = String(request.invocation_id);
       try {
         const raw = await this.invokeManagerPlan(request, "manager.replan");
         // M1: the call takes minutes; a pause, cancel or Decision in the
@@ -9624,6 +10085,7 @@ export class Core {
       }
       if (result.failure_class === "rate_limited") return "requeue";
       if (result.outcome !== "success") {
+        if (await this.recoverManagerTransient(workId, result, lastRequestId)) return "requeue";
         await fail(result.message ?? `Manager replan did not succeed (outcome=${result.outcome}).`);
         return "done";
       }
@@ -9665,7 +10127,28 @@ export class Core {
         await fail(humanizeUnexpected(error, "manager.replan").message);
         return "done";
       }
-      let validated: ReplanPlan | PlanRejection = validateReplan(items, snapshot, failedTaskIds, { actions: taskActions, allowOpen: ownerReplan !== null, acceptanceRevisionRequired });
+      // A budget_exhausted Task must come back with a different approach: remember what it was planned with.
+      const differentApproachRequired = new Map<string, PlannedApproach>();
+      for (const id of budgetExhaustedTaskIds(trigger)) {
+        const current = this.db.get<{ context: string | null; plan_context_json: string | null; acceptance: string; acceptance_criteria_json: string | null }>(
+          "SELECT context, plan_context_json, acceptance, acceptance_criteria_json FROM tasks WHERE id = ?",
+          id,
+        );
+        if (!current) continue;
+        const planned = readStoredTaskPlanContext(current.plan_context_json, current.context);
+        differentApproachRequired.set(id, {
+          context: planned.context,
+          notes: planned.manager_notes,
+          criteria: readStoredAcceptanceCriteria(current.acceptance_criteria_json, current.acceptance).map((criterion) => ({ text: criterion.text, check: criterion.check })),
+        });
+      }
+      const currentCriteria = new Map<string, readonly StoredAcceptanceCriterion[]>();
+      for (const task of snapshot.tasks) {
+        const row = this.db.get<{ acceptance: string; acceptance_criteria_json: string | null }>("SELECT acceptance, acceptance_criteria_json FROM tasks WHERE id = ?", task.id);
+        if (row) currentCriteria.set(task.id, readStoredAcceptanceCriteria(row.acceptance_criteria_json, row.acceptance));
+      }
+      const automaticReplan = ownerReplan === null || ownerReplan.kind === "auto_conflict" || ownerReplan.kind === "auto_final";
+      let validated: ReplanPlan | PlanRejection = validateReplan(items, snapshot, failedTaskIds, { actions: taskActions, allowOpen: ownerReplan !== null, acceptanceRevisionRequired, differentApproachRequired, currentCriteria, automatic: automaticReplan, qualitySettings: quality });
       let resolvedWaits: ReadonlyMap<string, PrerequisiteSpec> = new Map();
       if (!isPlanRejection(validated) && validated.waits.size > 0) {
         const resolved = await this.resolvePrerequisiteWaits(workId, validated.waits);
@@ -9673,7 +10156,16 @@ export class Core {
         else resolvedWaits = resolved.specs;
       }
       if (!isPlanRejection(validated)) {
-        const found = quality.enabled ? evaluatePlanQuality(items, quality) : [];
+        // partial_repeated: the Manager must say whether the rule applies; an empty rule_applicability is a missing field.
+        const missingRules = partialRepeatedTaskIds(trigger).filter((id) => (validated as ReplanPlan).revisions.has(id) && ((validated as ReplanPlan).revisions.get(id)?.rule_applicability ?? []).length === 0);
+        if (missingRules.length > 0) {
+          const errors = missingRules.map((id) => `Task ${id}: auto_recovery.rule_applicability must not be empty for a partial_repeated recovery; judge, for each open criterion, whether the rule the Worker cited applies.`);
+          validated = { errors };
+          qualityFeedback = { kind: "fields_missing", errors, warnings: [] };
+        }
+      }
+      if (!isPlanRejection(validated)) {
+        const found = quality.enabled ? evaluatePlanQuality(items, quality, this.ownerQuoteTexts(workId, ownerReplan)) : [];
         // Missing fields are a format error: rejected with a fields-only reason, not counted as a quality repair.
         const formatWarnings = found.filter((warning) => warning.code === "criterion_field_missing");
         const warnings = formatWarnings.length > 0 ? [] : found;
@@ -9692,6 +10184,7 @@ export class Core {
           continue;
         } else {
         plan = validated;
+        planWorkVersion = workBeforeCall.state_version;
         prerequisites = resolvedWaits;
         planSnapshot = snapshot;
         summaryUpdate = update;
@@ -9707,9 +10200,14 @@ export class Core {
       console.warn(`[owl-core] Manager replan attempt ${attempt} for Work ${workId} was rejected: ${rejection.join(" ")}`);
     }
     if (plan === null || planSnapshot === null) {
+      if ((feedback?.kind === "quality_rejected" || feedback?.kind === "fields_missing" || feedback?.kind === "plan_rejected") && await this.recoverPlanQuality(workId, feedback, lastRequestId)) return "requeue";
       await fail(`The Manager's replan was rejected twice. ${rejection.join(" ")}`);
       return "done";
     }
+    // Kind 8: before the plan is applied, Core runs the Manager's checks for a repeated partial report and settles the criteria.
+    const repaired = await this.repairRepeatedPartial(workId, plan, trigger, managerRunId, quality, () => this.started && this.isReplanStillCurrent(workId, planWorkVersion, ownerReplan !== null));
+    if (repaired === null) return "requeue";
+    plan = repaired;
     // An empty plan with no root failure writes nothing: the next tick sees
     // every Task terminal and runs the final check.
     if (plan.newItems.length === 0 && plan.reopenIds.length === 0 && plan.supersessions.size === 0 && (plan.actions?.size ?? 0) === 0) {
@@ -9737,6 +10235,8 @@ export class Core {
       base_plan_revision: planSnapshot.plan_revision ?? 0,
       root_statuses: new Map(planSnapshot.tasks.map((task) => [task.id, task.status])),
       owner_replan: ownerReplan !== null,
+      manager_agent_run_id: managerRunId,
+      partial_repeated_task_ids: partialRepeatedTaskIds(trigger),
     };
     try {
       const applied = await this.workflow.applyReplan(
@@ -9749,6 +10249,8 @@ export class Core {
           prerequisites,
           afterApply: (transaction, result) => {
             if (trigger.kind === "design_completed") this.insertDesignHandedMarkers(transaction, trigger.design_task_ids);
+            // The budget is given back once, here; the auto-recovery count is not reset so the next exhaustion counts against the same limit.
+            for (const id of budgetExhaustedTaskIds(trigger)) restartLineageBudgetInTransaction(transaction, id, utcNow());
             applyManagerWorkSummaryUpdateInTransaction(transaction, { work_id: workId, update: summaryUpdate, owner_replan: ownerReplan, agent_run_id: managerRunId, base: summaryBase });
             const revision = transaction.get<{ plan_revision: number }>("SELECT plan_revision FROM works WHERE id = ?", workId)?.plan_revision ?? 0;
             const title = (taskId: string): string => transaction.get<{ title: string }>("SELECT title FROM tasks WHERE id = ?", taskId)?.title ?? taskId;
@@ -9782,6 +10284,121 @@ export class Core {
     }
     await this.dispatcher.replayPending();
     return "done";
+  }
+
+  /**
+   * Kind 8 (partial_repeated), after the Manager's plan is accepted and before it is applied, for each retried Task of the trigger:
+   * (a) run the Manager's criterion_checks once each in the Task's last worktree; all passed: keep the stored criteria and have the Worker report with the results;
+   * (b) otherwise loosen only Manager-made criteria that failed or were not allowed, within the criteria_too_strict limit;
+   * (c) add the Manager's rule_applicability to the end of the notes.
+   * Returns the plan to apply, or null when the Work changed while the checks ran (the replan is asked again).
+   */
+  private async repairRepeatedPartial(
+    workId: string,
+    plan: ReplanPlan,
+    trigger: ManagerTrigger,
+    managerRunId: string,
+    quality: PlanQualitySettings,
+    isCurrent: () => boolean,
+  ): Promise<ReplanPlan | null> {
+    const ids = partialRepeatedTaskIds(trigger).filter((id) => plan.revisions.has(id));
+    if (ids.length === 0) return plan;
+    const revisions = new Map(plan.revisions);
+    const steps: { id: string; payload: JsonObject; relax: boolean }[] = [];
+    for (const id of ids) {
+      const revision = revisions.get(id) as NonNullable<ReturnType<typeof revisions.get>>;
+      const row = this.db.get<{ acceptance: string; acceptance_criteria_json: string | null; worktree_path: string | null; context: string | null; plan_context_json: string | null }>(
+        "SELECT acceptance, acceptance_criteria_json, worktree_path, context, plan_context_json FROM tasks WHERE id = ?", id);
+      if (!row) continue;
+      const stored = readStoredAcceptanceCriteria(row.acceptance_criteria_json, row.acceptance);
+      const last = lineagePartialReportPayloads(this.db, id, 1)[0];
+      const open = (last ? openCriteriaStatuses({ report: last.report, verification: last.verification }) : null)?.open ?? new Map<string, string>();
+      // (a) at most one check for each open criterion, in the Manager's order.
+      const seen = new Set<string>();
+      const checks = (revision.criterion_checks ?? []).filter((check) => open.has(check.criterion_id) && !seen.has(check.criterion_id) && seen.add(check.criterion_id));
+      const eventWorktree = this.db.get<{ worktree_path: string | null }>(
+        "SELECT json_extract(payload_json, '$.worktree_path') AS worktree_path FROM events WHERE task_id = ? AND type = 'task.failure.classified' ORDER BY sequence DESC LIMIT 1", id)?.worktree_path ?? null;
+      const cwd = [row.worktree_path, eventWorktree].find((path): path is string => typeof path === "string" && path.length > 0 && existsSync(path)) ?? null;
+      const results = await this.workflow.runManagerCriterionChecks(workId, id, checks, cwd);
+      if (!isCurrent()) return null;
+      const passedAll = open.size > 0 && [...open.keys()].every((criterionId) => results.some((result) => result.criterion_id === criterionId && result.status === "passed"));
+      const statusOf = (criterionId: string): CriterionCheckResult["status"] | null => results.find((result) => result.criterion_id === criterionId)?.status ?? null;
+      let next = revision;
+      let relaxed: string[] = [];
+      if (passedAll) {
+        // The criteria were never too strict: the stored ones stay and the Worker reports with Core's results as the evidence.
+        const legacy = stored.some((criterion) => criterion.legacy === true);
+        next = { ...next, acceptance: row.acceptance, acceptance_criteria: legacy ? undefined : stored as unknown as NonNullable<typeof revision.acceptance_criteria>, criteria_relaxations: [] };
+      } else {
+        // (b) only a Manager-made criterion that failed or was not allowed may be loosened, and only while criteria_too_strict has a try left.
+        const target = { kind: "task", id: lineageRootOf(this.db, id) } as const;
+        const tryLeft = autoRecoveryUsed(this.db, "criteria_too_strict", target) < autoRecoveryLimit(this.db, "criteria_too_strict");
+        const eligible = new Set(tryLeft
+          ? stored.filter((criterion) => isManagerCriterion(criterion) && ["failed", "not_allowed"].includes(statusOf(criterion.id) ?? "")).map((criterion) => criterion.id)
+          : []);
+        const revisedCriteria = revision.acceptance_criteria ?? [];
+        const kept = revisedCriteria.map((criterion) => {
+          const before = stored.find((entry) => entry.id === criterion.id);
+          const changed = before !== undefined && (before.text !== criterion.text || before.check !== criterion.check);
+          return changed && !eligible.has(criterion.id) ? before as unknown as typeof criterion : criterion;
+        });
+        let relaxations = (revision.criteria_relaxations ?? []).filter((record) => eligible.has(record.criterion_id));
+        if (evaluateCriteriaRelaxation(stored, kept, relaxations, quality).length > 0) {
+          // The kind 7 check refuses the loosened wording: every criterion goes back to what is stored.
+          relaxations = [];
+          kept.forEach((_criterion, index) => {
+            const before = stored.find((entry) => entry.id === kept[index].id);
+            if (before !== undefined) kept[index] = before as unknown as typeof kept[number];
+          });
+        }
+        relaxed = relaxations.map((record) => record.criterion_id).filter((criterionId) => {
+          const before = stored.find((entry) => entry.id === criterionId);
+          const after = kept.find((entry) => entry.id === criterionId);
+          return before !== undefined && after !== undefined && (before.text !== after.text || before.check !== after.check);
+        });
+        next = revision.acceptance_criteria === undefined
+          ? { ...next, criteria_relaxations: [] }
+          : { ...next, acceptance_criteria: kept, acceptance: renderAcceptanceCriteria(kept), criteria_relaxations: relaxations.filter((record) => relaxed.includes(record.criterion_id)) };
+      }
+      // (c) the Manager's judgement of the rule goes to the end of the notes, which the Worker reads as manager_notes.
+      const planned = readStoredTaskPlanContext(row.plan_context_json, row.context);
+      const base = next.plan_context ?? { context: planned.context, notes: planned.manager_notes, necessity: planned.necessity };
+      const notes = appendRuleSection(base.notes, next.rule_applicability ?? []);
+      const display = next.context === undefined ? undefined : `${next.context.replace(/\s+$/u, "")}\n\n${notes.slice(notes.lastIndexOf(RULE_SECTION_HEADING))}`;
+      next = { ...next, plan_context: { ...base, notes }, ...(display === undefined ? {} : { context: display }) };
+      revisions.set(id, next);
+      steps.push({
+        id,
+        relax: relaxed.length > 0,
+        payload: {
+          schema_version: 1, kind: "partial_repeated", target_kind: "task", target_id: lineageRootOf(this.db, id), step: "criterion_checks",
+          check_results: toJsonResults(results), all_passed: passedAll, relaxed_criteria: relaxed,
+        },
+      });
+    }
+    await this.writeLane.transact((transaction) => {
+      const now = utcNow();
+      for (const step of steps) {
+        appendEventInTransaction(transaction, {
+          type: "recovery.step",
+          idempotencyKey: `partial-repeated-step:${step.id}:${managerRunId}`,
+          workId,
+          taskId: step.id,
+          payload: step.payload,
+          now,
+        });
+        // A loosening is one more criteria_too_strict recovery, counted once per replan.
+        if (step.relax) {
+          recordAutoRecoveryInTransaction(transaction, {
+            kind: "criteria_too_strict", target: { kind: "task", id: lineageRootOf(transaction, step.id) }, workId, action: "relax_criteria",
+            sourceEventId: `partial-repeated:${managerRunId}:${step.id}`,
+            previousFailure: { summary: "The same partial report came again; the Manager loosened a criterion that failed Core's check.", error_key: "partial_repeated" }, now,
+          });
+        }
+      }
+      return null;
+    });
+    return { ...plan, revisions };
   }
 
   /** Stop the Agents still working on Tasks a replan cancelled, replaced or completed (their runs are already cancel_requested). */
@@ -9898,7 +10515,12 @@ export class Core {
           work_id: workId,
           scope,
           blocked_task_ids: eligibleTaskIds,
-          ...managerReplanFailureBrief(scope, detail, ownerLanguage(this.db), question, finalVerdict?.missing, autoConflictFiles),
+          ...withAutoRecoveryTried(
+            this.db,
+            managerReplanFailureBrief(scope, detail, ownerLanguage(this.db), question, finalVerdict?.missing, autoConflictFiles),
+            { workId, taskIds: eligibleTaskIds },
+            ownerLanguage(this.db),
+          ),
           allow_free_text: true,
           issuer_role: "manager",
         },
@@ -9952,6 +10574,7 @@ export class Core {
       failed_command_id: workBranchVerification.failed_command_id,
     };
     let failure: AgentRunResult | null = null;
+    let lastInvocationId = "";
     for (let attempt = 1; attempt <= FINAL_MANAGER_MAX_ATTEMPTS; attempt += 1) {
       // The shipped agent-runtime exposes `finalize` on its role-level
       // Manager request. Keep the Core context mode alongside that request.
@@ -9968,8 +10591,9 @@ export class Core {
         mode: "finalize" as const,
         memory_mode: "pages" as const,
         commit_language: this.db.get<{ commit_language: "ja" | "en" | null }>("SELECT projects.commit_language FROM works JOIN projects ON projects.id = works.project_id WHERE works.id = ?", workId)?.commit_language ?? null,
-        context: { mode: "finalize", trigger: { kind: "final_check" }, work_id: workId, tasks: managerTasks, reports, work_verification: workVerificationContext, design_documents: this.completedDesignDocuments(workId), backlog_items: listInProgressBacklogItemsOfWork(this.db, workId).map(({ id, file, line, problem, suggestion }) => ({ id, file, line, problem, suggestion })), ...this.processSkillsRequestContext() },
+        context: { mode: "finalize", trigger: { kind: "final_check" }, work_id: workId, tasks: managerTasks, reports, work_verification: workVerificationContext, criteria_relaxations: criteriaRelaxationsOfWork(this.db, workId), design_documents: this.completedDesignDocuments(workId), backlog_items: listInProgressBacklogItemsOfWork(this.db, workId).map(({ id, file, line, problem, suggestion }) => ({ id, file, line, problem, suggestion })), ...this.processSkillsRequestContext() },
       };
+      lastInvocationId = roleRequest.invocation_id;
       const outcome = await this.attemptFinalManager(workId, roleRequest);
       if (outcome === null) return null;
       if ("verdict" in outcome) return outcome;
@@ -9980,6 +10604,7 @@ export class Core {
       await delay(this.options.dispatcher?.manager_retry_delay_ms ?? INITIAL_PLAN_RETRY_DELAY_MS);
       if (!this.started) return null;
     }
+    if (failure !== null && await this.recoverManagerTransient(workId, failure, lastInvocationId)) return null;
     const cause = failure?.message && failure.message.length > 0 ? failure.message : `outcome=${failure?.outcome ?? "failed"}`;
     throw new HumanReadableError({
       code: "final_manager_failed",
@@ -10628,6 +11253,46 @@ export class Core {
     return fixerEscalation(this.db);
   }
 
+  public async getAutoRecoverySettings(): Promise<AutoRecoverySettings & { readonly warnings: readonly string[] }> {
+    const { limit, warnings } = autoRecoverySettings(this.db);
+    return { limit, warnings };
+  }
+
+  public async setAutoRecoverySettings(input: AutoRecoverySettings): Promise<AutoRecoverySettings & { readonly warnings: readonly string[] }> {
+    let normalized: AutoRecoverySettings;
+    try {
+      normalized = validateAutoRecoverySettings(input);
+    } catch (error) {
+      if (error instanceof AutoRecoverySettingsValidationError) {
+        throw validationError(error.message, { field: error.field });
+      }
+      throw error;
+    }
+    await this.writeLane.write({
+      mutateState: (transaction) => {
+        const now = utcNow();
+        ensureOwner(transaction, DEFAULT_OWNER_ID, now);
+        transaction.run(
+          `INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at)
+           VALUES (?, ?, '1.0.0', ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
+          AUTO_RECOVERY_SETTINGS_KEY,
+          DEFAULT_OWNER_ID,
+          JSON.stringify(normalized),
+          now,
+        );
+        return normalized;
+      },
+      event: {
+        idempotencyKey: `settings-auto-recovery:${createUlid()}`,
+        type: "settings.auto_recovery_updated",
+        payload: normalized as unknown as JsonObject,
+      },
+      outbox: [{ provider: "websocket" }],
+    });
+    return this.getAutoRecoverySettings();
+  }
+
   public async getPlanQualitySettings(): Promise<PlanQualitySettings> {
     return planQualitySettings(this.db);
   }
@@ -10930,6 +11595,8 @@ export class Core {
     const managerRoleModel = resolveRoleModelFromDb(this.db, "manager");
     const managerProvider = managerRoleModel?.provider ?? "anthropic";
     if (this.providerPauseController.isPaused(managerProvider)) return null;
+    // A counted automatic wait after a temporary provider error: no Manager call before its resume time.
+    if (transientRecoveryPendingUntil(this.db, workId) !== null) return null;
     // Resolved before the run is recorded: invalid Work rules fail the call
     // without leaving a running Manager row behind.
     const managerRules = this.composeRulesForRole("manager", workId);
@@ -11043,6 +11710,17 @@ export class Core {
             "UPDATE agent_runs SET status = 'exited', ended_at = ?, updated_at = ?, usage_json = COALESCE(?, usage_json) WHERE id = ?",
             now, now, usageJsonValue, agentRunId,
           );
+          // A 429 wait is shown with the other automatic recoveries but never counted.
+          recordAutoRecoveryInTransaction(transaction, {
+            kind: "provider_transient",
+            target: { kind: "work", id: workId },
+            workId,
+            action: "wait_rate_limit",
+            sourceEventId: agentRunId,
+            previousFailure: { summary: result.message ?? "rate limited", error_key: result.error_key ?? "rate_limited", detail: null },
+            counted: false,
+            resumeAt: pause.resume_at,
+          });
           return { agent_run_id: agentRunId, status: "exited" };
         },
         event: {
@@ -11313,7 +11991,7 @@ export function createCore(options: CoreOptions): Core {
 }
 
 function toWorkSummary(row: Omit<WorkDbRow, "owner_id" | "summary" | "size" | "plan_revision">): WorkSummary {
-  return { id: row.id, display_number: row.display_number, title: row.title, state: row.state, state_version: row.state_version, updated_at: row.updated_at, archived_at: row.archived_at, project_id: row.project_id };
+  return { id: row.id, display_number: row.display_number, title: row.title, state: row.state, state_version: row.state_version, updated_at: row.updated_at, archived_at: row.archived_at, project_id: row.project_id, prerequisite_wait: false, waiting_on: [] };
 }
 
 function toWorkDetail(row: WorkDetailDbRow): WorkDetail {
@@ -11334,6 +12012,7 @@ function toWorkDetail(row: WorkDetailDbRow): WorkDetail {
     progress,
     conversation_id: row.conversation_id,
     advisor_backlog: parseAdvisorBacklog(row.advisor_backlog_json),
+    prerequisites: [],
   };
 }
 
@@ -12931,8 +13610,6 @@ function policyDecisionIdempotencyKeyPrefix(workId: string): string {
 
 /** system.alert kind recorded each time a merge conflict is handed to the Manager without a Decision. */
 const AUTO_CONFLICT_ALERT_KIND = "work_merge_conflict_auto_resolve";
-/** Automatic conflict resolution rounds per Work before the Owner is asked. */
-const MAX_AUTO_CONFLICT_RESOLUTIONS = 2;
 
 /**
  * git's own conflict report in a failure message. The gateway classifies a
@@ -13284,6 +13961,8 @@ export function managerTasksToPlanItems(
     const necessity = parseTaskNecessity(candidate.necessity);
     // Structured criteria are kept as written; plan quality checks their fields. Only a Task that comes without any is read from its free-text acceptance.
     const criteria = Array.isArray(candidate.acceptance_criteria) ? candidate.acceptance_criteria as AcceptanceCriterion[] : undefined;
+    const relaxations = parseCriteriaRelaxations(candidate.auto_recovery, id, workId);
+    const recovery = parsePartialRecovery(candidate.auto_recovery, id, workId);
     const item: TaskPlanItem = {
       id,
       title: nonEmptyString(candidate.title, "title", index),
@@ -13306,9 +13985,43 @@ export function managerTasksToPlanItems(
       ...(candidate.wait_for === undefined || candidate.wait_for === null ? {} : { wait_for: candidate.wait_for as unknown as PlanWaitFor }),
       ...(candidate.base_sync_only === undefined || candidate.base_sync_only === null ? {} : { base_sync_only: baseSyncOnly(candidate.base_sync_only, index) }),
       ...(assignedDesigner === null ? {} : { assigned_designer: assignedDesigner }),
+      ...(relaxations.length === 0 && recovery.criterion_checks.length === 0 && recovery.rule_applicability.length === 0
+        ? {}
+        : { auto_recovery: { criteria_relaxations: relaxations, criterion_checks: recovery.criterion_checks, rule_applicability: recovery.rule_applicability } }),
     };
     return item;
   });
+}
+
+/** auto_recovery.criteria_relaxations as the Manager wrote them; absent or null reads as none. */
+function parseCriteriaRelaxations(value: unknown, taskId: string, workId: string): CriteriaRelaxation[] {
+  if (value === undefined || value === null) return [];
+  const list = isRecord(value) ? value.criteria_relaxations : undefined;
+  if (list === undefined || list === null) return [];
+  const text = (entry: unknown): entry is string => typeof entry === "string";
+  if (!Array.isArray(list) || list.some((entry) => !isRecord(entry) || !text(entry.criterion_id) || !text(entry.reason) || !text(entry.keeps))) {
+    throw validationError("The Manager plan Task auto_recovery.criteria_relaxations must be a list of criterion_id, reason and keeps.", { work_id: workId, task_id: taskId });
+  }
+  return list.map((entry) => ({ criterion_id: String(entry.criterion_id), reason: String(entry.reason), keeps: String(entry.keeps) }));
+}
+
+/** auto_recovery.criterion_checks and rule_applicability as the Manager wrote them (partial_repeated); absent or null reads as none. */
+function parsePartialRecovery(value: unknown, taskId: string, workId: string): { criterion_checks: CriterionCheck[]; rule_applicability: RuleApplicability[] } {
+  const none = { criterion_checks: [], rule_applicability: [] };
+  if (!isRecord(value)) return none;
+  const checks = value.criterion_checks ?? [];
+  const rules = value.rule_applicability ?? [];
+  const text = (entry: unknown): entry is string => typeof entry === "string" && entry.trim().length > 0;
+  if (!Array.isArray(checks) || checks.some((entry) => !isRecord(entry) || !text(entry.criterion_id) || !Array.isArray(entry.argv) || entry.argv.length === 0 || entry.argv.some((arg) => typeof arg !== "string"))) {
+    throw validationError("The Manager plan Task auto_recovery.criterion_checks must be a list of criterion_id and argv (strings).", { work_id: workId, task_id: taskId });
+  }
+  if (!Array.isArray(rules) || rules.some((entry) => !isRecord(entry) || !text(entry.criterion_id) || !text(entry.rule) || typeof entry.applies !== "boolean" || !text(entry.reason))) {
+    throw validationError("The Manager plan Task auto_recovery.rule_applicability must be a list of criterion_id, rule, applies and reason.", { work_id: workId, task_id: taskId });
+  }
+  return {
+    criterion_checks: checks.map((entry) => ({ criterion_id: String(entry.criterion_id), argv: (entry.argv as unknown[]).map(String) })),
+    rule_applicability: rules.map((entry) => ({ criterion_id: String(entry.criterion_id), rule: String(entry.rule), applies: entry.applies === true, reason: String(entry.reason) })),
+  };
 }
 
 function parseAssignedDesigner(value: unknown, type: string, index: number): "designer" | "lead_designer" | null {
@@ -13339,4 +14052,30 @@ class ReplayCommand extends Error {
 
 function localDayKey(date: Date): string {
   return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+}
+
+/** Ids of the Tasks the trigger names as partial_repeated. */
+function partialRepeatedTaskIds(trigger: ManagerTrigger): string[] {
+  if (trigger.kind !== "task_failed") return [];
+  return trigger.tasks.flatMap((task) => (task.kind === "partial_repeated" ? [task.task_id] : []));
+}
+
+/** The trigger with a partial_repeated entry for each of these Tasks. */
+function withPartialRepeatedTrigger(trigger: ManagerTrigger, taskIds: readonly string[]): ManagerTrigger {
+  const entries = taskIds.map((task_id) => ({ kind: "partial_repeated" as const, task_id }));
+  if (trigger.kind !== "task_failed") return { kind: "task_failed", tasks: entries };
+  return { kind: "task_failed", tasks: [...trigger.tasks.filter((task) => !taskIds.includes(task.task_id)), ...entries] };
+}
+
+/** Ids of the Tasks the trigger names as budget_exhausted. */
+function budgetExhaustedTaskIds(trigger: ManagerTrigger): string[] {
+  if (trigger.kind !== "task_failed") return [];
+  return trigger.tasks.flatMap((task) => (task.kind === "budget_exhausted" ? [task.task_id] : []));
+}
+
+/** The trigger with a budget_exhausted entry for each of these Tasks, so the Manager is told to plan a different approach. */
+function withBudgetExhaustedTrigger(trigger: ManagerTrigger, taskIds: readonly string[]): ManagerTrigger {
+  const entries = taskIds.map((task_id) => ({ kind: "budget_exhausted" as const, task_id, require_different_approach: true as const }));
+  if (trigger.kind !== "task_failed") return { kind: "task_failed", tasks: entries };
+  return { kind: "task_failed", tasks: [...trigger.tasks.filter((task) => !taskIds.includes(task.task_id)), ...entries] };
 }

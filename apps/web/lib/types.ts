@@ -62,6 +62,18 @@ export type AgentRunOutcome = 'success' | 'redo' | 'replan' | 'question' | 'part
 
 // ---- DTOs ---------------------------------------------------------------------
 
+/** One prerequisite Work as the API reports it (design 6.6). */
+export interface WorkPrerequisite {
+  work_id: ULID;
+  project_id: ULID | null;
+  project_name: string | null;
+  display_number: number | null;
+  title: string;
+  state: WorkState | null;
+  deleted: boolean;
+  satisfied: boolean;
+}
+
 export interface WorkSummary {
   id: ULID;
   display_number?: number | null;
@@ -71,6 +83,8 @@ export interface WorkSummary {
   updated_at: RFC3339;
   archived_at: RFC3339 | null;
   project_id?: ULID | null;
+  prerequisite_wait?: boolean;
+  waiting_on?: WorkPrerequisite[];
 }
 
 export interface WorkAdvisorBacklogEntry {
@@ -99,6 +113,7 @@ export interface WorkDetail extends Omit<WorkSummary, 'title' | 'state' | 'updat
   progress: WorkProgress | null;
   conversation_id?: ULID | null;
   advisor_backlog?: WorkAdvisorBacklog | null;
+  prerequisites?: WorkPrerequisite[];
 }
 
 export interface WorkProgress {
@@ -647,6 +662,12 @@ export interface FixerEscalationSettings {
   after_review_rejections: number;
 }
 
+/** GET/PUT /api/v1/settings/auto-recovery. */
+export interface AutoRecoverySettings {
+  limit: number;
+  warnings?: string[];
+}
+
 /** GET/PUT /api/v1/settings/remake-limits. */
 export interface RemakeLimitSettings {
   lineage_review_attempts: number;
@@ -825,6 +846,32 @@ export interface WorkDetailView {
   reports: Report[];
   decisions: Decision[];
   messages: Message[];
+  /** GET /works/{id}/view auto_recovery: recoveries in progress and the acceptance criteria relaxed so far. */
+  auto_recovery: AutoRecoveryView;
+}
+
+export interface AutoRecoveryView {
+  active: {
+    kind: string;
+    target_kind: 'work' | 'task';
+    target_id: string;
+    task_title: string | null;
+    attempt_no: number;
+    limit: number;
+    counted: boolean;
+    resume_at: string | null;
+    started_at: string;
+  }[];
+  relaxations: {
+    task_id: string;
+    task_title: string | null;
+    criterion_id: string;
+    original: { text: string; check: string };
+    relaxed: { text: string; check: string };
+    reason: string;
+    keeps: string;
+    at: string;
+  }[];
 }
 
 /** Stable, renderable Work shape created by work-detail-safety normalization. */
@@ -838,6 +885,8 @@ export interface NormalizedWorkDetail extends WorkSummary {
   progress: WorkProgress;
   conversation_id: ULID | null;
   advisor_backlog: WorkAdvisorBacklog | null;
+  prerequisites: WorkPrerequisite[];
+  prerequisite_wait: boolean;
 }
 
 export interface DecisionView {

@@ -54,6 +54,7 @@ export function BoardView({ onSelectCard, selectedCardId, refreshToken = 0 }: Bo
   const [formError, setFormError] = useState<string | null>(null);
   const [formNotice, setFormNotice] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
+  const [prerequisiteText, setPrerequisiteText] = useState('');
   const { hiddenIds } = useWorkRemovals();
   const { data: viewData, error, refresh } = useView<BoardData>('board', () => getBoard({ archived: 'exclude' }));
   const data = viewData ?? null;
@@ -100,10 +101,12 @@ export function BoardView({ onSelectCard, selectedCardId, refreshToken = 0 }: Bo
     setFormNotice(null);
     let created = false;
     try {
-      const work = await createWork({ ...form, title });
+      const prerequisite_work_ids = prerequisiteText.split(/[\s,、]+/).filter(Boolean);
+      const work = await createWork({ ...form, title, prerequisite_work_ids });
       created = true;
       await startWork(work.work_id, work.version, form.size === 'small' ? 'small' : 'normal');
       setForm(EMPTY_FORM);
+      setPrerequisiteText('');
       setFormNotice(t('board.createSuccess'));
       setFormOpen(false);
       await refresh();
@@ -245,6 +248,17 @@ export function BoardView({ onSelectCard, selectedCardId, refreshToken = 0 }: Bo
                     <option key={project.id} value={project.id}>{project.name}</option>
                   ))}
                 </select>
+              </label>
+              <label className="form-field">
+                <span>{t('board.prerequisiteLabel')}</span>
+                <textarea
+                  className="textarea"
+                  value={prerequisiteText}
+                  onChange={(ev) => setPrerequisiteText(ev.target.value)}
+                  rows={2}
+                  disabled={formBusy}
+                />
+                <span className="note">{t('board.prerequisiteHelp')}</span>
               </label>
             </div>
             <div className="btn-row mt-10">
@@ -546,6 +560,19 @@ export function WorkCard({
           </span>
         </div>
         <div className="card__title card__title--full">{title}</div>
+        {work.waiting_on && work.waiting_on.length > 0 && (
+          <div className="note">
+            {t('board.waitingOn')}
+            {work.waiting_on.map((p, i) => (
+              <span key={p.work_id}>
+                {i > 0 && '、'}
+                <Link href={workDetailHref(p.work_id)}>
+                  {p.display_number == null ? p.work_id : t('work.prerequisites.item', { project: p.project_name ?? t('work.prerequisites.noProject'), number: String(p.display_number) })}
+                </Link>
+              </span>
+            ))}
+          </div>
+        )}
         {work.archived_at && (
           <div className="mt-8">
             <ArchivedBadge />

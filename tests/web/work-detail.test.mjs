@@ -23,7 +23,7 @@ const workSizes = ['small', 'normal', 'large'];
 
 const workStateDisplayNames = {
   memo: 'Memo',
-  ready: 'Ready',
+  ready: 'Waiting on prerequisites',
   running: 'Running',
   paused: 'Paused',
   judgement_waiting: 'Needs review',
@@ -130,6 +130,15 @@ const componentTranslations = {
   'work.prerequisiteResume': 'Stop waiting and resume',
   'work.stopReason': ({ reason }) => `Why it stopped: ${reason}`,
   'work.fixerEscalated': ({ count }) => `Fixer took over after ${count} review rejections`,
+  'work.autoRecovering': ({ kind, attempt, limit }) => `Recovering automatically (${kind}, ${attempt} of ${limit})`,
+  'work.autoRecoveryTransient': ({ time, attempt, limit }) => `Waiting after a temporary error (resumes at ${time}, ${attempt} of ${limit})`,
+  'work.autoRecoveryRateLimited': ({ time }) => `Waiting for the usage limit (resumes at ${time}, not counted)`,
+  'work.autoRecoveryMore': ({ count }) => `and ${count} more`,
+  'work.autoRecoveryKind.integration_conflict': 'merge conflict',
+  'work.relaxedCriteriaTitle': 'Relaxed acceptance criteria',
+  'work.relaxedOriginal': 'Original criterion',
+  'work.relaxedNew': 'New criterion',
+  'work.relaxedKeeps': 'Check kept',
   'work.designDocuments': 'Design documents',
   'work.errorDesignDocumentsLoad': 'Could not load the design documents.',
   'work.errorDesignDocumentLoad': 'Could not load this design document.',
@@ -318,6 +327,7 @@ const detailComponentModule = compileWebComponent(join(repoRoot, 'apps/web/compo
   '@/components/StateBadge': stateBadgeModule,
   '@/components/WorkArchiveActions': archiveActionsModule,
   '@/components/WorkProjectMove': workProjectMoveStub,
+  '@/components/WorkPrerequisitesSection': { WorkPrerequisitesSection: () => null },
   '@/lib/i18n': componentI18n,
   '@/lib/work-detail-safety.mjs': { asReportEnvelope, humanizeWorkDetailError, normalizeWorkDetailData },
   '@/components/WorkSummaryBlock': workSummaryBlockModule,
@@ -524,7 +534,7 @@ function successfulApiFetch(input, options) {
       : apiWork({ id, title, summary, state, size, display_number });
     return jsonResponse({
       request_id: 'request-1',
-      data: { work, tasks: taskRows, runs: [], child_runs: [], reports: [], decisions: [], messages: [] },
+      data: { work, tasks: taskRows, runs: [], child_runs: [], reports: [], decisions: [], messages: [], auto_recovery: options.autoRecovery },
       version: 7,
     });
   }
@@ -778,6 +788,58 @@ test('Work detail marks a design Task with its own badge', async () => {
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+async function renderWithAutoRecovery(autoRecovery) {
+  const client = loadApiClient();
+  const originalFetch = globalThis.fetch;
+  const id = 'work-auto-recovery';
+  try {
+    globalThis.fetch = (input) => successfulApiFetch(input, { state: 'running', autoRecovery });
+    const board = renderBoardWorkLink({ id, title: 'Recovering', state: 'running', updated_at: '2026-09-23T00:00:00.000Z' });
+    return (await renderDetailFromRoute(board.href, client)).html;
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test('Work detail shows the recovering-automatically notice for each kind of wait, and nothing when none is active', async () => {
+  const resumeAt = '2026-09-23T05:30:00.000Z';
+  const clock = new Date(resumeAt).toLocaleTimeString('en', { hour: 'numeric', minute: '2-digit' });
+  const active = (extra) => ({ kind: 'integration_conflict', target_kind: 'work', target_id: 'w', task_title: null, attempt_no: 1, limit: 2, counted: true, resume_at: null, started_at: resumeAt, ...extra });
+
+  const conflict = await renderWithAutoRecovery({ active: [active()], relaxations: [] });
+  assert.ok(conflict.includes('Recovering automatically (merge conflict, 1 of 2)'));
+  assert.ok(!conflict.includes('more'));
+
+  const transient = await renderWithAutoRecovery({ active: [active({ kind: 'provider_transient', resume_at: resumeAt })], relaxations: [] });
+  assert.ok(transient.includes(`Waiting after a temporary error (resumes at ${clock}, 1 of 2)`));
+
+  const limited = await renderWithAutoRecovery({ active: [active({ kind: 'provider_transient', counted: false, resume_at: resumeAt })], relaxations: [] });
+  assert.ok(limited.includes(`Waiting for the usage limit (resumes at ${clock}, not counted)`));
+
+  const several = await renderWithAutoRecovery({ active: [active(), active({ kind: 'provider_transient', resume_at: resumeAt })], relaxations: [] });
+  assert.ok(several.includes('Recovering automatically (merge conflict, 1 of 2) and 1 more'));
+  assert.ok(several.includes('title="Recovering automatically (merge conflict, 1 of 2)\nWaiting after'), 'the title attribute lists every recovery');
+
+  for (const none of [{ active: [], relaxations: [] }, undefined]) {
+    const html = await renderWithAutoRecovery(none);
+    assert.ok(!html.includes('Recovering automatically') && !html.includes('Waiting after') && !html.includes('Waiting for the usage limit'));
+  }
+});
+
+test('Work detail lists the relaxed acceptance criteria after the assurance panel, and hides the section when there are none', async () => {
+  const relaxation = {
+    task_id: 't1', task_title: 'Check every page', criterion_id: 'AC3', at: '2026-09-23T00:00:00.000Z',
+    original: { text: 'Check all 120 pages', check: 'run all' }, relaxed: { text: 'Check three pages', check: 'run three' },
+    reason: 'Too many pages for one Task', keeps: 'Three sample pages are checked',
+  };
+  const shown = await renderWithAutoRecovery({ active: [], relaxations: [relaxation] });
+  assert.ok(shown.includes('Relaxed acceptance criteria'));
+  for (const cell of ['Check every page', 'AC3', 'Check all 120 pages', 'Check three pages', 'Too many pages for one Task', 'Three sample pages are checked']) {
+    assert.ok(shown.includes(`<td>${cell}</td>`), cell);
+  }
+  assert.ok(!(await renderWithAutoRecovery({ active: [], relaxations: [] })).includes('Relaxed acceptance criteria'));
 });
 
 test('Work detail shows why a Task waits, what it waits for and why a Task stopped, with a resume button', async () => {
@@ -1399,7 +1461,7 @@ test('Overview header places the number and state badges in the meta row and ren
     const meta = html.match(/<div class="work-head__meta">(.*?)<\/div>/s);
     assert.ok(meta, 'the meta row should render');
     assert.ok(meta[1].includes('Work #5'), 'the meta row should hold the Work number badge');
-    assert.ok(meta[1].includes('Ready'), 'the meta row should hold the state badge');
+    assert.ok(meta[1].includes('Waiting on prerequisites'), 'the meta row should hold the state badge');
     assert.ok(html.includes(`<h1 class="page__title panel__heading">${workData.title}</h1>`), 'the heading should hold only the title');
     assert.ok(/<h2 class="panel__title" id="sec-overview">Overview<\/h2>/.test(html), 'the Overview heading should have no badge');
     assert.ok(html.includes('<code class="wsum__code">npm test</code>'));

@@ -1,5 +1,8 @@
 import { PrerequisiteValidationError, validateWaitFor, type PlanWaitFor } from "../../shared/dist/prerequisite.js";
-import type { TaskPlanItem } from "./types";
+import { DEFAULT_PLAN_QUALITY_SETTINGS, type PlanQualitySettings } from "../../shared/dist/plan-quality-settings.js";
+import { isManagerCriterion, type CriteriaRelaxation, type StoredAcceptanceCriterion } from "../../shared/dist/acceptance-criteria.js";
+import { evaluateCriteriaRelaxation } from "./plan-quality";
+import type { CriterionCheck, RuleApplicability, TaskPlanItem } from "./types";
 
 /**
  * Validate a Manager plan or replan before Core writes any of it. Pure: it
@@ -36,6 +39,11 @@ export type TaskRevision = Pick<TaskPlanItem, "title" | "acceptance" | "acceptan
    * its current task_dependencies edges. Absent: the edges are kept.
    */
   readonly depends_on?: readonly ReplanDependency[];
+  /** The Manager-made criteria this automatic revision loosened, as the Manager recorded them. */
+  readonly criteria_relaxations?: readonly CriteriaRelaxation[];
+  /** partial_repeated recovery: what Core runs and records before applying the revision (see Core.repairRepeatedPartial). */
+  readonly criterion_checks?: readonly CriterionCheck[];
+  readonly rule_applicability?: readonly RuleApplicability[];
 };
 
 export interface ReplanPlan {
@@ -134,6 +142,32 @@ export interface ReplanOptions {
   readonly allowOpen?: boolean;
   /** Task id -> its current acceptance. Each is retried with its existing id and a rewritten acceptance. */
   readonly acceptanceRevisionRequired?: ReadonlyMap<string, string>;
+  /** Task id -> what it was planned with. A budget_exhausted replan must not retry the Task with the same context, notes and criteria. */
+  readonly differentApproachRequired?: ReadonlyMap<string, PlannedApproach>;
+  /** Task id -> its stored criteria; with `automatic`, the criteria the Owner asked for (or with no origin) must stay as they are. */
+  readonly currentCriteria?: ReadonlyMap<string, readonly StoredAcceptanceCriterion[]>;
+  /** True for a replan Core started by itself (automatic recovery, no Owner request): it may loosen Manager-made criteria only. */
+  readonly automatic?: boolean;
+  readonly qualitySettings?: PlanQualitySettings;
+}
+
+export interface PlannedApproach {
+  readonly context: string | null;
+  readonly notes: string | null;
+  readonly criteria: readonly { readonly text: string; readonly check: string }[];
+}
+
+export const SAME_APPROACH_REASON = "前と同じやり方です。やり方を変えてください。";
+
+function sameApproach(revision: TaskRevision, previous: PlannedApproach): boolean {
+  const text = (value: string | null | undefined): string => (value ?? "").trim();
+  const criteria = revision.acceptance_criteria ?? [];
+  // Why plan_context wins even when its context is null: revision.context then holds only the necessity text Core derived from it.
+  const context = revision.plan_context !== undefined ? revision.plan_context.context : revision.context;
+  return text(context) === text(previous.context)
+    && text(revision.plan_context?.notes) === text(previous.notes)
+    && criteria.length === previous.criteria.length
+    && criteria.every((criterion, index) => text(criterion.text) === text(previous.criteria[index].text) && text(criterion.check) === text(previous.criteria[index].check));
 }
 
 /**
@@ -149,8 +183,16 @@ export function validateReplan(
   options: ReplanOptions = {},
 ): ReplanPlan | PlanRejection {
   const plan = validatePlanAgainst(items, snapshot, rootFailedIds, "replan", { actions: options.actions ?? [], allowOpen: options.allowOpen === true });
-  const required = options.acceptanceRevisionRequired;
-  if (isPlanRejection(plan) || required === undefined || required.size === 0) return plan;
+  if (isPlanRejection(plan)) return plan;
+  const repeated = [...(options.differentApproachRequired ?? [])].filter(([id, previous]) => {
+    const revision = plan.revisions.get(id);
+    return revision !== undefined && sameApproach(revision, previous);
+  });
+  if (repeated.length > 0) {
+    const labelOf = (id: string): string => snapshot.tasks.find((task) => task.id === id)?.manager_task_id ?? id;
+    return { errors: repeated.map(([id]) => `Task ${labelOf(id)}: ${SAME_APPROACH_REASON}`) };
+  }
+  const required = options.acceptanceRevisionRequired ?? new Map<string, string>();
   const labelOf = (id: string): string => snapshot.tasks.find((task) => task.id === id)?.manager_task_id ?? id;
   const errors: string[] = [];
   for (const [id, current] of required) {
@@ -166,7 +208,50 @@ export function validateReplan(
       errors.push(`Task ${label}: an acceptance rewrite must not wait (wait_for).`);
     }
   }
+  errors.push(...criteriaOwnershipErrors(plan, options, required, labelOf));
   return errors.length > 0 ? { errors } : plan;
+}
+
+/** What an automatic replan may do to criteria: loosen Manager-made ones (recorded), never touch the Owner's (or origin-less) ones. */
+function criteriaOwnershipErrors(
+  plan: ReplanPlan,
+  options: ReplanOptions,
+  required: ReadonlyMap<string, string>,
+  labelOf: (id: string) => string,
+): string[] {
+  const current = options.currentCriteria;
+  if (current === undefined) return [];
+  const errors: string[] = [];
+  const settings = options.qualitySettings ?? DEFAULT_PLAN_QUALITY_SETTINGS;
+  // A Task planned with a free-text acceptance has one legacy criterion; there is nothing in it to protect or loosen by id.
+  const ownerCriteria = (id: string): StoredAcceptanceCriterion[] => (current.get(id) ?? []).filter((criterion) => criterion.legacy !== true && !isManagerCriterion(criterion));
+  if (options.automatic === true) {
+    for (const [id, revision] of plan.revisions) {
+      for (const before of ownerCriteria(id)) {
+        const after = (revision.acceptance_criteria ?? []).find((criterion) => criterion.id === before.id);
+        if (after === undefined || after.text !== before.text || after.check !== before.check) {
+          errors.push(`Task ${labelOf(id)}: criterion ${before.id} comes from the Owner (or has no origin); an automatic replan must keep its id, text and check as they are.`);
+        }
+      }
+    }
+    const replacements = new Map(plan.newItems.map((item, index) => [planItemLocalId(item, index), item]));
+    for (const [id, localIds] of plan.supersessions) {
+      const replacementCriteria = localIds.flatMap((localId) => replacements.get(localId)?.acceptance_criteria ?? []);
+      for (const before of ownerCriteria(id)) {
+        if (!replacementCriteria.some((criterion) => criterion.text === before.text && criterion.check === before.check)) {
+          errors.push(`Task ${labelOf(id)}: criterion ${before.id} comes from the Owner (or has no origin); an automatic replan must carry it unchanged into the Task that replaces it.`);
+        }
+      }
+    }
+  }
+  for (const [id, revision] of plan.revisions) {
+    const relaxations = revision.criteria_relaxations ?? [];
+    if (!required.has(id) && relaxations.length === 0) continue;
+    for (const line of evaluateCriteriaRelaxation(current.get(id) ?? [], revision.acceptance_criteria ?? [], relaxations, settings)) {
+      errors.push(`Task ${labelOf(id)}: ${line}`);
+    }
+  }
+  return errors;
 }
 
 function validatePlanAgainst(
@@ -273,6 +358,9 @@ function validatePlanAgainst(
         required_tests: item.required_tests,
         base_sync_only: item.base_sync_only,
         assigned_designer: item.assigned_designer,
+        criteria_relaxations: item.auto_recovery?.criteria_relaxations,
+        criterion_checks: item.auto_recovery?.criterion_checks,
+        rule_applicability: item.auto_recovery?.rule_applicability,
       });
       retried.push({ item, localId, taskId: match.id });
       return;

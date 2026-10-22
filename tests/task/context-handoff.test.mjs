@@ -335,7 +335,7 @@ test("a Manager replan receives readable failure details, not hashes", async (t)
     task_id: t1,
     manager_task_id: "T1",
     title: "A",
-    acceptance_criteria: [{ id: "AC1", text: "Done.", check: "test fixture", serves: "test fixture", if_omitted: "test fixture", check_weight: "light", weight_reason: "", kind: "work_check" }],
+    acceptance_criteria: [{ id: "AC1", text: "Done.", check: "test fixture", serves: "test fixture", if_omitted: "test fixture", check_weight: "light", weight_reason: "", kind: "work_check", origin: { kind: "manager", source: null, quote: "" } }],
     acceptance_defects: [],
     // One field per fact: no joined sentence, and no `detail`.
     failure: { kind: "worker_failed", role: "Worker", reported_result: "failed", work_done: "Could not write out.txt: DISK-FULL-MARKER.", reason: null },

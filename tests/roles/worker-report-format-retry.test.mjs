@@ -129,6 +129,18 @@ test("a report format failure after a Bash tool call is still resubmitted and su
   assert.equal(result.outcome, "success");
 });
 
+test("after a Bash tool call an exhausted format failure still reports report_format_invalid with the session id", async () => {
+  const bashUse = JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: {} }] } });
+  const runner = runnerWith(async (request) => {
+    const failed = formatFailure(request);
+    return { ...failed, stdout: `${bashUse}\n${failed.stdout}` };
+  });
+  const result = await runner.runWorker(limited(1));
+  assert.equal(result.outcome, "failed");
+  assert.equal(result.error_key, "report_format_invalid", "Core adds the side_effect_failure: prefix");
+  assert.equal(result.provider_session_id, "session-X");
+});
+
 test("resubmission stops at the configured limit and reports report_format_invalid", async () => {
   for (const limit of [0, 1, 3]) {
     let count = 0;

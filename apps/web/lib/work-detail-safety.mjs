@@ -1,4 +1,5 @@
 import { isAgentOutcome } from './agent-run-display.mjs';
+import { normalizeAutoRecovery } from './auto-recovery.mjs';
 
 /**
  * @typedef {import('./types').WorkDetailView} WorkDetailView
@@ -363,6 +364,8 @@ function normalizeWorkDetailDataUnsafe(value, requestedWorkId) {
       progress: normalizeProgress(rawWork.progress, tasks, state),
       conversation_id: nullableString(rawWork.conversation_id),
       advisor_backlog: normalizeAdvisorBacklog(rawWork.advisor_backlog),
+      prerequisites: Array.isArray(rawWork.prerequisites) ? rawWork.prerequisites : [],
+      prerequisite_wait: rawWork.prerequisite_wait === true,
     },
     tasks: /** @type {WorkDetailView['tasks']} */ (tasks),
     runs: normalizeRuns(source.runs, id),
@@ -370,6 +373,7 @@ function normalizeWorkDetailDataUnsafe(value, requestedWorkId) {
     reports: normalizeReports(source.reports, id),
     decisions: normalizeDecisions(source.decisions, id),
     messages: normalizeMessages(source.messages, id),
+    auto_recovery: normalizeAutoRecovery(source.auto_recovery),
   };
 }
 
@@ -406,6 +410,8 @@ export function normalizeWorkDetailData(value, requestedWorkId = 'unknown-work')
         progress: { total_tasks: 0, completed_tasks: 0, percent: 0 },
         conversation_id: null,
         advisor_backlog: null,
+        prerequisites: [],
+        prerequisite_wait: false,
       },
       tasks: [],
       runs: [],
@@ -413,6 +419,7 @@ export function normalizeWorkDetailData(value, requestedWorkId = 'unknown-work')
       reports: [],
       decisions: [],
       messages: [],
+      auto_recovery: normalizeAutoRecovery(null),
     };
   }
 }

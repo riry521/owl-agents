@@ -37,9 +37,12 @@ import {
   type ReplanApplyGuard,
   type ReplanApplyResult,
 } from "./state-reducer";
-import { lineageReviewHistory, recordTaskChangeMeasurementInTransaction } from "./task-lineage";
+import { lineageReviewHistory, lineageRootOf, recordTaskChangeMeasurementInTransaction } from "./task-lineage";
+import { autoRecoveryCountsOfWork, autoRecoverySummary, criteriaRelaxationsOfWork, recordAutoRecoveryInTransaction, startAutoRecoveryInTransaction, transientRecoveryResumeAt } from "./auto-recovery";
 import { progressGuard } from "./progress-guard";
 import { HYBRID_MODE_SETTINGS_KEY } from "./types";
+import type { CriterionCheck } from "./types";
+import { runCriterionChecks, splitPlainCommand, type CriterionCheckResult } from "./criterion-checks";
 import { GitWorktreeGateway } from "./git-gateway.js";
 import { prepareWorkGitTemplate, removeWorkGitTemplate } from "./work-git-template.js";
 import { processIdentityMatches, readProcessIdentity } from "./process-identity.js";
@@ -914,12 +917,14 @@ export class WorkflowEngine {
           const owner = spec.conditions.filter((condition) => condition.kind === "owner");
           if (owner.length === 0) continue;
           const title = transaction.get<{ title: string }>("SELECT title FROM tasks WHERE id = ?", taskId)?.title ?? taskId;
+          const language = ownerLanguage(transaction);
           const brief = prerequisiteExpiredBrief(
             { taskId, taskTitle: title, kind: "owner", detail: owner.map((condition) => condition.description).join(" / "), reason: spec.reason, conditions: spec.conditions.map((condition) => condition.description) },
-            ownerLanguage(transaction),
+            language,
           );
           const known = transaction.get<{ id: string }>("SELECT id FROM decisions WHERE work_id = ? AND status = 'open' AND reason = ?", workId, brief.reason);
           const decisionId = openRemakeLimitDecisionInTransaction(transaction, { workId, blockedTaskIds: [taskId], brief, now: utcNow() });
+          const saved = transaction.get<{ tried: string }>("SELECT tried FROM decisions WHERE id = ?", decisionId)?.tried ?? brief.tried;
           // The same notification event decisions.open emits (the dispatcher delivers it).
           if (known === undefined) {
             appendEventInTransaction(transaction, {
@@ -927,7 +932,7 @@ export class WorkflowEngine {
               idempotencyKey: `decision-opened:owner-wait:${decisionId}`,
               workId,
               taskId: null,
-              payload: { work_id: workId, scope: "work", blocked_task_ids: [taskId], ...brief, allow_free_text: true, issuer_role: "core", decision_id: decisionId, language: ownerLanguage(transaction) } as unknown as JsonObject,
+              payload: { work_id: workId, scope: "work", blocked_task_ids: [taskId], ...brief, tried: saved, allow_free_text: true, issuer_role: "core", decision_id: decisionId, language, auto_recovery_summary: autoRecoverySummary(saved, language) } as unknown as JsonObject,
             });
           }
         }
@@ -1340,6 +1345,8 @@ export class WorkflowEngine {
       started_at: startedAt,
       completed_at: completedAt,
       duration_ms: durationMs,
+      criteria_relaxations: criteriaRelaxationsOfWork(this.db, workId),
+      auto_recoveries: autoRecoveryCountsOfWork(this.db, workId),
     };
     await this.writeLane.write({
       mutateState: (transaction: CoreWriteLaneTransaction) => {
@@ -1957,9 +1964,10 @@ export class WorkflowEngine {
       await this.reportExternalBlocker({ workId, taskId, agentRunId, blocker: external.blocker, report: reportObject, usage });
       return;
     }
-    if (reportObject && result.outcome === "success") {
-      // Criteria the Task cannot prove go back to the Manager on the same Task;
-      // the Worker is not restarted and the Task is not replaced.
+    if (reportObject && (result.outcome === "success" || (result.outcome === "partial" && reportObject.result === "partial" && !reportObject.pending_process))) {
+      // Criteria the Task cannot prove go back to the Manager (or the Owner) on the same Task;
+      // the Worker is not restarted and the Task is not replaced. A partial report that lists
+      // unverifiable criteria is the same defect, not a partial to repeat (unless a process is still running).
       const defects = workerAcceptanceDefects(reportObject);
       if (defects.length > 0) {
         await this.reportAcceptanceDefect({ workId, taskId, source: "worker", agentRunId, defects, report: reportObject, usage });
@@ -2072,6 +2080,32 @@ export class WorkflowEngine {
         });
         return;
       }
+      // Past the short retries each auto_recovery slot buys one wait-and-rerun, kept as a transient failure whose
+      // next_attempt_at is the wait. The slot is written first so a replay never counts the same failure twice.
+      // A Worker timeout usually means the Task is too large, so waiting and rerunning would only spend a slot.
+      const recovery = result.error_key.startsWith("provider_failed:timeout:") ? null : await this.writeLane.transact((transaction) =>
+        startAutoRecoveryInTransaction(transaction, {
+          kind: "provider_transient",
+          target: { kind: "task", id: lineageRootOf(transaction, taskId) },
+          workId,
+          action: "wait_and_rerun",
+          sourceEventId: agentRunId,
+          previousFailure: { summary: result.message ?? result.error_key, error_key: result.error_key, detail: result.message ?? "" },
+          resumeAt: transientRecoveryResumeAt,
+        }));
+      if (recovery !== null) {
+        await this.writeFailureEvent(workId, taskId, agentRunId, {
+          failure_class: "transient",
+          retry_no: durableRetryNo,
+          next_attempt_at: recovery.resume_at,
+          auto_recovery_attempt_no: recovery.attempt_no,
+          error_key: result.error_key,
+          retry_allowed: true,
+          reason: result.message ?? null,
+          ...usage,
+        });
+        return;
+      }
       // Transient retry budget exhausted (3 attempts): escalate as a
       // deterministic failure so it counts toward failure_count/
       // same_error_count and can reach the Manager-trigger threshold
@@ -2154,6 +2188,17 @@ export class WorkflowEngine {
       failure_class: "rate_limited",
       ...usage,
     };
+    // Recorded for the Work screen only: a 429 wait is never counted against the auto_recovery limit.
+    await this.writeLane.transact((transaction) => recordAutoRecoveryInTransaction(transaction, {
+      kind: "provider_transient",
+      target: { kind: "task", id: lineageRootOf(transaction, taskId) },
+      workId,
+      action: "wait_rate_limit",
+      sourceEventId: agentRunId,
+      previousFailure: { summary: result.message ?? result.error_key ?? "rate_limited", error_key: result.error_key ?? "rate_limited", detail: result.message ?? "" },
+      counted: false,
+      resumeAt: pause.resume_at,
+    }));
     await this.writeLane.write({
       mutateState: (transaction) => reduceTaskInTransaction(transaction, taskId, { event: "task.rate_limited", payload }),
       event: {
@@ -2340,13 +2385,13 @@ export class WorkflowEngine {
     // A newly failed Task already cascaded to its waiting dependents inside
     // reduceTaskInTransaction.
     if (writeResult.state.manager_trigger) {
-      await this.triggerManagerReplanIfNeeded(workId, trigger ?? {
+      await this.triggerManagerReplanIfNeeded(workId, trigger ?? (writeResult.state.decision?.reason === "partial_repeated" ? { kind: "partial_repeated", task_id: taskId } : {
         kind: "failure_threshold",
         task_id: taskId,
         error_key: typeof payload.error_key === "string" ? payload.error_key : null,
         reason: typeof payload.reason === "string" ? payload.reason : null,
         question: question ?? null,
-      });
+      }));
     }
   }
 
@@ -3458,14 +3503,14 @@ export class WorkflowEngine {
   }
 
   /** Commands the Worker runs before reporting, resolved in the Task worktree; [] without a Project. */
-  private async workerReportCheckCommands(workId: string, taskId: string, worktree: string | null): Promise<string[]> {
+  private async workerReportCheckCommands(workId: string, taskId: string, worktree: string | null, options: { readonly resolvedOnly?: boolean } = {}): Promise<string[]> {
     const project = this.projectTestRunRow(workId, taskId);
     if (!project) return [];
     const root = worktree ?? project.canonical_path;
     const settings = testSetupSettings(this.db);
     const setup = await this.selectProjectTestSetup(project, root);
     return reportCheckCommands({
-      configured: project.report_check_commands_json === null ? [] : JSON.parse(project.report_check_commands_json) as string[],
+      configured: project.report_check_commands_json === null || options.resolvedOnly === true ? [] : JSON.parse(project.report_check_commands_json) as string[],
       explicit_json: project.test_run_json,
       detected_json: project.test_run_detected_json,
       root,
@@ -3617,6 +3662,26 @@ export class WorkflowEngine {
       if (absolute.startsWith(`${root}/`) && (await lstat(absolute).catch(() => null))?.isFile()) existing.push(path);
     }
     return existing;
+  }
+
+  /**
+   * The Manager's criterion checks for a repeated partial report: each argv runs once in cwd (the Task's last worktree), without a shell,
+   * with the verification policy's timeout and limits; an argv the Project does not allow is not run.
+   */
+  public async runManagerCriterionChecks(workId: string, taskId: string, checks: readonly CriterionCheck[], cwd: string | null): Promise<CriterionCheckResult[]> {
+    const { limits } = verificationPolicySettings(this.db);
+    // Allowed: the Project's check_commands plus what the Worker was told to run before reporting (report_check_commands or the resolved test_run).
+    // report_check_commands replaces the resolved test_run for the Worker, but the Manager may still check with either.
+    const reportCommands = [...await this.workerReportCheckCommands(workId, taskId, cwd), ...await this.workerReportCheckCommands(workId, taskId, cwd, { resolvedOnly: true })].flatMap((line) => {
+      const argv = splitPlainCommand(line);
+      return argv === null ? [] : [argv];
+    });
+    return runCriterionChecks({
+      checks,
+      allowed: [...this.contextBuilder.checkCommands(workId), ...reportCommands],
+      cwd,
+      run: (argv, directory) => this.runVerificationCommand(taskId, argv, directory, limits.env_allowlist, limits.timeout_seconds * 1000, limits.stdout_limit_bytes, limits.stderr_limit_bytes, [0]),
+    });
   }
 
   private async runVerificationCommand(

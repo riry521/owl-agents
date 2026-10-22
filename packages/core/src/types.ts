@@ -1,5 +1,5 @@
 import type { OwlDatabase, WriteLane, WriteLaneTransaction } from "../../db/dist/index.js";
-import type { AcceptanceCriterion, AgentFailureClass, AgentProcessEvent, CuratorCandidate, CuratorProposal, CuratorRequest, CuratorRunResult, OwnerLanguage, ProcessSkillsInstallCommand, PromptObserver, ProcessSkillsSettings, RateLimitInfo, SkillFeedback, TaskNecessity, TaskPlanContext, TestPolicy, TokenUsage } from "@owl/shared";
+import type { AcceptanceCriterion, CriteriaRelaxation, AgentFailureClass, AgentProcessEvent, CuratorCandidate, CuratorProposal, CuratorRequest, CuratorRunResult, OwnerLanguage, ProcessSkillsInstallCommand, PromptObserver, ProcessSkillsSettings, RateLimitInfo, SkillFeedback, TaskNecessity, TaskPlanContext, TestPolicy, TokenUsage } from "@owl/shared";
 import type { AttemptDecision } from "./attempt-policy";
 import type { ExecutorRuntime } from "./executor.js";
 import type { KnowledgeStoragePersistence } from "./knowledge-location.js";
@@ -7,6 +7,7 @@ import type { DetectedProcessSkillsPack, ProcessSkillsFileSystem } from "./proce
 import type { NormalizedLesson } from "./final-verdict.js";
 import type { DesignBlockedReport } from "../../shared/dist/design-blocked.js";
 import type { DecisionCauseKind } from "../../shared/dist/decision-explanation.js";
+import type { WorkPrerequisiteView } from "../../shared/dist/work-prerequisite.js";
 import type { PlanWaitFor } from "../../shared/dist/prerequisite.js";
 import type { PlanUsageSource } from "../../shared/dist/plan-usage.js";
 import type { ModelHarness } from "../../shared/dist/harness-models.js";
@@ -16,7 +17,6 @@ export type JsonObject = Record<string, unknown>;
 /** Final Manager lessons and their source metadata passed to the durable learning queue. */
 export interface WorkLearningInput {
   readonly agent_run_id: string | null;
-  explanation_json?: string | null;
   readonly project_id: string | null;
   readonly lessons: readonly NormalizedLesson[];
 }
@@ -897,6 +897,7 @@ export interface CreateWorkPayload extends JsonObject {
   readonly design_mode?: "auto" | "lead";
   readonly backlog_item_ids?: string[];
   readonly dismiss_backlog_item_ids?: string[];
+  readonly prerequisite_work_ids?: string[];
 }
 
 export interface CreateWorkData extends JsonObject {
@@ -940,6 +941,10 @@ export interface WorkSummary extends JsonObject {
   readonly updated_at: string;
   readonly archived_at: string | null;
   readonly project_id: string | null;
+  /** True while the Work is ready, waiting for its prerequisite Works. */
+  readonly prerequisite_wait: boolean;
+  /** The prerequisites not yet met, for a memo or ready Work; empty otherwise. */
+  readonly waiting_on: readonly WorkPrerequisiteView[];
 }
 
 export interface WorkProgress extends JsonObject {
@@ -970,6 +975,8 @@ export interface WorkDetail extends WorkSummary {
   readonly progress: WorkProgress;
   readonly conversation_id: string | null;
   readonly advisor_backlog: WorkAdvisorBacklog | null;
+  /** In the order the Owner listed them. */
+  readonly prerequisites: readonly WorkPrerequisiteView[];
 }
 
 export interface WorkListQuery extends ListQuery {
@@ -1136,6 +1143,7 @@ export interface WorkViewData extends JsonObject {
   readonly decisions: readonly Decision[];
   readonly conversation: JsonObject | null;
   readonly assurance: JsonObject | null;
+  readonly auto_recovery: { readonly active: readonly JsonObject[]; readonly relaxations: readonly JsonObject[] };
 }
 
 export interface BoardViewData extends JsonObject {
@@ -1368,6 +1376,28 @@ export interface TaskPlanItem {
   readonly necessity?: TaskNecessity | null;
   /** The Manager's context, notes and necessity as written; `context` above is their display text. */
   readonly plan_context?: TaskPlanContext;
+  /** Automatic-recovery replan only, on a retried Task: the Manager-made criteria it loosened, one record each. */
+  readonly auto_recovery?: {
+    readonly criteria_relaxations?: readonly CriteriaRelaxation[];
+    /** partial_repeated only: one command per open criterion for Core to run in the Task's last worktree. */
+    readonly criterion_checks?: readonly CriterionCheck[];
+    /** partial_repeated only: whether the rule the Worker cited applies to each open criterion. */
+    readonly rule_applicability?: readonly RuleApplicability[];
+  };
+}
+
+/** The Manager's command (argv, no shell) that shows whether one open criterion already holds. */
+export interface CriterionCheck {
+  readonly criterion_id: string;
+  readonly argv: readonly string[];
+}
+
+/** The Manager's judgement of whether the rule a Worker cited applies to one open criterion. */
+export interface RuleApplicability {
+  readonly criterion_id: string;
+  readonly rule: string;
+  readonly applies: boolean;
+  readonly reason: string;
 }
 
 export interface WorkflowSnapshot {

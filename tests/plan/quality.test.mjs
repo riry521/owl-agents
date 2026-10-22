@@ -79,7 +79,7 @@ const managerTask = (id, list) => ({
   id, title: `${id} title`, type: "code", acceptance: renderAcceptanceCriteria(list), acceptance_criteria: list, necessity, depends_on: [], required_sections: [], required_tests: [], replaces: [], context: "", notes: "", review: false,
 });
 
-async function openCore(t, plans, seen) {
+async function openCore(t, plans, seen, onCall = () => {}) {
   let release;
   const gate = new Promise((resolvePromise) => { release = resolvePromise; });
   t.after(() => release());
@@ -87,6 +87,7 @@ async function openCore(t, plans, seen) {
     agentRunner: {
       runManagerPlan: async (request) => {
         seen.push(request.context?.previous_output_feedback ? JSON.stringify(request.context.previous_output_feedback) : null);
+        onCall(request);
         const tasks = plans[Math.min(seen.length, plans.length) - 1];
         return { outcome: "success", report_valid: true, report: { event: "work.planned", tasks } };
       },
@@ -206,4 +207,66 @@ test("initial plan: the same content with other line breaks, numbering and wordi
   assert.ok(await waitFor(() => taskCount(db, workId) === 1));
   assert.equal(seen.length, 1);
   assert.deepEqual(warnedEvents(db, workId), []);
+});
+
+const startedRecords = (db, workId) =>
+  db.all("SELECT payload_json FROM events WHERE work_id = ? AND type = 'recovery.started' ORDER BY sequence", workId)
+    .map((row) => JSON.parse(row.payload_json));
+const decisionCount = (db, workId) => db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ?", workId).n;
+
+test("initial plan: a quality rejection opens no Decision at first and retries on the next tick with the same feedback; the Decision comes after the limit", async (t) => {
+  const seen = [];
+  const atCall = [];
+  const ref = { db: null, workId: null };
+  const { db, core } = await openCore(t, [[managerTask("A", [criterion(1, "本番のデータが前後で変わらない")])]], seen, () => {
+    if (ref.workId === null) return;
+    atCall.push({ decisions: decisionCount(ref.db, ref.workId), started: startedRecords(ref.db, ref.workId).length, state: ref.db.get("SELECT state FROM works WHERE id = ?", ref.workId).state });
+  });
+  ref.db = db;
+  const workId = await startWork(core);
+  ref.workId = workId;
+  assert.ok(await waitFor(() => decisionCount(db, workId) === 1), "after the limit a Decision opens");
+
+  // Calls 1 to 3 are one tick (a repair request, then the final rejection); call 4 is the next tick after the first recovery.
+  assert.equal(seen[0], null);
+  assert.match(seen[1], /"kind":"quality_repair"/);
+  assert.match(seen[2], /"kind":"quality_rejected"/);
+  assert.equal(seen[3], seen[2], "the next tick retries with the same feedback");
+  assert.equal(seen.length, 9, "three ticks of three calls each, none after the Decision");
+  assert.equal(atCall[3].decisions, 0);
+  assert.equal(atCall[3].started, 1);
+  assert.notEqual(atCall[3].state, "judgement_waiting");
+
+  const records = startedRecords(db, workId);
+  assert.deepEqual(records.map((record) => [record.kind, record.attempt_no, record.counted]), [["plan_quality_rejected", 1, true], ["plan_quality_rejected", 2, true]]);
+  assert.equal(JSON.parse(records[0].previous_failure.detail).kind, "quality_rejected");
+  const decision = db.get("SELECT tried FROM decisions WHERE work_id = ?", workId);
+  assert.match(decision.tried, /自動で試したこと|Tried automatically/);
+});
+
+test("initial plan: a validator rejection (plan_rejected) opens no Decision at first and keeps the feedback for the next tick; the Decision comes after the limit", async (t) => {
+  const seen = [];
+  const { db, core } = await openCore(t, [[managerTask("A", [criterion(1)]), managerTask("A", [criterion(1)])]], seen);
+  const workId = await startWork(core);
+  assert.ok(await waitFor(() => decisionCount(db, workId) === 1), "after the limit a Decision opens");
+
+  assert.equal(seen[0], null);
+  assert.match(seen[1], /"kind":"plan_rejected"/);
+  assert.equal(seen[2], seen[1], "the next call keeps the last feedback");
+  const records = startedRecords(db, workId);
+  assert.deepEqual(records.map((record) => [record.kind, record.attempt_no, record.counted]), [["plan_quality_rejected", 1, true], ["plan_quality_rejected", 2, true]]);
+  assert.equal(JSON.parse(records[0].previous_failure.detail).kind, "plan_rejected");
+  assert.match(db.get("SELECT tried FROM decisions WHERE work_id = ?", workId).tried, /自動で試したこと|Tried automatically/);
+});
+
+test("evaluatePlanQuality: an owner criterion needs a quote found in the Owner's words, and is then exempt from the weight checks", () => {
+  const ownerTexts = ["Please check the 本番のデータ\n and run it on 全件 before release."];
+  const owner = (quote, text = "ok", extra = {}) => item([criterion(1, text, { origin: { kind: "owner", source: "summary", quote }, ...extra })]);
+  const run = (list) => evaluatePlanQuality(list, S, ownerTexts).map((warning) => warning.code);
+  assert.deepEqual(run([owner("")]), ["criterion_origin_unquoted"]);
+  assert.deepEqual(run([owner("never said this")]), ["criterion_origin_unquoted"]);
+  assert.deepEqual(run([owner("check the 本番のデータ and run it")]), []);
+  assert.deepEqual(run([owner("全件 before release", "Run it on 全件")]), []);
+  assert.deepEqual(run([owner("本番のデータ", "本番のデータが前後で変わらない")]), []);
+  assert.deepEqual(run([item([criterion(1, "Run it on 全件", { origin: { kind: "manager", source: null, quote: "" } })])]), ["heavy_check_unjustified"]);
 });

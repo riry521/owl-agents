@@ -14,6 +14,7 @@ export interface AdvisorText {
   readonly unknownCause: string;
   readonly createdDraft: (title: string, workId: string) => string;
   readonly created: (title: string, route: "Worker" | "Manager", workId: string) => string;
+  readonly createdWaiting: (title: string, workId: string) => string;
   readonly createdNotStarted: (title: string, workId: string, detail: string) => string;
   readonly createFailed: (detail: string) => string;
   readonly createdRecovered: (title: string, workId: string) => string;
@@ -130,6 +131,7 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     unknownCause: "原因を確認できませんでした。",
     createdDraft: (title, workId) => `📝 Work「${title}」を下書きとして起票しました（ID: ${workId}）。まだ開始していません。開始は Work 詳細画面の開始ボタンから行ってください。`,
     created: (title, route, workId) => `✓ Work「${title}」を起票し、${route}へ渡しました（ID: ${workId}）。`,
+    createdWaiting: (title, workId) => `⏳ Work「${title}」を起票しました（ID: ${workId}）。前提の Work がすべて完了したら自動で開始します。`,
     createdNotStarted: (title, workId, detail) => `⚠ Work「${title}」は起票しました（ID: ${workId}）が、開始できませんでした。${detail}`,
     createFailed: (detail) => `⚠ Workの起票に失敗しました。${detail}`,
     createdRecovered: (title, workId) => `✓ Work「${title}」は前回の試行で起票済みだったため、開始しました（ID: ${workId}）。`,
@@ -194,6 +196,7 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     unknownCause: "The cause could not be determined.",
     createdDraft: (title, workId) => `📝 Created Work "${title}" as a draft (ID: ${workId}). It has not been started; start it from the Start button on the Work detail page.`,
     created: (title, route, workId) => `✓ Created Work "${title}" and handed it to the ${route} (ID: ${workId}).`,
+    createdWaiting: (title, workId) => `⏳ Created Work "${title}" (ID: ${workId}). It starts automatically when all prerequisite Works are completed.`,
     createdNotStarted: (title, workId, detail) => `⚠ Created Work "${title}" (ID: ${workId}) but could not start it. ${detail}`,
     createFailed: (detail) => `⚠ Could not create the Work. ${detail}`,
     createdRecovered: (title, workId) => `✓ Work "${title}" was already created by an earlier attempt; started it now (ID: ${workId}).`,

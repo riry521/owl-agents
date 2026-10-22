@@ -1,8 +1,8 @@
 'use client';
 
 import { Fragment, type FormEvent, useEffect, useRef, useState } from 'react';
-import { getModelSettings, getSettingsView, updateModelSettings, saveIntegration, testIntegration, deleteIntegration, setHybridMode, setChildRunSettings, createProvider, deleteProvider, testProvider, saveProvider, getProviderModels, setProviderModels as setProviderModelsApi, setTypesafeApiKey, setAdvisorPersona, putAdvisorFolders, putRemakeLimitSettings, putFixerEscalationSettings, getKnowledgeStorage, putKnowledgeStorage, setOwnerLanguage, setKnowledgeAutomationSettings, ApiRequestError } from '@/lib/api-client';
-import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ChildRunSettings, ChildRunHarnessChoice, ProviderInfo, SaveProviderPayload, AdvisorFolders, RemakeLimitSettings, FixerEscalationSettings, KnowledgeStorageStatus, KnowledgeAutomationSettingsData, KnowledgeAutomationSettingsInput } from '@/lib/types';
+import { getModelSettings, getSettingsView, updateModelSettings, saveIntegration, testIntegration, deleteIntegration, setHybridMode, setChildRunSettings, createProvider, deleteProvider, testProvider, saveProvider, getProviderModels, setProviderModels as setProviderModelsApi, setTypesafeApiKey, setAdvisorPersona, putAdvisorFolders, putRemakeLimitSettings, putFixerEscalationSettings, putAutoRecoverySettings, getKnowledgeStorage, putKnowledgeStorage, setOwnerLanguage, setKnowledgeAutomationSettings, ApiRequestError } from '@/lib/api-client';
+import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ChildRunSettings, ChildRunHarnessChoice, ProviderInfo, SaveProviderPayload, AdvisorFolders, RemakeLimitSettings, FixerEscalationSettings, AutoRecoverySettings, KnowledgeStorageStatus, KnowledgeAutomationSettingsData, KnowledgeAutomationSettingsInput } from '@/lib/types';
 import { roleDisplayName } from '@/lib/format';
 import { useLocale, type Locale } from '@/lib/i18n';
 import { REMAKE_TASK_TYPES, remakeLimitsToDraft, draftToRemakeLimits } from '@/lib/remake-limits.mjs';
@@ -21,6 +21,7 @@ interface SettingsData {
   language: { language: Locale };
   remake_limits: RemakeLimitSettings;
   fixer_escalation: FixerEscalationSettings;
+  auto_recovery: AutoRecoverySettings;
   knowledge_automation: KnowledgeAutomationSettingsData;
   advisor_persona: { advisor_persona: string };
   advisor_folders: AdvisorFolders;
@@ -545,6 +546,7 @@ export function SettingsView() {
       <AdvisorFoldersSection />
       <RemakeLimitsSection />
       <FixerEscalationSection />
+      <AutoRecoverySection />
       <KnowledgeStorageSection />
       <KnowledgeAutomationSection />
       <ProviderManagementSection providerModels={providerModels} onModelsUpdate={(id, models) => setProviderModels(prev => ({ ...prev, [id]: models }))} />
@@ -975,6 +977,84 @@ export function FixerEscalationSection() {
         <div className="btn-row" style={{ marginTop: '16px' }}>
           <button type="button" className="btn btn--primary btn--small" onClick={handleSave} disabled={saving || !changed}>
             {saving ? t('common.saving') : t('settings.fixerEscalationSave')}
+          </button>
+          {notice && <span className="note note--success">{notice}</span>}
+        </div>
+        {error && <div className="error" style={{ marginTop: '12px' }}>{error}</div>}
+      </div>
+    </section>
+  );
+}
+
+/** Same bounds as AUTO_RECOVERY_LIMIT_MIN/MAX in packages/shared; the API enforces them too. */
+const AUTO_RECOVERY_LIMIT_MIN = 0;
+const AUTO_RECOVERY_LIMIT_MAX = 10;
+
+export function AutoRecoverySection() {
+  const { t } = useLocale();
+  const [loaded, setLoaded] = useState<number | null>(null);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const settingsView = useSettings();
+
+  const savedValue = settingsView.data?.auto_recovery?.limit;
+  useEffect(() => {
+    if (savedValue === undefined) return;
+    setLoaded(savedValue);
+    setDraft(String(savedValue));
+  }, [savedValue]);
+
+  useEffect(() => {
+    if (settingsView.error && !settingsView.data) setError(t('settings.autoRecoveryError'));
+  }, [settingsView.error, settingsView.data, t]);
+
+  async function handleSave() {
+    setNotice(null);
+    const limit = Number(draft);
+    if (draft.trim() === '' || !Number.isInteger(limit) || limit < AUTO_RECOVERY_LIMIT_MIN || limit > AUTO_RECOVERY_LIMIT_MAX) {
+      setError(t('settings.autoRecoveryInvalid'));
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const saved = await putAutoRecoverySettings({ limit });
+      setLoaded(saved.limit);
+      setDraft(String(saved.limit));
+      setNotice(t('settings.autoRecoverySaved'));
+    } catch (err) {
+      setError(humanizeError(err, t));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const changed = loaded !== null && draft.trim() !== '' && Number(draft) !== loaded;
+
+  return (
+    <section className="panel advisor-persona-panel" aria-labelledby="sec-auto-recovery">
+      <div className="settings-disclosure__body">
+        <strong id="sec-auto-recovery">{t('settings.autoRecovery')}</strong>
+        <p className="settings-disclosure__hint">{t('settings.autoRecoveryDescription')}</p>
+        {loaded !== null && (
+          <label className="form-field">
+            <span>{t('settings.autoRecovery_limit')}</span>
+            <input
+              className="input"
+              type="number"
+              name="limit"
+              value={draft}
+              onChange={(ev) => setDraft(ev.target.value)}
+              disabled={saving}
+            />
+          </label>
+        )}
+        <div className="btn-row" style={{ marginTop: '16px' }}>
+          <button type="button" className="btn btn--primary btn--small" onClick={handleSave} disabled={saving || !changed}>
+            {saving ? t('common.saving') : t('settings.autoRecoverySave')}
           </button>
           {notice && <span className="note note--success">{notice}</span>}
         </div>

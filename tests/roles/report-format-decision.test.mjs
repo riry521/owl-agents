@@ -4,6 +4,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { coreTaskDecisionBrief } from "../../packages/core/dist/decision-brief.js";
+import { autoRecoveryForTask } from "../../packages/core/dist/auto-recovery.js";
+import { reduceTaskInTransaction } from "../../packages/core/dist/state-reducer.js";
+import { openTestDatabase } from "../helpers/db.mjs";
 import { outputResubmitLimit, reportResubmitLimit } from "../../packages/core/dist/report-resubmit.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { createAgentRunner, toolNamesInLine } from "../../packages/agent-runtime/dist/index.js";
@@ -112,6 +115,47 @@ test("a format failure is resubmitted in the same session without touching the w
   assert.match(snapshots[1], /\?\? dirty\.txt/u);
 });
 
+const recoveries = (db, workId) => db.all("SELECT payload_json FROM events WHERE work_id = ? AND type = 'recovery.started' ORDER BY sequence", workId).map((row) => JSON.parse(row.payload_json));
+
+test("the first format failure opens no Decision and resubmits only the report in the same session", async (t) => {
+  const { db, workId, calls, snapshots } = await openCore(t, async (n, request, worktree) => {
+    if (n === 1) await writeFile(join(worktree, "out.mjs"), "export {};\n");
+    return n <= 3 ? formatFailure(request) : okResponse(request, calls[0].prompt);
+  });
+  assert.ok(await taskCompleted(db, workId), "the Task completed through the automatic resubmission");
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ? AND reason LIKE '%報告の書式違反%'", workId).n, 0, "no format Decision opened");
+  const [recovery, ...rest] = recoveries(db, workId);
+  assert.equal(rest.length, 0);
+  assert.equal(recovery.kind, "output_format");
+  assert.equal(recovery.action, "report_resubmit");
+  assert.equal(calls.length, 4);
+  assert.equal(calls[3].provider_session_id, "session-X");
+  assert.match(calls[3].prompt, /Do not edit files/u);
+  assert.equal(snapshots[2], snapshots[3], "the worktree is untouched by the resubmission");
+});
+
+test("a first format failure without a session reruns the Task fresh, told to send only the report", async (t) => {
+  const { db } = await openTestDatabase(t, { prefix: "owl-format-fresh-" });
+  const lane = db.createWriteLane();
+  const now = "2026-09-24T00:00:00.000Z";
+  await lane.transact((tx) => {
+    tx.run("INSERT OR IGNORE INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Owner', ?, ?)", now, now);
+    tx.run(`INSERT INTO works (id, owner_id, project_id, title, summary, size, state, rules_json, related_work_ids_json, created_at, updated_at)
+            VALUES ('W', 'owner:default', NULL, 'W', 'x', 'normal', 'running', '[]', '[]', ?, ?)`, now, now);
+    tx.run(`INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, state_version, failure_count, same_error_count,
+              review_round, worker_generation, created_at, updated_at, retry_no, manager_task_id)
+            VALUES ('T1', 'W', 'T1', 'code', 'running', 'normal', '', 'Done.', 0, 0, 0, 0, 1, ?, ?, 0, 'T1')`, now, now);
+  });
+  // No provider_session_id on the failure: there is nothing to resume, so the Task is rerun fresh.
+  await lane.transact((tx) => reduceTaskInTransaction(tx, "T1", { event: "task.failure.classified", payload: { failure_class: "deterministic", error_key: "report_format_invalid", retry_allowed: false, reason: "format" } }));
+  assert.equal(db.get("SELECT status FROM tasks WHERE id = 'T1'").status, "ready");
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = 'W'").n, 0, "the first failure opens no Decision");
+  const [recovery] = recoveries(db, "W");
+  assert.equal(recovery.kind, "output_format");
+  assert.equal(recovery.action, "fresh_rerun");
+  assert.match(autoRecoveryForTask(db, "T1").instruction, /send only a correctly formed report/u);
+});
+
 test("reaching the limit opens a report-format Decision and resubmitting only the report never reruns the Task", async (t) => {
   let resubmit = false;
   const { db, core, workId, calls } = await openCore(t, async (n, request, worktree) => {
@@ -121,20 +165,23 @@ test("reaching the limit opens a report-format Decision and resubmitting only th
   const decision = await openDecision(db, workId);
   assert.ok(decision);
   assert.match(decision.reason, /報告の書式違反/u);
+  const full = db.get("SELECT tried FROM decisions WHERE id = ?", decision.id);
+  assert.match(full.tried.split("\n")[0], /^自動で試したこと: 2回/u, "the Decision opens on the 3rd failure and says what was tried");
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ? AND reason LIKE '%報告の書式違反%'", workId).n, 1);
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'recovery.started'", workId).n, 2);
   assert.ok(JSON.parse(decision.options_json).some((o) => o.key === "resubmit_report" && o.label === "報告だけ出し直す"));
   assert.equal(decision.recommended, "resubmit_report");
-  assert.equal(calls.length, 3, "the first call plus two automatic resubmissions");
+  assert.equal(calls.length, 9, "three failures, each the first call plus two automatic resubmissions");
   await new Promise((r) => setTimeout(r, 300));
-  assert.equal(workerRuns(db, workId), 1, "no new Worker generation starts while waiting");
 
   resubmit = true;
   await core.answerDecision(decision.id, envelope({ answer: "報告だけ出し直す", option_key: "resubmit_report", source_message_id: null }, "answer", decision.state_version));
   assert.ok(await reviewed(db, workId), "the Task moved on to review");
   assert.ok(await taskCompleted(db, workId), "the Task itself completed");
-  assert.equal(calls.length, 4);
-  assert.equal(calls[3].provider_session_id, "session-X");
-  assert.match(calls[3].prompt, /Do not edit files/u);
-  assert.doesNotMatch(calls[3].prompt, /## Output template/u);
+  assert.equal(calls.length, 10);
+  assert.equal(calls[9].provider_session_id, "session-X");
+  assert.match(calls[9].prompt, /Do not edit files/u);
+  assert.doesNotMatch(calls[9].prompt, /## Output template/u);
 });
 
 test("after a Bash call the exhausted format failure keeps the side_effect_failure: error_key, stores the session and still offers the resubmission", async (t) => {
@@ -152,14 +199,14 @@ test("after a Bash call the exhausted format failure keeps the side_effect_failu
   assert.ok(event, "the failure event carries the prefixed error_key");
   assert.equal(JSON.parse(event.payload_json).provider_session_id, "session-X");
   assert.ok(JSON.parse(decision.options_json).some((o) => o.key === "resubmit_report"));
-  assert.equal(calls.length, 3, "the first call plus two automatic resubmissions");
+  assert.equal(calls.length, 9, "three failures, each the first call plus two automatic resubmissions");
 
   resubmit = true;
   await core.answerDecision(decision.id, envelope({ answer: "報告だけ出し直す", option_key: "resubmit_report", source_message_id: null }, "answer", decision.state_version));
   assert.ok(await taskCompleted(db, workId), "the Task completed through the resubmission");
-  assert.equal(calls.length, 4);
-  assert.equal(calls[3].provider_session_id, "session-X");
-  assert.match(calls[3].prompt, /Do not edit files/u);
+  assert.equal(calls.length, 10);
+  assert.equal(calls[9].provider_session_id, "session-X");
+  assert.match(calls[9].prompt, /Do not edit files/u);
 });
 
 test("a Reviewer whose verdict keeps breaking the format opens a Decision, and rerunning only the Reviewer never reruns the Worker", async (t) => {

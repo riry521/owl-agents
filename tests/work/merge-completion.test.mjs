@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { promisify } from "node:util";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -569,6 +572,30 @@ test("a merge stopped by uncommitted changes that overlap the merge names the fi
 
   const decision = db.get("SELECT reason FROM decisions WHERE work_id = ? AND status = 'open'", workId);
   assert.match(decision.reason, /src\/a\.ts\nsrc\/b\.ts/);
+});
+
+test("a merge error with overlapping uncommitted files opens a Decision at once, leaves those files unchanged and says nothing was tried", async (t) => {
+  const repo = await tempDir(t, "owl-uncommitted-");
+  const run = (...args) => promisify(execFile)("git", args, { cwd: repo });
+  await run("init", "-q");
+  await writeFile(join(repo, "a.ts"), "committed\n");
+  await run("add", "a.ts");
+  await run("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "init");
+  await writeFile(join(repo, "a.ts"), "uncommitted edit\n");
+  const sha = async () => createHash("sha256").update(await readFile(join(repo, "a.ts"))).digest("hex");
+  const before = await sha();
+
+  const git = fakeGit([{ ...mergeError, overlap_files: ["a.ts"], base_worktree: repo }]);
+  const { db, core } = await openMergeCore(t, git);
+  const { workId } = await seedFinishedWork(t, core, db, true);
+
+  await core.tick(workId);
+
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE type = 'recovery.started'").n, 0);
+  const decision = db.get("SELECT tried FROM decisions WHERE work_id = ? AND status = 'open'", workId);
+  assert.match(decision.tried, /^自動では試していません（理由: /u);
+  assert.equal(await sha(), before);
+  assert.equal(await readFile(join(repo, "a.ts"), "utf8"), "uncommitted edit\n");
 });
 
 test("a Project-less Work skips merge and still saves outputs and removes its workspace", async (t) => {

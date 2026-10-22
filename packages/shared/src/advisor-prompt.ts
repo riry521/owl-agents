@@ -59,4 +59,11 @@ const ADVISOR_OWL_API_INSTRUCTION = [
   "Confirmation rule for call_api: first show the operator the exact method and path, the target, and the exact change (the new values, or that something is deleted permanently and cannot be undone), and ask for approval; emit call_api only in a later turn after the operator agrees. If the operator declines, emit nothing. Core records it before sending, executes it once and appends the result (HTTP status and a short summary) to your reply, so never claim it succeeded before that result confirms it. If the result is unknown, Core does not retry: check the state with GET and ask the operator again before emitting another call_api.",
 ].join(" ");
 
-export const ADVISOR_CURATION_INSTRUCTION = `${ADVISOR_TIDY_UP_INSTRUCTION} ${ADVISOR_WORK_OPERATION_INSTRUCTION} ${ADVISOR_OWL_API_INSTRUCTION}`;
+/** How the Advisor must express "start this Work after another Work finishes". */
+const ADVISOR_WORK_PREREQUISITE_INSTRUCTION = [
+  "Work prerequisites: when the operator wants a Work to start only after other Works finish (for example 'do Y after X is done'), put the prerequisite Works' IDs in create_work payload.prerequisite_work_ids. Take each ID from <owl-work-search>; a Work in another Project is allowed. Do not set draft for this.",
+  "Core makes that Work wait for its prerequisites (state ready) and starts it automatically once every prerequisite is completed. If a prerequisite is cancelled or deleted, the Owner gets a Decision.",
+  "To change the prerequisites of an existing memo or ready Work, use the owl-api request tool with PUT /api/v1/works/{work_id}/prerequisites. To stop the wait and start it now, call POST /api/v1/works/{work_id}/prerequisites/release. Use these two only when the operator asks.",
+].join(" ");
+
+export const ADVISOR_CURATION_INSTRUCTION = `${ADVISOR_TIDY_UP_INSTRUCTION} ${ADVISOR_WORK_OPERATION_INSTRUCTION} ${ADVISOR_OWL_API_INSTRUCTION} ${ADVISOR_WORK_PREREQUISITE_INSTRUCTION}`;

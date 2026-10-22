@@ -17,7 +17,10 @@
     "size",
     "plan_revision",
     "progress",
-    "conversation_id"
+    "conversation_id",
+    "prerequisite_wait",
+    "waiting_on",
+    "prerequisites"
   ],
   "properties": {
     "id": {
@@ -83,6 +86,17 @@
           "type": "null"
         }
       ]
+    },
+    "prerequisite_wait": {
+      "type": "boolean"
+    },
+    "waiting_on": {
+      "type": "array",
+      "items": { "$ref": "common.json#/$defs/WorkPrerequisite" }
+    },
+    "prerequisites": {
+      "type": "array",
+      "items": { "$ref": "common.json#/$defs/WorkPrerequisite" }
     },
     "progress": {
       "type": "object",

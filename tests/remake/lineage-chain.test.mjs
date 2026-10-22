@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { autoRecoveryAttempts, autoRecoveryLimit, autoRecoveryUsed, recordAutoRecoveryInTransaction } from "../../packages/core/dist/auto-recovery.js";
+import { createUlid } from "../../packages/db/dist/index.js";
+import { createTestCore } from "../helpers/core.mjs";
+import { createTestDatabase } from "../helpers/db.mjs";
 import { evaluateRemakeGate } from "../../packages/core/dist/remake-gate.js";
-import { reduceTaskInTransaction } from "../../packages/core/dist/state-reducer.js";
+import { appendEventInTransaction, reduceTaskInTransaction } from "../../packages/core/dist/state-reducer.js";
 import {
   assignReplacementLineageInTransaction,
   lineageChainIds,
@@ -69,13 +73,18 @@ async function setup(t) {
       ),
     setStatus: (taskId, status, reviews) =>
       lane.transact((tx) => tx.run("UPDATE tasks SET status = ?, total_review_attempts = ? WHERE id = ?", status, reviews, taskId)),
+    // These tests check where a lineage stops, so automatic recovery (which would hand the first stop to the Manager) is off.
     setLimits: (limits) =>
-      lane.transact((tx) =>
+      lane.transact((tx) => {
         tx.run(
           "INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at) VALUES ('remake_limits', 'owner:default', '1.0.0', ?, ?)",
           JSON.stringify({ ...DEFAULT_REMAKE_LIMIT_SETTINGS, ...limits }), stamp(),
-        ),
-      ),
+        );
+        tx.run(
+          "INSERT OR REPLACE INTO settings (key, owner_id, schema_version, value_json, updated_at) VALUES ('auto_recovery', 'owner:default', '1.0.0', '{\"limit\":0}', ?)",
+          stamp(),
+        );
+      }),
     afterReal: () => { clock += 7200; },
     reduce: (taskId, event, payload) => lane.transact((tx) => reduceTaskInTransaction(tx, taskId, { event, payload })),
     replace: (newTaskId, predecessors, restartLineage = false) => lane.transact((tx) => assignReplacementLineageInTransaction(tx, 'W', new Map([[newTaskId, predecessors]]), restartLineage)),
@@ -319,4 +328,82 @@ test("A replacement made by the Manager's replan keeps the Lead tier, so the sto
   await task("C2", { type: "code" });
   await replace("C2", ["C1"]);
   assert.equal(db.get("SELECT lead_designer_start_round AS n FROM tasks WHERE id = 'C2'").n, null, "a code Task is not promoted");
+});
+
+// The automatic-recovery count: events are the only state, so it is the same after a restart.
+const FAILURE = { summary: "conflict", error_key: "k", detail: "d" };
+
+function recovery(db, input) {
+  return db.createWriteLane().transact((tx) => recordAutoRecoveryInTransaction(tx, { kind: "output_format", workId: "W", action: "rerun", previousFailure: FAILURE, ...input }));
+}
+
+function workEvent(db, type, payload) {
+  return db.createWriteLane().transact((tx) => appendEventInTransaction(tx, { type, idempotencyKey: `${type}:${createUlid()}`, workId: "W", taskId: null, payload }));
+}
+
+test("recovery.started is written once per failure, and only counted records are used", async (t) => {
+  const { db, task } = await setup(t);
+  await task("T1");
+  const target = { kind: "task", id: "T1" };
+  const first = await recovery(db, { target, sourceEventId: "E1" });
+  const again = await recovery(db, { target, sourceEventId: "E1" });
+  assert.deepEqual(again, first, "the same failure returns the first numbers");
+  assert.equal(autoRecoveryUsed(db, "output_format", target), 1);
+  await recovery(db, { target, sourceEventId: "E2", counted: false });
+  assert.equal(autoRecoveryUsed(db, "output_format", target), 1, "an uncounted record is not used");
+  assert.equal(autoRecoveryAttempts(db, "output_format", target).length, 2, "the screen still reads it");
+  const second = await recovery(db, { target, sourceEventId: "E3" });
+  assert.equal(second.attempt_no, 2);
+  assert.equal(second.limit, autoRecoveryLimit(db));
+  assert.equal(autoRecoveryUsed(db, "budget_exhausted", target), 0, "each kind has its own count");
+});
+
+test("an Owner answer to the Decision that blocked the target, or a reopen, counts from 0 again; lineage_reset_json does not", async (t) => {
+  const { db, task, restart } = await setup(t);
+  await task("T1");
+  await task("T2", { root: "T1", replaces: ["T1"], generation: 2 });
+  const target = { kind: "task", id: "T1" };
+  const decide = (id, scope, blocked) => db.createWriteLane().transact((tx) => tx.run(
+    `INSERT INTO decisions (id, work_id, scope, status, blocked_task_ids_json, reason, tried, current_state, options_json, allow_free_text, issuer_role, created_at)
+     VALUES (?, 'W', ?, 'resolved', ?, 'r', 't', 's', '[]', 1, 'core', ?)`, id, scope, JSON.stringify(blocked), stamp(),
+  ));
+  await recovery(db, { target, sourceEventId: "E1" });
+  await restart("T2");
+  assert.equal(autoRecoveryUsed(db, "output_format", target), 1, "restarting the lineage budget does not reset the count");
+  await decide("D-other", "task", ["O"]);
+  await workEvent(db, "decision.resolved", { decision_id: "D-other" });
+  assert.equal(autoRecoveryUsed(db, "output_format", target), 1, "an answer to a Decision about another Task is ignored");
+  await decide("D1", "task", ["T2"]);
+  await workEvent(db, "decision.resolved", { decision_id: "D1" });
+  assert.equal(autoRecoveryUsed(db, "output_format", target), 0, "T2 is in the lineage of T1");
+  await recovery(db, { target, sourceEventId: "E2" });
+  assert.equal(autoRecoveryUsed(db, "output_format", target), 1);
+  await workEvent(db, "work.reopened", { work_id: "W", reason: "again" });
+  assert.equal(autoRecoveryUsed(db, "output_format", target), 0);
+  const workTarget = { kind: "work", id: "W" };
+  await recovery(db, { target: workTarget, kind: "final_incomplete", sourceEventId: "E3" });
+  await decide("D2", "work", []);
+  await workEvent(db, "decision.resolved", { decision_id: "D2" });
+  assert.equal(autoRecoveryUsed(db, "final_incomplete", workTarget), 0, "a Work-scope answer resets a Work target");
+});
+
+test("the count is the same on a new Core built on the same database after core.stop()", async (t) => {
+  const first = await createTestCore(t);
+  const target = { kind: "task", id: "T1" };
+  const now = stamp();
+  await first.db.createWriteLane().transact((tx) => {
+    tx.run("INSERT INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Owner', ?, ?)", now, now);
+    tx.run(
+      `INSERT INTO works (id, owner_id, project_id, title, summary, size, state, rules_json, related_work_ids_json, created_at, updated_at)
+       VALUES ('W', 'owner:default', NULL, 'W', 'x', 'normal', 'running', '[]', '[]', ?, ?)`, now, now,
+    );
+    tx.run("INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, created_at, updated_at) VALUES ('T1', 'W', 't', 'code', 'waiting', 'normal', '', 'a', ?, ?)", now, now);
+  });
+  await recovery(first.db, { target, sourceEventId: "E1" });
+  await recovery(first.db, { target, sourceEventId: "E2" });
+  await first.core.stop({ force: true });
+  const second = await createTestCore(t, { db: createTestDatabase(first.root), owlRoot: first.root }, { start: true });
+  assert.equal(autoRecoveryUsed(second.db, "output_format", target), 2);
+  assert.equal((await recovery(second.db, { target, sourceEventId: "E2" })).attempt_no, 2, "a replayed failure is not counted again");
+  assert.equal((await recovery(second.db, { target, sourceEventId: "E4" })).attempt_no, 3);
 });

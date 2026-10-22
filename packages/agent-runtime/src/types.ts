@@ -276,6 +276,8 @@ export interface WorkerContext {
   readonly design_stop?: Readonly<Record<string, unknown>> | null;
   /** Owner answers to this Work's Decisions, newest first. */
   readonly owner_guidance?: readonly Readonly<Record<string, unknown>>[];
+  /** Set when Core started this run as an automatic recovery. */
+  readonly auto_recovery?: Readonly<Record<string, unknown>> | null;
 }
 
 export interface WorkerRequest {

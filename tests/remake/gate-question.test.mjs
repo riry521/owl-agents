@@ -50,6 +50,7 @@ function runnerWith({ needsReplanning }) {
 
 async function setup(t, runner) {
   const { db, core } = await createTestCore(t, { agentRunner: withNecessity(runner), dispatcher: { tick_interval_ms: 25 } }, { prefix: "owl-remake-gate-question-", start: true });
+  await core.setAutoRecoverySettings({ limit: 0 }); // these tests check the Owner Decision a limit opens
   await core.setRemakeLimitSettings({ ...DEFAULT_REMAKE_LIMIT_SETTINGS, lineage_worker_runs: 1 });
   const created = await core.createWork(envelope({ title: "q", summary: "Worker question vs remake gate.", size: "normal", project_id: null }, "create"));
   await core.startWork(created.data.work_id, envelope({ mode: "normal" }, "start", created.version));

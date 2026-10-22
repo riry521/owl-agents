@@ -14,6 +14,7 @@ import { createUlid, isUlid } from "./ids.js";
 import { resolveDataDir, type ContractManifest } from "./contracts.js";
 import { configuredApiToken } from "./config.js";
 import { externalError } from "./core.js";
+import { validatePrerequisiteWorkIds } from "../../../packages/shared/dist/work-prerequisite.js";
 import { KnowledgeBase, type KnowledgeSearchResult } from "../../../packages/core/dist/knowledge-base.js";
 import { RuleStore } from "../../../packages/core/dist/rule-store.js";
 import { assertValidPage, PageRejectedError } from "../../../packages/core/dist/memory/page-format.js";
@@ -27,6 +28,7 @@ import type { VerificationPolicySettings } from "../../../packages/shared/dist/v
 import { ReviewLimitSettingsValidationError, validateReviewLimitSettings } from "../../../packages/shared/dist/review-limit-settings.js";
 import type { ReviewLimitSettings } from "../../../packages/shared/dist/review-limit-settings.js";
 import { REMAKE_LIMIT_SETTINGS_KEYS, RemakeLimitSettingsValidationError, validateRemakeLimitSettings } from "../../../packages/shared/dist/remake-limit-settings.js";
+import { AutoRecoverySettingsValidationError, validateAutoRecoverySettings, type AutoRecoverySettings } from "../../../packages/shared/dist/auto-recovery-settings.js";
 import { FixerEscalationSettingsValidationError, validateFixerEscalationSettings } from "../../../packages/shared/dist/fixer-escalation-settings.js";
 import type { FixerEscalationSettings } from "../../../packages/shared/dist/fixer-escalation-settings.js";
 import type { RemakeLimitSettings } from "../../../packages/shared/dist/remake-limit-settings.js";
@@ -276,6 +278,13 @@ interface WorkProjectMoveApiPort {
   moveWorkToProject(workId: string, input: { project_id: string }, command: { request_id: string; idempotency_key: string; expected_version: number }): Promise<{ data: JsonObject; version: number }>;
 }
 
+type WorkCommandMeta = { request_id: string; idempotency_key: string; expected_version: number };
+
+interface WorkPrerequisiteApiPort {
+  replaceWorkPrerequisites(workId: string, input: { prerequisite_work_ids: string[] }, command: WorkCommandMeta): Promise<{ data: JsonObject; version: number }>;
+  releaseWorkPrerequisiteWait(workId: string, command: WorkCommandMeta): Promise<{ data: JsonObject; version: number }>;
+}
+
 interface KnowledgeRetagApiPort {
   retagKnowledgeNotes(input: { dry_run: boolean; force?: boolean }): Promise<unknown>;
 }
@@ -349,6 +358,11 @@ interface ReviewRoutingApiPort {
 interface FixerEscalationApiPort {
   getFixerEscalationSettings(): Promise<FixerEscalationSettings>;
   setFixerEscalationSettings(input: FixerEscalationSettings): Promise<FixerEscalationSettings>;
+}
+
+interface AutoRecoveryApiPort {
+  getAutoRecoverySettings(): Promise<AutoRecoverySettings & { readonly warnings: readonly string[] }>;
+  setAutoRecoverySettings(input: AutoRecoverySettings): Promise<AutoRecoverySettings & { readonly warnings: readonly string[] }>;
 }
 
 interface RemakeLimitApiPort {
@@ -1137,8 +1151,9 @@ function validateCreateWorkPayload(payload: JsonObject): {
   size: "small" | "normal" | "large";
   project_id: string | null;
   design_mode?: "auto" | "lead";
+  prerequisite_work_ids?: string[];
 } {
-  exactKeys({ ...payload, design_mode: payload.design_mode ?? "auto" }, ["title", "summary", "size", "project_id", "design_mode"], "CreateWork payload");
+  exactKeys({ ...payload, design_mode: payload.design_mode ?? "auto" }, ["title", "summary", "size", "project_id", "design_mode"], "CreateWork payload", ["prerequisite_work_ids"]);
   const title = stringField(payload.title, "title", 1, 500);
   const summary = stringField(payload.summary, "summary", 0, 20000);
   if (payload.size !== "small" && payload.size !== "normal" && payload.size !== "large") {
@@ -1148,7 +1163,19 @@ function validateCreateWorkPayload(payload: JsonObject): {
   if (designMode !== "auto" && designMode !== "lead") {
     throw new ApiError(400, "validation_error", "design_modeはautoまたはleadを指定してください。");
   }
-  return { title, summary, size: payload.size, project_id: nullableUlid(payload.project_id, "project_id"), ...(payload.design_mode === undefined ? {} : { design_mode: designMode }) };
+  return {
+    title, summary, size: payload.size, project_id: nullableUlid(payload.project_id, "project_id"),
+    ...(payload.design_mode === undefined ? {} : { design_mode: designMode }),
+    ...(payload.prerequisite_work_ids === undefined ? {} : { prerequisite_work_ids: prerequisiteWorkIds(payload.prerequisite_work_ids) }),
+  };
+}
+
+function prerequisiteWorkIds(value: unknown): string[] {
+  try {
+    return validatePrerequisiteWorkIds(value);
+  } catch (error) {
+    throw new ApiError(400, "validation_error", (error as Error).message, { field: "prerequisite_work_ids" });
+  }
 }
 
 function validateStartPayload(payload: JsonObject): "normal" | "small" {
@@ -2086,6 +2113,35 @@ function requireWorkProjectMoveApi(core: CorePort): WorkProjectMoveApiPort {
   return candidate;
 }
 
+function requireWorkPrerequisiteApi(core: CorePort): WorkPrerequisiteApiPort {
+  const wrapped = core as CorePort & { core?: unknown };
+  const has = (value: unknown): value is WorkPrerequisiteApiPort =>
+    isObject(value) && typeof value.replaceWorkPrerequisites === "function" && typeof value.releaseWorkPrerequisiteWait === "function";
+  const rawCoreApi = (value: unknown): WorkPrerequisiteApiPort | null => {
+    if (!has(value)) return null;
+    const raw = value as unknown as {
+      replaceWorkPrerequisites(workId: string, request: JsonObject): Promise<{ data: JsonObject; version: number }>;
+      releaseWorkPrerequisiteWait(workId: string, request: JsonObject): Promise<{ data: JsonObject; version: number }>;
+    };
+    const strip = async (call: Promise<{ data: JsonObject; version: number }>, operation: string) => {
+      try {
+        const response = await call;
+        const { version: _version, ...data } = response.data;
+        return { data, version: response.version };
+      } catch (error) {
+        throw externalError(error, operation);
+      }
+    };
+    return {
+      replaceWorkPrerequisites: (workId, input, command) => strip(raw.replaceWorkPrerequisites(workId, { ...command, payload: input }), "replaceWorkPrerequisites"),
+      releaseWorkPrerequisiteWait: (workId, command) => strip(raw.releaseWorkPrerequisiteWait(workId, { ...command, payload: {} }), "releaseWorkPrerequisiteWait"),
+    };
+  };
+  const candidate = has(core) ? core : rawCoreApi(wrapped.core);
+  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support Work prerequisites.");
+  return candidate;
+}
+
 function requireKnowledgeRetagApi(core: CorePort): KnowledgeRetagApiPort {
   const wrapped = core as CorePort & { core?: unknown };
   const has = (value: unknown): value is KnowledgeRetagApiPort => isObject(value) && typeof value.retagKnowledgeNotes === "function";
@@ -2346,6 +2402,27 @@ function validatedFixerEscalationSettings(value: unknown): FixerEscalationSettin
   }
 }
 
+
+function requireAutoRecoveryApi(core: CorePort): AutoRecoveryApiPort {
+  const has = (value: unknown): value is AutoRecoveryApiPort => isObject(value)
+    && typeof value.getAutoRecoverySettings === "function"
+    && typeof value.setAutoRecoverySettings === "function";
+  const wrapped = core as CorePort & { core?: unknown };
+  const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
+  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support automatic recovery.");
+  return candidate;
+}
+
+function validatedAutoRecoverySettings(value: unknown): AutoRecoverySettings {
+  try {
+    return validateAutoRecoverySettings(value);
+  } catch (error) {
+    if (error instanceof AutoRecoverySettingsValidationError) {
+      throw new ApiError(400, "validation_error", error.message, { field: error.field });
+    }
+    throw error;
+  }
+}
 
 function requireReviewRoutingApi(core: CorePort): ReviewRoutingApiPort {
   const has = (value: unknown): value is ReviewRoutingApiPort => isObject(value)
@@ -2926,6 +3003,26 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
+  const workPrerequisitesMatch = pathname.match(new RegExp(`^${API_PREFIX}/works/([^/]+)/prerequisites(/release)?$`));
+  if (workPrerequisitesMatch && method === (workPrerequisitesMatch[2] ? "POST" : "PUT")) {
+    requireOwner(request);
+    const workId = pathId(workPrerequisitesMatch[1]!, "work_id");
+    const release = workPrerequisitesMatch[2] !== undefined;
+    const command = commandEnvelope(await readRequestBody(request));
+    const routeKey = release ? "work.prerequisites.release" : "work.prerequisites.replace";
+    if (release) exactKeys(command.payload, [], "Work prerequisite release payload");
+    else exactKeys(command.payload, ["prerequisite_work_ids"], "Work prerequisites payload");
+    const ids = release ? [] : prerequisiteWorkIds(command.payload.prerequisite_work_ids);
+    const result = await runCommand(context, routeKey, command, 200, async () => {
+      const api = requireWorkPrerequisiteApi(context.core);
+      const done = release ? await api.releaseWorkPrerequisiteWait(workId, command) : await api.replaceWorkPrerequisites(workId, { prerequisite_work_ids: ids }, command);
+      await invalidateWorkCommandCache(context, workId, `${routeKey}:${command.idempotency_key}`);
+      return { data: done.data, version: done.version };
+    }, workId);
+    sendJson(response, 200, result);
+    return;
+  }
+
   const workBranchStatusMatch = pathname.match(new RegExp(`^${API_PREFIX}/works/([^/]+)/branch-status$`));
   if (workBranchStatusMatch && method === "GET") {
     requireOwner(request);
@@ -3103,10 +3200,11 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     // Same Core calls and shaping as each settings GET route; secrets stay masked.
     const remakeLimits = requireRemakeLimitApi(context.core);
     const fixerEscalationApi = requireFixerEscalationApi(context.core);
+    const autoRecoveryApi = requireAutoRecoveryApi(context.core);
     const childRuns = requireChildRunApi(context.core);
     const knowledgeStorage = requireKnowledgeStorageApi(context.core);
     const core = context.core;
-    const [models, providers, hybrid_mode, language, knowledgeAutomation, advisor_persona, advisorFolders, integrations, typesafeKey, remake_limits, fixer_escalation, child_runs] = await Promise.all([
+    const [models, providers, hybrid_mode, language, knowledgeAutomation, advisor_persona, advisorFolders, integrations, typesafeKey, remake_limits, fixer_escalation, auto_recovery, child_runs] = await Promise.all([
       core.getModelSettings(),
       core.listProviders(),
       core.getHybridMode(),
@@ -3118,6 +3216,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       core.getTypesafeApiKey(),
       remakeLimits.getRemakeLimitSettings(),
       fixerEscalationApi.getFixerEscalationSettings(),
+      autoRecoveryApi.getAutoRecoverySettings(),
       childRunCall(() => childRuns.getChildRunSettings()),
     ]);
     const data = {
@@ -3128,6 +3227,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       language: { language },
       remake_limits,
       fixer_escalation,
+      auto_recovery,
       knowledge_automation: { ...knowledgeAutomation, time_zone: hostTimeZone() },
       advisor_persona: { advisor_persona },
       advisor_folders: advisorFolders,
@@ -3239,6 +3339,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
             size: payload.size ?? "normal",
             project_id: payload.project_id ?? null,
             ...(payload.design_mode === undefined ? {} : { design_mode: payload.design_mode }),
+            ...(payload.prerequisite_work_ids === undefined ? {} : { prerequisite_work_ids: payload.prerequisite_work_ids }),
           } as JsonObject;
           data = (await context.core.createWork(validateCreateWorkPayload(createPayload), actionCommand)).data as unknown as JsonObject;
         } else if (action.type === "start_work") {
@@ -3700,6 +3801,26 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     const api = requireFixerEscalationApi(context.core);
     const result = await runCommand(context, pathname, command, 200, async () => ({
       data: await api.setFixerEscalationSettings(input) as unknown as JsonObject,
+      version: 0,
+    }));
+    sendJson(response, 200, result);
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/settings/auto-recovery` && method === "GET") {
+    requireOwner(request);
+    const data = await requireAutoRecoveryApi(context.core).getAutoRecoverySettings();
+    sendJson(response, 200, { request_id: requestIdValue, data, version: 0 });
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/settings/auto-recovery` && method === "PUT") {
+    requireOwner(request);
+    const command = commandEnvelope(await readRequestBody(request));
+    const input = validatedAutoRecoverySettings(command.payload);
+    const api = requireAutoRecoveryApi(context.core);
+    const result = await runCommand(context, pathname, command, 200, async () => ({
+      data: await api.setAutoRecoverySettings(input) as unknown as JsonObject,
       version: 0,
     }));
     sendJson(response, 200, result);

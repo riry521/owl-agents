@@ -1,6 +1,6 @@
 {
   "name": "@owl/agent-runtime",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "private": true,
   "description": "Manager, Worker, and Reviewer role runtimes for Owl.",
   "type": "commonjs",

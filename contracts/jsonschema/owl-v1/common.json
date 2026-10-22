@@ -66,6 +66,21 @@
         "manager"
       ]
     },
+    "WorkPrerequisite": {
+      "type": "object",
+      "required": ["work_id", "project_id", "project_name", "display_number", "title", "state", "deleted", "satisfied"],
+      "properties": {
+        "work_id": { "$ref": "common.json#/$defs/ULID" },
+        "project_id": { "anyOf": [{ "$ref": "common.json#/$defs/ULID" }, { "type": "null" }] },
+        "project_name": { "type": ["string", "null"] },
+        "display_number": { "type": ["integer", "null"], "minimum": 1 },
+        "title": { "type": "string" },
+        "state": { "anyOf": [{ "$ref": "common.json#/$defs/WorkState" }, { "type": "null" }] },
+        "deleted": { "type": "boolean" },
+        "satisfied": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
     "OpaqueObject": {
       "type": "object",
       "additionalProperties": true

@@ -122,6 +122,9 @@ function schemaErrors(value, schema, path = "$", seenRefs = new Set()) {
     if (schema.format === "date-time" && (!/^\d{4}-\d{2}-\d{2}T/.test(value) || !Number.isFinite(Date.parse(value)))) {
       errors.push(`${path}: expected date-time`);
     }
+  } else if (schema.type === "array") {
+    if (!Array.isArray(value)) return [`${path}: expected array`];
+    value.forEach((item, index) => errors.push(...schemaErrors(item, schema.items ?? {}, `${path}[${index}]`, seenRefs)));
   } else if (schema.type === "integer") {
     if (!Number.isInteger(value)) return [`${path}: expected integer`];
   } else if (schema.type === "number") {

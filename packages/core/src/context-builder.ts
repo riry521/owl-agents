@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { autoRecoveryForTask } from "./auto-recovery";
 import { dirname } from "node:path";
 import { DEFAULT_DEPENDENCY_SUMMARY_SETTINGS } from "../../shared/dist/dependency-summary-settings.js";
 import { designDocumentPath, designMockDirectory, isScreenDesignTask, readTestPolicy, taskReportPath } from "@owl/shared";
@@ -398,6 +399,8 @@ export interface WorkerRoleContext extends JsonObject {
   dependency_reports: JsonObject[];
   artifact_paths: string[];
   owner_guidance: JsonObject[];
+  /** The automatic recovery this run belongs to; null when the Task was never recovered. */
+  auto_recovery: JsonObject | null;
   check_commands: string[][];
 }
 
@@ -439,6 +442,7 @@ export class ContextBuilder {
       // The fix context of the latest attempt only (a failed verification
       // or a fix/replan review, never both), plus the Owner's answers.
       ...((loadFixContext(this.db, taskId) ?? {}) as JsonObject),
+      auto_recovery: autoRecoveryForTask(this.db, taskId),
       owner_guidance: ownerGuidance(this.db, workId, taskId),
       check_commands: this.checkCommands(workId),
     } as WorkerRoleContext;

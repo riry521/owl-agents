@@ -34,7 +34,7 @@ export interface ProviderPauseController {
   noteProviderSucceeded(provider: string, runStartedAt: string): Promise<ProviderPauseRow | null>;
 }
 
-const FALLBACK_BACKOFF_MINUTES = [15, 30, 60] as const;
+export const FALLBACK_BACKOFF_MINUTES = [15, 30, 60] as const;
 const MAX_TIMEOUT_MS = 2_147_000_000;
 
 /** Durable provider pause scheduling shared by Core and the workflow engine. */

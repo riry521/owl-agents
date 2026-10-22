@@ -4,6 +4,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { NoopGitGateway, reduceTask } from "../../packages/core/dist/index.js";
+import { reduceTaskInTransaction } from "../../packages/core/dist/state-reducer.js";
+import { openTestDatabase } from "../helpers/db.mjs";
 import { openDatabase, createUlid } from "../../packages/db/dist/index.js";
 import { createTestCore, command } from "../helpers/core.mjs";
 import { withNecessity } from "../helpers/necessity.mjs";
@@ -494,4 +496,36 @@ test("a total review limit read from the settings survives a Core restart and se
   assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'review.passed'", workId).n, 0);
   // The restarted Core shares the first Core's db and root, which the first Core's cleanup closes first, so stop it here.
   await core.stop({ force: true });
+});
+
+test("the first review_budget_exceeded opens no Decision and queues a budget_exhausted Manager replan; the 3rd one opens it", async (t) => {
+  const { db } = await openTestDatabase(t, { prefix: "owl-review-budget-recovery-" });
+  const lane = db.createWriteLane();
+  const now = "2026-09-24T00:00:00.000Z";
+  await lane.transact((tx) => {
+    tx.run("INSERT OR IGNORE INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Owner', ?, ?)", now, now);
+    tx.run(`INSERT INTO works (id, owner_id, project_id, title, summary, size, state, rules_json, related_work_ids_json, created_at, updated_at)
+            VALUES ('W', 'owner:default', NULL, 'W', 'x', 'normal', 'running', '[]', '[]', ?, ?)`, now, now);
+    tx.run(`INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, state_version, failure_count, same_error_count,
+              review_round, worker_generation, total_review_attempts, created_at, updated_at, retry_no, manager_task_id, review_override)
+            VALUES ('T1', 'W', 'T1', 'code', 'verifying', 'normal', '', 'Done.', 0, 0, 0, 0, 1, 999, ?, ?, 0, 'T1', 'true')`, now, now);
+  });
+  const fail = () => lane.transact((tx) => reduceTaskInTransaction(tx, "T1", { event: "review.failed", payload: { verdict: "fix_required" } }));
+  const recoveries = () => db.all("SELECT payload_json FROM events WHERE type = 'recovery.started' ORDER BY sequence").map((row) => JSON.parse(row.payload_json));
+  const decisions = () => db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = 'W'").n;
+
+  await fail();
+  assert.equal(db.get("SELECT status FROM tasks WHERE id = 'T1'").status, "failed");
+  assert.equal(decisions(), 0, "the first budget stop opens no Decision");
+  assert.equal(JSON.parse(db.get("SELECT response_json FROM idempotency_keys WHERE key = 'manager-trigger:T1'").response_json).budget_recovery, true);
+  assert.deepEqual(recoveries().map((r) => [r.kind, r.action]), [["budget_exhausted", "replan_different_approach"]]);
+
+  // A replan gives the budget back and keeps the recovery count; here the Task simply hits the budget again.
+  for (const expected of [2, 2]) {
+    await lane.transact((tx) => tx.run("UPDATE tasks SET status = 'verifying', total_review_attempts = 999 WHERE id = 'T1'"));
+    await fail();
+    assert.equal(recoveries().length, expected);
+  }
+  assert.equal(decisions(), 1, "the 3rd budget stop opens exactly one Decision");
+  assert.match(db.get("SELECT tried FROM decisions WHERE work_id = 'W'").tried.split("\n")[0], /^自動で試したこと: 2回/u);
 });

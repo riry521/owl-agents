@@ -1,8 +1,8 @@
 /** A Task-level necessity so a fake Manager plan passes the plan quality check. */
 export const necessityFor = () => ({ serves: "test fixture", if_omitted: "test fixture" });
 
-/** One light criterion carrying the whole free-text acceptance of a fake Manager plan. */
-export const criteriaFor = (acceptance) => [{ id: "AC1", text: acceptance, check: "test fixture", serves: "test fixture", if_omitted: "test fixture", check_weight: "light", weight_reason: "", kind: "work_check" }];
+/** One light criterion carrying the whole free-text acceptance of a fake Manager plan; it is the Manager's own (a criterion with no origin counts as the Owner's and an automatic replan may not change it). */
+export const criteriaFor = (acceptance) => [{ id: "AC1", text: acceptance, check: "test fixture", serves: "test fixture", if_omitted: "test fixture", check_weight: "light", weight_reason: "", kind: "work_check", origin: { kind: "manager", source: null, quote: "" } }];
 
 /** Makes runManagerPlan of a fake runner add necessity and acceptance_criteria to every planned Task that has none; returns the same runner. */
 export function withNecessity(runner) {

@@ -33,6 +33,7 @@ import {
 } from '@/lib/format';
 import { AgentRunTree, AgentStatusBadge, ArchivedBadge, ChildRunList, HybridPhaseBadge, ResultBadge, TaskStateBadge, WorkStateBadge } from '@/components/StateBadge';
 import { WorkProjectMove } from '@/components/WorkProjectMove';
+import { WorkPrerequisitesSection } from '@/components/WorkPrerequisitesSection';
 import { WorkArchiveActions } from '@/components/WorkArchiveActions';
 import { DesignDocumentsSection } from '@/components/DesignDocumentsSection';
 import { DesignMocksSection } from '@/components/DesignMocksSection';
@@ -42,6 +43,7 @@ import { WorkPostMergeEvents } from '@/components/ActivityLog';
 import { orderTasksByStage } from '../lib/task-stages.mjs';
 import { activeRunByTask, buildRunTree, isRunActive } from '../lib/agent-run-tree.mjs';
 import { reviewNotesByTask } from '../lib/work-assurance.mjs';
+import { autoRecoveryBadge } from '../lib/auto-recovery.mjs';
 import { WorkAssurancePanel } from '@/components/WorkAssurancePanel';
 import { workDeliverables } from '../lib/work-deliverables.mjs';
 import { useLocale, type TFunction, type Locale } from '@/lib/i18n';
@@ -219,9 +221,10 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
   }
 
   const { work, tasks, runs, child_runs, reports, decisions } = data;
+  const recovering = autoRecoveryBadge(data.auto_recovery.active, locale, t);
   const shownConversation = conversation?.workId === id ? conversation.data : null;
   const displayNumber = workDisplayNumber(work.display_number);
-  const canStart = work.state === 'memo' || work.state === 'ready';
+  const canStart = work.state === 'memo' || (work.state === 'ready' && !work.prerequisite_wait);
   const canPause = work.state === 'running';
   // A Work stopped by an error waits on a Core Decision that offers a retry.
   const retryDecision = work.state === 'judgement_waiting'
@@ -316,6 +319,7 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
             <div className="work-head__meta">
               {displayNumber !== null && <span className="badge badge--gray">{t('work.numberLabel', { number: String(displayNumber) })}</span>}
               <WorkStateBadge state={work.state} />
+              {recovering && <span className="badge badge--amber" role="status" title={recovering.title}>{recovering.label}</span>}
               {work.archived_at && <ArchivedBadge />}
             </div>
             <h1 className="page__title panel__heading">{work.title}</h1>
@@ -334,6 +338,7 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
               <dt>{t('work.id')}</dt>
               <dd className="mono">{work.id}</dd>
             </dl>
+            <WorkPrerequisitesSection work={work} prerequisites={work.prerequisites} onChanged={retry} />
             {hasActions && (
               <div className="btn-row btn-row--spaced" aria-busy={operationPending}>
                 {canStart && (
@@ -537,6 +542,37 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
 
           {assuranceError && <p className="error" role="alert">{t('work.assuranceLoadError')}</p>}
           <WorkAssurancePanel assurance={assurance} t={t} />
+
+          {data.auto_recovery.relaxations.length > 0 && (
+            <section className="panel" aria-labelledby="sec-relaxed-criteria">
+              <h2 className="panel__title" id="sec-relaxed-criteria">{t('work.relaxedCriteriaTitle')}</h2>
+              <p className="muted">{t('work.relaxedCriteriaNote')}</p>
+              <table className="rules-table">
+                <thead>
+                  <tr>
+                    <th>{t('work.relaxedTask')}</th>
+                    <th>{t('work.relaxedCriterion')}</th>
+                    <th>{t('work.relaxedOriginal')}</th>
+                    <th>{t('work.relaxedNew')}</th>
+                    <th>{t('work.relaxedReason')}</th>
+                    <th>{t('work.relaxedKeeps')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.auto_recovery.relaxations.map((r) => (
+                    <tr key={`${r.task_id}:${r.criterion_id}:${r.at}`}>
+                      <td>{r.task_title ?? r.task_id}</td>
+                      <td>{r.criterion_id}</td>
+                      <td>{r.original.text}</td>
+                      <td>{r.relaxed.text}</td>
+                      <td>{r.reason}</td>
+                      <td>{r.keeps}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          )}
 
           {/* Design documents (hidden by the section itself when there are none) */}
           <DesignDocumentsSection

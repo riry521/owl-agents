@@ -15,3 +15,6 @@ rules:
   - id: owl_no_internal_docs_in_git
     kind: instruction
     text: "設計・計画・検証・レビュー結果・作業記録などの内部資料は git で追跡しないこと。git add -f や .gitignore の例外（!）で無視設定を破らないこと。テストやコードが内部資料のファイルを読む作りにしないこと（必要な値はテストやコード側に持たせる）。"
+  - id: owl_full_test_when_required
+    kind: instruction
+    text: "「全部を確かめるときは代表サンプルにする」という決まりは、全件の実行を禁止するものではない。受け入れ条件が全件のテストを求めているとき、または Core・共有の型・API の戻り値・プロンプトを変えるときは、全件の実行に理由があるものとして扱い、全件を実行すること。全件の実行を避けるために partial や blocked で報告しないこと。"

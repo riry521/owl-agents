@@ -21,12 +21,17 @@ function terminalVerdict(status: string | undefined, done: string): ConditionVer
   return status === undefined || status === "cancelled" ? "unreachable" : "pending";
 }
 
+/** A Work condition: completed satisfies; cancelled or missing (deleted) can never be met. */
+export function workConditionVerdict(state: string | undefined): ConditionVerdict {
+  return terminalVerdict(state, "completed");
+}
+
 export function evaluateCondition(condition: PrerequisiteCondition, spec: PrerequisiteSpec, facts: PrerequisiteFacts, taskId: string): ConditionVerdict {
   switch (condition.kind) {
     case "task":
       return terminalVerdict(facts.taskStatus(condition.task_id), "completed");
     case "work":
-      return terminalVerdict(facts.workState(condition.work_id), "completed");
+      return workConditionVerdict(facts.workState(condition.work_id));
     case "base_branch": {
       const base = facts.baseBranch();
       if (base === null) return "pending";

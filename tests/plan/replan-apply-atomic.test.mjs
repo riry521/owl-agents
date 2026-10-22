@@ -443,6 +443,10 @@ test("a cycle through a retried Task's new depends_on is rejected by validation 
 
   await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
   assert.match(managerInput(prompts.filter(isReplan)[1]).context.previous_output_feedback.errors.join(" "), /dependency cycle/);
+  assert.equal(managerDecisions(db, workId).length, 0, "the first final rejection is recovered automatically");
+  // The default limit allows two automatic recoveries; the third round opens the Decision.
+  await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
+  await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
   const decisions = managerDecisions(db, workId);
   assert.equal(decisions.length, 1);
   assert.match(decisions[0].tried, /rejected twice.*dependency cycle/s);

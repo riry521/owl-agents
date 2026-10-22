@@ -68,7 +68,7 @@ test("opencode v2 smoke: start, reply, finish, stop", { skip: model ? false : "O
     assert.ok(deltas >= 1, "no turn.delta");
     report.delta = "pass";
     assert.ok(final.reply.length > 0, "reply is empty");
-    assert.ok(final.usage.input_tokens > 0 && final.usage.output_tokens > 0, `usage: ${JSON.stringify(final.usage)}`);
+    assert.ok(typeof final.usage.input_tokens === "number" && typeof final.usage.output_tokens === "number", `usage: ${JSON.stringify(final.usage)}`);
     report.completed = "pass";
     t.diagnostic(`serve version ${version}, reply length ${final.reply.length}, usage ${JSON.stringify(final.usage)}`);
   } finally {

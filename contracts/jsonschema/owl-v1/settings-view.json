@@ -11,6 +11,7 @@
     "language",
     "remake_limits",
     "fixer_escalation",
+    "auto_recovery",
     "knowledge_automation",
     "advisor_persona",
     "advisor_folders",
@@ -39,6 +40,9 @@
       "type": "object"
     },
     "fixer_escalation": {
+      "type": "object"
+    },
+    "auto_recovery": {
       "type": "object"
     },
     "knowledge_automation": {

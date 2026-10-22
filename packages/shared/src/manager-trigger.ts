@@ -9,6 +9,8 @@ export type TaskReplanTrigger =
   | { kind: "review_budget_exhausted"; task_id: string; attempts: number; limit: number }
   | { kind: "reviewer_replan_requested"; task_id: string; summary: string | null }
   | { kind: "review_exhausted"; task_id: string }
+  | { kind: "budget_exhausted"; task_id: string; require_different_approach: true }
+  | { kind: "partial_repeated"; task_id: string }
   | { kind: "external_blocker"; task_id: string; cause: string }
   | {
     kind: "task_integration_failed";

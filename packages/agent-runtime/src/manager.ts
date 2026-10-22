@@ -10,7 +10,7 @@ import {
   validateRoleOutput,
   type RoleSchema,
 } from "./role-contract";
-import { ACCEPTANCE_CRITERION_ID_PREFIX, CHECK_WEIGHTS, CRITERION_KINDS, DEFAULT_OWNER_LANGUAGE, KNOWLEDGE_EXTERNAL_COMMAND_RULE, renderAcceptanceCriteria, validateAcceptanceCriteria, type AcceptanceCriterion, type OwnerLanguage, type TaskNecessity } from "@owl/shared";
+import { ACCEPTANCE_CRITERION_ID_PREFIX, CHECK_WEIGHTS, CRITERION_KINDS, CRITERION_ORIGIN_KINDS, CRITERION_ORIGIN_QUOTE_MAX, CRITERION_ORIGIN_SOURCES, DEFAULT_OWNER_LANGUAGE, KNOWLEDGE_EXTERNAL_COMMAND_RULE, renderAcceptanceCriteria, validateAcceptanceCriteria, type AcceptanceCriterion, type OwnerLanguage, type TaskNecessity } from "@owl/shared";
 import type { PlanWaitFor } from "../../shared/dist/prerequisite.js";
 import {
   type ManagerPlanRequest,
@@ -22,6 +22,11 @@ import {
 
 const TASK_TYPE_VALUES = ["research", "design", "code", "config", "doc", "test"] as const;
 
+/** A field the model should write but an older answer may lack: absent means the criterion has no origin (treated as the Owner's). */
+function withOptional(field: string, schema: RoleSchema): RoleSchema {
+  return { ...schema, required: (schema.required ?? []).filter((name) => name !== field) };
+}
+
 /** The one definition of a Manager plan/replan Task. */
 const MANAGER_TASK_SCHEMA: RoleSchema = objectSchema({
   id: { type: "string", minLength: 1, description: "Task id such as T1" },
@@ -31,7 +36,7 @@ const MANAGER_TASK_SCHEMA: RoleSchema = objectSchema({
     type: "array",
     minItems: 1,
     description: `the checkable success criteria the Worker must meet, one object per criterion; ids are ${ACCEPTANCE_CRITERION_ID_PREFIX}1, ${ACCEPTANCE_CRITERION_ID_PREFIX}2, ... in array order; a criterion over every occurrence names its concrete scope; written as deliverable behavior and checks to run, never as report-format requirements`,
-    items: objectSchema({
+    items: withOptional("origin", objectSchema({
       id: { type: "string", minLength: 1, description: `${ACCEPTANCE_CRITERION_ID_PREFIX}<position>, e.g. ${ACCEPTANCE_CRITERION_ID_PREFIX}1` },
       text: { type: "string", minLength: 1, description: "what must be true (the content of the criterion)" },
       check: { type: "string", minLength: 1, description: "how to check it: a command, test or evidence that can run inside this Task" },
@@ -40,7 +45,12 @@ const MANAGER_TASK_SCHEMA: RoleSchema = objectSchema({
       check_weight: { type: "string", enum: CHECK_WEIGHTS, description: "light: reading files, unit tests, typecheck, building the touched package; medium: the full test suite, an integration run or a local server or browser on temporary data; heavy: real model or paid API calls, production-size data or copies of it, every item of a large set, or runs of about ten minutes or more" },
       kind: { type: "string", enum: CRITERION_KINDS, description: "spec_test: asks to add or change a test that pins the specification; work_check: anything else (confirming the work is right)" },
       weight_reason: { type: "string", description: "for heavy only: why no lighter check can prove what the request needs; empty string otherwise" },
-    }),
+      origin: objectSchema({
+        kind: { type: "string", enum: CRITERION_ORIGIN_KINDS, description: "owner: the criterion restates something the Owner wrote in the Work summary, an instruction or a Decision answer; manager: you added it yourself" },
+        source: { type: ["string", "null"], enum: [...CRITERION_ORIGIN_SOURCES, null], description: "owner only: where the Owner wrote it (summary, instruction or decision_answer); null for manager" },
+        quote: { type: "string", description: `owner only: the Owner's own sentence copied word for word (at most ${CRITERION_ORIGIN_QUOTE_MAX} characters); empty string for manager` },
+      }),
+    })),
   },
   depends_on: {
     type: "array",
@@ -99,6 +109,37 @@ const MANAGER_TASK_SCHEMA: RoleSchema = objectSchema({
   necessity: objectSchema({
     serves: { type: "string", minLength: 1, description: "the part of the Owner's request this Task serves" },
     if_omitted: { type: "string", minLength: 1, description: "what goes wrong for the request if this Task is not done" },
+  }),
+  auto_recovery: objectSchema({
+    criteria_relaxations: {
+      type: "array",
+      description: "automatic recovery only, on a retried Task: one entry for each criterion you loosened (changed text or check); [] otherwise",
+      items: objectSchema({
+        criterion_id: { type: "string", minLength: 1, description: "id of the loosened criterion, e.g. AC2" },
+        reason: { type: "string", minLength: 1, description: "why the earlier wording could not be proven inside the Task" },
+        keeps: { type: "string", minLength: 1, description: "what the loosened criterion still checks" },
+      }),
+    },
+    criterion_checks: {
+      type: "array",
+      example: [],
+      description: "partial_repeated recovery only: one command for each criterion the repeated partial report left open, which Core runs once in the Task's last worktree to see whether the criterion already holds; [] otherwise",
+      items: objectSchema({
+        criterion_id: { type: "string", minLength: 1, description: "id of the open criterion, e.g. AC2" },
+        argv: { type: "array", items: { type: "string" }, minItems: 1, description: "the command as an argv array (no shell); it must be one of the Project's allowed commands" },
+      }),
+    },
+    rule_applicability: {
+      type: "array",
+      example: [],
+      description: "partial_repeated recovery only: for each open criterion, whether the rule the Worker kept citing really applies to it; [] otherwise (never [] for partial_repeated)",
+      items: objectSchema({
+        criterion_id: { type: "string", minLength: 1, description: "id of the open criterion" },
+        rule: { type: "string", minLength: 1, description: "the rule or constraint the Worker cited or followed, in a short sentence" },
+        applies: { type: "boolean", description: "true when the rule applies to this criterion" },
+        reason: { type: "string", minLength: 1, description: "why it applies or does not" },
+      }),
+    },
   }),
 });
 
@@ -257,6 +298,7 @@ export function managerPromptInput(request: ManagerPlanRequest): Record<string, 
       base_merge_conflict: isRecord(context.base_merge_conflict) ? context.base_merge_conflict : null,
       owner_requests: Array.isArray(context.owner_requests) ? context.owner_requests : [],
       previous_output_feedback: isRecord(context.previous_output_feedback) ? context.previous_output_feedback : null,
+      auto_recovery: isRecord(context.auto_recovery) ? context.auto_recovery : null,
       failed_tasks: Array.isArray(context.failed_tasks) ? context.failed_tasks : [],
       final_verdict: isRecord(context.final_verdict) ? context.final_verdict : null,
       work_verification: isRecord(context.work_verification) ? context.work_verification : null,
@@ -375,13 +417,17 @@ const MODE_INSTRUCTIONS: Readonly<Record<"plan" | "replan", readonly string[]>> 
       "- When the request does not concern the title or the summary, leave that field null (null means unchanged). updated_title is 1-500 characters; updated_summary is at most 20,000 characters.",
     ].join("\n"),
     "context.failed_tasks gives, per root failed Task, why it failed (failure.kind with its fields: reason, question, work_done, verdict, merge_conflict_files; for verification_failed see verification_failure, for external_blocker see cause, summary, evidence and suggested_fix, for acceptance_defect see acceptance_defects, whose criterion_id points at an entry of acceptance_criteria), its last report (last_report, null if none) and the reviewer_findings or verification_failure of its latest attempt. Change what caused the failure; do not repeat the same plan.",
-    "trigger says why the Manager is called, as fields only; each kind is explained below. initial_plan: plan the Work from the request. task_failed: trigger.tasks[] has one entry per Task that needs you, and its kind says why: launch_conflict (its worktree could not be set up because of merge conflicts in merge_conflict_files), verification_error (verification could not run; message is the error), failure_threshold (the Worker failed repeatedly; error_key, reason and question are the Worker's own), verification_exhausted (verification kept failing; see that Task's failure.verification_failure), reviewer_error (the Reviewer could not finish; message is the error), design_document_missing (the Task needs a design document that does not exist), review_budget_exhausted (attempts reached limit review rounds), reviewer_replan_requested (the Reviewer asked for a replan; summary is its own), review_exhausted (the Reviewer found defects and no review rounds remain), external_blocker (the Worker reported a pre-existing problem or an environment gap; cause is pre_existing or environment, details in that Task's failure), task_integration_failed (the Task passed after verification or review, but merging it into the Work branch work_branch failed: failure_kind merge_conflict with merge_conflict_files, or commit_failure; message is the error). queued_failed_tasks: Tasks failed earlier without a replan; retry or replace each. work_verification_failed: the integrated Work branch failed verification; context.work_verification has the failing command and output; when core_tests_failed is true, add fix Tasks only for the failing tests in work_verification.core_tests and do not redo completed Tasks. owner_request: the Owner (or Core, when automatic is true) asks for a change; owner_replan_kind is decision, reopen, instruction, work_update, auto_conflict or auto_final, and situation says what was open: failed_tasks (context.failed_tasks), base_merge_conflict (context.base_merge_conflict: add one Task that merges the latest base_branch into the Work in its worktree, resolves the conflict in files keeping both sides' intent, and commits; base_branch null means the Project base branch), final_incomplete (context.final_verdict), integration_verification (context.work_verification), other. design_completed: trigger.design_task_ids are the ids of the design Tasks that just completed; read the matching design documents in context.design_documents and add new implementation Tasks that depend on those design Tasks (this also applies to a Work with work.design_mode lead); do not redo completed Tasks. final_check: all Tasks completed; give the final verdict. When context.previous_output_feedback is not null, your previous replan was rejected or needs repair: fix the problems it lists (errors, warnings; kind fields_missing means return the same replan with only those fields fixed). context.owner_requests lists the Owner's requests to act on, oldest first; each entry's text is the Owner's own words, kept whole (kind decision, reopen or instruction), or {kind: work_update, changed_fields, previous_title, previous_summary} when the Owner rewrote work.title or work.summary (the new values are in work; [] if none). context.worker_questions holds the Workers' questions to answer, one {task_id, question} each ([] if none). context.final_verdict holds the final check's summary and missing items when this replan follows an incomplete final check (null otherwise). context.rules holds the rules every plan must follow (null if none).",
+    "trigger says why the Manager is called, as fields only; each kind is explained below. initial_plan: plan the Work from the request. task_failed: trigger.tasks[] has one entry per Task that needs you, and its kind says why: launch_conflict (its worktree could not be set up because of merge conflicts in merge_conflict_files), verification_error (verification could not run; message is the error), failure_threshold (the Worker failed repeatedly; error_key, reason and question are the Worker's own), verification_exhausted (verification kept failing; see that Task's failure.verification_failure), reviewer_error (the Reviewer could not finish; message is the error), design_document_missing (the Task needs a design document that does not exist), review_budget_exhausted (attempts reached limit review rounds), reviewer_replan_requested (the Reviewer asked for a replan; summary is its own), review_exhausted (the Reviewer found defects and no review rounds remain), budget_exhausted (the remake or review budget ran out and Core restores it once for this replan; require_different_approach is true: retry or replace the Task with a different approach, because the same context, notes and acceptance_criteria are rejected; context.auto_recovery has the budget used), external_blocker (the Worker reported a pre-existing problem or an environment gap; cause is pre_existing or environment, details in that Task's failure), task_integration_failed (the Task passed after verification or review, but merging it into the Work branch work_branch failed: failure_kind merge_conflict with merge_conflict_files, or commit_failure; message is the error). queued_failed_tasks: Tasks failed earlier without a replan; retry or replace each. work_verification_failed: the integrated Work branch failed verification; context.work_verification has the failing command and output; when core_tests_failed is true, add fix Tasks only for the failing tests in work_verification.core_tests and do not redo completed Tasks. owner_request: the Owner (or Core, when automatic is true) asks for a change; owner_replan_kind is decision, reopen, instruction, work_update, auto_conflict or auto_final, and situation says what was open: failed_tasks (context.failed_tasks), base_merge_conflict (context.base_merge_conflict: add one Task that merges the latest base_branch into the Work in its worktree, resolves the conflict in files keeping both sides' intent, and commits; base_branch null means the Project base branch), final_incomplete (context.final_verdict), integration_verification (context.work_verification), other. design_completed: trigger.design_task_ids are the ids of the design Tasks that just completed; read the matching design documents in context.design_documents and add new implementation Tasks that depend on those design Tasks (this also applies to a Work with work.design_mode lead); do not redo completed Tasks. final_check: all Tasks completed; give the final verdict. When context.previous_output_feedback is not null, your previous replan was rejected or needs repair: fix the problems it lists (errors, warnings; kind fields_missing means return the same replan with only those fields fixed). context.owner_requests lists the Owner's requests to act on, oldest first; each entry's text is the Owner's own words, kept whole (kind decision, reopen or instruction), or {kind: work_update, changed_fields, previous_title, previous_summary} when the Owner rewrote work.title or work.summary (the new values are in work; [] if none). context.worker_questions holds the Workers' questions to answer, one {task_id, question} each ([] if none). context.final_verdict holds the final check's summary and missing items when this replan follows an incomplete final check (null otherwise). context.rules holds the rules every plan must follow (null if none).",
+    "context.auto_recovery is null unless Core is replanning as an automatic recovery (kind, attempt_no of limit, instruction, previous_failures). previous_failures lists what earlier automatic attempts tried and why each did not fix the problem; do not repeat them. The recovery kind can be budget_exhausted (the Task used up its attempt or time budget: split it into smaller Tasks or narrow its scope) or partial_repeated (the same Task kept ending partial with the same missing items; its trigger entry has kind partial_repeated). For partial_repeated, in that Task's auto_recovery: (1) criterion_checks: for each open criterion, give one argv command (no shell, one of the Project's allowed commands) that proves whether it already holds; Core runs each once in the Task's last worktree and, when all pass, keeps the criteria and tells the Worker to report success with that evidence. (2) rule_applicability, never empty: for each open criterion, name the rule the Worker kept citing, say applies true or false, and why; it is added to the Task's notes. (3) Only a criterion whose origin is manager that still fails may be relaxed, as for criteria_too_strict; criteria with origin owner are kept as they are. Otherwise change the approach. It can also be integration_conflict (a merge conflict: add a Worker Task that keeps both sides' changes and whose acceptance criteria require both parents' changes to remain and the Project's check_commands to pass; if both cannot stay, ask the Owner instead) or final_incomplete (the final check found the Work incomplete: add Tasks for the missing items; previous_failures holds the missing items of earlier rounds, so do not repeat a fix that did not work).",
     "context.work_verification is set when the Project's checks failed on the Work branch with every Task merged (failed_command_id and the output of each command); add or change Tasks so that the failing command passes (null otherwise).",
   ],
 };
 
 const ACCEPTANCE_GUIDANCE =
   "Write acceptance criteria a Reviewer can check in one pass. When a criterion covers every occurrence of something (\"all\", \"every\", \"each\"), name its concrete scope: the directories or files, the identifiers, event types or UI surfaces it includes, and what it excludes, such as historical data or tests. Make the acceptance criteria require the build and the tests related to what the Task changes, and name those specific tests or checks. Do not require the whole test suite to pass, and do not plan a Task (such as a final finishing Task) whose job is to run it: Core runs the whole suite on the integrated Work branch and re-checks the failed and related tests after a fix, and do not require comparing failures with the base branch (main) or checking whether a test also fails there. Plan a Task to fix an already failing test only when the Work asks for it; the Reviewer sends such failures to the backlog. A test that this same Work's changes broke (for example a test still asserting behavior an earlier Task changed on purpose) is not an already failing test: have the Task that finds it fix or update that test in the same Task, and do not defer it to the backlog or to a later Task. Do not put report-format requirements in acceptance criteria, such as \"state X in the report\", \"paste the command output verbatim\" or \"list Y in the report\"; write criteria about the deliverable's behavior and about verification that can be run and checked (tests, commands, file state). Write each criterion as what must work correctly (behavior and result). Do not make the verification procedure, the way to prove it, or the details of the scripts to use into a criterion unless the Owner explicitly specified them.";
+
+const ORIGIN_GUIDANCE =
+  `Give every acceptance criterion an origin. kind owner: the criterion restates what the Owner wrote in the Work summary, an instruction or a Decision answer; set source to summary, instruction or decision_answer and copy the Owner's sentence word for word into quote (at most ${CRITERION_ORIGIN_QUOTE_MAX} characters); Core rejects an owner criterion whose quote is not found in the Owner's words. kind manager: you added the criterion yourself; source is null and quote is "". A criterion the Owner asked for is not held to the lightness limits of the plan quality check, but only an Owner quote makes it one. When the context has auto_recovery of kind criteria_too_strict, a criterion was judged too strict: loosen only criteria whose origin is manager (a smaller scope, a lighter or sampled check), keep the same id, kind and what is still checked, write each change in the Task's auto_recovery.criteria_relaxations (criterion_id, reason, keeps), and never change or remove a criterion with origin owner or without an origin. In every other case auto_recovery.criteria_relaxations is [].`;
 
 const NECESSITY_GUIDANCE =
   "Plan only what the Work needs. Every Task and every acceptance criterion must serve a part of the Owner's request; a Task, criterion, test or check whose absence would harm nothing does not belong in the plan. Give every Task a necessity: serves (the part of the request it serves) and if_omitted (what goes wrong for the request without it). Give every acceptance criterion its own fields in acceptance_criteria: id (AC1, AC2, ... in array order), text (what must be true), check (how to check it, runnable inside the Task), serves, if_omitted, check_weight, weight_reason and kind. Set each criterion's kind: spec_test only when the criterion asks to add or change a test that pins the specification; otherwise work_check. Core deletes test files added by any Task with no spec_test criterion, test-type Tasks included. Choose the lightest check that proves each criterion: a small sample, a stub provider, a temporary copy with a few items. Use check_weight heavy (real model or paid API calls, production-size data or copies of it, every item of a large set, runs of about ten minutes or more) only when no lighter check can prove what the request needs, and then give the reason in weight_reason; otherwise weight_reason is an empty string. Core reads these fields as they are, so put each fact in its own field; an output with missing fields is returned to you to fix the format only. Core rejects heavy checks without a reason.";
@@ -445,7 +491,7 @@ export function buildManagerPrompt(
   }
   return renderRolePrompt({
     role: "You are the Owl Manager.",
-    instructions: [...MODE_INSTRUCTIONS[mode], TEST_PLACEMENT_GUIDANCE, SMALL_TASK_BATCHING_GUIDANCE, ACCEPTANCE_GUIDANCE, NECESSITY_GUIDANCE, ...DESIGN_TASK_GUIDANCE, SKILL_CONTEXT_INSTRUCTION, KNOWLEDGE_CONTEXT_INSTRUCTION, ADVISOR_BACKLOG_INSTRUCTION, SKILL_USAGE_INSTRUCTION],
+    instructions: [...MODE_INSTRUCTIONS[mode], TEST_PLACEMENT_GUIDANCE, SMALL_TASK_BATCHING_GUIDANCE, ACCEPTANCE_GUIDANCE, ORIGIN_GUIDANCE, NECESSITY_GUIDANCE, ...DESIGN_TASK_GUIDANCE, SKILL_CONTEXT_INSTRUCTION, KNOWLEDGE_CONTEXT_INSTRUCTION, ADVISOR_BACKLOG_INSTRUCTION, SKILL_USAGE_INSTRUCTION],
     processSkills,
     output: managerOutputSchema({ mode }),
     outputRules: [],
@@ -506,8 +552,8 @@ export function parseManagerPlanWithFeedback(
     payload = { ...payload, verdict: { ...payload.verdict, lessons } };
   }
   if ((request.mode === "plan" || request.mode === "replan") && Array.isArray(payload.tasks)) {
-    // Plans from before assigned_designer lack it; absent means no designation.
-    payload = { ...payload, tasks: payload.tasks.map((task) => isRecord(task) ? { ...task, assigned_designer: task.assigned_designer ?? null } : task) };
+    // Plans from before assigned_designer / auto_recovery lack them; absent means no designation and no loosened criteria.
+    payload = { ...payload, tasks: payload.tasks.map((task) => isRecord(task) ? { ...task, assigned_designer: task.assigned_designer ?? null, auto_recovery: isRecord(task.auto_recovery) ? { criteria_relaxations: [], criterion_checks: [], rule_applicability: [], ...task.auto_recovery } : { criteria_relaxations: [], criterion_checks: [], rule_applicability: [] } } : task) };
   }
   if (request.mode === "replan") {
     // Answers from before the title/summary fields lack them; absent means unchanged.

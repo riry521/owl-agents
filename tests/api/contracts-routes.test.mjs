@@ -327,3 +327,22 @@ test("OpenAPI documents POST /advisor/workspace and AdvisorWorkspacePreparation,
   assert.match(finish, /merge_conflict|uncommitted_changes/u);
   assert.match(http, /pathname === ADVISOR_WORKSPACE_FINISH_API_PATH/u);
 });
+
+test("PUT /settings/auto-recovery saves a valid limit (200) and rejects bad bodies (400) without saving; GET and /settings/view carry auto_recovery", async (t) => {
+  const { root, db, core } = await createTestCore(t, {}, { prefix: "owl-api-autorecovery-", start: true });
+  const server = await startTestHttpServer(t, { core: new ExternalCoreAdapter(core, db, root, join(root, "data")), webOut: root, owlRoot: root }, { token: "autorecovery-token" });
+  if (!server) return t.skip("listen not permitted");
+  const put = (payload) => server.request("PUT", "/api/v1/settings/auto-recovery", { request_id: createUlid(), idempotency_key: `ar:${createUlid()}`, expected_version: 0, payload });
+  const stored = (await (await server.request("GET", "/api/v1/settings/auto-recovery")).json()).data;
+  const saved = await put({ limit: 1 });
+  assert.equal(saved.status, 200);
+  assert.equal((await saved.json()).data.limit, 1);
+  for (const bad of [{ limit: 1.5 }, { limit: 11 }, { limit: -1 }, { limit: 1, extra: true }]) {
+    const rejected = await put(bad);
+    assert.equal(rejected.status, 400, JSON.stringify(bad));
+  }
+  const view = (await (await server.request("GET", "/api/v1/settings/view")).json()).data;
+  assert.equal(view.auto_recovery.limit, 1, "the rejected bodies saved nothing");
+  assert.deepEqual(view.auto_recovery, (await (await server.request("GET", "/api/v1/settings/auto-recovery")).json()).data);
+  assert.notEqual(stored.limit, view.auto_recovery.limit);
+});

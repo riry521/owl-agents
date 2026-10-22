@@ -74,6 +74,27 @@ test("decision.opened follows the payload language for its card title", () => {
   assert.equal(card.title, decisionTitle({ language: "en" }));
 });
 
+test("decision.opened shows the auto-recovery summary as its own field, at most 200 characters, only when present", () => {
+  const render = (language, summary) => buildNotificationCard(event("decision.opened", {
+    language, decision_id: DECISION_ID, question: "Which option?", options: [],
+    ...(summary === undefined ? {} : { auto_recovery_summary: summary }),
+  }), { language: "ja", formatTime: () => "12:00", replyStyle: "reply" });
+  const field = (card) => card.fields.find((f) => f.label === (card.language === "ja" ? "自動で試したこと" : "Tried automatically"));
+  assert.equal(field(render("ja", "自動で 2 回試しました。直りませんでした。")).value, "自動で 2 回試しました。直りませんでした。");
+  assert.equal(field(render("en", "x".repeat(300))).value.length, 200);
+  assert.equal(field(render("ja", null)), undefined);
+  assert.equal(field(render("en")), undefined);
+});
+
+test("work.completed adds one line about relaxed acceptance criteria only when there are any", () => {
+  const relaxed = [{ criterion_id: "AC1" }, { criterion_id: "AC2" }];
+  assert.equal(formatWorkCompletionSummary({ task_count: 2, criteria_relaxations: relaxed }, "ja"), "Task 2件\n緩めた受け入れ条件: 2 件。Work の画面で見られます。");
+  assert.equal(formatWorkCompletionSummary({ task_count: 2, criteria_relaxations: relaxed }, "en"), "2 tasks\nRelaxed acceptance criteria: 2. See the Work screen.");
+  assert.equal(formatWorkCompletionSummary({ criteria_relaxations: relaxed }, "ja"), "緩めた受け入れ条件: 2 件。Work の画面で見られます。");
+  assert.equal(formatWorkCompletionSummary({ task_count: 2, criteria_relaxations: [] }, "ja"), "Task 2件");
+  assert.equal(formatWorkCompletionSummary({}, "ja"), null);
+});
+
 test("work.completed includes task count and duration and derives duration from timestamps", () => {
   const fromValues = buildNotificationCard(event("work.completed", {
     work_id: WORK_ID,

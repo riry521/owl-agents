@@ -5,6 +5,7 @@ import { test } from "node:test";
 
 import { DecisionService } from "../../packages/core/dist/index.js";
 import { coreTaskDecisionBrief, coreWorkDecisionBrief } from "../../packages/core/dist/decision-brief.js";
+import { recordAutoRecoveryInTransaction, withAutoRecoveryTried } from "../../packages/core/dist/auto-recovery.js";
 import { openDatabase } from "../../packages/db/dist/index.js";
 import { findInternalTerms, readDecisionExplanation } from "../../packages/shared/dist/index.js";
 import { formatDecisionText, answerGuideHint } from "../../packages/plugin-sdk/dist/shared/index.js";
@@ -253,4 +254,36 @@ test("readDecisionExplanation rejects internal terms and malformed explanations"
   assert.equal(readDecisionExplanation(report({ summary: "One. Two. Three." }), context).ok, false);
   assert.equal(readDecisionExplanation(report({ cause_kind: "criteria" }), context).ok, false);
   assert.deepEqual(findInternalTerms("The work was partially done.", []), []);
+});
+
+test("withAutoRecoveryTried puts the automatic attempts first, capped per line and by the limit", async (t) => {
+  const { db } = await openTestDatabase(t, { prefix: "owl-auto-tried-" });
+  await seedWork(db);
+  const target = { kind: "work", id: "W" };
+  const long = "x".repeat(400);
+  for (const n of [1, 2, 3, 4]) {
+    await db.createWriteLane().transact((tx) =>
+      recordAutoRecoveryInTransaction(tx, {
+        kind: "integration_conflict",
+        target,
+        workId: "W",
+        action: "add_conflict_task",
+        sourceEventId: `E${n}`,
+        previousFailure: { summary: n === 1 ? long : `failure ${n}`, error_key: "k", detail: "d" },
+      }),
+    );
+  }
+  const brief = { reason: "Still conflicting.", question: "q", tried: "Existing tried text.", current_state: "s", options: [], recommended: null };
+  const ja = withAutoRecoveryTried(db, brief, { workId: "W", taskIds: [] }, "ja");
+  const lines = ja.tried.split("\n");
+  assert.match(lines[0], /^自動で試したこと: \d+回（上限 \d+回）。直りませんでした。$/u);
+  assert.match(lines[1], /^\d+回目: /u);
+  assert.ok(lines.every((line) => line === "Existing tried text." || [...line].length <= 200));
+  assert.equal(lines.at(-1), "Existing tried text.");
+  const limit = Number(/上限 (\d+)回/u.exec(lines[0])[1]);
+  assert.ok(lines.filter((line) => /^\d+回目: /u.test(line)).length <= limit);
+  const en = withAutoRecoveryTried(db, brief, { workId: "W", taskIds: [] }, "en");
+  assert.match(en.tried.split("\n")[0], /^Tried automatically: /u);
+  assert.match(en.tried, /\nAttempt \d+: .*Result: /u);
+  assert.ok(withAutoRecoveryTried(db, brief, { workId: "W", taskIds: [] }, "ja", "design_decision").tried.startsWith("自動では試していません（理由: "));
 });

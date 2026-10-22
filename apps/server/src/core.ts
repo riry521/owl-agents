@@ -73,6 +73,7 @@ import type {
 import { configuredDesignSkill } from "./config.js";
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
 import type { WebResearchCapture } from "../../../packages/shared/dist/web-research.js";
+import { validatePrerequisiteWorkIds } from "../../../packages/shared/dist/work-prerequisite.js";
 import type { ChildDispatchRequest, ChildDispatchResponse, ChildRunListFilter, ChildRunRecord, ChildRunSettings, ChildWaitRequest, ChildWaitResponse } from "../../../packages/shared/dist/child-runs.js";
 
 import { IntegrationStore } from "./integration-store.js";
@@ -451,8 +452,9 @@ export class MemoryCore implements CorePort {
 
   async startWork(workId: string, mode: "normal" | "small", command: CommandMeta): Promise<CommandResult<{
     work_id: string;
-    state: "running";
+    state: "running" | "ready" | "judgement_waiting";
     started: boolean;
+    waiting_for_prerequisites: boolean;
   }>> {
     this.assertWritable();
     const work = this.requireWork(workId);
@@ -469,7 +471,32 @@ export class MemoryCore implements CorePort {
     work.state_version += 1;
     work.updated_at = utcNow();
     this.emit("work.started", { work_id: workId, state: work.state });
-    return { data: { work_id: workId, state: "running", started: true }, version: work.state_version };
+    return { data: { work_id: workId, state: "running", started: true, waiting_for_prerequisites: false }, version: work.state_version };
+  }
+
+  /** MemoryCore keeps no wait state: it stores no prerequisite rows, so a Work never becomes ready. */
+  async replaceWorkPrerequisites(workId: string, input: { prerequisite_work_ids: string[] }, command: CommandMeta): Promise<CommandResult<JsonObject>> {
+    this.assertWritable();
+    const work = this.requireWork(workId);
+    this.assertVersion(work.state_version, command.expected_version);
+    if (work.state !== "memo" && work.state !== "ready") {
+      throw new ApiError(409, "invalid_state_transition", "Prerequisites can be changed only before the Work starts.", { state: work.state });
+    }
+    let ids: string[];
+    try {
+      ids = validatePrerequisiteWorkIds(input.prerequisite_work_ids);
+    } catch (error) {
+      throw new ApiError(400, "validation_error", (error as Error).message, { field: "prerequisite_work_ids" });
+    }
+    if (ids.includes(workId)) throw new ApiError(400, "validation_error", "A Work cannot be its own prerequisite.", { field: "prerequisite_work_ids" });
+    const missing = ids.find((id) => !this.works.has(id));
+    if (missing) throw new ApiError(404, "prerequisite_work_not_found", `Prerequisite Work ${missing} was not found.`, { work_id: missing });
+    return { data: { work_id: workId, state: work.state, prerequisites: [] }, version: work.state_version };
+  }
+
+  async releaseWorkPrerequisiteWait(workId: string, _command: CommandMeta): Promise<CommandResult<JsonObject>> {
+    const work = this.requireWork(workId);
+    throw new ApiError(409, "invalid_state_transition", "Only a Work waiting for its prerequisites can be released.", { work_id: workId, state: work.state });
   }
 
   async pauseWork(workId: string, _reason: string, command: CommandMeta): Promise<CommandResult<{
@@ -1305,13 +1332,13 @@ export class MemoryCore implements CorePort {
 
   private toWorkSummary(work: StoredWork): WorkSummary {
     const { id, display_number, title, state, state_version, updated_at, archived_at, project_id } = work;
-    return { id, display_number, title, state, state_version, updated_at, archived_at, project_id };
+    return { id, display_number, title, state, state_version, updated_at, archived_at, project_id, prerequisite_wait: false, waiting_on: [] };
   }
 
   private toWorkDetail(work: StoredWork): WorkDetail {
     const { tasks: taskIds, ...detail } = work;
     const taskStates = taskIds.map((taskId) => this.tasks.get(taskId)?.status);
-    return { ...detail, progress: progressFromTaskStates(work.id, taskStates) };
+    return { ...detail, prerequisite_wait: false, waiting_on: [], prerequisites: [], progress: progressFromTaskStates(work.id, taskStates) };
   }
 
   private toTaskSummary(task: StoredTask): TaskSummary {
@@ -1436,6 +1463,8 @@ interface ExternalCore {
   getWorkDesign?(workId: string, taskId: string): Promise<WorkDesignDetail | null>;
   startWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   moveWorkToProject?(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
+  replaceWorkPrerequisites?(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
+  releaseWorkPrerequisiteWait?(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   pauseWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   resumeWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
   resumeWorkOrRetryDecision(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
@@ -1644,6 +1673,9 @@ function externalWorkDetail(response: unknown, workId: string, computedProgress:
     plan_revision: planRevision,
     progress: computedProgress,
     conversation_id: data.conversation_id === null || isUlid(data.conversation_id) ? data.conversation_id : null,
+    prerequisite_wait: data.prerequisite_wait === true,
+    waiting_on: Array.isArray(data.waiting_on) ? data.waiting_on : [],
+    prerequisites: Array.isArray(data.prerequisites) ? data.prerequisites : [],
   };
 }
 
@@ -1672,6 +1704,8 @@ export function externalError(error: unknown, operation: string): ApiError {
       "decision_already_resolved",
       "project_not_found",
       "work_project_already_set",
+      "prerequisite_work_not_found",
+      "prerequisite_cycle",
       "provider_pause_not_found",
       "write_paths_invalid",
       "timeout_out_of_range",
@@ -1769,6 +1803,8 @@ export class ExternalCoreAdapter implements CorePort {
         ...work,
         display_number: displayNumberOrNull(work.display_number),
         project_id: typeof work.project_id === "string" ? work.project_id : null,
+        prerequisite_wait: work.prerequisite_wait === true,
+        waiting_on: Array.isArray(work.waiting_on) ? work.waiting_on : [],
       })) };
     } catch (error) {
       throw externalError(error, "listWorks");
@@ -1905,13 +1941,35 @@ export class ExternalCoreAdapter implements CorePort {
     }
   }
 
-  async startWork(workId: string, mode: "normal" | "small", command: CommandMeta): Promise<CommandResult<{ work_id: string; state: "running"; started: boolean }>> {
+  async startWork(workId: string, mode: "normal" | "small", command: CommandMeta): Promise<CommandResult<{ work_id: string; state: "running" | "ready" | "judgement_waiting"; started: boolean; waiting_for_prerequisites: boolean }>> {
     try {
       const response = await this.core.startWork(workId, { ...command, payload: { mode } });
       const { version: _version, ...data } = response.data;
-      return { data: data as { work_id: string; state: "running"; started: boolean }, version: response.version };
+      return { data: data as { work_id: string; state: "running" | "ready" | "judgement_waiting"; started: boolean; waiting_for_prerequisites: boolean }, version: response.version };
     } catch (error) {
       throw externalError(error, "startWork");
+    }
+  }
+
+  async replaceWorkPrerequisites(workId: string, input: { prerequisite_work_ids: string[] }, command: CommandMeta): Promise<CommandResult<JsonObject>> {
+    try {
+      if (!this.core.replaceWorkPrerequisites) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support Work prerequisites.");
+      const response = await this.core.replaceWorkPrerequisites(workId, { ...command, payload: input });
+      const { version: _version, ...data } = response.data;
+      return { data, version: response.version };
+    } catch (error) {
+      throw externalError(error, "replaceWorkPrerequisites");
+    }
+  }
+
+  async releaseWorkPrerequisiteWait(workId: string, command: CommandMeta): Promise<CommandResult<JsonObject>> {
+    try {
+      if (!this.core.releaseWorkPrerequisiteWait) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support Work prerequisites.");
+      const response = await this.core.releaseWorkPrerequisiteWait(workId, { ...command, payload: {} });
+      const { version: _version, ...data } = response.data;
+      return { data, version: response.version };
+    } catch (error) {
+      throw externalError(error, "releaseWorkPrerequisiteWait");
     }
   }
 

@@ -744,3 +744,15 @@ export {
   type OpencodeToolCall,
   type OpencodeServeEnvInput,
 } from "./opencode-harness.js";
+
+export { WORK_PREREQUISITE_LIMIT, validatePrerequisiteWorkIds, type WorkPrerequisiteView } from "./work-prerequisite.js";
+export {
+  AUTO_RECOVERY_LIMIT_MAX,
+  AUTO_RECOVERY_LIMIT_MIN,
+  AUTO_RECOVERY_SETTINGS_KEY,
+  DEFAULT_AUTO_RECOVERY_SETTINGS,
+  AutoRecoverySettingsValidationError,
+  readAutoRecoverySettings,
+  validateAutoRecoverySettings,
+  type AutoRecoverySettings,
+} from "./auto-recovery-settings.js";

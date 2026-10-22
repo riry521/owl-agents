@@ -139,3 +139,32 @@ test('English and Japanese define the Fixer i18n keys', () => {
   assert.match(read('ja').work.fixerEscalated, /\{\{count\}\} 回差し戻されたため Fixer が担当しています/);
   assert.match(read('en').work.fixerEscalated, /Fixer took over after \{\{count\}\} review rejections/);
 });
+
+// AutoRecoverySection's useState() calls, in order: loaded, draft, saving, notice, error.
+test('the automatic recovery section saves the edited count', async () => {
+  let sent = null;
+  const api = { putAutoRecoverySettings: async (payload) => { sent = payload; return payload; } };
+  const isSave = (type, props) => (type === 'button' && props?.children === 'settings.autoRecoverySave' ? 'save' : null);
+  const { html, captured, state } = render('AutoRecoverySection', { 0: 2, 1: '4', 2: false, 3: null, 4: null }, api, isSave);
+  assert.match(html, /name="limit"[^>]*value="4"/);
+  await captured.save.onClick();
+  assert.deepEqual(sent, { limit: 4 });
+  assert.equal(state[3], 'settings.autoRecoverySaved');
+  assert.equal(state[4], null);
+});
+
+test('the automatic recovery section shows the invalid-value message and sends nothing for a bad count', async () => {
+  let sent = null;
+  const api = { putAutoRecoverySettings: async (payload) => { sent = payload; return payload; } };
+  const isSave = (type, props) => (type === 'button' && props?.children === 'settings.autoRecoverySave' ? 'save' : null);
+  for (const draft of ['11', '-1', '1.5', '']) {
+    const { captured, state } = render('AutoRecoverySection', { 0: 2, 1: draft, 2: false, 3: null, 4: null }, api, isSave);
+    await captured.save.onClick();
+    assert.equal(state[4], 'settings.autoRecoveryInvalid', draft);
+  }
+  assert.equal(sent, null);
+  const read = (lang) => JSON.parse(readFileSync(join(repoRoot, `apps/web/lib/i18n/${lang}.json`), 'utf8'));
+  assert.equal(read('ja').settings.autoRecoveryInvalid, '0 から 10 の整数を入れてください。');
+  assert.equal(read('ja').settings.autoRecovery, '自動の復旧');
+  assert.equal(typeof read('en').settings.autoRecoveryInvalid, 'string');
+});

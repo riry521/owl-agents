@@ -105,6 +105,7 @@ export const BUTTON_LABEL_MAX = 75;
 export const MAX_CARD_ACTIONS = 25;
 export const BODY_MAX = 2900;
 export const FIELD_VALUE_MAX = 1000;
+const AUTO_RECOVERY_FIELD_MAX = 200;
 export const FALLBACK_MAX = 200;
 export const DETAIL_MAX = 3800;
 
@@ -419,8 +420,12 @@ export function formatWorkCompletionSummary(payload: Record<string, unknown>, la
     const duration = formatDuration(durationMs, language);
     parts.push(language === "ja" ? `所要 ${duration}` : taskCount === null ? `Took ${duration}` : duration);
   }
-  if (parts.length === 0) return null;
-  return language === "ja" ? parts.join("・") : parts.join(" · ");
+  const relaxed = Array.isArray(payload.criteria_relaxations) ? payload.criteria_relaxations.length : 0;
+  const relaxedLine = relaxed === 0 ? null
+    : language === "ja" ? `緩めた受け入れ条件: ${relaxed} 件。Work の画面で見られます。` : `Relaxed acceptance criteria: ${relaxed}. See the Work screen.`;
+  if (parts.length === 0) return relaxedLine;
+  const summary = language === "ja" ? parts.join("・") : parts.join(" · ");
+  return relaxedLine ? `${summary}\n${relaxedLine}` : summary;
 }
 
 export function truncateText(value: string, max: number): string {
@@ -514,7 +519,11 @@ function buildDecisionOpenedCard(event: OwlEvent, ctx: CardRenderContext): Notif
   // The question line says what to decide; why Core stopped (for example the
   // no-progress limit) only lives in `reason`, so the card carries it too.
   const reason = text(payload.reason);
-  const fields = reason && reason !== question.full ? [{ label: t.fieldReason, value: truncateText(reason, FIELD_VALUE_MAX) }] : [];
+  const autoRecovery = text(payload.auto_recovery_summary);
+  const fields = [
+    ...(reason && reason !== question.full ? [{ label: t.fieldReason, value: truncateText(reason, FIELD_VALUE_MAX) }] : []),
+    ...(autoRecovery ? [{ label: decisionHeadings(language).autoRecovery, value: truncateText(autoRecovery, AUTO_RECOVERY_FIELD_MAX) }] : []),
+  ];
   return makeCard("decision.opened", language, CARD_STYLES["decision.opened"], decisionTitle(payload), truncateText(body, BODY_MAX), fields, footer, withWorkTitle(workTitle, question.line), {
     actions,
     threadDetail: truncateText(threadDetail, DETAIL_MAX),

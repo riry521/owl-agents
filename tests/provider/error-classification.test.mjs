@@ -54,6 +54,13 @@ test("the harness HTTP status decides before any text", () => {
   assert.equal(badRequest.failure_class, "deterministic");
 });
 
+test("authentication comes before rate limit when only the text names them", () => {
+  const failure = classifyProviderFailure("claude-cli/v1", exited({ stderr: "401 Unauthorized: please log in again. rate limit documentation: https://example.com" }));
+  assert.equal(failure.failure_class, "deterministic");
+  assert.equal(failure.retry_allowed, false);
+  assert.match(failure.message, /認証に失敗しました/u);
+});
+
 test("an expired Claude login is reported as an authentication failure", () => {
   const failure = classifyProviderFailure("claude-cli/v1", {
     exit_code: 0,

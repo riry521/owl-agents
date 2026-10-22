@@ -167,6 +167,82 @@ test("GET /works/{id}/view takes the conversation size from the query", async (t
   assert.equal(normal.body.data.conversation.messages.length, 5);
 });
 
+test("GET /works/{id}/view lists recoveries still in progress and the relaxed criteria", async (t) => {
+  const api = await openApi(t);
+  if (!api) return t.skip("localhost listen is unavailable");
+  const { ids, db } = api;
+  // After the Decisions seeded above, so they do not end the recoveries started here.
+  const at = new Date(Date.now() + 500).toISOString();
+  const future = new Date(Date.now() + 3_600_000).toISOString();
+  const past = new Date(Date.now() - 3_600_000).toISOString();
+  let sequence = 5000;
+  const event = (workId, type, payload, taskId = null) => db.createWriteLane().transact((tx) => {
+    sequence += 1;
+    tx.run(
+      `INSERT INTO events (id, sequence, idempotency_key, type, work_id, task_id, payload_json, status, attempt_no, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 'handled', 0, ?)`,
+      createUlid(), sequence, `sv:${sequence}`, type, workId, taskId, JSON.stringify(payload), at,
+    );
+    return null;
+  });
+  const started = (workId, kind, targetKind, targetId, extra = {}) => event(workId, "recovery.started", {
+    kind, target_kind: targetKind, target_id: targetId, attempt_no: 1, limit: 2, counted: true, resume_at: null, ...extra,
+  });
+  const active = async (workId) => (await api.get(`/works/${workId}/view`)).body.data.auto_recovery.active;
+
+  assert.deepEqual(await active(ids.workA), [], "nothing started yet");
+
+  started(ids.workA, "integration_conflict", "work", ids.workA);
+  started(ids.workA, "criteria_too_strict", "task", ids.taskA);
+  started(ids.workA, "provider_transient", "work", ids.workA, { counted: false, resume_at: future });
+  assert.deepEqual((await active(ids.workA)).map((item) => item.kind).sort(), ["criteria_too_strict", "integration_conflict", "provider_transient"]);
+  const waiting = (await active(ids.workA)).find((item) => item.kind === "provider_transient");
+  assert.equal(waiting.counted, false);
+  assert.equal(waiting.resume_at, future);
+  assert.equal((await active(ids.workA)).find((item) => item.kind === "criteria_too_strict").task_title, "Task");
+
+  db.createWriteLane().transact((tx) => {
+    tx.run("UPDATE tasks SET status = 'completed', updated_at = ? WHERE id = ?", new Date(Date.now() + 1000).toISOString(), ids.taskA);
+    return null;
+  });
+  assert.deepEqual((await active(ids.workA)).map((item) => item.kind).sort(), ["integration_conflict", "provider_transient"], "a Task success ends its recovery");
+
+  started(ids.workB, "provider_transient", "work", ids.workB, { counted: false, resume_at: past });
+  assert.deepEqual(await active(ids.workB), [], "a 429 wait that is not counted ends at resume_at");
+
+  started(ids.workB, "output_format", "task", ids.taskB);
+  assert.equal((await active(ids.workB)).length, 1);
+  // Only the decisions row exists: Core's Decision gets its decision.opened event after the explanation is ready.
+  db.createWriteLane().transact((tx) => {
+    tx.run(
+      `INSERT INTO decisions (id, work_id, scope, status, blocked_task_ids_json, reason, question, tried, current_state, options_json, recommended, allow_free_text, issuer_role, state_version, created_at)
+       VALUES (?, ?, 'task', 'open', ?, 'r', 'q', 't', 'c', '[]', NULL, 0, 'core', 0, ?)`,
+      createUlid(), ids.workB, JSON.stringify([ids.taskB]), new Date(Date.now() + 1000).toISOString(),
+    );
+    return null;
+  });
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'decision.opened'", ids.workB).n, 0);
+  assert.deepEqual(await active(ids.workB), [], "a Decision row ends the recovery before its decision.opened event");
+
+  event(ids.workA, "criteria.relaxed", {
+    task_id: ids.taskA, lineage_root_id: ids.taskA, criterion_id: "AC3",
+    original: { text: "all pages", check: "run all", check_weight: "heavy", kind: "work_check" },
+    relaxed: { text: "three pages", check: "run three", check_weight: "light", kind: "work_check" },
+    reason: "too many pages", keeps: "three pages are checked",
+  }, ids.taskA);
+  const { relaxations } = (await api.get(`/works/${ids.workA}/view`)).body.data.auto_recovery;
+  assert.equal(relaxations.length, 1);
+  assert.deepEqual(
+    { ...relaxations[0], at: undefined },
+    {
+      task_id: ids.taskA, task_title: "Task", criterion_id: "AC3",
+      original: { text: "all pages", check: "run all" }, relaxed: { text: "three pages", check: "run three" },
+      reason: "too many pages", keeps: "three pages are checked", at: undefined,
+    },
+  );
+  assert.deepEqual((await api.get(`/works/${ids.workB}/view`)).body.data.auto_recovery.relaxations, []);
+});
+
 test("GET /decisions/{id}/view returns the decision, its Work and blocked Tasks including superseded ones", async (t) => {
   const api = await openApi(t);
   if (!api) return t.skip("localhost listen is unavailable");
