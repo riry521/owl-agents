@@ -85,6 +85,8 @@ interface HandoffRecord {
 }
 
 const ACTIVE_PARENT_STATUSES = ["launch_pending", "spawned", "running"];
+/** The Owner stopped the Work between a child's start and its run record; the pause already closed the child. */
+const CHILD_STOPPED_BY_OWNER = new Error("The child run was stopped by the Owner before it was recorded.");
 const RETRYABLE: readonly ChildRunFailureKind[] = ["idle_timeout", "exit_code", "no_final_report", "spawn_error"];
 const OUTPUT_TOUCH_INTERVAL_MS = 5_000;
 const RELEASE_WAIT_MS = 35_000;
@@ -278,6 +280,13 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
       : null;
     await writeLane.write({
       mutateState: (tx: CoreWriteLaneTransaction) => {
+        // Read again inside the write: a pause may have committed since pumpOnce started this child.
+        const live = tx.get<{ one: number }>(
+          `SELECT 1 AS one FROM child_runs c JOIN agent_runs p ON p.id = c.parent_agent_run_id
+            WHERE c.id = ? AND c.status = 'running' AND p.status IN ('launch_pending','spawned','running')`,
+          r.id,
+        );
+        if (!live) throw CHILD_STOPPED_BY_OWNER;
         const now = timestamp();
         tx.run(
           `INSERT INTO agent_runs
@@ -506,6 +515,7 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
         await handleAttemptFailure(r, kind, result.output, result.output);
       }
     } catch (error) {
+      if (error === CHILD_STOPPED_BY_OWNER) return;
       console.error(`[owl-core] Child run ${r.id} failed unexpectedly`, error);
       const reason = error instanceof Error ? error.message : String(error);
       const cancelled = observer
@@ -562,10 +572,12 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
         continue;
       }
       const now = timestamp();
-      await writeLane.transact((tx) => tx.run(
+      const claimed = await writeLane.transact((tx) => tx.run(
         "UPDATE child_runs SET status = 'running', blocked_reason = NULL, attempt = attempt + 1, started_at = COALESCE(started_at, ?), updated_at = ? WHERE id = ? AND status = 'queued'",
         now, now, r.id,
-      ));
+      ).changes);
+      // A pause cancelled this child after the list was read; launching it would run an Executor for a stopped Work.
+      if (claimed === 0) continue;
       const started = row(r.id)!;
       running.push(started);
       const controller = new AbortController();

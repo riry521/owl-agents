@@ -3,6 +3,7 @@ import { isAbsolute, join, resolve } from "node:path";
 
 import { parseDotEnv } from "../../../packages/shared/dist/index.js";
 
+import { AdvisorFolderError, normalizeAdvisorFolder } from "./advisor-folders.js";
 import { legacyDataDir, prepareDataDir, resolveDataDir } from "./contracts.js";
 
 export interface CustomProviderConfig {
@@ -23,6 +24,10 @@ interface StoredAppSettings {
   advisor_screenshot_dir: string;
   /** Empty means the default <OWL_ROOT>/knowledge. */
   knowledge_dir: string;
+  /** Optional and absent from DEFAULTS: a missing key (use Core's defaults) differs from an explicit []. */
+  advisor_send_file_dirs?: string[];
+  advisor_send_file_slack_max_bytes?: number;
+  advisor_send_file_discord_max_bytes?: number;
 }
 
 /** The .env variable that holds the Typesafe API key saved from the settings UI. */
@@ -33,10 +38,7 @@ const DEFAULT_PROVIDER_MODELS: Record<string, string[]> = {
   anthropic: [
     "claude-fable-5-1",
     "claude-opus-5-5",
-    "claude-sonnet-5",
     "claude-sonnet-5-5",
-    "claude-opus-5",
-    "claude-haiku-4-5",
     "claude-haiku-5-5",
   ],
   openai: [
@@ -340,7 +342,20 @@ export class AppSettingsStore {
       const advisorSharedDir = parsed.advisor_shared_dir === undefined ? "" : typeof parsed.advisor_shared_dir === "string" ? parsed.advisor_shared_dir : (() => { throw new Error("advisor_shared_dir must be a string"); })();
       const advisorScreenshotDir = parsed.advisor_screenshot_dir === undefined ? "" : typeof parsed.advisor_screenshot_dir === "string" ? parsed.advisor_screenshot_dir : (() => { throw new Error("advisor_screenshot_dir must be a string"); })();
       const knowledgeDir = parsed.knowledge_dir === undefined ? "" : typeof parsed.knowledge_dir === "string" ? parsed.knowledge_dir : (() => { throw new Error("knowledge_dir must be a string"); })();
+      const sendFileDirs = parsed.advisor_send_file_dirs;
+      if (sendFileDirs !== undefined && (!Array.isArray(sendFileDirs) || !sendFileDirs.every((entry) => typeof entry === "string"))) {
+        throw new Error("advisor_send_file_dirs must be an array of strings");
+      }
+      const sendFileLimit = (key: "advisor_send_file_slack_max_bytes" | "advisor_send_file_discord_max_bytes"): number | undefined => {
+        const value = parsed[key];
+        if (value === undefined) return undefined;
+        if (typeof value === "number" && Number.isSafeInteger(value) && value >= 1) return value;
+        throw new Error(`${key} must be an integer of at least 1`);
+      };
       return {
+        ...(sendFileDirs === undefined ? {} : { advisor_send_file_dirs: sendFileDirs as string[] }),
+        ...(parsed.advisor_send_file_slack_max_bytes === undefined ? {} : { advisor_send_file_slack_max_bytes: sendFileLimit("advisor_send_file_slack_max_bytes") }),
+        ...(parsed.advisor_send_file_discord_max_bytes === undefined ? {} : { advisor_send_file_discord_max_bytes: sendFileLimit("advisor_send_file_discord_max_bytes") }),
         hybrid_mode: hybridMode,
         custom_providers: parseCustomProviders(parsed.custom_providers === undefined ? {} : parsed.custom_providers),
         provider_models: this.mergeProviderModels(parseProviderModels(parsed.provider_models === undefined ? {} : parsed.provider_models)),
@@ -417,6 +432,21 @@ export class AppSettingsStore {
   setAdvisorSharedDir(path: string): string { this.settings.advisor_shared_dir = path; this.save(); return path; }
   getAdvisorScreenshotDir(): string { return this.settings.advisor_screenshot_dir; }
   setAdvisorScreenshotDir(path: string): string { this.settings.advisor_screenshot_dir = path; this.save(); return path; }
+
+  /** Absent keys stay undefined; dirs that cannot be used are dropped, so an all-invalid list yields [] (send nothing). */
+  getAdvisorSendFileSettings(): { dirs?: string[]; slackMaxBytes?: number; discordMaxBytes?: number } {
+    const dirs = this.settings.advisor_send_file_dirs?.flatMap((entry) => {
+      try {
+        const folder = normalizeAdvisorFolder(entry);
+        if (folder) return [folder];
+      } catch (error) {
+        if (!(error instanceof AdvisorFolderError)) throw error;
+      }
+      console.warn("[owl] Ignoring advisor_send_file_dirs entry that is not an absolute path.");
+      return [];
+    });
+    return { dirs, slackMaxBytes: this.settings.advisor_send_file_slack_max_bytes, discordMaxBytes: this.settings.advisor_send_file_discord_max_bytes };
+  }
 
   getKnowledgeDir(): string { return this.settings.knowledge_dir; }
   /** Core normalizes first; only "" (default) or an absolute path without NUL is stored. */

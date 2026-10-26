@@ -368,10 +368,12 @@ Slack や Discord とつなぐと、ふだん使っているチャットアプ�
 4. 使うチャンネルに Bot を招待し（`/invite @owl-agent`）、チャンネル詳細の一番下にあるチャンネル ID をコピーします。
 5. Owl の **設定 → 連携 → Slack** に、トークンとチャンネル ID を入れて保存します。
 
+Advisor からファイルを送るには、Bot に `files:write` のスコープが必要です。このスコープを足す前にアプリを作った場合は、**OAuth & Permissions → Bot Token Scopes** に `files:write` を足し、**Reinstall to Workspace** で入れ直します。送れるフォルダと 1 ファイルの上限は、`app-settings.json` の `advisor_send_file_dirs`・`advisor_send_file_slack_max_bytes`・`advisor_send_file_discord_max_bytes` で変えられます。
+
 ### Discord
 
 1. [Discord Developer Portal](https://discord.com/developers/applications) でアプリケーションを作り、**Bot** のページでトークンをコピーします。同じページで **Message Content Intent** をオンにします。
-2. **OAuth2 → URL Generator** で、スコープに `bot`、権限に **Send Messages**・**Read Message History**・**Embed Links** を選びます。できた URL を開いて、Bot を自分のサーバーに追加します。
+2. **OAuth2 → URL Generator** で、スコープに `bot`、権限に **Send Messages**・**Read Message History**・**Embed Links**・**Attach Files** を選びます。スレッドにファイルを送るには **Send Messages in Threads** も付けます。すでに Bot がサーバーにいる場合は、サーバーのロールかチャンネルの権限で与えます。できた URL を開いて、Bot を自分のサーバーに追加します。
 3. Discord の開発者モードをオンにし（**ユーザー設定 → 詳細設定**）、チャンネルを右クリックして **チャンネル ID をコピー** を選びます。
 4. Owl の **設定 → 連携 → Discord** に、トークンとチャンネル ID を入れて保存します。
 

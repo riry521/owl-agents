@@ -56,12 +56,18 @@ function setup(files, { propose, dormant = [], repo, wrapRouter, options = {} } 
   const storage = { isAvailable: () => true, activeDir: () => vault, withRead: async (op) => op(), status: () => ({ available: true, dir: vault, since: null }) };
   const index = new MemoryIndex({ dataDir, storage, watch: false });
   const calls = [];
+  const otherScopeCalls = [];
   const state = { propose };
   const librarian = new PageLibrarian({
     vault: { isAvailable: () => true, activeDir: () => vault, withWrite: (fn) => fn() },
     dataDir,
     index: { refresh: () => index.refreshChanged(), listPages: (query) => index.listPages(query) },
-    propose: async (request) => { calls.push(request); return state.propose(request); },
+    // One request per scope: the stubs of these tests answer for the scope of PATH_A, and the other scopes' requests get no operations (and are kept apart in `otherScopeCalls`).
+    propose: async (request) => {
+      if (PATH_A in files && !request.scope_pages.paths.includes(PATH_A) && request.conversations.length === 0 && request.clippings.length === 0) { otherScopeCalls.push(request); return { ok: true, output: { operations: [] } }; }
+      calls.push(request);
+      return state.propose(request);
+    },
     router: (wrapRouter ?? ((r) => r))(new PageRouter({ knowledgeDir: () => vault, withWrite: (fn) => fn(), now: () => NOW })),
     model: () => MODEL,
     dormantCandidates: async () => dormant.map((path) => ({ path })),
@@ -75,7 +81,7 @@ function setup(files, { propose, dormant = [], repo, wrapRouter, options = {} } 
   const read = (rel) => readFileSync(join(vault, rel), "utf8");
   const ref = (path, section, index_ = 0) => ({ page: path, section, h: itemsOf(read(path)).find((s) => s.section === section).items[index_].h });
   return {
-    root, vault, dataDir, index, librarian, calls, read, ref, state,
+    root, vault, dataDir, index, librarian, calls, otherScopeCalls, read, ref, state,
     start: async () => { await index.start(); await index.rebuild("manual"); },
     cleanup: async () => { await index.stop(); rmSync(root, { recursive: true, force: true }); },
   };
@@ -114,7 +120,8 @@ test("one run does intake, merge, move, retire, dormant, reactivate, link, split
     assert.deepEqual(report.rejected, [], JSON.stringify(report.rejected));
     assert.equal(report.applied, 9);
     assert.equal(t.calls.length, 1);
-    assert.equal(report.llm_calls, 1);
+    assert.equal(t.otherScopeCalls.length, 1);
+    assert.equal(report.llm_calls, 2);
 
     const a = t.read(PATH_A);
     assert.ok(!a.includes("owl:new"), "the owl:new mark is gone");
@@ -827,6 +834,7 @@ test("an incident-sized page shared by title with a common page converges within
   let seq = 0;
   let batchNo = 0;
   const propose = (request) => {
+    if (!request.scope_pages.paths.includes(PROJ)) return { ok: true, output: { operations: [] } }; // the common page's own request
     batchNo += 1;
     const ops = [];
     const used = new Map();
@@ -852,7 +860,7 @@ test("an incident-sized page shared by title with a common page converges within
       }
     }
     if (batchNo === 1) {
-      const foreign = request.pages.find((x) => x.scope === "common").items.find((x) => x.section === "落とし穴").items[0].ref;
+      const foreign = t.ref(COMMON, "落とし穴");
       ops.push({ op: "move", item: { page: PROJ, section: "落とし穴", h: foreign.h }, to: { page: PROJ, section: "落とし穴" } });
     }
     return { ok: true, output: { operations: ops, ...(batchNo === 1 ? { note: secret } : {}) }, usage: { input_tokens: 1, output_tokens: 1 } };
@@ -875,7 +883,7 @@ test("an incident-sized page shared by title with a common page converges within
     const joined = fileTexts(t).filter((x) => x.includes("title: 合流先"));
     assert.equal(joined.length, 1);
     assert.deepEqual(sectionOf(joined[0], "決まりごと").map((i) => i.text), rules.slice(0, LIMIT.決まりごと));
-    for (const entry of t.calls[0].pages) for (const sec of entry.items ?? []) for (const i of sec.items) assert.equal(i.ref.page, entry.path);
+    for (const call of t.calls) for (const entry of call.pages) for (const sec of entry.items ?? []) for (const i of sec.items) assert.equal(i.ref.page, entry.path);
   } finally { await t.cleanup(); }
 });
 
@@ -992,15 +1000,20 @@ test("a page path written with 「・」 resolves to the page stored with 「-�
 const PATH_COMMON = "common/共通.md";
 const commonPage = () => themeFile(ID("M"), "共通", "common", { pitfalls: ["- 共通の行（W40）"] });
 
-test("the request lists, per page, only same-scope same-project destinations with their free room; a common page is never a destination of a project page", async () => {
+test("each request carries one scope's pages and lists them once as scope_pages, so a page of another scope or Project is never a destination", async () => {
   const t = setup({ [PATH_A]: page(ID("A"), "巨大", { facts: FACTS40 }, true), [PATH_B]: page(ID("B"), "ビルド", { pitfalls: ["- ビルドの行（W20）"] }, true), [PATH_COMMON]: commonPage(), [PATH_F]: page(ID("F"), "別件", { pid: PID2 }, true) }, { propose: () => ok([]) });
   try {
     await t.start();
     await t.librarian.run({ run_id: runId(), mode: "nightly" });
+    const requests = [...t.calls, ...t.otherScopeCalls];
+    assert.equal(requests.length, 3);
+    for (const r of requests) {
+      assert.equal(new Set(r.pages.map((p) => `${p.scope}:${p.project_id}`)).size, 1);
+      assert.deepEqual(r.pages.map((p) => p.path).sort(), [...r.scope_pages.paths].sort());
+      assert.ok(r.pages.every((p) => !("move_to" in p) && p.scope === r.scope_pages.scope && p.project_id === r.scope_pages.project_id));
+    }
+    assert.deepEqual(requests.map((r) => [...r.scope_pages.paths].sort().join(",")).sort(), [[PATH_A, PATH_B].sort().join(","), PATH_COMMON, PATH_F].sort());
     const pages = new Map(t.calls[0].pages.map((p) => [p.path, p]));
-    assert.deepEqual(pages.get(PATH_A).move_to, [PATH_B]);
-    assert.deepEqual(pages.get(PATH_B).move_to, [PATH_A]);
-    assert.deepEqual(pages.get(PATH_COMMON).move_to, []);
     assert.equal(pages.get(PATH_B).free.lines.落とし穴, LIMIT.落とし穴 - 1);
     assert.ok(pages.get(PATH_B).free.tokens > 0);
   } finally { await t.cleanup(); }
@@ -1058,13 +1071,14 @@ test("moves and splits are fitted in order to the room the batch leaves, a dropp
   try {
     await t.start();
     const into = (i) => ({ op: "move", item: t.ref(PATH_A, "決まりごと", i), to: { page: PATH_B, section: "決まりごと" } });
-    t.state.propose = () => ok([
+    let answered = false; // the same operations are not answered again for the next scope's request
+    t.state.propose = () => answered ? ok([]) : (answered = true, ok([
       { op: "take_conversation", conversation: CONV, h: "0".repeat(64), items: [{ kind: "fact", text: "x" }] },
       into(0),
       into(1),
       { op: "split", page: PATH_A, into: PATH_B, relation: "分割", items: [t.ref(PATH_A, "決まりごと", 2)] },
       { op: "split", page: PATH_A, into: PATH_COMMON, relation: "分割", items: [t.ref(PATH_A, "落とし穴", 0)] },
-    ]);
+    ]));
     const report = await t.librarian.run({ run_id: runId(), mode: "manual" });
     assert.deepEqual(report.rejected.map((r) => [r.index, r.code]), [[0, "hash_mismatch"], [2, "target_over_limit"], [3, "target_over_limit"], [4, "scope_mismatch"]]);
     assert.equal(report.applied, 1);
@@ -1091,7 +1105,8 @@ test("room a move frees on a full page counts for the operations after it, and o
   try {
     await t.start();
     const mv = (from, i, to) => ({ op: "move", item: t.ref(from, "決まりごと", i), to: { page: to, section: "決まりごと" } });
-    t.state.propose = () => ok([mv(PATH_B, 0, PATH_A), mv(PATH_A, 0, PATH_B), mv(PATH_A, 1, PATH_B)]);
+    let answered = false; // the next scope's request gets no operations
+    t.state.propose = () => answered ? ok([]) : (answered = true, ok([mv(PATH_B, 0, PATH_A), mv(PATH_A, 0, PATH_B), mv(PATH_A, 1, PATH_B)]));
     const report = await t.librarian.run({ run_id: runId(), mode: "manual" });
     assert.deepEqual(report.rejected.map((r) => [r.index, r.code]), [[2, "target_over_limit"]]);
     assert.equal(report.applied, 2);

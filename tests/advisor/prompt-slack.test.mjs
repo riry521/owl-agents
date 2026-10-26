@@ -17,6 +17,7 @@ test("Slack Advisor turns append Slack mrkdwn and owl-actions formatting guidanc
   assert.match(formatted, /Code fences and inline code are allowed/u);
   assert.match(formatted, /owl-actions/u);
   assert.match(formatted, /owl-actions fence format is unchanged/u);
+  assert.match(formatted, /send_file uses the same owl-actions block\./u);
   assert.match(formatted, /Whenever creating a Work, still emit the required action/u);
   assert.match(formatted, /exactly one standard triple-backtick/u);
   assert.match(formatted, /valid JSON array exactly as specified elsewhere in this prompt/u);

@@ -10,7 +10,7 @@ import {
   validateRoleOutput,
   type RoleSchema,
 } from "./role-contract";
-import { ACCEPTANCE_CRITERION_ID_PREFIX, CHECK_WEIGHTS, CRITERION_KINDS, CRITERION_ORIGIN_KINDS, CRITERION_ORIGIN_QUOTE_MAX, CRITERION_ORIGIN_SOURCES, DEFAULT_OWNER_LANGUAGE, KNOWLEDGE_EXTERNAL_COMMAND_RULE, renderAcceptanceCriteria, validateAcceptanceCriteria, type AcceptanceCriterion, type OwnerLanguage, type TaskNecessity } from "@owl/shared";
+import { ACCEPTANCE_CRITERION_ID_PREFIX, CRITERION_ORIGIN_QUOTE_MAX, DEFAULT_OWNER_LANGUAGE, finalizeOutputSchema, MANAGER_FINALIZE_OUTPUT_SCHEMA, MANAGER_FINALIZE_PAGES_OUTPUT_SCHEMA, MANAGER_PLAN_OUTPUT_SCHEMA, MANAGER_REPLAN_OUTPUT_SCHEMA, renderAcceptanceCriteria, validateAcceptanceCriteria, type AcceptanceCriterion, type OwnerLanguage, type TaskNecessity } from "@owl/shared";
 import type { PlanWaitFor } from "../../shared/dist/prerequisite.js";
 import {
   type ManagerPlanRequest,
@@ -20,141 +20,8 @@ import {
   type WorkContext,
 } from "./types";
 
-const TASK_TYPE_VALUES = ["research", "design", "code", "config", "doc", "test"] as const;
+export { MANAGER_FINALIZE_OUTPUT_SCHEMA, MANAGER_FINALIZE_PAGES_OUTPUT_SCHEMA, MANAGER_PLAN_OUTPUT_SCHEMA, MANAGER_REPLAN_OUTPUT_SCHEMA };
 
-/** A field the model should write but an older answer may lack: absent means the criterion has no origin (treated as the Owner's). */
-function withOptional(field: string, schema: RoleSchema): RoleSchema {
-  return { ...schema, required: (schema.required ?? []).filter((name) => name !== field) };
-}
-
-/** The one definition of a Manager plan/replan Task. */
-const MANAGER_TASK_SCHEMA: RoleSchema = objectSchema({
-  id: { type: "string", minLength: 1, description: "Task id such as T1" },
-  title: { type: "string", minLength: 1, description: "short Task title" },
-  type: { type: "string", enum: TASK_TYPE_VALUES, description: "kind of work" },
-  acceptance_criteria: {
-    type: "array",
-    minItems: 1,
-    description: `the checkable success criteria the Worker must meet, one object per criterion; ids are ${ACCEPTANCE_CRITERION_ID_PREFIX}1, ${ACCEPTANCE_CRITERION_ID_PREFIX}2, ... in array order; a criterion over every occurrence names its concrete scope; written as deliverable behavior and checks to run, never as report-format requirements`,
-    items: withOptional("origin", objectSchema({
-      id: { type: "string", minLength: 1, description: `${ACCEPTANCE_CRITERION_ID_PREFIX}<position>, e.g. ${ACCEPTANCE_CRITERION_ID_PREFIX}1` },
-      text: { type: "string", minLength: 1, description: "what must be true (the content of the criterion)" },
-      check: { type: "string", minLength: 1, description: "how to check it: a command, test or evidence that can run inside this Task" },
-      serves: { type: "string", minLength: 1, description: "the part of the request this criterion serves" },
-      if_omitted: { type: "string", minLength: 1, description: "what goes wrong for the request without this criterion" },
-      check_weight: { type: "string", enum: CHECK_WEIGHTS, description: "light: reading files, unit tests, typecheck, building the touched package; medium: the full test suite, an integration run or a local server or browser on temporary data; heavy: real model or paid API calls, production-size data or copies of it, every item of a large set, or runs of about ten minutes or more" },
-      kind: { type: "string", enum: CRITERION_KINDS, description: "spec_test: asks to add or change a test that pins the specification; work_check: anything else (confirming the work is right)" },
-      weight_reason: { type: "string", description: "for heavy only: why no lighter check can prove what the request needs; empty string otherwise" },
-      origin: objectSchema({
-        kind: { type: "string", enum: CRITERION_ORIGIN_KINDS, description: "owner: the criterion restates something the Owner wrote in the Work summary, an instruction or a Decision answer; manager: you added it yourself" },
-        source: { type: ["string", "null"], enum: [...CRITERION_ORIGIN_SOURCES, null], description: "owner only: where the Owner wrote it (summary, instruction or decision_answer); null for manager" },
-        quote: { type: "string", description: `owner only: the Owner's own sentence copied word for word (at most ${CRITERION_ORIGIN_QUOTE_MAX} characters); empty string for manager` },
-      }),
-    })),
-  },
-  depends_on: {
-    type: "array",
-    items: { type: "string", minLength: 1 },
-    description: "ids of Tasks that must complete first; [] if none",
-  },
-  context: { type: "string", description: "background the Worker needs; empty string if none" },
-  notes: { type: "string", description: "extra notes for the Worker; empty string if none" },
-  review: {
-    type: ["boolean", "null"],
-    description: "true requires the Reviewer, false skips the Reviewer, null keeps the Work default",
-  },
-  required_sections: {
-    type: "array",
-    items: { type: "string", minLength: 1 },
-    description: "for a doc Task: headings the deliverable must contain (at most 20), checked by Core; [] if none",
-  },
-  required_tests: {
-    type: "array",
-    items: { type: "string", minLength: 1 },
-    description: "for a test Task: worktree-relative test files Core must run and see pass (at most 20); [] if none",
-  },
-  assigned_designer: {
-    type: ["string", "null"],
-    enum: ["designer", "lead_designer", null],
-    description: "design Tasks only: lead_designer for the screen design (the look, layout and HTML mocks of screens) that the Work's request leaves to the Lead Designer; designer for any other design Task; null for Tasks that are not design Tasks. In a replan, null on a retried design Task keeps its current value; on a retried Task that becomes a design Task, null leaves it to the Work's design mode",
-  },
-  replaces: {
-    type: "array",
-    items: { type: "string", minLength: 1 },
-    description: "ids of failed Tasks in current_plan that this NEW Task replaces; [] for a retried Task or a Task that replaces nothing",
-  },
-  wait_for: {
-    type: ["object", "null"],
-    description: "replan only, on a retried Task: hold it until prerequisites outside this Work are met, then run it again; null otherwise (always null in a plan)",
-    properties: {
-      reason: { type: "string", minLength: 1, description: "why the Task must wait" },
-      conditions: {
-        type: "array",
-        description: "all must hold before the Task runs again",
-        items: objectSchema({
-          kind: { type: "string", enum: ["task", "work", "base_branch", "owner"], description: "task: a Task of another Work completes; work: another Work completes; base_branch: the base branch has the given paths (or moves on, when paths is []); owner: only the Owner's resume releases it" },
-          target: { type: "string", description: "task: the Task id; work: the Work id or display number such as \"#51\"; base_branch and owner: empty string" },
-          paths: { type: "array", items: { type: "string", minLength: 1 }, description: "base_branch only: repository-relative paths that must exist on the base branch; [] for every other kind" },
-          description: { type: "string", minLength: 1, description: "what is awaited, in words the Owner can read" },
-        }),
-      },
-    },
-    required: ["reason", "conditions"],
-    additionalProperties: false,
-  },
-  base_sync_only: {
-    type: ["boolean", "null"],
-    description: "true when this Task or attempt's only purpose is to bring the base branch into the Task's branch and make its existing checks pass again; in a replan only on a retried Task or a NEW Task with replaces; null otherwise",
-  },
-  necessity: objectSchema({
-    serves: { type: "string", minLength: 1, description: "the part of the Owner's request this Task serves" },
-    if_omitted: { type: "string", minLength: 1, description: "what goes wrong for the request if this Task is not done" },
-  }),
-  auto_recovery: objectSchema({
-    criteria_relaxations: {
-      type: "array",
-      description: "automatic recovery only, on a retried Task: one entry for each criterion you loosened (changed text or check); [] otherwise",
-      items: objectSchema({
-        criterion_id: { type: "string", minLength: 1, description: "id of the loosened criterion, e.g. AC2" },
-        reason: { type: "string", minLength: 1, description: "why the earlier wording could not be proven inside the Task" },
-        keeps: { type: "string", minLength: 1, description: "what the loosened criterion still checks" },
-      }),
-    },
-    criterion_checks: {
-      type: "array",
-      example: [],
-      description: "partial_repeated recovery only: one command for each criterion the repeated partial report left open, which Core runs once in the Task's last worktree to see whether the criterion already holds; [] otherwise",
-      items: objectSchema({
-        criterion_id: { type: "string", minLength: 1, description: "id of the open criterion, e.g. AC2" },
-        argv: { type: "array", items: { type: "string" }, minItems: 1, description: "the command as an argv array (no shell); it must be one of the Project's allowed commands" },
-      }),
-    },
-    rule_applicability: {
-      type: "array",
-      example: [],
-      description: "partial_repeated recovery only: for each open criterion, whether the rule the Worker kept citing really applies to it; [] otherwise (never [] for partial_repeated)",
-      items: objectSchema({
-        criterion_id: { type: "string", minLength: 1, description: "id of the open criterion" },
-        rule: { type: "string", minLength: 1, description: "the rule or constraint the Worker cited or followed, in a short sentence" },
-        applies: { type: "boolean", description: "true when the rule applies to this criterion" },
-        reason: { type: "string", minLength: 1, description: "why it applies or does not" },
-      }),
-    },
-  }),
-});
-
-/** Manager output for mode "plan": at least one Task. */
-export const MANAGER_PLAN_OUTPUT_SCHEMA: RoleSchema = objectSchema({
-  tasks: {
-    type: "array",
-    minItems: 1,
-    items: MANAGER_TASK_SCHEMA,
-    description: "the Tasks of the plan (at least one)",
-  },
-  skills_used: SKILLS_USED_SCHEMA,
-});
-
-/** Manager output for mode "replan": [] means nothing is needed. */
 /** Upper bounds shared with Core's updateWork validation. */
 export const WORK_TITLE_MAX_LENGTH = 500;
 export const WORK_SUMMARY_MAX_LENGTH = 20_000;
@@ -164,109 +31,6 @@ export type ManagerPlan = ManagerPlanResult & {
   readonly updated_title?: string | null;
   readonly updated_summary?: string | null;
 };
-
-export const MANAGER_REPLAN_OUTPUT_SCHEMA: RoleSchema = objectSchema({
-  tasks: {
-    type: "array",
-    items: MANAGER_TASK_SCHEMA,
-    description: "Tasks to retry or add; [] when nothing is missing and no failed Task remains",
-  },
-  updated_title: {
-    type: ["string", "null"],
-    minLength: 1,
-    description: "the Work's full new title (1-500 characters) when the Owner's request changes it; null otherwise",
-  },
-  updated_summary: {
-    type: ["string", "null"],
-    minLength: 1,
-    description: "the Work's full revised summary (at most 20,000 characters) reflecting only what the Owner's request changed; null when the request does not affect the summary",
-  },
-  task_actions: {
-    type: "array",
-    items: objectSchema({
-      task_id: { type: "string", minLength: 1, description: "id of an open Task in current_plan (waiting, ready, running, verifying, paused or blocked)" },
-      action: { type: "string", enum: ["cancel", "complete"], description: "cancel: the Task is no longer needed and its Agent is stopped; complete: treat the Task as done and stop its Agent (its worktree is not merged)" },
-      reason: { type: "string", minLength: 1, description: "why, in one sentence" },
-    }),
-    description: "replan after an Owner request only: cancel or complete open Tasks; [] to leave every open Task as it is",
-  },
-  skills_used: SKILLS_USED_SCHEMA,
-});
-
-/** Lesson keys for routing facts, decisions and pitfalls to theme pages. */
-const PAGES_LESSON_PROPERTIES = {
-  theme: { type: "string", description: "for kind fact, decision or pitfall: choose one title from the `## テーマ` / `## 共通テーマ` list of the injected index; if none fits, give a new short theme title; empty only if it cannot be classified, or for other kinds" },
-  cross_project: { type: "boolean", description: "true only if the lesson applies across Projects, not just this one; otherwise false" },
-} as const;
-
-function finalizeOutputSchema(pages: boolean, commitSubject = false): RoleSchema {
-  return objectSchema({
-  skills_used: SKILLS_USED_SCHEMA,
-  skill_proposals: SKILL_PROPOSALS_SCHEMA,
-  verdict: objectSchema({
-    verdict: {
-      type: "string",
-      enum: ["complete", "incomplete"],
-      description: "complete if the reports show the Work's goal was achieved, otherwise incomplete",
-    },
-    summary: { type: "string", description: "one sentence describing what the Work accomplished" },
-    ...(commitSubject ? { commit_subject: { type: ["string", "null"], description: "English, imperative-mood, one-line summary of the Work for its commit subject (ASCII only, at most 72 characters); null if you cannot write one" } } : {}),
-    missing: {
-      type: "array",
-      items: objectSchema({
-        item: { type: "string", minLength: 1, description: "what is left undone" },
-        reason: { type: "string", description: "why it counts as missing, citing the reports" },
-        fix: { type: "string", description: "what should be done to complete it" },
-      }),
-      example: [],
-      description: "one entry per missing point; [] if complete",
-    },
-    unaddressed_backlog_items: {
-      type: "array",
-      items: objectSchema({
-        item_id: { type: "string", minLength: 1, description: "id of an item in context.backlog_items" },
-        reason: { type: "string", description: "why the completed Tasks did not address it" },
-      }),
-      example: [],
-      description: "backlog items this Work did not address; [] if all were addressed or there are none",
-    },
-    lessons: {
-      type: "array",
-      items: objectSchema({
-        lesson: { type: "string", minLength: 1, description: "what was learned in 1–2 sentences" },
-        basis: { type: "string", description: "what in this Work shows it" },
-        applies_to: { type: "string", description: "which future Work or situations it applies to" },
-        kind: {
-          type: "string",
-          enum: ["procedure", "fact", "decision", "pitfall", "rule_candidate"],
-          description: "reusable lesson kind; omit lessons with no reuse value",
-        },
-        topic: { type: "string", description: "short topic for fact, decision, or pitfall; otherwise empty" },
-        procedure: { type: "string", description: "numbered procedure of at least 40 characters for procedure; otherwise empty" },
-        rule_text: { type: "string", description: "one-line imperative rule of at most 300 characters for rule_candidate, in general wording with no file names, Project names, Task or Work numbers; otherwise empty" },
-        rule_scope: {
-          type: "string",
-          enum: ["all", "manager", "designer", "worker", "reviewer", "advisor"],
-          description: "scope for rule_candidate; all other lesson kinds use all",
-        },
-        keywords: {
-          type: "array",
-          items: { type: "string", minLength: 1 },
-          description: "3-5 short noun keywords (topic words, product/tool names) for kind fact, decision or pitfall; [] for other kinds. No sentences, no particles or verb endings.",
-        },
-        ...(pages ? PAGES_LESSON_PROPERTIES : {}),
-      }),
-      example: [],
-      description: `lessons learned for future Work; may be []. ${KNOWLEDGE_EXTERNAL_COMMAND_RULE}`,
-    },
-  }),
-  });
-}
-
-/** Manager output for mode "finalize". */
-export const MANAGER_FINALIZE_OUTPUT_SCHEMA: RoleSchema = finalizeOutputSchema(false);
-/** The finalize output when memory_mode is "pages": lessons also carry theme and cross_project. */
-export const MANAGER_FINALIZE_PAGES_OUTPUT_SCHEMA: RoleSchema = finalizeOutputSchema(true);
 
 export function managerOutputSchema(request: Pick<ManagerPlanRequest, "mode" | "memory_mode" | "commit_language">): RoleSchema {
   return request.mode === "finalize"
@@ -297,6 +61,7 @@ export function managerPromptInput(request: ManagerPlanRequest): Record<string, 
       worker_questions: Array.isArray(context.worker_questions) ? context.worker_questions : [],
       base_merge_conflict: isRecord(context.base_merge_conflict) ? context.base_merge_conflict : null,
       owner_requests: Array.isArray(context.owner_requests) ? context.owner_requests : [],
+      ...(Array.isArray(context.stopped_task_ids) ? { stopped_task_ids: context.stopped_task_ids } : {}),
       previous_output_feedback: isRecord(context.previous_output_feedback) ? context.previous_output_feedback : null,
       auto_recovery: isRecord(context.auto_recovery) ? context.auto_recovery : null,
       failed_tasks: Array.isArray(context.failed_tasks) ? context.failed_tasks : [],
@@ -308,6 +73,8 @@ export function managerPromptInput(request: ManagerPlanRequest): Record<string, 
       skills: typeof context.skills === "string" ? context.skills : null,
       design_documents: Array.isArray(context.design_documents) ? context.design_documents : [],
       owner_replan_kind: typeof context.owner_replan_kind === "string" ? context.owner_replan_kind : null,
+      ...(Array.isArray(context.criteria_index) ? { criteria_index: context.criteria_index } : {}),
+      ...(Array.isArray(context.goal_shortfalls) ? { goal_shortfalls: context.goal_shortfalls } : {}),
     },
   };
 }
@@ -389,6 +156,7 @@ const MODE_INSTRUCTIONS: Readonly<Record<"plan" | "replan", readonly string[]>> 
       "Replan protocol:",
       "- To retry a failed Task, include it with its existing id and replaces: [] (you may revise title, acceptance_criteria, context, type, review, assigned_designer, required_sections and required_tests; restate the last two, [] clears them). Its depends_on replaces the Task's current dependencies: copy them from current_plan to keep them, or change them (existing Task ids or ids of new Tasks in this replan; not itself and not a cancelled Task).",
       "- A failed task with failure.kind \"acceptance_defect\" has criteria that cannot be proven inside the Task (listed in acceptance_defects). Retry that same Task with its existing id and replaces: [], rewrite only those criteria into checks the Task itself can run (text and check of each), keep the other criteria (restate the whole acceptance_criteria array, ids AC1, AC2, ... in order), and do not set wait_for or supersede it.",
+      "- context.stopped_task_ids lists Tasks stopped by the Owner's instruction. Each keeps its worktree. Leave a Task out to run it unchanged, list it with its existing id to revise it in place, or replace it with new Tasks.",
       "- When an Owner request in context.owner_requests lists \"Criteria rewrites\" for a Task, retry that same Task with its existing id and replaces: [], replace the text and check of each listed criterion with the given after and check, keep every other criterion as it is (restate the whole acceptance_criteria array), and follow the request's Instruction.",
       "- A failed task with failure.kind \"external_blocker\" stopped on a problem outside its own scope: one that already exists on the base branch (cause pre_existing) or a gap in the Project environment (cause environment); see its summary, evidence and suggested_fix. Fix it inside this Work: add a NEW Task that removes the cause (suggested_fix is a starting point, not a requirement) and retry the failed Task with its existing id, replaces: [] and depends_on including the new Task's id. Do not use wait_for for it. Do not change its acceptance criteria to hide the problem.",
       "- If a Task failed because of a prerequisite this Work cannot meet itself (another Work's completion, a merge into the base branch, an Owner decision), do not retry it unchanged: retry it with wait_for {reason, conditions[{kind, target, paths, description}]}. Core watches the conditions and runs the Task again once they hold. Use depends_on, not wait_for, to wait for a Task of this Work. context.failed_tasks[].no_progress holds the count of consecutive no-progress results and the limit; at the limit the Work goes to the Owner. Use wait_for only on a retried Task (replaces: []); everywhere else it is null.",
@@ -414,6 +182,7 @@ const MODE_INSTRUCTIONS: Readonly<Record<"plan" | "replan", readonly string[]>> 
       "Work title and summary (updated_title, updated_summary):",
       "- Set them only when context.owner_replan_kind is instruction, reopen, decision or auto_conflict and an Owner's request in context.owner_requests changes the Work's goal, scope or constraints. When context.owner_replan_kind is null or work_update, both are null.",
       "- Reflect only what the Owner's request changed; keep every other sentence of work.summary exactly as it is, in its original language and formatting. Return the whole revised text, not a diff.",
+      "- Keep each line in the section (受け入れ条件 or 目標) the Owner put it in, unless the Owner's instruction moves it.",
       "- When the request does not concern the title or the summary, leave that field null (null means unchanged). updated_title is 1-500 characters; updated_summary is at most 20,000 characters.",
     ].join("\n"),
     "context.failed_tasks gives, per root failed Task, why it failed (failure.kind with its fields: reason, question, work_done, verdict, merge_conflict_files; for verification_failed see verification_failure, for external_blocker see cause, summary, evidence and suggested_fix, for acceptance_defect see acceptance_defects, whose criterion_id points at an entry of acceptance_criteria), its last report (last_report, null if none) and the reviewer_findings or verification_failure of its latest attempt. Change what caused the failure; do not repeat the same plan.",
@@ -429,8 +198,11 @@ const ACCEPTANCE_GUIDANCE =
 const ORIGIN_GUIDANCE =
   `Give every acceptance criterion an origin. kind owner: the criterion restates what the Owner wrote in the Work summary, an instruction or a Decision answer; set source to summary, instruction or decision_answer and copy the Owner's sentence word for word into quote (at most ${CRITERION_ORIGIN_QUOTE_MAX} characters); Core rejects an owner criterion whose quote is not found in the Owner's words. kind manager: you added the criterion yourself; source is null and quote is "". A criterion the Owner asked for is not held to the lightness limits of the plan quality check, but only an Owner quote makes it one. When the context has auto_recovery of kind criteria_too_strict, a criterion was judged too strict: loosen only criteria whose origin is manager (a smaller scope, a lighter or sampled check), keep the same id, kind and what is still checked, write each change in the Task's auto_recovery.criteria_relaxations (criterion_id, reason, keeps), and never change or remove a criterion with origin owner or without an origin. In every other case auto_recovery.criteria_relaxations is [].`;
 
+const REQUIREMENT_GUIDANCE =
+  "Give every acceptance criterion a requirement. required: the Task is not done without it. Keep required criteria few: only what the Task's purpose needs and what can be checked inside the Task. goal: wanted but not required; when it is not met the Worker reports why and the Task still completes. Never make a criterion that depends on anything outside the Task (production, live services, other Works, people's answers) required. Make count criteria (\"at least N\", \"N or more\") and procedure criteria (\"do X before Y\", \"use tool Z\") goals, unless the Owner wrote them under 受け入れ条件 (Acceptance). An owner criterion keeps the section it comes from: a sentence quoted from the Work summary's 目標 (Goals) section is goal, and one quoted from 受け入れ条件 (Acceptance) is required; Core rejects a plan that changes this. When the Owner's instruction or Decision answer changes whether a criterion is required, quote that instruction or answer as its origin. Do not change the requirement of an existing criterion in an automatic replan. The build and the tests related to what the Task changes stay required.";
+
 const NECESSITY_GUIDANCE =
-  "Plan only what the Work needs. Every Task and every acceptance criterion must serve a part of the Owner's request; a Task, criterion, test or check whose absence would harm nothing does not belong in the plan. Give every Task a necessity: serves (the part of the request it serves) and if_omitted (what goes wrong for the request without it). Give every acceptance criterion its own fields in acceptance_criteria: id (AC1, AC2, ... in array order), text (what must be true), check (how to check it, runnable inside the Task), serves, if_omitted, check_weight, weight_reason and kind. Set each criterion's kind: spec_test only when the criterion asks to add or change a test that pins the specification; otherwise work_check. Core deletes test files added by any Task with no spec_test criterion, test-type Tasks included. Choose the lightest check that proves each criterion: a small sample, a stub provider, a temporary copy with a few items. Use check_weight heavy (real model or paid API calls, production-size data or copies of it, every item of a large set, runs of about ten minutes or more) only when no lighter check can prove what the request needs, and then give the reason in weight_reason; otherwise weight_reason is an empty string. Core reads these fields as they are, so put each fact in its own field; an output with missing fields is returned to you to fix the format only. Core rejects heavy checks without a reason.";
+  "Plan only what the Work needs. Every Task and every acceptance criterion must serve a part of the Owner's request; a Task, criterion, test or check whose absence would harm nothing does not belong in the plan. Give every Task a necessity: serves (the part of the request it serves) and if_omitted (what goes wrong for the request without it). Give every acceptance criterion its own fields in acceptance_criteria: id (AC1, AC2, ... in array order), text (what must be true), check (how to check it, runnable inside the Task), serves, if_omitted, check_weight, weight_reason and kind. Set each criterion's kind: spec_test only when the criterion asks to add or change a test that pins the specification; otherwise work_check. Core deletes test files added by any Task with no spec_test criterion, test-type Tasks included. Choose the lightest check that proves each criterion: a small sample, a stub provider, a temporary copy with a few items. Use check_weight heavy (real model or paid API calls, production-size data or copies of it, every item of a large set, runs of about ten minutes or more) only when no lighter check can prove what the request needs, and then give the reason in weight_reason; otherwise weight_reason is an empty string. Core reads these fields as they are, so put each fact in its own field; an output with missing fields is returned to you to fix the format only. Core rejects heavy checks without a reason. A goal still needs serves and if_omitted; a goal no one needs does not belong in the plan.";
 
 const DESIGN_TASK_GUIDANCE: readonly string[] = [
   "Use type design for a Task whose deliverable is a design: architecture, data model, API, UX, or implementation approach. The Designer writes an external design document and changes no repository files.",
@@ -462,6 +234,7 @@ function buildFinalizeManagerPrompt(request: ManagerPlanRequest, language: Owner
       "context.design_documents lists the design documents written by completed design Tasks as task_id, title and path ([] if none); a design Task's deliverable is that document, not repository changes.",
       "context.backlog_items lists the backlog items (id, file, line, problem, suggestion) this Work was started to handle ([] if none). Put in unaddressed_backlog_items (item_id and reason) every item the completed Tasks did not actually address; those items return to the backlog. Use only ids from context.backlog_items; every other item is treated as done. This does not affect verdict.",
       "context.work_verification is the result of the Project's checks run on the Work branch with every Task merged (status, commands, failed_command_id). Do not judge the Work complete unless status is passed; when status is not_applicable, judge from the Task reports.",
+      "context.criteria_index lists every condition of this Work with a ref and its requirement: the Work summary's 受け入れ条件 (Acceptance) lines, its 目標 (Goals) lines, and the acceptance criteria of the completed Tasks. Set criterion_ref on each missing item to the ref of the condition it is about, or null when it is about none of them; Core decides from that ref whether the item is a goal, and an item without a goal ref always counts as required. Give every missing item a reason. context.goal_shortfalls lists the goals already recorded as not met, with reasons; they are reported to the Owner and are never a reason for incomplete, and you do not need to list them again. Put a recorded goal with source final_check and resolution null in goals_met only when a report of a Task completed after its recorded_at shows it is now met, and give that as evidence.",
       SKILL_CONTEXT_INSTRUCTION,
       KNOWLEDGE_CONTEXT_INSTRUCTION,
       ADVISOR_BACKLOG_INSTRUCTION,
@@ -474,7 +247,7 @@ function buildFinalizeManagerPrompt(request: ManagerPlanRequest, language: Owner
     ],
     processSkills,
     output: managerOutputSchema(request),
-    outputRules: ["missing is [] exactly when verdict is complete.", "Every item_id in unaddressed_backlog_items is an id from context.backlog_items."],
+    outputRules: ["Set verdict complete exactly when no missing item is about a required condition (every missing item has a criterion_ref whose requirement is goal, or missing is []).", "Every criterion_ref is a ref from context.criteria_index or null.", "Every item_id in unaddressed_backlog_items is an id from context.backlog_items."],
     language,
     inputs: [{ name: "Manager input", value: managerPromptInput({ ...request, mode: "finalize" }) }],
   });
@@ -491,7 +264,7 @@ export function buildManagerPrompt(
   }
   return renderRolePrompt({
     role: "You are the Owl Manager.",
-    instructions: [...MODE_INSTRUCTIONS[mode], TEST_PLACEMENT_GUIDANCE, SMALL_TASK_BATCHING_GUIDANCE, ACCEPTANCE_GUIDANCE, ORIGIN_GUIDANCE, NECESSITY_GUIDANCE, ...DESIGN_TASK_GUIDANCE, SKILL_CONTEXT_INSTRUCTION, KNOWLEDGE_CONTEXT_INSTRUCTION, ADVISOR_BACKLOG_INSTRUCTION, SKILL_USAGE_INSTRUCTION],
+    instructions: [...MODE_INSTRUCTIONS[mode], TEST_PLACEMENT_GUIDANCE, SMALL_TASK_BATCHING_GUIDANCE, ACCEPTANCE_GUIDANCE, ORIGIN_GUIDANCE, REQUIREMENT_GUIDANCE, NECESSITY_GUIDANCE, ...DESIGN_TASK_GUIDANCE, SKILL_CONTEXT_INSTRUCTION, KNOWLEDGE_CONTEXT_INSTRUCTION, ADVISOR_BACKLOG_INSTRUCTION, SKILL_USAGE_INSTRUCTION],
     processSkills,
     output: managerOutputSchema({ mode }),
     outputRules: [],
@@ -582,9 +355,10 @@ export function parseManagerPlanWithFeedback(
     // verdict is a provider protocol failure, never an implicit incomplete
     // verdict that hides the cause from the operator.
     const verdict = managerPayload.verdict as unknown as ManagerVerdict;
-    // The one check of the rule "missing is [] exactly when verdict is
-    // complete" (the schema cannot express it).
-    if ((verdict.verdict === "complete") !== (verdict.missing.length === 0)) {
+    // The one check of the rule "an incomplete verdict lists what is missing"
+    // (the schema cannot express it). A complete verdict may list unmet goals;
+    // Core decides from the stored requirement of each criterion_ref.
+    if (verdict.verdict === "incomplete" && verdict.missing.length === 0) {
       throw managerPlanInvalid("manager_output_schema:verdict.missing:inconsistent_with_verdict");
     }
     return { result: { tasks: request.tasks ?? [], event: null, verdict }, skill_feedback };

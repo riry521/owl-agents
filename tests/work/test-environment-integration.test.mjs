@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { command } from "../helpers/core.mjs";
+import { assertOpenedOnceAfterExplanation, createExplainer } from "../helpers/decision-explanation.mjs";
 import { openTestRunCore, phaseOf, plannedTask, workerReport } from "../helpers/test-run-core.mjs";
 import { waitFor } from "../helpers/wait.mjs";
 
@@ -103,10 +104,16 @@ test("a test environment that stays broken in the integration verification goes 
   const state = { broken: true };
   const { run } = createWorkEnvironmentRunner(state);
   const { agentRunner, managerModes, investigations } = createAgent({ state, investigate: () => READY({ missing: ["node 22"], attempts: [] }) });
+  const explainer = createExplainer();
+  agentRunner.runDecisionExplanation = explainer.runDecisionExplanation;
   const ctx = await openTestRunCore(t, { agentRunner, runner: run, prefix: "owl-work-test-environment-blocked-" });
   const workId = await startWork(ctx);
 
   const decision = await waitFor(() => ctx.db.get("SELECT id, state_version, options_json, scope FROM decisions WHERE status = 'open'"), { timeoutMs: 30_000, message: "the test environment Decision" });
+  // The notice waits for the explanation and is emitted once; a Work's test environment has no Task or report to send.
+  await assertOpenedOnceAfterExplanation(ctx.db, decision.id, explainer);
+  assert.equal(explainer.requests[0].kind, "test_environment");
+  assert.equal(explainer.requests[0].task, null);
   assert.equal(investigations.length, 2);
   assert.deepEqual(JSON.parse(decision.options_json).map((option) => option.key).filter((key) => key !== "cancel"), ["retry_test_setup"]);
   assert.equal(ctx.db.get("SELECT state FROM works WHERE id = ?", workId).state, "judgement_waiting");

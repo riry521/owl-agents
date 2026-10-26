@@ -4,6 +4,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { samePartialReport } from "../../packages/core/dist/auto-recovery.js";
+import { replaceTaskGoalShortfalls } from "../../packages/core/dist/goal-shortfalls.js";
+import { goalOnlyShortfallReport } from "../../packages/core/dist/task-completion-gate.js";
 import { RULE_SECTION_HEADING, appendRuleSection, outputTail, runCriterionChecks, splitPlainCommand } from "../../packages/core/dist/criterion-checks.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { openTestRunCore } from "../helpers/test-run-core.mjs";
@@ -142,13 +144,13 @@ const report = (invocationId, result, status2, changes = []) => ({
 });
 
 /** Worker runs follow `partials` (that many same partial reports), then succeed. The Manager answers each replan with `answer(request, n)`. */
-function runner({ partials, answer }) {
+function runner({ partials, answer, planCriteria = baseCriteria, partialReport = (request) => report(request.invocation_id, "partial", "failed") }) {
   const state = { workerRequests: [], replans: [], db: null };
   return {
     state,
     runManagerPlan: async (request) => {
       const mode = request.mode ?? request.context?.mode;
-      if (mode === "plan") return { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [planTask(baseCriteria())] } };
+      if (mode === "plan") return { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [planTask(planCriteria())] } };
       if (mode === "finalize") return { outcome: "success", report_valid: true, report: { tasks: [], event: null, verdict: { verdict: "complete", summary: "Done.", missing: [], lessons: [] } } };
       if (mode === "replan") {
         state.replans.push(request);
@@ -162,7 +164,7 @@ function runner({ partials, answer }) {
       if (n <= partials) {
         await mkdir(join(request.context.worktree, "src"), { recursive: true });
         await writeFile(join(request.context.worktree, `src/p${n}.mjs`), "export const p = 1;\n");
-        return { outcome: "partial", failure_class: "deterministic", error_key: "report_result:partial", retry_allowed: true, report_valid: true, report: report(request.invocation_id, "partial", "failed") };
+        return { outcome: "partial", failure_class: "deterministic", error_key: "report_result:partial", retry_allowed: true, report_valid: true, report: partialReport(request) };
       }
       await mkdir(join(request.context.worktree, "src"), { recursive: true });
       const file = `src/done-${createUlid()}.mjs`;
@@ -178,10 +180,12 @@ function runner({ partials, answer }) {
 }
 
 /** The Project allows `checkCommands`; Core also runs them all when it verifies a Task, so a failing one keeps the Task from completing. */
-async function open(t, agentRunner, { limit = 2, checkCommands = [PASS_ARGV], testRun, reportCheckCommands } = {}) {
+async function open(t, agentRunner, { limit = 2, checkCommands = [PASS_ARGV], testRun, reportCheckCommands, planQuality = false } = {}) {
   const opened = await openTestRunCore(t, { agentRunner, prefix: "owl-partial-repeated-", testPolicy: { check_commands: checkCommands }, ...(testRun ? { testRun } : {}) });
   if (reportCheckCommands) await opened.core.updateProject(opened.projectId, opened.envelope({ report_check_commands: reportCheckCommands }, "report-checks"));
   await opened.core.setAutoRecoverySettings({ limit });
+  // The helper turns the plan quality gate off; deleting its setting brings the default (enabled) back.
+  if (planQuality) await opened.core.writeLane.transact((tx) => tx.run("DELETE FROM settings WHERE key = 'plan_quality'"));
   agentRunner.state.db = opened.db;
   const created = await opened.core.createWork(opened.envelope({ title: "partial", summary: "Exercise kind 8.", size: "normal", project_id: opened.projectId }, "work"));
   await opened.core.startWork(created.data.work_id, { ...opened.envelope({ mode: "normal" }, "start"), expected_version: created.version });
@@ -298,6 +302,10 @@ test("an empty rule_applicability goes back to the Manager as fields_missing", a
   await completes(db, workId);
   assert.ok(fake.state.replans.length >= 2, "the Manager was asked again");
   assert.match(JSON.stringify(fake.state.replans[1]), /rule_applicability/);
+  const rejected = events(db, workId, "work.replan_rejected");
+  assert.equal(rejected.length, 1, "the rejected replan is recorded once");
+  assert.equal(rejected[0].feedback_kind, "fields_missing");
+  assert.match(rejected[0].errors.join(" "), /auto_recovery\.rule_applicability must not be empty/);
   assert.equal(events(db, workId, "recovery.step").filter((e) => e.kind === "partial_repeated").length, 1);
 });
 
@@ -317,4 +325,113 @@ test("with the default limit 2 the next same partial opens exactly one partialSt
   assert.equal(fake.state.replans.length, 2);
   assert.deepEqual(workersAtRepair, [2, 4], "the second repair needs two new same partials: the report before a repair is not compared again");
   assert.match(decisions[0].tried ?? JSON.stringify(decisions[0]), /自動で試したこと: 2回/);
+});
+
+test("an Owner's fix answer to a partialStopped Decision replans without rule_applicability and keeps the Owner's rewrite", async (t) => {
+  const summaryOrigin = { kind: "owner", source: "summary", quote: "Exercise kind 8." };
+  const stored = [criterion("AC1", "The file exists.", summaryOrigin), criterion("AC2", "Every test passes in full.", MANAGER)];
+  const rewrittenOrigin = { kind: "owner", source: "decision_answer", quote: "The file exists or its year is shown." };
+  const rewritten = [criterion("AC1", "The file exists or its year is shown.", rewrittenOrigin), criterion("AC2", "Every test passes in full.", MANAGER)];
+  const done = runner({ partials: 0, answer: () => [] });
+  let released = false;
+  const fake = runner({
+    partials: 100,
+    answer: (_request, n) => n <= 2
+      ? [planTask(stored, { criterion_checks: [{ criterion_id: "AC2", argv: FAIL_ARGV }], rule_applicability: [RULE] })]
+      : [planTask(rewritten)],
+  });
+  const plan = fake.runManagerPlan;
+  fake.runManagerPlan = async (request) => (request.mode ?? request.context?.mode) === "plan"
+    ? { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [planTask(stored)] } }
+    : plan(request);
+  const partialWorker = fake.runWorker;
+  fake.runWorker = async (request) => (released ? done.runWorker(request) : partialWorker(request));
+  const { db, core, workId, envelope } = await open(t, fake, { planQuality: true });
+  await waitFor(() => openDecisions(db, workId).length >= 1, { timeoutMs: 60_000, message: "the Decision opens" });
+  const decision = openDecisions(db, workId)[0];
+  const fix = {
+    key: "fix_1", label: "Accept the year scene", description: "Widen AC1.", instruction: "Rewrite AC1 as criteria_rewrites says.",
+    criteria_rewrites: [{ criterion_id: "AC1", before: "The file exists.", after: "The file exists or its year is shown.", check: "node --test tests/x.test.mjs" }],
+  };
+  await core.writeLane.transact((tx) => tx.run("UPDATE decisions SET options_json = ? WHERE id = ?", JSON.stringify([...JSON.parse(decision.options_json), fix]), decision.id));
+
+  await core.answerDecision(decision.id, envelope({ answer: fix.label, option_key: fix.key, source_message_id: null }, "answer"));
+  released = true;
+
+  await completes(db, workId);
+  assert.equal(fake.state.replans.length, 3, "the Owner's answer was replanned once, without a fields_missing retry");
+  assert.match(JSON.stringify(fake.state.replans[2]), /Rewrite AC1/);
+  const row = db.get("SELECT acceptance_criteria_json FROM tasks WHERE work_id = ? AND manager_task_id = 'T1'", workId);
+  assert.equal(JSON.parse(row.acceptance_criteria_json).find((c) => c.id === "AC1").text, "The file exists or its year is shown.");
+});
+
+// --- Goal criteria: only a goal left unmet does not stop the Task ----------------------------------
+
+const goalCriteria = () => [criterion("AC1", "The file exists.", MANAGER), { ...criterion("AC2", "Every test passes in full.", MANAGER), requirement: "goal" }];
+const GOAL_REASON = "Only 6 branches exist, so 6 tests cover all of them.";
+const goalPartial = (invocationId, over = {}) => {
+  const base = report(invocationId, "partial", "failed");
+  return {
+    ...base,
+    verification: {
+      ...base.verification,
+      status: "passed",
+      acceptance: [base.verification.acceptance[0], { criterion_id: "AC2", criterion: "Every test passes in full.", status: "goal_unmet", evidence: "run", shortfall_reason: GOAL_REASON }],
+      ...over.verification,
+    },
+    ...over.report,
+  };
+};
+
+test("goalOnlyShortfallReport is true only when a goal is the sole reason, and every other hold keeps the partial", () => {
+  const ids = { goal_criterion_ids: ["AC2"] };
+  const lifted = goalPartial("i");
+  assert.equal(goalOnlyShortfallReport(lifted, ids), true);
+  assert.equal(goalOnlyShortfallReport({ ...lifted, result: "failed" }, ids), true);
+  assert.equal(goalOnlyShortfallReport({ ...lifted, result: "success" }, ids), false);
+  for (const hold of [{ pending_process: { pid: 1 } }, { needs_replanning: true }, { question_for_manager: "Which?" }, { external_blocker: { kind: "pre_existing" } }]) {
+    assert.equal(goalOnlyShortfallReport({ ...lifted, ...hold }, ids), false, JSON.stringify(hold));
+  }
+  const acceptance = lifted.verification.acceptance;
+  assert.equal(goalOnlyShortfallReport(goalPartial("i", { verification: { acceptance: [{ ...acceptance[0], status: "failed" }, acceptance[1]] } }), ids), false, "a required item is not passed");
+  assert.equal(goalOnlyShortfallReport(goalPartial("i", { verification: { checks: [{ name: "build", status: "failed", evidence: "x" }] } }), ids), false, "a check is not passed");
+  assert.equal(goalOnlyShortfallReport(goalPartial("i", { verification: { acceptance: [acceptance[0], { ...acceptance[1], status: "passed" }] } }), ids), false, "no goal_unmet: unfinished work");
+  assert.equal(goalOnlyShortfallReport(goalPartial("i", { verification: { acceptance: [acceptance[0], { ...acceptance[1], shortfall_reason: " " }] } }), ids), false, "no reason");
+  assert.equal(goalOnlyShortfallReport(lifted, { goal_criterion_ids: [] }), false, "an id with no requirement is required");
+});
+
+test("a Worker that writes partial for an unmet goal alone completes the Task with no Decision and no partial record", async (t) => {
+  const fake = runner({ partials: 100, planCriteria: goalCriteria, answer: () => [], partialReport: (request) => goalPartial(request.invocation_id) });
+  const { db, workId } = await open(t, fake);
+
+  await completes(db, workId);
+  assert.equal(fake.state.workerRequests.length, 1, "the Worker ran once; nothing was retried");
+  assert.equal(openDecisions(db, workId).length, 0);
+  const corrections = events(db, workId, "worker.report_corrected").flatMap((e) => e.corrections ?? []);
+  assert.equal(corrections.filter((c) => c.rule === "goal_only_unmet").length, 1);
+  const row = db.get("SELECT goal_shortfalls_json AS j FROM tasks WHERE work_id = ?", workId);
+  assert.match(row.j, /AC2/);
+  assert.match(row.j, /Only 6 branches/);
+});
+
+test("a Worker success replaces the stored goal shortfalls, and an empty list clears them to NULL", () => {
+  let stored = JSON.stringify([{ criterion_id: "AC2", text: "t", reason: "old", source: "worker" }]);
+  const transaction = { run: (_sql, json) => { stored = json; } };
+  replaceTaskGoalShortfalls(transaction, "task", [{ criterion_id: "AC3", text: "t", reason: "new", source: "worker" }]);
+  assert.deepEqual(JSON.parse(stored).map((e) => e.criterion_id), ["AC3"]);
+  replaceTaskGoalShortfalls(transaction, "task", []);
+  assert.equal(stored, null);
+});
+
+test("a goal_unmet next to a required item that is not passed stays partial and repeats into a Decision", async (t) => {
+  const required = (request) => {
+    const base = goalPartial(request.invocation_id);
+    return { ...base, verification: { ...base.verification, status: "failed", acceptance: [{ ...base.verification.acceptance[0], status: "failed" }, base.verification.acceptance[1]] } };
+  };
+  const fake = runner({ partials: 100, planCriteria: goalCriteria, answer: () => [], partialReport: required });
+  const { db, workId } = await open(t, fake);
+
+  await waitFor(() => openDecisions(db, workId).length >= 1, { timeoutMs: 60_000, message: "the Decision opens" });
+  const corrections = events(db, workId, "worker.report_corrected").flatMap((e) => e.corrections ?? []);
+  assert.equal(corrections.filter((c) => c.rule === "goal_only_unmet").length, 0);
 });

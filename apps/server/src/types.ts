@@ -234,6 +234,7 @@ export interface Project {
   canonical_path: string;
   base_branch: string;
   auto_push: boolean;
+  advisor_window_enabled?: boolean;
   commit_language?: "ja" | "en" | null;
   worktree_setup_command: string[];
   worktree_refresh_command: string[];
@@ -264,6 +265,7 @@ export interface UpdateProjectInput {
   canonical_path?: string;
   base_branch?: string;
   auto_push?: boolean;
+  advisor_window_enabled?: boolean;
   commit_language?: "ja" | "en" | null;
   worktree_setup_command?: string[];
   worktree_refresh_command?: string[];
@@ -418,6 +420,8 @@ export interface InboundMessageInput {
     thread_ref: string | null;
   };
   attachment_ids: string[];
+  /** The fixed status answer a connector already posted: recorded with the message, no Advisor turn. */
+  status_reply?: string;
 }
 
 export interface AdvisorOrigin {
@@ -486,6 +490,7 @@ export interface InboundUploadCompleteResult extends JsonObject {
 
 export interface AdvisorSessionSummary {
   id: string;
+  window_id?: string | null;
   status: string;
   provider_session_id: string | null;
   model: string | null;
@@ -498,6 +503,7 @@ export interface AdvisorSessionSummary {
 
 export interface AdvisorSessionsPort {
   getActiveSession(ownerId: string): AdvisorSessionSummary | null | Promise<AdvisorSessionSummary | null>;
+  getActiveSessionForWindow?(windowId: string): AdvisorSessionSummary | null | Promise<AdvisorSessionSummary | null>;
 }
 
 export interface Page<T> {
@@ -570,6 +576,8 @@ export interface IntegrationConfig {
   notification_channel_id?: string;
   /** Canonical connector_accounts.id. Generated once during setup if omitted. */
   account_id?: string;
+  /** Slack user ID of the Owner, invited to auto-created channels. Plain metadata, not a secret. */
+  owner_user_id?: string;
 }
 
 /** Partial update accepted by the settings API and IntegrationStore. */
@@ -580,6 +588,7 @@ export interface IntegrationStatus extends JsonObject {
   configured: boolean;
   conversation_channel_id: string | null;
   notification_channel_id: string | null;
+  owner_user_id: string | null;
   last_tested_at: string | null;
   last_test_ok: boolean | null;
 }
@@ -806,7 +815,7 @@ export interface CorePort {
   completeInboundUpload(ownerId: string, uploadId: string, input: InboundUploadCompleteInput, command: CommandMeta): Promise<CommandResult<InboundUploadCompleteResult>>;
   advisorRespond(conversationId: string, messageId: string, origin?: AdvisorOrigin): Promise<void>;
   readonly advisorSessions: AdvisorSessionsPort;
-  restartAdvisorSession(ownerId: string): Promise<void>;
+  restartAdvisorSession(ownerId: string, windowKey?: string): Promise<void>;
   getIntegrations(): Promise<IntegrationStatus[]>;
   saveIntegration(provider: IntegrationProvider, config: IntegrationConfigPatch, command: CommandMeta): Promise<{ data: IntegrationStatus; version: number }>;
   testIntegration(provider: IntegrationProvider): Promise<IntegrationTestResult>;
@@ -875,6 +884,8 @@ export interface CreateCoreOptions {
   workspacesRoot?: string;
   /** Provider client for persistent Advisor sessions (agent-runtime's ProviderClient), forwarded to @owl/core. */
   providerClient?: unknown;
+  /** Checkers of the Decision explanation texts; forwarded to @owl/core. */
+  decisionTextChecks?: readonly { readonly name: string; run(input: never, signal: AbortSignal): Promise<unknown> }[];
   /** Calls Owl's own HTTP API as the Owner for the Advisor's call_api action; forwarded to @owl/core. */
   callOwnApi?: (request: { method: string; path: string; body?: unknown }) => Promise<unknown>;
   getTypesafeApiKey?: () => string;

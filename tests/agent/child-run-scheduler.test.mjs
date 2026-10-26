@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -136,9 +136,10 @@ async function setup(t, { settings = withExecutor("claude"), pauseController, pa
     detectRateLimit: (_provider, stdout) => stdout.includes("rate limit marker") ? { resets_at: null } : null,
     ...(runOpencode ? { runOpencode } : {}),
   };
+  const writeLane = db.createWriteLane();
   const scheduler = createChildRunScheduler({
     db,
-    writeLane: db.createWriteLane(),
+    writeLane,
     executorRuntime: () => runtime,
     providerPauseController: pauseController,
     settings: () => ({ ...DEFAULT_CHILD_RUN_SETTINGS, ...settings }),
@@ -157,7 +158,7 @@ async function setup(t, { settings = withExecutor("claude"), pauseController, pa
     await scheduler.stop();
     db.close();
   });
-  return { db, scheduler, ids, records, workspace, guardCalls, runtime };
+  return { db, scheduler, ids, records, workspace, guardCalls, runtime, writeLane };
 }
 
 function dispatch(scheduler, parentId, instruction, writePaths, requestKey = instruction, extra = {}) {
@@ -554,4 +555,58 @@ test("structured child summaries and wait responses stay within their size limit
   assert.ok(Buffer.byteLength(JSON.stringify(response)) <= 16 * 1024);
   assert.equal(response.truncated, true);
   assert.ok(response.children.some((item) => item.summary_omitted));
+});
+
+/** What pauseWork commits for a Worker with a child: the parent run is told to stop and the child is closed. */
+async function commitOwnerPause(db, ids) {
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((tx) => {
+    tx.run("UPDATE agent_runs SET status = 'cancel_requested', updated_at = ? WHERE id = ?", now, ids.parent);
+    tx.run("UPDATE child_runs SET status = 'cancelled', failure_kind = 'parent_ended', finished_at = ?, updated_at = ? WHERE parent_agent_run_id = ? AND status IN ('queued','running')", now, now, ids.parent);
+  });
+}
+
+const EXECUTOR_RUNS_SQL = "SELECT COUNT(*) AS n FROM agent_runs WHERE role = 'executor'";
+const RACE_SETTLE_MS = 300;
+
+test("a child the Owner's pause cancels between the queue read and the claim never launches an Executor", { skip: process.platform === "win32" }, async (t) => {
+  const { db, scheduler, ids, writeLane, records } = await setup(t, {});
+  const transact = writeLane.transact.bind(writeLane);
+  let fired = false;
+  writeLane.transact = async (fn) => {
+    if (!fired && String(fn).includes("SET status = 'running'")) {
+      fired = true;
+      await commitOwnerPause(db, ids);
+    }
+    return transact(fn);
+  };
+
+  await dispatch(scheduler, ids.parent, "HANG_CHILD claim-race", ["src/claim"]).catch(() => null);
+  await new Promise((resolve) => setTimeout(resolve, RACE_SETTLE_MS));
+
+  assert.equal(fired, true);
+  assert.equal(db.get(EXECUTOR_RUNS_SQL).n, 0);
+  assert.equal(db.get("SELECT status FROM child_runs WHERE parent_agent_run_id = ?", ids.parent).status, "cancelled");
+  assert.deepEqual(await readdir(records), []);
+});
+
+test("a child whose start the Owner's pause beats records no Executor run and stays cancelled", { skip: process.platform === "win32" }, async (t) => {
+  const { db, scheduler, ids, writeLane, records } = await setup(t, {});
+  const write = writeLane.write.bind(writeLane);
+  let fired = false;
+  writeLane.write = async (input) => {
+    if (!fired && String(input.mutateState).includes("INSERT INTO agent_runs")) {
+      fired = true;
+      await commitOwnerPause(db, ids);
+    }
+    return write(input);
+  };
+
+  await dispatch(scheduler, ids.parent, "HANG_CHILD track-race", ["src/track"]).catch(() => null);
+  await new Promise((resolve) => setTimeout(resolve, RACE_SETTLE_MS));
+
+  assert.equal(fired, true);
+  assert.equal(db.get(EXECUTOR_RUNS_SQL).n, 0);
+  assert.equal(db.get("SELECT status FROM child_runs WHERE parent_agent_run_id = ?", ids.parent).status, "cancelled");
+  assert.deepEqual(await readdir(records), []);
 });

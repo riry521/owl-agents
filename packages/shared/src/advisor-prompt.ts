@@ -6,6 +6,7 @@ const SLACK_ADVISOR_REPLY_INSTRUCTION = [
   "Keep that action block unchanged. Core parses and strips it before display; never convert or reformat it.",
   "Work operations (send_work_instruction, update_work, pause_work, resume_work, cancel_work, delete_work, move_work_to_project) use the same owl-actions block.",
   "call_api uses the same owl-actions block.",
+  "send_file uses the same owl-actions block.",
 ].join("\n");
 
 /** Return the Slack-only formatting and action-fence guidance. */
@@ -66,4 +67,12 @@ const ADVISOR_WORK_PREREQUISITE_INSTRUCTION = [
   "To change the prerequisites of an existing memo or ready Work, use the owl-api request tool with PUT /api/v1/works/{work_id}/prerequisites. To stop the wait and start it now, call POST /api/v1/works/{work_id}/prerequisites/release. Use these two only when the operator asks.",
 ].join(" ");
 
-export const ADVISOR_CURATION_INSTRUCTION = `${ADVISOR_TIDY_UP_INSTRUCTION} ${ADVISOR_WORK_OPERATION_INSTRUCTION} ${ADVISOR_OWL_API_INSTRUCTION} ${ADVISOR_WORK_PREREQUISITE_INSTRUCTION}`;
+const ADVISOR_SEND_FILE_INSTRUCTION = "Sending files: when the operator asks you to send them a file in Slack or Discord, emit {type:\"send_file\",description,payload:{path,comment?}} in the owl-actions block. path is the absolute path of one regular file inside a send-file folder (listed under ## Send-file folders); comment (optional, up to 1,000 characters) is posted with the file. Use one action per file. Core sends the file to the same channel and thread as your reply, so emit it in the same turn without asking again. Core refuses a path outside the send-file folders, a symbolic link that points outside them, a secret file (.env, keys, credentials and the like), a folder, and a file over the size limit for that channel. If the file is somewhere else, tell the operator where it is and ask before copying it into a send-file folder. send_file works only in Slack and Discord conversations; elsewhere, tell the operator the file path instead. Core and the connector append the result to your reply, so never claim the file was sent. Example: [{\"type\":\"send_file\",\"description\":\"デモ動画を送る\",\"payload\":{\"path\":\"/path/to/materials/projects/demo/demo.mp4\",\"comment\":\"デモ動画です\"}}]";
+
+const ADVISOR_WINDOW_HANDOFF_INSTRUCTION = [
+  "Window handoff: when the talk does not fit this window, hand it over with {type:\"handoff_to_window\",description,payload:{project_id,summary}} in the owl-actions block. project_id is the id of the target Project's window, or null for the general window; the usable windows are listed in the per-turn blocks. summary (1 to 4,000 characters by default) is written in the Owner's words: what the Owner wants, what is decided, and what is still open.",
+  "In a Project window, hand another Project's talk to that Project's id, and talk that spans Projects or belongs to no Project to null. In the general window, talk about just one Project may be handed to that Project's window.",
+  "After handing over, tell the Owner briefly and do not continue that talk here. Core appends the result to your reply. Example: [{\"type\":\"handoff_to_window\",\"description\":\"課金の相談を引き継ぐ\",\"payload\":{\"project_id\":null,\"summary\":\"課金の仕組みを見直したい。方針は未定で、料金表の案を比べるところから。\"}}].",
+].join(" ");
+
+export const ADVISOR_CURATION_INSTRUCTION = `${ADVISOR_TIDY_UP_INSTRUCTION} ${ADVISOR_WORK_OPERATION_INSTRUCTION} ${ADVISOR_OWL_API_INSTRUCTION} ${ADVISOR_SEND_FILE_INSTRUCTION} ${ADVISOR_WORK_PREREQUISITE_INSTRUCTION} ${ADVISOR_WINDOW_HANDOFF_INSTRUCTION}`;

@@ -8,7 +8,8 @@ import { join, relative } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 
-import { createPluginManagerFromEnv, loadPluginSpecs, PluginConfigError, PluginManager } from "../../apps/server/dist/plugin-manager.js";
+import { createDecisionTextChecks } from "../../apps/server/dist/decision-text-checks.js";
+import { createPluginManagerFromEnv, loadDecisionTextCheckSpecs, loadPluginSpecs, PluginConfigError, PluginManager } from "../../apps/server/dist/plugin-manager.js";
 import { tempDir } from "../helpers/temp.mjs";
 import { waitFor } from "../helpers/wait.mjs";
 
@@ -365,4 +366,64 @@ test("createPluginManagerFromEnv requires an absolute configuration path", async
   }), (error) => error instanceof PluginConfigError
     && error.field === "OWL_PLUGINS_FILE"
     && error.message === "OWL_PLUGINS_FILE must be an absolute path.");
+});
+
+test("loadDecisionTextCheckSpecs reads decision_text_checks, returns [] without the key, and rejects unknown keys", async (t) => {
+  const directory = await tempDir(t, "owl-plugin-test-");
+  assert.deepEqual(loadDecisionTextCheckSpecs(await writeConfig(directory, [])), []);
+
+  const specs = loadDecisionTextCheckSpecs(await writeConfig(directory, [], {
+    decision_text_checks: [
+      { name: "lint", command: "node", args: ["lint.mjs"], cwd: directory, env: { LINT_MODE: "strict" } },
+      { name: "off", command: "node", cwd: directory, enabled: false },
+    ],
+  }));
+  assert.deepEqual(specs.map((spec) => [spec.name, spec.enabled]), [["lint", true], ["off", false]]);
+  assert.deepEqual(specs[0].env, { LINT_MODE: "strict" });
+  assert.deepEqual(createDecisionTextChecks(specs).map((check) => check.name), ["lint"]);
+
+  const unknownKey = await writeConfig(directory, [], { decision_text_checks: [{ name: "lint", command: "node", cwd: directory, extra: 1 }] });
+  assert.throws(() => loadDecisionTextCheckSpecs(unknownKey), (error) =>
+    error instanceof PluginConfigError && error.field === "decision_text_checks[0].extra");
+  const notArray = await writeConfig(directory, [], { decision_text_checks: {} });
+  assert.throws(() => loadDecisionTextCheckSpecs(notArray), PluginConfigError);
+});
+
+test("createDecisionTextChecks passes the input on stdin, hides OWL_ values, rejects bad exits, bad JSON and big output, and stops the child on abort", async (t) => {
+  const directory = await tempDir(t, "owl-plugin-test-");
+  const script = join(directory, "check.mjs");
+  await writeFile(script, [
+    'import { writeFileSync } from "node:fs";',
+    'let raw = "";',
+    'for await (const chunk of process.stdin) raw += chunk;',
+    'const mode = JSON.parse(raw).mode;',
+    'if (mode === "echo") process.stdout.write(JSON.stringify({ input: JSON.parse(raw), env: process.env }));',
+    'else if (mode === "fail") process.exit(3);',
+    'else if (mode === "text") process.stdout.write("not json");',
+    'else if (mode === "big") process.stdout.write("x".repeat(70 * 1024));',
+    'else if (mode === "hang") { writeFileSync(process.argv[2], String(process.pid)); setInterval(() => undefined, 1000); }',
+  ].join("\n"), "utf8");
+  const pidFile = join(directory, "pid");
+  const [check] = createDecisionTextChecks([{ name: "lint", command: process.execPath, args: [script, pidFile], cwd: directory, enabled: true, env: { LINT_MODE: "strict" } }]);
+  const signal = new AbortController().signal;
+  const call = (mode, abort = signal) => check.run({ mode }, abort);
+
+  process.env.OWL_SECRET_FOR_TEST = "hidden";
+  t.after(() => { delete process.env.OWL_SECRET_FOR_TEST; });
+  const echoed = await call("echo");
+  assert.deepEqual(echoed.input, { mode: "echo" });
+  assert.equal(echoed.env.LINT_MODE, "strict");
+  assert.deepEqual(Object.keys(echoed.env).filter((key) => key.startsWith("OWL_")), []);
+
+  await assert.rejects(call("fail"), /exited with 3/u);
+  await assert.rejects(call("text"), /did not write JSON/u);
+  await assert.rejects(call("big"), /more than/u);
+
+  const controller = new AbortController();
+  const hanging = call("hang", controller.signal);
+  await waitFor(() => existsSync(pidFile), { message: "the child started" });
+  const pid = Number(await readFile(pidFile, "utf8"));
+  controller.abort();
+  await assert.rejects(hanging, /aborted/u);
+  await waitFor(() => { try { process.kill(pid, 0); return false; } catch { return true; } }, { message: "the child stopped" });
 });

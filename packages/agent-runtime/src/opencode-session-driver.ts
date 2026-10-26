@@ -189,7 +189,10 @@ export class OpencodeSessionDriver implements ProviderSession {
       await waitForConnection(iterator, deps.startupTimeoutMs ?? OPENCODE_STARTUP_TIMEOUT_MS);
       const checked = await precheck(client, model, env, request.effort, eventsAbort.signal);
       if (checked.error) throw providerFailed("provider_reported_error", { exit_code: null, signal: null, ...opencodeFailureDetail(checked.error) });
-      const created = await client.request<{ data: { id: string; projectID: string } }>("POST", "/api/session", {
+      // Resuming reuses the stored session; a missing one makes this request fail, which Core treats as a failed resume.
+      const created = request.resume_provider_session_id
+        ? await client.request<{ data: { id: string; projectID: string } }>("GET", `/api/session/${encodeURIComponent(request.resume_provider_session_id)}`, undefined, eventsAbort.signal)
+        : await client.request<{ data: { id: string; projectID: string } }>("POST", "/api/session", {
         title: env.OWL_AGENT_RUN_ID ?? "advisor",
         agent: "build",
         model: { providerID: model.providerID, id: model.modelID, ...(checked.variant ? { variant: checked.variant } : {}) },

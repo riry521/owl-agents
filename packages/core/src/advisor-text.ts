@@ -11,6 +11,13 @@ export interface AdvisorText {
   readonly rateLimited: (timing: "reset" | "retry" | "unknown", time: string | null) => string;
   readonly createIncomplete: string;
   readonly createBadProject: string;
+  readonly windowProjectMismatch: (windowProject: string, requestedProject: string) => string;
+  readonly handoffDone: (targetName: string, channels: readonly string[]) => string;
+  readonly handoffMessage: (fromName: string, summary: string) => string;
+  readonly handoffNoProject: string;
+  readonly handoffSameWindow: string;
+  readonly handoffInvalid: string;
+  readonly generalWindowName: string;
   readonly unknownCause: string;
   readonly createdDraft: (title: string, workId: string) => string;
   readonly created: (title: string, route: "Worker" | "Manager", workId: string) => string;
@@ -54,6 +61,15 @@ export interface AdvisorText {
   readonly callApiAlreadyHandled: (method: string, path: string, outcome: string, status: number | null) => string;
   readonly callApiRejected: (reason: string) => string;
   readonly callApiUnavailable: string;
+  readonly sendFileIncomplete: (reason: string) => string;
+  readonly sendFileUnsupportedChannel: (name: string) => string;
+  readonly sendFileRejected: (name: string, reason: string) => string;
+  readonly sendFileReason: {
+    readonly outside: string; readonly symlinkEscape: string; readonly secret: string;
+    readonly notFound: string; readonly notAFile: string; readonly unreadable: string; readonly noFolder: string;
+    readonly changed: string;
+    readonly tooLarge: (size: string, limit: string, channel: string) => string;
+  };
 }
 
 const CURATION_KIND_LABEL: Record<OwnerLanguage, Record<string, string>> = {
@@ -128,6 +144,13 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     },
     createIncomplete: "⚠ Workの起票に失敗しました。AdvisorのWork内容が不足しているため、タイトル・概要・規模を確認して再依頼してください。",
     createBadProject: "⚠ Workの起票に失敗しました。プロジェクト指定を確認して再依頼してください。",
+    windowProjectMismatch: (windowProject, requestedProject) => `⚠ この窓は「${windowProject}」の専属です。「${requestedProject}」の話は handoff_to_window で「${requestedProject}」の窓に渡してください。`,
+    handoffDone: (targetName, channels) => `「${targetName}」の窓に引き継ぎました。続きはそちらで話してください。${channels.length === 0 ? "" : `（${channels.join(" / ")}）`}`,
+    handoffMessage: (fromName, summary) => `「${fromName}」の窓から引き継ぎました。\n\n${summary}`,
+    handoffNoProject: "⚠ 引き継ぎ先のプロジェクトが見つかりません。",
+    handoffSameWindow: "⚠ 同じ窓には引き継げません。",
+    handoffInvalid: "⚠ 引き継ぎに失敗しました。引き継ぎ先と要点を確認して再依頼してください。",
+    generalWindowName: "ジェネラリスト",
     unknownCause: "原因を確認できませんでした。",
     createdDraft: (title, workId) => `📝 Work「${title}」を下書きとして起票しました（ID: ${workId}）。まだ開始していません。開始は Work 詳細画面の開始ボタンから行ってください。`,
     created: (title, route, workId) => `✓ Work「${title}」を起票し、${route}へ渡しました（ID: ${workId}）。`,
@@ -178,6 +201,20 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     callApiAlreadyHandled: (method, path, outcome, status) => `✓ この呼び出しは前回の試行で処理済みです（${method} ${path}、結果: ${outcome}${status === null ? "" : ` ${status}`}）。`,
     callApiRejected: (reason) => `⚠ call_api を実行しませんでした: ${reason}`,
     callApiUnavailable: "⚠ この環境では Owl API を呼べないため、call_api を実行しませんでした。",
+    sendFileIncomplete: (reason) => `⚠ send_file を実行しませんでした: ${reason}`,
+    sendFileUnsupportedChannel: (name) => `⚠ ${name} は送っていません。ファイルの送信は Slack と Discord の会話でだけ使えます。`,
+    sendFileRejected: (name, reason) => `⚠ ${name} は送っていません: ${reason}`,
+    sendFileReason: {
+      outside: "送信できるフォルダの外にあります",
+      symlinkEscape: "リンク先が送信できるフォルダの外にあります",
+      secret: "秘密情報のファイルとみなしました",
+      notFound: "ファイルが見つかりません",
+      notAFile: "通常のファイルではありません（フォルダなど）",
+      unreadable: "ファイルを読めません",
+      noFolder: "送信できるフォルダがありません。設定 advisor_send_file_dirs を確かめてください",
+      changed: "確認しているあいだにファイルか途中のフォルダが変わりました。もう一度頼んでください",
+      tooLarge: (size, limit, channel) => `${size} あり、${channel} の上限 ${limit} を超えています`,
+    },
   },
   en: {
     replyFailed: "⚠ The Advisor could not reply.",
@@ -193,6 +230,13 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     },
     createIncomplete: "⚠ Could not create the Work: the Advisor's Work details were incomplete. Check the title, summary, and size, then ask again.",
     createBadProject: "⚠ Could not create the Work: check the Project and ask again.",
+    windowProjectMismatch: (windowProject, requestedProject) => `⚠ This window is dedicated to "${windowProject}". Hand "${requestedProject}" over to the "${requestedProject}" window with handoff_to_window.`,
+    handoffDone: (targetName, channels) => `Handed this over to the ${targetName} window. Please continue there.${channels.length === 0 ? "" : ` (${channels.join(" / ")})`}`,
+    handoffMessage: (fromName, summary) => `Handed over from the "${fromName}" window.\n\n${summary}`,
+    handoffNoProject: "⚠ The Project to hand over to was not found.",
+    handoffSameWindow: "⚠ Cannot hand over to the same window.",
+    handoffInvalid: "⚠ The handoff failed. Check the target and the summary, then ask again.",
+    generalWindowName: "General",
     unknownCause: "The cause could not be determined.",
     createdDraft: (title, workId) => `📝 Created Work "${title}" as a draft (ID: ${workId}). It has not been started; start it from the Start button on the Work detail page.`,
     created: (title, route, workId) => `✓ Created Work "${title}" and handed it to the ${route} (ID: ${workId}).`,
@@ -243,6 +287,20 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     callApiAlreadyHandled: (method, path, outcome, status) => `✓ This call was already handled by an earlier attempt (${method} ${path}, outcome: ${outcome}${status === null ? "" : ` ${status}`}).`,
     callApiRejected: (reason) => `⚠ call_api was not run: ${reason}`,
     callApiUnavailable: "⚠ The Owl API cannot be called in this environment, so call_api was not run.",
+    sendFileIncomplete: (reason) => `⚠ send_file was not run: ${reason}`,
+    sendFileUnsupportedChannel: (name) => `⚠ ${name} was not sent. Sending files works only in Slack and Discord conversations.`,
+    sendFileRejected: (name, reason) => `⚠ ${name} was not sent: ${reason}`,
+    sendFileReason: {
+      outside: "it is outside the send-file folders",
+      symlinkEscape: "its link target is outside the send-file folders",
+      secret: "it looks like a secret file",
+      notFound: "the file does not exist",
+      notAFile: "it is not a regular file (for example, a folder)",
+      unreadable: "the file cannot be read",
+      noFolder: "no send-file folder exists. Check advisor_send_file_dirs",
+      changed: "the file or a folder on its path changed while it was checked. Ask again",
+      tooLarge: (size, limit, channel) => `it is ${size}, over the ${channel} limit of ${limit}`,
+    },
   },
 };
 

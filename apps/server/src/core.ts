@@ -869,6 +869,7 @@ export class MemoryCore implements CorePort {
     const name = input.name?.trim() ?? project.name;
     const canonicalPath = input.canonical_path ?? project.canonical_path;
     const autoPush = input.auto_push ?? project.auto_push;
+    const advisorWindowEnabled = input.advisor_window_enabled ?? project.advisor_window_enabled ?? false;
     const setupCommand = input.worktree_setup_command ?? project.worktree_setup_command;
     const refreshCommand = input.worktree_refresh_command ?? project.worktree_refresh_command;
     const postMerge = input.post_merge_command !== undefined ? input.post_merge_command : project.post_merge_command;
@@ -879,6 +880,7 @@ export class MemoryCore implements CorePort {
       name === project.name
       && canonicalPath === project.canonical_path
       && autoPush === project.auto_push
+      && advisorWindowEnabled === (project.advisor_window_enabled ?? false)
       && JSON.stringify(setupCommand) === JSON.stringify(project.worktree_setup_command)
       && JSON.stringify(refreshCommand) === JSON.stringify(project.worktree_refresh_command)
       && JSON.stringify(postMerge) === JSON.stringify(project.post_merge_command)
@@ -900,6 +902,7 @@ export class MemoryCore implements CorePort {
       canonical_path: canonicalPath,
       base_branch: input.canonical_path === undefined ? project.base_branch : input.base_branch ?? project.base_branch,
       auto_push: autoPush,
+      advisor_window_enabled: advisorWindowEnabled,
       worktree_setup_command: [...setupCommand],
       worktree_refresh_command: [...refreshCommand],
       post_merge_command: postMerge === null ? null : [...postMerge],
@@ -1033,7 +1036,7 @@ export class MemoryCore implements CorePort {
   async ingestInbound(ownerId: string, input: InboundMessageInput, command: CommandMeta): Promise<CommandResult<InboundMessageResult>> {
     const conversationId = `${input.provider}:${input.conversation_hint.thread_ref ?? input.thread_id ?? input.channel_id}`;
     const result = await this.postMessage(conversationId, { body: input.text, attachment_ids: input.attachment_ids }, command);
-    void this.advisorRespond(conversationId, result.data.message_id, {
+    if (input.status_reply === undefined) void this.advisorRespond(conversationId, result.data.message_id, {
       channel: input.provider,
       channel_id: input.channel_id,
       ref: input.conversation_hint.thread_ref ?? input.thread_id ?? undefined,
@@ -1113,7 +1116,7 @@ export class MemoryCore implements CorePort {
     });
   }
 
-  async restartAdvisorSession(_ownerId: string): Promise<void> {
+  async restartAdvisorSession(_ownerId: string, _windowKey?: string): Promise<void> {
     // Standalone mode has no persistent Advisor runtime or session ledger.
   }
 
@@ -1400,7 +1403,7 @@ interface ExternalCore {
   }): Promise<void>;
   advisorRespond?(conversationId: string, messageId: string, origin?: AdvisorOrigin): Promise<void>;
   advisorSessions?: AdvisorSessionsPort;
-  restartAdvisorSession?(ownerId: string): Promise<void>;
+  restartAdvisorSession?(ownerId: string, windowKey?: string): Promise<void>;
   getHybridMode?(): Promise<boolean>;
   setHybridMode?(enabled: boolean): Promise<boolean>;
   getSkillActivity?(days: number): unknown;
@@ -2366,12 +2369,12 @@ export class ExternalCoreAdapter implements CorePort {
     }
   }
 
-  async restartAdvisorSession(ownerId: string): Promise<void> {
+  async restartAdvisorSession(ownerId: string, windowKey?: string): Promise<void> {
     if (typeof this.core.restartAdvisorSession !== "function") {
       throw new ApiError(503, "dependency_unavailable", "Persistent Advisor session restart is not available in the loaded Core.");
     }
     try {
-      await this.core.restartAdvisorSession(ownerId);
+      await this.core.restartAdvisorSession(ownerId, windowKey);
     } catch (error) {
       throw externalError(error, "restartAdvisorSession");
     }
@@ -3246,6 +3249,7 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
       try { ensureAdvisorSharedDir(sharedDir); } catch { /* prompt construction remains available */ }
       return { sharedDir, screenshotDir: appSettings.getAdvisorScreenshotDir() || defaults.screenshotDir };
     },
+    getAdvisorSendFileSettings: () => appSettings.getAdvisorSendFileSettings(),
     getAdvisorSharedDir: () => appSettings.getAdvisorSharedDir() || advisorFolderDefaults(options.dataDir ?? resolveDataDir(owlRoot)).sharedDir,
     knownModels: (harness: ModelHarness): ReadonlySet<string> | undefined =>
       harness === "codex" ? codexKnownModels() : harness === "opencode" ? opencodeKnownModels() : undefined,

@@ -408,7 +408,7 @@ test("finalize input carries task_id per report, omits cancelled Tasks' reports,
   for (const task of input.tasks) {
     // hardcode-check-allow whole-list-equal: 契約として固定された一覧の完全一致を確かめるため、現状の値を意図して比べている
     assert.deepEqual(Object.keys(task).sort(), [
-      "acceptance_criteria", "context", "depends_on", "failure_count", "id", "manager_notes", "manager_task_id", "necessity", "plan_context_legacy", "review_round", "status", "title", "type",
+      "acceptance_criteria", "context", "depends_on", "failure_count", "goal_shortfalls", "id", "manager_notes", "manager_task_id", "necessity", "plan_context_legacy", "review_round", "status", "title", "type",
     ]);
   }
   assert.match(finalPrompts[0], /reports\[\]\.task_id links each report to a Task in tasks/);
@@ -828,4 +828,143 @@ test("a rate-limited final check pauses the Provider without a Decision, keeps i
     assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "completed", label);
     t.mock.timers.reset();
   }
+});
+
+// Goals at the final check: a goal item is recorded and does not block completion; any required item still does.
+
+const goalCriteria = JSON.stringify([
+  { id: "AC1", text: "Tests pass", check: "run", serves: "s", if_omitted: "o", check_weight: "light", weight_reason: "", kind: "work_check", requirement: "required" },
+  { id: "AC2", text: "Add a diagram", check: "look", serves: "s", if_omitted: "o", check_weight: "light", weight_reason: "", kind: "work_check", requirement: "goal" },
+]);
+
+const stateOf = (db, workId) => db.get("SELECT state FROM works WHERE id = ?", workId).state;
+const storedGoals = (db, workId) => JSON.parse(db.get("SELECT goal_shortfalls_json FROM works WHERE id = ?", workId).goal_shortfalls_json ?? "[]");
+const completedPayload = (db, workId) => {
+  const row = db.get("SELECT payload_json FROM events WHERE type = 'work.completed' AND work_id = ?", workId);
+  return row ? JSON.parse(row.payload_json) : null;
+};
+
+/** A finished Work with one completed Task (taskId) holding a required AC1 and a goal AC2. verdictFor(request, taskId, call) builds each final verdict. */
+async function finalizeGoalWork(t, verdictFor, { prepare } = {}) {
+  const taskId = createUlid();
+  let calls = 0;
+  const { db, core } = await openCore(t, () => ({
+    runManagerPlan: async (request) => {
+      if (request.mode === "replan") return { outcome: "success", report_valid: true, report: { event: "task.replanned", tasks: [] } };
+      if (request.mode !== "finalize") return { outcome: "failed", message: "unexpected" };
+      calls += 1;
+      return { outcome: "success", report_valid: true, report: { tasks: request.tasks ?? [], event: null, verdict: verdictFor(taskId, calls, request) } };
+    },
+    runWorker: async () => ({ outcome: "failed" }),
+    runReviewer: async () => ({ outcome: "failed" }),
+    runAdvisor: async () => ({ reply: "" }),
+  }));
+  const workId = await seedFinishedWork(core, db, [{ id: taskId, status: "completed", managerTaskId: "T1", title: "task 1", withReport: true }]);
+  await db.createWriteLane().transact((tx) => {
+    tx.run("UPDATE tasks SET acceptance_criteria_json = ? WHERE id = ?", goalCriteria, taskId);
+    if (prepare) prepare(tx, workId, taskId);
+    return null;
+  });
+  await core.start();
+  await core.tick(workId);
+  return { db, core, workId, taskId, calls: () => calls };
+}
+
+const goalItem = (taskId, reason = "No time for a diagram") => ({ item: "diagram", reason, fix: "", criterion_ref: `task:${taskId}:AC2` });
+
+test("a final check that lists only a goal item completes the Work and records the stored goal", async (t) => {
+  const { db, workId, taskId } = await finalizeGoalWork(t, (id) => ({ verdict: "incomplete", summary: "Mostly done.", lessons: [], missing: [goalItem(id)] }));
+  assert.ok(await waitFor(() => stateOf(db, workId) === "completed"), `state ${stateOf(db, workId)}`);
+  const stored = storedGoals(db, workId);
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].text, "Add a diagram", "the stored goal text, not the Manager's wording");
+  assert.equal(stored[0].reason, "No time for a diagram");
+  assert.equal(stored[0].task_id, taskId);
+  assert.equal(stored[0].resolution, null);
+  const payload = completedPayload(db, workId);
+  assert.equal(payload.goal_shortfalls.length, 1);
+  assert.equal(payload.goal_shortfalls[0].text, "Add a diagram");
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ?", workId).n, 0, "no Decision for a goal");
+});
+
+test("a required, unknown or absent ref keeps the Work incomplete even when the Manager writes complete", async (t) => {
+  for (const ref of ["task:UNKNOWN:AC9", "work:A1", null, undefined, "TASK_REQUIRED"]) {
+    const { db, workId } = await finalizeGoalWork(t, (id) => {
+      const item = { item: "x", reason: "not done", fix: "" };
+      if (ref === "TASK_REQUIRED") item.criterion_ref = `task:${id}:AC1`;
+      else if (ref !== undefined) item.criterion_ref = ref;
+      return { verdict: "complete", summary: "s", lessons: [], missing: [item] };
+    });
+    assert.notEqual(stateOf(db, workId), "completed", `ref ${String(ref)}`);
+    assert.equal(completedPayload(db, workId), null, `ref ${String(ref)}`);
+  }
+});
+
+test("a required item beside a goal item keeps the Work incomplete and still records the goal", async (t) => {
+  const { db, workId } = await finalizeGoalWork(t, (id) => ({
+    verdict: "complete", summary: "s", lessons: [],
+    missing: [{ item: "tests", reason: "tests fail", fix: "fix them", criterion_ref: `task:${id}:AC1` }, goalItem(id)],
+  }));
+  assert.notEqual(stateOf(db, workId), "completed");
+  assert.deepEqual(storedGoals(db, workId).map((record) => record.text), ["Add a diagram"]);
+});
+
+test("a blank reason on a goal item reruns the final check instead of completing", async (t) => {
+  const { db, workId, calls } = await finalizeGoalWork(t, (id, call) => ({
+    verdict: "complete", summary: "s", lessons: [], missing: [goalItem(id, call === 1 ? "  " : "No time for a diagram")],
+  }));
+  assert.ok(await waitFor(() => stateOf(db, workId) === "completed", { timeoutMs: 8_000 }), `state ${stateOf(db, workId)}`);
+  assert.ok(calls() >= 2, `final check calls: ${calls()}`);
+  assert.equal(completedPayload(db, workId).goal_shortfalls[0].reason, "No time for a diagram");
+});
+
+const recordedGoal = (taskId) => JSON.stringify([{
+  task_id: taskId, criterion_id: "AC2", text: "Add a diagram", reason: "No time", source: "final_check", recorded_at: "2026-01-01T00:00:00.000Z", resolution: null,
+}]);
+const metGoal = (taskId) => [{ criterion_ref: `task:${taskId}:AC2`, evidence: "diagram added by the later Task" }];
+
+test("goals_met leaves a recorded goal unresolved when no Task completed after the record", async (t) => {
+  const { db, workId } = await finalizeGoalWork(
+    t,
+    (id) => ({ verdict: "complete", summary: "s", lessons: [], missing: [], goals_met: metGoal(id) }),
+    { prepare: (tx, workId, taskId) => {
+      tx.run("UPDATE works SET goal_shortfalls_json = ? WHERE id = ?", recordedGoal(taskId), workId);
+      tx.run("UPDATE tasks SET created_at = ? WHERE id = ?", "2025-01-01T00:00:00.000Z", taskId);
+    } },
+  );
+  assert.ok(await waitFor(() => stateOf(db, workId) === "completed", { timeoutMs: 8_000 }));
+  assert.equal(storedGoals(db, workId)[0].resolution, null);
+  assert.equal(completedPayload(db, workId).goal_shortfalls[0].resolution, null);
+});
+
+test("goals_met resolves a recorded goal with the evidence when a Task completed after the record", async (t) => {
+  const { db, workId } = await finalizeGoalWork(
+    t,
+    (id) => ({ verdict: "complete", summary: "s", lessons: [], missing: [], goals_met: metGoal(id) }),
+    { prepare: (tx, workId, taskId) => {
+      tx.run("UPDATE works SET goal_shortfalls_json = ? WHERE id = ?", recordedGoal(taskId), workId);
+      tx.run("UPDATE tasks SET created_at = ? WHERE id = ?", "2026-06-01T00:00:00.000Z", taskId);
+    } },
+  );
+  assert.ok(await waitFor(() => stateOf(db, workId) === "completed", { timeoutMs: 8_000 }));
+  const resolution = storedGoals(db, workId)[0].resolution;
+  assert.equal(resolution.evidence, "diagram added by the later Task");
+  assert.equal(completedPayload(db, workId).goal_shortfalls[0].resolution.evidence, "diagram added by the later Task");
+});
+
+test("a goal recorded by an incomplete final check reaches the next final check and the completed payload", async (t) => {
+  const seenByManager = [];
+  const { db, workId, taskId } = await finalizeGoalWork(t, (id, call, request) => {
+    if (call === 1) {
+      return { verdict: "incomplete", summary: "s", lessons: [], missing: [{ item: "tests", reason: "tests fail", fix: "", criterion_ref: `task:${id}:AC1` }, goalItem(id)] };
+    }
+    seenByManager.push(request.context.goal_shortfalls);
+    return { verdict: "complete", summary: "s", lessons: [], missing: [] };
+  });
+  assert.ok(await waitFor(() => stateOf(db, workId) === "completed", { timeoutMs: 8_000 }), `state ${stateOf(db, workId)}`);
+  assert.equal(seenByManager[0]?.[0]?.reason, "No time for a diagram", "the second final check receives the recorded goal");
+  const payload = completedPayload(db, workId);
+  assert.equal(payload.goal_shortfalls.length, 1);
+  assert.equal(payload.goal_shortfalls[0].task_id, taskId);
+  assert.equal(payload.goal_shortfalls[0].reason, "No time for a diagram");
 });

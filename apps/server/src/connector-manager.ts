@@ -4,12 +4,14 @@ import { pathToFileURL } from "node:url";
 import { resolveDataDir } from "./contracts.js";
 import type { IntegrationStore } from "./integration-store.js";
 import type { IntegrationConfig, IntegrationProvider } from "./types.js";
+import type { ChannelAdmin } from "../../../packages/plugin-sdk/dist/shared/channel-admin.js";
 import type { OwnerLanguage } from "../../../packages/shared/dist/owner-language.js";
 import { cliLanguage } from "./cli-language.js";
 
 export interface Connector {
   start(): Promise<void>;
   stop(): Promise<void>;
+  channelAdmin?(): ChannelAdmin;
 }
 
 interface SlackConnectorModule {
@@ -103,6 +105,11 @@ export class ConnectorManager {
     }
     this.connectors.set(provider, connector);
     console.log(`[owl-server] ${provider} connector started.`);
+  }
+
+  /** The running connector's channel API, or null when it is not running (or cannot manage channels). */
+  channelAdmin(provider: IntegrationProvider): ChannelAdmin | null {
+    return this.connectors.get(provider)?.channelAdmin?.() ?? null;
   }
 
   async stopConnector(provider: IntegrationProvider): Promise<void> {

@@ -46,6 +46,11 @@ export interface ConnectorText {
   readonly fileReceived: (name: string, size: string, knownFormat: boolean) => string;
   readonly executableNotRun: string;
   readonly fileFailed: (name: string, reason: string, checkScope: boolean) => string;
+  readonly fileSent: (name: string, size: string) => string;
+  readonly fileSendFailed: (name: string, reason: string, hint: string) => string;
+  readonly fileSendChanged: string;
+  readonly fileSendUnreadable: string;
+  readonly fileSendHint: { readonly slackScope: string; readonly discordPermission: string; readonly discordTooLarge: string };
   readonly notificationSubject: (sequence: number, type: string, shortDecisionId: string | null) => string;
   readonly notificationFailed: (subject: string, detail: string) => string;
   readonly nextActions: string;
@@ -91,6 +96,15 @@ const TEXT: Readonly<Record<OwlLanguage, ConnectorText>> = {
       : `ファイルを受け取りました: ${name}（${size}）— この形式はAIが中身を読めません。パスだけ渡します`,
     executableNotRun: "⚠ 実行ファイルのため実行はしません。",
     fileFailed: (name, reason, checkScope) => `⚠ ファイルを取り込めませんでした: ${name}（${reason}）${checkScope ? " Slack アプリの files:read スコープを確かめてください。" : ""}`,
+    fileSent: (name, size) => `✓ ファイルを送りました: ${name}（${size}）`,
+    fileSendFailed: (name, reason, hint) => `⚠ ファイルを送れませんでした: ${name}（${reason}）${hint ? ` ${hint}` : ""}`,
+    fileSendChanged: "確認したあとにファイルが変わりました。もう一度頼んでください",
+    fileSendUnreadable: "ファイルを読めません",
+    fileSendHint: {
+      slackScope: "Slack アプリに files:write スコープを足して、入れ直してください。",
+      discordPermission: "Bot に Attach Files の権限があるか確かめてください。",
+      discordTooLarge: "このサーバーの上限を超えています。advisor_send_file_discord_max_bytes を下げてください。",
+    },
     notificationSubject: (sequence, type, decisionId) => `イベント #${sequence} ${type}${decisionId ? `, Decision ${decisionId}` : ""}`,
     notificationFailed: (subject, detail) => `⚠ 通知を送信できませんでした（${subject}）。${detail}`,
     nextActions: "次のアクション案:",
@@ -134,6 +148,15 @@ const TEXT: Readonly<Record<OwlLanguage, ConnectorText>> = {
       : `File received: ${name} (${size}) — the AI cannot read this format, so only its path is passed on.`,
     executableNotRun: "⚠ This is an executable, so it will not be run.",
     fileFailed: (name, reason, checkScope) => `⚠ Could not import the file: ${name} (${reason})${checkScope ? " Check that the Slack app has the files:read scope." : ""}`,
+    fileSent: (name, size) => `✓ Sent the file: ${name} (${size})`,
+    fileSendFailed: (name, reason, hint) => `⚠ Could not send the file: ${name} (${reason})${hint ? ` ${hint}` : ""}`,
+    fileSendChanged: "the file changed after it was checked. Ask again",
+    fileSendUnreadable: "the file cannot be read",
+    fileSendHint: {
+      slackScope: "Add the files:write scope to the Slack app and reinstall it.",
+      discordPermission: "Check that the bot has the Attach Files permission.",
+      discordTooLarge: "The file is over this server's limit. Lower advisor_send_file_discord_max_bytes.",
+    },
     notificationSubject: (sequence, type, decisionId) => `event #${sequence} ${type}${decisionId ? `, Decision ${decisionId}` : ""}`,
     notificationFailed: (subject, detail) => `⚠ Could not send a notification (${subject}). ${detail}`,
     nextActions: "Suggested next actions:",

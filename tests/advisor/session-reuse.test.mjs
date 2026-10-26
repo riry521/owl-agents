@@ -15,6 +15,11 @@ const settings = {
   systemPrompt: "Advisor system prompt",
 };
 
+/** The runtime's per-window state; these tests use conversations without a window, which share one slot. */
+function slotOf(runtime, windowId = null) {
+  return runtime.slotFor(windowId);
+}
+
 function createRuntime({ session, providerClient = {}, sessionManager = {}, advisorSettings = settings }) {
   const db = {
     createWriteLane() {
@@ -53,14 +58,14 @@ test("Advisor reuses one live provider session when a turn comes from another in
   };
   const runtime = createRuntime({ session });
   const driver = { events: () => ({ [Symbol.asyncIterator]: async function* () {} }) };
-  runtime.activeDriver = driver;
-  runtime.activeSessionId = session.id;
+  slotOf(runtime).driver = driver;
+  slotOf(runtime).sessionId = session.id;
   runtime.activeSystemPrompt = settings.systemPrompt;
 
   const selected = await runtime.ensureSession("owner", "web-conversation");
 
   assert.equal(selected, session);
-  assert.equal(runtime.activeDriver, driver);
+  assert.equal(slotOf(runtime).driver, driver);
 });
 
 test("a changed system prompt keeps the live session", async () => {
@@ -77,8 +82,8 @@ test("a changed system prompt keeps the live session", async () => {
   const updated = { ...settings, systemPrompt: "Advisor system prompt\n\n--- BEGIN OWL RULES ---\n[system] new rule\n--- END OWL RULES ---" };
   const runtime = createRuntime({ session, advisorSettings: updated });
   const driver = { events: () => ({ [Symbol.asyncIterator]: async function* () {} }) };
-  runtime.activeDriver = driver;
-  runtime.activeSessionId = session.id;
+  slotOf(runtime).driver = driver;
+  slotOf(runtime).sessionId = session.id;
   runtime.activeSystemPrompt = settings.systemPrompt;
   runtime.stopSession = async () => assert.fail("a prompt change must not end the session");
   runtime.createSession = async () => assert.fail("a prompt change must not start a session");
@@ -86,7 +91,7 @@ test("a changed system prompt keeps the live session", async () => {
   const selected = await runtime.ensureSession("owner", "web-conversation");
 
   assert.equal(selected, session);
-  assert.equal(runtime.activeDriver, driver);
+  assert.equal(slotOf(runtime).driver, driver);
 });
 
 test("a changed effort ends the live session", async () => {
@@ -101,8 +106,8 @@ test("a changed effort ends the live session", async () => {
     effort: null,
   };
   const runtime = createRuntime({ session, advisorSettings: { ...settings, effort: "high" } });
-  runtime.activeDriver = { events: () => ({ [Symbol.asyncIterator]: async function* () {} }) };
-  runtime.activeSessionId = session.id;
+  slotOf(runtime).driver = { events: () => ({ [Symbol.asyncIterator]: async function* () {} }) };
+  slotOf(runtime).sessionId = session.id;
   const calls = [];
   runtime.stopSession = async (id, reason) => { calls.push(["stop", id, reason]); };
   runtime.createSession = async () => ({ id: "new-session" });
@@ -249,7 +254,7 @@ test("a driver that exited while idle is replaced on the next turn, and a send f
     assert.deepEqual(first.stopReasons, ["crashed"]);
     assert.equal(live.sessionRow(session1.id).status, "ended");
     assert.equal(live.sessionRow(session1.id).end_reason, "crashed");
-    assert.equal(live.runtime.activeDriver, second);
+    assert.equal(slotOf(live.runtime).driver, second);
 
     const turn2 = await live.sendTurn(session2.id, "second question");
     await waitFor(() => live.replies.length === 2, { message: "second reply" });
@@ -303,7 +308,7 @@ test("a driver that exited while idle is replaced on the next turn, and a send f
     assert.equal(dying.sent.length, 1);
     assert.equal(alsoDying.sent.length, 1);
     assert.deepEqual(alsoDying.stopReasons, ["send_failed"]);
-    assert.equal(live.runtime.activeDriver, null, "the failed replacement is not kept for the next turn");
+    assert.equal(slotOf(live.runtime).driver, null, "the failed replacement is not kept for the next turn");
     assert.deepEqual(live.replies, []);
   }
 });
@@ -525,7 +530,7 @@ test("shutdown during a slow resident spawn terminates the new driver", async (t
 
   assert.match(await settled, /shutting down/);
   assert.equal(slow.terminated, true);
-  assert.equal(live.runtime.activeDriver, null);
+  assert.equal(slotOf(live.runtime).driver, null);
   assert.equal(live.db.get("SELECT COUNT(*) AS n FROM advisor_sessions WHERE status IN ('starting', 'running')").n, 0);
 });
 
@@ -538,7 +543,7 @@ test("a session record write that fails after the spawn terminates the new drive
 
   await assert.rejects(live.runtime.ensureResident(live.ownerId, live.conversationId), /disk full/);
   assert.equal(spawned.terminated, true);
-  assert.equal(live.runtime.activeDriver, null);
+  assert.equal(slotOf(live.runtime).driver, null);
   assert.equal(live.db.get("SELECT COUNT(*) AS n FROM advisor_sessions WHERE status IN ('starting', 'running')").n, 0);
 });
 
@@ -561,7 +566,7 @@ test("shutdown while the new session is being recorded terminates the new driver
 
   assert.match(await settled, /shutting down/);
   assert.equal(spawned.terminated, true);
-  assert.equal(live.runtime.activeDriver, null);
+  assert.equal(slotOf(live.runtime).driver, null);
 });
 
 test("a prompt change keeps the session and prefixes the next turn with the updated instructions", async (t) => {
@@ -621,7 +626,7 @@ test("a session that exits during a turn is ended as crashed and the turn fails"
   assert.equal(live.sessionRow(one.id).end_reason, "crashed");
   assert.equal(live.turnRow(turn).status, "failed");
   assert.ok(errors.some((line) => line.includes("claude exited with code 1")));
-  assert.equal(live.runtime.activeDriver, null);
+  assert.equal(slotOf(live.runtime).driver, null);
 });
 
 test("an unsolicited reply is posted to the conversation of the most recent turn", async (t) => {

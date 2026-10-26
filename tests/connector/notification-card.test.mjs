@@ -4,11 +4,13 @@ import { test } from "node:test";
 import {
   answerGuideHint,
   buildNotificationCard,
+  decisionContextLines,
   decisionTitle,
   formatWorkCompletionSummary,
   isNotificationCardEvent,
   toPlainText,
 } from "../../packages/plugin-sdk/dist/shared/index.js";
+import { decisionContextLines as webDecisionContextLines } from "../../apps/web/lib/decision-sections.mjs";
 
 const WORK_ID = "01ARZ3NDEKTSV4RRFFQ69WORK1";
 const DECISION_ID = "01ARZ3NDEKTSV4RRFFQ6DECIS1";
@@ -259,24 +261,120 @@ const explainedPayload = {
 };
 const explainedOptions = { language: "ja", formatTime: () => "12:00", replyStyle: "thread" };
 
-test("decision.opened with an explanation shows summary, cause, ★ and orders thread sections", () => {
-  const card = buildNotificationCard(event("decision.opened", explainedPayload), explainedOptions);
-  assert.match(card.body, /測り方が合わず条件を満たせません。（原因: 条件の問題）/u);
-  assert.match(card.body, /• 条件を読み替える ★/u);
+test("decision.opened with an explanation shows 💡 summary and 👉 next steps without ❓ or a reason field", () => {
+  const payload = {
+    ...explainedPayload,
+    explanation: { ...explainedPayload.explanation, next_steps: "条件を読み替えて続けます。", option_notes: [{ key: "retry", note: "もう一度実行します。" }] },
+  };
+  const card = buildNotificationCard(event("decision.opened", payload), explainedOptions);
+  assert.match(card.body, /💡 測り方が合わず条件を満たせません。（原因: 条件の問題）\n👉 条件を読み替えて続けます。/u);
+  assert.match(card.body, /• 条件を読み替える ★\n• やり直す\n• 中止する/u);
+  assert.doesNotMatch(card.body, /❓/u);
+  assert.ok(!card.fields.some((field) => field.label === "理由"));
+  assert.equal(card.question, "どう進めますか？");
   assert.equal(card.actions[0].label, "★ 条件を読み替える");
   const detail = card.threadDetail;
   const at = (s) => detail.indexOf(s);
-  assert.ok(at("なぜ止まったか") >= 0 && at("なぜ止まったか") < at("選択肢と、選ぶとどうなるか"));
-  assert.ok(at("選択肢と、選ぶとどうなるか") < at("詳しい記録"));
-  assert.ok(at("元の条件X → 読み替えY") > at("選択肢と、選ぶとどうなるか") && at("元の条件X → 読み替えY") < at("詳しい記録"));
+  assert.ok(at("ネックになっている部分") >= 0 && at("ネックになっている部分") < at("選択肢"));
+  assert.ok(at("選択肢") < at("詳しい記録"));
+  assert.ok(at("条件を読み替えて続けます。") > at("選択肢") && at("条件を読み替えて続けます。") < at("• 条件を読み替える"));
+  assert.match(detail, /• やり直す — もう一度実行します。/u);
+  assert.ok(at("元の条件X → 読み替えY") > at("選択肢") && at("元の条件X → 読み替えY") < at("詳しい記録"));
   assert.ok(at("REASON_RECORD") > at("詳しい記録"));
   assert.doesNotMatch(detail, /AC1/u);
+  assert.match(detail, /回答 [0-9A-Z]{6}: /u);
 });
 
-test("decision.opened without an explanation keeps the previous text", () => {
+test("decision.opened with an old { summary, cause_kind } explanation skips the missing parts", () => {
+  const card = buildNotificationCard(event("decision.opened", explainedPayload), explainedOptions);
+  assert.match(card.body, /💡 測り方が合わず条件を満たせません。（原因: 条件の問題）\n\n• 条件を読み替える ★/u);
+  assert.doesNotMatch(card.body, /👉|❓/u);
+});
+
+test("decision.opened without an explanation shows ❓ and the reason field without repeats", () => {
   const { explanation, ...plain } = explainedPayload;
-  const card = buildNotificationCard(event("decision.opened", plain), explainedOptions);
-  assert.doesNotMatch(card.body, /💡|原因/u);
-  assert.match(card.threadDetail, /なぜ止まったか[\s\S]*REASON_RECORD/u);
-  assert.doesNotMatch(card.threadDetail, /詳しい記録/u);
+  const reason = "止まりました / 待っていた内容: A（01ARZ3NDEKTSV4RRFFQ69TASK1）";
+  const card = buildNotificationCard(event("decision.opened", { ...plain, reason, tried: "- A" }), explainedOptions);
+  assert.match(card.body, /❓ どう進めますか？/u);
+  assert.doesNotMatch(card.body, /💡|👉|原因/u);
+  assert.deepEqual(card.fields.filter((field) => field.label === "理由").map((field) => field.value), ["止まりました\n待っていた内容: A"]);
+  assert.match(card.threadDetail, /\*\*ネックになっている部分\*\*\n止まりました\n待っていた内容: A\n\n\*\*選択肢\*\*\n• 条件を読み替える ★/u);
+  assert.match(card.threadDetail, /\*\*今の状態\*\*\nSTATE_RECORD/u);
+  assert.doesNotMatch(card.threadDetail, /これまでの経緯|詳しい記録|01ARZ3NDEKTSV4RRFFQ69TASK1/u);
+});
+
+/** [name, input, expected lines]; a Work #13 shaped input (ids and repeats) comes first. Reused by the web parity test. */
+export const DECISION_CONTEXT_CASES = [
+  [
+    "Work #13 shape: a bare id line and the three tried lines repeat the reason",
+    {
+      reason: "前提待ち / 待っていた内容: Aの完了 / 詳細: 依存先が未完了です。 / （01ARZ3NDEKTSV4RRFFQ69TASK1）",
+      current_state: "判断待ち",
+      tried: "待っていた内容: Aの完了\n- Aの完了\n詳細: 依存先が未完了です",
+    },
+    { reason: ["前提待ち", "待っていた内容: Aの完了", "詳細: 依存先が未完了です。"], current_state: ["判断待ち"], tried: [] },
+  ],
+  [
+    "ascii parentheses, bullets, full-width colon and trailing periods compare equal",
+    { reason: "停止しました。\n(01ARZ3NDEKTSV4RRFFQ69TASK1)", current_state: "・停止しました", tried: "経緯：停止しました.\n• 別の行" },
+    { reason: ["停止しました。"], current_state: [], tried: ["• 別の行"] },
+  ],
+  [
+    "a heading longer than 12 characters is part of the line; ids inside a line are removed",
+    { reason: "とても長い見出しの付いた行です: X", current_state: "X", tried: "原因（01ARZ3NDEKTSV4RRFFQ69TASK1）の調査" },
+    { reason: ["とても長い見出しの付いた行です: X"], current_state: ["X"], tried: ["原因の調査"] },
+  ],
+  ["empty texts", { reason: "", current_state: "  ", tried: "\n / \n" }, { reason: [], current_state: [], tried: [] }],
+];
+
+test("decisionContextLines removes repeats and bare ids by the table of cases", () => {
+  for (const [name, input, expected] of DECISION_CONTEXT_CASES) {
+    assert.deepEqual(decisionContextLines(input), expected, name);
+  }
+  const [, work13Input] = DECISION_CONTEXT_CASES[0];
+  const lines = decisionContextLines(work13Input);
+  assert.ok(![...lines.reason, ...lines.current_state, ...lines.tried].some((line) => /[0-9A-Z]{26}/u.test(line)));
+  assert.equal(lines.tried.length, 0);
+});
+
+test("the web decisionContextLines returns the same lines as plugin-sdk for every case", () => {
+  for (const [name, input] of DECISION_CONTEXT_CASES) {
+    assert.deepEqual(webDecisionContextLines(input), decisionContextLines(input), name);
+  }
+});
+
+test("decision.opened thread detail keeps every option and the guide however long", () => {
+  const options = Array.from({ length: 30 }, (_, i) => ({ key: `k${i}`, label: `選択肢${i}` }));
+  const payload = { ...explainedPayload, explanation: { ...explainedPayload.explanation, summary: "長い説明。".repeat(1500) }, options };
+  const card = buildNotificationCard(event("decision.opened", payload), options);
+  assert.ok(card.threadDetail.length > 3800);
+  assert.match(card.threadDetail, /• 選択肢29/u);
+  assert.match(card.threadDetail, /回答 [0-9A-Z]{6}: /u);
+});
+
+test("work.completed lists goals that were not met and counts those met later separately", () => {
+  const shortfalls = [
+    { task_title: "T1", text: "Do X", reason: "no time", resolution: null },
+    { task_title: "T2", text: "Do Y", reason: "r", resolution: { evidence: "e", resolved_at: "2025-01-01T00:00:00Z" } },
+  ];
+  assert.equal(
+    formatWorkCompletionSummary({ task_count: 2, goal_shortfalls: shortfalls }, "ja"),
+    "Task 2件\n達成しなかった目標: 1 件。Work の画面でも見られます。\n- T1: Do X（no time）\nあとで満たした目標: 1 件（根拠は Work の画面）",
+  );
+  assert.equal(
+    formatWorkCompletionSummary({ task_count: 2, goal_shortfalls: shortfalls }, "en"),
+    "2 tasks\nGoals not met: 1. See the Work screen.\n- T1: Do X (no time)\nGoals met later: 1 (evidence on the Work screen).",
+  );
+  assert.equal(formatWorkCompletionSummary({ task_count: 2, goal_shortfalls: [] }, "en"), "2 tasks");
+});
+
+test("work.completed card keeps the goal count line when a long goal list is cut", () => {
+  const goal_shortfalls = Array.from({ length: 40 }, (_, i) => ({ task_title: `T${i}`, text: "目標".repeat(60), reason: "理由".repeat(60), resolution: null }));
+  const card = buildNotificationCard(
+    event("work.completed", { work_id: WORK_ID, title: "Archive", task_count: 40, goal_shortfalls }),
+    { language: "ja", formatTime: String, replyStyle: "thread" },
+  );
+  const body = toPlainText(card.body);
+  assert.match(body, /達成しなかった目標: 40 件/u);
+  assert.match(body, /…|\.\.\./u, "the body was actually cut");
 });

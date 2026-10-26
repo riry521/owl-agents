@@ -266,6 +266,7 @@ Settings key `progress_guard` (`packages/shared/src/progress-guard-settings.ts`;
 `progressGuard` in `packages/core/src/progress-guard.ts`). It is read and written through
 `Core.getProgressGuardSettings()` / `Core.setProgressGuardSettings()` (all six fields at once;
 an out-of-range value is rejected). There is no HTTP route or Settings screen for the settings themselves.
+A plan that Core rejects for a missing field or a format error (`auto_recovery.criteria_relaxations`, `rule_applicability`, the reason for rewriting a criterion, an Owner criterion not carried over word for word, a plan quality warning) goes back to the Manager with the reason in `previous_output_feedback`, up to `plan_rejection_attempts_max` Manager calls per round (1 to 10, default 3), before the auto-recovery and then the Decision.
 A missing or invalid stored value falls back to the default per field.
 
 | Field | Default | Range | Meaning |
@@ -400,8 +401,9 @@ warnings never reject; a warning whose code is in `blocking_codes` (default `ext
 is rejected instead. Warning codes: `acceptance_items_over`, `acceptance_chars_over`,
 `broad_scope` (a wide-scope keyword and no path, file name or identifier), `components_over`,
 `verification_missing` (a Task of a type in `verification_required_types` whose acceptance has none of
-`verification_keywords`). On a warning the Manager is asked to repair the plan up to
-`max_repair_requests` times; after that the plan is accepted with the warnings only if none of them is
+`verification_keywords`). On a warning the Manager is asked to repair the plan on every call before the
+last one `progress_guard.plan_rejection_attempts_max` allows, and the plan is not applied meanwhile; on that
+last call the plan is accepted with the warnings only if none of them is
 a blocking code, otherwise it is rejected. Each warning round
 is recorded as `work.plan_quality_warned` (with `manager_agent_run_id` and whether it was
 `repair_requested` or `accepted_with_warnings`).
@@ -414,7 +416,7 @@ silently uses its default; an invalid key falls back to its default with a warni
 | Field | Default | Invalid when |
 |---|---|---|
 | `enabled` | `true` | not a boolean |
-| `max_repair_requests` | 1 | not an integer ≥ 0 |
+| `max_repair_requests` | 1 | not an integer ≥ 0 (no longer read; repairs count toward `plan_rejection_attempts_max`) |
 | `max_acceptance_items` | 8 | not an integer ≥ 1 |
 | `max_acceptance_chars` | 1500 | not an integer ≥ 1 |
 | `max_components` | 3 | not an integer ≥ 1 |
@@ -501,6 +503,82 @@ to its default with a warning):
 `tokens_per_task_any_review` (all Tasks, reviewed or not) and
 `completion_gate_failures` (by `error_key`, counted from `task.failure.classified` and
 `task.replan_requested` events that carry `gate_reasons`). Ratios are rounded to four decimals and are `null` when the denominator is 0.
+
+## Checking the texts of Decision explanations (`decision_text_checks`)
+
+After the model writes the explanation of a stopped Decision, Core can pass the texts to external commands that check or fix them before the Owner reads them.
+The commands come from the plugin configuration file that `OWL_PLUGINS_FILE` points to. The file is read once at server start, so a change needs a restart.
+
+### Writing it
+
+`decision_text_checks` is a top-level key next to `plugins`. Each entry has the same fields as a plugin (`name`, `command`, `args`, `cwd`, `enabled`, `env`) and the same checks (unknown keys, a missing `cwd`, and `OWL_` names in `env` are errors). There is no per-command timeout.
+
+```json
+{
+  "plugins": [],
+  "decision_text_checks": [
+    { "name": "text-lint", "command": "node", "args": ["scripts/check-decision-text.mjs"], "cwd": "/path/to/writing-rules", "env": {} }
+  ]
+}
+```
+
+Without the key, or with `[]`, no command runs. An error in `decision_text_checks` is logged at start (`[owl-server] decision_text_checks: ...`) and the server starts with no checks. Entries with `enabled: false` are skipped. Entries are called in the order written; each gets the texts the previous one fixed.
+
+### Input and output
+
+Each call starts the command once. The server writes one JSON to its stdin and reads one JSON from its stdout. The command gets only `PATH`, `HOME`, `LANG` and the entry's `env`; `OWL_` values are not passed.
+
+```json
+{ "language": "ja", "kind": "partial_limit", "texts": {
+    "summary": "...", "next_steps": "...",
+    "options": [
+      { "key": "fix_1", "generated": true, "label": "...", "note": "...", "criteria_rewrites": [ { "criterion_id": "AC1", "after": "...", "check": "..." } ] },
+      { "key": "retry", "generated": false, "label": "...", "note": "...", "criteria_rewrites": [] }
+    ] } }
+```
+
+The command answers one of:
+
+- `{ "ok": true }`: the texts are fine.
+- `{ "ok": true, "fixed": <texts> }`: use these texts instead. `fixed` has the same shape as `texts`.
+- `{ "ok": false, "problems": ["one short sentence", "..."] }`: the texts break a rule. At most 10 problems are used.
+
+What a fix may change: `summary`, `next_steps`, each option's `note`, the `label` of options with `generated: true`, and the `after` and `check` of each `criteria_rewrites` entry.
+What a fix must not change: the option `key`, `generated`, the order of options, the `label` of options with `generated: false` (they are Core's own texts and also appear on buttons), and the `criterion_id` of each rewrite and its order. No text may be empty.
+A fix is also checked by Core's own rules (sentence limits and no internal ids or names), and so is the stored result.
+
+### When it goes wrong
+
+- `ok: false`, a fix that breaks Core's rules, or an answer that fails the common checks: the model is asked to write the whole explanation again, with the earlier texts and the problems, up to `decision_explanation_rewrites_max` times (0 to 5, default 2). The new texts go through the common checks and every command again. When the limit is passed the result is `text_check_rejected:<name>` (`internal_terms` for the common checks).
+- The command exits with a code other than 0, cannot start, writes no JSON, or writes more than 64 KiB: `text_check_failed:<name>`.
+- The output has the wrong shape (see above): `text_check_invalid:<name>`.
+- The deadline `decision_explanation_timeout_seconds` passes (it covers the model, every command and the rewrite): the command is stopped and the result is `timeout`.
+
+In all failure cases (and when the model errors, the deadline passes or there is no runner) the model's explanation is not stored; Core stores a fixed-form explanation (`status` ready, `plain` true) whose summary and next_steps are built from the Task report and the Decision's own texts, leaving out internal terms and, in Japanese, English-only lines. A broken checker never lets an unchecked text through. The reason is logged as `[owl-core] Decision text check <name> failed for <decision id>: ...` and kept in the stored explanation's `error`.
+
+### Example: a generic lint command
+
+```js
+// scripts/check-decision-text.mjs, in the repository that owns the writing rules
+import { lintTexts } from "./lint.mjs"; // that repository's own lint wrapper
+
+let raw = "";
+for await (const chunk of process.stdin) raw += chunk;
+const { language, texts } = JSON.parse(raw);
+const lines = [
+  texts.summary,
+  texts.next_steps,
+  ...texts.options.flatMap((o) => [
+    ...(o.generated ? [o.label] : []),
+    o.note,
+    ...o.criteria_rewrites.flatMap((r) => [r.after, r.check]),
+  ]),
+];
+const problems = await lintTexts(lines, { language }); // short sentences, [] when fine
+process.stdout.write(JSON.stringify(problems.length > 0 ? { ok: false, problems } : { ok: true }));
+```
+
+A tool that fixes problems itself (for example full-width and half-width mixes) answers `{ "ok": true, "fixed": ... }` and changes only the texts it fixes.
 
 ## Required tests
 

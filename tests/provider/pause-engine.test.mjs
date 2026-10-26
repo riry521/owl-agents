@@ -68,6 +68,17 @@ async function flushUntil(predicate, label) {
   if (!predicate()) throw new Error(`timed out waiting for ${label}`);
 }
 
+// Core polls the knowledge storage on the mocked setTimeout but probes it with real file I/O.
+// One large tick would fire the 5 s probe timeout before the real probe finishes and mark the
+// storage unavailable; its later recovery then races the test's teardown. Step below that timeout
+// and let each started probe finish, as real time would.
+async function tickMockedClock(t, core, milliseconds) {
+  for (let left = milliseconds; left > 0; left -= 1_000) {
+    t.mock.timers.tick(Math.min(1_000, left));
+    await core.checkKnowledgeStorage();
+  }
+}
+
 const waitUntil = (predicate, message) => waitFor(predicate, { timeoutMs: 5_000, intervalMs: 10, message });
 
 function unsetDefaultRoleModels(t, ...roles) {
@@ -536,7 +547,7 @@ test("a Manager replan rate limit is requeued and retried after persisted pause 
   assert.equal(db.get("SELECT COUNT(*) AS count FROM decisions WHERE status = 'open'").count, 0);
   assert.equal(JSON.parse(db.get("SELECT response_json FROM idempotency_keys WHERE key = ?", `manager-trigger:${taskId}`).response_json).status, "queued");
 
-  t.mock.timers.tick(90_000);
+  await tickMockedClock(t, core, 90_000);
   await flushUntil(() => db.get("SELECT status FROM tasks WHERE manager_task_id = 'REPLACEMENT'")?.status === "waiting", "requeued replan");
   assert.equal(managerCalls, 2, "the Work driver retries the queued replan when provider.resumed fires");
   assert.equal(db.get("SELECT status FROM tasks WHERE manager_task_id = 'REPLACEMENT'").status, "waiting");
@@ -589,7 +600,7 @@ test("an initial Manager plan rate limit leaves the Work running and retries aft
   assert.equal(db.get("SELECT COUNT(*) AS count FROM tasks WHERE work_id = ?", workId).count, 0);
   assert.equal(db.get("SELECT COUNT(*) AS count FROM decisions WHERE status = 'open'").count, 0);
 
-  t.mock.timers.tick(90_000);
+  await tickMockedClock(t, core, 90_000);
   await flushUntil(() => db.get("SELECT COUNT(*) AS count FROM tasks WHERE work_id = ?", workId).count === 1, "resumed Manager plan");
   assert.equal(managerCalls, 2);
   assert.equal(db.get("SELECT COUNT(*) AS count FROM tasks WHERE work_id = ?", workId).count, 1);
@@ -635,7 +646,7 @@ test("five Manager 429s open no Decision: each is recorded as an uncounted wait 
     const before = managerCalls;
     // The resume timer is armed once the pause is recorded; advance the clock only after that.
     await flushUntil(() => db.get("SELECT COUNT(*) AS count FROM events WHERE type = 'provider.paused'").count >= before && db.get("SELECT COUNT(*) AS count FROM events WHERE work_id = ? AND type = 'recovery.started'", workId).count === before, `pause ${before}`);
-    t.mock.timers.tick(90_000);
+    await tickMockedClock(t, core, 90_000);
     await flushUntil(() => managerCalls > before, `Manager call ${before + 1}`);
   }
   await flush();

@@ -1,6 +1,6 @@
 import { PrerequisiteValidationError, validateWaitFor, type PlanWaitFor } from "../../shared/dist/prerequisite.js";
 import { DEFAULT_PLAN_QUALITY_SETTINGS, type PlanQualitySettings } from "../../shared/dist/plan-quality-settings.js";
-import { isManagerCriterion, type CriteriaRelaxation, type StoredAcceptanceCriterion } from "../../shared/dist/acceptance-criteria.js";
+import { criterionRequirement, isManagerCriterion, type CriteriaRelaxation, type StoredAcceptanceCriterion } from "../../shared/dist/acceptance-criteria.js";
 import { evaluateCriteriaRelaxation } from "./plan-quality";
 import type { CriterionCheck, RuleApplicability, TaskPlanItem } from "./types";
 
@@ -59,6 +59,8 @@ export interface ReplanPlan {
   readonly waits: ReadonlyMap<string, PlanWaitFor>;
   /** Open Tasks the Manager cancels or treats as done, by Task id (Owner-initiated replans only). */
   readonly actions: ReadonlyMap<string, ReplanAction>;
+  /** Stopped ready Tasks the Manager rewrites in place (Owner instruction replans only); a subset of the revisions' keys. */
+  readonly reviseIds?: readonly string[];
 }
 
 export interface PlanRejection {
@@ -149,6 +151,8 @@ export interface ReplanOptions {
   /** True for a replan Core started by itself (automatic recovery, no Owner request): it may loosen Manager-made criteria only. */
   readonly automatic?: boolean;
   readonly qualitySettings?: PlanQualitySettings;
+  /** Ready Task id -> its type. Such a Task may be rewritten in place with its existing id (Owner instruction replans only). */
+  readonly revisable?: ReadonlyMap<string, string>;
 }
 
 export interface PlannedApproach {
@@ -182,7 +186,7 @@ export function validateReplan(
   rootFailedIds: readonly string[],
   options: ReplanOptions = {},
 ): ReplanPlan | PlanRejection {
-  const plan = validatePlanAgainst(items, snapshot, rootFailedIds, "replan", { actions: options.actions ?? [], allowOpen: options.allowOpen === true });
+  const plan = validatePlanAgainst(items, snapshot, rootFailedIds, "replan", { actions: options.actions ?? [], allowOpen: options.allowOpen === true, revisable: options.revisable });
   if (isPlanRejection(plan)) return plan;
   const repeated = [...(options.differentApproachRequired ?? [])].filter(([id, previous]) => {
     const revision = plan.revisions.get(id);
@@ -225,12 +229,21 @@ function criteriaOwnershipErrors(
   const settings = options.qualitySettings ?? DEFAULT_PLAN_QUALITY_SETTINGS;
   // A Task planned with a free-text acceptance has one legacy criterion; there is nothing in it to protect or loosen by id.
   const ownerCriteria = (id: string): StoredAcceptanceCriterion[] => (current.get(id) ?? []).filter((criterion) => criterion.legacy !== true && !isManagerCriterion(criterion));
+  // The original wording goes into the error so the Manager can copy it as it is.
+  const original = (criterion: StoredAcceptanceCriterion): string => `Copy it exactly: id ${JSON.stringify(criterion.id)}, text ${JSON.stringify(criterion.text)}, check ${JSON.stringify(criterion.check)}.`;
   if (options.automatic === true) {
     for (const [id, revision] of plan.revisions) {
       for (const before of ownerCriteria(id)) {
         const after = (revision.acceptance_criteria ?? []).find((criterion) => criterion.id === before.id);
-        if (after === undefined || after.text !== before.text || after.check !== before.check) {
-          errors.push(`Task ${labelOf(id)}: criterion ${before.id} comes from the Owner (or has no origin); an automatic replan must keep its id, text and check as they are.`);
+        if (after === undefined || after.text !== before.text || after.check !== before.check || criterionRequirement(after) !== criterionRequirement(before)) {
+          errors.push(`Task ${labelOf(id)}: criterion ${before.id} comes from the Owner (or has no origin); an automatic replan must keep its id, text, check and requirement (${criterionRequirement(before)}) as they are. ${original(before)}`);
+        }
+      }
+      // Manager-made criteria may be loosened, but never moved between required and goal.
+      for (const before of (current.get(id) ?? []).filter(isManagerCriterion)) {
+        const after = (revision.acceptance_criteria ?? []).find((criterion) => criterion.id === before.id);
+        if (after !== undefined && criterionRequirement(after) !== criterionRequirement(before)) {
+          errors.push(`Task ${labelOf(id)}: criterion ${before.id}: an automatic replan must keep requirement ${criterionRequirement(before)}.`);
         }
       }
     }
@@ -238,8 +251,13 @@ function criteriaOwnershipErrors(
     for (const [id, localIds] of plan.supersessions) {
       const replacementCriteria = localIds.flatMap((localId) => replacements.get(localId)?.acceptance_criteria ?? []);
       for (const before of ownerCriteria(id)) {
-        if (!replacementCriteria.some((criterion) => criterion.text === before.text && criterion.check === before.check)) {
-          errors.push(`Task ${labelOf(id)}: criterion ${before.id} comes from the Owner (or has no origin); an automatic replan must carry it unchanged into the Task that replaces it.`);
+        if (!replacementCriteria.some((criterion) => criterion.text === before.text && criterion.check === before.check && criterionRequirement(criterion) === criterionRequirement(before))) {
+          errors.push(`Task ${labelOf(id)}: criterion ${before.id} comes from the Owner (or has no origin); an automatic replan must carry it unchanged into the Task that replaces it. ${original(before)}`);
+        }
+      }
+      for (const before of (current.get(id) ?? []).filter(isManagerCriterion)) {
+        if (replacementCriteria.some((criterion) => criterion.text === before.text && criterion.check === before.check && criterionRequirement(criterion) !== criterionRequirement(before))) {
+          errors.push(`Task ${labelOf(id)}: criterion ${before.id}: an automatic replan must keep requirement ${criterionRequirement(before)} in the Task that replaces it.`);
         }
       }
     }
@@ -259,7 +277,7 @@ function validatePlanAgainst(
   snapshot: ReplanSnapshot,
   rootFailedIds: readonly string[],
   mode: "plan" | "replan",
-  options: { readonly actions: readonly ReplanAction[]; readonly allowOpen: boolean },
+  options: { readonly actions: readonly ReplanAction[]; readonly allowOpen: boolean; readonly revisable?: ReadonlyMap<string, string> },
 ): ReplanPlan | PlanRejection {
   const errors: string[] = [];
   const report = (message: string): void => {
@@ -324,6 +342,7 @@ function validatePlanAgainst(
     return null;
   };
   const retried: { item: TaskPlanItem; localId: string; taskId: string }[] = [];
+  const reviseIds: string[] = [];
   const newItems: { item: TaskPlanItem; index: number; localId: string }[] = [];
   items.forEach((item, index) => {
     const localId = planItemLocalId(item, index);
@@ -336,7 +355,15 @@ function validatePlanAgainst(
       newItems.push({ item, index, localId });
       return;
     }
-    if (rootFailed.has(match.id)) {
+    const revising = !rootFailed.has(match.id) && options.revisable?.has(match.id) === true;
+    if (rootFailed.has(match.id) || revising) {
+      if (revising) {
+        if ((item.replaces ?? []).length > 0) report(`Task ${localId} is revised with its existing id, so its replaces must be [] (it lists ${(item.replaces ?? []).join(", ")}).`);
+        if (item.wait_for !== undefined && item.wait_for !== null) report(`Task ${localId} is revised in place, so wait_for must be null.`);
+        if (item.type !== options.revisable!.get(match.id)) report(`Task ${localId} is revised in place, so its type must stay ${options.revisable!.get(match.id)}.`);
+        if (item.base_sync_only === true) report(`Task ${localId} is revised in place, so base_sync_only must be null.`);
+        reviseIds.push(match.id);
+      }
       if (revisions.has(match.id)) {
         report(`Task ${localId} is retried more than once in the plan (duplicate id).`);
         return;
@@ -344,7 +371,7 @@ function validatePlanAgainst(
       if ((item.replaces ?? []).length > 0) {
         report(`Task ${localId} is retried with its existing id, so its replaces must be [] (it lists ${(item.replaces ?? []).join(", ")}).`);
       }
-      const wait = checkedWaitFor(item, localId, (item.replaces ?? []).length === 0);
+      const wait = revising ? null : checkedWaitFor(item, localId, (item.replaces ?? []).length === 0);
       if (wait !== null) waits.set(match.id, wait);
       revisions.set(match.id, {
         title: item.title,
@@ -432,6 +459,12 @@ function validatePlanAgainst(
       supersessions.set(replacedTask.id, replacements);
     }
   }
+  // A Task revised in place keeps its id, so it can be neither replaced nor given a task_action.
+  for (const id of new Set(reviseIds)) {
+    const name = label(existing.get(id)!);
+    if (supersessions.has(id)) report(`Task ${name} is revised in place; do not also replace it.`);
+    if (actions.has(id)) report(`Task ${name} is revised in place; leave it out of task_actions.`);
+  }
   // L1: a retried Task's depends_on replaces its current dependencies (an
   // item without depends_on keeps them).
   const retriedEdges = new Map<string, string[]>();
@@ -500,6 +533,7 @@ function validatePlanAgainst(
     supersessions,
     waits,
     actions,
+    reviseIds,
   };
 }
 

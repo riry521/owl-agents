@@ -1,3 +1,4 @@
+import { AUTO_RECOVERY_KINDS, type AutoRecoveryAction, type AutoRecoveryKind, type ImmediateDecisionReason } from "../../shared/dist/auto-recovery-names.js";
 import {
   AUTO_RECOVERY_SETTINGS_KEY,
   DEFAULT_AUTO_RECOVERY_SETTINGS,
@@ -11,9 +12,7 @@ import { appendEventInTransaction } from "./state-reducer";
 import { lineageRootOf, type LineageReader } from "./task-lineage";
 import type { CoreWriteLaneTransaction, JsonObject } from "./types";
 
-export type AutoRecoveryKind =
-  | "integration_conflict" | "final_incomplete" | "output_format" | "budget_exhausted"
-  | "plan_quality_rejected" | "provider_transient" | "criteria_too_strict" | "partial_repeated";
+export type { AutoRecoveryKind };
 
 /** A Work id (kind "work") or a lineage root Task id (kind "task"). */
 export interface AutoRecoveryTarget {
@@ -132,7 +131,7 @@ export interface RecordAutoRecoveryInput {
   readonly kind: AutoRecoveryKind;
   readonly target: AutoRecoveryTarget;
   readonly workId: string;
-  readonly action: string;
+  readonly action: AutoRecoveryAction;
   readonly sourceEventId: string;
   readonly previousFailure?: JsonObject | null;
   /** false only for a 429 wait, which is recorded for the screen but not counted. */
@@ -220,15 +219,10 @@ export function transientRecoveryPendingUntil(reader: LineageReader, workId: str
   return row?.resume_at != null && Date.parse(row.resume_at) > now ? row.resume_at : null;
 }
 
-const ALL_KINDS: readonly AutoRecoveryKind[] = [
-  "integration_conflict", "final_incomplete", "output_format", "budget_exhausted",
-  "plan_quality_rejected", "provider_transient", "criteria_too_strict", "partial_repeated",
-];
+const ALL_KINDS: readonly AutoRecoveryKind[] = AUTO_RECOVERY_KINDS;
 
 /** Why Core opened the Decision at the first failure instead of trying to fix it. */
-export type ImmediateDecisionReason =
-  | "design_decision" | "irreversible_operation" | "uncommitted_changes" | "authentication_failed"
-  | "harness_config" | "owner_criteria" | "recovery_disabled";
+export type { ImmediateDecisionReason };
 
 export interface ImmediateDecisionInput {
   /** The Designer reported design_blocked. */
@@ -523,6 +517,7 @@ export function criteriaDecisionBrief(input: CriteriaDecisionInput, language: Ow
       cancelWorkOption(language),
     ],
     recommended: null,
+    explanation: { kind: "criteria_unverifiable", status: "pending" },
   };
 }
 

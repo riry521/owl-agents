@@ -61,7 +61,17 @@ test("the Worker prompt carries the Finalization steps, the retry limit and the 
   assert.match(prompt, /verify it yourself; a child's report is evidence, not proof/);
   assert.match(prompt, /secrets, credentials, environment dumps, and large raw logs/);
   assert.match(prompt, /two substantively different fixes, stop trying/);
-  assert.match(prompt, /every acceptance criterion was verified as met in the final workspace/);
+  assert.match(prompt, /every required acceptance criterion[^.]*was verified as met in the final workspace/);
+});
+
+test("the Worker prompt tells required from goal criteria and reports a goal shortfall as goal_unmet, not partial", () => {
+  const prompt = buildWorkerPrompt(request);
+  assert.match(prompt, /goal criterion \(requirement goal\) that is not met does not prevent success: report it as goal_unmet with shortfall_reason/);
+  assert.match(prompt, /Never report "partial" only because a goal criterion is not met/);
+  assert.match(prompt, /verification\.status covers the required criteria and the checks only/);
+  assert.match(prompt, /set status goal_unmet and write in shortfall_reason why[^.]*a goal_unmet without a reason is rejected/);
+  assert.match(prompt, /Never use failed, blocked or unverifiable for a goal/);
+  assert.match(prompt, /For a goal criterion, report goal_unmet with the reason instead/);
 });
 
 test("the Hybrid prompt says a child's success is evidence, not proof, and waits for every child", () => {

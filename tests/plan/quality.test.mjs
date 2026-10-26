@@ -144,15 +144,15 @@ test("initial plan: an over-threshold plan is sent back to the Manager with the 
   assert.ok(db.get("SELECT id FROM agent_runs WHERE id = ? AND role = 'manager'", events[0].manager_agent_run_id), "the event points at the Manager run that produced the plan");
 });
 
-test("initial plan: still over the limit after the repair is accepted unchanged with a warning record", async (t) => {
+test("initial plan: still over the limit on the last call plan_rejection_attempts_max allows is accepted unchanged with a warning record", async (t) => {
   const seen = [];
   const { db, core } = await openCore(t, [[managerTask("A", tooBig)]], seen);
   const workId = await startWork(core);
   assert.ok(await waitFor(() => taskCount(db, workId) === 1));
-  assert.equal(seen.length, 2, "one repair request only");
-  assert.deepEqual(warnedEvents(db, workId).map((event) => event.outcome), ["repair_requested", "accepted_with_warnings"]);
+  assert.equal(seen.length, 3, "repair requests up to the default limit of three calls");
+  assert.deepEqual(warnedEvents(db, workId).map((event) => event.outcome), ["repair_requested", "repair_requested", "accepted_with_warnings"]);
   const runIds = warnedEvents(db, workId).map((event) => event.manager_agent_run_id);
-  assert.equal(new Set(runIds).size, 2, "each Manager call gets its own warning record");
+  assert.equal(new Set(runIds).size, 3, "each Manager call gets its own warning record");
   assert.equal(taskCount(db, workId), 1, "the Task is not split mechanically");
 });
 
@@ -227,12 +227,12 @@ test("initial plan: a quality rejection opens no Decision at first and retries o
   ref.workId = workId;
   assert.ok(await waitFor(() => decisionCount(db, workId) === 1), "after the limit a Decision opens");
 
-  // Calls 1 to 3 are one tick (a repair request, then the final rejection); call 4 is the next tick after the first recovery.
+  // Calls 1 to 3 are one tick (repair requests, then the rejection on the last allowed call); call 4 is the next tick after the first recovery.
   assert.equal(seen[0], null);
   assert.match(seen[1], /"kind":"quality_repair"/);
-  assert.match(seen[2], /"kind":"quality_rejected"/);
-  assert.equal(seen[3], seen[2], "the next tick retries with the same feedback");
-  assert.equal(seen.length, 9, "three ticks of three calls each, none after the Decision");
+  assert.match(seen[2], /"kind":"quality_repair"/);
+  assert.match(seen[3], /"kind":"quality_rejected"/);
+  assert.equal(seen.length, 9, "three ticks of plan_rejection_attempts_max calls each, none after the Decision");
   assert.equal(atCall[3].decisions, 0);
   assert.equal(atCall[3].started, 1);
   assert.notEqual(atCall[3].state, "judgement_waiting");
@@ -240,6 +240,7 @@ test("initial plan: a quality rejection opens no Decision at first and retries o
   const records = startedRecords(db, workId);
   assert.deepEqual(records.map((record) => [record.kind, record.attempt_no, record.counted]), [["plan_quality_rejected", 1, true], ["plan_quality_rejected", 2, true]]);
   assert.equal(JSON.parse(records[0].previous_failure.detail).kind, "quality_rejected");
+  assert.deepEqual(JSON.parse(seen[3]), JSON.parse(records[0].previous_failure.detail), "the next tick retries with the feedback of the last rejection");
   const decision = db.get("SELECT tried FROM decisions WHERE work_id = ?", workId);
   assert.match(decision.tried, /自動で試したこと|Tried automatically/);
 });
@@ -259,6 +260,22 @@ test("initial plan: a validator rejection (plan_rejected) opens no Decision at f
   assert.match(db.get("SELECT tried FROM decisions WHERE work_id = ?", workId).tried, /自動で試したこと|Tried automatically/);
 });
 
+test("initial plan: a plan the parser rejects (criteria_relaxations not a list) goes back to the Manager with the Task and field named, then the fixed plan is registered", async (t) => {
+  const seen = [];
+  const bad = { ...managerTask("A", small), auto_recovery: { criteria_relaxations: "AC1" } };
+  const { db, core } = await openCore(t, [[bad], [bad], [managerTask("A", small)]], seen);
+  const workId = await startWork(core);
+  assert.ok(await waitFor(() => taskCount(db, workId) === 1));
+  assert.equal(seen.length, 3);
+  assert.equal(seen[0], null);
+  for (const feedback of seen.slice(1)) {
+    assert.match(feedback, /"kind":"fields_missing"/);
+    assert.match(feedback, /Task A: .*criteria_relaxations must be a list of criterion_id, reason and keeps/);
+  }
+  assert.equal(decisionCount(db, workId), 0);
+  assert.equal(startedRecords(db, workId).length, 0, "no recovery was started before the limit");
+});
+
 test("evaluatePlanQuality: an owner criterion needs a quote found in the Owner's words, and is then exempt from the weight checks", () => {
   const ownerTexts = ["Please check the 本番のデータ\n and run it on 全件 before release."];
   const owner = (quote, text = "ok", extra = {}) => item([criterion(1, text, { origin: { kind: "owner", source: "summary", quote }, ...extra })]);
@@ -269,4 +286,21 @@ test("evaluatePlanQuality: an owner criterion needs a quote found in the Owner's
   assert.deepEqual(run([owner("全件 before release", "Run it on 全件")]), []);
   assert.deepEqual(run([owner("本番のデータ", "本番のデータが前後で変わらない")]), []);
   assert.deepEqual(run([item([criterion(1, "Run it on 全件", { origin: { kind: "manager", source: null, quote: "" } })])]), ["heavy_check_unjustified"]);
+});
+
+test("evaluatePlanQuality: an owner criterion keeps the requirement of the Work summary section it quotes; other sources are not checked", () => {
+  const summary = "依頼: x\n\n受け入れ条件:\n- The build passes\n\n目標:\n- Add at least 10 tests";
+  const owner = (quote, requirement, source = "summary") => item([criterion(1, "ok", { origin: { kind: "owner", source, quote }, ...(requirement === undefined ? {} : { requirement }) })]);
+  const run = (list) => evaluatePlanQuality(list, S, [summary, "Make it required"], summary).map((warning) => warning.code);
+  assert.deepEqual(run([owner("Add at least 10 tests", "required")]), ["criterion_requirement_mismatch"]);
+  assert.deepEqual(run([owner("Add at least 10 tests", "goal")]), []);
+  assert.deepEqual(run([owner("The build passes", "goal")]), ["criterion_requirement_mismatch"]);
+  assert.deepEqual(run([owner("The build passes", "required")]), []);
+  assert.deepEqual(run([owner("The build passes", undefined)]), [], "no requirement reads as required");
+  assert.deepEqual(run([owner("Make it required", "goal", "instruction")]), [], "an instruction quote is not checked");
+  assert.deepEqual(run([owner("Make it required", "required", "decision_answer")]), []);
+});
+
+test("the default plan quality settings make criterion_requirement_mismatch blocking", () => {
+  assert.ok(S.blocking_codes.includes("criterion_requirement_mismatch"));
 });

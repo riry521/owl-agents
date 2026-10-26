@@ -75,13 +75,13 @@ export interface LibrarianOpsRequest {
     readonly status: string; readonly new_lines: number;
     /** Some `free` value is negative: its items are sent as long as they fit the batch, and it is to be split. */
     readonly over_limit: boolean;
-    /** Pages of the same scope and project (not this page): the only destinations split `into` and move may use. */
-    readonly move_to: readonly string[];
     /** Room left before each limit (negative = over): tokens, and lines per section except 更新履歴, which Core moves to _history itself before the operations. Null for a page that is not a theme. */
     readonly free: { readonly tokens: number; readonly lines: Readonly<Record<string, number>> } | null;
     /** Null when the page was left out of the token budget (or is dormant): it can still be linked or reactivated. */
     readonly items: readonly RequestSectionItems[] | null;
   }[];
+  /** The pages of this request's scope (common, or one Project), sent once: the only destinations split `into` and move may use. */
+  readonly scope_pages: { readonly scope: "project" | "common"; readonly project_id: string | null; readonly paths: readonly string[] };
   readonly dormant_candidates: readonly string[];
   /** Operations the previous run's last batch had rejected: do not propose them again. */
   readonly previous_rejections: readonly Record<string, unknown>[];
@@ -110,7 +110,7 @@ export const LIBRARIAN_RULES = [
   "Conversations: for each entry of `conversations`, output {op:\"take_conversation\", conversation: its path, h: its h, items:[{kind:\"decision\"|\"pitfall\"|\"fact\", text}]} with the decisions the Owner agreed to and the pitfalls/facts learned (one line each, no Work sources). The program appends them to theme pages as new lines.",
   "Clippings: for each entry of `clippings`, output {op:\"set_usage\", clipping: its path, h: its h, text} where text is one line saying when to use the clipping.",
   "Pages with over_limit true are over a limit, and `free` shows the room left (tokens, and lines per section; a negative number is over). Every section with negative room must come down, 概要 and 決まりごと as well as 落とし穴. Move its lines out with split, grouped by theme; each line keeps its section. Give each destination one split that carries all the lines going there. To add lines to a listed page of the same scope and project_id, use split{page,items,relation,into:\"<that page's path>\"}. Create a page with split{page,items,relation,new_title,new_summary} only when no listed page fits. A page that receives lines must fit every limit afterwards, so never send lines to a page with over_limit true, and send no more than its `free` allows. A page that only gives lines may stay over a limit while it shrinks, but nothing over a limit may grow and nothing within a limit may cross it; such an operation is rejected. While any page is over a limit, bring it down first: taking new lines in does not count as progress until every page fits. When the page is the 「その他」 page (title " + OTHER_NOTES_TITLE + ") or a numbered continuation of it, never create or fill a numbered continuation page (a title or path ending in a number); move each line to a page named for its theme, new or listed. Also merge pages and lines of similar themes instead of leaving small near-duplicates.",
-  "`move_to` of each page lists the only pages that may receive its lines (same scope and project); never send lines anywhere else, and never promote a project line to a common page with split. `previous_rejections` holds operations rejected last time: do not propose them again; choose another destination or fewer lines.",
+  "`scope_pages.paths` lists the only pages that may receive lines (every page in a request has the same scope and project_id); never send lines anywhere else, and never promote a project line to a common page with split. `previous_rejections` holds operations rejected last time: do not propose them again; choose another destination or fewer lines.",
   "dormant only for pages listed in `dormant_candidates`; never delete or shorten lines to fit a size limit.",
   "Every text field is one line without Work sources, ULIDs, API keys or tokens.",
   KNOWLEDGE_EXTERNAL_COMMAND_RULE,
@@ -202,6 +202,15 @@ interface BuiltRequest {
   readonly size: number;
   readonly warnings: readonly PageOpsWarning[];
 }
+/** Active, dormant and archived pages split by scope: common, and each Project. Every group becomes its own request. */
+const scopeGroups = (rows: readonly PageRow[]): readonly (readonly PageRow[])[] => {
+  const groups = new Map<string, PageRow[]>();
+  for (const row of rows) {
+    const key = row.page_scope === "common" ? "common" : `project:${row.project_id ?? ""}`;
+    groups.set(key, [...groups.get(key) ?? [], row]);
+  }
+  return groups.size === 0 ? [[]] : [...groups.values()];
+};
 const modifiedAt = async (path: string): Promise<number> => (await stat(path).catch(() => null))?.mtimeMs ?? 0;
 
 class WriteError extends Error {
@@ -301,53 +310,72 @@ export class PageLibrarian {
       if (rows.length === 0 && pending.conversations.length === 0 && pending.clippings.length === 0) return report;
       const candidates = new Set((await this.options.dormantCandidates?.() ?? []).map((c) => normalizePath(c.path)));
       const limit = this.options.batch?.().max_input_tokens ?? Number.POSITIVE_INFINITY;
-      // An output over the limit is not thrown away: the same batch is asked again with half of the items it actually held (pages sent in full, conversations and clippings together) until one is left.
-      let built = await this.buildRequest(input, rows, candidates, pending);
-      for (;;) {
-        // What was left out of this request (a page too big for it) stays on the report on every way out, `applyAll` appending its own.
-        report.warnings = built.warnings;
-        report.input_tokens = estimatePageTokens(JSON.stringify(built.request));
-        if (report.input_tokens > limit) {
-          return { ...report, error: "input_over_limit" };
+      // One request per scope (common, or one Project): the fixed part holds only that scope's pages, so it grows with the pages of a
+      // scope and not with all pages. The entries (conversations, clippings) go with the first scope and are not sent again.
+      // Raising `max_input_tokens` was not chosen: the fixed part would reach any limit again as pages are added.
+      const savedRejections: (RejectedOp & { raw?: unknown })[] = [];
+      let waiting = pending;
+      for (const group of scopeGroups(rows)) {
+        // An output over the limit is not thrown away: the same batch is asked again with half of the items it actually held (pages sent in full, conversations and clippings together) until one is left.
+        let built = await this.buildRequest(input, group, candidates, waiting);
+        let sent = 0;
+        let tooBig: string | null = null;
+        for (;;) {
+          // What was left out of this request (a page too big for it) stays on the report on every way out, `applyAll` appending its own.
+          report.warnings = [...report.warnings, ...built.warnings];
+          const tokens = estimatePageTokens(JSON.stringify(built.request));
+          sent += tokens;
+          if (tokens > limit) {
+            tooBig = `input_over_limit: scope=${built.request.scope_pages.scope} project_id=${built.request.scope_pages.project_id ?? "none"} pages=${group.length} tokens=${tokens} limit=${limit}; rules と page 情報は要約などを省いても上限に入らない`;
+            break;
+          }
+          report.llm_calls += 1;
+          const proposed = await this.call(built.request);
+          parsed = !proposed.ok ? { error: proposed.error }
+            : estimatePageTokens(JSON.stringify(proposed.output ?? null)) > this.limits.output_tokens ? { error: "output_over_limit" }
+              : parseOperationsOutput(proposed.output);
+          if (!("error" in parsed) || parsed.error !== "output_over_limit" || built.size <= 1) break;
+          const smaller = await this.buildRequest(input, group, candidates, waiting, Math.floor(built.size / 2));
+          if (smaller.size >= built.size) break; // fewer items is the only way a retry helps: the same input would only fail again
+          built = smaller;
         }
-        report.llm_calls += 1;
-        const proposed = await this.call(built.request);
-        parsed = !proposed.ok ? { error: proposed.error }
-          : estimatePageTokens(JSON.stringify(proposed.output ?? null)) > this.limits.output_tokens ? { error: "output_over_limit" }
-            : parseOperationsOutput(proposed.output);
-        if (!("error" in parsed) || parsed.error !== "output_over_limit" || built.size <= 1) break;
-        const smaller = await this.buildRequest(input, rows, candidates, pending, Math.floor(built.size / 2));
-        if (smaller.size >= built.size) break; // fewer items is the only way a retry helps: the same input would only fail again
-        built = smaller;
+        report.input_tokens += sent;
+        if (tooBig !== null) { report.error = tooBig; break; }
+        waiting = { conversations: [], clippings: [] };
+        const { conversations, clippings } = built;
+        if (parsed === null || "error" in parsed) {
+          const error = parsed?.error ?? "no_output";
+          this.recordFailure(error);
+          report.error = error;
+          break;
+        }
+        const themeOps: { op: unknown; index: number }[] = [];
+        const extraOps: { op: unknown; index: number }[] = [];
+        parsed.ops.forEach((raw, index) => {
+          const flat = normalizeOp(raw, EXTRA_SPECS);
+          // Only these two are taken here; every other shape goes on unchanged to applyOperations, which has its own table.
+          if (flat !== null) extraOps.push({ op: flat, index });
+          else themeOps.push({ op: raw, index });
+        });
+        // Lines taken out of conversations go first, so the theme pass below sees (and stamps around) them.
+        const extra = await this.applyExtra(extraOps, rows, { conversations, clippings }, ctx);
+        settled = { applied: settled.applied + extra.applied, pages: [...settled.pages, ...extra.pages] };
+        const themed = { pages: report.pages, applied: 0, rejected: [] as readonly RejectedOp[], warnings: [] as PageRunReport["warnings"] };
+        await this.options.vault.withWrite(async () => {
+          await this.applyAll(themeOps.map((o) => o.op), rows, candidates, rest, themed);
+        });
+        report.applied += themed.applied + extra.applied;
+        report.warnings = [...report.warnings, ...themed.warnings];
+        // The rejected index is a position in themeOps; it is mapped back to parsed.ops before the operation is looked up and saved.
+        const rejected = [...themed.rejected.map((r) => ({ ...r, index: themeOps[r.index]?.index ?? r.index })), ...extra.rejected].sort((a, b) => a.index - b.index);
+        const allOps = parsed.ops;
+        report.rejected = [...report.rejected, ...rejected];
+        savedRejections.push(...rejected.map((r) => ({ ...r, raw: allOps[r.index] })));
+        for (const path of extra.pages) if (!report.pages.some((p) => p.path === path)) report.pages.push({ path, action: "updated" });
       }
-      const { conversations, clippings } = built;
-      if (parsed === null || "error" in parsed) {
-        const error = parsed?.error ?? "no_output";
-        this.recordFailure(error);
-        return { ...report, error };
-      }
-      const themeOps: { op: unknown; index: number }[] = [];
-      const extraOps: { op: unknown; index: number }[] = [];
-      parsed.ops.forEach((raw, index) => {
-        const flat = normalizeOp(raw, EXTRA_SPECS);
-        // Only these two are taken here; every other shape goes on unchanged to applyOperations, which has its own table.
-        if (flat !== null) extraOps.push({ op: flat, index });
-        else themeOps.push({ op: raw, index });
-      });
-      // Lines taken out of conversations go first, so the theme pass below sees (and stamps around) them.
-      const extra = await this.applyExtra(extraOps, rows, { conversations, clippings }, ctx);
-      settled = extra;
-      await this.options.vault.withWrite(async () => {
-        await this.applyAll(themeOps.map((o) => o.op), rows, candidates, rest, report);
-      });
-      report.applied += extra.applied;
-      // The rejected index is a position in themeOps; it is mapped back to parsed.ops before the operation is looked up and saved.
-      report.rejected = [...report.rejected.map((r) => ({ ...r, index: themeOps[r.index]?.index ?? r.index })), ...extra.rejected].sort((a, b) => a.index - b.index);
-      const allOps = parsed.ops;
-      await this.saveRejections(report.rejected.map((r) => ({ ...r, raw: allOps[r.index] })));
-      for (const path of extra.pages) if (!report.pages.some((p) => p.path === path)) report.pages.push({ path, action: "updated" });
+      await this.saveRejections(savedRejections);
       await this.rebuildIndexes(rest, ctx.touched);
-      this.clearFailure();
+      if (!report.error) this.clearFailure();
       report.remaining = await this.countNewLines();
     } catch (error) {
       if (!(error instanceof WriteError)) throw error;
@@ -384,31 +412,49 @@ export class PageLibrarian {
    * warning tells the next run (with a larger room, or after a split) to come back to it. Only the over-limit pages are moved ahead
    * of the entries; the run's own `input_tokens` limit stays on the pages it always held back, which the entries never obeyed either.
    */
-  private async buildRequest(input: PageRunInput, rows: readonly PageRow[], candidates: ReadonlySet<string>, pending: PendingScan, cap = Number.POSITIVE_INFINITY): Promise<BuiltRequest> {
+  private async buildRequest(input: PageRunInput, group: readonly PageRow[], candidates: ReadonlySet<string>, pending: PendingScan, cap = Number.POSITIVE_INFINITY): Promise<BuiltRequest> {
     const batch = this.options.batch?.() ?? { max_items: Number.POSITIVE_INFINITY, max_input_tokens: Number.POSITIVE_INFINITY };
     const root = this.options.vault.activeDir();
     const wanted = input.paths ? new Set(input.paths.map(normalizePath)) : null;
-    const loaded = await Promise.all(rows.map(async (row) => ({ row, text: await readText(join(root, row.path)) })));
+    const loaded = await Promise.all(group.map(async (row) => ({ row, text: await readText(join(root, row.path)) })));
     const usable = loaded.filter((entry): entry is { row: PageRow; text: string } => entry.text !== null);
     const free = new Map(usable.map((entry) => [entry.row.path, freeOf(sizeOf(entry.text))]));
     const over = new Map([...free].map(([path, f]) => [path, f !== null && (f.tokens < 0 || Object.values(f.lines).some((v) => v < 0))]));
+    // Without the summaries the page metadata is much shorter, so they are the first thing to go when the fixed part is over the limit.
+    let summaries = true;
     const meta = (row: PageRow, text: string) => ({
       over_limit: over.get(row.path) === true,
-      move_to: usable.filter((o) => o.row.path !== row.path && o.row.page_scope === row.page_scope && o.row.project_id === row.project_id).map((o) => o.row.path),
       free: free.get(row.path) ?? null,
-      path: row.path, title: row.title, summary: row.summary, scope: row.page_scope === "common" ? "common" as const : "project" as const,
+      path: row.path, title: row.title, summary: summaries ? row.summary : "", scope: row.page_scope === "common" ? "common" as const : "project" as const,
       project_id: row.project_id, status: row.status, new_lines: (text.match(/<!--\s*owl:new\b/gu) ?? []).length,
     });
-    const fixed: LibrarianOpsRequest = {
-      run_id: input.run_id, pages: usable.map(({ row, text }) => ({ ...meta(row, text), items: null })), dormant_candidates: [...candidates], previous_rejections: this.loadRejections(), conversations: [], clippings: [],
+    const scope = group[0]?.page_scope === "common" ? "common" as const : "project" as const;
+    const scopePages = { scope, project_id: group[0]?.project_id ?? null, paths: usable.map((o) => o.row.path) };
+    let rejections = this.loadRejections();
+    let dormant = usable.map((o) => o.row.path).filter((path) => candidates.has(path));
+    const makeFixed = (): LibrarianOpsRequest => ({
+      run_id: input.run_id, pages: usable.map(({ row, text }) => ({ ...meta(row, text), items: null })), scope_pages: scopePages, dormant_candidates: dormant, previous_rejections: rejections, conversations: [], clippings: [],
       rules: LIBRARIAN_RULES, model: this.options.model(), max_output_tokens: this.limits.output_tokens,
-    };
+    });
+    const warnings: PageOpsWarning[] = [];
+    let fixed = makeFixed();
+    // A fixed part over the limit is cut down step by step instead of stopping the run; only when nothing is left to cut does runBatch report it.
+    const reductions: readonly (readonly [string, () => void])[] = [
+      ["page 要約を省いた", () => { summaries = false; }],
+      ["前回の却下を省いた", () => { rejections = []; }],
+      ["休眠候補を省いた", () => { dormant = []; }],
+    ];
+    for (const [what, cut] of reductions) {
+      if (estimatePageTokens(JSON.stringify(fixed)) <= batch.max_input_tokens) break;
+      cut();
+      fixed = makeFixed();
+      warnings.push({ code: "fixed_part_reduced", message: `rules と page 情報が max_input_tokens (${batch.max_input_tokens}) を超えたため、量を減らして続けた: ${what}` });
+    }
     // The room the pages' items and the entries use comes out of this one pool: what is left of `max_input_tokens` once the fixed
     // part (`rules`, the page metadata) is paid for. The over-limit pages take their room from it first, so the page the run is
     // about is never pushed out by the entries; the entries take theirs next, skipped and never cut when they do not fit, so one is
     // never marked done unread; the other pages take what is left under the run's own input limit, as before.
     let room = Math.max(0, batch.max_input_tokens - estimatePageTokens(JSON.stringify(fixed)));
-    const warnings: PageOpsWarning[] = [];
     const itemsOfPage = (row: PageRow, text: string): LibrarianOpsRequest["pages"][number]["items"] =>
       itemsOf(text).map((s) => ({ section: s.section, items: s.items.map((i) => ({ ref: { page: row.path, section: s.section, h: i.h }, text: i.text })) }));
     // Ranked so the pages to split come first, then the ones with new lines, then the dormant candidates and the rest: this is the

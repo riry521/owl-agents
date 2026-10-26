@@ -19,6 +19,10 @@ export interface ProgressGuardSettings {
   readonly partial_limit: number;
   /** Seconds Core waits for the explanation of a waiting Decision before it notifies with the plain text. */
   readonly decision_explanation_timeout_seconds: number;
+  /** Times Core asks for a rewrite of a Decision explanation that failed a check before it stores the fixed-form explanation. */
+  readonly decision_explanation_rewrites_max: number;
+  /** Manager calls Core makes for one plan or replan that is rejected for a missing field or a format error, before it asks the Owner. */
+  readonly plan_rejection_attempts_max: number;
 }
 
 export const DEFAULT_PROGRESS_GUARD_SETTINGS: ProgressGuardSettings = {
@@ -31,6 +35,8 @@ export const DEFAULT_PROGRESS_GUARD_SETTINGS: ProgressGuardSettings = {
   external_blocker_limit: 2,
   partial_limit: 3,
   decision_explanation_timeout_seconds: 300,
+  decision_explanation_rewrites_max: 2,
+  plan_rejection_attempts_max: 3,
 };
 export const PROGRESS_GUARD_RANGES = {
   no_progress_limit: { min: 1, max: 100 },
@@ -41,6 +47,8 @@ export const PROGRESS_GUARD_RANGES = {
   external_blocker_limit: { min: 0, max: 20 },
   partial_limit: { min: 1, max: 20 },
   decision_explanation_timeout_seconds: { min: 30, max: 1800 },
+  decision_explanation_rewrites_max: { min: 0, max: 5 },
+  plan_rejection_attempts_max: { min: 1, max: 10 },
 } as const;
 
 export class ProgressGuardSettingsValidationError extends Error {

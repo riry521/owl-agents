@@ -20,6 +20,7 @@ import { waitFor } from "../helpers/wait.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
 import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { findInternalTerms } from "../../packages/shared/dist/decision-explanation.js";
+import { toDecisionExplanation } from "../../packages/core/dist/decision-explainer.js";
 
 // A Worker that reports a criterion as "unverifiable" must not be restarted and
 // its Task must not be replaced: Core asks the Manager to rewrite the criterion
@@ -137,6 +138,20 @@ test("report schema and prompt describe unverifiable", () => {
   const gate = evaluateWorkerCompletion({ ...unverifiableReport("i"), result: "success" }, { hybrid: false, delegated_work_detected: false });
   assert.equal(gate.passed, false);
   assert.equal(gate.error_key, "worker_acceptance_unverifiable");
+});
+
+test("an unverifiable required criterion still reaches the defect path, an unverifiable goal does not", () => {
+  const stored = (requirement) => ({ id: "AC1", text: BAD_CRITERION, check: "c", serves: "s", if_omitted: "i", check_weight: "light", weight_reason: "", ...(requirement ? { requirement } : {}) });
+  const task = (requirement) => ({ acceptance: "a", acceptance_criteria: [stored(requirement), { ...stored(), id: "AC2", text: "The feature file exists." }] });
+  const base = unverifiableReport("i");
+  const acceptance = base.verification.acceptance.map(({ criterion: _text, ...item }) => item);
+  const stdout = JSON.stringify({ ...base, verification: { ...base.verification, acceptance }, pending_process: null, external_blocker: null });
+  const run = (requirement) => normalizeWorkerResponseWithFeedback({ adapter: "claude-cli/v1", stdout, format: "plain-text" }, "i", false, task(requirement)).report;
+  assert.deepEqual(workerAcceptanceDefects(run(undefined)).map((d) => d.criterion_id), ["AC1"]);
+  assert.deepEqual(workerAcceptanceDefects(run("required")).map((d) => d.criterion_id), ["AC1"]);
+  const goal = run("goal");
+  assert.deepEqual(workerAcceptanceDefects(goal), []);
+  assert.deepEqual([goal.verification.acceptance[0].status, goal.verification.acceptance[0].shortfall_reason], ["goal_unmet", REASON]);
 });
 
 test("report schema and prompt describe external_blocker", () => {
@@ -523,10 +538,12 @@ const goodExplanation = (patch = {}) => ({
   summary: "The work is finished, but the criterion averages three trials, so the startup time makes it fail.",
   cause_kind: "criteria",
   options: [
-    { label: "Reword the criterion", description: "Measure the time without startup and retry the Task.", instruction: "Reword the criterion and retry the Task.", criteria_rewrites: [{ criterion_id: "AC1", after: CRITERIA_AFTER, check: CRITERIA_CHECK }] },
+    { label: "Do you want to reword the criterion?", description: "Measure the time without startup and retry the Task.", instruction: "Reword the criterion and retry the Task.", criteria_rewrites: [{ criterion_id: "AC1", after: CRITERIA_AFTER, check: CRITERIA_CHECK }] },
     { label: "Speed up startup", description: "Keep the criterion and add work that shortens startup.", instruction: "Add work that shortens startup and retry the Task.", criteria_rewrites: [] },
   ],
-  recommended_option: 0,
+  next_steps: "Pick the first option to reword the criterion and run the Task again.",
+  option_notes: [{ key: "retry", note: "The Task runs again without changes." }, { key: "cancel", note: "Stop the Task for good." }],
+  recommended_option_key: "fix_1",
   ...patch,
 });
 
@@ -572,7 +589,12 @@ test("two partial reports open one Decision, and the explanation, fix options an
 
   assert.ok(await waitFor(() => openedEvents(db, workId).length === 1));
   const opened = openedEvents(db, workId)[0];
-  assert.deepEqual(opened.explanation, { summary: row.explanation.summary, cause_kind: row.explanation.cause_kind });
+  assert.deepEqual(opened.explanation, { summary: row.explanation.summary, cause_kind: row.explanation.cause_kind, next_steps: row.explanation.next_steps, option_notes: row.explanation.option_notes });
+  assert.equal(row.explanation.next_steps, goodExplanation().next_steps);
+  assert.deepEqual(row.explanation.option_notes, goodExplanation().option_notes);
+  // The Decision's own options keep their key, label and description; only the fix options are added in front.
+  assert.deepEqual(row.options.slice(2).map((option) => option.key), ["retry", "cancel"]);
+  assert.ok(row.options.slice(2).every((option) => !("note" in option)));
   assert.equal(opened.recommended, "fix_1");
 
   assert.equal(runner.state.explanationRequests.length, 1, "one explanation job per Decision");
@@ -599,10 +621,10 @@ test("a criteria cause carries the reworded criterion with the original text cop
   assert.equal(rewrite.check, CRITERIA_CHECK);
 });
 
-test("a Decision opens with the plain text when the explanation cannot be made", async (t) => {
+test("a Decision opens with Core's fixed-form explanation when the model's cannot be made", async (t) => {
   const cases = {
     "no runDecisionExplanation": [undefined, "runner_unavailable"],
-    "recommended_option out of range": [() => ({ ok: true, explanation: goodExplanation({ recommended_option: 5 }) }), "recommended_option out of range"],
+    "recommended_option_key unknown": [() => ({ ok: true, explanation: goodExplanation({ recommended_option_key: "fix_5" }) }), "recommended_option_key must be one of: fix_1, fix_2"],
     "summary with an internal term": [() => ({ ok: true, explanation: goodExplanation({ summary: "A partial report came back twice." }) }), "internal_terms"],
   };
   for (const [name, [explain, error]] of Object.entries(cases)) {
@@ -611,13 +633,14 @@ test("a Decision opens with the plain text when the explanation cannot be made",
     runner.state.db = db;
     const workId = await startWork(core, `failed-${name.replaceAll(" ", "-")}`);
 
-    assert.ok(await waitFor(() => explanationOf(db, workId)?.explanation.status === "failed"), `${name}: failed (${JSON.stringify(explanationOf(db, workId))})`);
+    assert.ok(await waitFor(() => explanationOf(db, workId)?.explanation.plain === true), `${name}: fixed-form (${JSON.stringify(explanationOf(db, workId))})`);
     const row = explanationOf(db, workId);
     assert.equal(row.explanation.error, error, name);
     assert.deepEqual(row.options.map((option) => option.key), ["retry", "cancel"], name);
     assert.equal(row.recommended, null, name);
     assert.ok(await waitFor(() => openedEvents(db, workId).length === 1), `${name}: decision.opened is emitted`);
-    assert.equal(openedEvents(db, workId)[0].explanation, undefined, name);
+    assert.equal(openedEvents(db, workId)[0].explanation.summary, row.explanation.summary, name);
+    assert.ok(row.explanation.summary.length > 0 && row.explanation.next_steps.length > 0, name);
   }
 });
 
@@ -653,4 +676,24 @@ test("choosing the recommended fix option sends its instruction to the Manager, 
   const resolved = db.all("SELECT payload_json FROM events WHERE work_id = ? AND type = 'decision.resolved'", workId).map((event) => JSON.parse(event.payload_json));
   assert.equal(resolved.length, 1);
   assert.equal(resolved[0].chosen_option.criteria_rewrites[0].after, CRITERIA_AFTER);
+});
+
+test("the explanation leaves the Decision's own options as they were, and an old ready row reads without next_steps", async (t) => {
+  const plain = explainingRunner(undefined);
+  const first = await openCore(t, plain, limitOne);
+  plain.state.db = first.db;
+  const plainWork = await startWork(first.core, "own-options-plain");
+  assert.ok(await waitFor(() => explanationOf(first.db, plainWork)?.explanation.plain === true));
+  const before = explanationOf(first.db, plainWork).options;
+
+  const runner = explainingRunner(() => ({ ok: true, explanation: goodExplanation() }));
+  const second = await openCore(t, runner, limitOne);
+  runner.state.db = second.db;
+  const workId = await startWork(second.core, "own-options-explained");
+  assert.ok(await waitFor(() => explanationOf(second.db, workId)?.explanation.status === "ready"));
+  assert.deepEqual(explanationOf(second.db, workId).options.slice(2), before, "key, label and description of retry and cancel are unchanged");
+
+  assert.deepEqual(toDecisionExplanation(JSON.stringify({ kind: "partial_limit", status: "ready", summary: "Old.", cause_kind: "work" })), {
+    kind: "partial_limit", status: "ready", summary: "Old.", cause_kind: "work", next_steps: null, option_notes: [],
+  });
 });

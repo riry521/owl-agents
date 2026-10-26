@@ -184,7 +184,7 @@ test("a write failure on one entry leaves only that entry pending, and an input 
   await writeFile(join(env.vault, "conversations", "2026-11", "next.md"), conversation("next"));
   batch.current = { max_items: 10, max_input_tokens: 1 };
   const before = env.requests.length;
-  assert.equal((await env.run()).error, "input_over_limit");
+  assert.match((await env.run()).error, /^input_over_limit/u);
   assert.equal(env.requests.length, before);
 });
 
@@ -589,4 +589,72 @@ test("a rejected take_conversation keeps a line another writer added between two
   const report = await env.run();
   assert.ok(report.rejected.some((r) => r.code.startsWith("route_failed")), JSON.stringify(report.rejected));
   assert.match(await readFile(join(vault, themeA), "utf8"), /別の書き手が足した行/u);
+});
+
+/** Theme pages written by hand under `themes/`: `scopes` is [[count, scope, project_id], ...]; the index is replaced by exactly these rows. */
+async function scopedEnv(t, scopes, batch, { summary = "要約", propose = async () => ({ ok: true, output: { operations: [] } }) } = {}) {
+  const rows = scopes.flatMap(([count, scope, project], s) => Array.from({ length: count }, (_, i) => ({
+    path: `themes/s${s}-${i}.md`, title: `テーマ ${s}-${i}`, summary: `${summary} ${s}-${i}`, page_scope: scope, project_id: project, status: "active", owl_new_count: 0,
+  })));
+  const env = await setup(t, { conversations: 0, batch, propose, themeRows: () => rows });
+  await mkdir(join(env.vault, "themes"), { recursive: true });
+  for (const row of rows) await writeFile(join(env.vault, row.path), themePage(createUlid(), row.title));
+  return env;
+}
+const tokensOf = (request) => estimatePageTokens(JSON.stringify(request));
+
+test("the fixed part of a request grows with the pages of its scope, not with their square", async (t) => {
+  const batch = { current: { max_items: 20, max_input_tokens: 10_000_000 } };
+  const small = await scopedEnv(t, [[60, "common", null]], batch);
+  await small.run();
+  const large = await scopedEnv(t, [[120, "common", null]], batch);
+  await large.run();
+  const ratio = tokensOf(large.requests[0]) / tokensOf(small.requests[0]);
+  assert.ok(ratio < 2.5, `120 pages cost ${ratio}x of 60 pages`);
+  assert.ok(large.requests[0].pages.every((p) => !("move_to" in p)));
+  assert.equal(large.requests[0].scope_pages.paths.length, 120);
+});
+
+test("a vault of 63 common and about 60 project pages is sent within max_input_tokens=60000 and reaches the model", async (t) => {
+  const batch = { current: { max_items: 20, max_input_tokens: 60000 } };
+  const env = await scopedEnv(t, [[63, "common", null], [20, "project", "P1"], [20, "project", "P2"], [20, "project", "P3"]], batch);
+  const report = await env.run();
+  assert.notEqual(report.error, "input_over_limit");
+  assert.equal(report.error, undefined);
+  assert.ok(env.requests.length >= 1);
+  for (const request of env.requests) assert.ok(tokensOf(request) <= 60000);
+});
+
+test("each request holds the pages of one scope only, and every scope is sent", async (t) => {
+  const batch = { current: { max_items: 20, max_input_tokens: 60000 } };
+  const env = await scopedEnv(t, [[3, "common", null], [4, "project", "P1"], [5, "project", "P2"]], batch);
+  await env.run();
+  assert.equal(env.requests.length, 3);
+  for (const request of env.requests) {
+    assert.equal(new Set(request.pages.map((p) => `${p.scope}:${p.project_id}`)).size, 1);
+    assert.deepEqual(request.pages.map((p) => p.path), request.scope_pages.paths);
+  }
+  assert.deepEqual(env.requests.flatMap((r) => r.pages.map((p) => p.path)).sort(), Array.from({ length: 12 }, (_, i) => i).map((i) => (i < 3 ? `themes/s0-${i}.md` : i < 7 ? `themes/s1-${i - 3}.md` : `themes/s2-${i - 7}.md`)).sort());
+});
+
+test("a fixed part over max_input_tokens is cut down with a warning and still sent; when nothing more can be cut the error says what did not fit", async (t) => {
+  const long = "とても長い要約です。".repeat(60);
+  const batch = { current: { max_items: 20, max_input_tokens: 10_000_000 } };
+  const env = await scopedEnv(t, [[30, "common", null]], batch, { summary: long });
+  await env.run();
+  // The fixed part alone: the request without any page items.
+  const whole = tokensOf({ ...env.requests[0], pages: env.requests[0].pages.map((p) => ({ ...p, items: null })) });
+
+  batch.current = { max_items: 20, max_input_tokens: whole - 1 };
+  const reduced = await env.run();
+  assert.equal(reduced.error, undefined);
+  assert.equal(env.requests.length, 2, "the model is called with the smaller request");
+  assert.ok(tokensOf(env.requests[1]) <= whole - 1);
+  assert.ok(env.requests[1].pages.every((p) => p.summary === ""));
+  assert.ok(reduced.warnings.some((w) => w.code === "fixed_part_reduced"), JSON.stringify(reduced.warnings));
+
+  batch.current = { max_items: 20, max_input_tokens: 100 };
+  const failed = await env.run();
+  assert.equal(env.requests.length, 2, "nothing is sent when even the reduced request does not fit");
+  assert.match(failed.error, /^input_over_limit: scope=common .*pages=30 tokens=\d+ limit=100/u);
 });

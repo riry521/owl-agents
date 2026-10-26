@@ -379,10 +379,12 @@ Both are optional, and saving the settings connects right away without a restart
 4. Invite the bot to the channels you want to use (`/invite @owl-agent`), and copy each channel ID from the bottom of the channel details.
 5. In Owl, open **Settings → Integrations → Slack**, enter the tokens and channel IDs, and save.
 
+To let the Advisor send files to Slack, the bot needs the `files:write` scope. If you created the app before this scope was added, add `files:write` under **OAuth & Permissions → Bot Token Scopes**, then choose **Reinstall to Workspace**. The folders the Advisor may send from and the size limits can be changed with `advisor_send_file_dirs`, `advisor_send_file_slack_max_bytes` and `advisor_send_file_discord_max_bytes` in `app-settings.json`.
+
 ### Discord
 
 1. Open the [Discord Developer Portal](https://discord.com/developers/applications), create an application, and copy the token from the **Bot** page. On the same page, turn on **Message Content Intent**.
-2. Under **OAuth2 → URL Generator**, choose the `bot` scope and the **Send Messages**, **Read Message History**, and **Embed Links** permissions. Open the generated URL to add the bot to your server.
+2. Under **OAuth2 → URL Generator**, choose the `bot` scope and the **Send Messages**, **Read Message History**, and **Embed Links**, and **Attach Files** permissions. To send files in threads, also give **Send Messages in Threads**. If the bot is already on your server, grant these in the server's role or channel permissions. Open the generated URL to add the bot to your server.
 3. Turn on Developer Mode in Discord (**User Settings → Advanced**), then right-click each channel and choose **Copy Channel ID**.
 4. In Owl, open **Settings → Integrations → Discord**, enter the token and channel IDs, and save.
 

@@ -4,7 +4,7 @@ import { type FormEvent, useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ApiRequestError, browseProjectFolders, deleteProject, getActiveConversation, getProjectDeletionImpact, inspectProjectFolder, getTestSetupInvestigation, investigateTestSetup, listProjects, postMessage, setupProject, updateProject } from '@/lib/api-client';
-import type { DeleteProjectResult, Project, ProjectDeletionImpact, ProjectFolderBrowserResult, ProjectFolderInspection, ProjectRunningWork, ProjectSetupInput } from '@/lib/types';
+import type { DeleteProjectResult, Project, WindowChannelError, ProjectDeletionImpact, ProjectFolderBrowserResult, ProjectFolderInspection, ProjectRunningWork, ProjectSetupInput } from '@/lib/types';
 import { buildProjectUpdateInput, deletionDialogModel, formatCommandLine, impactFromError, INVESTIGATE_POLL_INTERVAL_MS, INVESTIGATE_POLL_TIMEOUT_MS, investigateNoticeKey, investigateOutcome, isProjectAutoPushEnabled, postMergeCommandPlaceholder, projectEditForm, projectErrorKey, type ProjectEditForm, type TestRunMode } from '@/lib/project-management';
 import { workStateLabels } from '@/lib/format';
 import { useLocale, type Locale, type TFunction } from '@/lib/i18n';
@@ -297,11 +297,12 @@ export function ProjectsView({ pollIntervalMs = INVESTIGATE_POLL_INTERVAL_MS, po
     setProjectNotice(null);
     setProjectNoticeError(false);
     try {
-      await updateProject(project.id, input);
+      const updated = await updateProject(project.id, input);
+      const channelNotes = windowChannelNotes(updated.window_channels, t);
       setEditingId(null);
       clearInvestigation();
-      setProjectNotice(t('projects.editSuccess'));
-      setProjectNoticeError(false);
+      setProjectNotice([t('projects.editSuccess'), ...channelNotes].join(' '));
+      setProjectNoticeError(channelNotes.length > 0);
       await refresh();
     } catch (error) {
       console.error('[Owl] Project update failed', error);
@@ -566,6 +567,19 @@ export function ProjectsView({ pollIntervalMs = INVESTIGATE_POLL_INTERVAL_MS, po
                           disabled={busyProjectId !== null}
                         />
                         <p className="note">{t('projects.autoPushHelp')}</p>
+                      </div>
+                      <div className="form-row">
+                        <span id={`advisor-window-label-${project.id}`}>{t('projects.advisorWindowLabel')}</span>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={editForm.advisorWindowEnabled === true}
+                          aria-labelledby={`advisor-window-label-${project.id}`}
+                          className={`toggle-switch toggle-switch--${editForm.advisorWindowEnabled ? 'on' : 'off'}`}
+                          onClick={() => setEditForm((current) => ({ ...current, advisorWindowEnabled: !current.advisorWindowEnabled }))}
+                          disabled={busyProjectId !== null}
+                        />
+                        <p className="note">{t('projects.advisorWindowHelp')}</p>
                       </div>
                       <label className="form-field">
                         <span>{t('projects.commitLanguageLabel')}</span>
@@ -944,4 +958,17 @@ function isProjectError(error: unknown, code: string): boolean {
   return error instanceof ApiRequestError
     ? error.code === code
     : error instanceof Error && error.message === code;
+}
+
+/** Messages for the channels that failed or whose invite was skipped when a window was turned on. */
+function windowChannelNotes(results: Project['window_channels'], t: TFunction): string[] {
+  const notes: string[] = [];
+  for (const [provider, result] of Object.entries(results ?? {})) {
+    const reason = (error: WindowChannelError) =>
+      error.message + (error.needed?.length ? t('projects.windowChannelNeeded', { needed: error.needed.join(', ') }) : '');
+    if (result.status === 'failed' && result.error) notes.push(t('projects.windowChannelFailed', { provider, reason: reason(result.error) }));
+    if (result.invite === 'skipped_no_owner_user_id') notes.push(t('projects.windowChannelInviteSkipped', { provider }));
+    if (result.invite === 'failed' && result.invite_error) notes.push(t('projects.windowChannelInviteFailed', { provider, reason: reason(result.invite_error) }));
+  }
+  return notes;
 }

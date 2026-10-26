@@ -18,6 +18,7 @@ import {
 } from "./contracts.js";
 import { agentTimeoutConfigurationError, configuredApiToken, configuredBind, configuredIdempotencyTtlMs, configuredPort, configuredScreenViewLimits, providerMode, serverExposureError } from "./config.js";
 import { createConfiguredCore } from "./core.js";
+import { createDecisionTextChecksFromEnv } from "./decision-text-checks.js";
 import { createOwnApiCaller } from "./own-api-caller.js";
 import { ConnectorManager, formatConnectorFailure } from "./connector-manager.js";
 import { createPluginManagerFromEnv, type PluginManager } from "./plugin-manager.js";
@@ -30,7 +31,7 @@ import { prepareConnectorConfig } from "./secret-config.js";
 import { resolveInstanceId } from "../../../packages/shared/dist/instance-id.js";
 import { classifyProviderFailure } from "../../../packages/agent-runtime/dist/index.js";
 
-const SERVER_VERSION = "0.6.1";
+const SERVER_VERSION = "0.7.0";
 
 async function recordServerFailure(referenceId: string, context: string, error: unknown): Promise<void> {
   const raw = error instanceof Error ? (error.stack ?? error.message) : String(error);
@@ -255,6 +256,7 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
     owlRoot,
     dataDir,
     providerClient,
+    decisionTextChecks: createDecisionTextChecksFromEnv(process.env),
     callOwnApi: createOwnApiCaller({ apiBase: guardApiBase, token: configuredApiToken }),
     executorRuntime: async () => {
       const runtime = await createHybridExecutorRuntime(owlRoot, guard)();
@@ -284,7 +286,9 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
       else console.error(`[owl-server] Rule reload failed; keeping the previous rules. ${result.error.message}`);
     });
   }
-  const http = createOwlHttpServer({ core, db, webOut, bind: options.bind, port: options.port, contract, owlRoot, dataDir, ruleStore, guardTokens, idempotencyTtlMs: configuredIdempotencyTtlMs(), screenViewLimits: configuredScreenViewLimits() });
+  const integrationStore = (core as unknown as { integrationStore?: IntegrationStore }).integrationStore;
+  const connectorManager = integrationStore ? new ConnectorManager(owlRoot, integrationStore, options.port, () => core.getLanguage()) : null;
+  const http = createOwlHttpServer({ core, db, webOut, bind: options.bind, port: options.port, contract, owlRoot, dataDir, ruleStore, guardTokens, channelAdmins: connectorManager ?? undefined, idempotencyTtlMs: configuredIdempotencyTtlMs(), screenViewLimits: configuredScreenViewLimits() });
   try {
     await http.listen();
   } catch (error) {
@@ -308,7 +312,6 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
     );
   }
 
-  const integrationStore = (core as unknown as { integrationStore?: IntegrationStore }).integrationStore;
   const ownerId = process.env.OWL_OWNER_ID?.trim() || "owner:default";
   if (integrationStore) {
     for (const provider of ["slack", "discord"] as const) {
@@ -341,7 +344,6 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
   }
   let pluginManager: PluginManager | null = null;
   const stopPlugins = (): Promise<void> | undefined => pluginManager?.stopAll();
-  const connectorManager = integrationStore ? new ConnectorManager(owlRoot, integrationStore, options.port, () => core.getLanguage()) : null;
   if (connectorManager) {
     try {
       await connectorManager.startAll();

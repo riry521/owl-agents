@@ -23,7 +23,7 @@ export class PluginConfigError extends Error {
   }
 }
 
-const topLevelFields = new Set(["plugins"]);
+const topLevelFields = new Set(["plugins", "decision_text_checks"]);
 const pluginFields = new Set(["name", "command", "args", "cwd", "enabled", "env"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -43,7 +43,7 @@ function requireString(value: unknown, field: string): string {
   return value;
 }
 
-export function loadPluginSpecs(filePath: string): PluginSpec[] {
+function readConfigFile(filePath: string): Record<string, unknown> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(filePath, "utf8")) as unknown;
@@ -54,12 +54,28 @@ export function loadPluginSpecs(filePath: string): PluginSpec[] {
 
   if (!isRecord(parsed)) throw new PluginConfigError("Plugin configuration must be an object.", "file");
   checkKeys(parsed, topLevelFields, "file");
-  if (!Array.isArray(parsed.plugins)) throw new PluginConfigError("plugins must be an array.", "plugins");
+  return parsed;
+}
 
+export function loadPluginSpecs(filePath: string): PluginSpec[] {
+  const parsed = readConfigFile(filePath);
+  if (!Array.isArray(parsed.plugins)) throw new PluginConfigError("plugins must be an array.", "plugins");
+  return readSpecs(parsed.plugins, "plugins", filePath);
+}
+
+/** The decision_text_checks of the plugin configuration, in the same shape as plugins; [] when the key is absent. */
+export function loadDecisionTextCheckSpecs(filePath: string): PluginSpec[] {
+  const parsed = readConfigFile(filePath);
+  if (parsed.decision_text_checks === undefined) return [];
+  if (!Array.isArray(parsed.decision_text_checks)) throw new PluginConfigError("decision_text_checks must be an array.", "decision_text_checks");
+  return readSpecs(parsed.decision_text_checks, "decision_text_checks", filePath);
+}
+
+function readSpecs(entries: unknown[], key: string, filePath: string): PluginSpec[] {
   const configDirectory = dirname(resolve(filePath));
   const names = new Set<string>();
-  return parsed.plugins.map((value, index) => {
-    const field = `plugins[${index}]`;
+  return entries.map((value, index) => {
+    const field = `${key}[${index}]`;
     if (!isRecord(value)) throw new PluginConfigError(`${field} must be an object.`, field);
     checkKeys(value, pluginFields, field);
 

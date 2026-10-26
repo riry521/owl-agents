@@ -58,6 +58,7 @@ type AgentResult = { readonly ok: true; readonly investigation: AgentOutput; rea
 
 interface AgentRunner {
   runTestSetupInvestigation?(request: Record<string, unknown>): Promise<AgentResult>;
+  cancelAgent?(invocationId: string, force?: boolean): Promise<void>;
 }
 
 export interface TestSetupServiceDeps {
@@ -116,6 +117,8 @@ const isRecord = (value: unknown): value is Record<string, unknown> => typeof va
 
 export class TestSetupService {
   private readonly inflight = new Map<string, Promise<InvestigateOutcome>>();
+  /** Task id of each running investigation, by invocation id; an Owner stop cancels them through the runner. */
+  private readonly taskInvestigations = new Map<string, string>();
   private readonly background = new Set<Promise<unknown>>();
   private readonly runStates = new Map<string, TestSetupRunState>();
   private readonly rules: TestDetectionRules;
@@ -213,6 +216,15 @@ export class TestSetupService {
     return run;
   }
 
+  /** Cancels the running investigations of the given Tasks; the runner ends their Agent processes. */
+  public cancelInvestigations(taskIds: ReadonlySet<string>, force: boolean): void {
+    const agent = this.agent();
+    if (agent?.cancelAgent === undefined) return;
+    for (const [invocationId, taskId] of this.taskInvestigations) {
+      if (taskIds.has(taskId)) void agent.cancelAgent(invocationId, force).catch(() => {});
+    }
+  }
+
   private async runInvestigation(input: InvestigateInput, settings: TestSetupSettings): Promise<InvestigateOutcome> {
     const agent = this.agent();
     if (agent === null) return { saved: false, reason: "investigation_unavailable" };
@@ -231,7 +243,9 @@ export class TestSetupService {
     const env = childEnv(DEFAULT_TEST_RUN_SETTINGS.env_allowlist, settings.run_env);
     const invocationId = createUlid();
     const installs: (readonly string[])[] = [];
-    const unregister = this.deps.registerRun(invocationId, { project_id: input.project_id, roots, env, approved, installs });
+    const unregisterRun = this.deps.registerRun(invocationId, { project_id: input.project_id, roots, env, approved, installs });
+    if (input.task_id !== undefined) this.taskInvestigations.set(invocationId, input.task_id);
+    const unregister = (): void => { this.taskInvestigations.delete(invocationId); unregisterRun(); };
     const detection = detectTestRun(markerReader(input.checkout, this.rules.max_file_bytes), this.rules);
     const first = detection.enabled && detection.settings !== null
       ? {

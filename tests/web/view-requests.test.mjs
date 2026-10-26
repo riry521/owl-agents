@@ -15,6 +15,7 @@ const views = {
   listLinkableWorks: ['/api/v1/backlog/linkable-works', () => [null], { works: [], next_cursor: null }],
   getTokensView: ['/api/v1/tokens/view', () => ['7d'], { report: {}, plan_usage: {}, plan_usage_settings: {}, projects: [] }],
   getSettingsView: ['/api/v1/settings/view', () => [], { models: {} }],
+  listAdvisorWindows: ['/api/v1/advisor/windows', () => [], []],
   getAgents: ['/api/v1/agents/view', () => [], { running: [], recent: [], children: [], idle_threshold_seconds: 60 }],
 };
 
@@ -202,4 +203,17 @@ test('subscribeToUpdates reconnects after a close, keeps polling while it fails,
     globalThis.WebSocket = originalSocket;
     delete globalThis.window;
   }
+});
+
+test('advisor window events refetch the window list and window views', async () => {
+  const { viewKeysForEvent } = await import('../../apps/web/lib/view-events.mjs');
+  const mounted = ['advisor-windows', 'advisor-window:P', 'advisor-window-channels:P', 'advisor-session:c1', 'board'];
+  const keys = (type, payload = {}) => viewKeysForEvent({ type, payload, work_id: null }, mounted);
+  for (const type of ['advisor.window_created', 'advisor.channel_binding_changed']) {
+    const hit = keys(type);
+    assert.ok(['advisor-windows', 'advisor-window:P', 'advisor-window-channels:P'].every((k) => hit.includes(k)), type);
+  }
+  assert.ok(keys('advisor.session_started', { conversation_id: 'c1' }).includes('advisor-windows'));
+  assert.ok(keys('advisor.session_started').includes('advisor-windows'));
+  assert.ok(keys('project.created').includes('advisor-windows'));
 });

@@ -134,7 +134,8 @@ test("metrics proposals come only from low first-review pass rates, merge per ty
   const merged = db.get("SELECT rationale FROM rule_proposals WHERE id = ?", first.proposal_id).rationale;
   assert.match(merged, /tasks=11/);
   assert.ok(merged.includes("tasks(11, first 3)"));
-  assert.ok(merged.includes(`works(2)=${workA},${workB}`));
+  // Work IDs are listed sorted; two ULIDs from the same millisecond have no fixed order.
+  assert.ok(merged.includes(`works(2)=${[workA, workB].sort().join(",")}`));
   assert.notEqual(open[0].status, "applied");
   assert.equal(core.listRuleProposals("applied").length, 0);
 

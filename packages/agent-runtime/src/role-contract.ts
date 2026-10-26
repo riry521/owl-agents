@@ -2,6 +2,9 @@ import { isRecord, parseSingleJsonObject, unwrapCliResult } from "./protocol";
 import type { ProviderResponse } from "./types";
 import {
   outputLanguageInstruction,
+  objectSchema,
+  SKILLS_USED_SCHEMA,
+  SKILL_PROPOSALS_SCHEMA,
   validateRoleOutput,
   childPath,
   schemaTypes,
@@ -14,7 +17,7 @@ import {
   type SkillFeedback,
 } from "@owl/shared";
 
-export { validateRoleOutput };
+export { objectSchema, SKILLS_USED_SCHEMA, SKILL_PROPOSALS_SCHEMA, validateRoleOutput };
 export type { RoleSchema, RoleSchemaType };
 
 /**
@@ -30,30 +33,6 @@ export type { RoleSchema, RoleSchemaType };
  * Claude structured output and OpenAI strict structured output: every object
  * lists all of its properties as required and forbids additional ones.
  */
-
-export const SKILLS_USED_SCHEMA: RoleSchema = {
-  type: "array",
-  items: objectSchema({
-    name: { type: "string", description: "name of a skill you used" },
-    verdict: { type: "string", enum: ["helpful", "misleading", "irrelevant"], description: "how the skill applied" },
-    note: { type: "string", description: "brief optional context; empty when none" },
-  }),
-  example: [],
-  description: "skills actually used and how they applied; [] if none",
-};
-
-export const SKILL_PROPOSALS_SCHEMA: RoleSchema = {
-  type: "array",
-  items: objectSchema({
-    kind: { type: "string", enum: ["new", "update"], description: "create a new skill or update an existing one" },
-    target: { type: ["string", "null"], description: "existing skill name for update, otherwise null" },
-    summary: { type: "string", description: "what reusable procedure should be captured" },
-    steps_or_diff: { type: "string", description: "reusable steps or the change needed in the existing skill" },
-    evidence: { type: "string", description: "why the procedure is reusable or the skill needs correction" },
-  }),
-  example: [],
-  description: "proposals for reusable procedures or skill improvements; [] if none",
-};
 
 const SKILL_OUTPUT_FIELDS = new Set(["skills_used", "skill_proposals"]);
 
@@ -75,21 +54,6 @@ export function skillFeedbackFromOutput(payload: Record<string, unknown>, hasSki
     skill_proposals: (payload.skill_proposals ?? []) as SkillFeedback["skill_proposals"],
   };
 }
-
-/** Object schema whose every property is required and no other key is allowed. */
-export function objectSchema(
-  properties: Readonly<Record<string, RoleSchema>>,
-  description?: string,
-): RoleSchema {
-  return {
-    type: "object",
-    ...(description ? { description } : {}),
-    properties,
-    required: Object.keys(properties),
-    additionalProperties: false,
-  };
-}
-
 
 /**
  * Render the fill-in JSON template for a schema: every object field is present,

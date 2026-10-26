@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { SlackConnector, sendNotification } from "../../packages/connector-slack/dist/index.js";
@@ -224,4 +228,94 @@ test("Slack notifications show the Work title in the header and text", async () 
   }, [{ channelId: "C1" }]);
   assert.match(posts[1].text, /請求書整理/u);
   assert.match(posts[1].attachments[0].blocks[0].text.text, /^請求書整理\n/u);
+});
+
+async function outboundFixture(content = "file body") {
+  const dir = await mkdtemp(join(tmpdir(), "owl-slack-outbound-"));
+  const path = join(dir, "report.txt");
+  await writeFile(path, content);
+  const sha256 = createHash("sha256").update(content).digest("hex");
+  return { path, name: "report.txt", size: Buffer.byteLength(content), sha256 };
+}
+
+function outboundConnector(order, uploadError) {
+  const connector = new SlackConnector({
+    botToken: "xoxb-slack-post-test",
+    appToken: "xapp-slack-post-test",
+    conversationChannelId: "C-CONVERSATION",
+    notificationChannelId: "C-NOTIFICATIONS",
+    coreApiBase: "http://127.0.0.1:1/api/v1",
+    accountId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  });
+  const posts = [];
+  const uploads = [];
+  connector.web = {
+    chat: { postMessage: async (message) => { order.push("post"); posts.push(message); } },
+    filesUploadV2: async (args) => {
+      order.push("upload");
+      uploads.push(args);
+      if (uploadError) throw uploadError;
+    },
+  };
+  return { connector, posts, uploads };
+}
+
+const advisorEvent = (outbound_files, reply = "Done.\n\nNotice line") => ({
+  kind: "event",
+  event_id: "event-slack-outbound",
+  sequence: 1,
+  cursor: "1",
+  type: "advisor.responded",
+  schema_version: "1.0.0",
+  payload: {
+    conversation_id: "slack:C-CONVERSATION:thread",
+    reply,
+    action_results: "Notice line",
+    outbound_files,
+    origin: { channel: "slack", channel_id: "C-CONVERSATION", ref: "1712345678.000100" },
+  },
+});
+
+test("Slack uploads each outbound file before the reply and appends the sent line after Core notices", async () => {
+  const file = await outboundFixture();
+  const order = [];
+  const { connector, posts, uploads } = outboundConnector(order);
+  await connector.handleCoreEvent(advisorEvent([{ ...file, comment: "**here**" }]));
+
+  assert.deepEqual(order, ["upload", "post"]);
+  assert.equal(uploads.length, 1);
+  assert.equal(uploads[0].channel_id, "C-CONVERSATION");
+  assert.equal(uploads[0].thread_ts, "1712345678.000100");
+  assert.equal(uploads[0].file.toString(), "file body");
+  assert.equal(uploads[0].filename, "report.txt");
+  assert.equal(uploads[0].initial_comment, "*here*");
+  assert.match(posts[0].text, /Notice line\n✓ ファイルを送りました: report\.txt（9B）$|Notice line\n✓ Sent the file: report\.txt \(9B\)$/u);
+});
+
+test("Slack reports the files:write hint when the upload lacks the scope and still posts the reply", async () => {
+  const file = await outboundFixture();
+  const order = [];
+  const error = Object.assign(new Error("An API error occurred: missing_scope"), {
+    code: "slack_webapi_platform_error",
+    data: { ok: false, error: "missing_scope" },
+  });
+  const { connector, posts } = outboundConnector(order, error);
+  await connector.handleCoreEvent(advisorEvent([file]));
+
+  assert.equal(posts.length, 1);
+  assert.match(posts[0].text, /Done\./u);
+  assert.match(posts[0].text, /report\.txt/u);
+  assert.match(posts[0].text, /files:write/u);
+});
+
+test("Slack does not upload a file whose contents changed after Core checked it", async () => {
+  const file = await outboundFixture();
+  await writeFile(file.path, "different body!");
+  const order = [];
+  const { connector, posts, uploads } = outboundConnector(order);
+  await connector.handleCoreEvent(advisorEvent([file]));
+
+  assert.equal(uploads.length, 0);
+  assert.equal(posts.length, 1);
+  assert.match(posts[0].text, /ファイルが変わりました|the file changed after it was checked/u);
 });

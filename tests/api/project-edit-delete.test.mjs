@@ -975,3 +975,22 @@ test("Project responses carry test_setup; changing canonical_path resets the rec
   assert.equal(api.db.get("SELECT test_setup_json FROM projects WHERE id = ?", project.id).test_setup_json, null);
   assert.equal((await listProjects(api)).find((item) => item.id === project.id).test_setup, null);
 });
+
+test("advisor_window_enabled defaults off, PATCH persists it across a Core restart, and non-booleans are rejected", async (t) => {
+  const api = await setup(t);
+  if (!api) return;
+  const repo = await makeRepo(t, api.root, "advisor-window-project");
+  if (!repo) return;
+  const existing = await createProject(api, "advisor-window-existing", { path: repo });
+  assert.equal(existing.advisor_window_enabled, false);
+
+  await assertApiError(await sendCommand(api, "PATCH", `/projects/${existing.id}`, { advisor_window_enabled: "yes" }, "advisor-window:invalid"), 400, "validation_error");
+  const enabled = await sendCommand(api, "PATCH", `/projects/${existing.id}`, { advisor_window_enabled: true }, "advisor-window:true");
+  assert.equal(enabled.status, 200);
+  assert.equal((await enabled.json()).data.advisor_window_enabled, true);
+
+  await api.durableCore.stop();
+  const { core: restarted } = await createTestCore(t, { db: api.db, owlRoot: api.root });
+  const reloaded = restarted.listProjects().data.find((project) => project.id === existing.id);
+  assert.equal(reloaded.advisor_window_enabled, true);
+});

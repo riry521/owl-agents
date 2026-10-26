@@ -730,15 +730,13 @@ test("Manager finalize accepts structured lessons and rejects a bare string", as
   );
 });
 
-test("Manager finalize rejects a complete verdict with non-empty missing and an incomplete verdict with empty missing", async () => {
+test("Manager finalize accepts a complete verdict that lists missing items and rejects an incomplete verdict with empty missing", async () => {
   const finalizeInput = { work: { id: "work-1", title: "Archive Works" }, mode: "finalize", tasks: [task], reports: [] };
   const missing = { item: "Renumber the migration.", reason: "007 is taken.", fix: "Use 010." };
   const inconsistent = (error) =>
     error.code === "manager_plan_invalid" && error.reason === "manager_output_schema:verdict.missing:inconsistent_with_verdict";
-  await assert.rejects(
-    runnerAnswering((template) => ({ verdict: { ...fillTemplate(template.verdict), verdict: "complete", missing: [missing] } })).runManagerPlan(finalizeInput),
-    inconsistent,
-  );
+  const listed = await runnerAnswering((template) => ({ verdict: { ...fillTemplate(template.verdict), verdict: "complete", missing: [{ ...missing, criterion_ref: "work:G1" }] } })).runManagerPlan(finalizeInput);
+  assert.equal(listed.verdict.verdict, "complete", "Core decides from the stored requirement of the ref");
   await assert.rejects(
     runnerAnswering((template) => ({ verdict: { ...fillTemplate(template.verdict), verdict: "incomplete", missing: [] } })).runManagerPlan(finalizeInput),
     inconsistent,
@@ -1137,7 +1135,7 @@ test("Worker and Designer provider schemas carry the success rules only when ask
     assert.deepEqual(rule.then.properties.question_for_manager, { type: "null" });
     assert.deepEqual(rule.then.properties.needs_replanning, { const: false });
     assert.deepEqual(rule.then.properties.verification.properties.status, { const: "passed" });
-    assert.deepEqual(rule.then.properties.verification.properties.acceptance.items.properties.status, { const: "passed" });
+    assert.deepEqual(rule.then.properties.verification.properties.acceptance.items.properties.status, { enum: ["passed", "goal_unmet"] });
     assert.deepEqual(rule.then.properties.verification.properties.checks.items.properties.status, { const: "passed" });
     assert.ok(!JSON.stringify(ruled.properties).includes("allOf"));
   }

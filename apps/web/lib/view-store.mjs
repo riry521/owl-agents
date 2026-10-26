@@ -11,6 +11,14 @@ export const DEFAULT_REFRESH_MS = 5_000;
  * fetcher は (etag) => Promise<{ kind: "fresh", value: { data, version, etag } } | { kind: "not_modified" }>。
  * listener には { data, etag, fetchedAt, error } を渡す。
  */
+const sameJson = (a, b) => {
+  try {
+    return a !== undefined && a !== null && JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+};
+
 export function createViewStore({
   now = Date.now,
   setTimer = setTimeout,
@@ -69,7 +77,8 @@ export function createViewStore({
           entry.fetchedAt = now();
           entry.error = null;
           if (result && result.kind === "fresh") {
-            entry.data = result.value.data;
+            // Keep the old reference when the content is equal so memoized children skip rendering.
+            if (!sameJson(entry.data, result.value.data)) entry.data = result.value.data;
             entry.etag = result.value.etag ?? null;
           }
         },

@@ -16,10 +16,11 @@ export const VIEW_EVENT_RULES = [
   { prefixes: ["agent."], keys: ["advisor-session:*", "tokens:*"] },
   { prefixes: ["decision."], keys: ["board", "work:{work_id}", "decision:{decision_id}"] },
   { prefixes: ["message."], keys: ["advisor-session:{conversation_id}", "advisor-messages:{conversation_id}", "work:{work_id}"], needs: "conversation_id", otherwise: ADVISOR_KEYS },
-  { prefixes: ["advisor.", "conversation."], keys: ["advisor-session:{conversation_id}", "advisor-messages:{conversation_id}"], needs: "conversation_id", otherwise: ADVISOR_KEYS },
+  { prefixes: ["advisor.window_", "advisor.channel_binding_"], keys: ["advisor-windows", "advisor-window:*", "advisor-window-channels:*"] },
+  { prefixes: ["advisor.", "conversation."], keys: ["advisor-windows", "advisor-session:{conversation_id}", "advisor-messages:{conversation_id}"], needs: "conversation_id", otherwise: [...ADVISOR_KEYS, "advisor-windows"] },
   { prefixes: ["settings.plan_usage_updated"], keys: ["settings", "tokens:*"] },
   { prefixes: ["settings."], keys: ["settings"] },
-  { prefixes: ["project."], keys: ["projects", "board", "archive", "backlog:*", "settings"] },
+  { prefixes: ["project."], keys: ["projects", "advisor-windows", "board", "archive", "backlog:*", "settings"] },
   { prefixes: ["rule_proposal."], keys: ["rule-proposals:*"] },
   { prefixes: ["provider."], keys: ["provider-pauses", "settings"] },
 ];

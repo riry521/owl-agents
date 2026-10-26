@@ -454,7 +454,10 @@ export class CodexSessionDriver implements ProviderSession {
       sandbox: "danger-full-access",
       developerInstructions: request.system_prompt,
     };
-    const result = await this.sendRpcRequest("thread/start", threadParams);
+    const result = await this.sendRpcRequest(
+      request.resume_provider_session_id ? "thread/resume" : "thread/start",
+      request.resume_provider_session_id ? { ...threadParams, threadId: request.resume_provider_session_id } : threadParams,
+    );
     const threadId = threadIdFromResult(result);
     if (!threadId) {
       throw new Error(formatProviderError("codex", "invalid provider response"));

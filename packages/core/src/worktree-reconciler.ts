@@ -79,10 +79,19 @@ export async function cleanupWorkForDeletion(
   }
 }
 
+/**
+ * A design Task's uncommitted changes are reset only once its Work is over;
+ * in a Work that continues, a replaced design Task keeps them on its branch.
+ */
+function isFinishedWorkState(state: string): boolean {
+  return state === "cancelled" || state === "completed";
+}
+
 interface CandidateTask {
   readonly id: string;
   readonly work_id: string;
   readonly type: string;
+  readonly work_state: string;
   readonly worktree_path: string;
   readonly worker_generation: number;
 }
@@ -124,7 +133,7 @@ function activeRunCountForWork(reader: Pick<CoreDatabase, "get">, workId: string
  */
 function candidateTasks(db: CoreDatabase, workId: string | undefined): readonly CandidateTask[] {
   return db.all<CandidateTask>(
-    `SELECT tasks.id AS id, tasks.work_id AS work_id, tasks.type AS type, tasks.worktree_path AS worktree_path, tasks.worker_generation AS worker_generation
+    `SELECT tasks.id AS id, tasks.work_id AS work_id, tasks.type AS type, works.state AS work_state, tasks.worktree_path AS worktree_path, tasks.worker_generation AS worker_generation
        FROM tasks
        JOIN works ON works.id = tasks.work_id
       WHERE tasks.worktree_path IS NOT NULL
@@ -243,7 +252,7 @@ async function discardCandidate(deps: WorktreeReconcilerDeps, task: CandidateTas
     work_id: task.work_id,
     task_id: task.id,
     worktree_path: task.worktree_path,
-    discard_changes: task.type === "design",
+    discard_changes: task.type === "design" && isFinishedWorkState(task.work_state),
   }));
   if (!result.ok) {
     console.warn(`[owl-core] Worktree reconcile could not discard Task ${task.id}'s worktree: ${result.message}`);
@@ -555,7 +564,7 @@ async function reconcileStartupWorkspaces(
       work_id: entry.work_id,
       task_id: entry.task_id,
       worktree_path: entry.path,
-      discard_changes: task?.type === "design",
+      discard_changes: task?.type === "design" && work !== undefined && isFinishedWorkState(work.state),
     }));
     if (!result.ok) {
       skipped.push(entry.task_id);

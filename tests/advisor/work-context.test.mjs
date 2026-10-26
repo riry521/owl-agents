@@ -250,3 +250,21 @@ test("persistent web and Slack turns receive the latest Work catalog", async (t)
   assert.equal(slackActive[0].project_name, "Persistent Turn Project");
   assert.equal(sentTurns.length, 2);
 });
+
+test("Work catalog with projectId lists only that Project's active and finished Works", async (t) => {
+  const { db } = await fixture(t, "project-scope");
+  const alpha = await addProject(db, "Alpha");
+  const beta = await addProject(db, "Beta");
+  await addWork(db, { state: "running", title: "alpha running", projectId: alpha });
+  await addWork(db, { state: "completed", title: "alpha done", projectId: alpha, completedAt: "2026-09-30T00:00:00.000Z" });
+  await addWork(db, { state: "running", title: "beta running", projectId: beta });
+  await addWork(db, { state: "cancelled", title: "beta cancelled", projectId: beta, cancelledAt: "2026-09-30T00:00:00.000Z" });
+  await addWork(db, { state: "running", title: "no project" });
+
+  const scoped = buildAdvisorWorkCatalogInstruction(db, { projectId: alpha });
+  assert.match(scoped, /alpha running/);
+  assert.match(scoped, /alpha done/);
+  assert.doesNotMatch(scoped, /beta|no project/);
+  const everything = buildAdvisorWorkCatalogInstruction(db);
+  for (const title of ["alpha running", "beta running", "beta cancelled", "no project"]) assert.match(everything, new RegExp(title));
+});

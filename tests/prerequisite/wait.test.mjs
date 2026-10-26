@@ -11,6 +11,7 @@ import { openDatabase } from "../../packages/db/dist/index.js";
 import { DEFAULT_PROGRESS_GUARD_SETTINGS } from "../../packages/shared/dist/progress-guard-settings.js";
 import { createRetryingTestCore } from "../helpers/cleanup.mjs";
 import { command } from "../helpers/core.mjs";
+import { assertOpenedOnceAfterExplanation, createExplainer } from "../helpers/decision-explanation.mjs";
 import { migrationsDir } from "../helpers/paths.mjs";
 import { withNecessity } from "../helpers/necessity.mjs";
 import { waitFor } from "../helpers/wait.mjs";
@@ -255,6 +256,8 @@ test("the wait survives a restart: mark, reason and deadline stay and no Worker 
 
 test("an owner wait opens one Owner Decision and the answer releases the Task", async (t) => {
   const runner = runnerWith([{ wait_for: ownerWait }]);
+  const explainer = createExplainer();
+  runner.runDecisionExplanation = explainer.runDecisionExplanation;
   const { db, core } = await openCore(t, runner, 5);
   const workId = await startWork(core, "owner-decision");
   const open = () => db.all("SELECT * FROM decisions WHERE work_id = ? AND status = 'open'", workId);
@@ -266,7 +269,10 @@ test("an owner wait opens one Owner Decision and the answer releases the Task", 
   assert.match(decision.reason, new RegExp(task(db, workId).id));
   assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "judgement_waiting");
   assert.equal(task(db, workId).status, "judgement_waiting");
-  assert.ok(db.get("SELECT 1 AS x FROM events WHERE work_id = ? AND type = 'decision.opened'", workId), "the Decision notification event was recorded");
+  // The notice waits for the explanation and is emitted once (no direct write from applyReplan any more).
+  await assertOpenedOnceAfterExplanation(db, decision.id, explainer);
+  assert.equal(explainer.requests[0].kind, "prerequisite_wait");
+  assert.equal(explainer.requests[0].task.title, "A");
   await core.tick(workId);
   await sleep(200);
   assert.equal(db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ?", workId).n, 1, "evaluating again adds no Decision");
@@ -295,6 +301,7 @@ test("an owner wait's decision.opened carries auto_recovery_summary and the stor
   };
   const workId = await startWork(core, "owner-summary");
   assert.ok(await waitFor(() => db.get("SELECT 1 AS x FROM decisions WHERE work_id = ? AND status = 'open'", workId)), "the Decision opens");
+  assert.ok(await waitFor(() => db.get("SELECT 1 AS x FROM events WHERE work_id = ? AND type = 'decision.opened'", workId)), "the notice follows the explanation attempt");
   const stored = db.get("SELECT tried FROM decisions WHERE work_id = ?", workId).tried;
   const payload = JSON.parse(db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = 'decision.opened'", workId).payload_json);
   assert.equal(payload.tried, stored);

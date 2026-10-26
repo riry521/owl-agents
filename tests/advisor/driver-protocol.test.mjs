@@ -126,6 +126,10 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: { thread: { id: "thread-fresh" } } });
     return;
   }
+  if (message.method === "thread/resume") {
+    send({ id: message.id, result: { thread: { id: message.params.threadId } } });
+    return;
+  }
   if (message.method === "turn/start") {
     const threadId = message.params.threadId;
     send({ id: message.id, result: { turn: { id: "turn-c1", status: "inProgress", items: [] } } });
@@ -146,7 +150,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
 });
 `;
 
-async function createCodexDriver(t, { env = {} } = {}) {
+async function createCodexDriver(t, { env = {}, request = {} } = {}) {
   const root = await tempDir(t, "owl-codex-protocol-");
   const executable = await writeExecutable(root, "fake-codex", FAKE_CODEX_APP_SERVER);
   const log = join(root, "received.jsonl");
@@ -165,6 +169,7 @@ async function createCodexDriver(t, { env = {} } = {}) {
     cwd: root,
     env: requestEnv,
     system_prompt: "advisor system prompt",
+    ...request,
   }, executable);
   t.after(() => driver.stop("test", 1000));
   return { driver, log, startLog, requestEnv };
@@ -176,6 +181,14 @@ async function assertCodexAppServerExclusions(startLog, requestEnv) {
   assert.ok(configs.some((config) => config.startsWith("marketplaces.openai-bundled.source=")));
   assert.notEqual(codexHome, requestEnv.CODEX_HOME);
 }
+
+test("Codex app-server driver resumes the given thread with thread/resume instead of thread/start", async (t) => {
+  const { driver, log } = await createCodexDriver(t, { request: { resume_provider_session_id: "thread-old" } });
+  assert.equal(driver.provider_session_id, "thread-old");
+  const received = await readLog(log);
+  assert.deepEqual(received.map((message) => message.method), ["initialize", "initialized", "thread/resume"]);
+  assert.equal(received[2].params.threadId, "thread-old");
+});
 
 test("Codex app-server driver sends initialize and initialized before thread/start", async (t) => {
   const { driver, log, startLog, requestEnv } = await createCodexDriver(t);
@@ -470,6 +483,19 @@ test("Claude Advisor passes the configured model and a fresh session id on start
   assert.equal(freshArgv.includes("--resume"), false);
 
   assert.equal(optionValue(freshArgv, "--session-id"), fresh.provider_session_id);
+});
+
+test("Claude Advisor resumes the given provider session with --resume and no --session-id", async (t) => {
+  const resumeId = "11111111-2222-4333-8444-555555555555";
+  const driver = await createClaudeDriver(t, [[{ type: "result", subtype: "success", is_error: false, result: "ok" }]], {
+    resume_provider_session_id: resumeId,
+  });
+  assert.equal(driver.provider_session_id, resumeId);
+  await driver.send({ turn_id: "turn-resume", text: "hello" });
+  await collectEvents(driver, settled);
+  const argv = JSON.parse(await readFile(driver.argvLog, "utf8"));
+  assert.equal(optionValue(argv, "--resume"), resumeId);
+  assert.equal(argv.includes("--session-id"), false);
 });
 
 test("Claude Advisor knows its provider session id before the first turn", async (t) => {

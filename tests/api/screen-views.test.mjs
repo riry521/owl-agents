@@ -138,6 +138,23 @@ test("GET /works/{id}/view returns only that Work's decisions, the newest report
   assert.equal((await api.get(`/works/${createUlid()}/view`)).status, 404);
 });
 
+test("GET /works/{id}/view always returns goal_shortfalls as an array that fits work-view.json", async (t) => {
+  const api = await openApi(t);
+  if (!api) return t.skip("localhost listen is unavailable");
+  const { ids, db } = api;
+
+  const empty = await api.get(`/works/${ids.workA}/view`);
+  assert.deepEqual(empty.body.data.goal_shortfalls, []);
+  assert.deepEqual(schemaErrors(empty.body.data, loadSchema("work-view.json")), []);
+
+  const record = { task_id: ids.taskA, criterion_id: "AC2", text: "Add a diagram", reason: "No time", source: "final_check", recorded_at: "2026-01-01T00:00:00.000Z", resolution: null };
+  db.createWriteLane().transact((tx) => tx.run("UPDATE works SET goal_shortfalls_json = ? WHERE id = ?", JSON.stringify([record]), ids.workA));
+  const filled = await api.get(`/works/${ids.workA}/view`);
+  assert.equal(filled.body.data.goal_shortfalls.length, 1);
+  assert.equal(filled.body.data.goal_shortfalls[0].text, "Add a diagram");
+  assert.deepEqual(schemaErrors(filled.body.data, loadSchema("work-view.json")), []);
+});
+
 test("GET /works/{id}/view takes the conversation size from the query", async (t) => {
   const api = await openApi(t);
   if (!api) return t.skip("localhost listen is unavailable");

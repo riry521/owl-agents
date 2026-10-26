@@ -530,3 +530,63 @@ export function parseAdvisorCallApiPayload(
     },
   };
 }
+
+export const ADVISOR_SEND_FILE_ACTION_TYPE = "send_file";
+export const ADVISOR_SEND_FILE_PATH_MAX = 4096;
+export const ADVISOR_SEND_FILE_COMMENT_MAX = 1000;
+const ADVISOR_SEND_FILE_KEYS: ReadonlySet<string> = new Set(["path", "comment"]);
+
+export interface AdvisorSendFileRequest {
+  readonly path: string;
+  readonly comment?: string;
+}
+
+/** Validate a send_file payload in the order the design fixes; the first failure wins. node:path is not used because the Web UI reads shared; Core checks that the path is absolute. */
+export function parseAdvisorSendFilePayload(
+  payload: unknown,
+): { ok: true; value: AdvisorSendFileRequest } | { ok: false; reason: string } {
+  const fail = (reason: string) => ({ ok: false as const, reason });
+  if (!isPlainJsonObject(payload)) return fail("send_file payload must be an object");
+  if (Object.keys(payload).some((key) => !ADVISOR_SEND_FILE_KEYS.has(key))) {
+    return fail("send_file payload may only have path and comment");
+  }
+  const field = (key: string): unknown => (Object.hasOwn(payload, key) ? payload[key] : undefined);
+  const path = field("path");
+  if (typeof path !== "string" || path.length < 1 || path.length > ADVISOR_SEND_FILE_PATH_MAX) {
+    return fail(`send_file path must be a non-empty string of at most ${ADVISOR_SEND_FILE_PATH_MAX} characters`);
+  }
+  if (path.includes("\0")) return fail("send_file path must not contain NUL");
+  const comment = field("comment");
+  if (comment !== undefined && (typeof comment !== "string" || comment.length > ADVISOR_SEND_FILE_COMMENT_MAX)) {
+    return fail(`send_file comment must be a string of at most ${ADVISOR_SEND_FILE_COMMENT_MAX} characters`);
+  }
+  const trimmed = typeof comment === "string" ? comment.trim() : "";
+  return { ok: true, value: { path, ...(trimmed === "" ? {} : { comment }) } };
+}
+
+export const ADVISOR_WINDOW_ACTION_TYPES: ReadonlySet<string> = new Set(["handoff_to_window"]);
+
+export interface AdvisorWindowHandoff {
+  /** The target Project's id; null is the general window. */
+  readonly project_id: string | null;
+  readonly summary: string;
+}
+
+/** Validate a handoff_to_window payload; summary is 1 to maxSummaryChars characters (settings handoff_summary_max_chars). */
+export function validateWindowHandoffPayload(
+  payload: unknown,
+  maxSummaryChars: number,
+): { ok: true; value: AdvisorWindowHandoff } | { ok: false; reason: string } {
+  const fail = (reason: string) => ({ ok: false as const, reason });
+  if (!isPlainJsonObject(payload)) return fail("handoff_to_window payload must be an object");
+  const field = (key: string): unknown => (Object.hasOwn(payload, key) ? payload[key] : undefined);
+  const projectId = field("project_id");
+  if (projectId !== null && (typeof projectId !== "string" || projectId.trim() === "")) {
+    return fail("handoff_to_window project_id must be a Project id or null");
+  }
+  const summary = field("summary");
+  if (typeof summary !== "string" || summary.trim() === "" || summary.length > maxSummaryChars) {
+    return fail(`handoff_to_window summary must be 1 to ${maxSummaryChars} characters`);
+  }
+  return { ok: true, value: { project_id: projectId === null ? null : (projectId as string).trim(), summary } };
+}

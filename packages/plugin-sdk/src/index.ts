@@ -19,6 +19,7 @@ export {
 } from "./shared/router";
 export { formatStatusResponse } from "./shared/status";
 export { asOwlLanguage, type OwlLanguage } from "./shared/language";
+export { parseOutboundFiles, readOutboundFile, appendFileResults, type OutboundFile } from "./shared/outbound-files";
 export { connectorText, type ConnectorText } from "./shared/connector-text";
 export {
   createDecisionButtonId,
@@ -51,3 +52,10 @@ export function createPlugin(
     onInbound = handlers.onInbound;
   })(config);
 }
+export {
+  ChannelAdminError,
+  isChannelAdminError,
+  type ChannelAdmin,
+  type ChannelAdminErrorCode,
+  type ChannelInfo,
+} from "./shared/channel-admin";

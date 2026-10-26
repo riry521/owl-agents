@@ -172,3 +172,16 @@ test("viewKeysForEvent は表示中のキーのうち関係するものだけを
   assert.deepEqual(keys({ type: "settings.model_updated" }).sort(), ["events", "settings"]);
   assert.deepEqual(keys({ type: "unknown.thing" }), ["events"]);
 });
+
+test("取り直した中身が前と同じなら、古いデータの参照を保つ", async () => {
+  const { store } = harness();
+  let calls = 0;
+  const fetcher = async () => ({ kind: "fresh", value: { data: [{ id: 1 }, { id: calls++ >= 2 ? 2 : 1 }], etag: null } });
+  store.subscribe("same", () => {});
+  await store.load("same", fetcher);
+  const first = store.read("same").data;
+  await store.refresh("same");
+  assert.equal(store.read("same").data, first);
+  await store.refresh("same");
+  assert.notEqual(store.read("same").data, first);
+});

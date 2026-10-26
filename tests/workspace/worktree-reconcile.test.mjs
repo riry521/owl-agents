@@ -175,15 +175,15 @@ async function insertWork(writeLane, id, { projectId = "project:1", state = "run
   });
 }
 
-async function insertTask(writeLane, id, workId, { status, worktreeState = null, worktreePath = null, workerGeneration = 0 }) {
+async function insertTask(writeLane, id, workId, { status, worktreeState = null, worktreePath = null, workerGeneration = 0, type = "code" }) {
   const now = new Date().toISOString();
   await writeLane.transact((tx) => {
     tx.run(
       `INSERT INTO tasks
          (id, work_id, title, type, status, priority, context, acceptance,
           worker_generation, worktree_path, worktree_state, created_at, updated_at)
-       VALUES (?, ?, 'Task', 'code', ?, 'normal', '', 'Done.', ?, ?, ?, ?, ?)`,
-      id, workId, status, workerGeneration, worktreePath, worktreeState, now, now,
+       VALUES (?, ?, 'Task', ?, ?, 'normal', '', 'Done.', ?, ?, ?, ?, ?)`,
+      id, workId, type, status, workerGeneration, worktreePath, worktreeState, now, now,
     );
   });
 }
@@ -265,6 +265,24 @@ test("reconcileWorktrees discards a superseded Task's worktree, keeps its branch
   assert.deepEqual(second, { discarded: [], skipped: [] });
   assert.equal(db.all("SELECT type FROM events WHERE task_id = ?", "T1").length, 1, "the event is recorded only once");
 });
+
+for (const [workState, kept] of [["running", true], ["cancelled", false], ["completed", false]]) {
+  test(`reconcileWorktrees ${kept ? "commits" : "resets"} a cancelled design Task's changes when its Work is ${workState}`, async (t) => {
+    const { projectPath, owlRoot, db, writeLane, gateway } = await reconcileFixture(t);
+    await insertWork(writeLane, "W", { state: workState });
+    const prepared = await gateway.prepareWorktree({ work_id: "W", task_id: "T1" });
+    await writeFile(join(prepared.worktree_path, "partial.txt"), "design draft\n");
+    await insertTask(writeLane, "T1", "W", { status: "cancelled", type: "design", worktreeState: "active", worktreePath: prepared.worktree_path });
+
+    const result = await reconcileWorktrees({ db, writeLane, git: gateway, owlRoot, dataDir: join(owlRoot, "data") }, { work_id: "W", reason: "replan_applied" });
+    assert.deepEqual(result, { discarded: ["T1"], skipped: [] });
+    if (kept) {
+      assert.equal(git(projectPath, "show", "owl/task/W/T1:partial.txt"), "design draft");
+    } else {
+      assert.throws(() => git(projectPath, "show", "owl/task/W/T1:partial.txt"));
+    }
+  });
+}
 
 test("reconcileWorktrees leaves a non-terminal Task's worktree, and a terminal Task's worktree with an active agent run, untouched", async (t) => {
   const { db, writeLane, gateway } = await reconcileFixture(t);

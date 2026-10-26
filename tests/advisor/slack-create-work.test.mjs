@@ -348,13 +348,11 @@ test("Slack and web Advisor turns parse owl-actions and create Works end to end"
     });
 
     const slackConversation = await waitFor(
-      // Slack conversations are grouped channel-wide (thread_ref is always
-      // null); thread_ts is carried separately as the reply destination.
+      // Slack messages join the general window's canonical conversation;
+      // thread_ts is carried separately as the reply destination.
       () => db.get(
-        `SELECT id FROM conversations
-          WHERE owner_id = ? AND channel = 'slack' AND dm_ref = ? AND thread_ref IS NULL`,
+        "SELECT conversation_id AS id FROM advisor_windows WHERE owner_id = ? AND scope = 'general'",
         ownerId,
-        slackChannelId,
       ),
       { message: "Slack conversation from the inbound message" },
     );
@@ -442,8 +440,10 @@ test("Slack and web Advisor turns parse owl-actions and create Works end to end"
     assert.equal(webReply.turn.origin_channel, "web");
     assert.equal(webReply.turn.origin_channel_id, null);
     assert.equal(webReply.turn.origin_ref, null);
-    const webTurn = sentTurns.find((turn) => turn.text.startsWith("WEB_ORIGIN: create a small example Work"));
-    assert.ok(webTurn, "non-Slack messages should keep their original prompt at the start of the turn");
+    const webTurn = sentTurns.find((turn) => turn.text.includes("WEB_ORIGIN: create a small example Work"));
+    assert.ok(webTurn, "non-Slack messages should keep their original prompt");
+    // The Slack and web turns share one general session, so the previous turn's action results lead this turn.
+    assert.match(webTurn.text, /^<owl-action-results>[\s\S]*<\/owl-action-results>\n\nWEB_ORIGIN: create a small example Work/u);
     assert.match(webTurn.text, /<owl-project-search>/u, "each turn should include the current Project catalog");
     assert.match(webTurn.text, /always search this complete, current Project catalog/u);
     assert.doesNotMatch(webTurn.text, /Write user-visible text in Slack mrkdwn/u);

@@ -97,6 +97,11 @@
       "items": {
         "$ref": "common.json#/$defs/ULID"
       }
+    },
+    "status_reply": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 100000
     }
   },
   "additionalProperties": false

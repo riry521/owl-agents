@@ -10,6 +10,8 @@ export interface FinalMissingItem {
   readonly item: string;
   readonly reason: string;
   readonly fix: string;
+  /** A ref from the final check's criteria_index; absent or null when the item is about none of them. */
+  readonly criterion_ref?: string | null;
 }
 
 export interface FinalLesson {
@@ -67,6 +69,8 @@ export interface FinalManagerVerdict {
   /** Backlog items the Manager judged not addressed; malformed entries are dropped. */
   readonly unaddressed_backlog_items: readonly { readonly item_id: string; readonly reason: string }[];
   readonly lessons: readonly FinalLesson[];
+  /** Recorded goals the Manager says are now met; Core accepts them only under the rules of goal-shortfalls.ts. */
+  readonly goals_met: readonly { readonly criterion_ref: string; readonly evidence: string }[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -78,7 +82,7 @@ function hasStrings(value: Record<string, unknown>, keys: readonly string[]): bo
 }
 
 export function isFinalMissingItem(value: unknown): value is FinalMissingItem {
-  return isRecord(value) && hasStrings(value, ["item", "reason", "fix"]);
+  return isRecord(value) && hasStrings(value, ["item", "reason", "fix"]) && (value.criterion_ref === undefined || value.criterion_ref === null || typeof value.criterion_ref === "string");
 }
 
 export function isFinalLesson(value: unknown): value is FinalLesson {

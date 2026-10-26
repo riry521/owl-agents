@@ -115,6 +115,7 @@ test("a Task stopped by the no-progress limit carries the reason in the list and
   const opened = await waitFor(() => api.db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = 'decision.opened'", api.workId), { timeoutMs: 15_000 });
   const card = buildNotificationCard({ event_id: "e1", type: "decision.opened", payload: JSON.parse(opened.payload_json) }, { language: "ja", formatTime: String, replyStyle: "thread" });
   const reason = card.fields.find((field) => field.label === "理由");
-  assert.ok(reason?.value.includes(taskId), "the card carries the limit reason");
-  assert.equal(reason.value, listed.stop_reason);
+  assert.ok(reason, "the card carries the limit reason");
+  assert.ok(!reason.value.includes(taskId), "the card does not show the Task id");
+  assert.equal(reason.value, listed.stop_reason.replace(new RegExp(`[（(]${taskId}[）)]`, "u"), ""));
 });

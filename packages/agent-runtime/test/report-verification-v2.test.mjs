@@ -191,3 +191,48 @@ test("Worker acceptance accepts a Hybrid success with a passed integration_check
   assert.equal(accept(integrated, true).delegation.delegated.length, 1);
   assert.equal(accept(report(), true).verification.integration_check, null);
 });
+
+// A goal criterion (requirement goal) that is not met is reported as goal_unmet with a reason; it never lowers success.
+const GOAL_TASK = { acceptance: TASK.acceptance, acceptance_criteria: [CRITERIA[0], { ...CRITERIA[1], requirement: "goal" }] };
+const withAc2 = (item, over = {}) => report({ verification: verification({ acceptance: [ac("AC1"), { ...ac("AC2"), ...item }] }), ...over });
+
+test("a goal_unmet goal with a reason keeps success, and the runtime fills requirement from the Task", () => {
+  const accepted = accept(withAc2({ status: "goal_unmet", shortfall_reason: "only 6 branches exist" }), false, GOAL_TASK);
+  assert.equal(accepted.result, "success");
+  assert.deepEqual(accepted.verification.acceptance.map((item) => item.requirement), ["required", "goal"]);
+  assert.equal(accepted.verification.acceptance[1].shortfall_reason, "only 6 branches exist");
+});
+
+test("the runtime fills requirement from the Task's criteria, and a requirement the Worker writes is not accepted", () => {
+  assert.deepEqual(accept(report(), false, GOAL_TASK).verification.acceptance.map((item) => item.requirement), ["required", "goal"]);
+  assert.deepEqual(accept(report()).verification.acceptance.map((item) => item.requirement), ["required", "required"]);
+  assert.match(reason(() => accept(withAc2({ requirement: "required" }), false, GOAL_TASK)), /report_invalid|worker_output_schema/);
+});
+
+test("goal_unmet on a required criterion still lowers success to partial", () => {
+  const required = report({ verification: verification({ acceptance: [{ ...ac("AC1"), status: "goal_unmet", shortfall_reason: "why" }, ac("AC2")] }) });
+  assert.equal(accept(required, false, GOAL_TASK).result, "partial");
+});
+
+test("a required criterion that is not passed lowers success to partial even when a goal is goal_unmet", () => {
+  const mixed = report({ verification: verification({ status: "failed", acceptance: [ac("AC1", "failed"), { ...ac("AC2"), status: "goal_unmet", shortfall_reason: "why" }] }) });
+  assert.equal(accept(mixed, false, GOAL_TASK).result, "partial");
+});
+
+test("goal_unmet without a usable shortfall_reason is rejected whatever the result", () => {
+  for (const shortfall of [{}, { shortfall_reason: null }, { shortfall_reason: "" }, { shortfall_reason: "  \n" }]) {
+    for (const result of ["success", "partial"]) {
+      assert.match(reason(() => accept(withAc2({ status: "goal_unmet", ...shortfall }, { result }), false, GOAL_TASK)), /report_semantics:goal_unmet_without_reason/);
+    }
+  }
+});
+
+test("a failed, blocked or unverifiable goal becomes goal_unmet with the first non-blank reason", () => {
+  for (const status of ["failed", "blocked", "unverifiable"]) {
+    const fromShortfall = accept(withAc2({ status, shortfall_reason: "stated", unverifiable_reason: "other" }), false, GOAL_TASK).verification.acceptance[1];
+    assert.deepEqual([fromShortfall.status, fromShortfall.shortfall_reason], ["goal_unmet", "stated"]);
+    const fromEvidence = accept(withAc2({ status, shortfall_reason: " ", unverifiable_reason: "" }), false, GOAL_TASK).verification.acceptance[1];
+    assert.deepEqual([fromEvidence.status, fromEvidence.shortfall_reason], ["goal_unmet", "evidence AC2"]);
+  }
+  assert.equal(accept(withAc2({ status: "unverifiable", unverifiable_reason: "no way" }), false, GOAL_TASK).verification.acceptance[1].shortfall_reason, "no way");
+});

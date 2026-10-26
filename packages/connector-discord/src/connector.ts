@@ -14,16 +14,20 @@ import {
   classifyIntent,
   connectorText,
   decisionShortId,
+  appendFileResults,
   formatAdvisorReply,
   formatStatusResponse,
   parseDecisionButtonId,
+  parseOutboundFiles,
+  readOutboundFile,
   resolveDecisionButtonTarget,
   submitDecisionAnswer,
   uploadAttachment,
   FileConnectorStateStore,
   type PendingDecision,
 } from "@owl/plugin-sdk/shared";
-import type { OwlEvent } from "@owl/plugin-sdk";
+import type { ChannelAdmin, OwlEvent } from "@owl/plugin-sdk";
+import { createDiscordChannelAdmin } from "./channel-admin.js";
 import type { DiscordConfig, DiscordMessage } from "./types.js";
 import { sendNotification, shouldNotify, updateNotification } from "./notifications.js";
 import { downloadAttachment } from "./files.js";
@@ -39,6 +43,7 @@ export class DiscordConnector {
   private readonly config: DiscordConfig;
   private readonly conversationChannelIds: readonly string[];
   private readonly notificationChannelIds: readonly string[];
+  private boundChannelIds: ReadonlySet<string> = new Set();
   private readonly client: Client;
   private readonly core: CoreClient;
   private readonly charLimit: number;
@@ -50,6 +55,7 @@ export class DiscordConnector {
     this.notificationChannelIds = parseChannelIds(config.notificationChannelId);
     this.client = new Client({
       intents: [
+        GatewayIntentBits.Guilds,
         GatewayIntentBits.MessageContent,
         GatewayIntentBits.GuildMessages,
       ],
@@ -72,7 +78,7 @@ export class DiscordConnector {
       if (message.channel.isDMBased()) return;
       void (async () => {
         const replyToDecisionId = await this.decisionForReply(message);
-        if (!this.conversationChannelIds.includes(message.channelId) && !replyToDecisionId) return;
+        if (!this.isConversationChannel(message.channelId) && !replyToDecisionId) return;
         await this.handleMessage(message, replyToDecisionId);
       })().catch((err) => this.reportMessageError(message, err));
     });
@@ -84,6 +90,9 @@ export class DiscordConnector {
       );
     });
 
+    // Load the bound channels before the first message can arrive; until then
+    // the channel filter would drop them (Slack acks first, so no redelivery).
+    await this.refreshBindings();
     // Connect to Discord first: a bad token/gateway config fails here, before
     // any Core resource (WebSocket, persisted cursor) is touched.
     await this.client.login(this.config.botToken);
@@ -93,7 +102,7 @@ export class DiscordConnector {
     // events (or as a Decision), which notifications.ts renders as failures.
     try {
       await this.core.subscribeEvents(
-        ["advisor.responded", "decision.opened", "decision.resolved", "decision.cancelled", "work.completed", "work.cancelled", "work.paused", "work.reopened", "provider.paused", "provider.resumed", "system.alert"],
+        ["advisor.responded", "advisor.channel_binding_changed", "decision.opened", "decision.resolved", "decision.cancelled", "work.completed", "work.cancelled", "work.paused", "work.reopened", "provider.paused", "provider.resumed", "system.alert"],
         (event) => this.handleCoreEvent(event).catch((err) =>
           this.reportEventError(err)
         ),
@@ -139,6 +148,10 @@ export class DiscordConnector {
       case "status_query": {
         const status = await formatStatusResponse(this.core, language);
         await this.sendLong(message, status);
+        // A misjudged request must still reach the Advisor's conversation; a failed record never blocks the answer already posted.
+        await this.sendToCore(message, message.content, [], status).catch((error) => {
+          console.error("[discord] Failed to record the status exchange in Core:", error);
+        });
         break;
       }
 
@@ -264,7 +277,30 @@ export class DiscordConnector {
     }
   }
 
+  /** Channel create / rename / describe with the bot's discord.js Client; the HTTP API reaches it through ConnectorManager. */
+  channelAdmin(): ChannelAdmin {
+    return createDiscordChannelAdmin(this.client, this.conversationChannelIds);
+  }
+
+  private isConversationChannel(channelId: string): boolean {
+    return this.conversationChannelIds.includes(channelId) || this.boundChannelIds.has(channelId);
+  }
+
+  /** Keeps the previous list when Core cannot be read; the next binding event reads it again. */
+  private async refreshBindings(): Promise<void> {
+    try {
+      const data = await this.core.request<{ bindings: Array<{ channel_id: string }> }>("/advisor/channel-bindings?provider=discord");
+      this.boundChannelIds = new Set(data.bindings.map((binding) => binding.channel_id));
+    } catch (error) {
+      console.error("[discord] Could not read the Advisor channel bindings:", error);
+    }
+  }
+
   private async handleCoreEvent(event: OwlEvent): Promise<void> {
+    if (event.type === "advisor.channel_binding_changed") {
+      await this.refreshBindings();
+      return;
+    }
     if (event.type === "advisor.responded") {
       await this.handleAdvisorResponse(event);
       return;
@@ -350,7 +386,7 @@ export class DiscordConnector {
     const origin = asRecord(event.payload.origin);
     if (origin?.channel !== "discord") return;
 
-    const channelId = resolveDiscordAdvisorChannel(event, this.conversationChannelIds);
+    const channelId = resolveDiscordAdvisorChannel(event, [...this.conversationChannelIds, ...this.boundChannelIds]);
     if (!channelId) {
       console.error("[discord] Advisor response has no configured destination channel:", event.payload.origin);
       return;
@@ -365,7 +401,27 @@ export class DiscordConnector {
       // Core is the sole parsing point: `reply` is already the text Core
       // decided to show. Append any structured suggested_actions it left
       // unhandled, the same way the Slack connector does.
-      const text = formatAdvisorReply(reply, event.payload.suggested_actions, await this.core.language());
+      const language = await this.core.language();
+      const t = connectorText(language);
+      const lines: string[] = [];
+      for (const file of parseOutboundFiles(event.payload.outbound_files)) {
+        const read = await readOutboundFile(file);
+        if (!read.ok) {
+          lines.push(t.fileSendFailed(file.name, read.reason === "changed" ? t.fileSendChanged : t.fileSendUnreadable, ""));
+          continue;
+        }
+        try {
+          await channel.send({
+            ...(file.comment ? { content: file.comment } : {}),
+            files: [{ attachment: read.bytes, name: file.name }],
+            allowedMentions: NO_MENTIONS,
+          });
+          lines.push(t.fileSent(file.name, formatBytes(file.size)));
+        } catch (error) {
+          lines.push(t.fileSendFailed(file.name, formatIntegrationError("Discord", error, language), discordSendHint(error, t)));
+        }
+      }
+      const text = formatAdvisorReply(appendFileResults(reply, event.payload.action_results, lines), event.payload.suggested_actions, language);
       for (const chunk of splitAtParagraphs(text, this.charLimit)) {
         await channel.send({ content: chunk, allowedMentions: NO_MENTIONS });
       }
@@ -400,7 +456,7 @@ export class DiscordConnector {
     return body;
   }
 
-  private async sendToCore(message: Message, text: string, attachmentIds: readonly string[]): Promise<void> {
+  private async sendToCore(message: Message, text: string, attachmentIds: readonly string[], statusReply?: string): Promise<void> {
     const envelope = commandEnvelope({
       provider: "discord",
       account_id: this.config.accountId,
@@ -416,6 +472,7 @@ export class DiscordConnector {
         thread_ref: message.channelId,
       },
       attachment_ids: attachmentIds,
+      ...(statusReply === undefined ? {} : { status_reply: statusReply }),
     }, `discord:message:${this.config.accountId}:${message.id}`);
     await this.core.request("/inbound/messages", {
       method: "POST",
@@ -535,6 +592,14 @@ function splitAtParagraphs(text: string, limit: number): string[] {
   }
   if (remaining) chunks.push(remaining);
   return chunks;
+}
+
+function discordSendHint(error: unknown, t: ReturnType<typeof connectorText>): string {
+  const wrapper = asRecord(error);
+  const code = wrapper && Object.hasOwn(wrapper, "code") ? wrapper.code : undefined;
+  if (code === 50013) return t.fileSendHint.discordPermission;
+  if (code === 40005) return t.fileSendHint.discordTooLarge;
+  return "";
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {

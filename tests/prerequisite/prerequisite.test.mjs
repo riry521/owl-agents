@@ -58,9 +58,11 @@ test("progress guard defaults and per-key ranges", () => {
   assert.deepEqual(DEFAULT_PROGRESS_GUARD_SETTINGS, {
     no_progress_limit: 3, prerequisite_check_interval_seconds: 60, prerequisite_max_wait_hours: 72, prerequisite_sync_base: true,
     process_wait_max_count: 3, process_wait_max_hours: 6, external_blocker_limit: 2, partial_limit: 3,
-    decision_explanation_timeout_seconds: 300,
+    decision_explanation_timeout_seconds: 300, decision_explanation_rewrites_max: 2, plan_rejection_attempts_max: 3,
   });
   assert.deepEqual(PROGRESS_GUARD_RANGES.decision_explanation_timeout_seconds, { min: 30, max: 1800 });
+  assert.deepEqual(PROGRESS_GUARD_RANGES.decision_explanation_rewrites_max, { min: 0, max: 5 });
+  assert.deepEqual(PROGRESS_GUARD_RANGES.plan_rejection_attempts_max, { min: 1, max: 10 });
   assert.deepEqual(PROGRESS_GUARD_RANGES.prerequisite_check_interval_seconds, { min: 10, max: 86400 });
   assert.deepEqual(PROGRESS_GUARD_RANGES.prerequisite_max_wait_hours, { min: 1, max: 8760 });
   assert.deepEqual(PROGRESS_GUARD_RANGES.process_wait_max_count, { min: 0, max: 20 });

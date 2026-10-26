@@ -164,7 +164,7 @@ test("launching a session passes the summary-format instruction only to provider
     const { runtime, requests, root } = runtimeWith(canInstruct);
     t.after(() => rmSync(root, { recursive: true, force: true }));
     const session = { id: "s", conversation_id: "c", status: "starting" };
-    await runtime.launchSession(session, runtime.config.getAdvisorSettings(), root).catch(() => {});
+    await runtime.launchSession({ id: "slot" }, session, runtime.config.getAdvisorSettings(), { kind: "direct", cwd: root }).catch(() => {});
     assert.equal(requests.length, 1);
     assert.equal(requests[0].compact_instructions, expected);
   }

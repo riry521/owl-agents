@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdir, realpath, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, realpath, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { openPinnedFile } from "../../packages/core/dist/advisor-send-file.js";
 import { createCore } from "../../packages/core/dist/index.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import * as advisorResponse from "../../packages/shared/dist/advisor-response.js";
@@ -16,7 +18,9 @@ async function setup(t, coreOptions = {}) {
   const db = createTestDatabase(root);
   const advisorReplies = [];
   const advisorRequests = [];
+  const cancelledRuns = [];
   const agentRunner = {
+    cancelAgent: async (runId) => { cancelledRuns.push(runId); },
     runManagerPlan: async () => ({ outcome: "failed", message: "unused" }),
     runWorker: async () => ({ outcome: "failed" }),
     runReviewer: async () => ({ outcome: "failed" }),
@@ -69,7 +73,7 @@ async function setup(t, coreOptions = {}) {
     return { messageId: message.id, body: message.body };
   }
 
-  return { db, core, conversationId, respond };
+  return { db, core, conversationId, respond, cancelledRuns };
 }
 
 async function createWorkInState(core, db, state, suffix) {
@@ -150,6 +154,73 @@ test("pause_work followed by resume_work pauses and resumes the Work", async (t)
   const resumed = await respond([action("resume_work", { work_id: workId })]);
   assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "running");
   assert.match(resumed.body, /再開しました/u);
+});
+
+test("pause_work through the Advisor stops the running Worker and Manager and pauses the Tasks", async (t) => {
+  const { db, core, respond, cancelledRuns } = await setup(t);
+  const workId = await createWorkInState(core, db, "running", "pause-stops-agents");
+  const taskId = createUlid();
+  const workerRunId = createUlid();
+  const managerRunId = createUlid();
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run(
+      `INSERT INTO tasks
+         (id, work_id, title, type, status, priority, context, acceptance, state_version,
+          failure_count, same_error_count, review_round, worker_generation, created_at, updated_at,
+          retry_no, manager_task_id)
+       VALUES (?, ?, 'Active task', 'research', 'running', 'normal', '', 'Done.', 0, 0, 0, 0, 0, ?, ?, 0, 'T1')`,
+      taskId, workId, now, now,
+    );
+    for (const [id, role, runTaskId] of [[workerRunId, "worker", taskId], [managerRunId, "manager", null]]) {
+      transaction.run(
+        `INSERT INTO agent_runs (id, work_id, task_id, role, provider, model, status, fencing_token, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'test', 'test', 'running', ?, ?, ?)`,
+        id, workId, runTaskId, role, id, now, now,
+      );
+    }
+  });
+
+  await respond([action("pause_work", { work_id: workId })]);
+
+  assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "paused");
+  assert.deepEqual({ ...db.get("SELECT status, paused_from FROM tasks WHERE id = ?", taskId) }, { status: "paused", paused_from: "ready" });
+  assert.deepEqual(new Set(cancelledRuns), new Set([workerRunId, managerRunId]));
+  assert.deepEqual(db.all("SELECT id FROM agent_runs WHERE work_id = ? AND status = 'running'", workId), []);
+});
+
+test("send_work_instruction through the Advisor stops the running Worker, not the Manager, and returns the Task to ready", async (t) => {
+  const { db, core, respond, cancelledRuns } = await setup(t);
+  const workId = await createWorkInState(core, db, "running", "instruction-stops-worker");
+  const taskId = createUlid();
+  const workerRunId = createUlid();
+  const managerRunId = createUlid();
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run(
+      `INSERT INTO tasks
+         (id, work_id, title, type, status, priority, context, acceptance, state_version,
+          failure_count, same_error_count, review_round, worker_generation, created_at, updated_at,
+          retry_no, manager_task_id)
+       VALUES (?, ?, 'Active task', 'research', 'running', 'normal', '', 'Done.', 0, 0, 0, 0, 0, ?, ?, 0, 'T1')`,
+      taskId, workId, now, now,
+    );
+    for (const [id, role, runTaskId] of [[workerRunId, "worker", taskId], [managerRunId, "manager", null]]) {
+      transaction.run(
+        `INSERT INTO agent_runs (id, work_id, task_id, role, provider, model, status, fencing_token, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'test', 'test', 'running', ?, ?, ?)`,
+        id, workId, runTaskId, role, id, now, now,
+      );
+    }
+  });
+
+  await respond([action("send_work_instruction", { work_id: workId, body: "Change course" })]);
+
+  assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "running");
+  assert.equal(db.get("SELECT status FROM tasks WHERE id = ?", taskId).status, "ready");
+  assert.equal(db.get("SELECT failure_count FROM tasks WHERE id = ?", taskId).failure_count, 0);
+  assert.deepEqual(cancelledRuns, [workerRunId], "only the Worker is signalled");
+  assert.equal(ownerReplan(db, workId).kind, "instruction");
 });
 
 test("resume_work retries a judgement_waiting Work with an open retry Decision", async (t) => {
@@ -579,4 +650,122 @@ test("a retried turn saves the prerequisites that were never stored and reports 
     assert.match(body, waiting);
     assert.doesNotMatch(body, /開始しました|started it now/u);
   }
+});
+
+async function sendFileSetup(t, settings) {
+  const dir = await tempDir(t, "owl-send-file-");
+  const allowed = join(dir, "allowed");
+  const outside = join(dir, "outside");
+  await mkdir(allowed);
+  await mkdir(outside);
+  const ctx = await setup(t, settings === undefined ? {} : { getAdvisorSendFileSettings: () => settings(allowed) });
+  const send = async (channel, ...paths) => {
+    const turnId = createUlid();
+    const origin = { channel, channel_id: "C1", ref: "1.1" };
+    await ctx.core.persistAdvisorReply(ctx.conversationId, "reply", turnId, origin,
+      paths.map((path) => action("send_file", typeof path === "string" ? { path } : path)));
+    const row = ctx.db.get("SELECT payload_json FROM events WHERE type = 'advisor.responded' ORDER BY rowid DESC LIMIT 1");
+    return JSON.parse(row.payload_json);
+  };
+  return { ...ctx, allowed, outside, send };
+}
+
+test("send_file refuses paths outside the folders, symlink escapes, secret names, folders and missing files with a reason each", async (t) => {
+  const { allowed, outside, send } = await sendFileSetup(t, (dir) => ({ dirs: [dir] }));
+  await writeFile(join(outside, "out.txt"), "x");
+  await writeFile(join(allowed, ".env"), "x");
+  await writeFile(join(allowed, "id_rsa"), "x");
+  await writeFile(join(allowed, "ok.txt"), "ok");
+  await mkdir(join(allowed, "sub"));
+  await symlink(join(outside, "out.txt"), join(allowed, "escape.txt"));
+  await symlink(join(allowed, "ok.txt"), join(allowed, "inner.txt"));
+  const payload = await send("slack", join(outside, "out.txt"), join(allowed, "escape.txt"), join(allowed, ".env"),
+    join(allowed, "id_rsa"), join(allowed, "sub"), allowed, join(allowed, "missing.txt"), join(allowed, "inner.txt"));
+  assert.deepEqual(payload.outbound_files.map((file) => file.name), ["ok.txt"]);
+  for (const pattern of [/out\.txt は送っていません: 送信できるフォルダの外/u, /escape\.txt は送っていません: リンク先が/u,
+    /\.env は送っていません: 秘密情報/u, /id_rsa は送っていません: 秘密情報/u, /sub は送っていません: 通常のファイルではありません/u,
+    /missing\.txt は送っていません: ファイルが見つかりません/u]) {
+    assert.match(payload.reply, pattern);
+    assert.match(payload.action_results, pattern);
+  }
+});
+
+test("send_file over the channel limit is not published and the notice names the size and the limit", async (t) => {
+  const { allowed, send } = await sendFileSetup(t, (dir) => ({ dirs: [dir], slackMaxBytes: 10, discordMaxBytes: 40 }));
+  await writeFile(join(allowed, "big.txt"), "x".repeat(30));
+  const slack = await send("slack", join(allowed, "big.txt"));
+  assert.equal(slack.outbound_files, undefined);
+  assert.match(slack.reply, /30B あり、Slack の上限 10B/u);
+  const discord = await send("discord", join(allowed, "big.txt"));
+  assert.equal(discord.outbound_files.length, 1);
+  await writeFile(join(allowed, "bigger.txt"), "x".repeat(50));
+  assert.match((await send("discord", join(allowed, "bigger.txt"))).reply, /50B あり、Discord の上限 40B/u);
+});
+
+test("send_file from a Slack conversation publishes the verified file in outbound_files and keeps it out of suggested_actions", async (t) => {
+  const { allowed, send } = await sendFileSetup(t, (dir) => ({ dirs: [dir] }));
+  const content = "demo contents";
+  await writeFile(join(allowed, "a.txt"), content);
+  await writeFile(join(allowed, "b.txt"), "second");
+  const payload = await send("slack", { path: join(allowed, "a.txt"), comment: "note" }, join(allowed, "b.txt"));
+  assert.deepEqual(payload.outbound_files, [
+    { path: await realpath(join(allowed, "a.txt")), name: "a.txt", size: content.length, sha256: createHash("sha256").update(content).digest("hex"), comment: "note" },
+    { path: await realpath(join(allowed, "b.txt")), name: "b.txt", size: 6, sha256: createHash("sha256").update("second").digest("hex") },
+  ]);
+  assert.deepEqual(payload.suggested_actions, []);
+  assert.equal(payload.reply, "reply");
+  assert.equal(payload.action_results, "");
+});
+
+test("send_file from a Web conversation reports that sending works only in Slack and Discord", async (t) => {
+  const { allowed, send } = await sendFileSetup(t, (dir) => ({ dirs: [dir] }));
+  await writeFile(join(allowed, "a.txt"), "x");
+  const payload = await send("web", join(allowed, "a.txt"));
+  assert.equal(payload.outbound_files, undefined);
+  assert.match(payload.reply, /a\.txt は送っていません。ファイルの送信は Slack と Discord/u);
+});
+
+test("send_file with a missing or malformed payload reports the reason", async (t) => {
+  const { send } = await sendFileSetup(t, () => ({}));
+  const payload = await send("slack", {}, { path: 1 }, { path: "/x", extra: true }, { path: "relative/a.txt" });
+  assert.equal(payload.outbound_files, undefined);
+  assert.equal((payload.action_results.match(/send_file を実行しませんでした/gu) ?? []).length, 4);
+  assert.match(payload.action_results, /must be absolute/u);
+});
+
+test("send_file defaults to the materials folder only when advisor_send_file_dirs is absent", async (t) => {
+  for (const [settings, allowed] of [[undefined, true], [() => ({}), true], [() => ({ dirs: [] }), false]]) {
+    const ctx = await sendFileSetup(t, settings);
+    const materials = join(ctx.core.knowledgeLocation.path, "materials");
+    await mkdir(materials, { recursive: true });
+    await writeFile(join(materials, "m.txt"), "m");
+    const payload = await ctx.send("slack", join(materials, "m.txt"));
+    assert.equal(payload.outbound_files?.length, allowed ? 1 : undefined);
+    if (!allowed) assert.match(payload.reply, /送信できるフォルダがありません/u);
+  }
+});
+
+test("openPinnedFile refuses a path whose parent folder is a symbolic link and opens the same path without links", async (t) => {
+  const dir = await tempDir(t, "owl-pinned-");
+  await mkdir(join(dir, "root", "sub"), { recursive: true });
+  await mkdir(join(dir, "outside"));
+  await writeFile(join(dir, "outside", "f.txt"), "outside");
+  await writeFile(join(dir, "root", "sub", "f.txt"), "inside");
+  await symlink(join(dir, "outside"), join(dir, "root", "link"));
+  assert.deepEqual(await openPinnedFile(join(dir, "root", "link", "f.txt")), { ok: false, rejection: "changed" });
+  const opened = await openPinnedFile(join(dir, "root", "sub", "f.txt"));
+  assert.equal(opened.ok, true);
+  assert.equal(await opened.handle.readFile("utf8"), "inside");
+  await opened.handle.close();
+});
+
+test("the Advisor system prompt separates required acceptance criteria from goals", async (t) => {
+  const { core } = await setup(t);
+  const prompt = core.buildAdvisorSystemPrompt("codex");
+  assert.match(prompt, /keep these few/u);
+  assert.match(prompt, /Put a condition under "目標:" when it is wanted but not required, when it depends on anything outside the Work/u);
+  assert.match(prompt, /count or a procedure/u);
+  assert.match(prompt, /Never put a condition that depends on things outside the Work under "受け入れ条件:"/u);
+  assert.match(prompt, /An unmet goal is reported with its reason and does not stop the Work/u);
+  assert.match(prompt, /"目標:"/u);
 });

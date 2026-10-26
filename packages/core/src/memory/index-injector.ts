@@ -14,6 +14,7 @@ const ADVISOR_START_BYTE_BUDGET = 5400;
 
 /** Pseudo path under which a session remembers the Project index titles it was shown. */
 const PROJECT_LIST = "(project-list)";
+const OWN_INDEX = "(own-project-index):";
 const OMITTED = "(上限超過のため省略 — MCP の index で取得)";
 const GUIDE = "テーマページは owl-memory の page で開く（[[ページ名]] を渡す）。\n外部の資料は search で探す。Work の記録は普段は読まない。";
 const ADVISOR_GUIDE = "Project の目次は owl-memory の index（project に名前を渡す）で開く。テーマページは page で開く（[[ページ名]] を渡す）。\n外部の資料は search で探す。Work の記録は普段は読まない。\nappend でナレッジに書くのは教訓・決まりごと・落とし穴だけ。構想や設計のまとめは append せず、materials/ にファイルとして書く。\n壁打ちのまとめや調査結果は、保管庫の materials/（common/ または projects/<slug>/）にファイルとして書く。Work を作るときは summary にそのパスを書く。materials/ は search で探せるが、目次には出ない。";
@@ -88,7 +89,7 @@ export class IndexInjector {
     try {
       if (input.role === "curator") return null;
       if (input.role === "advisor" && input.session_id) this.options.resetReads?.(input.session_id);
-      const index = input.role === "advisor" ? this.advisor(input.session_id) : this.forProject(input.role, input.project_id);
+      const index = input.role === "advisor" ? this.advisor(input.session_id, input.project_id) : this.forProject(input.role, input.project_id);
       const recall = await this.recall(input);
       return index && recall ? `${index}\n\n${recall}` : index ?? recall;
     } catch (error) {
@@ -191,29 +192,34 @@ export class IndexInjector {
     return { hash: page.hash, title: page.title, type: page.page_type, lines: isIndex ? bodyLines(page.body) : bodyLines((history?.lines ?? []).join("\n")) };
   }
 
-  private advisor(sessionId: string | undefined): string | null {
+  /** A Project window (projectId set) sees the common index and its own Project's index only; this narrows the prompt, it does not limit what owl-memory can read. */
+  private advisor(sessionId: string | undefined, projectId: string | null): string | null {
     const shown = sessionId ? this.sessions.get(sessionId) : undefined;
-    return shown ? this.advisorDiff(shown) : this.advisorStart(sessionId);
+    return shown ? this.advisorDiff(shown) : this.advisorStart(sessionId, projectId);
   }
 
-  private startShown(common: PageText | null, projects: readonly { title: string }[]): Map<string, Shown> {
+  private startShown(common: PageText | null, projects: readonly { title: string }[], own: PageText | null, projectId: string | null): Map<string, Shown> {
     const shown = new Map<string, Shown>([[COMMON_INDEX, common ? this.shownOf(common) : { hash: "", title: "共通の目次", type: "project-index", lines: [], deleted: true }]]);
-    shown.set(PROJECT_LIST, { hash: "", title: "Project 目次の一覧", type: PROJECT_LIST, lines: projects.map((p) => `- ${defuseTags(p.title)}`) });
+    // A Project window never tracks the all-Project list; a not-yet-created own index is tracked by a placeholder so it shows up as a diff later.
+    if (projectId) shown.set(OWN_INDEX + projectId, own ? this.shownOf(own) : { hash: "", title: "Project 目次", type: "project-index", lines: [], deleted: true });
+    else shown.set(PROJECT_LIST, { hash: "", title: "Project 目次の一覧", type: PROJECT_LIST, lines: projects.map((p) => `- ${defuseTags(p.title)}`) });
     return shown;
   }
 
-  private advisorStart(sessionId: string | undefined): string | null {
+  private advisorStart(sessionId: string | undefined, projectId: string | null): string | null {
     const now = this.now();
     const { notice, empty } = this.storageNotice(now);
     if (empty) return empty;
     const common = this.indexPage(null);
-    const projects = this.options.index.listPages({ types: ["project-index"], scope: "project" });
-    if (!common && projects.length === 0) {
+    const own = projectId ? this.indexPage(projectId) : null;
+    const projects = projectId ? [] : this.options.index.listPages({ types: ["project-index"], scope: "project" });
+    if (!common && !own && projects.length === 0) {
       // Nothing to show yet, but track the session so a later index shows up as a diff.
-      if (sessionId) this.sessions.set(sessionId, this.startShown(common, projects));
+      if (sessionId) this.sessions.set(sessionId, this.startShown(common, projects, own, projectId));
       return null;
     }
     const sections = common ? sectionsOf(common.body) : [];
+    if (own) sections.push(...sectionsOf(own.body).map((section) => ({ ...section, title: section.title ? `${nameOf(own.title)} の${section.title}` : nameOf(own.title) })));
     if (projects.length > 0) {
       const lines: string[] = [];
       for (const [i, row] of projects.entries()) {
@@ -223,7 +229,7 @@ export class IndexInjector {
       }
       sections.push({ title: "Project 目次の一覧", lines, collapsed: false });
     }
-    if (sessionId) this.sessions.set(sessionId, this.startShown(common, projects));
+    if (sessionId) this.sessions.set(sessionId, this.startShown(common, projects, own, projectId));
     const head = `<owl-memory scope="advisor" generated="${now}" ${EXTERNAL_DATA_ATTR}>`;
     return this.fit({ head, minHead: head, notice, sections, guide: ADVISOR_GUIDE, limit: ADVISOR_START_TOKEN_LIMIT, budget: ADVISOR_START_BYTE_BUDGET });
   }
@@ -243,7 +249,7 @@ export class IndexInjector {
         changes.push(`## ${old.title}`, ...added.map((l) => `+ ${l}`), ...removed.map((l) => `- ${l}`));
         continue;
       }
-      const page = path === COMMON_INDEX ? this.indexPage(null) : this.page(path);
+      const page = path === COMMON_INDEX ? this.indexPage(null) : path.startsWith(OWN_INDEX) ? this.indexPage(path.slice(OWN_INDEX.length)) : this.page(path);
       if (!page) {
         if (old.deleted) continue;
         shown.set(path, { ...old, hash: "", lines: [], deleted: true });

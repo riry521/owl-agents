@@ -212,7 +212,7 @@ test("cancelling a Work while its Worker runs closes the run and raises no alert
   assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = 'system.alert'", workId).n, 0);
 });
 
-test("a Worker that finishes after pause and resume records its result and the Work completes", async (t) => {
+test("pausing a Work stops its running Worker and resume launches the Task again, which then completes the Work", async (t) => {
   const titles = lateTitles();
   const gated = gatedRunner(titles.titleOf);
   const { db, core } = await openCore(t, gated.runner);
@@ -223,11 +223,13 @@ test("a Worker that finishes after pause and resume records its result and the W
 
   await core.pauseWork(workId, commandEnvelope({ reason: "pause" }, "pause-running", workVersion(db, workId)));
   assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "paused");
-  assert.equal(statusOf(db, ids.get("A")), "running");
-  await core.resumeWork(workId, commandEnvelope({}, "pause-resume", workVersion(db, workId)));
+  assert.deepEqual({ ...db.get("SELECT status, paused_from FROM tasks WHERE id = ?", ids.get("A")) }, { status: "paused", paused_from: "ready" });
+  // The stopped Worker's pipeline must end before the Task can launch again.
   gated.release("A");
+  await core.workflow.drainPipelines();
+  await core.resumeWork(workId, commandEnvelope({}, "pause-resume", workVersion(db, workId)));
 
   assert.equal(await waitFor(() => db.get("SELECT state FROM works WHERE id = ?", workId).state === "completed"), true);
   assert.equal(statusOf(db, ids.get("A")), "completed");
-  assert.deepEqual(gated.started, ["A"]);
+  assert.deepEqual(gated.started, ["A", "A"]);
 });

@@ -126,3 +126,41 @@ export function validateRoleOutput(schema: RoleSchema, value: unknown, path = ""
   }
   return null;
 }
+
+/** Object schema whose every property is required and no other key is allowed. */
+export function objectSchema(
+  properties: Readonly<Record<string, RoleSchema>>,
+  description?: string,
+): RoleSchema {
+  return {
+    type: "object",
+    ...(description ? { description } : {}),
+    properties,
+    required: Object.keys(properties),
+    additionalProperties: false,
+  };
+}
+
+export const SKILLS_USED_SCHEMA: RoleSchema = {
+  type: "array",
+  items: objectSchema({
+    name: { type: "string", description: "name of a skill you used" },
+    verdict: { type: "string", enum: ["helpful", "misleading", "irrelevant"], description: "how the skill applied" },
+    note: { type: "string", description: "brief optional context; empty when none" },
+  }),
+  example: [],
+  description: "skills actually used and how they applied; [] if none",
+};
+
+export const SKILL_PROPOSALS_SCHEMA: RoleSchema = {
+  type: "array",
+  items: objectSchema({
+    kind: { type: "string", enum: ["new", "update"], description: "create a new skill or update an existing one" },
+    target: { type: ["string", "null"], description: "existing skill name for update, otherwise null" },
+    summary: { type: "string", description: "what reusable procedure should be captured" },
+    steps_or_diff: { type: "string", description: "reusable steps or the change needed in the existing skill" },
+    evidence: { type: "string", description: "why the procedure is reusable or the skill needs correction" },
+  }),
+  example: [],
+  description: "proposals for reusable procedures or skill improvements; [] if none",
+};

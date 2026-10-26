@@ -22,14 +22,18 @@ function catalogEntry(row: AdvisorWorkCatalogRow): AdvisorWorkCatalogRow {
 }
 
 /** Build the up-to-date Work lookup block appended to every Advisor turn. */
-export function buildAdvisorWorkCatalogInstruction(db: Pick<CoreDatabase, "all">): string {
+export function buildAdvisorWorkCatalogInstruction(db: Pick<CoreDatabase, "all">, scope: { readonly projectId?: string | null } = {}): string {
+  const projectId = scope.projectId ?? null;
+  const projectFilter = projectId === null ? "" : "AND works.project_id = ?";
+  const params = projectId === null ? [] : [projectId];
   const activeRows = db.all<AdvisorWorkCatalogRow>(
     `SELECT works.id, works.display_number, works.title, works.state, works.project_id,
             projects.name AS project_name, works.updated_at
        FROM works LEFT JOIN projects ON projects.id = works.project_id
-      WHERE works.archived_at IS NULL AND works.state IN ('running', 'paused', 'judgement_waiting')
+      WHERE works.archived_at IS NULL AND works.state IN ('running', 'paused', 'judgement_waiting') ${projectFilter}
       ORDER BY works.updated_at DESC, works.id DESC
       LIMIT ${ADVISOR_WORK_CATALOG_ACTIVE_LIMIT + 1}`,
+    ...params,
   );
   const hasMoreActive = activeRows.length > ADVISOR_WORK_CATALOG_ACTIVE_LIMIT;
   const active = activeRows.slice(0, ADVISOR_WORK_CATALOG_ACTIVE_LIMIT).map(catalogEntry);
@@ -37,9 +41,10 @@ export function buildAdvisorWorkCatalogInstruction(db: Pick<CoreDatabase, "all">
     `SELECT works.id, works.display_number, works.title, works.state, works.project_id,
             projects.name AS project_name, works.updated_at
        FROM works LEFT JOIN projects ON projects.id = works.project_id
-      WHERE works.archived_at IS NULL AND works.state IN ('completed', 'cancelled')
+      WHERE works.archived_at IS NULL AND works.state IN ('completed', 'cancelled') ${projectFilter}
       ORDER BY COALESCE(works.completed_at, works.cancelled_at, works.updated_at) DESC, works.id DESC
       LIMIT ${ADVISOR_WORK_CATALOG_RECENT_FINISHED_LIMIT}`,
+    ...params,
   ).map(catalogEntry);
 
   return [
@@ -53,6 +58,6 @@ export function buildAdvisorWorkCatalogInstruction(db: Pick<CoreDatabase, "all">
   ].join("\n");
 }
 
-export function appendAdvisorWorkCatalog(text: string, db: Pick<CoreDatabase, "all">): string {
-  return `${text}\n\n${buildAdvisorWorkCatalogInstruction(db)}`;
+export function appendAdvisorWorkCatalog(text: string, db: Pick<CoreDatabase, "all">, scope: { readonly projectId?: string | null } = {}): string {
+  return `${text}\n\n${buildAdvisorWorkCatalogInstruction(db, scope)}`;
 }

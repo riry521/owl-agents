@@ -136,3 +136,73 @@ test("agent.started names the harness and its gaps only for an opencode run", as
   assert.ok(started.harness_gaps.length > 0);
   assert.ok(started.harness_gaps.includes("process_skills_native"));
 });
+
+/** Commit the Owner's pause right before the first write that matches, as if it landed between the scan and its write. */
+function pauseBeforeWrite(core, db, workId, matches) {
+  const original = core.writeLane.write.bind(core.writeLane);
+  const state = { fired: false };
+  core.writeLane.write = async (input) => {
+    if (!state.fired && matches(input)) {
+      state.fired = true;
+      const version = db.get("SELECT state_version FROM works WHERE id = ?", workId).state_version;
+      await core.pauseWork(workId, command({ reason: "race" }, `race-pause-${createUlid()}`, version));
+    }
+    return original(input);
+  };
+  return state;
+}
+
+function insertRun(transaction, workId, taskId, { id, pid, role }) {
+  const now = new Date().toISOString();
+  transaction.run(
+    `INSERT INTO agent_runs (id, work_id, task_id, role, provider, model, status, pid, fencing_token, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'test', 'test', 'running', ?, ?, ?, ?)`,
+    id, workId, taskId, role, pid, id, now, now,
+  );
+}
+
+test("a dead Worker pid found after the Owner's pause records no crash and the run is closed as cancelled", async (t) => {
+  const { db, core } = await createTestCore(t, {
+    agentRunner: noopAgentRunner,
+    dispatcher: { tick_interval_ms: 5_000, stale_check_interval_ms: 100 },
+  }, { prefix: "owl-stale-pause-" });
+  const workId = await createRunningWork(core, db, "pause-worker");
+  const taskId = createUlid();
+  const runId = createUlid();
+  const pid = await deadPid();
+  await core.start();
+  const state = pauseBeforeWrite(core, db, workId, (input) => input.event?.type === "agent.crashed");
+  await db.createWriteLane().transact((transaction) => {
+    insertTask(transaction, workId, { id: taskId, status: "running", managerTaskId: "T1", title: "Dead pid" });
+    insertRun(transaction, workId, taskId, { id: runId, pid, role: "worker" });
+  });
+
+  await waitFor(() => state.fired, { message: "the pause to land before the crash write" });
+  await waitFor(() => db.get("SELECT status FROM agent_runs WHERE id = ?", runId).status === "cancelled", { message: "the stopped run to be closed" });
+
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE type = 'agent.crashed' AND agent_run_id = ?", runId).n, 0);
+  assert.deepEqual({ ...db.get("SELECT status, paused_from, failure_count, same_error_count FROM tasks WHERE id = ?", taskId) }, { status: "paused", paused_from: "ready", failure_count: 0, same_error_count: 0 });
+});
+
+test("a dead Manager pid found after the Owner's pause leaves no crash event and the run is closed as cancelled", async (t) => {
+  const { db, core } = await createTestCore(t, {
+    agentRunner: noopAgentRunner,
+    dispatcher: { tick_interval_ms: 5_000, stale_check_interval_ms: 100 },
+  }, { prefix: "owl-stale-pause-" });
+  const workId = await createRunningWork(core, db, "pause-manager");
+  const taskId = createUlid();
+  const runId = createUlid();
+  const pid = await deadPid();
+  await core.start();
+  const state = pauseBeforeWrite(core, db, workId, (input) => input.event?.idempotencyKey === `stale-crash:${runId}`);
+  await db.createWriteLane().transact((transaction) => {
+    // A Task keeps the Work pausable; the Manager run has no Task of its own.
+    insertTask(transaction, workId, { id: taskId, status: "ready", managerTaskId: "T1", title: "Waiting" });
+    insertRun(transaction, workId, null, { id: runId, pid, role: "manager" });
+  });
+
+  await waitFor(() => state.fired, { message: "the pause to land before the crash write" });
+  await waitFor(() => db.get("SELECT status FROM agent_runs WHERE id = ?", runId).status === "cancelled", { message: "the stopped run to be closed" });
+
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE type = 'agent.crashed' AND agent_run_id = ?", runId).n, 0);
+});

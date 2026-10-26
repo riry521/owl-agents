@@ -21,6 +21,9 @@ import { ADVISOR_TEXT, formatAdvisorRateLimitReply } from "./advisor-text";
 import type { IndexInjector } from "./memory/index-injector.js";
 import { searchQuery } from "./memory/memory-injector.js";
 import { ownerLanguage, type OwnerLanguage } from "./owner-language";
+import { advisorWindowSettings } from "./advisor-window-settings";
+import { findAdvisorWindow } from "./advisor-windows";
+import { GENERAL_WINDOW_KEY } from "../../shared/dist/advisor-windows.js";
 import { CONVERSATION_COMPACT_INSTRUCTIONS } from "./memory/conversation-log.js";
 import type { ConversationLogWriter } from "./memory/conversation-log-writer.js";
 // Imported from the agent-runtime "types" submodule (not the package barrel
@@ -86,6 +89,10 @@ export interface AdvisorRuntimeConfig {
    * cache in that case).
    */
   readonly resolveAttachmentPaths: (messageId: string) => { paths: readonly string[]; notes: readonly string[] };
+  /** Text block of the status answers a turn's message carries, rebuilt after a restart. */
+  readonly resolveStatusExchangesBlock?: (messageId: string) => string | null;
+  /** Text block of the window handoffs a turn's message carries, rebuilt after a restart. */
+  readonly resolveWindowHandoffBlock?: (messageId: string) => string | null;
   readonly onReply: (
     conversationId: string,
     reply: string,
@@ -202,77 +209,155 @@ class AdvisorRuntimeStoppedError extends Error {
   }
 }
 
+/** The Advisor window a conversation belongs to; window_id is null for conversations that predate windows. */
+interface WindowTarget {
+  readonly window_id: string | null;
+  /** The conversation the turn arrived on; a session started for it uses its working directory. */
+  readonly conversation_id: string;
+}
+
+/** Everything one Advisor window owns while its session is running; windows never share any of it. */
+interface WindowSlot {
+  driver: ProviderSession | null;
+  sessionId: string | null;
+  /** The Owl system prompt the live session currently follows (its start prompt, or the latest update sent to it). */
+  systemPrompt: string | null;
+  /** The conversation and origin of the most recent turn sent to the live session; unsolicited replies are posted there. */
+  lastTurnTarget: { readonly sessionId: string; readonly conversationId: string; readonly origin: AdvisorTurnRequest["origin"] } | null;
+  /** Serializes handling of unsolicited replies so they are posted in arrival order. */
+  unsolicitedChain: Promise<void>;
+  turnLoopRunning: boolean;
+  /** Set when startTurnLoop is called while the loop is already running; the loop switches to this session once its current queue drains. */
+  turnLoopKick: string | null;
+  /** Serializes ensureSession/suspend/stop for this window so two callers never race to create two provider processes for it. */
+  lock: Promise<void>;
+  /** Recent window history, put before the next turn's text once, when a suspended session could not be resumed. */
+  pendingHistoryBlock: string | null;
+  /** The session resumed from suspension whose first turn has not settled yet; if it dies first, the resume counts as failed. */
+  unconfirmedResume: string | null;
+}
+
+/** Slot key for conversations that predate windows. */
+const LEGACY_WINDOW_KEY = "legacy";
+
 /**
- * Orchestrates one persistent Advisor ProviderSession: (re)creating it via
- * AdvisorSessionManager + ProviderClient.createSession, running a FIFO queue
- * of turns against it (advisor_turns), and reacting to the SessionEvent
- * stream (turn completion/failure, compaction, process exit).
+ * Orchestrates the persistent Advisor ProviderSessions, one per window (the
+ * general window and each Project window): (re)creating, resuming and
+ * suspending them via AdvisorSessionManager + ProviderClient.createSession,
+ * running a FIFO queue of turns against each (advisor_turns), and reacting to
+ * the SessionEvent stream (turn completion/failure, compaction, process exit).
  *
- * Only one Advisor session is active system-wide at a time (mirrors
- * AdvisorSessionManager.startSession's global "one active session" guard),
- * so a single activeDriver/activeSessionId/turnLoopRunning trio is enough;
- * there is no per-session map.
+ * Windows run side by side, each with its own WindowSlot; the turns of one
+ * window run one after another. AdvisorSessionManager's "one active session
+ * per window" guard backs the slot.
  */
 export class AdvisorSessionRuntime {
   private readonly config: AdvisorRuntimeConfig;
   private readonly writeLane: ReturnType<CoreDatabase["createWriteLane"]>;
   private readonly pendingTurnPayloads = new Map<string, AdvisorTurnRequest>();
-  private activeDriver: ProviderSession | null = null;
-  private activeSessionId: string | null = null;
-  /** Sessions whose provider process is being started and is not yet the active driver. */
+  private readonly slots = new Map<string, WindowSlot>();
+  /** Sessions whose provider process is being started and is not yet a slot's driver. */
   private readonly startingSessionIds = new Set<string>();
-  /** The Owl system prompt the live session currently follows (its start prompt, or the latest update sent to it). */
-  private activeSystemPrompt: string | null = null;
-  /** The conversation and origin of the most recent turn sent to the live session; unsolicited replies are posted there. */
-  private lastTurnTarget: { readonly sessionId: string; readonly conversationId: string; readonly origin: AdvisorTurnRequest["origin"] } | null = null;
-  /** Serializes handling of unsolicited replies so they are posted in arrival order. */
-  private unsolicitedChain: Promise<void> = Promise.resolve();
   /** Keyed by conversation and shared worktree path, so one dirty worktree is announced once however many targets point at it. */
   private readonly workspaceWasDirty = new Map<string, boolean>();
   private readonly sessionDirectories = new Map<string, AdvisorSessionDirectory>();
   /** Project ids (null = the session's default target) whose shared worktree this session prepared, so replies keep checking them. */
   private readonly preparedTargets = new Map<string, Set<string | null>>();
-  private turnLoopRunning = false;
-  /** Set when startTurnLoop is called while the loop is already running; the loop switches to this session once its current queue drains. */
-  private turnLoopKick: string | null = null;
   private stopped = false;
-  /** Serializes ensureSession/stop so concurrent callers never race to create two provider processes for the single owner-wide session. */
-  private sessionLock: Promise<void> = Promise.resolve();
+  /** Serializes workspace sweeps with the creation of a session's working directory, across windows. */
+  private directoryLock: Promise<void> = Promise.resolve();
 
   public constructor(config: AdvisorRuntimeConfig) {
     this.config = config;
     this.writeLane = config.db.createWriteLane();
   }
 
-  /** Chains `fn` after every call already queued on the session lock; a rejection never blocks callers queued behind it. */
-  private withSessionLock<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.sessionLock.then(fn, fn);
-    this.sessionLock = run.then(
+  private slotFor(key: string | null): WindowSlot {
+    const slotKey = key ?? LEGACY_WINDOW_KEY;
+    let slot = this.slots.get(slotKey);
+    if (!slot) {
+      slot = {
+        driver: null, sessionId: null, systemPrompt: null, lastTurnTarget: null,
+        unsolicitedChain: Promise.resolve(), turnLoopRunning: false, turnLoopKick: null,
+        lock: Promise.resolve(), pendingHistoryBlock: null, unconfirmedResume: null,
+      };
+      this.slots.set(slotKey, slot);
+    }
+    return slot;
+  }
+
+  /** The slot a session runs in: the one holding it, else the one of the window recorded on its row. */
+  private slotForSession(sessionId: string): WindowSlot {
+    for (const slot of this.slots.values()) if (slot.sessionId === sessionId) return slot;
+    const row = this.config.db.get<{ window_id: string | null }>("SELECT window_id FROM advisor_sessions WHERE id = ?", sessionId);
+    return this.slotFor(row?.window_id ?? null);
+  }
+
+  /** Chains `fn` after every call already queued on `lock`; a rejection never blocks callers queued behind it. */
+  private chain<T>(holder: { lock: Promise<void> }, fn: () => Promise<T>): Promise<T> {
+    const run = holder.lock.then(fn, fn);
+    holder.lock = run.then(
       () => undefined,
       () => undefined,
     );
     return run;
   }
 
+  private withDirectoryLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.directoryLock.then(fn, fn);
+    this.directoryLock = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  /** A conversation with no window (it predates windows) belongs to its Owner's general window; Work conversations have none. */
+  private windowOf(conversationId: string): WindowTarget {
+    const row = this.config.db.get<{ advisor_window_id: string | null; owner_id: string; work_id: string | null }>(
+      "SELECT advisor_window_id, owner_id, work_id FROM conversations WHERE id = ?",
+      conversationId,
+    );
+    if (row && row.advisor_window_id === null && row.work_id === null) {
+      const general = findAdvisorWindow(this.config.db, row.owner_id, GENERAL_WINDOW_KEY);
+      if (general) return general;
+    }
+    return { window_id: row?.advisor_window_id ?? null, conversation_id: conversationId };
+  }
+
+  /** Runs `fn` inside the lock of the window that owns `conversationId`. */
+  private inWindow<T>(conversationId: string, fn: (slot: WindowSlot, window: WindowTarget) => Promise<T>): Promise<T> {
+    const window = this.windowOf(conversationId);
+    const slot = this.slotFor(window.window_id);
+    return this.chain(slot, () => fn(slot, window));
+  }
+
+  private activeSessionOf(ownerId: string, window: WindowTarget): AdvisorSession | null {
+    return window.window_id === null
+      ? this.config.sessionManager.getActiveSession(ownerId)
+      : this.config.sessionManager.getActiveSessionForWindow(window.window_id);
+  }
+
   /**
-   * Returns the Advisor session to send the next turn against, (re)creating
-   * the provider process as needed:
+   * Returns the window's Advisor session to send the next turn against,
+   * (re)creating the provider process as needed:
    *   - an already-running session whose driver this runtime still holds,
    *     and whose model/effort match current settings, is reused as-is,
    *     regardless of which interface conversation supplied the turn or
    *     whether the Owl system prompt changed (an updated prompt is sent to
    *     the live session with its next turn);
+   *   - a suspended session is resumed from its provider_session_id;
    *   - anything else unreusable (model or effort drift, a DB-active session
    *     this process holds no live driver for, or a held driver whose
    *     process already exited while idle) is ended and replaced by a fresh
    *     session.
    */
   public ensureSession(ownerId: string, conversationId: string): Promise<AdvisorSession> {
-    return this.withSessionLock(() => this.ensureSessionUnlocked(ownerId, conversationId));
+    return this.inWindow(conversationId, (slot, window) => this.ensureSessionUnlocked(slot, window, ownerId));
   }
 
   /**
-   * ensureSession followed by enqueueTurn as one step under the session lock,
+   * ensureSession followed by enqueueTurn as one step under the window's lock,
    * so a concurrent settings change cannot replace the session between the two
    * and leave the turn on an ended session.
    */
@@ -282,35 +367,37 @@ export class AdvisorSessionRuntime {
     userMessageId: string,
     turn: AdvisorTurnRequest,
   ): Promise<{ session: AdvisorSession; turnId: string }> {
-    return this.withSessionLock(async () => {
-      const session = await this.ensureSessionUnlocked(ownerId, conversationId);
+    return this.inWindow(conversationId, async (slot, window) => {
+      const session = await this.ensureSessionUnlocked(slot, window, ownerId);
       const turnId = await this.enqueueTurn(session.id, conversationId, userMessageId, turn);
       return { session, turnId };
     });
   }
 
   /**
-   * Brings the resident Advisor session up, or onto changed settings, without
+   * Brings the window's Advisor session up, or onto changed settings, without
    * a turn to send. A no-op while the runtime is stopped, the Advisor provider
-   * is paused, or a turn loop is draining on a live process (its in-flight
-   * turn is never interrupted; the next call applies any pending change).
+   * is paused, the window is suspended (only a message wakes it), or a turn
+   * loop is draining on a live process (its in-flight turn is never
+   * interrupted; the next call applies any pending change).
    */
   public ensureResident(ownerId: string, conversationId: string): Promise<void> {
-    return this.withSessionLock(async () => {
+    return this.inWindow(conversationId, async (slot, window) => {
       if (this.stopped) return;
-      if (this.turnLoopRunning && this.activeDriver !== null && this.activeDriver.exited !== true) return;
+      if (this.activeSessionOf(ownerId, window)?.status === "suspended") return;
+      if (slot.turnLoopRunning && slot.driver !== null && slot.driver.exited !== true) return;
       const settings = this.config.getAdvisorSettings();
       if (this.config.isProviderPaused?.(settings.providerId)) return;
-      await this.ensureSessionUnlocked(ownerId, conversationId);
+      await this.ensureSessionUnlocked(slot, window, ownerId);
     });
   }
 
-  private async ensureSessionUnlocked(ownerId: string, conversationId: string): Promise<AdvisorSession> {
+  private async ensureSessionUnlocked(slot: WindowSlot, window: WindowTarget, ownerId: string): Promise<AdvisorSession> {
     const settings = this.config.getAdvisorSettings();
-    const active = this.config.sessionManager.getActiveSession(ownerId);
+    const active = this.activeSessionOf(ownerId, window);
 
     if (active === null) {
-      const created = await this.createSession(ownerId, conversationId, settings);
+      const created = await this.createSession(slot, ownerId, window.conversation_id, settings);
       await this.adoptQueuedTurns(created.id);
       return created;
     }
@@ -324,27 +411,132 @@ export class AdvisorSessionRuntime {
       !modelDrifted &&
       !effortDrifted &&
       active.status === "running" &&
-      this.activeDriver !== null &&
-      this.activeDriver.exited !== true &&
-      this.activeSessionId === active.id
+      slot.driver !== null &&
+      slot.driver.exited !== true &&
+      slot.sessionId === active.id
     ) {
       return active;
     }
 
-    // Model or effort changed, or the DB says starting/running/ending but this
-    // process holds no live driver for it (a driver that exited while idle;
-    // its session.exited is only consumed while a turn is in flight). None is
-    // reusable: stop what remains (stop() on an exited driver returns once
-    // its process is gone) and start fresh.
-    const reason = modelDrifted ? "model_changed" : effortDrifted ? "owner_requested" : "crashed";
-    if (reason === "crashed" && this.activeSessionId === active.id) {
-      const detail = this.activeDriver?.exit_detail;
-      if (detail) console.error(`[owl-core] Advisor session ${active.id} is no longer usable: ${detail}`);
+    if (active.status === "suspended" && !modelDrifted && !effortDrifted) {
+      const resumed = await this.resumeSuspended(slot, window, ownerId, active, settings);
+      if (resumed) {
+        await this.adoptQueuedTurns(resumed.id);
+        return resumed;
+      }
+    } else {
+      // Model or effort changed, or the DB says starting/running/ending/suspended but this
+      // process holds no live driver for it (a driver that exited while idle;
+      // its session.exited is only consumed while a turn is in flight). None is
+      // reusable: stop what remains (stop() on an exited driver returns once
+      // its process is gone) and start fresh.
+      const resumeUnconfirmed = slot.unconfirmedResume === active.id;
+      const reason = modelDrifted ? "model_changed" : effortDrifted ? "owner_requested" : resumeUnconfirmed ? "resume_failed" : "crashed";
+      if (reason === "crashed" && slot.sessionId === active.id) {
+        const detail = slot.driver?.exit_detail;
+        if (detail) console.error(`[owl-core] Advisor session ${active.id} is no longer usable: ${detail}`);
+      }
+      // A fresh session knows nothing of the suspended or just-resumed one's talk, so it is handed the window's history.
+      if (active.status === "suspended" || resumeUnconfirmed) slot.pendingHistoryBlock = this.buildHistoryBlock(window);
+      slot.unconfirmedResume = null;
+      await this.stopSession(active.id, reason);
     }
-    await this.stopSession(active.id, reason);
-    const replacement = await this.createSession(ownerId, conversationId, settings);
+    const replacement = await this.createSession(slot, ownerId, window.conversation_id, settings);
     await this.adoptQueuedTurns(replacement.id);
     return replacement;
+  }
+
+  /**
+   * Continues a suspended session from its provider_session_id. A failed
+   * resume ends the session with resume_failed and returns null, so the caller
+   * starts a fresh one that is handed the recent window history.
+   */
+  private async resumeSuspended(
+    slot: WindowSlot,
+    window: WindowTarget,
+    ownerId: string,
+    active: AdvisorSession,
+    settings: AdvisorSettingsSnapshot,
+  ): Promise<AdvisorSession | null> {
+    try {
+      if (!active.provider_session_id) throw new Error("The suspended Advisor session has no provider session id to resume.");
+      this.requireSessionSupport();
+      const directory = await this.withDirectoryLock(async () => {
+        const built = await this.buildWorkingDirectory(active.conversation_id);
+        await this.config.sessionManager.resumeSession(active.id, advisorWindowSettings(this.config.db).idle_timeout_seconds);
+        return built;
+      });
+      this.startingSessionIds.add(active.id);
+      try {
+        const resumed = await this.launchSession(slot, { ...active, status: "starting" }, settings, directory, active.provider_session_id);
+        slot.unconfirmedResume = active.id;
+        return { ...resumed, resumed_count: active.resumed_count + 1 };
+      } finally {
+        this.startingSessionIds.delete(active.id);
+      }
+    } catch (error) {
+      if (error instanceof AdvisorRuntimeStoppedError) throw error;
+      console.warn(`[owl-core] Could not resume Advisor session ${active.id}; starting a new one with the window history`, error);
+      slot.pendingHistoryBlock = this.buildHistoryBlock(window);
+      await this.config.sessionManager.endSession(active.id, "resume_failed");
+      return null;
+    }
+  }
+
+  /** The last history_handoff_messages messages of the window's conversations (Owner and Advisor alike), oldest first. */
+  private buildHistoryBlock(window: WindowTarget): string | null {
+    const limit = advisorWindowSettings(this.config.db).history_handoff_messages;
+    if (limit <= 0) return null;
+    const rows = this.config.db.all<{ source_message_id: string; body: string; received_at: string }>(
+      `SELECT m.source_message_id, m.body, m.received_at
+         FROM messages AS m JOIN conversations AS c ON c.id = m.conversation_id
+        WHERE c.archived_at IS NULL AND ${window.window_id === null ? "c.id = ?" : "c.advisor_window_id = ?"}
+        ORDER BY m.received_at DESC, m.id DESC LIMIT ?`,
+      window.window_id ?? window.conversation_id,
+      limit,
+    );
+    if (rows.length === 0) return null;
+    return externalJsonBlock(
+      "owl-window-history",
+      rows.reverse().map((row) => ({ from: row.source_message_id.startsWith("advisor:") ? "advisor" : "owner", body: row.body, at: row.received_at })),
+    );
+  }
+
+  /** Puts the pending window history, once, in front of a turn's text. */
+  private takeHistoryBlock(slot: WindowSlot, text: string): string {
+    const block = slot.pendingHistoryBlock;
+    slot.pendingHistoryBlock = null;
+    return block ? `${block}\n\n${text}` : text;
+  }
+
+  /**
+   * Suspends every window whose running session has had no activity for its
+   * idle_timeout_seconds and has no queued or running turn. Its provider
+   * process is stopped; provider_session_id stays so the next message resumes it.
+   */
+  public async suspendIdleWindows(): Promise<void> {
+    for (const slot of [...this.slots.values()]) {
+      await this.chain(slot, () => this.suspendIfIdle(slot)).catch((error: unknown) =>
+        console.error("[owl-core] Could not suspend an idle Advisor window", error));
+    }
+  }
+
+  private async suspendIfIdle(slot: WindowSlot): Promise<void> {
+    const sessionId = slot.sessionId;
+    const driver = slot.driver;
+    if (this.stopped || sessionId === null || driver === null || slot.turnLoopRunning) return;
+    const session = this.config.db.get<{ status: string; last_activity_at: string; idle_timeout_seconds: number }>(
+      "SELECT status, last_activity_at, idle_timeout_seconds FROM advisor_sessions WHERE id = ?",
+      sessionId,
+    );
+    if (!session || session.status !== "running") return;
+    if (Date.now() - Date.parse(session.last_activity_at) < session.idle_timeout_seconds * 1000) return;
+    if (this.config.db.get("SELECT 1 FROM advisor_turns WHERE session_id = ? AND status IN ('queued', 'running') LIMIT 1", sessionId)) return;
+    slot.driver = null;
+    slot.sessionId = null;
+    slot.systemPrompt = null;
+    await driver.stop("idle_timeout");
+    await this.config.sessionManager.suspendSession(sessionId);
   }
 
   /**
@@ -389,7 +581,10 @@ export class AdvisorSessionRuntime {
   /** Whether this runtime holds a running driver for the session, or is still starting one. */
   public isSessionLive(sessionId: string): boolean {
     if (this.startingSessionIds.has(sessionId)) return true;
-    return this.activeSessionId === sessionId && this.activeDriver !== null && this.activeDriver.exited !== true;
+    for (const slot of this.slots.values()) {
+      if (slot.sessionId === sessionId && slot.driver !== null && slot.driver.exited !== true) return true;
+    }
+    return false;
   }
 
   /**
@@ -399,15 +594,20 @@ export class AdvisorSessionRuntime {
    * here; pending changes are reported before an ended session is forgotten.
    */
   public async stopSession(sessionId: string, reason: string): Promise<void> {
-    if (this.activeSessionId === sessionId && this.activeDriver !== null) {
-      const driver = this.activeDriver;
-      this.activeDriver = null;
-      this.activeSessionId = null;
-      this.activeSystemPrompt = null;
+    const slot = [...this.slots.values()].find((candidate) => candidate.sessionId === sessionId);
+    if (slot && slot.driver !== null) {
+      const driver = slot.driver;
+      this.forgetDriver(slot);
       await driver.stop(reason);
     }
     await this.config.sessionManager.endSession(sessionId, reason);
     await this.notifyRetainedWorkspace(sessionId);
+  }
+
+  private forgetDriver(slot: WindowSlot): void {
+    slot.driver = null;
+    slot.sessionId = null;
+    slot.systemPrompt = null;
   }
 
   /**
@@ -438,8 +638,8 @@ export class AdvisorSessionRuntime {
 
       let sessionId: string;
       try {
-        sessionId = await this.withSessionLock(async () => {
-          const session = await this.ensureSessionUnlocked(conversation.owner_id, turn.conversation_id);
+        sessionId = await this.inWindow(turn.conversation_id, async (slot, window) => {
+          const session = await this.ensureSessionUnlocked(slot, window, conversation.owner_id);
           await this.enqueueTurnMutation("requeued", { turn_id: turn.id }, (transaction) => {
             transaction.run(
               `UPDATE advisor_turns
@@ -481,54 +681,58 @@ export class AdvisorSessionRuntime {
     }
     if (this.config.isProviderPaused?.(providerId)) return;
     // A loop that is draining already picks up the current model; replacing the session now would cut the in-flight turn short.
-    if (this.turnLoopRunning) return;
-    await this.restartQueuedTurns(null, "after a model change");
+    await this.restartQueuedTurns(null, "after a model change", true);
   }
 
-  private async restartQueuedTurns(providers: readonly string[] | null, label: string): Promise<void> {
-    const session = this.config.db.get<{ id: string; owner_id: string; conversation_id: string }>(
-      `SELECT session.id, conversation.owner_id, session.conversation_id
+  private async restartQueuedTurns(providers: readonly string[] | null, label: string, skipDraining = false): Promise<void> {
+    const sessions = this.config.db.all<{ id: string; owner_id: string; conversation_id: string; window_id: string | null }>(
+      `SELECT session.id, conversation.owner_id, session.conversation_id, session.window_id
          FROM advisor_sessions AS session
          JOIN conversations AS conversation ON conversation.id = session.conversation_id
-        WHERE ${providers ? `session.provider_id IN (${providers.map(() => "?").join(",")}) AND ` : ""}session.status IN ('running', 'ended')
+        WHERE ${providers ? `session.provider_id IN (${providers.map(() => "?").join(",")}) AND ` : ""}session.status IN ('running', 'suspended', 'ended')
           AND EXISTS (SELECT 1 FROM advisor_turns WHERE session_id = session.id AND status = 'queued')
-        ORDER BY session.created_at DESC LIMIT 1`,
+        ORDER BY session.created_at DESC`,
       ...(providers ?? []),
     );
-    if (!session) return;
-    try {
-      const active = await this.ensureSession(session.owner_id, session.conversation_id);
-      void this.startTurnLoop(active.id).catch((error) => console.error(`[owl-core] Advisor provider resume failed for ${active.id}`, error));
-    } catch (error) {
-      console.error(`[owl-core] Could not resume queued Advisor turns ${label}`, error);
+    // The newest session of each window carries that window's queue.
+    const newestPerWindow = new Map<string, (typeof sessions)[number]>();
+    for (const session of sessions) {
+      const key = session.window_id ?? LEGACY_WINDOW_KEY;
+      if (!newestPerWindow.has(key)) newestPerWindow.set(key, session);
+    }
+    for (const session of newestPerWindow.values()) {
+      if (skipDraining && this.slotFor(session.window_id).turnLoopRunning) continue;
+      try {
+        const active = await this.ensureSession(session.owner_id, session.conversation_id);
+        void this.startTurnLoop(active.id).catch((error) => console.error(`[owl-core] Advisor provider resume failed for ${active.id}`, error));
+      } catch (error) {
+        console.error(`[owl-core] Could not resume queued Advisor turns ${label}`, error);
+      }
     }
   }
 
-  /** Core shutdown: stop the child process only. DB status reconciliation (running -> ended) is Core startup's job (AdvisorSessionManager.recoverOnStartup), not this call's. */
-  public stop(): Promise<void> {
-    return this.withSessionLock(() => this.stopUnlocked());
-  }
-
-  private async stopUnlocked(): Promise<void> {
+  /** Core shutdown: stop the child processes only. DB status reconciliation (running -> ended) is Core startup's job (AdvisorSessionManager.recoverOnStartup), not this call's. */
+  public async stop(): Promise<void> {
     this.stopped = true;
-    if (this.activeDriver !== null) {
-      const driver = this.activeDriver;
-      this.activeDriver = null;
-      this.activeSessionId = null;
-      this.activeSystemPrompt = null;
-      await driver.stop("core_shutdown");
-    }
+    await Promise.all([...this.slots.values()].map((slot) => this.chain(slot, () => this.stopSlotUnlocked(slot))));
   }
 
-  /** End the owned provider process group without waiting for a turn to finish. */
+  private async stopSlotUnlocked(slot: WindowSlot): Promise<void> {
+    if (slot.driver === null) return;
+    const driver = slot.driver;
+    this.forgetDriver(slot);
+    await driver.stop("core_shutdown");
+  }
+
+  /** End the owned provider process groups without waiting for a turn to finish. */
   public stopImmediately(): void {
     this.stopped = true;
-    if (this.activeDriver === null) return;
-    const driver = this.activeDriver;
-    this.activeDriver = null;
-    this.activeSessionId = null;
-    this.activeSystemPrompt = null;
-    this.terminateDriver(driver);
+    for (const slot of this.slots.values()) {
+      if (slot.driver === null) continue;
+      const driver = slot.driver;
+      this.forgetDriver(slot);
+      this.terminateDriver(driver);
+    }
   }
 
   private terminateDriver(driver: ProviderSession): void {
@@ -547,25 +751,33 @@ export class AdvisorSessionRuntime {
   // ---------------------------------------------------------------------
 
   private async createSession(
+    slot: WindowSlot,
     ownerId: string,
     conversationId: string,
     settings: AdvisorSettingsSnapshot,
   ): Promise<AdvisorSession> {
     this.requireSessionSupport();
-    const directory = await this.buildWorkingDirectory(conversationId);
-    const session = await this.config.sessionManager.startSession(ownerId, conversationId);
+    const { directory, session } = await this.withDirectoryLock(async () => {
+      const built = await this.buildWorkingDirectory(conversationId);
+      const started = await this.config.sessionManager.startSession(
+        ownerId, conversationId, undefined, advisorWindowSettings(this.config.db).idle_timeout_seconds,
+      );
+      return { directory: built, session: started };
+    });
     this.startingSessionIds.add(session.id);
     try {
-      return await this.launchSession(session, settings, directory);
+      return await this.launchSession(slot, session, settings, directory);
     } finally {
       this.startingSessionIds.delete(session.id);
     }
   }
 
   private async launchSession(
+    slot: WindowSlot,
     session: AdvisorSession,
     settings: AdvisorSettingsSnapshot,
     directory: AdvisorSessionDirectory,
+    resumeProviderSessionId?: string,
   ): Promise<AdvisorSession> {
     const workspacePath = directory.cwd;
     const createProviderSession = this.requireSessionSupport();
@@ -577,17 +789,18 @@ export class AdvisorSessionRuntime {
         model: settings.model,
         effort: settings.effort,
         cwd: workspacePath,
-        env: this.buildChildEnv(session.id, workspacePath, settings.connectionEnv),
+        env: this.buildChildEnv(session, workspacePath, settings.connectionEnv),
         system_prompt: this.systemPromptFor(settings, directory),
+        ...(resumeProviderSessionId ? { resume_provider_session_id: resumeProviderSessionId } : {}),
         ...(this.config.canInstructCompaction?.(settings.harnessId) ? { compact_instructions: CONVERSATION_COMPACT_INSTRUCTIONS } : {}),
-        on_unsolicited_reply: (unsolicited) => this.handleUnsolicitedReply(session.id, unsolicited),
+        on_unsolicited_reply: (unsolicited) => this.handleUnsolicitedReply(slot, session.id, unsolicited),
       });
     } catch (error) {
-      await this.config.sessionManager.endSession(session.id, "spawn_failed");
+      await this.config.sessionManager.endSession(session.id, resumeProviderSessionId ? "resume_failed" : "spawn_failed");
       throw error;
     }
 
-    // Until it becomes activeDriver nothing else holds the new process, so a
+    // Until it becomes the slot's driver nothing else holds the new process, so a
     // shutdown or a failed record write while it starts must end it here.
     const abandon = async (reason: string): Promise<void> => {
       this.terminateDriver(driver);
@@ -618,9 +831,9 @@ export class AdvisorSessionRuntime {
     }
 
     this.sessionDirectories.set(session.id, directory);
-    this.activeDriver = driver;
-    this.activeSessionId = session.id;
-    this.activeSystemPrompt = settings.systemPrompt;
+    slot.driver = driver;
+    slot.sessionId = session.id;
+    slot.systemPrompt = settings.systemPrompt;
     void this.startTurnLoop(session.id).catch((error) => console.error(`[owl-core] Advisor turn loop failed for ${session.id}`, error));
     this.sweepAdvisorWorkspacesInBackground();
 
@@ -640,8 +853,8 @@ export class AdvisorSessionRuntime {
   /**
    * Reclaims workspaces/branches a replaced or conversation-switched session
    * left behind (GitGateway.sweepAdvisorWorkspaces), queued behind this
-   * runtime's session lock so it can never race a concurrent
-   * ensureSession/stop call into removing the workspace one of them is about
+   * runtime's directory lock so it can never race a concurrent
+   * session start or resume into removing the workspace one of them is about
    * to use. Never awaited by a caller: a sweep failure is logged and never
    * delays or fails a turn or Core startup.
    */
@@ -649,7 +862,7 @@ export class AdvisorSessionRuntime {
     const git = this.config.git;
     const sweep = git?.sweepAdvisorWorkspaces;
     if (!git || !sweep) return Promise.resolve();
-    return this.withSessionLock(() =>
+    return this.withDirectoryLock(() =>
       sweep.call(git).then(
         () => undefined,
         (error: unknown) => console.error("[owl-core] Advisor workspace sweep failed", error),
@@ -668,15 +881,15 @@ export class AdvisorSessionRuntime {
    * or to the session's own conversation when no turn ran yet. Handled in
    * arrival order; a failure is logged and never thrown.
    */
-  private handleUnsolicitedReply(sessionId: string, unsolicited: { readonly reply: string; readonly usage: TokenUsage | null }): void {
-    this.unsolicitedChain = this.unsolicitedChain
+  private handleUnsolicitedReply(slot: WindowSlot, sessionId: string, unsolicited: { readonly reply: string; readonly usage: TokenUsage | null }): void {
+    slot.unsolicitedChain = slot.unsolicitedChain
       .then(async () => {
-        if (this.stopped || this.activeSessionId !== sessionId) return;
+        if (this.stopped || slot.sessionId !== sessionId) return;
         let conversationId: string;
         let origin: AdvisorTurnRequest["origin"];
-        if (this.lastTurnTarget !== null && this.lastTurnTarget.sessionId === sessionId) {
-          conversationId = this.lastTurnTarget.conversationId;
-          origin = this.lastTurnTarget.origin;
+        if (slot.lastTurnTarget !== null && slot.lastTurnTarget.sessionId === sessionId) {
+          conversationId = slot.lastTurnTarget.conversationId;
+          origin = slot.lastTurnTarget.origin;
         } else {
           const row = this.config.db.get<{ conversation_id: string }>(
             `SELECT conversation_id FROM advisor_sessions WHERE id = ?`,
@@ -700,7 +913,9 @@ export class AdvisorSessionRuntime {
       `SELECT turn.id FROM advisor_turns AS turn
          JOIN advisor_sessions AS session ON session.id = turn.session_id
         WHERE turn.status = 'queued' AND turn.session_id <> ? AND session.status = 'ended'
+          AND session.window_id IS (SELECT window_id FROM advisor_sessions WHERE id = ?)
         LIMIT 1`,
+      toSessionId,
       toSessionId,
     );
     if (!orphaned) return;
@@ -708,7 +923,9 @@ export class AdvisorSessionRuntime {
       transaction.run(
         `UPDATE advisor_turns SET session_id = ?
           WHERE status = 'queued' AND session_id <> ?
-            AND session_id IN (SELECT id FROM advisor_sessions WHERE status = 'ended')`,
+            AND session_id IN (SELECT id FROM advisor_sessions WHERE status = 'ended'
+                                  AND window_id IS (SELECT window_id FROM advisor_sessions WHERE id = ?))`,
+        toSessionId,
         toSessionId,
         toSessionId,
       );
@@ -827,17 +1044,27 @@ export class AdvisorSessionRuntime {
     }
   }
 
+  /** The Project a session's window is dedicated to; null for the general window and legacy sessions. */
+  private windowProjectId(sessionId: string): string | null {
+    return this.config.db.get<{ project_id: string | null }>(
+      "SELECT w.project_id FROM advisor_sessions s JOIN advisor_windows w ON w.id = s.window_id WHERE s.id = ?",
+      sessionId,
+    )?.project_id ?? null;
+  }
+
   /**
    * The Advisor identity plus, for a custom provider, its endpoint/key
    * travel on the session request. The provider owns the base agent
    * environment, which excludes Owl's own credentials; OWL_AGENT_* is set
    * last so a custom provider's env can never shadow the agent identity.
    */
-  private buildChildEnv(sessionId: string, cwd: string, connectionEnv: Readonly<Record<string, string>> | undefined): Record<string, string> {
+  private buildChildEnv(session: AdvisorSession, cwd: string, connectionEnv: Readonly<Record<string, string>> | undefined): Record<string, string> {
+    const projectId = this.windowProjectId(session.id);
     return {
       ...(connectionEnv ?? {}),
+      ...(projectId ? { OWL_PROJECT_ID: projectId } : {}),
       OWL_AGENT_ROLE: "advisor",
-      OWL_AGENT_RUN_ID: sessionId,
+      OWL_AGENT_RUN_ID: session.id,
       OWL_AGENT_CWD: cwd,
     };
   }
@@ -850,31 +1077,32 @@ export class AdvisorSessionRuntime {
     if (this.stopped) {
       return Promise.resolve();
     }
-    if (this.turnLoopRunning) {
+    const slot = this.slotForSession(sessionId);
+    if (slot.turnLoopRunning) {
       // The loop is busy draining another session's queue; ask it to switch
       // to this one once that queue is empty instead of starting a second
-      // loop (there is only ever one turn loop system-wide).
-      this.turnLoopKick = sessionId;
+      // loop (there is only ever one turn loop per window).
+      slot.turnLoopKick = sessionId;
       return Promise.resolve();
     }
-    this.turnLoopRunning = true;
-    return this.runTurnLoop(sessionId);
+    slot.turnLoopRunning = true;
+    return this.runTurnLoop(slot, sessionId);
   }
 
-  private async runTurnLoop(initialSessionId: string): Promise<void> {
+  private async runTurnLoop(slot: WindowSlot, initialSessionId: string): Promise<void> {
     let sessionId = initialSessionId;
     try {
       for (;;) {
         // Re-read the current active session on every iteration: ensureSession
         // may have replaced it (model change, crash recovery) while this loop
         // was mid-turn, and the queue now lives under the new session id.
-        const targetSessionId = this.activeSessionId ?? sessionId;
+        const targetSessionId = slot.sessionId ?? sessionId;
         if (this.config.isProviderPaused?.(this.advisorProviderId(targetSessionId))) return;
         const turnRow = this.dequeueOldestQueuedTurn(targetSessionId);
         if (!turnRow) {
-          if (this.turnLoopKick !== null) {
-            sessionId = this.turnLoopKick;
-            this.turnLoopKick = null;
+          if (slot.turnLoopKick !== null) {
+            sessionId = slot.turnLoopKick;
+            slot.turnLoopKick = null;
             continue;
           }
           return;
@@ -882,7 +1110,7 @@ export class AdvisorSessionRuntime {
         try {
           // A send failure may move the turn (and the rest of the queue) to a
           // replacement session; keep draining whichever session it ended on.
-          sessionId = await this.processTurn(targetSessionId, turnRow);
+          sessionId = await this.processTurn(slot, targetSessionId, turnRow);
         } catch (error) {
           const message = error instanceof Error && error.message.length > 0
             ? error.message
@@ -891,10 +1119,10 @@ export class AdvisorSessionRuntime {
         }
       }
     } finally {
-      this.turnLoopRunning = false;
-      if (this.turnLoopKick !== null && !this.stopped) {
-        const kicked = this.turnLoopKick;
-        this.turnLoopKick = null;
+      slot.turnLoopRunning = false;
+      if (slot.turnLoopKick !== null && !this.stopped) {
+        const kicked = slot.turnLoopKick;
+        slot.turnLoopKick = null;
         void this.startTurnLoop(kicked).catch((error) => console.error(`[owl-core] Advisor turn loop failed for ${kicked}`, error));
       }
     }
@@ -912,7 +1140,7 @@ export class AdvisorSessionRuntime {
    * ended on: normally `sessionId`, or the replacement session when the send
    * failed and was retried once on a fresh driver.
    */
-  private async processTurn(sessionId: string, turnRow: AdvisorTurnRow): Promise<string> {
+  private async processTurn(slot: WindowSlot, sessionId: string, turnRow: AdvisorTurnRow): Promise<string> {
     await this.markTurnRunning(turnRow.id);
     await this.config.sessionManager.recordActivity(sessionId);
 
@@ -939,21 +1167,27 @@ export class AdvisorSessionRuntime {
       ? { ...loadedRequest, text: `<owl-action-results>\n${actionResults}\n</owl-action-results>\n\n${loadedRequest.text}` }
       : loadedRequest;
 
-    const driver = this.activeDriver;
-    if (!driver || this.activeSessionId !== sessionId) {
+    const driver = slot.driver;
+    if (!driver || slot.sessionId !== sessionId) {
       const message = "The advisor session process is not running.";
       await this.failTurn(turnRow, message);
       return sessionId;
     }
 
-    const memory = await this.config.memoryInjector?.compose({ role: "advisor", query: searchQuery("advisor", { owner_text: turnRequest.text }), recall_query: turnRequest.text, start_query: this.activeWorkTexts(), project_id: null, session_id: sessionId });
+    const windowProjectId = this.windowProjectId(sessionId);
+    const memory = await this.config.memoryInjector?.compose({ role: "advisor", query: searchQuery("advisor", { owner_text: turnRequest.text }), recall_query: turnRequest.text, start_query: this.activeWorkTexts(windowProjectId), project_id: windowProjectId, session_id: sessionId });
     const knowledgeBlock = memory ? `\n\n${memory}` : "";
     const payload = {
       turn_id: turnRequest.turn_id,
       text: applyAdvisorInterfaceInstructions(
         appendAdvisorWorkCatalog(
-          appendAdvisorProjectCatalog(turnRequest.text, this.config.db) + knowledgeBlock,
+          appendAdvisorProjectCatalog(
+            turnRequest.text,
+            this.config.db,
+            windowProjectId === null ? null : { projectId: windowProjectId, backlogLimit: advisorWindowSettings(this.config.db).project_backlog_limit },
+          ) + knowledgeBlock,
           this.config.db,
+          { projectId: windowProjectId },
         ),
         turnRequest.origin.channel,
       ),
@@ -961,7 +1195,7 @@ export class AdvisorSessionRuntime {
     };
 
     const currentPrompt = this.config.getAdvisorSettings().systemPrompt;
-    const promptUpdated = this.activeSystemPrompt !== null && this.activeSystemPrompt !== currentPrompt;
+    const promptUpdated = slot.systemPrompt !== null && slot.systemPrompt !== currentPrompt;
     if (promptUpdated) {
       const workspace = this.config.db.get<{ workspace_path: string | null }>(
         "SELECT workspace_path FROM advisor_sessions WHERE id = ?",
@@ -971,34 +1205,49 @@ export class AdvisorSessionRuntime {
       const composedPrompt = this.systemPromptFor(this.config.getAdvisorSettings(), directory);
       payload.text = `${OWL_INSTRUCTIONS_UPDATE_HEADER}\n--- BEGIN UPDATED OWL INSTRUCTIONS ---\n${composedPrompt}\n--- END UPDATED OWL INSTRUCTIONS ---\n\n${payload.text}`;
     }
-    this.lastTurnTarget = { sessionId, conversationId: turnRow.conversation_id, origin: turnRequest.origin };
+    payload.text = this.takeHistoryBlock(slot, payload.text);
+    slot.lastTurnTarget = { sessionId, conversationId: turnRow.conversation_id, origin: turnRequest.origin };
+    const memoryRetry = { text: turnRequest.text, memory: knowledgeBlock };
 
+    let settleSessionId = sessionId;
+    let settleDriver = driver;
     try {
       if (driver.exited === true) {
         throw new Error("The advisor session process has already exited.");
       }
       await driver.send(payload);
     } catch (error) {
-      const recovered = await this.retrySendOnFreshSession(sessionId, turnRow, driver, payload, error, { text: turnRequest.text, memory: knowledgeBlock });
+      const recovered = await this.retrySendOnFreshSession(slot, sessionId, turnRow, driver, payload, error, memoryRetry);
       if (recovered.driver === null) {
         return recovered.sessionId;
       }
-      if (this.lastTurnTarget?.sessionId === sessionId) {
-        this.lastTurnTarget = { ...this.lastTurnTarget, sessionId: recovered.sessionId };
-      }
-      await this.recordPromptUpdate(recovered.sessionId, promptUpdated, currentPrompt);
-      await this.consumeUntilTurnSettles(recovered.sessionId, turnRow, recovered.driver);
-      return recovered.sessionId;
+      this.followTurnTarget(slot, sessionId, recovered.sessionId);
+      settleSessionId = recovered.sessionId;
+      settleDriver = recovered.driver;
     }
 
-    await this.recordPromptUpdate(sessionId, promptUpdated, currentPrompt);
-    await this.consumeUntilTurnSettles(sessionId, turnRow, driver);
-    return sessionId;
+    await this.recordPromptUpdate(slot, settleSessionId, promptUpdated, currentPrompt);
+    if (await this.consumeUntilTurnSettles(slot, settleSessionId, turnRow, settleDriver) === "settled") return settleSessionId;
+
+    // The session resumed from suspension died before its first turn settled:
+    // the turn goes to a fresh session that is handed the window history.
+    const recovered = await this.retrySendOnFreshSession(
+      slot, settleSessionId, turnRow, settleDriver, payload, new Error("The suspended Advisor session could not be resumed."), memoryRetry,
+    );
+    if (recovered.driver === null) return recovered.sessionId;
+    this.followTurnTarget(slot, settleSessionId, recovered.sessionId);
+    await this.recordPromptUpdate(slot, recovered.sessionId, promptUpdated, currentPrompt);
+    await this.consumeUntilTurnSettles(slot, recovered.sessionId, turnRow, recovered.driver);
+    return recovered.sessionId;
   }
 
-  private async recordPromptUpdate(sessionId: string, promptUpdated: boolean, prompt: string): Promise<void> {
+  private followTurnTarget(slot: WindowSlot, fromSessionId: string, toSessionId: string): void {
+    if (slot.lastTurnTarget?.sessionId === fromSessionId) slot.lastTurnTarget = { ...slot.lastTurnTarget, sessionId: toSessionId };
+  }
+
+  private async recordPromptUpdate(slot: WindowSlot, sessionId: string, promptUpdated: boolean, prompt: string): Promise<void> {
     if (!promptUpdated) return;
-    this.activeSystemPrompt = prompt;
+    slot.systemPrompt = prompt;
     try {
       await this.config.sessionManager.setSystemPromptSha256(sessionId, hashSystemPrompt(prompt));
     } catch (error) {
@@ -1007,12 +1256,8 @@ export class AdvisorSessionRuntime {
   }
 
   /** Stops a driver that can no longer take turns and forgets it, so the next ensureSession replaces it. */
-  private async discardDriver(driver: ProviderSession, reason: string): Promise<void> {
-    if (this.activeDriver === driver) {
-      this.activeDriver = null;
-      this.activeSessionId = null;
-      this.activeSystemPrompt = null;
-    }
+  private async discardDriver(slot: WindowSlot, driver: ProviderSession, reason: string): Promise<void> {
+    if (slot.driver === driver) this.forgetDriver(slot);
     try {
       await driver.stop(reason);
     } catch (error) {
@@ -1029,6 +1274,7 @@ export class AdvisorSessionRuntime {
    * consume the turn's events from.
    */
   private async retrySendOnFreshSession(
+    slot: WindowSlot,
     sessionId: string,
     turnRow: AdvisorTurnRow,
     driver: ProviderSession,
@@ -1037,7 +1283,7 @@ export class AdvisorSessionRuntime {
     memoryRetry: { readonly text: string; readonly memory: string },
   ): Promise<{ readonly sessionId: string; readonly driver: ProviderSession | null }> {
     const sendMessage = sendError instanceof Error && sendError.message.length > 0 ? sendError.message : String(sendError);
-    await this.discardDriver(driver, "send_failed");
+    await this.discardDriver(slot, driver, "send_failed");
     if (this.stopped) {
       await this.failTurn(turnRow, sendMessage);
       return { sessionId, driver: null };
@@ -1059,8 +1305,8 @@ export class AdvisorSessionRuntime {
       await this.failTurn(turnRow, message);
       return { sessionId, driver: null };
     }
-    const freshDriver = this.activeDriver;
-    if (freshDriver === null || this.activeSessionId !== freshSession.id) {
+    const freshDriver = slot.driver;
+    if (freshDriver === null || slot.sessionId !== freshSession.id) {
       await this.failTurn(turnRow, sendMessage);
       return { sessionId, driver: null };
     }
@@ -1071,14 +1317,15 @@ export class AdvisorSessionRuntime {
     let resend = payload;
     if (freshSession.id !== sessionId) {
       // The fresh session has seen nothing: rebuild the start catalog for it instead of the old session's delta.
-      const fresh = await this.config.memoryInjector?.compose({ role: "advisor", query: searchQuery("advisor", { owner_text: memoryRetry.text }), recall_query: memoryRetry.text, start_query: this.activeWorkTexts(), project_id: null, session_id: freshSession.id });
+      const fresh = await this.config.memoryInjector?.compose({ role: "advisor", query: searchQuery("advisor", { owner_text: memoryRetry.text }), recall_query: memoryRetry.text, start_query: this.activeWorkTexts(this.windowProjectId(freshSession.id)), project_id: this.windowProjectId(freshSession.id), session_id: freshSession.id });
       const block = fresh ? `\n\n${fresh}` : "";
       resend = { ...payload, text: memoryRetry.memory && payload.text.includes(memoryRetry.memory) ? payload.text.replace(memoryRetry.memory, () => block) : payload.text + block };
     }
+    resend = { ...resend, text: this.takeHistoryBlock(slot, resend.text) };
     try {
       await freshDriver.send(resend);
     } catch (error) {
-      await this.discardDriver(freshDriver, "send_failed");
+      await this.discardDriver(slot, freshDriver, "send_failed");
       const message = error instanceof Error && error.message.length > 0 ? error.message : String(error);
       await this.failTurn(turnRow, message);
       return { sessionId: freshSession.id, driver: null };
@@ -1105,9 +1352,11 @@ export class AdvisorSessionRuntime {
       throw new Error(`Advisor turn ${turnRow.id} references a missing or empty user message.`);
     }
     const { paths: attachmentPaths, notes } = this.config.resolveAttachmentPaths(turnRow.user_message_id);
+    const statusBlock = this.config.resolveStatusExchangesBlock?.(turnRow.user_message_id);
+    const handoffBlock = this.config.resolveWindowHandoffBlock?.(turnRow.user_message_id);
     return {
       turn_id: turnRow.id,
-      text: notes.length > 0 ? `${message.body}\n\n${externalJsonBlock("owl-attachment-notes", notes)}` : message.body,
+      text: [message.body, ...(notes.length > 0 ? [externalJsonBlock("owl-attachment-notes", notes)] : []), ...(statusBlock ? [statusBlock] : []), ...(handoffBlock ? [handoffBlock] : [])].join("\n\n"),
       origin: this.resolveTurnOrigin(turnRow),
       attachment_paths: attachmentPaths,
     };
@@ -1145,17 +1394,18 @@ export class AdvisorSessionRuntime {
    * matching turn.completed/turn.failed or on session.exited/stream end.
    */
   private async consumeUntilTurnSettles(
+    slot: WindowSlot,
     sessionId: string,
     turnRow: AdvisorTurnRow,
     driver: ProviderSession,
-  ): Promise<void> {
+  ): Promise<"settled" | "resume_failed"> {
     const iterator = driver.events()[Symbol.asyncIterator]();
     for (;;) {
       const step = await iterator.next();
       if (step.done || step.value === undefined) {
         const message = "The advisor session ended without completing this turn.";
         await this.failTurn(turnRow, message);
-        return;
+        return "settled";
       }
 
       const event: SessionEvent = step.value;
@@ -1193,6 +1443,7 @@ export class AdvisorSessionRuntime {
           if (event.turn_id !== turnRow.id) {
             break;
           }
+          if (slot.unconfirmedResume === sessionId) slot.unconfirmedResume = null;
           await this.config.sessionManager.recordActivity(sessionId);
           const usageJson = await this.recordUsageIfPresent(sessionId, event.usage);
           const parsed = parseAdvisorTurnReply(turnRow.origin_channel, event.reply, ownerLanguage(this.config.db));
@@ -1214,13 +1465,14 @@ export class AdvisorSessionRuntime {
           )?.provider_id;
           if (sessionProvider && startedAt) await this.config.onProviderSucceeded?.(sessionProvider, startedAt);
           this.sweepAdvisorWorkspacesInBackground();
-          return;
+          return "settled";
         }
 
         case "turn.failed": {
           if (event.turn_id !== turnRow.id) {
             break;
           }
+          if (slot.unconfirmedResume === sessionId) slot.unconfirmedResume = null;
           const rateLimit = rateLimitInfoFromEvent(event);
           if (rateLimit !== null) {
             await this.failRateLimitedTurn(sessionId, turnRow, event.error, rateLimit);
@@ -1228,7 +1480,7 @@ export class AdvisorSessionRuntime {
             await this.failTurn(turnRow, event.error);
           }
           this.sweepAdvisorWorkspacesInBackground();
-          return;
+          return "settled";
         }
 
         case "session.compacted":
@@ -1240,12 +1492,15 @@ export class AdvisorSessionRuntime {
           // recoverTurns() to retry on the next Core's fresh session. The
           // driver's SIGTERM exit event is expected during that shutdown.
           if (this.stopped) {
-            return;
+            return "settled";
           }
-          if (this.activeSessionId === sessionId) {
-            this.activeDriver = null;
-            this.activeSessionId = null;
-            this.activeSystemPrompt = null;
+          if (slot.sessionId === sessionId) this.forgetDriver(slot);
+          if (slot.unconfirmedResume === sessionId) {
+            slot.unconfirmedResume = null;
+            console.warn(`[owl-core] Resumed Advisor session ${sessionId} exited before its first turn settled: ${driver.exit_detail ?? event.stderr_tail}`);
+            slot.pendingHistoryBlock = this.buildHistoryBlock({ window_id: this.windowIdOfSession(sessionId), conversation_id: turnRow.conversation_id });
+            await this.config.sessionManager.endSession(sessionId, "resume_failed");
+            return "resume_failed";
           }
           const message = event.stderr_tail.length > 0
             ? event.stderr_tail
@@ -1253,13 +1508,17 @@ export class AdvisorSessionRuntime {
           console.error(`[owl-core] Advisor session ${sessionId} ended while a turn was running: ${driver.exit_detail ?? message}`);
           await this.config.sessionManager.endSession(sessionId, "crashed");
           await this.failTurn(turnRow, message);
-          return;
+          return "settled";
         }
 
         default:
           break;
       }
     }
+  }
+
+  private windowIdOfSession(sessionId: string): string | null {
+    return this.config.db.get<{ window_id: string | null }>("SELECT window_id FROM advisor_sessions WHERE id = ?", sessionId)?.window_id ?? null;
   }
 
   private async recordUsageIfPresent(sessionId: string, usage: TokenUsage | null): Promise<string | null> {
@@ -1385,9 +1644,10 @@ export class AdvisorSessionRuntime {
   }
 
   /** Titles and summaries of the active Works: search material for the Advisor start catalog (design §6.2). */
-  private activeWorkTexts(): string[] {
+  private activeWorkTexts(projectId: string | null): string[] {
     const rows = this.config.db.all<{ title: string; summary: string }>(
-      "SELECT title, summary FROM works WHERE state IN ('ready','running','judgement_waiting','paused') AND archived_at IS NULL ORDER BY updated_at DESC LIMIT 5",
+      `SELECT title, summary FROM works WHERE state IN ('ready','running','judgement_waiting','paused') AND archived_at IS NULL${projectId === null ? "" : " AND project_id = ?"} ORDER BY updated_at DESC LIMIT 5`,
+      ...(projectId === null ? [] : [projectId]),
     );
     return rows.flatMap((row) => [row.title, row.summary]);
   }

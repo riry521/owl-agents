@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { createDecisionButtonId } from "../../packages/plugin-sdk/dist/shared/index.js";
@@ -340,4 +344,48 @@ test("notification cards show the Work title in embed title, description and con
   await sendNotification(client, opened({ work_title: "請求書整理" }), "D-NOTIFICATIONS");
   assert.match(sends[1].message.content, /請求書整理/u);
   assert.ok(embedData(sends[1]).description.startsWith("請求書整理\n"));
+});
+
+async function outboundFileEvent(content, comment) {
+  const path = join(await mkdtemp(join(tmpdir(), "owl-discord-file-")), "report.txt");
+  await writeFile(path, content);
+  return event("advisor.responded", {
+    origin: { channel: "discord", channel_id: "D-CONVERSATION" },
+    reply: "done",
+    outbound_files: [{
+      path, name: "report.txt", size: Buffer.byteLength(content),
+      sha256: createHash("sha256").update(content).digest("hex"), ...(comment ? { comment } : {}),
+    }],
+  });
+}
+
+test("Discord uploads each outbound file before the reply and appends the result line", async () => {
+  const { connector } = await decisionReplyConnector();
+  const { sends, client } = discordClient();
+  connector.client.channels.fetch = client.channels.fetch;
+  await connector.handleAdvisorResponse(await outboundFileEvent("hello", "@everyone look"));
+
+  assert.equal(sends.length, 2);
+  const upload = sends[0];
+  assert.equal(upload.channelId, "D-CONVERSATION");
+  assert.equal(upload.message.files[0].attachment.toString(), "hello");
+  assert.equal(upload.message.files[0].name, "report.txt");
+  assert.equal(upload.message.content, "@everyone look");
+  assert.deepEqual(upload.message.allowedMentions, { parse: [] });
+  assert.match(sends[1].message.content, /^done\n\n✓ ファイルを送りました: report\.txt/);
+});
+
+test("Discord reports the Attach Files permission when the upload is refused", async () => {
+  const { connector } = await decisionReplyConnector();
+  const { sends, client } = discordClient((message) => {
+    if (message.files) throw Object.assign(new Error("Missing Permissions"), { code: 50013 });
+    return { id: "M1" };
+  });
+  connector.client.channels.fetch = client.channels.fetch;
+  await connector.handleAdvisorResponse(await outboundFileEvent("hello"));
+
+  const reply = sends.at(-1).message.content;
+  assert.match(reply, /^done/);
+  assert.match(reply, /⚠ ファイルを送れませんでした: report\.txt/);
+  assert.match(reply, /Attach Files/);
 });

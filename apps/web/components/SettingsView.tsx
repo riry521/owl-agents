@@ -1906,6 +1906,7 @@ oauth_config:
       - channels:read
       - chat:write
       - files:read
+      - files:write
       - groups:history
       - groups:read
 settings:
@@ -1934,6 +1935,7 @@ function IntegrationsSection() {
   const [signingSecret, setSigningSecret] = useState('');
   const [conversationChannelId, setConversationChannelId] = useState('');
   const [notificationChannelId, setNotificationChannelId] = useState('');
+  const [ownerUserId, setOwnerUserId] = useState('');
 
   const settingsView = useSettings();
 
@@ -1953,6 +1955,7 @@ function IntegrationsSection() {
       configured: false,
       conversation_channel_id: null,
       notification_channel_id: null,
+      owner_user_id: null,
       last_tested_at: null,
       last_test_ok: null,
     };
@@ -1986,6 +1989,7 @@ function IntegrationsSection() {
         signing_secret?: string;
         conversation_channel_id: string;
         notification_channel_id: string;
+        owner_user_id?: string;
       } = {
         conversation_channel_id: conversationChannelId.trim(),
         notification_channel_id: notificationChannelId.trim(),
@@ -1994,6 +1998,7 @@ function IntegrationsSection() {
       if (provider === 'slack') {
         if (appToken.trim()) config.app_token = appToken.trim();
         if (signingSecret.trim()) config.signing_secret = signingSecret.trim();
+        config.owner_user_id = ownerUserId.trim();
       }
       await saveIntegration(provider, config);
       await settingsView.refresh();
@@ -2003,6 +2008,7 @@ function IntegrationsSection() {
       setSigningSecret('');
       setConversationChannelId('');
       setNotificationChannelId('');
+      setOwnerUserId('');
       setNotice(t('settings.integrationSaved'));
     } catch (error) {
       console.error("Settings request failed", error);
@@ -2033,6 +2039,7 @@ function IntegrationsSection() {
     const status = getStatus(provider);
     setConversationChannelId(status.conversation_channel_id ?? '');
     setNotificationChannelId(status.notification_channel_id ?? '');
+    setOwnerUserId(status.owner_user_id ?? '');
     setNotice(null);
   }
 
@@ -2136,6 +2143,19 @@ function IntegrationsSection() {
               />
               <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>{t('settings.notificationChannelIdHint')}</span>
             </label>
+            {provider === 'slack' && (
+              <label className="form-field" style={{ marginTop: '8px' }}>
+                <span>{t('settings.ownerUserId')}</span>
+                <input
+                  className="input"
+                  value={ownerUserId}
+                  onChange={(ev) => setOwnerUserId(ev.target.value)}
+                  placeholder="U0123456789"
+                  autoComplete="off"
+                />
+                <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>{t('settings.ownerUserIdHint')}</span>
+              </label>
+            )}
             <label className="form-field" style={{ marginTop: '8px' }}>
               <span>{t('settings.botToken')}</span>
               <input

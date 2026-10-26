@@ -274,6 +274,9 @@ export interface DecisionExplanation {
   status: 'pending' | 'ready' | 'failed';
   summary: string | null;
   cause_kind: 'work' | 'criteria' | 'external' | null;
+  /** Absent on rows written before next_steps existed. */
+  next_steps?: string | null;
+  option_notes?: { key: string; note: string }[];
 }
 
 export interface Decision {
@@ -336,6 +339,7 @@ export interface IntegrationStatus {
   configured: boolean;
   conversation_channel_id: string | null;
   notification_channel_id: string | null;
+  owner_user_id: string | null;
   last_tested_at: string | null;
   last_test_ok: boolean | null;
 }
@@ -447,12 +451,25 @@ export interface TestSetupInvestigationState {
 /** The Owner's test settings (TestRunSettings keys, all optional). */
 export type TestRunInput = { mode?: 'per_file' | 'whole' | 'off'; whole_argv?: string[]; [key: string]: unknown };
 
+export interface WindowChannelError { code: string; message: string; needed?: string[] }
+
+/** One provider's outcome when a window is turned on. */
+export interface WindowChannelResult {
+  status: 'bound' | 'already_bound' | 'failed';
+  invite?: 'invited' | 'not_applicable' | 'skipped_no_owner_user_id' | 'failed';
+  invite_error?: WindowChannelError;
+  error?: WindowChannelError;
+}
+
 /** GET/POST /api/v1/projects. */
 export interface Project {
   id: string;
   name: string;
   canonical_path: string;
   auto_push?: boolean;
+  advisor_window_enabled?: boolean;
+  /** Present only in the PATCH response that turned the window on: per-provider channel results. */
+  window_channels?: Partial<Record<'slack' | 'discord', WindowChannelResult>>;
   commit_language?: 'ja' | 'en' | null;
   worktree_setup_command?: string[];
   worktree_refresh_command?: string[];
@@ -472,6 +489,7 @@ export interface UpdateProjectInput {
   name?: string;
   canonical_path?: string;
   auto_push?: boolean;
+  advisor_window_enabled?: boolean;
   commit_language?: 'ja' | 'en' | null;
   worktree_setup_command?: string[];
   worktree_refresh_command?: string[];
@@ -623,6 +641,34 @@ export interface WorkAssurance {
 }
 
 export type AdvisorSessionStatus = 'starting' | 'running' | 'ending' | 'suspended' | 'none';
+
+export interface AdvisorWindowChannel {
+  provider: 'slack' | 'discord';
+  channel_id: string;
+  display_name: string;
+}
+
+/** One entry of GET /advisor/windows. */
+export interface AdvisorWindow {
+  key: string;
+  scope: 'general' | 'project';
+  project_id: string | null;
+  name: string | null;
+  window_id: string | null;
+  conversation_id: string | null;
+  session_status: 'running' | 'starting' | 'suspended' | 'none';
+  channels: AdvisorWindowChannel[];
+  last_message_at: string | null;
+}
+
+/** One provider entry of GET /advisor/windows/:key/channels. */
+export interface AdvisorWindowChannelState {
+  provider: 'slack' | 'discord';
+  configured: boolean;
+  running: boolean;
+  binding: { channel_id: string; display_name: string } | null;
+  default_name: string | null;
+}
 
 export interface AdvisorSessionInfo {
   status: AdvisorSessionStatus;
@@ -848,6 +894,20 @@ export interface WorkDetailView {
   messages: Message[];
   /** GET /works/{id}/view auto_recovery: recoveries in progress and the acceptance criteria relaxed so far. */
   auto_recovery: AutoRecoveryView;
+  /** GET /works/{id}/view goal_shortfalls: goals not met, with reasons; [] when none. */
+  goal_shortfalls: GoalShortfallView[];
+}
+
+/** GET /works/{id}/view goal_shortfalls: a goal the Work did not meet, and why. */
+export interface GoalShortfallView {
+  task_id: string | null;
+  task_title: string | null;
+  criterion_id: string | null;
+  text: string;
+  reason: string;
+  source: 'worker' | 'reviewer' | 'final_check';
+  /** Set when a later final check showed the goal met; the row stays. */
+  resolution: { evidence: string; resolved_at: string } | null;
 }
 
 export interface AutoRecoveryView {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { WORK_SUMMARY_SECTIONS, workSummaryInstruction, workSummarySkeleton } from "../../packages/shared/dist/index.js";
+import { WORK_SUMMARY_SECTIONS, workSummaryInstruction, workSummaryListItems, workSummarySkeleton } from "../../packages/shared/dist/index.js";
 import {
   WORK_SUMMARY_SECTIONS as WEB_SECTIONS,
   parseWorkSummary,
@@ -69,4 +69,29 @@ test("splitInlineCode handles multi-backtick spans and degenerate input", () => 
     { code: true, text: "b" },
   ]);
   assert.deepEqual(splitInlineCode("`````"), [{ code: false, text: "`````" }]);
+});
+
+test("the Goals section follows Acceptance, and workSummaryListItems returns what parseWorkSummary shows", () => {
+  const keys = WORK_SUMMARY_SECTIONS.map((section) => section.key);
+  assert.equal(keys[keys.indexOf("acceptance") + 1], "goals");
+  const summary = [
+    "依頼: x",
+    "",
+    "受け入れ条件:",
+    "- 一つ目",
+    "  の続き",
+    "- 二つ目",
+    "",
+    "Goals:",
+    "1. 目標A",
+    "* 目標B",
+    "",
+    "注意: なし",
+  ].join("\n");
+  const parsed = parseWorkSummary(summary);
+  for (const key of ["acceptance", "goals"]) {
+    assert.deepEqual(workSummaryListItems(summary, key), parsed.sections.find((section) => section.key === key).items, key);
+  }
+  assert.deepEqual(workSummaryListItems(summary, "goals"), ["目標A", "目標B"]);
+  assert.deepEqual(workSummaryListItems("依頼: x", "goals"), []);
 });

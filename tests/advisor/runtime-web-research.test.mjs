@@ -65,7 +65,7 @@ test("Advisor runtime forwards research with conversation context and ignores re
     }),
   };
 
-  await runtime.consumeUntilTurnSettles("session-1", turn, driver);
+  await runtime.consumeUntilTurnSettles(runtime.slotFor(null), "session-1", turn, driver);
 
   assert.deepEqual(received, [[capture, { conversation_id: "conversation-from-turn", turn_id: "provider-turn-id" }]]);
   assert.equal(turnCompleted, true);
@@ -99,7 +99,7 @@ test("Advisor runtime reports a web research failure with conversation context a
     }),
   };
 
-  await runtime.consumeUntilTurnSettles("session-1", turn, driver);
+  await runtime.consumeUntilTurnSettles(runtime.slotFor(null), "session-1", turn, driver);
 
   assert.deepEqual(failures, [["bad result", { conversation_id: "conversation-from-turn", turn_id: "provider-turn-id" }]]);
   assert.equal(turnCompleted, true);

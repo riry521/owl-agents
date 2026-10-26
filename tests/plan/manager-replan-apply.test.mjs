@@ -6,8 +6,10 @@ import { test } from "node:test";
 import { createAgentRunner } from "../../packages/agent-runtime/dist/index.js";
 import { isPlanRejection, validatePlan, validateReplan } from "../../packages/core/dist/replan-plan.js";
 import { evaluateCriteriaRelaxation } from "../../packages/core/dist/plan-quality.js";
+import { DEFAULT_PROGRESS_GUARD_SETTINGS } from "../../packages/shared/dist/progress-guard-settings.js";
 import { DEFAULT_PLAN_QUALITY_SETTINGS } from "../../packages/shared/dist/plan-quality-settings.js";
 import { createUlid } from "../../packages/db/dist/index.js";
+import { criterionRequirement } from "../../packages/shared/dist/acceptance-criteria.js";
 import { createTaskPlanInTransaction, createWorkInTransaction } from "../../packages/core/dist/index.js";
 import { applyReplanInTransaction } from "../../packages/core/dist/state-reducer.js";
 import { openTestDatabase } from "../helpers/db.mjs";
@@ -291,14 +293,19 @@ test("a second bad replan answer opens one Decision listing the errors and block
   await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
   await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
 
-  assert.equal(prompts.filter(isReplan).length, 6);
+  assert.equal(prompts.filter(isReplan).length, 9);
   const decisions = openDecisions(db, workId);
   assert.equal(decisions.length, 1);
   assert.equal(decisions[0].issuer_role, "manager");
   assert.equal(decisions[0].scope, "task");
   assert.deepEqual(JSON.parse(decisions[0].blocked), [t2]);
-  assert.match(decisions[0].tried, /rejected twice/);
-  assert.match(decisions[0].tried, /N1 depends on T3, which is cancelled/);
+  // The English validation message stays in the logs; the Owner reads the fact and the count, in every field.
+  const shown = db.get("SELECT reason, question, current_state, tried, options_json FROM decisions WHERE id = ?", decisions[0].id);
+  const everything = Object.values(shown).join("\n");
+  assert.doesNotMatch(everything, /rejected twice|depends on T3|auto_recovery|criteria_relaxations/);
+  assert.match(shown.tried, /検証ではじかれ/);
+  assert.match(shown.tried, /3回/);
+  assert.match(shown.reason, /failed one/, "the reason names the failed Task");
   const after = writeState(db, workId);
   assert.equal(after.plan_revision, baseline.plan_revision);
   assert.equal(after.tasks, baseline.tasks);
@@ -307,6 +314,93 @@ test("a second bad replan answer opens one Decision listing the errors and block
   assert.deepEqual(await tickTwice(core, workId), []);
   assert.equal(tickFailureAlerts(db, workId), 0, "never a tick error");
 });
+
+test("a plan that changes a criterion without a criteria_relaxations entry is rejected twice and the Decision shows no English validation text", async (t) => {
+  const prompts = [];
+  const changed = { ...task("T2", { title: "failed one" }), acceptance_criteria: criteriaFor("Loosened: verified by a lighter test.") };
+  const { db, core } = await openCore(t, ({ gate }) =>
+    gatedRunner((prompt) => (isReplan(prompt) ? { tasks: [changed] } : "not json"), prompts, gate),
+  );
+  const { workId, t2 } = await seedRepro2(core, db);
+  await db.createWriteLane().transact((tx) => {
+    tx.run("UPDATE tasks SET acceptance_criteria_json = ? WHERE id = ?", JSON.stringify(criteriaFor("Done; verified by the test.")), t2);
+    // The Worker reported a criteria defect, so the replan must revise T2's criteria.
+    const sequence = tx.get("SELECT COALESCE(MAX(sequence), 0) + 1 AS n FROM events").n;
+    tx.run(
+      `INSERT INTO events (id, sequence, idempotency_key, type, work_id, task_id, agent_run_id, payload_json, status, attempt_no, created_at)
+       VALUES (?, ?, ?, 'task.acceptance_defect_reported', ?, ?, NULL, '{"defects":[],"reason":"cannot check the layout"}', 'handled', 0, ?)`,
+      createUlid(), sequence, `defect:${createUlid()}`, workId, t2, new Date().toISOString(),
+    );
+    return null;
+  });
+  await startWithoutDriving(core, db, workId);
+
+  for (let round = 0; round < 3; round += 1) await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
+
+  const decisions = openDecisions(db, workId);
+  assert.equal(decisions.length, 1);
+  const shown = db.get("SELECT reason, question, current_state, tried, options_json FROM decisions WHERE id = ?", decisions[0].id);
+  const everything = Object.values(shown).join("\n");
+  assert.doesNotMatch(everything, /was changed but|criteria_relaxations|auto_recovery|Criterion AC/);
+  assert.match(shown.tried, /検証ではじかれ/);
+  assert.match(shown.tried, /3回/);
+  assert.match(shown.reason, /cannot check the layout/, "with no report, the reason comes from the failure record");
+});
+
+for (const [name, type, payload, expected] of [
+  [
+    "a failed verification names the failed tests",
+    "verification.completed",
+    {
+      outcome: "fail",
+      verification: {
+        source: "core",
+        error: "internal check detail",
+        commands: [{ command_id: "policy:test", passed: false }],
+        test_run: { run_id: "r1", mode: "selected", files_run: 1, failed_files: ["tests/layout.test.mjs"], failures: { failures: [{ file: "tests/layout.test.mjs", name: "lists mikata_long" }], omitted_count: 0 } },
+      },
+    },
+    /通らなかった検査: tests\/layout\.test\.mjs: lists mikata_long/,
+  ],
+  [
+    "a failed verification without test failures names the failed check",
+    "verification.completed",
+    { outcome: "fail", verification: { source: "core", error: "internal check detail", commands: [{ command_id: "policy:doc", passed: false, file: "docs/a.md" }, { command_id: "policy:test", passed: true }] } },
+    /通らなかった検査: policy:doc \(docs\/a\.md\)$/m,
+  ],
+  [
+    "a merge conflict names the conflicting files",
+    "task.conflict",
+    { merge_conflict_files: ["src/a.ts", "src/b.ts"] },
+    /統合でコンフリクトしたファイル: src\/a\.ts, src\/b\.ts/,
+  ],
+]) {
+  test(`with no report, the replan_failed reason takes the cause from the failure record: ${name}`, async (t) => {
+    const prompts = [];
+    const { db, core } = await openCore(t, ({ gate }) =>
+      gatedRunner((prompt) => (isReplan(prompt) ? badReplans.cancelledDep.answer : "not json"), prompts, gate),
+    );
+    const { workId, t2 } = await seedRepro2(core, db);
+    await db.createWriteLane().transact((tx) => {
+      const sequence = tx.get("SELECT COALESCE(MAX(sequence), 0) + 1 AS n FROM events").n;
+      tx.run(
+        `INSERT INTO events (id, sequence, idempotency_key, type, work_id, task_id, agent_run_id, payload_json, status, attempt_no, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'handled', 0, ?)`,
+        createUlid(), sequence, `failure:${createUlid()}`, type, workId, t2, JSON.stringify(payload), new Date().toISOString(),
+      );
+      return null;
+    });
+    await startWithoutDriving(core, db, workId);
+
+    for (let round = 0; round < 3; round += 1) await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
+
+    const decisions = openDecisions(db, workId);
+    assert.equal(decisions.length, 1);
+    assert.match(decisions[0].reason, /タスク「failed one」が失敗しました。/);
+    assert.match(decisions[0].reason, expected);
+    assert.doesNotMatch(decisions[0].reason, /失敗の理由は記録されていません|internal check detail/);
+  });
+}
 
 test("the replan input carries the stored required_sections / required_tests in current_plan as well as in the failed Task", async (t) => {
   const prompts = [];
@@ -478,6 +572,44 @@ test("a failure while applying a valid replan becomes a Decision with the real c
   assert.equal(tickFailureAlerts(db, workId), 0, "no workflow_tick_failed alert");
   assert.equal(openDecisions(db, workId).length, 1);
 });
+
+for (const issuer of ["core", "manager"]) {
+  test(`a fix option chosen on a ${issuer} Decision reaches the Manager as the answer, and the Work goes on`, async (t) => {
+    const prompts = [];
+    const { db, core } = await openCore(t, ({ gate }) =>
+      gatedRunner((prompt) => (isReplan(prompt) ? correctedReplan : "not json"), prompts, gate),
+    );
+    const { workId, t2 } = await seedRepro2(core, db);
+    const decisionId = createUlid();
+    const options = [
+      { key: "fix_1", label: "Do you want to split T2 in two?", description: "Replaces T2 with smaller Tasks.", instruction: "fix-instruction-marker: replace T2 with two smaller Tasks", criteria_rewrites: [] },
+      { key: "retry", label: "Retry", description: "Run again." },
+      { key: "cancel", label: "Cancel", description: "Stop." },
+    ];
+    await db.createWriteLane().transact((tx) => {
+      tx.run("UPDATE works SET state = 'judgement_waiting' WHERE id = ?", workId);
+      tx.run("UPDATE tasks SET status = 'judgement_waiting' WHERE id = ?", t2);
+      tx.run(
+        `INSERT INTO decisions (id, work_id, scope, status, blocked_task_ids_json, reason, tried, current_state, options_json, recommended, allow_free_text, issuer_role, state_version, created_at)
+         VALUES (?, ?, 'task', 'open', ?, 'Stopped.', 'Core', 'judgement_waiting', ?, 'fix_1', 1, ?, 0, ?)`,
+        decisionId, workId, JSON.stringify([t2]), JSON.stringify(options), issuer, new Date().toISOString(),
+      );
+      return null;
+    });
+    await core.start();
+    await core.answerDecision(
+      decisionId,
+      commandEnvelope({ answer: options[0].label, option_key: "fix_1", source_message_id: null }, "answer"),
+    );
+
+    await waitFor(() => prompts.some(isReplan));
+    const text = managerInput(prompts.find(isReplan)).context.owner_requests[0].text;
+    assert.match(text, /Chosen option: Do you want to split T2 in two\? - Replaces T2 with smaller Tasks\./);
+    assert.match(text, /Instruction: fix-instruction-marker: replace T2 with two smaller Tasks/);
+    await waitFor(() => managerTaskRow(db, workId, "T2").status === "cancelled");
+    assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "running");
+  });
+}
 
 test("replacing the root Task through a replan keeps the cascaded dependent and re-points it", async (t) => {
   const prompts = [];
@@ -672,6 +804,29 @@ test("validateReplan and validatePlan allow base_sync_only on a plan Task, a ret
   assert.ok(!isPlanRejection(validateReplan([item({ id: "N1", replaces: ["T1"], base_sync_only: true })], snapshot, ["T1"])), "a new Task with replaces may carry it");
   assert.ok(isPlanRejection(validateReplan([item({ id: "N1", base_sync_only: true }), item({ id: "T1" })], snapshot, ["T1"])), "a new Task that replaces nothing may not");
   assert.ok(!isPlanRejection(validatePlan([item({ base_sync_only: true })])), "a plan may carry it");
+});
+
+test("validateReplan accepts a ready Task listed in revisable as a revision and rejects the unsafe forms", () => {
+  const item = (extra = {}) => ({ id: "R1", title: "A", type: "code", acceptance: "x", depends_on: [], replaces: [], ...extra });
+  const snapshot = { tasks: [{ id: "R1", manager_task_id: "R1", status: "ready", failed_by_dependency: false }], edges: [] };
+  const revisable = new Map([["R1", "code"]]);
+  const check = (items, options = {}) => validateReplan(items, snapshot, [], { allowOpen: true, revisable, ...options });
+  const accepted = check([item({ title: "Rewritten" })]);
+  assert.ok(!isPlanRejection(accepted), "a ready Task in revisable may be revised");
+  assert.deepEqual([...accepted.reviseIds], ["R1"]);
+  assert.equal(accepted.revisions.get("R1").title, "Rewritten");
+  assert.deepEqual(accepted.reopenIds, []);
+  for (const [name, items, options] of [
+    ["replaces", [item({ replaces: ["R1"] })]],
+    ["wait_for", [item({ wait_for: { conditions: [{ kind: "owner", description: "later" }], reason: "x" } })]],
+    ["a type change", [item({ type: "design" })]],
+    ["base_sync_only", [item({ base_sync_only: true })]],
+    ["a replacement of the same Task", [item(), item({ id: "N1", replaces: ["R1"] })]],
+    ["a task_action on the same Task", [item()], { actions: [{ task_id: "R1", action: "cancel", reason: "x" }] }],
+  ]) {
+    assert.ok(isPlanRejection(check(items, options)), `${name} is rejected`);
+  }
+  assert.ok(isPlanRejection(validateReplan([item()], snapshot, [], { allowOpen: true })), "without revisable a ready Task is still rejected");
 });
 
 test("replan: an over-threshold answer is sent back with the quality warnings, then applied and recorded", async (t) => {
@@ -933,4 +1088,267 @@ test("validateReplan: an automatic replan loosens Manager criteria but never cha
     assert.ok(!isPlanRejection(validate([protectedCriterion], [protectedCriterion], [])), "unchanged is fine");
     assert.ok(!isPlanRejection(validate([protectedCriterion], [loosened(protectedCriterion)], [], false)), "an Owner replan may change it");
   }
+});
+
+const setProgressGuard = (db, patch) => db.createWriteLane().transact((tx) => {
+  const now = new Date().toISOString();
+  tx.run("INSERT OR IGNORE INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Owner', ?, ?)", now, now);
+  return tx.run(
+    "INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at) VALUES ('progress_guard', 'owner:default', '1.0.0', ?, ?)",
+    JSON.stringify({ ...DEFAULT_PROGRESS_GUARD_SETTINGS, ...patch }), now,
+  );
+});
+
+const stubAnswer = (tasks) => ({ outcome: "success", report_valid: true, report: { event: "task.replanned", tasks: tasks.map((entry) => ({ ...entry, review: false })) } });
+const RULE = { criterion_id: "AC1", rule: "Only changed files are checked", applies: true, reason: "AC1 is about changed files." };
+const RELAX = { criterion_id: "AC1", reason: "too wide to prove", keeps: "the sample still holds" };
+const loosenedPlan = (extra = {}) => ({ ...task("T2", { title: "failed one" }), acceptance: "Loosened", acceptance_criteria: criteriaFor("Loosened: verified by a lighter test."), ...extra });
+
+// Each case: a plan with the omission, the plan that fixes it, and the text the feedback must contain.
+const omissionCases = {
+  "criteria_relaxations missing": {
+    defect: true,
+    bad: loosenedPlan(),
+    good: loosenedPlan({ auto_recovery: { criteria_relaxations: [RELAX] } }),
+    field: /criteria_relaxations|no entry/,
+  },
+  "rewrite reason (keeps) empty in criteria_relaxations": {
+    defect: true,
+    bad: loosenedPlan({ auto_recovery: { criteria_relaxations: [{ ...RELAX, keeps: "" }] } }),
+    good: loosenedPlan({ auto_recovery: { criteria_relaxations: [RELAX] } }),
+    field: /keeps/,
+  },
+  "reason omitted in criteria_relaxations": {
+    defect: true,
+    bad: loosenedPlan({ auto_recovery: { criteria_relaxations: [{ criterion_id: "AC1", keeps: RELAX.keeps }] } }),
+    good: loosenedPlan({ auto_recovery: { criteria_relaxations: [RELAX] } }),
+    field: /reason/,
+  },
+  "reason blank in criteria_relaxations": {
+    defect: true,
+    bad: loosenedPlan({ auto_recovery: { criteria_relaxations: [{ ...RELAX, reason: "  " }] } }),
+    good: loosenedPlan({ auto_recovery: { criteria_relaxations: [RELAX] } }),
+    field: /reason/,
+  },
+  "criteria_relaxations not a list": {
+    defect: true,
+    bad: loosenedPlan({ auto_recovery: { criteria_relaxations: "AC1 is loosened" } }),
+    good: loosenedPlan({ auto_recovery: { criteria_relaxations: [RELAX] } }),
+    field: /Task T2: .*criteria_relaxations must be a list of criterion_id, reason and keeps/,
+  },
+  "criterion_id missing in criteria_relaxations": {
+    defect: true,
+    bad: loosenedPlan({ auto_recovery: { criteria_relaxations: [{ reason: RELAX.reason, keeps: RELAX.keeps }] } }),
+    good: loosenedPlan({ auto_recovery: { criteria_relaxations: [RELAX] } }),
+    field: /Task T2: .*criteria_relaxations must be a list of criterion_id, reason and keeps/,
+  },
+  "rule_applicability empty": {
+    trigger: (t2) => ({ kind: "task_failed", tasks: [{ kind: "partial_repeated", task_id: t2 }] }),
+    bad: { ...task("T2", { title: "failed one" }), acceptance: "Done; verified by the test.", auto_recovery: { criteria_relaxations: [], criterion_checks: [], rule_applicability: [] } },
+    good: { ...task("T2", { title: "failed one" }), acceptance: "Done; verified by the test.", auto_recovery: { criteria_relaxations: [], criterion_checks: [], rule_applicability: [RULE] } },
+    field: /rule_applicability/,
+  },
+};
+
+async function seedOmission(core, db, { defect }) {
+  const seeded = await seedRepro2(core, db);
+  await db.createWriteLane().transact((tx) => {
+    tx.run("UPDATE tasks SET acceptance_criteria_json = ? WHERE id = ?", JSON.stringify(criteriaFor("Done; verified by the test.")), seeded.t2);
+    if (defect) {
+      const sequence = tx.get("SELECT COALESCE(MAX(sequence), 0) + 1 AS n FROM events").n;
+      tx.run(
+        `INSERT INTO events (id, sequence, idempotency_key, type, work_id, task_id, agent_run_id, payload_json, status, attempt_no, created_at)
+         VALUES (?, ?, ?, 'task.acceptance_defect_reported', ?, ?, NULL, '{"defects":[],"reason":"cannot check the layout"}', 'handled', 0, ?)`,
+        createUlid(), sequence, `defect:${createUlid()}`, seeded.workId, seeded.t2, new Date().toISOString(),
+      );
+    }
+    return null;
+  });
+  return seeded;
+}
+
+for (const [name, spec] of Object.entries(omissionCases)) {
+  test(`a plan with ${name} goes back to the Manager with the field named, opens no Decision before the limit and is applied once fixed`, async (t) => {
+    const { db, core, calls } = await openStubManagerCore(t, (_request, n) => stubAnswer([n < 3 ? spec.bad : spec.good]));
+    const { workId, t2 } = await seedOmission(core, db, spec);
+    await startWithoutDriving(core, db, workId);
+    const before = writeState(db, workId);
+
+    const replan = inBackground(core.triggerManagerReplan(workId, [t2], spec.trigger?.(t2) ?? { kind: "queued_failed_tasks" }));
+    await waitFor(() => calls.length >= 3 || replan.settled);
+
+    assert.equal(calls.length, 3, "the default allows three Manager calls");
+    assert.ok(!calls[0].context.previous_output_feedback);
+    for (const call of calls.slice(1, 3)) {
+      const feedback = call.context.previous_output_feedback;
+      assert.match(JSON.stringify(feedback), spec.field, "the feedback names the missing item");
+    }
+    assert.deepEqual(openDecisions(db, workId), []);
+    assert.equal(recoveryRecords(db, workId).length, 0, "no recovery was started before the limit");
+    await waitFor(() => writeState(db, workId).plan_revision > before.plan_revision || replan.settled);
+    assert.ok(writeState(db, workId).plan_revision > before.plan_revision, "only the fixed third answer was applied");
+  });
+}
+
+for (const limit of [1, 3]) {
+  test(`plan_rejection_attempts_max=${limit}: an incomplete plan is sent to the Manager ${limit} time(s) per round and the Decision opens after the recovery rounds`, async (t) => {
+    const { db, core, calls } = await openStubManagerCore(t, () => stubAnswer([omissionCases["criteria_relaxations missing"].bad]));
+    await setProgressGuard(db, { plan_rejection_attempts_max: limit });
+    const { workId, t2 } = await seedOmission(core, db, { defect: true });
+    await startWithoutDriving(core, db, workId);
+    const before = writeState(db, workId);
+
+    await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
+    assert.equal(calls.length, limit);
+    assert.deepEqual(openDecisions(db, workId), []);
+    await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
+    assert.equal(calls.length, limit * 2);
+    assert.deepEqual(openDecisions(db, workId), []);
+    await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
+    assert.equal(calls.length, limit * 3);
+    assert.equal(openDecisions(db, workId).length, 1);
+    assert.equal(writeState(db, workId).plan_revision, before.plan_revision, "the incomplete plan was never applied");
+  });
+}
+
+test("the Owner's one-line answer to a replan_failed Decision is in work.owner_guidance of the next Manager call", async (t) => {
+  const { db, core, calls } = await openStubManagerCore(t, () => stubAnswer([omissionCases["criteria_relaxations missing"].bad]));
+  const { workId, t2 } = await seedOmission(core, db, { defect: true });
+  await startWithoutDriving(core, db, workId);
+  for (let round = 0; round < 3; round += 1) await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
+  const [decision] = openDecisions(db, workId);
+  assert.ok(decision);
+
+  const before = calls.length;
+  await core.answerDecision(
+    decision.id,
+    commandEnvelope({ answer: "OWNER-ONE-LINE: relax the wording only", option_key: null, source_message_id: null }, "answer", decision.state_version),
+  );
+  await core.tick(workId);
+  await waitFor(() => calls.length > before);
+  assert.equal(calls[before].context.work.owner_guidance[0].answer, "OWNER-ONE-LINE: relax the wording only");
+});
+
+/** One automatic replan whose stub Manager answers `first`, then `fixed`; `seen` is the state each Manager call found. */
+async function replanFixedOnSecondCall(t, first, fixed, { seed = async () => {}, configure = async () => {} } = {}) {
+  const ref = {};
+  const seen = [];
+  const { db, core, calls } = await openStubManagerCore(t, (_request, n) => {
+    seen.push({ plan_revision: writeState(ref.db, ref.workId).plan_revision, decisions: openDecisions(ref.db, ref.workId).length });
+    return stubAnswer([n === 1 ? first : fixed]);
+  });
+  const { workId, t2 } = await seedRepro2(core, db);
+  await seed(db, t2);
+  Object.assign(ref, { db, workId });
+  await startWithoutDriving(core, db, workId);
+  await configure(core);
+  const initial = writeState(db, workId).plan_revision;
+  await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
+  assert.equal(calls.length, 2);
+  assert.deepEqual(seen[1], { plan_revision: initial, decisions: 0 }, "the rejected plan was not applied and no Decision opened before the second call");
+  assert.ok(writeState(db, workId).plan_revision > initial, "the fixed plan was applied");
+  assert.deepEqual(openDecisions(db, workId), []);
+  return { db, workId, feedback: calls[1].context.previous_output_feedback };
+}
+
+const replacementN1 = (criteria) => ({ ...task("N1", { dependsOn: ["T1"], replaces: ["T2"] }), acceptance_criteria: criteria });
+const storedCriteriaOf = (db, workId, managerTaskId) =>
+  JSON.parse(db.get("SELECT acceptance_criteria_json AS json FROM tasks WHERE work_id = ? AND manager_task_id = ?", workId, managerTaskId).json);
+
+test("a replacement Task that drops the Owner's criteria goes back with each criterion's original id, text and check, and is applied once they are carried over", async (t) => {
+  const quoted = { kind: "owner", source: "summary", quote: "x" };
+  const ownerCriteria = ["AC1", "AC2", "AC3"].map((id) => stored(id, quoted, { text: `${id}: the Owner's "exact" wording`, check: `node --test tests/${id.toLowerCase()}.test.mjs` }));
+  const { db, workId, feedback } = await replanFixedOnSecondCall(t, replacementN1(criteriaFor("Done; verified by the test.")), replacementN1(ownerCriteria), {
+    seed: (db, t2) => db.createWriteLane().transact((tx) => tx.run("UPDATE tasks SET acceptance_criteria_json = ? WHERE id = ?", JSON.stringify(ownerCriteria), t2)),
+  });
+  assert.equal(feedback.kind, "plan_rejected");
+  for (const criterion of ownerCriteria) {
+    const error = feedback.errors.find((line) => line.startsWith(`Task T2: criterion ${criterion.id} `));
+    assert.ok(error, `the feedback names T2 and ${criterion.id}`);
+    assert.ok(error.includes(JSON.stringify(criterion.text)), `the feedback quotes the text of ${criterion.id}`);
+    assert.ok(error.includes(JSON.stringify(criterion.check)), `the feedback quotes the check of ${criterion.id}`);
+  }
+  assert.deepEqual(storedCriteriaOf(db, workId, "N1").map((criterion) => [criterion.id, criterion.text, criterion.check]), ownerCriteria.map((criterion) => [criterion.id, criterion.text, criterion.check]));
+});
+
+test("heavy_check_unjustified goes back with the Task and every criterion id, opens no Decision before the limit and is applied once fixed", async (t) => {
+  const light = ["AC1", "AC2", "AC3"].map((id) => stored(id, MANAGER));
+  const heavy = [{ ...light[0], text: "Run it on 全件" }, light[1], { ...light[2], check: "node --test with 実モデル" }];
+  const { feedback } = await replanFixedOnSecondCall(t, replacementN1(heavy), replacementN1(light));
+  assert.equal(feedback.kind, "quality_repair");
+  const warning = feedback.warnings.find((entry) => entry.code === "heavy_check_unjustified");
+  assert.equal(warning.task_ref, "N1");
+  assert.deepEqual(warning.measured, ["AC1", "AC3"]);
+  assert.match(warning.detail, /^Task N1: criteria AC1, AC3 need a heavy check without a reason/);
+});
+
+test("acceptance_chars_over, when sent back, goes back with the Task, the total and limit and each criterion's length, and is applied once fixed", async (t) => {
+  const short = ["AC1", "AC2", "AC3"].map((id) => stored(id, MANAGER));
+  const long = [{ ...short[0], text: "a".repeat(1000) }, { ...short[1], text: "b".repeat(600) }, short[2]];
+  const { feedback } = await replanFixedOnSecondCall(t, replacementN1(long), replacementN1(short), {
+    // By default acceptance_chars_over is record-only and never sent back; this turns that off to follow the send-back path.
+    configure: (core) => core.setPlanQualitySettings({ ...DEFAULT_PLAN_QUALITY_SETTINGS, record_only_codes: [] }),
+  });
+  assert.equal(feedback.kind, "quality_repair");
+  const warning = feedback.warnings.find((entry) => entry.code === "acceptance_chars_over");
+  assert.equal(warning.task_ref, "N1");
+  assert.deepEqual([warning.measured, warning.threshold], [1669, 1500]);
+  assert.match(warning.detail, /^Task N1: the acceptance is 1669 characters in total \(limit 1500\); .*AC1 1020, AC2 620, AC3 29\./);
+});
+
+test("a plan still over a non-blocking limit is not applied before the last call plan_rejection_attempts_max allows", async (t) => {
+  const items = Array.from({ length: DEFAULT_PLAN_QUALITY_SETTINGS.max_acceptance_items + 1 }, (_, i) => stored(`AC${i + 1}`, MANAGER));
+  const ref = {};
+  const seen = [];
+  const { db, core, calls } = await openStubManagerCore(t, () => {
+    seen.push(writeState(ref.db, ref.workId).plan_revision);
+    return stubAnswer([replacementN1(items)]);
+  });
+  await setProgressGuard(db, { plan_rejection_attempts_max: 4 });
+  const { workId, t2 } = await seedRepro2(core, db);
+  Object.assign(ref, { db, workId });
+  await startWithoutDriving(core, db, workId);
+  const initial = writeState(db, workId).plan_revision;
+  await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
+  assert.equal(calls.length, 4);
+  assert.deepEqual(seen, [initial, initial, initial, initial]);
+  const outcomes = db.all("SELECT payload_json FROM events WHERE work_id = ? AND type = 'work.plan_quality_warned' ORDER BY sequence", workId).map((row) => JSON.parse(row.payload_json).outcome);
+  assert.deepEqual(outcomes, ["repair_requested", "repair_requested", "repair_requested", "accepted_with_warnings"]);
+  assert.ok(writeState(db, workId).plan_revision > initial, "on the last call the current judgement accepts it with warnings");
+});
+
+test("a replan that revises a Task clears its goal_shortfalls_json and keeps a stored criterion without requirement as required", async (t) => {
+  const quoted = { kind: "owner", source: "summary", quote: "x" };
+  const stale = [{ criterion_id: "AC1", text: "old goal", reason: "old reason", source: "worker" }];
+  const noRequirement = ["AC1", "AC2", "AC3"].map((id) => stored(id, quoted));
+  const { db, workId } = await replanFixedOnSecondCall(t, replacementN1(criteriaFor("Done; verified by the test.")), { ...task("T2", { title: "failed one" }), acceptance_criteria: noRequirement }, {
+    seed: (db, t2) => db.createWriteLane().transact((tx) => tx.run("UPDATE tasks SET acceptance_criteria_json = ?, goal_shortfalls_json = ? WHERE id = ?", JSON.stringify(noRequirement), JSON.stringify(stale), t2)),
+  });
+  const row = db.get("SELECT goal_shortfalls_json AS g, acceptance_criteria_json AS c FROM tasks WHERE work_id = ? AND manager_task_id = 'T2'", workId);
+  assert.equal(row.g, null);
+  for (const criterion of JSON.parse(row.c)) assert.equal(criterionRequirement(criterion), "required");
+});
+
+test("an automatic replan cannot change the requirement of an Owner or Manager criterion, and evaluateCriteriaRelaxation refuses it", () => {
+  const snapshot = { tasks: [{ id: "T1", manager_task_id: "T1", status: "failed", failed_by_dependency: false }], edges: [] };
+  const retry = (criteria) => ({ id: "T1", title: "A", type: "code", acceptance: "x", depends_on: [], replaces: [], acceptance_criteria: criteria });
+  const validate = (current, criteria) => validateReplan([retry(criteria)], snapshot, ["T1"], { currentCriteria: new Map([["T1", current]]), automatic: true });
+  for (const origin of [OWNER, MANAGER]) {
+    const required = stored("AC1", origin);
+    assert.ok(isPlanRejection(validate([required], [{ ...required, requirement: "goal" }])), "required to goal");
+    assert.ok(!isPlanRejection(validate([required], [{ ...required, requirement: "required" }])), "the same requirement is fine");
+    const goal = { ...required, requirement: "goal" };
+    assert.ok(isPlanRejection(validate([goal], [{ ...goal, requirement: "required" }])), "goal to required");
+  }
+  const manager = stored("AC1", MANAGER);
+  const errors = evaluateCriteriaRelaxation([manager], [{ ...manager, requirement: "goal" }], [record("AC1")], DEFAULT_PLAN_QUALITY_SETTINGS);
+  assert.ok(errors.some((line) => /requirement must stay required/.test(line)));
+});
+
+test("an automatic replan cannot change a Manager criterion's requirement when a replacement Task carries it", () => {
+  const snapshot = { tasks: [{ id: "T1", manager_task_id: "T1", status: "failed", failed_by_dependency: false }], edges: [] };
+  const manager = stored("AC1", MANAGER);
+  const replace = (criterion) => validateReplan([{ id: "N1", title: "A", type: "code", acceptance: "x", depends_on: [], replaces: ["T1"], acceptance_criteria: [criterion] }], snapshot, ["T1"], { currentCriteria: new Map([["T1", [manager]]]), automatic: true });
+  assert.ok(!isPlanRejection(replace(manager)), "the same requirement is fine");
+  assert.ok(isPlanRejection(replace({ ...manager, requirement: "goal" })), "required to goal");
 });

@@ -4,6 +4,7 @@ import { idempotencyConflict, validationError } from "./errors";
 import { autoRecoverySummary } from "./auto-recovery";
 import { ownerLanguage } from "./owner-language";
 import { toDecisionExplanation } from "./decision-explainer";
+import type { DecisionBrief } from "./decision-brief";
 import { openDecisionInTransaction, resolveDecisionInTransaction } from "./state-reducer";
 import type {
   CommandRequest,
@@ -29,6 +30,8 @@ export interface OpenDecisionPayload extends JsonObject {
   readonly issuer_role: "core" | "advisor" | "manager";
   /** Work scope only: false opens a Decision that does not block the Work. */
   readonly blocks_work?: boolean;
+  /** Set (pending) by the Manager's Decision: its opened notice waits for the explanation, so Core announces it. */
+  readonly explanation?: DecisionBrief["explanation"];
 }
 
 interface StoredIdempotencyRow {
@@ -61,8 +64,7 @@ export class DecisionService {
     const decisionId = createUlid();
     const language = ownerLanguage(this.db);
     try {
-      const result = await this.writeLane.write({
-        mutateState: (transaction: CoreWriteLaneTransaction) => {
+      const mutateState = (transaction: CoreWriteLaneTransaction) => {
           const existing = transaction.get<StoredIdempotencyRow>(
             "SELECT request_hash, response_json FROM idempotency_keys WHERE key = ?",
             scopedKey,
@@ -91,7 +93,11 @@ export class DecisionService {
             new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
           );
           return response;
-        },
+      };
+      // A pending explanation holds the opened notice back: Core announces the Decision once the explanation is written.
+      if (request.payload.explanation?.status === "pending") return await this.writeLane.transact(mutateState);
+      const result = await this.writeLane.write({
+        mutateState,
         event: {
           id: createUlid(),
           idempotencyKey: "decision-opened:" + scopedKey,

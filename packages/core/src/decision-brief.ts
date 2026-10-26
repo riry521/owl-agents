@@ -40,6 +40,11 @@ export interface DecisionBrief {
   readonly explanation?: { readonly kind: DecisionExplanationKind; readonly status: "pending" } | null;
 }
 
+/** Ask Core for a plain explanation of this kind once the Decision opens. */
+function pending(kind: DecisionExplanationKind): { readonly explanation: { readonly kind: DecisionExplanationKind; readonly status: "pending" } } {
+  return { explanation: { kind, status: "pending" } };
+}
+
 /** Option key whose answer cancels the Work (see isDecisionCancelAnswer). */
 export const DECISION_CANCEL_OPTION_KEY = "cancel";
 
@@ -209,10 +214,14 @@ const TEXT = {
     },
     replanFailed: {
       reason: "Managerが、タスクの失敗を解決する計画を立てられませんでした。",
+      failedTask: (title: string, cause: string | null) => `タスク「${title}」が失敗しました。${cause === null ? "失敗の理由は記録されていません。" : `理由: ${cause}`}`,
+      rejected: (count: number) => `Managerが出した計画は、検証ではじかれました（${count}回）。計画は適用していません。`,
+      failedChecks: (checks: string) => `通らなかった検査: ${checks}`,
+      conflictFiles: (files: string) => `統合でコンフリクトしたファイル: ${files}`,
       taskQuestion: "失敗したタスクをもう一度実行しますか？",
       workQuestion: "Managerにもう一度計画を立て直させますか？",
-      taskState: "失敗したタスクは判断待ちで止まっています。",
-      workState: "Workは判断待ちで止まっています。",
+      taskState: "失敗したタスクは判断待ちで止まっています。どの案にも当てはまらないときは、下の回答欄に一言書くと、Managerがそれに従って直します。",
+      workState: "Workは判断待ちで止まっています。どの案にも当てはまらないときは、下の回答欄に一言書くと、Managerがそれに従って直します。",
       noDetail: "詳細は記録されていません。",
       autoConflictReason: (files: string) => `Managerが計画を立て直せなかったため、Workの統合コンフリクトを自動で解消できませんでした。コンフリクトしたファイル: ${files}`,
       noFiles: "記録なし",
@@ -363,10 +372,14 @@ const TEXT = {
     },
     replanFailed: {
       reason: "The Manager could not make a plan that resolves the failed Tasks.",
+      failedTask: (title: string, cause: string | null) => `Task "${title}" failed. ${cause === null ? "No reason was recorded." : `Reason: ${cause}`}`,
+      rejected: (count: number) => `The plan the Manager made was rejected by validation (${count} times). It was not applied.`,
+      failedChecks: (checks: string) => `Checks that did not pass: ${checks}`,
+      conflictFiles: (files: string) => `Files that conflicted on merge: ${files}`,
       taskQuestion: "Run the failed Tasks again?",
       workQuestion: "Have the Manager replan again?",
-      taskState: "The failed Tasks are stopped, waiting for your decision.",
-      workState: "The Work is stopped, waiting for your decision.",
+      taskState: "The failed Tasks are stopped, waiting for your decision. If no choice fits, write a word in the answer field below and the Manager will follow it.",
+      workState: "The Work is stopped, waiting for your decision. If no choice fits, write a word in the answer field below and the Manager will follow it.",
       noDetail: "No details were recorded.",
       autoConflictReason: (files: string) => `Automatic resolution of the Work merge conflict failed because the Manager could not replan. Conflicting files: ${files}`,
       noFiles: "not recorded",
@@ -489,29 +502,32 @@ export function coreWorkDecisionBrief(payload: JsonObject, language: OwnerLangua
       tried: missing ? t.missing(missing) : t.noMissing,
       options: [option("retry", t.retry), cancelWorkOption(language)],
       recommended: "retry",
+      ...pending("final_incomplete"),
     };
   }
   if (payload.kind === "work_integration_verification_failed") {
     const t = TEXT[language].workIntegrationFailed;
     const command = Array.isArray(payload.command) ? payload.command.filter((part): part is string => typeof part === "string").join(" ") : "";
     return {
-      reason: t.reason,
+      reason: [t.reason, command ? t.failed(command, text(payload.output_tail) ?? t.noOutput) : text(payload.message)].filter(Boolean).join("\n"),
       question: t.question,
       current_state: t.currentState,
       tried: command ? t.failed(command, text(payload.output_tail) ?? t.noOutput) : (text(payload.message) ?? t.noCommand),
       options: [option("retry", t.retry), cancelWorkOption(language)],
       recommended: "retry",
+      ...pending("integration_failed"),
     };
   }
   if (payload.kind === "final_manager_failed") {
     const t = TEXT[language].finalFailed;
     return {
-      reason: t.reason,
+      reason: [t.reason, text(payload.failure) ?? text(payload.message)].filter(Boolean).join("\n"),
       question: t.question,
       current_state: t.currentState,
       tried: text(payload.failure) ?? text(payload.message) ?? t.noCause,
       options: [option("retry", t.retry), cancelWorkOption(language)],
       recommended: "retry",
+      ...pending("final_failed"),
     };
   }
   if (payload.kind === "work_merge_failed") {
@@ -560,6 +576,7 @@ export function coreWorkDecisionBrief(payload: JsonObject, language: OwnerLangua
         ? [option(RESOLVE_CONFLICT_OPTION_KEY, t.resolveConflict), option("retry", t.retry), cancelWorkOption(language)]
         : [option("retry", t.retry), cancelWorkOption(language)],
       recommended: conflict ? RESOLVE_CONFLICT_OPTION_KEY : "retry",
+      ...pending("merge_failed"),
     };
   }
   const t = TEXT[language].workHalted;
@@ -570,6 +587,7 @@ export function coreWorkDecisionBrief(payload: JsonObject, language: OwnerLangua
     tried: text(payload.failure) ?? text(payload.remediation) ?? t.tried,
     options: [option("retry", t.retry), cancelWorkOption(language)],
     recommended: null,
+    ...pending("work_halted"),
   };
 }
 
@@ -577,6 +595,9 @@ export function coreWorkDecisionBrief(payload: JsonObject, language: OwnerLangua
  * The Decision Core opens when a Task fails in a way it must not retry on
  * its own (retry_allowed=false). A "retry" answer runs the Task again.
  */
+/** The error_key Core gives coreTaskDecisionBrief when a Task's Reviewer attempts are used up. */
+export const REVIEW_BUDGET_EXHAUSTED_ERROR_KEY = "review_budget_exhausted";
+
 export function coreTaskDecisionBrief(taskTitle: string, payload: JsonObject, language: OwnerLanguage): DecisionBrief {
   const t = TEXT[language].taskFailed;
   const errorKey = text(payload.error_key);
@@ -590,6 +611,7 @@ export function coreTaskDecisionBrief(taskTitle: string, payload: JsonObject, la
       tried: t.errorKey(errorKey),
       options: [option(REPORT_RESUBMIT_OPTION_KEY, r.resubmit), option("retry", t.retry), cancelWorkOption(language)],
       recommended: REPORT_RESUBMIT_OPTION_KEY,
+      ...pending("report_format"),
     };
   }
   if (errorKey === OUTPUT_FORMAT_INVALID_ERROR_KEY && payload.role === "reviewer") {
@@ -601,6 +623,7 @@ export function coreTaskDecisionBrief(taskTitle: string, payload: JsonObject, la
       tried: t.errorKey(errorKey),
       options: [option(REVIEW_RERUN_OPTION_KEY, r.rerun), cancelWorkOption(language)],
       recommended: REVIEW_RERUN_OPTION_KEY,
+      ...pending("review_format"),
     };
   }
   if (isObject(payload.report) && payload.report.result === "partial") {
@@ -612,7 +635,7 @@ export function coreTaskDecisionBrief(taskTitle: string, payload: JsonObject, la
       tried: r.tried,
       options: [option("retry", t.retry), cancelWorkOption(language)],
       recommended: null,
-      explanation: { kind: "partial_limit", status: "pending" },
+      ...pending("partial_limit"),
     };
   }
   return {
@@ -622,6 +645,7 @@ export function coreTaskDecisionBrief(taskTitle: string, payload: JsonObject, la
     tried: errorKey ? t.errorKey(errorKey) : t.noErrorKey,
     options: [option("retry", t.retry), cancelWorkOption(language)],
     recommended: null,
+    ...pending(errorKey === REVIEW_BUDGET_EXHAUSTED_ERROR_KEY ? "review_budget" : "task_failed"),
   };
 }
 
@@ -656,6 +680,7 @@ export function testEnvironmentBrief(input: TestEnvironmentBriefInput, language:
     tried,
     options: approval ? [approve, retry, cancelWorkOption(language)] : [retry, cancelWorkOption(language)],
     recommended: approval ? TEST_SETUP_APPROVE_OPTION_KEY : TEST_SETUP_RETRY_OPTION_KEY,
+    ...pending("test_environment"),
   };
 }
 
@@ -779,6 +804,7 @@ export function remakeLimitBrief(input: RemakeLimitBriefInput, language: OwnerLa
     tried,
     options: [option("retry", t.retry), cancelWorkOption(language)],
     recommended: null,
+    ...pending("remake_limit"),
   };
 }
 
@@ -844,6 +870,7 @@ export function designBlockedBrief(input: DesignBlockedBriefInput, language: Own
     ],
     recommended: report && report.recommended_option !== null ? `option_${report.recommended_option + 1}` : null,
     design_block: report ? { cause_kind: report.cause_kind, repeated_findings: report.repeated_findings } : null,
+    ...pending("design_blocked"),
   };
 }
 
@@ -888,6 +915,7 @@ export function noProgressLimitBrief(input: NoProgressBriefInput, language: Owne
     tried: input.recent.length === 0 ? t.none : input.recent.map((line, index) => `${index + 1}. ${clip(line)}`).join("\n"),
     options: [option("retry", t.retry), cancelWorkOption(language)],
     recommended: null,
+    ...pending("no_progress"),
   };
 }
 
@@ -936,6 +964,7 @@ export function prerequisiteExpiredBrief(input: PrerequisiteExpiredBriefInput, l
     tried: [`${t.waitingFor}: ${input.reason}`, ...input.conditions.map((line) => `- ${line}`), `${t.detail}: ${input.detail}`].join("\n"),
     options: [option("retry", t.retry), cancelWorkOption(language)],
     recommended: null,
+    ...pending("prerequisite_wait"),
   };
 }
 
@@ -983,7 +1012,19 @@ export function workPrerequisiteUnreachableBrief(items: readonly WorkPrerequisit
     tried: items.map((item) => `- ${item.name} ${item.title}: ${item.state ?? t.deletedState}`).join("\n"),
     options: [option(DROP_MISSING_PREREQUISITES_OPTION_KEY, t.drop), cancelWorkOption(language)],
     recommended: null,
+    ...pending("work_prerequisite"),
   };
+}
+
+/** What the replan failure Decision names: each failed Task with its cause, and how often the Manager's plan was rejected. */
+export interface ReplanFailureCause {
+  readonly tasks: readonly {
+    readonly title: string;
+    readonly cause: string | null;
+    readonly failedChecks?: readonly string[];
+    readonly conflictFiles?: readonly string[];
+  }[];
+  readonly rejectedAttempts?: number;
 }
 
 /** The Decision opened when a Manager replan fails or leaves a failure unresolved. */
@@ -994,6 +1035,7 @@ export function managerReplanFailureBrief(
   ownerAnswer?: string,
   finalMissing?: unknown,
   autoConflictFiles?: readonly string[],
+  failure?: ReplanFailureCause,
 ): DecisionBrief {
   const t = TEXT[language].replanFailed;
   const onTasks = scope === "task";
@@ -1003,18 +1045,30 @@ export function managerReplanFailureBrief(
   const missing = finalMissing === undefined ? null : formatMissingList(finalMissing, language);
   return {
     reason: autoConflictFiles === undefined
-      ? t.reason
+      ? [
+          ...(failure?.tasks ?? []).map((task) => {
+            const cause = [
+              task.cause,
+              task.failedChecks?.length ? t.failedChecks(task.failedChecks.join(", ")) : null,
+              task.conflictFiles?.length ? t.conflictFiles(task.conflictFiles.join(", ")) : null,
+            ].filter((part): part is string => part !== null);
+            return t.failedTask(task.title, cause.length > 0 ? cause.join(" ") : null);
+          }),
+          t.reason,
+        ].join("\n")
       : t.autoConflictReason(autoConflictFiles.length > 0 ? autoConflictFiles.join(", ") : t.noFiles),
     question: onTasks ? t.taskQuestion : t.workQuestion,
     current_state: onTasks ? t.taskState : t.workState,
     // The Owner's answer that led to this replan, so the next Decision shows
     // what was asked and why it could not be done.
     tried: [
-      text(detail) ?? t.noDetail,
+      // A rejected plan's validation message is internal English; the Owner sees the fact and the count instead.
+      failure?.rejectedAttempts === undefined ? text(detail) ?? t.noDetail : t.rejected(failure.rejectedAttempts),
       missing ? TEXT[language].finalIncomplete.missing(missing) : null,
       answer === null ? null : t.ownerAnswer(answer),
     ].filter((line): line is string => line !== null).join("\n"),
     options: [option("retry", onTasks ? t.taskRetry : t.workRetry), cancelWorkOption(language)],
     recommended: null,
+    ...pending("replan_failed"),
   };
 }

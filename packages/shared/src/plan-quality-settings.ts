@@ -3,13 +3,16 @@ export const PLAN_QUALITY_SETTINGS_KEY = "plan_quality";
 export const PLAN_QUALITY_CODES = [
   "acceptance_items_over", "acceptance_chars_over", "broad_scope", "components_over", "verification_missing",
   "criterion_verification_missing", "external_state_comparison", "necessity_missing", "heavy_check_unjustified", "criterion_field_missing",
-  "criterion_origin_unquoted",
+  "criterion_origin_unquoted", "criterion_requirement_mismatch",
 ] as const;
 export type PlanQualityCode = typeof PLAN_QUALITY_CODES[number];
 
 export interface PlanQualitySettings {
   readonly enabled: boolean;
-  /** Times the Manager is asked to repair one plan or replan before it is accepted with warnings. */
+  /**
+   * No longer read: repair requests share progress_guard.plan_rejection_attempts_max with the other rejections.
+   * Kept so stored settings and PUT bodies that carry it stay valid.
+   */
   readonly max_repair_requests: number;
   readonly max_acceptance_items: number;
   readonly max_acceptance_chars: number;
@@ -58,7 +61,7 @@ export const DEFAULT_PLAN_QUALITY_SETTINGS: PlanQualitySettings = {
     "\\d{2,}\\s*分", "\\d+\\s*時間", "\\b\\d{2,}\\s*min(ute)?s?\\b", "\\b\\d+\\s*hours?\\b",
     "(本番|production)[^。.\\n]{0,12}(コピー|複製|\\bcopy\\b|\\bsnapshot\\b)",
   ],
-  blocking_codes: ["external_state_comparison", "criterion_field_missing", "heavy_check_unjustified", "criterion_origin_unquoted"],
+  blocking_codes: ["external_state_comparison", "criterion_field_missing", "heavy_check_unjustified", "criterion_origin_unquoted", "criterion_requirement_mismatch"],
   record_only_codes: ["acceptance_chars_over"],
 };
 

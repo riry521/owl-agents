@@ -41,8 +41,8 @@ test("plan quality settings: heavy_check_patterns is required and validated, and
   assert.ok(S.blocking_codes.includes("heavy_check_unjustified"));
   assert.ok(S.blocking_codes.includes("criterion_field_missing"));
   const heavy = [{ code: "heavy_check_unjustified" }];
-  assert.equal(planQualityOutcome(heavy, S.max_repair_requests, S), "rejected");
-  assert.equal(planQualityOutcome([{ code: "criterion_field_missing" }], S.max_repair_requests, S), "rejected");
+  assert.equal(planQualityOutcome(heavy, true, S), "rejected");
+  assert.equal(planQualityOutcome([{ code: "criterion_field_missing" }], true, S), "rejected");
   const { heavy_check_patterns: _drop, ...without } = S;
   assert.throws(() => validatePlanQualitySettings(without));
   assert.throws(() => validatePlanQualitySettings({ ...S, heavy_check_patterns: ["("] }));
@@ -133,7 +133,7 @@ for (const [name, make, expectedReason] of REPLANS) {
     const { workId, replan } = await startReplan(db, core);
     assert.ok(await waitFor(() => warned(db, workId).some((e) => e.outcome === "rejected")));
     await replan;
-    assert.deepEqual(warned(db, workId).slice(0, 2).map((e) => e.outcome), ["repair_requested", "rejected"]);
+    assert.deepEqual(warned(db, workId).slice(0, 3).map((e) => e.outcome), ["repair_requested", "repair_requested", "rejected"]);
     assert.match(seen[1], expectedReason);
   });
 
@@ -159,7 +159,7 @@ for (const [name, make, expectedReason] of REPLANS) {
 }
 
 for (const [label, task, format] of [["a heavy check without a reason", managerTask("A", heavyAcceptance), false], ["an empty necessity", managerTask("A", LIGHT, { necessity: null }), true]])
-test(`initial plan: ${label} is rejected after the repair request`, async (t) => {
+test(`initial plan: ${label} is rejected after the repair requests`, async (t) => {
   const seen = [];
   const { db, core } = await openCore(t, [[task]], seen, "work.planned");
   const created = await core.createWork({
@@ -177,7 +177,7 @@ test(`initial plan: ${label} is rejected after the repair request`, async (t) =>
     assert.deepEqual(warned(db, workId), []);
   } else {
     assert.ok(await waitFor(() => warned(db, workId).some((e) => e.outcome === "rejected")));
-    assert.deepEqual(warned(db, workId).slice(0, 2).map((e) => e.outcome), ["repair_requested", "rejected"]);
+    assert.deepEqual(warned(db, workId).slice(0, 3).map((e) => e.outcome), ["repair_requested", "repair_requested", "rejected"]);
   }
   assert.equal(db.get("SELECT COUNT(*) AS n FROM tasks WHERE work_id = ?", workId).n, 0);
 });

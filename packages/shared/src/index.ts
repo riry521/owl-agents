@@ -29,7 +29,15 @@ export {
   ADVISOR_CALL_API_ACTION_TYPE,
   ADVISOR_CALL_API_MAX_BODY_CHARS,
   parseAdvisorCallApiPayload,
+  ADVISOR_SEND_FILE_ACTION_TYPE,
+  ADVISOR_SEND_FILE_PATH_MAX,
+  ADVISOR_SEND_FILE_COMMENT_MAX,
+  parseAdvisorSendFilePayload,
+  type AdvisorSendFileRequest,
   type AdvisorCallApiRequest,
+  ADVISOR_WINDOW_ACTION_TYPES,
+  validateWindowHandoffPayload,
+  type AdvisorWindowHandoff,
 } from "./advisor-response.js";
 export {
   ADVISOR_CURATION_INSTRUCTION,
@@ -46,7 +54,7 @@ export {
   ownerLanguageFromLocale,
   type OwnerLanguage,
 } from "./owner-language.js";
-export { WORK_SUMMARY_SECTIONS, workSummaryInstruction, workSummaryLabel, workSummarySkeleton, type WorkSummarySection } from "./work-summary.js";
+export { WORK_SUMMARY_SECTIONS, workSummaryInstruction, workSummaryLabel, workSummaryListItems, workSummarySkeleton, type WorkSummarySection } from "./work-summary.js";
 export { GUARD_COMMAND_KEYS, GUARD_CONTENT_KEYS, GUARD_NAMED_TOOLS, GUARD_PATH_KEYS, GUARD_SHELL_COMMAND_KEYS, GUARD_SHELL_TOOL_NAMES, guardChecksToolCall, isReadOnlyAgentRole, readOnlyToolAllowed, READ_ONLY_AGENT_ROLES, READ_ONLY_TOOL_NAMES } from "./guard-inputs.js";
 export { GUARD_TOKEN_FILE_ENV, type GuardTokenAgent, type GuardTokenIssuer, type GuardTokenLease } from "./guard-token.js";
 export { buildCodexCustomProviderArgs, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV } from "./codex-provider.js";
@@ -390,7 +398,7 @@ export interface ProviderExecutionRequest {
   readonly on_spawn?: (pid: number) => void;
 }
 export interface ProviderResponse { readonly adapter: string; readonly stdout: string; readonly stderr: string; readonly exit_code: number | null; readonly signal: string | null; readonly pid?: number; readonly provider_session_id?: string; readonly format?: "provider-json" | "canonical-jsonl" | "plain-text"; }
-export interface ProviderSessionRequest { readonly adapter: string; readonly role: "advisor"; readonly model: string; readonly effort?: string; readonly cwd: string; readonly env: Readonly<Record<string, string>>; readonly system_prompt: string; /** How the provider should write its compaction summary; only sent to providers that can be told (T10 design §4). */ readonly compact_instructions?: string; readonly on_unsolicited_reply?: (reply: { readonly reply: string; readonly usage: TokenUsage | null }) => void; }
+export interface ProviderSessionRequest { readonly adapter: string; readonly role: "advisor"; readonly model: string; readonly effort?: string; readonly cwd: string; readonly env: Readonly<Record<string, string>>; readonly system_prompt: string; /** The provider-native session id of a suspended session to continue; omitted to start a new one. */ readonly resume_provider_session_id?: string; /** How the provider should write its compaction summary; only sent to providers that can be told (T10 design §4). */ readonly compact_instructions?: string; readonly on_unsolicited_reply?: (reply: { readonly reply: string; readonly usage: TokenUsage | null }) => void; }
 export interface TokenUsage { readonly input_tokens?: number; readonly output_tokens?: number; readonly cache_read_tokens?: number; readonly cache_write_tokens?: number; }
 export type SessionEvent =
   | { type: "session.ready"; provider_session_id: string; pid: number }
@@ -672,6 +680,8 @@ export { MEMORY_MCP_SERVER_NAME, owlMcpServers, claudeMcpArgs, codexMcpArgs, ope
 export { OWL_API_MCP_SERVER_NAME, OWL_API_MCP_TOOL_TIMEOUT_MS, OWL_API_MCP_ENV_NAMES, buildOwlApiMcpArgs } from "./owl-api-mcp-args.js";
 export { DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, OUTPUT_RESUBMIT_LIMIT_SETTINGS_KEY, REVIEW_RERUN_OPTION_KEY, TEST_SETUP_APPROVE_OPTION_KEY, TEST_SETUP_RETRY_OPTION_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_OPTION_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY } from "./report-resubmit.js";
 export * from "./role-schema.js";
+export * from "./manager-schema.js";
+export * from "./auto-recovery-names.js";
 export {
   EXTERNAL_BLOCKER_EVENT,
   EXTERNAL_BLOCKER_KINDS,
@@ -693,11 +703,13 @@ export {
   DECISION_CAUSE_KINDS,
   DECISION_EXPLANATION_KINDS,
   DECISION_EXPLANATION_SCHEMA,
-  DECISION_FIX_OPTIONS_MAX,
   DECISION_FIX_OPTIONS_MIN,
+  DECISION_FIX_OPTION_KINDS,
   DECISION_FIX_OPTION_PREFIX,
   DECISION_INTERNAL_TERM_PATTERNS,
-  DECISION_SUMMARY_MAX_SENTENCES,
+  applyDecisionTexts,
+  decisionTextsOf,
+  findDecisionTextProblems,
   findInternalTerms,
   readDecisionExplanation,
   type DecisionCauseKind,
@@ -708,6 +720,9 @@ export {
   type DecisionExplanationRequest,
   type DecisionExplanationRunResult,
   type DecisionFixOption,
+  type DecisionFixOptionReport,
+  type DecisionTextRewrite,
+  type DecisionTexts,
   type StoredDecisionExplanation,
 } from "./decision-explanation.js";
 

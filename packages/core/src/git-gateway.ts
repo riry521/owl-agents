@@ -532,6 +532,13 @@ export class GitWorktreeGateway implements GitGateway {
     }
   }
 
+  private windowProjectId(conversationId: string): string | null {
+    return this.db.get<{ project_id: string | null }>(
+      "SELECT w.project_id FROM conversations c JOIN advisor_windows w ON w.id = c.advisor_window_id WHERE c.id = ?",
+      conversationId,
+    )?.project_id ?? null;
+  }
+
   /** Which repository, shared worktree and base an Advisor request targets, without creating anything. */
   private async resolveAdvisorTarget(request: AdvisorWorkspaceRequest): Promise<
     { readonly ok: true; readonly target: AdvisorTarget } | { readonly ok: false; readonly error_code: AdvisorWorkspaceErrorCode; readonly message: string }
@@ -541,12 +548,14 @@ export class GitWorktreeGateway implements GitGateway {
       return { ok: false, error_code: "conversation_not_found", message: `Conversation ${request.conversation_id} was not found.` };
     }
     let project: ProjectRow | undefined;
-    if (request.project_id) {
+    // Without an explicit project or a Work's project, a Project window works in its own Project.
+    const projectId = request.project_id ?? (conversation.work_id ? null : this.windowProjectId(request.conversation_id));
+    if (projectId) {
       project = this.db.get<ProjectRow>(
         "SELECT canonical_path, base_branch, allowed_roots_json FROM projects WHERE id = ?",
-        request.project_id,
+        projectId,
       );
-      if (!project) return { ok: false, error_code: "project_not_found", message: `Project ${request.project_id} was not found.` };
+      if (!project) return { ok: false, error_code: "project_not_found", message: `Project ${projectId} was not found.` };
     } else if (conversation.work_id) {
       project = this.projectFor(conversation.work_id);
     }

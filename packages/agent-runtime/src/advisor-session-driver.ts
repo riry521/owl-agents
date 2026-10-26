@@ -214,7 +214,9 @@ export function buildStartArgv(
       cwd: request.cwd,
     }),
   ];
-  argv.push("--session-id", freshSessionId);
+  // A resumed session keeps its own id, so --session-id (which would mint a new one) is left out.
+  if (request.resume_provider_session_id) argv.push("--resume", request.resume_provider_session_id);
+  else argv.push("--session-id", freshSessionId);
   argv.push("--model", request.model);
   if (request.effort) {
     argv.push("--effort", request.effort);
@@ -311,7 +313,7 @@ export class AdvisorSessionDriver implements ProviderSession {
     executablePath: string,
     options: { readonly reapGraceMs?: number } = {},
   ): Promise<AdvisorSessionDriver> {
-    const freshSessionId = randomUUID();
+    const freshSessionId = request.resume_provider_session_id ?? randomUUID();
     const argv = buildStartArgv(request, executablePath, freshSessionId);
     const [executable, ...args] = argv;
     let child: ChildProcess;

@@ -5,6 +5,7 @@ import { test } from "node:test";
 
 import { approvedInstallArgvs } from "../../packages/core/dist/test-environment.js";
 import { command } from "../helpers/core.mjs";
+import { assertOpenedOnceAfterExplanation, createExplainer } from "../helpers/decision-explanation.mjs";
 import { openTestRunCore, plannedTask, workerReport } from "../helpers/test-run-core.mjs";
 import { waitFor } from "../helpers/wait.mjs";
 
@@ -121,10 +122,16 @@ test("a test environment that stays broken goes to the Owner once; retrying afte
   const state = { broken: true };
   const { run } = createEnvironmentRunner(state);
   const { agentRunner, workerRequests, investigations } = createAgent({ state, investigate: () => READY({ missing: ["node 22"], attempts: [] }) });
+  const explainer = createExplainer();
+  agentRunner.runDecisionExplanation = explainer.runDecisionExplanation;
   const ctx = await openTestRunCore(t, { agentRunner, runner: run, prefix: "owl-task-test-environment-blocked-" });
   const workId = await startWork(ctx);
 
   const decision = await waitFor(() => openDecision(ctx.db), { timeoutMs: 30_000, message: "the test environment Decision" });
+  // The notice waits for the explanation and is emitted once, whichever way the Decision was opened.
+  await assertOpenedOnceAfterExplanation(ctx.db, decision.id, explainer);
+  assert.equal(explainer.requests[0].kind, "test_environment");
+  assert.ok(explainer.requests[0].task, "a Task's test environment sends T");
   assert.equal(investigations.length, 2, "max_reinvestigations investigations, then the Owner");
   assert.deepEqual(optionKeys(decision).filter((key) => key !== "cancel"), ["retry_test_setup"]);
   const task = ctx.db.get("SELECT id, status FROM tasks WHERE work_id = ?", workId);

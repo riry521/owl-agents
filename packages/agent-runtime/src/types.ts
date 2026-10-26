@@ -1,4 +1,4 @@
-import type { AcceptanceDefect, GuardTokenIssuer, ManagerTrigger, RateLimitInfo, ResearchSubagentSettings, StoredAcceptanceCriterion, TaskNecessity, WebResearchCapture } from "@owl/shared";
+import type { AcceptanceDefect, CriterionRequirement, GuardTokenIssuer, ManagerTrigger, RateLimitInfo, ResearchSubagentSettings, StoredAcceptanceCriterion, TaskNecessity, WebResearchCapture } from "@owl/shared";
 
 export const REPORT_SCHEMA_VERSION = "1.1.0" as const;
 /** Reports saved before schema 1.1.0 (`verification.passed` boolean). Read-only: new agent output must not use it. */
@@ -24,10 +24,14 @@ export type VerificationStatus = "passed" | "failed" | "blocked";
 export interface AcceptanceVerification {
   readonly criterion_id: string;
   readonly criterion: string;
-  /** unverifiable: nothing this Task can run could prove the criterion. */
-  readonly status: VerificationStatus | "unverifiable";
+  /** unverifiable: nothing this Task can run could prove the criterion. goal_unmet: a goal criterion that is not met. */
+  readonly status: VerificationStatus | "unverifiable" | "goal_unmet";
   readonly evidence: string;
   readonly unverifiable_reason?: string | null;
+  /** Why a goal_unmet criterion was not met; never blank for goal_unmet. */
+  readonly shortfall_reason?: string | null;
+  /** Filled by the runtime from the Task's criteria; a value the Worker writes is discarded. */
+  readonly requirement?: CriterionRequirement;
 }
 
 /** One check the Worker ran (test, typecheck, build, search). */
@@ -182,6 +186,8 @@ export interface ManagerMissingItem {
   readonly item: string;
   readonly reason: string;
   readonly fix: string;
+  /** ref from context.criteria_index; absent or null reads as a required point. */
+  readonly criterion_ref?: string | null;
 }
 
 /** A reusable lesson from the Work, classified for future use. */
@@ -213,6 +219,8 @@ export interface ManagerVerdict {
   readonly missing: readonly ManagerMissingItem[];
   /** Absent in verdicts recorded before backlog items were tied to Works. */
   readonly unaddressed_backlog_items?: readonly { readonly item_id: string; readonly reason: string }[];
+  /** Recorded final-check goals now met; absent reads as []. */
+  readonly goals_met?: readonly { readonly criterion_ref: string; readonly evidence: string }[];
   readonly lessons: readonly (ManagerLesson | LegacyManagerLesson)[];
 }
 
@@ -293,7 +301,7 @@ export interface ReviewFinding {
   /** "report" = about the report's wording only; never registered in the backlog. */
   readonly target: "deliverable" | "report";
   /** "beyond_acceptance" = asks for work no criterion or rule requires (Core stores it as minor); "overbuilt" = the delivered work adds what the criteria do not need. */
-  readonly scope?: "in_scope" | "beyond_acceptance" | "overbuilt";
+  readonly scope?: "in_scope" | "beyond_acceptance" | "overbuilt" | "goal";
   /** "test_result" = about a test or check result (never registered in the backlog); "other" = anything else. */
   readonly subject: "test_result" | "other";
   /** Path of the file the finding is about; "" for a general finding. */
@@ -321,6 +329,8 @@ export interface ReviewResult {
   readonly findings: readonly ReviewFinding[];
   /** Criteria that cannot be proven inside the Task; set only with verdict acceptance_defect. */
   readonly acceptance_defects?: readonly AcceptanceDefect[];
+  /** Goal criteria (requirement goal) that are not met, each with a reason. */
+  readonly goal_shortfalls?: readonly { readonly criterion_id: string; readonly reason: string }[];
   readonly tests: ReviewTests;
 }
 
@@ -409,6 +419,8 @@ export interface ProviderSessionRequest {
   readonly cwd: string;
   readonly env: Readonly<Record<string, string>>;
   readonly system_prompt: string;
+  /** The provider-native session id of a suspended session to continue; omitted to start a new one. */
+  readonly resume_provider_session_id?: string;
   /** Raw stdout JSONL records for telemetry parsing; callers must not retain or log them. */
   readonly on_stdout_line?: (line: string) => void;
   /**

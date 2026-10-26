@@ -6,7 +6,7 @@ import type { KnowledgeStoragePersistence } from "./knowledge-location.js";
 import type { DetectedProcessSkillsPack, ProcessSkillsFileSystem } from "./process-skills-pack.js";
 import type { NormalizedLesson } from "./final-verdict.js";
 import type { DesignBlockedReport } from "../../shared/dist/design-blocked.js";
-import type { DecisionCauseKind } from "../../shared/dist/decision-explanation.js";
+import type { DecisionCauseKind, DecisionTextCheckInput } from "../../shared/dist/decision-explanation.js";
 import type { WorkPrerequisiteView } from "../../shared/dist/work-prerequisite.js";
 import type { PlanWaitFor } from "../../shared/dist/prerequisite.js";
 import type { PlanUsageSource } from "../../shared/dist/plan-usage.js";
@@ -726,7 +726,16 @@ export type OwnApiResult =
   | { readonly kind: "not_sent"; readonly error: string }
   | { readonly kind: "unknown"; readonly error: string };
 
+/** A checker of the explanation texts the Owner reads; see DecisionExplainer. */
+export interface DecisionTextCheck {
+  readonly name: string;
+  /** Resolves to the raw output, or rejects when the checker failed; stops the checker when signal aborts. */
+  run(input: DecisionTextCheckInput, signal: AbortSignal): Promise<unknown>;
+}
+
 export interface CoreOptions {
+  /** Checkers called in order on each explanation's texts before it is stored. None unless set. */
+  readonly decisionTextChecks?: readonly DecisionTextCheck[];
   /** Skill the Lead Designer uses for screen design Tasks; null or unset names none. */
   readonly designSkill?: string | null;
   readonly db: CoreDatabase;
@@ -811,6 +820,12 @@ export interface CoreOptions {
   /** Returns the operator-configured Advisor persona, or an empty string for the default. */
   readonly getAdvisorPersona?: () => string;
   readonly getAdvisorFolders?: () => { sharedDir: string; screenshotDir: string } | null;
+  readonly getAdvisorSendFileSettings?: () => {
+    /** undefined: not configured (use materials). [] : configured but nothing usable (send nothing). */
+    readonly dirs?: readonly string[];
+    readonly slackMaxBytes?: number;
+    readonly discordMaxBytes?: number;
+  };
   readonly getAdvisorSharedDir?: () => string | null;
   /** Resolves a configured provider id to its harness without guessing between harnesses. */
   readonly getProviderHarness?: (providerId: string) => ModelHarness | undefined;
@@ -1067,7 +1082,7 @@ export interface Decision extends JsonObject {
   /** Set when the Decision is a design stop with a Designer report: why the design cannot pass, as data. */
   readonly design_block: { readonly cause_kind: "wrong_premise" | "policy_conflict" | "ambiguous_criteria" | "simple_defect"; readonly repeated_findings: readonly { readonly summary: string; readonly times: number }[] } | null;
   /** Set when Core adds a plain explanation of the stop; null for a Decision it does not explain. */
-  readonly explanation: { readonly kind: string; readonly status: "pending" | "ready" | "failed"; readonly summary: string | null; readonly cause_kind: DecisionCauseKind | null } | null;
+  readonly explanation: { readonly kind: string; readonly status: "pending" | "ready" | "failed"; readonly summary: string | null; readonly cause_kind: DecisionCauseKind | null; readonly next_steps: string | null; readonly option_notes: readonly { readonly key: string; readonly note: string }[] } | null;
 }
 
 export interface DecisionListQuery extends ListQuery {
@@ -1144,6 +1159,7 @@ export interface WorkViewData extends JsonObject {
   readonly conversation: JsonObject | null;
   readonly assurance: JsonObject | null;
   readonly auto_recovery: { readonly active: readonly JsonObject[]; readonly relaxations: readonly JsonObject[] };
+  readonly goal_shortfalls: readonly JsonObject[];
 }
 
 export interface BoardViewData extends JsonObject {
@@ -1454,6 +1470,8 @@ export interface Project extends JsonObject {
   readonly canonical_path: string;
   readonly base_branch: string;
   readonly auto_push: boolean;
+  /** Whether the Project's Advisor window is listed in the window list. */
+  readonly advisor_window_enabled: boolean;
   /** Language of the commit messages Core writes. null when unset. */
   readonly commit_language: "ja" | "en" | null;
   /** Command (argv, no shell) run in each newly created worktree before its first agent. Empty when unset. */
@@ -1497,6 +1515,7 @@ export interface UpdateProjectPayload extends JsonObject {
   readonly canonical_path?: string;
   readonly base_branch?: string;
   readonly auto_push?: boolean;
+  readonly advisor_window_enabled?: boolean;
   readonly commit_language?: "ja" | "en" | null;
   readonly worktree_setup_command?: readonly string[];
   readonly worktree_refresh_command?: readonly string[];
@@ -1624,6 +1643,8 @@ export interface InboundMessagePayload extends JsonObject {
   readonly text: string;
   readonly conversation_hint: ConversationHint;
   readonly attachment_ids: readonly string[];
+  /** The fixed status answer a connector already posted: the message and this answer are recorded only, with no Advisor turn. */
+  readonly status_reply?: string;
 }
 
 /**

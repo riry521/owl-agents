@@ -98,3 +98,24 @@ for (const mode of ["plan", "replan"]) {
     assert.match(prompt, /split that into a separate Task that a Worker runs, such as type doc or code/);
   });
 }
+
+for (const mode of ["plan", "replan"]) {
+  test(`Manager ${mode} prompt distinguishes required from goal criteria`, async () => {
+    const prompt = await managerPrompt(mode);
+    assert.match(prompt, /Keep required criteria few/);
+    assert.match(prompt, /Never make a criterion that depends on anything outside the Task .* required/);
+    assert.match(prompt, /Make count criteria .* and procedure criteria .* goals/);
+    assert.match(prompt, /quoted from the Work summary's 目標 \(Goals\) section is goal/);
+    assert.match(prompt, /Do not change the requirement of an existing criterion in an automatic replan/);
+    assert.match(prompt, /A goal still needs serves and if_omitted/);
+  });
+}
+
+test("Manager finalize prompt explains criteria_index, criterion_ref, goal_shortfalls and goals_met", async () => {
+  const prompt = await managerPrompt("finalize");
+  for (const word of ["criteria_index", "criterion_ref", "goal_shortfalls", "goals_met"]) {
+    assert.ok(prompt.includes(word), word);
+  }
+  assert.match(prompt, /Set verdict complete exactly when no missing item is about a required condition/);
+  assert.equal(prompt.includes("missing is [] exactly when verdict is complete"), false, "the old rule is gone");
+});

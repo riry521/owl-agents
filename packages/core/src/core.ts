@@ -7,7 +7,7 @@ import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } 
 import { createUlid, utcNow } from "../../db/dist/index.js";
 import { DecisionService, type OpenDecisionPayload } from "./decision";
 import { DesignMockStore, type DesignMockSummary } from "./design-mocks";
-import { DECISION_CANCEL_OPTION_KEY, managerReplanFailureBrief, prerequisiteExpiredBrief, RESOLVE_CONFLICT_OPTION_KEY } from "./decision-brief";
+import { DECISION_CANCEL_OPTION_KEY, managerReplanFailureBrief, prerequisiteExpiredBrief, RESOLVE_CONFLICT_OPTION_KEY, type ReplanFailureCause } from "./decision-brief";
 import { evaluatePrerequisite, type PrerequisiteFacts } from "./prerequisite-monitor";
 import {
   evaluateWorkPrerequisitesInTransaction,
@@ -64,7 +64,10 @@ import {
   transientRecoveryResumeAt, withAutoRecoveryTried,
 } from "./auto-recovery";
 import { fixPendingTaskIds } from "./fix-pending-tasks.js";
+import { finalCriteriaIndex, goalShortfallsOfWork, readTaskGoalShortfalls, recordFinalGoalShortfalls, settleFinalVerdict, type FinalCriterionRef, type SettledFinalVerdict } from "./goal-shortfalls";
 import { detectNewRepositories, type NewRepositoryCandidate } from "./new-repository-detection.js";
+import { clearPausedReviewerWait } from "./provider-pause-reviewer-wait.js";
+import { assertAgentRunNotStopped, isAgentRunStopped } from "./agent-run-stop.js";
 import { WorkflowEngine, mergeConflictPaths, type HookSubagentInput } from "./workflow-engine";
 import { isPlanRejection, validatePlan, validateReplan, type PlannedApproach, type PlanRejection, type ReplanAction, type ReplanPlan, type ReplanSnapshot } from "./replan-plan";
 import type { PlanWaitFor, PrerequisiteCondition, PrerequisiteSpec } from "../../shared/dist/prerequisite.js";
@@ -87,7 +90,7 @@ import { normalizeKnowledgeLimits, renderProjectOverview } from "./knowledge-ret
 import { IndexInjector } from "./memory/index-injector.js";
 import { ResearchRecall } from "./memory/research-recall.js";
 import { PageRouter, writePage } from "./memory/page-router.js";
-import { assertValidPage } from "./memory/page-format.js";
+import { assertValidPage, MATERIALS_DIR } from "./memory/page-format.js";
 import { PageLibrarian, type PagePendingStats, type PageRunMode, type ProposeOperationsFn } from "./memory/page-librarian.js";
 import { IndexBuilder } from "./memory/index-builder.js";
 import { bodySha256 } from "./memory/page-format.js";
@@ -135,6 +138,22 @@ import {
 import { buildCurationNotice, curationNoticeWrite, curationReportFailure, summarizeCurationReport, type CurationNotice, type CurationNoticeEntry } from "./curation-summary.js";
 import { reviewLimits } from "./review-limits.js";
 import { dependencySummarySettings } from "./dependency-summary-settings.js";
+import { advisorWindowSettings } from "./advisor-window-settings.js";
+import {
+  ensureGeneralWindowInTransaction,
+  ensureWebAccount,
+  ensureProjectWindowInTransaction,
+  findAdvisorWindow,
+  listAdvisorWindows,
+  type AdvisorWindowRef,
+} from "./advisor-windows.js";
+import {
+  ADVISOR_WINDOW_SETTINGS_KEY,
+  AdvisorWindowSettingsValidationError,
+  validateAdvisorWindowSettings,
+  type AdvisorWindowSettings,
+} from "../../shared/dist/advisor-window-settings.js";
+import { GENERAL_WINDOW_KEY, type AdvisorWindowChannel, type AdvisorWindowSummary } from "../../shared/dist/advisor-windows.js";
 import {
   DependencySummarySettingsValidationError,
   DEPENDENCY_SUMMARY_SETTINGS_KEY,
@@ -248,6 +267,7 @@ import { ADVISOR_TEXT, workRef } from "./advisor-text.js";
 import { INSTRUCTION_REPLY_TEXT, type ReplanSummary } from "./instruction-reply-text.js";
 import { ownerGuidance } from "./owner-guidance.js";
 import { failedTaskBrief, pendingAcceptanceDefect, pendingExternalBlocker } from "./task-context.js";
+import { DEFAULT_ADVISOR_SEND_FILE_MAX_BYTES, formatSendFileSize, prepareAdvisorSendFile, sendFileNotice, type AdvisorOutboundFile, type AdvisorSendFileSettings } from "./advisor-send-file.js";
 import { planContextFields } from "./context-builder.js";
 import { detectProcessSkillsPack, type DetectedProcessSkillsPack } from "./process-skills-pack.js";
 import { ResearchRecorder, type ResearchAttributionRole } from "./research-recorder.js";
@@ -256,6 +276,9 @@ import type { TokenUsagePeriod, TokenUsageReport } from "../../shared/dist/token
 import { RESEARCH_CAPTURE_ROLES } from "../../shared/dist/permission-args.js";
 import {
   ADVISOR_CALL_API_ACTION_TYPE,
+  ADVISOR_SEND_FILE_ACTION_TYPE,
+  ADVISOR_WINDOW_ACTION_TYPES,
+  validateWindowHandoffPayload,
   ADVISOR_WORK_OPERATION_ACTION_TYPES,
   parseAdvisorCallApiPayload,
   redactProviderOutput,
@@ -312,6 +335,8 @@ validatePrerequisiteWorkIds,
   PROCESS_SKILLS_SETTINGS_KEY,
   usageJson,
   workSummaryInstruction,
+  workSummaryLabel,
+  WORK_SUMMARY_SECTIONS,
   type ProcessSkillsSettings,
   type GuardTokenAgent,
   type WebResearchCapture,
@@ -674,6 +699,7 @@ interface ProjectDbRow {
   canonical_path: string;
   base_branch: string;
   auto_push: number;
+  advisor_window_enabled: number;
   commit_language: "ja" | "en" | null;
   allowed_roots_json: string;
   verification_plan_json: string;
@@ -770,6 +796,9 @@ export class Core {
   private readonly projectReader: ProjectSourceReader;
   private readonly overviewRuns = new Set<Promise<unknown>>();
   private readonly worktreeReconciles = new Set<Promise<unknown>>();
+  private readonly agentStops = new Set<Promise<void>>();
+  /** Per Work, when the tick began waiting for Agents the Owner stopped to end, and whether the forced stop was resent. */
+  private readonly ownerStopWaits = new Map<string, { since: number; resent: boolean }>();
   /** Per Work, the chain of new-repository detections in flight; its presence holds Task launches. */
   private readonly repositoryDetections = new Map<string, Promise<void>>();
   /** Works with exactly one auto-registered Project waiting to be attached by the next tick. */
@@ -846,6 +875,8 @@ export class Core {
       rules: (workId) => this.composeRulesForRole("manager", workId),
       language: () => ownerLanguage(this.db),
       timeoutSeconds: () => progressGuard(this.db).decision_explanation_timeout_seconds,
+      rewritesMax: () => progressGuard(this.db).decision_explanation_rewrites_max,
+      textChecks: () => this.options.decisionTextChecks ?? [],
       announce: (workId) => this.announceCoreDecisions(workId),
     });
     this.coreActivity = new CoreActivityRegistry({
@@ -1089,6 +1120,8 @@ export class Core {
           await this.providerPauseController.noteProviderSucceeded(provider, runStartedAt);
         },
         resolveAttachmentPaths: (messageId) => this.resolveAttachmentPaths(messageId),
+        resolveStatusExchangesBlock: (messageId) => this.statusExchangesBlock(messageId),
+        resolveWindowHandoffBlock: (messageId) => this.windowHandoffBlock(messageId),
         onReply: (conversationId, reply, turnId, origin, suggestedActions, actionsMalformed) =>
           this.persistAdvisorReply(conversationId, reply, turnId, origin, suggestedActions, actionsMalformed),
         onError: (conversationId, errorMessage, turnId, origin) =>
@@ -1230,6 +1263,8 @@ export class Core {
       onTaskSettled: (workId) => this.onTaskSettled(workId),
       externalOutputs: (workId, files) => this.externalRepositoryFiles(workId, files),
       launchHold: (workId) => {
+        // An Owner instruction holds every launch until the Manager replan applies.
+        if (this.ownerInstructionPending(workId)) return { allowedTaskIds: new Set() };
         if (this.repositoryDetections.has(workId)) return { allowedTaskIds: new Set() };
         if (this.pendingRepositoryAttach.has(workId)) return { allowedTaskIds: new Set(fixPendingTaskIds(this.db, workId)) };
         return null;
@@ -2076,6 +2111,8 @@ export class Core {
     if (advisorRecovery > 0) {
       console.log(`[owl-core] Recovery: ${advisorRecovery} advisor sessions ended after core restart`);
     }
+    await this.releaseUncarriedStatusExchanges();
+    await this.releaseUncarriedWindowHandoffs();
     if (this.advisorRuntime) await this.advisorRuntime.recoverTurns();
     if (this.advisorRuntime) void this.advisorRuntime.sweepWorkspaces();
     void this.keepAdvisorResident();
@@ -2094,7 +2131,7 @@ export class Core {
     }
     this.recoverPostMergeCommands();
     this.advisorKeepAliveTimer = setInterval(() => {
-      void this.keepAdvisorResident();
+      void this.runAdvisorWindowTick().then(() => this.keepAdvisorResident());
     }, 60_000);
     this.advisorKeepAliveTimer.unref();
     this.workspaceSweepTimer = setInterval(() => {
@@ -2755,6 +2792,7 @@ export class Core {
     // terminate every Owl-owned Agent process group, and leave durable active
     // rows for startup recovery instead of waiting for provider calls to finish.
     this.workDriver.stopScheduling();
+    await Promise.allSettled([...this.agentStops]);
     this.workflow.stopImmediately();
     this.terminateActiveAgentProcessesImmediately();
     this.advisorRuntime?.stopImmediately();
@@ -3272,6 +3310,9 @@ export class Core {
     workId: string,
     request: CommandRequest<PauseWorkPayload>,
   ): Promise<CommandResponse<{ work_id: string; state: "paused"; signal: "pause_requested" }>> {
+    // Collected in the pause transaction; stays empty when the request is replayed.
+    let stoppedRunIds: string[] = [];
+    let stoppedVerifyingTaskIds: string[] = [];
     const response: CommandResponse<{ work_id: string; state: "paused"; signal: "pause_requested" }> = await this.runCommand(request, {
       type: "work.paused",
       workId,
@@ -3285,6 +3326,19 @@ export class Core {
         `SELECT COUNT(*) AS count FROM agent_runs WHERE work_id = ? AND status IN ('launch_pending', 'spawned', 'running', 'cancel_requested')`,
         workId,
       );
+      // cancel_requested stays in: a Manager replacement may have left a stopped run unfinished.
+      stoppedRunIds = transaction.all<{ id: string }>(
+        `SELECT id FROM agent_runs
+          WHERE work_id = ? AND status IN ('launch_pending', 'spawned', 'running', 'cancel_requested')
+            AND role <> 'advisor' AND hook_agent_id IS NULL AND (origin IS NULL OR origin <> 'observed')`,
+        workId,
+      ).map((run) => run.id);
+      stoppedVerifyingTaskIds = transaction.all<{ id: string }>(
+        "SELECT id FROM tasks WHERE work_id = ? AND status = 'verifying'",
+        workId,
+      ).map((task) => task.id);
+      // A provider-paused Reviewer wait must not wake the stopped Task later.
+      for (const taskId of stoppedVerifyingTaskIds) clearPausedReviewerWait(transaction, taskId);
       const result = reduceWorkInTransaction(transaction, workId, {
         event: "work.paused",
         expected_version: request.expected_version,
@@ -3305,6 +3359,8 @@ export class Core {
       return { data: { work_id: workId, state: "paused", signal: "pause_requested" }, version: result.next.state_version };
     });
     this.workDriver.unregister(workId);
+    this.ownerStopWaits.delete(workId);
+    this.stopOwnerStoppedRuns(workId, stoppedRunIds, stoppedVerifyingTaskIds);
     return response;
   }
 
@@ -3337,6 +3393,7 @@ export class Core {
       restoreCascadedDependentsInTransaction(transaction, workId);
       return { data: { work_id: workId, state: "running" }, version: result.next.state_version };
     });
+    this.ownerStopWaits.delete(workId);
     this.workDriver.register(workId);
     return response;
   }
@@ -3514,20 +3571,7 @@ export class Core {
       JSON.stringify(closedLaunchRunIds),
     );
     for (const run of activeRuns) {
-      try {
-        // Child runs and observed subagents are not AgentRunner
-        // processes; stop them through their recorded process identity.
-        if (run.role === "executor") signalRecordedProcess(run, force ? "SIGKILL" : "SIGTERM");
-        else if (this.options.agentRunner.cancelAgent) await this.options.agentRunner.cancelAgent(run.id, force);
-        else if (run.pid && processIdentityMatches(
-          { process_start_time: run.process_start_time, process_cmdline_sha256: run.process_cmdline_sha256 },
-          readProcessIdentity(run.pid),
-        )) {
-          signalProcessGroup(run.pid, force ? "SIGKILL" : "SIGTERM");
-        }
-      } catch (error) {
-        console.error(`[owl-core] Failed to signal cancelled Agent ${run.id}`, error);
-      }
+      await this.signalAgentRun(run, force, (id) => `Failed to signal cancelled Agent ${id}`);
     }
     const deadline = Date.now() + (this.options.agentStopWaitMs ?? AGENT_STOP_WAIT_MS);
     while (Date.now() < deadline) {
@@ -3543,6 +3587,72 @@ export class Core {
         WHERE work_id = ? AND status IN (${ACTIVE_AGENT_RUN_STATUSES_SQL})`,
       workId,
     ).filter((run) => run.pid !== null && !isRecordedProcessGone(run, run.pid)).map((run) => run.id);
+  }
+
+  /** Send one stop signal to an Agent run; failures are logged, not thrown. */
+  private async signalAgentRun(run: StoppableRun, force: boolean, failureMessage: (runId: string) => string): Promise<void> {
+    try {
+      // Child runs and observed subagents are not AgentRunner
+      // processes; stop them through their recorded process identity.
+      if (run.role === "executor") signalRecordedProcess(run, force ? "SIGKILL" : "SIGTERM");
+      else if (this.options.agentRunner.cancelAgent) await this.options.agentRunner.cancelAgent(run.id, force);
+      else if (run.pid && processIdentityMatches(
+        { process_start_time: run.process_start_time, process_cmdline_sha256: run.process_cmdline_sha256 },
+        readProcessIdentity(run.pid),
+      )) {
+        signalProcessGroup(run.pid, force ? "SIGKILL" : "SIGTERM");
+      }
+    } catch (error) {
+      console.error(`[owl-core] ${failureMessage(run.id)}`, error);
+    }
+  }
+
+  /** Poll until none of runIds is active or waitMs passes; returns the rows still active whose process may be alive. */
+  private async waitForAgentRuns(runIds: readonly string[], waitMs: number): Promise<StoppableRun[]> {
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      const active = this.db.all<StoppableRun>(
+        `SELECT id, role, pid, process_start_time, process_cmdline_sha256 FROM agent_runs
+          WHERE id IN (SELECT value FROM json_each(?)) AND status IN (${ACTIVE_AGENT_RUN_STATUSES_SQL})`,
+        JSON.stringify(runIds),
+      ).filter((run) => run.pid === null || !isRecordedProcessGone(run, run.pid));
+      if (active.length === 0 || Date.now() >= deadline) return active;
+      await new Promise((resolveWait) => setTimeout(resolveWait, AGENT_STOP_POLL_MS));
+    }
+  }
+
+  /** Signal runIds, then wait for them to end. */
+  private async stopAgentRuns(runIds: readonly string[], options: { force: boolean; waitMs: number }): Promise<StoppableRun[]> {
+    const runs = this.db.all<StoppableRun>(
+      `SELECT id, role, pid, process_start_time, process_cmdline_sha256 FROM agent_runs
+        WHERE id IN (SELECT value FROM json_each(?))`,
+      JSON.stringify(runIds),
+    );
+    for (const run of runs) {
+      await this.signalAgentRun(run, options.force, (id) => `Failed to signal Agent ${id} the Owner stopped`);
+    }
+    return this.waitForAgentRuns(runIds, options.waitMs);
+  }
+
+  /** Stop the Agents and verification commands the Owner stopped; runs in the background. */
+  private stopOwnerStoppedRuns(workId: string, runIds: readonly string[], taskIds: readonly string[]): void {
+    if (runIds.length === 0 && taskIds.length === 0) return;
+    const waitMs = this.options.agentStopWaitMs ?? AGENT_STOP_WAIT_MS;
+    const tasks = new Set(taskIds);
+    const stop = (async () => {
+      const deadline = Date.now() + waitMs;
+      this.workflow.stopTaskVerification(tasks, "SIGTERM");
+      const left = await this.stopAgentRuns(runIds, { force: false, waitMs });
+      while (this.workflow.tasksWithVerification(tasks).length > 0 && Date.now() < deadline) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, AGENT_STOP_POLL_MS));
+      }
+      this.workflow.stopTaskVerification(tasks, "SIGKILL");
+      if (left.length === 0) return;
+      const survivors = await this.stopAgentRuns(left.map((run) => run.id), { force: true, waitMs: 0 });
+      if (survivors.length > 0) console.warn(`[owner-stop] Agents of Work ${workId} did not stop: ${survivors.map((run) => run.id).join(", ")}`);
+    })().catch((error) => console.error(`[owner-stop] Failed to stop Agents of Work ${workId}`, error));
+    this.agentStops.add(stop);
+    void stop.finally(() => this.agentStops.delete(stop));
   }
 
   private async purgeWorkWorkspace(workId: string, projectId: string | null): Promise<WorktreeCleanupResult> {
@@ -4020,6 +4130,9 @@ export class Core {
     }
     const reopen = request.payload.reopen === true;
     let reopened = false;
+    // Collected in the instruction transaction; stays empty when the request is replayed.
+    let stoppedRunIds: string[] = [];
+    let stoppedTaskIds: string[] = [];
     const response = await this.runConditionalWorkCommand(request, { type: "message.posted", workId }, (transaction) => {
       const work = transaction.get<{ state: WorkState; archived_at: string | null; owner_id: string }>(
         "SELECT state, archived_at, owner_id FROM works WHERE id = ?",
@@ -4111,6 +4224,27 @@ export class Core {
           events.push({ type: "decision.resolved", payload: { decision_id: decision.id, answer: body }, createdAt: now });
         }
       }
+      // The Manager replans before the Tasks that run now continue, so stop them; their worktrees and counters stay.
+      stoppedRunIds = transaction.all<{ id: string }>(
+        `SELECT r.id FROM agent_runs r JOIN tasks t ON t.id = r.task_id
+          WHERE r.work_id = ? AND t.status IN ('running', 'verifying')
+            AND r.status IN ('launch_pending', 'spawned', 'running')
+            AND r.role IN ('worker', 'designer', 'reviewer', 'executor')
+            AND r.hook_agent_id IS NULL AND (r.origin IS NULL OR r.origin <> 'observed')`,
+        workId,
+      ).map((run) => run.id);
+      const interrupted = transaction.all<{ id: string; status: string }>(
+        "SELECT id, status FROM tasks WHERE work_id = ? AND status IN ('running', 'verifying')",
+        workId,
+      );
+      stoppedTaskIds = interrupted.map((task) => task.id);
+      for (const task of interrupted) {
+        if (task.status === "verifying") clearPausedReviewerWait(transaction, task.id);
+        reduceTaskInTransaction(transaction, task.id, {
+          event: "task.interrupted",
+          payload: { owner_instruction: true, message_id: messageId },
+        });
+      }
       events.push({ type: "message.posted", payload: { kind: "message_posted", schema_version: "1.0.0" }, createdAt: now });
       return {
         data: { work_id: workId, conversation_id: conversation.id, message_id: messageId, status: "queued" as const },
@@ -4118,6 +4252,8 @@ export class Core {
         events,
       };
     });
+    this.ownerStopWaits.delete(workId);
+    this.stopOwnerStoppedRuns(workId, stoppedRunIds, stoppedTaskIds);
     if (reopened) this.workDriver.register(workId);
     else this.workDriver.wake(workId);
     return response;
@@ -4378,6 +4514,7 @@ export class Core {
       conversation: optional(() => this.getWorkConversation(workId, { limit: query.conversation_limit ?? DEFAULT_WORK_VIEW_CONVERSATION_LIMIT })) as unknown as WorkViewData["conversation"],
       assurance: optional(() => this.getWorkAssurance(workId)) as unknown as WorkViewData["assurance"],
       auto_recovery: { active: optional(() => activeAutoRecoveries(this.db, workId)) ?? [], relaxations: optional(() => criteriaRelaxationsOfWork(this.db, workId)) ?? [] },
+      goal_shortfalls: (optional(() => goalShortfallsOfWork(this.db, workId)) ?? []) as unknown as WorkViewData["goal_shortfalls"],
     };
   }
 
@@ -4479,7 +4616,7 @@ export class Core {
     const designStop = this.designStopBelongsToManager(decisionId, request.payload.option_key);
     // A fix option the Owner picked is the Manager's instruction, so it goes to a replan like a design stop does.
     const fix = this.fixOptionOf(decisionId, request.payload.option_key);
-    const toManager = this.retryBelongsToManager(decisionId, request.payload.option_key) || designStop || fix;
+    const toManager = this.retryBelongsToManager(decisionId, request.payload.option_key) || designStop || fix || this.freeTextBelongsToManager(decisionId, request.payload.option_key, request.payload.answer);
     // Read before resolving: the stored question and options are what the Manager needs to understand the answer.
     const replanText = fix || designStop ? this.chosenOptionReplanText(decisionId, request.payload.option_key, request.payload.answer) : request.payload.answer;
     const response = await this.decisions.resolve({
@@ -4520,6 +4657,8 @@ export class Core {
       return response;
     }
     if (resumedWork?.state === "running") {
+      // A stop still unconfirmed is waited for again from this answer.
+      this.ownerStopWaits.delete(resumedWork.work_id);
       // A Work-scope halt on failed Tasks, on an incomplete final verdict, or
       // on a Manager replan that could not be made (issuer_role "manager")
       // would recur on the next tick unchanged. Hand the owner's answer to
@@ -4577,6 +4716,12 @@ export class Core {
     });
   }
 
+  /** A sentence typed into the answer field of a Decision the Manager opened (no option chosen) is the Owner's instruction to the Manager: the next replan carries it in work.owner_guidance. */
+  private freeTextBelongsToManager(decisionId: string, optionKey: string | null, answer: string): boolean {
+    if (optionKey !== null || answer.trim().length === 0) return false;
+    return this.db.get<{ id: string }>("SELECT id FROM decisions WHERE id = ? AND status = 'open' AND issuer_role = 'manager' AND allow_free_text = 1", decisionId) !== undefined;
+  }
+
   /**
    * A Decision Core opened because a design Task stopped (design_stop_json set) is answered by the
    * Manager's replan, whatever the answer, unless the Owner cancels: another Designer run would only repeat it.
@@ -4622,10 +4767,10 @@ export class Core {
     ].join("\n");
   }
 
-  /** Whether the picked option is a fix option Core added: an option of an open Core Decision that carries an instruction for the Manager. */
+  /** Whether the picked option is a fix option Core added: an option of an open Decision that carries an instruction for the Manager. A replan_failed Decision is issued by the Manager and carries them too. */
   private fixOptionOf(decisionId: string, optionKey: string | null): boolean {
     if (optionKey === null) return false;
-    const decision = this.db.get<{ options_json: string }>("SELECT options_json FROM decisions WHERE id = ? AND status = 'open' AND issuer_role = 'core'", decisionId);
+    const decision = this.db.get<{ options_json: string }>("SELECT options_json FROM decisions WHERE id = ? AND status = 'open' AND issuer_role IN ('core', 'manager')", decisionId);
     return decision !== undefined &&
       (JSON.parse(decision.options_json) as readonly { key?: string; instruction?: string }[]).some((item) => item.key === optionKey && typeof item.instruction === "string" && item.instruction !== "");
   }
@@ -4874,7 +5019,7 @@ export class Core {
   public listProjects(query: ProjectListQuery = {}): ListResponse<Project> {
     const limit = boundLimit(query.limit ?? 50);
     const rows = this.db.all<ProjectDbRow>(
-      `SELECT id, name, canonical_path, base_branch, auto_push, commit_language, allowed_roots_json, verification_plan_json,
+      `SELECT id, name, canonical_path, base_branch, auto_push, advisor_window_enabled, commit_language, allowed_roots_json, verification_plan_json,
                 worktree_prepare_argv_json, worktree_refresh_argv_json, post_merge_argv_json, post_merge_install_argv_json, required_test_argv_json, test_run_json, test_run_detected_json, test_setup_json, test_policy_json, report_check_commands_json
          FROM projects
         WHERE (? IS NULL OR id > ?)
@@ -4928,7 +5073,7 @@ export class Core {
       payload: { kind: "project_updated", schema_version: "1.0.0", project_id: projectId },
     }, (transaction) => {
       const row = transaction.get<ProjectDbRow>(
-        `SELECT id, name, canonical_path, base_branch, auto_push, commit_language, allowed_roots_json, verification_plan_json,
+        `SELECT id, name, canonical_path, base_branch, auto_push, advisor_window_enabled, commit_language, allowed_roots_json, verification_plan_json,
                 worktree_prepare_argv_json, worktree_refresh_argv_json, post_merge_argv_json, post_merge_install_argv_json, required_test_argv_json, test_run_json, test_run_detected_json, test_setup_json, test_policy_json, report_check_commands_json
            FROM projects WHERE id = ?`,
         projectId,
@@ -4939,6 +5084,10 @@ export class Core {
       const hasName = Object.prototype.hasOwnProperty.call(payload, "name");
       const hasPath = Object.prototype.hasOwnProperty.call(payload, "canonical_path");
       const hasBaseBranch = Object.prototype.hasOwnProperty.call(payload, "base_branch");
+      const hasAdvisorWindow = Object.prototype.hasOwnProperty.call(payload, "advisor_window_enabled");
+      if (hasAdvisorWindow && typeof payload.advisor_window_enabled !== "boolean") {
+        throw validationError(ownerLanguage(transaction) === "ja" ? "Advisorの窓を使うかはtrueかfalseで指定してください。" : "advisor_window_enabled must be true or false.", { field: "advisor_window_enabled" });
+      }
       const hasAutoPush = Object.prototype.hasOwnProperty.call(payload, "auto_push");
       if (hasAutoPush && typeof payload.auto_push !== "boolean") {
         throw validationError(ownerLanguage(transaction) === "ja" ? "自動pushはtrueかfalseで指定してください。" : "auto_push must be true or false.", { field: "auto_push" });
@@ -4992,6 +5141,7 @@ export class Core {
       let baseBranch = row.base_branch;
       let autoPush = row.auto_push === 1;
       if (hasAutoPush) autoPush = payload.auto_push as boolean;
+      const advisorWindowEnabled = hasAdvisorWindow ? payload.advisor_window_enabled as boolean : row.advisor_window_enabled === 1;
       const commitLanguage = hasCommitLanguage ? payload.commit_language as "ja" | "en" | null : row.commit_language;
       let allowedRoots = JSON.parse(row.allowed_roots_json) as string[];
       if (hasPath) {
@@ -5032,6 +5182,7 @@ export class Core {
         && reportChecksJson === row.report_check_commands_json
         && canonicalPath === row.canonical_path
         && autoPush === (row.auto_push === 1)
+        && advisorWindowEnabled === (row.advisor_window_enabled === 1)
         && commitLanguage === row.commit_language
         && setupJson === row.worktree_prepare_argv_json
         && refreshJson === row.worktree_refresh_argv_json
@@ -5047,13 +5198,14 @@ export class Core {
       const now = utcNow();
       transaction.run(
         `UPDATE projects
-            SET name = ?, canonical_path = ?, base_branch = ?, auto_push = ?, commit_language = ?, allowed_roots_json = ?,
+            SET name = ?, canonical_path = ?, base_branch = ?, auto_push = ?, advisor_window_enabled = ?, commit_language = ?, allowed_roots_json = ?,
                 worktree_prepare_argv_json = ?, worktree_refresh_argv_json = ?, post_merge_argv_json = ?, post_merge_install_argv_json = ?, required_test_argv_json = ?, test_run_json = ?, test_policy_json = ?, report_check_commands_json = ?, verification_plan_json = ?, test_setup_json = ?, updated_at = ?
           WHERE id = ?`,
         name,
         canonicalPath,
         baseBranch,
         autoPush ? 1 : 0,
+        advisorWindowEnabled ? 1 : 0,
         commitLanguage,
         JSON.stringify(allowedRoots),
         setupJson,
@@ -5076,6 +5228,7 @@ export class Core {
           canonical_path: canonicalPath,
           base_branch: baseBranch,
           auto_push: autoPush ? 1 : 0,
+          advisor_window_enabled: advisorWindowEnabled ? 1 : 0,
           commit_language: commitLanguage,
           allowed_roots_json: JSON.stringify(allowedRoots),
           worktree_prepare_argv_json: setupJson,
@@ -5151,6 +5304,26 @@ export class Core {
         now,
         projectId,
       ).changes;
+      // advisor_windows.project_id is RESTRICT: archive the window's conversation (messages stay), end its session, drop the window and its bindings.
+      for (const window of transaction.all<{ id: string; conversation_id: string }>("SELECT id, conversation_id FROM advisor_windows WHERE project_id = ?", projectId)) {
+        transaction.run(
+          `UPDATE advisor_sessions SET status = 'ended', end_reason = 'owner_requested', pid = NULL, ended_at = ?, updated_at = ?
+            WHERE window_id = ? AND status IN ('starting', 'running', 'ending', 'suspended')`,
+          now, now, window.id,
+        );
+        transaction.run("UPDATE conversations SET archived_at = ?, updated_at = ?, advisor_window_id = NULL WHERE advisor_window_id = ?", now, now, window.id);
+        for (const binding of transaction.all<{ provider: string; channel_id: string; display_name: string }>("SELECT provider, channel_id, display_name FROM advisor_channel_bindings WHERE window_id = ?", window.id)) {
+          appendEventInTransaction(transaction, {
+            type: "advisor.channel_binding_changed",
+            idempotencyKey: `advisor-channel-binding-changed:${window.id}:${binding.provider}:${createUlid()}`,
+            workId: null,
+            taskId: null,
+            payload: { kind: "advisor_channel_binding_changed", schema_version: "1.0.0", window_id: window.id, provider: binding.provider, channel_id: binding.channel_id, display_name: binding.display_name, change: "unbound" },
+            now,
+          });
+        }
+        transaction.run("DELETE FROM advisor_windows WHERE id = ?", window.id);
+      }
       transaction.run("DELETE FROM projects WHERE id = ?", projectId);
       return {
         data: {
@@ -5706,58 +5879,172 @@ export class Core {
   }
 
   public async getActiveConversation(): Promise<{ conversation_id: string }> {
-    const existing = this.db.get<{ id: string }>(
-      "SELECT id FROM conversations WHERE owner_id = ? AND is_active = 1 AND archived_at IS NULL AND (channel <> 'web' OR work_id IS NULL) ORDER BY updated_at DESC LIMIT 1",
-      DEFAULT_OWNER_ID,
-    );
-    if (existing) return { conversation_id: existing.id };
+    const window = await this.ensureAdvisorWindow(DEFAULT_OWNER_ID, GENERAL_WINDOW_KEY);
+    if (!window) throw new Error("The general Advisor window could not be created.");
+    return { conversation_id: window.conversation_id };
+  }
 
+  /**
+   * The window for a key (GENERAL_WINDOW_KEY or a Project id), created on first use.
+   * Null when the key names a Project that does not exist.
+   */
+  public async ensureAdvisorWindow(ownerId: string, key: string): Promise<AdvisorWindowRef | null> {
+    const existing = findAdvisorWindow(this.db, ownerId, key);
+    if (existing) return existing;
+    if (key !== GENERAL_WINDOW_KEY && !this.db.get("SELECT id FROM projects WHERE id = ?", key)) return null;
     const result = await this.writeLane.write({
       mutateState: (transaction) => {
         const now = utcNow();
-        ensureOwner(transaction, DEFAULT_OWNER_ID, now);
-        const accountExists = transaction.get<{ id: string }>(
-          "SELECT id FROM connector_accounts WHERE owner_id = ? AND provider = 'web'",
-          DEFAULT_OWNER_ID,
-        );
-        if (!accountExists) {
-          transaction.run(
-            "INSERT INTO connector_accounts (id, owner_id, provider, external_account_id, created_at) VALUES (?, ?, 'web', 'web-default', ?)",
-            createUlid(), DEFAULT_OWNER_ID, now,
-          );
-        }
-        const raceCheck = transaction.get<{ id: string }>(
-          "SELECT id FROM conversations WHERE owner_id = ? AND is_active = 1 AND archived_at IS NULL AND (channel <> 'web' OR work_id IS NULL) ORDER BY updated_at DESC LIMIT 1",
-          DEFAULT_OWNER_ID,
-        );
-        if (raceCheck) return { conversation_id: raceCheck.id };
-        const id = createUlid();
-        transaction.run(
-          "INSERT INTO conversations (id, owner_id, channel, is_active, created_at, updated_at) VALUES (?, ?, 'web', 1, ?, ?)",
-          id, DEFAULT_OWNER_ID, now, now,
-        );
-        return { conversation_id: id };
+        return key === GENERAL_WINDOW_KEY
+          ? ensureGeneralWindowInTransaction(transaction, ownerId, now)
+          : ensureProjectWindowInTransaction(transaction, ownerId, key, now);
       },
       event: {
-        idempotencyKey: `conversation.active.create:${DEFAULT_OWNER_ID}:${createUlid()}`,
-        type: "conversation.active_ensured",
-        payload: { kind: "conversation_active_ensured", schema_version: "1.0.0", owner_id: DEFAULT_OWNER_ID },
+        idempotencyKey: `advisor.window.ensure:${ownerId}:${key}:${createUlid()}`,
+        type: "advisor.window_created",
+        payload: { kind: "advisor_window_created", schema_version: "1.0.0", owner_id: ownerId, window_key: key },
       },
       outbox: [],
     });
     return result.state;
   }
 
+  /** The Project an Advisor session's window is dedicated to; null for the general window, a legacy session, or an unknown id. */
+  public windowProjectForSession(sessionId: string): string | null {
+    return this.db.get<{ project_id: string | null }>(
+      "SELECT w.project_id FROM advisor_sessions s JOIN advisor_windows w ON w.id = s.window_id WHERE s.id = ?",
+      sessionId,
+    )?.project_id ?? null;
+  }
+
+  /** The Project of each given Review Backlog item (unknown ids are left out). */
+  public backlogItemProjects(itemIds: readonly string[]): Array<{ id: string; project_id: string | null }> {
+    return itemIds.flatMap((id) => this.db.get<{ id: string; project_id: string | null }>("SELECT id, project_id FROM backlog_items WHERE id = ?", id) ?? []);
+  }
+
+  public async listAdvisorWindows(): Promise<AdvisorWindowSummary[]> {
+    return listAdvisorWindows(this.db, DEFAULT_OWNER_ID);
+  }
+
+  public async listAdvisorChannelBindings(provider: string): Promise<Array<{ window_id: string; channel_id: string }>> {
+    return this.db.all<{ window_id: string; channel_id: string }>(
+      "SELECT window_id, channel_id FROM advisor_channel_bindings WHERE provider = ? ORDER BY channel_id",
+      provider,
+    );
+  }
+
+  public async getAdvisorChannelBinding(windowId: string, provider: string): Promise<AdvisorWindowChannel | null> {
+    return this.db.get<AdvisorWindowChannel>(
+      "SELECT provider, channel_id, display_name FROM advisor_channel_bindings WHERE window_id = ? AND provider = ?",
+      windowId, provider,
+    ) ?? null;
+  }
+
+  /** The window (key and id) a channel is bound to, if any. */
+  public async findAdvisorChannelOwner(provider: string, channelId: string): Promise<{ window_id: string; window_key: string } | null> {
+    const row = this.db.get<{ window_id: string; scope: string; project_id: string | null }>(
+      `SELECT w.id AS window_id, w.scope, w.project_id FROM advisor_channel_bindings b
+         JOIN advisor_windows w ON w.id = b.window_id WHERE b.provider = ? AND b.channel_id = ?`,
+      provider, channelId,
+    );
+    return row ? { window_id: row.window_id, window_key: row.scope === "general" ? GENERAL_WINDOW_KEY : row.project_id ?? "" } : null;
+  }
+
+  /** Binds the channel to the window, replacing the window's binding for the same provider. */
+  public async bindAdvisorChannel(windowId: string, provider: string, channelId: string, displayName: string): Promise<AdvisorWindowChannel> {
+    const replaced = await this.getAdvisorChannelBinding(windowId, provider) !== null;
+    await this.writeLane.write({
+      mutateState: (transaction) => {
+        transaction.run("DELETE FROM advisor_channel_bindings WHERE window_id = ? AND provider = ?", windowId, provider);
+        const now = utcNow();
+        transaction.run(
+          "INSERT INTO advisor_channel_bindings (id, window_id, provider, channel_id, display_name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          createUlid(), windowId, provider, channelId, displayName, now, now,
+        );
+      },
+      event: {
+        idempotencyKey: `advisor-channel-binding-changed:${windowId}:${provider}:${createUlid()}`,
+        type: "advisor.channel_binding_changed",
+        payload: { kind: "advisor_channel_binding_changed", schema_version: "1.0.0", window_id: windowId, provider, channel_id: channelId, display_name: displayName, change: replaced ? "rebound" : "bound" },
+      },
+      outbox: [],
+    });
+    return { provider: provider as AdvisorWindowChannel["provider"], channel_id: channelId, display_name: displayName };
+  }
+
+  /** Stores the name Slack / Discord reported; returns false when the window has no binding for the provider. */
+  public async updateAdvisorChannelName(windowId: string, provider: string, displayName: string): Promise<boolean> {
+    const current = await this.getAdvisorChannelBinding(windowId, provider);
+    if (!current) return false;
+    if (current.display_name === displayName) return true;
+    await this.writeLane.write({
+      mutateState: (transaction) => {
+        transaction.run(
+          "UPDATE advisor_channel_bindings SET display_name = ?, updated_at = ? WHERE window_id = ? AND provider = ?",
+          displayName, utcNow(), windowId, provider,
+        );
+      },
+      event: {
+        idempotencyKey: `advisor-channel-binding-changed:${windowId}:${provider}:${createUlid()}`,
+        type: "advisor.channel_binding_changed",
+        payload: { kind: "advisor_channel_binding_changed", schema_version: "1.0.0", window_id: windowId, provider, channel_id: current.channel_id, display_name: displayName, change: "renamed" },
+      },
+      outbox: [],
+    });
+    return true;
+  }
+
+  public async getAdvisorWindowSettings(): Promise<AdvisorWindowSettings> {
+    return advisorWindowSettings(this.db);
+  }
+
+  public async setAdvisorWindowSettings(input: unknown): Promise<AdvisorWindowSettings> {
+    let normalized: AdvisorWindowSettings;
+    try {
+      normalized = validateAdvisorWindowSettings(input);
+    } catch (error) {
+      if (error instanceof AdvisorWindowSettingsValidationError) {
+        throw validationError(error.message, { field: error.field });
+      }
+      throw error;
+    }
+    await this.writeLane.write({
+      mutateState: (transaction) => {
+        const now = utcNow();
+        ensureOwner(transaction, DEFAULT_OWNER_ID, now);
+        transaction.run(
+          `INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at)
+           VALUES (?, ?, '1.0.0', ?, ?)
+           ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
+          ADVISOR_WINDOW_SETTINGS_KEY,
+          DEFAULT_OWNER_ID,
+          JSON.stringify(normalized),
+          now,
+        );
+        return normalized;
+      },
+      event: {
+        idempotencyKey: `settings-advisor-windows:${createUlid()}`,
+        type: "settings.advisor_windows_updated",
+        payload: normalized,
+      },
+      outbox: [{ provider: "websocket" }],
+    });
+    return advisorWindowSettings(this.db);
+  }
+
   public async clearConversation(conversationId: string): Promise<{ cleared: boolean }> {
-    const existing = this.db.get<{ id: string; owner_id: string }>(
-      "SELECT id, owner_id FROM conversations WHERE id = ?",
+    const existing = this.db.get<{ id: string; owner_id: string; advisor_window_id: string | null }>(
+      "SELECT id, owner_id, advisor_window_id FROM conversations WHERE id = ?",
       conversationId,
     );
     if (!existing) return { cleared: false };
 
     let clearedSession = false;
     if (this.advisorRuntime) {
-      const activeSession = this.advisorSessions.getActiveSession(existing.owner_id);
+      const activeSession = existing.advisor_window_id
+        ? this.advisorSessions.getActiveSessionForWindow(existing.advisor_window_id)
+        : this.advisorSessions.getActiveSession(existing.owner_id);
       if (activeSession) {
         await this.advisorRuntime.stopSession(activeSession.id, "cleared");
         clearedSession = true;
@@ -5803,26 +6090,15 @@ export class Core {
         conversationId,
       );
       if (!conversation) {
-        // Auto-create conversation for web advisor on first message
+        // Auto-create conversation for web advisor on first message; it joins the general window
+        // (ensureGeneralWindowInTransaction also ensures the Owner and its web connector account).
         const now2 = utcNow();
-        ensureOwner(transaction, DEFAULT_OWNER_ID, now2);
+        const general = ensureGeneralWindowInTransaction(transaction, DEFAULT_OWNER_ID, now2);
         transaction.run(
-          `INSERT INTO conversations (id, owner_id, channel, is_active, created_at, updated_at)
-           VALUES (?, ?, 'web', 1, ?, ?)`,
-          conversationId, DEFAULT_OWNER_ID, now2, now2,
+          `INSERT INTO conversations (id, owner_id, channel, is_active, advisor_window_id, created_at, updated_at)
+           VALUES (?, ?, 'web', 0, ?, ?, ?)`,
+          conversationId, DEFAULT_OWNER_ID, general.window_id, now2, now2,
         );
-        // Ensure a web connector account exists for the default owner
-        const existingAccount = transaction.get<{ id: string }>(
-          "SELECT id FROM connector_accounts WHERE owner_id = ? AND provider = 'web'",
-          DEFAULT_OWNER_ID,
-        );
-        if (!existingAccount) {
-          transaction.run(
-            `INSERT INTO connector_accounts (id, owner_id, provider, external_account_id, created_at)
-             VALUES (?, ?, 'web', 'web-default', ?)`,
-            createUlid(), DEFAULT_OWNER_ID, now2,
-          );
-        }
         conversation = { id: conversationId, owner_id: DEFAULT_OWNER_ID };
       }
       const body = request.payload.body;
@@ -5833,17 +6109,9 @@ export class Core {
       if (!Array.isArray(attachmentIds) || !attachmentIds.every((item): item is string => typeof item === "string")) {
         throw validationError("Message attachment_ids must be an array of strings.", { field: "attachment_ids" });
       }
-      const account = transaction.get<{ id: string }>(
-        "SELECT id FROM connector_accounts WHERE owner_id = ? AND provider = 'web'",
-        conversation.owner_id,
-      );
-      if (!account) {
-        throw dependencyUnavailable(
-          "No web connector account is configured for this Owner; the message cannot be attributed to a channel identity.",
-          { owner_id: conversation.owner_id, provider: "web" },
-        );
-      }
+      // Migrated Owners may have only Slack/Discord accounts, so the web account is created on first post.
       const now = utcNow();
+      const account = ensureWebAccount(transaction, conversation.owner_id, now);
       const messageId = createUlid();
       const sourceMessageId = `api:${conversationId}:${request.idempotency_key}`;
       transaction.run(
@@ -5987,6 +6255,22 @@ export class Core {
         payload.received_at,
         now,
       );
+      if (payload.status_reply !== undefined) {
+        // ULIDs made in one millisecond do not sort by creation, so the question names its answer instead of relying on order.
+        const replyId = createUlid();
+        transaction.run(
+          "UPDATE messages SET metadata_json = ? WHERE id = ?",
+          JSON.stringify({ kind: "status_question", delivered: false, reply_id: replyId } satisfies StatusExchangeMetadata),
+          messageId,
+        );
+        transaction.run(
+          `INSERT INTO messages
+             (id, conversation_id, provider, account_id, source_message_id, body,
+              attachment_ids_json, received_at, created_at, metadata_json)
+           VALUES (?, ?, ?, ?, ?, ?, '[]', ?, ?, ?)`,
+          replyId, conversation.id, payload.provider, payload.account_id, `advisor:status:${createUlid()}`, payload.status_reply, now, now, JSON.stringify({ kind: "status_reply" } satisfies StatusExchangeMetadata),
+        );
+      }
       transaction.run("UPDATE conversations SET updated_at = ? WHERE id = ?", now, conversation.id);
       transaction.run(
         `INSERT INTO inbound_receipts
@@ -6018,7 +6302,7 @@ export class Core {
         version: 0,
       };
     });
-    if (!result.data.deduplicated) {
+    if (!result.data.deduplicated && request.payload.status_reply === undefined) {
       void this.advisorRespond(result.data.conversation_id, result.data.message_id, {
         channel: request.payload.provider,
         channel_id: request.payload.channel_id,
@@ -6380,11 +6664,211 @@ export class Core {
    * compatibility/stub cores; production server startup rejects a real
    * provider that cannot create sessions instead of silently falling back.
    */
+  /**
+   * Marks the status answers no Advisor turn has carried yet as carried by this turn's message, in one write-lane
+   * transaction, so turns started at the same time cannot both take the same answer.
+   */
+  private async claimStatusExchanges(conversationId: string, messageId: string): Promise<void> {
+    await this.writeLane.transact((transaction: CoreWriteLaneTransaction) => {
+      transaction.run(
+        `UPDATE messages SET metadata_json = json_set(metadata_json, '$.delivered', json('true'), '$.carried_by', ?)
+          WHERE conversation_id = ?
+            AND json_extract(metadata_json, '$.kind') = 'status_question'
+            AND json_extract(metadata_json, '$.delivered') = 0`,
+        messageId,
+        conversationId,
+      );
+    });
+  }
+
+  private async releaseStatusExchanges(messageId: string): Promise<void> {
+    await this.writeLane.transact((transaction: CoreWriteLaneTransaction) => {
+      transaction.run(
+        `UPDATE messages SET metadata_json = json_set(json_remove(metadata_json, '$.carried_by'), '$.delivered', json('false'))
+          WHERE json_extract(metadata_json, '$.kind') = 'status_question' AND json_extract(metadata_json, '$.carried_by') = ?`,
+        messageId,
+      );
+    });
+  }
+
+  /**
+   * A restart between claimStatusExchanges and the turn insert leaves answers claimed by a message with no turn;
+   * recoverTurns only rebuilds stored turns, so those answers go back to waiting for the next turn.
+   * Not one transaction with the claim: AdvisorSessionRuntime writes the turn row after taking its session lock.
+   */
+  private async releaseUncarriedStatusExchanges(): Promise<void> {
+    await this.writeLane.transact((transaction: CoreWriteLaneTransaction) => {
+      transaction.run(
+        `UPDATE messages SET metadata_json = json_set(json_remove(metadata_json, '$.carried_by'), '$.delivered', json('false'))
+          WHERE json_extract(metadata_json, '$.kind') = 'status_question'
+            AND json_extract(metadata_json, '$.carried_by') IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM advisor_turns t WHERE t.user_message_id = json_extract(messages.metadata_json, '$.carried_by'))`,
+      );
+    });
+  }
+
+  /** The text block for the status answers carried by a turn's message; also used to rebuild a turn after a restart. */
+  private statusExchangesBlock(messageId: string): string | null {
+    const rows = this.db.all<{ body: string; reply: string }>(
+      `SELECT q.body, r.body AS reply
+         FROM messages q
+         JOIN messages r ON r.id = json_extract(q.metadata_json, '$.reply_id')
+        WHERE json_extract(q.metadata_json, '$.kind') = 'status_question'
+          AND json_extract(q.metadata_json, '$.carried_by') = ?
+        ORDER BY q.received_at ASC, q.id ASC`,
+      messageId,
+    );
+    return rows.length === 0 ? null : externalJsonBlock("owl-status-exchanges", rows.map((row) => ({ owner_message: row.body, fixed_reply: row.reply })));
+  }
+
+  /** Same shape as claimStatusExchanges: marks the window's undelivered handoffs as carried by this turn's message. */
+  private async claimWindowHandoffs(windowId: string, messageId: string): Promise<void> {
+    // Windowless (legacy) conversations count as the general window only for that window's own Owner.
+    const generalOwnerId = this.db.get<{ owner_id: string }>(
+      "SELECT owner_id FROM advisor_windows WHERE id = ? AND scope = 'general'",
+      windowId,
+    )?.owner_id ?? null;
+    await this.writeLane.transact((transaction: CoreWriteLaneTransaction) => {
+      transaction.run(
+        `UPDATE messages SET metadata_json = json_set(metadata_json, '$.delivered', json('true'), '$.carried_by', ?)
+          WHERE conversation_id IN (SELECT id FROM conversations WHERE advisor_window_id = ?
+                  OR (owner_id = ? AND advisor_window_id IS NULL AND work_id IS NULL AND archived_at IS NULL))
+            AND json_extract(metadata_json, '$.kind') = 'window_handoff'
+            AND json_extract(metadata_json, '$.delivered') = 0`,
+        messageId,
+        windowId,
+        generalOwnerId,
+      );
+    });
+  }
+
+  /** A conversation with no window and no Work (it predates windows) belongs to its Owner's general window (design 4.2). */
+  private conversationWindowId(conversationId: string): string | null {
+    const row = this.db.get<{ owner_id: string; advisor_window_id: string | null; work_id: string | null; archived_at: string | null }>(
+      "SELECT owner_id, advisor_window_id, work_id, archived_at FROM conversations WHERE id = ?",
+      conversationId,
+    );
+    if (!row) return null;
+    if (row.advisor_window_id || row.work_id || row.archived_at) return row.advisor_window_id;
+    return findAdvisorWindow(this.db, row.owner_id, GENERAL_WINDOW_KEY)?.window_id ?? null;
+  }
+
+  private async releaseWindowHandoffs(messageId: string): Promise<void> {
+    await this.writeLane.transact((transaction: CoreWriteLaneTransaction) => {
+      transaction.run(
+        `UPDATE messages SET metadata_json = json_set(json_remove(metadata_json, '$.carried_by'), '$.delivered', json('false'))
+          WHERE json_extract(metadata_json, '$.kind') = 'window_handoff' AND json_extract(metadata_json, '$.carried_by') = ?`,
+        messageId,
+      );
+    });
+  }
+
+  /** Handoffs claimed by a message that never got a turn (a restart in between) go back to waiting. */
+  private async releaseUncarriedWindowHandoffs(): Promise<void> {
+    await this.writeLane.transact((transaction: CoreWriteLaneTransaction) => {
+      transaction.run(
+        `UPDATE messages SET metadata_json = json_set(json_remove(metadata_json, '$.carried_by'), '$.delivered', json('false'))
+          WHERE json_extract(metadata_json, '$.kind') = 'window_handoff'
+            AND json_extract(metadata_json, '$.carried_by') IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM advisor_turns t WHERE t.user_message_id = json_extract(messages.metadata_json, '$.carried_by'))`,
+      );
+    });
+  }
+
+  /** The text block for the handoffs carried by a turn's message; also used to rebuild a turn after a restart. */
+  private windowHandoffBlock(messageId: string): string | null {
+    const rows = this.db.all<{ summary: string; from_name: string | null; received_at: string }>(
+      `SELECT json_extract(m.metadata_json, '$.summary') AS summary, p.name AS from_name, m.received_at
+         FROM messages m
+         LEFT JOIN advisor_windows w ON w.id = json_extract(m.metadata_json, '$.from_window_id')
+         LEFT JOIN projects p ON p.id = w.project_id
+        WHERE json_extract(m.metadata_json, '$.kind') = 'window_handoff'
+          AND json_extract(m.metadata_json, '$.carried_by') = ?
+        ORDER BY m.received_at ASC, m.id ASC`,
+      messageId,
+    );
+    const general = ADVISOR_TEXT[ownerLanguage(this.db)].generalWindowName;
+    return rows.length === 0
+      ? null
+      : externalJsonBlock("owl-window-handoff", rows.map((row) => ({ from_window: row.from_name ?? general, summary: row.summary, handed_at: row.received_at })));
+  }
+
+  private windowName(windowId: string, general: string): string {
+    return this.db.get<{ name: string | null }>(
+      "SELECT p.name FROM advisor_windows w LEFT JOIN projects p ON p.id = w.project_id WHERE w.id = ?",
+      windowId,
+    )?.name ?? general;
+  }
+
+  private windowHandoffDoneNotice(windowId: string, targetName: string, t: (typeof ADVISOR_TEXT)["ja"]): string {
+    const channels = this.db.all<{ provider: string; display_name: string }>(
+      "SELECT provider, display_name FROM advisor_channel_bindings WHERE window_id = ? ORDER BY provider",
+      windowId,
+    ).map((row) => `${row.provider === "slack" ? "Slack" : "Discord"}: #${row.display_name.replace(/^#/u, "")}`);
+    return t.handoffDone(targetName, channels);
+  }
+
+  /** handoff_to_window: puts the summary into the target window's conversation and returns the notice for the source reply. */
+  private async runWindowHandoff(
+    conversationId: string,
+    turnId: string,
+    index: number,
+    action: AdvisorSuggestedAction,
+    t: (typeof ADVISOR_TEXT)["ja"],
+  ): Promise<string> {
+    const parsed = validateWindowHandoffPayload(action.payload, advisorWindowSettings(this.db).handoff_summary_max_chars);
+    if (!parsed.ok) return t.handoffInvalid;
+    const owner = this.db.get<{ owner_id: string }>("SELECT owner_id FROM conversations WHERE id = ?", conversationId);
+    if (!owner) return t.handoffInvalid;
+    const source = { owner_id: owner.owner_id, advisor_window_id: this.conversationWindowId(conversationId) };
+    const { project_id: projectId, summary } = parsed.value;
+    if (projectId !== null && !this.db.get("SELECT id FROM projects WHERE id = ? AND owner_id = ?", projectId, source.owner_id)) {
+      return t.handoffNoProject;
+    }
+    const target = await this.ensureAdvisorWindow(source.owner_id, projectId ?? GENERAL_WINDOW_KEY);
+    if (!target) return t.handoffNoProject;
+    if (target.window_id === source.advisor_window_id) return t.handoffSameWindow;
+    const targetName = this.windowName(target.window_id, t.generalWindowName);
+    const fromName = source.advisor_window_id ? this.windowName(source.advisor_window_id, t.generalWindowName) : t.generalWindowName;
+    const messageId = createUlid();
+    const now = utcNow();
+    await this.writeLane.write({
+      mutateState: (transaction) => {
+        const account = ensureWebAccount(transaction, source.owner_id, now);
+        transaction.run(
+          `INSERT INTO messages
+             (id, conversation_id, provider, account_id, source_message_id, body,
+              attachment_ids_json, received_at, created_at, metadata_json)
+           VALUES (?, ?, 'web', ?, ?, ?, ?, ?, ?, ?)`,
+          messageId, target.conversation_id, account.id,
+          `advisor:${target.conversation_id}:handoff:${turnId}:${index}`,
+          t.handoffMessage(fromName, summary), JSON.stringify([]), now, now,
+          JSON.stringify({ kind: "window_handoff", from_window_id: source.advisor_window_id, from_conversation_id: conversationId, source_turn_id: turnId, summary, delivered: false }),
+        );
+      },
+      event: {
+        id: createUlid(),
+        idempotencyKey: `advisor-window-handoff:${turnId}:${index}`,
+        type: "advisor.window_handoff",
+        payload: {
+          kind: "advisor_window_handoff",
+          schema_version: "1.0.0",
+          from_window_id: source.advisor_window_id,
+          to_window_id: target.window_id,
+          conversation_id: target.conversation_id,
+          message_id: messageId,
+        },
+      },
+      outbox: [],
+    });
+    return this.windowHandoffDoneNotice(target.window_id, targetName, t);
+  }
+
   public async advisorRespond(conversationId: string, messageId: string, origin?: { channel: string; channel_id?: string; ref?: string }): Promise<void> {
     try {
       if (this.advisorRuntime) {
-        const conversation = this.db.get<{ id: string; owner_id: string }>(
-          "SELECT id, owner_id FROM conversations WHERE id = ?",
+        const conversation = this.db.get<{ id: string; owner_id: string; advisor_window_id: string | null }>(
+          "SELECT id, owner_id, advisor_window_id FROM conversations WHERE id = ?",
           conversationId,
         );
         if (!conversation) return;
@@ -6400,12 +6884,29 @@ export class Core {
         }
 
         const { paths: attachmentPaths, notes } = this.resolveAttachmentPaths(message.id);
-        await this.advisorRuntime.ensureSessionAndEnqueue(conversation.owner_id, conversationId, message.id, {
-          turn_id: createUlid(),
-          text: notes.length > 0 ? `${message.body}\n\n${externalJsonBlock("owl-attachment-notes", notes)}` : message.body,
-          origin: origin ?? { channel: "web" },
-          attachment_paths: attachmentPaths,
-        });
+        await this.claimStatusExchanges(conversationId, message.id);
+        const statusBlock = this.statusExchangesBlock(message.id);
+        const handoffWindowId = this.conversationWindowId(conversationId);
+        if (handoffWindowId) await this.claimWindowHandoffs(handoffWindowId, message.id);
+        const handoffBlock = this.windowHandoffBlock(message.id);
+        const blocks = [
+          ...(notes.length > 0 ? [externalJsonBlock("owl-attachment-notes", notes)] : []),
+          ...(statusBlock ? [statusBlock] : []),
+          ...(handoffBlock ? [handoffBlock] : []),
+        ];
+        try {
+          await this.advisorRuntime.ensureSessionAndEnqueue(conversation.owner_id, conversationId, message.id, {
+            turn_id: createUlid(),
+            text: [message.body, ...blocks].join("\n\n"),
+            origin: origin ?? { channel: "web" },
+            attachment_paths: attachmentPaths,
+          });
+        } catch (error) {
+          // A failed enqueue leaves the answers for the next turn.
+          await this.releaseStatusExchanges(message.id);
+          await this.releaseWindowHandoffs(message.id);
+          throw error;
+        }
         return;
       }
 
@@ -6465,11 +6966,15 @@ export class Core {
   }
 
   /**
-   * End the owner's current persistent Advisor session without deleting the
-   * conversation. The next message will create a fresh session.
+   * End one window's current persistent Advisor session (the general window by
+   * default) without deleting the conversation. The next message will create a
+   * fresh session; other windows are not touched.
    */
-  public async restartAdvisorSession(ownerId: string): Promise<void> {
-    const session = this.advisorSessions.getActiveSession(ownerId);
+  public async restartAdvisorSession(ownerId: string, windowKey: string = GENERAL_WINDOW_KEY): Promise<void> {
+    const window = findAdvisorWindow(this.db, ownerId, windowKey);
+    const session = window
+      ? this.advisorSessions.getActiveSessionForWindow(window.window_id)
+      : windowKey === GENERAL_WINDOW_KEY ? this.advisorSessions.getActiveSession(ownerId) : null;
     if (!session) return;
 
     if (this.advisorRuntime) {
@@ -6544,6 +7049,7 @@ export class Core {
     const exampleSummary = language === "en"
       ? "Request: Correct the requested label.\\n\\nAcceptance:\\n- The label reads as requested."
       : "依頼: Correct the requested label.\\n\\n受け入れ条件:\\n- The label reads as requested.";
+    const sectionLabel = (key: "acceptance" | "goals"): string => workSummaryLabel(WORK_SUMMARY_SECTIONS.find((section) => section.key === key)!, language);
     const base = [
       "You are the Owl Advisor, the operator's front door to Owl. Answer questions and discuss ideas directly. By default, every concrete request to perform work (make, fix, change, investigate, or build something), regardless of size, must become an Owl Work that you dispatch; ordinary wording like 'please do this' does not authorize you to do it yourself. In Japanese, 'これやっといて' is a normal Work request; phrases like '直接やって', 'Workにせず直接', or 'Advisor自身で実装して' explicitly ask you to bypass Work. Only bypass Work when the operator explicitly asks you to do the work directly yourself or without creating a Work. For that explicit exception, first prepare your Advisor workspace as described under Advisor workspace, do the work only there, and do not create a Work. Never claim you lack permission to create a Work.",
       "When you issue a Work for a concrete request without an explicit direct-work instruction (the rules below decide when), append exactly one ```owl-actions``` fenced JSON array containing {type:\"create_work\", description, payload:{title,summary,size,project_id}}. Core will create the Work and start it, unless payload.draft is true. When the operator says \"draft\", \"just register it\", \"don't run it yet\", '下書き', '登録だけ', or 'まだ動かさないで', set the optional payload.draft to true: Core then creates the Work as a memo and does not start it, and the operator starts it with the Start button on the Work detail page. Omit draft otherwise. Use size \"small\" for a focused, lightweight change so it goes directly to the Worker; use \"normal\" or \"large\" for work that needs Manager planning. Before returning create_work, compare the full request and conversation context against the complete current Project catalog in context. Set the exact project_id when one Project matches, use null only when none matches, and ask which Project to use if multiple are plausible. Project registration is optional. The payload may also carry the optional backlog_item_ids (IDs of open backlog items from GET /api/v1/backlog (status=open) to link to the new Work; they become in_progress), dismiss_backlog_item_ids (backlog item IDs to dismiss; every backlog ID must belong to the same Project as the Work), and prerequisite_work_ids (IDs of Works that must complete before this Work starts). Example: ```owl-actions\n[{\"type\":\"create_work\",\"description\":\"Fix the label\",\"payload\":{\"title\":\"Fix the label\",\"summary\":\"" + exampleSummary + "\",\"size\":\"small\",\"project_id\":null}}]\n```.",
@@ -6551,7 +7057,7 @@ export class Core {
       "When the operator explicitly asks for the strongest or Lead Designer to handle the design from the start, set create_work payload.design_mode to \"lead\" and size to \"normal\" or \"large\" so Manager plans a design Task. When the operator asks the Lead Designer only for the screen design, omit design_mode and keep that request in the Work summary; Manager then assigns the screen design Task to the Lead Designer. Otherwise omit design_mode (automatic routing). Never infer this override merely from Work size.",
       "For a small request whose goal, target, and completion condition are unambiguous, you may emit create_work in that turn.",
       "Otherwise, do not emit create_work in that turn. Clarify the goal, who it serves, and what success means; identify constraints; state what the conversation and existing context already establish and confirm it; ask one question at a time, preferably with choices; present two or three approaches with pros and cons and recommend one when there are alternatives; then summarize the proposed Work—request, approach, acceptance criteria, and exclusions—and ask whether to issue it.",
-      "Emit create_work in the turn when the operator agrees, including \"sounds good\", \"OK\", \"go ahead\", \"issue it\", 'それで', 'OK', '進めて', or '発行して'. Include the agreed details in summary: background, chosen approach and constraints, acceptance criteria, and exclusions or known pitfalls.",
+      `Emit create_work in the turn when the operator agrees, including \"sounds good\", \"OK\", \"go ahead\", \"issue it\", 'それで', 'OK', '進めて', or '発行して'. Include the agreed details in summary: background, chosen approach and constraints, required acceptance criteria, goals, and exclusions or known pitfalls. Put a condition under \"${sectionLabel("acceptance")}:\" only when the Work is not done without it and it can be checked inside the Work; keep these few. Put a condition under \"${sectionLabel("goals")}:\" when it is wanted but not required, when it depends on anything outside the Work (production, live services, other Works, people's answers), or when it is a count or a procedure (\"at least N tests\", \"run X before Y\"). Never put a condition that depends on things outside the Work under \"${sectionLabel("acceptance")}:\". An unmet goal is reported with its reason and does not stop the Work.`,
       "If the operator declines further clarification or says \"use your judgment\", \"skip the details and issue it\", \"do it now\", '任せる', '詳細はいいから発行して', or 'すぐやって', issue the Work immediately and list what is still unknown in the summary's notes section, each line starting \"Unconfirmed:\" ('未確認:' in Japanese).",
       "Do not write specification files or implementation plans; planning belongs to the Manager. Do not create branches or commits.",
       "If the request is informational, exploratory, or asks for advice without asking you to take action, answer normally and do not create a Work.",
@@ -6592,7 +7098,27 @@ export class Core {
       `- Screenshot folder: ${folders.screenshotDir}`,
       '  When the Owner asks you to look at a screenshot ("スクショ見て", "look at the screenshot") without a path, list the image files in this folder sorted by modification time and open the newest one. If they mention several ("the last 2 screenshots"), open that many, newest first. Do not modify or delete files here.',
     ].join("\n") : null;
-    return [base, rulesBlock, personaBlock, foldersBlock].filter((part): part is string => part !== null).join("\n\n");
+    const sendFile = this.resolveAdvisorSendFileSettings();
+    const sendFileBlock = [
+      "## Send-file folders",
+      sendFile.dirs.length === 0
+        ? "- No send-file folder is configured; send_file is unavailable. Tell the operator the file path instead."
+        : `- send_file may send regular files inside: ${sendFile.dirs.join(", ")}`,
+      `- Size limits per file: Slack ${formatSendFileSize(sendFile.maxBytes.slack)}, Discord ${formatSendFileSize(sendFile.maxBytes.discord)}`,
+    ].join("\n");
+    return [base, rulesBlock, personaBlock, foldersBlock, sendFileBlock].filter((part): part is string => part !== null).join("\n\n");
+  }
+
+  /** Applies the defaults: only an absent dirs falls back to materials; an explicit [] stays [] (send nothing). */
+  private resolveAdvisorSendFileSettings(): AdvisorSendFileSettings {
+    const configured = this.options.getAdvisorSendFileSettings?.();
+    return {
+      dirs: configured?.dirs ?? [join(this.knowledgeLocation.path, MATERIALS_DIR)],
+      maxBytes: {
+        slack: configured?.slackMaxBytes ?? DEFAULT_ADVISOR_SEND_FILE_MAX_BYTES.slack,
+        discord: configured?.discordMaxBytes ?? DEFAULT_ADVISOR_SEND_FILE_MAX_BYTES.discord,
+      },
+    };
   }
 
   private advisorProcessSkillsLines(harness: "claude" | "codex" | "opencode"): string[] {
@@ -6663,7 +7189,7 @@ export class Core {
       : [...suggestedActions];
     const recovery = await this.recoverAdvisorWorkActions(turnId, allSuggestedActions);
     recovery.notices.push(...await this.recoverAdvisorCallApis(turnId));
-    const actionResult = await this.dispatchAdvisorWorkActions(conversationId, turnId, allSuggestedActions, recovery.recoveredIndexes);
+    const actionResult = await this.dispatchAdvisorWorkActions(conversationId, turnId, allSuggestedActions, origin, recovery.recoveredIndexes);
     const trimmedReply = visibleReply.trimEnd();
     const allNotices = [
       ...recovery.notices,
@@ -6696,16 +7222,7 @@ export class Core {
 
     const result = await this.writeLane.write({
       mutateState: (transaction) => {
-        const account = transaction.get<{ id: string }>(
-          "SELECT id FROM connector_accounts WHERE owner_id = ? AND provider = 'web'",
-          conversation.owner_id,
-        );
-        if (!account) {
-          throw dependencyUnavailable(
-            "Web connector account is missing; the Advisor reply cannot be displayed.",
-            { owner_id: conversation.owner_id, provider: "web" },
-          );
-        }
+        const account = ensureWebAccount(transaction, conversation.owner_id, utcNow());
         transaction.run(
           `INSERT INTO messages
              (id, conversation_id, provider, account_id, source_message_id, body,
@@ -6739,6 +7256,7 @@ export class Core {
           action_results: actionNotices,
           suggested_actions: publishedActions,
           origin,
+          ...(actionResult.outboundFiles.length > 0 ? { outbound_files: actionResult.outboundFiles } : {}),
         },
       },
       outbox: [],
@@ -6867,6 +7385,17 @@ export class Core {
       "SELECT key, response_json FROM idempotency_keys WHERE key LIKE ?",
       `%:advisor-work:${turnId}:%`,
     );
+    // A handoff message that already exists was delivered by an earlier attempt; it must not be inserted twice.
+    for (const row of this.db.all<{ source_message_id: string; conversation_id: string }>(
+      "SELECT source_message_id, conversation_id FROM messages WHERE source_message_id LIKE ?",
+      `advisor:%:handoff:${turnId}:%`,
+    )) {
+      const index = Number.parseInt(row.source_message_id.split(":").pop() ?? "", 10);
+      const windowId = this.db.get<{ advisor_window_id: string | null }>("SELECT advisor_window_id FROM conversations WHERE id = ?", row.conversation_id)?.advisor_window_id;
+      if (!Number.isInteger(index) || index < 0 || !windowId || !row.source_message_id.startsWith(`advisor:${row.conversation_id}:handoff:`)) continue;
+      recoveredIndexes.add(index);
+      notices.push(this.windowHandoffDoneNotice(windowId, this.windowName(windowId, t.generalWindowName), t));
+    }
     for (const row of rows) {
       // Work commands scope their key as <event>:<work>:-:-:-:advisor-work:turn:index:op.
       const parts = row.key.split(":");
@@ -6950,15 +7479,31 @@ export class Core {
     conversationId: string,
     turnId: string,
     actions: readonly AdvisorSuggestedAction[],
+    origin: { channel: string; channel_id?: string; ref?: string },
     recoveredIndexes: ReadonlySet<number> = new Set(),
-  ): Promise<{ notices: string[]; handledIndexes: Set<number> }> {
+  ): Promise<{ notices: string[]; handledIndexes: Set<number>; outboundFiles: AdvisorOutboundFile[] }> {
     const notices: string[] = [];
+    const outboundFiles: AdvisorOutboundFile[] = [];
     const handledIndexes = new Set<number>();
     const curatedKinds = new Set<CurationKind>();
     // Curations this reply started: their outcomes go out as one notice once all of them have ended.
     const finishedCurations: Promise<CurationNoticeEntry>[] = [];
     const t = ADVISOR_TEXT[ownerLanguage(this.db)];
-    const inheritedProject = this.db.get<{ project_id: string | null }>(
+    // A Project window pins every Work it creates or moves to its own Project.
+    const windowProject = this.db.get<{ id: string; name: string }>(
+      `SELECT project.id, project.name
+         FROM conversations AS conversation
+         JOIN advisor_windows AS window ON window.id = conversation.advisor_window_id
+         JOIN projects AS project ON project.id = window.project_id
+        WHERE conversation.id = ?`,
+      conversationId,
+    ) ?? null;
+    const mismatchNotice = (requestedProjectId: string): string =>
+      t.windowProjectMismatch(
+        windowProject!.name,
+        this.db.get<{ name: string }>("SELECT name FROM projects WHERE id = ?", requestedProjectId)?.name ?? requestedProjectId,
+      );
+    const inheritedProject = windowProject?.id ?? this.db.get<{ project_id: string | null }>(
       `SELECT work.project_id
          FROM conversations AS conversation
          LEFT JOIN works AS work ON work.id = conversation.work_id
@@ -6997,10 +7542,28 @@ export class Core {
         notices.push(await this.runAdvisorCallApi(conversationId, turnId, action, t));
         continue;
       }
+      if (ADVISOR_WINDOW_ACTION_TYPES.has(action.type)) {
+        handledIndexes.add(index);
+        if (!recoveredIndexes.has(index)) notices.push(await this.runWindowHandoff(conversationId, turnId, index, action, t));
+        continue;
+      }
+      if (action.type === ADVISOR_SEND_FILE_ACTION_TYPE) {
+        // Kept out of suggested_actions: a raw path must not appear as a suggestion.
+        handledIndexes.add(index);
+        const prepared = await prepareAdvisorSendFile(action.payload, origin.channel, this.resolveAdvisorSendFileSettings());
+        if (prepared.ok) outboundFiles.push(prepared.file);
+        else notices.push(sendFileNotice(prepared, t));
+        continue;
+      }
       if (ADVISOR_WORK_OPERATION_ACTION_TYPES.has(action.type)) {
         if (!isAdvisorWorkOperationType(action.type)) continue;
         handledIndexes.add(index);
         if (recoveredIndexes.has(index)) continue;
+        const moveTarget = action.type === "move_work_to_project" ? action.payload?.project_id : undefined;
+        if (windowProject && typeof moveTarget === "string" && moveTarget.trim() !== windowProject.id) {
+          notices.push(mismatchNotice(moveTarget.trim()));
+          continue;
+        }
         notices.push(await this.runAdvisorWorkOperation(turnId, index, action, action.type, t));
         continue;
       }
@@ -7031,6 +7594,10 @@ export class Core {
       const requestedProjectId = payload?.project_id;
       if (requestedProjectId !== undefined && requestedProjectId !== null && typeof requestedProjectId !== "string") {
         notices.push(t.createBadProject);
+        continue;
+      }
+      if (windowProject && typeof requestedProjectId === "string" && requestedProjectId !== windowProject.id) {
+        notices.push(mismatchNotice(requestedProjectId));
         continue;
       }
       const projectId = typeof requestedProjectId === "string" ? requestedProjectId : inheritedProject;
@@ -7101,7 +7668,7 @@ export class Core {
       }
     }
     if (finishedCurations.length > 0) void Promise.all(finishedCurations).then((entries) => this.sendCurationNoticeFor(entries));
-    return { notices, handledIndexes };
+    return { notices, handledIndexes, outboundFiles };
   }
 
   private async runAdvisorWorkOperation(
@@ -7261,16 +7828,7 @@ export class Core {
 
     await this.writeLane.write({
       mutateState: (transaction) => {
-        const account = transaction.get<{ id: string }>(
-          "SELECT id FROM connector_accounts WHERE owner_id = ? AND provider = 'web'",
-          conversation.owner_id,
-        );
-        if (!account) {
-          throw dependencyUnavailable(
-            "Web connector account is missing; the Advisor error cannot be displayed.",
-            { owner_id: conversation.owner_id, provider: "web" },
-          );
-        }
+        const account = ensureWebAccount(transaction, conversation.owner_id, utcNow());
         transaction.run(
           `INSERT OR IGNORE INTO messages
              (id, conversation_id, provider, account_id, source_message_id, body,
@@ -7304,8 +7862,13 @@ export class Core {
     });
   }
 
+  /** The periodic window pass: suspends every Advisor window that has been idle beyond its idle_timeout_seconds. */
+  public async runAdvisorWindowTick(): Promise<void> {
+    await this.advisorRuntime?.suspendIdleWindows();
+  }
+
   /**
-   * Keeps the owner-wide Advisor session resident: brings it up when no
+   * Keeps the general window's Advisor session resident: brings it up when no
    * provider process is alive (first start, exit, crash) and moves it onto
    * changed settings. It is anchored to the current session's conversation,
    * else to `conversationId`, else to the newest active conversation; with
@@ -7313,7 +7876,8 @@ export class Core {
    * Never throws: a paused, unconfigured, or failing provider is retried on
    * the next tick, backing off exponentially (1m up to 30m) while bring-ups
    * keep failing or the fresh process keeps dying; `force` (a settings change
-   * or a clear) skips and resets that backoff.
+   * or a clear) skips and resets that backoff. A suspended general window stays
+   * suspended: only a message resumes it.
    */
   private async keepAdvisorResident(conversationId?: string, force = false): Promise<void> {
     if (!this.advisorRuntime || !this.started) return;
@@ -7325,8 +7889,11 @@ export class Core {
     }
     const currentSessionId = (): string | null =>
       this.db.get<{ id: string }>(
-        `SELECT id FROM advisor_sessions WHERE status IN ('starting', 'running', 'ending', 'suspended')
-          ORDER BY created_at DESC LIMIT 1`,
+        `SELECT session.id FROM advisor_sessions AS session
+           LEFT JOIN advisor_windows AS advisor_window ON advisor_window.id = session.window_id
+          WHERE session.status IN ('starting', 'running', 'ending', 'suspended')
+            AND (advisor_window.scope IS NULL OR advisor_window.scope = 'general')
+          ORDER BY session.created_at DESC LIMIT 1`,
       )?.id ?? null;
     const before = currentSessionId();
     let failed = false;
@@ -7335,17 +7902,20 @@ export class Core {
         `SELECT conversation.owner_id AS owner_id, conversation.id AS conversation_id
            FROM advisor_sessions AS session
            JOIN conversations AS conversation ON conversation.id = session.conversation_id
+           LEFT JOIN advisor_windows AS advisor_window ON advisor_window.id = session.window_id
           WHERE session.status IN ('starting', 'running', 'ending', 'suspended')
+            AND (advisor_window.scope IS NULL OR advisor_window.scope = 'general')
           ORDER BY session.created_at DESC LIMIT 1`,
       ) ?? (conversationId ? null : this.db.get<{ owner_id: string; conversation_id: string }>(
         `SELECT conversation.owner_id AS owner_id, conversation.id AS conversation_id
            FROM advisor_sessions AS session
            JOIN conversations AS conversation ON conversation.id = session.conversation_id
-          WHERE session.status = 'ended'
+           LEFT JOIN advisor_windows AS advisor_window ON advisor_window.id = session.window_id
+          WHERE session.status = 'ended' AND (advisor_window.scope IS NULL OR advisor_window.scope = 'general')
           ORDER BY session.ended_at DESC LIMIT 1`,
       )) ?? this.db.get<{ owner_id: string; conversation_id: string }>(
         `SELECT owner_id, id AS conversation_id FROM conversations
-          WHERE ${conversationId ? "id = ?" : "is_active = 1 AND archived_at IS NULL AND (channel <> 'web' OR work_id IS NULL)"}
+          WHERE ${conversationId ? "id = ?" : "is_active = 1 AND archived_at IS NULL AND (channel <> 'web' OR work_id IS NULL) AND (advisor_window_id IS NULL OR advisor_window_id IN (SELECT id FROM advisor_windows WHERE scope = 'general'))"}
           ORDER BY updated_at DESC LIMIT 1`,
         ...(conversationId ? [conversationId] : []),
       ) ?? { owner_id: DEFAULT_OWNER_ID, conversation_id: (await this.getActiveConversation()).conversation_id };
@@ -7786,7 +8356,14 @@ export class Core {
     if (workState === "running" && this.replansInFlight.has(workId)) {
       return this.workflow.snapshot(workId);
     }
-    const queuedReplans = workState !== "running" || this.replansInFlight.has(workId) ? [] : this.queuedReplanTasks(workId);
+    // Agents the Owner stopped must have ended before any replan starts, or the
+    // Manager would plan over a worktree an old Agent still writes to.
+    if (workState !== "paused" && await this.holdForOwnerStop(workId, workState)) {
+      return this.workflow.snapshot(workId);
+    }
+    // Why not replan the failures first: that plan would be applied without
+    // the Owner's request. The Owner replan below carries every root failure.
+    const queuedReplans = workState !== "running" || this.replansInFlight.has(workId) || this.hasQueuedOwnerReplan(workId) ? [] : this.queuedReplanTasks(workId);
     if (queuedReplans.length > 0) {
       await this.triggerManagerReplan(
         workId,
@@ -7850,7 +8427,8 @@ export class Core {
                 : finalVerdict !== null ? "final_incomplete"
                   : "other",
         };
-        await this.triggerManagerReplan(workId, failedIds, trigger, [], finalVerdict, ownerReplan, integrationReplan, baseConflict);
+        const workerQuestions = this.queuedReplanTasks(workId).flatMap((task) => (task.question === null ? [] : [{ task_id: task.id, question: task.question }]));
+        await this.triggerManagerReplan(workId, failedIds, trigger, workerQuestions, finalVerdict, ownerReplan, integrationReplan, baseConflict);
         if (this.started) await this.announceCoreDecisions(workId);
         return this.workflow.snapshot(workId);
       }
@@ -7875,6 +8453,7 @@ export class Core {
             const finalOutcome = await this.runFinalManager(workId, integration.verification);
             if (!this.started || finalOutcome === null) return this.workflow.snapshot(workId);
             const { verdict, agent_run_id: agentRunId } = finalOutcome;
+            await this.recordFinalGoalShortfalls(workId, finalOutcome.settled, finalOutcome.criteria_index);
             if (verdict.verdict === "complete") {
               // An instruction that arrived during the final check goes to the Manager first.
               const pendingReplan = this.db.get<{ key: string }>(
@@ -7997,18 +8576,29 @@ export class Core {
   /**
    * Decisions opened inside a reducer transaction (ensureCoreDecision) have
    * no decision.opened event of their own, so connectors never announced
-   * them. Emit one per open Core Decision, keyed by the Decision id.
+   * them. Emit one per open Core or Manager Decision, keyed by the Decision id.
+   * A Manager Decision announced here carries an explanation; its earlier
+   * ones already have their decision.opened event and are skipped.
    */
-  private async announceCoreDecisions(workId?: string): Promise<void> {
+  private announceCoreDecisions(workId?: string): Promise<void> {
+    // One pass at a time: a second pass starting while the first writes would read the same unannounced rows and write them twice.
+    const pass = this.announceChain.then(() => this.announceCoreDecisionsNow(workId));
+    this.announceChain = pass.catch(() => undefined);
+    return pass;
+  }
+
+  private announceChain: Promise<void> = Promise.resolve();
+
+  private async announceCoreDecisionsNow(workId?: string): Promise<void> {
     const rows = this.db.all<{
       id: string; work_id: string; scope: string; blocked_task_ids_json: string; reason: string; question: string;
       tried: string; current_state: string; options_json: string; recommended: string | null; allow_free_text: number;
-      explanation_json: string | null;
+      explanation_json: string | null; issuer_role: string;
     }>(
       `SELECT id, work_id, scope, blocked_task_ids_json, reason, question, tried, current_state, options_json,
-              recommended, allow_free_text, explanation_json
+              recommended, allow_free_text, explanation_json, issuer_role
          FROM decisions
-        WHERE status = 'open' AND issuer_role = 'core' AND (? IS NULL OR work_id = ?)
+        WHERE status = 'open' AND issuer_role IN ('core', 'manager') AND (? IS NULL OR work_id = ?)
           AND NOT EXISTS (SELECT 1 FROM events WHERE events.idempotency_key = 'decision-opened:core:' || decisions.id)
           AND NOT EXISTS (
             SELECT 1 FROM events
@@ -8020,9 +8610,13 @@ export class Core {
     );
     const language = ownerLanguage(this.db);
     for (const row of rows) {
-      const explanation = toDecisionExplanation(row.explanation_json);
+      // The explanation may have been written since the rows were read, so read it again: tried first, because the job marks it only after its write.
+      const tried = this.decisionExplainer.tried(row.id);
+      const current = this.db.get<{ explanation_json: string | null }>("SELECT explanation_json FROM decisions WHERE id = ? AND status = 'open'", row.id);
+      if (!current) continue;
+      const explanation = toDecisionExplanation(current.explanation_json);
       // Wait for the explanation so the first notice carries it; a Decision this run already tried goes out as it is.
-      if (explanation?.status === "pending" && !this.decisionExplainer.tried(row.id)) {
+      if (explanation?.status === "pending" && !tried) {
         this.decisionExplainer.schedule(row.id, row.work_id);
         continue;
       }
@@ -8045,10 +8639,10 @@ export class Core {
               options: JSON.parse(row.options_json) as JsonObject[],
               recommended: row.recommended,
               allow_free_text: row.allow_free_text === 1,
-              issuer_role: "core",
+              issuer_role: row.issuer_role,
               language,
               auto_recovery_summary: autoRecoverySummary(row.tried, language),
-              ...(explanation?.status === "ready" ? { explanation: { summary: explanation.summary, cause_kind: explanation.cause_kind } } : {}),
+              ...(explanation?.status === "ready" ? { explanation: { summary: explanation.summary, cause_kind: explanation.cause_kind, next_steps: explanation.next_steps, option_notes: explanation.option_notes } } : {}),
             },
           },
           outbox: [{ provider: "websocket" }],
@@ -8301,6 +8895,7 @@ export class Core {
     if (routedTo === "final_manager") return { kind: "proceed", verification };
     if (environmentBlocked !== null) {
       await this.workflow.openWorkTestEnvironmentDecision(workId, environmentBlocked);
+      if (this.started) await this.announceCoreDecisions(workId);
       if (this.started) await this.dispatcher.replayPending();
       return { kind: "routed" };
     }
@@ -9010,21 +9605,30 @@ export class Core {
     const work = this.managerWorkContext(workId);
     // A plan that breaks a rule the schema cannot express (duplicate ids,
     // unknown dependencies, cycles) is rejected before any write and handed
-    // back to the Manager once with the reasons; a second bad plan escalates
-    // to the Owner through recordTickFailure with those reasons.
-    // Quality repairs are counted apart from structural rejections: each one
-    // buys one more attempt.
+    // back to the Manager with the reasons up to plan_rejection_attempts_max
+    // calls; then recoverPlanQuality retries on a later tick or opens a Decision.
+    // Quality repairs use the same attempts as the other rejections.
     let feedback: PreviousOutputFeedback | null = this.pendingPlanFeedback(workId);
-    let qualityRepairs = 0;
     const quality = planQualitySettings(this.db);
-    for (let planAttempt = 1; planAttempt <= PLAN_MAX_ATTEMPTS + qualityRepairs; planAttempt += 1) {
+    const PLAN_MAX_ATTEMPTS = progressGuard(this.db).plan_rejection_attempts_max;
+    for (let planAttempt = 1; planAttempt <= PLAN_MAX_ATTEMPTS; planAttempt += 1) {
       const invoked = await this.invokeInitialManagerPlan(workId, mode, work, feedback);
       if (invoked === null || !this.started) return;
       const { result, runId } = invoked;
       if (result.failure_class === "rate_limited") return;
       if (await this.recoverManagerTransient(workId, result, runId)) return;
       const report = requireManagerReport(result, "manager plan");
-      const items = managerTasksToPlanItems(report.tasks, workId, { allowEmpty: false });
+      let items: readonly TaskPlanItem[];
+      try {
+        items = managerTasksToPlanItems(report.tasks, workId, { allowEmpty: false });
+      } catch (error) {
+        const parsed = planParseFeedback(error);
+        if (parsed === null) throw error;
+        feedback = parsed;
+        if (planAttempt < PLAN_MAX_ATTEMPTS) continue;
+        if (await this.recoverPlanQuality(workId, feedback, runId)) return;
+        throw error;
+      }
       const managerEvent = report.event;
       if (managerEvent !== "work.planned" && managerEvent !== "task.replanned") {
         throw validationError("The Manager plan must return work.planned or task.replanned.", { work_id: workId, event: managerEvent });
@@ -9032,35 +9636,34 @@ export class Core {
       const plan = validatePlan(items);
       if (isPlanRejection(plan)) {
         feedback = { kind: "plan_rejected", errors: plan.errors, warnings: [] };
-        if (planAttempt < PLAN_MAX_ATTEMPTS + qualityRepairs) {
+        if (planAttempt < PLAN_MAX_ATTEMPTS) {
           console.warn(`[owl-core] Manager plan for Work ${workId} was rejected (${plan.errors.join("; ")}); asking for a corrected plan.`);
           continue;
         }
         if (await this.recoverPlanQuality(workId, feedback, runId)) return;
         throw validationError(`The Manager plan was rejected twice: ${plan.errors.join(" ")}`, { work_id: workId });
       }
-      const found = quality.enabled ? evaluatePlanQuality(items, quality, this.ownerQuoteTexts(workId, null)) : [];
+      const found = quality.enabled ? evaluatePlanQuality(items, quality, this.ownerQuoteTexts(workId, null), this.workSummaryText(workId)) : [];
       // Missing fields are a format error: the Manager fixes the fields only, without redoing the plan or using a quality repair.
       const formatWarnings = found.filter((warning) => warning.code === "criterion_field_missing");
       if (formatWarnings.length > 0) {
         feedback = { kind: "fields_missing", errors: [], warnings: formatWarnings };
-        if (planAttempt < PLAN_MAX_ATTEMPTS + qualityRepairs) continue;
+        if (planAttempt < PLAN_MAX_ATTEMPTS) continue;
         if (await this.recoverPlanQuality(workId, feedback, runId)) return;
         throw validationError(`The Manager plan kept missing fields.\n${formatPlanQualityReason(formatWarnings)}`, { work_id: workId, codes: ["criterion_field_missing"] });
       }
       const warnings = found;
       if (warnings.length > 0) {
-        const outcome = planQualityOutcome(warnings, qualityRepairs, quality);
+        const outcome = planQualityOutcome(warnings, planAttempt >= PLAN_MAX_ATTEMPTS, quality);
         await this.recordPlanQualityWarned(workId, "plan", planAttempt, runId, warnings, outcome);
         if (outcome === "rejected") {
           const blocking = warnings.filter((warning) => quality.blocking_codes.includes(warning.code));
           feedback = { kind: "quality_rejected", errors: [], warnings: blocking };
-          if (planAttempt < PLAN_MAX_ATTEMPTS + qualityRepairs) continue;
+          if (planAttempt < PLAN_MAX_ATTEMPTS) continue;
           if (await this.recoverPlanQuality(workId, feedback, runId)) return;
           throw validationError(`The Manager plan was rejected by blocking plan quality checks (${blocking.map((warning) => warning.code).join(", ")}).\n${formatPlanQualityReason(blocking)}`, { work_id: workId, codes: blocking.map((warning) => warning.code) });
         }
         if (outcome === "repair_requested") {
-          qualityRepairs += 1;
           feedback = { kind: "quality_repair", errors: [], warnings: repairableWarnings(warnings, quality) };
           continue;
         }
@@ -9069,6 +9672,20 @@ export class Core {
       if (this.started) await this.dispatcher.replayPending();
       return;
     }
+  }
+
+  /** Keeps why a Manager replan was rejected; console.warn alone leaves no trace in the DB to trace a repeated rejection. */
+  private async recordReplanRejected(workId: string, attempt: number, managerAgentRunId: string, triggerKind: string, feedbackKind: string, errors: readonly string[]): Promise<void> {
+    await this.writeLane.write({
+      mutateState: () => undefined,
+      event: {
+        idempotencyKey: `replan-rejected:${workId}:${managerAgentRunId}`,
+        type: "work.replan_rejected",
+        workId,
+        payload: { work_id: workId, attempt, manager_agent_run_id: managerAgentRunId, trigger_kind: triggerKind, feedback_kind: feedbackKind, errors: [...errors] },
+      },
+      outbox: [{ provider: "websocket" }],
+    });
   }
 
   /** Records the plan quality warnings of one Manager answer; the plan itself is never rejected for them. */
@@ -9186,6 +9803,13 @@ export class Core {
       await this.requeueManagerReplan(workId, new Map(), ownerReplan);
       return;
     }
+    // Agents the Owner stopped may still run. The tick confirms the stop (and
+    // escalates when it never comes) before any replan starts; this entry only
+    // defers, so a Task pipeline cannot start a replan ahead of that check.
+    if (this.ownerStopBlocked(workId)) {
+      await this.requeueManagerReplan(workId, new Map(), ownerReplan);
+      return;
+    }
     // A Worker that finishes while the Work is paused (or after it left
     // `running` for any other reason) must not start a Manager replan. The
     // `manager-trigger:<taskId>` marker is left `queued`, so the first tick
@@ -9201,6 +9825,10 @@ export class Core {
         (id) => this.db.get<{ prerequisite_json: string | null }>("SELECT prerequisite_json FROM tasks WHERE id = ?", id)?.prerequisite_json == null,
       );
       if (failedTaskIds.length === 0) return;
+      // A failure while an Owner request waits goes to the Manager with that
+      // request: the tick's Owner replan takes every root failure, and the
+      // failure's trigger stays queued until then.
+      if (ownerReplan === null && this.hasQueuedOwnerReplan(workId)) return;
     }
     this.replansInFlight.add(workId);
     // Failed Tasks the budget stopped that this replan must plan differently; their lineage budget is restored when the plan is applied.
@@ -9228,7 +9856,10 @@ export class Core {
         }
       }
       if (budgetIds.length > 0) trigger = withBudgetExhaustedTrigger(trigger, budgetIds);
-      const partialIds = failedTaskIds.filter((id) => this.isTriggerFlagged(id, "partial_recovery"));
+      // Kind 8 repairs an automatic replan. An Owner's answer already decided the criteria, and the repair would demand
+      // rule_applicability the answer has no use for and put the Owner's rewritten criteria back to the stored ones.
+      const automaticReplan = ownerReplan === null || ownerReplan.kind === "auto_conflict" || ownerReplan.kind === "auto_final";
+      const partialIds = automaticReplan ? failedTaskIds.filter((id) => this.isTriggerFlagged(id, "partial_recovery")) : [];
       if (partialIds.length > 0) trigger = withPartialRepeatedTrigger(trigger, partialIds);
       const previousMarkers = await this.markReplanAttempted(failedTaskIds);
       const outcome = await this.runManagerReplan(workId, failedTaskIds, trigger, workerQuestions, finalVerdict, ownerReplan, workVerification, baseConflict);
@@ -9236,6 +9867,8 @@ export class Core {
       else if (trigger.kind === "design_completed") await this.markDesignsHandedToManager(trigger.design_task_ids);
     } finally {
       this.replansInFlight.delete(workId);
+      // The launch hold is gone now; do not wait for the next interval to start the Tasks.
+      if (ownerReplan?.kind === "instruction") this.workDriver.wake(workId);
     }
   }
 
@@ -9703,6 +10336,10 @@ export class Core {
   // catches that case too (M1): any transition at all during the call,
   // including a pause immediately undone by a resume, discards the answer.
   /** The Owner's own words for a Work: its summary, instruction messages and Decision answers (and the request being answered); an owner-origin criterion must quote one of them. */
+  private workSummaryText(workId: string): string | null {
+    return this.db.get<{ summary: string | null }>("SELECT summary FROM works WHERE id = ?", workId)?.summary ?? null;
+  }
+
   private ownerQuoteTexts(workId: string, ownerReplan: OwnerReplanRequest | null): string[] {
     const texts: string[] = [];
     const summary = this.db.get<{ summary: string | null }>("SELECT summary FROM works WHERE id = ?", workId)?.summary;
@@ -9823,6 +10460,153 @@ export class Core {
     ) !== undefined;
   }
 
+  private ownerReplanMarkerText(workId: string): string | null {
+    return this.db.get<{ response_json: string }>("SELECT response_json FROM idempotency_keys WHERE key = ?", ownerReplanKey(workId))?.response_json ?? null;
+  }
+
+  /** True from an Owner instruction until its Manager replan applies; every Task launch of the Work waits meanwhile. */
+  private ownerInstructionPending(workId: string): boolean {
+    return this.db.get(
+      `SELECT 1 FROM idempotency_keys
+        WHERE key = ?
+          AND (json_extract(response_json, '$.kind') = 'instruction' OR json_extract(response_json, '$.processing_kind') = 'instruction')
+          AND (json_extract(response_json, '$.status') = 'queued'
+               OR (json_extract(response_json, '$.status') = 'attempted' AND ?))`,
+      ownerReplanKey(workId),
+      this.replansInFlight.has(workId) ? 1 : 0,
+    ) !== undefined;
+  }
+
+  /**
+   * What the Owner stopped that may still run: Agent runs marked cancel_requested
+   * whose process is alive, and Tasks that left running/verifying but whose
+   * pipeline or verification command is still in this process (a completed
+   * Worker leaves no run to look at).
+   */
+  private ownerStopPending(workId: string): { runIds: string[]; taskIds: string[] } {
+    const runIds = this.db.all<StoppableRun>(
+      `SELECT id, role, pid, process_start_time, process_cmdline_sha256 FROM agent_runs
+        WHERE work_id = ? AND status = 'cancel_requested'
+          AND role <> 'advisor' AND hook_agent_id IS NULL AND (origin IS NULL OR origin <> 'observed')`,
+      workId,
+    ).filter((run) => run.pid === null || !isRecordedProcessGone(run, run.pid)).map((run) => run.id);
+    const stoppedTasks = new Set(
+      this.db.all<{ id: string }>("SELECT id FROM tasks WHERE work_id = ? AND status IN ('ready', 'waiting', 'paused')", workId).map((task) => task.id),
+    );
+    const taskIds = new Set(
+      this.workflow.activePipelineTasks().filter((entry) => entry.workId === workId && stoppedTasks.has(entry.taskId)).map((entry) => entry.taskId),
+    );
+    for (const taskId of this.workflow.tasksWithVerification(stoppedTasks)) taskIds.add(taskId);
+    return { runIds, taskIds: [...taskIds] };
+  }
+
+  private ownerStopBlocked(workId: string): boolean {
+    const pending = this.ownerStopPending(workId);
+    return pending.runIds.length > 0 || pending.taskIds.length > 0;
+  }
+
+  /** Holds the replans of the tick while Agents the Owner stopped may still run; true when the tick must stop here. */
+  private async holdForOwnerStop(workId: string, workState: string | undefined): Promise<boolean> {
+    // Once the stop Decision is open, the tick waits only while stopped Agents remain; when they have ended,
+    // the Decision is closed and the Work goes on. The wait is not counted meanwhile, so no second Decision is raised.
+    const stopDecision = workState === "judgement_waiting" ? this.ownerStopDecision(workId) : null;
+    if (stopDecision) {
+      // Why not keep waiting once nothing is left: the Decision asked about processes that have since ended, so "Resume" is answered for the Owner.
+      if (this.ownerStopBlocked(workId)) return true;
+      // Why not resumeWorkOrRetryDecision: it answers the first open Decision with a retry option, which may be another Decision the Owner must judge.
+      const id = createUlid();
+      await this.answerDecision(stopDecision.id, {
+        request_id: id,
+        idempotency_key: `owner-stop-cleared:${workId}:${id}`,
+        expected_version: stopDecision.state_version,
+        payload: { answer: stopDecision.retryLabel, option_key: "retry", source: "advisor", source_message_id: null },
+      }).catch((error) => console.error(`[owner-stop] Failed to clear the Decision of Work ${workId}`, error));
+      return true;
+    }
+    const pending = this.ownerStopPending(workId);
+    if (pending.runIds.length === 0 && pending.taskIds.length === 0) {
+      this.ownerStopWaits.delete(workId);
+      return false;
+    }
+    const wait = this.ownerStopWaits.get(workId) ?? { since: Date.now(), resent: false };
+    this.ownerStopWaits.set(workId, wait);
+    const bound = (this.options.agentStopWaitMs ?? AGENT_STOP_WAIT_MS) * OWNER_STOP_CONFIRM_FACTOR;
+    const waited = Date.now() - wait.since;
+    if (!wait.resent && waited >= bound) {
+      wait.resent = true;
+      this.workflow.stopTaskVerification(new Set(pending.taskIds), "SIGKILL");
+      await this.stopAgentRuns(pending.runIds, { force: true, waitMs: 0 });
+    }
+    // A Work already waiting on the Owner raises no second Decision; the alert follows once it runs again.
+    if (waited >= 2 * bound && workState === "running") {
+      await this.recordOwnerStopUnconfirmed(workId, pending);
+      this.ownerStopWaits.delete(workId);
+      if (this.started) await this.announceCoreDecisions(workId);
+      if (this.started) await this.dispatcher.replayPending();
+    }
+    return true;
+  }
+
+  private ownerStopDecision(workId: string): { id: string; state_version: number; retryLabel: string } | null {
+    const decision = this.db.all<{ id: string; state_version: number; options_json: string }>(
+      "SELECT id, state_version, options_json FROM decisions WHERE work_id = ? AND status = 'open' AND scope = 'work' AND issuer_role = 'core'",
+      workId,
+    ).find((row) => this.decisionSourceAlert(row.id)?.kind === "owner_stop_unconfirmed");
+    if (!decision) return null;
+    let options: unknown = null;
+    try {
+      options = JSON.parse(decision.options_json);
+    } catch {
+      // A malformed Decision gets no label; answerDecision then rejects it and the Owner answers it instead.
+    }
+    const retry = Array.isArray(options) ? options.find((option) => isRecord(option) && option.key === "retry") : undefined;
+    return { id: decision.id, state_version: decision.state_version, retryLabel: isRecord(retry) && typeof retry.label === "string" ? retry.label : "retry" };
+  }
+
+  /** Halts a Work whose stopped Agents never ended, so the Owner decides; no replan has begun. */
+  private async recordOwnerStopUnconfirmed(workId: string, pending: { runIds: string[]; taskIds: string[] }): Promise<void> {
+    const language = ownerLanguage(this.db);
+    const alertPayload: JsonObject = {
+      kind: "owner_stop_unconfirmed",
+      safe_reconcile_failed: true,
+      driver_stopped: true,
+      run_ids: pending.runIds,
+      task_ids: pending.taskIds,
+      message: language === "en"
+        ? "Agents the Owner stopped have not ended, even after a forced stop. Their Tasks are not started and no Manager replan has begun."
+        : "Owner が止めた Agent が、強制終了の合図の後も終わりません。その Task の起動と Manager の再計画を止めています。",
+      remediation: language === "en"
+        ? "Check that the processes have ended, then choose Resume. Cancel the Work if it should not continue."
+        : "プロセスが終わったことを確かめてから「再開する」を選んでください。続けないときは Work を中止してください。",
+    };
+    const notRunning = new WorkNotRunningAbort();
+    try {
+      await this.writeLane.write({
+        mutateState: (transaction) => {
+          const work = transaction.get<Pick<WorkDbRow, "state" | "state_version">>("SELECT state, state_version FROM works WHERE id = ?", workId);
+          if (!work) throw notFound("work", workId);
+          if (work.state !== "running") {
+            notRunning.state = work.state;
+            throw notRunning;
+          }
+          reduceWorkInTransaction(transaction, workId, { event: "system.alert", expected_version: work.state_version, payload: alertPayload });
+          return { work_id: workId, state: work.state };
+        },
+        event: {
+          id: createUlid(),
+          idempotencyKey: `owner-stop-unconfirmed:${workId}:${createUlid()}`,
+          type: "system.alert",
+          workId,
+          payload: alertPayload,
+        },
+        outbox: [{ provider: "websocket" }],
+      });
+    } catch (writeError) {
+      if (writeError === notRunning) return;
+      throw writeError;
+    }
+  }
+
   /**
    * Take the persisted Owner replan request for a Work, if any. The marker is
    * moved to `attempted` rather than deleted, so a crash before the Manager
@@ -9913,6 +10697,7 @@ export class Core {
         trigger: trigger as unknown as JsonObject,
         worker_questions: workerQuestions as unknown as JsonObject[],
         owner_requests: ownerRequests as unknown as JsonObject[],
+        ...(ownerReplanKind === "instruction" ? { stopped_task_ids: this.stoppedTaskIds(workId) } : {}),
         base_merge_conflict: baseConflict as unknown as JsonObject | null,
         final_verdict: finalVerdict,
         work_verification: workVerification,
@@ -9972,6 +10757,18 @@ export class Core {
   }
 
   /** The Work's Tasks and dependency edges, read once per Manager replan answer. */
+  /** Ready Tasks an Owner instruction stopped: a task.interrupted newer than their last task.started. */
+  private stoppedTaskIds(workId: string): string[] {
+    return this.db.all<{ id: string }>(
+      `SELECT t.id FROM tasks t
+        WHERE t.work_id = ? AND t.status = 'ready'
+          AND EXISTS (SELECT 1 FROM events e WHERE e.task_id = t.id AND e.type = 'task.interrupted'
+                        AND e.sequence > COALESCE((SELECT MAX(sequence) FROM events WHERE task_id = t.id AND type = 'task.started'), 0))
+        ORDER BY t.created_at ASC, t.id ASC`,
+      workId,
+    ).map((row) => row.id);
+  }
+
   private replanSnapshot(workId: string): ReplanSnapshot {
     const tasks = this.db.all<{ id: string; manager_task_id: string | null; status: string; failed_by_dependency_task_id: string | null }>(
       "SELECT id, manager_task_id, status, failed_by_dependency_task_id FROM tasks WHERE work_id = ? ORDER BY created_at ASC, id ASC",
@@ -10020,7 +10817,7 @@ export class Core {
     failedTaskIds = failedTaskIds.filter((taskId) => !this.isCascadedFailure(taskId));
     const messageIds = ownerReplan?.message_ids ?? [];
     const language = ownerLanguage(this.db);
-    const fail = async (detail: string): Promise<void> => {
+    const fail = async (detail: string, rejectedAttempts?: number): Promise<void> => {
       await this.openManagerReplanFailureDecision(
         workId,
         failedTaskIds,
@@ -10030,6 +10827,7 @@ export class Core {
           : workerQuestions.length > 0 ? workerQuestions.map((entry) => entry.question).join("\n") : undefined,
         finalVerdict,
         ownerReplan?.kind === "auto_conflict" ? mergeConflictFiles(this.latestSystemAlert(workId)) : undefined,
+        rejectedAttempts,
       );
       if (messageIds.length === 0) return;
       await this.writeLane.write({
@@ -10054,18 +10852,19 @@ export class Core {
     let lastRequestId = "";
     // Set where a quality check, not the validator, produced the rejection.
     let qualityFeedback: PreviousOutputFeedback | null = null;
-    let qualityRepairs = 0;
     const quality = planQualitySettings(this.db);
+    const REPLAN_MAX_ATTEMPTS = progressGuard(this.db).plan_rejection_attempts_max;
     let summaryUpdate: ManagerWorkSummaryUpdate | null = null;
     let summaryBase = { title: "", summary: "" };
     let managerRunId = "";
     let planWorkVersion = 0;
-    for (let attempt = 1; attempt <= REPLAN_MAX_ATTEMPTS + qualityRepairs && plan === null; attempt += 1) {
+    for (let attempt = 1; attempt <= REPLAN_MAX_ATTEMPTS && plan === null; attempt += 1) {
       const workBeforeCall = this.db.get<Pick<WorkDbRow, "state" | "state_version">>(
         "SELECT state, state_version FROM works WHERE id = ?",
         workId,
       );
       if (workBeforeCall?.state !== "running" && !(ownerReplan !== null && workBeforeCall?.state === "judgement_waiting")) return "requeue";
+      const markerBeforeCall = this.ownerReplanMarkerText(workId);
       const snapshot = this.replanSnapshot(workId);
       const request = this.buildReplanRequest(workId, failedTaskIds, trigger, workerQuestions, attempt, finalVerdict, ownerReplan?.kind ?? null, workVerification, feedback, ownerReplan?.requests ?? [], baseConflict);
       let result: AgentRunResult;
@@ -10076,6 +10875,8 @@ export class Core {
         // meantime means this answer must not be acted on now, even if the
         // Work is running again by the time this returns.
         if (!this.started || !this.isReplanStillCurrent(workId, workBeforeCall.state_version, ownerReplan !== null)) return "requeue";
+        // An instruction that arrived during the call stopped Tasks this plan knows nothing about.
+        if (this.ownerReplanMarkerText(workId) !== markerBeforeCall) return "requeue";
         if (raw === null) return "requeue";
         result = requireAgentRunResult(raw, "manager replan");
       } catch (error) {
@@ -10101,11 +10902,21 @@ export class Core {
         return "done";
       }
       let items: readonly TaskPlanItem[];
+      let taskActions: readonly ReplanAction[];
       try {
         items = managerTasksToPlanItems(report.tasks, workId, { allowEmpty: true });
+        taskActions = managerTaskActions(report.task_actions);
       } catch (error) {
-        await fail(humanizeUnexpected(error, "manager.replan").message);
-        return "done";
+        const parsed = planParseFeedback(error);
+        if (parsed === null) {
+          await fail(humanizeUnexpected(error, "manager.replan").message);
+          return "done";
+        }
+        rejection = parsed.errors;
+        feedback = parsed;
+        console.warn(`[owl-core] Manager replan attempt ${attempt} for Work ${workId} was rejected: ${rejection.join(" ")}`);
+        await this.recordReplanRejected(workId, attempt, String(request.invocation_id), trigger.kind, feedback.kind, rejection);
+        continue;
       }
       let update: ManagerWorkSummaryUpdate | null;
       try {
@@ -10119,13 +10930,6 @@ export class Core {
         if (!pendingAcceptanceDefect(this.db, id)) continue;
         const current = this.db.get<{ acceptance: string }>("SELECT acceptance FROM tasks WHERE id = ?", id);
         if (current) acceptanceRevisionRequired.set(id, current.acceptance);
-      }
-      let taskActions: readonly ReplanAction[];
-      try {
-        taskActions = managerTaskActions(report.task_actions);
-      } catch (error) {
-        await fail(humanizeUnexpected(error, "manager.replan").message);
-        return "done";
       }
       // A budget_exhausted Task must come back with a different approach: remember what it was planned with.
       const differentApproachRequired = new Map<string, PlannedApproach>();
@@ -10147,8 +10951,12 @@ export class Core {
         const row = this.db.get<{ acceptance: string; acceptance_criteria_json: string | null }>("SELECT acceptance, acceptance_criteria_json FROM tasks WHERE id = ?", task.id);
         if (row) currentCriteria.set(task.id, readStoredAcceptanceCriteria(row.acceptance_criteria_json, row.acceptance));
       }
+      const readyIds = snapshot.tasks.filter((task) => task.status === "ready").map((task) => task.id);
+      const revisable = ownerReplan?.kind === "instruction"
+        ? new Map(this.db.all<{ id: string; type: string }>(`SELECT id, type FROM tasks WHERE id IN (${readyIds.map(() => "?").join(",")})`, ...readyIds).map((row) => [row.id, row.type] as const))
+        : undefined;
       const automaticReplan = ownerReplan === null || ownerReplan.kind === "auto_conflict" || ownerReplan.kind === "auto_final";
-      let validated: ReplanPlan | PlanRejection = validateReplan(items, snapshot, failedTaskIds, { actions: taskActions, allowOpen: ownerReplan !== null, acceptanceRevisionRequired, differentApproachRequired, currentCriteria, automatic: automaticReplan, qualitySettings: quality });
+      let validated: ReplanPlan | PlanRejection = validateReplan(items, snapshot, failedTaskIds, { actions: taskActions, allowOpen: ownerReplan !== null, revisable, acceptanceRevisionRequired, differentApproachRequired, currentCriteria, automatic: automaticReplan, qualitySettings: quality });
       let resolvedWaits: ReadonlyMap<string, PrerequisiteSpec> = new Map();
       if (!isPlanRejection(validated) && validated.waits.size > 0) {
         const resolved = await this.resolvePrerequisiteWaits(workId, validated.waits);
@@ -10165,11 +10973,11 @@ export class Core {
         }
       }
       if (!isPlanRejection(validated)) {
-        const found = quality.enabled ? evaluatePlanQuality(items, quality, this.ownerQuoteTexts(workId, ownerReplan)) : [];
+        const found = quality.enabled ? evaluatePlanQuality(items, quality, this.ownerQuoteTexts(workId, ownerReplan), this.workSummaryText(workId)) : [];
         // Missing fields are a format error: rejected with a fields-only reason, not counted as a quality repair.
         const formatWarnings = found.filter((warning) => warning.code === "criterion_field_missing");
         const warnings = formatWarnings.length > 0 ? [] : found;
-        const outcome = warnings.length > 0 ? planQualityOutcome(warnings, qualityRepairs, quality) : null;
+        const outcome = warnings.length > 0 ? planQualityOutcome(warnings, attempt >= REPLAN_MAX_ATTEMPTS, quality) : null;
         if (outcome !== null) await this.recordPlanQualityWarned(workId, "replan", attempt, String(request.invocation_id), warnings, outcome);
         if (formatWarnings.length > 0) {
           validated = { errors: [formatPlanQualityReason(formatWarnings)] };
@@ -10179,7 +10987,6 @@ export class Core {
           validated = { errors: [formatPlanQualityReason(blocking)] };
           qualityFeedback = { kind: "quality_rejected", errors: [], warnings: blocking };
         } else if (outcome === "repair_requested") {
-          qualityRepairs += 1;
           feedback = { kind: "quality_repair", errors: [], warnings: repairableWarnings(warnings, quality) };
           continue;
         } else {
@@ -10198,10 +11005,11 @@ export class Core {
       feedback = qualityFeedback ?? { kind: "plan_rejected", errors: rejection, warnings: [] };
       qualityFeedback = null;
       console.warn(`[owl-core] Manager replan attempt ${attempt} for Work ${workId} was rejected: ${rejection.join(" ")}`);
+      await this.recordReplanRejected(workId, attempt, String(request.invocation_id), trigger.kind, feedback.kind, rejection);
     }
     if (plan === null || planSnapshot === null) {
       if ((feedback?.kind === "quality_rejected" || feedback?.kind === "fields_missing" || feedback?.kind === "plan_rejected") && await this.recoverPlanQuality(workId, feedback, lastRequestId)) return "requeue";
-      await fail(`The Manager's replan was rejected twice. ${rejection.join(" ")}`);
+      await fail(`The Manager's replan was rejected twice. ${rejection.join(" ")}`, REPLAN_MAX_ATTEMPTS);
       return "done";
     }
     // Kind 8: before the plan is applied, Core runs the Manager's checks for a repeated partial report and settles the criteria.
@@ -10210,7 +11018,7 @@ export class Core {
     plan = repaired;
     // An empty plan with no root failure writes nothing: the next tick sees
     // every Task terminal and runs the final check.
-    if (plan.newItems.length === 0 && plan.reopenIds.length === 0 && plan.supersessions.size === 0 && (plan.actions?.size ?? 0) === 0) {
+    if (plan.newItems.length === 0 && plan.reopenIds.length === 0 && plan.supersessions.size === 0 && (plan.actions?.size ?? 0) === 0 && (plan.reviseIds?.length ?? 0) === 0) {
       if (ownerReplan !== null) {
         await this.writeLane.write({
           mutateState: (transaction) => {
@@ -10233,7 +11041,7 @@ export class Core {
     // the Work state, the plan revision and every root Task's status.
     const guard = {
       base_plan_revision: planSnapshot.plan_revision ?? 0,
-      root_statuses: new Map(planSnapshot.tasks.map((task) => [task.id, task.status])),
+      root_statuses: new Map([...planSnapshot.tasks.map((task) => [task.id, task.status] as const), ...(plan.reviseIds ?? []).map((id) => [id, "ready"] as const)]),
       owner_replan: ownerReplan !== null,
       manager_agent_run_id: managerRunId,
       partial_repeated_task_ids: partialRepeatedTaskIds(trigger),
@@ -10257,7 +11065,7 @@ export class Core {
             const summary: ReplanSummary = {
               planRevision: revision,
               added: result.registered.map((task) => task.title),
-              redone: result.reopened.map(title),
+              redone: [...result.reopened, ...result.revised].map(title),
               replaced: Object.entries(result.replacements).map(([oldId, newIds]) => `${title(oldId)} → ${newIds.map(title).join(", ")}`),
             };
             insertInstructionReply(transaction, messageIds, "tasks_changed", revision, INSTRUCTION_REPLY_TEXT[language].tasksChanged(summary));
@@ -10265,6 +11073,8 @@ export class Core {
         },
       );
       await this.announceDecisionCancellations(applied.cancelled_decision_ids);
+      // An Owner-wait Decision the plan opened is announced once its explanation is written; no later tick is guaranteed on this path.
+      if (this.started) await this.announceCoreDecisions(workId);
       await this.signalStoppedTaskRuns(applied.stopped_task_ids);
       this.trackWorktreeReconcile(workId, "replan_applied");
     } catch (error) {
@@ -10410,18 +11220,7 @@ export class Core {
       JSON.stringify(taskIds),
     );
     for (const run of runs) {
-      try {
-        if (run.role === "executor") signalRecordedProcess(run, "SIGTERM");
-        else if (this.options.agentRunner.cancelAgent) await this.options.agentRunner.cancelAgent(run.id, false);
-        else if (run.pid && processIdentityMatches(
-          { process_start_time: run.process_start_time, process_cmdline_sha256: run.process_cmdline_sha256 },
-          readProcessIdentity(run.pid),
-        )) {
-          signalProcessGroup(run.pid, "SIGTERM");
-        }
-      } catch (error) {
-        console.error(`[owl-core] Failed to signal Agent ${run.id} of a stopped Task`, error);
-      }
+      await this.signalAgentRun(run, false, (id) => `Failed to signal Agent ${id} of a stopped Task`);
     }
   }
 
@@ -10487,6 +11286,51 @@ export class Core {
    * Decision inside the reducer transaction via ensureCoreDecision and
    * never reach this method.
    */
+  /** The title and latest reported reason of a failed Task, for the Decision the Owner reads. */
+  private failedTaskCause(taskId: string): ReplanFailureCause["tasks"][number] {
+    const title = this.db.get<{ title: string }>("SELECT title FROM tasks WHERE id = ?", taskId)?.title ?? taskId;
+    const row = this.db.get<{ payload_json: string }>(
+      `SELECT reports.payload_json FROM reports JOIN agent_runs ON agent_runs.id = reports.agent_run_id
+        WHERE agent_runs.task_id = ? ORDER BY reports.created_at DESC LIMIT 1`,
+      taskId,
+    );
+    const report = row ? parseStoredJsonObject(row.payload_json, "report", taskId) : null;
+    const lines: string[] = [];
+    const add = (value: unknown): void => {
+      if (typeof value === "string" && value.trim().length > 0) lines.push(value.trim());
+    };
+    const blocker = report?.external_blocker;
+    if (blocker !== null && typeof blocker === "object" && !Array.isArray(blocker)) add((blocker as JsonObject).summary);
+    if (Array.isArray(report?.remaining_issues)) {
+      for (const issue of report.remaining_issues) add(issue !== null && typeof issue === "object" ? (issue as JsonObject).issue : issue);
+    }
+    add(report?.question_for_manager);
+    if (lines.length > 0) return { title, cause: lines.join(" ") };
+    // No usable report: fall back to the Task's failure record (crash, classified failure, verification, conflict, review).
+    const brief = failedTaskBrief(this.db, taskId);
+    const failure = isRecord(brief?.failure) ? brief.failure : {};
+    for (const key of ["summary", "reason", "question", "work_done"]) add(failure[key]);
+    const conflictFiles = failure.kind === "merge_conflict" && Array.isArray(failure.merge_conflict_files)
+      ? failure.merge_conflict_files.filter((file): file is string => typeof file === "string")
+      : [];
+    const failedChecks: string[] = [];
+    const verification = failure.kind === "verification_failed" && isRecord(brief?.verification_failure) ? brief.verification_failure : null;
+    if (verification !== null) {
+      // Failed test names and check ids say which check failed; a check's detail is internal English and stays in the event.
+      const tests = isRecord(verification.test_failures) && Array.isArray(verification.test_failures.failures) ? verification.test_failures.failures : [];
+      for (const test of tests) {
+        if (isRecord(test) && typeof test.name === "string") failedChecks.push(typeof test.file === "string" ? `${test.file}: ${test.name}` : test.name);
+      }
+      if (failedChecks.length === 0 && Array.isArray(verification.commands)) {
+        for (const command of verification.commands) {
+          if (!isRecord(command) || command.passed !== false || typeof command.command_id !== "string") continue;
+          failedChecks.push(typeof command.file === "string" ? `${command.command_id} (${command.file})` : command.command_id);
+        }
+      }
+    }
+    return { title, cause: lines.length > 0 ? lines.join(" ") : null, failedChecks, conflictFiles };
+  }
+
   private async openManagerReplanFailureDecision(
     workId: string,
     failedTaskIds: readonly string[],
@@ -10494,6 +11338,7 @@ export class Core {
     question?: string,
     finalVerdict: JsonObject | null = null,
     autoConflictFiles?: readonly string[],
+    rejectedAttempts?: number,
   ): Promise<void> {
     // Only root failures are blocked: a cascaded Task stays failed and
     // returns to waiting by itself once the answer resumes its dependency
@@ -10517,7 +11362,7 @@ export class Core {
           blocked_task_ids: eligibleTaskIds,
           ...withAutoRecoveryTried(
             this.db,
-            managerReplanFailureBrief(scope, detail, ownerLanguage(this.db), question, finalVerdict?.missing, autoConflictFiles),
+            managerReplanFailureBrief(scope, detail, ownerLanguage(this.db), question, finalVerdict?.missing, autoConflictFiles, { tasks: eligibleTaskIds.map((taskId) => this.failedTaskCause(taskId)), rejectedAttempts }),
             { workId, taskIds: eligibleTaskIds },
             ownerLanguage(this.db),
           ),
@@ -10529,6 +11374,7 @@ export class Core {
       console.error(`[owl-core] failed to open Owner Decision after Manager replan failure for Work ${workId}`, error);
       return;
     }
+    await this.announceCoreDecisions(workId);
     await this.dispatcher.replayPending();
   }
 
@@ -10539,10 +11385,11 @@ export class Core {
    * (a failed check, never an "incomplete" verdict). Returns null when Core
    * stopped mid-call.
    */
-  private async runFinalManager(workId: string, workBranchVerification: WorkBranchVerification): Promise<{ readonly verdict: FinalManagerVerdict; readonly agent_run_id: string } | null> {
+  private async runFinalManager(workId: string, workBranchVerification: WorkBranchVerification): Promise<FinalManagerOutcome | null> {
     const work = this.managerWorkContext(workId);
     const tasks = this.db.all<TaskRow>("SELECT * FROM tasks WHERE work_id = ? ORDER BY created_at ASC, id ASC", workId);
     const managerTasks = tasks.map((task) => managerTaskView(task, this.taskDependencyIds(task.id)));
+    const criteriaIndex = finalCriteriaIndex(this.workSummaryText(workId), tasks.map((task) => ({ id: task.id, status: task.status, acceptance: task.acceptance, acceptance_criteria_json: task.acceptance_criteria_json ?? null })));
     const reports: JsonObject[] = [];
     for (const task of tasks) {
       if (task.status !== "completed") continue;
@@ -10591,10 +11438,10 @@ export class Core {
         mode: "finalize" as const,
         memory_mode: "pages" as const,
         commit_language: this.db.get<{ commit_language: "ja" | "en" | null }>("SELECT projects.commit_language FROM works JOIN projects ON projects.id = works.project_id WHERE works.id = ?", workId)?.commit_language ?? null,
-        context: { mode: "finalize", trigger: { kind: "final_check" }, work_id: workId, tasks: managerTasks, reports, work_verification: workVerificationContext, criteria_relaxations: criteriaRelaxationsOfWork(this.db, workId), design_documents: this.completedDesignDocuments(workId), backlog_items: listInProgressBacklogItemsOfWork(this.db, workId).map(({ id, file, line, problem, suggestion }) => ({ id, file, line, problem, suggestion })), ...this.processSkillsRequestContext() },
+        context: { mode: "finalize", trigger: { kind: "final_check" }, work_id: workId, tasks: managerTasks, reports, work_verification: workVerificationContext, criteria_relaxations: criteriaRelaxationsOfWork(this.db, workId), criteria_index: criteriaIndex as unknown as JsonObject[], goal_shortfalls: goalShortfallsOfWork(this.db, workId) as unknown as JsonObject[], design_documents: this.completedDesignDocuments(workId), backlog_items: listInProgressBacklogItemsOfWork(this.db, workId).map(({ id, file, line, problem, suggestion }) => ({ id, file, line, problem, suggestion })), ...this.processSkillsRequestContext() },
       };
       lastInvocationId = roleRequest.invocation_id;
-      const outcome = await this.attemptFinalManager(workId, roleRequest);
+      const outcome = await this.attemptFinalManager(workId, roleRequest, criteriaIndex);
       if (outcome === null) return null;
       if ("verdict" in outcome) return outcome;
       failure = outcome.failure;
@@ -10618,7 +11465,8 @@ export class Core {
   private async attemptFinalManager(
     workId: string,
     request: JsonObject,
-  ): Promise<{ readonly verdict: FinalManagerVerdict; readonly agent_run_id: string } | { readonly failure: AgentRunResult } | null> {
+    criteriaIndex: readonly FinalCriterionRef[],
+  ): Promise<FinalManagerOutcome | { readonly failure: AgentRunResult } | null> {
     let raw: unknown;
     try {
       raw = await this.invokeManagerPlan(request, "manager.finalize");
@@ -10636,10 +11484,30 @@ export class Core {
       this.recordSkillFeedback(agentRunId, result.skill_feedback);
       if (result.outcome !== "success") return { failure: result };
       const report = requireManagerReport(result, "manager finalization");
-      return { verdict: requireManagerVerdict(report.verdict, workId), agent_run_id: agentRunId };
+      const settled = settleFinalVerdict(requireManagerVerdict(report.verdict, workId), criteriaIndex);
+      return { verdict: settled.verdict, settled, criteria_index: criteriaIndex, agent_run_id: agentRunId };
     } catch (error) {
       return { failure: finalManagerErrorResult(error, ownerLanguage(this.db)) };
     }
+  }
+
+  /** Stores the goals this final check found unmet or met before the verdict is acted on, so an incomplete round keeps them. */
+  private async recordFinalGoalShortfalls(workId: string, settled: SettledFinalVerdict, criteriaIndex: readonly FinalCriterionRef[]): Promise<void> {
+    if (settled.goal_items.length === 0 && settled.goals_met.length === 0) return;
+    const now = utcNow();
+    await this.writeLane.write({
+      mutateState: (transaction) => {
+        recordFinalGoalShortfalls(transaction, workId, settled, criteriaIndex, now);
+        return {};
+      },
+      event: {
+        idempotencyKey: `work-goal-shortfalls-recorded:${workId}:${createUlid()}`,
+        type: "work.goal_shortfalls_recorded",
+        workId,
+        payload: { schema_version: "1.0.0", work_id: workId, goal_items: settled.goal_items as unknown as JsonObject[], goals_met: settled.goals_met as unknown as JsonObject[] },
+      },
+      outbox: [],
+    });
   }
 
   private recordSkillFeedback(agentRunId: string, feedback: AgentRunResult["skill_feedback"]): void {
@@ -11588,10 +12456,45 @@ export class Core {
   private async invokeManagerPlan(request: unknown, operation: string): Promise<unknown> {
     if (!this.started) return null;
     const { workId, taskId } = extractManagerRequestIds(request, operation);
-    const requestInvocationId = isRecord(request) && typeof request.invocation_id === "string" && request.invocation_id.length > 0
+    const agentRunId = isRecord(request) && typeof request.invocation_id === "string" && request.invocation_id.length > 0
       ? request.invocation_id
       : createUlid();
-    const agentRunId = requestInvocationId;
+    try {
+      return await this.runManagerPlanRecorded(request, operation, workId, taskId, agentRunId);
+    } catch (error) {
+      if (error === MANAGER_PAUSED_AT_START) return null;
+      if (!isAgentRunStopped(error)) throw error;
+      await this.closeStoppedManagerRun(workId, taskId, agentRunId);
+      return null;
+    }
+  }
+
+  /** A Manager run the Owner stopped ends cancelled; its result is never applied. */
+  private async closeStoppedManagerRun(workId: string, taskId: string | null, agentRunId: string): Promise<void> {
+    await this.writeLane.write({
+      mutateState: (transaction: CoreWriteLaneTransaction) => {
+        const now = utcNow();
+        transaction.run(
+          "UPDATE agent_runs SET status = 'cancelled', ended_at = COALESCE(ended_at, ?), updated_at = ? WHERE id = ? AND status IN ('cancel_requested','running','spawned','launch_pending')",
+          now,
+          now,
+          agentRunId,
+        );
+        return { agent_run_id: agentRunId, result_ignored: true };
+      },
+      event: {
+        idempotencyKey: `manager-result-ignored:${agentRunId}`,
+        type: "agent.exited",
+        workId,
+        taskId,
+        agentRunId,
+        payload: { agent_run_id: agentRunId, outcome: "cancelled", result_ignored: true, reason: "manager_result_arrived_after_owner_pause" },
+      },
+      outbox: [{ provider: "websocket" }],
+    });
+  }
+
+  private async runManagerPlanRecorded(request: unknown, operation: string, workId: string, taskId: string | null, agentRunId: string): Promise<unknown> {
     const managerRoleModel = resolveRoleModelFromDb(this.db, "manager");
     const managerProvider = managerRoleModel?.provider ?? "anthropic";
     if (this.providerPauseController.isPaused(managerProvider)) return null;
@@ -11604,6 +12507,8 @@ export class Core {
     const managerKnowledge = await this.composeKnowledgeForWork(workId);
     await this.writeLane.write({
       mutateState: (transaction: CoreWriteLaneTransaction) => {
+        // An Owner pause that committed after the caller's check leaves no run behind.
+        if (transaction.get<{ state: string }>("SELECT state FROM works WHERE id = ?", workId)?.state === "paused") throw MANAGER_PAUSED_AT_START;
         const now = utcNow();
         transaction.run(
           `INSERT INTO agent_runs
@@ -11655,6 +12560,7 @@ export class Core {
       if (!this.started) return null;
       await this.writeLane.write({
         mutateState: (transaction: CoreWriteLaneTransaction) => {
+          assertAgentRunNotStopped(transaction, agentRunId);
           const now = utcNow();
           transaction.run(
             `UPDATE agent_runs SET status = 'failed', ended_at = ?, updated_at = ? WHERE id = ?`,
@@ -11705,6 +12611,7 @@ export class Core {
       };
       await this.writeLane.write({
         mutateState: (transaction: CoreWriteLaneTransaction) => {
+          assertAgentRunNotStopped(transaction, agentRunId);
           const now = utcNow();
           transaction.run(
             "UPDATE agent_runs SET status = 'exited', ended_at = ?, updated_at = ?, usage_json = COALESCE(?, usage_json) WHERE id = ?",
@@ -11751,6 +12658,7 @@ export class Core {
       const failure = typeof result.message === "string" && result.message.length > 0 ? result.message : `outcome=${result.outcome}`;
       await this.writeLane.write({
         mutateState: (transaction: CoreWriteLaneTransaction) => {
+          assertAgentRunNotStopped(transaction, agentRunId);
           const now = utcNow();
           transaction.run(
             `UPDATE agent_runs SET status = 'failed', ended_at = ?, updated_at = ?, usage_json = COALESCE(?, usage_json) WHERE id = ?`,
@@ -11776,6 +12684,7 @@ export class Core {
     const workRules = extractManagerWorkRules(result);
     await this.writeLane.write({
       mutateState: (transaction: CoreWriteLaneTransaction) => {
+        assertAgentRunNotStopped(transaction, agentRunId);
         const now = utcNow();
         transaction.run(
           `UPDATE agent_runs SET status = 'completed', outcome = 'success', ended_at = ?, updated_at = ?, usage_json = COALESCE(?, usage_json) WHERE id = ?`,
@@ -12158,6 +13067,7 @@ function toProject(row: ProjectDbRow, defaultExecutables: Readonly<Record<string
     canonical_path: row.canonical_path,
     base_branch: row.base_branch,
     auto_push: row.auto_push === 1,
+    advisor_window_enabled: row.advisor_window_enabled === 1,
     commit_language: row.commit_language,
     worktree_setup_command: parseStringArray(row.worktree_prepare_argv_json, "worktree_setup_command", row.id, "Project"),
     worktree_refresh_command: parseStringArray(row.worktree_refresh_argv_json, "worktree_refresh_command", row.id, "Project"),
@@ -12177,6 +13087,12 @@ function toProject(row: ProjectDbRow, defaultExecutables: Readonly<Record<string
 const PROJECT_LOCKING_WORK_STATES_SQL = PROJECT_LOCKING_WORK_STATES.map(() => "?").join(", ");
 const WORKSPACE_SWEEP_INTERVAL_MS = 10 * 60_000;
 const AGENT_STOP_WAIT_MS = 10_000;
+/** The tick resends a forced stop after this many agentStopWaitMs, and opens a Decision after twice that. */
+const OWNER_STOP_CONFIRM_FACTOR = 3;
+type StoppableRun = { id: string; role: string; pid: number | null; process_start_time: string | null; process_cmdline_sha256: string | null };
+
+/** Thrown inside the Manager start write when the Owner paused the Work first. */
+const MANAGER_PAUSED_AT_START = new Error("The Work was paused before the Manager run was recorded.");
 const AGENT_STOP_POLL_MS = 100;
 const ACTIVE_AGENT_RUN_STATUSES_SQL = "'launch_pending', 'spawned', 'running', 'cancel_requested'";
 const AGENT_LIVE_STATUSES = ["launch_pending", "spawned", "running", "cancel_requested"] as const;
@@ -12243,6 +13159,14 @@ function assertProjectUnlocked(
 }
 
 type InstructionOutcome = "tasks_changed" | "no_change" | "decision_opened";
+
+/** A status_query answered by a connector: the Owner's message and the fixed answer; delivered turns true once an Advisor turn carried them. */
+interface StatusExchangeMetadata {
+  readonly kind: "status_question" | "status_reply";
+  readonly delivered?: boolean;
+  readonly reply_id?: string;
+  readonly carried_by?: string;
+}
 
 interface MessageMetadata {
   readonly kind: "instruction_reply";
@@ -12612,6 +13536,22 @@ function resolveInboundConversation(
   provider: string,
   hint: ConversationHint,
 ): { id: string; work_id: string | null } {
+  // Without a Work, every channel's messages join the general window's canonical conversation,
+  // so Web and Slack/Discord continue one conversation.
+  if (hint.work_id === null) {
+    // Only the channel id picks the window, so renaming the channel never detaches it.
+    const channelId = hint.dm_ref ?? hint.thread_ref;
+    const bound = channelId === null ? undefined : transaction.get<{ conversation_id: string }>(
+      `SELECT w.conversation_id FROM advisor_channel_bindings b
+         JOIN advisor_windows w ON w.id = b.window_id
+        WHERE b.provider = ? AND b.channel_id = ? AND w.owner_id = ?`,
+      provider,
+      channelId,
+      ownerId,
+    );
+    if (bound) return { id: bound.conversation_id, work_id: null };
+    return { id: ensureGeneralWindowInTransaction(transaction, ownerId, utcNow()).conversation_id, work_id: null };
+  }
   const threadRef = hint.thread_ref;
   const dmRef = hint.dm_ref;
   let conversation = transaction.get<{ id: string; work_id: string | null }>(
@@ -12630,10 +13570,8 @@ function resolveInboundConversation(
     dmRef,
   );
   if (!conversation) {
-    if (hint.work_id !== null) {
-      const work = transaction.get<{ id: string; owner_id: string }>("SELECT id, owner_id FROM works WHERE id = ?", hint.work_id);
-      if (!work || work.owner_id !== ownerId) throw notFound("work", hint.work_id);
-    }
+    const work = transaction.get<{ id: string; owner_id: string }>("SELECT id, owner_id FROM works WHERE id = ?", hint.work_id);
+    if (!work || work.owner_id !== ownerId) throw notFound("work", hint.work_id);
     const conversationId = createUlid();
     const now = utcNow();
     transaction.run(
@@ -12717,6 +13655,7 @@ function createProjectInTransaction(transaction: CoreWriteLaneTransaction, paylo
     canonical_path: canonicalPath,
     base_branch: baseBranch,
     auto_push: false,
+    advisor_window_enabled: false,
     commit_language: null,
     worktree_setup_command: [],
     worktree_refresh_command: [],
@@ -13473,9 +14412,6 @@ function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
 
 /** Initial Manager plan: 1 attempt plus 2 retries for transient/retryable failures. */
 const INITIAL_PLAN_MAX_ATTEMPTS = 3;
-/** A rejected plan or replan is handed back to the Manager once before the Owner is asked. */
-const PLAN_MAX_ATTEMPTS = 2;
-const REPLAN_MAX_ATTEMPTS = 2;
 const INITIAL_PLAN_RETRY_DELAY_MS = 5_000;
 /** Final Manager check: 1 attempt plus 1 retry for transient/retryable failures. */
 const FINAL_MANAGER_MAX_ATTEMPTS = 2;
@@ -13499,6 +14435,13 @@ function sideEffectFailureFields(errorKey: unknown): JsonObject {
  * it is treated as transient (one bounded retry). Anything else (setup,
  * Core validation) is deterministic.
  */
+interface FinalManagerOutcome {
+  readonly verdict: FinalManagerVerdict;
+  readonly settled: SettledFinalVerdict;
+  readonly criteria_index: readonly FinalCriterionRef[];
+  readonly agent_run_id: string;
+}
+
 function finalManagerErrorResult(error: unknown, language: OwnerLanguage): AgentRunResult {
   const code = isCodedError(error) ? error.code : null;
   const reason = isRecord(error) && typeof error.reason === "string" ? error.reason : null;
@@ -13513,7 +14456,8 @@ function finalManagerErrorResult(error: unknown, language: OwnerLanguage): Agent
     skill_feedback: null,
     failure_class: transient ? "transient" : "deterministic",
     error_key: afterSideEffect ? `${SIDE_EFFECT_FAILURE_PREFIX}${baseKey}` : baseKey,
-    retry_allowed: contract && !afterSideEffect,
+    // A blank reason on a goal is the Manager's slip: the final check runs again.
+    retry_allowed: (contract || (isRecord(error) && isRecord(error.details) && error.details.final_check_retry === true)) && !afterSideEffect,
     message: formatRuntimeFailure(error, "Manager", language),
   };
 }
@@ -13543,6 +14487,7 @@ function managerTaskView(task: TaskRow, dependsOn: readonly string[]): JsonObjec
     type: task.type,
     status: task.status,
     acceptance_criteria: readStoredAcceptanceCriteria(task.acceptance_criteria_json, task.acceptance) as unknown as JsonObject[],
+    goal_shortfalls: readTaskGoalShortfalls(task.goal_shortfalls_json as string | null | undefined) as unknown as JsonObject[],
     ...planContextFields(task),
     ...storedVerificationSpec(task),
     depends_on: [...dependsOn],
@@ -13871,6 +14816,9 @@ function requireManagerVerdict(value: unknown, workId: string): FinalManagerVerd
       (entry: unknown) => isRecord(entry) && typeof entry.item_id === "string" && typeof entry.reason === "string" ? [{ item_id: entry.item_id, reason: entry.reason }] : [],
     ),
     lessons: value.lessons,
+    goals_met: (Array.isArray(value.goals_met) ? value.goals_met : []).flatMap(
+      (entry: unknown) => isRecord(entry) && typeof entry.criterion_ref === "string" && typeof entry.evidence === "string" ? [{ criterion_ref: entry.criterion_ref, evidence: entry.evidence }] : [],
+    ),
   };
 }
 
@@ -13885,7 +14833,7 @@ function managerTaskActions(value: unknown): readonly ReplanAction[] {
       (entry.action !== "cancel" && entry.action !== "complete") ||
       typeof entry.reason !== "string"
     ) {
-      throw validationError("The Manager task_actions entry is invalid.", { index });
+      throw validationError(`The Manager task_actions[${index}] needs task_id, action (cancel or complete) and reason.`, {});
     }
     return { task_id: entry.task_id, action: entry.action, reason: entry.reason };
   });
@@ -13993,16 +14941,24 @@ export function managerTasksToPlanItems(
   });
 }
 
-/** auto_recovery.criteria_relaxations as the Manager wrote them; absent or null reads as none. */
+/** A format error the plan parser found, as fields_missing feedback naming the Task and the field so the Manager can fix it; any other error is not the Manager's to fix (null). */
+function planParseFeedback(error: unknown): PreviousOutputFeedback | null {
+  if (!(error instanceof HumanReadableError) || error.code !== "validation_error") return null;
+  const { task_id: taskId, index } = error.details;
+  const where = typeof taskId === "string" ? `Task ${taskId}: ` : typeof index === "number" ? `Task at index ${index}: ` : "";
+  return { kind: "fields_missing", errors: [`${where}${error.message}`], warnings: [] };
+}
+
+/** auto_recovery.criteria_relaxations as the Manager wrote them; absent or null reads as none. A missing reason or keeps reads as "" so evaluateCriteriaRelaxation can hand it back to the Manager instead of failing the replan. */
 function parseCriteriaRelaxations(value: unknown, taskId: string, workId: string): CriteriaRelaxation[] {
   if (value === undefined || value === null) return [];
   const list = isRecord(value) ? value.criteria_relaxations : undefined;
   if (list === undefined || list === null) return [];
   const text = (entry: unknown): entry is string => typeof entry === "string";
-  if (!Array.isArray(list) || list.some((entry) => !isRecord(entry) || !text(entry.criterion_id) || !text(entry.reason) || !text(entry.keeps))) {
+  if (!Array.isArray(list) || list.some((entry) => !isRecord(entry) || !text(entry.criterion_id))) {
     throw validationError("The Manager plan Task auto_recovery.criteria_relaxations must be a list of criterion_id, reason and keeps.", { work_id: workId, task_id: taskId });
   }
-  return list.map((entry) => ({ criterion_id: String(entry.criterion_id), reason: String(entry.reason), keeps: String(entry.keeps) }));
+  return list.map((entry) => ({ criterion_id: String(entry.criterion_id), reason: text(entry.reason) ? entry.reason : "", keeps: text(entry.keeps) ? entry.keeps : "" }));
 }
 
 /** auto_recovery.criterion_checks and rule_applicability as the Manager wrote them (partial_repeated); absent or null reads as none. */

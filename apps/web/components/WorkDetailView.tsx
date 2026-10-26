@@ -543,6 +543,34 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
           {assuranceError && <p className="error" role="alert">{t('work.assuranceLoadError')}</p>}
           <WorkAssurancePanel assurance={assurance} t={t} />
 
+          {data.goal_shortfalls.length > 0 && (
+            <section className="panel" aria-labelledby="sec-goal-shortfalls">
+              <h2 className="panel__title" id="sec-goal-shortfalls">{t('work.goalShortfallsTitle')}</h2>
+              <p className="muted">{t('work.goalShortfallsNote')}</p>
+              <table className="rules-table">
+                <thead>
+                  <tr>
+                    <th>{t('work.goalShortfallTask')}</th>
+                    <th>{t('work.goalShortfallCriterion')}</th>
+                    <th>{t('work.goalShortfallReason')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.goal_shortfalls.map((g, index) => (
+                    <tr key={`${g.task_id ?? 'work'}:${g.criterion_id ?? index}:${g.source}`}>
+                      <td>{g.task_title ?? g.task_id ?? '—'}</td>
+                      <td>{g.text}</td>
+                      <td>
+                        {g.reason}
+                        {g.resolution && <> <strong>{t('work.goalShortfallResolved')}</strong>: {g.resolution.evidence}</>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </section>
+          )}
+
           {data.auto_recovery.relaxations.length > 0 && (
             <section className="panel" aria-labelledby="sec-relaxed-criteria">
               <h2 className="panel__title" id="sec-relaxed-criteria">{t('work.relaxedCriteriaTitle')}</h2>

@@ -61,6 +61,26 @@
     },
     "auto_recovery": {
       "type": "object"
+    },
+    "goal_shortfalls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["task_id", "task_title", "criterion_id", "text", "reason", "source", "resolution"],
+        "properties": {
+          "task_id": { "type": ["string", "null"] },
+          "task_title": { "type": ["string", "null"] },
+          "criterion_id": { "type": ["string", "null"] },
+          "text": { "type": "string" },
+          "reason": { "type": "string" },
+          "source": { "enum": ["worker", "reviewer", "final_check"] },
+          "resolution": {
+            "type": ["object", "null"],
+            "required": ["evidence", "resolved_at"],
+            "properties": { "evidence": { "type": "string" }, "resolved_at": { "type": "string" } }
+          }
+        }
+      }
     }
   }
 }

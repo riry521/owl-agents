@@ -36,9 +36,14 @@ async function startWork(core) {
 }
 
 function runner({ workerHangs, onReplan, replanGate, replanReport }) {
-  const state = { replans: 0, workerCalls: 0 };
+  const state = { replans: 0, workerCalls: 0, cancels: [], hungWorkers: [] };
   return {
     state,
+    // An Owner instruction stops the running Worker: the hung call ends once it is signalled.
+    cancelAgent: async (agentRunId, force) => {
+      state.cancels.push({ agentRunId, force });
+      for (const end of state.hungWorkers.splice(0)) end();
+    },
     runManagerPlan: async (request) => {
       const mode = request.mode ?? request.context?.mode;
       if (mode === "plan") return { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [planTask] } };
@@ -52,7 +57,7 @@ function runner({ workerHangs, onReplan, replanGate, replanReport }) {
     },
     runWorker: async (request) => {
       state.workerCalls += 1;
-      if (workerHangs) await new Promise(() => {});
+      if (workerHangs && state.workerCalls === 1) await new Promise((end) => state.hungWorkers.push(end));
       return { outcome: "success", report_valid: true, report: workerReport(request.invocation_id) };
     },
     runReviewer: async () => ({ outcome: "failed", message: "unused" }),
@@ -75,7 +80,12 @@ test("an instruction on a Work with a running Task reaches the Manager at the ne
   assert.equal(marker(db, workId).status, "attempted", "the marker moved from queued to attempted");
   release();
   assert.ok(await waitFor(() => marker(db, workId) === null), "the Manager's answer consumed the marker");
-  assert.equal(db.get("SELECT status FROM tasks WHERE work_id = ?", workId).status, "running", "the running Task was not stopped");
+  const taskId = db.get("SELECT id FROM tasks WHERE work_id = ?", workId).id;
+  assert.equal(r.state.cancels.length, 1, "the running Worker was signalled to stop");
+  assert.ok(await waitFor(() => r.state.workerCalls === 2), "the same Task's Worker ran again after the replan");
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM tasks WHERE work_id = ?", workId).n, 1);
+  assert.equal(db.get("SELECT id FROM tasks WHERE work_id = ?", workId).id, taskId, "the Task kept its id");
+  assert.equal(db.get("SELECT failure_count FROM tasks WHERE id = ?", taskId).failure_count, 0, "the stop is not a failure");
 });
 
 test("an instruction on a Work stopped at a limit closes the Decision and starts the Manager, not the Worker", async (t) => {

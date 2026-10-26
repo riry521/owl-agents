@@ -11,6 +11,7 @@ import {
   noProgressLimitBrief,
   designBlockedBrief,
   remakeLimitBrief,
+  REVIEW_BUDGET_EXHAUSTED_ERROR_KEY,
   reviewBudgetReason,
   type DecisionBrief,
 } from "./decision-brief";
@@ -28,9 +29,10 @@ import { remakeLimits } from "./remake-limits";
 import { fixerEscalation } from "./fixer-escalation";
 import type { FixerEscalationSettings } from "../../shared/dist/fixer-escalation-settings.js";
 import { progressGuard } from "./progress-guard";
+import { assertAgentRunNotStopped } from "./agent-run-stop";
 import { assignReplacementLineageInTransaction, lineageExternalBlockerReports, lineagePartialReports, previousPartialReport, lineageGenerationCount, lineageReviewAttemptsExcluding, lineageRootOf, lineageUsage, parseLineageReset, restartLineageBudgetInTransaction } from "./task-lineage";
 import type { RemakeLimitSettings } from "../../shared/dist/remake-limit-settings.js";
-import { findDependencyCycle, type ReplanPlan } from "./replan-plan";
+import { findDependencyCycle, type ReplanPlan, type TaskRevision } from "./replan-plan";
 import { PROCESS_WAIT_EVENT, validatePrerequisiteSpec, type PrerequisiteSpec } from "../../shared/dist/prerequisite.js";
 import { designerStateAfterRetry, designerStateAtCreation, type AssignedDesigner } from "./designer-assignment.js";
 import { ACCEPTANCE_DEFECT_EVENT, normalizeAcceptanceDefects, workerAcceptanceDefects } from "../../shared/dist/acceptance-defect.js";
@@ -60,8 +62,8 @@ export const WORK_TRANSITION_TABLE = [
   { row: 1, current: "memo", guard: "title/summary/owner/project valid", event: "work.ready", next: "ready" },
   { row: 2, current: "memo", guard: "owner explicitly starts", event: "work.started", next: "running" },
   { row: 3, current: "ready", guard: "start idempotency not processed", event: "work.started", next: "running" },
-  { row: 4, current: "running", guard: "unfinished task or agent", event: "work.paused", next: "paused" },
-  { row: 5, current: "paused", guard: "natural agent exit and reconciled", event: "work.resumed", next: "running" },
+  { row: 4, current: "running", guard: "unfinished task or agent; every Agent run of the Work but the Advisor's is stopped, and running/verifying Tasks are paused to be redone", event: "work.paused", next: "paused" },
+  { row: 5, current: "paused", guard: "owner resume (reconciled); stopped Agent runs are ignored and stopped Tasks are redone", event: "work.resumed", next: "running" },
   { row: 6, current: "running", guard: "open decision blocks work", event: "decision.opened", next: "judgement_waiting" },
   { row: 7, current: "judgement_waiting", guard: "winner answer committed by CAS", event: "decision.resolved", next: "running" },
   { row: 8, current: "running", guard: "all tasks complete and manager verdict complete", event: "work.completed", next: "completed" },
@@ -111,12 +113,13 @@ export const TASK_TRANSITION_TABLE = [
   { row: 22, current: "judgement_waiting", guard: "decision winner targets task and every dependency completed", event: "decision.resolved", next: "ready" },
   { row: "22b", current: "judgement_waiting", guard: "decision winner targets task but a dependency is not completed", event: "decision.resolved", next: "waiting" },
   { row: 23, current: "waiting/ready/review_fix_waiting/failed", guard: "owner pause", event: "work.paused", next: "paused" },
-  { row: 24, current: "running/verifying", guard: "owner pause; running/verifying keep their state; nothing recorded in paused_from", event: "work.paused", next: "running/verifying" },
+  { row: 24, current: "running/verifying", guard: "owner pause; every Agent run of the Work is marked cancel_requested in the same transaction and stopped by Core after the commit; paused_from records ready so resume redoes the Task", event: "work.paused", next: "paused" },
   { row: 25, current: "paused", guard: "work resumed", event: "work.resumed", next: "paused_from" },
   { row: 26, current: "any non-terminal", guard: "owner cancel", event: "work.cancelled", next: "cancelled" },
   { row: 27, current: "waiting", guard: "a dependency permanently failed; failed_by_dependency_task_id records it", event: "task.dependency_failed", next: "failed" },
   { row: 28, current: "verifying", guard: "review replan_required (explicit, any review_round)", event: "review.failed", next: "failed" },
   { row: 29, current: "verifying", guard: "Reviewer agent failed; reviewer_failure_count below REVIEWER_FAILURE_LIMIT (else failed + manager trigger)", event: "agent.crashed", next: "review_fix_waiting/failed" },
+  { row: "24b", current: "running/verifying", guard: "owner instruction; the Task's Agent runs are marked cancel_requested in the same transaction and stopped by Core after the commit; failure counters, lineage and worktree kept", event: "task.interrupted", next: "ready" },
   { row: 30, current: "failed/judgement_waiting", guard: "manager replan registered replacement Tasks", event: "task.superseded", next: "cancelled" },
   { row: 31, current: "failed", guard: "failed_by_dependency_task_id set and no dependency is failed or cancelled any more; marker cleared", event: "task.dependency_restored", next: "waiting" },
   { row: 32, current: "running", guard: "Worker asked the Manager a question or requested replanning", event: "task.replan_requested", next: "failed" },
@@ -133,6 +136,7 @@ export const TASK_TRANSITION_TABLE = [
   { row: 39, current: "waiting/paused(paused_from=waiting)", guard: "prerequisite set and the Owner resumed it; mark cleared, no_progress_count=0", event: "task.prerequisite_resumed", next: "same state" },
   { row: 40, current: "verifying", guard: "Core's test run failed for the test environment and the re-investigation did not fix it; the Task is not remade", event: "decision.opened", next: "judgement_waiting" },
   { row: 41, current: "judgement_waiting", guard: "decision winner chose to run the verification again", event: "decision.resolved", next: "verifying" },
+  { row: 42, current: "ready", guard: "owner instruction replan revised the Task in place; failure counters, lineage, retry_no and worktree kept", event: "task.revised", next: "ready/waiting" },
 ] as const;
 
 /**
@@ -958,15 +962,30 @@ export function reduceTask(
     return taskResult(row, next, ["spawn_suppressed"]);
   }
 
-  // Task row 24: running/verifying state is kept while Core drains work.
-  // Nothing is recorded in paused_from: the Task never becomes `paused`, so row 25
-  // never restores it, and the tasks CHECK only admits waiting/ready/review_fix_waiting/failed.
-  // The event is still appended as an audit entry.
+  // Task row 24: an Owner pause stops the Task's Agents. paused_from records
+  // ready, so row 25 redoes the Task from its Worker on resume.
   if ((row.status === "running" || row.status === "verifying") && event === "work.paused") {
     if (!requiredBoolean(payload, "work_paused")) {
-      reject(row, event, "The Task may stay active during pause only after Work pause is committed.");
+      reject(row, event, "A Task pause requires the committed Work pause.");
     }
-    return taskResult(row, withTaskVersion(row, row.status, now), ["launches_queued"]);
+    const next = { ...withTaskVersion(row, "paused", now), paused_from: "ready" as const };
+    return taskResult(row, next, ["spawn_suppressed", "cancel_requested"]);
+  }
+
+  // Task row 24b: an Owner instruction stops the Task so the Manager replans
+  // before it runs again.
+  if ((row.status === "running" || row.status === "verifying") && event === "task.interrupted") {
+    if (!requiredBoolean(payload, "owner_instruction")) {
+      reject(row, event, "A Task interruption requires the committed Owner instruction.");
+    }
+    return taskResult(row, withTaskVersion(row, "ready", now), ["spawn_suppressed", "cancel_requested"]);
+  }
+
+  // Task row 42: the Manager rewrote a stopped ready Task in place. Only the
+  // state follows the dependencies; counters, lineage and worktree stay.
+  if (row.status === "ready" && event === "task.revised") {
+    const target: TaskState = requiredBoolean(payload, "dependencies_completed") ? "ready" : "waiting";
+    return taskResult(row, withTaskVersion(row, target, now), []);
   }
 
   // Task row 25: paused restores paused_from, with dependency re-evaluation.
@@ -1430,6 +1449,34 @@ export function reduceWorkInTransaction(
       row.id,
     );
   }
+  if (command.event === "work.paused" && result.changed) {
+    // An Owner pause stops every Agent run of the Work but the Advisor's.
+    // Hook-reported children and observed executors end with their Worker's
+    // process group and are closed by their own watchers.
+    transaction.run(
+      `UPDATE agent_runs
+          SET status = CASE WHEN status = 'launch_pending' AND pid IS NULL AND role <> 'executor' THEN 'cancelled' ELSE 'cancel_requested' END,
+              ended_at = CASE WHEN status = 'launch_pending' AND pid IS NULL AND role <> 'executor' THEN COALESCE(ended_at, ?) ELSE ended_at END,
+              updated_at = ?
+        WHERE work_id = ? AND status IN ('launch_pending', 'spawned', 'running')
+          AND role <> 'advisor' AND hook_agent_id IS NULL AND (origin IS NULL OR origin <> 'observed')`,
+      result.next.updated_at,
+      result.next.updated_at,
+      row.id,
+    );
+    const childRunsTable = transaction.get<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'child_runs'");
+    if (childRunsTable) {
+      transaction.run(
+        `UPDATE child_runs
+            SET status = 'cancelled', blocked_reason = NULL, failure_kind = 'cancelled',
+                failure_reason = 'The Work was paused by the Owner.', finished_at = ?, updated_at = ?
+          WHERE work_id = ? AND status IN ('queued','running')`,
+        result.next.updated_at,
+        result.next.updated_at,
+        row.id,
+      );
+    }
+  }
   return result;
 }
 
@@ -1617,6 +1664,19 @@ function acceptanceDefectRoute(transaction: CoreWriteLaneTransaction, row: TaskR
   return autoRecoveryUsed(transaction, kind, target) >= autoRecoveryLimit(transaction, kind) ? "exhausted" : "manager";
 }
 
+const RUN_RESULT_EVENTS: ReadonlySet<string> = new Set([
+  "agent.exited",
+  "task.failure.classified",
+  "agent.crashed",
+  "task.replan_requested",
+  ACCEPTANCE_DEFECT_EVENT,
+  EXTERNAL_BLOCKER_EVENT,
+  "task.rate_limited",
+  "task.design_blocked",
+  PROCESS_WAIT_EVENT,
+]);
+const REVIEW_VERDICT_EVENTS: ReadonlySet<string> = new Set(["review.passed", "review.failed"]);
+
 export function reduceTaskInTransaction(
   transaction: CoreWriteLaneTransaction,
   taskId: string,
@@ -1630,6 +1690,11 @@ export function reduceTaskInTransaction(
       remediation: "Verify the Task identifier and refresh the list.",
       details: { task_id: taskId },
     });
+  }
+  const resultRunId = objectPayload(command).agent_run_id;
+  // A stopped run never records a result; the throw also rolls back the event row.
+  if (typeof resultRunId === "string" && (RUN_RESULT_EVENTS.has(command.event) || REVIEW_VERDICT_EVENTS.has(command.event))) {
+    assertAgentRunNotStopped(transaction, resultRunId);
   }
   let lineage: NonNullable<NonNullable<Parameters<typeof reduceTask>[2]>["lineage"]> | undefined;
   if (command.event === "review.failed") {
@@ -1750,6 +1815,46 @@ export function reduceTaskInTransaction(
       row.id,
     );
   }
+  if (result.changed && (command.event === "task.interrupted" || command.event === "task.revised")) {
+    // The Manager reads these from the events table (context.stopped_task_ids), so they are recorded.
+    appendEventInTransaction(transaction, {
+      type: command.event,
+      idempotencyKey: `${command.event}:${row.id}:${createUlid()}`,
+      workId: row.work_id,
+      taskId: row.id,
+      payload: { task_id: row.id, ...objectPayload(command) },
+      now: result.next.updated_at,
+    });
+  }
+  if (result.changed && command.event === "task.interrupted") {
+    // An Owner instruction stops the Task's Agents; the Manager keeps running.
+    // Hook-reported children and observed executors end with their Worker's
+    // process group and are closed by their own watchers.
+    transaction.run(
+      `UPDATE agent_runs
+          SET status = CASE WHEN status = 'launch_pending' AND pid IS NULL AND role <> 'executor' THEN 'cancelled' ELSE 'cancel_requested' END,
+              ended_at = CASE WHEN status = 'launch_pending' AND pid IS NULL AND role <> 'executor' THEN COALESCE(ended_at, ?) ELSE ended_at END,
+              updated_at = ?
+        WHERE task_id = ? AND status IN ('launch_pending', 'spawned', 'running')
+          AND role IN ('worker', 'designer', 'reviewer', 'executor')
+          AND hook_agent_id IS NULL AND (origin IS NULL OR origin <> 'observed')`,
+      result.next.updated_at,
+      result.next.updated_at,
+      row.id,
+    );
+    const childRunsTable = transaction.get<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'child_runs'");
+    if (childRunsTable) {
+      transaction.run(
+        `UPDATE child_runs
+            SET status = 'cancelled', blocked_reason = NULL, failure_kind = 'cancelled',
+                failure_reason = 'Task was stopped by the Owner.', finished_at = ?, updated_at = ?
+          WHERE task_id = ? AND status IN ('queued','running')`,
+        result.next.updated_at,
+        result.next.updated_at,
+        taskId,
+      );
+    }
+  }
   if (row.status !== "cancelled" && result.next.status === "cancelled") {
     const childRunsTable = transaction.get<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'child_runs'");
     if (childRunsTable) {
@@ -1786,18 +1891,7 @@ export function reduceTaskInTransaction(
     result.next.updated_at);
   }
   const agentRunId = typeof payload.agent_run_id === "string" ? payload.agent_run_id : null;
-  if (
-    agentRunId &&
-    (command.event === "agent.exited" ||
-      command.event === "task.failure.classified" ||
-      command.event === "agent.crashed" ||
-      command.event === "task.replan_requested" ||
-      command.event === ACCEPTANCE_DEFECT_EVENT ||
-      command.event === EXTERNAL_BLOCKER_EVENT ||
-      command.event === "task.rate_limited" ||
-      command.event === "task.design_blocked" ||
-      command.event === PROCESS_WAIT_EVENT)
-  ) {
+  if (agentRunId && RUN_RESULT_EVENTS.has(command.event)) {
     // The run ends `completed` with an outcome whenever it produced a valid
     // result, even if that result sends the Task back (replan, question, redo,
     // partial, not achieved). Only a run that could not produce a result ends
@@ -1981,7 +2075,7 @@ export function reduceTaskInTransaction(
       return result;
     }
     const brief = result.review_budget
-      ? coreTaskDecisionBrief(row.title, { error_key: "review_budget_exhausted", reason: reviewBudgetReason(result.review_budget, language) }, language)
+      ? coreTaskDecisionBrief(row.title, { error_key: REVIEW_BUDGET_EXHAUSTED_ERROR_KEY, reason: reviewBudgetReason(result.review_budget, language) }, language)
       : coreTaskDecisionBrief(row.title, payload, language);
     const withTried = withAutoRecoveryTried(
       transaction, brief, { workId: row.work_id, taskIds: [row.id] }, language,
@@ -2039,7 +2133,7 @@ export function appendEventInTransaction(
   event: {
     readonly type: string;
     readonly idempotencyKey: string;
-    readonly workId: string;
+    readonly workId: string | null;
     readonly taskId: string | null;
     readonly payload: JsonObject;
     readonly now?: string;
@@ -2661,6 +2755,8 @@ export interface ReplanApplyResult {
   readonly cancelled_decision_ids: readonly string[];
   /** Tasks the replan cancelled, replaced or completed that may still have an Agent running. */
   readonly stopped_task_ids: readonly string[];
+  /** Stopped ready Tasks rewritten in place with their existing id. */
+  readonly revised: readonly string[];
 }
 
 /**
@@ -2742,7 +2838,8 @@ export function applyReplanInTransaction(
       actual: work.plan_revision,
     });
   }
-  const rootIds = [...new Set([...plan.reopenIds, ...plan.supersessions.keys(), ...(plan.actions ?? new Map()).keys()])];
+  const reviseIds = plan.reviseIds ?? [];
+  const rootIds = [...new Set([...plan.reopenIds, ...reviseIds, ...plan.supersessions.keys(), ...(plan.actions ?? new Map()).keys()])];
   for (const rootId of rootIds) {
     const row = transaction.get<{ status: string; work_id: string }>("SELECT status, work_id FROM tasks WHERE id = ?", rootId);
     const expected = guard.root_statuses.get(rootId) ?? "failed";
@@ -2779,7 +2876,7 @@ export function applyReplanInTransaction(
 
   // L1: a retried Task's depends_on replaces its dependencies. Edges into a
   // replaced Task are re-pointed below like every other dependent's.
-  for (const taskId of plan.reopenIds) {
+  for (const taskId of [...plan.reopenIds, ...reviseIds]) {
     const dependsOn = plan.revisions.get(taskId)?.depends_on;
     if (dependsOn === undefined) continue;
     transaction.run("DELETE FROM task_dependencies WHERE task_id = ?", taskId);
@@ -2858,25 +2955,7 @@ export function applyReplanInTransaction(
       },
     });
     const revision = plan.revisions.get(taskId);
-    const originalTask = transaction.get<{ acceptance: string; acceptance_criteria_json: string | null }>("SELECT acceptance, acceptance_criteria_json FROM tasks WHERE id = ?", taskId);
-    if (revision) {
-      transaction.run(
-        "UPDATE tasks SET title = ?, acceptance = ?, acceptance_criteria_json = ?, context = COALESCE(?, context), plan_context_json = COALESCE(?, plan_context_json), type = ?, review_override = ?, verification_spec_json = CASE WHEN ? THEN ? ELSE verification_spec_json END, updated_at = ? WHERE id = ?",
-        revision.title,
-        revision.acceptance,
-        revision.acceptance_criteria === undefined ? null : JSON.stringify(revision.acceptance_criteria),
-        revision.context ?? null,
-        revision.plan_context === undefined ? null : JSON.stringify(revision.plan_context),
-        revision.type,
-        reviewOverrideFor(revision.review),
-        // The Manager restates the spec on a retry: [] clears it, absent keeps it.
-        revision.required_sections !== undefined || revision.required_tests !== undefined ? 1 : 0,
-        verificationSpecFor(revision),
-        now,
-        taskId,
-      );
-    }
-    if (revision && originalTask) recordCriteriaRelaxations(transaction, workId, taskId, originalTask, revision, guard, now);
+    if (revision) applyTaskRevisionInTransaction(transaction, workId, taskId, revision, guard, now);
     const designer = designerStateAfterRetry(
       before,
       { type: revision?.type ?? before.type, assigned_designer: revision?.assigned_designer },
@@ -2893,11 +2972,48 @@ export function applyReplanInTransaction(
     transaction.run("UPDATE tasks SET base_sync_only = ?, base_sync_generations = base_sync_generations + ? WHERE id = ?", baseSyncMark, baseSyncMark, taskId);
   }
 
+  // Row 42: a stopped ready Task is rewritten in place; the replan does not count as a retry.
+  for (const taskId of reviseIds) {
+    reduceTaskInTransaction(transaction, taskId, {
+      event: "task.revised",
+      payload: { dependencies_completed: taskDependenciesCompletedInTransaction(transaction, taskId) },
+    });
+    applyTaskRevisionInTransaction(transaction, workId, taskId, plan.revisions.get(taskId)!, guard, now);
+  }
+
   restoreCascadedDependentsInTransaction(transaction, workId);
   transaction.run("UPDATE works SET plan_revision = plan_revision + 1, updated_at = ? WHERE id = ?", now, workId);
   assertTaskDependencyGraph(transaction, workId, "The replan creates a dependency cycle.");
   if (work.state === "judgement_waiting") cancelledDecisionIds.push(...resumeWorkAfterOwnerReplanInTransaction(transaction, workId, now));
-  return { registered, reopened: [...plan.reopenIds], replacements, cancelled_decision_ids: cancelledDecisionIds, stopped_task_ids: stoppedTaskIds };
+  return { registered, reopened: [...plan.reopenIds], replacements, cancelled_decision_ids: cancelledDecisionIds, stopped_task_ids: stoppedTaskIds, revised: [...reviseIds] };
+}
+
+/** Write the Manager's revised instructions into the Task row and record the criteria it relaxed. Shared by the retry of a failed Task and the in-place revision of a stopped one. */
+function applyTaskRevisionInTransaction(
+  transaction: CoreWriteLaneTransaction,
+  workId: string,
+  taskId: string,
+  revision: TaskRevision,
+  guard: ReplanApplyGuard,
+  now: string,
+): void {
+  const originalTask = transaction.get<{ acceptance: string; acceptance_criteria_json: string | null }>("SELECT acceptance, acceptance_criteria_json FROM tasks WHERE id = ?", taskId);
+  transaction.run(
+    "UPDATE tasks SET title = ?, acceptance = ?, acceptance_criteria_json = ?, goal_shortfalls_json = NULL, context = COALESCE(?, context), plan_context_json = COALESCE(?, plan_context_json), type = ?, review_override = ?, verification_spec_json = CASE WHEN ? THEN ? ELSE verification_spec_json END, updated_at = ? WHERE id = ?",
+    revision.title,
+    revision.acceptance,
+    revision.acceptance_criteria === undefined ? null : JSON.stringify(revision.acceptance_criteria),
+    revision.context ?? null,
+    revision.plan_context === undefined ? null : JSON.stringify(revision.plan_context),
+    revision.type,
+    reviewOverrideFor(revision.review),
+    // The Manager restates the spec on a retry: [] clears it, absent keeps it.
+    revision.required_sections !== undefined || revision.required_tests !== undefined ? 1 : 0,
+    verificationSpecFor(revision),
+    now,
+    taskId,
+  );
+  if (originalTask) recordCriteriaRelaxations(transaction, workId, taskId, originalTask, revision, guard, now);
 }
 
 /**
@@ -3016,6 +3132,8 @@ export interface OpenDecisionInput {
    * a completed Work cannot enter judgement_waiting). Defaults to true.
    */
   readonly blocks_work?: boolean;
+  /** Ask Core for a plain explanation; the opened notice then waits for it (Core.announceCoreDecisions). */
+  readonly explanation?: DecisionBrief["explanation"];
 }
 
 export interface DecisionRow {
@@ -3057,8 +3175,8 @@ export function openDecisionInTransaction(
     `INSERT INTO decisions
        (id, work_id, scope, status, blocked_task_ids_json, reason, question, tried,
         current_state, options_json, recommended, allow_free_text, issuer_role,
-        state_version, created_at)
-     VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+        state_version, created_at, explanation_json)
+     VALUES (?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
     id,
     input.work_id,
     input.scope,
@@ -3072,6 +3190,7 @@ export function openDecisionInTransaction(
     input.allow_free_text ? 1 : 0,
     input.issuer_role,
     now,
+    input.explanation ? JSON.stringify(input.explanation) : null,
   );
   if (input.scope === "work" && input.blocks_work === false) {
     if (input.blocked_task_ids.length > 0) {

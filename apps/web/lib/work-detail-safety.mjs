@@ -374,7 +374,33 @@ function normalizeWorkDetailDataUnsafe(value, requestedWorkId) {
     decisions: normalizeDecisions(source.decisions, id),
     messages: normalizeMessages(source.messages, id),
     auto_recovery: normalizeAutoRecovery(source.auto_recovery),
+    goal_shortfalls: normalizeGoalShortfalls(source.goal_shortfalls),
   };
+}
+
+/**
+ * goal_shortfalls of GET /works/{id}/view: a response from a server without the field reads as [];
+ * an entry without text and reason is dropped, and a missing resolution reads as null.
+ * @param {unknown} value
+ * @returns {WorkDetailView['goal_shortfalls']}
+ */
+function normalizeGoalShortfalls(value) {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!isRecord(entry) || typeof entry.text !== 'string' || typeof entry.reason !== 'string') return [];
+    const resolution = isRecord(entry.resolution) && typeof entry.resolution.evidence === 'string'
+      ? { evidence: entry.resolution.evidence, resolved_at: stringOr(entry.resolution.resolved_at) }
+      : null;
+    return [{
+      task_id: nullableString(entry.task_id),
+      task_title: nullableString(entry.task_title),
+      criterion_id: nullableString(entry.criterion_id),
+      text: entry.text,
+      reason: entry.reason,
+      source: entry.source === 'reviewer' || entry.source === 'final_check' ? entry.source : 'worker',
+      resolution,
+    }];
+  });
 }
 
 /**
@@ -420,6 +446,7 @@ export function normalizeWorkDetailData(value, requestedWorkId = 'unknown-work')
       decisions: [],
       messages: [],
       auto_recovery: normalizeAutoRecovery(null),
+      goal_shortfalls: [],
     };
   }
 }

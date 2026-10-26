@@ -27,6 +27,7 @@ interface StoredMeta {
   has_notification_channel_id: boolean;
   notification_channel_id?: string;
   account_id?: string;
+  owner_user_id?: string;
   last_tested_at: string | null;
   last_test_ok: boolean | null;
   created_at: string;
@@ -210,6 +211,7 @@ export class IntegrationStore {
     if (conversationChannelId) config.conversation_channel_id = conversationChannelId;
     if (notificationChannelId) config.notification_channel_id = notificationChannelId;
     if (metadata?.account_id) config.account_id = metadata.account_id;
+    if (metadata?.owner_user_id) config.owner_user_id = metadata.owner_user_id;
     return config;
   }
 
@@ -310,6 +312,7 @@ export class IntegrationStore {
       has_notification_channel_id: Boolean(channels.notification),
       ...(channels.notification ? { notification_channel_id: channels.notification } : {}),
       ...(config.account_id ? { account_id: config.account_id } : {}),
+      ...(config.owner_user_id ? { owner_user_id: config.owner_user_id } : {}),
       last_tested_at: existing?.last_tested_at ?? null,
       last_test_ok: existing?.last_test_ok ?? null,
       created_at: existing?.created_at ?? now,
@@ -329,6 +332,7 @@ export class IntegrationStore {
         configured,
         conversation_channel_id: channels.conversation ?? null,
         notification_channel_id: channels.notification ?? null,
+        owner_user_id: config?.owner_user_id ?? null,
         last_tested_at: stored?.last_tested_at ?? null,
         last_test_ok: stored?.last_test_ok ?? null,
       };
@@ -366,6 +370,9 @@ export class IntegrationStore {
       const value = patch[key];
       if (value !== undefined && value !== "") merged[key] = value;
     }
+    // An empty owner_user_id is the only metadata value that clears a setting.
+    if (patch.owner_user_id === "") delete merged.owner_user_id;
+    else if (patch.owner_user_id) merged.owner_user_id = patch.owner_user_id;
 
     if (!normalizeChannelId(merged.bot_token)) throw new Error(`${provider} bot_token is required.`);
     if (provider === "slack" && !normalizeChannelId(merged.app_token)) {
@@ -416,6 +423,7 @@ export class IntegrationStore {
       configured: isCompleteIntegrationConfig(provider, effective, effectiveChannels),
       conversation_channel_id: effectiveChannels.conversation ?? null,
       notification_channel_id: effectiveChannels.notification ?? null,
+      owner_user_id: effective.owner_user_id ?? null,
       last_tested_at: entry.last_tested_at,
       last_test_ok: entry.last_test_ok,
     };
@@ -601,6 +609,7 @@ function parseIntegrationConfig(value: unknown): IntegrationConfig | null {
     "conversation_channel_id",
     "notification_channel_id",
     "account_id",
+    "owner_user_id",
   ] as const) {
     if (typeof record[key] === "string" && record[key].length > 0) {
       config[key] = key === "channel_id" || key.endsWith("_channel_id")
@@ -620,6 +629,7 @@ function cloneIntegrationConfig(config: IntegrationConfig): IntegrationConfig {
     "conversation_channel_id",
     "notification_channel_id",
     "account_id",
+    "owner_user_id",
   ] as const) {
     if (config[key]) {
       clone[key] = key === "channel_id" || key.endsWith("_channel_id")
@@ -643,6 +653,7 @@ function normalizeIntegrationPatch(config: IntegrationConfigPatch): IntegrationC
     "conversation_channel_id",
     "notification_channel_id",
     "account_id",
+    "owner_user_id",
   ] as const) {
     const value = config[key];
     if (value !== undefined && typeof value !== "string") {

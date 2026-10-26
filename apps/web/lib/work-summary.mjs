@@ -12,7 +12,7 @@
  * (the definition the Advisor prompt is built from); tests keep them equal.
  * Plain JS imported by relative path, like agent-run-tree.mjs.
  *
- * @typedef {'request' | 'background' | 'approach' | 'acceptance' | 'notes'} WorkSummaryKey
+ * @typedef {'request' | 'background' | 'approach' | 'acceptance' | 'goals' | 'notes'} WorkSummaryKey
  *
  * @typedef {object} WorkSummarySection
  * @property {WorkSummaryKey} key
@@ -41,7 +41,8 @@ export const WORK_SUMMARY_SECTIONS = [
   { key: 'request', label: '依頼', label_en: 'Request', kind: 'text', required: true, guide: 'what should be done, in one to three sentences' },
   { key: 'background', label: '背景', label_en: 'Background', kind: 'text', required: false, guide: 'why it is needed and what the conversation established' },
   { key: 'approach', label: '方針', label_en: 'Approach', kind: 'text', required: false, guide: 'the agreed way to do it and its constraints' },
-  { key: 'acceptance', label: '受け入れ条件', label_en: 'Acceptance', kind: 'list', required: true, guide: 'conditions that make the Work done, one per line' },
+  { key: 'acceptance', label: '受け入れ条件', label_en: 'Acceptance', kind: 'list', required: true, guide: 'conditions without which the Work is not done, one per line; keep them few and checkable inside the Work' },
+  { key: 'goals', label: '目標', label_en: 'Goals', kind: 'list', required: false, guide: 'conditions that are wanted but not required, one per line: counts, procedures, and anything that depends on things outside the Work; an unmet goal is reported with its reason and does not stop the Work' },
   { key: 'notes', label: '注意', label_en: 'Notes', kind: 'text', required: false, guide: 'what must not be done and known pitfalls' },
 ];
 

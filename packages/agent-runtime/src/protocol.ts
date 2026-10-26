@@ -1,4 +1,4 @@
-import { cliTokenUsage, harnessOfAdapter, UNVERIFIABLE_STATUS } from "@owl/shared";
+import { CRITERION_REQUIREMENTS, cliTokenUsage, harnessOfAdapter, isNonBlankReason, UNVERIFIABLE_STATUS } from "@owl/shared";
 import { providerFailed, reportInvalid } from "./errors";
 import { opencodeFailureDetail, opencodeTokenUsage, parseOpencodeResult, unwrapOpencodeResult } from "./opencode-result";
 import { claudeRateLimitEvidence, codexRateLimitEvidence, type RateLimitResetInput } from "./rate-limit";
@@ -130,6 +130,13 @@ function isStatus(value: unknown): value is VerificationStatus {
   return typeof value === "string" && VERIFICATION_STATUSES.includes(value);
 }
 
+/** A goal criterion that is not met; only a goal criterion may carry it. */
+export const GOAL_UNMET_STATUS = "goal_unmet" as const;
+
+/** A goal_unmet item of a goal criterion is a reported shortfall, not a failure to count against success. */
+const isGoalShortfall = (item: { readonly status: string; readonly requirement?: string }): boolean =>
+  item.status === GOAL_UNMET_STATUS && item.requirement === "goal";
+
 /** verification (schema 1.1.0): per-criterion status and evidence, checks and the integration check. */
 function verificationField(payload: Record<string, unknown>): ReportVerificationV2 {
   const value = required(payload, "verification");
@@ -144,12 +151,14 @@ function verificationField(payload: Record<string, unknown>): ReportVerification
   }
   const ids = new Set<string>();
   for (const item of acceptance) {
-    // unverifiable_reason is optional so reports without it stay valid.
+    // The reason fields and requirement are optional so reports without them stay valid.
     const keys = ["criterion_id", "criterion", "status", "evidence"];
-    if (!isRecord(item) || !(onlyKeys(item, keys) || (onlyKeys(item, [...keys, "unverifiable_reason"]) &&
-      (item.unverifiable_reason === null || typeof item.unverifiable_reason === "string"))) ||
+    const optional = isRecord(item) ? ["unverifiable_reason", "shortfall_reason", "requirement"].filter((key) => key in item) : [];
+    if (!isRecord(item) || !onlyKeys(item, [...keys, ...optional]) ||
+      ["unverifiable_reason", "shortfall_reason"].some((key) => key in item && item[key] !== null && typeof item[key] !== "string") ||
+      ("requirement" in item && !(CRITERION_REQUIREMENTS as readonly unknown[]).includes(item.requirement)) ||
       !nonEmptyString(item.criterion_id) || !nonEmptyString(item.criterion) ||
-      !(isStatus(item.status) || item.status === UNVERIFIABLE_STATUS) || !nonEmptyString(item.evidence)) {
+      !(isStatus(item.status) || item.status === UNVERIFIABLE_STATUS || item.status === GOAL_UNMET_STATUS) || !nonEmptyString(item.evidence)) {
       throw reportInvalid("report_verification_acceptance_invalid");
     }
     if (ids.has(item.criterion_id)) throw reportInvalid("report_verification_criterion_id_duplicate");
@@ -345,7 +354,7 @@ export const REPORT_CORRECTION_RULES: readonly ReportCorrectionRule[] = [
   { name: "success_with_unpassed_verification", applies: (r) => r.verification.status !== "passed" },
   {
     name: "success_with_unpassed_item",
-    applies: (r) => [...r.verification.acceptance, ...r.verification.checks].some((item) => item.status !== "passed"),
+    applies: (r) => [...r.verification.acceptance.filter((item) => !isGoalShortfall(item)), ...r.verification.checks].some((item) => item.status !== "passed"),
   },
   { name: "success_with_needs_replanning", applies: (r) => r.needs_replanning },
   { name: "success_with_question_for_manager", applies: (r) => r.question_for_manager !== null },
@@ -374,9 +383,12 @@ export function correctReportSemantics(
  */
 export function validateReportSemantics(report: ReportEnvelope, hybrid?: HybridRouting): void {
   const { verification } = report;
+  if (verification.acceptance.some((item) => item.status === GOAL_UNMET_STATUS && !isNonBlankReason(item.shortfall_reason))) {
+    throw reportInvalid("report_semantics:goal_unmet_without_reason");
+  }
   if (report.result === "success") {
     if (verification.status !== "passed") throw reportInvalid(`report_semantics:success_with_verification_${verification.status}`);
-    const unmet = verification.acceptance.find((item) => item.status !== "passed")
+    const unmet = verification.acceptance.find((item) => item.status !== "passed" && !isGoalShortfall(item))
       ?? verification.checks.find((item) => item.status !== "passed");
     if (unmet) throw reportInvalid(`report_semantics:success_with_${unmet.status}_item`);
     if (report.needs_replanning) throw reportInvalid("report_semantics:success_with_needs_replanning");

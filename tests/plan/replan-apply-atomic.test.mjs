@@ -449,7 +449,8 @@ test("a cycle through a retried Task's new depends_on is rejected by validation 
   await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
   const decisions = managerDecisions(db, workId);
   assert.equal(decisions.length, 1);
-  assert.match(decisions[0].tried, /rejected twice.*dependency cycle/s);
+  assert.match(decisions[0].tried, /検証ではじかれました（3回）/);
+  assert.doesNotMatch(decisions[0].tried, /dependency cycle/);
   assert.deepEqual(dependencyIds(db, t2), [t1]);
   assert.equal(writeState(db, workId).plan_revision, baseline.plan_revision);
 

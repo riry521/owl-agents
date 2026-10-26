@@ -193,7 +193,7 @@ test("registerInboundUpload requires exactly one of conversation_id/conversation
     runReviewer: async () => { throw new Error("This validation test never runs a Reviewer."); },
     runAdvisor: async () => { throw new Error("This validation test never dispatches an Advisor turn."); },
   };
-  const { core } = await createTestCore(t, {
+  const { core, db } = await createTestCore(t, {
     agentRunner,
     version: "inbound-upload-validation-test",
     dispatcher: { tick_interval_ms: 25 },
@@ -243,7 +243,17 @@ test("registerInboundUpload requires exactly one of conversation_id/conversation
   });
   assert.equal(uploadedA.completed.status, "stored");
 
-  const hintB = { work_id: null, dm_ref: "validation-b", thread_ref: null };
+  // hintA resolves to the general window; hintB resolves to a Work conversation.
+  const workId = createUlid();
+  const workNow = new Date().toISOString();
+  await db.createWriteLane().transact((tx) => {
+    tx.run(
+      `INSERT INTO works (id, owner_id, project_id, title, summary, size, state, rules_json, related_work_ids_json, created_at, updated_at)
+       VALUES (?, ?, NULL, 'Upload Work', '', 'normal', 'running', '[]', '[]', ?, ?)`,
+      workId, ownerId, workNow, workNow,
+    );
+  });
+  const hintB = { work_id: workId, dm_ref: "validation-b", thread_ref: null };
   await assert.rejects(
     () => core.ingestInbound(ownerId, commandEnvelope({
       provider: "slack",

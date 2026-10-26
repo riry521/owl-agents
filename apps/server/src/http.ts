@@ -23,6 +23,10 @@ import { MemorySettingsValidationError, validateMemoryFolderKinds, type MemoryFo
 import { PlanUsageSettingsValidationError, validatePlanUsageSettings } from "../../../packages/shared/dist/plan-usage-settings.js";
 import { DependencySummarySettingsValidationError, validateDependencySummarySettings } from "../../../packages/shared/dist/dependency-summary-settings.js";
 import type { DependencySummarySettings } from "../../../packages/shared/dist/dependency-summary-settings.js";
+import { AdvisorWindowSettingsValidationError, defaultChannelName, normalizeChannelName, validateAdvisorWindowSettings } from "../../../packages/shared/dist/advisor-window-settings.js";
+import type { AdvisorWindowSettings } from "../../../packages/shared/dist/advisor-window-settings.js";
+import { GENERAL_WINDOW_KEY, type AdvisorWindowChannel, type AdvisorWindowSummary } from "../../../packages/shared/dist/advisor-windows.js";
+import { isChannelAdminError, type ChannelAdmin } from "../../../packages/plugin-sdk/dist/shared/channel-admin.js";
 import { VerificationPolicySettingsValidationError, validateVerificationPolicyPatch } from "../../../packages/shared/dist/verification-policy-settings.js";
 import type { VerificationPolicySettings } from "../../../packages/shared/dist/verification-policy-settings.js";
 import { ReviewLimitSettingsValidationError, validateReviewLimitSettings } from "../../../packages/shared/dist/review-limit-settings.js";
@@ -150,6 +154,12 @@ export interface OwlHttpOptions {
   readonly ruleStore?: RuleStore;
   /** Verifies the per-process tokens agent permission hooks send to the guard endpoint. */
   readonly guardTokens?: GuardTokenVerifier;
+  /** Reaches the running Slack / Discord connectors' channel API; absent means no connector can be reached. */
+  readonly channelAdmins?: ChannelAdminSource;
+}
+
+export interface ChannelAdminSource {
+  channelAdmin(provider: "slack" | "discord"): ChannelAdmin | null;
 }
 
 export interface ScreenViewLimits {
@@ -201,6 +211,7 @@ interface RequestContext {
   readonly knowledge: KnowledgeBase;
   readonly ruleStore: RuleStore;
   readonly guardTokens: GuardTokenVerifier | null;
+  readonly channelAdmins: ChannelAdminSource | null;
 }
 
 interface SessionSummaryPayload {
@@ -368,6 +379,18 @@ interface AutoRecoveryApiPort {
 interface RemakeLimitApiPort {
   getRemakeLimitSettings(): Promise<RemakeLimitSettings>;
   setRemakeLimitSettings(input: RemakeLimitSettings): Promise<RemakeLimitSettings>;
+}
+
+interface AdvisorWindowApiPort {
+  listAdvisorWindows(): Promise<AdvisorWindowSummary[]>;
+  listAdvisorChannelBindings(provider: string): Promise<Array<{ window_id: string; channel_id: string }>>;
+  ensureAdvisorWindow(ownerId: string, key: string): Promise<{ window_id: string; conversation_id: string } | null>;
+  getAdvisorChannelBinding(windowId: string, provider: string): Promise<AdvisorWindowChannel | null>;
+  findAdvisorChannelOwner(provider: string, channelId: string): Promise<{ window_id: string; window_key: string } | null>;
+  bindAdvisorChannel(windowId: string, provider: string, channelId: string, displayName: string): Promise<AdvisorWindowChannel>;
+  updateAdvisorChannelName(windowId: string, provider: string, displayName: string): Promise<boolean>;
+  getAdvisorWindowSettings(): Promise<AdvisorWindowSettings>;
+  setAdvisorWindowSettings(input: unknown): Promise<AdvisorWindowSettings>;
 }
 
 interface DependencySummaryApiPort {
@@ -1075,6 +1098,30 @@ function advisorSessionDatabase(value: unknown): AdvisorSessionReadDatabase | nu
   return value as unknown as AdvisorSessionReadDatabase;
 }
 
+/**
+ * The Advisor window a session request addresses: the window of `conversationId`
+ * when given, else the window named by `windowKey` (GENERAL_WINDOW_KEY or a Project id).
+ * Null when neither is given, or the conversation belongs to no window, so the
+ * caller falls back to the general window; "missing" when the named window does not exist yet.
+ */
+function resolveAdvisorSessionWindow(
+  database: AdvisorSessionReadDatabase | null,
+  ownerId: string,
+  conversationId: string | null,
+  windowKey: string | null,
+): { readonly window_id: string } | "missing" | null {
+  if (!database) return null;
+  if (conversationId) {
+    const row = database.get<{ advisor_window_id: string | null }>("SELECT advisor_window_id FROM conversations WHERE id = ?", conversationId);
+    if (row?.advisor_window_id) return { window_id: row.advisor_window_id };
+  }
+  if (!windowKey) return null;
+  const window = windowKey === GENERAL_WINDOW_KEY
+    ? database.get<{ id: string }>("SELECT id FROM advisor_windows WHERE owner_id = ? AND scope = 'general'", ownerId)
+    : database.get<{ id: string }>("SELECT id FROM advisor_windows WHERE owner_id = ? AND scope = 'project' AND project_id = ?", ownerId, windowKey);
+  return window ? { window_id: window.id } : "missing";
+}
+
 function requestUrl(request: IncomingMessage): URL {
   return new URL(request.url ?? "/", `http://${headerValue(request, "host") ?? "localhost"}`);
 }
@@ -1321,6 +1368,7 @@ export function validateIntegrationPayload(
     "conversation_channel_id",
     "notification_channel_id",
     "account_id",
+    "owner_user_id",
   ]);
   const extra = Object.keys(payload).filter((key) => !allowed.has(key));
   if (extra.length > 0) {
@@ -1336,6 +1384,7 @@ export function validateIntegrationPayload(
     "conversation_channel_id",
     "notification_channel_id",
     "account_id",
+    "owner_user_id",
   ];
   for (const field of stringFields) {
     if (!Object.prototype.hasOwnProperty.call(payload, field)) continue;
@@ -1343,6 +1392,13 @@ export function validateIntegrationPayload(
       throw new ApiError(400, "validation_error", `${field}は文字列で指定してください。`, { field });
     }
     const value = (payload[field] as string).trim();
+    if (field === "owner_user_id") {
+      if (provider !== "slack" || value.length > 64 || /\s/u.test(value)) {
+        throw new ApiError(400, "validation_error", "owner_user_idが不正です。Slackのみ、空白を含まない64文字以内で指定してください（空文字で未設定に戻します）。", { field });
+      }
+      result[field] = value;
+      continue;
+    }
     const max = field === "account_id" ? 26 : 4096;
     if (value.length === 0 || value.length > max) {
       throw new ApiError(400, "validation_error", `${field}が不正です。1〜${max}文字で指定してください。`, { field });
@@ -1475,7 +1531,7 @@ async function assertProjectPathNotRegistered(core: CorePort, canonicalPath: str
 }
 
 function validateProjectUpdatePayload(payload: JsonObject): UpdateProjectInput {
-  const allowed = ["name", "canonical_path", "auto_push", "commit_language", "worktree_setup_command", "worktree_refresh_command", "post_merge_command", "post_merge_install_command", "required_test_command", "test_run", "test_policy", "report_check_commands", "verification_plan"];
+  const allowed = ["name", "canonical_path", "auto_push", "advisor_window_enabled", "commit_language", "worktree_setup_command", "worktree_refresh_command", "post_merge_command", "post_merge_install_command", "required_test_command", "test_run", "test_policy", "report_check_commands", "verification_plan"];
   const extra = Object.keys(payload).filter((key) => !allowed.includes(key));
   if (extra.length > 0) {
     throw new ApiError(400, "validation_error", "UpdateProject payloadの項目が契約と一致しません。必須項目と余分な項目を確認してください。", { missing: [], extra });
@@ -1498,6 +1554,10 @@ function validateProjectUpdatePayload(payload: JsonObject): UpdateProjectInput {
   if (Object.prototype.hasOwnProperty.call(payload, "auto_push")) {
     if (typeof payload.auto_push !== "boolean") throw new ApiError(400, "validation_error", "自動pushはtrueかfalseで指定してください。");
     input.auto_push = payload.auto_push;
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "advisor_window_enabled")) {
+    if (typeof payload.advisor_window_enabled !== "boolean") throw new ApiError(400, "validation_error", "Advisorの窓を使うかはtrueかfalseで指定してください。");
+    input.advisor_window_enabled = payload.advisor_window_enabled;
   }
   if (Object.prototype.hasOwnProperty.call(payload, "commit_language")) {
     if (payload.commit_language !== null && payload.commit_language !== "ja" && payload.commit_language !== "en") throw new ApiError(400, "validation_error", "コミットメッセージの言語はja、en、nullのいずれかで指定してください。");
@@ -1603,7 +1663,7 @@ function validatePostMessagePayload(payload: JsonObject): PostMessageInput {
 
 function validateInboundMessage(value: unknown): InboundMessageInput {
   if (!isObject(value)) throw new ApiError(400, "validation_error", "Inbound messageはJSON objectで指定してください。");
-  exactKeys(value, ["provider", "account_id", "external_message_id", "user_id", "channel_id", "thread_id", "received_at", "text", "conversation_hint", "attachment_ids"], "InboundMessage");
+  exactKeys(value, ["provider", "account_id", "external_message_id", "user_id", "channel_id", "thread_id", "received_at", "text", "conversation_hint", "attachment_ids"], "InboundMessage", ["status_reply"]);
   if (value.provider !== "slack" && value.provider !== "discord") {
     throw new ApiError(400, "validation_error", "providerはslackまたはdiscordで指定してください。");
   }
@@ -1636,6 +1696,7 @@ function validateInboundMessage(value: unknown): InboundMessageInput {
     text,
     conversation_hint: { work_id, dm_ref, thread_ref },
     attachment_ids: value.attachment_ids as string[],
+    ...(value.status_reply === undefined ? {} : { status_reply: stringField(value.status_reply, "status_reply", 1, 100000) }),
   };
 }
 
@@ -2317,6 +2378,186 @@ function requireDependencySummaryApi(core: CorePort): DependencySummaryApiPort {
   return candidate;
 }
 
+interface AdvisorWindowScopePort {
+  windowProjectForSession(sessionId: string): string | null;
+  backlogItemProjects(itemIds: readonly string[]): Array<{ id: string; project_id: string | null }>;
+}
+
+/** The Project an Advisor's window is dedicated to; null when the caller is not an Advisor or its window is not a Project window. */
+function advisorWindowProject(core: CorePort, advisor: GuardTokenAgent | null): { port: AdvisorWindowScopePort; projectId: string } | null {
+  if (!advisor) return null;
+  const has = (value: unknown): value is AdvisorWindowScopePort => isObject(value)
+    && typeof value.windowProjectForSession === "function" && typeof value.backlogItemProjects === "function";
+  const wrapped = core as CorePort & { core?: unknown };
+  const port = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
+  if (!port) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support Advisor window scopes.");
+  const projectId = port.windowProjectForSession(advisor.agent_run_id);
+  return projectId === null ? null : { port, projectId };
+}
+
+function windowScopeMismatch(windowProjectId: string, requestedProjectId: string | null): ApiError {
+  return new ApiError(403, "window_scope_mismatch", "このAdvisorの窓は別のプロジェクトの専属です。そのプロジェクトの窓に引き継いでください。", {
+    window_project_id: windowProjectId,
+    requested_project_id: requestedProjectId,
+  });
+}
+
+function requireAdvisorWindowApi(core: CorePort): AdvisorWindowApiPort {
+  const has = (value: unknown): value is AdvisorWindowApiPort => isObject(value)
+    && typeof value.listAdvisorWindows === "function"
+    && typeof value.listAdvisorChannelBindings === "function"
+    && typeof value.ensureAdvisorWindow === "function"
+    && typeof value.getAdvisorChannelBinding === "function"
+    && typeof value.findAdvisorChannelOwner === "function"
+    && typeof value.bindAdvisorChannel === "function"
+    && typeof value.updateAdvisorChannelName === "function"
+    && typeof value.getAdvisorWindowSettings === "function"
+    && typeof value.setAdvisorWindowSettings === "function";
+  const wrapped = core as CorePort & { core?: unknown };
+  const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
+  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support Advisor windows.");
+  return candidate;
+}
+
+type ChannelProvider = "slack" | "discord";
+const CHANNEL_PROVIDERS: readonly ChannelProvider[] = ["slack", "discord"];
+type ChannelOperation = "create" | "rename" | "describe" | "invite";
+
+function channelProvider(value: string | undefined): ChannelProvider {
+  const provider = CHANNEL_PROVIDERS.find((candidate) => candidate === value);
+  if (!provider) throw new ApiError(400, "validation_error", "providerはslackまたはdiscordで指定してください。", { field: "provider" });
+  return provider;
+}
+
+async function integrationOf(context: RequestContext, provider: ChannelProvider): Promise<{ configured: boolean; channelIds: Set<string> }> {
+  const status = (await context.core.getIntegrations()).find((integration) => integration.provider === provider);
+  const ids = [status?.conversation_channel_id, status?.notification_channel_id]
+    .flatMap((value) => (value ?? "").split(/[\s,]+/u))
+    .filter((id) => id.length > 0);
+  return { configured: status?.configured ?? false, channelIds: new Set(ids) };
+}
+
+async function requireChannelAdmin(context: RequestContext, provider: ChannelProvider): Promise<ChannelAdmin> {
+  const admin = context.channelAdmins?.channelAdmin(provider) ?? null;
+  if (admin) return admin;
+  const { configured } = await integrationOf(context, provider);
+  throw new ApiError(503, "integration_not_running", `${provider}連携が動いていません。設定画面で連携を確認してください。`, { provider, configured });
+}
+
+/** Maps a connector's ChannelAdminError to the API error of design section 14; anything else passes through. */
+function channelAdminApiError(error: unknown, provider: ChannelProvider, operation: ChannelOperation): unknown {
+  if (!isChannelAdminError(error)) return error;
+  const providerCode = error.provider_code;
+  switch (error.code) {
+    case "permission_missing":
+      return new ApiError(422, "integration_permission_missing", error.message, { provider, operation, needed: [...error.needed] });
+    case "name_taken":
+      return new ApiError(409, "channel_name_taken", error.message, { provider });
+    case "invalid_name":
+      return new ApiError(422, "validation_error", error.message, { field: "name", provider, ...(providerCode ? { provider_code: providerCode } : {}) });
+    case "not_found":
+      return new ApiError(404, "channel_not_found", error.message, { provider });
+    case "bot_not_in_channel":
+      return new ApiError(422, "channel_bot_not_member", error.message, { provider, needed: [...error.needed] });
+    case "not_authorized":
+      return new ApiError(403, "integration_not_authorized", error.message, { provider });
+    case "rate_limited":
+      return new ApiError(429, "integration_rate_limited", error.message, { provider, retry_after_seconds: error.retry_after_seconds ?? null });
+    default:
+      return new ApiError(502, "integration_provider_error", error.message, { provider, provider_code: providerCode ?? null });
+  }
+}
+
+async function channelCall<T>(provider: ChannelProvider, operation: ChannelOperation, call: () => Promise<T>): Promise<T> {
+  try {
+    return await call();
+  } catch (error) {
+    throw channelAdminApiError(error, provider, operation);
+  }
+}
+
+/**
+ * Creates and binds a channel for each running provider that has none yet. Failures never undo the window's ON;
+ * they are returned per provider so the screen can show the reason.
+ */
+async function provisionWindowChannels(context: RequestContext, ownerId: string, key: string): Promise<JsonObject> {
+  const results: JsonObject = {};
+  try {
+    const api = requireAdvisorWindowApi(context.core);
+    const window = await api.ensureAdvisorWindow(ownerId, key);
+    if (!window) return results;
+    const settings = await api.getAdvisorWindowSettings();
+    for (const provider of CHANNEL_PROVIDERS) {
+      const admin = context.channelAdmins?.channelAdmin(provider) ?? null;
+      if (!admin) continue;
+      const existing = await api.getAdvisorChannelBinding(window.window_id, provider);
+      if (existing) {
+        results[provider] = { status: "already_bound", channel_id: existing.channel_id, display_name: existing.display_name };
+        continue;
+      }
+      try {
+        const name = channelNameFromPayload(defaultChannelName(projectNameOf(context, key), key, settings), settings);
+        const info = await channelCall(provider, "create", () => admin.createChannel(name));
+        await api.bindAdvisorChannel(window.window_id, provider, info.channel_id, info.name);
+        const result: JsonObject = { status: "bound", channel_id: info.channel_id, display_name: info.name, invite: "not_applicable" };
+        results[provider] = result;
+        if (provider !== "slack") continue;
+        const ownerUserId = (await context.core.getIntegrations()).find((integration) => integration.provider === provider)?.owner_user_id ?? null;
+        if (!ownerUserId) {
+          result.invite = "skipped_no_owner_user_id";
+          continue;
+        }
+        try {
+          await channelCall(provider, "invite", () => admin.inviteUsers(info.channel_id, [ownerUserId]));
+          result.invite = "invited";
+        } catch (error) {
+          result.invite = "failed";
+          result.invite_error = windowChannelError(error);
+        }
+      } catch (error) {
+        results[provider] = { status: "failed", error: windowChannelError(error) };
+      }
+    }
+  } catch (error) {
+    results.error = windowChannelError(error);
+  }
+  return results;
+}
+
+function windowChannelError(error: unknown): JsonObject {
+  if (error instanceof ApiError) {
+    const needed = error.details.needed;
+    return { code: error.code, message: error.message, ...(Array.isArray(needed) ? { needed: needed as string[] } : {}) };
+  }
+  return { code: "server_error", message: error instanceof Error ? error.message : String(error) };
+}
+
+function projectNameOf(context: RequestContext, key: string): string {
+  return (context.db as AdvisorSessionReadDatabase | null)?.get<{ name: string }>("SELECT name FROM projects WHERE id = ?", key)?.name ?? "";
+}
+
+function channelNameFromPayload(value: unknown, settings: AdvisorWindowSettings): string {
+  if (typeof value !== "string") throw new ApiError(422, "validation_error", "nameを文字列で指定してください。", { field: "name" });
+  const name = normalizeChannelName(value, settings);
+  if (name.length === 0) throw new ApiError(422, "validation_error", "nameに使える文字がありません。別の名前を指定してください。", { field: "name" });
+  return name;
+}
+
+function channelBindingBody(binding: AdvisorWindowChannel): JsonObject {
+  return { provider: binding.provider, channel_id: binding.channel_id, display_name: binding.display_name };
+}
+
+function validatedAdvisorWindowSettings(value: unknown): AdvisorWindowSettings {
+  try {
+    return validateAdvisorWindowSettings(value);
+  } catch (error) {
+    if (error instanceof AdvisorWindowSettingsValidationError) {
+      throw new ApiError(422, "validation_error", error.message, { field: error.field });
+    }
+    throw error;
+  }
+}
+
 function requireVerificationPolicyApi(core: CorePort): VerificationPolicyApiPort {
   const has = (value: unknown): value is VerificationPolicyApiPort => isObject(value)
     && typeof value.getVerificationPolicySettings === "function"
@@ -2842,6 +3083,15 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     requireOwner(request);
     const body = await readRequestBody(request);
     const command = commandEnvelope(body);
+    // A Project window's Advisor can only create Works in its own Project; an unset project_id means that Project.
+    const windowProject = advisorWindowProject(context.core, advisorAgent);
+    if (windowProject) {
+      const requested = command.payload.project_id;
+      if (requested !== undefined && requested !== null && requested !== windowProject.projectId) {
+        throw windowScopeMismatch(windowProject.projectId, typeof requested === "string" ? requested : null);
+      }
+      command.payload = { ...command.payload, project_id: windowProject.projectId };
+    }
     const payload = validateCreateWorkPayload(command.payload);
     const result = await runCommand(context, pathname, command, 201, async () => context.core.createWork(payload, command));
     sendJson(response, 201, result);
@@ -3544,7 +3794,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   }
 
   if (projectMatch && method === "PATCH") {
-    requireOwner(request);
+    const ownerId = requireOwner(request);
     const projectId = pathId(projectMatch[1], "project_id");
     const command = commandEnvelope(await readRequestBody(request));
     const input = validateProjectUpdatePayload(command.payload);
@@ -3553,6 +3803,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       const update: UpdateProjectInput = {};
       if (input.name !== undefined) update.name = input.name;
       if (input.auto_push !== undefined) update.auto_push = input.auto_push;
+      if (input.advisor_window_enabled !== undefined) update.advisor_window_enabled = input.advisor_window_enabled;
       if (input.commit_language !== undefined) update.commit_language = input.commit_language;
       if (input.worktree_setup_command !== undefined) update.worktree_setup_command = input.worktree_setup_command;
       if (input.worktree_refresh_command !== undefined) update.worktree_refresh_command = input.worktree_refresh_command;
@@ -3580,7 +3831,9 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
         }
       }
       const updated = await context.core.updateProject(projectId, update, command);
-      return { data: updated.data as unknown as JsonObject, version: updated.version };
+      const data = updated.data as unknown as JsonObject;
+      if (input.advisor_window_enabled === true) data.window_channels = await provisionWindowChannels(context, ownerId, projectId);
+      return { data, version: updated.version };
     });
     sendJson(response, 200, result);
     return;
@@ -3713,6 +3966,26 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     const api = requireDependencySummaryApi(context.core);
     const result = await runCommand(context, pathname, command, 200, async () => ({
       data: await api.setDependencySummarySettings(input) as unknown as JsonObject,
+      version: 0,
+    }));
+    sendJson(response, 200, result);
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/settings/advisor-windows` && method === "GET") {
+    requireOwner(request);
+    const data = await requireAdvisorWindowApi(context.core).getAdvisorWindowSettings();
+    sendJson(response, 200, { request_id: requestIdValue, data, version: 0 });
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/settings/advisor-windows` && method === "PUT") {
+    requireOwner(request);
+    const command = commandEnvelope(await readRequestBody(request));
+    const input = validatedAdvisorWindowSettings(command.payload);
+    const api = requireAdvisorWindowApi(context.core);
+    const result = await runCommand(context, pathname, command, 200, async () => ({
+      data: await api.setAdvisorWindowSettings(input) as unknown as JsonObject,
       version: 0,
     }));
     sendJson(response, 200, result);
@@ -4265,6 +4538,9 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     requireOwner(request);
     const command = commandEnvelope(await readRequestBody(request));
     const payload = validateIssueBacklogWorkPayload(command.payload);
+    const windowProject = advisorWindowProject(context.core, advisorAgent);
+    const foreign = windowProject?.port.backlogItemProjects(payload.item_ids).find((item) => item.project_id !== windowProject.projectId);
+    if (windowProject && foreign) throw windowScopeMismatch(windowProject.projectId, foreign.project_id);
     const result = await runCommand(context, pathname, command, 201, async () => {
       const issued = await requireBacklogApi(context.core).issueBacklogWork({ ...command, payload });
       return { data: issued.data, version: issued.version };
@@ -4927,6 +5203,139 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
+  if (pathname === `${API_PREFIX}/advisor/windows` && method === "GET") {
+    requireOwner(request);
+    const data = await requireAdvisorWindowApi(context.core).listAdvisorWindows();
+    sendJson(response, 200, { request_id: requestIdValue, data, version: 0 });
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/advisor/channel-bindings` && method === "GET") {
+    requireOwner(request);
+    const provider = url.searchParams.get("provider");
+    if (provider !== "slack" && provider !== "discord") {
+      throw new ApiError(400, "validation_error", "provider must be slack or discord.", { field: "provider" });
+    }
+    const bindings = await requireAdvisorWindowApi(context.core).listAdvisorChannelBindings(provider);
+    sendJson(response, 200, { request_id: requestIdValue, data: { bindings }, version: 0 });
+    return;
+  }
+
+  const advisorChannelsMatch = pathname.match(new RegExp(`^${API_PREFIX}/advisor/windows/([^/]+)/channels(?:/([^/]+))?$`));
+  if (advisorChannelsMatch) {
+    const key = decodeURIComponent(advisorChannelsMatch[1] ?? "");
+    const providerPart = advisorChannelsMatch[2];
+    const windowNotFound = () => new ApiError(404, "advisor_window_not_found", "指定されたAdvisorの窓が見つかりません。窓の一覧を読み直してください。", { key });
+
+    if (providerPart === undefined && method === "GET") {
+      const ownerId = requireOwner(request);
+      const api = requireAdvisorWindowApi(context.core);
+      const window = await api.ensureAdvisorWindow(ownerId, key);
+      if (!window) throw windowNotFound();
+      const settings = await api.getAdvisorWindowSettings();
+      const channels: JsonObject[] = [];
+      for (const provider of CHANNEL_PROVIDERS) {
+        const { configured } = await integrationOf(context, provider);
+        const admin = context.channelAdmins?.channelAdmin(provider) ?? null;
+        let binding = await api.getAdvisorChannelBinding(window.window_id, provider);
+        if (binding && admin) {
+          // Slack / Discord hold the real name; when it cannot be read the stored one stays.
+          const info = await admin.describeChannel(binding.channel_id).catch(() => null);
+          if (info && info.name !== binding.display_name && await api.updateAdvisorChannelName(window.window_id, provider, info.name)) {
+            binding = { ...binding, display_name: info.name };
+          }
+        }
+        channels.push({
+          provider,
+          configured,
+          running: admin !== null,
+          binding: binding ? { channel_id: binding.channel_id, display_name: binding.display_name } : null,
+          default_name: key === GENERAL_WINDOW_KEY ? null : defaultChannelName(projectNameOf(context, key), key, settings),
+        });
+      }
+      sendJson(response, 200, { request_id: requestIdValue, data: { channels }, version: 0 });
+      return;
+    }
+
+    if (providerPart !== undefined && (method === "POST" || method === "PUT" || method === "PATCH")) {
+      const ownerId = requireOwner(request);
+      const provider = channelProvider(providerPart);
+      const command = commandEnvelope(await readRequestBody(request));
+      if (key === GENERAL_WINDOW_KEY) {
+        throw new ApiError(422, "validation_error", "ジェネラリストのチャンネルは連携設定で決めます。", { field: "key" });
+      }
+      const api = requireAdvisorWindowApi(context.core);
+      const window = await api.ensureAdvisorWindow(ownerId, key);
+      if (!window) throw windowNotFound();
+      const settings = await api.getAdvisorWindowSettings();
+
+      if (method === "POST") {
+        const result = await runCommand(context, pathname, command, 201, async () => {
+          if (await api.getAdvisorChannelBinding(window.window_id, provider)) {
+            throw new ApiError(409, "window_channel_exists", "この窓には既にチャンネルが連携しています。名前を変えるか、既存の連携を確認してください。", { provider });
+          }
+          const name = channelNameFromPayload(command.payload.name ?? defaultChannelName(projectNameOf(context, key), key, settings), settings);
+          const admin = await requireChannelAdmin(context, provider);
+          const info = await channelCall(provider, "create", () => admin.createChannel(name));
+          try {
+            return { data: channelBindingBody(await api.bindAdvisorChannel(window.window_id, provider, info.channel_id, info.name)), version: 0 };
+          } catch (error) {
+            throw new ApiError(500, "server_error", "チャンネルは作れましたが、連携を保存できませんでした。既にあるチャンネルとして連携してください。", { provider, channel_id: info.channel_id, name: info.name }, { cause: error });
+          }
+        });
+        sendJson(response, 201, result);
+        return;
+      }
+
+      if (method === "PUT") {
+        const result = await runCommand(context, pathname, command, 200, async () => {
+          const channelId = stringField(command.payload.channel_id, "channel_id", 1, 200);
+          if (/\s/u.test(channelId)) throw new ApiError(400, "validation_error", "channel_idに空白は使えません。", { field: "channel_id" });
+          if ((await integrationOf(context, provider)).channelIds.has(channelId)) {
+            throw new ApiError(409, "channel_in_use", "このチャンネルは連携設定の会話・通知チャンネルです。別のチャンネルを選んでください。", { provider, channel_id: channelId });
+          }
+          const owner = await api.findAdvisorChannelOwner(provider, channelId);
+          if (owner && owner.window_id !== window.window_id) {
+            throw new ApiError(409, "channel_already_bound", "このチャンネルはほかの窓と連携しています。", { provider, window_key: owner.window_key });
+          }
+          const admin = await requireChannelAdmin(context, provider);
+          const info = await channelCall(provider, "describe", () => admin.describeChannel(channelId));
+          if (!info.bot_is_member) {
+            throw new ApiError(422, "channel_bot_not_member", "Botがこのチャンネルに入っていません。Botを招待してからやり直してください。", { provider });
+          }
+          return { data: channelBindingBody(await api.bindAdvisorChannel(window.window_id, provider, info.channel_id, info.name)), version: 0 };
+        });
+        sendJson(response, 200, result);
+        return;
+      }
+
+      const result = await runCommand(context, pathname, command, 200, async () => {
+        const existing = await api.getAdvisorChannelBinding(window.window_id, provider);
+        if (!existing) throw new ApiError(404, "channel_binding_not_found", "この窓にはチャンネルが連携していません。", { provider });
+        const name = channelNameFromPayload(command.payload.name, settings);
+        const admin = await requireChannelAdmin(context, provider);
+        const info = await channelCall(provider, "rename", () => admin.renameChannel(existing.channel_id, name));
+        await api.updateAdvisorChannelName(window.window_id, provider, info.name);
+        return { data: channelBindingBody({ ...existing, display_name: info.name }), version: 0 };
+      });
+      sendJson(response, 200, result);
+      return;
+    }
+  }
+
+  const advisorWindowConversationMatch = pathname.match(new RegExp(`^${API_PREFIX}/advisor/windows/([^/]+)/conversation$`));
+  if (advisorWindowConversationMatch && method === "GET") {
+    const ownerId = requireOwner(request);
+    const key = decodeURIComponent(advisorWindowConversationMatch[1] ?? "");
+    const api = requireAdvisorWindowApi(context.core);
+    // Same visibility as the list: a switched-off, unbound Project's window is not found even by URL.
+    const listed = (await api.listAdvisorWindows()).some((entry) => entry.key === key);
+    const window = listed ? await api.ensureAdvisorWindow(ownerId, key) : null;
+    if (!window) throw new ApiError(404, "advisor_window_not_found", "指定されたAdvisorの窓が見つかりません。窓の一覧を読み直してください。", { key });
+    sendJson(response, 200, { request_id: requestIdValue, conversation_id: window.conversation_id, window_id: window.window_id });
+    return;
+  }
+
   if (pathname === `${API_PREFIX}/advisor/conversation/active` && method === "GET") {
     requireOwner(request);
     const result = await context.core.getActiveConversation();
@@ -4937,13 +5346,19 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   if (pathname === `${API_PREFIX}/advisor/session` && method === "GET") {
     const ownerId = requireOwner(request);
     try {
-      const session = await featureCore.advisorSessions.getActiveSession(ownerId);
+      const database = advisorSessionDatabase(context.db);
+      const params = requestUrl(request).searchParams;
+      const target = resolveAdvisorSessionWindow(database, ownerId, nullableQuery(params.get("conversation_id")), nullableQuery(params.get("window")));
+      const session = target === "missing"
+        ? null
+        : target && featureCore.advisorSessions.getActiveSessionForWindow
+          ? await featureCore.advisorSessions.getActiveSessionForWindow(target.window_id)
+          : await featureCore.advisorSessions.getActiveSession(ownerId);
       if (!session) {
         sendJson(response, 200, { status: "none" });
         return;
       }
 
-      const database = advisorSessionDatabase(context.db);
       const sessionRow = database?.get<{
         provider_session_id: string | null;
         provider_id: string | null;
@@ -4996,6 +5411,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
 
       sendJson(response, 200, {
         status: session.status,
+        window_id: session.window_id ?? null,
         provider_session_id: sessionRow ? sessionRow.provider_session_id : session.provider_session_id ?? null,
         model: sessionRow ? sessionRow.model : session.model ?? null,
         effort: sessionRow ? sessionRow.effort : session.effort ?? null,
@@ -5016,12 +5432,19 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
   if (pathname === `${API_PREFIX}/advisor/session/restart` && method === "POST") {
     const ownerId = requireOwner(request);
     try {
-      const session = await featureCore.advisorSessions.getActiveSession(ownerId);
+      const body = isJsonContentType(headerValue(request, "content-type")) ? await readRequestBody(request) : {};
+      const windowKey = isObject(body) && typeof body.window === "string" && body.window.length > 0 ? body.window : GENERAL_WINDOW_KEY;
+      const target = resolveAdvisorSessionWindow(advisorSessionDatabase(context.db), ownerId, null, windowKey);
+      const session = target === "missing"
+        ? null
+        : target && featureCore.advisorSessions.getActiveSessionForWindow
+          ? await featureCore.advisorSessions.getActiveSessionForWindow(target.window_id)
+          : await featureCore.advisorSessions.getActiveSession(ownerId);
       if (!session) {
         sendJson(response, 404, { error: "no active session" });
         return;
       }
-      await context.core.restartAdvisorSession(ownerId);
+      await context.core.restartAdvisorSession(ownerId, windowKey);
       sendJson(response, 200, { restarted: true, ended_session_id: session.id });
     } catch (error) {
       await sendApiError(response, requestIdValue, error, `${method} ${pathname}`, context.core);
@@ -5791,6 +6214,7 @@ export function createOwlHttpServer(options: OwlHttpOptions): OwlHttpServer {
     }),
     ruleStore: options.ruleStore ?? new RuleStore(options.owlRoot),
     guardTokens: options.guardTokens ?? null,
+    channelAdmins: options.channelAdmins ?? null,
   };
   const runtimeConfig: RuntimeConfig = {
     base_path: "/owl/",

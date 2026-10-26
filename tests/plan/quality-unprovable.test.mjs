@@ -62,22 +62,23 @@ test("settings drive the verdict and are validated", () => {
   assert.equal(read.max_components, 9);
 });
 
-test("planQualityOutcome: repair first, then reject blocking codes only", () => {
+test("planQualityOutcome: repair before the last allowed call, then reject blocking codes only", () => {
   const blocking = [{ code: "external_state_comparison" }];
   const soft = [{ code: "acceptance_items_over" }];
-  assert.equal(planQualityOutcome(blocking, 0, S), "repair_requested");
-  assert.equal(planQualityOutcome(blocking, S.max_repair_requests, S), "rejected");
-  assert.equal(planQualityOutcome(soft, S.max_repair_requests, S), "accepted_with_warnings");
-  assert.equal(planQualityOutcome(blocking, S.max_repair_requests, { ...S, blocking_codes: [] }), "accepted_with_warnings");
+  assert.equal(planQualityOutcome(blocking, false, S), "repair_requested");
+  assert.equal(planQualityOutcome(soft, false, S), "repair_requested");
+  assert.equal(planQualityOutcome(blocking, true, S), "rejected");
+  assert.equal(planQualityOutcome(soft, true, S), "accepted_with_warnings");
+  assert.equal(planQualityOutcome(blocking, true, { ...S, blocking_codes: [] }), "accepted_with_warnings");
 });
 
 test("record_only_codes: a chars-over warning alone is accepted without repair and never reaches the repair message", () => {
   const chars = { code: "acceptance_chars_over", task_ref: "t", title: "t", detail: "d", measured: 1, threshold: 1 };
   const items = { code: "acceptance_items_over", task_ref: "t", title: "t", detail: "d", measured: 1, threshold: 1 };
-  assert.equal(planQualityOutcome([chars], 0, S), "accepted_with_warnings");
-  assert.equal(planQualityOutcome([chars, items], 0, S), "repair_requested");
+  assert.equal(planQualityOutcome([chars], false, S), "accepted_with_warnings");
+  assert.equal(planQualityOutcome([chars, items], false, S), "repair_requested");
   assert.deepEqual(repairableWarnings([chars, items], S).map((w) => w.code), ["acceptance_items_over"]);
-  assert.equal(planQualityOutcome([chars], 0, { ...S, record_only_codes: [] }), "repair_requested");
+  assert.equal(planQualityOutcome([chars], false, { ...S, record_only_codes: [] }), "repair_requested");
   assert.throws(() => validatePlanQualitySettings({ ...S, record_only_codes: ["nope"] }));
   assert.deepEqual(validatePlanQualitySettings({ ...S, record_only_codes: [] }).record_only_codes, []);
 });
@@ -161,11 +162,11 @@ test("initial plan: an external-state criterion is sent back, then rejected; not
   const workId = await startWork(core);
   assert.ok(await waitFor(() => outcomes(db, workId).includes("rejected")));
   assert.match(seen[1], /"task_ref":"A","title":"A title","code":"external_state_comparison"/);
-  assert.deepEqual(outcomes(db, workId).slice(0, 2), ["repair_requested", "rejected"]);
+  assert.deepEqual(outcomes(db, workId).slice(0, 3), ["repair_requested", "repair_requested", "rejected"]);
   assert.equal(taskCount(db, workId), 0);
 });
 
-test("initial plan: a repaired plan is accepted; a non-blocking warning alone is accepted after the repair", async (t) => {
+test("initial plan: a repaired plan is accepted; a non-blocking warning alone is accepted on the last call plan_rejection_attempts_max allows", async (t) => {
   const seen = [];
   const { db, core } = await openCore(t, [[managerTask("A", [ok, external])], [managerTask("A", [ok])]], seen);
   const workId = await startWork(core);
@@ -176,7 +177,7 @@ test("initial plan: a repaired plan is accepted; a non-blocking warning alone is
   const second = await openCore(t, [[managerTask("B", many)]], []);
   const workId2 = await startWork(second.core);
   assert.ok(await waitFor(() => taskCount(second.db, workId2) === 1));
-  assert.deepEqual(outcomes(second.db, workId2), ["repair_requested", "accepted_with_warnings"]);
+  assert.deepEqual(outcomes(second.db, workId2), ["repair_requested", "repair_requested", "accepted_with_warnings"]);
 });
 
 test("replan: an external-state criterion is sent back with the Task and code, then rejected with nothing applied", async (t) => {
@@ -185,7 +186,7 @@ test("replan: an external-state criterion is sent back with the Task and code, t
   const { workId, replan } = await startReplan(db, core);
   assert.ok(await waitFor(() => outcomes(db, workId).includes("rejected")));
   await replan;
-  assert.deepEqual(outcomes(db, workId).slice(0, 2), ["repair_requested", "rejected"]);
+  assert.deepEqual(outcomes(db, workId).slice(0, 3), ["repair_requested", "repair_requested", "rejected"]);
   assert.match(seen[1], /"task_ref":"N1","title":"N1 title","code":"external_state_comparison"/);
   assert.equal(taskCount(db, workId), 2);
 });

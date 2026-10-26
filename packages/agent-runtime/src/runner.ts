@@ -1512,7 +1512,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
       const outcome = await runAndParse(
         request,
         await executeProviderWithPlanUsage(request),
-        (answer) => parseDecisionExplanationResponse(answer, input),
+        (answer) => parseDecisionExplanationResponse(answer),
         resubmitLimitFor(),
         executeProviderWithPlanUsage,
       );

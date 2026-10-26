@@ -496,3 +496,27 @@ test("Slack: an uploadAttachment failure is announced and the text is still sent
     globalThis.fetch = originalFetch;
   }
 });
+
+test("Slack status_query posts the fixed answer, then records the message and that answer in Core once", async () => {
+  const { calls, request } = coreRequestFake();
+  const posts = [];
+  const connector = new SlackConnector({
+    botToken: "xoxb-status-record-test",
+    appToken: "xapp-status-record-test",
+    conversationChannelId: "C-STATUS-RECORD",
+    notificationChannelId: "C-STATUS-RECORD-NOTIFICATIONS",
+    coreApiBase: "http://127.0.0.1:1/api/v1",
+    accountId: "ACCT-SLACK-STATUS",
+  });
+  connector.web.chat.postMessage = async (message) => { posts.push(message); return { ok: true }; };
+  connector.core.requestPage = async () => ({ data: [], cursor: null, has_more: false });
+  connector.core.request = async (path, options) => (path.startsWith("/works") || path.startsWith("/decisions") ? [] : request(path, options));
+
+  await connector.handleMessage({ user: "U-STATUS", text: "/status", channel: "C-STATUS-RECORD", ts: "1712400000.000900" });
+
+  assert.equal(posts.length, 1);
+  const recordCalls = calls.filter((c) => c.path === "/inbound/messages");
+  assert.equal(recordCalls.length, 1);
+  assert.equal(recordCalls[0].body.text, "/status");
+  assert.equal(recordCalls[0].body.status_reply, posts[0].text);
+});

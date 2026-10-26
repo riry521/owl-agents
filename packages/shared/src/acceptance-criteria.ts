@@ -7,6 +7,51 @@ export const ACCEPTANCE_CRITERION_ID_PREFIX = "AC";
 export const CRITERION_KINDS = ["work_check", "spec_test"] as const;
 export type CriterionKind = (typeof CRITERION_KINDS)[number];
 
+/** required: the Task is not done without it. goal: wanted; when unmet the reason is reported and the Task still completes. */
+export const CRITERION_REQUIREMENTS = ["required", "goal"] as const;
+export type CriterionRequirement = (typeof CRITERION_REQUIREMENTS)[number];
+
+/** The one place that decides the default: an absent requirement is required. */
+export const criterionRequirement = (criterion: { readonly requirement?: CriterionRequirement }): CriterionRequirement =>
+  criterion.requirement ?? "required";
+export const isGoalCriterion = (criterion: { readonly requirement?: CriterionRequirement }): boolean =>
+  criterionRequirement(criterion) === "goal";
+
+/** A reason counts only when it has a non-space character. */
+export const isNonBlankReason = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
+
+/** Where an unmet goal was found. */
+export const GOAL_SHORTFALL_SOURCES = ["worker", "reviewer", "final_check"] as const;
+export type GoalShortfallSource = (typeof GOAL_SHORTFALL_SOURCES)[number];
+
+/** One goal criterion of a Task that was not met, with why (tasks.goal_shortfalls_json). */
+export interface GoalShortfall {
+  /** AC<k> of the Task. */
+  readonly criterion_id: string;
+  /** The stored criterion text. */
+  readonly text: string;
+  /** Never blank. */
+  readonly reason: string;
+  readonly source: "worker" | "reviewer";
+}
+
+/** One goal a final check found unmet (works.goal_shortfalls_json). */
+export interface WorkGoalRecord {
+  /** Set when the goal is a Task's goal criterion; null for a line of the Work summary's Goals section. */
+  readonly task_id: string | null;
+  /** AC<k> of that Task; null for a Work goal. */
+  readonly criterion_id: string | null;
+  /** The stored goal text, never the Manager's wording. */
+  readonly text: string;
+  /** The latest final check's reason. Never blank. */
+  readonly reason: string;
+  readonly source: "final_check";
+  /** When a final check first found it unmet. */
+  readonly recorded_at: string;
+  /** Set when a later final check showed it met; the record itself is never removed. */
+  readonly resolution: { readonly evidence: string; readonly resolved_at: string } | null;
+}
+
 /** Who a criterion comes from: the Owner's own words (summary, instruction, Decision answer) or the Manager. */
 export const CRITERION_ORIGIN_KINDS = ["owner", "manager"] as const;
 export const CRITERION_ORIGIN_SOURCES = ["summary", "instruction", "decision_answer"] as const;
@@ -44,6 +89,8 @@ export interface AcceptanceCriterion {
   readonly kind?: CriterionKind;
   /** Absent on criteria stored before it existed; those read as owner and are never loosened. */
   readonly origin?: CriterionOrigin;
+  /** Absent on criteria stored before it existed and when an output leaves it out; those read as required. */
+  readonly requirement?: CriterionRequirement;
 }
 
 /** A stored criterion; a Task planned with a free-text acceptance reads as one legacy criterion with unknown weight. */
@@ -54,7 +101,7 @@ export interface StoredAcceptanceCriterion extends Omit<AcceptanceCriterion, "ch
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const TEXT_FIELDS = ["text", "check", "serves", "if_omitted"] as const;
-const KEYS: readonly string[] = ["id", ...TEXT_FIELDS, "check_weight", "weight_reason", "kind", "origin"];
+const KEYS: readonly string[] = ["id", ...TEXT_FIELDS, "check_weight", "weight_reason", "kind", "origin", "requirement"];
 const ORIGIN_KEYS: readonly string[] = ["kind", "source", "quote"];
 
 function validOrigin(value: unknown): boolean {
@@ -85,6 +132,7 @@ export function acceptanceCriteriaProblems(value: unknown, requireKind = false):
     if (!(CHECK_WEIGHTS as readonly unknown[]).includes(entry.check_weight)) problems.push(`${at}.check_weight`);
     if ((requireKind || entry.kind !== undefined) && !(CRITERION_KINDS as readonly unknown[]).includes(entry.kind)) problems.push(`${at}.kind`);
     if (typeof entry.weight_reason !== "string" || (entry.check_weight === "heavy" && entry.weight_reason.trim() === "")) problems.push(`${at}.weight_reason`);
+    if (entry.requirement !== undefined && !(CRITERION_REQUIREMENTS as readonly unknown[]).includes(entry.requirement)) problems.push(`${at}.requirement`);
     if (entry.origin !== undefined && !validOrigin(entry.origin)) problems.push(`${at}.origin`);
     for (const key of Object.keys(entry)) if (!KEYS.includes(key)) problems.push(`${at}.${key}`);
   });
@@ -104,7 +152,7 @@ export function requestsSpecTest(criteria: readonly { readonly kind?: CriterionK
 
 /** The display text kept in tasks.acceptance; Core never reads it back. */
 export function renderAcceptanceCriteria(criteria: readonly AcceptanceCriterion[]): string {
-  return criteria.map((c) => `(${c.id.slice(ACCEPTANCE_CRITERION_ID_PREFIX.length)}) ${c.text}\n  check: ${c.check}`).join("\n");
+  return criteria.map((c) => `(${c.id.slice(ACCEPTANCE_CRITERION_ID_PREFIX.length)}) ${isGoalCriterion(c) ? "[goal] " : ""}${c.text}\n  check: ${c.check}`).join("\n");
 }
 
 /** Reads a stored Task's criteria: the JSON column when it holds a valid array, otherwise the free-text acceptance as one legacy criterion. The text is never split. */

@@ -23,13 +23,17 @@ const skip = esbuild ? false : "playwright-core / esbuild not available";
 
 const stubApi = `
 export const getOwnerLanguage = async () => 'ja';
-export const getActiveConversation= async () => 'conv1';
+export const getAdvisorWindowConversation = async () => 'conv1';
+export const getAdvisorWindowChannels = async () => [];
+export const createAdvisorWindowChannel = async () => {};
+export const bindAdvisorWindowChannel = async () => {};
+export const renameAdvisorWindowChannel = async () => {};
 export const getAdvisorSession = async () => ({ running_turns: 0, queued_turns: 0 });
-export const listMessages = async () => [];
+export const listMessages = async () => [{ id: 'm0', conversation_id: 'conv1', source: 'advisor', body: 'hi', attachment_ids: [], created_at: '2026-01-01T00:00:00Z' }];
 export const ingestConversation = async () => {};
 export const clearAdvisorConversation = async () => {};
 export const subscribeToUpdates = () => () => {};
-export const postMessage =async (_id, body) => { (window.__posts ??= []).push(body); return { message_id: 'm' + window.__posts.length }; };
+export const postMessage = async (_id, body) => { (window.__posts ??= []).push(body); if (window.__hold) await new Promise((r) => { window.__release = r; }); return { message_id: 'm' + window.__posts.length }; };
 `;
 
 let bundle;
@@ -55,8 +59,20 @@ before(async () => {
     plugins: [{
       name: "stub-api",
       setup(b) {
+        // Count renders: useView runs once per AdvisorView body render, formatRelative once per Turn render.
+        b.onResolve({ filter: /^@\/lib\/(view-loader|format)$/ }, (a) => ({ path: a.path, namespace: "counted" }));
+        b.onLoad({ filter: /.*/, namespace: "counted" }, (a) => a.path.endsWith("view-loader")
+          ? { contents: `import { useView as real } from ${JSON.stringify(join(webDir, "lib/view-loader.ts"))}; export const useView = (...a) => { window.__bodyRenders = (window.__bodyRenders ?? 0) + 1; return real(...a); };`, loader: "js", resolveDir: webDir }
+          : { contents: `import * as real from ${JSON.stringify(join(webDir, "lib/format.ts"))}; export * from ${JSON.stringify(join(webDir, "lib/format.ts"))}; export const formatRelative = (...a) => { window.__turnRenders = (window.__turnRenders ?? 0) + 1; return real.formatRelative(...a); };`, loader: "js", resolveDir: webDir });
         b.onResolve({ filter: /^@\/lib\/api-client$/ }, () => ({ path: "api", namespace: "stub" }));
         b.onLoad({ filter: /.*/, namespace: "stub" }, () => ({ contents: stubApi, loader: "js", resolveDir: webDir }));
+        // next/link reads process.env in the browser bundle; the panel only needs the import to resolve.
+        b.onResolve({ filter: /^next\/link$/ }, () => ({ path: "link", namespace: "stub-link" }));
+        b.onLoad({ filter: /.*/, namespace: "stub-link" }, () => ({
+          contents: 'import { createElement } from "react"; export default ({ href, children, ...p }) => createElement("a", { href, ...p }, children);',
+          loader: "js",
+          resolveDir: webDir,
+        }));
       },
     }],
   });
@@ -76,8 +92,12 @@ async function open(engine, mobile) {
   await page.setContent('<div id="root"></div>');
   await page.addScriptTag({ content: bundle });
   await page.waitForSelector("textarea");
+  // The mount's own resize frame must run before the observer starts; with a slow machine it can otherwise land mid-test.
+  await page.clock.fastForward(100);
   // Every change of the style attribute (i.e. style.height) is one record.
+  // Start from a px height so the product's reset to "" is a real write, as in use after the first resize.
   await page.evaluate(() => {
+    document.querySelector("textarea").style.height = "40px";
     window.__heightObserver = new MutationObserver((records) => { window.__heightWrites += records.length; });
     window.__heightObserver.observe(document.querySelector("textarea"), { attributes: true, attributeFilter: ["style"] });
     window.__heightWrites = 0;
@@ -120,7 +140,11 @@ for (const engine of ["chromium", "webkit"]) {
     assert.equal(mid.height, initial.height);
     assert.equal(mid.value, "が", "polling did not reset the unconfirmed value");
     await compose(page, "end", "が");
-    assert.equal((await state(page)).writes, initial.writes + 2, "one resize (auto, then px) after composition end");
+    const end = await state(page);
+    // With field-sizing the browser sizes the box and no JS runs; without it, one resize (auto, then px) runs after composition end.
+    const native = await page.evaluate(() => CSS.supports("field-sizing: content"));
+    assert.equal(end.writes, initial.writes + (native ? 0 : 2));
+    if (!native) assert.match(end.height, /^\d+px$/);
     let text = "が";
     for (const ch of ["ぱ", "っ", "ゃ"]) {
       await compose(page, "start", text + ch);
@@ -150,3 +174,35 @@ for (const engine of ["chromium", "webkit"]) {
     await page.context().close();
   });
 }
+
+test("typing re-renders neither AdvisorView nor the turns", { skip }, async () => {
+  const page = await open("chromium", false);
+  await page.waitForSelector(".turn");
+  const counts = () => page.evaluate(() => [window.__bodyRenders, window.__turnRenders]);
+  const before = await counts();
+  assert.ok(before[0] > 0 && before[1] > 0, "counters are wired");
+  await page.locator("textarea").pressSequentially("hello world", { delay: 5 });
+  await page.clock.fastForward(100);
+  assert.equal(await page.locator("textarea").inputValue(), "hello world");
+  assert.deepEqual(await counts(), before);
+  await page.context().close();
+});
+
+test("keeps input enabled and empty while sending, and refocuses the textarea afterwards", { skip }, async () => {
+  const page = await open("chromium", false);
+  const ta = page.locator("textarea");
+  const send = page.locator("button.advisor__send");
+  await page.evaluate(() => { window.__hold = true; });
+  await ta.fill("hello");
+  await send.click();
+  await page.waitForFunction(() => window.__posts?.length === 1 && window.__release);
+  assert.ok(await ta.isEnabled(), "textarea stays enabled while sending");
+  assert.equal(await ta.inputValue(), "", "textarea cleared before the response");
+  assert.ok(await send.isDisabled(), "send button disabled while sending");
+  await ta.evaluate((el) => el.blur());
+  await page.evaluate(() => { window.__hold = false; window.__release(); });
+  await page.waitForFunction(() => document.activeElement === document.querySelector("textarea"));
+  assert.ok(await ta.isEnabled());
+  assert.equal(await ta.inputValue(), "");
+  await page.context().close();
+});

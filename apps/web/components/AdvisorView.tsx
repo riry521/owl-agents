@@ -1,28 +1,46 @@
 'use client';
 
-import { type FormEvent, type KeyboardEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { type FormEvent, type KeyboardEvent, type Ref, useCallback, useEffect, useLayoutEffect, memo, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { clearAdvisorConversation, getActiveConversation, getAdvisorSession, ingestConversation, listMessages, postMessage } from '@/lib/api-client';
+import { clearAdvisorConversation, getAdvisorWindowConversation, getAdvisorSession, ingestConversation, listMessages, postMessage } from '@/lib/api-client';
 import type { AdvisorSessionInfo, Message } from '@/lib/types';
-import { formatClock, formatDateTime, formatRelative, newUlid } from '@/lib/format';
+import { formatClock, formatDateTime, formatRelative } from '@/lib/format';
 import { useLocale } from '@/lib/i18n';
+import { AdvisorChannelPanel } from '@/components/AdvisorChannelPanel';
 import { SendIcon } from '@/components/icons';
 import { useView } from '@/lib/view-loader';
 import { replyArrived } from '@/lib/advisor-awaiting.mjs';
+import { DEFAULT_WINDOW_KEY, viaLabelKey } from '@/lib/advisor-windows.mjs';
 
 const PENDING_POLL_INTERVAL_MS = 1_500;
 const AWAITING_REPLY_TIMEOUT_MS = 60_000;
+const RELATIVE_TIME_TICK_MS = 30_000;
+// Turns rendered when a window opens; "show earlier" adds this many more. Each advisor turn parses Markdown.
+const VISIBLE_MESSAGES_STEP = 30;
 
 interface AwaitingReply {
   messageId: string;
 }
 
-export function AdvisorView() {
+interface AdvisorViewProps {
+  // The window's conversation when the window list already knows it; skips the lookup request.
+  knownConversationId?: string | null;
+  windowKey?: string;
+  // channelControls shows the channel button; only the Advisor page turns it on.
+  channelControls?: boolean;
+  // Omitting all of the props below keeps the Home/Board markup unchanged.
+  windowName?: string;
+  windowScope?: 'general' | 'project';
+  // Only when given, the heading gets a window-name button (shown on narrow screens) that opens the picker sheet.
+  onOpenWindowPicker?: () => void;
+  windowPickerOpen?: boolean;
+  windowTriggerRef?: Ref<HTMLButtonElement>;
+}
+
+export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationId = null, channelControls = false, windowName, windowScope, onOpenWindowPicker, windowPickerOpen = false, windowTriggerRef }: AdvisorViewProps = {}) {
   const { t, locale } = useLocale();
-  const [conversationId, setConversationId] = useState<string | null>(null);
-  const [now, setNow] = useState(0);
-  const [draft, setDraft] = useState('');
+  const [visibleCount, setVisibleCount] = useState(VISIBLE_MESSAGES_STEP);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [clearError, setClearError] = useState<string | null>(null);
@@ -33,20 +51,15 @@ export function AdvisorView() {
   const [isTouchDevice, setIsTouchDevice] = useState(false);
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const followMessagesRef = useRef(true);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-  const composingRef = useRef(false);
   // Both views poll while a reply is awaited: the enqueue lands after the send returns, so the session
   // can still read idle and nothing else would refresh them (the spinner then stalls or vanishes).
   const [awaitingReply, setAwaitingReply] = useState<AwaitingReply | null>(null);
+  const [channelsOpen, setChannelsOpen] = useState(false);
+  const channelsButtonRef = useRef<HTMLButtonElement | null>(null);
 
-  useEffect(() => {
-    void getActiveConversation()
-      .then((id) => setConversationId(id))
-      .catch((error) => {
-        console.error('[Owl] Failed to get active conversation', error);
-        setConversationId(newUlid());
-      });
-  }, []);
+  // No fallback id on failure: a conversation made up here would belong to no window.
+  const conversationView = useView<string>(knownConversationId ? null : `advisor-window:${windowKey}`, () => getAdvisorWindowConversation(windowKey));
+  const conversationId = knownConversationId ?? conversationView.data ?? null;
 
   useEffect(() => {
     const query = window.matchMedia('(hover: none) and (pointer: coarse)');
@@ -81,16 +94,13 @@ export function AdvisorView() {
     () => (messagesView.data ? [...messagesView.data].sort((a, b) => a.created_at.localeCompare(b.created_at)) : null),
     [messagesView.data],
   );
-  const loadError = messagesView.error ? humanizeLoadError(messagesView.error, t) : null;
+  const loadErrorSource = conversationView.error ?? messagesView.error;
+  const loadError = loadErrorSource ? humanizeLoadError(loadErrorSource, t) : null;
   const refreshMessages = messagesView.refresh;
   const refreshSession = sessionView.refresh;
   const refresh = useCallback(async () => {
     await Promise.all([refreshMessages(), refreshSession()]);
   }, [refreshMessages, refreshSession]);
-
-  useEffect(() => {
-    if (messagesView.data) setNow(Date.now());
-  }, [messagesView.data]);
 
   useEffect(() => {
     if (messagesView.error) console.error('[Owl] Advisor conversation load failed', messagesView.error);
@@ -132,37 +142,28 @@ export function AdvisorView() {
     followMessagesRef.current = distanceFromBottom <= 48;
   }
 
-  // Touching style.height mid-composition makes mobile IMEs drop the
-  // unconfirmed text, so resize only outside composition and on its end.
-  const resizeTextarea = useCallback(() => {
-    const ta = textareaRef.current;
-    if (!ta || composingRef.current) return;
-    ta.style.height = 'auto';
-    ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
-  }, []);
-
-  useEffect(resizeTextarea, [draft, resizeTextarea]);
-
-  async function handleSend() {
-    if (!conversationId) return;
-    const body = draft.trim();
+  // Resolves true when the message was posted; false tells the composer to restore its draft.
+  async function handleSend(text: string): Promise<boolean> {
+    if (!conversationId) return false;
+    const body = text.trim();
     if (!body) {
       setSendError(t('advisor.messageRequired'));
-      return;
+      return false;
     }
     setSending(true);
     setSendError(null);
     try {
       const posted = await postMessage(conversationId, body);
       setAwaitingReply({ messageId: posted.message_id });
-      setDraft('');
-      await refresh();
+      // Not awaited: the composer is already empty, and the reply is polled anyway.
+      refresh().catch((error) => console.error('[Owl] Advisor refresh after send failed', error));
+      return true;
     } catch (error) {
       console.error('[Owl] Advisor message send failed', error);
       setSendError(humanizeSendError(error, t));
+      return false;
     } finally {
       setSending(false);
-      textareaRef.current?.focus();
     }
   }
 
@@ -222,21 +223,6 @@ export function AdvisorView() {
         : t('advisor.providerPausedUntil', { time: pausedClock }))
       : t('advisor.waitingInQueue');
 
-  function onSubmit(ev: FormEvent<HTMLFormElement>) {
-    ev.preventDefault();
-    void handleSend();
-  }
-
-  function onKeyDown(ev: KeyboardEvent<HTMLTextAreaElement>) {
-    // Touch devices never send on a key; only the send button does. Desktop
-    // sends on Shift+Enter and leaves plain Enter as a newline.
-    if (isTouchDevice) return;
-    if (ev.key === 'Enter' && ev.shiftKey && !composingRef.current && !ev.nativeEvent.isComposing && ev.nativeEvent.keyCode !== 229) {
-      ev.preventDefault();
-      void handleSend();
-    }
-  }
-
   if (!conversationId || messages === null) {
     return loadError ? <div className="advisor-error">{loadError}</div> : <p className="advisor-loading">{t('common.loading')}</p>;
   }
@@ -246,21 +232,50 @@ export function AdvisorView() {
       <div className="advisor__header">
         <div className="advisor__header-left">
           <img src="/owl/icon.png" alt="Owl" className="advisor__header-icon" width={24} height={24} />
-          <span className="advisor__header-title">{t('advisor.title')}</span>
-          {sessionInfo && (
+          <span className="advisor__header-title" title={windowName}>{windowName ?? t('advisor.title')}</span>
+          {onOpenWindowPicker && (
+            <button
+              type="button"
+              ref={windowTriggerRef}
+              className="advisor__window-trigger"
+              aria-haspopup="dialog"
+              aria-expanded={windowPickerOpen}
+              aria-label={t('advisorWindows.openPicker', { name: windowName ?? t('advisor.title') })}
+              title={windowName}
+              onClick={onOpenWindowPicker}
+            >
+              <span className="advisor__window-trigger-name">{windowName ?? t('advisor.title')}</span>
+              <span className="advisor__window-trigger-caret" aria-hidden="true" />
+            </button>
+          )}
+          {(sessionInfo || windowScope) && (
             <div className="advisor__session-badges" aria-label={t('advisor.sessionStatusLabel')}>
-              {sessionInfo.model && (
-                <span className="advisor__session-badge advisor__session-badge--model">{sessionInfo.model}</span>
+              {windowScope && (
+                <span className={windowScope === 'project' ? 'badge badge--accent' : 'badge'}>
+                  {t(windowScope === 'project' ? 'advisorWindows.scopeProject' : 'advisorWindows.scopeGeneral')}
+                </span>
               )}
-              <span className={`advisor__session-badge advisor__session-badge--${sessionInfo.status === 'suspended' ? 'suspended' : sessionInfo.status === 'none' ? 'none' : 'running'}`}>
-                {sessionStatusLabel(sessionInfo.status, t)}
-              </span>
-              <span className="advisor__session-badge">
-                {t('advisor.compactions', { count: String(sessionInfo.compaction_count ?? 0) })}
-              </span>
+              {sessionInfo && (
+                <>
+                  {sessionInfo.model && (
+                    <span className="advisor__session-badge advisor__session-badge--model">{sessionInfo.model}</span>
+                  )}
+                  <span className={`advisor__session-badge advisor__session-badge--${sessionInfo.status === 'suspended' ? 'suspended' : sessionInfo.status === 'none' ? 'none' : 'running'}`}>
+                    {sessionStatusLabel(sessionInfo.status, t)}
+                  </span>
+                  <span className="advisor__session-badge">
+                    {t('advisor.compactions', { count: String(sessionInfo.compaction_count ?? 0) })}
+                  </span>
+                </>
+              )}
             </div>
           )}
         </div>
+        {channelControls && (
+          <button ref={channelsButtonRef} type="button" className="advisor__channels-button" aria-haspopup="dialog" aria-expanded={channelsOpen} onClick={() => setChannelsOpen(!channelsOpen)}>
+            {t('advisorWindows.channelsButton')}
+          </button>
+        )}
         <div className="advisor__kebab-wrap">
           <button className="advisor__kebab" onClick={() => setMenuOpen(!menuOpen)} aria-label="Menu">⋮</button>
           {menuOpen && (
@@ -279,6 +294,10 @@ export function AdvisorView() {
         </div>
       </div>
 
+      {channelControls && channelsOpen && (
+        <AdvisorChannelPanel windowKey={windowKey} generalist={windowKey === DEFAULT_WINDOW_KEY} onClose={() => setChannelsOpen(false)} returnFocusTo={channelsButtonRef} />
+      )}
+
       {knowledgeSaveNotice && <div className="note note--success">{knowledgeSaveNotice}</div>}
       {knowledgeSaveError && <div className="advisor-error">{knowledgeSaveError}</div>}
       {clearError && <div className="advisor-error">{clearError}</div>}
@@ -288,13 +307,20 @@ export function AdvisorView() {
         {messages.length === 0 ? (
           <div className="advisor__empty">
             <div className="advisor__empty-icon"><img src="/owl/icon.png" alt="Owl" width={48} height={48} style={{ borderRadius: "10px" }} /></div>
-            <h2>{t('advisor.title')}</h2>
+            <h2>{windowName ?? t('advisor.title')}</h2>
             <p>{t('advisor.emptyMessage')}<br />{t('advisor.emptyHint')}</p>
           </div>
         ) : (
-          messages.map((m) => (
-            <Turn key={m.id} message={m} now={now} />
-          ))
+          <>
+            {messages.length > visibleCount && (
+              <button type="button" className="advisor__show-earlier" onClick={() => setVisibleCount((n) => n + VISIBLE_MESSAGES_STEP)}>
+                {t('advisor.showEarlier')}
+              </button>
+            )}
+            {messages.slice(-visibleCount).map((m) => (
+              <Turn key={m.id} message={m} />
+            ))}
+          </>
         )}
         {showIndicator && (
           <div className="turn turn--advisor">
@@ -315,59 +341,160 @@ export function AdvisorView() {
       </div>
 
       <div className="advisor__input-area">
-        <form onSubmit={onSubmit} className="advisor__form">
-          <div className="advisor__input-wrap">
-            <textarea
-              ref={textareaRef}
-              className="advisor__textarea"
-              onCompositionStart={() => { composingRef.current = true; }}
-              onCompositionEnd={() => {
-                composingRef.current = false;
-                resizeTextarea();
-              }}
-              value={draft}
-              onChange={(ev) => setDraft(ev.target.value)}
-              onKeyDown={onKeyDown}
-              placeholder={t('advisor.placeholder')}
-              maxLength={100000}
-              disabled={sending}
-              rows={2}
-              enterKeyHint="enter"
-            />
-            <button
-              type="submit"
-              className="advisor__send"
-              disabled={sending || !draft.trim()}
-              aria-label={t('advisor.sendLabel')}
-            >
-              <SendIcon />
-            </button>
-          </div>
-          {sendError && <div className="advisor-error advisor-error--send">{sendError}</div>}
-          <p className="advisor__hint">{t(isTouchDevice ? 'advisor.hintTouch' : 'advisor.hint')}</p>
-        </form>
+        <AdvisorComposer sending={sending} sendError={sendError} isTouchDevice={isTouchDevice} onSend={handleSend} />
       </div>
     </div>
   );
 }
 
-function Turn({ message, now }: { message: Message; now: number }) {
-  const { locale, t } = useLocale();
+// The input lives here, not in AdvisorView, so it never re-renders the conversation.
+function AdvisorComposer({ sending, sendError, isTouchDevice, onSend }: {
+  sending: boolean;
+  sendError: string | null;
+  isTouchDevice: boolean;
+  onSend: (text: string) => Promise<boolean>;
+}) {
+  const { t } = useLocale();
+  // The text stays in the uncontrolled textarea; state only tracks empty vs. not, for the send button.
+  const [hasText, setHasText] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composingRef = useRef(false);
+  const frameRef = useRef(0);
+  // A ref, not the disabled prop: the textarea stays enabled so the draft clears at once.
+  const sendingRef = useRef(false);
+
+  // Touching style.height mid-composition makes mobile IMEs drop the
+  // unconfirmed text, so resize only outside composition and on its end.
+  const resizeTextarea = useCallback(() => {
+    const ta = textareaRef.current;
+    if (!ta || composingRef.current) return;
+    ta.style.height = '';
+    ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
+  }, []);
+
+  // At most one measurement per frame: each one forces a layout of the whole page.
+  // Browsers with field-sizing: content size the box themselves, so no JS runs there.
+  const scheduleResize = useCallback(() => {
+    if (typeof CSS !== 'undefined' && CSS.supports('field-sizing: content')) return;
+    cancelAnimationFrame(frameRef.current);
+    frameRef.current = requestAnimationFrame(resizeTextarea);
+  }, [resizeTextarea]);
+
+  useEffect(() => () => cancelAnimationFrame(frameRef.current), []);
+
+  async function send() {
+    const ta = textareaRef.current;
+    if (!ta || sendingRef.current) return;
+    const text = ta.value;
+    const clear = text.trim() !== '';
+    sendingRef.current = true;
+    if (clear) {
+      ta.value = '';
+      setHasText(false);
+      scheduleResize();
+    }
+    let posted = false;
+    try {
+      posted = await onSend(text);
+    } finally {
+      sendingRef.current = false;
+      ta.focus();
+    }
+    // Restore only into an empty box: text typed since the send is newer than the failed draft and must not be overwritten.
+    if (!posted && clear && ta.value === '') {
+      ta.value = text;
+      setHasText(true);
+      scheduleResize();
+    }
+  }
+
+  function onSubmit(ev: FormEvent<HTMLFormElement>) {
+    ev.preventDefault();
+    void send();
+  }
+
+  function onKeyDown(ev: KeyboardEvent<HTMLTextAreaElement>) {
+    // Touch devices never send on a key; only the send button does. Desktop
+    // sends on Shift+Enter and leaves plain Enter as a newline.
+    if (isTouchDevice) return;
+    if (ev.key === 'Enter' && ev.shiftKey && !composingRef.current && !ev.nativeEvent.isComposing && ev.nativeEvent.keyCode !== 229) {
+      ev.preventDefault();
+      void send();
+    }
+  }
+
+  return (
+    <form onSubmit={onSubmit} className="advisor__form">
+      <div className="advisor__input-wrap">
+        <textarea
+          ref={textareaRef}
+          className="advisor__textarea"
+          onCompositionStart={() => { composingRef.current = true; }}
+          onCompositionEnd={() => {
+            composingRef.current = false;
+            scheduleResize();
+          }}
+          onChange={(ev) => {
+            const next = ev.target.value.trim() !== '';
+            if (next !== hasText) setHasText(next);
+            scheduleResize();
+          }}
+          onKeyDown={onKeyDown}
+          placeholder={t('advisor.placeholder')}
+          maxLength={100000}
+          rows={2}
+          enterKeyHint="enter"
+        />
+        <button
+          type="submit"
+          className="advisor__send"
+          disabled={sending || !hasText}
+          aria-label={t('advisor.sendLabel')}
+        >
+          <SendIcon />
+        </button>
+      </div>
+      {sendError && <div className="advisor-error advisor-error--send">{sendError}</div>}
+      <p className="advisor__hint">{t(isTouchDevice ? 'advisor.hintTouch' : 'advisor.hint')}</p>
+    </form>
+  );
+}
+
+// memo: AdvisorView re-renders on every poll; without it every turn re-parses its Markdown each time.
+const Turn = memo(function Turn({ message }: { message: Message }) {
+  const { t } = useLocale();
   const fromAdvisor = message.source === 'advisor';
+  const viaKey = fromAdvisor ? null : viaLabelKey(message.source);
   return (
     <div className={`turn turn--${fromAdvisor ? 'advisor' : 'owner'}`}>
       <div className="turn__content">
         <div className="turn__header">
           <span className={`turn__dot turn__dot--${fromAdvisor ? 'advisor' : 'owner'}`} />
-          <span className="turn__name">{fromAdvisor ? t('advisor.nameAdvisor') : t('advisor.nameYou')}</span>
-          <span className="turn__time">{formatRelative(message.created_at, now, locale)}</span>
+          <span className="turn__name">{fromAdvisor ? t('advisor.nameAdvisor') : t('advisor.nameYou') + (viaKey ? t(viaKey) : '')}</span>
+          <span className="turn__time"><RelativeTime iso={message.created_at} /></span>
         </div>
         <div className={`turn__body${fromAdvisor ? '' : ' turn__body--plain'}`}>
-          {fromAdvisor ? <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>{message.body}</ReactMarkdown> : message.body}
+          {fromAdvisor ? <MarkdownBody body={message.body} /> : message.body}
         </div>
       </div>
     </div>
   );
+});
+
+// Keyed on the body string, so a refetch that returns equal text never re-parses the Markdown.
+const MarkdownBody = memo(function MarkdownBody({ body }: { body: string }) {
+  return <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>{body}</ReactMarkdown>;
+});
+
+// Owns the clock so ticking re-renders only this label, not the Turn around it.
+function RelativeTime({ iso }: { iso: string }) {
+  const { locale } = useLocale();
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), RELATIVE_TIME_TICK_MS);
+    return () => clearInterval(timer);
+  }, []);
+  return <>{formatRelative(iso, now, locale)}</>;
 }
 
 /** Whether the timestamp falls on today's date in the viewer's local time. */

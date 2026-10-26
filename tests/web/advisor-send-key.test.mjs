@@ -51,6 +51,10 @@ function translateForComponent(key) {
   return overrides[key] ?? key;
 }
 
+// The composer schedules a resize after a send when the browser lacks field-sizing.
+globalThis.requestAnimationFrame ??= () => 0;
+globalThis.cancelAnimationFrame ??= () => {};
+
 let postMessageCalls = 0;
 const componentApiClient = {
   getActiveConversation: async () => 'conv-1',
@@ -107,27 +111,42 @@ const advisorViewModule = compileWebComponent(advisorViewPath, {
   '@/lib/format': componentFormat,
   '@/lib/i18n': componentI18n,
   '@/lib/advisor-awaiting.mjs': { replyArrived },
-  '@/lib/view-loader': { useView: (key, _fetcher, options) => (viewOptions[key?.split(':')[0]] = options, { data: key?.startsWith('advisor-messages:') ? [] : undefined, error: null, loading: false, refresh: async () => {} }) },
+  '@/lib/advisor-windows.mjs': await import('../../apps/web/lib/advisor-windows.mjs'),
+  '@/lib/view-loader': { useView: (key, _fetcher, options) => (viewOptions[key?.split(':')[0]] = options, { data: key?.startsWith('advisor-messages:') ? [] : key === 'advisor-window:general' ? 'conv-1' : undefined, error: null, loading: false, refresh: async () => {} }) },
   '@/components/icons': { SendIcon: () => null },
+  '@/components/AdvisorChannelPanel': { AdvisorChannelPanel: () => null },
 });
 
-// State order must match the AdvisorView useState() calls, top to bottom:
-// conversationId, now, draft, sending,
-// sendError, clearError, knowledgeSaving, knowledgeSaveNotice,
-// knowledgeSaveError, menuOpen, isTouchDevice.
-function createHookHarness(isTouchDevice, awaitingReply = null) {
-  // The 12th state is awaitingReply.
-  const state = ['conv-1', 0, 'hello', false, null, null, false, null, null, false, isTouchDevice, awaitingReply];
+// State order must match the useState() calls in render order, top to bottom:
+// AdvisorView: visibleCount, sending, sendError, clearError, knowledgeSaving,
+// knowledgeSaveNotice, knowledgeSaveError, menuOpen, isTouchDevice,
+// awaitingReply, channelsOpen; then AdvisorComposer: hasText.
+// AdvisorView holds three refs; the composer's textarea and composing refs follow.
+const COMPOSING_REF = 4;
+const VISIBLE_STEP = 30;
+
+function createHookHarness(isTouchDevice, awaitingReply = null, hasText = false) {
+  const state = [VISIBLE_STEP, false, null, null, false, null, null, false, isTouchDevice, awaitingReply, false, true];
+  if (hasText) state[12] = true; // composer's hasText
   let hookIndex = 0;
   let refIndex = 0;
+  // refs[3] is the composer's textarea; the text is read from it at send time.
   const refs = [];
+  refs[3] = { current: { value: 'hello', focus() {} } };
+  // setCalls counts every state setter call; changes counts those that would re-render.
+  const counts = { setCalls: 0, changes: 0 };
   return {
     refs,
+    state,
+    counts,
     useState(initialValue) {
       const index = hookIndex++;
       if (index >= state.length) state[index] = initialValue;
       return [state[index], (nextValue) => {
-        state[index] = typeof nextValue === 'function' ? nextValue(state[index]) : nextValue;
+        const value = typeof nextValue === 'function' ? nextValue(state[index]) : nextValue;
+        counts.setCalls += 1;
+        if (!Object.is(value, state[index])) counts.changes += 1;
+        state[index] = value;
       }];
     },
     useRef(initialValue) {
@@ -140,8 +159,8 @@ function createHookHarness(isTouchDevice, awaitingReply = null) {
   };
 }
 
-function renderAdvisor(isTouchDevice, awaitingReply = null) {
-  const harness = createHookHarness(isTouchDevice, awaitingReply);
+function renderAdvisor(isTouchDevice, awaitingReply = null, hasText = false) {
+  const harness = createHookHarness(isTouchDevice, awaitingReply, hasText);
   capturedTextarea = null;
   capturedHint = null;
   activeHookHarness = harness;
@@ -190,13 +209,13 @@ test('desktop: Shift+Enter is ignored while composing (IME)', async () => {
   const { textarea, harness } = renderAdvisor(false);
 
   postMessageCalls = 0;
-  harness.refs[3].current = true; // composingRef
+  harness.refs[COMPOSING_REF].current = true; // composingRef
   const composingRef = keyEvent({ shiftKey: true });
   textarea.onKeyDown(composingRef.event);
   await new Promise((r) => setImmediate(r));
   assert.equal(composingRef.wasPrevented(), false, 'composingRef guard should block send');
   assert.equal(postMessageCalls, 0);
-  harness.refs[3].current = false;
+  harness.refs[COMPOSING_REF].current = false;
 
   postMessageCalls = 0;
   const nativeComposing = keyEvent({ shiftKey: true, isComposing: true });
@@ -278,17 +297,20 @@ test('rendered: the spinner stays through idle or stale session reads after a se
     '@/lib/format': componentFormat,
     '@/lib/i18n': componentI18n,
     '@/lib/advisor-awaiting.mjs': { replyArrived },
-    '@/lib/view-loader': { useView: (key) => ({ data: key?.startsWith('advisor-messages:') ? messages : session, error: null, loading: false, refresh: async () => {} }) },
+    '@/lib/advisor-windows.mjs': await import('../../apps/web/lib/advisor-windows.mjs'),
+    '@/lib/view-loader': { useView: (key) => ({ data: key?.startsWith('advisor-messages:') ? messages : key === 'advisor-window:general' ? 'conv-1' : session, error: null, loading: false, refresh: async () => {} }) },
     '@/components/icons': { SendIcon: () => null },
+  '@/components/AdvisorChannelPanel': { AdvisorChannelPanel: () => null },
   });
   const state = [];
   const effects = [];
   const refs = [];
+  refs[3] = { current: { value: 'hello', focus() {} } };
   let dirty = false;
   let hookIndex = 0;
   let effectIndex = 0;
   let refIndex = 0;
-  const init = ['conv-1', 0, 'hello', false, null, null, false, null, null, false, false];
+  const init = [0, false, null, null, false, null, null, false, false, null, false, true];
   const harness = {
     useState(initialValue) {
       const index = hookIndex++;
@@ -313,6 +335,9 @@ test('rendered: the spinner stays through idle or stale session reads after a se
     useLayoutEffect() {},
   };
   const originalWindow = globalThis.window;
+  const originalFrame = [globalThis.requestAnimationFrame, globalThis.cancelAnimationFrame];
+  globalThis.requestAnimationFrame = () => 0;
+  globalThis.cancelAnimationFrame = () => {};
   globalThis.window = { matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }) };
   function render() {
     for (let pass = 0; pass < 20; pass += 1) {
@@ -357,5 +382,87 @@ test('rendered: the spinner stays through idle or stale session reads after a se
   } finally {
     for (const slot of effects) slot?.cleanup?.();
     globalThis.window = originalWindow;
+    [globalThis.requestAnimationFrame, globalThis.cancelAnimationFrame] = originalFrame;
+  }
+});
+
+function withBrowserGlobals(fieldSizing, run) {
+  const saved = [globalThis.CSS, globalThis.requestAnimationFrame, globalThis.cancelAnimationFrame];
+  let frames = 0;
+  globalThis.CSS = { supports: (q) => fieldSizing && q === 'field-sizing: content' };
+  globalThis.requestAnimationFrame = () => { frames += 1; return 1; };
+  globalThis.cancelAnimationFrame = () => {};
+  try { run(() => frames); } finally { [globalThis.CSS, globalThis.requestAnimationFrame, globalThis.cancelAnimationFrame] = saved; }
+}
+
+test('with field-sizing, typing sets no state and schedules no height measurement', () => {
+  withBrowserGlobals(true, (frames) => {
+    const { textarea, harness } = renderAdvisor(false, null, true);
+    textarea.onChange({ target: { value: 'hello w' } });
+    textarea.onChange({ target: { value: 'hello wo' } });
+    textarea.onCompositionEnd();
+    assert.equal(frames(), 0);
+    assert.deepEqual(harness.counts, { setCalls: 0, changes: 0 }, 'no state update, so no re-render, per keystroke');
+    assert.equal(textarea.value, undefined, 'textarea is uncontrolled');
+    textarea.onChange({ target: { value: '  ' } });
+    assert.deepEqual(harness.counts, { setCalls: 1, changes: 1 }, 'state updates only when empty-ness changes');
+  });
+});
+
+test('without field-sizing, the JS resize is scheduled per change and on composition end', () => {
+  withBrowserGlobals(false, (frames) => {
+    const { textarea } = renderAdvisor(false);
+    textarea.onChange({ target: { value: 'hello w' } });
+    assert.equal(frames(), 1);
+    textarea.onCompositionEnd();
+    assert.equal(frames(), 2);
+  });
+});
+
+test('without field-sizing, the scheduled resize writes no height while composing', () => {
+  withBrowserGlobals(false, () => {
+    const { textarea, harness } = renderAdvisor(false);
+    const writes = [];
+    harness.refs[3].current = { scrollHeight: 80, style: { set height(v) { writes.push(v); } } };
+    let frame;
+    globalThis.requestAnimationFrame = (fn) => { frame = fn; return 1; };
+    harness.refs[4].current = true;
+    textarea.onChange({ target: { value: 'x' } });
+    frame();
+    assert.deepEqual(writes, []);
+    harness.refs[4].current = false;
+    textarea.onChange({ target: { value: 'xy' } });
+    frame();
+    assert.deepEqual(writes, ['', '80px']);
+  });
+});
+
+test('send clears the box before postMessage answers, restores it on failure, and blocks a second send', async () => {
+  const original = componentApiClient.postMessage;
+  let calls = 0;
+  let settle;
+  componentApiClient.postMessage = () => { calls += 1; return new Promise((resolve, reject) => { settle = { resolve, reject }; }); };
+  try {
+    const { textarea, harness } = renderAdvisor(false);
+    assert.equal(textarea.disabled, undefined, 'textarea is never disabled');
+    const ta = harness.refs[3].current;
+    textarea.onKeyDown(keyEvent({ shiftKey: true }).event);
+    assert.equal(ta.value, '', 'cleared before the API answers');
+    ta.value = 'again';
+    textarea.onKeyDown(keyEvent({ shiftKey: true }).event);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(calls, 1, 'second send is blocked while one is in flight');
+    ta.value = '';
+    settle.reject(new Error('boom'));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(ta.value, 'hello', 'failed send restores the draft');
+
+    textarea.onKeyDown(keyEvent({ shiftKey: true }).event);
+    ta.value = 'newer';
+    settle.reject(new Error('boom'));
+    await new Promise((r) => setImmediate(r));
+    assert.equal(ta.value, 'newer', 'text typed after the send is not overwritten');
+  } finally {
+    componentApiClient.postMessage = original;
   }
 });

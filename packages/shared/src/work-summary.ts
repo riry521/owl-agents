@@ -18,7 +18,7 @@ import { DEFAULT_OWNER_LANGUAGE, type OwnerLanguage } from "./owner-language.js"
  *   - <condition>
  */
 export interface WorkSummarySection {
-  readonly key: "request" | "background" | "approach" | "acceptance" | "notes";
+  readonly key: "request" | "background" | "approach" | "acceptance" | "goals" | "notes";
   /** The label written in the summary text (`<label>: ...`). */
   readonly label: string;
   /** English label, also accepted when reading a summary. */
@@ -34,7 +34,8 @@ export const WORK_SUMMARY_SECTIONS: readonly WorkSummarySection[] = [
   { key: "request", label: "依頼", label_en: "Request", kind: "text", required: true, guide: "what should be done, in one to three sentences" },
   { key: "background", label: "背景", label_en: "Background", kind: "text", required: false, guide: "why it is needed and what the conversation established" },
   { key: "approach", label: "方針", label_en: "Approach", kind: "text", required: false, guide: "the agreed way to do it and its constraints" },
-  { key: "acceptance", label: "受け入れ条件", label_en: "Acceptance", kind: "list", required: true, guide: "conditions that make the Work done, one per line" },
+  { key: "acceptance", label: "受け入れ条件", label_en: "Acceptance", kind: "list", required: true, guide: "conditions without which the Work is not done, one per line; keep them few and checkable inside the Work" },
+  { key: "goals", label: "目標", label_en: "Goals", kind: "list", required: false, guide: "conditions that are wanted but not required, one per line: counts, procedures, and anything that depends on things outside the Work; an unmet goal is reported with its reason and does not stop the Work" },
   { key: "notes", label: "注意", label_en: "Notes", kind: "text", required: false, guide: "what must not be done and known pitfalls" },
 ];
 
@@ -62,4 +63,37 @@ export function workSummaryInstruction(language: OwnerLanguage = DEFAULT_OWNER_L
     "Write summary in this template, with the labels exactly as shown, each section starting on its own line, sections in this order and separated by a blank line. Put the user's full request, relevant conversation context, and concrete acceptance criteria into these sections.",
     ...lines,
   ].join("\n");
+}
+
+const LIST_MARKER = /^(?:[-*•・]|\d+[.)])\s+/u;
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+const LABEL_LINE = new RegExp(
+  `^\\s*(${WORK_SUMMARY_SECTIONS.flatMap((section) => [section.label, section.label_en]).map(escapeRegExp).join("|")})\\s*[:：][ \\t]*(.*)$`,
+  "iu",
+);
+
+/** The items of one list section of a summary; the same rules as parseWorkSummary in apps/web/lib/work-summary.mjs (label lines, list markers, continuation lines). */
+export function workSummaryListItems(summary: string, key: WorkSummarySection["key"]): string[] {
+  const text = summary.replace(/\r\n?/gu, "\n").trim();
+  const lines: string[] = [];
+  let current: string | null = null;
+  for (const line of text.split("\n")) {
+    const match = LABEL_LINE.exec(line);
+    const lower = match ? match[1]!.toLowerCase() : "";
+    const section = match ? WORK_SUMMARY_SECTIONS.find((s) => s.label === match[1] || s.label_en.toLowerCase() === lower) : undefined;
+    if (match && section) {
+      current = section.key;
+      if (section.key === key && match[2]!.trim().length > 0) lines.push(match[2]!);
+      continue;
+    }
+    if (current === key) lines.push(line);
+  }
+  const items: string[] = [];
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line.length === 0) continue;
+    if (LIST_MARKER.test(line) || items.length === 0) items.push(line.replace(LIST_MARKER, ""));
+    else items[items.length - 1] = `${items[items.length - 1]} ${line}`;
+  }
+  return items.filter((item) => item.length > 0);
 }

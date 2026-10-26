@@ -60,6 +60,8 @@ import type {
   ProviderPauseView,
   SaveProviderPayload,
   AdvisorSessionInfo,
+AdvisorWindow,
+  AdvisorWindowChannelState,
   AdvisorFolders,
   AdvisorFoldersInput,
   RemakeLimitSettings,
@@ -1003,6 +1005,7 @@ export async function saveIntegration(
     signing_secret?: string;
     conversation_channel_id: string;
     notification_channel_id: string;
+    owner_user_id?: string;
   },
 ): Promise<IntegrationStatus> {
   const response = await command<IntegrationStatus>(
@@ -1570,6 +1573,43 @@ export async function setProviderModels(providerId: string, models: string[]): P
 export async function getActiveConversation(): Promise<string> {
   const result = await requestJson<{ conversation_id: string }>('/advisor/conversation/active');
   return result.conversation_id;
+}
+
+/** GET /api/v1/advisor/windows. */
+export async function listAdvisorWindows(): Promise<AdvisorWindow[]> {
+  const response = await requestJson<ApiEnvelope<AdvisorWindow[]>>('/advisor/windows');
+  return response.data;
+}
+
+/** GET /api/v1/advisor/windows/:key/conversation: the window's canonical conversation (created on first use). */
+export async function getAdvisorWindowConversation(key: string): Promise<string> {
+  const result = await requestJson<{ conversation_id: string }>(`/advisor/windows/${encodeURIComponent(key)}/conversation`);
+  return result.conversation_id;
+}
+
+/** GET /api/v1/advisor/windows/:key/channels. */
+export async function getAdvisorWindowChannels(key: string): Promise<AdvisorWindowChannelState[]> {
+  const response = await requestJson<ApiEnvelope<{ channels: AdvisorWindowChannelState[] }>>(`/advisor/windows/${encodeURIComponent(key)}/channels`);
+  return response.data.channels;
+}
+
+function windowChannelPath(key: string, provider: string): string {
+  return `/advisor/windows/${encodeURIComponent(key)}/channels/${encodeURIComponent(provider)}`;
+}
+
+/** POST: create a channel (named `name`, or the server's default) and bind it to the window. */
+export async function createAdvisorWindowChannel(key: string, provider: string, name?: string): Promise<void> {
+  await command(windowChannelPath(key, provider), name === undefined ? {} : { name }, 0, 'POST');
+}
+
+/** PUT: bind a channel that already exists. */
+export async function bindAdvisorWindowChannel(key: string, provider: string, channelId: string): Promise<void> {
+  await command(windowChannelPath(key, provider), { channel_id: channelId }, 0, 'PUT');
+}
+
+/** PATCH: rename the bound channel. */
+export async function renameAdvisorWindowChannel(key: string, provider: string, name: string): Promise<void> {
+  await command(windowChannelPath(key, provider), { name }, 0, 'PATCH');
 }
 
 /** GET /api/v1/advisor/session. */

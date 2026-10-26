@@ -1,7 +1,15 @@
 import type { OwlEvent } from "../types";
 import { asOwlLanguage, type OwlLanguage } from "./language";
 import { createDecisionButtonId } from "./decision-button";
-import { decisionHeadings, decisionLanguage, decisionTitle, formatDecisionExplanation } from "./decision-text";
+import {
+  decisionHeadings,
+  decisionLanguage,
+  decisionOptionDescription,
+  decisionPayloadContextLines,
+  decisionTitle,
+  formatDecisionExplanation,
+  formatDecisionNextSteps,
+} from "./decision-text";
 import { answerGuideHint, decisionShortId } from "./router";
 
 /** Events that can be represented by the shared notification card model. */
@@ -107,7 +115,6 @@ export const BODY_MAX = 2900;
 export const FIELD_VALUE_MAX = 1000;
 const AUTO_RECOVERY_FIELD_MAX = 200;
 export const FALLBACK_MAX = 200;
-export const DETAIL_MAX = 3800;
 
 type CardStyleKey = Exclude<NotificationCardEvent, "system.alert"> | "system.alert.work" | "system.alert.system" | "system.alert.notice";
 
@@ -179,7 +186,7 @@ export const CARD_TEXT: Readonly<Record<OwlLanguage, NotificationCardText>> = {
     recommendedLegend: "★ はおすすめの選択肢です。", detailTitle: "詳細", howToAnswer: "回答方法",
     threadReplySupplement: "詳細が投稿されたこのスレッドへの返信も回答として扱われます。",
     replyMessageSupplement: "この詳細メッセージに直接返信して回答することもできます。",
-    guideFreeText: "選択肢にない内容で答えることもできます。",
+    guideFreeText: "選択肢にない内容は、回答欄に一言書けば Manager が直します。",
     guideOptionsOnly: "返信で答えるときは、選択肢の名前をそのまま書いてください。",
     unknownTime: "時刻不明",
     providerPaused: (label, time) => `${label}が利用上限に達したため、${label}を使う処理を止めています。${time}ごろ再開します。`,
@@ -202,7 +209,7 @@ export const CARD_TEXT: Readonly<Record<OwlLanguage, NotificationCardText>> = {
     recommendedLegend: "★ marks the recommended option.", detailTitle: "Details", howToAnswer: "How to answer",
     threadReplySupplement: "A reply in this thread also counts as your answer.",
     replyMessageSupplement: "You can also answer by replying directly to this detail message.",
-    guideFreeText: "You can also answer with something that is not one of the options.",
+    guideFreeText: "For anything not in the options, write a word in the answer field and the Manager will fix it.",
     guideOptionsOnly: "When you answer by reply, write the option name exactly as shown.",
     unknownTime: "unknown time",
     providerPaused: (label, time) => `${label} hit its usage limit. Work that uses ${label} is on hold until about ${time}.`,
@@ -309,7 +316,7 @@ export function decisionOptionViews(payload: Record<string, unknown>): DecisionO
       index,
       key,
       label,
-      description: text(record.description),
+      description: decisionOptionDescription(payload, record),
       recommended: recommended !== null && key === recommended,
       criteriaRewrites,
     }];
@@ -340,28 +347,28 @@ export function formatDecisionThreadDetail(payload: Record<string, unknown>, inp
   const headings = decisionHeadings(input.language);
   const options = decisionOptionViews(payload);
   const sections: Array<{ heading: string; body: string }> = [];
-  const reason = text(payload.reason);
-  const currentState = text(payload.current_state);
-  const tried = text(payload.tried);
+  const lines = decisionPayloadContextLines(payload);
   const explanation = formatDecisionExplanation(payload);
-  if (explanation) sections.push({ heading: headings.reason, body: explanation });
-  else if (reason) sections.push({ heading: headings.reason, body: reason });
-  if (input.question.source === "question" && input.question.shortened && input.question.full) {
-    sections.push({ heading: headings.question, body: input.question.full });
-  }
-  if (options.length > 0) {
-    const optionLines = options.map((option) =>
-      [`• ${option.label}${option.recommended ? " ★" : ""}${option.description ? ` — ${option.description}` : ""}`,
-        ...option.criteriaRewrites.map((rewrite) => `  ${rewrite.before} → ${rewrite.after}`)].join("\n"));
-    if (options.some((option) => option.recommended)) optionLines.push(t.recommendedLegend);
-    sections.push({ heading: headings.options, body: optionLines.join("\n") });
-  }
+  const optionLines = options.map((option) =>
+    [`• ${option.label}${option.recommended ? " ★" : ""}${option.description ? ` — ${option.description}` : ""}`,
+      ...option.criteriaRewrites.map((rewrite) => `  ${rewrite.before} → ${rewrite.after}`)].join("\n"));
+  if (options.some((option) => option.recommended)) optionLines.push(t.recommendedLegend);
+  const add = (heading: string, parts: ReadonlyArray<string | null>, separator = "\n") => {
+    const body = parts.filter((part): part is string => part !== null && part !== "").join(separator);
+    if (body) sections.push({ heading, body });
+  };
   if (explanation) {
-    const details = [reason, currentState, tried].filter(Boolean).join("\n");
-    if (details) sections.push({ heading: headings.details, body: details });
+    add(headings.reason, [explanation]);
+    add(headings.how, [formatDecisionNextSteps(payload), optionLines.join("\n")], "\n\n");
+    add(headings.details, [...lines.reason, ...lines.current_state, ...lines.tried]);
   } else {
-    if (currentState) sections.push({ heading: headings.currentState, body: currentState });
-    if (tried) sections.push({ heading: headings.tried, body: tried });
+    add(headings.reason, lines.reason);
+    add(headings.how, [
+      input.question.source === "question" && input.question.shortened ? input.question.full : null,
+      optionLines.join("\n"),
+    ], "\n\n");
+    add(headings.currentState, lines.current_state);
+    add(headings.tried, lines.tried);
   }
   const guide = formatDecisionAnswerGuide({
     decisionId: input.decisionId,
@@ -371,7 +378,7 @@ export function formatDecisionThreadDetail(payload: Record<string, unknown>, inp
     allowFreeText: typeof payload.allow_free_text === "boolean" ? payload.allow_free_text : null,
     replyStyle: input.replyStyle,
   });
-  return fitDetail(sections, guide, DETAIL_MAX, t.howToAnswer);
+  return joinDetail(sections, guide, t.howToAnswer);
 }
 
 export function workCompletionStats(payload: Record<string, unknown>): WorkCompletionStats {
@@ -423,9 +430,28 @@ export function formatWorkCompletionSummary(payload: Record<string, unknown>, la
   const relaxed = Array.isArray(payload.criteria_relaxations) ? payload.criteria_relaxations.length : 0;
   const relaxedLine = relaxed === 0 ? null
     : language === "ja" ? `緩めた受け入れ条件: ${relaxed} 件。Work の画面で見られます。` : `Relaxed acceptance criteria: ${relaxed}. See the Work screen.`;
-  if (parts.length === 0) return relaxedLine;
-  const summary = language === "ja" ? parts.join("・") : parts.join(" · ");
-  return relaxedLine ? `${summary}\n${relaxedLine}` : summary;
+  const lines = [...(parts.length === 0 ? [] : [language === "ja" ? parts.join("・") : parts.join(" · ")]), ...(relaxedLine ? [relaxedLine] : []), ...goalShortfallLines(payload, language)];
+  return lines.length === 0 ? null : lines.join("\n");
+}
+
+/** The goals not met: the count line first, so a body cut by BODY_MAX still keeps it; goals met later are counted on one more line. */
+function goalShortfallLines(payload: Record<string, unknown>, language: OwlLanguage): string[] {
+  const entries = (Array.isArray(payload.goal_shortfalls) ? payload.goal_shortfalls : [])
+    .filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null && typeof (entry as Record<string, unknown>).text === "string");
+  const unmet = entries.filter((entry) => entry.resolution === null || entry.resolution === undefined);
+  const met = entries.length - unmet.length;
+  const ja = language === "ja";
+  const lines: string[] = [];
+  if (unmet.length > 0) {
+    lines.push(ja ? `達成しなかった目標: ${unmet.length} 件。Work の画面でも見られます。` : `Goals not met: ${unmet.length}. See the Work screen.`);
+    for (const entry of unmet) {
+      const title = text(entry.task_title);
+      const reason = text(entry.reason) ?? "";
+      lines.push(`- ${title ? `${title}: ` : ""}${entry.text}${ja ? `（${reason}）` : ` (${reason})`}`);
+    }
+  }
+  if (met > 0) lines.push(ja ? `あとで満たした目標: ${met} 件（根拠は Work の画面）` : `Goals met later: ${met} (evidence on the Work screen).`);
+  return lines;
 }
 
 export function truncateText(value: string, max: number): string {
@@ -492,7 +518,9 @@ function buildDecisionOpenedCard(event: OwlEvent, ctx: CardRenderContext): Notif
   const optionList = formatDecisionOptionList(options, language);
   const workTitle = eventWorkTitle(event);
   const explanation = formatDecisionExplanation(payload);
-  const body = joinLines(workTitle, `${explanation ? `💡 ${explanation}\n` : ""}❓ ${question.line}${optionList ? `\n\n${optionList}` : ""}`) ?? "";
+  const nextSteps = formatDecisionNextSteps(payload);
+  const lead = explanation ? `💡 ${explanation}${nextSteps ? `\n👉 ${nextSteps}` : ""}` : `❓ ${question.line}`;
+  const body = joinLines(workTitle, `${lead}${optionList ? `\n\n${optionList}` : ""}`) ?? "";
   const decisionId = text(payload.decision_id);
   const targetId = decisionId ?? event.event_id;
   const actions = options.slice(0, MAX_CARD_ACTIONS).flatMap((option): CardAction[] => {
@@ -516,9 +544,10 @@ function buildDecisionOpenedCard(event: OwlEvent, ctx: CardRenderContext): Notif
     hasButtons: actions.length > 0,
     decisionId,
   });
-  // The question line says what to decide; why Core stopped (for example the
-  // no-progress limit) only lives in `reason`, so the card carries it too.
-  const reason = text(payload.reason);
+  // Without an explanation the question line says what to decide; why Core
+  // stopped (for example the no-progress limit) only lives in `reason`, so the
+  // card carries it too. With one, the summary already says it.
+  const reason = explanation ? null : decisionPayloadContextLines(payload).reason.join("\n") || null;
   const autoRecovery = text(payload.auto_recovery_summary);
   const fields = [
     ...(reason && reason !== question.full ? [{ label: t.fieldReason, value: truncateText(reason, FIELD_VALUE_MAX) }] : []),
@@ -526,7 +555,7 @@ function buildDecisionOpenedCard(event: OwlEvent, ctx: CardRenderContext): Notif
   ];
   return makeCard("decision.opened", language, CARD_STYLES["decision.opened"], decisionTitle(payload), truncateText(body, BODY_MAX), fields, footer, withWorkTitle(workTitle, question.line), {
     actions,
-    threadDetail: truncateText(threadDetail, DETAIL_MAX),
+    threadDetail,
     question: question.source === "none" ? null : question.line,
   });
 }
@@ -629,20 +658,12 @@ function text(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
 }
 
-function fitDetail(sections: Array<{ heading: string; body: string }>, guide: string, max: number, guideTitle: string): string {
+// Never trims: postSlackMessage splits long text across messages, and a
+// trimmed detail would hide options and what choosing each one does.
+function joinDetail(sections: Array<{ heading: string; body: string }>, guide: string, guideTitle: string): string {
   const render = (section: { heading: string; body: string }): string => `**${section.heading}**\n${section.body}`;
   const guideBlock = guideTitle && !guide.startsWith(`${guideTitle}:`)
     ? render({ heading: guideTitle, body: guide })
     : guide;
-  const budget = max - guideBlock.length - 2;
-  const kept = [...sections];
-  const total = (): number => kept.reduce((length, section, index) => length + render(section).length + (index > 0 ? 2 : 0), 0);
-  while (kept.length > 0 && total() > budget) {
-    const last = kept[kept.length - 1]!;
-    const overflow = total() - budget;
-    const room = last.body.length - overflow;
-    if (room >= 20) kept[kept.length - 1] = { ...last, body: truncateText(last.body, room) };
-    else kept.pop();
-  }
-  return [...kept.map(render), guideBlock].join("\n\n");
+  return [...sections.map(render), guideBlock].join("\n\n");
 }

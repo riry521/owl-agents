@@ -63,6 +63,17 @@ test("a major finding that only asks for work beyond the acceptance criteria doe
   assert.equal(judge("replan_required", [beyond, inScope]), "replan_required");
 });
 
+test("a major finding that is only about a goal is stored as minor and never sends the Task back", () => {
+  const goal = { severity: "major", scope: "goal", problem: "the goal is not met" };
+  const beyond = { severity: "major", scope: "beyond_acceptance", problem: "add an extra test" };
+  const inScope = { severity: "major", scope: "in_scope", problem: "criterion 2 fails" };
+  assert.equal(normalizeReviewFindings([goal])[0].severity, "minor");
+  assert.equal(judge("fix_required", [goal]), "pass");
+  assert.equal(judge("replan_required", [goal, beyond]), "pass");
+  assert.equal(judge("replan_required", [goal, inScope]), "replan_required");
+  assert.equal(judge("fix_required", [goal, inScope]), "fix_required");
+});
+
 test("a major finding on overbuilt work still sends the Task back", () => {
   assert.equal(judge("fix_required", [{ severity: "major", scope: "overbuilt", problem: "45 minute full run added" }]), "fix_required");
 });

@@ -11,7 +11,7 @@ import type {
 /** auto = test_run null; command = { mode: whole, whole_argv }; off = { mode: off }; custom = a setting the form cannot express (per_file, extra keys), kept as is. */
 export type TestRunMode = 'auto' | 'command' | 'off' | 'custom';
 
-export type ProjectEditForm = { name: string; path: string; autoPush: boolean; commitLanguage?: 'ja' | 'en' | null; setupCommand: string; refreshCommand: string; postMergeCommand: string; postMergeDisabled: boolean; installCommand: string; installDisabled: boolean; testRunMode?: TestRunMode; testRunCommand?: string };
+export type ProjectEditForm = { name: string; path: string; autoPush: boolean; advisorWindowEnabled?: boolean; commitLanguage?: 'ja' | 'en' | null; setupCommand: string; refreshCommand: string; postMergeCommand: string; postMergeDisabled: boolean; installCommand: string; installDisabled: boolean; testRunMode?: TestRunMode; testRunCommand?: string };
 
 function testRunFormValue(testRun: TestRunInput | null | undefined): { mode: TestRunMode; command: string } {
   if (testRun == null) return { mode: 'auto', command: '' };
@@ -32,6 +32,7 @@ export function projectEditForm(project: Project): ProjectEditForm {
     name: project.name,
     path: project.canonical_path,
     autoPush: isProjectAutoPushEnabled(project),
+    advisorWindowEnabled: project.advisor_window_enabled === true,
     commitLanguage: project.commit_language ?? null,
     setupCommand: formatCommandLine(project.worktree_setup_command ?? []),
     refreshCommand: formatCommandLine(project.worktree_refresh_command ?? []),
@@ -127,6 +128,7 @@ export function buildProjectUpdateInput(
   if (form.path !== project.canonical_path) input.canonical_path = form.path;
   const autoPush = form.autoPush === true;
   if (autoPush !== isProjectAutoPushEnabled(project)) input.auto_push = autoPush;
+  if (form.advisorWindowEnabled !== undefined && form.advisorWindowEnabled !== (project.advisor_window_enabled === true)) input.advisor_window_enabled = form.advisorWindowEnabled;
   // A form without a commitLanguage choice leaves the stored setting alone.
   if (form.commitLanguage !== undefined && form.commitLanguage !== (project.commit_language ?? null)) input.commit_language = form.commitLanguage;
   if (!sameArgv(setupCommand, project.worktree_setup_command ?? [])) input.worktree_setup_command = setupCommand;

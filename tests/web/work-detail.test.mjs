@@ -135,7 +135,13 @@ const componentTranslations = {
   'work.autoRecoveryRateLimited': ({ time }) => `Waiting for the usage limit (resumes at ${time}, not counted)`,
   'work.autoRecoveryMore': ({ count }) => `and ${count} more`,
   'work.autoRecoveryKind.integration_conflict': 'merge conflict',
-  'work.relaxedCriteriaTitle': 'Relaxed acceptance criteria',
+  'work.goalShortfallsTitle': 'Goals not met',
+'work.goalShortfallsNote': 'These goals were not required.',
+'work.goalShortfallTask': 'Task',
+'work.goalShortfallCriterion': 'Goal',
+'work.goalShortfallReason': 'Reason',
+'work.goalShortfallResolved': 'Met later',
+'work.relaxedCriteriaTitle': 'Relaxed acceptance criteria',
   'work.relaxedOriginal': 'Original criterion',
   'work.relaxedNew': 'New criterion',
   'work.relaxedKeeps': 'Check kept',
@@ -534,7 +540,7 @@ function successfulApiFetch(input, options) {
       : apiWork({ id, title, summary, state, size, display_number });
     return jsonResponse({
       request_id: 'request-1',
-      data: { work, tasks: taskRows, runs: [], child_runs: [], reports: [], decisions: [], messages: [], auto_recovery: options.autoRecovery },
+      data: { work, tasks: taskRows, runs: [], child_runs: [], reports: [], decisions: [], messages: [], auto_recovery: options.autoRecovery, goal_shortfalls: options.goalShortfalls },
       version: 7,
     });
   }
@@ -790,12 +796,12 @@ test('Work detail marks a design Task with its own badge', async () => {
   }
 });
 
-async function renderWithAutoRecovery(autoRecovery) {
+async function renderWithAutoRecovery(autoRecovery, goalShortfalls) {
   const client = loadApiClient();
   const originalFetch = globalThis.fetch;
   const id = 'work-auto-recovery';
   try {
-    globalThis.fetch = (input) => successfulApiFetch(input, { state: 'running', autoRecovery });
+    globalThis.fetch = (input) => successfulApiFetch(input, { state: 'running', autoRecovery, goalShortfalls });
     const board = renderBoardWorkLink({ id, title: 'Recovering', state: 'running', updated_at: '2026-09-23T00:00:00.000Z' });
     return (await renderDetailFromRoute(board.href, client)).html;
   } finally {
@@ -2022,4 +2028,21 @@ test('Work detail mounts the Project move part in the Project row', () => {
     const { html } = harness.render(detailComponentModule.WorkDetailView);
     assert.ok(html.includes(`data-move="${work.project_id === null}"`));
   }
+});
+
+test('Work detail lists goals that were not met, shows later evidence, and hides the section when there are none', async () => {
+  const none = { active: [], relaxations: [] };
+  const base = { task_id: 't1', task_title: 'Write docs', criterion_id: 'AC2', text: 'Add a diagram', reason: 'No time left', source: 'worker' };
+  const shown = await renderWithAutoRecovery(none, [
+    { ...base, resolution: null },
+    { ...base, task_id: 't2', task_title: 'Add tests', criterion_id: null, text: 'Cover edge cases', reason: 'Skipped', source: 'final_check', resolution: { evidence: 'tests added in t3', resolved_at: '2026-09-23T00:00:00.000Z' } },
+    { task_id: 't3', text: 5 },
+  ]);
+  assert.ok(shown.includes('Goals not met'));
+  for (const cell of ['Write docs', 'Add a diagram', 'No time left', 'Add tests', 'Cover edge cases']) {
+    assert.ok(shown.includes(`<td>${cell}</td>`) || shown.includes(`<td>${cell}`), cell);
+  }
+  assert.ok(shown.includes('Met later') && shown.includes('tests added in t3'));
+  assert.ok(!(await renderWithAutoRecovery(none, [])).includes('Goals not met'));
+  assert.ok(!(await renderWithAutoRecovery(none, undefined)).includes('Goals not met'));
 });

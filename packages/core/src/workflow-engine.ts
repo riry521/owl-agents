@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, readlink, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { createUlid, utcNow } from "../../db/dist/index.js";
-import { OUTPUT_FORMAT_INVALID_ERROR_KEY, readDesignBlocked, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, readStoredAcceptanceCriteria, readStoredTaskPlanContext, requestsSpecTest, AGENT_STALE_THRESHOLD_MS,DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, designDocumentPath, designMockDirectory, isScreenDesignTask, OWL_INSTANCE_ID_ENV, reapProcessGroup, resolveInstanceId, tokenUsageOf, usageJson, type DelegationMismatchKind, type ResearchSubagentSettings, type TaskReplanTrigger, type TokenUsage } from "@owl/shared";
+import { OUTPUT_FORMAT_INVALID_ERROR_KEY, readDesignBlocked, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, readStoredAcceptanceCriteria, type StoredAcceptanceCriterion, readStoredTaskPlanContext, requestsSpecTest, AGENT_STALE_THRESHOLD_MS,DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, designDocumentPath, designMockDirectory, isScreenDesignTask, OWL_INSTANCE_ID_ENV, reapProcessGroup, resolveInstanceId, tokenUsageOf, usageJson, type DelegationMismatchKind, type ResearchSubagentSettings, type TaskReplanTrigger, type TokenUsage } from "@owl/shared";
 import { matchesAnyGlob } from "../../shared/dist/glob.js";
 import { taskVerificationMarker } from "./workspace-process-sweeper.js";
 import { TRANSIENT_RETRY_DELAYS_MS, TRANSIENT_RETRY_LIMIT } from "./attempt-policy";
@@ -54,9 +54,12 @@ import { ContextBuilder } from "./context-builder.js";
 import { pendingExternalBlocker, taskDependencyIds } from "./task-context.js";
 import { EXTERNAL_BLOCKER_EVENT, reportedExternalBlocker, type ExternalBlocker } from "../../shared/dist/external-blocker.js";
 import { registerReviewBacklogInTransaction, settleWorkBacklogOnCompletionInTransaction } from "./review-backlog.js";
+import { assertAgentRunNotStopped, isAgentRunStopped, isStoppedAgentStatus } from "./agent-run-stop.js";
 import { clearPausedReviewerWait, readPausedReviewerWait, recordPausedReviewerWait } from "./provider-pause-reviewer-wait.js";
 import { agentCliNames, installedAgentCliMatches, listProcesses, planSubagentReconciliation } from "./subagent-watcher.js";
-import { evaluateWorkerCompletion, type WorkerChild } from "./task-completion-gate.js";
+import { evaluateWorkerCompletion, goalOnlyShortfallReport, type WorkerChild } from "./task-completion-gate.js";
+import { isNonBlankReason, type GoalShortfall } from "../../shared/dist/acceptance-criteria.js";
+import { goalCriterionIds, goalShortfallsFromReport, goalShortfallsOfWork, recordTaskGoalShortfalls, replaceTaskGoalShortfalls } from "./goal-shortfalls.js";
 import { NO_CORE_ACTIVITY, type CoreActivityReporter } from "./core-activity.js";
 import { childEnv, coreTestErrorOutcome, coreTestRunBrief, notApplicableTestRun, runCoreTests, workTestRunner, type CoreTestRunDeps, type CoreTestRunOutcome } from "./core-test-run.js";
 import { DEFAULT_TEST_RUN_SETTINGS, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
@@ -97,6 +100,10 @@ import { defaultOwlRoot } from "./workspace-layout.js";
 const ACTIVE_AGENT_STATUSES = ["launch_pending", "spawned", "running", "cancel_requested"] as const;
 
 const SUBAGENT_SCAN_INTERVAL_MS = 5_000;
+/** Thrown inside a write whose auto_recovery slots are used up; the caller escalates the failure. */
+const AUTO_RECOVERY_EXHAUSTED = new Error("No auto_recovery slot is left.");
+/** Thrown inside a write that must leave no row because the Owner stopped the work it records. */
+const OWNER_STOP_ABORT = new Error("The Owner stopped this work before its result was recorded.");
 
 /** Whether `candidate` resolves to `base` itself or a path underneath it. */
 function inside(base: string, candidate: string): boolean {
@@ -153,14 +160,16 @@ interface WorktreeEntry {
   text?: string;
 }
 
+const isGoalOrBeyondScope = (scope: unknown): boolean => scope === "beyond_acceptance" || scope === "goal";
+
 export function normalizeReviewerVerdict(
   verdict: "pass" | "fix_required" | "replan_required",
   findings: readonly unknown[],
 ): "pass" | "fix_required" | "replan_required" {
-  // replan_required backed only by requests beyond the acceptance criteria is not a reason to replan.
+  // replan_required backed only by requests beyond the acceptance criteria, or by goals alone, is not a reason to replan.
   if (verdict === "replan_required") {
     return findings.length > 0 && findings.every((finding) =>
-      finding !== null && typeof finding === "object" && !Array.isArray(finding) && (finding as JsonObject).scope === "beyond_acceptance"
+      finding !== null && typeof finding === "object" && !Array.isArray(finding) && isGoalOrBeyondScope((finding as JsonObject).scope)
     ) ? "pass" : verdict;
   }
   if (verdict !== "fix_required") return verdict;
@@ -169,11 +178,11 @@ export function normalizeReviewerVerdict(
   ) ? "pass" : "fix_required";
 }
 
-/** A finding that only asks for work beyond the acceptance criteria never sends the Task back: it is stored as minor. */
+/** A finding that only asks for work beyond the acceptance criteria, or only concerns a goal, never sends the Task back: it is stored as minor. */
 export function normalizeReviewFindings(findings: readonly unknown[]): unknown[] {
   return findings.map((finding) =>
     finding !== null && typeof finding === "object" && !Array.isArray(finding)
-      && (finding as JsonObject).scope === "beyond_acceptance" && (finding as JsonObject).severity === "major"
+      && isGoalOrBeyondScope((finding as JsonObject).scope) && (finding as JsonObject).severity === "major"
       ? { ...(finding as JsonObject), severity: "minor" }
       : finding);
 }
@@ -386,7 +395,7 @@ export class WorkflowEngine {
   private readonly memoryInjector?: Pick<IndexInjector, "compose">;
   private readonly getProcessSkillsPack?: () => { readonly skills_dir: string; readonly source: "setting" | "claude" | "codex" } | null;
   private readonly getResearchSubagentSettings?: () => ResearchSubagentSettings;
-  private readonly verificationChildren = new Set<ChildProcess>();
+  private readonly verificationChildren = new Map<ChildProcess, string>();
   private readonly workspaceRoot: string;
   private readonly testCommandRunner?: TestCommandRunner;
   private readonly coreActivity: CoreActivityReporter;
@@ -479,11 +488,28 @@ export class WorkflowEngine {
   }
 
   /** Stop scheduling and terminate every child process owned by this engine. */
+  /** Signal the verification commands of the given Tasks; returns how many were signalled. */
+  public stopTaskVerification(taskIds: ReadonlySet<string>, signal: NodeJS.Signals): number {
+    let signalled = 0;
+    for (const [child, taskId] of this.verificationChildren) {
+      if (!taskIds.has(taskId)) continue;
+      signalChildProcessGroup(child, signal);
+      signalled += 1;
+    }
+    this.testSetup?.cancelInvestigations(taskIds, signal === "SIGKILL");
+    return signalled;
+  }
+
+  /** The given Tasks whose verification command is still running. */
+  public tasksWithVerification(taskIds: ReadonlySet<string>): readonly string[] {
+    return [...new Set(this.verificationChildren.values())].filter((taskId) => taskIds.has(taskId));
+  }
+
   public stopImmediately(): void {
     this.running = false;
     this.stopping = true;
     this.stopStaleDetection();
-    for (const child of this.verificationChildren) signalChildProcessGroup(child, "SIGKILL");
+    for (const child of this.verificationChildren.keys()) signalChildProcessGroup(child, "SIGKILL");
     terminateActiveExecutorsImmediately();
   }
 
@@ -808,10 +834,12 @@ export class WorkflowEngine {
           void this.writeLane.write({
             mutateState: (transaction) => {
               const now = utcNow();
-              transaction.run(
+              const changed = transaction.run(
                 "UPDATE agent_runs SET status = 'failed', ended_at = ?, updated_at = ? WHERE id = ? AND status IN ('launch_pending','spawned','running')",
                 now, now, run.id,
-              );
+              ).changes;
+              // The Owner stopped this run after the scan read it; no crash is recorded for it.
+              if (changed === 0) throw OWNER_STOP_ABORT;
               return { agent_run_id: run.id };
             },
             event: {
@@ -823,7 +851,9 @@ export class WorkflowEngine {
               payload,
             },
             outbox: [{ provider: "websocket" }],
-          }).catch((error) => console.error(`[stale-detect] Failed to record stale agent ${run.id}`, error));
+          }).catch((error) => {
+            if (error !== OWNER_STOP_ABORT) console.error(`[stale-detect] Failed to record stale agent ${run.id}`, error);
+          });
         }
         console.log(`[stale-detect] Agent ${run.id} (pid ${run.pid ?? "unknown"} ${processFailure}) → reconciled`);
         continue;
@@ -922,19 +952,8 @@ export class WorkflowEngine {
             { taskId, taskTitle: title, kind: "owner", detail: owner.map((condition) => condition.description).join(" / "), reason: spec.reason, conditions: spec.conditions.map((condition) => condition.description) },
             language,
           );
-          const known = transaction.get<{ id: string }>("SELECT id FROM decisions WHERE work_id = ? AND status = 'open' AND reason = ?", workId, brief.reason);
-          const decisionId = openRemakeLimitDecisionInTransaction(transaction, { workId, blockedTaskIds: [taskId], brief, now: utcNow() });
-          const saved = transaction.get<{ tried: string }>("SELECT tried FROM decisions WHERE id = ?", decisionId)?.tried ?? brief.tried;
-          // The same notification event decisions.open emits (the dispatcher delivers it).
-          if (known === undefined) {
-            appendEventInTransaction(transaction, {
-              type: "decision.opened",
-              idempotencyKey: `decision-opened:owner-wait:${decisionId}`,
-              workId,
-              taskId: null,
-              payload: { work_id: workId, scope: "work", blocked_task_ids: [taskId], ...brief, tried: saved, allow_free_text: true, issuer_role: "core", decision_id: decisionId, language, auto_recovery_summary: autoRecoverySummary(saved, language) } as unknown as JsonObject,
-            });
-          }
+          // Core.announceCoreDecisions announces it once its explanation is written.
+          openRemakeLimitDecisionInTransaction(transaction, { workId, blockedTaskIds: [taskId], brief, now: utcNow() });
         }
         // The Owner's replan request that produced this plan is now applied;
         // clear it in the same transaction so a crash right after this write
@@ -959,6 +978,7 @@ export class WorkflowEngine {
           task_ids: [...plan.reopenIds],
           new_task_local_ids: plan.newItems.map((item, index) => item.manager_task_id ?? item.id ?? `item-${index + 1}`),
           superseded_task_ids: [...plan.supersessions.keys()],
+          revised_task_ids: [...(plan.reviseIds ?? [])],
           base_plan_version: guard.base_plan_revision,
           current_plan_version: guard.base_plan_revision,
           reason,
@@ -1090,6 +1110,10 @@ export class WorkflowEngine {
     return [...this.pipelineTasks.values()];
   }
 
+  private taskPipelineActive(taskId: string): boolean {
+    return [...this.pipelineTasks.values()].some((entry) => entry.taskId === taskId);
+  }
+
   private launchHeld(workId: string, taskId: string): boolean {
     const hold = this.launchHold?.(workId) ?? null;
     return hold !== null && !hold.allowedTaskIds.has(taskId);
@@ -1120,6 +1144,11 @@ export class WorkflowEngine {
       `SELECT id, type FROM tasks
         WHERE work_id = ? AND status IN ('ready', 'review_fix_waiting')
           AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+          AND NOT EXISTS (
+            SELECT 1 FROM agent_runs r
+             WHERE r.task_id = tasks.id AND r.status = 'cancel_requested'
+               AND r.hook_agent_id IS NULL AND (r.origin IS NULL OR r.origin <> 'observed')
+          )
         ORDER BY priority DESC, created_at ASC`,
       workId,
       utcNow(),
@@ -1132,6 +1161,9 @@ export class WorkflowEngine {
       // an earlier iteration awaited the worktree or the WriteLane.
       if (!this.running || !this.isWorkRunning(workId)) break;
       if (this.launchHeld(workId, taskId)) continue;
+      // A stopped run of this Task may still be ending; a second Worker would
+      // share its worktree.
+      if (this.taskPipelineActive(taskId)) continue;
       const modelRoleRow = this.db.get<{ type: string; lead_designer_start_round: number | null; fixer_escalated_rejections: number | null }>(
         "SELECT type, lead_designer_start_round, fixer_escalated_rejections FROM tasks WHERE id = ?", taskId,
       );
@@ -1180,8 +1212,8 @@ export class WorkflowEngine {
             if (this.launchHeld(workId, taskId)) {
               throw new HumanReadableError({
                 code: "launch_held",
-                message: "The Task launch is held while the Work's new repository is being registered.",
-                remediation: "The Task starts after the Work is attached to the Project.",
+                message: "The Task launch is held for the Work.",
+                remediation: "The Task starts after the Work's pending change is applied.",
                 details: { work_id: workId, task_id: taskId },
               });
             }
@@ -1347,6 +1379,7 @@ export class WorkflowEngine {
       duration_ms: durationMs,
       criteria_relaxations: criteriaRelaxationsOfWork(this.db, workId),
       auto_recoveries: autoRecoveryCountsOfWork(this.db, workId),
+      goal_shortfalls: goalShortfallsOfWork(this.db, workId) as unknown as JsonObject[],
     };
     await this.writeLane.write({
       mutateState: (transaction: CoreWriteLaneTransaction) => {
@@ -1505,6 +1538,13 @@ export class WorkflowEngine {
         }
       }
     } catch (recoveryError) {
+      if (isAgentRunStopped(recoveryError)) {
+        // The Owner stopped this run after the check above; end it cancelled without a failure.
+        await this.closeAbandonedWorkerRun(workId, taskId, agentRunId).catch((closeError) => {
+          console.error(`[owl-core] Failed to close stopped Worker run ${agentRunId}`, closeError);
+        });
+        return;
+      }
       console.error(`[owl-core] Failed to reconcile Worker exception for Task ${taskId}`, recoveryError);
     }
   }
@@ -1789,7 +1829,32 @@ export class WorkflowEngine {
       hybrid: type !== "design" && hybridAtLaunch,
       delegated_work_detected: observed.length > 0,
       children,
+      goal_criterion_ids: goalCriterionIds(this.storedCriteriaOf(taskId)),
     });
+  }
+
+  /** The Task's criteria as stored; the report's own requirement is never used to tell required from goal. */
+  private storedCriteriaOf(taskId: string): StoredAcceptanceCriterion[] {
+    const row = this.db.get<{ acceptance_criteria_json: string | null; acceptance: string | null }>("SELECT acceptance_criteria_json, acceptance FROM tasks WHERE id = ?", taskId);
+    return readStoredAcceptanceCriteria(row?.acceptance_criteria_json, row?.acceptance ?? "");
+  }
+
+  /**
+   * A partial or failed report whose only unmet criteria are goals counts as success: Core reads required and goal from the stored
+   * criteria, so a Worker that stops for a goal alone does not start the retry and Decision path. The raise is recorded as a correction.
+   */
+  private liftGoalOnlyShortfall(taskId: string, result: AgentRunResult): AgentRunResult {
+    const report = result.report;
+    if (!report || result.outcome === "success" || result.report_valid !== true || result.failure_class !== "deterministic" || result.error_key !== `report_result:${String(report.result)}`) return result;
+    if (!goalOnlyShortfallReport(report, { goal_criterion_ids: goalCriterionIds(this.storedCriteriaOf(taskId)) })) return result;
+    const { failure_class: _failureClass, error_key: _errorKey, retry_allowed: _retryAllowed, ...rest } = result;
+    const verification = report.verification as JsonObject;
+    return {
+      ...rest,
+      outcome: "success",
+      report: { ...report, result: "success", verification: { ...verification, status: "passed" } },
+      report_corrections: [...(result.report_corrections ?? []), { rule: "goal_only_unmet", from_result: String(report.result), to_result: "success" }],
+    };
   }
 
   /**
@@ -1920,6 +1985,7 @@ export class WorkflowEngine {
   ): Promise<void> {
     if (this.stopping) return;
     if (await this.closeAbandonedWorkerRun(workId, taskId, agentRunId)) return;
+    result = this.liftGoalOnlyShortfall(taskId, result);
     this.recordSkillFeedback(agentRunId, result.skill_feedback);
     await this.recordReportCorrections(workId, taskId, agentRunId, result.report_corrections);
     // Every outcome below stores the tokens the Worker spent.
@@ -2038,12 +2104,16 @@ export class WorkflowEngine {
         });
         return;
       }
+      const goalShortfalls = goalShortfallsFromReport(result.report, this.storedCriteriaOf(taskId));
       await this.writeLane.write({
-        mutateState: (transaction: CoreWriteLaneTransaction) =>
-          reduceTaskInTransaction(transaction, taskId, {
+        mutateState: (transaction: CoreWriteLaneTransaction) => {
+          const reduced = reduceTaskInTransaction(transaction, taskId, {
             event: "agent.exited",
             payload: { outcome: "success", report_valid: true, agent_run_id: agentRunId, report: result.report, ...usage },
-          }),
+          });
+          replaceTaskGoalShortfalls(transaction, taskId, goalShortfalls);
+          return reduced;
+        },
         event: {
           idempotencyKey: `agent-exited:${agentRunId}`,
           type: "agent.exited",
@@ -2083,28 +2153,33 @@ export class WorkflowEngine {
       // Past the short retries each auto_recovery slot buys one wait-and-rerun, kept as a transient failure whose
       // next_attempt_at is the wait. The slot is written first so a replay never counts the same failure twice.
       // A Worker timeout usually means the Task is too large, so waiting and rerunning would only spend a slot.
-      const recovery = result.error_key.startsWith("provider_failed:timeout:") ? null : await this.writeLane.transact((transaction) =>
-        startAutoRecoveryInTransaction(transaction, {
-          kind: "provider_transient",
-          target: { kind: "task", id: lineageRootOf(transaction, taskId) },
-          workId,
-          action: "wait_and_rerun",
-          sourceEventId: agentRunId,
-          previousFailure: { summary: result.message ?? result.error_key, error_key: result.error_key, detail: result.message ?? "" },
-          resumeAt: transientRecoveryResumeAt,
-        }));
-      if (recovery !== null) {
-        await this.writeFailureEvent(workId, taskId, agentRunId, {
-          failure_class: "transient",
-          retry_no: durableRetryNo,
-          next_attempt_at: recovery.resume_at,
-          auto_recovery_attempt_no: recovery.attempt_no,
-          error_key: result.error_key,
-          retry_allowed: true,
-          reason: result.message ?? null,
-          ...usage,
-        });
-        return;
+      // The slot and the result share one write: a run the Owner stopped keeps neither.
+      const errorKey = result.error_key;
+      if (!errorKey.startsWith("provider_failed:timeout:")) {
+        try {
+          await this.writeFailureEvent(workId, taskId, agentRunId, {
+            failure_class: "transient",
+            retry_no: durableRetryNo,
+            error_key: errorKey,
+            retry_allowed: true,
+            reason: result.message ?? null,
+            ...usage,
+          }, "task.failure.classified", undefined, null, (transaction) => {
+            const recovery = startAutoRecoveryInTransaction(transaction, {
+              kind: "provider_transient",
+              target: { kind: "task", id: lineageRootOf(transaction, taskId) },
+              workId,
+              action: "wait_and_rerun",
+              sourceEventId: agentRunId,
+              previousFailure: { summary: result.message ?? errorKey, error_key: errorKey, detail: result.message ?? "" },
+              resumeAt: transientRecoveryResumeAt,
+            });
+            return recovery === null ? null : { next_attempt_at: recovery.resume_at, auto_recovery_attempt_no: recovery.attempt_no };
+          });
+          return;
+        } catch (error) {
+          if (error !== AUTO_RECOVERY_EXHAUSTED) throw error;
+        }
       }
       // Transient retry budget exhausted (3 attempts): escalate as a
       // deterministic failure so it counts toward failure_count/
@@ -2189,7 +2264,9 @@ export class WorkflowEngine {
       ...usage,
     };
     // Recorded for the Work screen only: a 429 wait is never counted against the auto_recovery limit.
-    await this.writeLane.transact((transaction) => recordAutoRecoveryInTransaction(transaction, {
+    await this.writeLane.transact((transaction) => {
+      assertAgentRunNotStopped(transaction, agentRunId);
+      return recordAutoRecoveryInTransaction(transaction, {
       kind: "provider_transient",
       target: { kind: "task", id: lineageRootOf(transaction, taskId) },
       workId,
@@ -2198,7 +2275,8 @@ export class WorkflowEngine {
       previousFailure: { summary: result.message ?? result.error_key ?? "rate_limited", error_key: result.error_key ?? "rate_limited", detail: result.message ?? "" },
       counted: false,
       resumeAt: pause.resume_at,
-    }));
+    });
+    });
     await this.writeLane.write({
       mutateState: (transaction) => reduceTaskInTransaction(transaction, taskId, { event: "task.rate_limited", payload }),
       event: {
@@ -2287,7 +2365,13 @@ export class WorkflowEngine {
     }
   }
 
+  /** Read right before a merge: an Owner stop leaves the Task paused or ready, and a stopped Task is never merged. */
+  private taskIsVerifying(taskId: string): boolean {
+    return this.db.get<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId)?.status === "verifying";
+  }
+
   private async completeWaitingResearch(workId: string, taskId: string, worktreePath: string | null, agentRunId: string): Promise<void> {
+    if (!this.taskIsVerifying(taskId)) return;
     const integration = await this.integrateTask(workId, taskId, worktreePath);
     const verification: JsonObject = { passed: true, source: "research_without_review", commands: [] };
     const verificationEvent = await this.writeLane.write({
@@ -2367,11 +2451,17 @@ export class WorkflowEngine {
     event = "task.failure.classified",
     question?: string | null,
     trigger: TaskReplanTrigger | null = null,
+    // Runs in the same write as the result so a stopped run never keeps a slot; null means no slot is left.
+    reducerExtra?: (transaction: CoreWriteLaneTransaction) => JsonObject | null,
   ): Promise<void> {
     const eventPayload = { ...payload, agent_run_id: agentRunId };
     const writeResult = await this.writeLane.write({
-      mutateState: (transaction: CoreWriteLaneTransaction) =>
-        reduceTaskInTransaction(transaction, taskId, { event, payload: eventPayload }),
+      mutateState: (transaction: CoreWriteLaneTransaction) => {
+        if (reducerExtra) assertAgentRunNotStopped(transaction, agentRunId);
+        const extra = reducerExtra ? reducerExtra(transaction) : {};
+        if (extra === null) throw AUTO_RECOVERY_EXHAUSTED;
+        return reduceTaskInTransaction(transaction, taskId, { event, payload: { ...eventPayload, ...extra } });
+      },
       event: {
         idempotencyKey: `${event}:${agentRunId}`,
         type: event,
@@ -2506,6 +2596,8 @@ export class WorkflowEngine {
       };
     }
     if (this.stopping) return;
+    // The Owner's stop killed the command; its failed exit is not a verification result.
+    if (!this.taskIsVerifying(taskId)) return;
     if (verification.error_key === "test_environment" && typeof verification.test_environment === "object" && verification.test_environment !== null) {
       await this.blockOnTestEnvironment({ workId, taskId, agentRunId, block: verification.test_environment as unknown as TestEnvironmentBlock });
       return;
@@ -2527,6 +2619,7 @@ export class WorkflowEngine {
     const reviewRequired = task.type === "research" ? false : routing?.required ?? true;
     // A Task without review is finished here, so it is merged now; a
     // reviewed Task is merged once its review passes (runReviewer).
+    if (passed && !reviewRequired && !this.taskIsVerifying(taskId)) return;
     const integration = passed && !reviewRequired ? await this.integrateTask(workId, taskId, task.worktree_path) : null;
     const verificationEvent = await this.writeLane.write({
       mutateState: (transaction: CoreWriteLaneTransaction) => {
@@ -2940,7 +3033,7 @@ export class WorkflowEngine {
         results.push({ command_id: command.command_id, passed: false, error: "cwd_outside_allowed_roots" });
         continue;
       }
-      const result = await this.runVerificationCommand(task.id, command.argv, cwd, command.env_allowlist, command.timeout_seconds * 1000, command.stdout_limit, command.stderr_limit, command.expected_exit_codes);
+      const result = await this.runVerificationCommand(task.id, command.argv, cwd, command.env_allowlist, command.timeout_seconds * 1000, command.stdout_limit, command.stderr_limit, command.expected_exit_codes, true);
       results.push({ command_id: command.command_id, ...result });
     }
     const coreChecksPassed = results.every((result) => result.passed === true);
@@ -3026,7 +3119,7 @@ export class WorkflowEngine {
         } : coreTests?.outcome.status === "not_applicable" && coreTests.outcome.reason === "explicit_off" ? { enabled: false, reason: "explicit_off" } : undefined,
         coreTestRun: coreTests && coreTests.outcome.status !== "not_applicable" ? { run_id: coreTests.outcome.run_id, mode: coreTests.outcome.mode, passed_files: coreTests.outcome.passed_files, failed_files: coreTests.outcome.failed_files } : undefined,
         runCommand: async (argv, cwd) => {
-          const outcome = await this.runVerificationCommand(task.id, argv, cwd, limits.env_allowlist, limits.timeout_seconds * 1000, limits.stdout_limit_bytes, limits.stderr_limit_bytes, [0]);
+          const outcome = await this.runVerificationCommand(task.id, argv, cwd, limits.env_allowlist, limits.timeout_seconds * 1000, limits.stdout_limit_bytes, limits.stderr_limit_bytes, [0], true);
           return {
             passed: outcome.passed === true,
             exit_code: typeof outcome.exit_code === "number" ? outcome.exit_code : null,
@@ -3128,7 +3221,7 @@ export class WorkflowEngine {
     const { limits } = verificationPolicySettings(this.db);
     const results: JsonObject[] = [];
     for (const [index, argv] of commands.entries()) {
-      const result = await this.runVerificationCommand(task.id, argv, root, limits.env_allowlist, limits.timeout_seconds * 1000, limits.stdout_limit_bytes, limits.stderr_limit_bytes, [0]);
+      const result = await this.runVerificationCommand(task.id, argv, root, limits.env_allowlist, limits.timeout_seconds * 1000, limits.stdout_limit_bytes, limits.stderr_limit_bytes, [0], true);
       results.push({ command_id: `check:${index}`, ...result });
       if (result.passed !== true) break;
     }
@@ -3176,7 +3269,7 @@ export class WorkflowEngine {
     }
     const baseRun: TestCommandRunner = this.testCommandRunner ?? (async (argv, cwd, timeoutMs, limit) => {
       const started = Date.now();
-      const result = await this.runVerificationCommand(task.id, argv, cwd, [...settings.env_allowlist, "HOME"], timeoutMs, limit, limit, [0]);
+      const result = await this.runVerificationCommand(task.id, argv, cwd, [...settings.env_allowlist, "HOME"], timeoutMs, limit, limit, [0], true);
       const error = typeof result.error === "string" ? result.error : undefined;
       return {
         exit_code: error !== undefined || typeof result.exit_code !== "number" ? null : result.exit_code,
@@ -3397,6 +3490,9 @@ export class WorkflowEngine {
         return { result, blocked: block() };
       }
       if (rounds >= maxRounds) return { result, blocked: block() };
+      // Why not investigate anyway: an Owner stop ends the command in failure, which reads as an environment failure,
+      // and the investigation (an Agent outside agent_runs) would keep this pipeline, and so the stop, pending.
+      if (place.task_id !== null && !this.taskIsVerifying(place.task_id)) return { result, blocked: null };
       rounds += 1;
       const outcome = await service.investigate({
         project_id: project.id,
@@ -3418,6 +3514,8 @@ export class WorkflowEngine {
         if (outcome.code_problem) return { result, blocked: null };
         if (outcome.status === "needs_approval") return { result, blocked: block() };
       }
+      // Why not run again: the stop cancelled the investigation, and a new run would outlive the stop.
+      if (place.task_id !== null && !this.taskIsVerifying(place.task_id)) return { result, blocked: null };
       result = await input.run();
     }
   }
@@ -3431,13 +3529,6 @@ export class WorkflowEngine {
         const brief = testEnvironmentBrief({ subject: { kind: "task", title }, block: input.block }, ownerLanguage(transaction));
         const decisionId = openTestEnvironmentDecisionInTransaction(transaction, { workId: input.workId, taskId: input.taskId, brief, now: utcNow() });
         tagOutsideInstalls(transaction, input.workId, decisionId, input.block.outside_installs);
-        appendEventInTransaction(transaction, {
-          type: "decision.opened",
-          idempotencyKey: `decision-opened:test-environment:${decisionId}`,
-          workId: input.workId,
-          taskId: null,
-          payload: { work_id: input.workId, scope: "work", blocked_task_ids: [input.taskId], ...brief, allow_free_text: true, issuer_role: "core", decision_id: decisionId, language: ownerLanguage(transaction) } as unknown as JsonObject,
-        });
       },
       event: {
         idempotencyKey: `verification-environment-blocked:${input.agentRunId}:${round}`,
@@ -3457,13 +3548,6 @@ export class WorkflowEngine {
         const brief = testEnvironmentBrief({ subject: { kind: "work" }, block }, ownerLanguage(transaction));
         const decisionId = openTestEnvironmentDecisionInTransaction(transaction, { workId, taskId: null, brief, now: utcNow() });
         tagOutsideInstalls(transaction, workId, decisionId, block.outside_installs);
-        appendEventInTransaction(transaction, {
-          type: "decision.opened",
-          idempotencyKey: `decision-opened:test-environment:${decisionId}`,
-          workId,
-          taskId: null,
-          payload: { work_id: workId, scope: "work", blocked_task_ids: [], ...brief, allow_free_text: true, issuer_role: "core", decision_id: decisionId, language: ownerLanguage(transaction) } as unknown as JsonObject,
-        });
     });
   }
 
@@ -3680,7 +3764,7 @@ export class WorkflowEngine {
       checks,
       allowed: [...this.contextBuilder.checkCommands(workId), ...reportCommands],
       cwd,
-      run: (argv, directory) => this.runVerificationCommand(taskId, argv, directory, limits.env_allowlist, limits.timeout_seconds * 1000, limits.stdout_limit_bytes, limits.stderr_limit_bytes, [0]),
+      run: (argv, directory) => this.runVerificationCommand(taskId, argv, directory, limits.env_allowlist, limits.timeout_seconds * 1000, limits.stdout_limit_bytes, limits.stderr_limit_bytes, [0], false),
     });
   }
 
@@ -3693,9 +3777,13 @@ export class WorkflowEngine {
     stdoutLimit: number,
     stderrLimit: number,
     expectedExitCodes: readonly number[],
+    taskMustBeVerifying: boolean,
   ): Promise<JsonObject> {
     if (argv.length === 0) return { passed: false, error: "argv_empty" };
     if (this.stopping) return { passed: false, error: "workflow_stopping" };
+    if (taskMustBeVerifying && this.db.get<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId)?.status !== "verifying") {
+      return { passed: false, error: "task_stopped" };
+    }
     const env: Record<string, string> = {};
     for (const key of new Set(["PATH", ...envAllowlist])) {
       const value = process.env[key];
@@ -3709,7 +3797,7 @@ export class WorkflowEngine {
       let stderr = "";
       let timedOut = false;
       const child = spawn(argv[0], argv.slice(1), { cwd, env, shell: false, detached: true, stdio: ["ignore", "pipe", "pipe"] });
-      this.verificationChildren.add(child);
+      this.verificationChildren.set(child, taskId);
       const append = (current: string, chunk: Buffer, cap: number): string => {
         const currentBytes = Buffer.from(current);
         if (currentBytes.byteLength >= cap) return current;
@@ -3790,9 +3878,18 @@ export class WorkflowEngine {
       return;
     }
     let managerTrigger = false;
+    try {
     await this.writeLane.write({
       mutateState: (transaction) => {
+        // Read again inside the write: an Owner stop may have committed since the check above.
+        if (reviewer) assertAgentRunNotStopped(transaction, reviewer.id);
         const task = transaction.get<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId);
+        const reviewerRunning = reviewer !== undefined && transaction.get<{ one: number }>(
+          "SELECT 1 AS one FROM agent_runs WHERE id = ? AND status IN ('launch_pending','spawned','running')",
+          reviewer.id,
+        ) !== undefined;
+        // The Task left verifying and no Reviewer runs: the Owner stopped it, so no failure is recorded.
+        if (task?.status !== "verifying" && !reviewerRunning) throw OWNER_STOP_ABORT;
         if (task?.status === "verifying") {
           // The Reviewer itself failed (provider or contract error): no
           // finding was produced, so this must not consume a review round.
@@ -3807,7 +3904,7 @@ export class WorkflowEngine {
         }
         if (reviewer && ["launch_pending", "spawned", "running", "cancel_requested"].includes(reviewer.status)) {
           transaction.run(
-            "UPDATE agent_runs SET status = 'failed', ended_at = ?, updated_at = ? WHERE id = ? AND status IN ('launch_pending','spawned','running','cancel_requested')",
+            "UPDATE agent_runs SET status = 'failed', ended_at = ?, updated_at = ? WHERE id = ? AND status IN ('launch_pending','spawned','running')",
             utcNow(),
             utcNow(),
             reviewer.id,
@@ -3825,6 +3922,12 @@ export class WorkflowEngine {
       },
       outbox: [{ provider: "websocket" }],
     });
+    } catch (stopped) {
+      if (stopped === OWNER_STOP_ABORT) return;
+      if (!isAgentRunStopped(stopped) || !reviewer) throw stopped;
+      await this.ignoreReviewerResult(workId, taskId, reviewer.id, "review_result_arrived_after_owner_stop");
+      return;
+    }
     if (managerTrigger) {
       await this.triggerManagerReplanIfNeeded(workId, { kind: "reviewer_error", task_id: taskId, message });
     }
@@ -3920,6 +4023,8 @@ export class WorkflowEngine {
     const reviewerProvider = this.providerForRoleModel(reviewerRoleModel);
     if (this.providerPauseController?.isPaused(reviewerProvider)) {
       await this.writeLane.transact((transaction) => {
+        // A Task the Owner stopped waits for nothing.
+        if (transaction.get<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId)?.status !== "verifying") return;
         recordPausedReviewerWait(transaction, taskId, reviewerProvider, utcNow());
       });
       return;
@@ -3962,6 +4067,7 @@ export class WorkflowEngine {
     if (this.providerPauseController?.isPaused(reviewerProvider)) {
       await this.writeLane.write({
         mutateState: (transaction) => {
+          assertAgentRunNotStopped(transaction, reviewerAgentRunId);
           const now = utcNow();
           transaction.run("UPDATE agent_runs SET status = 'exited', ended_at = ?, updated_at = ? WHERE id = ? AND status = 'running'", now, now, reviewerAgentRunId);
           recordPausedReviewerWait(transaction, taskId, reviewerProvider, now);
@@ -4037,6 +4143,7 @@ export class WorkflowEngine {
       const payload = { task_id: taskId, agent_run_id: reviewerAgentRunId, provider: pause.provider, resume_at: pause.resume_at };
       await this.writeLane.write({
         mutateState: (transaction) => {
+          assertAgentRunNotStopped(transaction, reviewerAgentRunId);
           const now = utcNow();
           transaction.run("UPDATE agent_runs SET status = 'exited', ended_at = ?, updated_at = ?, usage_json = COALESCE(?, usage_json) WHERE id = ? AND status = 'running'", now, now, usageJson(result.usage), reviewerAgentRunId);
           recordPausedReviewerWait(transaction, taskId, provider, now);
@@ -4120,6 +4227,24 @@ export class WorkflowEngine {
     if (!Array.isArray(rawFindings) || !tests || typeof tests !== "object" || Array.isArray(tests)) {
       throw validationError("The Reviewer result is missing findings or tests.", { task_id: taskId });
     }
+    const storedCriteria = this.storedCriteriaOf(taskId);
+    const goalIds = new Set(goalCriterionIds(storedCriteria));
+    const criterionText = new Map(storedCriteria.map((criterion) => [criterion.id, criterion.text]));
+    const rawShortfalls = reviewObject.goal_shortfalls ?? [];
+    if (!Array.isArray(rawShortfalls)) {
+      throw validationError("The Reviewer goal_shortfalls must be an array.", { task_id: taskId, agent_run_id: reviewerAgentRunId });
+    }
+    const goalShortfalls: GoalShortfall[] = rawShortfalls.map((entry) => {
+      const item = entry !== null && typeof entry === "object" && !Array.isArray(entry) ? entry as JsonObject : {};
+      if (typeof item.criterion_id !== "string" || !goalIds.has(item.criterion_id)) {
+        throw validationError("The Reviewer goal_shortfalls names a criterion that is not a goal.", { task_id: taskId, agent_run_id: reviewerAgentRunId });
+      }
+      if (!isNonBlankReason(item.reason)) {
+        throw validationError("The Reviewer goal_shortfalls reason is blank.", { task_id: taskId, agent_run_id: reviewerAgentRunId });
+      }
+      return { criterion_id: item.criterion_id, text: criterionText.get(item.criterion_id) ?? "", reason: item.reason.trim(), source: "reviewer" };
+    });
+    const findings = normalizeReviewFindings(rawFindings);
     if (rawVerdict === ACCEPTANCE_DEFECT_VERDICT) {
       // Not a review: no reviews row and no review.failed, so neither the review
       // limits nor lineage_review_attempts count it. The shared route fails the
@@ -4128,12 +4253,20 @@ export class WorkflowEngine {
       if (defects.length === 0) {
         throw validationError("The Reviewer reported acceptance_defect without acceptance_defects.", { task_id: taskId, agent_run_id: reviewerAgentRunId });
       }
-      await this.reportAcceptanceDefect({ workId, taskId, source: "reviewer", agentRunId: reviewerAgentRunId, defects, report: null, usage: usagePayload(result.usage) });
-      return;
+      // A goal never stops the Task: its defects become shortfalls, and only required defects take the Manager route.
+      const requiredDefects = defects.filter((defect) => !goalIds.has(defect.criterion_id));
+      if (requiredDefects.length > 0) {
+        await this.reportAcceptanceDefect({ workId, taskId, source: "reviewer", agentRunId: reviewerAgentRunId, defects: requiredDefects, report: null, usage: usagePayload(result.usage) });
+        return;
+      }
+      for (const defect of defects) {
+        if (!goalShortfalls.some((entry) => entry.criterion_id === defect.criterion_id)) {
+          goalShortfalls.push({ criterion_id: defect.criterion_id, text: criterionText.get(defect.criterion_id) ?? defect.criterion, reason: defect.reason.trim(), source: "reviewer" });
+        }
+      }
     }
-    const findings = normalizeReviewFindings(rawFindings);
     const storedReview: JsonObject = { ...reviewObject, findings: findings as JsonObject[] };
-    const verdict = normalizeReviewerVerdict(rawVerdict, findings);
+    const verdict = normalizeReviewerVerdict(rawVerdict === ACCEPTANCE_DEFECT_VERDICT ? "fix_required" : rawVerdict, findings);
     const expectedOutcome = rawVerdict === "pass" ? "success" : "failed";
     if (result.outcome !== expectedOutcome) {
       throw validationError("The Reviewer outcome does not match its verdict.", {
@@ -4144,6 +4277,10 @@ export class WorkflowEngine {
       });
     }
 
+    if (verdict === "pass" && !this.taskIsVerifying(taskId)) {
+      await this.ignoreReviewerResult(workId, taskId, reviewerAgentRunId, "review_result_arrived_after_owner_stop");
+      return;
+    }
     const integration = verdict === "pass" ? await this.integrateTask(workId, taskId, task.worktree_path) : null;
     const event = verdict === "pass" ? "review.passed" : "review.failed";
     const reviewPayload: JsonObject = {
@@ -4192,7 +4329,10 @@ export class WorkflowEngine {
             details: { agent_run_id: reviewerAgentRunId, task_id: taskId },
           });
         }
-        if (reduction.next.status === "completed") registerReviewBacklogInTransaction(transaction, taskId, utcNow());
+        if (reduction.next.status === "completed") {
+          registerReviewBacklogInTransaction(transaction, taskId, utcNow());
+          recordTaskGoalShortfalls(transaction, taskId, goalShortfalls);
+        }
         return reduction;
       },
       event: {

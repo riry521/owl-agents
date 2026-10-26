@@ -82,7 +82,7 @@ test("Completion Gate (Subagent): observed subagents need integration; no observ
   assert.equal(evaluateWorkerCompletion(report(), normal).passed, true);
 });
 
-async function openWorkflow(t, { hybrid = false, launchHybrid = hybrid, childRuns } = {}) {
+async function openWorkflow(t, { hybrid = false, launchHybrid = hybrid, childRuns, criteria } = {}) {
   const { root, db } = await openTestDatabase(t, { prefix: "owl-completion-gate-" });
   // The Task type policy inspects the Task worktree, so the Task owns one valid code file.
   await writeFile(join(root, "a.mjs"), "export const x = 1;\n");
@@ -97,6 +97,7 @@ async function openWorkflow(t, { hybrid = false, launchHybrid = hybrid, childRun
       `INSERT INTO artifacts (id, work_id, task_id, path, kind, deliverable, sha256, bytes, mime, version_no, created_at)
        VALUES ('artifact-1', 'work-1', 'task-1', 'a.mjs', 'generated', 1, ?, 1, 'text/javascript', 1, ?)`, "a".repeat(64), now);
     if (hybrid) tx.run("INSERT INTO settings (owner_id, key, value_json, schema_version, updated_at) VALUES ('owner:default', 'hybrid_mode', 'true', '1.0.0', ?)", now);
+    if (criteria) tx.run("UPDATE tasks SET acceptance_criteria_json = ? WHERE id = 'task-1'", JSON.stringify(criteria));
   });
   let reviewerRuns = 0;
   const agentRunner = {
@@ -276,4 +277,49 @@ test("Workflow (Hybrid): the gate uses the mode the Worker was launched with, no
   await settingOn.succeed("run-1", report());
   assert.equal(settingOn.events("task.failure.classified"), 0);
   assert.equal(settingOn.reviewerRuns(), 1);
+});
+
+// Goal criteria: the Task's stored criteria decide what is a goal, never the report's own requirement.
+const criterion = (id, requirement) => ({ id, text: `criterion ${id}`, check: "c", serves: "s", if_omitted: "i", check_weight: "light", weight_reason: "", ...(requirement ? { requirement } : {}) });
+const GOAL_CRITERIA = [criterion("AC1"), criterion("AC2", "goal")];
+const goalUnmet = (id, shortfall_reason) => ({ criterion_id: id, criterion: "c", status: "goal_unmet", evidence: "e", ...(shortfall_reason === undefined ? {} : { shortfall_reason }) });
+const passedAc = (id) => ({ criterion_id: id, criterion: "c", status: "passed", evidence: "e" });
+const withGoalUnmet = (...items) => report({}, { acceptance: items });
+const goalOptions = { ...normal, goal_criterion_ids: ["AC2"] };
+
+test("Completion Gate: goal_unmet passes for a goal with a reason, and stops for a required id or a blank reason", () => {
+  assert.equal(evaluateWorkerCompletion(withGoalUnmet(passedAc("AC1"), goalUnmet("AC2", "only 6 branches")), goalOptions).passed, true);
+  const required = evaluateWorkerCompletion(withGoalUnmet(goalUnmet("AC1", "why"), passedAc("AC2")), goalOptions);
+  assert.deepEqual([required.passed, required.error_key], [false, "worker_verification_failed"]);
+  for (const reason of [undefined, null, "", "  \n"]) {
+    const blank = evaluateWorkerCompletion(withGoalUnmet(passedAc("AC1"), goalUnmet("AC2", reason)), goalOptions);
+    assert.deepEqual([blank.passed, blank.error_key], [false, "worker_verification_failed"]);
+  }
+});
+
+test("Completion Gate: a criterion without a requirement is required, so goal_unmet on it stops", () => {
+  const verdict = evaluateWorkerCompletion(withGoalUnmet(passedAc("AC1"), goalUnmet("AC2", "why")), normal);
+  assert.deepEqual([verdict.passed, verdict.error_key], [false, "worker_verification_failed"]);
+});
+
+test("Workflow: a goal_unmet goal passes the gate, starts the Reviewer and stores the shortfall on the Task", async (t) => {
+  const w = await openWorkflow(t, { criteria: GOAL_CRITERIA });
+  await w.seedRun("run-1");
+  await w.succeed("run-1", withGoalUnmet(passedAc("AC1"), goalUnmet("AC2", " only 6 branches ")));
+  assert.equal(w.events("task.failure.classified"), 0);
+  assert.equal(w.reviewerRuns(), 1);
+  assert.deepEqual(JSON.parse(w.db.get("SELECT goal_shortfalls_json AS j FROM tasks WHERE id = 'task-1'").j), [
+    { criterion_id: "AC2", text: "criterion AC2", reason: "only 6 branches", source: "worker" },
+  ]);
+});
+
+test("Workflow: goal_unmet without a reason, or on a required id, is worker_verification_failed and stores nothing", async (t) => {
+  for (const body of [withGoalUnmet(passedAc("AC1"), goalUnmet("AC2", "  ")), withGoalUnmet(passedAc("AC1"), goalUnmet("AC2")), withGoalUnmet(goalUnmet("AC1", "why"), passedAc("AC2"))]) {
+    const w = await openWorkflow(t, { criteria: GOAL_CRITERIA });
+    await w.seedRun("run-1");
+    await w.succeed("run-1", body);
+    assert.equal(w.reviewerRuns(), 0);
+    assert.equal(JSON.parse(w.db.get("SELECT payload_json FROM events WHERE type = 'task.failure.classified'").payload_json).error_key, "worker_verification_failed");
+    assert.equal(w.db.get("SELECT goal_shortfalls_json AS j FROM tasks WHERE id = 'task-1'").j, null);
+  }
 });

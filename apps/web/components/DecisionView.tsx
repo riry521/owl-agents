@@ -7,6 +7,7 @@ import { answerDecision, getDecision } from '@/lib/api-client';
 import { useView } from '@/lib/view-loader';
 import type { DecisionAnswerResult, DecisionOption, DecisionView as DecisionData } from '@/lib/types';
 import { TaskStateBadge } from '@/components/StateBadge';
+import { decisionDisplay } from '@/lib/decision-sections.mjs';
 import { workDisplayNumber } from '@/lib/format';
 import { useLocale } from '@/lib/i18n';
 
@@ -84,13 +85,18 @@ export function DecisionView() {
   }
 
   const explanation = decision.explanation ?? null;
-  const ready = explanation?.status === 'ready' && explanation.summary !== null;
   const causeKind = explanation?.cause_kind ?? null;
-  const fixOptions = ready ? decision.options.filter((o) => o.key.startsWith('fix_')) : [];
-  const otherOptions = ready ? decision.options.filter((o) => !o.key.startsWith('fix_')) : [];
+  const notes = new Map((explanation?.option_notes ?? []).map((n) => [n.key, n.note]));
+  // The question and the explanation texts are shown outside the stored reason; put them first so a repeat of them is dropped from the reason lines.
+  const questionText = decision.question || t('decision.questionMissing');
+  const { ready, howLines, questionLines, lines } = decisionDisplay({ explanation, questionText, decision });
+  const fixOptions = decision.options.filter((o) => o.key.startsWith('fix_'));
+  const otherOptions = decision.options.filter((o) => !o.key.startsWith('fix_'));
+  const paragraphs = (items: string[]) => items.map((line, n) => <p key={n} className="decision__text">{line}</p>);
 
   function renderOption(o: DecisionOption, i: number) {
     const recommended = o.key === decision.recommended;
+    const description = (ready && !o.key.startsWith('fix_') ? notes.get(o.key) : undefined) || o.description;
     return (
       <div key={o.key} className={`option${recommended ? ' option--recommended' : ''}`}>
         <span className="option__key">{String.fromCharCode(65 + i)}</span>
@@ -99,7 +105,7 @@ export function DecisionView() {
             {o.label}
             {recommended && <span className="badge badge--accent badge--ml">{t('decision.recommended')}</span>}
           </div>
-          <div className="option__desc">{o.description || t('decision.effectMissing')}</div>
+          <div className="option__desc">{description || t('decision.effectMissing')}</div>
           {o.criteria_rewrites?.map((r, n) => (
             <dl key={n} className="kv kv--spaced">
               <dt>{t('decision.rewriteBefore')}</dt>
@@ -122,20 +128,21 @@ export function DecisionView() {
 
   const contextList = (
     <dl className="kv kv--spaced">
-      {decision.current_state && (
+      {lines.current_state.length > 0 && (
         <>
           <dt>{t('decision.currentState')}</dt>
-          <dd className="decision__text">{decision.current_state}</dd>
+          <dd>{paragraphs(lines.current_state)}</dd>
         </>
       )}
-      {decision.tried && (
+      {lines.tried.length > 0 && (
         <>
           <dt>{t('decision.tried')}</dt>
-          <dd className="decision__text">{decision.tried}</dd>
+          <dd>{paragraphs(lines.tried)}</dd>
         </>
       )}
     </dl>
   );
+  const hasContext = lines.current_state.length > 0 || lines.tried.length > 0;
 
   const answerArea = answered ? (
     <div className="answered mt-14">
@@ -194,7 +201,7 @@ export function DecisionView() {
         <span className={statusBadge}>{statusText}</span>
       </div>
 
-      {/* Ready explanation: summary → options with the recommendation → collapsed record. Otherwise the original template order. */}
+      {/* Always two parts: why it stopped, then what the Owner can do. Without a ready explanation the stored texts fill both, with repeats removed. */}
       <section className="panel" aria-labelledby="sec-reason">
         <h2 className="panel__title" id="sec-reason">
           {t('decision.why')}
@@ -205,7 +212,8 @@ export function DecisionView() {
           )}
         </h2>
         {explanation?.status === 'pending' && <p className="note note--block">{t('decision.explanationPending')}</p>}
-        <p className="decision__text">{ready ? explanation?.summary : decision.reason}</p>
+        {explanation?.status === 'failed' && <p className="note note--block">{t('decision.explanationFailed')}</p>}
+        {ready ? <p className="decision__text">{explanation?.summary}</p> : paragraphs(lines.reason)}
         <dl className="kv kv--spaced">
           <dt>Work</dt>
           <dd>
@@ -233,51 +241,37 @@ export function DecisionView() {
         </dl>
       </section>
 
-      {ready ? (
-        <section className="panel decision__ask" aria-labelledby="sec-question">
-          <h2 className="panel__title" id="sec-question">
-            {t('decision.question')}
-          </h2>
-          <p className="decision__question">{decision.question || t('decision.questionMissing')}</p>
-          <div className="list mt-14">{fixOptions.map((o, i) => renderOption(o, i))}</div>
-          {otherOptions.length > 0 && (
-            <>
-              <h3 className="decision__subhead">{t('decision.otherOptions')}</h3>
-              <div className="list">{otherOptions.map((o, i) => renderOption(o, fixOptions.length + i))}</div>
-            </>
-          )}
-          {answerArea}
-        </section>
-      ) : (
-        <>
-          <section className="panel decision__ask" aria-labelledby="sec-question">
-            <h2 className="panel__title" id="sec-question">
-              {t('decision.question')}
-            </h2>
-            <p className="decision__question">{decision.question || t('decision.questionMissing')}</p>
-          </section>
-
-          <section className="panel" aria-labelledby="sec-options">
-            <h2 className="panel__title" id="sec-options">
-              {t('decision.options')}
-            </h2>
-            {decision.options.length === 0 && (
-              <p className="empty">{decision.allow_free_text ? t('decision.freeTextOnlyHint') : t('decision.noOptions')}</p>
-            )}
-            <div className="list">{decision.options.map((o, i) => renderOption(o, i))}</div>
-            {answerArea}
-          </section>
-        </>
-      )}
+      <section className="panel decision__ask" aria-labelledby="sec-how">
+        <h2 className="panel__title" id="sec-how">
+          {t('decision.how')}
+        </h2>
+        {howLines.map((line, n) => (
+          <p key={n} className="decision__question">
+            {line}
+          </p>
+        ))}
+        {decision.options.length === 0 && (
+          <p className="empty">{decision.allow_free_text ? t('decision.freeTextOnlyHint') : t('decision.noOptions')}</p>
+        )}
+        <div className="list mt-14">{fixOptions.map((o, i) => renderOption(o, i))}</div>
+        {otherOptions.length > 0 && (
+          <>
+            {fixOptions.length > 0 && <h3 className="decision__subhead">{t('decision.otherOptions')}</h3>}
+            <div className="list">{otherOptions.map((o, i) => renderOption(o, fixOptions.length + i))}</div>
+          </>
+        )}
+        {answerArea}
+      </section>
 
       {ready ? (
         <details className="panel decision__details">
           <summary>{t('decision.detailsSummary')}</summary>
-          <p className="decision__text">{decision.reason}</p>
+          {paragraphs(questionLines)}
+          {paragraphs(lines.reason)}
           {contextList}
         </details>
       ) : (
-        (decision.current_state || decision.tried) && (
+        hasContext && (
           <section className="panel" aria-labelledby="sec-context">
             <h2 className="panel__title" id="sec-context">
               {t('decision.context')}

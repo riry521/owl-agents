@@ -245,3 +245,17 @@ test("Discord: a button click on an already-settled Decision replies 'already an
   assert.match(replies[0].content, /却下/u);
   assert.match(replies[0].content, /回答済み/u);
 });
+
+test("status_query only for explicit status commands and short status questions", () => {
+  for (const text of ["進捗は？", "状況どう？", "ステータス教えて", "/status"]) {
+    assert.equal(classifyIntent({ text }, []).kind, "status_query", text);
+  }
+  for (const text of [
+    "ops-dash の UI がスマホで web アプリとして使おうと上がステータスバーに隠れたりして崩れる",
+    "ステータスバーが崩れる",
+    "進捗画面が表示されない",
+    "状況一覧のレイアウトがずれる",
+  ]) {
+    assert.notEqual(classifyIntent({ text }, []).kind, "status_query", text);
+  }
+});

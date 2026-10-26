@@ -83,6 +83,8 @@ test("the Work summary template uses the labels of the language", () => {
   assert.ok(english.includes('"Request:"') && english.includes('"Acceptance:"'), english);
   assert.doesNotMatch(english, JAPANESE);
   assert.ok(workSummaryInstruction().includes('"依頼:"'));
+  assert.ok(english.includes('"Goals:"'), english);
+  assert.ok(workSummaryInstruction().includes('"目標:"'));
 });
 
 test("the Advisor is told to reply in the language, and Owl's Advisor notices follow it", async (t) => {

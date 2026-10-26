@@ -116,3 +116,31 @@ test("the Manager output schema requires kind", async () => {
   const result = await runner.runManagerPlan({ invocation_id: "manager-plan-no-kind", work_id: "w", task_id: null, attempt: 1, context: { mode: "plan", work: { id: "w", title: "T", summary: "" } } });
   assert.notEqual(result.outcome, "success");
 });
+
+test("a criterion without requirement reads as required, a goal is marked, and any other value is rejected", async () => {
+  const { validateAcceptanceCriteria, readStoredAcceptanceCriteria, criterionRequirement, isGoalCriterion, renderAcceptanceCriteria } = await import("../../packages/shared/dist/acceptance-criteria.js");
+  assert.equal(validateAcceptanceCriteria([criterion]), null);
+  assert.equal(validateAcceptanceCriteria([{ ...criterion, requirement: "goal" }]), null);
+  assert.equal(validateAcceptanceCriteria([{ ...criterion, requirement: "required" }]), null);
+  assert.match(validateAcceptanceCriteria([{ ...criterion, requirement: "optional" }]), /acceptance_criteria\[1\]\.requirement/u);
+  assert.equal(criterionRequirement(criterion), "required");
+  assert.equal(criterionRequirement(readStoredAcceptanceCriteria(null, "free text")[0]), "required");
+  assert.equal(criterionRequirement(readStoredAcceptanceCriteria(JSON.stringify([criterion]), "t")[0]), "required");
+  assert.equal(isGoalCriterion({ requirement: "goal" }), true);
+  assert.doesNotMatch(renderAcceptanceCriteria([criterion]), /\[goal\]/u);
+  assert.match(renderAcceptanceCriteria([{ ...criterion, requirement: "goal" }]), /^\(1\) \[goal\] Migration/u);
+});
+
+test("the Manager output schemas take requirement, criterion_ref and goals_met as optional, and a plan keeps requirement", async () => {
+  const { MANAGER_PLAN_OUTPUT_SCHEMA, finalizeOutputSchema } = await import("../../packages/shared/dist/manager-schema.js");
+  const item = MANAGER_PLAN_OUTPUT_SCHEMA.properties.tasks.items.properties.acceptance_criteria.items;
+  assert.ok(item.properties.requirement && !item.required.includes("requirement"));
+  const verdict = finalizeOutputSchema(false).properties.verdict;
+  const missing = verdict.properties.missing.items;
+  assert.ok(missing.properties.criterion_ref && !missing.required.includes("criterion_ref"));
+  assert.ok(verdict.properties.goals_met && !verdict.required.includes("goals_met"));
+  const runner = runnerReturning({ tasks: [{ ...promptCompliantPlan.tasks[0], acceptance_criteria: [{ ...criterion, requirement: "goal" }] }] });
+  const result = await runner.runManagerPlan({ invocation_id: "m-req", work_id: "w-req", task_id: null, attempt: 1, context: { mode: "plan", work: { id: "w-req", title: "t", summary: "s" } } });
+  assert.equal(result.outcome, "success");
+  assert.equal(result.report.tasks[0].acceptance_criteria[0].requirement, "goal");
+});

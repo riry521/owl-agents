@@ -121,3 +121,10 @@ test("Work contracts expose positive nullable display numbers", () => {
     assert.match(schema, /\n        display_number:\n          anyOf:\n            - type: integer\n              minimum: 1\n            - type: 'null'\n/u, header);
   }
 });
+
+test("WorkView contract lists goal shortfalls as an optional array", () => {
+  const schema = readJson("contracts/jsonschema/owl-v1/work-view.json");
+  assert.equal(schema.properties.goal_shortfalls.type, "array");
+  assert.equal(schema.required.includes("goal_shortfalls"), false);
+  assert.deepEqual(schema.properties.goal_shortfalls.items.properties.source.enum, ["worker", "reviewer", "final_check"]);
+});

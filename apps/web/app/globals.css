@@ -830,12 +830,6 @@ a.card:hover {
 }
 
 
-.advisor-page-wrap {
-  margin: -20px -16px -48px;
-  padding: 0 16px;
-  height: calc(100vh - var(--nav-h));
-}
-
 .advisor {
   display: flex;
   flex-direction: column;
@@ -995,6 +989,19 @@ a.card:hover {
 .advisor__messages::-webkit-scrollbar-thumb {
   background: rgba(0,0,0,0.12);
   border-radius: 3px;
+}
+
+.advisor__show-earlier {
+  align-self: center;
+  margin: 4px 0 8px;
+  padding: 4px 12px;
+  border: 1px solid var(--border, rgba(0,0,0,0.12));
+  border-radius: var(--radius);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
 }
 
 .advisor__empty {
@@ -1265,6 +1272,7 @@ a.card:hover {
   padding: 4px 0;
   min-height: 42px;
   max-height: 200px;
+  field-sizing: content;
   color: var(--ink);
 }
 
@@ -2930,12 +2938,6 @@ input, textarea, select {
     padding-bottom: 100px;
   }
 
-  .advisor-page-wrap {
-    margin: 0;
-    padding: 0;
-    height: calc(100vh - var(--nav-h) - 83px);
-  }
-
   .advisor {
     height: calc(100vh - var(--nav-h) - 83px);
     padding-bottom: 90px;
@@ -4314,3 +4316,244 @@ input, textarea, select {
   color: #5c4000;
   font-weight: 600;
 }
+
+/* advisor-windows: begin */
+:root {
+  --tabbar-h: 83px;
+  --advisor-picker-w: 260px;
+  --advisor-min-h: 420px;
+  --advisor-notice-max-h: 96px;
+  --advisor-fixed-h: 459px;
+}
+
+body:has(.advisor-page-wrap) { display: flex; flex-direction: column; height: 100dvh; min-height: 0; }
+body:has(.advisor-page-wrap) > * { flex-shrink: 0; }
+.page:has(> .advisor-page-wrap) {
+  flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0;
+  width: 100%; max-width: none; margin: 0; padding: 0;
+}
+.advisor-page-wrap {
+  flex: 1 1 auto; display: flex; flex-direction: column;
+  min-height: var(--advisor-min-h);
+  padding: 0 16px;
+}
+
+.advisor-windows-layout {
+  flex: 1 1 auto; min-height: 0;
+  display: grid;
+  grid-template-columns: var(--advisor-picker-w) minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-areas:
+    "notice notice"
+    "picker chat";
+  column-gap: 20px; row-gap: 0;
+  width: 100%; max-width: 1320px; margin: 0 auto;
+  padding: 16px 0 12px;
+}
+.advisor-windows-layout__notices {
+  grid-area: notice; display: grid; gap: 8px; align-content: start;
+  max-height: var(--advisor-notice-max-h); overflow-y: auto; margin-bottom: 8px;
+}
+.advisor-windows-layout__notices:empty { display: none; }
+.advisor-window-picker { grid-area: picker; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.advisor-window-picker__list { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.advisor-windows-layout__chat { grid-area: chat; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+
+.advisor-page-wrap .advisor { flex: 1 1 auto; min-height: 0; min-width: 0; height: auto; max-width: none; margin: 0; }
+.advisor-page-wrap .advisor__header { justify-content: flex-start; gap: 6px; padding: 4px 4px 12px; }
+.advisor-page-wrap .advisor__header-left { flex: 1 1 auto; min-width: 0; }
+.advisor-page-wrap .advisor__header-title {
+  flex: 0 1 auto;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; overflow-wrap: anywhere; line-height: 1.3; min-width: 0;
+}
+.advisor-page-wrap .advisor__session-badges { flex: 0 1 auto; min-width: 0; flex-wrap: nowrap; overflow: hidden; }
+.advisor-page-wrap .advisor__messages { flex: 1 1 auto; min-height: 96px; margin-top: 12px; }
+.advisor-page-wrap .advisor__input-area { margin-top: 12px; }
+.advisor-page-wrap .advisor__textarea {
+  max-height: max(calc(1.5em + 8px), min(200px, calc(100dvh - var(--advisor-fixed-h) - var(--advisor-banner-h, 0px))));
+}
+
+body:has(.advisor-page-wrap):has(.info-banner) { --advisor-banner-h: 48px; }
+body:has(.advisor-page-wrap) .info-banner { margin-top: 8px; padding: 6px 12px; max-height: 64px; overflow-y: auto; gap: 6px; }
+body:has(.advisor-page-wrap) .provider-pause-banner__line { flex-wrap: nowrap; gap: 8px; }
+body:has(.advisor-page-wrap) .provider-pause-banner__text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+body:has(.advisor-page-wrap) .info-banner .btn { flex-shrink: 0; min-height: 28px; padding: 0 10px; font-size: 12px; white-space: nowrap; }
+body:has(.advisor-page-wrap) .provider-pause-banner__error { flex-basis: auto; white-space: nowrap; }
+
+@media (max-width: 768px) {
+  :root { --advisor-fixed-h: 498px; }
+  .advisor-page-wrap { padding: 0 12px var(--tabbar-h); min-height: calc(var(--advisor-min-h) + var(--tabbar-h)); }
+  .advisor-windows-layout { display: flex; flex-direction: column; gap: 8px; padding: 8px 0 0; max-width: none; }
+  .advisor-windows-layout__notices { flex-shrink: 0; margin-bottom: 0; }
+  .advisor-window-picker { display: none; }
+  .advisor-windows-layout__chat { flex: 1 1 auto; }
+
+  .advisor-page-wrap .advisor { height: auto; padding-bottom: 0; }
+  .advisor-page-wrap .advisor__header { align-items: flex-start; padding: 4px 0 8px; }
+  .advisor-page-wrap .advisor__header-title { display: none; }
+  .advisor-page-wrap .advisor__window-trigger { display: inline-flex; flex: 1 1 0; }
+  .advisor-page-wrap .advisor__session-badges { flex: 0 0 100%; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+  .advisor-page-wrap .advisor__session-badges::-webkit-scrollbar { display: none; }
+  .advisor-page-wrap .advisor__session-badges .badge,
+  .advisor-page-wrap .advisor__session-badge { flex-shrink: 0; }
+  .advisor-page-wrap .advisor__channels-button,
+  .advisor-page-wrap .advisor__kebab-wrap { margin-top: 2px; }
+  .advisor-page-wrap .advisor__messages { margin-top: 8px; }
+  .advisor-page-wrap .advisor__input-area { position: static; padding: 8px 0 6px; margin-top: 8px; background: transparent; backdrop-filter: none; }
+  .advisor-page-wrap .advisor__textarea { font-size: 16px; }
+
+  body:has(.advisor-page-wrap):has(.info-banner) { --advisor-banner-h: 72px; }
+  body:has(.advisor-page-wrap) .provider-pause-banner__text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; }
+}
+
+@media (max-height: 560px), (max-width: 768px) and (max-height: 640px) {
+  :root { --advisor-min-h: 250px; --advisor-notice-max-h: 40px; --advisor-fixed-h: 257px; }
+  .advisor-windows-layout { padding: 8px 0; }
+  .advisor-windows-layout__notice { padding: 8px 12px; }
+  .advisor-windows-layout__notice > span { -webkit-line-clamp: 1; }
+  .advisor-window-picker__title { display: none; }
+  .advisor-page-wrap .advisor__header { padding: 2px 4px 8px; }
+  .advisor-page-wrap .advisor__header-left { flex-wrap: nowrap; }
+  .advisor-page-wrap .advisor__header-title { -webkit-line-clamp: 1; }
+  .advisor-page-wrap .advisor__messages { min-height: 48px; margin-top: 8px; }
+  .advisor-page-wrap .advisor__input-area { margin-top: 8px; padding: 6px 0 4px; }
+  .advisor-page-wrap .advisor__input-wrap { padding: 5px 10px; }
+  .advisor-page-wrap .advisor__textarea {
+    height: calc(1.5em + 8px); min-height: 0;
+    max-height: max(calc(1.5em + 8px), min(calc(4.5em + 8px), calc(100dvh - var(--advisor-fixed-h) - var(--advisor-banner-h, 0px))));
+  }
+  .advisor-page-wrap .advisor__hint { display: none; }
+
+  body:has(.advisor-page-wrap):has(.info-banner) { --advisor-banner-h: 36px; }
+  body:has(.advisor-page-wrap) .info-banner { margin-top: 4px; padding: 4px 10px; max-height: 32px; font-size: 12px; line-height: 1.4; }
+  body:has(.advisor-page-wrap) .provider-pause-banner__text { display: block; white-space: nowrap; text-overflow: ellipsis; }
+  body:has(.advisor-page-wrap) .info-banner .btn { min-height: 24px; padding: 0 8px; font-size: 11px; border-radius: 6px; }
+}
+
+@media (max-width: 768px) and (max-height: 640px) {
+  :root { --advisor-min-h: 176px; --advisor-notice-max-h: 28px; --advisor-fixed-h: 280px; }
+  .advisor-windows-layout { padding: 2px 0 0; gap: 4px; }
+  .advisor-windows-layout__notice { padding: 4px 10px; }
+  .advisor-page-wrap .advisor__header { padding: 0 0 4px; }
+  .advisor-page-wrap .advisor__window-trigger { min-height: 32px; }
+  .advisor-page-wrap .advisor__session-badges { display: none; }
+  .advisor-page-wrap .advisor__messages { margin-top: 2px; }
+  .advisor-page-wrap .advisor__input-area { margin-top: 2px; padding: 2px 0 0; }
+  .advisor-page-wrap .advisor__send { width: 32px; height: 32px; }
+}
+/* 窓の一覧の行。PC のサイドバーとスマホのシートで共通（設計書 5.2） */
+.advisor-window-picker__title { margin: 0 0 8px; padding: 0 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.advisor-window-picker__list { list-style: none; margin: 0; padding: 0 2px 2px; display: flex; flex-direction: column; gap: 2px; }
+.advisor-window-picker__item--general { margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.advisor-window-picker__row {
+  position: relative; box-sizing: border-box; width: 100%; min-width: 0; text-align: left;
+  display: flex; flex-direction: column; gap: 4px; padding: 8px 12px;
+  border: 1px solid transparent; border-radius: 10px; background: none;
+  font: inherit; color: var(--ink); cursor: pointer;
+}
+.advisor-window-picker__row:hover { background: rgba(255, 255, 255, .6); }
+.advisor-window-picker__row:focus-visible { outline: 2px solid rgba(99, 102, 241, .35); outline-offset: 0; }
+.advisor-window-picker__row[aria-current="page"] {
+  background: var(--card); border-color: var(--card-border); box-shadow: var(--shadow);
+}
+.advisor-window-picker__row[aria-current="page"]::before {
+  content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 3px; background: var(--accent);
+}
+.advisor-window-picker__name {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; overflow-wrap: anywhere; min-width: 0; font-size: 13px; font-weight: 500; line-height: 1.35;
+}
+.advisor-window-picker__row[aria-current="page"] .advisor-window-picker__name { color: var(--accent); font-weight: 600; }
+.advisor-window-picker__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; min-width: 0; font-size: 11px; color: var(--muted); }
+.advisor-window-picker__badge { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.advisor-window-picker__badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+.advisor-window-picker__badge--running::before { background: var(--green); }
+.advisor-window-picker__badge--suspended::before { background: var(--amber); }
+.advisor-window-picker__channel {
+  max-width: 100%; padding: 1px 7px; border-radius: 7px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: var(--accent-soft); color: var(--accent); font-weight: 600;
+}
+.advisor-window-picker__list--sheet .advisor-window-picker__row { min-height: 44px; }
+
+/* お知らせ（存在しない窓）。--amber-soft 地に --amber の文字ではコントラストが足りないので #92400e を使う */
+.advisor-windows-layout__notice {
+  display: flex; align-items: flex-start; gap: 8px; padding: 10px 14px; border-radius: 10px;
+  background: var(--amber-soft); color: #92400e; font-size: 13px; line-height: 1.45;
+}
+.advisor-windows-layout__notice::before {
+  content: "!"; flex: none; width: 18px; height: 18px; border-radius: 50%;
+  background: #92400e; color: var(--amber-soft); font-size: 12px; font-weight: 700; line-height: 18px; text-align: center;
+}
+.advisor-windows-layout__notice > span {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; min-width: 0;
+}
+
+/* スマホの見出しの窓名ボタン。窓画面でしか描画しないので接頭辞なし。既定は非表示（768px 以下で出す） */
+.advisor__window-trigger {
+  display: none; align-items: center; gap: 6px; min-width: 0; min-height: 36px; padding: 0 4px;
+  border: 1px solid var(--line); border-radius: 8px; background: rgba(255, 255, 255, .8);
+  font: inherit; font-size: 15px; font-weight: 600; color: var(--ink); text-align: left; cursor: pointer;
+}
+.advisor__window-trigger:focus-visible { outline: 2px solid rgba(99, 102, 241, .35); border-radius: 8px; }
+.advisor__window-trigger-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.advisor__window-trigger-caret { flex: none; width: 8px; height: 8px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: translateY(-2px) rotate(45deg); }
+.advisor__window-trigger[aria-expanded="true"] .advisor__window-trigger-caret { transform: translateY(2px) rotate(225deg); }
+
+/* スマホの窓シート。z-index はタブバー（10）の上、チャンネルのダイアログ（100）の下 */
+.advisor-window-sheet__overlay { position: fixed; inset: 0; z-index: 20; background: rgba(15, 23, 42, .42); }
+.advisor-window-sheet {
+  position: fixed; left: 0; right: 0; bottom: var(--tabbar-h); z-index: 21;
+  max-height: min(70dvh, calc(100dvh - var(--nav-h) - var(--tabbar-h) - 16px));
+  display: flex; flex-direction: column; padding: 12px 16px; background: var(--card);
+  border-radius: 16px 16px 0 0; box-shadow: 0 -4px 24px rgba(0, 0, 0, .1);
+}
+.advisor-window-sheet__grip { flex: none; width: 36px; height: 4px; margin: 0 auto 10px; border-radius: 2px; background: var(--line); }
+.advisor-window-sheet__head { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-bottom: 8px; }
+.advisor-window-sheet__title { margin: 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 600; }
+.advisor-window-sheet__close {
+  flex: none; display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0;
+  border: 1px solid var(--line); border-radius: 8px; background: transparent;
+  font: inherit; font-size: 18px; color: var(--muted); cursor: pointer;
+}
+.advisor-window-sheet .advisor-window-picker__list { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+.advisor-page-wrap .advisor__channels-button {
+  flex: none; height: 32px; margin-left: auto; margin-right: 8px; padding: 0 12px;
+  border: 1px solid var(--line); border-radius: 8px; background: rgba(255, 255, 255, 0.8);
+  color: var(--ink-2); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.advisor-page-wrap .advisor__channels-button[aria-expanded="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.advisor-channel-panel__overlay {
+  position: fixed; inset: 0; z-index: 100; display: grid; place-items: center;
+  padding: 16px; background: rgba(15, 23, 42, 0.42);
+}
+.advisor-channel-panel {
+  width: min(640px, 100%); max-height: min(85dvh, 760px); display: flex; flex-direction: column;
+  padding: 18px 20px; border: 1px solid var(--card-border); border-radius: 16px;
+  background: var(--card); box-shadow: var(--shadow);
+}
+.advisor-channel-panel__header { flex: none; display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.advisor-channel-panel__header h2 { margin: 0; font-size: 16px; }
+.advisor-channel-panel__body { min-height: 0; overflow-y: auto; }
+.advisor-channel-panel__lead, .advisor-channel-panel__text { margin: 0 0 12px; font-size: 13px; line-height: 1.6; color: var(--ink-2); }
+.advisor-channel-panel__provider { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; }
+.advisor-channel-panel__provider h3 { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 0 8px; font-size: 14px; }
+.advisor-channel-panel__provider h4 { margin: 0 0 6px; font-size: 13px; }
+.advisor-channel-panel__group + .advisor-channel-panel__group { margin-top: 14px; padding-top: 14px; border-top: 1px dashed var(--line); }
+.advisor-channel-panel__row { display: flex; flex-wrap: wrap; gap: 8px; }
+.advisor-channel-panel__row .input { flex: 1; min-width: 160px; }
+.advisor-channel-panel__bound-name { margin-bottom: 10px; font-size: 15px; font-weight: 600; }
+.advisor-channel-panel__bound-name code { font-weight: 400; font-size: 12px; }
+.advisor-channel-panel__hint { margin: 5px 0 0; font-size: 12px; line-height: 1.6; color: var(--muted); }
+.advisor-channel-panel__notice { margin: 10px 0 0; font-size: 13px; color: #047857; }
+.advisor-channel-panel .advisor-error ol { margin: 6px 0 0; padding-left: 20px; }
+@media (max-width: 768px) {
+  .advisor-channel-panel__overlay { padding: 12px; }
+  .advisor-channel-panel { padding: 14px 16px; }
+}
+/* 空の会話の見出し。長い窓名が 390px でカードをはみ出さないよう、折り返して 2 行で省略する */
+.advisor-page-wrap .advisor__empty h2 {
+  max-width: 100%; overflow: hidden; overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+/* advisor-windows: end */

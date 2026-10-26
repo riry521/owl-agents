@@ -774,3 +774,52 @@ test("deletedPaths lists a Task's own deletions, with or without a merge, and no
   git(wt, "merge", "--no-ff", "-m", "merge side", "side");
   assert.deepEqual(await gateway.deletedPaths(request), ["README.md"]);
 });
+
+/** A projectless design Task whose only criterion has the given requirement; each Reviewer call returns the next review of `reviews`. */
+async function reviewGoalTask(t, key, reviews, { requirement = "goal" } = {}) {
+  let reviewerCalls = 0;
+  const agentRunner = {
+    runManagerPlan: async (request) => request.context?.mode === "plan"
+      ? { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [
+          { id: "T1", title: "Design the approach", type: "design", acceptance: "Document exists.", depends_on: [], required_sections: [], required_tests: [], replaces: [], necessity: TEST_NECESSITY, acceptance_criteria: [{ ...criteriaFor("Document exists.")[0], requirement }], review: true },
+        ] } }
+      : { outcome: "success", report_valid: true, report: { verdict: { verdict: "complete", summary: "Done.", missing: [], lessons: [] } } },
+    runDesigner: async (request) => {
+      await mkdir(dirname(request.context.design_document_path), { recursive: true });
+      await writeFile(request.context.design_document_path, "# Design\n");
+      return { outcome: "success", report_valid: true, report: workerReport(request.invocation_id, [{ file: request.context.design_document_path, action: "created" }]) };
+    },
+    runWorker: async () => { throw new Error("design Task must not run as Worker"); },
+    runReviewer: async (request) => {
+      const review = reviews[Math.min(reviewerCalls, reviews.length - 1)];
+      reviewerCalls += 1;
+      return { outcome: "success", report_valid: true, report: { kind: "review", invocation_id: request.invocation_id }, review: { findings: [], tests: {}, ...review } };
+    },
+    runAdvisor: async () => ({ reply: "" }),
+  };
+  const { db, workId } = await startProjectlessWork(t, `owl-task-goal-review-${key}-`, agentRunner, `goal-review-${key}`);
+  await waitFor(() => reviewerCalls >= reviews.length && db.get("SELECT status FROM tasks WHERE work_id = ?", workId)?.status === "completed", { timeoutMs: 15_000, message: "the Task to complete" });
+  const task = db.get("SELECT id, status, goal_shortfalls_json FROM tasks WHERE work_id = ?", workId);
+  return { db, task, reviewerCalls: () => reviewerCalls, shortfalls: JSON.parse(task.goal_shortfalls_json ?? "[]") };
+}
+
+test("a goal the Reviewer reports as unmet does not stop the Task and is recorded as the Reviewer's", async (t) => {
+  const { task, shortfalls, reviewerCalls } = await reviewGoalTask(t, "unmet", [
+    { verdict: "pass", goal_shortfalls: [{ criterion_id: "AC1", reason: "  only half of the cases are covered  " }] },
+  ]);
+  assert.equal(task.status, "completed");
+  assert.equal(reviewerCalls(), 1);
+  assert.deepEqual(shortfalls.map((entry) => [entry.criterion_id, entry.text, entry.reason, entry.source]), [["AC1", "Document exists.", "only half of the cases are covered", "reviewer"]]);
+});
+
+test("a Reviewer output naming a required criterion or giving a blank reason in goal_shortfalls is invalid and records nothing", async (t) => {
+  for (const [key, requirement, bad] of [
+    ["required", "required", { criterion_id: "AC1", reason: "not covered" }],
+    ["blank", "goal", { criterion_id: "AC1", reason: "   " }],
+  ]) {
+    const { db, task, reviewerCalls, shortfalls } = await reviewGoalTask(t, key, [{ verdict: "pass", goal_shortfalls: [bad] }, { verdict: "pass" }], { requirement });
+    assert.equal(reviewerCalls(), 2, `${key}: the invalid output was not accepted`);
+    assert.equal(db.get("SELECT COUNT(*) AS n FROM reviews WHERE task_id = ?", task.id).n, 1, `${key}: only the valid review was stored`);
+    assert.deepEqual(shortfalls, [], `${key}: nothing from the invalid output was recorded`);
+  }
+});

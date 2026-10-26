@@ -17,6 +17,8 @@ export interface AdvisorSession {
   id: string;
   owner_id: string;
   conversation_id: string;
+  /** The Advisor window this session belongs to; null for rows that predate windows. */
+  window_id: string | null;
   status: AdvisorSessionStatus;
   end_reason: AdvisorSessionEndReason | null;
   pid: number | null;
@@ -45,13 +47,15 @@ interface AdvisorSessionDbRow extends AdvisorSession {
   updated_at: string;
 }
 
+/** The provider process is (supposed to be) alive. */
+const LIVE_STATUSES = ["starting", "running", "ending"] as const;
+
 /**
- * Statuses treated as "an owner already has a session" for the purposes of
- * getActiveSession/startSession. The 'suspended' status is only found in
- * rows written by older databases; such a row still blocks a new session
- * until recoverOnStartup ends it.
+ * Statuses that occupy a window's single session slot; the same list as the
+ * advisor_sessions_one_active_per_window partial index. 'suspended' is an idle
+ * window that resumes from provider_session_id.
  */
-const ACTIVE_STATUSES = ["starting", "running", "ending", "suspended"] as const;
+const ACTIVE_STATUSES = [...LIVE_STATUSES, "suspended"] as const;
 
 const END_REASONS: readonly AdvisorSessionEndReason[] = [
   "idle_timeout",
@@ -65,7 +69,7 @@ const END_REASONS: readonly AdvisorSessionEndReason[] = [
 ];
 
 const SESSION_SELECT_COLUMNS = `
-  session.id, conversation.owner_id, session.conversation_id,
+  session.id, conversation.owner_id, session.conversation_id, session.window_id,
   session.status, session.end_reason, session.pid,
   session.started_at, session.ended_at, session.last_activity_at,
   session.process_start_time,
@@ -94,12 +98,15 @@ export class AdvisorSessionManager {
     this.writeLane = db.createWriteLane();
   }
 
+  /** The general window's live session (windowless legacy rows count as general). */
   public getActiveSession(ownerId: string): AdvisorSession | null {
     const row = this.db.get<AdvisorSessionDbRow>(
       `SELECT ${SESSION_SELECT_COLUMNS}
          FROM advisor_sessions AS session
          JOIN conversations AS conversation ON conversation.id = session.conversation_id
+         LEFT JOIN advisor_windows AS advisor_window ON advisor_window.id = session.window_id
         WHERE conversation.owner_id = ?
+          AND (advisor_window.scope IS NULL OR advisor_window.scope = 'general')
           AND session.status IN (${placeholders(ACTIVE_STATUSES)})
         ORDER BY session.created_at DESC
         LIMIT 1`,
@@ -108,8 +115,41 @@ export class AdvisorSessionManager {
     return row ? toAdvisorSession(row) : null;
   }
 
-  public async startSession(ownerId: string, conversationId: string): Promise<AdvisorSession> {
-    if (this.getActiveSession(ownerId)) {
+  /** Every window's live or suspended session of the owner. */
+  public listActiveSessions(ownerId: string): AdvisorSession[] {
+    return this.db.all<AdvisorSessionDbRow>(
+      `SELECT ${SESSION_SELECT_COLUMNS}
+         FROM advisor_sessions AS session
+         JOIN conversations AS conversation ON conversation.id = session.conversation_id
+        WHERE conversation.owner_id = ? AND session.status IN (${placeholders(ACTIVE_STATUSES)})
+        ORDER BY session.created_at ASC`,
+      ownerId,
+    ).map(toAdvisorSession);
+  }
+
+  public getActiveSessionForWindow(windowId: string): AdvisorSession | null {
+    const row = this.db.get<AdvisorSessionDbRow>(
+      `SELECT ${SESSION_SELECT_COLUMNS}
+         FROM advisor_sessions AS session
+         JOIN conversations AS conversation ON conversation.id = session.conversation_id
+        WHERE session.window_id = ?
+          AND session.status IN (${placeholders(ACTIVE_STATUSES)})
+        LIMIT 1`,
+      windowId,
+    );
+    return row ? toAdvisorSession(row) : null;
+  }
+
+  /**
+   * Starts the window's session. windowId defaults to the window of
+   * conversationId; at most one active session per window (the partial index
+   * rejects a concurrent insert that slips past the checks).
+   */
+  public async startSession(ownerId: string, conversationId: string, windowId?: string | null, idleTimeoutSeconds?: number): Promise<AdvisorSession> {
+    const resolvedWindowId = windowId !== undefined
+      ? windowId
+      : this.db.get<{ advisor_window_id: string | null }>("SELECT advisor_window_id FROM conversations WHERE id = ?", conversationId)?.advisor_window_id ?? null;
+    if (resolvedWindowId ? this.getActiveSessionForWindow(resolvedWindowId) : this.getActiveSession(ownerId)) {
       throw new Error(`Owner ${ownerId} already has an active Advisor session.`);
     }
 
@@ -118,6 +158,7 @@ export class AdvisorSessionManager {
       id: createUlid(),
       owner_id: ownerId,
       conversation_id: conversationId,
+      window_id: resolvedWindowId,
       status: "starting",
       end_reason: null,
       pid: null,
@@ -154,8 +195,9 @@ export class AdvisorSessionManager {
       const active = transaction.get<{ id: string }>(
         `SELECT id
            FROM advisor_sessions
-          WHERE status IN (${placeholders(ACTIVE_STATUSES)})
+          WHERE window_id IS ? AND status IN (${placeholders(ACTIVE_STATUSES)})
           LIMIT 1`,
+        resolvedWindowId,
       );
       if (active) {
         throw new Error(`Owner ${ownerId} already has an active Advisor session.`);
@@ -163,17 +205,19 @@ export class AdvisorSessionManager {
 
       transaction.run(
         `INSERT INTO advisor_sessions
-           (id, status, pid, process_start_time, conversation_id,
+           (id, status, pid, process_start_time, conversation_id, window_id,
             started_at, last_activity_at,
             ending_started_at, ended_at, end_reason, session_summary_id,
-            created_at, updated_at)
-         VALUES (?, 'starting', NULL, NULL, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?)`,
+            created_at, updated_at, idle_timeout_seconds)
+         VALUES (?, 'starting', NULL, NULL, ?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, COALESCE(?, 7200))`,
         session.id,
         session.conversation_id,
+        session.window_id,
         session.started_at,
         session.last_activity_at,
         now,
         now,
+        idleTimeoutSeconds ?? null,
       );
       return session;
     });
@@ -214,6 +258,22 @@ export class AdvisorSessionManager {
       );
       return null;
     });
+  }
+
+  /** Running -> suspended: the provider process is gone, provider_session_id stays so the window can resume. */
+  public async suspendSession(sessionId: string): Promise<void> {
+    await this.changeState("suspended", sessionId, `UPDATE advisor_sessions SET status = 'suspended', pid = NULL, updated_at = ? WHERE id = ? AND status = 'running'`);
+  }
+
+  /** Suspended -> starting for a resume; activateSession then makes it running. */
+  public async resumeSession(sessionId: string, idleTimeoutSeconds: number): Promise<void> {
+    await this.changeState(
+      "starting",
+      sessionId,
+      `UPDATE advisor_sessions SET status = 'starting', resumed_count = resumed_count + 1, idle_timeout_seconds = ?, last_activity_at = ?, updated_at = ?
+        WHERE id = ? AND status = 'suspended'`,
+      [idleTimeoutSeconds, utcNow()],
+    );
   }
 
   /** Persist the provider-native session ID once the first stream turn emits its init frame. */
@@ -401,14 +461,14 @@ export class AdvisorSessionManager {
   }
 
   /**
-   * On Core startup, any session still marked starting/running/ending (or
-   * left 'suspended' by an older database) belongs to a process this Core
-   * instance no longer owns. Each is ended with `core_restart`; a fresh
-   * session is started for the next turn.
+   * On Core startup, any session still marked starting/running/ending
+   * belongs to a process this Core instance no longer owns. Each is ended
+   * with `core_restart`; a fresh session is started for the next turn.
+   * 'suspended' rows have no process and stay, so they resume after a restart.
    */
   public async recoverOnStartup(): Promise<number> {
     const leftover = this.db.all<{ id: string }>(
-      `SELECT id FROM advisor_sessions WHERE status IN (${placeholders(ACTIVE_STATUSES)})`,
+      `SELECT id FROM advisor_sessions WHERE status IN (${placeholders(LIVE_STATUSES)})`,
     );
     if (leftover.length === 0) {
       return 0;
@@ -420,13 +480,43 @@ export class AdvisorSessionManager {
         `UPDATE advisor_sessions
             SET status = 'ended', end_reason = 'core_restart', pid = NULL,
                 ended_at = ?, updated_at = ?
-          WHERE status IN (${placeholders(ACTIVE_STATUSES)})`,
+          WHERE status IN (${placeholders(LIVE_STATUSES)})`,
         now,
         now,
       );
       return null;
     });
     return leftover.length;
+  }
+
+  /** Writes a suspend/resume transition together with the advisor.session_state_changed event the Web refreshes window state from. */
+  private async changeState(status: "suspended" | "starting", sessionId: string, sql: string, leading: (string | number)[] = []): Promise<void> {
+    const now = utcNow();
+    const eventId = createUlid();
+    const row = this.db.get<{ window_id: string | null; conversation_id: string }>(
+      "SELECT window_id, conversation_id FROM advisor_sessions WHERE id = ?",
+      sessionId,
+    );
+    await this.writeLane.write({
+      mutateState: (transaction) => {
+        transaction.run(sql, ...leading, now, sessionId);
+        return null;
+      },
+      event: {
+        id: eventId,
+        idempotencyKey: `advisor-session:${status}:${eventId}`,
+        type: "advisor.session_state_changed",
+        payload: {
+          kind: "advisor_session_state_changed",
+          schema_version: "1.0.0",
+          session_id: sessionId,
+          window_id: row?.window_id ?? null,
+          conversation_id: row?.conversation_id ?? null,
+          status,
+        },
+      },
+      outbox: [],
+    });
   }
 
   private enqueueMutation<StateResult>(
@@ -461,6 +551,7 @@ function toAdvisorSession(row: AdvisorSessionDbRow): AdvisorSession {
     id: row.id,
     owner_id: row.owner_id,
     conversation_id: row.conversation_id,
+    window_id: row.window_id,
     status: row.status,
     end_reason: row.end_reason,
     pid: row.pid,

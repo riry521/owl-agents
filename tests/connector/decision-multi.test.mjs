@@ -256,7 +256,7 @@ test("Discord: a reply to a Decision notification answers that Decision; default
 
   connector.fetchPendingDecisions = async () => open;
   const requests = [];
-  connector.core.request = async (path, init) => { requests.push({ path, init }); return {}; };
+  connector.core.request = async (path, init) => { if (!path.startsWith("/advisor/channel-bindings")) requests.push({ path, init }); return {}; };
   connector.core.language = async () => "ja";
   const replies = [];
   const reply = {
@@ -382,4 +382,38 @@ test("Discord notification retries a transient send failure", async () => {
   }
   assert.equal(calls, 4);
   assert.deepEqual(posted, [{ channelId: "D-NOTIFICATIONS", messageId: "M9" }]);
+});
+
+test("Discord status_query records the message and the fixed answer in Core once", async () => {
+  const connector = discordConnector();
+  const requests = [];
+  connector.fetchPendingDecisions = async () => [];
+  connector.core.request = async (path, init) => { requests.push({ path, init }); return path === "/inbound/messages" ? {} : []; };
+  connector.core.requestPage = async () => ({ data: [], cursor: null, has_more: false });
+  connector.core.language = async () => "ja";
+  const replies = [];
+  const message = {
+    id: "R-STATUS",
+    author: { id: "U1", bot: false },
+    content: "/status",
+    channelId: "D-CONVERSATION",
+    attachments: new Map(),
+    channel: { isDMBased: () => false, isTextBased: () => true, send: async (m) => replies.push(m) },
+  };
+  let handler;
+  connector.client.on = (name, fn) => { if (name === "messageCreate") handler = fn; return connector.client; };
+  connector.core.subscribeEvents = async () => {};
+  connector.client.login = async () => "ok";
+  connector.client.destroy = async () => {};
+  await connector.start();
+  handler(message);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const recordCalls = requests.filter((r) => r.path === "/inbound/messages");
+  assert.equal(recordCalls.length, 1);
+  const body = JSON.parse(JSON.stringify(recordCalls[0].init.body));
+  assert.equal(body.text, "/status");
+  assert.equal(body.status_reply, replies[0].content);
+  await connector.stop();
 });

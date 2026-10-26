@@ -301,10 +301,25 @@ function describeOpenDecisions(decisions: readonly PendingDecision[], language: 
   return `\n${t.openDecisions}\n${lines.join("\n")}`;
 }
 
+// Words that may follow a status keyword in a short question ("進捗は？", "状況どう？", "ステータス教えて").
+// Why not substring match: "ステータスバーが崩れる" contains "ステータス" but is a bug report for the Advisor.
+const STATUS_QUESTION_TAILS = [
+  "は", "って", "を", "も", "どう", "どうなってる", "どうなった", "どんな感じ", "教えて", "知りたい",
+  "ください", "下さい", "です", "ですか", "か", "now", "please", "pls",
+];
+const STATUS_DEFECT_WORDS = /崩れ|表示されな|ずれ|エラー|落ちる|動かない|\b(?:error|broken|crash)/;
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 export function isStatusQuery(text: string, keywords: readonly string[]): boolean {
   const normalized = text.toLowerCase().replace(/[？?！!。.、,\s]+/g, " ").trim();
   if (normalized.length > 50) return false;
   const hasActionWord = /直して|足して|作って|変えて|消して|追加|削除|修正|実装|\b(?:fix|add|make|change|remove|delete|implement|create)\b/.test(normalized);
   if (hasActionWord) return false;
-  return keywords.some((kw) => normalized.includes(kw.toLowerCase()));
+  if (STATUS_DEFECT_WORDS.test(normalized)) return false;
+  const tails = STATUS_QUESTION_TAILS.map(escapeRegExp).join("|");
+  return keywords.some((kw) =>
+    new RegExp(`^/?${escapeRegExp(kw.toLowerCase())}(?:\\s*(?:${tails}))*$`).test(normalized));
 }

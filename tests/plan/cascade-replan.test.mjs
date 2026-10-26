@@ -8,6 +8,7 @@ import { createAgentRunner } from "../../packages/agent-runtime/dist/index.js";
 import { reduceTask } from "../../packages/core/dist/index.js";
 import { openDatabase, createUlid } from "../../packages/db/dist/index.js";
 import { createTestCore, command } from "../helpers/core.mjs";
+import { assertOpenedOnceAfterExplanation, createExplainer } from "../helpers/decision-explanation.mjs";
 import { migrationsDir } from "../helpers/paths.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 import { waitFor } from "../helpers/wait.mjs";
@@ -273,11 +274,13 @@ async function retryTasks(core, db, workId, taskIds) {
 }
 
 test("a Manager replan failure blocks only the root Task; retry answer resumes it and returns the cascaded dependent to waiting", async (t) => {
+  const explainer = createExplainer();
   const { db, core } = await openCore(t, () => ({
     runManagerPlan: async () => ({ outcome: "failed", failure_class: "deterministic", retry_allowed: false, message: "manager unavailable" }),
     runWorker: async () => ({ outcome: "failed", failure_class: "transient", error_key: "x", retry_allowed: true, message: "x" }),
     runReviewer: async () => ({ outcome: "failed" }),
     runAdvisor: async () => ({ reply: "" }),
+    runDecisionExplanation: explainer.runDecisionExplanation,
   }));
   const { workId, t1, t2 } = await seedCascade(core, db);
   await startWithoutDriving(core, db, workId);
@@ -288,8 +291,13 @@ test("a Manager replan failure blocks only the root Task; retry answer resumes i
   assert.ok(decision, "the failed replan opened a Decision");
   assert.equal(decision.scope, "task");
   assert.deepEqual(JSON.parse(decision.blocked), [t1.id]);
+  assert.match(db.get("SELECT reason FROM decisions WHERE id = ?", decision.id).reason, /T1 title/, "the reason names the failed Task");
   assert.equal(taskState(db, t1.id).status, "judgement_waiting");
   assert.deepEqual(taskState(db, t2.id), { status: "failed", marker: t1.id });
+  // The Manager's Decision opens without a notice; the notice follows the explanation and is emitted once.
+  await assertOpenedOnceAfterExplanation(db, decision.id, explainer);
+  assert.equal(explainer.requests[0].kind, "replan_failed");
+  assert.equal(JSON.parse(db.get("SELECT payload_json FROM events WHERE type = 'decision.opened'").payload_json).issuer_role, "manager");
 
   const response = await core.answerDecision(
     decision.id,

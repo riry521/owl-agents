@@ -1,4 +1,4 @@
-import { correctReportSemantics, extractReportPayload, validateReportEnvelope, validateReportSemantics, type ReportCorrection } from "./protocol";
+import { GOAL_UNMET_STATUS, correctReportSemantics, extractReportPayload, validateReportEnvelope, validateReportSemantics, type ReportCorrection } from "./protocol";
 import { AgentRuntimeError, reportInvalid } from "./errors";
 import {
   extractRoleOutputObject,
@@ -13,7 +13,7 @@ import {
   type RolePromptSlots,
   type RoleSchema,
 } from "./role-contract";
-import { DESIGN_BLOCKED_SCHEMA, DEFAULT_OWNER_LANGUAGE, EXTERNAL_BLOCKER_SCHEMA, MINIMAL_CODE_RULES, UNVERIFIABLE_STATUS, renderWorkspaceToolsNote, workerOwnSubagentRules, workerSubagentRules, type OwnerLanguage, type ResearcherPromptRef } from "@owl/shared";
+import { DESIGN_BLOCKED_SCHEMA, DEFAULT_OWNER_LANGUAGE, EXTERNAL_BLOCKER_SCHEMA, MINIMAL_CODE_RULES, UNVERIFIABLE_STATUS, criterionRequirement, isGoalCriterion, isNonBlankReason, renderWorkspaceToolsNote, workerOwnSubagentRules, workerSubagentRules, type OwnerLanguage, type ResearcherPromptRef } from "@owl/shared";
 import {
   type ProviderResponse,
   type ReportEnvelope,
@@ -96,11 +96,12 @@ const WORKER_REPORT_PROPERTIES: Readonly<Record<string, RoleSchema>> = {
       items: {
         ...objectSchema({
           criterion_id: { type: "string", minLength: 1, example: "AC1", description: "id of a Task acceptance criterion (the id given in task.acceptance_criteria); do not restate the criterion text" },
-          status: { type: "string", enum: ["passed", "failed", "blocked", UNVERIFIABLE_STATUS], description: "passed only if you verified it in the final workspace; blocked if it could not be checked; unverifiable if nothing this Task can run could ever prove it (see the unverifiable rule below)" },
+          status: { type: "string", enum: ["passed", "failed", "blocked", UNVERIFIABLE_STATUS, GOAL_UNMET_STATUS], description: "passed only if you verified it in the final workspace; blocked if it could not be checked; unverifiable if nothing this Task can run could ever prove it (see the unverifiable rule below); goal_unmet only for a criterion with requirement goal that is not met: give shortfall_reason" },
           evidence: { type: "string", minLength: 1, description: "what you ran or inspected and what it showed" },
           unverifiable_reason: { type: ["string", "null"], description: "only for status unverifiable: why this criterion cannot be proven inside the Task and what provable check would replace it; null otherwise" },
+          shortfall_reason: { type: ["string", "null"], description: "only for status goal_unmet: why the goal was not met and what was done instead (required, not blank); null otherwise" },
         }),
-        // `unverifiable_reason` is optional so reports that omit it stay valid.
+        // `unverifiable_reason` and `shortfall_reason` are optional so reports that omit them stay valid.
         required: ["criterion_id", "status", "evidence"],
       },
       description: "one entry per numbered acceptance criterion",
@@ -155,7 +156,7 @@ const SUCCESS_RULES: Readonly<Record<string, unknown>> = {
       verification: {
         properties: {
           status: { const: "passed" },
-          acceptance: { items: { properties: { status: { const: "passed" } } } },
+          acceptance: { items: { properties: { status: { enum: ["passed", GOAL_UNMET_STATUS] } } } },
           checks: { items: { properties: { status: { const: "passed" } } } },
         },
       },
@@ -343,20 +344,21 @@ const SKILL_FEEDBACK_INSTRUCTION =
 
 const RESULT_RULES: readonly string[] = [
   "Fill in result using these exact rules (do not guess or hedge):",
-  "- \"success\": only when every acceptance criterion was verified as met in the final workspace. Creating or changing files is not by itself a reason for \"success\".",
-  "- \"partial\": the task was cut short (you ran out of time/turns, a required resource was unavailable partway through), or an essential verification could not be run and no alternative evidence shows the criterion is met.",
+  "- \"success\": only when every required acceptance criterion (requirement required, or no requirement) was verified as met in the final workspace. A goal criterion (requirement goal) that is not met does not prevent success: report it as goal_unmet with shortfall_reason. Creating or changing files is not by itself a reason for \"success\".",
+  "- \"partial\": the task was cut short (you ran out of time/turns, a required resource was unavailable partway through), or an essential verification could not be run and no alternative evidence shows the criterion is met. Never report \"partial\" only because a goal criterion is not met.",
   "- \"failed\": the task could not be done at all (the requested change is impossible, a hard blocker prevented any progress, or you made no meaningful progress).",
-  "verification: give each numbered acceptance criterion its own entry in verification.acceptance with a status and evidence, and use a distinct criterion_id for each. Status \"passed\" only when you verified that criterion in the final workspace; \"failed\" when the check ran and the criterion is not met; \"blocked\" when an essential verification (a test, build, or check the criterion depends on) could not be run and cannot be replaced by other evidence. Never report a check you could not run as passed. verification.status is \"passed\" only when every acceptance entry and every check passed, \"failed\" if any failed, otherwise \"blocked\". Use result \"success\" only with verification.status \"passed\", needs_replanning false and question_for_manager null. A check that fails for a reason unrelated to this Task does not make it failed, but say so in verification.method. If you found a defect during verification, fix it before reporting, then re-verify the whole Task.",
+  "verification: give each numbered acceptance criterion its own entry in verification.acceptance with a status and evidence, and use a distinct criterion_id for each. Status \"passed\" only when you verified that criterion in the final workspace; \"failed\" when the check ran and the criterion is not met; \"blocked\" when an essential verification (a test, build, or check the criterion depends on) could not be run and cannot be replaced by other evidence. Never report a check you could not run as passed. verification.status is \"passed\" only when every acceptance entry and every check passed, \"failed\" if any failed, otherwise \"blocked\". verification.status covers the required criteria and the checks only. Use result \"success\" only with verification.status \"passed\", needs_replanning false and question_for_manager null. A check that fails for a reason unrelated to this Task does not make it failed, but say so in verification.method. If you found a defect during verification, fix it before reporting, then re-verify the whole Task.",
   "verification.integration_check: set it to null unless you delegated children or used your own subagents; when you did, run an integration check on the combined result and report its status and evidence. Set required true only when you dispatched children through Owl.",
 ];
 
 /** Finalization: what the Worker does between "implementation written" and "report returned". */
 const FINALIZATION_INSTRUCTIONS: readonly string[] = [
   "Finalization: do not report until you have done all of the following.",
+  "A criterion with requirement goal is checked like the others: mark it passed only with evidence from the final workspace. When it is not met, set status goal_unmet and write in shortfall_reason why and what you did instead; a goal_unmet without a reason is rejected. Never use failed, blocked or unverifiable for a goal.",
   "1. Take each criterion in task.acceptance_criteria as one criterion, identified by its id (AC1, AC2, ...); a criterion with legacy true holds the whole free-text acceptance as one criterion, so do not split it or invent other ids. 2. Inspect the final workspace itself (the files as they are now, not your memory of what you wrote) against each criterion. 3. Run the checks that show each criterion is met (tests, typecheck, build, searches). 4. When a check fails or shows a defect, fix the cause. 5. After every fix, re-verify the whole Task, not only the part you touched. 6. If an essential check cannot be run and no alternative evidence replaces it, the work is blocked: report it as not verified (result \"partial\", verification.status \"blocked\") and say what is missing; never present it as passed. 7. For work you delegated, read the integrated final workspace and verify it yourself; a child's report is evidence, not proof. 8. Keep secrets, credentials, environment dumps, and large raw logs out of verification evidence. 9. Report each unresolved issue in remaining_issues.",
   "If the same verification failure is still not fixed after two substantively different fixes, stop trying: report it, set needs_replanning or raise a blocker in question_for_manager, and do not claim success.",
   "If you cannot proceed because of a prerequisite outside this Task (another Work's result, a file not yet on the base branch, an Owner decision), do not build a workaround. Put in question_for_manager what is missing and what would let you proceed (Work number, Task id, or paths on the base branch). Core can hold the Task until the prerequisite is met and then run it again.",
-  "If a criterion cannot be proven by anything this Task can run (it compares a live server, live data or another Work before and after, or depends on state outside the worktree), do not try to satisfy it and do not retry. Report result \"partial\", verification.status \"blocked\", and for that criterion status \"unverifiable\" with unverifiable_reason saying why and what provable check would replace it. Core sends it to the Manager to rewrite the criterion; other criteria are reported as usual.",
+  "If a criterion cannot be proven by anything this Task can run (it compares a live server, live data or another Work before and after, or depends on state outside the worktree), do not try to satisfy it and do not retry. Report result \"partial\", verification.status \"blocked\", and for that criterion status \"unverifiable\" with unverifiable_reason saying why and what provable check would replace it. Core sends it to the Manager to rewrite the criterion; other criteria are reported as usual. (For a goal criterion, report goal_unmet with the reason instead.)",
   "If a check needs a long process (a dry-run, a long build), first decide whether it fits in your remaining time; if it does, run it in the background, poll its log and finish in this run. If it does not fit, start the whole wrapper (the command and the touch of the done file) detached in its own session, because Core ends the agent's process group when your run ends (for example `perl -MPOSIX -e 'fork and exit; POSIX::setsid(); exec @ARGV' sh -c '<command> > <log> 2>&1; touch <done_file>' < /dev/null > /dev/null 2>&1`), write its log and a done file inside the worktree, and report result \"partial\" with pending_process describing it. Core keeps the Task waiting until the done file appears or the process ends and then relaunches you with the previous report; do not report partial just to be relaunched later without pending_process.",
   "If you cannot meet an acceptance criterion because of a problem that already exists on the base branch (pre_existing) or a gap in the Project environment that this Task must not set up (environment) — for example Attempt.verification_failure.error_key is code_unchecked because no checker or test runner is configured for the files you changed — do not work around it: report result \"partial\" with external_blocker {kind, summary, evidence, suggested_fix}, and mark that criterion failed. evidence must show, from what you ran or read, that the problem does not come from this Task's changes. Otherwise external_blocker is null. A failure that does not block any criterion stays in remaining_issues as before.",
 ];
@@ -479,26 +481,32 @@ type CriteriaTask = Pick<TaskDetail, "acceptance_criteria">;
 
 /**
  * Checks the reported criterion ids against the Task's criteria (every id exactly once, no unknown id) and
- * fills the stored `criterion` text from the id. Without Task criteria the id set is not checked and the id is used.
+ * fills the stored `criterion` text and the `requirement` from the id; a requirement the Worker wrote is discarded.
+ * A goal criterion can only be passed or goal_unmet, so failed, blocked and unverifiable become goal_unmet with the first non-blank reason.
+ * Without Task criteria the id set is not checked, the id is used and every criterion is required.
  */
-function withCriterionTexts(payload: Record<string, unknown>, task: CriteriaTask | undefined): Record<string, unknown> {
+function withCriterionFacts(payload: Record<string, unknown>, task: CriteriaTask | undefined): Record<string, unknown> {
   const verification = payload.verification as { acceptance?: unknown } | null;
   if (verification === null || typeof verification !== "object" || !Array.isArray(verification.acceptance)) return payload;
   const criteria = task?.acceptance_criteria;
-  const texts = new Map((criteria ?? []).map((criterion) => [criterion.id, criterion.text]));
+  const byId = new Map((criteria ?? []).map((criterion) => [criterion.id, criterion]));
   const items = verification.acceptance as Record<string, unknown>[];
   if (criteria !== undefined) {
     const reported = items.map((item) => item.criterion_id);
-    const unknown = reported.filter((id) => typeof id !== "string" || !texts.has(id));
-    const missing = [...texts.keys()].filter((id) => !reported.includes(id));
+    const unknown = reported.filter((id) => typeof id !== "string" || !byId.has(id));
+    const missing = [...byId.keys()].filter((id) => !reported.includes(id));
     if (unknown.length > 0 || missing.length > 0 || new Set(reported).size !== reported.length) {
       throw reportInvalid(`worker_acceptance_criterion_ids:unknown=[${unknown.map(String)}],missing=[${missing}]`);
     }
   }
-  return {
-    ...payload,
-    verification: { ...verification, acceptance: items.map((item) => ({ ...item, criterion: texts.get(String(item.criterion_id)) ?? String(item.criterion_id) })) },
+  const withFacts = (item: Record<string, unknown>): Record<string, unknown> => {
+    const criterion = byId.get(String(item.criterion_id));
+    const base = { ...item, criterion: criterion?.text ?? String(item.criterion_id), requirement: criterion ? criterionRequirement(criterion) : "required" };
+    if (!criterion || !isGoalCriterion(criterion) || item.status === "passed" || item.status === GOAL_UNMET_STATUS) return base;
+    const reason = [item.shortfall_reason, item.unverifiable_reason, item.evidence].find(isNonBlankReason);
+    return { ...base, status: GOAL_UNMET_STATUS, ...(reason === undefined ? {} : { shortfall_reason: reason }) };
   };
+  return { ...payload, verification: { ...verification, acceptance: items.map(withFacts) } };
 }
 
 export function normalizeWorkerResponse(
@@ -532,7 +540,7 @@ export function normalizeWorkerResponseWithFeedback(
       throw reportInvalid(`worker_output_schema:${problem}`);
     }
     // A Hybrid success is an "ok" verdict and needs a passed integration check.
-    const parsed = validateReportEnvelope(withCriterionTexts(reportPayload, task));
+    const parsed = validateReportEnvelope(withCriterionFacts(reportPayload, task));
     const { report, corrections } = correctReportSemantics(parsed, hybrid && parsed.result === "success" ? { verdict: "ok", retry_subtasks: [] } : undefined);
     validateReportSemantics(report, hybrid && report.result === "success" ? { verdict: "ok", retry_subtasks: [] } : undefined);
     return {

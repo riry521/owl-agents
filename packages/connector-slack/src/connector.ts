@@ -8,7 +8,10 @@ import {
   classifyIntent,
   connectorText,
   decisionShortId,
+  appendFileResults,
   formatAdvisorReply,
+  parseOutboundFiles,
+  readOutboundFile,
   formatStatusResponse,
   parseDecisionButtonId,
   resolveDecisionButtonTarget,
@@ -17,11 +20,13 @@ import {
   FileConnectorStateStore,
   type PendingDecision,
 } from "@owl/plugin-sdk/shared";
-import type { OwlEvent } from "@owl/plugin-sdk";
+import type { ChannelAdmin, OwlEvent } from "@owl/plugin-sdk";
+import { createSlackChannelAdmin } from "./channel-admin.js";
 import type { SlackConfig, SlackMessage } from "./types.js";
 import { sendNotification, shouldNotify, updateNotification } from "./notifications.js";
 import { downloadFile } from "./files.js";
 import { postSlackMessage } from "./posting.js";
+import { markdownToMrkdwn } from "./markdown.js";
 
 const PENDING_DECISION_PAGE_LIMIT = 50;
 const MAX_PENDING_DECISION_PAGES = 10_000;
@@ -31,6 +36,7 @@ export class SlackConnector {
   private readonly config: SlackConfig;
   private readonly conversationChannelIds: readonly string[];
   private readonly notificationChannelIds: readonly string[];
+  private boundChannelIds: ReadonlySet<string> = new Set();
   private readonly web: WebClient;
   private readonly socket: SocketModeClient;
   private readonly core: CoreClient;
@@ -69,7 +75,7 @@ export class SlackConnector {
         // edit, deletion or system message.
         if (!message || (message.subtype && !USER_MESSAGE_SUBTYPES.has(message.subtype))
           || message.bot_id || message.bot_profile || !message.user) return;
-        if (!this.conversationChannelIds.includes(message.channel) && !this.decisionForThread(message)) return;
+        if (!this.isConversationChannel(message.channel) && !this.decisionForThread(message)) return;
         await this.handleMessage(message).catch((error) => this.reportMessageError(message.channel, error));
       } catch (error) {
         await this.reportEventError(error);
@@ -86,6 +92,9 @@ export class SlackConnector {
       }
     });
 
+    // Load the bound channels before the first message can arrive; until then
+    // the channel filter would drop them (Slack acks first, so no redelivery).
+    await this.refreshBindings();
     // Connect to Slack first: a bad token/app config fails here, before any
     // Core resource (WebSocket, persisted cursor) is touched.
     await this.socket.start();
@@ -95,7 +104,7 @@ export class SlackConnector {
     // events (or as a Decision), which notifications.ts renders as failures.
     try {
       await this.core.subscribeEvents(
-        ["advisor.responded", "decision.opened", "decision.resolved", "decision.cancelled", "work.completed", "work.cancelled", "work.paused", "work.reopened", "provider.paused", "provider.resumed", "system.alert"],
+        ["advisor.responded", "advisor.channel_binding_changed", "decision.opened", "decision.resolved", "decision.cancelled", "work.completed", "work.cancelled", "work.paused", "work.reopened", "provider.paused", "provider.resumed", "system.alert"],
         (event) => this.handleCoreEvent(event).catch((error) => this.reportEventError(error)),
       );
     } catch (error) {
@@ -131,6 +140,10 @@ export class SlackConnector {
         await postSlackMessage(this.web, {
           channel: message.channel,
           text: status,
+        });
+        // A misjudged request must still reach the Advisor's conversation; a failed record never blocks the answer already posted.
+        await this.sendSlackInboundMessage(message, message.text, [], status).catch((error) => {
+          console.error("[slack] Failed to record the status exchange in Core:", error);
         });
         break;
       }
@@ -240,7 +253,7 @@ export class SlackConnector {
    * carrying attachment_ids from a batch of uploadAttachment() calls made
    * for the same message (file_upload case).
    */
-  private async sendSlackInboundMessage(message: SlackMessage, text: string, attachmentIds: readonly string[]): Promise<void> {
+  private async sendSlackInboundMessage(message: SlackMessage, text: string, attachmentIds: readonly string[], statusReply?: string): Promise<void> {
     const threadTs = message.thread_ts;
     const envelope = commandEnvelope({
       provider: "slack",
@@ -257,6 +270,7 @@ export class SlackConnector {
         thread_ref: null,
       },
       attachment_ids: attachmentIds,
+      ...(statusReply === undefined ? {} : { status_reply: statusReply }),
     }, `slack:message:${this.config.accountId}:${message.ts}`);
     await this.core.request("/inbound/messages", {
       method: "POST",
@@ -313,7 +327,30 @@ export class SlackConnector {
     }
   }
 
+  /** Channel create / rename / describe with the bot token's WebClient; the HTTP API reaches it through ConnectorManager. */
+  channelAdmin(): ChannelAdmin {
+    return createSlackChannelAdmin(this.web);
+  }
+
+  private isConversationChannel(channelId: string): boolean {
+    return this.conversationChannelIds.includes(channelId) || this.boundChannelIds.has(channelId);
+  }
+
+  /** Keeps the previous list when Core cannot be read; the next binding event reads it again. */
+  private async refreshBindings(): Promise<void> {
+    try {
+      const data = await this.core.request<{ bindings: Array<{ channel_id: string }> }>("/advisor/channel-bindings?provider=slack");
+      this.boundChannelIds = new Set(data.bindings.map((binding) => binding.channel_id));
+    } catch (error) {
+      console.error("[slack] Could not read the Advisor channel bindings:", error);
+    }
+  }
+
   private async handleCoreEvent(event: OwlEvent): Promise<void> {
+    if (event.type === "advisor.channel_binding_changed") {
+      await this.refreshBindings();
+      return;
+    }
     if (event.type === "advisor.responded") {
       await this.handleAdvisorResponse(event);
       return;
@@ -381,7 +418,7 @@ export class SlackConnector {
     if (origin?.channel !== "slack") return;
 
     const threadTs = typeof origin.ref === "string" ? origin.ref : undefined;
-    const channel = resolveSlackAdvisorChannel(event, this.conversationChannelIds, this.threadChannels, threadTs);
+    const channel = resolveSlackAdvisorChannel(event, [...this.conversationChannelIds, ...this.boundChannelIds], this.threadChannels, threadTs);
     if (!channel) {
       throw new Error("Could not determine the Slack channel for the Advisor reply.");
     }
@@ -390,12 +427,35 @@ export class SlackConnector {
       // Core is the sole parsing point for Advisor replies: it has already
       // parsed and dispatched any action fence before emitting this event, so
       // `reply` is the text Core decided to show, as-is.
+      const language = await this.core.language();
+      const t = connectorText(language);
+      const lines: string[] = [];
+      for (const file of parseOutboundFiles(event.payload.outbound_files)) {
+        const read = await readOutboundFile(file);
+        if (!read.ok) {
+          lines.push(t.fileSendFailed(file.name, read.reason === "changed" ? t.fileSendChanged : t.fileSendUnreadable, ""));
+          continue;
+        }
+        try {
+          const upload = {
+            channel_id: channel,
+            file: read.bytes,
+            filename: file.name,
+            ...(file.comment ? { initial_comment: markdownToMrkdwn(file.comment) } : {}),
+          };
+          // The SDK types thread_ts as required once present, so the two shapes are separate calls.
+          await (threadTs ? this.web.filesUploadV2({ ...upload, thread_ts: threadTs }) : this.web.filesUploadV2(upload));
+          lines.push(t.fileSent(file.name, formatBytes(file.size)));
+        } catch (error) {
+          lines.push(t.fileSendFailed(file.name, formatIntegrationError("Slack", error, language), slackSendHint(error, t)));
+        }
+      }
       await postSlackMessage(this.web, {
         channel,
         // Reply in the same thread the operator messaged from, if any; a
         // channel-scoped conversation does not imply a thread.
         ...(threadTs ? { thread_ts: threadTs } : {}),
-        text: formatAdvisorReply(reply, event.payload.suggested_actions, await this.core.language()),
+        text: formatAdvisorReply(appendFileResults(reply, event.payload.action_results, lines), event.payload.suggested_actions, language),
       });
     } catch (error) {
       await this.reportMessageError(channel, error);
@@ -525,6 +585,12 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+function slackSendHint(error: unknown, t: ReturnType<typeof connectorText>): string {
+  const wrapper = asRecord(error);
+  const data = wrapper && Object.hasOwn(wrapper, "data") ? asRecord(wrapper.data) : null;
+  return data && Object.hasOwn(data, "error") && data.error === "missing_scope" ? t.fileSendHint.slackScope : "";
 }
 
 function formatBytes(bytes: number): string {

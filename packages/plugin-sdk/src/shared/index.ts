@@ -14,12 +14,15 @@ export {
 export { formatStatusResponse } from "./status";
 export { asOwlLanguage, type OwlLanguage } from "./language";
 export { connectorText, type ConnectorText } from "./connector-text";
+export { parseOutboundFiles, readOutboundFile, appendFileResults, type OutboundFile } from "./outbound-files";
 export { formatAdvisorReply } from "./advisor-reply";
+export { decisionContextLines, type DecisionContextInput, type DecisionContextLines } from "./decision-sections";
 export {
   decisionLanguage,
   decisionTitle,
   decisionHeadings,
   formatDecisionText,
+  formatDecisionNextSteps,
   type DecisionLanguage,
   type DecisionHeadings,
 } from "./decision-text";
@@ -32,7 +35,6 @@ export {
   BODY_MAX,
   FIELD_VALUE_MAX,
   FALLBACK_MAX,
-  DETAIL_MAX,
   DETAIL_COLOR,
   CARD_TEXT,
   isNotificationCardEvent,
@@ -102,3 +104,10 @@ export {
   type ConnectorStateStore,
   type ConnectorDecisionMessageRef,
 } from "./state-store";
+export {
+  ChannelAdminError,
+  isChannelAdminError,
+  type ChannelAdmin,
+  type ChannelAdminErrorCode,
+  type ChannelInfo,
+} from "./channel-admin";

@@ -219,9 +219,9 @@ test("/advisor/actions rejects invalid payloads and state violations without cha
   });
 });
 
-test("ふさぐ API の一覧: 32 行を照合し、Work 移動は専用 action に誘導する", async () => {
+test("ふさぐ API の一覧: 35 行を照合し、Work 移動は専用 action に誘導する", async () => {
   const policy = await import("../../packages/shared/dist/advisor-api-policy.js");
-  assert.equal(policy.ADVISOR_BLOCKED_APIS.length, 32);
+  assert.equal(policy.ADVISOR_BLOCKED_APIS.length, 35);
   for (const row of policy.ADVISOR_BLOCKED_APIS) {
     const pathname = `/api/v1${row.path.replace(/\{[a-z_]+\*\}/, "a/b").replace(/\{[a-z_]+\}/g, "x1")}`;
     assert.equal(policy.matchAdvisorBlockedApi(row.method, pathname), row, `${row.method} ${row.path}`);

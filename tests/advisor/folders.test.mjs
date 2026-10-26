@@ -211,3 +211,37 @@ test("uploads copy with collision names, resolve to shared paths, and quarantine
   await rm(join(shared, "report.txt"));
   assert.deepEqual(core.resolveAttachmentPaths(messageId).paths, [join(root, db.get("SELECT path FROM artifacts WHERE id = ?", first.done.artifact_id).path)]);
 });
+
+test("send-file settings load from app-settings.json, keep an explicit folder list even when every entry is dropped and reject wrong types", async (t) => {
+  const root = await tempDir(t, "owl-send-file-settings-");
+  const write = async (name, settings) => {
+    const data = join(root, name);
+    await mkdir(data, { recursive: true });
+    await writeFile(join(data, "app-settings.json"), JSON.stringify(settings));
+    return data;
+  };
+  assert.deepEqual(new AppSettingsStore(root, join(root, "none")).getAdvisorSendFileSettings(),
+    { dirs: undefined, slackMaxBytes: undefined, discordMaxBytes: undefined });
+  const loaded = new AppSettingsStore(root, await write("ok", {
+    advisor_send_file_dirs: [join(root, "a")], advisor_send_file_slack_max_bytes: 5, advisor_send_file_discord_max_bytes: 7,
+  }));
+  assert.deepEqual(loaded.getAdvisorSendFileSettings(), { dirs: [join(root, "a")], slackMaxBytes: 5, discordMaxBytes: 7 });
+  const warn = console.warn;
+  console.warn = () => {};
+  t.after(() => { console.warn = warn; });
+  assert.deepEqual(new AppSettingsStore(root, await write("rel", { advisor_send_file_dirs: ["relative/dir"] })).getAdvisorSendFileSettings().dirs, []);
+  for (const [name, settings] of [["t1", { advisor_send_file_dirs: "x" }], ["t2", { advisor_send_file_dirs: [1] }],
+    ["t3", { advisor_send_file_slack_max_bytes: 0 }], ["t4", { advisor_send_file_discord_max_bytes: "5" }]]) {
+    const data = await write(name, settings);
+    assert.throws(() => new AppSettingsStore(root, data), /app-settings\.json is corrupt/u);
+  }
+});
+
+test("Advisor prompt lists the send-file folders and size limits", async (t) => {
+  const { root, core } = await createTestCore(t, {
+    agentRunner: runner,
+    getAdvisorSendFileSettings: () => ({ dirs: [join(root, "send")], slackMaxBytes: 2048, discordMaxBytes: 3 * 1024 * 1024 }),
+  }, { prefix: "owl-send-file-prompt-" });
+  const prompt = core.getAdvisorSettingsSnapshot().systemPrompt;
+  for (const part of ["send_file", "## Send-file folders", join(root, "send"), "Slack 2.0KB", "Discord 3.0MB"]) assert.ok(prompt.includes(part), part);
+});

@@ -9,6 +9,7 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 
 import { IntegrationStore } from "../../apps/server/dist/integration-store.js";
+import { ConnectorManager } from "../../apps/server/dist/connector-manager.js";
 import { validateIntegrationPayload } from "../../apps/server/dist/http.js";
 import { createCore as createServerCore } from "../../apps/server/dist/core.js";
 import { DecisionService } from "../../packages/core/dist/index.js";
@@ -399,6 +400,61 @@ test("integration payload validator covers new-config completeness and configure
     () => validateIntegrationPayload({ owner_user_ids: ["unsupported"] }, "discord", true),
     (error) => error?.status === 400 && error?.code === "validation_error",
   );
+});
+
+test("Slack owner_user_id is stored as plain metadata, returned in status, cleared by empty string and validated", async (t) => {
+  const root = await tempDir(t, "owl-owner-id-");
+  const dataDir = join(root, "data");
+  const store = new IntegrationStore(root, dataDir);
+  store.save_integration("slack", { bot_token: "xoxb-owner-id", app_token: "xapp-owner-id", conversation_channel_id: "C1", notification_channel_id: "C2", owner_user_id: "U0123456789" });
+  const reloaded = new IntegrationStore(root, dataDir);
+  assert.equal(reloaded.getConfig("slack")?.owner_user_id, "U0123456789");
+  const meta = JSON.parse(await readFile(join(dataDir, "integrations-meta.json"), "utf8"));
+  assert.equal(meta[0].owner_user_id, "U0123456789");
+  reloaded.save_integration("slack", { owner_user_id: "" });
+  assert.equal(new IntegrationStore(root, dataDir).getConfig("slack")?.owner_user_id, undefined);
+
+  assert.deepEqual(validateIntegrationPayload({ owner_user_id: " U1 " }, "slack", true), { owner_user_id: "U1" });
+  assert.deepEqual(validateIntegrationPayload({ owner_user_id: "" }, "slack", true), { owner_user_id: "" });
+  for (const [value, provider] of [["U 1", "slack"], ["U1", "discord"]]) {
+    assert.throws(
+      () => validateIntegrationPayload({ owner_user_id: value }, provider, true),
+      (error) => error?.status === 400 && error?.code === "validation_error",
+    );
+  }
+});
+
+test("Slack owner_user_id round-trips through the settings API and invalid values return 400", async (t) => {
+  const root = await tempDir(t, "owl-owner-id-api-");
+  const store = new IntegrationStore(root, join(root, "data"));
+  const core = {
+    ready: true,
+    getIntegrations: async () => store.list(),
+    saveIntegration: async (provider, config) => ({ data: store.save_integration(provider, config), version: 0 }),
+  };
+  const api = await startTestHttpServer(t, { core, webOut: root, owlRoot: root }, { token: "owner-id-api-test-token" });
+  if (!api) return t.skip("localhost listen is unavailable");
+  const slackOwnerId = async () => {
+    const res = await api.request("GET", "/api/v1/settings/integrations");
+    return (await res.json()).data.integrations.find((item) => item.provider === "slack")?.owner_user_id;
+  };
+
+  const saved = await api.request("PUT", "/api/v1/settings/integrations/slack", commandEnvelope({
+    bot_token: "xoxb-owner-id-api", app_token: "xapp-owner-id-api", conversation_channel_id: "C1", notification_channel_id: "C2", owner_user_id: "U0123456789",
+  }, "owner-save"));
+  assert.equal(saved.status, 200);
+  assert.equal(await slackOwnerId(), "U0123456789");
+
+  for (const [provider, value] of [["slack", "U 1"], ["discord", "U1"]]) {
+    const invalid = await api.request("PUT", `/api/v1/settings/integrations/${provider}`, commandEnvelope({ owner_user_id: value }, `owner-invalid-${provider}`));
+    assert.equal(invalid.status, 400);
+    assert.equal((await invalid.json()).error.code, "validation_error");
+  }
+  assert.equal(await slackOwnerId(), "U0123456789");
+
+  const cleared = await api.request("PUT", "/api/v1/settings/integrations/slack", commandEnvelope({ owner_user_id: "" }, "owner-clear"));
+  assert.equal(cleared.status, 200);
+  assert.equal(await slackOwnerId() ?? null, null);
 });
 
 test("integration connection tests validate Slack Socket Mode and both channels, plus Discord send access", async (t) => {
@@ -2112,4 +2168,16 @@ test("advisor turn migration persists a channel-id column for restart recovery",
   } finally {
     db.close();
   }
+});
+
+test("ConnectorManager.channelAdmin returns the running connector channel API and null once the connector is stopped", async () => {
+  const manager = new ConnectorManager("/tmp/owl-root-fake", { list: () => [], getConfig: () => ({}) }, 4000);
+  const admin = { createChannel: async () => ({}), renameChannel: async () => ({}), describeChannel: async () => ({}) };
+  assert.equal(manager.channelAdmin("slack"), null);
+  manager.createConnector = async () => ({ start: async () => {}, stop: async () => {}, channelAdmin: () => admin });
+  await manager.startConnector("slack");
+  assert.equal(manager.channelAdmin("slack"), admin);
+  assert.equal(manager.channelAdmin("discord"), null);
+  await manager.stopConnector("slack");
+  assert.equal(manager.channelAdmin("slack"), null);
 });

@@ -52,10 +52,10 @@ const OWNER = { kind: "owner", source: "summary", quote: "unprovable criterion" 
 const RELAX = { reason: "The live server is outside the Task.", keeps: "A copy made inside the Task is unchanged." };
 
 /** A Task whose only criterion is AC1 with the given origin (undefined: no origin). A loosening names its entry in auto_recovery. */
-const planTask = (text, origin, relax = false) => ({
+const planTask = (text, origin, relax = false, requirement = undefined) => ({
   id: "T1", title: "A", type: "code",
   necessity: { serves: "test fixture", if_omitted: "test fixture" },
-  acceptance_criteria: [{ id: "AC1", text, check: "node --test tests/x.test.mjs", serves: "test fixture", if_omitted: "test fixture", check_weight: "light", weight_reason: "", kind: "work_check", ...(origin ? { origin } : {}) }],
+  acceptance_criteria: [{ id: "AC1", text, check: "node --test tests/x.test.mjs", serves: "test fixture", if_omitted: "test fixture", check_weight: "light", weight_reason: "", kind: "work_check", ...(requirement ? { requirement } : {}), ...(origin ? { origin } : {}) }],
   auto_recovery: { criteria_relaxations: relax ? [{ criterion_id: "AC1", ...RELAX }] : [] },
   depends_on: [], required_sections: [], required_tests: [], replaces: [], review: true,
 });
@@ -64,13 +64,13 @@ const planTask = (text, origin, relax = false) => ({
  * The first review reports BAD_CRITERION as unprovable; the Manager rewrites it; the next review passes.
  * With alwaysDefect every review reports it, so the recovery limit is what ends the loop.
  */
-function runner({ origin = MANAGER, alwaysDefect = false } = {}) {
+function runner({ origin = MANAGER, alwaysDefect = false, requirement = undefined } = {}) {
   const state = { workerCalls: 0, reviewCalls: 0, replanRequests: [] };
   return {
     state,
     runManagerPlan: async (request) => {
       const mode = request.mode ?? request.context?.mode;
-      if (mode === "plan") return { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [planTask(BAD_CRITERION, origin)] } };
+      if (mode === "plan") return { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [planTask(BAD_CRITERION, origin, false, requirement)] } };
       if (mode === "replan") {
         state.replanRequests.push(request);
         return { outcome: "success", report_valid: true, report: { event: "task.replanned", tasks: [planTask(GOOD_ACCEPTANCE, origin, true)] } };
@@ -239,4 +239,31 @@ test("the Reviewer prompt says when to use acceptance_defect and how it differs 
   assert.match(prompt, /verdict "acceptance_defect"/);
   assert.match(prompt, /that is fix_required/);
   assert.match(prompt, /does not count as a review attempt/);
+});
+
+test("the Reviewer prompt separates goals from required criteria and asks for goal_shortfalls with a reason", () => {
+  const prompt = buildReviewerPrompt({ task: { id: "t", title: "t", acceptance: "a", type: "code", review_round: 0 }, report: { changes: [] } });
+  assert.match(prompt, /goal: it is only about a goal criterion/);
+  assert.match(prompt, /including the ones the Worker marked passed/);
+  assert.match(prompt, /goal_shortfalls with its reason; a blank reason is rejected/);
+  assert.match(prompt, /Never return fix_required, replan_required or acceptance_defect because of a goal alone/);
+  assert.match(prompt, /required criterion .* that is not met is still fix_required/);
+});
+
+test("the Reviewer output reads goal_shortfalls, defaulting to none", () => {
+  const shortfall = { criterion_id: "AC2", reason: "half done" };
+  assert.deepEqual(parse({ goal_shortfalls: [shortfall] }).goal_shortfalls, [shortfall]);
+  assert.deepEqual(parse({}).goal_shortfalls, []);
+  assert.throws(() => parse({ goal_shortfalls: [{ criterion_id: "AC2", reason: "" }] }), (error) => error.code === "review_invalid");
+});
+
+test("an acceptance_defect that names only a goal does not stop the Task and is recorded as a shortfall", async (t) => {
+  const { fake, db, workId } = await run(t, undefined, { origin: MANAGER, requirement: "goal", alwaysDefect: true });
+  const [task] = tasksOf(db, workId);
+  assert.equal(task.status, "completed");
+  assert.equal(fake.state.reviewCalls, 1);
+  assert.equal(fake.state.replanRequests.length, 0, "the Manager was not asked");
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE work_id = ? AND type = ?", workId, ACCEPTANCE_DEFECT_EVENT).n, 0);
+  const stored = JSON.parse(db.get("SELECT goal_shortfalls_json AS json FROM tasks WHERE id = ?", task.id).json);
+  assert.deepEqual(stored.map((entry) => [entry.criterion_id, entry.reason, entry.source]), [["AC1", REASON, "reviewer"]]);
 });

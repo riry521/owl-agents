@@ -23,7 +23,7 @@ import {
   type ReviewerRequest,
 } from "./types";
 
-const REVIEW_SCOPE_INSTRUCTION = "Give every finding a scope. in_scope: it breaks an acceptance criterion, a rule, behavior or security. beyond_acceptance: it asks for a test, check, feature or improvement that no acceptance criterion or rule requires; Core always stores it as minor, so it never sends the Task back. overbuilt: the delivered work adds code, tests, dependencies or checks the criteria and context do not need; it is minor unless the excess adds a heavy or slow check (real model or paid API calls, production-size data, long runs), a new dependency, or risk to existing behavior, and then it is major and its fix is to remove the excess. Judge necessity from task.acceptance_criteria (each criterion's serves, if_omitted, check_weight and weight_reason) and task.necessity, not from what you would have liked to see.";
+const REVIEW_SCOPE_INSTRUCTION = "Give every finding a scope. in_scope: it breaks an acceptance criterion, a rule, behavior or security. beyond_acceptance: it asks for a test, check, feature or improvement that no acceptance criterion or rule requires; Core always stores it as minor, so it never sends the Task back. overbuilt: the delivered work adds code, tests, dependencies or checks the criteria and context do not need; it is minor unless the excess adds a heavy or slow check (real model or paid API calls, production-size data, long runs), a new dependency, or risk to existing behavior, and then it is major and its fix is to remove the excess. goal: it is only about a goal criterion (requirement goal); Core always stores it as minor, so it never sends the Task back. Judge necessity from task.acceptance_criteria (each criterion's serves, if_omitted, check_weight and weight_reason) and task.necessity, not from what you would have liked to see.";
 
 /** The one definition of the Reviewer output. */
 export const REVIEW_OUTPUT_SCHEMA: RoleSchema = objectSchema({
@@ -41,13 +41,21 @@ export const REVIEW_OUTPUT_SCHEMA: RoleSchema = objectSchema({
     }),
     description: "the unprovable criteria; non-empty only with verdict acceptance_defect, otherwise []",
   },
+  goal_shortfalls: {
+    type: "array",
+    items: objectSchema({
+      criterion_id: { type: "string", minLength: 1, description: "id of a goal criterion (requirement goal) that is not met" },
+      reason: { type: "string", minLength: 1, description: "why the goal is not met; never blank" },
+    }),
+    description: "goal criteria (requirement goal) that are not met, including ones the Worker marked passed; [] if none",
+  },
   summary: { type: "string", description: "one sentence review summary" },
   findings: {
     type: "array",
     items: objectSchema({
       severity: { type: "string", enum: ["major", "minor"], description: "major = behavior failure, acceptance-criteria violation, rule violation, or security issue in the delivered work; otherwise minor. Never report the format, omissions, or wording of the report itself as a finding. If findings are only minor, the verdict must be pass." },
       target: { type: "string", enum: ["deliverable", "report"], description: "deliverable = a finding about the deliverable (code, design document, or workspace state); report = a finding only about how the report is written. A report finding is always minor and is not registered in the backlog" },
-      scope: { type: "string", enum: ["in_scope", "beyond_acceptance", "overbuilt"], description: "in_scope = breaks an acceptance criterion, a rule, behavior or security; beyond_acceptance = asks for a test, check, feature or improvement no acceptance criterion or rule requires (Core always treats it as minor); overbuilt = the delivered work adds code, tests, dependencies or checks the criteria do not need" },
+      scope: { type: "string", enum: ["in_scope", "beyond_acceptance", "overbuilt", "goal"], description: "goal = the finding is only about a goal criterion (requirement goal; Core always treats it as minor); in_scope = breaks an acceptance criterion, a rule, behavior or security; beyond_acceptance = asks for a test, check, feature or improvement no acceptance criterion or rule requires (Core always treats it as minor); overbuilt = the delivered work adds code, tests, dependencies or checks the criteria do not need" },
       subject: { type: "string", enum: ["test_result", "other"], description: "test_result = the finding is about a test or check failing, passing or not having been run (including anything in Review.core_tests); other = anything else. Core never registers a test_result finding in the backlog" },
       file: { type: "string", description: "path of the file the finding is about, relative to the Task's workspace root (never a path inside a temporary worktree), or empty string for a general finding" },
       line: { type: "integer", minimum: 0, description: "1-based line number, or 0 when no specific line applies" },
@@ -144,6 +152,7 @@ export function buildReviewerPrompt(
       `Use verdict "${ACCEPTANCE_DEFECT_VERDICT}" (with acceptance_defects, each pointing at its criterion by criterion_id) only when a criterion cannot be proven by anything this Task can run, for example it compares a live server, live data or another Work before and after. Do not use it for code that fails a provable criterion; that is fix_required. This verdict sends the criteria back to the Manager to rewrite and does not count as a review attempt. With any other verdict, acceptance_defects must be []. A criterion that is missing cannot be pointed at by id; report it as a finding instead.`,
       "Classify findings as major for behavior failures, acceptance-criteria violations, rule violations, or security issues in the delivered work; everything else is minor. A problem that is only naming or style in the code is minor. If findings are only minor, the verdict must be pass.",
       REVIEW_SCOPE_INSTRUCTION,
+      "Check goal criteria (requirement goal) like the others, including the ones the Worker marked passed. Put each goal that is not met in goal_shortfalls with its reason; a blank reason is rejected. Never return fix_required, replan_required or acceptance_defect because of a goal alone. A required criterion (requirement required, or no requirement) that is not met is still fix_required.",
       `Do not report the format, omissions, or wording of the ${reviewedRole} report as findings, not even as minor (for example, the report does not list a command or does not include output). Judge anything the report leaves out yourself by reading the workspace; run commands only for what Review.core_checks and Review.core_tests do not cover. Exception: when the report states something that is not true (it says tests passed but they fail, or it claims a verification that was not performed), treat it as a problem in verifying the deliverable: set target to deliverable and decide severity by the usual criteria.`,
       "Do not run the Project's tests; the hook denies the Project's test commands. Building is allowed. Judge tests only from Review.core_tests, the result of Core's test run for this Task (failed test names and error messages). Failures listed under core_tests.pre_existing already fail on the base branch and are quarantined by Core; never report them. Set subject to test_result on any finding about a test or check result. Never send the Task back, and never report a finding, because of a test the Worker added only to check its own work or because a test asserts a hardcoded value: Core removes test files that no criterion asked for, and the Project's check commands catch hardcoded expectations. A test file named in the report but missing from the workspace was removed by Core and is not a finding.",
       "A failed entry in Review.core_checks means Core has already sent the Task back; concentrate on meaning, design and rules.",
@@ -205,6 +214,7 @@ export function parseReviewResultWithFeedback(
   }
   // Strict providers need every property required; older outputs without acceptance_defects stay valid.
   if (!("acceptance_defects" in payload)) payload = { ...payload, acceptance_defects: [] };
+  if (!("goal_shortfalls" in payload)) payload = { ...payload, goal_shortfalls: [] };
   const prepared = prepareLegacySkillOutput(REVIEW_OUTPUT_SCHEMA, payload);
   payload = prepared.payload;
   const problem = validateRoleOutput(REVIEW_OUTPUT_SCHEMA, payload);

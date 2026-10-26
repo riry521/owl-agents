@@ -16,6 +16,7 @@ import {
   normalizeWorkDetailData,
   workDetailHref,
 } from '../../apps/web/lib/work-detail-safety.mjs';
+import * as decisionSections from '../../apps/web/lib/decision-sections.mjs';
 
 const webRequire = createRequire(join(repoRoot, 'apps/web/package.json'));
 const React = webRequire('react');
@@ -73,7 +74,7 @@ const apiClient = {
   getWorkDetail: async () => null,
   getDecision: async () => null,
   getWorkCoreActivity: async () => null,
-  answerDecision: async () => ({}),
+  answerDecision: async (...args) => { apiCalls.push(['answerDecision', ...args]); return { resumed_task_ids: [] }; },
   startWork: async (...args) => { apiCalls.push(['startWork', ...args]); return {}; },
   pauseWork: async (...args) => { apiCalls.push(['pauseWork', ...args]); return {}; },
   resumeWork: async (...args) => { apiCalls.push(['resumeWork', ...args]); return {}; },
@@ -229,6 +230,7 @@ const { DecisionView } = compile(join(repoRoot, 'apps/web/components/DecisionVie
   '@/lib/format': format,
   '@/lib/view-loader': viewLoader,
   '@/components/StateBadge': badges,
+  '@/lib/decision-sections.mjs': decisionSections,
   '@/lib/i18n': i18n,
 });
 
@@ -392,6 +394,113 @@ test('Decision shows a hint when there are no options', () => {
   assert.doesNotMatch(none, /<textarea/u);
 });
 
+const ID26 = '01ARZ3NDEKTSV4RRFFQ69TASK1';
+const stateOptions = [
+  { key: 'retry', label: 'Run again', description: 'Stored description of retry.' },
+  { key: 'cancel', label: 'Stop', description: 'Stored description of cancel.' },
+];
+const explanations = {
+  ready: { kind: 'work_prerequisite', status: 'ready', summary: 'Why summary text.', cause_kind: 'work', next_steps: 'Next steps text.',
+    option_notes: [{ key: 'retry', note: 'Note for retry.' }, { key: 'cancel', note: 'Note for cancel.' }] },
+  pending: { kind: 'work_prerequisite', status: 'pending', summary: null, cause_kind: null },
+  failed: { kind: 'work_prerequisite', status: 'failed', summary: null, cause_kind: null },
+  none: null,
+};
+
+/** A Work #13 shaped Decision: the reason ends with a bare id and the tried lines repeat the reason. */
+function explainedState(name) {
+  const state = decisionState({ allowFreeText: true, options: stateOptions });
+  const d = state[0].decision;
+  d.reason = `Waiting for A / Detail: A is not done. / （${ID26}）`;
+  d.tried = 'Waiting for A\n- Detail: A is not done';
+  d.recommended = 'retry';
+  d.explanation = explanations[name];
+  return state;
+}
+
+function findForm(node) {
+  if (node === null || typeof node !== 'object') return null;
+  if (Array.isArray(node)) return node.map(findForm).find(Boolean) ?? null;
+  if (typeof node.type === 'function') return findForm(node.type(node.props));
+  return node.type === 'form' ? node : findForm(node.props?.children);
+}
+
+test('Decision splits why and how in every state and never repeats a line or shows an id', () => {
+  for (const name of ['ready', 'pending', 'failed', 'none']) {
+    const { html } = renderWith(DecisionView, explainedState(name));
+    assert.ok(html.indexOf(en.decision.why) < html.indexOf(en.decision.how), `${name}: why comes before how`);
+    assert.equal(html.split(en.decision.recommended).length - 1, 1, `${name}: one recommendation`);
+    assert.doesNotMatch(html, new RegExp(ID26), `${name}: no id`);
+    const lines = html.replace(/<[^>]*>/gu, '\n').split('\n').map((l) => l.trim()).filter((l) => l.length > 6);
+    assert.deepEqual(lines.filter((l, i) => lines.indexOf(l) !== i), [], `${name}: repeated lines`);
+  }
+  for (const name of ['ready', 'pending', 'failed', 'none']) {
+    const state = explainedState(name);
+    state[0].decision.reason = state[0].decision.question;
+    const { html } = renderWith(DecisionView, state);
+    const same = html.replace(/<[^>]*>/gu, '\n').split('\n').filter((l) => l.trim() === state[0].decision.question);
+    assert.ok(same.length <= 1, `${name}: question not repeated`);
+  }
+  const echoed = explainedState('ready');
+  echoed[0].decision.explanation = { ...explanations.ready, next_steps: explanations.ready.summary };
+  const echoedView = renderWith(DecisionView, echoed);
+  assert.equal(echoedView.html.split('Why summary text.').length - 1, 1, 'summary and next_steps shown once');
+  assert.equal(buttons(echoedView.tree).filter((b) => textOf(b.props.children) === en.decision.choose).length, 2, 'options stay answerable');
+  const partial = explainedState('ready');
+  partial[0].decision.explanation = { ...explanations.ready, next_steps: 'Why summary text.\nWait, then run again.' };
+  partial[0].decision.question = 'Wait, then run again.\nPick one';
+  const partialHtml = renderWith(DecisionView, partial).html;
+  assert.equal(partialHtml.split('Why summary text.').length - 1, 1, 'a summary line repeated in next_steps shown once');
+  assert.equal(partialHtml.split('Wait, then run again.').length - 1, 1, 'a next_steps line repeated in the question shown once');
+  assert.match(partialHtml.slice(partialHtml.indexOf('<details')), /Pick one/u, 'the new question line stays in the full record');
+  for (const name of ['pending', 'failed', 'none']) {
+    const state = explainedState(name);
+    state[0].decision.question = 'Pick one\nPick one.';
+    assert.equal(renderWith(DecisionView, state).html.split('Pick one').length - 1, 1, `${name}: a question line shown once`);
+  }
+  const bare = explainedState('ready');
+  bare[0].decision.explanation = { ...explanations.ready, next_steps: null };
+  for (const [name, html] of [['echoed', echoedView.html], ['no next_steps', renderWith(DecisionView, bare).html]]) {
+    assert.doesNotMatch(html.slice(0, html.indexOf('<details')), /Pick one/u, `${name}: question stays out of how`);
+    assert.match(html.slice(html.indexOf('<details')), /Pick one/u, `${name}: question in the full record`);
+  }
+  const ready = renderWith(DecisionView, explainedState('ready')).html;
+  assert.match(ready, /Why summary text\./u);
+  assert.match(ready, /Next steps text\./u);
+  assert.match(ready, /Note for retry\./u);
+  assert.doesNotMatch(ready.slice(0, ready.indexOf('<details')), /Pick one/u, 'question stays out of how');
+  assert.match(ready, new RegExp(`<summary>${en.decision.detailsSummary}</summary>`, 'u'));
+  const pending = renderWith(DecisionView, explainedState('pending')).html;
+  assert.ok(pending.includes(en.decision.explanationPending));
+  assert.match(pending, /Pick one/u);
+  assert.match(pending, /Stored description of retry\./u);
+  assert.ok(renderWith(DecisionView, explainedState('failed')).html.includes(en.decision.explanationFailed));
+  assert.ok(!renderWith(DecisionView, explainedState('none')).html.includes(en.decision.explanationFailed));
+  for (const key of ['how', 'explanationFailed', 'detailsSummary']) {
+    assert.equal(typeof ja.decision[key], 'string', `ja decision.${key}`);
+  }
+});
+
+test('Decision answers with option_key for a button and null for free text in every state', async () => {
+  for (const name of ['ready', 'pending', 'failed', 'none']) {
+    apiCalls.length = 0;
+    const choose = buttons(renderWith(DecisionView, explainedState(name)).tree).filter((b) => textOf(b.props.children) === en.decision.choose);
+    assert.equal(choose.length, 2, `${name}: both option buttons`);
+    choose[1].props.onClick();
+    await new Promise((resolveNext) => setImmediate(resolveNext));
+    assert.deepEqual(apiCalls[0].slice(0, 2), ['answerDecision', '01J00000000000000000000009']);
+    assert.equal(apiCalls[0][2].option_key, 'cancel', name);
+
+    apiCalls.length = 0;
+    const state = explainedState(name);
+    state[1] = 'My own answer';
+    findForm(renderWith(DecisionView, state).tree).props.onSubmit({ preventDefault() {} });
+    await new Promise((resolveNext) => setImmediate(resolveNext));
+    assert.equal(apiCalls[0][2].option_key, null, name);
+    assert.equal(apiCalls[0][2].answer, 'My own answer', name);
+  }
+});
+
 function loadApiClient() {
   const apiClientPath = join(repoRoot, 'apps/web/lib/api-client.ts');
   return compile(apiClientPath, {
@@ -433,18 +542,18 @@ test('api-client asks for the newest events and exposes reopenWork', async () =>
   }
 });
 
-test('Decision shows why it stopped, what to decide, and what each option does', () => {
+test('Decision without an explanation shows why it stopped, then what to do, then the record', () => {
   const options = [
     { key: 'retry', label: 'Fix it', description: 'The Manager plans the fix.' },
     { key: 'cancel', label: 'Stop', description: 'The Work is cancelled.' },
   ];
   const { html } = renderWith(DecisionView, decisionState({ allowFreeText: true, options }));
-  const order = [en.decision.why, 'The Work stopped', en.decision.question, 'Pick one', en.decision.options,
+  const order = [en.decision.why, 'The Work stopped', en.decision.how, 'Pick one',
     'Fix it', 'The Manager plans the fix.', 'Stop', 'The Work is cancelled.', en.decision.currentState, 'Waiting', en.decision.tried, 'Nothing yet'];
   let at = -1;
   for (const part of order) {
     const next = html.indexOf(part, at + 1);
-    assert.ok(next > at, `${part} should follow the previous template section`);
+    assert.ok(next > at, `${part} should follow the previous section`);
     at = next;
   }
   assert.equal(html.split(en.decision.choose).length - 1, 2, 'each option has its own answer button');
