@@ -1,7 +1,11 @@
-import type { AgentFailureClass, OwnerLanguage, RateLimitInfo } from "@owl/shared";
+import { harnessOfAdapter, PROVIDER_ERROR_RECORD_MAX_CHARS, type AgentFailureClass, type OwnerLanguage, type ProviderErrorRecord, type RateLimitInfo } from "@owl/shared";
 
 import { AgentRuntimeError } from "./errors";
-import { rateLimitHarness, resolveRateLimitReset, type RateLimitResetInput } from "./rate-limit";
+import { codexErrorInfoOf, isUsageLimitCode } from "./codex-error-info";
+import { rateLimitHarness, reportedRateLimitReset, resolveRateLimitReset, type RateLimitResetInput } from "./rate-limit";
+
+/** error_key of a 429 with no usage-limit code and no reported reset time: a short limit, not a used-up quota. */
+export const RATE_LIMIT_TRANSIENT_ERROR_KEY = "provider_failed:rate_limit_transient";
 
 /** How a provider process ended, as observed by Owl rather than read from its output. */
 export type ProviderFailureKind =
@@ -45,6 +49,8 @@ export interface ProviderFailureClassification {
   /** The harness's own first error line, for owner-facing task failures; never part of chat-visible `message`. */
   readonly detail_message?: string;
   readonly rate_limit?: RateLimitInfo;
+  /** The provider's own error, masked and bounded, for the raw-error record. */
+  readonly provider_error: ProviderErrorRecord;
 }
 
 interface ProviderErrorContext {
@@ -56,6 +62,7 @@ interface ProviderErrorContext {
   readonly stdout?: string;
   readonly stderr?: string;
   readonly rateLimitInfo?: RateLimitInfo;
+  readonly rateLimitTransient?: boolean;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -156,6 +163,8 @@ interface ProviderErrorText {
   auth: StatusLabelText;
   permission: StatusLabelText;
   rateLimit: (label: string, statusText: string, resetsAt: string | null) => string;
+  rateLimitTransient: StatusLabelText;
+  rateLimitTransientResend: string;
   overloaded: LabelText;
   timeout: LabelText;
   idle: LabelText;
@@ -187,6 +196,8 @@ const PROVIDER_ERROR_TEXT: Record<OwnerLanguage, ProviderErrorText> = {
     rateLimit: (label, statusText, resetsAt) => resetsAt === null
       ? label + "の利用上限に達しました" + statusText + "（解除時刻は不明）。"
       : label + "の利用上限に達しました" + statusText + "。" + formatResetTime(resetsAt, "ja") + "ごろ解除される見込みです。",
+    rateLimitTransient: (label, statusText) => `${label}へのリクエストが一時的に制限されました${statusText}。`,
+    rateLimitTransientResend: "少し待ってから、もう一度送ってください。",
     overloaded: (label) => label + "が混み合っています。しばらくして自動で再試行します。",
     timeout: (label) => `${label}の応答がタイムアウトしました。ネットワークとモデルの状態を確認し、必要ならタイムアウト設定を見直してください。`,
     idle: (label) => `${label}が長時間進捗を出さなかったため停止しました。ネットワークとProviderの状態を確認してください。長い無出力が想定される作業ではOWL_PROVIDER_IDLE_TIMEOUT_MSを見直してください。`,
@@ -215,6 +226,8 @@ const PROVIDER_ERROR_TEXT: Record<OwnerLanguage, ProviderErrorText> = {
     rateLimit: (label, statusText, resetsAt) => resetsAt === null
       ? label + " hit its usage limit" + statusText + " (reset time unknown)."
       : label + " hit its usage limit" + statusText + ". It should reset around " + formatResetTime(resetsAt, "en") + ".",
+    rateLimitTransient: (label, statusText) => `${label} is temporarily limiting requests${statusText}.`,
+    rateLimitTransientResend: "Wait a moment, then send the message again.",
     overloaded: (label) => label + " is overloaded. Owl will retry shortly.",
     timeout: (label) => `${label} timed out. Check the network and the model status, and review the timeout settings if needed.`,
     idle: (label) => `${label} was stopped after producing no progress for too long. Check the network and the Provider status; for work that is expected to stay silent longer, review OWL_PROVIDER_IDLE_TIMEOUT_MS.`,
@@ -267,10 +280,11 @@ export function formatProviderError(
   if (context.rateLimitInfo !== undefined) {
     return t.rateLimit(label, statusText, context.rateLimitInfo.resets_at);
   }
+  if (context.rateLimitTransient === true) return t.rateLimitTransient(label, statusText);
   if (isAuthenticationFailure(text, status)) return t.auth(label, statusText);
   if (isPermissionFailure(text, status)) return t.permission(label, statusText);
   if (isOverloadedFailure(text, status)) return t.overloaded(label);
-  if (isRateLimitFailure(text, status)) return t.rateLimit(label, statusText, null);
+  if (isRateLimitFailure(text, status)) return t.rateLimitTransient(label, statusText);
   if (isTimeoutFailure(text)) return t.timeout(label);
   if (isNetworkFailure(text)) return t.network(label, statusText);
   if (isConfigurationFailure(text, status)) return t.configuration(label);
@@ -289,6 +303,59 @@ export function formatProviderError(
 
 const PROVIDER_DETAIL_MAX_CHARS = 300;
 
+/** Replaces the given secret values and credential-looking tokens in provider text with ***. */
+export function maskProviderText(text: string, secrets: readonly string[] = []): string {
+  return secrets
+    .filter((secret) => secret.length > 0)
+    .reduce((masked, secret) => masked.split(secret).join("***"), text)
+    .replace(/(authorization\s*[:=]\s*|api[-_ ]?key\s*[:=]\s*|access[_ -]?token\s*[:=]\s*|secret\s*[:=]\s*)(?:"[^"]*"|'[^']*'|(?:(?:bearer|basic)\s+)?[^\s,;]+)/giu, "$1***")
+    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/giu, "$1 ***")
+    .replace(/\b(?:sk|pk|rk|key)[-_][A-Za-z0-9_-]{8,}/giu, "***")
+    .replace(/\b(?:(?:xoxb|xapp)-|github_pat_)[A-Za-z0-9_-]+/gu, "***")
+    .replace(/\b(?:ghp|gho)_[A-Za-z0-9]+/gu, "***")
+    .replace(/\b[A-Za-z0-9_-]{32,}\b/gu, "***");
+}
+
+/** The provider_error for a turn.failed that has no richer classification than its text and process facts. */
+export function turnFailureProviderError(harness: string, cause: Partial<ProviderFailureCause> & { readonly error: unknown }): ProviderErrorRecord {
+  return classifyProviderFailure(harness, { exit_code: null, signal: null, kind: "harness_error", ...cause }).provider_error;
+}
+
+/**
+ * The record of one failed provider call. The message is the harness's error
+ * field (cut from the start), else the end of stderr; stdout is never copied
+ * because it holds model output.
+ */
+export function providerErrorRecord(
+  harness: string,
+  cause: ProviderFailureCause,
+  verdict: { readonly failure_class: AgentFailureClass },
+  errorKey: string,
+  secrets: readonly string[] = [],
+  now: Date = new Date(),
+  attempt = 1,
+): ProviderErrorRecord {
+  const harnessText = maskProviderText(errorText(cause.error).trim(), secrets);
+  const stderrText = harnessText.length > 0 ? "" : maskProviderText((cause.stderr ?? "").trim(), secrets);
+  const message = harnessText.length > 0
+    ? harnessText.slice(0, PROVIDER_ERROR_RECORD_MAX_CHARS)
+    : stderrText.length > 0 ? stderrText.slice(-PROVIDER_ERROR_RECORD_MAX_CHARS) : null;
+  return {
+    harness,
+    message,
+    message_source: harnessText.length > 0 ? "harness_error" : message !== null ? "stderr" : null,
+    code: cause.harness_code ?? cause.error_code ?? null,
+    http_status: cause.harness_status ?? null,
+    failure_kind: cause.kind ?? null,
+    exit_code: cause.exit_code,
+    signal: cause.signal,
+    failure_class: verdict.failure_class,
+    error_key: errorKey,
+    attempt,
+    recorded_at: now.toISOString(),
+  };
+}
+
 /**
  * The first line of the message the harness itself reported, bounded and with
  * the given secret values and key-like tokens masked, or null when there is none worth showing. Failures
@@ -300,12 +367,7 @@ function providerErrorDetail(cause: ProviderFailureCause, verdict: FailureVerdic
   if (cause.kind === "timeout" || cause.kind === "cancelled" || cause.kind === "output_too_large" || cause.kind === "spawn_error") return null;
   const line = errorText(cause.error).split(/\r?\n/u).map((part) => part.trim()).find((part) => part.length > 0);
   if (line === undefined) return null;
-  const masked = secrets
-    .filter((secret) => secret.length > 0)
-    .reduce((text, secret) => text.split(secret).join("***"), line)
-    .replace(/\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{8,}/giu, "$1 ***")
-    .replace(/\b(?:sk|pk|rk|key)[-_][A-Za-z0-9_-]{8,}/giu, "***")
-    .replace(/\b[A-Za-z0-9_-]{32,}\b/gu, "***");
+  const masked = maskProviderText(line, secrets);
   return masked.length > PROVIDER_DETAIL_MAX_CHARS ? `${masked.slice(0, PROVIDER_DETAIL_MAX_CHARS)}...` : masked;
 }
 
@@ -321,6 +383,8 @@ interface FailureVerdict {
 const deterministic = (key: string): FailureVerdict => ({ failure_class: "deterministic", retry_allowed: false, key });
 const transient = (key: string): FailureVerdict => ({ failure_class: "transient", retry_allowed: true, key });
 const rateLimited = (): FailureVerdict => ({ failure_class: "rate_limited", retry_allowed: true, key: "rate_limited" });
+const rateLimitTransient = (): FailureVerdict => ({ failure_class: "transient", retry_allowed: true, key: "rate_limit_transient" });
+const USAGE_LIMIT_HARNESS_CODES: ReadonlySet<string> = new Set(["provider.rate-limit", "provider.quota"]);
 
 function exitDescriptor(cause: ProviderFailureCause): string {
   if (cause.kind === "harness_error") {
@@ -329,25 +393,29 @@ function exitDescriptor(cause: ProviderFailureCause): string {
   return cause.signal !== null ? `signal:${cause.signal}` : `exit:${cause.exit_code ?? "unknown"}`;
 }
 
-function hasStructuredRateLimitSignal(cause: ProviderFailureCause): boolean {
-  if (/usageLimitExceeded|usage[_ -]?limit[_ -]?exceeded/iu.test(cause.harness_code ?? "")) return true;
+/**
+ * A code the harness reported for a used-up usage limit. Words in the error
+ * text do not count: a 429 that only says "usage limit" is a short limit.
+ */
+function hasUsageLimitCode(cause: ProviderFailureCause): boolean {
+  const code = cause.harness_code ?? "";
+  if (isUsageLimitCode(code) || USAGE_LIMIT_HARNESS_CODES.has(code)) return true;
   const seen = new Set<object>();
   const visit = (value: unknown, depth: number): boolean => {
     if (!isRecord(value) || depth > 7 || seen.has(value)) return false;
     seen.add(value);
     const info = isRecord(value.rate_limit_info) ? value.rate_limit_info : null;
-    if (value.type === "rate_limit_event" && info?.status === "rejected") return true;
     if (info?.status === "rejected") return true;
-    const codexInfo = isRecord(value.codexErrorInfo) ? value.codexErrorInfo : null;
-    if (codexInfo?.kind === "usageLimitExceeded" || codexInfo?.type === "usageLimitExceeded" || codexInfo?.code === "usageLimitExceeded") return true;
-    if (value.kind === "usageLimitExceeded" || value.type === "usageLimitExceeded" || value.code === "usageLimitExceeded") return true;
+    if (isUsageLimitCode(codexErrorInfoOf(value)?.code)) return true;
+    if ([value.kind, value.type, value.code].some(isUsageLimitCode)) return true;
+    if (Object.keys(value).some((key) => isUsageLimitCode(key))) return true;
     return Object.values(value).some((nested) => visit(nested, depth + 1));
   };
   return (cause.rate_limit_evidence ?? []).some((evidence) => evidence.kind === "event" && visit(evidence.event, 0));
 }
 
 /** Decides from what Owl observed and what the harness reported as structured data. */
-function structuredVerdict(cause: ProviderFailureCause): FailureVerdict | null {
+function structuredVerdict(cause: ProviderFailureCause, resetReported: boolean): FailureVerdict | null {
   if (cause.error_code === "E2BIG") return deterministic("argument_list_too_long");
   if (cause.kind === "timeout") return transient(`timeout:${cause.timeout_kind ?? "wall"}`);
   if (cause.kind === "cancelled") return deterministic("cancelled");
@@ -358,13 +426,13 @@ function structuredVerdict(cause: ProviderFailureCause): FailureVerdict | null {
   }
   if (isOverloadedFailure(cause.harness_code ?? "", cause.harness_status ?? null)) return transient(exitDescriptor(cause));
   const status = cause.harness_status;
+  if (status !== 401 && status !== 403 && hasUsageLimitCode(cause)) return rateLimited();
   if (status !== undefined) {
     if (status === 401 || status === 403) return deterministic(exitDescriptor(cause));
-    if (status === 429) return rateLimited();
+    if (status === 429) return resetReported ? rateLimited() : rateLimitTransient();
     if (status === 408 || status >= 500) return transient(exitDescriptor(cause));
     if (status === 400 || status === 404 || status === 422) return deterministic(exitDescriptor(cause));
   }
-  if (hasStructuredRateLimitSignal(cause)) return rateLimited();
   if (cause.harness_transient !== undefined) {
     return cause.harness_transient ? transient(exitDescriptor(cause)) : deterministic(exitDescriptor(cause));
   }
@@ -384,7 +452,7 @@ function classifiedText(cause: ProviderFailureCause): string {
   return [stderr.slice(-CLASSIFIED_STDERR_CHARS), cause.harness_code ?? "", errorText(cause.error)].join("\n");
 }
 
-function fallbackVerdict(cause: ProviderFailureCause, text: string): FailureVerdict {
+function fallbackVerdict(cause: ProviderFailureCause, text: string, resetReported: boolean): FailureVerdict {
   if (isArgumentSizeFailure(text)) return deterministic("argument_list_too_long");
   if (isInsufficientQuotaFailure(text)) return deterministic(exitDescriptor(cause));
   const status = statusFrom(text, { status: cause.harness_status ?? null });
@@ -392,7 +460,7 @@ function fallbackVerdict(cause: ProviderFailureCause, text: string): FailureVerd
   const needsOwner = isAuthenticationFailure(text, status) || isPermissionFailure(text, status) || isConfigurationFailure(text, status);
   if (needsOwner) return { failure_class: "deterministic", retry_allowed: false, key: exitDescriptor(cause) };
   if (isOverloadedFailure(text, status)) return transient(exitDescriptor(cause));
-  if (isRateLimitFailure(text, status)) return rateLimited();
+  if (isRateLimitFailure(text, status)) return resetReported ? rateLimited() : rateLimitTransient();
   const isTransient = isNetworkFailure(text) || isTimeoutFailure(text);
   const retryDisallowed = isProtocolFailure(text);
   return {
@@ -433,18 +501,23 @@ export function classifyProviderFailure(
   secrets: readonly string[] = [],
 ): ProviderFailureClassification {
   const text = classifiedText(cause);
-  const verdict = structuredVerdict(cause) ?? fallbackVerdict(cause, text);
+  const inputs: RateLimitResetInput[] = [
+    ...(cause.rate_limit_evidence ?? []),
+    { kind: "text", text },
+    ...retryAfterEvidence(text),
+  ];
+  const options = { harness: rateLimitHarness(harness) };
+  const reported = reportedRateLimitReset(inputs, now, options);
+  const verdict = structuredVerdict(cause, reported !== null) ?? fallbackVerdict(cause, text, reported !== null);
   const rateLimit = verdict.failure_class === "rate_limited"
-    ? resolveRateLimitReset([
-        ...(cause.rate_limit_evidence ?? []),
-        { kind: "text", text },
-        ...retryAfterEvidence(text),
-      ], now, { harness: rateLimitHarness(harness) })
+    ? reported ?? resolveRateLimitReset(inputs, now, options)
     : undefined;
   const detail = providerErrorDetail(cause, verdict, secrets);
+  const errorKey = `provider_failed:${verdict.key}`;
   return {
     failure_class: verdict.failure_class,
-    error_key: `provider_failed:${verdict.key}`,
+    error_key: errorKey,
+    provider_error: providerErrorRecord(harnessOfAdapter(harness) ?? harness, cause, verdict, errorKey, secrets, now),
     retry_allowed: verdict.retry_allowed,
     ...(rateLimit !== undefined ? { rate_limit: rateLimit } : {}),
     message: formatProviderError(harness, text, {
@@ -454,9 +527,19 @@ export function classifyProviderFailure(
       signal: cause.signal,
       status: cause.harness_status ?? null,
       ...(rateLimit !== undefined ? { rateLimitInfo: rateLimit } : {}),
+      ...(verdict.key === "rate_limit_transient" ? { rateLimitTransient: true } : {}),
     }, language),
     ...(detail !== null ? { detail_message: detail } : {}),
   };
+}
+
+/**
+ * The text for a session's failed turn. A session does not retry on its own,
+ * so a short rate limit also tells the owner to send the message again.
+ */
+export function sessionFailureMessage(classification: ProviderFailureClassification, language: OwnerLanguage = "ja"): string {
+  if (classification.error_key !== RATE_LIMIT_TRANSIENT_ERROR_KEY) return classification.message;
+  return `${classification.message} ${PROVIDER_ERROR_TEXT[language].rateLimitTransientResend}`;
 }
 
 const PROVIDER_FAILURE_KINDS: Readonly<Record<string, ProviderFailureKind>> = {

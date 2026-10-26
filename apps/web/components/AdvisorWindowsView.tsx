@@ -5,8 +5,8 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { AdvisorView } from '@/components/AdvisorView';
 import { AdvisorWindowPicker } from '@/components/AdvisorWindowPicker';
 import { AdvisorWindowSheet } from '@/components/AdvisorWindowSheet';
-import { listAdvisorWindows } from '@/lib/api-client';
-import { DEFAULT_WINDOW_KEY, resolveWindowKey, windowHref } from '@/lib/advisor-windows.mjs';
+import { listAdvisorWindows, reorderAdvisorWindows } from '@/lib/api-client';
+import { DEFAULT_WINDOW_KEY, moveProjectWindow, projectWindowKeys, resolveWindowKey, windowHref } from '@/lib/advisor-windows.mjs';
 import { useLocale } from '@/lib/i18n';
 import type { AdvisorWindow } from '@/lib/types';
 import { useView } from '@/lib/view-loader';
@@ -21,7 +21,11 @@ export function AdvisorWindowsView() {
   const router = useRouter();
   const param = useSearchParams().get('window');
   const windowsView = useView<AdvisorWindow[]>('advisor-windows', listAdvisorWindows);
-  const windows = windowsView.data ?? (windowsView.error ? GENERAL_ONLY : []);
+  // The order shown while a drop is being saved; cleared once the list is reloaded, or on failure (back to the saved order).
+  const [pending, setPending] = useState<AdvisorWindow[] | null>(null);
+  const saving = useRef(false);
+  const [reorderFailed, setReorderFailed] = useState(false);
+  const windows = pending ?? windowsView.data ?? (windowsView.error ? GENERAL_ONLY : []);
   const [sheetOpen, setSheetOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   // Until the list arrives, trust the URL so the right conversation starts loading at once.
@@ -53,15 +57,29 @@ export function AdvisorWindowsView() {
     if (next !== key) router.push(windowHref(next));
   };
 
+  const reorder = (fromKey: string, toKey: string) => {
+    const next = moveProjectWindow(windows, fromKey, toKey);
+    // One save at a time: a second drop mid-save could finish first and leave the older order on the server.
+    if (saving.current || next === windows) return;
+    saving.current = true;
+    setReorderFailed(false);
+    setPending(next);
+    reorderAdvisorWindows(projectWindowKeys(next))
+      .then(() => windowsView.refresh())
+      .catch(() => setReorderFailed(true))
+      .finally(() => { saving.current = false; setPending(null); });
+  };
+
   return (
     <div className="advisor-windows-layout">
-      {(windowsView.error || !found) && (
+      {(windowsView.error || reorderFailed || !found) && (
         <div className="advisor-windows-layout__notices">
           {windowsView.error ? <div className="advisor-error">{t('advisorWindows.loadError')}</div> : null}
+          {reorderFailed ? <div className="advisor-error">{t('advisorWindows.reorderError')}</div> : null}
           {!found && <div className="advisor-windows-layout__notice" role="status" aria-live="polite"><span>{t('advisorWindows.unknownWindow', { key: '\0' }).split('\0').flatMap((part, i) => (i ? [<code key={i}>{param}</code>, part] : [part]))}</span></div>}
         </div>
       )}
-      <AdvisorWindowPicker variant="sidebar" windows={windows} currentKey={key} onSelect={select} />
+      <AdvisorWindowPicker variant="sidebar" windows={windows} currentKey={key} onSelect={select} onReorder={windowsView.data ? reorder : undefined} />
       <div className="advisor-windows-layout__chat">
         <AdvisorView
           key={key}
@@ -75,7 +93,7 @@ export function AdvisorWindowsView() {
           windowTriggerRef={triggerRef}
         />
       </div>
-      <AdvisorWindowSheet open={sheetOpen} onClose={() => setSheetOpen(false)} windows={windows} currentKey={key} onSelect={(next) => { refocus.current = next !== key; select(next); if (next === key) triggerRef.current?.focus(); }} returnFocusTo={triggerRef} />
+      <AdvisorWindowSheet open={sheetOpen} onClose={() => setSheetOpen(false)} windows={windows} currentKey={key} onReorder={windowsView.data ? reorder : undefined} onSelect={(next) => { refocus.current = next !== key; select(next); if (next === key) triggerRef.current?.focus(); }} returnFocusTo={triggerRef} />
     </div>
   );
 }

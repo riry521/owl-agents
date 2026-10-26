@@ -164,9 +164,120 @@ test("Codex rate-limit snapshots and retry-after values resolve to UTC ISO strin
 });
 
 test("a usage-limit failure without a readable reset carries null", () => {
-  const failure = runtime.classifyProviderFailure("codex-cli/v1", failed({ stderr: "You've hit your usage limit" }), "en", now);
+  const failure = runtime.classifyProviderFailure("codex-cli/v1", failed({
+    stderr: "You've hit your usage limit",
+    rate_limit_evidence: [{ kind: "event", event: { error: { codexErrorInfo: "usageLimitExceeded" } } }],
+  }), "en", now);
   assert.equal(failure.failure_class, "rate_limited");
   assert.deepEqual(failure.rate_limit, { resets_at: null, source: null });
+});
+
+const INCIDENT = "exceeded retry limit, last status: 429 Too Many Requests";
+const jsonl = (...events) => events.map((event) => JSON.stringify(event)).join("\n");
+
+// Design table 3.5: rows with no usage-limit code and no reported reset time.
+const TRANSIENT_CASES = {
+  "1 codex exec turn.failed": ["codex-cli/v1", failed({ stdout: jsonl({ type: "turn.failed", error: { message: INCIDENT } }), error: INCIDENT })],
+  "2 app-server responseTooManyFailedAttempts": ["codex", failed({ kind: "harness_error", harness_status: 429, harness_code: "responseTooManyFailedAttempts", error: INCIDENT })],
+  "3 rollout snake_case": ["codex", failed({ kind: "harness_error", harness_status: 429, error: INCIDENT, rate_limit_evidence: [{ kind: "event", event: { codex_error_info: { response_too_many_failed_attempts: { http_status_code: 429 } } } }] })],
+  "4 rateLimitExceeded": ["codex", failed({ kind: "harness_error", harness_code: "rateLimitExceeded", error: "slow down" })],
+  "8 usage limit sentence only": ["codex-cli/v1", failed({ stderr: "You've hit your usage limit." })],
+  "9 try again later": ["codex-cli/v1", failed({ stderr: "You've hit your usage limit. Try again later." })],
+  "10 relative wait": ["codex-cli/v1", failed({ stderr: "You've hit your usage limit. Try again in 45m" })],
+  "11 word usageLimitExceeded in the text": ["codex-cli/v1", failed({ error: "usageLimitExceeded", stderr: "429" })],
+  "13 snapshot below 100%": ["codex-cli/v1", failed({ harness_status: 429, rate_limit_evidence: [{ kind: "event", event: { rate_limits: { primary: { used_percent: 40, resets_at: Date.parse("2026-09-27T05:00:00.000Z") / 1000 } } } }] })],
+  "15 relative wait with 429": ["codex-cli/v1", failed({ harness_status: 429, error: "Rate limit reached for gpt-5. Please try again in 6ms." })],
+  "16 time without a marker": ["codex-cli/v1", failed({ harness_status: 429, stderr: "2026-09-27 03:04:05 429 Too Many Requests" })],
+  "17 stderr 429 only": ["codex-cli/v1", failed({ stderr: "429 Too Many Requests" })],
+  "18 Retry-After in the model output": ["codex-cli/v1", failed({
+    stdout: jsonl({ type: "item.completed", item: { type: "agent_message", text: "Retry-After: 30" } }, { type: "turn.failed", error: { message: INCIDENT } }),
+    error: INCIDENT,
+    rate_limit_evidence: runtime.codexRateLimitEvidence(jsonl({ type: "item.completed", item: { type: "agent_message", text: "Retry-After: 30" } }, { type: "turn.failed", error: { message: INCIDENT } })),
+  })],
+  "23 claude rate_limit_error": ["claude-cli/v1", failed({ harness_status: 429, harness_code: "rate_limit_error", error: "API Error: Rate limit reached" })],
+  "24 claude stderr 429": ["claude-cli/v1", failed({ stderr: "API Error: 429 Too Many Requests" })],
+  "25 thrown usage limit": ["codex-cli/v1", { exit_code: null, signal: null, error: new Error("You've hit your usage limit") }],
+  "32 429 before unauthorized": ["claude-cli/v1", failed({ harness_status: 429, stderr: "unauthorized" })],
+};
+
+for (const [name, [harness, cause]] of Object.entries(TRANSIENT_CASES)) {
+  test(`a 429 without a usage-limit code or reset time is a transient limit: ${name}`, () => {
+    const failure = runtime.classifyProviderFailure(harness, cause, "ja", now);
+    assert.equal(failure.failure_class, "transient");
+    assert.equal(failure.error_key, "provider_failed:rate_limit_transient");
+    assert.equal(failure.rate_limit, undefined);
+    assert.equal(failure.retry_allowed, true);
+  });
+}
+
+// Design table 3.5 rows 5-7, 12, 14, 18-22, 26: a code or a reported reset time.
+const LIMITED_CASES = {
+  "5 string code": ["codex", failed({ kind: "harness_error", harness_code: "usageLimitExceeded", error: "limit" }), null],
+  "5 string codexErrorInfo": ["codex", failed({ rate_limit_evidence: [{ kind: "event", event: { error: { codexErrorInfo: "usageLimitExceeded" } } }] }), null],
+  "5 one-key object": ["codex", failed({ rate_limit_evidence: [{ kind: "event", event: { error: { codexErrorInfo: { usageLimitExceeded: {} } } } }] }), null],
+  "5 snake_case": ["codex", failed({ rate_limit_evidence: [{ kind: "event", event: { codex_error_info: "usage_limit_exceeded" } }] }), null],
+  "5 record form": ["codex", failed({ rate_limit_evidence: [{ kind: "event", event: { error: { codexErrorInfo: { kind: "usageLimitExceeded" } } } }] }), null],
+  "7 try again at": ["codex-cli/v1", failed({ stderr: "You've hit your usage limit. Try again at 9:00 PM." }), "text"],
+  "12 saturated snapshot": ["codex-cli/v1", failed({ harness_status: 429, rate_limit_evidence: [{ kind: "event", event: { rate_limits: { primary: { used_percent: 100, resets_at: Date.parse("2026-09-27T05:00:00.000Z") / 1000 } } } }] }), "event"],
+  "14 Retry-After": ["codex-cli/v1", failed({ harness_status: 429, stderr: "Retry-After: 120" }), "retry_after"],
+  "20 usage limit epoch": ["claude-cli/v1", failed({ harness_status: 429, error: "Claude AI usage limit reached|1790000000" }), "text"],
+  "21 session limit resets 4am": ["claude-cli/v1", failed({ harness_status: 429, error: "You've hit your session limit · resets 4am (UTC)" }), "text"],
+  "22 5-hour limit resets 3pm": ["claude-cli/v1", failed({ harness_status: 429, error: "5-hour limit reached · resets 3pm" }), "text"],
+  "19 claude rejected": ["claude-cli/v1", failed({ rate_limit_evidence: [{ kind: "event", event: { type: "rate_limit_event", rate_limit_info: { status: "rejected" } } }] }), null],
+  "26 opencode provider.rate-limit": ["opencode-serve/v1", failed({ harness_status: 429, harness_code: "provider.rate-limit", error: "slow down" }), null],
+};
+
+for (const [name, [harness, cause, source]] of Object.entries(LIMITED_CASES)) {
+  test(`a usage-limit code or a reported reset time is rate_limited: ${name}`, () => {
+    const failure = runtime.classifyProviderFailure(harness, cause, "en", now);
+    assert.equal(failure.failure_class, "rate_limited");
+    assert.equal(failure.error_key, "provider_failed:rate_limited");
+    assert.notEqual(failure.rate_limit, undefined);
+    if (source !== null) assert.equal(failure.rate_limit.source, source);
+  });
+}
+
+test("reportedRateLimitReset reads only a time right after a marker", () => {
+  const read = (text) => runtime.reportedRateLimitReset([{ kind: "text", text }], now, { harness: "codex", timeZone: "UTC" });
+  assert.equal(read("You've hit your usage limit. Try again at 9:00 PM.").resets_at, "2026-09-27T21:01:00.000Z");
+  assert.equal(read("Try again at Sep 28, 2026 3:05 PM").resets_at, "2026-09-28T15:06:00.000Z");
+  assert.equal(read("limit reached, resets 9pm (Asia/Tokyo)").resets_at, "2026-09-27T12:01:00.000Z");
+  assert.equal(read("Please try again in 6ms."), null);
+  assert.equal(read("try again in 45m"), null);
+  assert.equal(read("2026-09-27 03:04:05 Too Many Requests"), null);
+  assert.equal(read("429 Too Many Requests; resets unknown; log entry Sep 28, 2026 3:05 PM"), null);
+  assert.equal(read("429 Too Many Requests; resets Monday unknown; log entry Sep 28, 2026 3:05 PM"), null);
+  assert.equal(read("resets 9pm; log entry Sep 28, 2026 3:05 PM").resets_at, "2026-09-27T21:01:00.000Z");
+  assert.equal(read("resets 9pm; log entry 3:05 PM (Asia/Tokyo)").resets_at, "2026-09-27T21:01:00.000Z");
+  assert.equal(read("resets 2026-09-28 03:04:05"), null);
+  assert.equal(runtime.reportedRateLimitReset([{ kind: "retry_after", value: 120 }], now, { harness: "codex" }).source, "retry_after");
+});
+
+test("the transient limit message never says usage limit, while the detail keeps the provider's words", () => {
+  for (const [language, expected] of [
+    ["ja", "Codexへのリクエストが一時的に制限されました（HTTP 429）。"],
+    ["en", "Codex is temporarily limiting requests (HTTP 429)."],
+  ]) {
+    const failure = runtime.classifyProviderFailure("codex-cli/v1", failed({ harness_status: 429, error: "You've hit your usage limit." }), language, now);
+    assert.equal(failure.message, expected);
+    assert.doesNotMatch(failure.message, /利用上限/u);
+    assert.doesNotMatch(failure.message, /usage limit/iu);
+    assert.match(runtime.withProviderDetail(failure, language), /You've hit your usage limit\./u);
+  }
+});
+
+test("sessionFailureMessage adds the resend note only to a transient limit", () => {
+  const transient = runtime.classifyProviderFailure("codex", failed({ harness_status: 429, error: INCIDENT }), "ja", now);
+  assert.equal(runtime.sessionFailureMessage(transient), `${transient.message} 少し待ってから、もう一度送ってください。`);
+  assert.match(runtime.sessionFailureMessage(transient, "en"), /Wait a moment, then send the message again\.$/u);
+  const limited = runtime.classifyProviderFailure("codex", failed({ harness_code: "usageLimitExceeded" }), "ja", now);
+  assert.equal(runtime.sessionFailureMessage(limited), limited.message);
+  const network = runtime.classifyProviderFailure("codex", failed({ stderr: "ECONNRESET" }), "ja", now);
+  assert.equal(runtime.sessionFailureMessage(network), network.message);
+});
+
+test("formatProviderError without a verdict shows a rate-limit-like text as a transient limit", () => {
+  assert.equal(runtime.formatProviderError("codex", "429 Too Many Requests", {}, "en"), "Codex is temporarily limiting requests.");
 });
 
 test("billing quota exhaustion is not classified as a resettable limit", () => {

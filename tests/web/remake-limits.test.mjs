@@ -118,7 +118,7 @@ function renderSection(state, api) {
     '@/lib/i18n': { useLocale: () => ({ t: (key) => key }) },
     '@/lib/api-client': { ApiRequestError: class ApiRequestError extends Error {}, ...api },
     '@/lib/format': {}, '@/lib/model-presets': {}, '@/lib/settings-errors': { humanizeError: () => 'ERROR' },
-    '@/components/ModelPresetsBar': {}, '@/components/FolderPickerDialog': {},
+    '@/components/OwnerInviteButton': { OwnerInviteButton: () => null }, '@/components/ModelPresetsBar': {}, '@/components/FolderPickerDialog': {},
   }, {
     react: {
       useEffect: () => {},
@@ -199,7 +199,7 @@ test('child-run settings are two-level, have no concurrency-limit inputs and Sav
     '@/lib/i18n': { useLocale: () => ({ t: (key) => key }) },
     '@/lib/api-client': { ApiRequestError: class extends Error {}, setChildRunSettings: async (config) => { sent = config; return config; } },
     '@/lib/format': {}, '@/lib/model-presets': {}, '@/lib/settings-errors': { humanizeError: () => 'ERROR' },
-    '@/components/ModelPresetsBar': { ModelPresetsBar: () => null }, '@/components/FolderPickerDialog': { FolderPickerDialog: () => null },
+    '@/components/OwnerInviteButton': { OwnerInviteButton: () => null }, '@/components/ModelPresetsBar': { ModelPresetsBar: () => null }, '@/components/FolderPickerDialog': { FolderPickerDialog: () => null },
   }, {
     react: { useEffect: () => {}, useState: (initial) => { const i = index++; return [Object.hasOwn(preset, i) ? preset[i] : initial, () => {}]; } },
     jsx: { ...realJsxRuntime, jsx: wrap(realJsxRuntime.jsx), jsxs: wrap(realJsxRuntime.jsxs) },

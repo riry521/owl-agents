@@ -117,16 +117,17 @@ export function windowOfConversation(db: Pick<CoreDatabase, "get">, conversation
 
 const SESSION_STATUS_RANK: readonly AdvisorWindowSessionStatus[] = ["running", "starting", "suspended"];
 
-/** General window first, then the Projects with the window switched on or a channel bound, in the Projects list order, whether or not its window exists yet. */
+/** General window first, then the Projects with the window switched on or a channel bound, in the Owner's saved order (unsaved ones after, by id), whether or not its window exists yet. */
 export function listAdvisorWindows(db: Pick<CoreDatabase, "all" | "get">, ownerId: string): AdvisorWindowSummary[] {
   const windows = db.all<WindowRow & { id: string }>(
     "SELECT id AS window_id, id, conversation_id, scope, project_id FROM advisor_windows WHERE owner_id = ?",
     ownerId,
   );
   const projects = db.all<{ id: string; name: string }>(`SELECT p.id, p.name FROM projects p
+      LEFT JOIN advisor_window_order o ON o.owner_id = ? AND o.window_key = p.id
       WHERE p.advisor_window_enabled = 1
          OR EXISTS (SELECT 1 FROM advisor_windows w JOIN advisor_channel_bindings b ON b.window_id = w.id WHERE w.project_id = p.id)
-      ORDER BY p.id ASC`);
+      ORDER BY o.position IS NULL, o.position ASC, p.id ASC`, ownerId);
   const bindings = db.all<AdvisorWindowChannel & { window_id: string }>(
     "SELECT window_id, provider, channel_id, display_name FROM advisor_channel_bindings ORDER BY provider",
   );

@@ -391,6 +391,7 @@ interface AdvisorWindowApiPort {
   updateAdvisorChannelName(windowId: string, provider: string, displayName: string): Promise<boolean>;
   getAdvisorWindowSettings(): Promise<AdvisorWindowSettings>;
   setAdvisorWindowSettings(input: unknown): Promise<AdvisorWindowSettings>;
+  setAdvisorWindowOrder(keys: readonly string[]): Promise<AdvisorWindowSummary[]>;
 }
 
 interface DependencySummaryApiPort {
@@ -2412,7 +2413,8 @@ function requireAdvisorWindowApi(core: CorePort): AdvisorWindowApiPort {
     && typeof value.bindAdvisorChannel === "function"
     && typeof value.updateAdvisorChannelName === "function"
     && typeof value.getAdvisorWindowSettings === "function"
-    && typeof value.setAdvisorWindowSettings === "function";
+    && typeof value.setAdvisorWindowSettings === "function"
+    && typeof value.setAdvisorWindowOrder === "function";
   const wrapped = core as CorePort & { core?: unknown };
   const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
   if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support Advisor windows.");
@@ -2522,6 +2524,23 @@ async function provisionWindowChannels(context: RequestContext, ownerId: string,
     results.error = windowChannelError(error);
   }
   return results;
+}
+
+async function slackOwnerUserId(context: RequestContext): Promise<string> {
+  const ownerUserId = (await context.core.getIntegrations()).find((integration) => integration.provider === "slack")?.owner_user_id ?? "";
+  if (!ownerUserId) throw new ApiError(422, "owner_user_id_missing", "オーナーIDが未設定です。設定画面でSlackのオーナーIDを保存してから、もう一度招待してください。", { provider: "slack" });
+  return ownerUserId;
+}
+
+/** Slack's already_in_channel means the Owner is already there, so it counts as success. */
+async function inviteOwnerToChannel(admin: ChannelAdmin, channelId: string, ownerUserId: string): Promise<"invited" | "already_in_channel"> {
+  try {
+    await channelCall("slack", "invite", () => admin.inviteUsers(channelId, [ownerUserId]));
+    return "invited";
+  } catch (error) {
+    if (error instanceof ApiError && error.details.provider_code === "already_in_channel") return "already_in_channel";
+    throw error;
+  }
 }
 
 function windowChannelError(error: unknown): JsonObject {
@@ -4227,6 +4246,31 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
+  if (pathname === `${API_PREFIX}/settings/integrations/slack/invite-owner` && method === "POST") {
+    requireOwner(request);
+    const command = commandEnvelope(await readRequestBody(request));
+    const result = await runCommand(context, pathname, command, 200, async () => {
+      const api = requireAdvisorWindowApi(context.core);
+      const ownerUserId = await slackOwnerUserId(context);
+      const admin = await requireChannelAdmin(context, "slack");
+      const results: JsonObject[] = [];
+      for (const { window_id: windowId } of await api.listAdvisorChannelBindings("slack")) {
+        const binding = await api.getAdvisorChannelBinding(windowId, "slack");
+        if (!binding) continue;
+        const owner = await api.findAdvisorChannelOwner("slack", binding.channel_id);
+        const entry = { window_key: owner?.window_key ?? "", channel_id: binding.channel_id, display_name: binding.display_name };
+        try {
+          results.push({ ...entry, invite: await inviteOwnerToChannel(admin, binding.channel_id, ownerUserId) });
+        } catch (error) {
+          results.push({ ...entry, invite: "failed", error: windowChannelError(error) });
+        }
+      }
+      return { data: { results }, version: 0 };
+    });
+    sendJson(response, 200, result);
+    return;
+  }
+
   const integrationTestMatch = pathname.match(new RegExp(`^${API_PREFIX}/settings/integrations/(slack|discord)/test$`));
   if (integrationTestMatch && method === "POST") {
     requireOwner(request);
@@ -5210,6 +5254,24 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
+  if (pathname === `${API_PREFIX}/advisor/windows/order` && method === "PUT") {
+    requireOwner(request);
+    const command = commandEnvelope(await readRequestBody(request));
+    const keys = isObject(command.payload) ? command.payload.keys : undefined;
+    if (!Array.isArray(keys) || !keys.every((key) => typeof key === "string")) {
+      throw new ApiError(400, "validation_error", "keys must be an array of strings.", { field: "keys" });
+    }
+    if (new Set(keys).size !== keys.length) throw new ApiError(400, "validation_error", "keys must not contain duplicates.", { field: "keys" });
+    if (keys.includes(GENERAL_WINDOW_KEY)) throw new ApiError(400, "validation_error", "The general window is always first and cannot be reordered.", { field: "keys" });
+    const api = requireAdvisorWindowApi(context.core);
+    const result = await runCommand(context, pathname, command, 200, async () => ({
+      data: await api.setAdvisorWindowOrder(keys) as unknown as JsonObject,
+      version: 0,
+    }));
+    sendJson(response, 200, result);
+    return;
+  }
+
   if (pathname === `${API_PREFIX}/advisor/channel-bindings` && method === "GET") {
     requireOwner(request);
     const provider = url.searchParams.get("provider");
@@ -5221,10 +5283,11 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
-  const advisorChannelsMatch = pathname.match(new RegExp(`^${API_PREFIX}/advisor/windows/([^/]+)/channels(?:/([^/]+))?$`));
+  const advisorChannelsMatch = pathname.match(new RegExp(`^${API_PREFIX}/advisor/windows/([^/]+)/channels(?:/([^/]+))?(/invite-owner)?$`));
   if (advisorChannelsMatch) {
     const key = decodeURIComponent(advisorChannelsMatch[1] ?? "");
     const providerPart = advisorChannelsMatch[2];
+    const inviteOwner = advisorChannelsMatch[3] !== undefined;
     const windowNotFound = () => new ApiError(404, "advisor_window_not_found", "指定されたAdvisorの窓が見つかりません。窓の一覧を読み直してください。", { key });
 
     if (providerPart === undefined && method === "GET") {
@@ -5250,6 +5313,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
           configured,
           running: admin !== null,
           binding: binding ? { channel_id: binding.channel_id, display_name: binding.display_name } : null,
+          owner_user_id_set: provider === "slack" && Boolean((await context.core.getIntegrations()).find((integration) => integration.provider === provider)?.owner_user_id),
           default_name: key === GENERAL_WINDOW_KEY ? null : defaultChannelName(projectNameOf(context, key), key, settings),
         });
       }
@@ -5257,7 +5321,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       return;
     }
 
-    if (providerPart !== undefined && (method === "POST" || method === "PUT" || method === "PATCH")) {
+    if (providerPart !== undefined && (inviteOwner ? method === "POST" : (method === "POST" || method === "PUT" || method === "PATCH"))) {
       const ownerId = requireOwner(request);
       const provider = channelProvider(providerPart);
       const command = commandEnvelope(await readRequestBody(request));
@@ -5267,6 +5331,21 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       const api = requireAdvisorWindowApi(context.core);
       const window = await api.ensureAdvisorWindow(ownerId, key);
       if (!window) throw windowNotFound();
+
+      if (inviteOwner) {
+        if (provider !== "slack") throw new ApiError(422, "invite_not_supported", "Discordはチャンネルへの招待に対応していません。", { provider });
+        const result = await runCommand(context, pathname, command, 200, async () => {
+          const existing = await api.getAdvisorChannelBinding(window.window_id, provider);
+          if (!existing) throw new ApiError(404, "channel_binding_not_found", "この窓にはチャンネルが連携していません。", { provider });
+          const ownerUserId = await slackOwnerUserId(context);
+          const admin = await requireChannelAdmin(context, provider);
+          const invite = await inviteOwnerToChannel(admin, existing.channel_id, ownerUserId);
+          return { data: { provider, window_key: key, channel_id: existing.channel_id, display_name: existing.display_name, invite }, version: 0 };
+        });
+        sendJson(response, 200, result);
+        return;
+      }
+
       const settings = await api.getAdvisorWindowSettings();
 
       if (method === "POST") {

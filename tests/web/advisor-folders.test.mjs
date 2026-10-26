@@ -236,7 +236,7 @@ function renderAdvisorFolders(state, apiClientOverrides) {
       '@/lib/settings-errors': { humanizeError: () => 'ERROR' },
       '@/lib/remake-limits.mjs': {},
       '@/lib/model-presets': { presetMatchesSettings: () => false },
-      '@/components/ModelPresetsBar': { ModelPresetsBar: () => null },
+      '@/components/OwnerInviteButton': { OwnerInviteButton: () => null }, '@/components/ModelPresetsBar': { ModelPresetsBar: () => null },
       '@/components/FolderPickerDialog': { FolderPickerDialog: () => null },
     },
   });

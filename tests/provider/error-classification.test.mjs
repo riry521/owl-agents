@@ -36,13 +36,16 @@ test("words in the model's stdout do not block a retry", () => {
     { failure_class: noisy.failure_class, retry_allowed: noisy.retry_allowed },
     { failure_class: plain.failure_class, retry_allowed: plain.retry_allowed },
   );
-  assert.equal(noisy.failure_class, "rate_limited");
+  assert.equal(noisy.failure_class, "transient");
+  assert.equal(noisy.error_key, "provider_failed:rate_limit_transient");
   assert.equal(noisy.retry_allowed, true);
 });
 
 test("the harness HTTP status decides before any text", () => {
   const limited = classifyProviderFailure("claude-cli/v1", exited({ harness_status: 429, stderr: "unauthorized" }));
-  assert.equal(limited.failure_class, "rate_limited");
+  assert.equal(limited.failure_class, "transient");
+  assert.equal(limited.error_key, "provider_failed:rate_limit_transient");
+  assert.equal(limited.rate_limit, undefined);
   assert.equal(limited.retry_allowed, true);
   const unauthorized = classifyProviderFailure("claude-cli/v1", exited({ harness_status: 401, stderr: "connection reset" }));
   assert.equal(unauthorized.failure_class, "deterministic");

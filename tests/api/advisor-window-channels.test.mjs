@@ -305,3 +305,110 @@ test("create and invite failures keep the window ON and return per-provider reas
   assert.equal(data.window_channels.discord.error.code, "integration_permission_missing");
   assert.deepEqual(data.window_channels.discord.error.needed, ["Manage Channels"]);
 });
+
+const inviteOwnerPath = (key) => channelsPath(key, "slack/invite-owner");
+const bindSlack = async (api, project, channelId) => {
+  const window = await api.durableCore.ensureAdvisorWindow("owner:default", project.project_id);
+  await api.durableCore.bindAdvisorChannel(window.window_id, "slack", channelId, `name-${channelId}`);
+};
+const invitePost = (api, path, id) => api.request("POST", path, command({}, id));
+
+test("per-window invite-owner invites the saved owner_user_id, maps failures, and treats already_in_channel as success", async (t) => {
+  const slack = inviting();
+  const api = await startApi(t, { slack });
+  if (!api) return;
+  withOwnerId(api, "U-OWNER");
+  const project = await api.project("Invite Later");
+  const none = await invitePost(api, inviteOwnerPath(project.project_id), "inv-none");
+  assert.equal(none.status, 404);
+  assert.equal((await errorOf(none)).code, "channel_binding_not_found");
+  await bindSlack(api, project, "C-1");
+  const ok = await invitePost(api, inviteOwnerPath(project.project_id), "inv-ok");
+  assert.equal(ok.status, 200);
+  assert.deepEqual((await ok.json()).data, { provider: "slack", window_key: project.project_id, channel_id: "C-1", display_name: "name-C-1", invite: "invited" });
+  assert.deepEqual(slack.invites, [["C-1", ["U-OWNER"]]]);
+
+  slack.inviteUsers = async () => { throw new ChannelAdminError("permission_missing", "no scope", { needed: ["channels:manage"] }); };
+  const denied = await invitePost(api, inviteOwnerPath(project.project_id), "inv-denied");
+  assert.equal(denied.status, 422);
+  const error = await errorOf(denied);
+  assert.equal(error.code, "integration_permission_missing");
+  assert.deepEqual(error.details.needed, ["channels:manage"]);
+
+  slack.inviteUsers = async () => { throw new ChannelAdminError("provider_error", "already", { provider_code: "already_in_channel" }); };
+  const already = await invitePost(api, inviteOwnerPath(project.project_id), "inv-already");
+  assert.equal(already.status, 200);
+  assert.equal((await already.json()).data.invite, "already_in_channel");
+});
+
+test("invite-all covers Slack channels only and keeps going after a failure", async (t) => {
+  const slack = inviting();
+  const discord = inviting();
+  const api = await startApi(t, { slack, discord });
+  if (!api) return;
+  withOwnerId(api, "U-OWNER");
+  const [a, b, c] = [await api.project("All A"), await api.project("All B"), await api.project("All C")];
+  await bindSlack(api, a, "C-A");
+  await bindSlack(api, b, "C-B");
+  await bindSlack(api, c, "C-C");
+  const window = await api.durableCore.ensureAdvisorWindow("owner:default", a.project_id);
+  await api.durableCore.bindAdvisorChannel(window.window_id, "discord", "D-A", "discord-a");
+  slack.inviteUsers = async (channel, ids) => {
+    slack.invites.push([channel, [...ids]]);
+    if (channel === "C-B") throw new ChannelAdminError("permission_missing", "no scope", { needed: ["channels:manage"] });
+    if (channel === "C-C") throw new ChannelAdminError("provider_error", "already", { provider_code: "already_in_channel" });
+  };
+  const response = await invitePost(api, "/settings/integrations/slack/invite-owner", "all-1");
+  assert.equal(response.status, 200);
+  const { results } = (await response.json()).data;
+  assert.deepEqual(slack.invites, [["C-A", ["U-OWNER"]], ["C-B", ["U-OWNER"]], ["C-C", ["U-OWNER"]]]);
+  assert.equal(discord.invites.length, 0);
+  assert.deepEqual(results.map((r) => [r.window_key, r.channel_id, r.display_name, r.invite]), [
+    [a.project_id, "C-A", "name-C-A", "invited"],
+    [b.project_id, "C-B", "name-C-B", "failed"],
+    [c.project_id, "C-C", "name-C-C", "already_in_channel"],
+  ]);
+  assert.deepEqual(results[1].error, { code: "integration_permission_missing", message: "no scope", needed: ["channels:manage"] });
+});
+
+test("invite-owner is 422 owner_user_id_missing without calling inviteUsers; GET reports owner_user_id_set", async (t) => {
+  const slack = inviting();
+  const api = await startApi(t, { slack });
+  if (!api) return;
+  const project = await api.project("No Owner Id");
+  await bindSlack(api, project, "C-1");
+  const owned = async () => (await (await api.request("GET", channelsPath(project.project_id))).json()).data.channels.map((c) => [c.provider, c.owner_user_id_set]);
+  withOwnerId(api, "");
+  for (const [index, path] of [inviteOwnerPath(project.project_id), "/settings/integrations/slack/invite-owner"].entries()) {
+    const response = await invitePost(api, path, `missing-${index}`);
+    assert.equal(response.status, 422);
+    const error = await errorOf(response);
+    assert.equal(error.code, "owner_user_id_missing");
+    assert.match(error.message, /設定画面/u);
+  }
+  assert.equal(slack.invites.length, 0);
+  assert.deepEqual(await owned(), [["slack", false], ["discord", false]]);
+  withOwnerId(api, "U-OWNER");
+  assert.deepEqual(await owned(), [["slack", true], ["discord", false]]);
+});
+
+test("saving owner_user_id does not invite", async (t) => {
+  const slack = inviting();
+  const api = await startApi(t, { slack });
+  if (!api) return;
+  await bindSlack(api, await api.project("Save Only"), "C-1");
+  const saved = await api.request("PUT", "/settings/integrations/slack", command({ bot_token: "xoxb-test", app_token: "xapp-test", conversation_channel_id: "C-CONV", owner_user_id: "U-OWNER" }, "save-owner"));
+  assert.equal(saved.status, 200);
+  assert.deepEqual(slack.invites, []);
+});
+
+test("Discord invite-owner is 422 invite_not_supported and never calls inviteUsers", async (t) => {
+  const discord = inviting();
+  const api = await startApi(t, { discord });
+  if (!api) return;
+  withOwnerId(api, "U-OWNER");
+  const response = await invitePost(api, channelsPath((await api.project("Discord Inv")).project_id, "discord/invite-owner"), "inv-discord");
+  assert.equal(response.status, 422);
+  assert.equal((await errorOf(response)).code, "invite_not_supported");
+  assert.equal(discord.invites.length, 0);
+});

@@ -1581,6 +1581,12 @@ export async function listAdvisorWindows(): Promise<AdvisorWindow[]> {
   return response.data;
 }
 
+/** PUT /api/v1/advisor/windows/order: Project の窓の key を表示順に送る（全体の窓は含めない）。応答は並べ替えたあとの一覧。 */
+export async function reorderAdvisorWindows(keys: string[]): Promise<AdvisorWindow[]> {
+  const response = await command<AdvisorWindow[]>('/advisor/windows/order', { keys }, 0, 'PUT');
+  return response.data;
+}
+
 /** GET /api/v1/advisor/windows/:key/conversation: the window's canonical conversation (created on first use). */
 export async function getAdvisorWindowConversation(key: string): Promise<string> {
   const result = await requestJson<{ conversation_id: string }>(`/advisor/windows/${encodeURIComponent(key)}/conversation`);
@@ -1610,6 +1616,24 @@ export async function bindAdvisorWindowChannel(key: string, provider: string, ch
 /** PATCH: rename the bound channel. */
 export async function renameAdvisorWindowChannel(key: string, provider: string, name: string): Promise<void> {
   await command(windowChannelPath(key, provider), { name }, 0, 'PATCH');
+}
+
+/** POST: invite the Owner to the Slack channel bound to the window. */
+export async function inviteOwnerToWindowChannel(key: string): Promise<{ display_name: string; invite: 'invited' | 'already_in_channel' }> {
+  const response = await command<{ display_name: string; invite: 'invited' | 'already_in_channel' }>(`${windowChannelPath(key, 'slack')}/invite-owner`, {}, 0, 'POST');
+  return response.data;
+}
+
+export interface SlackOwnerInviteResult {
+  display_name: string;
+  invite: 'invited' | 'already_in_channel' | 'failed';
+  error?: { code: string; message: string };
+}
+
+/** POST: invite the Owner to every existing window channel in Slack. */
+export async function inviteOwnerToSlackChannels(): Promise<SlackOwnerInviteResult[]> {
+  const response = await command<{ results: SlackOwnerInviteResult[] }>('/settings/integrations/slack/invite-owner', {}, 0, 'POST');
+  return response.data.results;
 }
 
 /** GET /api/v1/advisor/session. */

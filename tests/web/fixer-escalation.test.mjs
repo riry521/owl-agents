@@ -56,7 +56,7 @@ function render(name, preset, api, capture) {
     '@/lib/api-client': { ApiRequestError: class ApiRequestError extends Error {}, ...api },
     '@/lib/format': { roleDisplayName }, '@/lib/model-presets': { presetMatchesSettings: () => true },
     '@/lib/settings-errors': { humanizeError: () => 'ERROR' },
-    '@/components/ModelPresetsBar': { ModelPresetsBar: () => null }, '@/components/FolderPickerDialog': { FolderPickerDialog: () => null },
+    '@/components/OwnerInviteButton': { OwnerInviteButton: () => null }, '@/components/ModelPresetsBar': { ModelPresetsBar: () => null }, '@/components/FolderPickerDialog': { FolderPickerDialog: () => null },
   }, {
     react: {
       useEffect: () => {},
@@ -136,8 +136,8 @@ test('English and Japanese define the Fixer i18n keys', () => {
     const dict = read(lang);
     for (const [section, key] of added) assert.equal(typeof dict[section][key], 'string', `${lang}: ${section}.${key}`);
   }
-  assert.match(read('ja').work.fixerEscalated, /\{\{count\}\} 回差し戻されたため Fixer が担当しています/);
-  assert.match(read('en').work.fixerEscalated, /Fixer took over after \{\{count\}\} review rejections/);
+  assert.match(read('ja').work.fixerEscalated, /検証の不合格とレビューの差し戻しが合わせて \{\{count\}\} 回になったため Fixer が担当しています/);
+  assert.match(read('en').work.fixerEscalated, /Fixer took over after \{\{count\}\} verification failures and review rejections/);
 });
 
 // AutoRecoverySection's useState() calls, in order: loaded, draft, saving, notice, error.

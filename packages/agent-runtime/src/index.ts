@@ -11,14 +11,17 @@ export {
   validateReportEnvelope,
   validateReportSemantics,
   correctReportSemantics,
+  harnessFailureDetail,
   REPORT_CORRECTION_RULES,
 } from "./protocol";
+export { executorProviderError } from "./executor-provider-error";
 export { toolNamesInLine } from "./provider";
 export { AgentRuntimeError } from "./errors";
 export {
   claudeRateLimitEvidence,
   codexRateLimitEvidence,
   parseRateLimitReset,
+  reportedRateLimitReset,
   rateLimitHarness,
   resolveRateLimitReset,
   RATE_LIMIT_EVENT_PARSERS,
@@ -40,7 +43,7 @@ export type { TestSetupFirstCandidate, TestSetupInvestigationOutput, TestSetupIn
 export type { ProjectInvestigationOutput, ProjectInvestigationRequest, ProjectInvestigationRunResult } from "./project-investigation";
 export { MINIMAL_CODE_RULES, WORKING_STYLE_RULES } from "@owl/shared";
 export type { CuratorRequest, CuratorRunResult, CuratorResultItem, CuratorJudgement } from "@owl/shared";
-export { classifyProviderFailure, formatProviderError, formatRuntimeError, providerFailureCause } from "./provider-error";
+export { classifyProviderFailure, formatProviderError, maskProviderText, providerErrorRecord, turnFailureProviderError, formatRuntimeError, providerFailureCause, RATE_LIMIT_TRANSIENT_ERROR_KEY, sessionFailureMessage, withProviderDetail } from "./provider-error";
 export type { ProviderFailureCause, ProviderFailureClassification, ProviderFailureKind } from "./provider-error";
 export type { AgentFailureClass, RateLimitInfo, RateLimitSource } from "@owl/shared";
 export type {

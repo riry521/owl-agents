@@ -126,10 +126,17 @@ const PHASE_LABEL_KEYS: Record<string, string> = {
   verdict: 'hybrid.phaseVerdict',
 };
 
+/** Same value as WHOLE_DEFERRED_REASON in packages/core/src/test-runs.ts (Web cannot import Core). */
+const WHOLE_DEFERRED_REASON = 'whole_deferred_to_work';
+
 /** Short payload detail for legacy phase and current child-run events. */
 function eventDetail(ev: EventFrame, t: TFunction): string | null {
   const payload: Record<string, unknown> = ev.payload && typeof ev.payload === 'object' ? ev.payload : {};
   const { phase, label, provider, model, effort } = payload;
+  if (ev.type.startsWith('verification.')) {
+    const testRun = (payload.verification as { test_run?: { status?: unknown; reason?: unknown } } | undefined)?.test_run;
+    if (testRun?.status === 'skipped' && testRun.reason === WHOLE_DEFERRED_REASON) return t('activity.testRunDeferredToWork');
+  }
   if (ev.type === 'system.alert' && payload.kind === 'work_post_merge_command_failed') {
     const tail = String(payload.stderr_tail || payload.stdout_tail || '').slice(-500);
     const exit = typeof payload.exit_code === 'number' ? `${t('activity.exitCode')}: ${payload.exit_code}` : '';

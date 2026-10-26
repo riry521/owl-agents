@@ -207,9 +207,9 @@ Settings key `fixer_escalation` (`packages/shared/src/fixer-escalation-settings.
 
 | Field | Default | Meaning |
 |---|---|---|
-| `after_review_rejections` | 2 | Reviewer rejections (`fix_required` or `replan_required`) of a non-design Task after which the Fixer role takes the next fix (integer 1–100) |
+| `after_review_rejections` | 2 | Verification failures plus Reviewer rejections (`fix_required` or `replan_required`) of a non-design Task, counted together, after which the Fixer role takes the next fix (integer 1–100) |
 
-The Task records the rejection count in `tasks.review_rejections` and the count at which it moved
+The Task records the combined verification-failure and rejection count in `tasks.review_rejections` and the count at which it moved
 to the Fixer in `tasks.fixer_escalated_rejections`; its Agent runs record `agent_runs.worker_tier`
 (`standard` or `fixer`). Once set, the Fixer keeps the Task until it completes: replans, refunds and
 Owner answers do not return it to the Worker. The next Task starts with the Worker again. Design Tasks
@@ -504,6 +504,11 @@ to its default with a warning):
 `completion_gate_failures` (by `error_key`, counted from `task.failure.classified` and
 `task.replan_requested` events that carry `gate_reasons`). Ratios are rounded to four decimals and are `null` when the denominator is 0.
 
+## Required and goal criteria, pause and instructions
+
+- Each acceptance criterion has a `requirement`: `required` or `goal`. A Task completes when every required criterion is met. An unmet goal is recorded with its reason and shown on the Work detail page; it does not block completion.
+- Pausing a Work stops its running agents (the Advisor and observed agents are left alone) and starts no new Tasks; resuming it runs the stopped Tasks again. Sending an instruction also stops the running agents, and the Manager then replans from the new state.
+
 ## Checking the texts of Decision explanations (`decision_text_checks`)
 
 After the model writes the explanation of a stopped Decision, Core can pass the texts to external commands that check or fix them before the Owner reads them.
@@ -605,7 +610,11 @@ Besides `create_work`, the Advisor can act on an existing Work through these act
 
 ## Provider rate limits
 
-When a provider answers with a rate limit (HTTP 429, overloaded, or a reported reset time), Core pauses that provider (`provider_pauses`). Tasks that need it wait in `ready` and start by themselves when the pause ends. The resume time is the reset time the provider reported, or an exponential backoff when none was reported; after the pause Core sends one probe run, and the pause clears when it succeeds. `GET /api/v1/providers/pauses` lists the pauses and `POST /api/v1/providers/pauses/{provider}/resume` (Owner only) lifts one early.
+When a provider answers with a rate limit (HTTP 429, overloaded, or a reported reset time), Core pauses that provider (`provider_pauses`). Tasks that need it wait in `ready` and start by themselves when the pause ends. The resume time is the reset time the provider reported, or an exponential backoff when none was reported; after the pause Core sends one probe run, and the pause clears when it succeeds. A 429 with no error code and no usage-limit message is a temporary limit: the run first retries in place (`OWL_PROVIDER_RATE_LIMIT_RETRY_MAX`, default 2, 0–10, 0 disables; `OWL_PROVIDER_RATE_LIMIT_RETRY_DELAY_MS`, default 15000, 0–600000; the n-th retry waits the delay × n; a role suffix such as `OWL_PROVIDER_RATE_LIMIT_RETRY_MAX_REVIEWER` takes precedence) and only then pauses the provider. The provider's raw error is recorded with the run. `GET /api/v1/providers/pauses` lists the pauses and `POST /api/v1/providers/pauses/{provider}/resume` (Owner only) lifts one early.
+
+## Inviting the Owner to Slack channels
+
+The Slack channel panel and **Settings → Integrations** invite the Owner (the saved Owner Slack user ID) to existing window channels with `POST /api/v1/settings/integrations/slack/invite-owner`.
 
 ## Background work in Core
 
@@ -630,6 +639,12 @@ recorded as needing approval), confirms the runner with probe commands, and remo
 runs left. The record has a `status` (`ready`, `tests_failing`, `no_tests`, `no_language`, `needs_approval`
 or `unresolved`) and `known_failures`: tests that already failed when the setup was confirmed. Later Core
 test runs treat those as pre-existing and do not fail a Task for them.
+
+**Defaults and skipped setup.** A new Project's test mode defaults to `per_file`. `test_setup` can carry `setup_cache` (`inputs` and `outputs`, checkout-relative paths); Core skips the setup command while the input files are unchanged and the output paths exist.
+
+**Whole mode.** When the Project's test mode is `whole`, Core does not run the whole suite for a Task. The Task's `policy:test` and `policy:required_tests` checks pass with a detail saying they were deferred to the Work verification, where the whole suite runs.
+
+**Clones.** Workers keep cloned external repositories outside the Project. Core resolves a clone root outside every Project and worktree root (git `ghq.root`, else the home folder with the most clones, else `clones` under the data directory), remembers it in `clone-root.json` in the data directory, and tells the Worker. A Task that creates a clone inside the Project or edits a clone fails verification; the uses are recorded in `task_clone_uses`.
 
 **Test run off.** When the Project's `test_run` is explicitly off, Core starts no test runner for that
 Project, and the per-Task type verification (`doc`, `config`, `test`, `code`) does not start one either;

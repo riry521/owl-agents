@@ -14,6 +14,8 @@ import { waitFor } from "../helpers/wait.mjs";
 const READY = (over = {}) => ({
   verdict: "ready",
   setup_argvs: [],
+  setup_inputs: [],
+  setup_outputs: [],
   test_run: { mode: "per_file", file_argv: ["node", "--test", "--test-reporter=tap", "{file}"], test_patterns: ["tests/**/*.test.mjs"], cwd: "." },
   executables: [],
   confirm_files: ["tests/a.test.mjs"],

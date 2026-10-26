@@ -50,6 +50,10 @@ export interface TestSetupInvestigationRequest {
 export interface TestSetupInvestigationOutput {
   readonly verdict: TestSetupVerdict;
   readonly setup_argvs: readonly (readonly string[])[];
+  /** Files setup_argvs and prepare_argv read (requirements, lock files), relative to the checkout; Core re-runs the setup when their content changes. */
+  readonly setup_inputs: readonly string[];
+  /** What setup_argvs make (.venv, node_modules), relative to the checkout; Core re-runs the setup when one is missing. */
+  readonly setup_outputs: readonly string[];
   readonly test_run: {
     readonly mode: "per_file" | "whole";
     readonly whole_argv: readonly string[];
@@ -81,9 +85,11 @@ const PATHS: RoleSchema = { type: "array", items: { type: "string", minLength: 1
 export const TEST_SETUP_OUTPUT_SCHEMA: RoleSchema = objectSchema({
   verdict: { type: "string", enum: TEST_SETUP_VERDICTS, description: "the outcome of the investigation" },
   setup_argvs: { ...ARGV_LIST, description: "commands that prepare the environment inside the checkout, in order" },
+  setup_inputs: { ...PATHS, description: "files the setup commands depend on (requirements, lock files, package manifests), relative to the checkout root; empty when none" },
+  setup_outputs: { ...PATHS, description: "paths the setup commands create (.venv, node_modules), relative to the checkout root; empty when none" },
   test_run: {
     ...objectSchema({
-      mode: { type: "string", enum: ["whole", "per_file"], description: "whole suite or one file at a time" },
+      mode: { type: "string", enum: ["whole", "per_file"], description: "per_file (default) runs one test file at a time; whole only when running one file could not be confirmed, with the reason in notes" },
       whole_argv: { ...ARGV, description: "whole-suite command; empty when mode is per_file" },
       file_argv: { ...ARGV, description: "command with {file} for one test file; empty when mode is whole" },
       prepare_argv: { ...ARGV, description: "command run once before the tests; empty when none" },
@@ -120,7 +126,7 @@ export const TEST_SETUP_OUTPUT_SCHEMA: RoleSchema = objectSchema({
     description: "commands you could not run that need to change something outside the Project; commands you ran yourself go in installed",
   },
   missing: { type: "array", items: { type: "string", minLength: 1 }, description: "what is still missing" },
-  notes: { type: "string", description: "short notes for the Owner" },
+  notes: { type: "string", description: "short notes for the Owner; required when mode is whole: why one test file cannot be run alone" },
 });
 
 const BOOTSTRAP_LINES = (bootstrap: Readonly<Record<string, TestSetupBootstrap>>): string[] =>
@@ -136,11 +142,12 @@ export function buildTestSetupInvestigationPrompt(request: TestSetupInvestigatio
       "2. Check the tools at hand: an existing .venv, pyenv, uv, node and the package managers (which, --version).",
       "3. Try first_candidate first. If current is not null, try its commands too.",
       "4. When the environment is missing something, prepare it inside the checkout and try again. Examples: python3 -m venv .venv, .venv/bin/python -m pip install -r requirements-dev.txt, uv sync --frozen, pnpm install --frozen-lockfile.",
-      "5. Write the commands that prepared the environment to setup_argvs. Core runs them in every fresh checkout before the tests, so each must give the same result however often it runs. Core runs setup_argvs in test_run.cwd (not the checkout root), so write their relative paths from test_run.cwd (with cwd \"backend\": requirements.txt, not backend/requirements.txt). Executables paths stay relative to the checkout; Core turns them into absolute paths. A Task worktree or a Work checkout starts with no .venv and no node_modules.",
+      "5. Write the commands that prepared the environment to setup_argvs. Core runs them in every fresh checkout before the tests, so each must give the same result however often it runs: it must not delete or rebuild an environment that is already in place (an existing .venv or node_modules), so avoid commands that rebuild every time such as python -m venv --clear; create the environment only when it is missing. Core runs setup_argvs in test_run.cwd (not the checkout root), so write their relative paths from test_run.cwd (with cwd \"backend\": requirements.txt, not backend/requirements.txt). Executables paths stay relative to the checkout; Core turns them into absolute paths. A Task worktree or a Work checkout starts with no .venv and no node_modules.",
+      "5b. Core skips setup_argvs and prepare_argv in a checkout where they already succeeded, until something they depend on changes. Write the files they read (requirements files, lock files, package manifests) in setup_inputs and the paths they create (the environment folder) in setup_outputs, both relative to the checkout root (not test_run.cwd) and without \"..\". Core re-runs the setup when an input's content changes or an output is missing.",
       "6. Write an executable inside the checkout as a checkout-relative path in executables (for example .venv/bin/python); write one outside as an absolute path. Write a Python in argv as {python}.",
       "7. If the environment needs something installed on the Mac itself (brew install, npm -g, pip install --user and the like), run it yourself; Core records the command it saw. Installing into the Project's own environment from a local path outside the Project (for example .venv/bin/python -m pip install -e <path outside the Project>) needs no approval: run it yourself. Never run sudo or anything that asks for a password, and never write files outside the Project by redirection or tee: the guard stops them.",
       "8. Do not change tracked files. Do not write test code or settings files. The only untracked folders you may leave in the checkout are the environment folders (.venv, venv, node_modules, .pytest_cache, __pycache__).",
-      "9. For a per_file command, list test files that confirm it in confirm_files.",
+      "9. per_file is the default: use it whenever the runner can run one test file given on the command line (for example pytest <file>, node --test <file>, vitest run <file>, bun test <file>, jest <file>). Run one test file yourself to confirm it and list the test files that confirm it in confirm_files. Choose whole only when you tried and could not confirm that one file can be run alone; then write the reason in notes.",
       "10. Write every command you ran and its result in attempts.",
       repair
         ? "11. mode is repair_explicit: do not change the command in explicit_test_run. Prepare only the checkout's environment so that exact command runs, and set test_run to null."
@@ -192,6 +199,7 @@ export function parseTestSetupResponse(
   if (bad) throw new OutputFormatError(`executables.${bad.name}.probe_argv: must start with {${bad.name}}`);
   if (!isStringArray(output.sources)) throw new OutputFormatError("sources: must be strings");
   const needsRun = ["ready", "tests_failing", "no_tests"].includes(output.verdict);
+  if (output.test_run?.mode === "whole" && output.notes.trim() === "") throw new OutputFormatError("notes: required when test_run.mode is whole: write why one test file cannot be run alone, or use per_file");
   if (options.mode === "repair_explicit" && output.test_run !== null) throw new OutputFormatError("test_run: must be null in repair_explicit");
   if (options.mode === "find" && needsRun && output.test_run === null) throw new OutputFormatError(`test_run: required when verdict is ${output.verdict}`);
   return output;

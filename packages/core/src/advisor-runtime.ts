@@ -8,6 +8,8 @@
 //
 
 import { createHash } from "node:crypto";
+import type { ProviderErrorRecord } from "@owl/shared";
+import { insertProviderError } from "./provider-error-store";
 import { createUlid, utcNow } from "../../db/dist/index.js";
 import { applyAdvisorInterfaceInstructions, externalJsonBlock, formatAdvisorMalformed, parseAdvisorResponse, parseSlackAdvisorResponse } from "@owl/shared";
 import type { AdvisorSessionDirectory, AdvisorTurnRequest, AdvisorWorkspacePreparation, CoreDatabase, CoreWriteLaneTransaction, GitGateway } from "./types";
@@ -1475,9 +1477,9 @@ export class AdvisorSessionRuntime {
           if (slot.unconfirmedResume === sessionId) slot.unconfirmedResume = null;
           const rateLimit = rateLimitInfoFromEvent(event);
           if (rateLimit !== null) {
-            await this.failRateLimitedTurn(sessionId, turnRow, event.error, rateLimit);
+            await this.failRateLimitedTurn(sessionId, turnRow, event.error, rateLimit, event.provider_error);
           } else {
-            await this.failTurn(turnRow, event.error);
+            await this.failTurn(turnRow, event.error, event.provider_error);
           }
           this.sweepAdvisorWorkspacesInBackground();
           return "settled";
@@ -1631,7 +1633,7 @@ export class AdvisorSessionRuntime {
     });
   }
 
-  private markTurnFailed(turnId: string, errorMessage: string): Promise<void> {
+  private markTurnFailed(turnId: string, errorMessage: string, providerError?: ProviderErrorRecord): Promise<void> {
     const now = utcNow();
     return this.enqueueTurnMutation("turn_failed", { turn_id: turnId }, (transaction) => {
       transaction.run(
@@ -1640,6 +1642,7 @@ export class AdvisorSessionRuntime {
         errorMessage,
         turnId,
       );
+      if (providerError) insertProviderError(transaction, turnId, "advisor", providerError);
     });
   }
 
@@ -1652,7 +1655,7 @@ export class AdvisorSessionRuntime {
     return rows.flatMap((row) => [row.title, row.summary]);
   }
 
-  private async failTurn(turnRow: AdvisorTurnRow, errorMessage: string): Promise<void> {
+  private async failTurn(turnRow: AdvisorTurnRow, errorMessage: string, providerError?: ProviderErrorRecord): Promise<void> {
     const current = this.config.db.get<{ status: AdvisorTurnStatus }>(
       `SELECT status FROM advisor_turns WHERE id = ?`,
       turnRow.id,
@@ -1660,7 +1663,7 @@ export class AdvisorSessionRuntime {
     if (!current || current.status === "completed" || current.status === "failed") {
       return;
     }
-    await this.markTurnFailed(turnRow.id, errorMessage);
+    await this.markTurnFailed(turnRow.id, errorMessage, providerError);
     try {
       await this.config.onError(
         turnRow.conversation_id,
@@ -1681,6 +1684,7 @@ export class AdvisorSessionRuntime {
     turnRow: AdvisorTurnRow,
     errorMessage: string,
     rateLimit: RateLimitInfo,
+    providerError?: ProviderErrorRecord,
   ): Promise<void> {
     const current = this.config.db.get<{ status: AdvisorTurnStatus }>(
       `SELECT status FROM advisor_turns WHERE id = ?`,
@@ -1690,7 +1694,7 @@ export class AdvisorSessionRuntime {
 
     // Mark the turn failed before any reply work so a restart cannot resend
     // this same request after a rate-limit response.
-    await this.markTurnFailed(turnRow.id, errorMessage);
+    await this.markTurnFailed(turnRow.id, errorMessage, providerError);
 
     let nextAttemptAt: string | null = null;
     try {

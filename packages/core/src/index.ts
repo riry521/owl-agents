@@ -252,3 +252,5 @@ export type { WorktreeReconcilerDeps, WorktreeReconcileScope, WorktreeReconcileR
 export type { WorkSummaryHistory, WorkSummaryRevision } from "./work-summary-history";
 export { PROVIDER_FAILED_ERROR_PREFIX, TRANSIENT_RETRY_DELAYS_MS, TRANSIENT_RETRY_LIMIT, attemptAction } from "./attempt-policy";
 export type { AttemptAction, AttemptDecision, AttemptReason } from "./attempt-policy";
+export { resolveCloneRoot, cloneRelativePath, planClone } from "./clone-root";
+export type { CloneDestination, CloneRootInput } from "./clone-root";

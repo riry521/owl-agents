@@ -3,7 +3,7 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
-import { diffSnapshots, readStoredTestSetup, selectTestSetup, selectTestSetupInCheckout, snapshotCheckout, sourcesDigest, testSetupDigests } from "../../packages/core/dist/test-setup.js";
+import { diffSnapshots, isLegacyWholeSetup, readStoredTestSetup, selectTestSetup, selectTestSetupInCheckout, snapshotCheckout, sourcesDigest, testSetupDigests } from "../../packages/core/dist/test-setup.js";
 import { DEFAULT_TEST_SETUP_SETTINGS } from "../../packages/shared/dist/test-setup-settings.js";
 import { createTestRepo } from "../helpers/git.mjs";
 import { tempDir } from "../helpers/temp.mjs";
@@ -187,4 +187,13 @@ test("snapshotCheckout and diffSnapshots: report rewrites, additions and deletio
   await write(repo, "out/.next/cache/x.js", "1\n");
   await write(repo, "kept.txt", "1\n");
   assert.deepEqual(diffSnapshots(beforeIgnored, await snap()), [{ kind: "left", path: "kept.txt" }]);
+});
+
+test("isLegacyWholeSetup: only a whole record without a reason is investigated again", () => {
+  const digests = { layout: "l", tests: "t", sources: "s", settings: "x" };
+  const read = (extra) => readStoredTestSetup(JSON.stringify({ status: "ready", sources: [], digests, ...extra }));
+  assert.equal(isLegacyWholeSetup(read({ test_run: { mode: "whole" } })), true);
+  assert.equal(isLegacyWholeSetup(read({ test_run: { mode: "per_file" } })), false);
+  assert.equal(isLegacyWholeSetup(read({ test_run: { mode: "whole" }, whole_reason: "pytest cannot take one file" })), false);
+  assert.equal(isLegacyWholeSetup(read({ test_run: { mode: "whole" }, explicit_digest: "abc" })), false);
 });

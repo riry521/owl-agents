@@ -223,16 +223,25 @@ curl http://localhost:3787/api/v1/works
 - **Backlog**：`/backlog`ページにProjectごとのレビュー指摘の持ち越しが並びます。項目をWorkに紐づけたり、そこからWorkを発行したり、破棄したりできます。
 - **Advisorからの操作**：AdvisorはWorkへの指示の送信（`send_work_instruction`）、タイトルや要約の編集（`update_work`）、一時停止・再開・キャンセル・削除（`pause_work`、`resume_work`、`cancel_work`、`delete_work`）ができます。
 - **キャンセルと削除の違い**：キャンセルはエージェントを止めてWorkの作業ファイル（worktree）を片付け、Workはキャンセル済みとして残します。削除はWorkをDBから消し、番号を空けます。
+- **一時停止と指示**：Workを一時停止すると、実行中のエージェントを止め、新しいTaskを始めません。再開すると、止めたTaskをやり直します。Workへ指示を送ったときも実行中のエージェントを止め、Managerが新しい状態から計画を立て直します。
+- **必須と目標**：受け入れ条件は「必須」か「目標」のどちらかです。目標を満たせなくても、必須をすべて満たせばWorkは完了できます。満たせなかった目標は、理由と一緒にWork詳細ページに並びます。
 
 ### 動かし続ける仕組み
 
-- **レート制限**：providerがレート制限（429など）を返すと、そのproviderを一時停止し、リセット時刻の後に自動で再開します。時刻が分からないときは15分、30分、60分と間隔を延ばして再開します。
+- **レート制限**：providerがレート制限（429など）を返すと、そのproviderを一時停止し、リセット時刻の後に自動で再開します。時刻が分からないときは15分、30分、60分と間隔を延ばして再開します。エラーコードも使用量上限のメッセージもない429は一時的な上限として扱い、まず同じ実行の中で数回やり直します（`OWL_PROVIDER_RATE_LIMIT_RETRY_MAX`、`OWL_PROVIDER_RATE_LIMIT_RETRY_DELAY_MS`、`.env.example`を参照）。providerが返した生のエラーは実行と一緒に記録します。
 - **Core自身の処理の表示**：Coreが統合検証、テスト、マージ前の再検証、Gitの順番待ち、ベースの取り込みを行っている間、Work詳細ページに処理の種類と経過時間が出ます。
 - **マージ後のビルド**：Workがマージされると、Projectのマージ後コマンド（ビルド）を実行します。`package.json`や`pnpm-lock.yaml`など依存ファイルが変わっていれば、先にインストールコマンドを実行します。どちらかが失敗するとOwnerに通知します。どちらもProjectごとの設定です。
-- **Fixer**：設計以外のタスクが Reviewer に2回（`after_review_rejections`、既定は2）差し戻されると、Fixer 役が次の修正を担当し、タスクが完了するまで続けます。モデルは設定画面の`fixer`役で選びます。詳しくは[docs/operations.md](docs/operations.md#fixer-escalation)を見てください。
-- **Projectごとのテスト方法**：Projectの登録時・変更時、または環境の問題でテストが落ちたときに、エージェントがそのProjectのテストの動かし方を調べ、Coreが動くことを確かめて、結果をProjectに保存します。Projects画面でProjectを編集し、再調査ボタンを押すと手動でやり直せます。
+- **Fixer**：設計以外のタスクが検証の不合格と Reviewer の差し戻しを合わせて2回（`after_review_rejections`、既定は2）に達すると、Fixer 役が次の修正を担当し、タスクが完了するまで続けます。モデルは設定画面の`fixer`役で選びます。詳しくは[docs/operations.md](docs/operations.md#fixer-escalation)を見てください。
+- **Projectごとのテスト方法**：テストの既定のモードは`per_file`です。準備の手順は、依存するファイルが変わっておらず、手順が作ったものが残っている間は飛ばします。Projectの登録時・変更時、または環境の問題でテストが落ちたときに、エージェントがそのProjectのテストの動かし方を調べ、Coreが動くことを確かめて、結果をProjectに保存します。Projects画面でProjectを編集し、再調査ボタンを押すと手動でやり直せます。
+- **全件テスト**：テストを`whole`モードで動かすProjectでは、Coreは各Taskの検証で全件テストを動かしません。Taskにはテストの確認を先送りしたと記録し、全件テストはWorkの検証で1回動かします。
+- **cloneの置き場**：Workerは、外部リポジトリのcloneをProjectの外に置きます。OwlはどのProjectの中にもない置き場（gitの`ghq.root`、なければcloneが最も多いホームのフォルダ、それもなければデータディレクトリの下の`clones`）を選んでWorkerに伝えます。cloneをProjectの中に置いたTask、またはcloneに手を加えたTaskは、検証で失敗になります。
 - **テスト実行をoffにする**：Projectのテスト実行を「テストを実行しない」（`test_run`の`mode`を`off`）にすると、Taskの検証でもCoreはテストランナーを動かしません。
 - **コミットメッセージの言語**：Projectに`commit_language`（`ja`または`en`）を設定できます。`en`のProjectでは、Workの完了コミットを英語で書きます。
+
+### Workが止まったとき
+
+- **Decision**：Workが先へ進めないとき、Decisionの画面が開きます。説明は「ネックになっている部分」（なぜ止まったか）と「選択肢」（どうすればよいか）の二つに分かれます。選択肢を一つ選ぶか、自由記述で答えます。選択肢には「Managerに直させる」と「計画を立て直す」があり、後者ではManagerが計画そのものを直します。未確認の停止を示すDecisionは、止まった作業が終わると自動で閉じます。説明文を自前のコマンドで検査するには、[docs/operations.md](docs/operations.md#checking-the-texts-of-decision-explanations-decision_text_checks)を見てください。
+- **ファイルの送信**：Advisorは`owl-action`の`send_file`ツールで、ファイルをSlackやDiscordへ送れます。送れるフォルダとサイズの上限は`app-settings.json`で決めます。設定は[Slack や Discord から話しかける](#slack-や-discord-から話しかける)を見てください。
 
 ### メモリとルール
 
@@ -246,7 +255,22 @@ owl open
 # 必要ならOwlを起動し、ブラウザで http://127.0.0.1:3787/owl/ を開きます
 ```
 
-ページ: Board（work概要）、Archive、Work detail、Settings（モデル設定とプリセット）、Projects、Advisor（chat）、Backlog、Decision、Activity、Agents、Knowledge、Rules（ルール承認を含む）、Skills、Tokens。
+ページ: Board（work概要）、Archive、Work detail、Settings（モデル設定とプリセット）、Projects、Advisor（chat。窓ごとに表示します。[Advisor の窓](#advisor-の窓)を参照）、Backlog、Decision、Activity、Agents、Knowledge、Rules（ルール承認を含む）、Skills、Tokens。
+
+### Advisor の窓
+
+Advisor の画面は窓に分かれていて、窓ごとに別の会話を持ちます。
+
+- **全体の窓**の名前は **Owl** です。いつでも使え、Owl 全体についての相談に使います。Slack・Discord のチャンネルは **設定 → 連携** で決めます。
+- **プロジェクト専用の窓**は、1つのプロジェクトのための窓です。初期状態ではオフです。
+
+画面が広いときは、窓の一覧が左のサイドバーに出ます。狭いときは、Advisor 画面の上にある窓の名前を押すと、一覧がシートで開くので、窓を選びます。上にある **チャンネル** ボタンは、窓ごとのチャンネルの操作用です。プロジェクト専用の窓では、連携した Slack・Discord のチャンネルを確かめ、作成、既存のチャンネル ID の連携、名前の変更ができます。全体の窓（Owl）では、これらの操作はなく、チャンネルを **設定 → 連携** で決めるという案内と、設定画面へのリンクが出ます。
+
+プロジェクトの窓は、窓の一覧でドラッグして並べ替えられます。並びは保存されます。
+
+プロジェクトの窓をオン・オフにするには、**Projects** を開き、そのプロジェクトの **編集** を押して、**Advisorの窓を使う** のスイッチを切り替え、**保存** を押します。チャンネルを連携したプロジェクトは、スイッチがオフでも一覧に残ります。
+
+窓をオンにすると、連携中の Slack・Discord のうちチャンネルがまだ無いものに、Owl がその窓用のチャンネルを作ります（[Slack や Discord から話しかける](#slack-や-discord-から話しかける)を参照）。チャンネルを作れなくても窓はオンのままで、理由が画面に出ます。すでにある Slack のチャンネルには、チャンネルのパネルと **設定 → 連携** のボタンで、Owner（**Owner の Slack ユーザー ID**）を招待できます。
 
 ## CLIコマンド
 
@@ -360,20 +384,22 @@ Slack や Discord とつなぐと、ふだん使っているチャットアプ�
 連携ごとに、会話用のチャンネル（あなたのメッセージと Advisor の返信）と、通知用のチャンネルを決めます。同じチャンネルにしてもかまいません。DM や他のチャンネルのメッセージは無視します。
 どちらの連携も任意で、設定を保存するとすぐにつながります。Owl の再起動は要りません。
 
+プロジェクトの Advisor の窓（[Advisor の窓](#advisor-の窓)）をオンにすると、連携中の Slack・Discord に、そのプロジェクト用の**チャンネルが自動で作られます**。そのチャンネルで話すと、プロジェクトの窓で話すのと同じです。Slack ではパブリックチャンネルを作り、**設定 → 連携 → Slack** の **オーナーの Slack ユーザーID**（例: `U0123456789`）が入っていれば、Owner をそのチャンネルに招待します。未設定のときは、チャンネルは作られますが誰も招待されません。Discord には招待の手順はありません。窓にすでに連携したチャンネルがあるときは、それをそのまま使います。
+
 ### Slack
 
-1. [api.slack.com/apps](https://api.slack.com/apps) で **Create New App → From a manifest** を選び、[`docs/slack-manifest.yaml`](docs/slack-manifest.yaml) の中身を貼り付けます。Owl の設定画面にもコピー用のボタンがあります。
+1. [api.slack.com/apps](https://api.slack.com/apps) で **Create New App → From a manifest** を選び、[`docs/slack-manifest.yaml`](docs/slack-manifest.yaml) の中身を貼り付けます。Owl の設定画面にもコピー用のボタンがありますが、画面に埋め込まれたマニフェストには `channels:manage` と `channels:join` がありません。チャンネルの自動作成を使うなら、こちらではなく `docs/slack-manifest.yaml` を使うか、画面からコピーしたときは下の2スコープを足してください。
 2. アプリをワークスペースにインストールし、**Bot Token**（`xoxb-...`）をコピーします。
 3. **Basic Information → App-Level Tokens** で、`connections:write` のスコープを付けたトークンを作ってコピーします（`xapp-...`）。
 4. 使うチャンネルに Bot を招待し（`/invite @owl-agent`）、チャンネル詳細の一番下にあるチャンネル ID をコピーします。
-5. Owl の **設定 → 連携 → Slack** に、トークンとチャンネル ID を入れて保存します。
+5. Owl の **設定 → 連携 → Slack** に、トークンとチャンネル ID を入れて保存します。Owl が作るチャンネルに自分を招待したいときは、**オーナーの Slack ユーザーID** にも自分のユーザー ID を入れます。
 
-Advisor からファイルを送るには、Bot に `files:write` のスコープが必要です。このスコープを足す前にアプリを作った場合は、**OAuth & Permissions → Bot Token Scopes** に `files:write` を足し、**Reinstall to Workspace** で入れ直します。送れるフォルダと 1 ファイルの上限は、`app-settings.json` の `advisor_send_file_dirs`・`advisor_send_file_slack_max_bytes`・`advisor_send_file_discord_max_bytes` で変えられます。
+v0.7.0 で、マニフェストに Bot Token Scopes を3つ足しました。`channels:manage` と `channels:join`（プロジェクトのチャンネルを作って入り、Owner を招待する）と、`files:write`（Advisor がファイルを送る）です。**古いマニフェストでアプリを作った場合は、入れ直しが必要です。** **OAuth & Permissions → Bot Token Scopes** にこの3つを足し、**Reinstall to Workspace** で入れ直します。Bot Token が変わったら、Owl にも保存し直します。足りないままだとチャンネルを作れず、Projects 画面に足りない権限が出ます。今のマニフェストで新しく作ったアプリは、何もしなくて大丈夫です。送れるフォルダと 1 ファイルの上限は、`app-settings.json` の `advisor_send_file_dirs`・`advisor_send_file_slack_max_bytes`・`advisor_send_file_discord_max_bytes` で変えられます。
 
 ### Discord
 
 1. [Discord Developer Portal](https://discord.com/developers/applications) でアプリケーションを作り、**Bot** のページでトークンをコピーします。同じページで **Message Content Intent** をオンにします。
-2. **OAuth2 → URL Generator** で、スコープに `bot`、権限に **Send Messages**・**Read Message History**・**Embed Links**・**Attach Files** を選びます。スレッドにファイルを送るには **Send Messages in Threads** も付けます。すでに Bot がサーバーにいる場合は、サーバーのロールかチャンネルの権限で与えます。できた URL を開いて、Bot を自分のサーバーに追加します。
+2. **OAuth2 → URL Generator** で、スコープに `bot`、権限に **Send Messages**・**Read Message History**・**Embed Links**・**Attach Files** を選びます。スレッドにファイルを送るには **Send Messages in Threads** も付けます。Owl にプロジェクトのチャンネルを作らせるには **Manage Channels** も付けます。すでに Bot がサーバーにいる場合は、サーバーのロールかチャンネルの権限で与えます。できた URL を開いて、Bot を自分のサーバーに追加します。
 3. Discord の開発者モードをオンにし（**ユーザー設定 → 詳細設定**）、チャンネルを右クリックして **チャンネル ID をコピー** を選びます。
 4. Owl の **設定 → 連携 → Discord** に、トークンとチャンネル ID を入れて保存します。
 

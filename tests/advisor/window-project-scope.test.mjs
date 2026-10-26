@@ -229,6 +229,21 @@ test("memory index: a Project window gets the common index and its own Project's
   assert.doesNotMatch(later, /Alpha|Beta/);
 });
 
+test("the saved Project window order survives a Core restart and windows added later come last", async (t) => {
+  const { root, db, core, addProject } = await setup(t);
+  const [a, b, c] = [await addProject("A"), await addProject("B"), await addProject("C")];
+  for (const id of [a, b, c]) await db.createWriteLane().transact((tx) => tx.run("UPDATE projects SET advisor_window_enabled = 1 WHERE id = ?", id));
+  await core.setAdvisorWindowOrder([c, a, b]);
+  await core.stop();
+
+  const { core: restarted } = await createTestCore(t, { db, owlRoot: root, version: "window-order-restart" });
+  assert.deepEqual((await restarted.listAdvisorWindows()).map((window) => window.key), ["general", c, a, b]);
+
+  const later = await addProject("Later");
+  await db.createWriteLane().transact((tx) => tx.run("UPDATE projects SET advisor_window_enabled = 1 WHERE id = ?", later));
+  assert.deepEqual((await restarted.listAdvisorWindows()).map((window) => window.key), ["general", c, a, b, later]);
+});
+
 test("listAdvisorWindows lists Owl, switched-on Projects and Projects with a channel binding, and keeps rows of the rest", async (t) => {
   const { db, core, addProject } = await setup(t);
   const on = await addProject("On");

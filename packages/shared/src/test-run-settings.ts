@@ -35,6 +35,8 @@ export interface TestRunSettings {
   readonly whole_timeout_seconds: number;
   /** argv run in order in cwd (relative paths are cwd-relative; "{name}" executables become absolute) before prepare_argv; the first failure stops the run ([] = nothing). Builds the test environment. */
   readonly setup_argvs: readonly (readonly string[])[];
+  /** Files the setup depends on and what it makes, checkout-relative; the setup is skipped while those files are unchanged and the made paths exist. null = no record: always run the setup. */
+  readonly setup_cache: { readonly inputs: readonly string[]; readonly outputs: readonly string[] } | null;
   /** Working directory of the test command, relative to the checkout root without ".."; per_file only accepts ".". */
   readonly cwd: string;
 }
@@ -62,6 +64,7 @@ export const DEFAULT_TEST_RUN_SETTINGS: TestRunSettings = {
   whole_argv: [],
   whole_timeout_seconds: 1800,
   setup_argvs: [],
+  setup_cache: null,
   cwd: ".",
 };
 
@@ -89,7 +92,9 @@ const mode = (value: unknown): boolean => value === "per_file" || value === "who
 const wholeArgv = (value: unknown): boolean => nonEmptyStrings(value) && !(value as string[]).includes("{file}");
 
 const setupArgvs = (value: unknown): boolean => Array.isArray(value) && value.every((argv) => nonEmptyStrings(argv) && (argv as string[]).length > 0);
-const relativeCwd = (value: unknown): boolean =>
+const relativePaths = (value: unknown): boolean => nonEmptyStrings(value) && (value as string[]).every((item) => !item.startsWith("/") && !item.split(/[\\/]/u).includes(".."));
+const setupCache = (value: unknown): boolean => value === null || (isRecord(value) && relativePaths(value.inputs) && relativePaths(value.outputs));
+const relativeCwd =(value: unknown): boolean =>
   typeof value === "string" && value.length > 0 && !value.startsWith("/") && !value.split(/[\\/]/u).includes("..");
 
 const VALIDATORS: Readonly<Record<keyof TestRunSettings, (value: unknown) => boolean>> = {
@@ -111,6 +116,7 @@ const VALIDATORS: Readonly<Record<keyof TestRunSettings, (value: unknown) => boo
   whole_argv: wholeArgv,
   whole_timeout_seconds: integerAtLeast(1),
   setup_argvs: setupArgvs,
+  setup_cache: setupCache,
   cwd: relativeCwd,
 };
 

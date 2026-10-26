@@ -14,7 +14,8 @@ import type {
   TokenUsage,
 } from "./types.js";
 import { readCodexCompactionSummaries, waitForCompactionSummary } from "./compaction-summary.js";
-import { classifyProviderFailure, formatProviderError } from "./provider-error.js";
+import { codexErrorInfoOf } from "./codex-error-info.js";
+import { classifyProviderFailure, formatProviderError, sessionFailureMessage, turnFailureProviderError } from "./provider-error.js";
 import { agentUserInstructionEnv, buildAgentPermissionArgs, buildCodexCustomProviderArgs, externalJsonBlock, reapProcessGroup, uncachedInputTokens } from "@owl/shared";
 
 const STDERR_RING_BUFFER_BYTES = 8 * 1024;
@@ -140,25 +141,25 @@ function codexErrorMessage(value: unknown): string {
 
 function codexTurnFailure(value: unknown, turnId: string): Extract<SessionEvent, { type: "turn.failed" }> {
   const message = codexErrorMessage(value);
-  const errorInfo = isRecord(value) && isRecord(value.codexErrorInfo) ? value.codexErrorInfo : null;
-  const errorCode = errorInfo?.kind ?? errorInfo?.type ?? errorInfo?.code;
+  const errorInfo = codexErrorInfoOf(value);
   const status = isRecord(value) && typeof value.status === "number" && Number.isInteger(value.status)
     ? value.status
-    : undefined;
+    : errorInfo?.httpStatus ?? undefined;
   const classification = classifyProviderFailure("codex", {
     exit_code: 0,
     signal: null,
     kind: "harness_error",
     ...(status !== undefined ? { harness_status: status } : {}),
-    ...(typeof errorCode === "string" ? { harness_code: errorCode } : {}),
+    ...(errorInfo !== null ? { harness_code: errorInfo.code } : {}),
     error: message,
     rate_limit_evidence: [{ kind: "event", event: value }, { kind: "text", text: message }],
   });
   return {
     type: "turn.failed",
     turn_id: turnId,
-    error: classification.message,
+    error: sessionFailureMessage(classification),
     ...(classification.rate_limit !== undefined ? { rate_limit: classification.rate_limit } : {}),
+    provider_error: classification.provider_error,
   };
 }
 
@@ -556,6 +557,7 @@ export class CodexSessionDriver implements ProviderSession {
         type: "turn.failed",
         turn_id: this.currentTurnId,
         error: detail,
+        provider_error: turnFailureProviderError("codex", { exit_code: exitCode, signal, error: detail, stderr: detail }),
       });
       this.clearCurrentTurn();
     }
@@ -902,12 +904,14 @@ export class CodexSessionDriver implements ProviderSession {
           type: "turn.failed",
           turn_id: localTurnId,
           error: "CodexのAdvisorターンが最終回答（final_answer）を返さずに完了しました（commentaryのみ）。Provider/Harnessのバージョンとモデル設定を確認してください。",
+          provider_error: turnFailureProviderError("codex", { exit_code: 0, error: "no final_answer" }),
         });
       } else if (reply.trim().length === 0) {
         this.pushEvent({
           type: "turn.failed",
           turn_id: localTurnId,
           error: formatProviderError("codex", "invalid provider response"),
+          provider_error: turnFailureProviderError("codex", { exit_code: 0, error: "invalid provider response" }),
         });
       } else {
         this.pushEvent({
@@ -925,6 +929,7 @@ export class CodexSessionDriver implements ProviderSession {
         type: "turn.failed",
         turn_id: localTurnId,
         error: `CodexのAdvisorターンが未対応の終了状態で終了しました（status=${safeStatus}）。Provider/Harnessのバージョンと出力契約を確認してください。`,
+        provider_error: turnFailureProviderError("codex", { exit_code: 0, error: `unsupported turn status: ${safeStatus}` }),
       });
     }
 
@@ -978,7 +983,7 @@ export class CodexSessionDriver implements ProviderSession {
     });
     if (this.currentTurnId) {
       const turnId = this.currentTurnId;
-      this.pushEvent({ type: "turn.failed", turn_id: turnId, error: message });
+      this.pushEvent({ type: "turn.failed", turn_id: turnId, error: message, provider_error: turnFailureProviderError("codex", { error: message, stderr: message }) });
       this.clearCurrentTurn();
     }
     this.sessionExitEmitted = true;
@@ -1024,6 +1029,7 @@ export class CodexSessionDriver implements ProviderSession {
         type: "turn.failed",
         turn_id: this.currentTurnId,
         error: error.message,
+        provider_error: turnFailureProviderError("codex", { error: error.message }),
       });
       this.clearCurrentTurn();
     }

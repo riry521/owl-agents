@@ -320,3 +320,29 @@ test("the weaker write_paths guard of opencode children is stated in doctor gaps
   assert.equal(buildChildRunPrompt(task, null, null, null, "claude").includes(line), false);
   assert.equal(buildChildRunPrompt(task).includes(line), false);
 });
+
+test("a failed opencode child outcome carries a masked provider_error from the serve's error and stderr", async (t) => {
+  const { owlRoot, runtime } = await childFixture(t, [
+    { op: "stderr", text: SECRET_STDERR },
+    { op: "fail", error: { type: "permission.rejected", message: "permission denied: write outside the workspace" } },
+  ]);
+  const outcome = await runtime.runOpencode({
+    agent_run_id: "run-1", model: "fake-provider/fake-model", prompt: "Do the part.", cwd: owlRoot, env: { ...runtime.env }, timeout_ms: 30_000, idle_timeout_ms: 30_000,
+  });
+  assert.equal(outcome.success, false);
+  assert.equal(outcome.provider_error?.harness, "opencode");
+  assert.equal(outcome.provider_error?.message_source, "harness_error");
+  assert.match(outcome.provider_error?.message ?? "", /permission denied/u);
+  for (const dummy of SECRETS) assert.ok(!JSON.stringify(outcome.provider_error).includes(dummy), dummy);
+});
+
+test("an opencode child that ends without a final message still carries a provider_error", async (t) => {
+  const { owlRoot, runtime } = await childFixture(t, [{ op: "succeed" }]);
+  const outcome = await runtime.runOpencode({
+    agent_run_id: "run-1", model: "fake-provider/fake-model", prompt: "Do the part.", cwd: owlRoot, env: { ...runtime.env }, timeout_ms: 30_000, idle_timeout_ms: 30_000,
+  });
+  assert.equal(outcome.failure_kind, "no_final_report");
+  assert.equal(outcome.provider_error?.harness, "opencode");
+  assert.equal(outcome.provider_error?.exit_code, 0);
+  assert.match(outcome.provider_error?.message ?? "", /without a final assistant message/u);
+});

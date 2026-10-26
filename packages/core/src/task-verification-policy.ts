@@ -10,7 +10,7 @@ import {
   type VerificationPolicySettings,
 } from "../../shared/dist/verification-policy-settings.js";
 import type { SettingsReader } from "./owner-language";
-import { WHOLE_RUN_FILE } from "./test-runs.js";
+import { WHOLE_DEFERRED_REASON, WHOLE_RUN_FILE } from "./test-runs.js";
 
 /** What the Manager asked Core to check for one Task (tasks.verification_spec_json). */
 export interface TaskVerificationSpec {
@@ -31,7 +31,9 @@ export type PolicyErrorKey =
   | "test_required_not_executed"
   | "code_check_failed"
   | "code_unchecked"
-  | "verification_spec_unreadable";
+  | "verification_spec_unreadable"
+  | "clone_in_worktree"
+  | "clone_modified";
 
 export interface PolicyCheck {
   command_id: string;
@@ -91,7 +93,7 @@ export interface TypePolicyInput {
   /** Files Core's own test run already judged; those are not started again and carry no output. */
   /** Set only when the Project's own test_run resolved to an explicit off; no test runner is started then. */
   projectTestRun?: { enabled: false; reason: string } | { enabled: true; cwd: string; file_argv?: readonly string[]; whole_argv?: readonly string[]; test_patterns?: readonly string[] };
-  coreTestRun?: { run_id: string | null; mode?: "full" | "selected"; passed_files: readonly string[]; failed_files: readonly string[] };
+  coreTestRun?: { reason?: string | null; run_id: string | null; mode?: "full" | "selected"; passed_files: readonly string[]; failed_files: readonly string[] };
 }
 
 const DELETE_ACTIONS = new Set(["delete", "deleted", "remove", "removed"]);
@@ -290,11 +292,13 @@ export async function evaluateTaskTypePolicy(input: TypePolicyInput): Promise<Ty
   // Why not look at the global settings: only the Owner's explicit off for this Project is meant to stop tests;
   // no_test_marker or invalid_settings must keep running them.
   const testsOff = input.projectTestRun?.enabled === false && input.projectTestRun.reason === "explicit_off";
+  const wholeDeferred = input.coreTestRun?.reason === WHOLE_DEFERRED_REASON;
+  const wholeDeferredDetail = `policy:test deferred to the Work verification (${WHOLE_DEFERRED_REASON}); the whole suite runs there.`;
   const testsOffDetail = "Project test_run is off (explicit_off); test runners were not started.";
 
   const runTests = async (files: readonly string[]): Promise<{ executed: string[] }> => {
     const executed: string[] = [];
-    if (testsOff) return { executed };
+    if (testsOff || wholeDeferred) return { executed };
     for (const file of limited(files)) {
       const runner = firstRunner(file, settings.test.runners);
       if (!runner) continue;
@@ -334,9 +338,11 @@ export async function evaluateTaskTypePolicy(input: TypePolicyInput): Promise<Ty
     const { executed } = await runTests([...new Set([...input.files, ...named])]);
     for (const required of spec.required_tests ?? []) {
       if (executed.includes(required)) record({ command_id: "policy:required_tests", passed: true, detail: `Required test "${required}" ran and passed.` });
+      else if (wholeDeferred) record({ command_id: "policy:required_tests", passed: true, detail: wholeDeferredDetail });
       else if (result.passed) record({ command_id: "policy:required_tests", passed: false, detail: `The required test "${required}" was not run by a passing test runner.` }, "test_required_not_executed");
     }
-    if (checks.every((check) => check.command_id !== "policy:test")) unchecked("test_not_executed", "No changed file matches a configured test runner.");
+    if (wholeDeferred && checks.every((check) => check.command_id !== "policy:test")) record({ command_id: "policy:test", passed: true, detail: wholeDeferredDetail });
+    else if (checks.every((check) => check.command_id !== "policy:test")) unchecked("test_not_executed", "No changed file matches a configured test runner.");
     return result;
   }
 
@@ -362,7 +368,10 @@ export async function evaluateTaskTypePolicy(input: TypePolicyInput): Promise<Ty
   // no whole command; there Core's selected run of the tests related to the changed files is the verification, and
   // it counts only when at least one test ran and none failed (failed files are judged by Core's own test gate).
   const core = input.coreTestRun;
-  if (core && (core.passed_files.includes(WHOLE_RUN_FILE) || core.failed_files.includes(WHOLE_RUN_FILE))) {
+  if (wholeDeferred) {
+    record({ command_id: "policy:test", passed: true, detail: wholeDeferredDetail });
+    executed += 1;
+  } else if (core && (core.passed_files.includes(WHOLE_RUN_FILE) || core.failed_files.includes(WHOLE_RUN_FILE))) {
     const ok = core.passed_files.includes(WHOLE_RUN_FILE);
     record({ command_id: "policy:test", passed: ok, file: WHOLE_RUN_FILE, detail: `Core whole test run ${core.run_id ?? ""}`.trimEnd() }, ok ? undefined : "test_failed");
     executed += 1;

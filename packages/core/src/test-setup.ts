@@ -38,6 +38,8 @@ export interface StoredTestSetup {
   readonly digests: TestSetupDigests;
   /** Set for a repair of an Owner's explicit test_run; the record then applies only to that test_run. */
   readonly explicit_digest: string | null;
+  /** Why the agent chose mode whole ("" = no reason, as in records saved before per_file became the default). */
+  readonly whole_reason: string;
   readonly confirmed_at: string | null;
   readonly attempts: TestSetupView["attempts"];
   readonly outside_installs: TestSetupView["outside_installs"];
@@ -49,6 +51,13 @@ export interface StoredTestSetup {
   readonly trigger: string;
   readonly investigated_at: string;
 }
+
+/**
+ * A whole record saved without a reason comes from the old policy (whole was the default).
+ * Why not change every record's digests: that would also make per_file records and whole records with a reason investigate again, over and over.
+ */
+export const isLegacyWholeSetup = (record: StoredTestSetup): boolean =>
+  record.explicit_digest === null && record.test_run?.mode === "whole" && record.whole_reason === "";
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const isStrings = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === "string");
@@ -77,6 +86,7 @@ export function readStoredTestSetup(json: string | null, warn?: (message: string
       sources: value.sources,
       digests: digests as unknown as TestSetupDigests,
       explicit_digest: typeof value.explicit_digest === "string" ? value.explicit_digest : null,
+      whole_reason: typeof value.whole_reason === "string" ? value.whole_reason : "",
       confirmed_at: typeof value.confirmed_at === "string" ? value.confirmed_at : null,
       attempts: Array.isArray(value.attempts) ? (value.attempts as StoredTestSetup["attempts"]) : [],
       outside_installs: Array.isArray(value.outside_installs) ? (value.outside_installs as StoredTestSetup["outside_installs"]) : [],

@@ -300,6 +300,14 @@ function failureBase(task: AttemptTaskSnapshot, errorKey: string, counters: { sa
   };
 }
 
+// review_rejections counts verification failures and review rejections together.
+function countRejection(task: AttemptTaskSnapshot, c: AttemptPolicyConfig): { rejections: number; fixer: boolean } {
+  const rejections = (task.review_rejections ?? 0) + 1;
+  // Why not reset on replan: the Fixer stays until the Task completes, so a value once set is never overwritten.
+  const fixer = task.type !== "design" && (task.fixer_escalated_rejections ?? null) === null && rejections >= c.fixerAfterRejections;
+  return { rejections, fixer };
+}
+
 function evaluateReviewFailed(o: Extract<AttemptTaskObservation, { kind: "review_failed" }>, c: AttemptPolicyConfig): AttemptTaskEvaluation {
   const task = o.task;
   const totalAttempts = task.total_review_attempts + 1;
@@ -310,9 +318,7 @@ function evaluateReviewFailed(o: Extract<AttemptTaskObservation, { kind: "review
   const baseSyncAttempts = (task.base_sync_review_attempts ?? 0) + (baseSync ? 1 : 0);
   // Why not lead_designer_start_round != null: design_mode=lead and assigned_designer=lead_designer set it to 0 at creation, and replans reset it to 0, so it cannot tell "began at Lead" from "escalated".
   const lead = task.type === "design" && task.design_escalated === 1;
-  const rejections = (task.review_rejections ?? 0) + 1;
-  // Why not reset on replan: the Fixer stays until the Task completes, so a value once set is never overwritten.
-  const fixer = task.type !== "design" && (task.fixer_escalated_rejections ?? null) === null && rejections >= c.fixerAfterRejections;
+  const { rejections, fixer } = countRejection(task, c);
   // Every outcome carries these columns: the counts are recorded whatever the verdict leads to.
   const counted = {
     total_review_attempts: totalAttempts,
@@ -481,8 +487,14 @@ export function evaluate(observation: AttemptObservation, c: AttemptPolicyConfig
     case "verification_failed": {
       const o = observation;
       if (o.task.review_round < c.reviewLimits.plan_review_rounds) {
-        return decide(o.task, "review_fix_waiting", "verification_failed", ["replacement_worker_reserved"], false, { review_round: o.task.review_round + 1 });
+        const { rejections, fixer } = countRejection(o.task, c);
+        return decide(o.task, "review_fix_waiting", "verification_failed", ["replacement_worker_reserved"], false, {
+          review_round: o.task.review_round + 1,
+          review_rejections: rejections,
+          ...(fixer ? { fixer_escalated_rejections: rejections } : {}),
+        });
       }
+      // Why not count here: the Task fails without another fix, so a Fixer switch would have no effect and the limit logic stays unchanged.
       return decide(o.task, "failed", "verification_exhausted", ["manager_trigger_required"], true, {});
     }
     case "review_failed":

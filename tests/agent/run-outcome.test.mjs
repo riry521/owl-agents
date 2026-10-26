@@ -375,7 +375,7 @@ test("a role-shaped Manager finalize failure after a side effect keeps the side-
 });
 
 const codexShellStarted = JSON.stringify({ type: "item.started", item: { type: "command_execution", command: "curl -X POST https://example.com" } });
-const codexLimitError = JSON.stringify({ type: "error", message: "You've hit your usage limit. Try again in 45m" });
+const codexLimitError = JSON.stringify({ type: "error", message: "You've hit your usage limit. Try again at 9:00 PM." });
 const limitedAfterBash = (stdoutTail) => createAgentRunner({
   adapter: "codex-cli/v1",
   outputLogDir: null,
@@ -408,12 +408,13 @@ test("a role-shaped rate limit after a side effect is rethrown without the side-
 
 test("a role-shaped failure is marked rate_limited only when the runner classifier says so", async () => {
   const work = { id: "work-1", title: "W", summary: "S", size: "normal", status: "running", tasks: [] };
-  const runnerFor = (execute) => createAgentRunner({ adapter: "claude-cli/v1", outputLogDir: null, provider: { toolNamesInLine, execute } });
+  const runnerFor = (execute) => createAgentRunner({ adapter: "claude-cli/v1", outputLogDir: null, env: { OWL_PROVIDER_RATE_LIMIT_RETRY_MAX: "0" }, provider: { toolNamesInLine, execute } });
   const result = (stderr, extra = {}) => async (request) => ({ adapter: request.adapter, stdout: "", stderr, exit_code: 1, signal: null, format: "provider-json", ...extra });
   const cases = [
-    ["cause Error", async () => { throw new Error("You've hit your usage limit"); }, true],
-    ["stderr only", result("You've hit your usage limit. Try again in 45m"), true],
-    ["429", result("API Error: 429 Too Many Requests"), true],
+    ["cause Error", async () => { throw new Error("You've hit your usage limit"); }, false],
+    ["stderr only", result("You've hit your usage limit. Try again in 45m"), false],
+    ["stderr with a reset time", result("You've hit your usage limit. Try again at 9:00 PM."), true],
+    ["429", result("API Error: 429 Too Many Requests"), false],
     ["529", result("API Error: 529 overloaded_error"), false],
     ["argument list too long", async () => { throw Object.assign(new Error("spawn E2BIG: argument list too long"), { code: "E2BIG" }); }, false],
     ["serverOverloaded", result("", { harness_code: "serverOverloaded" }), false],

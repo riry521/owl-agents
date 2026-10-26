@@ -2,7 +2,7 @@ import type { OwnerLanguage } from "../../../packages/shared/dist/owner-language
 import type { ModelHarness } from "../../../packages/shared/dist/harness-models.js";
 import type { GuardTokenIssuer } from "../../../packages/shared/dist/guard-token.js";
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
-import type { OpencodeChildOutcome, OpencodeChildRun } from "../../../packages/shared/dist/index.js";
+import type { OpencodeChildOutcome, OpencodeChildRun, ProviderErrorRecord } from "../../../packages/shared/dist/index.js";
 import type { KnowledgeAutomationSettings, KnowledgeAutomationSnapshot } from "../../../packages/shared/dist/knowledge-automation.js";
 import type { WebResearchCapture } from "../../../packages/shared/dist/web-research.js";
 import type {
@@ -900,6 +900,7 @@ export interface CreateCoreOptions {
     readonly executables: { readonly claude?: string; readonly codex?: string };
     readonly guardToken?: GuardTokenIssuer;
     readonly detectRateLimit?: (provider: string, stdout: string, stderr: string) => { resets_at: string | null } | null;
+    readonly describeProviderError?: (provider: string, stdout: string, stderr: string, exitCode: number | null, signal: string | null) => ProviderErrorRecord;
     readonly runOpencode?: (run: OpencodeChildRun) => Promise<OpencodeChildOutcome>;
   }>;
 }

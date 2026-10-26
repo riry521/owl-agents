@@ -7,6 +7,7 @@ import type { WebResearchCapture } from "./web-research.js";
 import type { ChildRunFailureKind, ExecutorRelayConfig, ResearchSubagentSettings } from "./child-runs.js";
 import type { HandoffMemo } from "./token-relay.js";
 import type { AgentFailureClass, RateLimitInfo } from "./rate-limit.js";
+import type { ProviderErrorRecord } from "./provider-error-record.js";
 import type { StoredAcceptanceCriterion } from "./acceptance-criteria.js";
 import type { TaskNecessity } from "./task-necessity.js";
 
@@ -176,11 +177,19 @@ export {
   DEFAULT_ROLE_SESSION_CONTEXT_LIMIT,
   ROLE_SESSION_CONTEXT_LIMIT_ENV,
   roleSessionContextLimit,
+  RATE_LIMIT_RETRY_MAX_ENV,
+  RATE_LIMIT_RETRY_DELAY_ENV,
+  DEFAULT_RATE_LIMIT_RETRY_MAX,
+  DEFAULT_RATE_LIMIT_RETRY_DELAY_MS,
+  MAX_RATE_LIMIT_RETRY_MAX,
+  MAX_RATE_LIMIT_RETRY_DELAY_MS,
+  rateLimitRetrySettings,
   DEFAULT_AGENT_IDLE_TIMEOUT_MS,
   DEFAULT_AGENT_WALL_TIMEOUT_MS,
   MAX_AGENT_TIMEOUT_MS,
   type AgentTimeoutKind,
 } from "./agent-timeouts.js";
+export { PROVIDER_ERROR_RECORD_MAX_CHARS, type ProviderErrorRecord } from "./provider-error-record.js";
 
 /** The owner-facing responsibilities an agent can act under. */
 export type ActorRole =
@@ -318,6 +327,7 @@ export interface AgentRunner {
   setProcessObserver?(observer: (invocationId: string, event: AgentProcessEvent) => void | Promise<void>): void;
   setOutputObserver?(observer: (invocationId: string) => void): void;
   setPromptObserver?(observer: PromptObserver | undefined): void;
+  setProviderErrorObserver?(observer: ProviderErrorObserver | undefined): void;
 }
 /** SHA-256 hex of each cache layer of a role prompt; null when the prompt has no field of that layer. */
 export interface PromptFingerprint {
@@ -328,6 +338,8 @@ export interface PromptFingerprint {
 }
 /** How a provider call was sent: a full prompt, a delta on a resumed session, a full prompt plus handoff, or a report resubmission. */
 export type PromptMode = "fresh" | "resumed" | "handoff" | "report_resubmit";
+/** Called for each failed provider call with the provider's own (masked) error. */
+export type ProviderErrorObserver = (event: { readonly invocation_id: string; readonly role: string; readonly record: ProviderErrorRecord }) => void;
 export type PromptObserver = (invocationId: string, record: { readonly fingerprint: PromptFingerprint; readonly mode: PromptMode }) => void;
 /** Identifies the lifetime of the one-shot CLI process backing a logical AgentRun. */
 export type AgentProcessEvent =
@@ -348,7 +360,7 @@ export interface ExecutorTaskContext {
   readonly knowledge?: string | null;
 }
 export interface ExecutorTask { readonly subtask_id: string; /** Ids of the Task this subtask belongs to; they become OWL_WORK_ID, OWL_TASK_ID and OWL_PROJECT_ID. */ readonly work_id?: string; readonly task_id?: string; readonly project_id?: string; readonly instruction: string; readonly workspace_dir: string; readonly task: ExecutorTaskContext; /** Relative paths this Executor may edit; omitted means whole-workspace scope. */ readonly write_paths?: readonly string[]; readonly process_skills_dir?: string; /** Where process_skills_dir was detected; decides whether the Executor's own harness can invoke a skill natively. */ readonly process_skills_source?: "setting" | "claude" | "codex"; /** The Task's git worktree, when workspace_dir is one; null/omitted when it is not (e.g. the Owl workspace fallback). */ readonly worktree?: string | null; }
-export interface ExecutorResult { readonly subtask_id: string; readonly success: boolean; readonly output: string; readonly exit_code: number; readonly duration_ms: number; /** Set when the process failed; a missing kind on a failure means it never started. */ readonly failure_kind?: ChildRunFailureKind; readonly rate_limit?: { readonly resets_at: string | null }; /** Set when a relay-watched child handed off or was stopped at the prompt-size limit. */ readonly relay?: { readonly reason: "handoff" | "kill"; readonly memo: HandoffMemo | null; readonly peak_prompt_tokens: number }; }
+export interface ExecutorResult { readonly subtask_id: string; readonly success: boolean; readonly output: string; readonly exit_code: number; readonly duration_ms: number; /** Set when the process failed; a missing kind on a failure means it never started. */ readonly failure_kind?: ChildRunFailureKind; readonly rate_limit?: { readonly resets_at: string | null }; /** The provider's own error of a failed process, masked and bounded. */ readonly provider_error?: ProviderErrorRecord; /** Set when a relay-watched child handed off or was stopped at the prompt-size limit. */ readonly relay?: { readonly reason: "handoff" | "kill"; readonly memo: HandoffMemo | null; readonly peak_prompt_tokens: number }; }
 export interface ExecutorConfig { readonly provider: "claude" | "codex" | string; readonly model: string; readonly effort?: string; readonly timeout_ms: number; /** Prompt-size limits; only for Claude children Owl watches. */ readonly relay?: ExecutorRelayConfig; }
 /** One opencode child run: Core assembles it, the server's agent runtime executes it. */
 export interface OpencodeChildRun {
@@ -378,6 +390,7 @@ export interface OpencodeChildOutcome {
   readonly failure_kind?: ChildRunFailureKind;
   readonly usage: TokenUsage | null;
   readonly rate_limit?: { readonly resets_at: string | null };
+  readonly provider_error?: ProviderErrorRecord;
 }
 export interface ProviderExecutionRequest {
   readonly adapter: string;
@@ -406,7 +419,7 @@ export type SessionEvent =
   | { type: "tool.web_research"; turn_id: string; capture: WebResearchCapture }
   | { type: "tool.web_research_failed"; turn_id: string; error: string }
   | { type: "turn.completed"; turn_id: string; reply: string; usage: TokenUsage | null }
-  | { type: "turn.failed"; turn_id: string; error: string; rate_limit?: RateLimitInfo }
+  | { type: "turn.failed"; turn_id: string; error: string; rate_limit?: RateLimitInfo; provider_error?: ProviderErrorRecord }
   | { type: "session.compacted"; cause: "auto" | "manual"; pre_tokens: number | null; summary: string | null; transcript_path: string | null }
   | { type: "session.exited"; exit_code: number | null; signal: string | null; stderr_tail: string };
 export interface ProviderSession { readonly provider_session_id: string; readonly pid: number; /** True once the session can no longer accept turns (process exited or protocol failure). */ readonly exited?: boolean; /** Why the session became unusable (exit or protocol failure), when known. */ readonly exit_detail?: string | null; send(turn: { turn_id: string; text: string; attachment_paths?: readonly string[] }): Promise<void>; events(): AsyncIterable<SessionEvent>; stop(reason: string, graceMs?: number): Promise<void>; terminateImmediately?(): void; }

@@ -28,6 +28,7 @@ export const getAdvisorWindowChannels = async () => [];
 export const createAdvisorWindowChannel = async () => {};
 export const bindAdvisorWindowChannel = async () => {};
 export const renameAdvisorWindowChannel = async () => {};
+export const inviteOwnerToWindowChannel = async () => {};
 export const getAdvisorSession = async () => ({ running_turns: 0, queued_turns: 0 });
 export const listMessages = async () => [{ id: 'm0', conversation_id: 'conv1', source: 'advisor', body: 'hi', attachment_ids: [], created_at: '2026-01-01T00:00:00Z' }];
 export const ingestConversation = async () => {};

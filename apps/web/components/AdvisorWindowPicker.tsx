@@ -11,6 +11,8 @@ interface Props {
   // sidebar: PC column with its own heading. sheet: only the list, for AdvisorWindowSheet.
   variant: 'sidebar' | 'sheet';
   listRef?: Ref<HTMLUListElement>;
+  // Given: project rows can be dragged; fromKey is dropped onto toKey's row.
+  onReorder?: (fromKey: string, toKey: string) => void;
 }
 
 const STATUS_KEYS = {
@@ -34,13 +36,24 @@ function moveFocus(ev: KeyboardEvent<HTMLUListElement>) {
   rows[next]?.focus();
 }
 
-export function AdvisorWindowPicker({ windows, currentKey, onSelect, variant, listRef }: Props) {
+export function AdvisorWindowPicker({ windows, currentKey, onSelect, variant, listRef, onReorder }: Props) {
   const { t } = useLocale();
   const nameOf = (w: AdvisorWindow) => w.name ?? t('advisorWindows.general');
   const list = (
     <ul ref={listRef} className={`advisor-window-picker__list advisor-window-picker__list--${variant}`} onKeyDown={moveFocus}>
       {windows.map((w) => (
-        <li key={w.key} className={w.scope === 'general' ? 'advisor-window-picker__item--general' : undefined}>
+        <li
+          key={w.key}
+          className={w.scope === 'general' ? 'advisor-window-picker__item--general' : undefined}
+          draggable={onReorder && w.scope !== 'general' ? true : undefined}
+          onDragStart={(ev) => ev.dataTransfer.setData('text/plain', w.key)}
+          onDragOver={onReorder ? (ev) => ev.preventDefault() : undefined}
+          onDrop={onReorder ? (ev) => {
+            ev.preventDefault();
+            const from = ev.dataTransfer.getData('text/plain');
+            if (from && from !== w.key) onReorder(from, w.key);
+          } : undefined}
+        >
           <button
             type="button"
             className="advisor-window-picker__row"

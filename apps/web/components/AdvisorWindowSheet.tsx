@@ -11,6 +11,7 @@ interface Props {
   windows: AdvisorWindow[];
   currentKey: string;
   onSelect: (key: string) => void;
+  onReorder?: (fromKey: string, toKey: string) => void;
   /** The window-name button; gets the focus back when the sheet closes. */
   returnFocusTo: RefObject<HTMLElement | null>;
 }
@@ -18,7 +19,7 @@ interface Props {
 const FOCUSABLE = 'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
 
 /** Bottom sheet for switching windows on narrow screens. */
-export function AdvisorWindowSheet({ open, onClose, windows, currentKey, onSelect, returnFocusTo }: Props) {
+export function AdvisorWindowSheet({ open, onClose, windows, currentKey, onSelect, onReorder, returnFocusTo }: Props) {
   const { t } = useLocale();
   const sheetRef = useRef<HTMLDivElement | null>(null);
 
@@ -74,6 +75,7 @@ export function AdvisorWindowSheet({ open, onClose, windows, currentKey, onSelec
           variant="sheet"
           windows={windows}
           currentKey={currentKey}
+          onReorder={onReorder}
           onSelect={(key) => {
             // No focus return here: switching remounts the heading, so the caller refocuses the new button.
             onSelect(key);

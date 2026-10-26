@@ -21,7 +21,7 @@ import { OpencodePermissionResponder } from "./opencode-permission";
 import { opencodeFailureDetail, opencodeMessagesContextTokens, opencodeMessagesUsage } from "./opencode-result";
 import { runOpencodeTurn, type OpencodeTurnError } from "./opencode-turn";
 import { resolveOwlDataDir } from "./output-log";
-import { classifyProviderFailure, type ProviderFailureCause } from "./provider-error";
+import { classifyProviderFailure, sessionFailureMessage, turnFailureProviderError, type ProviderFailureCause } from "./provider-error";
 import type { ProviderSession, ProviderSessionRequest, SessionEvent } from "./types";
 
 const STOP_GRACE_MS = 5_000;
@@ -51,7 +51,7 @@ function turnFailure(error: OpencodeTurnError, turnId: string): TurnFailed {
       ? { exit_code: null, signal: null, kind: "harness_error", error_code: error.type, error: error.message, harness_transient: false }
       : { exit_code: 0, signal: null, kind: "harness_error", ...opencodeFailureDetail({ ...error }) };
   const classification = classifyProviderFailure("opencode", cause);
-  return { type: "turn.failed", turn_id: turnId, error: classification.message, ...(classification.rate_limit !== undefined ? { rate_limit: classification.rate_limit } : {}) };
+  return { type: "turn.failed", turn_id: turnId, error: sessionFailureMessage(classification), ...(classification.rate_limit !== undefined ? { rate_limit: classification.rate_limit } : {}), provider_error: classification.provider_error };
 }
 
 /**
@@ -269,7 +269,8 @@ export class OpencodeSessionDriver implements ProviderSession {
       this.contextTokens = opencodeMessagesContextTokens(result.messages) ?? this.contextTokens;
       this.push({ type: "turn.completed", turn_id: turnId, reply: result.text, usage: opencodeMessagesUsage(result.messages) });
     } catch (error) {
-      this.push({ type: "turn.failed", turn_id: turnId, error: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      this.push({ type: "turn.failed", turn_id: turnId, error: message, provider_error: turnFailureProviderError("opencode", { error: message }) });
     }
   }
 

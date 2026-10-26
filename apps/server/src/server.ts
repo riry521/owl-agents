@@ -29,9 +29,9 @@ import type { IntegrationStore } from "./integration-store.js";
 import type { IntegrationProvider } from "./types.js";
 import { prepareConnectorConfig } from "./secret-config.js";
 import { resolveInstanceId } from "../../../packages/shared/dist/instance-id.js";
-import { classifyProviderFailure } from "../../../packages/agent-runtime/dist/index.js";
+import { classifyProviderFailure, executorProviderError } from "../../../packages/agent-runtime/dist/index.js";
 
-const SERVER_VERSION = "0.7.0";
+const SERVER_VERSION = "0.8.0";
 
 async function recordServerFailure(referenceId: string, context: string, error: unknown): Promise<void> {
   const raw = error instanceof Error ? (error.stack ?? error.message) : String(error);
@@ -269,6 +269,7 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
           const rateLimit = classify(stderr) ?? (/rate[ _-]?limits?|too many requests|usage[ _-]?limits?|429|usageLimitExceeded/iu.test(stdout) ? classify(stdout) : null);
           return rateLimit ? { resets_at: rateLimit.resets_at } : null;
         },
+        describeProviderError: executorProviderError,
       };
     },
   });

@@ -32,6 +32,7 @@ import { insertRequestUsageRows } from "./token-usage-report.js";
 import type { ProviderPauseController } from "./provider-pause-controller.js";
 import { readProcessIdentity } from "./process-identity.js";
 import type { CoreDatabase, CoreWriteLaneTransaction } from "./types.js";
+import { insertProviderError } from "./provider-error-store.js";
 
 export interface ChildRunParentContext {
   readonly agent_run_id: string;
@@ -421,6 +422,7 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
             WHERE id = ? AND status IN ('launch_pending','spawned','running','cancel_requested')`,
           status, status === "completed" ? "success" : null, now, now, usageJson(usage), runId,
         );
+        if (result.provider_error) insertProviderError(tx, runId, "executor", result.provider_error);
         return { cancelled };
       },
       event: {

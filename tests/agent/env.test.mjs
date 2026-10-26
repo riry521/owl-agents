@@ -54,7 +54,7 @@ test("agent env withholds Owl credentials and passes everything else through", a
 });
 
 test("keys defined in Owl's project .env are withheld unless they are shared CLI settings", async (t) => {
-  await withRoot(t, "OWL_PROVIDER=real\nSOME_OWL_SECRET=abc\nCODEX_HOME=/alt/codex\nLC_ALL=C\nOWL_PROVIDER_TIMEOUT_MS=1000\nOWL_PROVIDER_TIMEOUT_MS_WORKER=2000\nOWL_PROVIDER_IDLE_TIMEOUT_MS_WORKER=3000\nOWL_ROLE_SESSION_CONTEXT_LIMIT=1234\nOWL_ROLE_SESSION_CONTEXT_LIMIT_WORKER=4321\n", async (root) => {
+  await withRoot(t, "OWL_PROVIDER=real\nSOME_OWL_SECRET=abc\nCODEX_HOME=/alt/codex\nLC_ALL=C\nOWL_PROVIDER_TIMEOUT_MS=1000\nOWL_PROVIDER_TIMEOUT_MS_WORKER=2000\nOWL_PROVIDER_IDLE_TIMEOUT_MS_WORKER=3000\nOWL_ROLE_SESSION_CONTEXT_LIMIT=1234\nOWL_ROLE_SESSION_CONTEXT_LIMIT_WORKER=4321\nOWL_PROVIDER_RATE_LIMIT_RETRY_MAX=3\nOWL_PROVIDER_RATE_LIMIT_RETRY_DELAY_MS=500\nOWL_PROVIDER_RATE_LIMIT_RETRY_MAX_REVIEWER=1\nOWL_PROVIDER_RATE_LIMIT_RETRY_DELAY_MS_REVIEWER=900\n", async (root) => {
     const env = buildAgentEnv({
       PATH: "/usr/bin",
       HOME: "/home/owl",
@@ -67,6 +67,10 @@ test("keys defined in Owl's project .env are withheld unless they are shared CLI
       OWL_PROVIDER_IDLE_TIMEOUT_MS_WORKER: "3000",
       OWL_ROLE_SESSION_CONTEXT_LIMIT: "1234",
       OWL_ROLE_SESSION_CONTEXT_LIMIT_WORKER: "4321",
+      OWL_PROVIDER_RATE_LIMIT_RETRY_MAX: "3",
+      OWL_PROVIDER_RATE_LIMIT_RETRY_DELAY_MS: "500",
+      OWL_PROVIDER_RATE_LIMIT_RETRY_MAX_REVIEWER: "1",
+      OWL_PROVIDER_RATE_LIMIT_RETRY_DELAY_MS_REVIEWER: "900",
       UNRELATED_USER_SETTING: "kept",
     }, { owlRoot: root });
     assert.equal(env.OWL_PROVIDER, undefined);
@@ -78,6 +82,10 @@ test("keys defined in Owl's project .env are withheld unless they are shared CLI
     assert.equal(env.OWL_PROVIDER_IDLE_TIMEOUT_MS_WORKER, "3000");
     assert.equal(env.OWL_ROLE_SESSION_CONTEXT_LIMIT, "1234");
     assert.equal(env.OWL_ROLE_SESSION_CONTEXT_LIMIT_WORKER, "4321");
+    assert.equal(env.OWL_PROVIDER_RATE_LIMIT_RETRY_MAX, "3");
+    assert.equal(env.OWL_PROVIDER_RATE_LIMIT_RETRY_DELAY_MS, "500");
+    assert.equal(env.OWL_PROVIDER_RATE_LIMIT_RETRY_MAX_REVIEWER, "1");
+    assert.equal(env.OWL_PROVIDER_RATE_LIMIT_RETRY_DELAY_MS_REVIEWER, "900");
     assert.equal(env.UNRELATED_USER_SETTING, "kept");
   });
 });

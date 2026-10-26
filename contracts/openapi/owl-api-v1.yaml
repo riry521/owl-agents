@@ -3474,6 +3474,44 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/advisor/windows/order:
+    put:
+      operationId: updateAdvisorWindowOrder
+      summary: Save the display order of Project windows
+      description: The general window is always first and cannot be reordered. Project windows missing from keys follow the listed ones, ordered by id.
+      security:
+        - ownerBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateAdvisorWindowOrderCommand'
+      responses:
+        '200':
+          description: The windows in the new order, general window first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdvisorWindowListResponse'
+        '400':
+          description: validation_error - keys is not an array of strings, has duplicates, or contains the general window key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/settings/knowledge-storage:
     get:
       operationId: getKnowledgeStorage
@@ -6065,7 +6103,7 @@ components:
                   minimum: 1
               additionalProperties: false
             - type: 'null'
-          description: Set once a rejected Worker Task moved to the Fixer; rejections is the review rejection count at that point.
+          description: Set once a rejected Worker Task moved to the Fixer; rejections is the combined verification-failure and review rejection count at that point.
       additionalProperties: false
     TaskPrerequisite:
       type: object
@@ -6208,7 +6246,7 @@ components:
                   minimum: 1
               additionalProperties: false
             - type: 'null'
-          description: Set once a rejected Worker Task moved to the Fixer; rejections is the review rejection count at that point.
+          description: Set once a rejected Worker Task moved to the Fixer; rejections is the combined verification-failure and review rejection count at that point.
       additionalProperties: false
     TaskListResponse:
       allOf:
@@ -8214,6 +8252,30 @@ components:
           properties:
             payload:
               $ref: '#/components/schemas/UpdateAdvisorFoldersPayload'
+    UpdateAdvisorWindowOrderCommand:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+        - type: object
+          properties:
+            payload:
+              type: object
+              required: [keys]
+              properties:
+                keys:
+                  type: array
+                  description: Project window keys (project ids) in display order, without duplicates and without "general".
+                  items: { type: string }
+              additionalProperties: false
+    AdvisorWindowListResponse:
+      type: object
+      required: [request_id, data, version]
+      properties:
+        request_id: { type: string }
+        version: { type: integer }
+        data:
+          type: array
+          description: Window summaries (key, scope, project_id, name, window_id, conversation_id, session_status, channels, last_message_at), general window first.
+          items: { type: object }
     KnowledgeStorageMoveStage:
       type: string
       enum: [validating, draining, scanning, copying, verifying, switching, cleaning_up]

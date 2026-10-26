@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { promisify } from "node:util";
 
 import { baselineTestRun, latestTestRun, listTestFiles, prepareCheckout, recordTestRunInTransaction, runTestFiles, runWholeSuite, selectTests } from "../../packages/core/dist/test-runs.js";
-import { runCoreTests } from "../../packages/core/dist/core-test-run.js";
+import { runCoreTests, WHOLE_DEFERRED_REASON } from "../../packages/core/dist/core-test-run.js";
 import { resolveTestRun } from "../../packages/core/dist/test-detection.js";
 import { testFailureKey } from "../../packages/core/dist/nightly-tests.js";
 import { ensureBaselineRun, triageTestFailures } from "../../packages/core/dist/test-failure-triage.js";
@@ -205,7 +205,7 @@ test("triage treats a failure as in_scope without a baseline, with an errored ba
 
 // Whole-command mode: one run of whole_argv per check, judged by its exit code; prepare runs once before it.
 
-async function wholeRun(t, exitCode) {
+async function wholeRun(t, exitCode, { scope = "work", force_full = null } = {}) {
   const repo = await createTestRepo(t);
   const { db } = await openTestDatabase(t);
   await seed(db);
@@ -225,8 +225,8 @@ async function wholeRun(t, exitCode) {
   const outcome = await runCoreTests(
     { db, writeLane: db.createWriteLane(), workspaceRoot: repo, baselineRunner: run, baselineLocks: new Map() },
     {
-      scope: "work", project_id: "p", work_id: "w", task_id: null, agent_run_id: null, root: repo, commit: git(repo, "rev-parse", "HEAD"),
-      base_commit: null, repo, changed_files: [], work_changed_files: [], required_tests: [], force_full: null,
+      scope, project_id: "p", work_id: "w", task_id: scope === "task" ? "t" : null, agent_run_id: null, root: repo, commit: git(repo, "rev-parse", "HEAD"),
+      base_commit: null, repo, changed_files: [], work_changed_files: [], required_tests: [], force_full,
       settings: readTestRunSettings({ mode: "whole", whole_argv: ["suite", "--all"], prepare_argv: ["prep"] }), run,
     },
   );
@@ -241,6 +241,61 @@ test("a whole-command run is passed on exit code 0 and failed otherwise, with pr
     assert.equal(db.get("SELECT status FROM test_runs WHERE id = ?", outcome.run_id).status, status);
     assert.deepEqual(db.all("SELECT file FROM test_run_files WHERE run_id = ?", outcome.run_id).map((row) => row.file), ["*"]);
   }
+});
+
+test("a whole Work check runs whole_argv on the first and later runs, recorded as scope work and mode full", async (t) => {
+  for (const force_full of ["first_work_run", null]) {
+    const { db, outcome, calls } = await wholeRun(t, 0, { force_full });
+    assert.deepEqual(calls, ["prep", "suite --all"]);
+    const row = db.get("SELECT scope, mode FROM test_runs WHERE id = ?", outcome.run_id);
+    assert.deepEqual([row.scope, row.mode], ["work", "full"]);
+  }
+});
+
+test("a whole Task check starts no runner and is skipped with the whole_deferred_to_work reason", async (t) => {
+  const { db, outcome, calls } = await wholeRun(t, 1, { scope: "task" });
+  assert.deepEqual(calls, []);
+  assert.deepEqual([outcome.status, outcome.reason, outcome.run_id], ["skipped", WHOLE_DEFERRED_REASON, null]);
+  assert.equal(WHOLE_DEFERRED_REASON, "whole_deferred_to_work");
+  assert.equal(db.all("SELECT id FROM test_runs").length, 0);
+});
+
+test("per_file: a Task check runs only the tests related to the change, the Work's first run runs every test file", async (t) => {
+  const repo = await createTestRepo(t, { files });
+  const { db } = await openTestDatabase(t);
+  await seed(db);
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((tx) => {
+    tx.run(
+      `INSERT INTO works (id, owner_id, project_id, title, summary, size, state, rules_json, related_work_ids_json, created_at, updated_at)
+       VALUES ('w', 'o', 'p', 'W', '', 'normal', 'running', '[]', '[]', ?, ?)`, now, now,
+    );
+    tx.run(
+      `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, state_version, failure_count, same_error_count, review_round, worker_generation, created_at, updated_at, retry_no, manager_task_id)
+       VALUES ('t', 'w', 'T', 'code', 'running', 'normal', '', 'Done.', 0, 0, 0, 0, 0, ?, ?, 0, 'T1')`, now, now,
+    );
+  });
+  const ran = [];
+  const run = async (argv) => {
+    ran.push(argv.at(-1));
+    return { exit_code: 0, timed_out: false, stdout: "", stderr: "", duration_ms: 1 };
+  };
+  const check = (scope, force_full) => runCoreTests(
+    { db, writeLane: db.createWriteLane(), workspaceRoot: repo, baselineRunner: run, baselineLocks: new Map() },
+    {
+      scope, project_id: "p", work_id: "w", task_id: scope === "task" ? "t" : null, agent_run_id: null, root: repo, commit: git(repo, "rev-parse", "HEAD"),
+      base_commit: null, repo, changed_files: ["src/lib.mjs"], work_changed_files: ["src/lib.mjs"], required_tests: [], force_full,
+      settings: readTestRunSettings({ test_patterns: ["tests/**/*.test.mjs"], concurrency: 1 }), run,
+    },
+  );
+  const task = await check("task", null);
+  assert.deepEqual([task.selection.mode, task.selection.files], ["selected", ["tests/d.test.mjs"]]);
+  assert.deepEqual(ran, ["tests/d.test.mjs"]);
+  ran.length = 0;
+  const work = await check("work", "first_work_run");
+  assert.deepEqual([work.selection.mode, work.selection.full_reason], ["full", "first_work_run"]);
+  assert.deepEqual(work.selection.files, ["tests/a.test.mjs", "tests/b.test.mjs", "tests/c.test.mjs", "tests/d.test.mjs"]);
+  assert.deepEqual(ran.sort(), work.selection.files);
 });
 
 test("resolveTestRun prefers explicit settings, then a saved detection, and detects when neither fits", async (t) => {
@@ -327,4 +382,101 @@ test("test_run.cwd is relative without .., and per_file only accepts the root", 
   assert.equal(readTestRunSettings({ mode: "whole", whole_argv: ["suite"], cwd: "/abs" }).cwd, ".");
   assert.equal(readTestRunSettings({ cwd: "a" }).cwd, ".");
   assert.deepEqual(validateTestRunSettings({ mode: "per_file", cwd: "a" }), ['test_run.cwd must be "." when mode is per_file']);
+});
+
+// setup_cache: the setup runs once per checkout until its inputs change; the hash lives in the git directory.
+const cacheSettings = (over = {}) => readTestRunSettings({
+  mode: "whole", whole_argv: ["suite"], setup_argvs: [["mkenv"]], prepare_argv: ["prep"],
+  setup_cache: { inputs: ["requirements.txt"], outputs: [".venv"] }, ...over,
+});
+
+async function cacheCheckout(t) {
+  const root = await createTestRepo(t);
+  await writeFile(join(root, "requirements.txt"), "a\n");
+  git(root, "add", "requirements.txt");
+  git(root, "commit", "-m", "requirements");
+  await mkdir(join(root, ".venv"));
+  const calls = [];
+  const run = async (argv) => {
+    calls.push(argv[0]);
+    return { exit_code: argv[0] === "mkenv" && calls.failMkenv ? 1 : 0, timed_out: false, stdout: "", stderr: "", duration_ms: 1 };
+  };
+  return { root, calls, run };
+}
+
+const setupCalls = (calls) => calls.filter((name) => name === "mkenv" || name === "prep").length;
+
+test("an unchanged setup is not run again in either run path, and leaves git status clean", async (t) => {
+  const { root, calls, run } = await cacheCheckout(t);
+  const settings = cacheSettings();
+  await runWholeSuite({ root, settings, run });
+  await runWholeSuite({ root, settings, run });
+  assert.equal(setupCalls(calls), 2, "mkenv and prep ran once in total");
+  await runTestFiles({ root, files: ["a.test.mjs"], settings: { ...settings, mode: "per_file", file_argv: ["node", "--test", "{file}"] }, run });
+  assert.equal(setupCalls(calls), 2);
+  assert.equal(git(root, "status", "--porcelain"), "");
+});
+
+test("a changed input, changed argv, removed output or failed setup runs the setup again", async (t) => {
+  const { root, calls, run } = await cacheCheckout(t);
+  await runWholeSuite({ root, settings: cacheSettings(), run });
+  await writeFile(join(root, "requirements.txt"), "b\n");
+  await runWholeSuite({ root, settings: cacheSettings(), run });
+  assert.equal(setupCalls(calls), 4, "input content changed");
+  await runWholeSuite({ root, settings: cacheSettings({ prepare_argv: ["prep", "2"] }), run });
+  assert.equal(setupCalls(calls), 6, "prepare_argv changed");
+  await rm(join(root, ".venv"), { recursive: true });
+  await runWholeSuite({ root, settings: cacheSettings({ prepare_argv: ["prep", "2"] }), run });
+  assert.equal(setupCalls(calls), 8, "output removed");
+  await writeFile(join(root, "requirements.txt"), "c\n");
+  calls.failMkenv = true;
+  assert.equal((await runWholeSuite({ root, settings: cacheSettings(), run })).status, "error");
+  calls.failMkenv = false;
+  const failed = setupCalls(calls);
+  await runWholeSuite({ root, settings: cacheSettings(), run });
+  assert.equal(setupCalls(calls), failed + 2, "a failed setup recorded nothing");
+});
+
+test("settings without a setup record run the setup every time", async (t) => {
+  const { root, calls, run } = await cacheCheckout(t);
+  const settings = cacheSettings({ setup_cache: null });
+  assert.equal(settings.setup_cache, null);
+  await runWholeSuite({ root, settings, run });
+  await runWholeSuite({ root, settings, run });
+  assert.equal(setupCalls(calls), 4);
+});
+
+test("a test run that fails for the environment after a skipped setup prepares again and runs once more", async (t) => {
+  const repo = await createTestRepo(t);
+  const { db } = await openTestDatabase(t);
+  await seed(db);
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((tx) => {
+    tx.run(`INSERT INTO works (id, owner_id, project_id, title, summary, size, state, rules_json, related_work_ids_json, created_at, updated_at) VALUES ('w', 'o', 'p', 'W', '', 'normal', 'running', '[]', '[]', ?, ?)`, now, now);
+  });
+  await mkdir(join(repo, ".venv"));
+  let broken = false;
+  const calls = [];
+  const count = (name) => calls.filter((call) => call === name).length;
+  const run = async (argv) => {
+    calls.push(argv[0]);
+    const bad = argv[0] === "suite" && broken;
+    if (argv[0] === "mkenv") broken = false;
+    return { exit_code: bad ? 127 : 0, timed_out: false, stdout: "", stderr: bad ? "no such interpreter\n" : "", duration_ms: 1 };
+  };
+  const request = () => ({
+    scope: "work", project_id: "p", work_id: "w", task_id: null, agent_run_id: null, root: repo, commit: git(repo, "rev-parse", "HEAD"),
+    base_commit: null, repo, changed_files: [], work_changed_files: [], required_tests: [], force_full: null,
+    settings: cacheSettings({ setup_cache: { inputs: [], outputs: [".venv"] }, prepare_argv: [] }), run,
+    environment_signals: { exit_codes: [127], patterns: [] },
+  });
+  const deps = { db, writeLane: db.createWriteLane(), workspaceRoot: repo, baselineRunner: run, baselineLocks: new Map() };
+  await runCoreTests(deps, request());
+  broken = true;
+  const outcome = await runCoreTests(deps, request());
+  assert.equal(count("mkenv"), 2, "setup ran again after the environment failure");
+  assert.equal(count("suite"), 3, "the suite ran once more");
+  assert.equal(outcome.status, "passed");
+  await runCoreTests(deps, request());
+  assert.equal(count("mkenv"), 2, "the re-prepare was recorded");
 });

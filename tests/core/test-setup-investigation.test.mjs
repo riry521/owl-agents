@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
+import { createAgentRunner } from "../../packages/agent-runtime/dist/index.js";
 import { runWholeSuite } from "../../packages/core/dist/test-runs.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { command, createTestCore } from "../helpers/core.mjs";
@@ -50,6 +51,8 @@ async function writeExecutable(path, body = SH) {
 const READY = (over = {}) => ({
   verdict: "ready",
   setup_argvs: [],
+  setup_inputs: [],
+  setup_outputs: [],
   test_run: { mode: "whole", whole_argv: ["{python}", "-m", "pytest", "-q"], file_argv: [], prepare_argv: [], test_patterns: ["**/test_*.py"], cwd: "." },
   executables: [{ name: "python", path: ".venv/bin/python", probe_argv: ["{python}", "--version"] }],
   confirm_files: [],
@@ -59,7 +62,7 @@ const READY = (over = {}) => ({
   installed: [],
   outside_installs: [],
   missing: [],
-  notes: "",
+  notes: "one test file cannot run alone in this fixture",
   ...over,
 });
 
@@ -193,6 +196,44 @@ test("every registration route schedules one investigation, and a Project with i
 });
 
 // ---- AC2: four environments
+
+test("a per_file output stays per_file and a whole output with a reason stays whole", async (t) => {
+  const perFile = { mode: "per_file", whole_argv: [], file_argv: ["{python}", "-m", "pytest", "-q", "{file}"], prepare_argv: [], test_patterns: ["**/test_*.py"], cwd: "." };
+  const agent = stubAgent((request) => (request.project.name === "pytest-files"
+    ? { output: READY({ test_run: perFile, confirm_files: ["tests/test_app.py"] }) }
+    : { output: READY({ notes: "pytest cannot run one file here: conftest needs the whole suite" }) }));
+  const ctx = await open(t, { agent });
+  assert.equal(ctx.record("projects", (await ctx.register("pytest-files")).projectId).test_run.mode, "per_file");
+  assert.equal(ctx.record("projects", (await ctx.register("whole-reason")).projectId).test_run.mode, "whole");
+});
+
+test("through the real agent runner, a whole output without a reason is resubmitted and a per_file output is saved", async (t) => {
+  const perFile = { mode: "per_file", whole_argv: [], file_argv: ["{python}", "-m", "pytest", "-q", "{file}"], prepare_argv: [], test_patterns: ["**/test_*.py"], cwd: "." };
+  const replies = [READY({ notes: "" }), READY({ test_run: perFile, confirm_files: ["tests/test_app.py"] })];
+  const prompts = [];
+  const respond = (result, session) => ({ adapter: "claude", stdout: JSON.stringify({ type: "result", result, session_id: session }), stderr: "", exit_code: 0, signal: null, provider_session_id: session });
+  const provider = {
+    execute: async (request) => {
+      if (!request.prompt.includes("test environment investigator") && request.provider_session_id !== "setup-session") return respond("overview", "other-session");
+      prompts.push(request.prompt);
+      await writeExecutable(join(request.cwd, ".venv/bin/python"));
+      return respond(JSON.stringify(replies[prompts.length - 1]), "setup-session");
+    },
+  };
+  const ctx = await open(t, { agent: createAgentRunner({ adapter: "claude-cli/v1", model: "claude-opus-5-5", provider }) });
+  const { projectId } = await ctx.register("resubmit");
+  assert.equal(prompts.length, 2, "the whole output without a reason asks for another answer");
+  assert.equal(ctx.record("projects", projectId).test_run.mode, "per_file");
+});
+
+test("the dependency files and made paths the agent reports are saved in the record's test_run as setup_cache", async (t) => {
+  const agent = stubAgent(() => ({ output: READY({ setup_argvs: [["python3", "-m", "venv", ".venv"]], setup_inputs: ["requirements.txt"], setup_outputs: [".venv"] }) }));
+  const ctx = await open(t, { agent, runner: stubRunner() });
+  const { projectId } = await ctx.register("cache", REPO_FILES);
+  const saved = ctx.record("projects", projectId);
+  assert.equal(saved.status, "ready", JSON.stringify(saved.missing));
+  assert.deepEqual(saved.test_run.setup_cache, { inputs: ["requirements.txt"], outputs: [".venv"] });
+});
 
 test("Core confirms four environments and saves a ready command with its executables, sources, attempts and times", async (t) => {
   const pyenv = (root) => join(root, "pyenv-home", "shims", "python");
@@ -357,6 +398,34 @@ test("investigations of the same Project and digest share one agent run", async 
 });
 
 // ---- AC4: investigation on change
+
+test("a whole record saved without a reason is investigated again once; per_file and reasoned whole records, and the record saved after the investigation, are not", async (t) => {
+  const perFile = { mode: "per_file", whole_argv: [], file_argv: ["{python}", "-m", "pytest", "-q", "{file}"], prepare_argv: [], test_patterns: ["**/test_*.py"], cwd: "." };
+  const agent = stubAgent((request) => (request.project.name === "pytest-files" ? { output: READY({ test_run: perFile, confirm_files: ["tests/test_app.py"] }) } : {}));
+  const ctx = await open(t, { agent });
+  const legacy = await ctx.register("legacy");
+  const files = await ctx.register("pytest-files");
+  const reasoned = await ctx.register("reasoned");
+  const saved = (id) => ctx.record("projects", id);
+  assert.equal(saved(legacy.projectId).whole_reason, READY().notes);
+  assert.equal(saved(files.projectId).test_run.mode, "per_file");
+  const { whole_reason: _dropped, ...old } = saved(legacy.projectId);
+  await ctx.db.createWriteLane().transact((tx) => tx.run("UPDATE projects SET test_setup_json = ? WHERE id = ?", JSON.stringify(old), legacy.projectId));
+
+  const check = async (name, { projectId, repo }) => {
+    const { workId, taskId } = await addTask(ctx, projectId, name);
+    const before = agent.calls.length;
+    await resolveAt(ctx, workId, taskId, repo);
+    await ctx.core.whenTestSetupIdle();
+    return agent.calls.length - before;
+  };
+  assert.equal(await check("files", files), 0, "per_file is not investigated again");
+  assert.equal(await check("reasoned", reasoned), 0, "a whole record with a reason is not investigated again");
+  assert.equal(await check("legacy", legacy), 1, "a whole record without a reason is investigated again");
+  assert.equal(agent.calls.at(-1).trigger, "inputs_changed");
+  assert.equal(saved(legacy.projectId).whole_reason, READY().notes);
+  assert.equal(await check("legacy-again", legacy), 0, "the new record keeps it from being investigated again");
+});
 
 test("a layout change of the canonical checkout schedules a Project investigation, an unchanged layout does not", async (t) => {
   const agent = stubAgent();

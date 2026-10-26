@@ -24,6 +24,8 @@ const NODE_BOOTSTRAP = {
 const report = (over) => ({
   verdict: "no_tests",
   setup_argvs: [],
+  setup_inputs: [],
+  setup_outputs: [],
   test_run: PYTHON_BOOTSTRAP,
   executables: [{ name: "python", path: ".venv/bin/python", probe_argv: ["{python}", "-m", "pytest", "--version"] }],
   confirm_files: [],

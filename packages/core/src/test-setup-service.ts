@@ -43,6 +43,8 @@ const SAFETY_MARGIN_MS = 60_000;
 interface AgentOutput {
   readonly verdict: string;
   readonly setup_argvs: readonly (readonly string[])[];
+  readonly setup_inputs: readonly string[];
+  readonly setup_outputs: readonly string[];
   readonly test_run: { readonly mode: "per_file" | "whole"; readonly whole_argv: readonly string[]; readonly file_argv: readonly string[]; readonly prepare_argv: readonly string[]; readonly test_patterns: readonly string[]; readonly cwd: string } | null;
   readonly executables: readonly { readonly name: string; readonly path: string; readonly probe_argv: readonly string[] }[];
   readonly confirm_files: readonly string[];
@@ -52,6 +54,7 @@ interface AgentOutput {
   readonly installed: readonly { readonly argv: readonly string[] }[];
   readonly outside_installs: readonly { readonly argv: readonly string[]; readonly reason: string }[];
   readonly missing: readonly string[];
+  readonly notes?: string;
 }
 
 type AgentResult = { readonly ok: true; readonly investigation: AgentOutput; readonly invocation_id: string } | { readonly ok: false; readonly error: string; readonly invocation_id?: string };
@@ -344,6 +347,7 @@ export class TestSetupService {
       trigger: "core_confirmed",
       agent_run: null,
       explicit_digest: input.record.explicit_digest,
+      whole_reason: input.record.whole_reason,
     }, at);
     await this.write(input, body, "ready");
   }
@@ -407,6 +411,7 @@ export class TestSetupService {
         code_problem: output?.verdict === "code_problem",
         fields: {
           explicit_digest: explicitDigest,
+          whole_reason: output?.test_run?.mode === "whole" ? (output.notes ?? "").trim() : "",
           digests: await digestsFor(),
           setup_argvs: output?.setup_argvs ?? [],
           test_run: null,
@@ -452,7 +457,12 @@ export class TestSetupService {
     const nonEmpty = (entries: Record<string, unknown>): Record<string, unknown> =>
       Object.fromEntries(Object.entries(entries).filter(([, value]) => !(Array.isArray(value) && value.length === 0) && value !== ""));
     const runInput = explicit ?? nonEmpty({ ...agentRun });
-    const withSetup = { ...runInput, ...(output.setup_argvs.length > 0 ? { setup_argvs: output.setup_argvs } : {}) };
+    // The cache describes the setup_argvs the agent recorded, which repair_explicit also keeps, so it is saved in both modes.
+    const withSetup = {
+      ...runInput,
+      ...(output.setup_argvs.length > 0 ? { setup_argvs: output.setup_argvs } : {}),
+      setup_cache: { inputs: output.setup_inputs, outputs: output.setup_outputs },
+    };
     const problems = validateTestRunSettings(withSetup);
     if (problems.length > 0) return finish("unresolved", { missing: problems });
     if (output.verdict === "no_tests" && (explicit !== null || !Array.isArray(runInput.test_patterns) || runInput.test_patterns.length === 0)) {

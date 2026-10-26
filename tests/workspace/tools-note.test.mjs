@@ -19,3 +19,15 @@ test("renderWorkspaceToolsNote returns null without a usable absolute path", () 
   assert.equal(renderWorkspaceToolsNote("   "), null);
   assert.equal(renderWorkspaceToolsNote("relative/path"), null);
 });
+
+test("renderWorkspaceToolsNote tells where to clone from the clone root it is given", () => {
+  const note = (root) => renderWorkspaceToolsNote("/Users/owner/wt", root).join("\n");
+  const first = note("/Users/owner/clones");
+  assert.match(first, /\/Users\/owner\/clones\/<host>\/<owner>\/<repo>/);
+  assert.match(first, /never inside the worktree/);
+  assert.match(first, /same URL already exists/);
+  assert.match(first, /do not edit them/);
+  assert.match(note("/srv/other"), /\/srv\/other\/<host>/);
+  assert.doesNotMatch(note("/srv/other"), /\/Users\/owner\/clones/);
+  assert.doesNotMatch(note(null), /clone/i);
+});

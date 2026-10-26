@@ -77,6 +77,13 @@ function phasedTurn(threadId) {
     return;
   }
   delta(threadId, "i1", "thinking...");
+  if (scenario.startsWith("turn-failed-")) {
+    const errorInfo = scenario === "turn-failed-429"
+      ? { responseTooManyFailedAttempts: { httpStatusCode: 429 } }
+      : "usageLimitExceeded";
+    send({ method: "turn/completed", params: { threadId, turn: { id: "turn-c1", status: "failed", items: [], itemsView: "notLoaded", error: { message: "exceeded retry limit, last status: 429 Too Many Requests", codexErrorInfo: errorInfo, additionalDetails: null } } } });
+    return;
+  }
   if (scenario === "commentary-only") {
     itemCompleted(threadId, commentary);
     turnCompleted(threadId, [commentary]);
@@ -97,7 +104,7 @@ function phasedTurn(threadId) {
     turnCompleted(threadId, []);
   }
 }
-const PHASED = new Set(["phased", "phased-items-only", "phased-delta-only", "commentary-only", "legacy-multi", "delta-missing-item-id"]);
+const PHASED = new Set(["turn-failed-429", "turn-failed-usage", "phased", "phased-items-only", "phased-delta-only", "commentary-only", "legacy-multi", "delta-missing-item-id"]);
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line);
   fs.appendFileSync(log, JSON.stringify(message) + "\\n");
@@ -266,6 +273,26 @@ test("Codex turn with commentary but no final_answer fails", async (t) => {
   assert.equal(failed?.turn_id, "local-turn");
   assert.match(failed?.error ?? "", /final_answer/);
   assert.doesNotMatch(failed?.error ?? "", /thinking\.\.\./);
+});
+
+test("a Codex 429 with only responseTooManyFailedAttempts fails the turn as a transient limit", async (t) => {
+  const { events } = await codexTurn(t, "turn-failed-429");
+  const failed = events.find((event) => event.type === "turn.failed");
+  assert.equal(failed?.turn_id, "local-turn");
+  assert.equal(failed?.rate_limit, undefined);
+  assert.equal(failed?.error, "Codexへのリクエストが一時的に制限されました（HTTP 429）。 少し待ってから、もう一度送ってください。");
+  assert.doesNotMatch(failed?.error ?? "", /利用上限/u);
+  assert.equal(failed?.provider_error?.harness, "codex");
+  assert.equal(failed?.provider_error?.code, "responseTooManyFailedAttempts");
+  assert.equal(failed?.provider_error?.http_status, 429);
+  assert.equal(failed?.provider_error?.message_source, "harness_error");
+});
+
+test("a Codex usageLimitExceeded string code fails the turn as a usage limit", async (t) => {
+  const { events } = await codexTurn(t, "turn-failed-usage");
+  const failed = events.find((event) => event.type === "turn.failed");
+  assert.notEqual(failed?.rate_limit, undefined);
+  assert.match(failed?.error ?? "", /利用上限/u);
 });
 
 test("Codex legacy turn without phases replies with the last agentMessage only", async (t) => {

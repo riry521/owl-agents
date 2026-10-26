@@ -238,6 +238,7 @@ export function withWorkspacePreparation(runner: AgentRunner, preparer: AgentWor
     ...(runner.cancelAgent ? { cancelAgent: (invocationId: string, force?: boolean) => runner.cancelAgent!(invocationId, force) } : {}),
     ...(runner.setProcessObserver ? { setProcessObserver: (observer: Parameters<NonNullable<AgentRunner["setProcessObserver"]>>[0]) => runner.setProcessObserver!(observer) } : {}),
     ...(runner.setPromptObserver ? { setPromptObserver: (observer: Parameters<NonNullable<AgentRunner["setPromptObserver"]>>[0]) => runner.setPromptObserver!(observer) } : {}),
+    ...(runner.setProviderErrorObserver ? { setProviderErrorObserver: (observer: Parameters<NonNullable<AgentRunner["setProviderErrorObserver"]>>[0]) => runner.setProviderErrorObserver!(observer) } : {}),
     ...(runner.setOutputObserver ? { setOutputObserver: (observer: (invocationId: string) => void) => runner.setOutputObserver!(observer) } : {}),
   };
 }

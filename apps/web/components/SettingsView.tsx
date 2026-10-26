@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment, type FormEvent, useEffect, useRef, useState } from 'react';
-import { getModelSettings, getSettingsView, updateModelSettings, saveIntegration, testIntegration, deleteIntegration, setHybridMode, setChildRunSettings, createProvider, deleteProvider, testProvider, saveProvider, getProviderModels, setProviderModels as setProviderModelsApi, setTypesafeApiKey, setAdvisorPersona, putAdvisorFolders, putRemakeLimitSettings, putFixerEscalationSettings, putAutoRecoverySettings, getKnowledgeStorage, putKnowledgeStorage, setOwnerLanguage, setKnowledgeAutomationSettings, ApiRequestError } from '@/lib/api-client';
+import { getModelSettings, getSettingsView, updateModelSettings, saveIntegration, testIntegration, deleteIntegration, setHybridMode, setChildRunSettings, createProvider, deleteProvider, testProvider, saveProvider, getProviderModels, setProviderModels as setProviderModelsApi, setTypesafeApiKey, setAdvisorPersona, putAdvisorFolders, putRemakeLimitSettings, putFixerEscalationSettings, putAutoRecoverySettings, getKnowledgeStorage, putKnowledgeStorage, setOwnerLanguage, inviteOwnerToSlackChannels, setKnowledgeAutomationSettings, ApiRequestError } from '@/lib/api-client';
 import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ChildRunSettings, ChildRunHarnessChoice, ProviderInfo, SaveProviderPayload, AdvisorFolders, RemakeLimitSettings, FixerEscalationSettings, AutoRecoverySettings, KnowledgeStorageStatus, KnowledgeAutomationSettingsData, KnowledgeAutomationSettingsInput } from '@/lib/types';
 import { roleDisplayName } from '@/lib/format';
 import { useLocale, type Locale } from '@/lib/i18n';
@@ -9,6 +9,7 @@ import { REMAKE_TASK_TYPES, remakeLimitsToDraft, draftToRemakeLimits } from '@/l
 import { humanizeError } from '@/lib/settings-errors';
 import { presetMatchesSettings } from '@/lib/model-presets';
 import { ModelPresetsBar } from '@/components/ModelPresetsBar';
+import { OwnerInviteButton } from '@/components/OwnerInviteButton';
 import { FolderPickerDialog } from '@/components/FolderPickerDialog';
 import { useView } from '@/lib/view-loader';
 
@@ -2155,6 +2156,13 @@ function IntegrationsSection() {
                 />
                 <span style={{ fontSize: '0.8rem', color: 'var(--color-text-muted)' }}>{t('settings.ownerUserIdHint')}</span>
               </label>
+            )}
+            {provider === 'slack' && (
+              <OwnerInviteButton
+                ownerSet={!!status.owner_user_id?.trim()}
+                label={t('ownerInvite.settingsButton')}
+                onInvite={async () => (await inviteOwnerToSlackChannels()).map((r) => ({ name: r.display_name, invite: r.invite, message: r.error?.message }))}
+              />
             )}
             <label className="form-field" style={{ marginTop: '8px' }}>
               <span>{t('settings.botToken')}</span>

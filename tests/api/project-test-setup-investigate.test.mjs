@@ -19,6 +19,8 @@ const REPO_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 const READY = {
   verdict: "ready",
   setup_argvs: [],
+  setup_inputs: [],
+  setup_outputs: [],
   test_run: { mode: "whole", whole_argv: ["node", "--test"], file_argv: [], prepare_argv: [], test_patterns: ["**/*.test.mjs"], cwd: "." },
   executables: [],
   confirm_files: [],
@@ -28,7 +30,7 @@ const READY = {
   installed: [],
   outside_installs: [],
   missing: [],
-  notes: "",
+  notes: "whole: this runner cannot run a single file",
 };
 
 function stubAgent() {

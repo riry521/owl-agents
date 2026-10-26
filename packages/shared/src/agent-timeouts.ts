@@ -26,6 +26,15 @@ export const ROLE_SESSION_CONTEXT_LIMIT_ENV = "OWL_ROLE_SESSION_CONTEXT_LIMIT";
 /** Context-token limit for keeping a role session unless configured otherwise. */
 export const DEFAULT_ROLE_SESSION_CONTEXT_LIMIT = 80_000;
 
+export const RATE_LIMIT_RETRY_MAX_ENV = "OWL_PROVIDER_RATE_LIMIT_RETRY_MAX";
+export const RATE_LIMIT_RETRY_DELAY_ENV = "OWL_PROVIDER_RATE_LIMIT_RETRY_DELAY_MS";
+/** Retries of a temporary rate limit inside one invocation unless configured otherwise. */
+export const DEFAULT_RATE_LIMIT_RETRY_MAX = 2;
+export const MAX_RATE_LIMIT_RETRY_MAX = 10;
+/** Base wait before a temporary-rate-limit retry; the n-th retry waits n times this. */
+export const DEFAULT_RATE_LIMIT_RETRY_DELAY_MS = 15_000;
+export const MAX_RATE_LIMIT_RETRY_DELAY_MS = 600_000;
+
 /** Setting keys to try in order: the role-specific key (`<BASE>_<ROLE>`), then the common key. */
 function settingKeys(base: string, role: string | undefined): string[] {
   const suffix = role?.trim().toUpperCase().replace(/[^A-Z0-9]+/gu, "_");
@@ -84,6 +93,27 @@ export function roleSessionContextLimit(env: Env, role?: string): number {
     throw new AgentTimeoutSettingError(found.key, `${found.key} must be a positive whole number of tokens.`);
   }
   return value;
+}
+
+function boundedIntegerSetting(env: Env, base: string, role: string | undefined, fallback: number, max: number): number {
+  const found = firstSetting(env, settingKeys(base, role));
+  if (!found) return fallback;
+  const value = Number(found.raw);
+  if (!/^\d+$/u.test(found.raw) || value > max) {
+    throw new AgentTimeoutSettingError(found.key, `${found.key} must be a whole number from 0 to ${max}.`);
+  }
+  return value;
+}
+
+/**
+ * Short-retry settings for a temporary rate limit, from OWL_PROVIDER_RATE_LIMIT_RETRY_MAX
+ * and OWL_PROVIDER_RATE_LIMIT_RETRY_DELAY_MS (each with an optional `_<ROLE>` key); 0 retries disables it.
+ */
+export function rateLimitRetrySettings(env: Env, role?: string): { maxRetries: number; delayMs: number } {
+  return {
+    maxRetries: boundedIntegerSetting(env, RATE_LIMIT_RETRY_MAX_ENV, role, DEFAULT_RATE_LIMIT_RETRY_MAX, MAX_RATE_LIMIT_RETRY_MAX),
+    delayMs: boundedIntegerSetting(env, RATE_LIMIT_RETRY_DELAY_ENV, role, DEFAULT_RATE_LIMIT_RETRY_DELAY_MS, MAX_RATE_LIMIT_RETRY_DELAY_MS),
+  };
 }
 
 /**

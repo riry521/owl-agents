@@ -228,16 +228,25 @@ Details are in [docs/operations.md](docs/operations.md).
 - **Backlog.** The `/backlog` page lists review follow-ups per Project. Link an item to a Work, issue a Work from it, or dismiss it.
 - **Steering from the Advisor.** The Advisor can send an instruction to a Work (`send_work_instruction`), edit its title or summary (`update_work`), and pause, resume, cancel or delete it (`pause_work`, `resume_work`, `cancel_work`, `delete_work`).
 - **Cancel vs. delete.** Cancel stops the agents, cleans up the Work's worktree and keeps the Work as cancelled. Delete removes the Work from the database and frees its number.
+- **Pause and instructions.** Pausing a Work stops the agents that are running and starts no new Tasks; resuming it runs the stopped Tasks again. Sending an instruction also stops the running agents, and the Manager replans from the new state.
+- **Required and goal criteria.** Each acceptance criterion is either required or a goal. A Work can complete when every required criterion is met, even if a goal is not. The Work detail page lists the goals that were not met, with the reason.
 
 ### Keeping it running
 
-- **Rate limits.** When a provider answers with a rate limit (for example HTTP 429), Owl pauses that provider and resumes automatically after the reset time, or after a backoff of 15, 30 and 60 minutes when none is given.
+- **Rate limits.** When a provider answers with a rate limit (for example HTTP 429), Owl pauses that provider and resumes automatically after the reset time, or after a backoff of 15, 30 and 60 minutes when none is given. A 429 with no error code and no usage-limit message is treated as a temporary limit: the run retries a few times first (`OWL_PROVIDER_RATE_LIMIT_RETRY_MAX`, `OWL_PROVIDER_RATE_LIMIT_RETRY_DELAY_MS`; see `.env.example`), and the provider's raw error is recorded with the run.
 - **Core background work.** While Core itself runs integration verification, tests, pre-merge re-verification, a wait for the Git lane or a base merge, the Work detail page shows what Core is doing and for how long.
 - **Build after merge.** After a Work is merged, Owl runs the Project's post-merge command (the build). If a dependency file such as `package.json` or `pnpm-lock.yaml` changed, the install command runs first. If either fails, the Owner is notified. Both commands are per-Project settings.
-- **Fixer.** When the Reviewer rejects a non-design Task twice (`after_review_rejections`, default 2), the Fixer role takes the next fix and keeps the Task until it completes. Set its model under the `fixer` role in Settings. See [docs/operations.md](docs/operations.md#fixer-escalation).
-- **Test setup per Project.** When you register or change a Project, or when a test fails because of the environment, an agent investigates how to run that Project's tests, Core confirms the command works, and the result is saved with the Project. In the Projects view, edit a Project and use the re-investigation button to run it again by hand.
+- **Fixer.** When verification fails or the Reviewer rejects a non-design Task twice in total (`after_review_rejections`, default 2), the Fixer role takes the next fix and keeps the Task until it completes. Set its model under the `fixer` role in Settings. See [docs/operations.md](docs/operations.md#fixer-escalation).
+- **Test setup per Project.** The default test mode is `per_file`, and a setup step is skipped while the files it depends on are unchanged and what it made still exists. When you register or change a Project, or when a test fails because of the environment, an agent investigates how to run that Project's tests, Core confirms the command works, and the result is saved with the Project. In the Projects view, edit a Project and use the re-investigation button to run it again by hand.
+- **Whole-suite tests.** For a Project whose tests run in `whole` mode, Core does not run the whole suite during each Task's verification. The Task records the test check as deferred, and the whole suite runs once in the Work's verification.
+- **Cloned repositories.** Workers must keep cloned external repositories outside the Project. Owl picks a clone folder outside every Project (git `ghq.root`, else the home folder that already holds the most clones, else a `clones` folder under the data directory) and tells the Worker. A Task that places a clone inside the Project, or edits a clone, fails verification.
 - **Turn off tests.** Set the Project's test run to "Don't run tests" (`test_run` mode `off`) and Core does not run the test runner during Task verification either.
 - **Commit language.** Set `commit_language` (`ja` or `en`) on a Project. For `en`, the commit that completes a Work is written in English.
+
+### When a Work stops
+
+- **Decisions.** When a Work cannot go on, a Decision page opens. It explains the stop in two parts: "The bottleneck" (why it stopped) and "Options" (what you can do). Pick one option, or write a free-text answer. Options include "Let the Manager fix it" and "Replan", where the Manager repairs the plan itself. A Decision that only flags an unconfirmed stop closes by itself once the stopped work finishes. To check the explanation texts with your own commands, see [docs/operations.md](docs/operations.md#checking-the-texts-of-decision-explanations-decision_text_checks).
+- **Sending files.** The Advisor can send a file to Slack or Discord with the `send_file` tool of `owl-action`. The folders it may send from and the size limits are set in `app-settings.json`; see [Talk to Owl from Slack or Discord](#talk-to-owl-from-slack-or-discord).
 
 ### Memory and rules
 
@@ -251,7 +260,22 @@ owl open
 # Starts Owl if needed and opens http://127.0.0.1:3787/owl/ in your browser
 ```
 
-Pages: Board (work overview), Archive, Work detail, Settings (model config and presets), Projects, Advisor (chat), Backlog, Decision, Activity, Agents, Knowledge, Rules (including rule approvals), Skills, Tokens.
+Pages: Board (work overview), Archive, Work detail, Settings (model config and presets), Projects, Advisor (chat, one window at a time; see [Advisor windows](#advisor-windows)), Backlog, Decision, Activity, Agents, Knowledge, Rules (including rule approvals), Skills, Tokens.
+
+### Advisor windows
+
+The Advisor page is split into windows, and each window has its own conversation.
+
+- **The general window** is named **Owl**. It is always there and is for questions about Owl as a whole. Its Slack and Discord channels are the ones you set under **Settings → Integrations**.
+- **A Project window** is for one Project. It is off by default.
+
+On a wide screen the window list is a sidebar on the left. On a narrow screen, press the window name at the top of the Advisor page to open the list as a sheet, then pick a window. The **Channels** button at the top handles per-window channels. In a Project window it shows the Slack and Discord channels bound to that window, and lets you create a channel, bind an existing channel ID, or rename a channel. In the general window (Owl) it offers none of these: it only says the channels are set under **Settings → Integrations**, with a link to Settings.
+
+You can reorder the Project windows by dragging them in the window list; the order is saved.
+
+To turn a Project window on or off, open **Projects**, press **Edit** on the Project, switch **Use an Advisor window** on or off, and press **Save**. A Project that already has a channel bound stays in the list even when the switch is off.
+
+When you turn a window on, Owl creates a channel for it in each connected Slack and Discord that has none yet (see [Talk to Owl from Slack or Discord](#talk-to-owl-from-slack-or-discord)). If a channel cannot be created, the window stays on and the screen shows the reason. For a Slack channel that already exists, the channel panel and **Settings → Integrations** have a button that invites the Owner (the **Owner Slack user ID**) to it.
 
 ## CLI Commands
 
@@ -371,20 +395,22 @@ Connect Slack or Discord and you can work with Owl from the chat app you already
 Each connection uses a conversation channel (your messages and the Advisor's replies) and a notification channel. They can be the same channel. Direct messages and other channels are ignored.
 Both are optional, and saving the settings connects right away without a restart.
 
+When you turn on a Project's Advisor window ([Advisor windows](#advisor-windows)), Owl also **creates a channel for that Project automatically** in each connected Slack and Discord. Talking in that channel is the same as talking in the Project window. In Slack the channel is public, and Owl invites the Owner to it when **Owner Slack user ID** is set under **Settings → Integrations → Slack** (for example `U0123456789`). Without it, the channel is created but nobody is invited. Discord has no invite step. A channel that is already bound to the window is kept.
+
 ### Slack
 
-1. Open [api.slack.com/apps](https://api.slack.com/apps), choose **Create New App → From a manifest**, and paste [`docs/slack-manifest.yaml`](docs/slack-manifest.yaml). The Settings screen also has a button that copies it.
+1. Open [api.slack.com/apps](https://api.slack.com/apps), choose **Create New App → From a manifest**, and paste [`docs/slack-manifest.yaml`](docs/slack-manifest.yaml). The Settings screen also has a button that copies a manifest, but the one embedded there lacks `channels:manage` and `channels:join`. To use automatic channel creation, use `docs/slack-manifest.yaml` instead, or add those two scopes (see below) after copying from the screen.
 2. Install the app to your workspace and copy the **Bot Token** (`xoxb-...`).
 3. Under **Basic Information → App-Level Tokens**, create a token with the `connections:write` scope and copy it (`xapp-...`).
 4. Invite the bot to the channels you want to use (`/invite @owl-agent`), and copy each channel ID from the bottom of the channel details.
-5. In Owl, open **Settings → Integrations → Slack**, enter the tokens and channel IDs, and save.
+5. In Owl, open **Settings → Integrations → Slack**, enter the tokens and channel IDs, and save. Also enter your own Slack user ID as **Owner Slack user ID** if you want to be invited to the channels Owl creates.
 
-To let the Advisor send files to Slack, the bot needs the `files:write` scope. If you created the app before this scope was added, add `files:write` under **OAuth & Permissions → Bot Token Scopes**, then choose **Reinstall to Workspace**. The folders the Advisor may send from and the size limits can be changed with `advisor_send_file_dirs`, `advisor_send_file_slack_max_bytes` and `advisor_send_file_discord_max_bytes` in `app-settings.json`.
+v0.7.0 added three Bot Token Scopes to the manifest: `channels:manage` and `channels:join` (create and join the Project channels, and invite the Owner) and `files:write` (let the Advisor send files). **If you created the app from an older manifest, you need to reinstall it.** Add these scopes under **OAuth & Permissions → Bot Token Scopes**, choose **Reinstall to Workspace**, and save the new Bot Token in Owl if it changed. Without them, creating a channel fails and the Projects screen shows the missing scope. New apps created from the current manifest need nothing more. The folders the Advisor may send from and the size limits can be changed with `advisor_send_file_dirs`, `advisor_send_file_slack_max_bytes` and `advisor_send_file_discord_max_bytes` in `app-settings.json`.
 
 ### Discord
 
 1. Open the [Discord Developer Portal](https://discord.com/developers/applications), create an application, and copy the token from the **Bot** page. On the same page, turn on **Message Content Intent**.
-2. Under **OAuth2 → URL Generator**, choose the `bot` scope and the **Send Messages**, **Read Message History**, and **Embed Links**, and **Attach Files** permissions. To send files in threads, also give **Send Messages in Threads**. If the bot is already on your server, grant these in the server's role or channel permissions. Open the generated URL to add the bot to your server.
+2. Under **OAuth2 → URL Generator**, choose the `bot` scope and the **Send Messages**, **Read Message History**, and **Embed Links**, and **Attach Files** permissions. To send files in threads, also give **Send Messages in Threads**. To let Owl create Project channels, also give **Manage Channels**. If the bot is already on your server, grant these in the server's role or channel permissions. Open the generated URL to add the bot to your server.
 3. Turn on Developer Mode in Discord (**User Settings → Advanced**), then right-click each channel and choose **Copy Channel ID**.
 4. In Owl, open **Settings → Integrations → Discord**, enter the token and channel IDs, and save.
 

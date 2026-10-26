@@ -44,6 +44,7 @@ import { HYBRID_MODE_SETTINGS_KEY } from "./types";
 import type { CriterionCheck } from "./types";
 import { runCriterionChecks, splitPlainCommand, type CriterionCheckResult } from "./criterion-checks";
 import { GitWorktreeGateway } from "./git-gateway.js";
+import { cloneCheck, usedCloneCheck, type RecordedCloneUse } from "./clone-check.js";
 import { prepareWorkGitTemplate, removeWorkGitTemplate } from "./work-git-template.js";
 import { processIdentityMatches, readProcessIdentity } from "./process-identity.js";
 import { formatRuntimeFailure } from "./error-display.js";
@@ -65,7 +66,7 @@ import { childEnv, coreTestErrorOutcome, coreTestRunBrief, notApplicableTestRun,
 import { DEFAULT_TEST_RUN_SETTINGS, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
 import { DEFAULT_TEST_DETECTION_RULES, type TestDetectionRules } from "./test-detection-rules.js";
 import { markerReader, reportCheckCommands, resolveTestRun, testDetectionMarkerDigest, testDetectionRulesVersion, type TestRunResolution } from "./test-detection.js";
-import { explicitTestRunDigest, readStoredTestSetup, selectTestSetupInCheckout, testExecutables, testSetupDigests, type KnownFailure, type StoredTestSetup, type TestSetupSelection } from "./test-setup.js";
+import { explicitTestRunDigest, isLegacyWholeSetup, readStoredTestSetup, selectTestSetupInCheckout, testExecutables, testSetupDigests, type KnownFailure, type StoredTestSetup, type TestSetupSelection } from "./test-setup.js";
 import { testSetupSettings } from "./test-setup-settings.js";
 import type { TestSetupSettings } from "../../shared/dist/test-setup-settings.js";
 import type { TestSetupService } from "./test-setup-service.js";
@@ -287,6 +288,10 @@ export interface WorkflowEngineOptions {
   readonly testDetectionRules?: TestDetectionRules;
   /** Investigates how to run a Project's tests; without it the test run uses only the Owner's command, a saved record and detection. */
   readonly testSetup?: TestSetupService;
+  /** The folder where Workers clone external repositories; told to the Worker in its prompt. */
+  readonly cloneRoot?: () => Promise<string>;
+  /** Clones under the clone root that the Task's tool calls used, recorded by Core (see cloneUses). */
+  readonly clonesUsed?: (taskId: string) => readonly RecordedCloneUse[];
 }
 
 /**
@@ -401,6 +406,8 @@ export class WorkflowEngine {
   private readonly coreActivity: CoreActivityReporter;
   private readonly testDetectionRules: TestDetectionRules;
   private readonly testSetup?: TestSetupService;
+  private readonly cloneRoot?: () => Promise<string>;
+  private readonly clonesUsed?: (taskId: string) => readonly RecordedCloneUse[];
   /** Serialises baseline checkouts per Project (one path each). */
   private readonly baselineLocks = new Map<string, Promise<unknown>>();
   private running = false;
@@ -449,6 +456,8 @@ export class WorkflowEngine {
     this.coreActivity = options.coreActivity ?? NO_CORE_ACTIVITY;
     this.testDetectionRules = options.testDetectionRules ?? DEFAULT_TEST_DETECTION_RULES;
     this.testSetup = options.testSetup;
+    this.cloneRoot = options.cloneRoot;
+    this.clonesUsed = options.clonesUsed;
     this.git = options.git ?? new GitWorktreeGateway(options.db, this.owlRoot);
     this.ruleStore = options.ruleStore;
     this.skillBox = options.skillBox;
@@ -1583,6 +1592,7 @@ export class WorkflowEngine {
         task_id: taskId,
         work_id: workId,
         worktree: taskRow?.worktree_path ?? null,
+        clone_root: (await this.cloneRoot?.()) ?? null,
         hybrid_mode: hybridMode,
         [REPORT_RESUBMIT_LIMIT_CONTEXT_KEY]: reportResubmitLimit(this.db),
         ...(resubmitSession ? { [REPORT_RESUBMIT_SESSION_CONTEXT_KEY]: resubmitSession } : {}),
@@ -2584,8 +2594,9 @@ export class WorkflowEngine {
     try {
       // A design Task changes no code: the design document check is its
       // verification, together with the Designer's own verdict.
+      const hasProject = this.db.get<{ project_id: string | null }>("SELECT project_id FROM works WHERE id = ?", workId)?.project_id != null;
       verification = task.type === "design"
-        ? { passed: reportedVerificationPassed(report), source: "design_document", commands: [] }
+        ? await this.cloneFailure(workId, task, reportedVerificationPassed(report), hasProject) ?? { passed: reportedVerificationPassed(report), source: "design_document", commands: [] }
         : await this.executeVerificationPlan(workId, task, report, agentRunId);
     } catch (error) {
       verification = {
@@ -3060,6 +3071,18 @@ export class WorkflowEngine {
    * Core's own check of a Task's output by its type, so that the Worker's
    * report alone never passes a code, doc, config or test Task.
    */
+  /** A failed verification when the worktree holds a clone or the Task committed a gitlink; null otherwise. Runs for every Task type. */
+  private async cloneFailure(workId: string, task: TaskRow, workerPassed: boolean, hasProject: boolean): Promise<JsonObject | null> {
+    const used = this.clonesUsed === undefined || this.cloneRoot === undefined ? null : await usedCloneCheck(await this.cloneRoot(), this.clonesUsed(task.id));
+    if (used !== null) return { passed: false, worker_verification_passed: workerPassed, source: "task_type_policy", core_checks: "executed", commands: [used as unknown as JsonObject], check_commands: [], error_key: used.error_key ?? null, error: used.detail };
+    if (task.worktree_path === null) return null;
+    const root = resolve(task.worktree_path);
+    const gitlinks = hasProject ? [...(await this.git.gitlinkPaths?.({ work_id: workId, task_id: task.id, worktree_path: root }) ?? [])] : [];
+    const clone = await cloneCheck(root, gitlinks);
+    if (clone === null) return null;
+    return { passed: false, worker_verification_passed: workerPassed, source: "task_type_policy", core_checks: "executed", commands: [clone as unknown as JsonObject], check_commands: [], error_key: clone.error_key ?? null, error: clone.detail };
+  }
+
   private async verifyByTaskType(workId: string, task: TaskRow, report: JsonObject, workerPassed: boolean, mode: "sole" | "supplement", hasProject: boolean, agentRunId: string | null = null, removedTests: readonly string[] = []): Promise<JsonObject> {
     const settings = verificationPolicySettings(this.db);
     const root = task.worktree_path === null ? null : resolve(task.worktree_path);
@@ -3075,6 +3098,8 @@ export class WorkflowEngine {
       console.error(`[owl-core] Task ${task.id} verification_spec_json is unreadable; verification fails:`, error);
       return { passed: false, worker_verification_passed: workerPassed, source: "task_type_policy", core_checks: "executed", commands: [], check_commands: [], error_key: "verification_spec_unreadable", error: `verification_spec_json is unreadable: ${message}` };
     }
+    const cloneFailure = await this.cloneFailure(workId, task, workerPassed, hasProject);
+    if (cloneFailure !== null) return cloneFailure;
     const claimedChanges = (Array.isArray(report.changes) ? report.changes : [])
       .filter((change): change is JsonObject => change !== null && typeof change === "object" && !Array.isArray(change))
       .flatMap((change) => typeof change.file === "string" && !removedTests.includes(change.file) ? [{ file: change.file, action: typeof change.action === "string" ? change.action : "" }] : []);
@@ -3117,7 +3142,7 @@ export class WorkflowEngine {
           whole_argv: resolved.settings.whole_argv,
           ...(Object.hasOwn(explicit, "test_patterns") ? { test_patterns: resolved.settings.test_patterns } : {}),
         } : coreTests?.outcome.status === "not_applicable" && coreTests.outcome.reason === "explicit_off" ? { enabled: false, reason: "explicit_off" } : undefined,
-        coreTestRun: coreTests && coreTests.outcome.status !== "not_applicable" ? { run_id: coreTests.outcome.run_id, mode: coreTests.outcome.mode, passed_files: coreTests.outcome.passed_files, failed_files: coreTests.outcome.failed_files } : undefined,
+        coreTestRun: coreTests && coreTests.outcome.status !== "not_applicable" ? { reason: coreTests.outcome.reason ?? null, run_id: coreTests.outcome.run_id, mode: coreTests.outcome.mode, passed_files: coreTests.outcome.passed_files, failed_files: coreTests.outcome.failed_files } : undefined,
         runCommand: async (argv, cwd) => {
           const outcome = await this.runVerificationCommand(task.id, argv, cwd, limits.env_allowlist, limits.timeout_seconds * 1000, limits.stdout_limit_bytes, limits.stderr_limit_bytes, [0], true);
           return {
@@ -3143,7 +3168,7 @@ export class WorkflowEngine {
         checkout: root,
         run: async () => {
           const row = this.projectTestRunRow(workId, task.id) ?? project;
-          last.resolved = await this.resolveProjectTestRun(row, root, { investigate: true, place });
+          last.resolved = await this.resolveTaskVerificationTestRun(row, root, place);
           const core = task.type !== "design" ? await this.runTaskCoreTests(workId, task, root, files, spec, agentRunId, last.resolved) : null;
           return { core, policy: await evaluate(core, last.resolved) };
         },
@@ -3257,7 +3282,7 @@ export class WorkflowEngine {
         return { outcome: { ...notApplicableTestRun(message), status: "error", error: message, reason: undefined }, settings: DEFAULT_TEST_RUN_SETTINGS };
       }
     }
-    const resolved = preResolved ?? await this.resolveProjectTestRun(project, root, { investigate: true, place: { scope: "task", work_id: workId, task_id: task.id } });
+    const resolved = preResolved ?? await this.resolveTaskVerificationTestRun(project, root, { scope: "task", work_id: workId, task_id: task.id });
     if (!resolved.enabled) return { outcome: notApplicableTestRun(resolved.reason), settings: DEFAULT_TEST_RUN_SETTINGS };
     const settings = resolved.settings;
     let baseCommit: string | null = null;
@@ -3580,6 +3605,13 @@ export class WorkflowEngine {
     }
   }
 
+  /** The test run of a Task's verification: a whole Project defers to the Work, so it is resolved without investigating. */
+  private async resolveTaskVerificationTestRun(project: ProjectTestRunRow, root: string, place: TestRunPlace): Promise<TestRunResolutionWithExecutables> {
+    // Why not investigate first: the investigation runs setup, prepare and the whole suite, which a whole Project leaves to the Work.
+    const known = await this.resolveProjectTestRun(project, root, { investigate: false });
+    return known.enabled && known.settings.mode === "whole" ? known : this.resolveProjectTestRun(project, root, { investigate: true, place });
+  }
+
   /** The test run Core uses for a Task's worktree, read-only (nothing is investigated or stored); null without a Project. */
   public async resolveTaskTestRun(workId: string, taskId: string, worktree: string | null): Promise<TestRunResolution | null> {
     const project = this.projectTestRunRow(workId, taskId);
@@ -3674,7 +3706,7 @@ export class WorkflowEngine {
       a.layout === b.layout && a.sources === b.sources && a.settings === b.settings;
     const canonical = await digestsOf(project.canonical_path);
     if (canonical === null) return project;
-    if (projectRecord === null || !sameKey(projectRecord.digests, canonical)) service.schedule(project.id, { trigger: "inputs_changed" });
+    if (projectRecord === null || !sameKey(projectRecord.digests, canonical) || isLegacyWholeSetup(projectRecord)) service.schedule(project.id, { trigger: "inputs_changed" });
     if (root === project.canonical_path) return project;
     const here = await digestsOf(root);
     if (here === null || sameKey(here, canonical)) return project;
@@ -3927,6 +3959,23 @@ export class WorkflowEngine {
       if (!isAgentRunStopped(stopped) || !reviewer) throw stopped;
       await this.ignoreReviewerResult(workId, taskId, reviewer.id, "review_result_arrived_after_owner_stop");
       return;
+    }
+    // A temporary rate limit that outlasted the runner's short retries is also recorded as a transient classification
+    // (the Reviewer path has no other classified event); it changes no Task state and never pauses the Provider.
+    const errorKey = (error as { details?: { error_key?: unknown } } | null)?.details?.error_key;
+    if (reviewer && errorKey === "provider_failed:rate_limit_transient") {
+      await this.writeLane.write({
+        mutateState: () => ({}),
+        event: {
+          idempotencyKey: `task.failure.classified:${reviewer.id}`,
+          type: "task.failure.classified",
+          workId,
+          taskId,
+          agentRunId: reviewer.id,
+          payload: { failure_class: "transient", error_key: errorKey, retry_allowed: true, reason: message, agent_run_id: reviewer.id },
+        },
+        outbox: [{ provider: "websocket" }],
+      });
     }
     if (managerTrigger) {
       await this.triggerManagerReplanIfNeeded(workId, { kind: "reviewer_error", task_id: taskId, message });

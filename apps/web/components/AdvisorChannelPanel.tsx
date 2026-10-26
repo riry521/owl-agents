@@ -6,8 +6,10 @@ import {
   bindAdvisorWindowChannel,
   createAdvisorWindowChannel,
   getAdvisorWindowChannels,
+  inviteOwnerToWindowChannel,
   renameAdvisorWindowChannel,
 } from '@/lib/api-client';
+import { OwnerInviteButton } from '@/components/OwnerInviteButton';
 import { channelErrorMessage } from '@/lib/advisor-windows.mjs';
 import { useLocale } from '@/lib/i18n';
 import type { AdvisorWindowChannelState } from '@/lib/types';
@@ -109,6 +111,16 @@ function ChannelSection({ windowKey, item, onChanged }: { windowKey: string; ite
             <p className="advisor-channel-panel__hint">{t(`advisorWindows.channels.bindHint${label}`)}</p>
           </div>
         </>
+      )}
+      {provider === 'slack' && (
+        <OwnerInviteButton
+          ownerSet={item.owner_user_id_set}
+          label={t('ownerInvite.channelButton')}
+          onInvite={async () => {
+            const result = await inviteOwnerToWindowChannel(windowKey);
+            return [{ name: result.display_name, invite: result.invite }];
+          }}
+        />
       )}
       {notice && <p className="advisor-channel-panel__notice" role="status">{notice}</p>}
     </section>

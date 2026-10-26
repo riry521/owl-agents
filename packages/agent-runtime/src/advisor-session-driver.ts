@@ -26,7 +26,7 @@ import type {
   TokenUsage,
 } from "./types.js";
 import { readClaudeCompactionSummaries, waitForCompactionSummary } from "./compaction-summary.js";
-import { classifyProviderFailure, formatProviderError } from "./provider-error.js";
+import { classifyProviderFailure, formatProviderError, sessionFailureMessage, turnFailureProviderError } from "./provider-error.js";
 import { claudeRateLimitEvidence } from "./rate-limit.js";
 import { buildAgentPermissionArgs, externalJsonBlock, extractWebResearchCapture, reapProcessGroup, type WebResearchTool } from "@owl/shared";
 
@@ -190,8 +190,9 @@ function classifiedClaudeTurnFailure(record: ClaudeStreamLine, turnId: string, l
   return {
     type: "turn.failed",
     turn_id: turnId,
-    error: classification.message,
+    error: sessionFailureMessage(classification),
     ...(classification.rate_limit !== undefined ? { rate_limit: classification.rate_limit } : {}),
+    provider_error: classification.provider_error,
   };
 }
 
@@ -499,6 +500,7 @@ export class AdvisorSessionDriver implements ProviderSession {
         type: "turn.failed",
         turn_id: this.currentTurnId,
         error: detail,
+        provider_error: turnFailureProviderError("claude", { exit_code: exitCode, signal, error: detail, stderr: detail }),
       });
       this.currentTurnId = null;
       this.turnTextParts = [];
@@ -806,7 +808,7 @@ export class AdvisorSessionDriver implements ProviderSession {
         this.turnTextParts = [];
         this.lastRateLimitEvent = null;
         if (reply.trim().length === 0) {
-          return [{ type: "turn.failed", turn_id: turnId, error: formatProviderError("claude", "invalid provider response") }];
+          return [{ type: "turn.failed", turn_id: turnId, error: formatProviderError("claude", "invalid provider response"), provider_error: turnFailureProviderError("claude", { exit_code: 0, error: "invalid provider response" }) }];
         }
         return [{ type: "turn.completed", turn_id: turnId, reply, usage }];
       }
@@ -817,7 +819,7 @@ export class AdvisorSessionDriver implements ProviderSession {
       this.currentTurnId = null;
       this.turnTextParts = [];
       this.lastRateLimitEvent = null;
-      return [{ type: "turn.failed", turn_id: turnId, error: errorText }];
+      return [{ type: "turn.failed", turn_id: turnId, error: errorText, provider_error: turnFailureProviderError("claude", { exit_code: 0, error: record.error ?? record.result ?? `advisor turn failed: subtype=${String(record.subtype)}`, ...(typeof record.subtype === "string" ? { harness_code: record.subtype } : {}) }) }];
     }
 
     if (typeof record.type !== "string" || record.type.length === 0) {
@@ -888,7 +890,7 @@ export class AdvisorSessionDriver implements ProviderSession {
       this.turnTextParts = [];
       this.startupError = error;
       this.pushEvent({ type: "session.exited", exit_code: null, signal: null, stderr_tail: error });
-      this.pushEvent({ type: "turn.failed", turn_id: turnId, error });
+      this.pushEvent({ type: "turn.failed", turn_id: turnId, error, provider_error: turnFailureProviderError("claude", { error, stderr: error }) });
       this.endStream();
       if (!this.childClosed) signalProcessGroup(this.child, "SIGTERM");
       return [];

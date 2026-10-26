@@ -280,7 +280,7 @@
     },
     "prerequisiteResume": "待ちを終えて再開する",
     "stopReason": "止まった理由: {{reason}}",
-    "fixerEscalated": "レビューで {{count}} 回差し戻されたため Fixer が担当しています",
+    "fixerEscalated": "検証の不合格とレビューの差し戻しが合わせて {{count}} 回になったため Fixer が担当しています",
     "autoRecovering": "自動で直しています（{{kind}}・{{attempt}}/{{limit}} 回目）",
     "autoRecoveryTransient": "一時的なエラーのため待っています（{{time}} に再開・{{attempt}}/{{limit}} 回目）",
     "autoRecoveryRateLimited": "利用の上限のため待っています（{{time}} に再開・回数に数えません）",
@@ -462,7 +462,11 @@
     "currentState": "今の状態",
     "tried": "これまでの経緯",
     "causeLabel": "原因",
-    "causeKind": { "work": "作業の問題", "criteria": "条件の問題", "external": "外の問題" },
+    "causeKind": {
+      "work": "作業の問題",
+      "criteria": "条件の問題",
+      "external": "外の問題"
+    },
     "rewriteBefore": "元の条件",
     "rewriteAfter": "読み替えた条件",
     "rewriteCheck": "確かめ方",
@@ -543,6 +547,7 @@
     }
   },
   "advisorWindows": {
+    "reorderError": "並び順を保存できませんでした。元の順に戻しました。",
     "title": "Advisor の窓",
     "general": "Owl",
     "unknownWindow": "指定された窓 {{key}} が見つからないため、Owlの窓を表示しています。",
@@ -629,7 +634,7 @@
     "title": "Owl Advisor",
     "emptyMessage": "方針や戦略について相談できます。",
     "emptyHint": "下の入力欄から話しかけてください。",
-"showEarlier": "以前のメッセージを表示",
+    "showEarlier": "以前のメッセージを表示",
     "placeholder": "Advisorへの相談内容を入力",
     "sendLabel": "送信",
     "hint": "Shift+Enterで送信 · Enterで改行",
@@ -783,7 +788,7 @@
     "testSetupStateLoading": "調査の状態を読み込んでいます…",
     "testSetupStateLoadFailed": "調査の状態を読み込めませんでした。{{reason}}",
     "testSetupStateReload": "状態を読み直す",
-    "testSetupInvestigateTimeout":"まだ調査中です。あとで開き直すと結果が分かります。",
+    "testSetupInvestigateTimeout": "まだ調査中です。あとで開き直すと結果が分かります。",
     "testSetupInvestigateUnavailable_explicit_test_run": "この Project はテストの実行方法を明示的に指定しているため、調べ直しません。",
     "testSetupInvestigateUnavailable_runner_unavailable": "調べ直しに使うエージェントを起動できないため、受け付けられません。",
     "testSetupInvestigateUnavailable_provider_paused": "プロバイダが一時停止中のため、受け付けられません。",
@@ -1046,8 +1051,8 @@
     "remakeLimitsSaved": "保存しました。",
     "remakeLimitsError": "作り直しの上限を読み込めませんでした。",
     "fixerEscalation": "Fixer への切り替え",
-    "fixerEscalationDescription": "Worker の Task がレビューでこの回数差し戻されると、次の修正から Fixer が担当します。Fixer はその Task が完了するまで担当します。",
-    "fixerEscalation_after_review_rejections": "差し戻しの回数（1〜100）",
+    "fixerEscalationDescription": "Worker の Task が検証の不合格とレビューの差し戻しを合わせてこの回数になると、次の修正から Fixer が担当します。Fixer はその Task が完了するまで担当します。",
+    "fixerEscalation_after_review_rejections": "検証の不合格と差し戻しの合計回数（1〜100）",
     "fixerEscalationSave": "Fixer への切り替えを保存",
     "fixerEscalationSaved": "保存しました。",
     "fixerEscalationError": "Fixer への切り替えの設定を読み込めませんでした。",
@@ -1164,6 +1169,7 @@
     "workPostMergeSucceeded": "マージ後コマンドが成功",
     "alertWorkPostMergeFailed": "マージ後コマンドが失敗",
     "exitCode": "終了コード",
+    "testRunDeferredToWork": "whole の Project なので、Task ではテストを流さず、Work の検証で流します",
     "workPostMergeQueued": "マージ後コマンドを予約",
     "durationSeconds": "{{count}} 秒",
     "postMergeHistory": "マージ後コマンド",
@@ -1622,5 +1628,14 @@
     "errorVersionConflict": "Workの状態が変わりました。最新の状態を読み込みました。内容を確認してもう一度送信してください",
     "errorReopenRequired": "このWorkは完了しています。もう一度送信すると再開の確認が出ます",
     "errorValidation": "指示の内容を確認してください（長すぎる・空など）"
+  },
+  "ownerInvite": {
+    "settingsButton": "既存の窓チャンネルに招待",
+    "channelButton": "Owner を招待",
+    "ownerMissing": "オーナーIDが保存されていません。設定画面の連携でオーナーIDを保存してください。",
+    "noChannels": "招待するチャンネルがありません。",
+    "invited": "招待しました",
+    "already_in_channel": "招待済みです",
+    "failed": "失敗しました: {{message}}"
   }
 }

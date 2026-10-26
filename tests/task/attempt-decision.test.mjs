@@ -488,6 +488,24 @@ test("verification failure: fix while review_round < plan_review_rounds, then ex
   assert.deepEqual([done.to, done.reason, done.managerTrigger], ["failed", "verification_exhausted", true]);
 });
 
+test("verification failures count toward the Fixer switch, alone or mixed with review rejections", () => {
+  const after = cfg().fixerAfterRejections;
+  const verify = (overrides) => decisionOf(evaluate({ kind: "verification_failed", task: taskRow({ status: "verifying", review_round: 0, ...overrides }) }, cfg()));
+  assert.equal(verify({ review_rejections: after - 2 }).patch.fixer_escalated_rejections, undefined);
+  const second = verify({ review_rejections: after - 1 });
+  assert.deepEqual([second.patch.review_rejections, second.patch.fixer_escalated_rejections], [after, after]);
+  // One review rejection first, then one verification failure.
+  const rejected = decisionOf(evaluate(reviewFailed({ review_rejections: after - 2 }), cfg()));
+  assert.equal(rejected.patch.review_rejections, after - 1);
+  assert.equal(verify({ review_rejections: rejected.patch.review_rejections }).patch.fixer_escalated_rejections, after);
+  // Design Tasks and Tasks already on the Fixer keep their state.
+  assert.equal(verify({ type: "design", review_rejections: after }).patch.fixer_escalated_rejections, undefined);
+  assert.equal(verify({ review_rejections: after + 1, fixer_escalated_rejections: after }).patch.fixer_escalated_rejections, undefined);
+  // The exhausted round does not count and still fails.
+  const exhausted = decisionOf(evaluate({ kind: "verification_failed", task: taskRow({ status: "verifying", review_round: DEFAULT_REVIEW_LIMIT_SETTINGS.plan_review_rounds, review_rejections: after - 1 }) }, cfg()));
+  assert.deepEqual([exhausted.to, exhausted.reason, exhausted.patch.review_rejections], ["failed", "verification_exhausted", undefined]);
+});
+
 test("review failure: lineage limit comes before the total review budget", () => {
   const config = cfg({ lineageLimits: lineageLimits({ reviewAttempts: 3 }) });
   const total = DEFAULT_REVIEW_LIMIT_SETTINGS.total_review_attempts;
@@ -899,4 +917,51 @@ test("task.attempt_decided carries fixer_escalation only on the decision that mo
     event: "task.started", payload: { capacity_acquired: true, launch_lease_acquired: true, role: "worker", provider: "p", model: "m", invocation_id: "i1" },
   }));
   assert.equal(db.get("SELECT worker_tier FROM agent_runs WHERE task_id = 'T1'").worker_tier, "fixer");
+});
+
+test("the next launch is a Fixer once verification failures, alone or mixed with review rejections, reach the threshold; design Tasks stay standard", async (t) => {
+  const { root, db } = await openTestDatabase(t, { prefix: "owl-fixer-verification-" });
+  const core = createCore({ db, version: "t", owlRoot: root, dataDir: root, agentRunner: {} });
+  t.after(async () => { await core.stop({ force: true }).catch(() => {}); });
+  const lane = db.createWriteLane();
+  const now = new Date().toISOString();
+  await lane.transact((tx) => {
+    tx.run("INSERT OR IGNORE INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Owner', ?, ?)", now, now);
+    tx.run(
+      `INSERT INTO works (id, owner_id, project_id, title, summary, size, state, rules_json, related_work_ids_json, created_at, updated_at)
+       VALUES ('W', 'owner:default', NULL, 'W', 'x', 'normal', 'running', '[]', '[]', ?, ?)`,
+      now, now,
+    );
+  });
+  const threshold = DEFAULT_ATTEMPT_POLICY_CONFIG.fixerAfterRejections;
+  const events = {
+    verification: ["verification.completed", { outcome: "fail" }],
+    review: ["review.failed", { verdict: "fix_required" }],
+  };
+  // Applies each failure to a fresh Task, then launches it and returns the launch's worker_tier and the escalation column.
+  const launchAfter = async (id, type, failures) => {
+    await lane.transact((tx) => tx.run(
+      `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, state_version, failure_count, same_error_count,
+         review_round, worker_generation, created_at, updated_at, retry_no, manager_task_id)
+       VALUES (?, 'W', ?, ?, 'verifying', 'normal', '', 'Done.', 0, 0, 0, 0, 0, ?, ?, 0, ?)`,
+      id, id, type, now, now, id,
+    ));
+    for (const failure of failures) {
+      await lane.transact((tx) => tx.run("UPDATE tasks SET status = 'verifying' WHERE id = ?", id));
+      const [event, payload] = events[failure];
+      await lane.transact((tx) => reduceTaskInTransaction(tx, id, { event, payload }));
+    }
+    await lane.transact((tx) => tx.run("UPDATE tasks SET status = 'ready' WHERE id = ?", id));
+    await lane.transact((tx) => reduceTaskInTransaction(tx, id, {
+      event: "task.started", payload: { capacity_acquired: true, launch_lease_acquired: true, role: "worker", provider: "p", model: "m", invocation_id: `i-${id}` },
+    }));
+    return {
+      tier: db.get("SELECT worker_tier FROM agent_runs WHERE task_id = ?", id).worker_tier,
+      escalated: db.get("SELECT fixer_escalated_rejections AS e FROM tasks WHERE id = ?", id).e,
+    };
+  };
+  assert.deepEqual(await launchAfter("V", "code", Array(threshold).fill("verification")), { tier: "fixer", escalated: threshold });
+  assert.deepEqual(await launchAfter("M", "code", ["verification", ...Array(threshold - 1).fill("review")]), { tier: "fixer", escalated: threshold });
+  assert.deepEqual(await launchAfter("B", "code", Array(threshold - 1).fill("verification")), { tier: "standard", escalated: null });
+  assert.deepEqual(await launchAfter("D", "design", Array(threshold).fill("verification")), { tier: null, escalated: null });
 });

@@ -668,6 +668,7 @@ export interface AdvisorWindowChannelState {
   running: boolean;
   binding: { channel_id: string; display_name: string } | null;
   default_name: string | null;
+  owner_user_id_set: boolean;
 }
 
 export interface AdvisorSessionInfo {
@@ -1356,4 +1357,11 @@ export interface SkillListFilter {
   state?: SkillState;
   scope?: string;
   trial?: boolean;
+}
+
+/** One row of an owner-invite result, shaped for display. */
+export interface OwnerInviteLine {
+  name: string | null;
+  invite: 'invited' | 'already_in_channel' | 'failed';
+  message?: string;
 }

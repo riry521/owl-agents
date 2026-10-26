@@ -68,6 +68,7 @@ const baseOverrides = {
     createAdvisorWindowChannel: async (...args) => { channelCalls.push(['create', ...args]); if (channelFailure) throw channelFailure; },
     bindAdvisorWindowChannel: async (...args) => { channelCalls.push(['bind', ...args]); if (channelFailure) throw channelFailure; },
     renameAdvisorWindowChannel: async (...args) => { channelCalls.push(['rename', ...args]); if (channelFailure) throw channelFailure; },
+    inviteOwnerToWindowChannel: async (...args) => { channelCalls.push(['invite', ...args]); if (channelFailure) throw channelFailure; return { display_name: 'owl-beta', invite: 'already_in_channel' }; },
     postMessage: async (...args) => { postCalls.push(args); return { message_id: 'm' }; },
   },
   '@/lib/view-loader': {
@@ -101,7 +102,8 @@ export function loadTsx(relPath, extra = {}) {
   return loaded.exports;
 }
 
-const { AdvisorChannelPanel } = loadTsx('apps/web/components/AdvisorChannelPanel.tsx');
+const { OwnerInviteButton } = loadTsx('apps/web/components/OwnerInviteButton.tsx');
+const { AdvisorChannelPanel } = loadTsx('apps/web/components/AdvisorChannelPanel.tsx', { '@/components/OwnerInviteButton': { OwnerInviteButton } });
 const { AdvisorView } = loadTsx('apps/web/components/AdvisorView.tsx', { '@/components/AdvisorChannelPanel': { AdvisorChannelPanel } });
 const { AdvisorWindowPicker } = loadTsx('apps/web/components/AdvisorWindowPicker.tsx');
 const { AdvisorWindowSheet } = loadTsx('apps/web/components/AdvisorWindowSheet.tsx', { '@/components/AdvisorWindowPicker': { AdvisorWindowPicker } });
@@ -207,7 +209,7 @@ test('owner messages from Slack and Discord carry the channel in the sender name
 // ---- channel panel ----------------------------------------------------------
 
 const channelItems = [
-  { provider: 'slack', configured: true, running: true, binding: null, default_name: 'owl-alpha' },
+  { provider: 'slack', configured: true, running: true, binding: null, default_name: 'owl-alpha', owner_user_id_set: true },
   { provider: 'discord', configured: true, running: true, binding: { channel_id: '123', display_name: 'owl-beta' }, default_name: 'owl-alpha' },
 ];
 let refreshed = 0;
@@ -551,4 +553,153 @@ test('only the selected window loads its conversation, and a listed conversation
   // AdvisorWindowsView hands over the listed id of the selected window only.
   assert.equal(renderWindows('P2').advisor.props.knownConversationId, 'c2');
   assert.equal(renderWindows('P1').advisor.props.knownConversationId, null);
+});
+
+// ---- owner invite -----------------------------------------------------------
+
+// A component with its own state: call it again per render so the harness state carries over.
+const inviteButton = (props) => { si = 0; return OwnerInviteButton(props); };
+const buttonOf = (tree) => find(tree, (n) => n.type === 'button');
+
+test('owner invite: the channel panel shows the button for Slack bound channels only', () => {
+  viewData = { 'advisor-window-channels:P1': [{ ...channelItems[0], binding: { channel_id: 'C1', display_name: 'owl-alpha' } }, channelItems[1]] };
+  state.length = 0; si = 0;
+  const tree = AdvisorChannelPanel({ windowKey: 'P1', onClose() {} });
+  const invites = [];
+  find(tree, (n) => { if (typeof n.type === 'function' && n.props.item) invites.push(find(n.type({ ...n.props }), (m) => m.type === OwnerInviteButton) !== null); return false; });
+  assert.deepEqual(invites, [true, false]);
+});
+
+test('owner invite: disabled with a reason until the owner ID is set', () => {
+  state.length = 0;
+  const missing = renderToStaticMarkup(inviteButton({ ownerSet: false, label: 'Invite Owner', onInvite: async () => [] }));
+  assert.match(missing, /<button[^>]*disabled/);
+  assert.ok(missing.includes(en.ownerInvite.ownerMissing));
+  const set = renderToStaticMarkup(inviteButton({ ownerSet: true, label: 'Invite Owner', onInvite: async () => [] }));
+  assert.doesNotMatch(set, /disabled/);
+  assert.ok(!set.includes(en.ownerInvite.ownerMissing));
+});
+
+test('owner invite: shows invited, already_in_channel and failed with the reason', async () => {
+  state.length = 0;
+  const results = [
+    { name: 'a', invite: 'invited' },
+    { name: 'b', invite: 'already_in_channel' },
+    { name: 'c', invite: 'failed', message: 'missing_scope' },
+  ];
+  await buttonOf(inviteButton({ ownerSet: true, label: 'x', onInvite: async () => results })).props.onClick();
+  const html = renderToStaticMarkup(inviteButton({ ownerSet: true, label: 'x', onInvite: async () => results }));
+  assert.ok(html.includes('#a: Invited') && html.includes('#b: Already in the channel') && html.includes('#c: Failed: missing_scope'));
+  state.length = 0;
+  await buttonOf(inviteButton({ ownerSet: true, label: 'x', onInvite: async () => [] })).props.onClick();
+  assert.ok(renderToStaticMarkup(inviteButton({ ownerSet: true, label: 'x', onInvite: async () => [] })).includes(en.ownerInvite.noChannels));
+  state.length = 0;
+  await buttonOf(inviteButton({ ownerSet: true, label: 'x', onInvite: async () => { throw { rawMessage: 'boom' }; } })).props.onClick();
+  assert.ok(renderToStaticMarkup(inviteButton({ ownerSet: true, label: 'x', onInvite: async () => [] })).includes('Failed: boom'));
+});
+
+test('owner invite: ja.json and en.json define the same ownerInvite keys', () => {
+  assert.deepEqual(Object.keys(ja.ownerInvite).sort(), Object.keys(en.ownerInvite).sort());
+  assert.ok(Object.keys(en.ownerInvite).includes('already_in_channel'));
+});
+
+// ---- owner invite wiring ----------------------------------------------------
+
+const { SettingsView } = loadTsx('apps/web/components/SettingsView.tsx', {
+  '@/lib/api-client': { ...baseOverrides['@/lib/api-client'], inviteOwnerToSlackChannels: async () => [], ApiRequestError: class extends Error {} },
+  '@/components/OwnerInviteButton': { OwnerInviteButton },
+  '@/lib/remake-limits.mjs': {},
+  '@/lib/settings-errors': {},
+  '@/lib/model-presets': {},
+  '@/components/ModelPresetsBar': {},
+  '@/components/FolderPickerDialog': {},
+});
+
+// IntegrationsSection is private: reach it as an element of SettingsView and pre-seed its state (integrations, editing, testResult, ownerUserId).
+function settingsInvite({ saved, typed }) {
+  viewData = { settings: undefined };
+  state.length = 0; si = 0;
+  state[0] = []; // rows: past the loading placeholder
+  const section = find(SettingsView(), (n) => typeof n.type === 'function' && n.type.name === 'IntegrationsSection');
+  state.length = 0; si = 0;
+  state[0] = [{ provider: 'slack', configured: true, conversation_channel_id: null, notification_channel_id: null, owner_user_id: saved, last_tested_at: null }];
+  state[1] = 'slack';
+  state[2] = {}; // testResult
+  for (let i = 3; i < 12; i += 1) state[i] = ''; // testing .. notificationChannelId
+  state[12] = typed; // ownerUserId input
+  si = 0;
+  return find(section.type(section.props), (n) => n.type === OwnerInviteButton);
+}
+
+test('owner invite: Settings decides from the saved owner ID, not the typed one', () => {
+  assert.equal(settingsInvite({ saved: null, typed: 'U1' }).props.ownerSet, false);
+  assert.equal(settingsInvite({ saved: 'U1', typed: '' }).props.ownerSet, true);
+});
+
+test('owner invite: the channel panel keeps the button when Slack is stopped, and passes owner_user_id_set', () => {
+  const stopped = (owner) => {
+    viewData = { 'advisor-window-channels:P1': [{ ...channelItems[0], running: false, binding: { channel_id: 'C1', display_name: 'owl-alpha' }, owner_user_id_set: owner }] };
+    state.length = 0; si = 0;
+    const tree = AdvisorChannelPanel({ windowKey: 'P1', onClose() {} });
+    const el = find(tree, (n) => typeof n.type === 'function' && n.props.item);
+    state.length = 0; si = 0;
+    return find(el.type({ ...el.props }), (n) => n.type === OwnerInviteButton);
+  };
+  assert.equal(stopped(false).props.ownerSet, false);
+  assert.equal(stopped(true).props.ownerSet, true);
+});
+
+// ---- reordering project windows --------------------------------------------
+
+const mixed = [...windows, { ...windows[2], key: 'P3', project_id: 'P3', name: 'Gamma' }];
+const orderOf = (list) => list.map((w) => w.key);
+
+test('moveProjectWindow keeps the generalist first and never sends its key', () => {
+  assert.deepEqual(orderOf(windowsMod.moveProjectWindow(mixed, 'P3', 'P1')), ['general', 'P3', 'P1', 'P2']);
+  assert.deepEqual(orderOf(windowsMod.moveProjectWindow(mixed, 'P1', 'P3')), ['general', 'P2', 'P3', 'P1']);
+  // Dropping onto the generalist's row puts the project first among projects, not above the generalist.
+  assert.deepEqual(orderOf(windowsMod.moveProjectWindow(mixed, 'P2', 'general')), ['general', 'P2', 'P1', 'P3']);
+  assert.equal(windowsMod.moveProjectWindow(mixed, 'general', 'P1'), mixed);
+  assert.deepEqual(windowsMod.projectWindowKeys(windowsMod.moveProjectWindow(mixed, 'P3', 'general')), ['P3', 'P1', 'P2']);
+  assert.equal(windowsMod.projectWindowKeys(mixed).includes(windowsMod.DEFAULT_WINDOW_KEY), false);
+});
+
+test('picker: only project rows are draggable, and a drop reports from and to', () => {
+  const reorders = [];
+  const onReorder = (...args) => reorders.push(args);
+  const tree = AdvisorWindowPicker({ windows: mixed, currentKey: 'general', onSelect() {}, variant: 'sidebar', onReorder });
+  const rows = [];
+  find(tree, (n) => { if (n.type === 'li') rows.push(n); return false; });
+  assert.deepEqual(rows.map((r) => r.props.draggable), [undefined, true, true, true]);
+  const drop = { preventDefault() {}, dataTransfer: { getData: () => 'P3' } };
+  rows[1].props.onDrop(drop);
+  rows[3].props.onDrop(drop);
+  assert.deepEqual(reorders, [['P3', 'P1']]);
+  const plain = AdvisorWindowPicker({ windows: mixed, currentKey: 'general', onSelect() {}, variant: 'sheet' });
+  assert.equal(find(plain, (n) => n.type === 'li' && n.props.draggable), null);
+});
+
+test('reorderAdvisorWindows PUTs the project keys to /advisor/windows/order', async () => {
+  const fetchCalls = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    fetchCalls.push([String(url), init]);
+    const body = String(url).includes('advisor/windows/order') ? { data: mixed } : { base_path: '/owl/', api_base: '/api/v1', ws_url: '/ws', schema_version: '1.0.0' };
+    return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  try {
+    const { reorderAdvisorWindows } = loadTsx('apps/web/lib/api-client.ts', { '@/lib/work-detail-safety.mjs': {}, './backlog-link.mjs': {} });
+    const result = await reorderAdvisorWindows(['P3', 'P1', 'P2']);
+    assert.equal(result.length, 4);
+    const [url, init] = fetchCalls.find(([u]) => u.includes('advisor/windows/order'));
+    assert.match(url, /\/api\/v1\/advisor\/windows\/order$/);
+    assert.equal(init.method, 'PUT');
+    assert.deepEqual(JSON.parse(init.body).payload, { keys: ['P3', 'P1', 'P2'] });
+  } finally { globalThis.fetch = realFetch; }
+});
+
+test('reorder wiring: the sidebar gets onReorder, and the new string exists in both locales', () => {
+  const { picker } = renderWindows(null);
+  assert.equal(typeof picker.props.onReorder, 'function');
+  assert.ok(en.advisorWindows.reorderError && ja.advisorWindows.reorderError);
 });

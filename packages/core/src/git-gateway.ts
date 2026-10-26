@@ -39,6 +39,7 @@ import { OWL_INSTANCE_ID_ENV, reapProcessGroup, resolveInstanceId } from "@owl/s
 import { workVerificationMarker } from "./workspace-process-sweeper.js";
 import { ADVISOR_HOME_DIRNAME, ADVISOR_SHARED_DIRNAME, safeSegment, WorkspaceLayout } from "./workspace-layout.js";
 import { commitExcludePathspecs } from "./workspace-tooling.js";
+import { gitlinkPathsSince } from "./clone-check.js";
 import { inspectRepositoryRoot, type RepositoryRootInspection } from "./repository-inspection.js";
 
 export { safeSegment } from "./workspace-layout.js";
@@ -2688,8 +2689,16 @@ export class GitWorktreeGateway implements GitGateway {
     return this.taskPaths(request, "D", []);
   }
 
-  /** The Task worktree and the commit it forked from the Work at; null without a Project, fork null when Git cannot tell. */
-  private async taskForkPoint(request: GitOperationRequest): Promise<{ taskPath: string; fork: string | null; baseBranch: string } | null> {
+  public async gitlinkPaths(request: GitOperationRequest): Promise<readonly string[]> {
+    const task = await this.taskForkPoint(request);
+    if (!task) return [];
+    // Why not return [] like the path lists: an unknown fork point would let a committed gitlink pass the clone check.
+    if (task.fork === null) throw new Error(`Cannot list gitlinks in ${task.taskPath}: ${task.forkError}`);
+    return gitlinkPathsSince(task.taskPath, task.fork);
+  }
+
+  /** The Task worktree and the commit it forked from the Work at; null without a Project, fork null (with forkError) when Git cannot tell. */
+  private async taskForkPoint(request: GitOperationRequest): Promise<{ taskPath: string; fork: string | null; forkError: string | null; baseBranch: string } | null> {
     const project = this.projectFor(request.work_id);
     if (!project || !request.task_id) return null;
     const canonical = await this.validProjectPath(project.canonical_path, project.allowed_roots_json);
@@ -2698,7 +2707,12 @@ export class GitWorktreeGateway implements GitGateway {
     const workBranchExists = await this.git(canonical, ["show-ref", "--verify", "--quiet", `refs/heads/${workBranch}`]);
     const base = workBranchExists.exit_code === 0 ? workBranch : project.base_branch;
     const forkPoint = await this.git(taskPath, ["merge-base", "HEAD", base]);
-    return { taskPath, fork: forkPoint.ok ? forkPoint.message.trim() : null, baseBranch: project.base_branch };
+    return {
+      taskPath,
+      fork: forkPoint.ok ? forkPoint.message.trim() : null,
+      forkError: forkPoint.ok ? null : `git merge-base HEAD ${base} failed: ${forkPoint.message}`,
+      baseBranch: project.base_branch,
+    };
   }
 
   /** Paths a Task changed since it forked from the Work: "d" edits and additions, "A" additions only, "D" deletions only. */

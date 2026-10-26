@@ -307,7 +307,7 @@ test("a Worker that hit the usage limit after a side-effect tool call is requeue
     return work.id;
   });
   const started = JSON.stringify({ type: "item.started", item: { type: "command_execution", command: "curl -X POST https://example.com" } });
-  const limit = JSON.stringify({ type: "error", message: "You've hit your usage limit. Try again in 45m" });
+  const limit = JSON.stringify({ type: "error", message: "You've hit your usage limit. Try again at 9:00 PM." });
   const runner = createAgentRunner({
     adapter: "codex-cli/v1",
     outputLogDir: null,
@@ -334,6 +334,65 @@ test("a Worker that hit the usage limit after a side-effect tool call is requeue
   assert.equal(db.get("SELECT COUNT(*) AS count FROM events WHERE type IN ('decision.opened', 'task.failure.classified')").count, 0);
   assert.equal(db.get("SELECT state FROM provider_pauses WHERE provider = 'openai'").state, "paused");
 });
+
+for (const role of ["worker", "reviewer"]) {
+  test(`a ${role} that keeps hitting a temporary rate limit fails as transient without pausing the provider`, async (t) => {
+    const { root, db, onCleanup } = await dbInTemp(t);
+    const clock = fakeClock();
+    const store = createProviderPauseStore(db, clock.now);
+    const workId = await db.createWriteLane().transact((tx) => {
+      const work = createWorkInTransaction(tx, { title: "Temporary limit", summary: "429 only", size: "normal", project_id: null });
+      tx.run("UPDATE works SET state = 'running' WHERE id = ?", work.id);
+      const [task] = createTaskPlanInTransaction(tx, work.id, [{ id: "TASK", title: "Do it", type: "code", acceptance: "Pass", depends_on: [] }]);
+      if (role === "reviewer") tx.run("UPDATE tasks SET review_override = 'true' WHERE id = ?", task.id);
+      tx.run("INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at) VALUES ('model_settings', 'owner:default', '1.0.0', ?, ?)",
+        JSON.stringify({ version: 1, roles: [
+          { role: "worker", provider: "anthropic", model: "claude-test" },
+          { role: "reviewer", provider: "anthropic", model: "claude-test" },
+        ] }), clock.now());
+      return work.id;
+    });
+    let calls = 0;
+    const runner = createAgentRunner({
+      adapter: "claude-cli/v1",
+      outputLogDir: null,
+      env: { OWL_PROVIDER_RATE_LIMIT_RETRY_DELAY_MS: "0" },
+      provider: { toolNamesInLine, execute: async (request) => (calls += 1, { adapter: request.adapter, stdout: "", stderr: "API Error: 429 Too Many Requests", exit_code: 1, signal: null, format: "provider-json" }) },
+    });
+    const controller = createProviderPauseController({ store, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
+    const workflow = new WorkflowEngine({
+      db,
+      agentRunner: {
+        runWorker: role === "worker"
+          ? (request) => runner.runWorker(request)
+          : async (request) => (await writeValidFile(request), { outcome: "success", report_valid: true, report: { kind: "report", schema_version: "1.1.0", invocation_id: request.invocation_id, result: "success", work_done: "Done.", delegation: { decomposition: "Small.", delegated: [], own_subagents_used: false, retained: [] }, changes: [], verification: { status: "passed", method: "Checked.", acceptance: [{ criterion_id: "AC1", criterion: "Pass", status: "passed", evidence: "Looked." }], checks: [], integration_check: null }, remaining_issues: [], next_action: "none", needs_replanning: false, question_for_manager: null }, skill_feedback: null }),
+        runReviewer: (request) => runner.runReviewer(request),
+      },
+      git: Object.assign(new NoopGitGateway(), { prepareWorktree: async () => ({ ok: true, worktree_path: root }) }),
+      owlRoot: root,
+      dataDir: root,
+      providerPauseController: controller,
+    });
+    onCleanup(async () => { controller.stop(); await workflow.stop(); db.close(); });
+    workflow.start();
+    controller.start();
+    await workflow.resolveDependencies(workId);
+    await workflow.launchReady(workId);
+    await workflow.drainPipelines();
+
+    assert.ok(calls >= 3, "the runner retried the temporary limit before failing");
+    assert.equal(db.get("SELECT COUNT(*) AS count FROM provider_pauses").count, 0);
+    assert.equal(db.get("SELECT COUNT(*) AS count FROM events WHERE type = 'task.rate_limited'").count, 0);
+    const classified = db.all("SELECT payload_json FROM events WHERE type = 'task.failure.classified'").map((row) => JSON.parse(row.payload_json));
+    assert.ok(classified.some((payload) => payload.failure_class === "transient"), "the failure is classified as transient");
+    assert.ok(classified.every((payload) => !String(payload.reason ?? "").includes("利用上限")));
+    if (role === "reviewer") {
+      const failed = db.all("SELECT payload_json FROM events WHERE type = 'review.failed'").map((row) => JSON.parse(row.payload_json).error);
+      assert.equal(failed.length, 1);
+      assert.ok(!failed[0].includes("利用上限"));
+    }
+  });
+}
 
 test("a rate-limited Reviewer resumes without consuming Reviewer failures", async (t) => {
   const { root, db, onCleanup } = await dbInTemp(t);

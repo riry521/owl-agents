@@ -514,7 +514,23 @@ test("rate-limited children queue without consuming an attempt and resume after 
   assert.equal(db.get("SELECT rate_limit_requeues FROM child_runs WHERE id = ?", child.child_id).rate_limit_requeues, 1);
 });
 
-test("wait caps its ID count", { skip: process.platform === "win32" }, async (t) => {
+test("a failed Executor attempt stores the provider error under its agent run id", { skip: process.platform === "win32" }, async (t) => {
+  const { db, scheduler, ids, runtime } = await setup(t);
+  runtime.describeProviderError = (provider, _stdout, stderr, exitCode) => ({
+    harness: provider, message: `raw ${stderr.trim()}`, message_source: "stderr", code: null, http_status: null, failure_kind: "exit",
+    exit_code: exitCode, signal: null, failure_class: "transient", error_key: "provider_failed:test", attempt: 1, recorded_at: new Date().toISOString(),
+  });
+  const child = await dispatch(scheduler, ids.parent, "RETRY_ONCE", ["src/provider-error.ts"]);
+  const result = await scheduler.wait(ids.parent, { child_ids: [child.child_id], timeout_seconds: 8 }, new AbortController().signal);
+  assert.equal(result.children[0].status, "completed");
+  const failedRun = db.get("SELECT id FROM agent_runs WHERE child_run_id = ? AND status = 'failed'", child.child_id);
+  const rows = db.all("SELECT role, record_json FROM provider_error_records WHERE invocation_id = ?", failedRun.id);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].role, "executor");
+  assert.equal(JSON.parse(rows[0].record_json).exit_code, 17);
+});
+
+test("wait caps its ID count",{ skip: process.platform === "win32" }, async (t) => {
   const { scheduler, ids } = await setup(t);
   await assert.rejects(
     scheduler.wait(ids.parent, { child_ids: Array.from({ length: 17 }, () => "missing") }, new AbortController().signal),

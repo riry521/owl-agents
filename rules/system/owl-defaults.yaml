@@ -18,3 +18,6 @@ rules:
   - id: owl_full_test_when_required
     kind: instruction
     text: "「全部を確かめるときは代表サンプルにする」という決まりは、全件の実行を禁止するものではない。受け入れ条件が全件のテストを求めているとき、または Core・共有の型・API の戻り値・プロンプトを変えるときは、全件の実行に理由があるものとして扱い、全件を実行すること。全件の実行を避けるために partial や blocked で報告しないこと。"
+  - id: owl_no_cloned_repos_in_project
+    kind: instruction
+    text: "clone やダウンロードした外部のリポジトリ・ツールは別のプロジェクトとして扱い、プロジェクトの外に置くこと。プロジェクトにはコミットせず、一部を写すこともしない。clone は取ってきたままにし、手を加えない。"

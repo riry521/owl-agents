@@ -148,7 +148,7 @@ test('KnowledgeAutomationSection shows the next run of all three scheduled kinds
     '@/lib/settings-errors': {},
     '@/lib/remake-limits.mjs': {},
     '@/lib/model-presets': {},
-    '@/components/ModelPresetsBar': {},
+    '@/components/OwnerInviteButton': { OwnerInviteButton: () => null }, '@/components/ModelPresetsBar': {},
     '@/components/FolderPickerDialog': {},
   };
   const originalLoad = Module._load;

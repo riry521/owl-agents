@@ -167,6 +167,14 @@ test("resolveTestRun: gate and adoption follow how the record matched", () => {
   const repaired = resolveTestRun({ explicit_json: JSON.stringify({ mode: "whole", whole_argv: ["{python}", "-m", "pytest"] }), detected_json: null, root: pythonRoot, now: NOW, setup: { setup: repair, match: "explicit" } });
   assert.deepEqual(repaired.gate, { only: [["/saved/venv/bin/python", "-m", "pip", "install", "pytest"]] });
   assert.deepEqual(repaired.settings.setup_argvs, repaired.gate.only);
+  const cached = readyRecord({ setup_argvs: [["{python}", "-m", "pip", "install", "pytest"]], setup_cache: { inputs: ["requirements.txt"], outputs: [".venv"] } }, { explicit_digest: "d" });
+  const repairedCache = resolveTestRun({ explicit_json: JSON.stringify({ mode: "whole", whole_argv: ["{python}", "-m", "pytest"] }), detected_json: null, root: pythonRoot, now: NOW, setup: { setup: cached, match: "explicit" } });
+  assert.deepEqual(repairedCache.settings.setup_cache, { inputs: ["requirements.txt"], outputs: [".venv"] });
+  const prepareOnly = readyRecord({ setup_cache: { inputs: ["package.json"], outputs: ["node_modules"] } }, { explicit_digest: "d" });
+  const prepareCached = resolveTestRun({ explicit_json: JSON.stringify({ prepare_argv: ["npm", "ci"], file_argv: ["node", "--test", "{file}"] }), detected_json: null, root: pythonRoot, now: NOW, setup: { setup: prepareOnly, match: "explicit" } });
+  assert.deepEqual([prepareCached.settings.setup_argvs, prepareCached.settings.setup_cache], [[], { inputs: ["package.json"], outputs: ["node_modules"] }]);
+  const ownerCache = resolveTestRun({ explicit_json: JSON.stringify({ prepare_argv: ["npm", "ci"], file_argv: ["node", "--test", "{file}"], setup_cache: { inputs: ["owner.lock"], outputs: [] } }), detected_json: null, root: pythonRoot, now: NOW, setup: { setup: prepareOnly, match: "explicit" } });
+  assert.deepEqual(ownerCache.settings.setup_cache, { inputs: ["owner.lock"], outputs: [] });
   const none = readyRecord(null, { status: "no_language" });
   assert.deepEqual(pick(resolveTestRun({ explicit_json: null, detected_json: null, root: pythonRoot, now: NOW, setup: { setup: none, match: "exact" } }), { enabled: false, reason: "setup_no_language" }), { enabled: false, reason: "setup_no_language" });
   const noTests = resolveTestRun({ explicit_json: null, detected_json: null, root: pythonRoot, now: NOW, setup: { setup: readyRecord(null, { status: "no_tests" }), match: "exact" } });

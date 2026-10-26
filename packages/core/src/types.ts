@@ -1,5 +1,5 @@
 import type { OwlDatabase, WriteLane, WriteLaneTransaction } from "../../db/dist/index.js";
-import type { AcceptanceCriterion, CriteriaRelaxation, AgentFailureClass, AgentProcessEvent, CuratorCandidate, CuratorProposal, CuratorRequest, CuratorRunResult, OwnerLanguage, ProcessSkillsInstallCommand, PromptObserver, ProcessSkillsSettings, RateLimitInfo, SkillFeedback, TaskNecessity, TaskPlanContext, TestPolicy, TokenUsage } from "@owl/shared";
+import type { AcceptanceCriterion, CriteriaRelaxation, AgentFailureClass, AgentProcessEvent, CuratorCandidate, CuratorProposal, CuratorRequest, CuratorRunResult, OwnerLanguage, ProcessSkillsInstallCommand, PromptObserver, ProviderErrorObserver, ProviderErrorRecord, ProcessSkillsSettings, RateLimitInfo, SkillFeedback, TaskNecessity, TaskPlanContext, TestPolicy, TokenUsage } from "@owl/shared";
 import type { AttemptDecision } from "./attempt-policy";
 import type { ExecutorRuntime } from "./executor.js";
 import type { KnowledgeStoragePersistence } from "./knowledge-location.js";
@@ -201,6 +201,7 @@ export interface AgentRunner {
   setOutputObserver?(observer: (invocationId: string) => void): void;
   setOutputResubmitLimit?(read: () => number): void;
   setPromptObserver?(observer: PromptObserver | undefined): void;
+  setProviderErrorObserver?(observer: ProviderErrorObserver | undefined): void;
 }
 
 export interface WorkCheckout {
@@ -572,6 +573,8 @@ export interface GitGateway {
   addedPaths?(request: GitOperationRequest): Promise<readonly string[] | null>;
   /** Like changedPaths, limited to tracked files the Task deleted; [] when unknown. */
   deletedPaths?(request: GitOperationRequest): Promise<readonly string[] | null>;
+  /** Paths the Task committed as gitlinks (mode 160000) since it branched from the Work; [] when unknown. */
+  gitlinkPaths?(request: GitOperationRequest): Promise<readonly string[]>;
   /**
    * Per-file added/deleted line counts of everything the Task changed since it
    * branched from the Work (committed or not, untracked files included); null
@@ -753,6 +756,8 @@ export interface CoreOptions {
   readonly owlRoot?: string;
   /** Durable runtime data directory. Defaults to `<owlRoot>/data`. */
   readonly dataDir?: string;
+  /** Home folder searched for a folder of clones. Defaults to os.homedir(). */
+  readonly homeDir?: string;
   /** Persists the Owner-chosen knowledge directory ("" = `<owlRoot>/knowledge`). Without it the location is fixed. */
   readonly knowledgeStorage?: KnowledgeStoragePersistence;
   /** Root directory for Work and Advisor worktrees. Defaults to `<owlRoot>/.owl-workspaces` for backward compatibility. */
@@ -1701,4 +1706,11 @@ export interface InboundUploadBytes {
   readonly content: Buffer;
   readonly sha256: string;
   readonly mime: string;
+}
+
+export interface StoredProviderError {
+  readonly invocation_id: string;
+  readonly role: string;
+  readonly record: ProviderErrorRecord;
+  readonly created_at: string;
 }

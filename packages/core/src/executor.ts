@@ -29,6 +29,7 @@ import {
   type ExecutorConfig,
   type ExecutorRelayConfig,
   type ExecutorResult,
+  type ProviderErrorRecord,
   type ExecutorTask,
   type GuardTokenIssuer,
   type GuardTokenLease,
@@ -84,6 +85,8 @@ export interface ExecutorRuntime {
   readonly guardToken?: GuardTokenIssuer;
   /** Classifies a failed process's output as a provider rate limit; null when it is not one. */
   readonly detectRateLimit?: (provider: string, stdout: string, stderr: string) => { resets_at: string | null } | null;
+  /** The provider's own error of a failed process (masked, bounded), for the error record. */
+  readonly describeProviderError?: (provider: string, stdout: string, stderr: string, exitCode: number | null, signal: string | null) => ProviderErrorRecord;
   /** Runs one opencode child; Core cannot import agent-runtime, so the server injects it. */
   readonly runOpencode?: (run: OpencodeChildRun) => Promise<OpencodeChildOutcome>;
 }
@@ -678,7 +681,7 @@ export async function runExecutorProcess(
       duration_ms: Date.now() - started,
       failure_kind: "spawn_error",
     }));
-    child.once("close", (code) => {
+    child.once("close", (code, signal) => {
       if (claudeStream) { stdout = claudeStream.output(); outputTooLarge ||= claudeStream.retainedBytes() + Buffer.byteLength(stderr) > OUTPUT_CAP_BYTES; }
       tracker.flush();
       if (relay && relayKilled && !cancelled) {
@@ -735,6 +738,9 @@ export async function runExecutorProcess(
       const rate_limit = failure_kind === undefined || failure_kind === "cancelled"
         ? null
         : runtime.detectRateLimit?.(config.provider, stdout, stderr) ?? null;
+      const provider_error = failure_kind === undefined || failure_kind === "cancelled"
+        ? null
+        : runtime.describeProviderError?.(config.provider, stdout, stderr, code, signal) ?? null;
       finish({
         subtask_id: task.subtask_id,
         success,
@@ -743,6 +749,7 @@ export async function runExecutorProcess(
         duration_ms: Date.now() - started,
         ...(failure_kind ? { failure_kind } : {}),
         ...(rate_limit ? { rate_limit } : {}),
+        ...(provider_error ? { provider_error } : {}),
       });
     });
     try {
@@ -818,6 +825,7 @@ async function runOpencodeChild(
       duration_ms: Date.now() - started,
       ...(outcome.failure_kind ? { failure_kind: outcome.failure_kind } : {}),
       ...(outcome.rate_limit ? { rate_limit: outcome.rate_limit } : {}),
+      ...(outcome.provider_error ? { provider_error: outcome.provider_error } : {}),
     };
   } catch (error) {
     return failure("Executor process could not be started", error instanceof Error ? error.message : String(error), opencodeErrorText(error));

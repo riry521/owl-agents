@@ -279,7 +279,7 @@
     },
     "prerequisiteResume": "Stop waiting and resume",
     "stopReason": "Why it stopped: {{reason}}",
-    "fixerEscalated": "Fixer took over after {{count}} review rejections",
+    "fixerEscalated": "Fixer took over after {{count}} verification failures and review rejections",
     "reviewForced": "Review required because: {{reason}}",
     "autoRecovering": "Recovering automatically ({{kind}}, {{attempt}} of {{limit}})",
     "autoRecoveryTransient": "Waiting after a temporary error (resumes at {{time}}, {{attempt}} of {{limit}})",
@@ -462,7 +462,11 @@
     "currentState": "Current state",
     "tried": "What happened so far",
     "causeLabel": "Cause",
-    "causeKind": { "work": "A problem in the work", "criteria": "A problem in the criteria", "external": "A problem outside the Task" },
+    "causeKind": {
+      "work": "A problem in the work",
+      "criteria": "A problem in the criteria",
+      "external": "A problem outside the Task"
+    },
     "rewriteBefore": "Original criterion",
     "rewriteAfter": "Reworded criterion",
     "rewriteCheck": "How to check",
@@ -543,6 +547,7 @@
     }
   },
   "advisorWindows": {
+    "reorderError": "Could not save the new order. The previous order is shown.",
     "title": "Advisor windows",
     "general": "Owl",
     "unknownWindow": "The requested window {{key}} was not found, so the Owl window is shown.",
@@ -629,7 +634,7 @@
     "title": "Owl Advisor",
     "emptyMessage": "Get advice on strategy and direction.",
     "emptyHint": "Type a message below to start.",
-"showEarlier": "Show earlier messages",
+    "showEarlier": "Show earlier messages",
     "placeholder": "Ask the Advisor a question",
     "sendLabel": "Send",
     "hint": "Shift+Enter to send / Enter for new line",
@@ -783,7 +788,7 @@
     "testSetupStateLoading": "Loading the investigation state…",
     "testSetupStateLoadFailed": "Could not load the investigation state. {{reason}}",
     "testSetupStateReload": "Reload the state",
-    "testSetupInvestigateTimeout":"Still investigating. Reopen this page later to see the result.",
+    "testSetupInvestigateTimeout": "Still investigating. Reopen this page later to see the result.",
     "testSetupInvestigateUnavailable_explicit_test_run": "This Project specifies how to run tests explicitly, so it is not re-investigated.",
     "testSetupInvestigateUnavailable_runner_unavailable": "The agent used for the investigation cannot be started, so the request was not accepted.",
     "testSetupInvestigateUnavailable_provider_paused": "The provider is paused, so the request was not accepted.",
@@ -1046,8 +1051,8 @@
     "remakeLimitsSaved": "Saved.",
     "remakeLimitsError": "Could not load the remake limits.",
     "fixerEscalation": "Switch to Fixer",
-    "fixerEscalationDescription": "When a Worker Task is rejected by review this many times, the Fixer takes the next fix and stays until the Task completes.",
-    "fixerEscalation_after_review_rejections": "Review rejections (1–100)",
+    "fixerEscalationDescription": "When a Worker Task's verification failures and review rejections reach this total, the Fixer takes the next fix and stays until the Task completes.",
+    "fixerEscalation_after_review_rejections": "Verification failures plus review rejections (1–100)",
     "fixerEscalationSave": "Save Fixer switch",
     "fixerEscalationSaved": "Saved.",
     "fixerEscalationError": "Could not load the Fixer switch setting.",
@@ -1164,6 +1169,7 @@
     "workPostMergeSucceeded": "Post-merge command succeeded",
     "alertWorkPostMergeFailed": "Post-merge command failed",
     "exitCode": "Exit code",
+    "testRunDeferredToWork": "This Project runs the whole test suite, so tests are skipped for the Task and run in the Work verification",
     "workPostMergeQueued": "Post-merge command queued",
     "durationSeconds": "{{count}}s",
     "postMergeHistory": "Post-merge command",
@@ -1622,5 +1628,14 @@
     "errorVersionConflict": "The Work changed. The latest state was loaded; review it and send again",
     "errorReopenRequired": "This Work is completed. Send again to get the reopen confirmation",
     "errorValidation": "Check the instruction (too long, empty, etc.)"
+  },
+  "ownerInvite": {
+    "settingsButton": "Invite to existing window channels",
+    "channelButton": "Invite Owner",
+    "ownerMissing": "The Owner Slack user ID is not saved. Save it under Integrations in Settings first.",
+    "noChannels": "There are no channels to invite to.",
+    "invited": "Invited",
+    "already_in_channel": "Already in the channel",
+    "failed": "Failed: {{message}}"
   }
 }

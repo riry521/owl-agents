@@ -11,7 +11,7 @@ import { buildAgentEnv } from "./agent-env.js";
 import { providerConfigurationError, providerSelection, resolveExecutableForSelection, type ProviderSelection } from "./provider-selection.js";
 import type { AgentRunner } from "./types.js";
 import type { GuardTokenIssuer } from "../../../packages/shared/dist/guard-token.js";
-import type { PromptObserver } from "../../../packages/shared/dist/index.js";
+import type { PromptObserver, ProviderErrorObserver } from "../../../packages/shared/dist/index.js";
 import { OPENCODE_EXECUTABLE_ENV, type OpencodeChildOutcome, type OpencodeChildRun } from "../../../packages/shared/dist/index.js";
 import { runOpencodeChild } from "./opencode-child.js";
 import type { PlanUsageSnapshot } from "../../../packages/shared/dist/plan-usage.js";
@@ -275,6 +275,7 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
       setOutputObserver?: (observer: (invocationId: string) => void) => void;
       setOutputResubmitLimit?: (read: () => number) => void;
       setPromptObserver?: (observer: PromptObserver | undefined) => void;
+      setProviderErrorObserver?: (observer: ProviderErrorObserver | undefined) => void;
       setPlanUsageObserver?: (observer: (observation: PlanUsageSnapshot) => void) => void;
     } | null = null;
     // The provider registry is mutable by design: settings are edited through
@@ -282,6 +283,7 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
     // request's custom-provider changes without being recreated.
     let refreshProviderSettings: () => void = () => undefined;
     let planUsageObserver: ((observation: PlanUsageSnapshot) => void) | undefined;
+    let providerErrorObserver: ProviderErrorObserver | undefined;
     let outputResubmitLimit: (() => number) | undefined;
     // Observers are registered fire-and-forget; a failed delegate must be logged, not left as an unhandled rejection.
     const logObserverError = (name: string) => (error: unknown): void => {
@@ -398,6 +400,9 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
           if (outputResubmitLimit) {
             (configured as { setOutputResubmitLimit?: (read: () => number) => void }).setOutputResubmitLimit?.(outputResubmitLimit);
           }
+          if (providerErrorObserver) {
+            (configured as { setProviderErrorObserver?: (observer: ProviderErrorObserver | undefined) => void }).setProviderErrorObserver?.(providerErrorObserver);
+          }
           if (planUsageObserver) {
             (configured as {
               setPlanUsageObserver?: (observer: (observation: PlanUsageSnapshot) => void) => void;
@@ -481,6 +486,10 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
       setOutputResubmitLimit: (read: () => number) => {
         outputResubmitLimit = read;
         void getDelegate().then((delegateValue) => delegateValue.setOutputResubmitLimit?.(read)).catch(logObserverError("setOutputResubmitLimit"));
+      },
+      setProviderErrorObserver: (observer: ProviderErrorObserver | undefined) => {
+        providerErrorObserver = observer;
+        void getDelegate().then((delegateValue) => delegateValue.setProviderErrorObserver?.(observer)).catch(logObserverError("setProviderErrorObserver"));
       },
       setPromptObserver: (observer: PromptObserver | undefined) => {
         void getDelegate().then((delegateValue) => delegateValue.setPromptObserver?.(observer)).catch(logObserverError("setPromptObserver"));

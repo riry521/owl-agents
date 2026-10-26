@@ -1,4 +1,5 @@
 import { CRITERION_REQUIREMENTS, cliTokenUsage, harnessOfAdapter, isNonBlankReason, UNVERIFIABLE_STATUS } from "@owl/shared";
+import { codexErrorInfoOf, type CodexErrorInfo } from "./codex-error-info";
 import { providerFailed, reportInvalid } from "./errors";
 import { opencodeFailureDetail, opencodeTokenUsage, parseOpencodeResult, unwrapOpencodeResult } from "./opencode-result";
 import { claudeRateLimitEvidence, codexRateLimitEvidence, type RateLimitResetInput } from "./rate-limit";
@@ -508,8 +509,11 @@ export function harnessFailureDetail(adapter: string, rawStdout: string): Harnes
   if (adapter === "codex" || adapter.startsWith("codex")) {
     const message = codexFailureMessage(rawStdout);
     const evidence = codexRateLimitEvidence(rawStdout);
+    const info = codexFailureInfo(rawStdout);
     return message === null ? null : {
       error: message,
+      ...(info !== null ? { harness_code: info.code } : {}),
+      ...(info?.httpStatus != null ? { harness_status: info.httpStatus } : {}),
       ...(evidence.length > 0 ? { rate_limit_evidence: evidence } : {}),
     };
   }
@@ -554,6 +558,23 @@ function codexErrorEventMessage(event: Record<string, unknown>): string {
 }
 
 /** The last `error` or `turn.failed` message in a Codex event stream; lines that are not JSON are skipped. */
+function codexFailureInfo(rawStdout: string): CodexErrorInfo | null {
+  let info: CodexErrorInfo | null = null;
+  for (const rawLine of rawStdout.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line.startsWith("{")) continue;
+    let event: unknown;
+    try {
+      event = JSON.parse(line) as unknown;
+    } catch {
+      continue;
+    }
+    if (!isRecord(event) || (event.type !== "error" && event.type !== "turn.failed")) continue;
+    info = codexErrorInfoOf(event.error) ?? codexErrorInfoOf(event) ?? info;
+  }
+  return info;
+}
+
 function codexFailureMessage(rawStdout: string): string | null {
   let message: string | null = null;
   for (const rawLine of rawStdout.split(/\r?\n/)) {
@@ -597,6 +618,7 @@ export function unwrapCliResult(adapter: string, rawStdout: string): string {
 export function unwrapCodexCliResult(rawStdout: string): string {
   let finalText: string | null = null;
   let turnFailed = false;
+  let errorInfo: CodexErrorInfo | null = null;
   const errors: string[] = [];
   for (const rawLine of rawStdout.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -612,6 +634,7 @@ export function unwrapCodexCliResult(rawStdout: string): string {
     }
     if (event.type === "error") {
       errors.push(codexErrorEventMessage(event));
+      errorInfo = codexErrorInfoOf(event) ?? errorInfo;
       continue;
     }
     if (event.type === "turn.failed") {
@@ -619,6 +642,7 @@ export function unwrapCodexCliResult(rawStdout: string): string {
       if (isRecord(event.error) && typeof event.error.message === "string") {
         errors.push(event.error.message);
       }
+      errorInfo = codexErrorInfoOf(event.error) ?? codexErrorInfoOf(event) ?? errorInfo;
       continue;
     }
     if (event.type !== "item.completed") continue;
@@ -646,6 +670,8 @@ export function unwrapCodexCliResult(rawStdout: string): string {
       stdout: rawStdout,
       error: errors.length > 0 ? errors[errors.length - 1] : "codex turn failed",
       errors,
+      ...(errorInfo !== null ? { harness_code: errorInfo.code } : {}),
+      ...(errorInfo?.httpStatus != null ? { harness_status: errorInfo.httpStatus } : {}),
       ...(rateLimitEvidence.length > 0 ? { rate_limit_evidence: rateLimitEvidence } : {}),
     });
   }

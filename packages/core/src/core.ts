@@ -5,6 +5,8 @@ import { copyFile, lstat, mkdir, readFile, rename, rm, rmdir, stat, unlink, writ
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createUlid, utcNow } from "../../db/dist/index.js";
+import { insertProviderError, listProviderErrors } from "./provider-error-store.js";
+import type { StoredProviderError } from "./types.js";
 import { DecisionService, type OpenDecisionPayload } from "./decision";
 import { DesignMockStore, type DesignMockSummary } from "./design-mocks";
 import { DECISION_CANCEL_OPTION_KEY, managerReplanFailureBrief, prerequisiteExpiredBrief, RESOLVE_CONFLICT_OPTION_KEY, type ReplanFailureCause } from "./decision-brief";
@@ -374,6 +376,8 @@ import { verificationPolicySettings } from "./task-verification-policy.js";
 import { resolveTestRun } from "./test-detection.js";
 import { explicitTestRunDigest, readStoredTestSetup, testSetupView } from "./test-setup.js";
 import { testSetupSettings } from "./test-setup-settings.js";
+import { resolveCloneRoot } from "./clone-root";
+import { cloneBaseline, cloneUses } from "./clone-check.js";
 import { classifyInstallCommand, execInstallQuery, outsideWriteTargets, resolveInstallTarget, TestSetupRunRegistry, type InstallQuery, type TestSetupRunEntry } from "./test-setup-install-guard.js";
 import { GUARD_PATH_KEYS, GUARD_SHELL_COMMAND_KEYS, GUARD_SHELL_TOOL_NAMES, READ_ONLY_TOOL_NAMES } from "../../shared/dist/guard-inputs.js";
 import { matchDeniedCommand, reviewerDeniedCommands, REVIEWER_TEST_COMMAND_DENIED_MESSAGE, type ReviewerTestCommandCheck } from "./reviewer-test-guard.js";
@@ -795,6 +799,8 @@ export class Core {
   private readonly memory: MemoryService;
   private readonly projectReader: ProjectSourceReader;
   private readonly overviewRuns = new Set<Promise<unknown>>();
+  /** Clone root resolutions in flight; stop() waits for them so none writes into the data folder afterwards. */
+  private readonly cloneRootResolutions = new Set<Promise<unknown>>();
   private readonly worktreeReconciles = new Set<Promise<unknown>>();
   private readonly agentStops = new Set<Promise<void>>();
   /** Per Work, when the tick began waiting for Agents the Owner stopped to end, and whether the forced stop was resent. */
@@ -1254,6 +1260,8 @@ export class Core {
     this.workflow = new WorkflowEngine({
       designSkill: options.designSkill ?? null,
       testSetup: this.testSetup,
+      cloneRoot: () => this.cloneRoot(),
+      clonesUsed: (taskId) => this.db.all<{ path: string; clone_exists: number; baseline: string }>("SELECT path, clone_exists, baseline FROM task_clone_uses WHERE task_id = ?", taskId).map((row) => ({ path: row.path, exists: row.clone_exists === 1, baseline: row.baseline })),
       db: options.db,
       agentRunner: workspacePreparer ? withWorkspacePreparation(options.agentRunner, workspacePreparer) : options.agentRunner,
       onWorktreeCreated: workspacePreparer ? (worktreePath) => workspacePreparer.markCreated(worktreePath) : undefined,
@@ -1357,6 +1365,13 @@ export class Core {
         );
       }).catch((error) => {
         console.error(`[owl-core] Failed to record the prompt fingerprint of ${invocationId}`, error);
+      });
+    });
+    options.agentRunner.setProviderErrorObserver?.(({ invocation_id, role, record }) => {
+      void this.writeLane.transact((transaction) => {
+        insertProviderError(transaction, invocation_id, role, record);
+      }).catch((error) => {
+        console.error(`[owl-core] Failed to record the provider error of ${invocation_id}`, error);
       });
     });
     options.agentRunner.setOutputObserver?.((invocationId) => {
@@ -1469,6 +1484,21 @@ export class Core {
     this.testSetupRuns.get(agentRunId)?.installs.push(...installs);
   }
 
+  /** The folder outside every Project where Workers clone external repositories; see resolveCloneRoot. */
+  public cloneRoot(): Promise<string> {
+    const resolving = resolveCloneRoot({
+      home: this.options.homeDir ?? homedir(),
+      dataDir: this.dataDir,
+      exclude: this.workspaceLayout.roots(),
+      projectPaths: this.db.all<{ canonical_path: string }>("SELECT canonical_path FROM projects").map((row) => row.canonical_path),
+      ownDir: dirname(this.workspaceLayout.root),
+    });
+    // The caller handles a failure; the tracked copy only marks when the resolution is over.
+    const tracked: Promise<unknown> = resolving.catch(() => null).finally(() => this.cloneRootResolutions.delete(tracked));
+    this.cloneRootResolutions.add(tracked);
+    return resolving;
+  }
+
   public async checkTestSetupTool(input: {
     readonly agent_run_id: string;
     readonly tool_name: string;
@@ -1476,9 +1506,25 @@ export class Core {
     readonly cwd: string;
     readonly query?: InstallQuery;
   }): Promise<{ readonly denied: false; readonly installs?: readonly (readonly string[])[] } | { readonly denied: true; readonly reason: string; readonly message: string }> {
+    const cloneRoot = await this.cloneRoot().catch(() => null);
+    const taskId = cloneRoot === null ? undefined : this.db.get<{ task_id: string | null }>("SELECT task_id FROM agent_runs WHERE id = ?", input.agent_run_id)?.task_id;
+    if (cloneRoot !== null && taskId) {
+      const uses = cloneUses(cloneRoot, input.tool_name, input.tool_input, input.cwd, this.options.homeDir ?? homedir());
+      if (uses.length > 0) {
+        // The baseline is taken here, before the tool call runs, and only the first record of a path keeps it.
+        const known = new Set(this.db.all<{ path: string }>("SELECT path FROM task_clone_uses WHERE task_id = ?", taskId).map((row) => row.path));
+        const baselines = await Promise.all(uses.map((use) => (known.has(use.path) ? "" : cloneBaseline(use))));
+        await this.writeLane.transact((tx) => {
+          uses.forEach((use, i) => {
+            tx.run("INSERT INTO task_clone_uses (task_id, path, clone_exists, baseline) VALUES (?, ?, ?, ?) ON CONFLICT (task_id, path) DO UPDATE SET clone_exists = MAX(clone_exists, excluded.clone_exists)", taskId, use.path, use.exists ? 1 : 0, baselines[i]);
+          });
+        });
+      }
+    }
     const run = this.testSetupRuns.get(input.agent_run_id);
     if (run === undefined) return { denied: false };
     const settings = testSetupSettings(this.db);
+    const writableOutside = [...settings.install.writable_outside, cloneRoot ?? await this.cloneRoot()];
     const toolName = input.tool_name.toLowerCase();
     let reason: string | null = null;
     let installs: (readonly string[])[] = [];
@@ -1498,7 +1544,7 @@ export class Core {
       const bad = classified.segments.find((segment) => segment.denied === true);
       if (bad !== undefined) reason = bad.reason;
       else {
-        const writes = outsideWriteTargets(command, { cwd: input.cwd, roots: run.roots, writable: settings.install.writable_outside });
+        const writes = outsideWriteTargets(command, { cwd: input.cwd, roots: run.roots, writable: writableOutside });
         if (writes.length > 0) reason = `writes outside the Project: ${writes.join(", ")}`;
         // Not recorded here: the caller records them with recordTestSetupInstalls once the rule-store guard has also let the call through.
         else installs = classified.segments.filter((segment) => segment.scope === "outside").map((segment) => segment.argv);
@@ -1508,7 +1554,7 @@ export class Core {
         const value = input.tool_input[key];
         return typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
       });
-      const bad = paths.find((path) => resolveInstallTarget(path, input.cwd, [...run.roots, ...settings.install.writable_outside]) === "outside");
+      const bad = paths.find((path) => resolveInstallTarget(path, input.cwd, [...run.roots, ...writableOutside]) === "outside");
       if (bad !== undefined) {
         subject = bad;
         reason = `writes outside the Project: ${bad}`;
@@ -2753,7 +2799,7 @@ export class Core {
       await Promise.allSettled([...this.activeCurations.values()]);
       await this.learningTask;
       await this.projectOverviews.idle();
-      await Promise.allSettled([...this.overviewRuns]);
+      await Promise.allSettled([...this.overviewRuns, ...this.cloneRootResolutions]);
       await this.researchRecorder.idle();
       return;
     }
@@ -2802,7 +2848,7 @@ export class Core {
     await Promise.allSettled([...this.worktreeReconciles, ...this.repositoryDetections.values()]);
     await this.learningTask;
     await this.projectOverviews.idle();
-    await Promise.allSettled([...this.overviewRuns]);
+    await Promise.allSettled([...this.overviewRuns, ...this.cloneRootResolutions]);
     await this.dispatcher.stop();
     // Before the drain: a failing research write records its own alert through the lane, and that write must not land after the drain.
     await this.researchRecorder.idle();
@@ -4894,6 +4940,10 @@ export class Core {
     return response;
   }
 
+  public listProviderErrors(query: Parameters<typeof listProviderErrors>[1]): StoredProviderError[] {
+    return listProviderErrors(this.db, query);
+  }
+
   public listAgentRuns(query: AgentListQuery = {}): ListResponse<AgentRun> {
     const limit = boundLimit(query.limit ?? 50);
     const rows = this.db.all<AgentDbRow>(
@@ -5992,6 +6042,26 @@ export class Core {
       outbox: [],
     });
     return true;
+  }
+
+  /** Saves the display order of Project windows; the general window is always first and never stored. Returns the list in the new order. */
+  public async setAdvisorWindowOrder(keys: readonly string[]): Promise<AdvisorWindowSummary[]> {
+    await this.writeLane.write({
+      mutateState: (transaction) => {
+        ensureOwner(transaction, DEFAULT_OWNER_ID, utcNow());
+        transaction.run("DELETE FROM advisor_window_order WHERE owner_id = ?", DEFAULT_OWNER_ID);
+        keys.forEach((key, position) => transaction.run(
+          "INSERT INTO advisor_window_order (owner_id, window_key, position) VALUES (?, ?, ?)", DEFAULT_OWNER_ID, key, position,
+        ));
+      },
+      event: {
+        idempotencyKey: `advisor-window-order-changed:${createUlid()}`,
+        type: "advisor.window_order_changed",
+        payload: { kind: "advisor_window_order_changed", schema_version: "1.0.0", keys: [...keys] },
+      },
+      outbox: [{ provider: "websocket" }],
+    });
+    return this.listAdvisorWindows();
   }
 
   public async getAdvisorWindowSettings(): Promise<AdvisorWindowSettings> {

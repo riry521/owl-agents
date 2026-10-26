@@ -138,3 +138,10 @@ test("Discord API error codes map to channel admin codes", async () => {
     if (code === "rate_limited") assert.equal(result.retry_after_seconds, 3);
   }
 });
+
+test("Slack already_in_channel stays in provider_code", async () => {
+  const failing = slackWith({ invite: async () => { throw Object.assign(new Error("slack"), { data: { error: "already_in_channel" } }); } });
+  const error = await rejection(failing.inviteUsers("C1", ["U1"]));
+  assert.equal(error.code, "provider_error");
+  assert.equal(error.provider_code, "already_in_channel");
+});

@@ -199,11 +199,15 @@ export function resolveTestRun(input: {
     const settings = testRunSettingsFromJson(input.explicit_json, input.warn);
     if (settings === null) return { enabled: false, source: "explicit", reason: "invalid_settings", ...NONE };
     if (settings.mode === "off") return { enabled: false, source: "explicit", reason: "explicit_off", ...NONE };
-    const repair = selection !== null && selection.match === "explicit" && recorded !== null ? recorded.setup_argvs : [];
+    const record = selection !== null && selection.match === "explicit" ? recorded : null;
+    const repair = record?.setup_argvs ?? [];
+    // The investigation records the cache even when no repair command was needed (prepare_argv alone, or the Owner's
+    // setup_argvs already enough), so it is taken from the record, not only with repair commands; the Owner's own setup_cache wins.
+    const withCache = record !== null && settings.setup_cache === null ? { ...settings, setup_cache: record.setup_cache } : settings;
     return {
       enabled: true,
       source: "explicit",
-      settings: withSetupExecutables(settings, executables, repair),
+      settings: withSetupExecutables(withCache, executables, repair),
       save: null,
       setup_match: repair.length > 0 ? "explicit" : null,
       adopt_on_pass: false,

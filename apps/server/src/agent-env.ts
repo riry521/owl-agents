@@ -24,7 +24,7 @@ const OWL_SECRET_ENV_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 /** Role-scoped timeout and context-limit settings (see agent-timeouts.ts). */
-const ROLE_RUNTIME_SETTING_ENV = /^(?:OWL_PROVIDER_(?:IDLE_)?TIMEOUT_MS_[A-Z0-9_]+|OWL_ROLE_SESSION_CONTEXT_LIMIT(?:_[A-Z0-9_]+)?)$/u;
+const ROLE_RUNTIME_SETTING_ENV = /^(?:OWL_PROVIDER_(?:IDLE_)?TIMEOUT_MS_[A-Z0-9_]+|OWL_ROLE_SESSION_CONTEXT_LIMIT(?:_[A-Z0-9_]+)?|OWL_PROVIDER_RATE_LIMIT_RETRY_(?:MAX|DELAY_MS)_[A-Z0-9_]+)$/u;
 
 const OWL_PROVIDER_API_KEY_ENV = /^OWL_PROVIDER_[A-Z0-9_]+_API_KEY$/u;
 
@@ -68,6 +68,8 @@ const SHARED_CONFIGURATION_ENV_NAMES: ReadonlySet<string> = new Set([
   OPENCODE_EXECUTABLE_ENV,
   "OWL_PROVIDER_TIMEOUT_MS",
   "OWL_PROVIDER_IDLE_TIMEOUT_MS",
+  "OWL_PROVIDER_RATE_LIMIT_RETRY_MAX",
+  "OWL_PROVIDER_RATE_LIMIT_RETRY_DELAY_MS",
 ]);
 
 export function isOwlSecretEnvName(name: string): boolean {

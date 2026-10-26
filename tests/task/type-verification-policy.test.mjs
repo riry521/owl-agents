@@ -393,11 +393,11 @@ test("code and test: files no checker or runner covers fail", async (t) => {
   assert.equal((await directly(t, { type: "test", files: { "readme.md": "x" } })).error_key, "test_not_executed");
 });
 
-test("code: a whole-command Core test run verifies a .ts-only Task; its failure is a test failure; no run stays code_unchecked", async (t) => {
+test("code: a whole-deferred Core test run verifies a .ts-only Task with a policy:test detail naming the Work verification; a failed whole run still fails; no run stays code_unchecked", async (t) => {
   const run = (coreTestRun) => directly(t, { type: "code", files: { "src/a.ts": "x" }, coreTestRun });
-  const passed = await run({ run_id: "R1", passed_files: ["*"], failed_files: [] });
-  assert.equal(passed.passed, true);
-  assert.ok(passed.checks.some((check) => check.command_id === "policy:test" && check.passed));
+  const deferred = await run({ reason: "whole_deferred_to_work", run_id: null, passed_files: [], failed_files: [] });
+  assert.equal(deferred.passed, true);
+  assert.ok(deferred.checks.some((check) => check.command_id === "policy:test" && check.passed && check.detail.includes("whole_deferred_to_work")));
   assert.equal((await run({ run_id: "R2", passed_files: [], failed_files: ["*"] })).error_key, "test_failed");
   assert.equal((await run(undefined)).error_key, "code_unchecked");
 });
@@ -490,18 +490,69 @@ async function tsOnlyTaskWithWholeRun(t, { wholePasses, testRun = { mode: "whole
   return { argvs, payload: JSON.parse(event.payload_json) };
 }
 
-test("code: a .ts-only Task is verified by the Project's whole test run, not left code_unchecked", async (t) => {
+test("code: a .ts-only Task in a whole Project starts no test runner and records the deferral to the Work verification", async (t) => {
   const { argvs, payload } = await tsOnlyTaskWithWholeRun(t, { wholePasses: true });
-  assert.deepEqual(argvs.at(-1), ["bun", "test"]);
-  assert.notEqual(payload.verification.error_key, "code_unchecked");
+  assert.equal(argvs.some((argv) => argv.join(" ") === "bun test"), false);
+  assert.equal(payload.outcome, "pass");
+  assert.equal(payload.verification.test_run.status, "skipped");
+  assert.equal(payload.verification.test_run.reason, "whole_deferred_to_work");
+  assert.ok(payload.verification.commands.some((command) => command.command_id === "policy:test" && String(command.detail).includes("whole_deferred_to_work")));
+});
+
+test("code: a failing whole suite does not fail the .ts-only Task; the Work verification judges it", async (t) => {
+  const { argvs, payload } = await tsOnlyTaskWithWholeRun(t, { wholePasses: false });
+  assert.equal(argvs.some((argv) => argv.join(" ") === "bun test"), false);
+  assert.equal(payload.outcome, "pass");
+  assert.notEqual(payload.verification.error_key, "test_failed");
+});
+
+test("code: a changed test file in a whole Project starts no per-file test runner either", async (t) => {
+  const { argvs, payload } = await tsOnlyTaskWithWholeRun(t, { wholePasses: false, written: ["src/a.ts", "src/a.test.mjs"] });
+  assert.equal(argvs.some((argv) => argv.includes("src/a.test.mjs")), false);
   assert.equal(payload.outcome, "pass");
 });
 
-test("code: a failing whole test run fails the .ts-only Task as a test failure", async (t) => {
-  const { argvs, payload } = await tsOnlyTaskWithWholeRun(t, { wholePasses: false });
-  assert.deepEqual(argvs.at(-1), ["bun", "test"]);
-  assert.equal(payload.outcome, "fail");
-  assert.equal(payload.verification.error_key, "test_failed");
+test("Core: a Task whose inputs differ from an investigated whole Project's runs no investigation, setup or test", async (t) => {
+  const written = ["requirements.txt", "src/a.ts"];
+  const investigations = [];
+  const argvs = [];
+  const agentRunner = {
+    runManagerPlan: async (request) => request.mode === "finalize"
+      ? { outcome: "success", report_valid: true, report: { tasks: [], event: null, verdict: { verdict: "complete", summary: "Done.", missing: [], lessons: [] } } }
+      : { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [plannedTask("T1")] } },
+    runWorker: async (request) => {
+      for (const name of written) {
+        await mkdir(dirname(join(request.context.worktree, name)), { recursive: true });
+        await writeFile(join(request.context.worktree, name), "pytest\nrequests\n");
+      }
+      return { outcome: "success", report_valid: true, report: projectWorkerReport(request.invocation_id, written) };
+    },
+    runReviewer: async (request) => ({ outcome: "success", report_valid: true, report: { kind: "review", invocation_id: request.invocation_id }, review: { verdict: "pass", findings: [], tests: {} } }),
+    runAdvisor: async () => ({ reply: "" }),
+    runTestSetupInvestigation: async (request) => { investigations.push(request); return { ok: false, error: "stub", invocation_id: request.invocation_id }; },
+  };
+  const runner = async (argv) => { argvs.push(argv); return { exit_code: 0, timed_out: false, stdout: "", stderr: "", duration_ms: 1 }; };
+  const { db, core, repo, projectId, envelope } = await openTestRunCore(t, {
+    agentRunner, runner, prefix: "owl-whole-setup-", emptyPlan: true, files: { "README.md": "x\n", "requirements.txt": "pytest\n" }, testRun: null,
+  });
+  await core.whenTestSetupIdle();
+  const digests = await testSetupDigests({ root: repo, rules_version: testDetectionRulesVersion(DEFAULT_TEST_DETECTION_RULES), settings: DEFAULT_TEST_SETUP_SETTINGS });
+  const record = {
+    status: "ready", test_run: { mode: "whole", whole_argv: ["{python}", "-m", "pytest", "-q"], prepare_argv: ["{python}", "-m", "pip", "install"] },
+    executables: { python: { path: SAVED_PYTHON, version: "3.12.0" } }, sources: [], digests, explicit_digest: null, whole_reason: "the suite cannot run per file",
+    confirmed_at: new Date().toISOString(), attempts: [], outside_installs: [], missing: [], trigger: "test", investigated_at: new Date().toISOString(),
+  };
+  await db.createWriteLane().transact((tx) => { tx.run("UPDATE projects SET test_setup_json = ? WHERE id = ?", JSON.stringify(record), projectId); });
+  const before = investigations.length;
+  const created = await core.createWork(envelope({ title: "setup", summary: "x", size: "normal", project_id: projectId }, "work"));
+  await core.startWork(created.data.work_id, { ...envelope({ mode: "normal" }, "start"), expected_version: created.version });
+  await waitFor(() => db.all("SELECT id FROM events WHERE type = 'verification.completed'").length >= 1, { timeoutMs: 30_000, message: "the Task verification" });
+  await core.whenTestSetupIdle();
+  const payload = JSON.parse(db.all("SELECT payload_json FROM events WHERE type = 'verification.completed' ORDER BY rowid")[0].payload_json);
+  assert.deepEqual(investigations.slice(before).map((request) => request.scope), []);
+  assert.deepEqual(argvs, []);
+  assert.equal(payload.verification.test_run.status, "skipped");
+  assert.equal(payload.verification.test_run.reason, "whole_deferred_to_work");
 });
 
 const offInput = { enabled: false, reason: "explicit_off" };
@@ -618,7 +669,7 @@ async function pythonTaskCore(t, { savedPython, settingPython }) {
   if (savedPython !== undefined) {
     const digests = await testSetupDigests({ root: repo, rules_version: testDetectionRulesVersion(DEFAULT_TEST_DETECTION_RULES), settings: DEFAULT_TEST_SETUP_SETTINGS });
     const record = {
-      status: "ready", test_run: { mode: "whole", whole_argv: ["{python}", "-m", "pytest", "-q"] },
+      status: "ready", test_run: { mode: "per_file", file_argv: ["{python}", "-m", "pytest", "-q", "{file}"] },
       executables: { python: { path: savedPython, version: "3.12.0" } }, sources: [], digests, explicit_digest: null,
       confirmed_at: new Date().toISOString(), attempts: [], outside_installs: [], missing: [], trigger: "test", investigated_at: new Date().toISOString(),
     };

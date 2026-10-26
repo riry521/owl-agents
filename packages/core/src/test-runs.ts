@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, readFile, rm, writeFile } from "node:fs/promises";
 import { availableParallelism } from "node:os";
 import { dirname, posix, resolve } from "node:path";
 import { matchesGlobWithDots } from "./glob.js";
@@ -63,6 +64,8 @@ export interface TestExecution {
   readonly duration_ms: number;
   /** The setup or prepare step that failed (status error only). */
   readonly prepare_failure?: PrepareFailure;
+  /** Prepare was skipped because its recorded inputs were unchanged; an environment failure then deserves one re-prepare. */
+  readonly prepare_skipped?: true;
 }
 
 export interface PrepareFailure {
@@ -266,17 +269,55 @@ export async function prepareCheckoutStep(input: { root: string; settings: TestR
   return null;
 }
 
+/**
+ * The hash file lives in the checkout's git directory: it never shows in `git status`, so it cannot leak into a Task's diff,
+ * and a linked worktree gets its own file, so a fresh worktree always prepares. A Project-side file or Owl's database would
+ * need a key per checkout and cleanup when the worktree goes away.
+ */
+async function setupCacheFile(root: string): Promise<string | null> {
+  try {
+    return resolve(root, (await execFileAsync("git", ["rev-parse", "--git-path", "owl-setup-hash"], { cwd: root })).stdout.trim());
+  } catch {
+    return null;
+  }
+}
+
+/** Invalidates the recorded hash so the next run prepares again. */
+export async function invalidateSetupCache(root: string): Promise<void> {
+  const file = await setupCacheFile(root);
+  if (file !== null) await rm(file, { force: true });
+}
+
+/** Prepare, skipped when a prior success recorded the same inputs and its outputs still exist; settings without setup_cache always prepare. */
+async function prepareForRun(input: { root: string; settings: TestRunSettings; run: TestCommandRunner }): Promise<{ failure: (PrepareFailure & { readonly message: string }) | null; skipped: boolean }> {
+  const { root, settings } = input;
+  const cache = settings.setup_cache;
+  const file = cache === null || (settings.setup_argvs.length === 0 && settings.prepare_argv.length === 0) ? null : await setupCacheFile(root);
+  if (cache === null || file === null) return { failure: await prepareCheckoutStep(input), skipped: false };
+  const contents = await Promise.all(cache.inputs.map((path) => readFile(resolve(root, path)).then((bytes) => createHash("sha256").update(bytes).digest("hex"), () => "missing")));
+  const hash = createHash("sha256").update(JSON.stringify([settings.setup_argvs, settings.prepare_argv, settings.cwd, cache.inputs, contents])).digest("hex");
+  const recorded = await readFile(file, "utf8").catch(() => "");
+  const present = (await Promise.all(cache.outputs.map((path) => access(resolve(root, path)).then(() => true, () => false)))).every(Boolean);
+  if (recorded === hash && present) return { failure: null, skipped: true };
+  await rm(file, { force: true });
+  const failure = await prepareCheckoutStep(input);
+  if (failure === null) await writeFile(file, hash);
+  return { failure, skipped: false };
+}
+
 const stepOf = ({ message: _message, ...step }: PrepareFailure & { readonly message: string }): PrepareFailure => step;
 
 /** The one row a whole-command run records in test_run_files. */
 export const WHOLE_RUN_FILE = "*";
+/** Why a whole-command Project skips the Task-level test run: only the Work-level run executes the suite. */
+export const WHOLE_DEFERRED_REASON = "whole_deferred_to_work";
 
 /** Runs prepare once, then whole_argv once; pass = exit code 0. */
 export async function runWholeSuite(input: { root: string; settings: TestRunSettings; run: TestCommandRunner; signal?: AbortSignal }): Promise<TestExecution> {
   const { root, settings, run, signal } = input;
   const started = Date.now();
-  const done = (status: TestExecution["status"], error: string | null, files: readonly TestFileResult[] = []): TestExecution => ({ status, error, files, duration_ms: Date.now() - started });
-  const prepareError = await prepareCheckoutStep({ root, settings, run });
+  const { failure: prepareError, skipped } = await prepareForRun({ root, settings, run });
+  const done = (status: TestExecution["status"], error: string | null, files: readonly TestFileResult[] = []): TestExecution => ({ status, error, files, duration_ms: Date.now() - started, ...(skipped ? { prepare_skipped: true as const } : {}) });
   if (prepareError !== null) return { ...done("error", prepareError.message), prepare_failure: stepOf(prepareError) };
   if (signal?.aborted === true) return done("error", "aborted");
   const file = WHOLE_RUN_FILE;
@@ -301,8 +342,9 @@ export async function runTestFiles(input: {
 }): Promise<TestExecution> {
   const { root, files, settings, run, signal } = input;
   const started = Date.now();
-  const fail = (error: string, results: readonly TestFileResult[] = []): TestExecution => ({ status: "error", error, files: results, duration_ms: Date.now() - started });
-  const prepareError = await prepareCheckoutStep({ root, settings, run });
+  const { failure: prepareError, skipped } = await prepareForRun({ root, settings, run });
+  const skip = skipped ? { prepare_skipped: true as const } : {};
+  const fail = (error: string, results: readonly TestFileResult[] = []): TestExecution => ({ status: "error", error, files: results, duration_ms: Date.now() - started, ...skip });
   if (prepareError !== null) return { ...fail(prepareError.message), prepare_failure: stepOf(prepareError) };
   const aborted = (): boolean => signal?.aborted === true;
   const results: TestFileResult[] = [];
@@ -322,7 +364,7 @@ export async function runTestFiles(input: {
     }
   }));
   results.sort((a, b) => a.file.localeCompare(b.file));
-  return aborted() ? fail("aborted", results) : { status: "completed", error: null, files: results, duration_ms: Date.now() - started };
+  return aborted() ? fail("aborted", results) : { status: "completed", error: null, files: results, duration_ms: Date.now() - started, ...skip };
 }
 
 /** error: the run did not go through; failed: some file has an in_scope failure; otherwise passed. */

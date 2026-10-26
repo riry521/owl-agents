@@ -1,4 +1,4 @@
-import type { AcceptanceDefect, CriterionRequirement, GuardTokenIssuer, ManagerTrigger, RateLimitInfo, ResearchSubagentSettings, StoredAcceptanceCriterion, TaskNecessity, WebResearchCapture } from "@owl/shared";
+import type { AcceptanceDefect, CriterionRequirement, GuardTokenIssuer, ManagerTrigger, ProviderErrorRecord, RateLimitInfo, ResearchSubagentSettings, StoredAcceptanceCriterion, TaskNecessity, WebResearchCapture } from "@owl/shared";
 
 export const REPORT_SCHEMA_VERSION = "1.1.0" as const;
 /** Reports saved before schema 1.1.0 (`verification.passed` boolean). Read-only: new agent output must not use it. */
@@ -276,6 +276,8 @@ export interface WorkerContext {
   /** Commands Core chose for the Worker to run before reporting (Project setting, else test detection); [] = none. */
   readonly report_check_commands?: readonly string[];
   readonly worktree?: string;
+  /** Absolute folder outside every Project where the Worker clones external repositories. */
+  readonly clone_root?: string | null;
   readonly previous_report?: ReportEnvelope | null;
   /** Set when Core relaunches the Worker after the process it left running ended. */
   readonly process_wait?: Readonly<Record<string, unknown>> | null;
@@ -443,7 +445,7 @@ export type SessionEvent =
   | { type: "tool.web_research"; turn_id: string; capture: WebResearchCapture }
   | { type: "tool.web_research_failed"; turn_id: string; error: string }
   | { type: "turn.completed"; turn_id: string; reply: string; usage: TokenUsage | null }
-  | { type: "turn.failed"; turn_id: string; error: string; rate_limit?: RateLimitInfo }
+  | { type: "turn.failed"; turn_id: string; error: string; rate_limit?: RateLimitInfo; provider_error?: ProviderErrorRecord }
   | {
       type: "session.compacted";
       cause: "auto" | "manual";

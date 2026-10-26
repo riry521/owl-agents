@@ -14,6 +14,7 @@ import {
 } from "./test-quarantine";
 import { ensureBaselineRun, triageTestFailures } from "./test-failure-triage";
 import {
+  invalidateSetupCache,
   latestTestRun,
   listTestFiles,
   recordTestRunInTransaction,
@@ -21,15 +22,19 @@ import {
   runWholeSuite,
   selectTests,
   WHOLE_RUN_FILE,
+  WHOLE_DEFERRED_REASON,
   testFailureBriefs,
   testRunStatus,
   type ClassifiedFailure,
   type TestCommandRunner,
+  type TestExecution,
   type TestFailureBriefs,
   type TestSelection,
 } from "./test-runs";
 import type { CoreDatabase } from "./types";
 import { workVerificationMarker } from "./workspace-process-sweeper";
+
+export { WHOLE_DEFERRED_REASON };
 
 export interface CoreTestRunRequest {
   readonly scope: "task" | "work";
@@ -116,6 +121,10 @@ function latestNightlyKeys(db: Pick<CoreDatabase, "get">, projectId: string): Se
 
 /** Select, run, triage and record: the one path both a Task check and a Work check take. */
 export async function runCoreTests(deps: CoreTestRunDeps, req: CoreTestRunRequest): Promise<CoreTestRunOutcome> {
+  // Why not run it at Task level: a whole suite costs minutes per Task; the Work-level run still covers every change.
+  if (req.settings.mode === "whole" && req.scope === "task") {
+    return { ...notApplicableTestRun(WHOLE_DEFERRED_REASON), status: "skipped" };
+  }
   const previous = latestTestRun(deps.db, req.scope === "task" && req.task_id !== null ? { scope: "task", task_id: req.task_id } : { scope: "work", work_id: req.work_id });
   const whole = req.settings.mode === "whole";
   const allTestFiles = whole ? [] : await listTestFiles(req.root, req.settings);
@@ -146,16 +155,24 @@ export async function runCoreTests(deps: CoreTestRunDeps, req: CoreTestRunReques
   }
 
   const startedAt = new Date().toISOString();
-  const ran = whole
-    ? await runWholeSuite({ root: req.root, settings: req.settings, run: req.run, signal: req.signal })
-    : await runTestFiles({ root: req.root, files: selection.files, settings: req.settings, run: req.run, signal: req.signal });
+  const execute = (): Promise<TestExecution> => whole
+    ? runWholeSuite({ root: req.root, settings: req.settings, run: req.run, signal: req.signal })
+    : runTestFiles({ root: req.root, files: selection.files, settings: req.settings, run: req.run, signal: req.signal });
   // Before the baseline: a missing tool fails the base commit the same way, and would read as an old failure.
-  const environment = req.environment_signals === undefined ? null : executionEnvironmentFailure(
-    ran,
+  const environmentOf = (result: TestExecution): TestEnvironmentFailure | null => req.environment_signals === undefined ? null : executionEnvironmentFailure(
+    result,
     (file) => (whole ? req.settings.whole_argv : req.settings.file_argv.map((arg) => (arg === "{file}" ? file.file : arg))),
     req.environment_signals,
     new Set((req.known_failures ?? []).map(testFailureKey)),
   );
+  let ran = await execute();
+  let environment = environmentOf(ran);
+  // A skipped prepare may have left a broken environment (a half-deleted .venv): prepare once more and run again. A run that prepared is not repeated.
+  if (environment !== null && ran.prepare_skipped === true) {
+    await invalidateSetupCache(req.root);
+    ran = await execute();
+    environment = environmentOf(ran);
+  }
   const execution = environment === null || ran.status === "error" ? ran : { ...ran, status: "error" as const, error: `test environment: ${environment.signal}` };
   // A whole-command run is judged by its exit code alone: no nightly or baseline triage.
   const nightlyKeys = whole ? new Set<string>() : latestNightlyKeys(deps.db, req.project_id);

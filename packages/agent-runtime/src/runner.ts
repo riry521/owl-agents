@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { AgentRuntimeError, providerConfigInvalid, providerFailed, reportInvalid } from "./errors";
 import {
   classifyProviderFailure,
+  RATE_LIMIT_TRANSIENT_ERROR_KEY,
   withProviderDetail,
   formatProviderError,
   formatRuntimeError,
@@ -12,9 +13,10 @@ import {
 } from "./provider-error";
 import { asManagerRequest, buildManagerPrompt, managerOutputSchema, parseManagerPlanWithFeedback } from "./manager";
 import { statSync } from "node:fs";
-import { EXTERNAL_DATA_POLICY, AgentTimeoutSettingError, readStoredAcceptanceCriteria, DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, OPENCODE_API_KEY_ENV_ENV, OPENCODE_BASE_URL_ENV, PROCESS_SKILLS_PROMPT_FILES, renderProcessSkills, parseResearchSubagentSettings, researchSubagentPromptRef, type CuratorRequest, type ResearcherPromptRef, type ResearchSubagentSettings, type CuratorRunResult, type ProcessSkillsRole, type PromptObserver, type ModelHarness, harnessOfAdapter, roleSessionContextLimit } from "@owl/shared";
+import { EXTERNAL_DATA_POLICY, AgentTimeoutSettingError, readStoredAcceptanceCriteria, DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, OPENCODE_API_KEY_ENV_ENV, OPENCODE_BASE_URL_ENV, PROCESS_SKILLS_PROMPT_FILES, renderProcessSkills, parseResearchSubagentSettings, researchSubagentPromptRef, type CuratorRequest, type ResearcherPromptRef, type ResearchSubagentSettings, type CuratorRunResult, type ProcessSkillsRole, type PromptObserver, type ProviderErrorObserver, type ModelHarness, harnessOfAdapter, roleSessionContextLimit, rateLimitRetrySettings } from "@owl/shared";
 import { type ReportCorrection, extractProviderUsage, harnessFailureDetail, isClaudeReportFormatFailure, isRecord, parseSingleJsonObject, unwrapCliResult } from "./protocol";
 import { extractRoleOutputObject, providerSchema } from "./role-contract";
+import { providerResponseFailure, waitForRateLimitRetry } from "./rate-limit-retry";
 import { RoleSessionManager } from "./role-session-manager";
 import { resolveOutputLogDir, writeInvalidOutputLog } from "./output-log";
 import { createCliProvider } from "./provider";
@@ -757,6 +759,9 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
   let processObserver: ((invocationId: string, event: { type: "spawned" | "exited"; pid: number; harness?: ModelHarness }) => void | Promise<void>) | undefined;
   let outputObserver: ((invocationId: string) => void) | undefined;
   let promptObserver: PromptObserver | undefined;
+  let providerErrorObserver: ProviderErrorObserver | undefined;
+  /** Failed provider calls seen per invocation, so each record carries its attempt number. */
+  const providerErrorAttempts = new Map<string, number>();
   let planUsageObserver: ((observation: PlanUsageSnapshot) => void) | undefined;
   const observePlanUsageLine = (adapter: string, line: string): void => {
     if (!planUsageObserver || line.trim().length === 0) return;
@@ -801,6 +806,8 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
   };
   const sideEffectPatterns = options.sideEffectTools ?? DEFAULT_SIDE_EFFECT_TOOLS;
   const sideEffectInvocations = new Set<string>();
+  /** Short retries of a temporary rate limit used per invocation; shared across session fresh retries and resubmissions. */
+  const rateLimitRetries = new Map<string, number>();
   const observeSideEffects = (request: ProviderExecutionRequest, line: string): void => {
     if ((provider.toolNamesInLine?.(request.adapter, line) ?? []).some((name) => isSideEffectTool(name, sideEffectPatterns))) {
       sideEffectInvocations.add(request.invocation_id);
@@ -808,16 +815,19 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
   };
   /** Makes a failed result non-retryable once the invocation has had an external side effect (a rate limit stays as is so Core pauses the provider). */
   const afterSideEffect = (invocationId: string, result: RuntimeAgentRunResult): RuntimeAgentRunResult =>
-    !sideEffectInvocations.delete(invocationId) || result.outcome === "success" || result.failure_class === "rate_limited"
+    !((rateLimitRetries.delete(invocationId), providerErrorAttempts.delete(invocationId)), sideEffectInvocations.delete(invocationId)) || result.outcome === "success" || result.failure_class === "rate_limited"
       ? result
       : { ...result, failure_class: "deterministic", retry_allowed: false, error_key: `side_effect_failure:${result.error_key ?? "unknown"}` };
   /** Role-shaped callers get a thrown error: release the record and mark it as a failure after a side effect. */
   const guardLegacySideEffects = async <T>(invocationId: string, run: () => Promise<T>): Promise<T> => {
+    rateLimitRetries.delete(invocationId);
     try {
       const value = await run();
       sideEffectInvocations.delete(invocationId);
+      rateLimitRetries.delete(invocationId);
       return value;
     } catch (error) {
+      rateLimitRetries.delete(invocationId);
       const cause = providerFailureCause(error);
       const classification = cause === null ? null : classifyProviderFailure(options.adapter ?? "provider", cause);
       const rateLimited = classification?.failure_class === "rate_limited";
@@ -831,7 +841,31 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
       throw error;
     }
   };
+  /** Reports a failed provider call to the observer; telemetry, so it never affects the call. */
+  const observeProviderFailure = (request: ProviderExecutionRequest, cause: ProviderFailureCause): void => {
+    if (!providerErrorObserver) return;
+    const attempt = (providerErrorAttempts.get(request.invocation_id) ?? 0) + 1;
+    providerErrorAttempts.set(request.invocation_id, attempt);
+    try {
+      const classification = classifyProviderFailure(request.adapter, cause, "ja", undefined, providerSecretValues(options));
+      providerErrorObserver({ invocation_id: request.invocation_id, role: request.role, record: { ...classification.provider_error, attempt } });
+    } catch (error) {
+      console.error(`[agent-runtime] Provider error observer failed for ${request.invocation_id}`, error);
+    }
+  };
   const executeProviderWithPlanUsage = async (request: ProviderExecutionRequest): Promise<ProviderResponse> => {
+    try {
+      const response = await executeObservedProvider(request);
+      const cause = providerResponseFailure(response);
+      if (cause !== null) observeProviderFailure(request, cause);
+      return response;
+    } catch (error) {
+      const cause = providerFailureCause(error instanceof AgentRuntimeError ? error : providerFailed("provider_execute_failed", error));
+      if (cause !== null) observeProviderFailure(request, cause);
+      throw error;
+    }
+  };
+  const executeObservedProvider = async (request: ProviderExecutionRequest): Promise<ProviderResponse> => {
     let receivedRawLines = false;
     const response = await provider.execute({
       ...request,
@@ -858,9 +892,15 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
       throw error;
     }
   };
-  const executeProvider = async (request: ProviderExecutionRequest): Promise<ProviderResponse> => {
-    // Checked on the first run too: the session manager only reads the limit when a prior session exists.
-    contextLimit(request.role);
+  const rateLimitRetryConfig = (role: ProviderExecutionRequest["role"]): { maxRetries: number; delayMs: number } => {
+    try {
+      return rateLimitRetrySettings(options.env ?? {}, role);
+    } catch (error) {
+      if (error instanceof AgentTimeoutSettingError) throw providerConfigInvalid(`${error.setting.toLowerCase()}_invalid`);
+      throw error;
+    }
+  };
+  const executeProviderOnce = async (request: ProviderExecutionRequest): Promise<ProviderResponse> => {
     const controller = new AbortController();
     const active: { controller: AbortController; pid?: number } = { controller };
     activeControllers.set(request.invocation_id, active);
@@ -892,6 +932,33 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
       }
       activeControllers.delete(request.invocation_id);
       lastOutputNotifiedAt.delete(request.invocation_id);
+    }
+  };
+
+  /**
+   * Runs the provider again after a temporary rate limit (waiting delay x retry number), within the
+   * same invocation. Usage limits, side effects, and a used-up retry budget return the response as is.
+   */
+  const executeProvider = async (request: ProviderExecutionRequest): Promise<ProviderResponse> => {
+    // Checked on the first run too: the session manager only reads the limit when a prior session exists.
+    contextLimit(request.role);
+    const { maxRetries, delayMs } = rateLimitRetryConfig(request.role);
+    const id = request.invocation_id;
+    for (;;) {
+      const response = await executeProviderOnce(request);
+      const cause = providerResponseFailure(response);
+      if (cause === null) return response;
+      const classification = classifyProviderFailure(request.adapter, cause);
+      const used = rateLimitRetries.get(id) ?? 0;
+      if (classification.error_key !== RATE_LIMIT_TRANSIENT_ERROR_KEY || used >= maxRetries || sideEffectInvocations.has(id)) return response;
+      rateLimitRetries.set(id, used + 1);
+      const waiting = new AbortController();
+      activeControllers.set(id, { controller: waiting });
+      try {
+        await waitForRateLimitRetry(delayMs * (used + 1), waiting.signal);
+      } finally {
+        activeControllers.delete(id);
+      }
     }
   };
 
@@ -1226,11 +1293,15 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
         };
     const invocationId = "invocation_id" in input ? (input as CoreAdvisorRunRequest).invocation_id : invocationIdFactory();
     const { model, adapter, effort, env } = resolveOverrides(input as unknown as Record<string, unknown>, options);
-    const response = await executeProvider(
-      requestForProvider("advisor", invocationId, buildAdvisorPrompt(request), options, undefined, model, adapter, effort, undefined, env),
-    );
-    assertProviderCompleted(response);
-    return parseAdvisorResponse(extractInnerStdout(response));
+    try {
+      const response = await executeProvider(
+        requestForProvider("advisor", invocationId, buildAdvisorPrompt(request), options, undefined, model, adapter, effort, undefined, env),
+      );
+      assertProviderCompleted(response);
+      return parseAdvisorResponse(extractInnerStdout(response));
+    } finally {
+      rateLimitRetries.delete(invocationId);
+    }
   };
 
   const runCurator = async (input: CuratorRequest): Promise<CuratorRunResult> => {
@@ -1560,6 +1631,9 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     },
     setPromptObserver: (observer: PromptObserver | undefined) => {
       promptObserver = observer;
+    },
+    setProviderErrorObserver: (observer: ProviderErrorObserver | undefined) => {
+      providerErrorObserver = observer;
     },
     setPlanUsageObserver: (observer: (observation: PlanUsageSnapshot) => void) => {
       planUsageObserver = observer;

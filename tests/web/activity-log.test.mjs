@@ -289,3 +289,17 @@ test("Work screen offers older history and shows a failure found on the second p
   assert.match(markup, /old-tail/);
   assert.doesNotMatch(markup, /postMergeLoadOlder/);
 });
+
+test("Activity Log explains a whole-deferred test run only for that reason", () => {
+  const event = (id, reason) => ({
+    event_id: id,
+    type: "verification.completed",
+    work_id: "work-1",
+    payload: { verification: { test_run: { status: "skipped", ...(reason ? { reason } : {}) } } },
+    created_at: new Date().toISOString(),
+  });
+  hookValues = [[event("v-1", "whole_deferred_to_work")], ""];
+  assert.match(renderToStaticMarkup(React.createElement(ActivityLog)), /activity\.testRunDeferredToWork/);
+  hookValues = [[event("v-2")], ""];
+  assert.doesNotMatch(renderToStaticMarkup(React.createElement(ActivityLog)), /activity\.testRunDeferredToWork/);
+});

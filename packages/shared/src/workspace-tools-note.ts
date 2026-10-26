@@ -9,12 +9,16 @@ import { isAbsolute } from "node:path";
  * absolute worktree path was supplied, so callers can skip the section
  * entirely.
  */
-export function renderWorkspaceToolsNote(worktree: string | null | undefined): string[] | null {
+export function renderWorkspaceToolsNote(worktree: string | null | undefined, cloneRoot?: string | null): string[] | null {
   const path = worktree?.trim();
   if (!path || !isAbsolute(path)) return null;
+  const clones = cloneRoot?.trim();
   return [
     `- You are working in the git worktree ${path}. The user's MCP servers and project skills are configured the same as in the main checkout and operate on this worktree.`,
     "- For finding files or symbols, tracing references and callers, and estimating the impact of a change, prefer the semantic search, reference search and impact-analysis tools available to you. Read files exhaustively only when no such tool is available or it did not answer the question.",
     "- If a tool reports that its index, graph or project for this workspace is missing or stale, build or refresh it with that tool's own command before relying on it. Never treat empty results from an unbuilt index as evidence that something does not exist.",
+    ...(clones && isAbsolute(clones)
+      ? [`- Clone external repositories only under ${clones}, never inside the worktree: git clone <url> ${clones}/<host>/<owner>/<repo> (host, owner and repo come from the URL). If a clone of the same URL already exists there, reuse it instead of cloning again. Treat clones as read-only: do not edit them.`]
+      : []),
   ];
 }

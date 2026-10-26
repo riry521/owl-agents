@@ -6,6 +6,7 @@ import {
   opencodeTokenUsage,
   parseOpencodeResult,
   providerFailureCause,
+  turnFailureProviderError,
   unwrapOpencodeResult,
 } from "../../../packages/agent-runtime/dist/index.js";
 import {
@@ -57,31 +58,40 @@ export async function runOpencodeChild(run: OpencodeChildRun, options: { executa
     const usage = opencodeTokenUsage(response.stdout);
     if (response.exit_code === 0) {
       const text = unwrapOpencodeResult(response.stdout)?.trim();
-      return text
-        ? { success: true, output: text, exit_code: 0, usage }
-        : { success: false, output: "opencode finished without a final assistant message.", exit_code: 0, failure_kind: "no_final_report", usage };
+      if (text) return { success: true, output: text, exit_code: 0, usage };
+      const output = "opencode finished without a final assistant message.";
+      return {
+        success: false,
+        output,
+        exit_code: 0,
+        failure_kind: "no_final_report",
+        usage,
+        provider_error: turnFailureProviderError("opencode", { exit_code: 0, signal: response.signal, error: output, stderr: response.stderr }),
+      };
     }
     const error = parseOpencodeResult(response.stdout)?.error;
-    const rate_limit = error
-      ? classifyProviderFailure("opencode", { exit_code: response.exit_code, signal: response.signal, ...opencodeFailureDetail(error), stdout: response.stdout, stderr: response.stderr }).rate_limit
-      : undefined;
+    const classification = classifyProviderFailure("opencode", { exit_code: response.exit_code, signal: response.signal, kind: "exit", ...(error ? opencodeFailureDetail(error) : {}), stdout: response.stdout, stderr: response.stderr });
+    const rate_limit = error ? classification.rate_limit : undefined;
     return {
       success: false,
       output: failureText(error?.message || `opencode exited with code ${String(response.exit_code)}`, { stderr: response.stderr }),
       exit_code: response.exit_code ?? -1,
       failure_kind: "exit_code",
       usage,
+      provider_error: classification.provider_error,
       ...(rate_limit ? { rate_limit: { resets_at: rate_limit.resets_at } } : {}),
     };
   } catch (error) {
     const cause = providerFailureCause(error);
-    const rate_limit = cause?.kind === "harness_error" ? classifyProviderFailure("opencode", cause).rate_limit : undefined;
+    const classification = cause === null ? null : classifyProviderFailure("opencode", cause);
+    const rate_limit = cause?.kind === "harness_error" ? classification?.rate_limit : undefined;
     return {
       success: false,
       output: failureText(error, cause),
       exit_code: -1,
       failure_kind: failureKindOf(cause),
       usage: null,
+      provider_error: classification?.provider_error ?? turnFailureProviderError("opencode", { error }),
       ...(rate_limit ? { rate_limit: { resets_at: rate_limit.resets_at } } : {}),
     };
   }

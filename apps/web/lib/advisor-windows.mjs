@@ -13,6 +13,23 @@ export function windowHref(key) {
   return key === DEFAULT_WINDOW_KEY ? "/advisor" : `/advisor?window=${encodeURIComponent(key)}`;
 }
 
+/** Project の窓 fromKey を toKey の位置へ動かした一覧。全体の窓は常に先頭のまま。toKey が全体の窓なら Project の先頭に入れる。 */
+export function moveProjectWindow(windows, fromKey, toKey) {
+  const general = windows.filter((w) => w.scope === "general");
+  const projects = windows.filter((w) => w.scope !== "general");
+  const from = projects.findIndex((w) => w.key === fromKey);
+  if (from < 0) return windows;
+  const to = Math.max(projects.findIndex((w) => w.key === toKey), 0);
+  const [moved] = projects.splice(from, 1);
+  projects.splice(to, 0, moved);
+  return [...general, ...projects];
+}
+
+/** 並べ替えの保存に送る keys。Project の窓の key だけを表示順に並べる。 */
+export function projectWindowKeys(windows) {
+  return windows.filter((w) => w.scope !== "general").map((w) => w.key);
+}
+
 /** Slack・Discord から来た Owner の発言の送り手の名前に付ける文言のキー。それ以外は null。 */
 export function viaLabelKey(source) {
   return source === "slack" || source === "discord" ? `advisorWindows.via.${source}` : null;

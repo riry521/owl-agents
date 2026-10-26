@@ -1,3 +1,4 @@
+import { codexErrorInfoOf, isUsageLimitCode } from "./codex-error-info";
 import { builtinProviderHarness, harnessOfAdapter, type RateLimitInfo } from "@owl/shared";
 
 export type RateLimitHarness = "claude" | "codex" | "opencode";
@@ -64,7 +65,7 @@ function claudeEventReset(event: unknown): Date | null {
   return resets[0] ?? null;
 }
 
-function codexEventReset(event: unknown, now: Date): Date | null {
+function codexEventReset(event: unknown, now: Date, saturatedOnly = false): Date | null {
   const candidates: { date: Date; used: number | null }[] = [];
   const seen = new Set<object>();
   const visit = (value: unknown, depth: number): void => {
@@ -85,7 +86,8 @@ function codexEventReset(event: unknown, now: Date): Date | null {
   };
   visit(event, 0);
   const saturated = candidates.filter((candidate) => candidate.used !== null && candidate.used >= 100);
-  const pool = saturated.length > 0 ? saturated : candidates;
+  // A snapshot under 100% is sent on ordinary turns, so it reports no reset when only saturated windows count.
+  const pool = saturated.length > 0 || saturatedOnly ? saturated : candidates;
   return pool.sort((left, right) => right.date.getTime() - left.date.getTime())[0]?.date ?? null;
 }
 
@@ -325,6 +327,60 @@ export function resolveRateLimitReset(
   return { resets_at: null, source: null };
 }
 
+const RESET_MARKER = /resets|try\s+again\s+at/giu;
+// Marker, optional weekday and month date, the time, and a zone right after it.
+const RESET_VALUE = /^(?:resets|try\s+again\s+at)\s+(?:(?:on|at)\s+)?(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)[a-z]*\.?,?\s*)?(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2}(?:st|nd|rd|th)?,?\s*(?:\d{4},?\s*)?)?\d{1,2}(?::\d{2}){0,2}(?!\d)(?:\s*(?:AM|PM)\b)?(?:\s*\([A-Za-z][\w+-]*(?:\/[\w+-]+)*\))?/iu;
+
+/** Only a time right after "resets" or "try again at" is a reset; other times in the text are log noise. */
+function markedClockReset(text: string, now: Date, timeZone: string): Date | null {
+  for (const marker of text.matchAll(RESET_MARKER)) {
+    // Parse only the value itself: parseLocalClock searches its whole input, so a
+    // later "log entry Sep 28, 3:05 PM" on the same line would be read as the reset.
+    const value = RESET_VALUE.exec(text.slice(marker.index));
+    const date = value === null ? null : parseLocalClock(value[0], now, timeZone);
+    if (date !== null) return date;
+  }
+  return null;
+}
+
+/**
+ * The reset time the provider itself reported, or null. Unlike
+ * resolveRateLimitReset, it ignores relative waits ("try again in 6ms"), times
+ * without a marker and Codex snapshots under 100%, because those describe a
+ * short API limit, not a used-up usage limit.
+ */
+export function reportedRateLimitReset(
+  inputs: readonly RateLimitResetInput[],
+  now: Date,
+  options: RateLimitParseOptions = {},
+): RateLimitInfo | null {
+  const harness = options.harness;
+  const timeZone = options.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const read = (input: RateLimitResetInput): Date | null => {
+    if (input.kind === "retry_after") return parseRetryAfter(input.value, now);
+    if (input.kind === "event") {
+      if (harness === "claude") return claudeEventReset(input.event);
+      return harness === "codex" ? codexEventReset(input.event, now, true) : null;
+    }
+    const clock = harness === "claude" || harness === "codex" ? markedClockReset(input.text, now, timeZone) : null;
+    return clock ?? parseUsageEpoch(input.text);
+  };
+  for (const kind of ["event", "text", "retry_after"] as const) {
+    for (let index = inputs.length - 1; index >= 0; index -= 1) {
+      const input = inputs[index];
+      if (input?.kind !== kind) continue;
+      let date: Date | null = null;
+      try {
+        date = normalized(read(input), now);
+      } catch {
+        date = null;
+      }
+      if (date !== null) return { resets_at: date.toISOString(), source: kind };
+    }
+  }
+  return null;
+}
+
 /** Extracts structured reset evidence from a Claude one-shot result wrapper. */
 export function claudeRateLimitEvidence(wrapper: Record<string, unknown>): RateLimitResetInput[] {
   const evidence: RateLimitResetInput[] = [];
@@ -356,9 +412,13 @@ export function codexRateLimitEvidence(rawJsonl: string): RateLimitResetInput[] 
       }
     }
   };
+  const plainLines: string[] = [];
   for (const rawLine of rawJsonl.split(/\r?\n/u)) {
     const line = rawLine.trim();
-    if (!line.startsWith("{")) continue;
+    if (!line.startsWith("{")) {
+      plainLines.push(line);
+      continue;
+    }
     let event: unknown;
     try {
       event = JSON.parse(line) as unknown;
@@ -366,17 +426,17 @@ export function codexRateLimitEvidence(rawJsonl: string): RateLimitResetInput[] 
       continue;
     }
     if (!isRecord(event)) continue;
-    visitRetryAfter(event, 0);
-    const hasResetSnapshot = isRecord(event.rate_limits) || isRecord(event.rateLimits);
+    // Only error events carry the provider's headers; the model's own messages can quote any "retry-after".
+    if (event.type === "error" || event.type === "turn.failed") visitRetryAfter(event, 0);
     const error = isRecord(event.error) ? event.error : isRecord(event.turn) && isRecord(event.turn.error) ? event.turn.error : null;
-    const code = isRecord(error?.codexErrorInfo)
-      ? error.codexErrorInfo.kind ?? error.codexErrorInfo.type ?? error.codexErrorInfo.code
-      : null;
-    if (hasResetSnapshot || code === "usageLimitExceeded") evidence.push({ kind: "event", event });
+    const hasResetSnapshot = [event, error].some((holder) => isRecord(holder) && (isRecord(holder.rate_limits) || isRecord(holder.rateLimits)));
+    const code = (codexErrorInfoOf(error) ?? codexErrorInfoOf(event))?.code;
+    if (hasResetSnapshot || isUsageLimitCode(code)) evidence.push({ kind: "event", event });
   }
   const textRetryAfter = /\bretry-after\s*:\s*([^\r\n]+)/giu;
   let retryMatch: RegExpExecArray | null;
-  while ((retryMatch = textRetryAfter.exec(rawJsonl)) !== null) {
+  const plainText = plainLines.join("\n");
+  while ((retryMatch = textRetryAfter.exec(plainText)) !== null) {
     evidence.push({ kind: "retry_after", value: retryMatch[1].trim() });
   }
   return evidence;

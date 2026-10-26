@@ -10,6 +10,8 @@ export type ApiErrorCode =
   | "channel_in_use"
   | "channel_already_bound"
   | "channel_binding_not_found"
+  | "owner_user_id_missing"
+  | "invite_not_supported"
   | "channel_name_taken"
   | "channel_bot_not_member"
   | "channel_not_found"
