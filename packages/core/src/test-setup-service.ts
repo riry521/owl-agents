@@ -1,8 +1,8 @@
 import { accessSync, constants } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
 
 import { createUlid } from "../../db/dist/index.js";
-import { DEFAULT_TEST_RUN_SETTINGS, readTestRunSettings, validateTestRunSettings, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
+import { DEFAULT_TEST_RUN_SETTINGS, readTestRunSettings, runArgvOf, validateTestRunSettings, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
 import { REGEX_FLAGS, type TestSetupSettings } from "../../shared/dist/test-setup-settings.js";
 import { matchesGlobWithDots } from "./glob.js";
 import { childEnv } from "./core-test-run.js";
@@ -25,7 +25,7 @@ import {
   type TestSetupDigests,
   type TestSetupStatus,
 } from "./test-setup.js";
-import { listTestFiles, prepareCheckout, runTestFiles, runWholeSuite, type TestCommandResult, type TestCommandRunner } from "./test-runs.js";
+import { listTestTargets, prepareWithSetupCache, runTestFiles, runWholeSuite, type TestCommandResult, type TestCommandRunner } from "./test-runs.js";
 import type { CoreDatabase, JsonObject } from "./types.js";
 
 export type TestSetupScope = "project" | "work" | "task";
@@ -45,7 +45,7 @@ interface AgentOutput {
   readonly setup_argvs: readonly (readonly string[])[];
   readonly setup_inputs: readonly string[];
   readonly setup_outputs: readonly string[];
-  readonly test_run: { readonly mode: "per_file" | "whole"; readonly whole_argv: readonly string[]; readonly file_argv: readonly string[]; readonly prepare_argv: readonly string[]; readonly test_patterns: readonly string[]; readonly cwd: string } | null;
+  readonly test_run: { readonly mode: "per_file" | "whole"; readonly whole_argv: readonly string[]; readonly file_argv: readonly string[]; readonly prepare_argv: readonly string[]; readonly test_patterns: readonly string[]; readonly cwd: string; readonly unit: "file" | "folder" | "package"; readonly unit_argv: readonly string[]; readonly unit_markers: readonly string[] } | null;
   readonly executables: readonly { readonly name: string; readonly path: string; readonly probe_argv: readonly string[] }[];
   readonly confirm_files: readonly string[];
   readonly probe_argvs: readonly (readonly string[])[];
@@ -348,6 +348,7 @@ export class TestSetupService {
       agent_run: null,
       explicit_digest: input.record.explicit_digest,
       whole_reason: input.record.whole_reason,
+      unit_reason: input.record.unit_reason,
     }, at);
     await this.write(input, body, "ready");
   }
@@ -412,6 +413,7 @@ export class TestSetupService {
         fields: {
           explicit_digest: explicitDigest,
           whole_reason: output?.test_run?.mode === "whole" ? (output.notes ?? "").trim() : "",
+          unit_reason: output?.test_run?.mode === "per_file" && output.test_run.unit !== "file" ? (output.notes ?? "").trim() : "",
           digests: await digestsFor(),
           setup_argvs: output?.setup_argvs ?? [],
           test_run: null,
@@ -456,7 +458,9 @@ export class TestSetupService {
     if (explicit === null && agentRun === null) return finish("unresolved", { missing: ["test_run がありません"] });
     const nonEmpty = (entries: Record<string, unknown>): Record<string, unknown> =>
       Object.fromEntries(Object.entries(entries).filter(([, value]) => !(Array.isArray(value) && value.length === 0) && value !== ""));
-    const runInput = explicit ?? nonEmpty({ ...agentRun });
+    // A file unit keeps the stored JSON as it was before units: no unit key, and nonEmpty drops the empty unit_argv and unit_markers.
+    const { unit: agentUnit, ...agentRest } = agentRun ?? { unit: "file" };
+    const runInput = explicit ?? nonEmpty({ ...agentRest, ...(agentUnit === "folder" || agentUnit === "package" ? { unit: agentUnit } : {}) });
     // The cache describes the setup_argvs the agent recorded, which repair_explicit also keeps, so it is saved in both modes.
     const withSetup = {
       ...runInput,
@@ -482,6 +486,7 @@ export class TestSetupService {
       ...testSettings,
       prepare_argv: replace(testSettings.prepare_argv),
       file_argv: replace(testSettings.file_argv),
+      unit_argv: replace(testSettings.unit_argv),
       whole_argv: replace(testSettings.whole_argv),
       setup_argvs: testSettings.setup_argvs.map(replace),
     };
@@ -528,7 +533,9 @@ export class TestSetupService {
     };
 
     // Setup once, then the executables are probed, so the tests can run without repeating the setup.
-    const setupError = await prepareCheckout({ root: input.checkout, settings: resolved, run });
+    // Why not reuse: true: a confirmation must prove that the commands build the environment, so a recorded hash must not skip them.
+    // A success writes the same hash a normal run writes, so the next run in this checkout skips the prepare.
+    const { failure: setupError } = await prepareWithSetupCache({ root: input.checkout, settings: resolved, run, reuse: false });
     if (setupError !== null) return unresolvedByCommand("環境を用意できませんでした");
     for (const entry of output.executables) {
       const path = executables[entry.name];
@@ -543,7 +550,8 @@ export class TestSetupService {
     }
 
     const runOnly: TestRunSettings = { ...resolved, setup_argvs: [], prepare_argv: [] };
-    const existing = await listTestFiles(input.checkout, runOnly).catch(() => [] as string[]);
+    const targets = await listTestTargets(input.checkout, runOnly).catch(() => ({ files: [] as readonly string[], targets: [] as readonly string[], targetOf: (_path: string): string | null => null }));
+    const existing = targets.files;
     const storedRun = { ...withSetup };
     if (output.verdict === "no_tests" && existing.length === 0) {
       const probes: { argv: readonly string[]; exit_code: number | null; at: string }[] = [];
@@ -556,17 +564,25 @@ export class TestSetupService {
       return finish("no_tests", { fields: { test_run: storedRun, executables: storedExecutables, probes } });
     }
 
+    if (runOnly.mode === "per_file" && runOnly.unit === "package" && !(await hasPackageRoot(input.checkout, runOnly))) {
+      return finish("unresolved", { missing: ["unit_markers に当たるパッケージの根が見つかりません"], fields: { test_run: storedRun, executables: storedExecutables } });
+    }
+
     const execution = runOnly.mode === "whole"
       ? await runWholeSuite({ root: input.checkout, settings: runOnly, run })
       : await (async () => {
           const wanted = output.confirm_files.filter((file) => existing.includes(file) || runOnly.test_patterns.some((glob) => matchesGlobWithDots(file, glob)));
-          const files = (wanted.length > 0 ? wanted : existing).slice(0, settings.max_confirm_files);
+          const picked = [...new Set(wanted.flatMap((file) => targets.targetOf(file) ?? []))];
+          const files = (picked.length > 0 ? picked : targets.targets).slice(0, settings.max_confirm_files);
           return files.length === 0 ? null : runTestFiles({ root: input.checkout, files, settings: runOnly, run });
         })();
-    if (execution === null) return finish("unresolved", { missing: ["確かめに使うテストファイルがありません"], fields: { test_run: storedRun, executables: storedExecutables } });
+    if (execution === null) {
+      const hint = runOnly.cwd === "." ? "" : "。test_patterns と confirm_files はチェックアウトの根からの相対パスで書きます";
+      return finish("unresolved", { missing: [`確かめに使うテストファイルがありません${hint}`], fields: { test_run: storedRun, executables: storedExecutables } });
+    }
     const failed = failureOf();
     const passed = execution.status === "completed" && execution.files.length > 0 && execution.files.every((file) => file.status === "passed");
-    const argv = runOnly.mode === "whole" ? runOnly.whole_argv : runOnly.file_argv;
+    const argv = runArgvOf(runOnly);
     if (passed) {
       return finish("ready", {
         fields: {
@@ -611,6 +627,12 @@ export class TestSetupService {
       },
     });
   }
+}
+
+/** True when some file under settings.cwd matches a unit_markers glob, so a package root exists. */
+async function hasPackageRoot(root: string, settings: TestRunSettings): Promise<boolean> {
+  const prefix = settings.cwd === "." ? "" : `${settings.cwd.replace(/\/$/u, "")}/`;
+  return [...(await listCheckoutFiles(root))].some((path) => path.startsWith(prefix) && settings.unit_markers.some((marker) => matchesGlobWithDots(basename(path), marker)));
 }
 
 interface Confirmed {

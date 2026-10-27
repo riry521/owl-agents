@@ -128,7 +128,7 @@ const criterion = (kind) => ({
   id: "AC1", text: "Code works.", check: "Look.", serves: "x", if_omitted: "y", check_weight: "light", weight_reason: "", kind,
 });
 
-async function runUntilVerified(t, { kind, taskType = "code", check, workerFiles, testRun, projectCheckArgv }) {
+async function runUntilVerified(t, { kind, taskType = "code", check, workerFiles, testRun, projectCheckArgv, files }) {
   const workerRequests = [];
   const { run } = createStubTestRunner(() => false);
   const agentRunner = {
@@ -144,7 +144,7 @@ async function runUntilVerified(t, { kind, taskType = "code", check, workerFiles
     runReviewer: async (request) => ({ outcome: "success", report_valid: true, report: { kind: "review", invocation_id: request.invocation_id }, review: { verdict: "pass", findings: [], tests: {} } }),
     runAdvisor: async () => ({ reply: "" }),
   };
-  const { db, core, projectId, envelope } = await openTestRunCore(t, { agentRunner, runner: run, prefix: "owl-task-core-check-", ...(testRun === undefined ? {} : { testRun }), ...(projectCheckArgv === undefined ? {} : { projectCheckArgv }), ...(check === undefined ? {} : { testPolicy: { check_commands: [check] } }) });
+  const { db, core, projectId, envelope } = await openTestRunCore(t, { agentRunner, runner: run, prefix: "owl-task-core-check-", ...(files === undefined ? {} : { files }), ...(testRun === undefined ? {} : { testRun }), ...(projectCheckArgv === undefined ? {} : { projectCheckArgv }), ...(check === undefined ? {} : { testPolicy: { check_commands: [check] } }) });
   const created = await core.createWork(envelope({ title: "Check", summary: "x", size: "normal", project_id: projectId }, "work"));
   await core.startWork(created.data.work_id, { ...envelope({ mode: "normal" }, "start"), expected_version: created.version });
   await waitFor(() => db.all("SELECT id FROM events WHERE type = 'verification.completed'").length >= 1, { timeoutMs: 30_000, message: "a verification" });
@@ -218,4 +218,21 @@ test("a git failure before the Core test run is logged and fails verification in
   assert.match(String(verified.verification.error), /git failed/u);
   assert.ok(errors.some((args) => /git failed before the Core test run/u.test(String(args[0])) && args[1] instanceof Error));
   assert.equal(db.all("SELECT id FROM test_runs").length, 0);
+});
+
+test("a folder-unit Project: policy:test uses Core's result for the test files inside the passed unit instead of running one file", async (t) => {
+  const throwing = 'throw new Error("run the folder, not one file");\n';
+  const { db, verified } = await runUntilVerified(t, {
+    taskType: "test",
+    kind: "spec_test",
+    files: { "tests/one/a.test.mjs": throwing, "tests/two/b.test.mjs": throwing },
+    testRun: { test_patterns: ["tests/**/*.test.mjs"], unit: "folder", unit_argv: ["unit-runner", "{unit}"], concurrency: 1, flaky_retries: 0, source_map: [] },
+    workerFiles: () => ({ "tests/one/a.test.mjs": `// changed\n${throwing}` }),
+  });
+  assert.equal(verified.outcome, "pass");
+  const run = db.all("SELECT selection_json FROM test_runs ORDER BY id")[0];
+  assert.deepEqual(JSON.parse(run.selection_json).files, ["tests/one"]);
+  const check = verified.verification.commands.find((command) => command.command_id === "policy:test" && command.file === "tests/one/a.test.mjs");
+  assert.equal(check?.passed, true);
+  assert.equal(check.argv, undefined);
 });

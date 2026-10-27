@@ -7,7 +7,8 @@ import { test } from "node:test";
 
 import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { createAgentRunner } from "../../packages/agent-runtime/dist/index.js";
-import { runWholeSuite } from "../../packages/core/dist/test-runs.js";
+import { invalidateSetupCache, runWholeSuite } from "../../packages/core/dist/test-runs.js";
+import { testSetupView, readStoredTestSetup } from "../../packages/core/dist/test-setup.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { command, createTestCore } from "../helpers/core.mjs";
 import { git } from "../helpers/git.mjs";
@@ -53,18 +54,20 @@ const READY = (over = {}) => ({
   setup_argvs: [],
   setup_inputs: [],
   setup_outputs: [],
-  test_run: { mode: "whole", whole_argv: ["{python}", "-m", "pytest", "-q"], file_argv: [], prepare_argv: [], test_patterns: ["**/test_*.py"], cwd: "." },
+  test_run: { mode: "whole", whole_argv: ["{python}", "-m", "pytest", "-q"], file_argv: [], prepare_argv: [], test_patterns: ["**/test_*.py"], cwd: ".", unit: "file", unit_argv: [], unit_markers: [] },
   executables: [{ name: "python", path: ".venv/bin/python", probe_argv: ["{python}", "--version"] }],
   confirm_files: [],
   probe_argvs: [],
   sources: ["requirements.txt", "docs/testing.md", "tests/test_app.py"],
-  attempts: [{ argv: ["python3", "-m", "venv", ".venv"], cwd: ".", exit_code: 0, summary: "made the venv" }],
+  attempts: [{ argv: ["python3", "-m", "venv", ".venv"], cwd: ".", exit_code: 0, summary: "made the venv", unit: "" }],
   installed: [],
   outside_installs: [],
   missing: [],
   notes: "one test file cannot run alone in this fixture",
   ...over,
 });
+
+const tried = (...runs) => runs.map(([unit, exit_code]) => ({ argv: ["{runner}", unit], cwd: ".", exit_code, summary: unit, unit }));
 
 /**
  * An agent that does what `plan(request, n)` says: `act(checkout)` changes the folder, `output` is the report (default: ready with .venv/bin/python).
@@ -198,18 +201,20 @@ test("every registration route schedules one investigation, and a Project with i
 // ---- AC2: four environments
 
 test("a per_file output stays per_file and a whole output with a reason stays whole", async (t) => {
-  const perFile = { mode: "per_file", whole_argv: [], file_argv: ["{python}", "-m", "pytest", "-q", "{file}"], prepare_argv: [], test_patterns: ["**/test_*.py"], cwd: "." };
+  const perFile = { mode: "per_file", whole_argv: [], file_argv: ["{python}", "-m", "pytest", "-q", "{file}"], prepare_argv: [], test_patterns: ["**/test_*.py"], cwd: ".", unit: "file", unit_argv: [], unit_markers: [] };
   const agent = stubAgent((request) => (request.project.name === "pytest-files"
     ? { output: READY({ test_run: perFile, confirm_files: ["tests/test_app.py"] }) }
     : { output: READY({ notes: "pytest cannot run one file here: conftest needs the whole suite" }) }));
   const ctx = await open(t, { agent });
-  assert.equal(ctx.record("projects", (await ctx.register("pytest-files")).projectId).test_run.mode, "per_file");
+  const stored = ctx.record("projects", (await ctx.register("pytest-files")).projectId).test_run;
+  assert.equal(stored.mode, "per_file");
+  for (const key of ["unit", "unit_argv", "unit_markers"]) assert.equal(key in stored, false, `${key} is not stored for unit file`);
   assert.equal(ctx.record("projects", (await ctx.register("whole-reason")).projectId).test_run.mode, "whole");
 });
 
 test("through the real agent runner, a whole output without a reason is resubmitted and a per_file output is saved", async (t) => {
-  const perFile = { mode: "per_file", whole_argv: [], file_argv: ["{python}", "-m", "pytest", "-q", "{file}"], prepare_argv: [], test_patterns: ["**/test_*.py"], cwd: "." };
-  const replies = [READY({ notes: "" }), READY({ test_run: perFile, confirm_files: ["tests/test_app.py"] })];
+  const perFile = { mode: "per_file", whole_argv: [], file_argv: ["{python}", "-m", "pytest", "-q", "{file}"], prepare_argv: [], test_patterns: ["**/test_*.py"], cwd: ".", unit: "file", unit_argv: [], unit_markers: [] };
+  const replies = [READY({ notes: "", attempts: tried(["file", 1], ["folder", 1], ["package", 1]) }), READY({ test_run: perFile, confirm_files: ["tests/test_app.py"], attempts: tried(["file", 0]) })];
   const prompts = [];
   const respond = (result, session) => ({ adapter: "claude", stdout: JSON.stringify({ type: "result", result, session_id: session }), stderr: "", exit_code: 0, signal: null, provider_session_id: session });
   const provider = {
@@ -283,7 +288,7 @@ test("Core confirms four environments and saves a ready command with its executa
   }
 });
 
-test("with test_run.cwd in a subfolder, setup_argvs read cwd-relative files in the confirmation and again in a later Task's run", async (t) => {
+test("with test_run.cwd in a subfolder, setup_argvs read cwd-relative files in the confirmation; a later run in the same checkout skips them until the cache is invalidated, then reads them from cwd", async (t) => {
   // The stub python really runs: "read <file>" fails when <file> is missing from its cwd.
   const python = "#!/bin/sh\nif [ \"$1\" = read ]; then cat \"$2\" > /dev/null || exit 1; fi\necho 'Python 3.12.0 (stub)'\n";
   const setupFor = { cwd: ["{python}", "read", "requirements.txt"], doubled: ["{python}", "read", "backend/requirements.txt"] };
@@ -291,7 +296,7 @@ test("with test_run.cwd in a subfolder, setup_argvs read cwd-relative files in t
     act: (checkout) => writeExecutable(join(checkout, "backend/.venv/bin/python"), python),
     output: READY({
       setup_argvs: [setupFor[request.project.name]],
-      test_run: { mode: "whole", whole_argv: ["{python}", "-m", "pytest", "-q"], file_argv: [], prepare_argv: [], test_patterns: ["**/test_*.py"], cwd: "backend" },
+      test_run: { mode: "whole", whole_argv: ["{python}", "-m", "pytest", "-q"], file_argv: [], prepare_argv: [], test_patterns: ["**/test_*.py"], cwd: "backend", unit: "file", unit_argv: [], unit_markers: [] },
       executables: [{ name: "python", path: "backend/.venv/bin/python", probe_argv: ["{python}", "--version"] }],
     }),
   }));
@@ -316,11 +321,69 @@ test("with test_run.cwd in a subfolder, setup_argvs read cwd-relative files in t
   const { workId, taskId } = await addTask(ctx, projectId, "cwd");
   const resolved = await resolveAt(ctx, workId, taskId, repo);
   assert.equal(resolved.source, "setup");
+  // The confirmation prepared with reuse: false and wrote the hash, so a run in the same checkout skips the setup.
+  const skipping = realRunner();
+  const skipped = await runWholeSuite({ root: repo, settings: resolved.settings, run: skipping.run });
+  assert.equal(skipped.prepare_skipped, true);
+  assert.equal(setupCall(skipping.calls), undefined);
+  await invalidateSetupCache(repo);
   const later = realRunner();
   const run = await runWholeSuite({ root: repo, settings: resolved.settings, run: later.run });
   assert.equal(run.error, null);
   assert.equal(run.files[0].status, "passed");
   assert.deepEqual(setupCall(later.calls), { argv: [executable, "read", "requirements.txt"], cwd: join(repo, "backend") });
+});
+
+// ---- units: the agent picks folder or package, Core confirms the unit and saves it
+
+const UNIT_RUNNER = (isUnit) => `#!/bin/sh\n[ "$1" = --version ] && { echo "unit-runner 1"; exit 0; }\n${isUnit}\necho "TAP version 13"; echo "ok 1 - $1"; echo "1..1"\n`;
+const unitRun = (unit, over = {}) => ({ mode: "per_file", unit, unit_argv: ["{runner}", "{unit}"], unit_markers: [], file_argv: [], whole_argv: [], prepare_argv: [], cwd: ".", ...over });
+const runnerExe = [{ name: "runner", path: ".venv/bin/unit-runner", probe_argv: ["{runner}", "--version"] }];
+const realRunner = () => stubRunner((argv, cwd) => spawnSync(argv[0], argv.slice(1), { cwd }).status);
+
+test("when one file cannot run alone but a folder can, the investigation saves unit folder and Core confirms the folder only", async (t) => {
+  const notes = "one file cannot run alone: the runner needs a folder";
+  const agent = stubAgent(() => ({
+    act: (checkout) => writeExecutable(join(checkout, ".venv/bin/unit-runner"), UNIT_RUNNER('[ -d "$1" ] || { echo "one file cannot run alone: $1" >&2; exit 2; }')),
+    output: READY({
+      test_run: unitRun("folder", { test_patterns: ["suite/**/check_*.t"] }),
+      executables: runnerExe, confirm_files: ["suite/alpha/check_one.t"], notes, attempts: tried(["file", 2], ["folder", 0]),
+    }),
+  }));
+  const runner = realRunner();
+  const ctx = await open(t, { agent, runner });
+  const files = { ".gitignore": ".venv/\n", "suite/alpha/check_one.t": "x\n", "suite/alpha/check_two.t": "x\n", "suite/beta/check_three.t": "x\n" };
+  const { projectId, repo } = await ctx.register("folder-unit", files);
+  const saved = ctx.record("projects", projectId);
+  assert.equal(saved.status, "ready", JSON.stringify(saved.missing));
+  assert.equal(saved.test_run.unit, "folder");
+  assert.deepEqual(saved.test_run.unit_argv, ["{runner}", "{unit}"]);
+  assert.deepEqual(saved.confirmed.files, ["suite/alpha"]);
+  assert.equal(saved.unit_reason, notes);
+  const given = runner.calls.filter((call) => call.argv[0].endsWith("unit-runner") && call.argv[1] !== "--version").map((call) => call.argv[1]);
+  assert.deepEqual(given, ["suite/alpha"]);
+  const view = testSetupView(readStoredTestSetup(JSON.stringify(saved)), repo, {});
+  assert.deepEqual(view.command, [join(repo, ".venv/bin/unit-runner"), "{unit}"]);
+});
+
+test("when a folder cannot run alone but a package can, the investigation saves the package roots; with no root it is unresolved", async (t) => {
+  const agent = stubAgent((request) => ({
+    act: (checkout) => writeExecutable(join(checkout, ".venv/bin/unit-runner"), UNIT_RUNNER('[ -f "$1/unit.marker" ] || { echo "not a package: $1" >&2; exit 2; }')),
+    output: READY({
+      test_run: unitRun("package", { unit_markers: [request.project.name === "pkg-absent" ? "absent.marker" : "unit.marker"], test_patterns: ["pkgs/**/check_*.t"] }),
+      executables: runnerExe, confirm_files: ["pkgs/one/checks/check_a.t", "pkgs/two/check_b.t"], notes: "file and folder do not run alone",
+      attempts: tried(["file", 2], ["folder", 2], ["package", 0]),
+    }),
+  }));
+  const ctx = await open(t, { agent, runner: realRunner() });
+  const files = { ".gitignore": ".venv/\n", "pkgs/one/unit.marker": "", "pkgs/one/src/lib.txt": "x\n", "pkgs/one/checks/check_a.t": "x\n", "pkgs/two/unit.marker": "", "pkgs/two/check_b.t": "x\n" };
+  const saved = ctx.record("projects", (await ctx.register("pkg-ok", files)).projectId);
+  assert.equal(saved.status, "ready", JSON.stringify(saved.missing));
+  assert.deepEqual(saved.confirmed.files, ["pkgs/one", "pkgs/two"]);
+  assert.deepEqual(saved.test_run.unit_markers, ["unit.marker"]);
+  const absent = ctx.record("projects", (await ctx.register("pkg-absent", files)).projectId);
+  assert.equal(absent.status, "unresolved");
+  assert.match(absent.missing.join("\n"), /unit_markers に当たるパッケージの根が見つかりません/u);
 });
 
 // ---- AC3: Core's confirmation

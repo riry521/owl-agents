@@ -233,6 +233,7 @@ curl http://localhost:3787/api/v1/works
 - **マージ後のビルド**：Workがマージされると、Projectのマージ後コマンド（ビルド）を実行します。`package.json`や`pnpm-lock.yaml`など依存ファイルが変わっていれば、先にインストールコマンドを実行します。どちらかが失敗するとOwnerに通知します。どちらもProjectごとの設定です。
 - **Fixer**：設計以外のタスクが検証の不合格と Reviewer の差し戻しを合わせて2回（`after_review_rejections`、既定は2）に達すると、Fixer 役が次の修正を担当し、タスクが完了するまで続けます。モデルは設定画面の`fixer`役で選びます。詳しくは[docs/operations.md](docs/operations.md#fixer-escalation)を見てください。
 - **Projectごとのテスト方法**：テストの既定のモードは`per_file`です。準備の手順は、依存するファイルが変わっておらず、手順が作ったものが残っている間は飛ばします。Projectの登録時・変更時、または環境の問題でテストが落ちたときに、エージェントがそのProjectのテストの動かし方を調べ、Coreが動くことを確かめて、結果をProjectに保存します。Projects画面でProjectを編集し、再調査ボタンを押すと手動でやり直せます。
+- **テストの実行単位**：`per_file`モードでは、準備したディレクトリ（`cwd`）から`file`・`folder`・`package`のどれを1回のコマンドの対象にするかを、Projectごとに選べます（`test_run`の`unit`、`unit_argv`、`unit_markers`）。調査はこの順に試し、動いた最も細かい単位を保存します。
 - **全件テスト**：テストを`whole`モードで動かすProjectでは、Coreは各Taskの検証で全件テストを動かしません。Taskにはテストの確認を先送りしたと記録し、全件テストはWorkの検証で1回動かします。
 - **cloneの置き場**：Workerは、外部リポジトリのcloneをProjectの外に置きます。OwlはどのProjectの中にもない置き場（gitの`ghq.root`、なければcloneが最も多いホームのフォルダ、それもなければデータディレクトリの下の`clones`）を選んでWorkerに伝えます。cloneをProjectの中に置いたTask、またはcloneに手を加えたTaskは、検証で失敗になります。
 - **テスト実行をoffにする**：Projectのテスト実行を「テストを実行しない」（`test_run`の`mode`を`off`）にすると、Taskの検証でもCoreはテストランナーを動かしません。

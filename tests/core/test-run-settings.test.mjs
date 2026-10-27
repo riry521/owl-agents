@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { readTestRunSettings } from "../../packages/shared/dist/test-run-settings.js";
+import { DEFAULT_TEST_RUN_SETTINGS, readTestRunSettings, runArgvOf, targetPlaceholderOf, validateTestRunSettings } from "../../packages/shared/dist/test-run-settings.js";
 import { DEFAULT_TEST_POLICY } from "../../packages/shared/dist/test-policy.js";
-import { spawnTestCommand, withDetachedWorktree } from "../../packages/core/dist/nightly-tests.js";
+import { spawnTestCommand, testFailureKey, withDetachedWorktree } from "../../packages/core/dist/nightly-tests.js";
 import { listTestFiles, recordTestRunInTransaction, runTestFiles, selectTests } from "../../packages/core/dist/test-runs.js";
 import { command as envelope, createTestCore } from "../helpers/core.mjs";
 import { createTestRepo, git } from "../helpers/git.mjs";
 import { tempDir } from "../helpers/temp.mjs";
-import { access } from "node:fs/promises";
+import { access, chmod } from "node:fs/promises";
 import { join } from "node:path";
 
 const command = (payload, key) => envelope(payload, `test-run-settings:${key}`);
@@ -177,4 +177,83 @@ test("a Project's report_check_commands save through updateProject, survive a Co
   assert.deepEqual(restarted.listProjects().data.find((project) => project.id === projectId).report_check_commands, ["pnpm test:layout"]);
   await restarted.updateProject(projectId, command({ report_check_commands: null }, "checks-clear"));
   assert.deepEqual(restarted.listProjects().data.find((project) => project.id === projectId).report_check_commands, []);
+});
+
+const unitArgv = ["runner", "{unit}"];
+
+test("unit settings: each write rule rejects its own shape", () => {
+  const cases = [
+    [{ unit: "dir" }, "test_run.unit is invalid"],
+    [{ unit_argv: ["runner"] }, "test_run.unit_argv is invalid"],
+    [{ unit_argv: ["runner", "{unit}", "{unit}"] }, "test_run.unit_argv is invalid"],
+    [{ unit_argv: ["runner", "{unit}", "{file}"] }, "test_run.unit_argv is invalid"],
+    [{ unit_markers: ["a/b"] }, "test_run.unit_markers is invalid"],
+    [{ unit_markers: [".."] }, "test_run.unit_markers is invalid"],
+    [{ file_argv: ["runner", "{file}", "{unit}"] }, "test_run.file_argv is invalid"],
+    [{ mode: "whole", whole_argv: ["runner", "{unit}"] }, "test_run.whole_argv is invalid"],
+    [{ mode: "whole", whole_argv: ["suite"], unit: "folder" }, 'test_run.unit must be "file" unless mode is per_file'],
+    [{ unit: "folder" }, "test_run.unit_argv is required when unit is folder or package"],
+    [{ unit: "package", unit_argv: unitArgv }, "test_run.unit_markers is required when unit is package"],
+  ];
+  for (const [input, message] of cases) assert.ok(validateTestRunSettings(input).includes(message), JSON.stringify(input));
+  assert.deepEqual(validateTestRunSettings({ unit: "package", unit_argv: unitArgv, unit_markers: ["m.*"] }), []);
+});
+
+test("unit settings: an incomplete unit reads back as file with a warning", () => {
+  for (const input of [{ unit: "folder" }, { unit: "package", unit_argv: unitArgv }, { mode: "off", unit: "folder", unit_argv: unitArgv }]) {
+    const warnings = [];
+    assert.equal(readTestRunSettings(input, (message) => warnings.push(message)).unit, "file");
+    assert.equal(warnings.length, 1);
+  }
+  const complete = readTestRunSettings({ unit: "package", unit_argv: unitArgv, unit_markers: ["m.*"] });
+  assert.equal(complete.unit, "package");
+  assert.equal(targetPlaceholderOf(complete), "{unit}");
+  assert.deepEqual(runArgvOf(complete), unitArgv);
+});
+
+test("unit settings: per_file, whole and off JSON read with unit file and every other value as before", () => {
+  for (const shape of [{ mode: "per_file", cwd: "." }, { mode: "whole", whole_argv: ["suite"] }, { mode: "off" }]) {
+    const settings = readTestRunSettings(shape);
+    assert.deepEqual(settings, { ...DEFAULT_TEST_RUN_SETTINGS, ...shape });
+    assert.equal(settings.unit, "file");
+    assert.deepEqual([settings.unit_argv, settings.unit_markers], [[], []]);
+    assert.deepEqual(runArgvOf(settings), shape.mode === "whole" ? settings.whole_argv : settings.file_argv);
+    assert.equal(targetPlaceholderOf(settings), "{file}");
+  }
+});
+
+test("a per_file Project with cwd backend saves, reads back, and runs its tests from backend with checkout-relative results", async (t) => {
+  const repo = await createTestRepo(t, { files: {
+    "backend/run-one.sh": `#!/bin/sh
+[ -f "$1" ] || { echo "missing $1" >&2; exit 3; }
+case "$1" in
+  *fail*) printf "TAP version 13\\nnot ok 1 - boom\\n  ---\\n  location: '%s:2:1'\\n  ...\\n1..1\\n" "$1"; exit 1;;
+esac
+printf "TAP version 13\\nok 1 - pass\\n1..1\\n"
+`,
+    "backend/tests/pass.t": "", "backend/tests/fail.t": "", "other/tests/outside.t": "",
+  } });
+  await chmod(join(repo, "backend/run-one.sh"), 0o755);
+  const { core, projectId } = await setup(t);
+  const testRun = { mode: "per_file", cwd: "backend", file_argv: ["./run-one.sh", "{file}"], test_patterns: ["backend/tests/*.t"], concurrency: 1, flaky_retries: 0 };
+  const saved = await core.updateProject(projectId, command({ test_run: testRun }, "subfolder"));
+  assert.equal(saved.data.test_run.cwd, "backend");
+  assert.equal(core.listProjects().data[0].test_run.cwd, "backend");
+
+  const settings = readTestRunSettings(testRun);
+  const files = await listTestFiles(repo, settings);
+  assert.deepEqual(files, ["backend/tests/fail.t", "backend/tests/pass.t"]);
+  const calls = [];
+  const env = { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" };
+  const run = (argv, cwd, timeoutMs, limit) => {
+    calls.push({ argv, cwd });
+    return spawnTestCommand(argv, cwd, env, timeoutMs, limit);
+  };
+  const execution = await runTestFiles({ root: repo, files, settings, run });
+  assert.deepEqual(calls.map((call) => call.cwd), [join(repo, "backend"), join(repo, "backend")]);
+  assert.deepEqual(calls.map((call) => call.argv.at(-1)).sort(), ["tests/fail.t", "tests/pass.t"]);
+  assert.deepEqual(execution.files.map((file) => [file.file, file.status]), [["backend/tests/fail.t", "failed"], ["backend/tests/pass.t", "passed"]]);
+  const [failure] = execution.files[0].failures;
+  assert.equal(failure.file, "backend/tests/fail.t");
+  assert.equal(testFailureKey(failure), `backend/tests/fail.t\0boom`);
 });

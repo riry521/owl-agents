@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import type { TestRunSettings } from "../../shared/dist/test-run-settings.js";
-import { testFailureKey, withDetachedWorktree } from "./nightly-tests";
+import { testFailureKey, withDetachedWorktree, type TestFailure } from "./nightly-tests";
 import {
   baselineTestRun,
   recordTestRunInTransaction,
@@ -22,7 +22,11 @@ export interface TriageInput {
   readonly workChangedFiles: ReadonlySet<string>;
   /** Failure keys recorded in the Project's test setup when it was confirmed. */
   readonly knownKeys?: ReadonlySet<string>;
+  /** The baseline row holding a failure's result; the failure's own file unless rows are folder or package units. */
+  readonly baselineFileOf?: (entry: TestFileResult, failure: TestFailure) => string;
 }
+
+const defaultBaselineFile = (_entry: TestFileResult, failure: TestFailure): string => failure.file;
 
 /** Pure. file -> classified failures. A failure of a whole file (no test name) is pre-existing only through the nightly run. */
 export function triageTestFailures(input: TriageInput): Map<string, ClassifiedFailure[]> {
@@ -36,7 +40,7 @@ export function triageTestFailures(input: TriageInput): Map<string, ClassifiedFa
       if (failure.name !== "" && !input.workChangedFiles.has(failure.file) && input.knownKeys?.has(key) === true) {
         return { ...failure, classification: "pre_existing", pre_existing_by: "known" };
       }
-      if (failure.name !== "" && !input.workChangedFiles.has(failure.file) && baselineKeys.get(failure.file)?.has(key) === true) {
+      if (failure.name !== "" && !input.workChangedFiles.has(failure.file) && baselineKeys.get((input.baselineFileOf ?? defaultBaselineFile)(file, failure))?.has(key) === true) {
         return { ...failure, classification: "pre_existing", pre_existing_by: "baseline" };
       }
       return { ...failure, classification: "in_scope", pre_existing_by: null };

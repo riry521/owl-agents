@@ -523,11 +523,11 @@ test("opening the registry discards token files left by an earlier server", asyn
   await assert.rejects(() => stat(stale.file), { code: "ENOENT" });
 });
 
-test("the guard endpoint denies a Reviewer the Project's test commands under both shell tool names and records the denial", async (t) => {
+async function reviewerGuardCheck(t, testRun) {
   const { core, db, root } = await createTestCore(t, { version: "reviewer-test-guard" }, { prefix: "owl-reviewer-test-guard-" });
   const created = await core.createProject(envelope({
     name: "P", canonical_path: path.join(root, "p"), base_branch: "main", allowed_roots: [root], verification_plan: [],
-    test_run: { file_argv: ["node", "--test", "--test-reporter=tap", "{file}"] },
+    test_run: testRun,
     test_policy: { reviewer_denied_commands: ["pnpm test"] },
   }, "reviewer-test-guard:create"));
   const now = new Date().toISOString();
@@ -557,7 +557,7 @@ test("the guard endpoint denies a Reviewer the Project's test commands under bot
   await ruleStore.load();
   t.after(() => guardTokens.clear());
   const api = await startTestHttpServer(t, { core, db, webOut: root, owlRoot: root, dataDir: root, ruleStore, guardTokens });
-  if (!api) return t.skip("localhost listen is unavailable");
+  if (!api) return null;
   const check = async (runId, role, toolName, shellCommand) => {
     const lease = guardTokens.issue({ agent_run_id: runId, role });
     const token = (await readFile(lease.file, "utf8")).trim();
@@ -570,7 +570,13 @@ test("the guard endpoint denies a Reviewer the Project's test commands under bot
     assert.equal(response.status, 200);
     return (await response.json()).data;
   };
+  return { db, check };
+}
 
+test("the guard endpoint denies a Reviewer the Project's test commands under both shell tool names and records the denial", async (t) => {
+  const guard = await reviewerGuardCheck(t, { file_argv: ["node", "--test", "--test-reporter=tap", "{file}"] });
+  if (!guard) return t.skip("localhost listen is unavailable");
+  const { db, check } = guard;
   for (const toolName of ["Bash", "shell"]) {
     assert.equal((await check("run-reviewer", "reviewer", toolName, "node --test a.test.mjs")).allowed, false, toolName);
   }
@@ -589,4 +595,14 @@ test("the guard endpoint denies a Reviewer the Project's test commands under bot
   assert.equal(events.length, 7);
   assert.ok(events.every((payload) => payload.agent_run_id === "run-reviewer"));
   assert.ok(events.some((payload) => payload.command === "cd x && node --test a.test.mjs" && payload.matched === "node --test"));
+});
+
+test("the guard endpoint denies a Reviewer the part of unit_argv before {unit} when the unit is a folder", async (t) => {
+  const guard = await reviewerGuardCheck(t, { mode: "per_file", unit: "folder", unit_argv: ["unit-runner", "--only", "{unit}"] });
+  if (!guard) return t.skip("localhost listen is unavailable");
+  const denied = await guard.check("run-reviewer", "reviewer", "Bash", "unit-runner --only tests/one");
+  assert.equal(denied.allowed, false);
+  assert.equal(denied.rule_id, "reviewer-test-command");
+  assert.equal((await guard.check("run-reviewer", "reviewer", "Bash", "unit-runner --other")).allowed, true);
+  assert.equal((await guard.check("run-worker", "worker", "Bash", "unit-runner --only tests/one")).allowed, true);
 });

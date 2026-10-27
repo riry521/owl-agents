@@ -580,6 +580,12 @@ test("Project test_run: file commands use the Project cwd and cwd-relative file"
   }
 });
 
+test("Project test_run: per_file applies test_patterns to the checkout-relative file and passes the cwd-relative file", async (t) => {
+  const projectTestRun = { enabled: true, cwd: "backend", mode: "per_file", file_argv: ["runner", "{file}"], test_patterns: ["backend/tests/*.py"] };
+  const { calls, root } = await policyWithRecordedArgv(t, { type: "test", files: ["backend/tests/test_x.py"], projectTestRun });
+  assert.deepEqual(calls, [{ argv: ["runner", "tests/test_x.py"], cwd: join(root, "backend") }]);
+});
+
 test("Project test_run: files outside cwd or explicit patterns and absent argv use the default runner", async (t) => {
   for (const [file, projectTestRun] of [
     ["test_x.py", { enabled: true, cwd: "backend", whole_argv: ["custom"] }],

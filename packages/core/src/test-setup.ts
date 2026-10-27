@@ -4,6 +4,7 @@ import { lstatSync, readFileSync, readdirSync, realpathSync, rmdirSync, statSync
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
+import { TEST_RUN_UNITS } from "../../shared/dist/test-run-settings.js";
 import { REGEX_FLAGS, type TestSetupSettings } from "../../shared/dist/test-setup-settings.js";
 import { matchesGlobWithDots } from "./glob.js";
 import { DEFAULT_TEST_DETECTION_RULES } from "./test-detection-rules.js";
@@ -40,6 +41,8 @@ export interface StoredTestSetup {
   readonly explicit_digest: string | null;
   /** Why the agent chose mode whole ("" = no reason, as in records saved before per_file became the default). */
   readonly whole_reason: string;
+  /** Why the agent chose a unit larger than file ("" = file, or a record saved before units). */
+  readonly unit_reason: string;
   readonly confirmed_at: string | null;
   readonly attempts: TestSetupView["attempts"];
   readonly outside_installs: TestSetupView["outside_installs"];
@@ -87,6 +90,7 @@ export function readStoredTestSetup(json: string | null, warn?: (message: string
       digests: digests as unknown as TestSetupDigests,
       explicit_digest: typeof value.explicit_digest === "string" ? value.explicit_digest : null,
       whole_reason: typeof value.whole_reason === "string" ? value.whole_reason : "",
+      unit_reason: typeof value.unit_reason === "string" ? value.unit_reason : "",
       confirmed_at: typeof value.confirmed_at === "string" ? value.confirmed_at : null,
       attempts: Array.isArray(value.attempts) ? (value.attempts as StoredTestSetup["attempts"]) : [],
       outside_installs: Array.isArray(value.outside_installs) ? (value.outside_installs as StoredTestSetup["outside_installs"]) : [],
@@ -153,9 +157,11 @@ export function sourcesDigest(root: string, sources: readonly string[], skip: (p
   return hash.digest("hex");
 }
 
+// Why not an isLegacyWholeSetup-style check: nothing in a record tells which ones need a new unit choice (a whole record with a reason,
+// an old unresolved one). The digest changes only when the unit order changes, not on every run.
 function settingsDigest(rulesVersion: string, settings: TestSetupSettings): string {
   const { input_files, test_file_globs, import_patterns, ignored_dirs, bootstrap } = settings;
-  return sha256(JSON.stringify({ rulesVersion, input_files, test_file_globs, import_patterns, ignored_dirs, bootstrap }));
+  return sha256(JSON.stringify({ rulesVersion, input_files, test_file_globs, import_patterns, ignored_dirs, bootstrap, units: TEST_RUN_UNITS }));
 }
 
 /**
@@ -400,7 +406,7 @@ export function testSetupView(setup: StoredTestSetup | null, root: string, defau
   const run = setup.test_run ?? {};
   const executables = testExecutables(setup, root, defaultExecutables);
   const argvOf = (key: string): readonly string[] | null => (isStrings(run[key]) && run[key].length > 0 ? withExecutables(run[key], executables) : null);
-  const command = run.mode === "whole" ? argvOf("whole_argv") : argvOf("file_argv");
+  const command = run.mode === "whole" ? argvOf("whole_argv") : run.unit === "folder" || run.unit === "package" ? argvOf("unit_argv") : argvOf("file_argv");
   return {
     status: setup.status,
     command,

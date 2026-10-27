@@ -6,7 +6,7 @@ import { dirname, posix, resolve } from "node:path";
 import { matchesGlobWithDots } from "./glob.js";
 import { promisify } from "node:util";
 import { createUlid } from "../../db/dist/index.js";
-import { readTestRunSettings, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
+import { readTestRunSettings, targetPlaceholderOf, runArgvOf, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
 import { parseBunFailures, parseTapFailures, type TestFailure } from "./nightly-tests";
 import type { CoreDatabase, CoreWriteLaneTransaction } from "./types";
 
@@ -141,10 +141,53 @@ export function testRunSettingsFromJson(json: string | null, warn?: (message: st
 
 const matchesAny = (file: string, patterns: readonly string[]): boolean => patterns.some((pattern) => matchesGlobWithDots(file, pattern));
 
-/** Test files of a checkout: tracked and untracked (not ignored) files that match test_patterns. */
-export async function listTestFiles(root: string, settings: TestRunSettings): Promise<string[]> {
+export interface TestTargets {
+  /** Test files (checkout-relative), the same list listTestFiles returns. */
+  readonly files: readonly string[];
+  /** Run targets (checkout-relative, sorted): the files themselves for unit file, else the folders or package roots holding them. */
+  readonly targets: readonly string[];
+  /** The target a checkout-relative path belongs to, or null when no target holds it. */
+  targetOf(path: string): string | null;
+}
+
+/** Test files of a checkout (tracked and untracked, not ignored, matching test_patterns) and the run targets they form for settings.unit. */
+export async function listTestTargets(root: string, settings: TestRunSettings): Promise<TestTargets> {
   const { stdout } = await execFileAsync("git", ["ls-files", "-co", "--exclude-standard", "-z"], { cwd: root, maxBuffer: 64 * 1024 * 1024 });
-  return stdout.split("\0").filter((file) => file !== "" && matchesAny(file, settings.test_patterns)).sort();
+  const all = stdout.split("\0").filter((file) => file !== "");
+  const perFile = settings.mode === "per_file";
+  const cwd = posix.normalize(settings.cwd).replace(/\/$/u, "");
+  // Only a path under cwd can be handed to the command; whole and a root cwd list everything.
+  // Normalised first: "../x" and "sub/../x" must not pass the prefix test, and an escaping path would never reach a root in packageOf.
+  const inCwd = (raw: string): boolean => {
+    const path = posix.normalize(raw);
+    if (path.startsWith("/") || path === ".." || path.startsWith("../")) return false;
+    return !perFile || cwd === "." || path.startsWith(`${cwd}/`);
+  };
+  const files = all.filter((file) => inCwd(file) && matchesAny(file, settings.test_patterns)).sort();
+  const fileSet = new Set(files);
+  const unit = perFile ? settings.unit : "file";
+  const roots = new Set(unit === "package" ? all.filter((file) => inCwd(file) && settings.unit_markers.some((marker) => matchesGlobWithDots(posix.basename(file), marker))).map((file) => posix.dirname(file)) : []);
+  const packageOf = (path: string): string => {
+    for (let dir = posix.dirname(path); ; dir = posix.dirname(dir)) {
+      if (roots.has(dir)) return dir;
+      if (dir === cwd || dir === "." || dir === "/") return cwd;
+    }
+  };
+  const unitOf = (path: string): string => (unit === "folder" ? posix.dirname(path) : unit === "package" ? packageOf(path) : path);
+  const targets = [...new Set(files.map(unitOf))].sort();
+  const targetSet = new Set(targets);
+  const targetOf = (raw: string): string | null => {
+    if (!inCwd(raw)) return null;
+    const path = posix.normalize(raw);
+    if (unit === "file") return fileSet.has(path) ? path : null;
+    const target = unitOf(path);
+    return targetSet.has(target) ? target : null;
+  };
+  return { files, targets, targetOf };
+}
+
+export async function listTestFiles(root: string, settings: TestRunSettings): Promise<string[]> {
+  return [...(await listTestTargets(root, settings)).files];
 }
 
 const IMPORT_PATTERN = /(?:\bfrom|\bimport\s*\(?|\brequire\s*\()\s*["'](\.{1,2}\/[^"']*)["']/gu;
@@ -187,11 +230,16 @@ export async function relatedTests(input: {
   return { changed_tests: [...changedTests], related };
 }
 
-/** Chooses the test files to run (nothing is executed). */
+/** Why a Work-level run of folder or package units runs every unit. */
+export const WORK_EVERY_UNIT_REASON = "work_every_unit";
+
+/** Chooses the run targets (test files, or folders and packages for another unit) to run (nothing is executed). */
 export async function selectTests(input: {
   scope: "task" | "work";
   root: string;
   testFiles: readonly string[];
+  /** Absent = every test file is its own target. */
+  targets?: TestTargets;
   changedFiles: readonly string[];
   previous: TestRunRecord | null;
   requiredTests: readonly string[];
@@ -199,31 +247,47 @@ export async function selectTests(input: {
   forceFull: string | null;
   settings: TestRunSettings;
 }): Promise<TestSelection> {
+  const fileSet = new Set(input.testFiles);
+  const targets: TestTargets = input.targets ?? { files: input.testFiles, targets: input.testFiles, targetOf: (path) => (fileSet.has(path) ? path : null) };
   const base = { changed_files_count: input.changedFiles.length };
   let fullReason = input.forceFull;
   if (fullReason === null && input.scope === "work") {
     const hit = input.changedFiles.find((file) => matchesAny(file, input.settings.full_run_patterns));
     if (hit !== undefined) fullReason = `full_run_pattern:${hit}`;
   }
+  // Why not make a file-unit Work run every file as well: that would change the Work-level checks of the Projects already running per file.
+  // A folder or package unit is new, so there is no behavior to keep.
+  if (fullReason === null && input.scope === "work" && input.settings.mode === "per_file" && input.settings.unit !== "file") fullReason = WORK_EVERY_UNIT_REASON;
   const empty = { previous_failed: [], changed_tests: [], related: [], required: [] };
-  if (fullReason !== null) return { ...base, ...empty, mode: "full", files: [...input.testFiles].sort(), full_reason: fullReason };
+  if (fullReason !== null) return { ...base, ...empty, mode: "full", files: [...targets.targets].sort(), full_reason: fullReason };
 
-  const known = new Set(input.testFiles);
+  const known = new Set(targets.targets);
   const previousFailed = (input.previous?.files ?? [])
     .filter((entry) => entry.status !== "passed" && entry.failures.some((f) => f.classification === "in_scope"))
     .map((entry) => entry.file)
     .filter((file) => known.has(file));
-  const { changed_tests, related } = await relatedTests(input);
-  const required = input.requiredTests.filter((file) => known.has(file));
+  const unitsOf = (paths: readonly string[]): string[] => [...new Set(paths.flatMap((path) => targets.targetOf(path) ?? []))];
+  const found = await relatedTests({ ...input, testFiles: targets.files });
+  const changed_tests = unitsOf(found.changed_tests);
+  // R3: any changed path inside a unit (a helper, a package source, a marker file) selects that unit.
+  const related = unitsOf([...found.related, ...input.changedFiles]).filter((unit) => !changed_tests.includes(unit));
+  const required = [...new Set(input.requiredTests.flatMap((file) => (known.has(file) ? file : targets.targetOf(file) ?? [])))];
   const files = [...new Set([...previousFailed, ...changed_tests, ...related, ...required])].sort();
   return { ...base, mode: "selected", files, previous_failed: previousFailed, changed_tests, related, required, full_reason: null };
 }
 
 const lastLine = (text: string): string => text.split(/\r?\n/u).map((line) => line.trim()).filter(Boolean).pop() ?? "";
 
-async function runOneFile(file: string, root: string, settings: TestRunSettings, run: TestCommandRunner): Promise<Omit<TestFileResult, "attempts">> {
-  const argv = settings.file_argv.map((arg) => (arg === "{file}" ? file : arg));
-  const result = await run(argv, root, settings.file_timeout_seconds * 1000, settings.output_limit_bytes);
+/** The argv and cwd for one target: the placeholder becomes the target relative to settings.cwd. */
+export function targetCommand(root: string, settings: TestRunSettings, target: string): { argv: string[]; cwd: string } {
+  const placeholder = targetPlaceholderOf(settings);
+  const value = settings.cwd === "." ? target : posix.relative(posix.normalize(settings.cwd), target) || ".";
+  return { argv: runArgvOf(settings).map((arg) => (arg === placeholder ? value : arg)), cwd: resolve(root, settings.cwd) };
+}
+
+async function runOneTarget(file: string, root: string, settings: TestRunSettings, run: TestCommandRunner): Promise<Omit<TestFileResult, "attempts">> {
+  const { argv, cwd } = targetCommand(root, settings, file);
+  const result = await run(argv, cwd, settings.file_timeout_seconds * 1000, settings.output_limit_bytes);
   const tail = `${result.stdout}${result.stderr}`.slice(-settings.output_tail_chars);
   const base = { file, duration_ms: result.duration_ms, exit_code: result.exit_code, output_tail: tail };
   if (result.timed_out) {
@@ -232,7 +296,8 @@ async function runOneFile(file: string, root: string, settings: TestRunSettings,
   }
   if (result.error !== undefined) return { ...base, status: "error", failures: [{ file, name: "", line: 0, message: result.error.slice(0, SYNTHETIC_MESSAGE_CHARS) }] };
   if (result.exit_code === 0) return { ...base, status: "passed", failures: [] };
-  const parsed = parseTapFailures(result.stdout, root);
+  // Paths the tool prints are relative to cwd; recorded failures are checkout-relative.
+  const parsed = parseTapFailures(result.stdout, cwd).map((failure) => (failure.file === "" || settings.cwd === "." ? failure : { ...failure, file: posix.normalize(posix.join(settings.cwd, failure.file)) }));
   const failures = parsed.length > 0
     ? parsed.map((failure) => (failure.file === "" ? { ...failure, file } : failure))
     : [{ file, name: "", line: 0, message: (lastLine(result.stderr) || lastLine(result.stdout)).slice(0, SYNTHETIC_MESSAGE_CHARS) }];
@@ -288,17 +353,23 @@ export async function invalidateSetupCache(root: string): Promise<void> {
   if (file !== null) await rm(file, { force: true });
 }
 
-/** Prepare, skipped when a prior success recorded the same inputs and its outputs still exist; settings without setup_cache always prepare. */
-async function prepareForRun(input: { root: string; settings: TestRunSettings; run: TestCommandRunner }): Promise<{ failure: (PrepareFailure & { readonly message: string }) | null; skipped: boolean }> {
+/**
+ * Prepare. reuse: skipped when a prior success recorded the same inputs and its outputs still exist. No reuse: the recorded hash is
+ * dropped and prepare always runs (a confirmation must prove the commands build the environment). Either way a success records the hash.
+ * Settings without setup_cache always prepare.
+ */
+export async function prepareWithSetupCache(input: { root: string; settings: TestRunSettings; run: TestCommandRunner; reuse: boolean }): Promise<{ failure: (PrepareFailure & { readonly message: string }) | null; skipped: boolean }> {
   const { root, settings } = input;
   const cache = settings.setup_cache;
   const file = cache === null || (settings.setup_argvs.length === 0 && settings.prepare_argv.length === 0) ? null : await setupCacheFile(root);
   if (cache === null || file === null) return { failure: await prepareCheckoutStep(input), skipped: false };
   const contents = await Promise.all(cache.inputs.map((path) => readFile(resolve(root, path)).then((bytes) => createHash("sha256").update(bytes).digest("hex"), () => "missing")));
   const hash = createHash("sha256").update(JSON.stringify([settings.setup_argvs, settings.prepare_argv, settings.cwd, cache.inputs, contents])).digest("hex");
-  const recorded = await readFile(file, "utf8").catch(() => "");
-  const present = (await Promise.all(cache.outputs.map((path) => access(resolve(root, path)).then(() => true, () => false)))).every(Boolean);
-  if (recorded === hash && present) return { failure: null, skipped: true };
+  if (input.reuse) {
+    const recorded = await readFile(file, "utf8").catch(() => "");
+    const present = (await Promise.all(cache.outputs.map((path) => access(resolve(root, path)).then(() => true, () => false)))).every(Boolean);
+    if (recorded === hash && present) return { failure: null, skipped: true };
+  }
   await rm(file, { force: true });
   const failure = await prepareCheckoutStep(input);
   if (failure === null) await writeFile(file, hash);
@@ -316,7 +387,7 @@ export const WHOLE_DEFERRED_REASON = "whole_deferred_to_work";
 export async function runWholeSuite(input: { root: string; settings: TestRunSettings; run: TestCommandRunner; signal?: AbortSignal }): Promise<TestExecution> {
   const { root, settings, run, signal } = input;
   const started = Date.now();
-  const { failure: prepareError, skipped } = await prepareForRun({ root, settings, run });
+  const { failure: prepareError, skipped } = await prepareWithSetupCache({ root, settings, run, reuse: true });
   const done = (status: TestExecution["status"], error: string | null, files: readonly TestFileResult[] = []): TestExecution => ({ status, error, files, duration_ms: Date.now() - started, ...(skipped ? { prepare_skipped: true as const } : {}) });
   if (prepareError !== null) return { ...done("error", prepareError.message), prepare_failure: stepOf(prepareError) };
   if (signal?.aborted === true) return done("error", "aborted");
@@ -332,7 +403,7 @@ export async function runWholeSuite(input: { root: string; settings: TestRunSett
   return done("completed", null, [{ ...base, status: "failed", failures: parsed.length > 0 ? parsed : synthetic(lastLine(result.stderr) || lastLine(result.stdout)) }]);
 }
 
-/** Runs prepare once, then each file in its own process (concurrency at a time); failed files are re-run alone up to flaky_retries times. */
+/** Runs prepare once, then each target (a file, or a folder or package) in its own process (concurrency at a time); failed files are re-run alone up to flaky_retries times. */
 export async function runTestFiles(input: {
   root: string;
   files: readonly string[];
@@ -342,7 +413,7 @@ export async function runTestFiles(input: {
 }): Promise<TestExecution> {
   const { root, files, settings, run, signal } = input;
   const started = Date.now();
-  const { failure: prepareError, skipped } = await prepareForRun({ root, settings, run });
+  const { failure: prepareError, skipped } = await prepareWithSetupCache({ root, settings, run, reuse: true });
   const skip = skipped ? { prepare_skipped: true as const } : {};
   const fail = (error: string, results: readonly TestFileResult[] = []): TestExecution => ({ status: "error", error, files: results, duration_ms: Date.now() - started, ...skip });
   if (prepareError !== null) return { ...fail(prepareError.message), prepare_failure: stepOf(prepareError) };
@@ -352,11 +423,11 @@ export async function runTestFiles(input: {
   const workers = Math.min(queue.length, settings.concurrency ?? Math.max(1, Math.floor(availableParallelism() / 2)));
   await Promise.all(Array.from({ length: workers }, async () => {
     for (let file = queue.shift(); file !== undefined && !aborted(); file = queue.shift()) {
-      let result = await runOneFile(file, root, settings, run);
+      let result = await runOneTarget(file, root, settings, run);
       let attempts = 1;
       let duration_ms = result.duration_ms;
       while (result.status !== "passed" && attempts <= settings.flaky_retries && !aborted()) {
-        result = await runOneFile(file, root, settings, run);
+        result = await runOneTarget(file, root, settings, run);
         duration_ms += result.duration_ms;
         attempts += 1;
       }

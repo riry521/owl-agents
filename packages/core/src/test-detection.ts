@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 
-import { DEFAULT_TEST_RUN_SETTINGS, readTestRunSettings, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
+import { DEFAULT_TEST_RUN_SETTINGS, readTestRunSettings, runArgvOf, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
 import { DEFAULT_TEST_SETUP_SETTINGS } from "../../shared/dist/test-setup-settings.js";
 import { testExecutables, withExecutables, type TestSetupMatch, type TestSetupSelection } from "./test-setup.js";
 import { testRunSettingsFromJson } from "./test-runs.js";
@@ -168,6 +168,7 @@ function withSetupExecutables(settings: TestRunSettings, executables: Readonly<R
     ...settings,
     prepare_argv: replace(settings.prepare_argv),
     file_argv: replace(settings.file_argv),
+    unit_argv: replace(settings.unit_argv),
     whole_argv: replace(settings.whole_argv),
     setup_argvs: [...setupArgvs, ...settings.setup_argvs].map(replace),
   };
@@ -258,7 +259,7 @@ export function reportCheckCommands(input: {
   const resolved = resolveTestRun({ ...input, now: new Date().toISOString() });
   if (!resolved.enabled) return [];
   const { settings } = resolved;
-  return [...settings.setup_argvs, settings.prepare_argv, settings.mode === "whole" ? settings.whole_argv : settings.file_argv]
+  return [...settings.setup_argvs, settings.prepare_argv, runArgvOf(settings)]
     .filter((argv) => argv.length > 0)
     .map(shellLine);
 }

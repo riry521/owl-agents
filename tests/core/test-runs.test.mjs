@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { promisify } from "node:util";
 
-import { baselineTestRun, latestTestRun, listTestFiles, prepareCheckout, recordTestRunInTransaction, runTestFiles, runWholeSuite, selectTests } from "../../packages/core/dist/test-runs.js";
+import { baselineTestRun, latestTestRun, listTestFiles, listTestTargets, prepareCheckout, recordTestRunInTransaction, runTestFiles, runWholeSuite, selectTests, targetCommand, WORK_EVERY_UNIT_REASON } from "../../packages/core/dist/test-runs.js";
 import { runCoreTests, WHOLE_DEFERRED_REASON } from "../../packages/core/dist/core-test-run.js";
 import { resolveTestRun } from "../../packages/core/dist/test-detection.js";
 import { testFailureKey } from "../../packages/core/dist/nightly-tests.js";
@@ -376,12 +376,13 @@ test("setup_argvs read cwd-relative paths in a subfolder, and a checkout-relativ
   await rm(root, { recursive: true, force: true });
 });
 
-test("test_run.cwd is relative without .., and per_file only accepts the root", () => {
+test("test_run.cwd is relative without .., and every mode accepts a subfolder", () => {
   assert.equal(readTestRunSettings({ mode: "whole", whole_argv: ["suite"], cwd: "a/b" }).cwd, "a/b");
   assert.equal(readTestRunSettings({ mode: "whole", whole_argv: ["suite"], cwd: "../x" }).cwd, ".");
   assert.equal(readTestRunSettings({ mode: "whole", whole_argv: ["suite"], cwd: "/abs" }).cwd, ".");
-  assert.equal(readTestRunSettings({ cwd: "a" }).cwd, ".");
-  assert.deepEqual(validateTestRunSettings({ mode: "per_file", cwd: "a" }), ['test_run.cwd must be "." when mode is per_file']);
+  assert.equal(readTestRunSettings({ cwd: "a" }).cwd, "a");
+  assert.deepEqual(validateTestRunSettings({ mode: "per_file", cwd: "a" }), []);
+  for (const cwd of ["../x", "/abs", ""]) assert.notEqual(validateTestRunSettings({ mode: "per_file", cwd }).length, 0, cwd);
 });
 
 // setup_cache: the setup runs once per checkout until its inputs change; the hash lives in the git directory.
@@ -479,4 +480,107 @@ test("a test run that fails for the environment after a skipped setup prepares a
   assert.equal(outcome.status, "passed");
   await runCoreTests(deps, request());
   assert.equal(count("mkenv"), 2, "the re-prepare was recorded");
+});
+
+// Units: a folder or package is one run target; the marker names and globs below exist only in these tests.
+test("listTestTargets maps paths to folder and package targets, and targetCommand passes cwd-relative paths", async (t) => {
+  const repo = await createTestRepo(t, { files: {
+    "backend/pkgs/one/unit.marker": "", "backend/pkgs/one/src/lib.txt": "", "backend/pkgs/one/checks/check_a.t": "", "backend/pkgs/two/check_b.t": "",
+    "backend/loose/check_c.t": "", "other/check_d.t": "",
+  } });
+  const base = { test_patterns: ["**/check_*.t"], unit_argv: ["unit-runner", "{unit}"], unit_markers: ["unit.marker"] };
+  const folder = await listTestTargets(repo, readTestRunSettings({ ...base, unit: "folder" }));
+  assert.deepEqual(folder.targets, ["backend/loose", "backend/pkgs/one/checks", "backend/pkgs/two", "other"]);
+  assert.deepEqual([folder.targetOf("backend/pkgs/one/checks/check_a.t"), folder.targetOf("backend/pkgs/one/src/lib.txt"), folder.targetOf("backend/pkgs/two/helper.txt")], ["backend/pkgs/one/checks", null, "backend/pkgs/two"]);
+  assert.deepEqual(folder.files, (await listTestFiles(repo, readTestRunSettings({ ...base, unit: "folder" }))));
+
+  const pkgSettings = readTestRunSettings({ ...base, unit: "package", cwd: "backend" });
+  const pkg = await listTestTargets(repo, pkgSettings);
+  assert.deepEqual(pkg.files, ["backend/loose/check_c.t", "backend/pkgs/one/checks/check_a.t", "backend/pkgs/two/check_b.t"]);
+  assert.deepEqual(pkg.targets, ["backend", "backend/pkgs/one"], "a test outside any package root falls back to cwd");
+  assert.deepEqual([pkg.targetOf("backend/pkgs/one/checks/check_a.t"), pkg.targetOf("backend/pkgs/one/src/lib.txt"), pkg.targetOf("backend/pkgs/one/unit.marker")], ["backend/pkgs/one", "backend/pkgs/one", "backend/pkgs/one"]);
+  assert.equal(pkg.targetOf("other/check_d.t"), null, "outside cwd");
+  assert.equal(pkg.targetOf("backend/../other/check_d.t"), null, "path leaving cwd after normalisation");
+  assert.equal(pkg.targetOf("../check_d.t"), null, "parent path");
+  assert.deepEqual(targetCommand("/r", pkgSettings, "backend/pkgs/one"), { argv: ["unit-runner", "pkgs/one"], cwd: "/r/backend" });
+  assert.deepEqual(targetCommand("/r", pkgSettings, "backend").argv, ["unit-runner", "."]);
+  assert.deepEqual(targetCommand("/r", readTestRunSettings({ ...base, unit: "folder" }), "other"), { argv: ["unit-runner", "other"], cwd: "/r" });
+  const fileSettings = readTestRunSettings({ file_argv: ["runner", "{file}"], test_patterns: ["backend/**/*.t"], cwd: "backend" });
+  assert.deepEqual(targetCommand("/r", fileSettings, "backend/x/a.t"), { argv: ["runner", "x/a.t"], cwd: "/r/backend" });
+  assert.equal((await listTestTargets(repo, fileSettings)).targetOf("other/check_d.t"), null);
+});
+
+test("folder units: a Task check runs the units the change touches and the failed ones; a Work check runs every unit", async (t) => {
+  const repo = await createTestRepo(t, { files: {
+    "suite/alpha/check_one.t": "", "suite/alpha/helper.txt": "", "suite/beta/check_two.t": "", "suite/gamma/check_three.t": "",
+  } });
+  const { db } = await openTestDatabase(t);
+  await seed(db);
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((tx) => {
+    tx.run(`INSERT INTO works (id, owner_id, project_id, title, summary, size, state, rules_json, related_work_ids_json, created_at, updated_at) VALUES ('w', 'o', 'p', 'W', '', 'normal', 'running', '[]', '[]', ?, ?)`, now, now);
+    tx.run(
+      `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, state_version, failure_count, same_error_count, review_round, worker_generation, created_at, updated_at, retry_no, manager_task_id)
+       VALUES ('t', 'w', 'T', 'code', 'running', 'normal', '', 'Done.', 0, 0, 0, 0, 0, ?, ?, 0, 'T1')`, now, now,
+    );
+  });
+  let failUnit = "suite/gamma";
+  const ran = [];
+  const run = async (argv, cwd) => {
+    const unit = argv.at(-1);
+    ran.push({ unit, cwd });
+    const bad = unit === failUnit;
+    return { exit_code: bad ? 1 : 0, timed_out: false, stdout: bad ? "TAP version 13\nnot ok 1 - gamma\n1..1\n" : "", stderr: "", duration_ms: 1 };
+  };
+  const check = (scope, changed, force_full) => runCoreTests(
+    { db, writeLane: db.createWriteLane(), workspaceRoot: repo, baselineRunner: run, baselineLocks: new Map() },
+    {
+      scope, project_id: "p", work_id: "w", task_id: scope === "task" ? "t" : null, agent_run_id: null, root: repo, commit: git(repo, "rev-parse", "HEAD"),
+      base_commit: null, repo, changed_files: changed, work_changed_files: changed, required_tests: [], force_full,
+      settings: readTestRunSettings({ test_patterns: ["suite/**/check_*.t"], unit: "folder", unit_argv: ["unit-runner", "{unit}"], concurrency: 1, flaky_retries: 0 }), run,
+    },
+  );
+  const first = await check("task", ["suite/gamma/check_three.t"], null);
+  assert.deepEqual([first.selection.files, first.failed_files], [["suite/gamma"], ["suite/gamma"]]);
+  assert.deepEqual(first.test_files, { passed: [], failed: ["suite/gamma/check_three.t"] });
+  failUnit = "";
+  ran.length = 0;
+  const second = await check("task", ["suite/alpha/helper.txt"], null);
+  assert.deepEqual(second.selection.files, ["suite/alpha", "suite/gamma"]);
+  assert.deepEqual(ran.map((call) => call.unit).sort(), ["suite/alpha", "suite/gamma"], "suite/beta did not run");
+  assert.deepEqual(second.test_files, { passed: ["suite/alpha/check_one.t", "suite/gamma/check_three.t"], failed: [] });
+  assert.deepEqual(db.all("SELECT file FROM test_run_files WHERE run_id = ? ORDER BY file", second.run_id).map((row) => row.file), ["suite/alpha", "suite/gamma"]);
+
+  const workFirst = await check("work", ["suite/alpha/helper.txt"], "first_work_run");
+  assert.equal(workFirst.selection.files.length, 3);
+  ran.length = 0;
+  const workSecond = await check("work", ["suite/alpha/helper.txt"], null);
+  assert.deepEqual([workSecond.selection.mode, workSecond.selection.full_reason], ["full", WORK_EVERY_UNIT_REASON]);
+  assert.equal(WORK_EVERY_UNIT_REASON, "work_every_unit");
+  assert.deepEqual(ran.map((call) => call.unit).sort(), ["suite/alpha", "suite/beta", "suite/gamma"]);
+});
+
+test("a folder-unit Project prepares once for any number of units, in cwd, and not again until an input changes", async (t) => {
+  const root = await createTestRepo(t, { files: { "backend/requirements.txt": "a\n", "backend/a/check_1.t": "", "backend/b/check_2.t": "", "backend/c/check_3.t": "" } });
+  await mkdir(join(root, "backend/.venv"));
+  const calls = [];
+  const run = async (argv, cwd) => {
+    calls.push({ name: argv[0], arg: argv[1], cwd });
+    return { exit_code: 0, timed_out: false, stdout: "", stderr: "", duration_ms: 1 };
+  };
+  const settings = readTestRunSettings({
+    mode: "per_file", unit: "folder", unit_argv: ["unit-runner", "{unit}"], cwd: "backend", setup_argvs: [["mkenv"]], prepare_argv: ["prep"],
+    setup_cache: { inputs: ["backend/requirements.txt"], outputs: ["backend/.venv"] }, test_patterns: ["backend/**/check_*.t"], concurrency: 3,
+  });
+  const prepared = () => calls.filter((call) => call.name === "mkenv" || call.name === "prep");
+  const files = ["backend/a", "backend/b", "backend/c"];
+  await runTestFiles({ root, files, settings, run });
+  assert.deepEqual(prepared().map((call) => [call.name, call.cwd]), [["mkenv", join(root, "backend")], ["prep", join(root, "backend")]]);
+  assert.deepEqual(calls.filter((call) => call.name === "unit-runner").map((call) => call.arg).sort(), ["a", "b", "c"]);
+  await runTestFiles({ root, files, settings, run });
+  assert.equal(prepared().length, 2, "the second run prepares nothing");
+  assert.equal(git(root, "status", "--porcelain"), "");
+  await writeFile(join(root, "backend/requirements.txt"), "b\n");
+  await runTestFiles({ root, files, settings, run });
+  assert.equal(prepared().length, 4);
 });

@@ -16,7 +16,8 @@ import { ensureBaselineRun, triageTestFailures } from "./test-failure-triage";
 import {
   invalidateSetupCache,
   latestTestRun,
-  listTestFiles,
+  listTestTargets,
+  targetCommand,
   recordTestRunInTransaction,
   runTestFiles,
   runWholeSuite,
@@ -28,6 +29,7 @@ import {
   type ClassifiedFailure,
   type TestCommandRunner,
   type TestExecution,
+  type TestFileResult,
   type TestFailureBriefs,
   type TestSelection,
 } from "./test-runs";
@@ -82,6 +84,8 @@ export interface CoreTestRunOutcome {
   readonly environment: TestEnvironmentFailure | null;
   /** Why no tests ran (not_applicable only). */
   readonly reason?: string | null;
+  /** Test files inside the folder or package units of passed_files / failed_files; absent for unit file and whole, where those lists already name the files. */
+  readonly test_files?: { readonly passed: readonly string[]; readonly failed: readonly string[] };
 }
 
 export interface CoreTestRunBrief {
@@ -127,13 +131,14 @@ export async function runCoreTests(deps: CoreTestRunDeps, req: CoreTestRunReques
   }
   const previous = latestTestRun(deps.db, req.scope === "task" && req.task_id !== null ? { scope: "task", task_id: req.task_id } : { scope: "work", work_id: req.work_id });
   const whole = req.settings.mode === "whole";
-  const allTestFiles = whole ? [] : await listTestFiles(req.root, req.settings);
+  const targets = whole ? null : await listTestTargets(req.root, req.settings);
   const selected: TestSelection = whole
     ? { mode: "full", files: [WHOLE_RUN_FILE], previous_failed: [], changed_tests: [], related: [], required: [], full_reason: "whole_command", changed_files_count: req.changed_files.length }
     : await selectTests({
       scope: req.scope,
       root: req.root,
-      testFiles: allTestFiles,
+      testFiles: targets?.files ?? [],
+      targets: targets ?? undefined,
       changedFiles: req.changed_files,
       previous,
       requiredTests: req.required_tests,
@@ -142,16 +147,17 @@ export async function runCoreTests(deps: CoreTestRunDeps, req: CoreTestRunReques
     });
   // Only the Work-level run skips quarantined files, and never one the Work touched (it may have fixed it).
   // A file holding a known failure always runs: the known failure only hides itself, and skipping the file would hide new failures in it too.
-  const workChangedSet = new Set(req.work_changed_files);
-  const knownFiles = new Set(whole ? [] : (req.known_failures ?? []).map((failure) => failure.file));
-  const skipped = whole || req.scope !== "work" ? [] : quarantinedFiles(deps.db, req.project_id).filter((file) => selected.files.includes(file) && !workChangedSet.has(file) && !knownFiles.has(file));
+  const unitOf = (path: string): string | null => targets?.targetOf(path) ?? null;
+  const touched = new Set(req.work_changed_files.flatMap((file) => unitOf(file) ?? []));
+  const knownFiles = new Set(whole ? [] : (req.known_failures ?? []).map((failure) => unitOf(failure.file) ?? failure.file));
+  const skipped = whole || req.scope !== "work" ? [] : quarantinedFiles(deps.db, req.project_id).filter((file) => selected.files.includes(file) && !touched.has(file) && !knownFiles.has(file));
   const selection: TestSelection = {
     ...selected,
     ...(skipped.length > 0 ? { files: selected.files.filter((file) => !skipped.includes(file)), quarantined: skipped } : {}),
     ...(req.dirty ? { dirty: true } : {}), ...(req.change_digest ? { change_digest: req.change_digest } : {}),
   };
   if (selection.files.length === 0) {
-    return { run_id: null, status: "skipped", mode: selection.mode, selection, passed_files: [], failed_files: [], in_scope: [], pre_existing: [], error: null, environment: null };
+    return { run_id: null, status: "skipped", mode: selection.mode, selection, passed_files: [], failed_files: [], in_scope: [], pre_existing: [], error: null, environment: null, ...(!whole && req.settings.unit !== "file" ? { test_files: { passed: [], failed: [] } } : {}) };
   }
 
   const startedAt = new Date().toISOString();
@@ -161,7 +167,7 @@ export async function runCoreTests(deps: CoreTestRunDeps, req: CoreTestRunReques
   // Before the baseline: a missing tool fails the base commit the same way, and would read as an old failure.
   const environmentOf = (result: TestExecution): TestEnvironmentFailure | null => req.environment_signals === undefined ? null : executionEnvironmentFailure(
     result,
-    (file) => (whole ? req.settings.whole_argv : req.settings.file_argv.map((arg) => (arg === "{file}" ? file.file : arg))),
+    (file) => (whole ? req.settings.whole_argv : targetCommand(req.root, req.settings, file.file).argv),
     req.environment_signals,
     new Set((req.known_failures ?? []).map(testFailureKey)),
   );
@@ -179,9 +185,11 @@ export async function runCoreTests(deps: CoreTestRunDeps, req: CoreTestRunReques
   const workChanged = new Set(req.work_changed_files);
   const knownKeys = new Set((req.known_failures ?? []).map(testFailureKey));
   // A baseline is only worth taking for failures that could be old ones: not in the latest nightly, in a test file the Work left alone.
+  // A folder or package unit is the baseline row, so the candidate is the unit that produced the failure, not the file inside it.
+  const byUnit = !whole && req.settings.unit !== "file";
   const candidates = [...new Set(execution.files.flatMap((file) => file.failures
     .filter((failure) => failure.name !== "" && !nightlyKeys.has(testFailureKey(failure)) && !knownKeys.has(testFailureKey(failure)) && !workChanged.has(failure.file))
-    .map((failure) => failure.file)))];
+    .map((failure) => (byUnit ? file.file : failure.file))))];
   let baseline = null;
   if (!whole && environment === null && execution.status === "completed" && candidates.length > 0 && req.base_commit !== null) {
     baseline = await ensureBaselineRun({
@@ -200,7 +208,7 @@ export async function runCoreTests(deps: CoreTestRunDeps, req: CoreTestRunReques
       return null;
     });
   }
-  const classified = triageTestFailures({ files: execution.files, nightlyKeys, baseline, workChangedFiles: workChanged, knownKeys });
+  const classified = triageTestFailures({ files: execution.files, nightlyKeys, baseline, workChangedFiles: workChanged, knownKeys, ...(byUnit ? { baselineFileOf: (entry: TestFileResult) => entry.file } : {}) });
   const status = testRunStatus(execution, classified);
   const runId = createUlid();
   const passedFiles: string[] = [];
@@ -234,7 +242,7 @@ export async function runCoreTests(deps: CoreTestRunDeps, req: CoreTestRunReques
       recordTestRunInTransaction(tx, record, new Date().toISOString());
       // Files that fail on the base too are quarantined (and listed in one backlog item per Project); a whole-command run cannot name files.
       // A file that also has a new failure stays out: quarantining it would hide that failure from the next Work-level run.
-      if (!whole && environment === null) {
+      if (targets !== null && environment === null) {
         const now = new Date().toISOString();
         const entries = execution.files.flatMap((file) => {
           const failures = classified.get(file.file) ?? [];
@@ -253,7 +261,7 @@ export async function runCoreTests(deps: CoreTestRunDeps, req: CoreTestRunReques
           }
         }
         releaseQuarantinedFilesInTransaction(tx, req.project_id, execution.files.filter((file) => file.status === "passed").map((file) => file.file));
-        if (req.scope === "work") pruneMissingQuarantineInTransaction(tx, req.project_id, allTestFiles);
+        if (req.scope === "work") pruneMissingQuarantineInTransaction(tx, req.project_id, targets.targets);
       }
     },
     event: {
@@ -278,7 +286,11 @@ export async function runCoreTests(deps: CoreTestRunDeps, req: CoreTestRunReques
     },
     outbox: [{ provider: "websocket" }],
   });
-  return { run_id: runId, status, mode: selection.mode, selection, passed_files: passedFiles, failed_files: failedFiles, in_scope: inScope, pre_existing: preExisting, error: execution.error, environment };
+  const testFilesIn = (units: readonly string[]): string[] => (targets?.files ?? []).filter((file) => units.includes(unitOf(file) ?? ""));
+  return {
+    run_id: runId, status, mode: selection.mode, selection, passed_files: passedFiles, failed_files: failedFiles, in_scope: inScope, pre_existing: preExisting, error: execution.error, environment,
+    ...(byUnit ? { test_files: { passed: testFilesIn(passedFiles), failed: testFilesIn(failedFiles) } } : {}),
+  };
 }
 
 /** The shape an agent (and the event log) gets: names and message summaries, never raw output. */

@@ -370,7 +370,7 @@ import { EXTERNAL_DATA_POLICY, externalJsonBlock, MEMORY_ARCHIVE_SETTINGS_KEY, r
 import { approveOutsideInstalls } from "./test-environment";
 
 const isTestSetupOptionKey = (key: string | null): key is string => key === TEST_SETUP_APPROVE_OPTION_KEY || key === TEST_SETUP_RETRY_OPTION_KEY;
-import { validateTestRunSettings } from "../../shared/dist/test-run-settings.js";
+import { runArgvOf, validateTestRunSettings } from "../../shared/dist/test-run-settings.js";
 import { readTestPolicy, validateTestPolicy } from "../../shared/dist/test-policy.js";
 import { verificationPolicySettings } from "./task-verification-policy.js";
 import { resolveTestRun } from "./test-detection.js";
@@ -13126,7 +13126,7 @@ function projectTestRunStatus(row: Pick<ProjectDbRow, "canonical_path" | "test_r
     default_executables: defaultExecutables,
   });
   const settings = resolved.enabled ? resolved.settings : null;
-  const command = settings === null ? null : settings.mode === "whole" ? settings.whole_argv : settings.file_argv;
+  const command = settings === null ? null : runArgvOf(settings);
   return { enabled: resolved.enabled, reason: resolved.enabled ? null : resolved.reason, command, source: resolved.source };
 }
 
@@ -13979,7 +13979,7 @@ function validateTestRunPayload(value: unknown, language: "ja" | "en"): JsonObje
     );
   }
   const settings = value as JsonObject;
-  for (const key of ["file_argv", "prepare_argv", "whole_argv"]) {
+  for (const key of ["file_argv", "unit_argv", "prepare_argv", "whole_argv"]) {
     if (Object.prototype.hasOwnProperty.call(settings, key)) validateWorktreeCommand(settings[key], `test_run.${key}`, language, true);
   }
   return settings;

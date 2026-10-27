@@ -63,7 +63,7 @@ import { isNonBlankReason, type GoalShortfall } from "../../shared/dist/acceptan
 import { goalCriterionIds, goalShortfallsFromReport, goalShortfallsOfWork, recordTaskGoalShortfalls, replaceTaskGoalShortfalls } from "./goal-shortfalls.js";
 import { NO_CORE_ACTIVITY, type CoreActivityReporter } from "./core-activity.js";
 import { childEnv, coreTestErrorOutcome, coreTestRunBrief, notApplicableTestRun, runCoreTests, workTestRunner, type CoreTestRunDeps, type CoreTestRunOutcome } from "./core-test-run.js";
-import { DEFAULT_TEST_RUN_SETTINGS, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
+import { DEFAULT_TEST_RUN_SETTINGS, runArgvOf, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
 import { DEFAULT_TEST_DETECTION_RULES, type TestDetectionRules } from "./test-detection-rules.js";
 import { markerReader, reportCheckCommands, resolveTestRun, testDetectionMarkerDigest, testDetectionRulesVersion, type TestRunResolution } from "./test-detection.js";
 import { explicitTestRunDigest, isLegacyWholeSetup, readStoredTestSetup, selectTestSetupInCheckout, testExecutables, testSetupDigests, type KnownFailure, type StoredTestSetup, type TestSetupSelection } from "./test-setup.js";
@@ -3138,11 +3138,13 @@ export class WorkflowEngine {
         projectTestRun: resolved?.enabled && resolved.source === "explicit" ? {
           enabled: true,
           cwd: resolved.settings.cwd,
+          mode: resolved.settings.mode,
+          unit: resolved.settings.unit,
           ...(Object.hasOwn(explicit, "file_argv") ? { file_argv: resolved.settings.file_argv } : {}),
           whole_argv: resolved.settings.whole_argv,
           ...(Object.hasOwn(explicit, "test_patterns") ? { test_patterns: resolved.settings.test_patterns } : {}),
         } : coreTests?.outcome.status === "not_applicable" && coreTests.outcome.reason === "explicit_off" ? { enabled: false, reason: "explicit_off" } : undefined,
-        coreTestRun: coreTests && coreTests.outcome.status !== "not_applicable" ? { reason: coreTests.outcome.reason ?? null, run_id: coreTests.outcome.run_id, mode: coreTests.outcome.mode, passed_files: coreTests.outcome.passed_files, failed_files: coreTests.outcome.failed_files } : undefined,
+        coreTestRun: coreTests && coreTests.outcome.status !== "not_applicable" ? { reason: coreTests.outcome.reason ?? null, run_id: coreTests.outcome.run_id, mode: coreTests.outcome.mode, passed_files: coreTests.outcome.passed_files, failed_files: coreTests.outcome.failed_files, ...(coreTests.outcome.test_files === undefined ? {} : { test_files: coreTests.outcome.test_files }) } : undefined,
         runCommand: async (argv, cwd) => {
           const outcome = await this.runVerificationCommand(task.id, argv, cwd, limits.env_allowlist, limits.timeout_seconds * 1000, limits.stdout_limit_bytes, limits.stderr_limit_bytes, [0], true);
           return {
@@ -3735,7 +3737,7 @@ export class WorkflowEngine {
       ...(place.task_id === null ? {} : { task_id: place.task_id }),
       checkout: root,
       record: resolved.adopt_record,
-      argv: settings.mode === "whole" ? settings.whole_argv : settings.file_argv,
+      argv: runArgvOf(settings),
     }).catch((error: unknown) => console.warn(`[owl-core] Could not save the confirmed test setup: ${error instanceof Error ? error.message : String(error)}`));
   }
 

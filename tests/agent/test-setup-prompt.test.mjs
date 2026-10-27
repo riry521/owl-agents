@@ -24,17 +24,18 @@ const request = (over = {}) => ({
   ...over,
 });
 
+const UNITS = ["file", "folder", "package"];
 const output = (over = {}) => ({
   verdict: "ready",
   setup_argvs: [],
   setup_inputs: [],
   setup_outputs: [],
-  test_run: { mode: "whole", whole_argv: ["{python}", "-m", "pytest", "-q"], file_argv: [], prepare_argv: [], test_patterns: ["**/test_*.py"], cwd: "." },
+  test_run: { mode: "whole", whole_argv: ["{python}", "-m", "pytest", "-q"], file_argv: [], prepare_argv: [], test_patterns: ["**/test_*.py"], cwd: ".", unit: "file", unit_argv: [], unit_markers: [] },
   executables: [{ name: "python", path: ".venv/bin/python", probe_argv: ["{python}", "--version"] }],
   confirm_files: [],
   probe_argvs: [],
   sources: ["README.md"],
-  attempts: [],
+  attempts: UNITS.map((unit) => ({ argv: ["{python}", "-m", "pytest", unit], cwd: ".", exit_code: 1, summary: "failed", unit })),
   installed: [],
   outside_installs: [],
   missing: [],
@@ -69,8 +70,10 @@ test("repair_explicit tells the agent to keep the Owner's command", () => {
 
 test("the prompt makes per_file the default and setup_argvs safe to repeat", () => {
   const prompt = buildTestSetupInvestigationPrompt(request());
-  assert.match(prompt, /per_file is the default/u);
-  assert.match(prompt, /Choose whole only when you tried and could not confirm/u);
+  assert.match(prompt, /mode per_file runs one unit at a time\. Try the units in this order: file, folder, package\. Stop at the first unit that works and do not skip a unit/u);
+  assert.match(prompt, /Choose mode whole only when none of the units works; then write in notes what you tried for each unit/u);
+  assert.match(prompt, /10\. Write every command you ran and its result in attempts\. For a command that ran tests as one unit, write that unit in the attempt's unit/u);
+  assert.match(prompt, /unit is file, and unit_argv and unit_markers are empty/u);
   assert.match(prompt, /must not delete or rebuild an environment that is already in place/u);
   assert.match(prompt, /venv --clear/u);
 });
@@ -85,8 +88,37 @@ test("the prompt asks for the setup's dependency files and made paths", () => {
 test("parseTestSetupResponse accepts whole only with a reason in notes", () => {
   assert.throws(() => parseTestSetupResponse(answer(output({ notes: " " })), { mode: "find" }), OutputFormatError);
   assert.equal(parseTestSetupResponse(answer(output()), { mode: "find" }).test_run.mode, "whole");
-  const perFile = { mode: "per_file", whole_argv: [], file_argv: ["{python}", "-m", "pytest", "{file}"], prepare_argv: [], test_patterns: ["**/test_*.py"], cwd: "." };
-  assert.equal(parseTestSetupResponse(answer(output({ notes: "", test_run: perFile, confirm_files: ["tests/test_app.py"] })), { mode: "find" }).test_run.mode, "per_file");
+  const perFile = { mode: "per_file", whole_argv: [], file_argv: ["{python}", "-m", "pytest", "{file}"], prepare_argv: [], test_patterns: ["**/test_*.py"], cwd: ".", unit: "file", unit_argv: [], unit_markers: [] };
+  assert.equal(parseTestSetupResponse(answer(output({ notes: "", test_run: perFile, attempts: [output().attempts[0]], confirm_files: ["tests/test_app.py"] })), { mode: "find" }).test_run.mode, "per_file");
+});
+
+const unitRun = (unit, over = {}) => ({ mode: "per_file", whole_argv: [], file_argv: ["{python}", "-m", "pytest", "{file}"], prepare_argv: [], test_patterns: ["**/test_*.py"], cwd: ".", unit, unit_argv: unit === "file" ? [] : ["{python}", "-m", "pytest", "{unit}"], unit_markers: unit === "package" ? ["unit.marker"] : [], ...over });
+const tried = (...units) => units.map((unit) => ({ argv: ["x"], cwd: ".", exit_code: 0, summary: "", unit }));
+const parsed = (over) => parseTestSetupResponse(answer(output({ notes: "finer units fail", confirm_files: ["a"], ...over })), { mode: "find" });
+const rejects = (over, start) => assert.throws(() => parsed(over), (error) => error instanceof OutputFormatError && error.message.startsWith(start), start);
+
+test("parseTestSetupResponse checks the unit order, the chosen unit and the unit fields", () => {
+  for (const units of [["file", "folder"], ["file", "file", "folder"], ["file", "folder", "folder"]]) {
+    assert.equal(parsed({ test_run: unitRun("folder"), attempts: tried(...units) }).test_run.unit, "folder");
+  }
+  const blank = { argv: ["setup"], cwd: ".", exit_code: 0, summary: "", unit: "" };
+  assert.equal(parsed({ test_run: unitRun("folder"), attempts: [...tried("file"), blank, ...tried("folder")] }).test_run.unit, "folder");
+  assert.equal(parsed({ test_run: unitRun("package"), attempts: tried("file", "folder", "package") }).test_run.unit, "package");
+  assert.equal(parsed({ test_run: unitRun("file"), attempts: [...tried("file"), { argv: ["setup"], cwd: ".", exit_code: 0, summary: "", unit: "" }], notes: "" }).test_run.unit, "file");
+  rejects({ test_run: unitRun("folder"), attempts: tried("folder") }, "attempts: try the units in the order file, folder, package: no attempt with unit file before choosing folder");
+  rejects({ test_run: unitRun("folder"), attempts: tried("folder", "file") }, "attempts: try the units in the order file, folder, package: an attempt with unit file comes after an attempt with unit folder");
+  rejects({ test_run: unitRun("folder"), attempts: tried("file", "folder", "package") }, "attempts: stop at the first unit that works: an attempt with unit package comes after choosing folder");
+  rejects({ test_run: unitRun("package"), attempts: tried("file", "package") }, "attempts: try the units in the order file, folder, package: no attempt with unit folder before choosing package");
+  rejects({ test_run: unitRun("package"), attempts: tried("file", "folder") }, "attempts: try the units in the order file, folder, package: no attempt with unit package before choosing package");
+  rejects({ attempts: tried("package", "folder", "file") }, "attempts: try the units in the order file, folder, package: an attempt with unit folder comes after an attempt with unit package");
+  rejects({ attempts: tried("file", "package") }, "attempts: mode whole needs an attempt for every unit (file, folder, package): no attempt with unit folder");
+  rejects({ test_run: { ...output().test_run, unit: "folder" } }, "test_run.unit: must be file when mode is whole");
+  rejects({ verdict: "no_tests", test_run: unitRun("folder"), attempts: [], probe_argvs: [["x"]] }, "test_run.unit: must be file when verdict is no_tests");
+  rejects({ test_run: unitRun("folder"), attempts: tried("file", "folder"), notes: " " }, "notes: required when test_run.unit is folder or package");
+  rejects({ test_run: unitRun("folder", { unit_argv: ["x", "{unit}", "{unit}"] }), attempts: tried("file", "folder") }, "test_run.unit_argv: must contain {unit} exactly once and no {file}");
+  rejects({ test_run: unitRun("folder", { unit_argv: ["x", "{unit}", "{file}"] }), attempts: tried("file", "folder") }, "test_run.unit_argv: must contain {unit} exactly once and no {file}");
+  rejects({ test_run: unitRun("package", { unit_markers: [] }), attempts: tried("file", "folder", "package") }, "test_run.unit_markers: required when unit is package");
+  rejects({ notes: " " }, "notes: required when test_run.mode is whole: write why no unit (file, folder, package) can be run alone, or use per_file");
 });
 
 test("parseTestSetupResponse accepts one valid object, with or without a json fence", () => {

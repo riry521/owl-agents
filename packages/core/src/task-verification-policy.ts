@@ -2,6 +2,7 @@ import { lstat, readFile } from "node:fs/promises";
 import { parseAllDocuments } from "yaml";
 import { isAbsolute, relative, resolve } from "node:path";
 import { matchesGlobWithDots } from "./glob.js";
+import type { TestRunUnit } from "../../shared/dist/test-run-settings.js";
 import {
   DEFAULT_VERIFICATION_POLICY_SETTINGS,
   VERIFICATION_POLICY_SETTINGS_KEY,
@@ -92,8 +93,8 @@ export interface TypePolicyInput {
   executables?: Readonly<Record<string, string>>;
   /** Files Core's own test run already judged; those are not started again and carry no output. */
   /** Set only when the Project's own test_run resolved to an explicit off; no test runner is started then. */
-  projectTestRun?: { enabled: false; reason: string } | { enabled: true; cwd: string; file_argv?: readonly string[]; whole_argv?: readonly string[]; test_patterns?: readonly string[] };
-  coreTestRun?: { reason?: string | null; run_id: string | null; mode?: "full" | "selected"; passed_files: readonly string[]; failed_files: readonly string[] };
+  projectTestRun?: { enabled: false; reason: string } | { enabled: true; cwd: string; mode?: "per_file" | "whole" | "off"; unit?: TestRunUnit; file_argv?: readonly string[]; whole_argv?: readonly string[]; test_patterns?: readonly string[] };
+  coreTestRun?: { reason?: string | null; run_id: string | null; mode?: "full" | "selected"; passed_files: readonly string[]; failed_files: readonly string[]; test_files?: { passed: readonly string[]; failed: readonly string[] } };
 }
 
 const DELETE_ACTIONS = new Set(["delete", "deleted", "remove", "removed"]);
@@ -168,8 +169,9 @@ export async function evaluateTaskTypePolicy(input: TypePolicyInput): Promise<Ty
   const run = async (id: string, command: PolicyCommand, file: string, key: PolicyErrorKey, cwd = root, argumentFile = file): Promise<{ ok: boolean; stdout: string }> => {
     const argv = expand(command.argv, argumentFile, input.executables);
     const core = id === "policy:test" ? input.coreTestRun : undefined;
-    if (core?.passed_files.includes(file) || core?.failed_files.includes(file)) {
-      const ok = core.passed_files.includes(file);
+    const corePassed = core?.passed_files.includes(file) === true || core?.test_files?.passed.includes(file) === true;
+    if (core && (corePassed || core.failed_files.includes(file) || core.test_files?.failed.includes(file))) {
+      const ok = corePassed;
       const detail = `Core test run ${core.run_id ?? ""}`.trimEnd();
       return { ok: record({ command_id: id, passed: ok, file, detail }, ok ? undefined : key), stdout: "" };
     }
@@ -310,10 +312,13 @@ export async function evaluateTaskTypePolicy(input: TypePolicyInput): Promise<Ty
         const projectCwd = resolve(root, project.cwd);
         const cwdRelative = relative(root, projectCwd);
         const fileRelative = relative(projectCwd, resolve(root, file));
-        const argv = project.file_argv ?? (project.whole_argv?.length ? [...project.whole_argv, "{file}"] : undefined);
+        // Why not build a one-file command for a folder or package unit: that Project cannot run a single file.
+        const byUnit = project.unit === "folder" || project.unit === "package";
+        const argv = byUnit ? undefined : project.file_argv ?? (project.whole_argv?.length ? [...project.whole_argv, "{file}"] : undefined);
+        const patternPath = project.mode === "per_file" ? file : fileRelative;
         if (!isAbsolute(cwdRelative) && !cwdRelative.split(/[\\/]/u).includes("..")
           && fileRelative !== "" && !isAbsolute(fileRelative) && !fileRelative.split(/[\\/]/u).includes("..")
-          && (!project.test_patterns || matchesAny(fileRelative, project.test_patterns)) && argv?.length) {
+          && (!project.test_patterns || matchesAny(patternPath, project.test_patterns)) && argv?.length) {
           command = { ...runner, argv: [...argv] };
           cwd = projectCwd;
           argumentFile = fileRelative;

@@ -6,6 +6,9 @@ export interface SourceMapRule {
   readonly to: string;
 }
 
+export const TEST_RUN_UNITS = ["file", "folder", "package"] as const;
+export type TestRunUnit = (typeof TEST_RUN_UNITS)[number];
+
 export interface TestRunSettings {
   /** Globs (path.matchesGlob) that tell a test file from other files. */
   readonly test_patterns: readonly string[];
@@ -37,8 +40,14 @@ export interface TestRunSettings {
   readonly setup_argvs: readonly (readonly string[])[];
   /** Files the setup depends on and what it makes, checkout-relative; the setup is skipped while those files are unchanged and the made paths exist. null = no record: always run the setup. */
   readonly setup_cache: { readonly inputs: readonly string[]; readonly outputs: readonly string[] } | null;
-  /** Working directory of the test command, relative to the checkout root without ".."; per_file only accepts ".". */
+  /** Working directory of the test command, relative to the checkout root without "..". */
   readonly cwd: string;
+  /** With mode per_file: what one command runs on (the order is the order an investigation tries). Unused by whole and off. */
+  readonly unit: TestRunUnit;
+  /** argv for one folder or package unit; contains "{unit}" exactly once and no "{file}" ([] = none). */
+  readonly unit_argv: readonly string[];
+  /** For unit "package": file name globs (no "/") that mark a package root. */
+  readonly unit_markers: readonly string[];
 }
 
 /** The one place the defaults live; a Project's test_run JSON overrides it per key. */
@@ -66,6 +75,9 @@ export const DEFAULT_TEST_RUN_SETTINGS: TestRunSettings = {
   setup_argvs: [],
   setup_cache: null,
   cwd: ".",
+  unit: "file",
+  unit_argv: [],
+  unit_markers: [],
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -74,7 +86,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 const strings = (value: unknown): boolean => Array.isArray(value) && value.every((item) => typeof item === "string");
 const nonEmptyStrings = (value: unknown): boolean => strings(value) && (value as string[]).every((item) => item.length > 0);
-const fileArgv = (value: unknown): boolean => nonEmptyStrings(value) && (value as string[]).length > 0 && (value as string[]).filter((item) => item === "{file}").length === 1;
+const fileArgv = (value: unknown): boolean =>
+  nonEmptyStrings(value) && (value as string[]).length > 0 && (value as string[]).filter((item) => item === "{file}").length === 1 && !(value as string[]).includes("{unit}");
 const integerAtLeast = (min: number) => (value: unknown): boolean => typeof value === "number" && Number.isInteger(value) && value >= min;
 const concurrency = (value: unknown): boolean => value === null || integerAtLeast(1)(value);
 const sourceMap = (value: unknown): boolean =>
@@ -89,7 +102,12 @@ const sourceMap = (value: unknown): boolean =>
   });
 
 const mode = (value: unknown): boolean => value === "per_file" || value === "whole" || value === "off";
-const wholeArgv = (value: unknown): boolean => nonEmptyStrings(value) && !(value as string[]).includes("{file}");
+const wholeArgv = (value: unknown): boolean => nonEmptyStrings(value) && !(value as string[]).includes("{file}") && !(value as string[]).includes("{unit}");
+const unit = (value: unknown): boolean => (TEST_RUN_UNITS as readonly unknown[]).includes(value);
+const unitArgv = (value: unknown): boolean =>
+  nonEmptyStrings(value) && ((value as string[]).length === 0 || ((value as string[]).filter((item) => item === "{unit}").length === 1 && !(value as string[]).includes("{file}")));
+const unitMarkers = (value: unknown): boolean =>
+  nonEmptyStrings(value) && (value as string[]).every((item) => !/[\\/]/u.test(item) && item !== "." && item !== "..");
 
 const setupArgvs = (value: unknown): boolean => Array.isArray(value) && value.every((argv) => nonEmptyStrings(argv) && (argv as string[]).length > 0);
 const relativePaths = (value: unknown): boolean => nonEmptyStrings(value) && (value as string[]).every((item) => !item.startsWith("/") && !item.split(/[\\/]/u).includes(".."));
@@ -118,7 +136,31 @@ const VALIDATORS: Readonly<Record<keyof TestRunSettings, (value: unknown) => boo
   setup_argvs: setupArgvs,
   setup_cache: setupCache,
   cwd: relativeCwd,
+  unit,
+  unit_argv: unitArgv,
+  unit_markers: unitMarkers,
 };
+
+/** The message for a unit that cannot run with the other settings, or null. */
+function unitProblem(mode: unknown, unitValue: unknown, argv: unknown, markers: unknown): string | null {
+  const empty = (list: unknown): boolean => !Array.isArray(list) || list.length === 0;
+  if (unitValue === "file") return null;
+  if (mode !== "per_file") return 'test_run.unit must be "file" unless mode is per_file';
+  if (empty(argv)) return "test_run.unit_argv is required when unit is folder or package";
+  if (unitValue === "package" && empty(markers)) return "test_run.unit_markers is required when unit is package";
+  return null;
+}
+
+/** The argv Core runs: whole_argv for whole, unit_argv for a folder or package unit, file_argv otherwise. */
+export function runArgvOf(settings: TestRunSettings): readonly string[] {
+  if (settings.mode === "whole") return settings.whole_argv;
+  return settings.unit === "file" ? settings.file_argv : settings.unit_argv;
+}
+
+/** "{unit}" for a folder or package unit, "{file}" otherwise. */
+export function targetPlaceholderOf(settings: TestRunSettings): "{file}" | "{unit}" {
+  return settings.mode === "per_file" && settings.unit !== "file" ? "{unit}" : "{file}";
+}
 
 /** For reads: each invalid or missing key falls back to its default; invalid ones are reported through warn. */
 export function readTestRunSettings(value: unknown, warn?: (message: string) => void): TestRunSettings {
@@ -130,9 +172,10 @@ export function readTestRunSettings(value: unknown, warn?: (message: string) => 
     else warn?.(`Invalid test_run.${key}; using default.`);
   }
   const settings = result as unknown as TestRunSettings;
-  if (settings.mode === "per_file" && settings.cwd !== ".") {
-    warn?.('Invalid test_run.cwd; per_file only accepts "."; using default.');
-    return { ...settings, cwd: "." };
+  const problem = unitProblem(settings.mode, settings.unit, settings.unit_argv, settings.unit_markers);
+  if (problem !== null) {
+    warn?.(`Invalid test_run.unit (${problem}); using "file".`);
+    return { ...settings, unit: "file" };
   }
   return settings;
 }
@@ -146,7 +189,10 @@ export function validateTestRunSettings(value: unknown): string[] {
     if (valid === undefined) errors.push(`test_run.${key} is not a known key`);
     else if (!valid(item)) errors.push(`test_run.${key} is invalid`);
   }
-  if ((value.mode ?? DEFAULT_TEST_RUN_SETTINGS.mode) === "per_file" && typeof value.cwd === "string" && value.cwd !== ".") errors.push('test_run.cwd must be "." when mode is per_file');
   if (value.mode === "whole" && !(Array.isArray(value.whole_argv) && value.whole_argv.length > 0)) errors.push("test_run.whole_argv is required when mode is whole");
+  if (unit(value.unit)) {
+    const problem = unitProblem(value.mode ?? DEFAULT_TEST_RUN_SETTINGS.mode, value.unit, value.unit_argv, value.unit_markers);
+    if (problem !== null) errors.push(problem);
+  }
   return errors;
 }
