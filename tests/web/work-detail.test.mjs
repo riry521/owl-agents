@@ -93,6 +93,11 @@ const componentTranslations = {
   'work.manager': 'Manager',
   'work.noManager': 'No manager',
   'work.activeAgents': 'Active agents',
+  'work.finalReport': 'Final report',
+  'work.finalReportMeta': ({ at }) => `Manager · written ${at}`,
+  'work.finalReportSummary': 'Brief report',
+  'work.finalReportTests': 'Test results',
+  'work.finalReportIssues': 'Issues',
   'work.noActiveAgents': 'No active agents',
   'work.agentHistory': 'Agent history',
   'work.coreActivity.title': ({ kind }) => `Core: ${kind}`,
@@ -175,6 +180,7 @@ const componentFormat = {
   agentOutcomeLabels: () => ({}),
   boardSectionLabels: () => ({ judgement: 'Needs review', running: 'Running', waiting: 'Waiting', done: 'Done', cancelled: 'Cancelled' }),
   boardSectionOf: actualFormatModule.boardSectionOf,
+  formatDateTime: actualFormatModule.formatDateTime,
   formatRelative: () => 'just now',
   formatAgentLabel: () => 'Agent',
   roleDisplayName: (role) => role,
@@ -319,6 +325,9 @@ const boardPageModule = compileWebComponent(join(repoRoot, 'apps/web/app/board/p
   '@/components/WorkPreviewPanel': previewComponentModule,
 });
 const moveHelpers = await import('../../apps/web/lib/work-project-move.mjs');
+const workFinalReportPanelModule = compileWebComponent(join(repoRoot, 'apps/web/components/WorkFinalReportPanel.tsx'), {
+  '@/lib/format': componentFormat,
+});
 const workProjectMoveStub = { WorkProjectMove: ({ work }) => React.createElement('span', { 'data-move': String(work.project_id === null) }) };
 const detailComponentModule = compileWebComponent(join(repoRoot, 'apps/web/components/WorkDetailView.tsx'), {
   '@/lib/view-loader': componentViewLoader,
@@ -344,6 +353,7 @@ const detailComponentModule = compileWebComponent(join(repoRoot, 'apps/web/compo
   '@/components/ActivityLog': { WorkPostMergeEvents: () => null },
   '@/components/WorkConversation': { WorkConversation: () => null },
   '@/components/WorkAssurancePanel': { WorkAssurancePanel: () => null },
+  '@/components/WorkFinalReportPanel': workFinalReportPanelModule,
   '@/components/WorkSummaryHistory': { WorkSummaryHistory: () => null },
 });
 const workErrorModule = compileWebComponent(join(repoRoot, 'apps/web/app/work/error.tsx'), {
@@ -2045,4 +2055,35 @@ test('Work detail lists goals that were not met, shows later evidence, and hides
   assert.ok(shown.includes('Met later') && shown.includes('tests added in t3'));
   assert.ok(!(await renderWithAutoRecovery(none, [])).includes('Goals not met'));
   assert.ok(!(await renderWithAutoRecovery(none, undefined)).includes('Goals not met'));
+});
+
+async function renderWithFinalReport(state, finalReport) {
+  const client = loadApiClient();
+  const originalFetch = globalThis.fetch;
+  const id = 'work-final-report';
+  try {
+    const workData = { ...apiWork({ id, title: 'Reported', summary: 'Do it', state, size: 'small' }), final_report: finalReport };
+    globalThis.fetch = (input) => successfulApiFetch(input, { state, workData });
+    const board = renderBoardWorkLink({ id, title: 'Reported', state, updated_at: '2026-09-23T00:00:00.000Z' });
+    return (await renderDetailFromRoute(board.href, client)).html;
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+}
+
+test('Work detail shows the final report in three sections between the overview and the conversation, only for a completed Work with a report', async () => {
+  const report = { summary: 'Brief body', test_results: 'Tests body', issues: 'Issues body', created_at: '2026-10-28T05:32:00.000Z' };
+  const html = await renderWithFinalReport('completed', report);
+  const start = html.indexOf('id="sec-final-report"');
+  assert.ok(start > 0 && html.includes('Final report'));
+  const order = ['Brief report', 'Brief body', 'Test results', 'Tests body', 'Issues', 'Issues body'].map((text) => html.indexOf(text, start));
+  assert.ok(order.every((at, i) => at > 0 && (i === 0 || at > order[i - 1])), 'headings and bodies appear in order');
+  assert.ok(html.indexOf('id="sec-overview"') < start);
+  assert.ok(start < html.indexOf('id="sec-conversation"'));
+
+  assert.ok(!(await renderWithFinalReport('running', report)).includes('sec-final-report'));
+  assert.ok(!(await renderWithFinalReport('completed', null)).includes('sec-final-report'));
+
+  const partial = await renderWithFinalReport('completed', { ...report, test_results: '  ', issues: '' });
+  assert.ok(partial.includes('Brief report') && !partial.includes('Test results') && !partial.includes('>Issues<'));
 });

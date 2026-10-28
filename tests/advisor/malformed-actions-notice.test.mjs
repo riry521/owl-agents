@@ -82,3 +82,15 @@ test("a valid fence runs and a malformed fence in the same Slack reply adds a no
   assert.equal(db.get("SELECT COUNT(*) AS count FROM works WHERE title = ?", "Valid Work").count, 1);
   assert.equal(db.get("SELECT COUNT(*) AS count FROM works WHERE title = ?", "Malformed Work").count, 0);
 });
+
+test("a broken owl-actions block is recorded as an owl-actions failure at index -1", async (t) => {
+  const { core, db, conversationId } = await setup(t);
+  captureWarnings(t);
+  const parsed = parseAdvisorTurnReply("slack", malformedReply, "ja");
+  await core.persistAdvisorReply(conversationId, parsed.reply, createUlid(), { channel: "slack" }, parsed.suggested_actions, parsed.malformed);
+  const payload = JSON.parse(db.get("SELECT payload_json FROM events WHERE type = 'advisor.responded' ORDER BY rowid DESC LIMIT 1").payload_json);
+  assert.deepEqual(payload.action_failures.map((f) => [f.index, f.type, f.status, f.code, f.retryable, f.target, f.details]), [
+    [-1, "owl-actions", "failed", "invalid_payload", true, null, {}],
+  ]);
+  assert.doesNotMatch(JSON.stringify(payload.action_failures), /SECRETVALUE123/u);
+});

@@ -226,9 +226,12 @@ Details are in [docs/operations.md](docs/operations.md).
 - **Draft Works.** Tell the Advisor "draft" or "just register it" and it creates the Work as a memo without starting it. Start it later with the Start button on the Work detail page.
 - **Lead Designer.** A Work created with `design_mode: "lead"` (default `auto`) plans a design Task first and adds the implementation Tasks after the design is done.
 - **Backlog.** The `/backlog` page lists review follow-ups per Project. Link an item to a Work, issue a Work from it, or dismiss it.
+- **Advisor sessions.** Owl resumes an Advisor session only after its turn has finished, and sends the message again once if it fails. When an `owl-action` fails, the Advisor gets one more turn to deal with the failure.
 - **Steering from the Advisor.** The Advisor can send an instruction to a Work (`send_work_instruction`), edit its title or summary (`update_work`), and pause, resume, cancel or delete it (`pause_work`, `resume_work`, `cancel_work`, `delete_work`).
 - **Cancel vs. delete.** Cancel stops the agents, cleans up the Work's worktree and keeps the Work as cancelled. Delete removes the Work from the database and frees its number.
 - **Pause and instructions.** Pausing a Work stops the agents that are running and starts no new Tasks; resuming it runs the stopped Tasks again. Sending an instruction also stops the running agents, and the Manager replans from the new state.
+- **Board and Archive by Project.** The Board and the Archive group Works under a heading for each Project. On the Board, each heading has a rule and the number of Works in that Project.
+- **Final report.** The top of a completed Work's detail page shows the Manager's final report: a summary, the test results and the remaining issues.
 - **Required and goal criteria.** Each acceptance criterion is either required or a goal. A Work can complete when every required criterion is met, even if a goal is not. The Work detail page lists the goals that were not met, with the reason.
 
 ### Keeping it running

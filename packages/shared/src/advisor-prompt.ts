@@ -75,4 +75,19 @@ const ADVISOR_WINDOW_HANDOFF_INSTRUCTION = [
   "After handing over, tell the Owner briefly and do not continue that talk here. Core appends the result to your reply. Example: [{\"type\":\"handoff_to_window\",\"description\":\"課金の相談を引き継ぐ\",\"payload\":{\"project_id\":null,\"summary\":\"課金の仕組みを見直したい。方針は未定で、料金表の案を比べるところから。\"}}].",
 ].join(" ");
 
-export const ADVISOR_CURATION_INSTRUCTION = `${ADVISOR_TIDY_UP_INSTRUCTION} ${ADVISOR_WORK_OPERATION_INSTRUCTION} ${ADVISOR_OWL_API_INSTRUCTION} ${ADVISOR_SEND_FILE_INSTRUCTION} ${ADVISOR_WORK_PREREQUISITE_INSTRUCTION} ${ADVISOR_WINDOW_HANDOFF_INSTRUCTION}`;
+/** How the Advisor handles the one automatic follow-up turn Core sends after failed owl-actions. */
+export const ADVISOR_FOLLOWUP_INSTRUCTION = [
+  "Automatic follow-up: when owl-actions of your reply fail or end with an unknown result, or a file you sent with send_file could not be delivered, Owl sends you one follow-up turn in the same conversation. It is not a message from the operator. It carries <owl-action-results> and <owl-action-failures>, one entry per action that did not complete: index, type, status, code, message, retryable, approval, target and details. Reply once, in the reply language set above, and follow these rules.",
+  "- Re-emit only actions listed in <owl-action-failures>, and each of them at most once. Never re-emit an action that already succeeded. Owl runs at most one retry per failed action and ignores any other action.",
+  "- If retryable is true and you can fix the cause (a missing or malformed field, a wrong id, a version conflict, a rate limit), emit the fixed action once.",
+  "- If retryable is false (the Work's state, a blocked API, a missing permission, a setting), do not emit it. Tell the operator the reason and the next step they can take.",
+  "- If approval is true, re-emit the action only when its target and content stay exactly as the operator approved; only the format may change. If your fix changes the target or the content (including a cancel reason or any value in a call_api body), do not emit it: show the fixed proposal and ask the operator to approve it.",
+  "- If status is unknown, the action may or may not have run. Never re-emit it. For an Owl action, check the current state with a GET through the owl-api tool, tell the operator what you found, and ask before doing it again. For send_file, ask the operator whether the file arrived.",
+  "- Owl retries automatically only once. If the follow-up's actions fail again, Owl stops and tells the operator. Do not promise another automatic attempt.",
+].join("\n");
+
+/** The body of the follow-up turn itself. */
+export const ADVISOR_FOLLOWUP_TURN_TEXT =
+  "Owl automatic follow-up: some owl-actions of your previous reply did not complete. Handle them by the follow-up rules.";
+
+export const ADVISOR_CURATION_INSTRUCTION = `${ADVISOR_TIDY_UP_INSTRUCTION} ${ADVISOR_WORK_OPERATION_INSTRUCTION} ${ADVISOR_OWL_API_INSTRUCTION} ${ADVISOR_SEND_FILE_INSTRUCTION} ${ADVISOR_WORK_PREREQUISITE_INSTRUCTION} ${ADVISOR_WINDOW_HANDOFF_INSTRUCTION} ${ADVISOR_FOLLOWUP_INSTRUCTION}`;

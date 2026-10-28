@@ -221,9 +221,12 @@ curl http://localhost:3787/api/v1/works
 - **下書きのWork**：Advisorに「下書き」「登録だけ」と伝えると、起動せずメモとしてWorkを作ります。後でWork詳細ページのStartボタンで開始します。
 - **Lead Designer**：`design_mode: "lead"`（既定は`auto`）で作ったWorkは、先に設計Taskを計画し、設計が終わってから実装Taskを追加します。
 - **Backlog**：`/backlog`ページにProjectごとのレビュー指摘の持ち越しが並びます。項目をWorkに紐づけたり、そこからWorkを発行したり、破棄したりできます。
+- **Advisorのセッション**：Advisorのセッションはターンが完了したあとにだけ再開し、失敗したときは1回だけメッセージを送り直します。`owl-action`が失敗したときは、Advisorがもう1ターン動いて対処します。
 - **Advisorからの操作**：AdvisorはWorkへの指示の送信（`send_work_instruction`）、タイトルや要約の編集（`update_work`）、一時停止・再開・キャンセル・削除（`pause_work`、`resume_work`、`cancel_work`、`delete_work`）ができます。
 - **キャンセルと削除の違い**：キャンセルはエージェントを止めてWorkの作業ファイル（worktree）を片付け、Workはキャンセル済みとして残します。削除はWorkをDBから消し、番号を空けます。
 - **一時停止と指示**：Workを一時停止すると、実行中のエージェントを止め、新しいTaskを始めません。再開すると、止めたTaskをやり直します。Workへ指示を送ったときも実行中のエージェントを止め、Managerが新しい状態から計画を立て直します。
+- **BoardとArchiveのProject別表示**：BoardとArchiveでは、WorkをProjectごとの見出しにまとめて表示します。Boardの見出しには区切り線とProjectごとの件数が付きます。
+- **最終報告**：完了したWorkの詳細ページの先頭に、Managerが書いた最終報告（要約、テスト結果、残った課題）を表示します。
 - **必須と目標**：受け入れ条件は「必須」か「目標」のどちらかです。目標を満たせなくても、必須をすべて満たせばWorkは完了できます。満たせなかった目標は、理由と一緒にWork詳細ページに並びます。
 
 ### 動かし続ける仕組み

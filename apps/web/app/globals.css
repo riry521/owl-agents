@@ -218,6 +218,29 @@ textarea {
   font-weight: 700;
 }
 
+.board-project__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 16px 0 8px;
+  padding: 0 0 6px 10px;
+  border-left: 3px solid var(--accent);
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.section__head + .board-project .board-project__head {
+  margin-top: 4px;
+}
+
+.board-project__count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+}
+
 .count {
   color: #fff;
   font-size: 11px;
@@ -4557,3 +4580,45 @@ body:has(.advisor-page-wrap) .provider-pause-banner__error { flex-basis: auto; w
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
 }
 /* advisor-windows: end */
+
+/* Final report at the top of a completed Work */
+.final-report {
+  border-color: #bbf7d0;
+  background: linear-gradient(180deg, #f0fdf4 0%, rgba(255, 255, 255, 0.9) 100%);
+}
+.final-report__head {
+  display: flex;
+  align-items: baseline;
+  gap: 4px 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.final-report__title { margin: 0; }
+.final-report__title::before {
+  content: '';
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--green);
+  flex-shrink: 0;
+}
+.final-report__meta {
+  margin: 0 0 0 auto;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.final-report__heading {
+  margin: 12px 0 4px;
+  font-size: 13px;
+  color: var(--ink-2);
+}
+.final-report__text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 640px) {
+  .final-report__meta { margin-left: 0; width: 100%; white-space: normal; }
+}

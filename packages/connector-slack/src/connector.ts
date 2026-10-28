@@ -12,12 +12,14 @@ import {
   formatAdvisorReply,
   parseOutboundFiles,
   readOutboundFile,
+  reportAdvisorDelivery,
   formatStatusResponse,
   parseDecisionButtonId,
   resolveDecisionButtonTarget,
   submitDecisionAnswer,
   uploadAttachment,
   FileConnectorStateStore,
+  type OutboundFileResult,
   type PendingDecision,
 } from "@owl/plugin-sdk/shared";
 import type { ChannelAdmin, OwlEvent } from "@owl/plugin-sdk";
@@ -430,10 +432,14 @@ export class SlackConnector {
       const language = await this.core.language();
       const t = connectorText(language);
       const lines: string[] = [];
+      const results: OutboundFileResult[] = [];
       for (const file of parseOutboundFiles(event.payload.outbound_files)) {
+        const index = file.index ?? -1;
         const read = await readOutboundFile(file);
         if (!read.ok) {
-          lines.push(t.fileSendFailed(file.name, read.reason === "changed" ? t.fileSendChanged : t.fileSendUnreadable, ""));
+          const message = t.fileSendFailed(file.name, read.reason === "changed" ? t.fileSendChanged : t.fileSendUnreadable, "");
+          lines.push(message);
+          results.push({ index, outcome: "failed", code: read.reason, platform_error: null, message });
           continue;
         }
         try {
@@ -446,10 +452,15 @@ export class SlackConnector {
           // The SDK types thread_ts as required once present, so the two shapes are separate calls.
           await (threadTs ? this.web.filesUploadV2({ ...upload, thread_ts: threadTs }) : this.web.filesUploadV2(upload));
           lines.push(t.fileSent(file.name, formatBytes(file.size)));
+          results.push({ index, outcome: "sent" });
         } catch (error) {
-          lines.push(t.fileSendFailed(file.name, formatIntegrationError("Slack", error, language), slackSendHint(error, t)));
+          const message = t.fileSendFailed(file.name, formatIntegrationError("Slack", error, language), slackSendHint(error, t));
+          lines.push(message);
+          results.push({ index, message, ...classifySlackUploadError(error) });
         }
       }
+      const notice = await reportAdvisorDelivery(this.core, event, results);
+      if (notice) lines.push(notice);
       await postSlackMessage(this.web, {
         channel,
         // Reply in the same thread the operator messaged from, if any; a
@@ -585,6 +596,28 @@ function asRecord(value: unknown): Record<string, unknown> | null {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+type UploadFailure = Required<Pick<OutboundFileResult, "outcome" | "code" | "platform_error">>;
+
+/** Failed only when Slack plainly refused the upload (nothing was posted); a dropped connection or an unrecognised error may have gone through. */
+export function classifySlackUploadError(error: unknown): UploadFailure {
+  const wrapper = asRecord(error);
+  const code = wrapper && Object.hasOwn(wrapper, "code") ? wrapper.code : undefined;
+  const data = wrapper && Object.hasOwn(wrapper, "data") ? asRecord(wrapper.data) : null;
+  const failed = (upload: "upload_rejected" | "upload_rate_limited", platformError: string | null): UploadFailure =>
+    ({ outcome: "failed", code: upload, platform_error: platformError });
+  if (code === "slack_webapi_platform_error") {
+    const name = data && typeof data.error === "string" ? data.error.slice(0, 100) : null;
+    return name === "ratelimited" ? failed("upload_rate_limited", name) : failed("upload_rejected", name);
+  }
+  if (code === "slack_webapi_rate_limited_error") return failed("upload_rate_limited", null);
+  if (code === "slack_webapi_file_upload_invalid_args_error" || code === "slack_webapi_file_upload_read_file_data_error") return failed("upload_rejected", code);
+  if (code === "slack_webapi_http_error") {
+    const status = wrapper && typeof wrapper.statusCode === "number" ? wrapper.statusCode : 0;
+    if (status >= 400 && status < 500) return failed("upload_rejected", `http_${status}`);
+  }
+  return { outcome: "unknown", code: "upload_unknown", platform_error: null };
 }
 
 function slackSendHint(error: unknown, t: ReturnType<typeof connectorText>): string {

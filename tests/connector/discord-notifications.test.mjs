@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtemp, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -373,6 +374,78 @@ test("Discord uploads each outbound file before the reply and appends the result
   assert.equal(upload.message.content, "@everyone look");
   assert.deepEqual(upload.message.allowedMentions, { parse: [] });
   assert.match(sends[1].message.content, /^done\n\n✓ ファイルを送りました: report\.txt/);
+});
+
+const discordJs = createRequire(new URL("../../packages/connector-discord/package.json", import.meta.url))("discord.js");
+const apiError = (code, status) => new discordJs.DiscordAPIError({ code, message: "refused" }, code, status, "POST", "https://discord.test/api", {});
+
+async function pendingFileEvent(extra = {}) {
+  const base = await outboundFileEvent("hello");
+  base.payload.outbound_files[0].index = 0;
+  return { ...base, payload: { ...base.payload, conversation_id: "discord:D-CONVERSATION", turn_id: "turn-1", message_id: "message-1", delivery_pending: true, ...extra } };
+}
+
+function reportingConnector(sendError, notice = "Checking the failed upload.") {
+  return decisionReplyConnector().then(({ connector }) => {
+    const reports = [];
+    connector.core.request = async (path, init) => { reports.push({ path, body: init.body }); return { deduplicated: false, followup_pending: true, notice }; };
+    const { sends, client } = discordClient((message) => {
+      if (message.files && sendError) throw sendError;
+      return { id: "M1" };
+    });
+    connector.client.channels.fetch = client.channels.fetch;
+    return { connector, reports, sends };
+  });
+}
+
+for (const [name, error, expected] of [
+  ["DiscordAPIError 50013", apiError(50013, 403), { outcome: "failed", code: "upload_rejected", platform_error: "50013" }],
+  ["a 429 response", apiError(0, 429), { outcome: "failed", code: "upload_rate_limited", platform_error: null }],
+  ["an HTTPError", new discordJs.HTTPError(502, "Bad Gateway", "POST", "https://discord.test/api", {}), { outcome: "unknown", code: "upload_unknown", platform_error: null }],
+]) {
+  test(`Discord reports ${name} as ${expected.code} and appends the notice Core returns`, async () => {
+    const { connector, reports, sends } = await reportingConnector(error);
+    await connector.handleAdvisorResponse(await pendingFileEvent());
+
+    assert.equal(reports.length, 1);
+    assert.equal(reports[0].path, "/conversations/discord%3AD-CONVERSATION/advisor-deliveries");
+    assert.equal(reports[0].body.payload.turn_id, "turn-1");
+    assert.equal(reports[0].body.payload.message_id, "message-1");
+    assert.deepEqual(reports[0].body.payload.results.map(({ message, ...rest }) => rest), [{ index: 0, ...expected }]);
+    assert.ok(sends.at(-1).message.content.includes("Checking the failed upload."), sends.at(-1).message.content);
+  });
+}
+
+test("Discord reports a sent file, still posts the reply when the report fails and does not report without delivery_pending", async () => {
+  const sentCase = await reportingConnector();
+  await sentCase.connector.handleAdvisorResponse(await pendingFileEvent());
+  assert.deepEqual(sentCase.reports[0].body.payload.results, [{ index: 0, outcome: "sent" }]);
+
+  const failing = await reportingConnector();
+  failing.connector.core.request = async () => { throw new Error("core unreachable"); };
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    await failing.connector.handleAdvisorResponse(await pendingFileEvent());
+  } finally {
+    console.error = originalError;
+  }
+  assert.match(failing.sends.at(-1).message.content, /^done/);
+
+  const plain = await reportingConnector();
+  await plain.connector.handleAdvisorResponse(await outboundFileEvent("hello"));
+  assert.equal(plain.reports.length, 0);
+});
+
+test("Discord posts a follow-up reply into the same channel with the label at the start", async () => {
+  const { connector, sends } = await reportingConnector();
+  const label = "【フォローアップ】";
+  await connector.handleAdvisorResponse(event("advisor.responded", {
+    origin: { channel: "discord", channel_id: "D-CONVERSATION" }, reply: `${label}\nRetried it.`, followup_of_turn_id: "turn-1",
+  }));
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].channelId, "D-CONVERSATION");
+  assert.ok(sends[0].message.content.startsWith(label), sends[0].message.content);
 });
 
 test("Discord reports the Attach Files permission when the upload is refused", async () => {

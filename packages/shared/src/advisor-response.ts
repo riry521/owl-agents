@@ -485,10 +485,18 @@ function isPlainJsonObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Validate a call_api payload in the order the design fixes; the first failure wins. */
-export function parseAdvisorCallApiPayload(
+export interface AdvisorCallApiRequestShape {
+  readonly method: AdvisorCallApiRequest["method"];
+  readonly path: string;
+  readonly body?: Readonly<Record<string, unknown>>;
+}
+
+/** Reads method, path and body of a call_api payload the way execution does; the fingerprint (Core) uses only this. */
+export function parseAdvisorCallApiRequestShape(
   payload: unknown,
-): { ok: true; value: AdvisorCallApiRequest } | { ok: false; reason: string } {
+  // Runs after method and path pass and before body is checked, so parseAdvisorCallApiPayload keeps its original check order.
+  afterPath?: (method: AdvisorCallApiRequest["method"], path: string) => { ok: false; reason: string } | undefined,
+): { ok: true; value: AdvisorCallApiRequestShape } | { ok: false; reason: string } {
   const fail = (reason: string) => ({ ok: false as const, reason });
   if (!isPlainJsonObject(payload)) return fail("call_api payload must be an object");
   if (Object.keys(payload).some((key) => !ADVISOR_CALL_API_KEYS.has(key))) {
@@ -503,21 +511,12 @@ export function parseAdvisorCallApiPayload(
   }
   const checked = validateOwnApiPath(field("path") as string, { allowQuery: false });
   if (!checked.ok) return fail(checked.reason);
-  const row = matchAdvisorBlockedApi(method, checked.pathname);
-  if (row === null) return fail("this API is not blocked: call it directly with the owl-api tool");
-  if (row.kind === "dedicated") {
-    const instead = `Use ${advisorAlternativeActions(row).join(" or ")} under its confirmation rule instead.`;
-    return fail(row.path === "/advisor/actions" ? `${row.reason} ${instead}` : instead);
-  }
+  const early = afterPath?.(method as AdvisorCallApiRequest["method"], checked.pathname);
+  if (early !== undefined) return early;
   const body = field("body");
   if (body !== undefined && !isPlainJsonObject(body)) return fail("body must be a JSON object");
   if (body !== undefined && JSON.stringify(body).length > ADVISOR_CALL_API_MAX_BODY_CHARS) {
     return fail(`body must be at most ${ADVISOR_CALL_API_MAX_BODY_CHARS} characters`);
-  }
-  const reason = field("reason");
-  const trimmed = typeof reason === "string" ? reason.trim() : "";
-  if (trimmed.length < 1 || trimmed.length > ADVISOR_CALL_API_MAX_REASON_CHARS) {
-    return fail(`reason must be 1 to ${ADVISOR_CALL_API_MAX_REASON_CHARS} characters`);
   }
   return {
     ok: true,
@@ -525,10 +524,37 @@ export function parseAdvisorCallApiPayload(
       method: method as AdvisorCallApiRequest["method"],
       path: checked.pathname,
       ...(body === undefined ? {} : { body }),
-      reason: trimmed,
-      blocked: row,
     },
   };
+}
+
+/** Validate a call_api payload; the first failure wins. `kind` is "blocked" when the API is not blocked or has a dedicated action, else "invalid". */
+export function parseAdvisorCallApiPayload(
+  payload: unknown,
+): { ok: true; value: AdvisorCallApiRequest } | { ok: false; reason: string; kind: "invalid" | "blocked" } {
+  const fail = (reason: string, kind: "invalid" | "blocked" = "invalid") => ({ ok: false as const, reason, kind });
+  let blocked: ReturnType<typeof fail> | undefined;
+  const found: { row: ReturnType<typeof matchAdvisorBlockedApi> } = { row: null };
+  const shape = parseAdvisorCallApiRequestShape(payload, (method, path) => {
+    const row = (found.row = matchAdvisorBlockedApi(method, path));
+    if (row === null) blocked = fail("this API is not blocked: call it directly with the owl-api tool", "blocked");
+    else if (row.kind === "dedicated") {
+      const instead = `Use ${advisorAlternativeActions(row).join(" or ")} under its confirmation rule instead.`;
+      blocked = fail(row.path === "/advisor/actions" ? `${row.reason} ${instead}` : instead, "blocked");
+    }
+    return blocked;
+  });
+  if (blocked !== undefined) return blocked;
+  if (!shape.ok) return fail(shape.reason);
+  const { method, path, body } = shape.value;
+  const row = found.row;
+  if (row === null || row.kind === "dedicated") return fail("this API is not blocked: call it directly with the owl-api tool", "blocked");
+  const reason = (payload as Record<string, unknown>).reason;
+  const trimmed = typeof reason === "string" ? reason.trim() : "";
+  if (trimmed.length < 1 || trimmed.length > ADVISOR_CALL_API_MAX_REASON_CHARS) {
+    return fail(`reason must be 1 to ${ADVISOR_CALL_API_MAX_REASON_CHARS} characters`);
+  }
+  return { ok: true, value: { method, path, ...(body === undefined ? {} : { body }), reason: trimmed, blocked: row } };
 }
 
 export const ADVISOR_SEND_FILE_ACTION_TYPE = "send_file";

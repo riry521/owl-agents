@@ -110,7 +110,8 @@ function taskFailure(db: ContextReader, taskId: string): TaskFailureInput {
     case "task.replan_requested":
       return { kind: "replan_requested", role, reason, question: text(payload.question) };
     case ACCEPTANCE_DEFECT_EVENT:
-      return { kind: ACCEPTANCE_DEFECT_FAILURE_KIND, reason };
+      // The event keeps each defect's own reason in defects[]; payload.reason is the request text written for the Manager.
+      return { kind: ACCEPTANCE_DEFECT_FAILURE_KIND, reason: acceptanceDefectsOf(payload).map((defect) => defect.reason).filter((line) => line !== "").join(" ") || reason };
     case EXTERNAL_BLOCKER_EVENT: {
       const blocker = readExternalBlocker(payload.external_blocker);
       return { kind: "external_blocker", cause: blocker?.kind ?? null, summary: blocker?.summary ?? reason, evidence: blocker?.evidence ?? null, suggested_fix: blocker?.suggested_fix ?? null };

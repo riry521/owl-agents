@@ -52,3 +52,15 @@ test("the Advisor system prompt carries the external-data policy exactly once", 
   const prompt = core.getAdvisorSettingsSnapshot().systemPrompt;
   assert.equal(prompt.split(EXTERNAL_DATA_POLICY).length - 1, 1);
 });
+
+test("the Advisor system prompt carries the follow-up rules exactly once", async (t) => {
+  const { ADVISOR_FOLLOWUP_INSTRUCTION, ADVISOR_FOLLOWUP_TURN_TEXT } = await import("../../packages/shared/dist/index.js");
+  const { core } = await createTestCore(t, { agentRunner }, { prefix: "owl-advisor-followup-prompt-", start: true });
+  const prompt = core.getAdvisorSettingsSnapshot().systemPrompt;
+  assert.equal(prompt.split(ADVISOR_FOLLOWUP_INSTRUCTION).length - 1, 1);
+  assert.match(prompt, /check the current state with a GET through the owl-api tool/u);
+  assert.match(prompt, /For send_file, ask the operator whether the file arrived/u);
+  assert.match(prompt, /If approval is true, re-emit the action only when its target and content stay exactly as the operator approved/u);
+  assert.match(prompt, /Reply once, in the reply language set above/u);
+  assert.match(ADVISOR_FOLLOWUP_TURN_TEXT, /^Owl automatic follow-up: /u);
+});

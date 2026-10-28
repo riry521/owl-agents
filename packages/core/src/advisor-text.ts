@@ -44,6 +44,14 @@ export interface AdvisorText {
   readonly workFixPendingForMove: (ref: string, taskIds: readonly string[]) => string;
   readonly workActionIncomplete: (action: string) => string;
   readonly actionsMalformed: string;
+  readonly followupPending: string;
+  readonly followupLabel: string;
+  readonly followupHeldChanged: (action: string) => string;
+  readonly followupHeldUnknown: (action: string) => string;
+  readonly followupHeldOther: (action: string) => string;
+  readonly followupHeldRecorded: (action: string) => string;
+  readonly followupHeldNotRecorded: (action: string) => string;
+  readonly followupStopped: string;
   readonly workNotFound: (workId: string) => string;
   readonly instructionNotStarted: (ref: string) => string;
   readonly instructionCancelled: (ref: string) => string;
@@ -184,6 +192,14 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     workFixPendingForMove: (ref, taskIds) => `⚠ Work${ref}には修正待ちのTask（${taskIds.join("、")}）があるため、移していません。そのTaskが終わってからもう一度依頼してください。`,
     workActionIncomplete: (action) => `⚠ ${workActionLabel("ja", action)}を実行できませんでした。AdvisorのWork指定（work_idなど）が不足しているか形式が違います。Workは変更していません。`,
     actionsMalformed: "⚠ owl-actions の一部が不正で破棄されたため、そのアクション（Work 作成など）を実行できませんでした。",
+    followupPending: "↻ うまくいかなかった操作があるので、Advisor が続けて確かめます。",
+    followupLabel: "（自動のフォローアップ）",
+    followupHeldChanged: (action) => `⏸ ${workActionLabel("ja", action)}は承認した内容と変わったので、実行していません。直した案でよければ、改めて承認してください。`,
+    followupHeldUnknown: (action) => `⏸ ${workActionLabel("ja", action)}は前の結果がわからないので、自動では実行しません。状態を確かめてから、改めて頼んでください。`,
+    followupHeldOther: (action) => `⏸ ${workActionLabel("ja", action)}は自動でやり直せる操作ではないので、実行していません。必要なら改めて頼んでください。`,
+    followupHeldRecorded: (action) => `⏸ ${workActionLabel("ja", action)}は前の試みで実行を始めたので、もう一度は実行しません。結果は上の通知か今の状態で確かめてください。`,
+    followupHeldNotRecorded: (action) => `⏸ ${workActionLabel("ja", action)}の実行の記録を書けなかったので、実行していません。必要なら改めて頼んでください。`,
+    followupStopped: "⚠ 自動のやり直しは 1 回までなので、ここで止めました。上の理由を確かめて、続けるときは改めて頼んでください。",
     workNotFound: (workId) => `⚠ ID ${workId} のWorkが見つからないため、何も変更していません。`,
     instructionNotStarted: (ref) => `⚠ Work${ref}はまだ開始されていないため、指示を送っていません。`,
     instructionCancelled: (ref) => `⚠ Work${ref}はキャンセル済みのため、指示を送っていません。続けるには新しいWorkを起票してください。`,
@@ -270,6 +286,14 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     workFixPendingForMove: (ref, taskIds) => `⚠ Work ${ref} has Tasks waiting for a fix (${taskIds.join(", ")}), so it was not moved. Ask again after those Tasks finish.`,
     workActionIncomplete: (action) => `⚠ Could not run the ${workActionLabel("en", action)}: the Advisor's Work details (such as work_id) were missing or malformed. No Work was changed.`,
     actionsMalformed: "⚠ Part of the owl-actions was malformed and discarded, so that action (such as creating a Work) could not be run.",
+    followupPending: "↻ Some actions did not work, so the Advisor will check them next.",
+    followupLabel: "(Automatic follow-up)",
+    followupHeldChanged: (action) => `⏸ The ${workActionLabel("en", action)} differs from what you approved, so it was not run. If the revised proposal is fine, approve it again.`,
+    followupHeldUnknown: (action) => `⏸ The earlier result of the ${workActionLabel("en", action)} is unknown, so it will not run automatically. Check the state, then ask again.`,
+    followupHeldOther: (action) => `⏸ The ${workActionLabel("en", action)} cannot be retried automatically, so it was not run. Ask again if you still need it.`,
+    followupHeldRecorded: (action) => `⏸ The ${workActionLabel("en", action)} already started in an earlier attempt, so it will not run again. Check the notices above or the current state.`,
+    followupHeldNotRecorded: (action) => `⏸ The ${workActionLabel("en", action)} was not run because its record could not be written. Ask again if you still need it.`,
+    followupStopped: "⚠ Automatic retry happens only once, so it stops here. Check the reasons above and ask again to continue.",
     workNotFound: (workId) => `⚠ No Work has the ID ${workId}; nothing was changed.`,
     instructionNotStarted: (ref) => `⚠ Work ${ref} has not started yet, so the instruction was not sent.`,
     instructionCancelled: (ref) => `⚠ Work ${ref} is cancelled, so the instruction was not sent. Create a new Work to continue.`,

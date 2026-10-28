@@ -15,6 +15,7 @@ import { type BoardSection, boardSectionOf, boardSectionLabels, formatRelative, 
 import { ArchivedBadge, WorkStateBadge } from '@/components/StateBadge';
 import { useLocale, type TFunction, type Locale } from '@/lib/i18n';
 import { workDetailHref } from '@/lib/work-detail-safety.mjs';
+import { groupByProject } from '../lib/archive-list.mjs';
 import { workSummarySkeleton } from '../lib/work-summary.mjs';
 import { removeWorks, revealWork, useWorkRemovals, type RemovalKind } from '@/lib/work-removal';
 import { ArchiveBoxIcon, RestoreIcon } from '@/components/icons';
@@ -292,8 +293,14 @@ export function BoardView({ onSelectCard, selectedCardId, refreshToken = 0 }: Bo
             {works.length === 0 ? (
               <p className="empty">{t('board.empty')}</p>
             ) : (
+              (groupByProject(works, projects.map((p) => p.id)) as { projectId: string | null; works: WorkSummary[] }[]).map((pg) => (
+              <div className="board-project" key={pg.projectId ?? 'none'}>
+              <h3 className="board-project__head">
+                <span>{projects.find((p) => p.id === pg.projectId)?.name ?? t('archive.noProjectGroup')}</span>
+                <span className="board-project__count">{t('common.items', { count: String(pg.works.length) })}</span>
+              </h3>
               <div className={`grid grid--${cols}`}>
-                {works.map((w) => (
+                {pg.works.map((w) => (
                   <WorkCard
                     key={w.id}
                     work={w}
@@ -308,6 +315,8 @@ export function BoardView({ onSelectCard, selectedCardId, refreshToken = 0 }: Bo
                   />
                 ))}
               </div>
+              </div>
+              ))
             )}
           </section>
         );

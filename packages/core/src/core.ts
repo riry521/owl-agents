@@ -21,6 +21,7 @@ import {
   workPrerequisiteViews,
 } from "./work-prerequisites";
 import type { WorkPrerequisiteView } from "../../shared/dist/work-prerequisite.js";
+import type { AcceptanceDefect } from "../../shared/dist/acceptance-defect.js";
 import { isFinalLesson, isFinalMissingItem, normalizeLesson, parseLessonBlocks, type FinalManagerVerdict } from "./final-verdict";
 import { outputResubmitLimit } from "./report-resubmit";
 import { DEFAULT_OWNER_LANGUAGE, OWNER_LANGUAGE_SETTINGS_KEY, ownerLanguage, storedOwnerLanguage, type OwnerLanguage, type SettingsReader } from "./owner-language";
@@ -110,6 +111,11 @@ import { DEFAULT_SKILL_FEEDBACK_WEIGHTS, detectSkillReads, SkillBox, type SkillS
 import { isValidSkillScope, validateSkillFilePath, validateSkillName } from "./skill-files";
 import { SKILL_CURATOR_DEBOUNCE_MS, SkillCurator, type SkillCurationResult } from "./skill-curator";
 import { AdvisorSessionManager } from "./advisor-session.js";
+import {
+  advisorActionFingerprint, advisorActionNeedsApproval, advisorActionTarget, buildAdvisorActionFailure, buildFollowupTurnText, loadFollowupRetries, loadSourceActionResults, shouldInsertFollowup,
+  loadSourceFailures, nextTurnOf, planFollowupActions, stableJson, type AdvisorActionFailure, type AdvisorFailureDetails, type FollowupCandidate,
+} from "./advisor-followup.js";
+import { advisorWorkId, parseAdvisorWorkOperationPayload } from "./advisor-work-payload.js";
 import { AdvisorSessionNotFoundError, AdvisorSessionRuntime, type AdvisorSettingsSnapshot } from "./advisor-runtime.js";
 import { MemorySaver } from "./memory-saver.js";
 import { slugifyKnowledgeContentName } from "./knowledge-naming.js";
@@ -188,6 +194,7 @@ import {
 } from "../../shared/dist/auto-recovery-settings.js";
 import { progressGuard } from "./progress-guard.js";
 import { DecisionExplainer, toDecisionExplanation } from "./decision-explainer";
+import { FinalReporter, readFinalReport } from "./final-report";
 import { metricsRuleCandidates, proposeFromMetrics } from "./learning-metrics.js";
 import { learningMetrics } from "./learning-metrics-settings.js";
 import {
@@ -283,6 +290,7 @@ import {
   validateWindowHandoffPayload,
   ADVISOR_WORK_OPERATION_ACTION_TYPES,
   parseAdvisorCallApiPayload,
+parseAdvisorCallApiRequestShape,
   redactProviderOutput,
   isAdvisorWorkOperationType,
   type AdvisorWorkOperationType,
@@ -818,6 +826,8 @@ export class Core {
   private processSkillsPack: DetectedProcessSkillsPack | null = null;
 
   private readonly decisionExplainer: DecisionExplainer;
+private readonly finalReporter: FinalReporter;
+private readonly finalReportRuns = new Set<Promise<unknown>>();
   private processSkillsMissingLogged = false;
   public readonly skillCurator: SkillCurator;
   public readonly advisorSessions: AdvisorSessionManager;
@@ -884,6 +894,16 @@ export class Core {
       rewritesMax: () => progressGuard(this.db).decision_explanation_rewrites_max,
       textChecks: () => this.options.decisionTextChecks ?? [],
       announce: (workId) => this.announceCoreDecisions(workId),
+    });
+    this.finalReporter = new FinalReporter({
+      db: this.db,
+      writeLane: this.writeLane,
+      runner: () => this.options.agentRunner as ReturnType<ConstructorParameters<typeof FinalReporter>[0]["runner"]>,
+      roleModel: (role) => resolveRoleModelFromDb(this.db, role),
+      rules: (workId) => this.composeRulesForRole("manager", workId),
+      language: () => ownerLanguage(this.db),
+      timeoutSeconds: () => progressGuard(this.db).decision_explanation_timeout_seconds,
+      textChecks: () => this.options.finalReportTextChecks ?? [],
     });
     this.coreActivity = new CoreActivityRegistry({
       write: (event) => this.writeLane.write({
@@ -2799,7 +2819,7 @@ export class Core {
       await Promise.allSettled([...this.activeCurations.values()]);
       await this.learningTask;
       await this.projectOverviews.idle();
-      await Promise.allSettled([...this.overviewRuns, ...this.cloneRootResolutions]);
+      await Promise.allSettled([...this.overviewRuns, ...this.finalReportRuns, ...this.cloneRootResolutions]);
       await this.researchRecorder.idle();
       return;
     }
@@ -2848,7 +2868,7 @@ export class Core {
     await Promise.allSettled([...this.worktreeReconciles, ...this.repositoryDetections.values()]);
     await this.learningTask;
     await this.projectOverviews.idle();
-    await Promise.allSettled([...this.overviewRuns, ...this.cloneRootResolutions]);
+    await Promise.allSettled([...this.overviewRuns, ...this.finalReportRuns, ...this.cloneRootResolutions]);
     await this.dispatcher.stop();
     // Before the drain: a failing research write records its own alert through the lane, and that write must not land after the drain.
     await this.researchRecorder.idle();
@@ -3127,7 +3147,7 @@ export class Core {
     const prerequisites = workPrerequisiteViews(this.db, [workId]).get(workId) ?? [];
     return {
       request_id: query.request_id ?? createUlid(),
-      data: { ...this.withPrerequisiteSummaries([detail])[0], prerequisites },
+      data: { ...this.withPrerequisiteSummaries([detail])[0], prerequisites, final_report: readFinalReport(this.db, workId) },
       version: row.state_version,
     };
   }
@@ -3992,6 +4012,7 @@ export class Core {
         transaction.run("DELETE FROM tasks WHERE work_id = ?", workId);
         transaction.run("DELETE FROM decisions WHERE work_id = ?", workId);
         transaction.run("DELETE FROM work_summary_revisions WHERE work_id = ?", workId);
+        transaction.run("DELETE FROM work_final_reports WHERE work_id = ?", workId);
         // Rows that wait on this Work keep a copy of it, so the wait can tell "deleted" from "never completed".
         snapshotDeletedPrerequisiteInTransaction(transaction, workId);
         transaction.run("DELETE FROM work_prerequisites WHERE work_id = ?", workId);
@@ -6885,23 +6906,31 @@ export class Core {
     index: number,
     action: AdvisorSuggestedAction,
     t: (typeof ADVISOR_TEXT)["ja"],
-  ): Promise<string> {
+  ): Promise<AdvisorActionOutcome> {
+    const fail = (code: string, notice: string, targetProjectId?: string | null): AdvisorActionOutcome => ({
+      notice,
+      failure: buildAdvisorActionFailure({
+        index, type: action.type, action, code, message: notice,
+        details: { target_project_id: targetProjectId },
+      }),
+    });
     const parsed = validateWindowHandoffPayload(action.payload, advisorWindowSettings(this.db).handoff_summary_max_chars);
-    if (!parsed.ok) return t.handoffInvalid;
+    if (!parsed.ok) return fail("invalid_payload", t.handoffInvalid);
     const owner = this.db.get<{ owner_id: string }>("SELECT owner_id FROM conversations WHERE id = ?", conversationId);
-    if (!owner) return t.handoffInvalid;
+    if (!owner) return fail("invalid_payload", t.handoffInvalid);
     const source = { owner_id: owner.owner_id, advisor_window_id: this.conversationWindowId(conversationId) };
     const { project_id: projectId, summary } = parsed.value;
     if (projectId !== null && !this.db.get("SELECT id FROM projects WHERE id = ? AND owner_id = ?", projectId, source.owner_id)) {
-      return t.handoffNoProject;
+      return fail("no_project", t.handoffNoProject, projectId);
     }
     const target = await this.ensureAdvisorWindow(source.owner_id, projectId ?? GENERAL_WINDOW_KEY);
-    if (!target) return t.handoffNoProject;
-    if (target.window_id === source.advisor_window_id) return t.handoffSameWindow;
+    if (!target) return fail("no_project", t.handoffNoProject, projectId);
+    if (target.window_id === source.advisor_window_id) return fail("same_window", t.handoffSameWindow, projectId);
     const targetName = this.windowName(target.window_id, t.generalWindowName);
     const fromName = source.advisor_window_id ? this.windowName(source.advisor_window_id, t.generalWindowName) : t.generalWindowName;
     const messageId = createUlid();
     const now = utcNow();
+    try {
     await this.writeLane.write({
       mutateState: (transaction) => {
         const account = ensureWebAccount(transaction, source.owner_id, now);
@@ -6931,7 +6960,11 @@ export class Core {
       },
       outbox: [],
     });
-    return this.windowHandoffDoneNotice(target.window_id, targetName, t);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message.slice(0, 300) : t.unknownCause;
+      return fail("result_unknown", t.handoffInvalid + " " + detail, projectId);
+    }
+    return { notice: this.windowHandoffDoneNotice(target.window_id, targetName, t) };
   }
 
   public async advisorRespond(conversationId: string, messageId: string, origin?: { channel: string; channel_id?: string; ref?: string }): Promise<void> {
@@ -6982,47 +7015,19 @@ export class Core {
 
       // Explicit compatibility/stub path. The production server requires a
       // session-capable ProviderClient before it constructs this Core.
-      const rows = this.db.all<MessageDbRow>(
-        `SELECT id, conversation_id, provider, source_message_id, body, attachment_ids_json, created_at
-           FROM messages
-          WHERE conversation_id = ?
-          ORDER BY id ASC`,
+      const effectiveOrigin = origin ?? { channel: "web" };
+      const first = await this.runOneShotAdvisor(conversationId, effectiveOrigin);
+      if (!first) return;
+      const persisted = await this.persistAdvisorReplyInternal(
         conversationId,
+        first.result.reply,
+        first.invocationId,
+        effectiveOrigin,
+        first.result.suggested_actions ?? [],
+        false,
+        { oneShot: true },
       );
-      if (rows.length === 0) return;
-
-      const messages = rows.map((row) => ({
-        source: (row.source_message_id != null && row.source_message_id.startsWith("advisor:")) ? "advisor" : "user",
-        body: row.body,
-      }));
-
-      const invocationId = createUlid();
-      const advisorRoleModel = resolveRoleModelFromDb(this.db, "advisor");
-      const advisorProvider = advisorRoleModel?.provider ?? "anthropic";
-      const request: AdvisorRunRequest = {
-        conversation_id: conversationId,
-        messages,
-        invocation_id: invocationId,
-        system_prompt: addAdvisorReplyTargetInstruction(
-          `${this.buildAdvisorSystemPrompt(this.advisorHarness(advisorProvider))}\n\n${buildAdvisorProjectCatalogInstruction(this.db)}\n\n${buildAdvisorWorkCatalogInstruction(this.db)}`,
-          origin?.channel ?? "web",
-        ),
-        ...(advisorRoleModel ? {
-          model: advisorRoleModel.model,
-          provider: advisorRoleModel.provider,
-          effort: advisorRoleModel.effort,
-        } : {}),
-      };
-
-      const result: AdvisorRunResult = await this.options.agentRunner.runAdvisor(request);
-
-      await this.persistAdvisorReply(
-        conversationId,
-        result.reply,
-        invocationId,
-        origin ?? { channel: "web" },
-        result.suggested_actions ?? [],
-      );
+      if (persisted.followupPlanned) await this.runOneShotFollowup(first.invocationId, conversationId, effectiveOrigin);
     } catch (error) {
       const turnId = createUlid();
       const message = formatRuntimeFailure(error, "Advisor", ownerLanguage(this.db));
@@ -7033,6 +7038,69 @@ export class Core {
       }
       console.error("[owl-core] advisorRespond failed for conversation", conversationId, error);
     }
+  }
+
+  /** One-shot compatibility path: builds the request from the conversation history (plus an unsaved last entry) and runs the Advisor once. */
+  private async runOneShotAdvisor(
+    conversationId: string,
+    origin: { channel: string; channel_id?: string; ref?: string },
+    extraEntry?: { source: "user"; body: string },
+  ): Promise<{ invocationId: string; result: AdvisorRunResult } | null> {
+    const rows = this.db.all<MessageDbRow>(
+      `SELECT id, conversation_id, provider, source_message_id, body, attachment_ids_json, created_at
+         FROM messages
+        WHERE conversation_id = ?
+        ORDER BY id ASC`,
+      conversationId,
+    );
+    if (rows.length === 0) return null;
+
+    const messages = [
+      ...rows.map((row) => ({
+        source: (row.source_message_id != null && row.source_message_id.startsWith("advisor:")) ? "advisor" : "user",
+        body: row.body,
+      })),
+      ...(extraEntry ? [extraEntry] : []),
+    ];
+
+    const invocationId = createUlid();
+    const advisorRoleModel = resolveRoleModelFromDb(this.db, "advisor");
+    const advisorProvider = advisorRoleModel?.provider ?? "anthropic";
+    const request: AdvisorRunRequest = {
+      conversation_id: conversationId,
+      messages,
+      invocation_id: invocationId,
+      system_prompt: addAdvisorReplyTargetInstruction(
+        `${this.buildAdvisorSystemPrompt(this.advisorHarness(advisorProvider))}\n\n${buildAdvisorProjectCatalogInstruction(this.db)}\n\n${buildAdvisorWorkCatalogInstruction(this.db)}`,
+        origin.channel,
+      ),
+      ...(advisorRoleModel ? {
+        model: advisorRoleModel.model,
+        provider: advisorRoleModel.provider,
+        effort: advisorRoleModel.effort,
+      } : {}),
+    };
+    return { invocationId, result: await this.options.agentRunner.runAdvisor(request) };
+  }
+
+  /** Runs the one follow-up turn of the one-shot path (10.4); its input is not saved to messages, and its reply never plans another follow-up. */
+  private async runOneShotFollowup(
+    sourceTurnId: string,
+    conversationId: string,
+    origin: { channel: string; channel_id?: string; ref?: string },
+  ): Promise<void> {
+    const body = buildFollowupTurnText(loadSourceActionResults(this.db, sourceTurnId), loadSourceFailures(this.db, sourceTurnId));
+    const followup = await this.runOneShotAdvisor(conversationId, origin, { source: "user", body });
+    if (!followup) return;
+    await this.persistAdvisorReplyInternal(
+      conversationId,
+      followup.result.reply,
+      followup.invocationId,
+      origin,
+      followup.result.suggested_actions ?? [],
+      false,
+      { followupOf: sourceTurnId },
+    );
   }
 
   /**
@@ -7228,11 +7296,27 @@ export class Core {
     suggestedActions: readonly AdvisorSuggestedAction[],
     actionsMalformed = false,
   ): Promise<string | null> {
+    return (await this.persistAdvisorReplyInternal(conversationId, reply, turnId, origin, suggestedActions, actionsMalformed)).messageId;
+  }
+
+  /**
+   * `options.followupOf` names the source turn on the one-shot path, which has no advisor_turns row; `options.oneShot` lets a
+   * Core without a runtime plan a follow-up, and `followupPlanned` tells that path to run it.
+   */
+  private async persistAdvisorReplyInternal(
+    conversationId: string,
+    reply: string,
+    turnId: string,
+    origin: { channel: string; channel_id?: string; ref?: string },
+    suggestedActions: readonly AdvisorSuggestedAction[],
+    actionsMalformed = false,
+    options: { followupOf?: string; oneShot?: boolean } = {},
+  ): Promise<{ messageId: string | null; followupPlanned: boolean }> {
     const conversation = this.db.get<{ id: string; owner_id: string }>(
       "SELECT id, owner_id FROM conversations WHERE id = ?",
       conversationId,
     );
-    if (!conversation) return null;
+    if (!conversation) return { messageId: null, followupPlanned: false };
 
     // Slack needs a Core-side fallback because the one-shot compatibility
     // path does not pass through AdvisorSessionRuntime's response parser.
@@ -7258,20 +7342,46 @@ export class Core {
       ? mergeAdvisorSuggestedActions(suggestedActions, fencedActions)
       : [...suggestedActions];
     const recovery = await this.recoverAdvisorWorkActions(turnId, allSuggestedActions);
-    recovery.notices.push(...await this.recoverAdvisorCallApis(turnId));
-    const actionResult = await this.dispatchAdvisorWorkActions(conversationId, turnId, allSuggestedActions, origin, recovery.recoveredIndexes);
+    const recoveredApis = await this.recoverAdvisorCallApis(turnId, allSuggestedActions);
+    recovery.notices.push(...recoveredApis.notices);
+    recovery.failures.push(...recoveredApis.failures);
+    const t = ADVISOR_TEXT[ownerLanguage(this.db)];
+    const followupOf = options.followupOf ?? this.db.get<{ followup_of_turn_id: string | null }>(
+      "SELECT followup_of_turn_id FROM advisor_turns WHERE id = ?", turnId,
+    )?.followup_of_turn_id ?? null;
+    const reconciled = followupOf === null
+      ? { heldIndexes: new Set<number>(), notices: [] as string[], failures: [] as AdvisorActionFailure[] }
+      : await this.reconcileFollowupActions(conversationId, turnId, followupOf, allSuggestedActions, origin);
+    const actionResult = await this.dispatchAdvisorWorkActions(conversationId, turnId, allSuggestedActions, origin, recovery.recoveredIndexes, reconciled.heldIndexes);
     const trimmedReply = visibleReply.trimEnd();
     const allNotices = [
       ...recovery.notices,
+      ...reconciled.notices,
       ...actionResult.notices,
-      ...(actionsMalformed ? [ADVISOR_TEXT[ownerLanguage(this.db)].actionsMalformed] : []),
+      ...(actionsMalformed ? [t.actionsMalformed] : []),
     ];
+    const actionFailures = [
+      ...recovery.failures,
+      ...reconciled.failures,
+      ...actionResult.failures,
+      ...(actionsMalformed
+        ? [buildAdvisorActionFailure({ index: -1, type: "owl-actions", code: "invalid_payload", message: t.actionsMalformed })]
+        : []),
+    ];
+    // A follow-up that fails again ends the automatic retry (7.3); a source reply with files waits for the delivery report.
+    const followupPending = followupOf === null && actionResult.outboundFiles.length === 0
+      && (this.advisorRuntime
+        ? this.advisorRuntime.followupSessionFor({ sourceTurnId: turnId, conversationId, failures: actionFailures }) != null
+        : options.oneShot === true && shouldInsertFollowup({ failures: actionFailures, sourceIsFollowup: false, followupExists: false, nextTurnReceives: false, sessionFound: true }));
+    if (followupPending) allNotices.push(t.followupPending);
+    if (followupOf !== null && actionFailures.some((failure) => failure.status === "failed" || failure.status === "unknown")) allNotices.push(t.followupStopped);
     const actionNotices = allNotices.join("\n");
-    const replyBody = allNotices.length === 0
+    const unlabelledBody = allNotices.length === 0
       ? visibleReply
       : trimmedReply.length === 0
         ? actionNotices
         : `${trimmedReply}\n\n${actionNotices}`;
+    const replyBody = followupOf === null ? unlabelledBody : `${t.followupLabel}\n${unlabelledBody}`;
     const publishedActions = allSuggestedActions.filter((_action, index) => !actionResult.handledIndexes.has(index));
     const now = utcNow();
     const messageId = createUlid();
@@ -7290,6 +7400,7 @@ export class Core {
     const replyKeySuffix = priorReplyCount === 0 ? "" : `:retry${priorReplyCount}`;
     const sourceMessageId = `advisor:${conversationId}:${turnId}${replyKeySuffix}`;
 
+    let followupTurn: { turnId: string; sessionId: string } | null = null;
     const result = await this.writeLane.write({
       mutateState: (transaction) => {
         const account = ensureWebAccount(transaction, conversation.owner_id, utcNow());
@@ -7307,6 +7418,10 @@ export class Core {
           now,
           now,
         );
+        // Same transaction as the reply, so a crash can neither lose the follow-up nor queue it twice.
+        if (followupPending) {
+          followupTurn = this.advisorRuntime?.insertFollowupTurn(transaction, { sourceTurnId: turnId, conversationId, replyMessageId: messageId, origin, failures: actionFailures }) ?? null;
+        }
         return messageId;
       },
       event: {
@@ -7326,12 +7441,231 @@ export class Core {
           action_results: actionNotices,
           suggested_actions: publishedActions,
           origin,
-          ...(actionResult.outboundFiles.length > 0 ? { outbound_files: actionResult.outboundFiles } : {}),
+          ...(actionResult.outboundFiles.length > 0 ? { outbound_files: actionResult.outboundFiles, delivery_pending: true } : {}),
+          ...(actionFailures.length > 0 ? { action_failures: actionFailures } : {}),
+          ...(followupPending ? { followup_pending: true } : {}),
+          ...(followupOf !== null ? { followup_of_turn_id: followupOf } : {}),
         },
       },
       outbox: [],
     });
-    return result.state;
+    if (followupTurn) this.advisorRuntime?.kickFollowupTurn((followupTurn as { sessionId: string }).sessionId);
+    return { messageId: result.state, followupPlanned: followupPending && this.advisorRuntime === null };
+  }
+
+  /**
+   * Takes a connector's report of how an `outbound_files` reply was delivered (4.4) and decides, together with the
+   * reply's own failures, whether to queue the follow-up (6.4). Reported once per reply: a repeat returns the first answer.
+   */
+  public async reportAdvisorDelivery(
+    ownerId: string,
+    conversationId: string,
+    payload: unknown,
+  ): Promise<{ deduplicated: boolean; followup_pending: boolean; notice: string | null }> {
+    const notFoundError = (message: string) => new HumanReadableError({ code: "not_found", message, remediation: "Report only replies that still await delivery.", details: { conversation_id: conversationId } });
+    const conversation = this.db.get<{ owner_id: string }>("SELECT owner_id FROM conversations WHERE id = ?", conversationId);
+    if (!conversation || conversation.owner_id !== ownerId) throw notFoundError(`conversation ${conversationId} was not found.`);
+
+    const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+    const idField = (value: unknown, name: string): string => {
+      if (typeof value !== "string" || value.length < 1 || value.length > 128) throw validationError(`${name} must be a string of 1 to 128 characters.`, { field: name });
+      return value;
+    };
+    if (!isRecord(payload) || !Array.isArray(payload.results) || payload.results.length === 0) throw validationError("The delivery report needs turn_id, message_id and at least one result.");
+    const turnId = idField(payload.turn_id, "turn_id");
+    const messageId = idField(payload.message_id, "message_id");
+    const codesByOutcome: Readonly<Record<string, readonly string[]>> = { failed: ["changed", "unreadable", "upload_rejected", "upload_rate_limited"], unknown: ["upload_unknown"], sent: [] };
+    const results = payload.results.map((entry: unknown) => {
+      if (!isRecord(entry) || typeof entry.index !== "number" || !Number.isSafeInteger(entry.index) || entry.index < 0) throw validationError("Each result needs a non-negative integer index.");
+      const outcome = entry.outcome;
+      if (typeof outcome !== "string" || !Object.hasOwn(codesByOutcome, outcome)) throw validationError("outcome must be sent, failed or unknown.", { index: entry.index });
+      const code = entry.code;
+      if (outcome === "sent" ? code !== undefined : typeof code !== "string" || !codesByOutcome[outcome]!.includes(code)) throw validationError("code does not match outcome.", { index: entry.index });
+      const platformError = entry.platform_error ?? null;
+      if (platformError !== null && (typeof platformError !== "string" || platformError.length > 100)) throw validationError("platform_error must be null or a string of at most 100 characters.", { index: entry.index });
+      if (entry.message !== undefined && (typeof entry.message !== "string" || entry.message.length > 300)) throw validationError("message must be a string of at most 300 characters.", { index: entry.index });
+      return { index: entry.index, outcome, code: code as string | undefined, platformError, message: entry.message as string | undefined };
+    });
+    if (new Set(results.map((r) => r.index)).size !== results.length) throw validationError("result indexes must not repeat.");
+
+    const row = this.db.get<{ payload_json: string }>(
+      `SELECT payload_json FROM events
+        WHERE type = 'advisor.responded' AND json_extract(payload_json, '$.conversation_id') = ?
+          AND json_extract(payload_json, '$.turn_id') = ? AND json_extract(payload_json, '$.message_id') = ?
+          AND json_extract(payload_json, '$.delivery_pending') = 1
+        ORDER BY rowid DESC LIMIT 1`,
+      conversationId, turnId, messageId,
+    );
+    if (!row) throw notFoundError(`No reply of turn ${turnId} awaits delivery.`);
+    const responded = JSON.parse(row.payload_json) as Record<string, unknown>;
+    const files = new Map<number, { path: string; name: string }>();
+    for (const file of Array.isArray(responded.outbound_files) ? responded.outbound_files : []) {
+      if (isRecord(file) && typeof file.index === "number" && typeof file.path === "string") files.set(file.index, { path: file.path, name: String(file.name ?? "") });
+    }
+    for (const result of results) if (!files.has(result.index)) throw validationError(`index ${result.index} is not one of the reply's outbound_files.`, { index: result.index });
+
+    const idempotencyKey = `advisor-delivery:${turnId}:${messageId}`;
+    const saved = this.db.get<{ payload_json: string }>("SELECT payload_json FROM events WHERE idempotency_key = ?", idempotencyKey);
+    if (saved) {
+      const first = JSON.parse(saved.payload_json) as { followup_pending?: boolean; notice?: string | null };
+      return { deduplicated: true, followup_pending: first.followup_pending === true, notice: first.notice ?? null };
+    }
+
+    const t = ADVISOR_TEXT[ownerLanguage(this.db)];
+    const deliveryFailures = results.filter((r) => r.outcome !== "sent").map((r) => {
+      const file = files.get(r.index)!;
+      return buildAdvisorActionFailure({
+        index: r.index,
+        type: "send_file",
+        code: r.code!,
+        message: r.message ?? `${file.name}: ${r.code}`,
+        details: { platform_error: r.platformError },
+        preparedPath: file.path,
+        targetPayload: { path: file.path },
+      });
+    });
+    const sourceFailures = Array.isArray(responded.action_failures) ? responded.action_failures as AdvisorActionFailure[] : [];
+    // A later turn that already built its input took the reply's own failures (6.5), so only the delivery's are handed over.
+    const followupScope = nextTurnOf(this.db, turnId) !== null ? "delivery" : "all";
+    const failures = followupScope === "delivery" ? deliveryFailures : [...sourceFailures, ...deliveryFailures];
+    const sourceIsFollowup = typeof responded.followup_of_turn_id === "string";
+    const origin = isRecord(responded.origin) && typeof responded.origin.channel === "string"
+      ? responded.origin as { channel: string; channel_id?: string; ref?: string }
+      : { channel: "web" };
+    const followupPending = this.advisorRuntime
+      ? this.advisorRuntime.followupSessionFor({ sourceTurnId: turnId, conversationId, failures }) !== null
+      : shouldInsertFollowup({ failures, sourceIsFollowup, followupExists: false, nextTurnReceives: false, sessionFound: true });
+    const hasFailed = (list: readonly AdvisorActionFailure[]) => list.some((f) => f.status === "failed" || f.status === "unknown");
+    const notice = followupPending
+      ? t.followupPending
+      : sourceIsFollowup && hasFailed(deliveryFailures) && !hasFailed(sourceFailures) ? t.followupStopped : null;
+
+    let followupTurn: { turnId: string; sessionId: string } | null = null;
+    try {
+    await this.writeLane.write({
+      mutateState: (transaction) => {
+        if (followupPending) {
+          followupTurn = this.advisorRuntime?.insertFollowupTurn(transaction, { sourceTurnId: turnId, conversationId, replyMessageId: messageId, origin, failures }) ?? null;
+        }
+        return null;
+      },
+      event: {
+        id: createUlid(),
+        idempotencyKey,
+        type: "advisor.delivery_reported",
+        payload: {
+          kind: "advisor_delivery_reported",
+          schema_version: "1.0.0",
+          conversation_id: conversationId,
+          turn_id: turnId,
+          message_id: messageId,
+          results: results.map((r) => ({ index: r.index, outcome: r.outcome, ...(r.code === undefined ? {} : { code: r.code }) })),
+          action_failures: deliveryFailures,
+          followup_scope: followupScope,
+          followup_pending: followupPending,
+          notice,
+        },
+      },
+      outbox: [],
+    });
+    } catch (error) {
+      // A concurrent identical report wrote first; the unique key rolled this write back, so answer with theirs.
+      const first = this.db.get<{ payload_json: string }>("SELECT payload_json FROM events WHERE idempotency_key = ?", idempotencyKey);
+      if (!first) throw error;
+      const body = JSON.parse(first.payload_json) as { followup_pending?: boolean; notice?: string | null };
+      return { deduplicated: true, followup_pending: body.followup_pending === true, notice: body.notice ?? null };
+    }
+    if (followupTurn) this.advisorRuntime?.kickFollowupTurn((followupTurn as { sessionId: string }).sessionId);
+    if (followupPending && this.advisorRuntime === null) {
+      void this.runOneShotFollowup(turnId, conversationId, origin).catch(async (error) => {
+        await this.persistAdvisorError(conversationId, formatRuntimeFailure(error, "Advisor", ownerLanguage(this.db)), createUlid(), origin)
+          .catch((surfaceError) => console.error("[owl-core] follow-up failed and could not surface the error", conversationId, surfaceError));
+      });
+    }
+    return { deduplicated: false, followup_pending: followupPending, notice };
+  }
+
+  /**
+   * Decides which of a follow-up reply's actions may run (7.2). Each allowed retry is recorded durably before it
+   * runs, so a follow-up re-sent after a restart cannot run the same retry again; an action held back is reported
+   * as a failure with status "held".
+   */
+  private async reconcileFollowupActions(
+    conversationId: string,
+    turnId: string,
+    sourceTurnId: string,
+    actions: readonly AdvisorSuggestedAction[],
+    origin: { channel: string; channel_id?: string; ref?: string },
+  ): Promise<{ heldIndexes: Set<number>; notices: string[]; failures: AdvisorActionFailure[] }> {
+    const t = ADVISOR_TEXT[ownerLanguage(this.db)];
+    const candidates: { index: number; action: AdvisorSuggestedAction; candidate: FollowupCandidate }[] = [];
+    for (const [index, action] of actions.entries()) {
+      const executedByCore = ADVISOR_CURATION_ACTION_TYPES.has(action.type) || ADVISOR_WINDOW_ACTION_TYPES.has(action.type)
+        || action.type === ADVISOR_CALL_API_ACTION_TYPE || action.type === ADVISOR_SEND_FILE_ACTION_TYPE
+        || action.type === "create_work" || ADVISOR_WORK_OPERATION_ACTION_TYPES.has(action.type);
+      if (!executedByCore) continue;
+      // The real path of a file is a second key: the same file written differently is still the same file.
+      const prepared = action.type === ADVISOR_SEND_FILE_ACTION_TYPE
+        ? await prepareAdvisorSendFile(action.payload, origin.channel, this.resolveAdvisorSendFileSettings())
+        : null;
+      candidates.push({
+        index,
+        action,
+        candidate: {
+          type: action.type,
+          targets: advisorActionTarget(action, prepared?.ok ? { path: prepared.file.path } : undefined),
+          approval: advisorActionNeedsApproval(action),
+          fingerprint: advisorActionFingerprint(action),
+        },
+      });
+    }
+    const decisions = planFollowupActions(
+      loadSourceFailures(this.db, sourceTurnId),
+      candidates.map((entry) => entry.candidate),
+      loadFollowupRetries(this.db, sourceTurnId),
+    );
+    const heldIndexes = new Set<number>();
+    const notices: string[] = [];
+    const failures: AdvisorActionFailure[] = [];
+    const hold = (entry: (typeof candidates)[number], reason: string, notice: string): void => {
+      heldIndexes.add(entry.index);
+      notices.push(notice);
+      failures.push({
+        index: entry.index, type: entry.action.type, status: "held", code: reason, message: notice, retryable: false,
+        approval: entry.candidate.approval, target: entry.candidate.targets[0] ?? null, details: {},
+      });
+    };
+    for (const [position, decision] of decisions.entries()) {
+      const entry = candidates[position]!;
+      if (decision.action === "hold") {
+        hold(entry, decision.reason, t[decision.reason](entry.action.type));
+        continue;
+      }
+      try {
+        await this.writeLane.write({
+          mutateState: () => null,
+          event: {
+            id: createUlid(),
+            idempotencyKey: `advisor-followup-retry:${sourceTurnId}:${decision.sourceIndex}`,
+            type: "advisor.followup_retry_started",
+            payload: {
+              schema_version: "1.0.0",
+              conversation_id: conversationId,
+              source_turn_id: sourceTurnId,
+              source_index: decision.sourceIndex,
+              followup_turn_id: turnId,
+              action_index: entry.index,
+              type: entry.action.type,
+              target: entry.candidate.targets[0] ?? null,
+            },
+          },
+          outbox: [],
+        });
+      } catch {
+        hold(entry, "followupHeldNotRecorded", t.followupHeldNotRecorded(entry.action.type));
+      }
+    }
+    return { heldIndexes, notices, failures };
   }
 
   private async writeAdvisorCallApiEvent(key: string, type: string, payload: Record<string, unknown>): Promise<void> {
@@ -7343,9 +7677,10 @@ export class Core {
   }
 
   /** Marks started-only calls of a turn as unknown: a crash after the send leaves no way to tell whether it ran. */
-  private async recoverAdvisorCallApis(turnId: string): Promise<string[]> {
+  private async recoverAdvisorCallApis(turnId: string, actions: readonly AdvisorSuggestedAction[] = []): Promise<{ notices: string[]; failures: AdvisorActionFailure[] }> {
     const t = ADVISOR_TEXT[ownerLanguage(this.db)];
     const notices: string[] = [];
+    const failures: AdvisorActionFailure[] = [];
     const started = this.db.all<{ idempotency_key: string; payload_json: string }>(
       `SELECT idempotency_key, payload_json FROM events
         WHERE type = 'advisor.api_call_started' AND json_extract(payload_json, '$.turn_id') = ?`,
@@ -7363,9 +7698,15 @@ export class Core {
       } catch (error) {
         console.warn("[owl-core] Could not record the unknown call_api outcome.", error);
       }
-      notices.push(t.callApiUnknown(method, path));
+      const notice = t.callApiUnknown(method, path);
+      notices.push(notice);
+      const index = actions.findIndex((candidate) => candidate.type === ADVISOR_CALL_API_ACTION_TYPE && callApiRequestHash(candidate.payload) === request_hash);
+      failures.push(buildAdvisorActionFailure({
+        index, type: ADVISOR_CALL_API_ACTION_TYPE, action: index < 0 ? undefined : actions[index], code: null, message: notice,
+        targetPayload: { method, path }, details: { method, path, request_hash },
+      }));
     }
-    return notices;
+    return { notices, failures };
   }
 
   /** Records the call before sending it, so a crash can never lead to a second send of the same request. */
@@ -7374,13 +7715,18 @@ export class Core {
     turnId: string,
     action: AdvisorSuggestedAction,
     t: (typeof ADVISOR_TEXT)[keyof typeof ADVISOR_TEXT],
-  ): Promise<string> {
+    index: number,
+  ): Promise<AdvisorActionOutcome> {
+    const fail = (code: string | null, notice: string, details: AdvisorFailureDetails, forceUnknown = false): AdvisorActionOutcome => ({
+      notice,
+      failure: buildAdvisorActionFailure({ index, type: action.type, action, code, message: notice, details, forceUnknown }),
+    });
     const parsed = parseAdvisorCallApiPayload(action.payload);
-    if (!parsed.ok) return t.callApiRejected(parsed.reason);
-    const callOwnApi = this.options.callOwnApi;
-    if (!callOwnApi) return t.callApiUnavailable;
+    if (!parsed.ok) return fail(parsed.kind === "blocked" ? "blocked" : "invalid_payload", t.callApiRejected(parsed.reason), {});
     const { method, path, body, reason } = parsed.value;
-    const requestHash = createHash("sha256").update(stableJson({ method, path, body: body ?? null }), "utf8").digest("hex").slice(0, 16);
+    const requestHash = callApiHash(method, path, body);
+    const callOwnApi = this.options.callOwnApi;
+    if (!callOwnApi) return fail("unavailable", t.callApiUnavailable, { method, path, request_hash: requestHash });
     const key = `advisor-call-api:${turnId}:${requestHash}`;
     const previous = this.db.all<{ idempotency_key: string; payload_json: string }>(
       "SELECT idempotency_key, payload_json FROM events WHERE idempotency_key IN (?, ?)",
@@ -7390,11 +7736,11 @@ export class Core {
     const finished = previous.find((row) => row.idempotency_key === `${key}:finished`);
     if (finished) {
       const record = JSON.parse(finished.payload_json) as { outcome: string; status: number | null };
-      return t.callApiAlreadyHandled(method, path, record.outcome, record.status);
+      return { notice: t.callApiAlreadyHandled(method, path, record.outcome, record.status) };
     }
     if (previous.length > 0) {
       await this.recoverAdvisorCallApis(turnId);
-      return t.callApiUnknown(method, path);
+      return fail(null, t.callApiUnknown(method, path), { method, path, request_hash: requestHash });
     }
     const base = { schema_version: "1.0.0", conversation_id: conversationId, turn_id: turnId, request_hash: requestHash, method, path };
     const payloadValue = body?.payload;
@@ -7406,7 +7752,7 @@ export class Core {
       });
     } catch (error) {
       console.warn("[owl-core] Could not record call_api start; not sending.", error);
-      return t.callApiNotRecorded(method, path);
+      return fail("not_sent", t.callApiNotRecorded(method, path), { method, path, request_hash: requestHash });
     }
     const sendBody = body !== undefined && Object.hasOwn(body, "payload")
       ? { ...body, request_id: turnId, idempotency_key: key, expected_version: body.expected_version ?? 0 }
@@ -7415,11 +7761,14 @@ export class Core {
     let outcome: "succeeded" | "failed" | "unknown";
     let status: number | null = null;
     let summary: string;
+    let apiErrorCode: string | null = null;
     if (result.kind === "response") {
       status = result.status;
-      outcome = status >= 200 && status < 300 ? "succeeded" : "failed";
+      // A 5xx may have written before it failed, so it is unknown, not failed.
+      outcome = status >= 200 && status < 300 ? "succeeded" : status >= 500 ? "unknown" : "failed";
       const data = isRecord(result.body) ? result.body : {};
       const error = isRecord(data.error) ? data.error : null;
+      apiErrorCode = error && typeof error.code === "string" ? error.code : null;
       summary = outcome === "succeeded"
         ? JSON.stringify(data.data ?? null)
         : error ? `${String(error.code)}: ${String(error.message)}` : "";
@@ -7433,8 +7782,10 @@ export class Core {
     } catch (error) {
       console.warn("[owl-core] Could not record call_api result.", error);
     }
-    if (outcome === "unknown") return t.callApiUnknown(method, path);
-    return outcome === "succeeded" ? t.callApiDone(method, path, status ?? 0, summary) : t.callApiFailed(method, path, status ?? 0, summary);
+    const details = { method, path, request_hash: requestHash, http_status: status, api_error_code: apiErrorCode };
+    if (outcome === "unknown") return fail(null, t.callApiUnknown(method, path), details);
+    if (outcome === "succeeded") return { notice: t.callApiDone(method, path, status ?? 0, summary) };
+    return fail(result.kind === "response" ? apiErrorCode ?? `http_${status}` : "not_sent", t.callApiFailed(method, path, status ?? 0, summary), details);
   }
 
   /**
@@ -7447,8 +7798,9 @@ export class Core {
    * an earlier attempt created but never started, and mark their index as
    * handled so the main loop below does not try to create them again.
    */
-  private async recoverAdvisorWorkActions(turnId: string, actions: readonly AdvisorSuggestedAction[]): Promise<{ notices: string[]; recoveredIndexes: Set<number> }> {
+  private async recoverAdvisorWorkActions(turnId: string, actions: readonly AdvisorSuggestedAction[]): Promise<{ notices: string[]; failures: AdvisorActionFailure[]; recoveredIndexes: Set<number> }> {
     const notices: string[] = [];
+    const failures: AdvisorActionFailure[] = [];
     const recoveredIndexes = new Set<number>();
     const t = ADVISOR_TEXT[ownerLanguage(this.db)];
     const rows = this.db.all<{ key: string; response_json: string }>(
@@ -7495,8 +7847,8 @@ export class Core {
         continue;
       }
 
-      const work = this.db.get<{ title: string; size: "small" | "normal" | "large"; state: WorkState; state_version: number }>(
-        "SELECT title, size, state, state_version FROM works WHERE id = ?",
+      const work = this.db.get<{ title: string; size: "small" | "normal" | "large"; state: WorkState; state_version: number; project_id: string | null }>(
+        "SELECT title, size, state, state_version, project_id FROM works WHERE id = ?",
         workId,
       );
       if (!work) continue;
@@ -7534,10 +7886,15 @@ export class Core {
           : t.createdRecovered(work.title, workId));
       } catch (error) {
         const detail = error instanceof Error ? error.message.slice(0, 300) : t.unknownCause;
-        notices.push(t.createdNotStarted(work.title, workId, detail));
+        const notice = t.createdNotStarted(work.title, workId, detail);
+        notices.push(notice);
+        failures.push(buildAdvisorActionFailure({
+          index, type: "create_work", action: actions[index] ?? { type: "create_work", payload: { title: work.title } },
+          code: "start_failed", message: notice, details: { title: work.title, project_id: work.project_id, created_work_id: workId },
+        }));
       }
     }
-    return { notices, recoveredIndexes };
+    return { notices, failures, recoveredIndexes };
   }
 
   /**
@@ -7551,9 +7908,18 @@ export class Core {
     actions: readonly AdvisorSuggestedAction[],
     origin: { channel: string; channel_id?: string; ref?: string },
     recoveredIndexes: ReadonlySet<number> = new Set(),
-  ): Promise<{ notices: string[]; handledIndexes: Set<number>; outboundFiles: AdvisorOutboundFile[] }> {
+    heldIndexes: ReadonlySet<number> = new Set(),
+  ): Promise<{ notices: string[]; failures: AdvisorActionFailure[]; handledIndexes: Set<number>; outboundFiles: (AdvisorOutboundFile & { index: number })[] }> {
     const notices: string[] = [];
-    const outboundFiles: AdvisorOutboundFile[] = [];
+    const failures: AdvisorActionFailure[] = [];
+    const outboundFiles: (AdvisorOutboundFile & { index: number })[] = [];
+    const add = (outcome: AdvisorActionOutcome): void => {
+      notices.push(outcome.notice);
+      if (outcome.failure) failures.push(outcome.failure);
+    };
+    const fail = (index: number, action: AdvisorSuggestedAction, code: string | null, notice: string, details: AdvisorFailureDetails = {}, preparedPath?: string): void => {
+      add({ notice, failure: buildAdvisorActionFailure({ index, type: action.type, action, code, message: notice, details, preparedPath }) });
+    };
     const handledIndexes = new Set<number>();
     const curatedKinds = new Set<CurationKind>();
     // Curations this reply started: their outcomes go out as one notice once all of them have ended.
@@ -7582,6 +7948,10 @@ export class Core {
     )?.project_id ?? null;
 
     for (const [index, action] of actions.entries()) {
+      if (heldIndexes.has(index)) {
+        handledIndexes.add(index);
+        continue;
+      }
       // The action list is untrusted input: a Set membership test keeps
       // inherited keys ("toString", "constructor", …) out of the curation
       // path entirely, and advisorCurationKind only reads own properties.
@@ -7602,27 +7972,36 @@ export class Core {
           }, (finished) => finishedCurations.push(finished));
           notices.push(t.curationStarted(kind, run.id, !started));
         } catch (error) {
-          notices.push(t.curationFailed(kind, error instanceof Error ? error.message.slice(0, 300) : t.unknownCause));
+          fail(index, action, "start_failed", t.curationFailed(kind, error instanceof Error ? error.message.slice(0, 300) : t.unknownCause), { kind });
         }
         continue;
       }
       if (action.type === ADVISOR_CALL_API_ACTION_TYPE) {
         // Kept out of suggested_actions: the body may carry secrets.
         handledIndexes.add(index);
-        notices.push(await this.runAdvisorCallApi(conversationId, turnId, action, t));
+        add(await this.runAdvisorCallApi(conversationId, turnId, action, t, index));
         continue;
       }
       if (ADVISOR_WINDOW_ACTION_TYPES.has(action.type)) {
         handledIndexes.add(index);
-        if (!recoveredIndexes.has(index)) notices.push(await this.runWindowHandoff(conversationId, turnId, index, action, t));
+        if (!recoveredIndexes.has(index)) add(await this.runWindowHandoff(conversationId, turnId, index, action, t));
         continue;
       }
       if (action.type === ADVISOR_SEND_FILE_ACTION_TYPE) {
         // Kept out of suggested_actions: a raw path must not appear as a suggestion.
         handledIndexes.add(index);
         const prepared = await prepareAdvisorSendFile(action.payload, origin.channel, this.resolveAdvisorSendFileSettings());
-        if (prepared.ok) outboundFiles.push(prepared.file);
-        else notices.push(sendFileNotice(prepared, t));
+        if (prepared.ok) {
+          outboundFiles.push({ ...prepared.file, index });
+        } else if (prepared.kind === "rejected") {
+          fail(index, action, prepared.rejection, sendFileNotice(prepared, t), {
+            name: prepared.name, rejection: prepared.rejection, size: prepared.size, limit: prepared.limit, channel: prepared.channel,
+          });
+        } else if (prepared.kind === "unsupported_channel") {
+          fail(index, action, "unsupported_channel", sendFileNotice(prepared, t), { name: prepared.name, channel: origin.channel });
+        } else {
+          fail(index, action, "invalid_payload", sendFileNotice(prepared, t));
+        }
         continue;
       }
       if (ADVISOR_WORK_OPERATION_ACTION_TYPES.has(action.type)) {
@@ -7631,10 +8010,10 @@ export class Core {
         if (recoveredIndexes.has(index)) continue;
         const moveTarget = action.type === "move_work_to_project" ? action.payload?.project_id : undefined;
         if (windowProject && typeof moveTarget === "string" && moveTarget.trim() !== windowProject.id) {
-          notices.push(mismatchNotice(moveTarget.trim()));
+          fail(index, action, "window_project_mismatch", mismatchNotice(moveTarget.trim()), { work_id: advisorWorkId(action.payload) ?? undefined });
           continue;
         }
-        notices.push(await this.runAdvisorWorkOperation(turnId, index, action, action.type, t));
+        add(await this.runAdvisorWorkOperation(turnId, index, action, action.type, t));
         continue;
       }
       if (action.type !== "create_work") continue;
@@ -7651,6 +8030,7 @@ export class Core {
       const size = payload?.size;
       const designMode = payload?.design_mode ?? "auto";
       const draft = payload !== null && typeof payload === "object" && "draft" in payload ? payload.draft : false;
+      const createDetails: AdvisorFailureDetails = { title: typeof title === "string" ? title.trim().slice(0, 100) : undefined, project_id: typeof payload?.project_id === "string" ? payload.project_id : undefined };
       if (
         typeof draft !== "boolean" ||
         typeof title !== "string" || title.trim().length === 0 || title.length > 500 ||
@@ -7658,34 +8038,39 @@ export class Core {
         (size !== "small" && size !== "normal" && size !== "large") ||
         (designMode !== "auto" && designMode !== "lead")
       ) {
-        notices.push(t.createIncomplete);
+        fail(index, action, "invalid_payload", t.createIncomplete, createDetails);
         continue;
       }
       const requestedProjectId = payload?.project_id;
       if (requestedProjectId !== undefined && requestedProjectId !== null && typeof requestedProjectId !== "string") {
-        notices.push(t.createBadProject);
+        fail(index, action, "not_found", t.createBadProject, createDetails);
         continue;
       }
       if (windowProject && typeof requestedProjectId === "string" && requestedProjectId !== windowProject.id) {
-        notices.push(mismatchNotice(requestedProjectId));
+        fail(index, action, "window_project_mismatch", mismatchNotice(requestedProjectId), createDetails);
         continue;
       }
       const projectId = typeof requestedProjectId === "string" ? requestedProjectId : inheritedProject;
+      const resolvedDetails: AdvisorFailureDetails = { ...createDetails, project_id: projectId };
       const backlogItemIds: unknown = payload?.backlog_item_ids === undefined ? [] : payload.backlog_item_ids;
       const dismissItemIds: unknown = payload?.dismiss_backlog_item_ids === undefined ? [] : payload.dismiss_backlog_item_ids;
       const isIdList = (value: unknown): value is string[] =>
         Array.isArray(value) && value.every((id) => typeof id === "string");
       if (!isIdList(backlogItemIds) || !isIdList(dismissItemIds)) {
-        notices.push(t.createFailed("backlog_item_ids and dismiss_backlog_item_ids must be arrays of strings."));
+        fail(index, action, "invalid_payload", t.createFailed("backlog_item_ids and dismiss_backlog_item_ids must be arrays of strings."), resolvedDetails);
         continue;
       }
       let prerequisiteIds: string[] = [];
+      let prerequisiteCode = "invalid_payload";
       try {
         prerequisiteIds = payload?.prerequisite_work_ids === undefined ? [] : validatePrerequisiteWorkIds(payload.prerequisite_work_ids);
         const missing = prerequisiteIds.find((id) => !this.db.get("SELECT id FROM works WHERE id = ?", id));
-        if (missing !== undefined) throw new Error(`Prerequisite Work ${missing} was not found.`);
+        if (missing !== undefined) {
+          prerequisiteCode = "not_found";
+          throw new Error(`Prerequisite Work ${missing} was not found.`);
+        }
       } catch (error) {
-        notices.push(t.createFailed(error instanceof Error ? error.message.slice(0, 300) : t.unknownCause));
+        fail(index, action, prerequisiteCode, t.createFailed(error instanceof Error ? error.message.slice(0, 300) : t.unknownCause), resolvedDetails);
         continue;
       }
       const createKey = `advisor-work:${turnId}:${index}:create`;
@@ -7732,13 +8117,16 @@ export class Core {
         notices.push(t.created(title.trim(), size === "small" ? "Worker" : "Manager", createdWorkId));
       } catch (error) {
         const detail = error instanceof Error ? error.message.slice(0, 300) : t.unknownCause;
-        notices.push(createdWorkId
-          ? t.createdNotStarted(title.trim(), createdWorkId, detail)
-          : t.createFailed(detail));
+        const errorCode = isRecord(error) && typeof error.code === "string" ? error.code : null;
+        if (createdWorkId) {
+          fail(index, action, "start_failed", t.createdNotStarted(title.trim(), createdWorkId, detail), { ...resolvedDetails, created_work_id: createdWorkId });
+        } else {
+          fail(index, action, errorCode, t.createFailed(detail), resolvedDetails);
+        }
       }
     }
     if (finishedCurations.length > 0) void Promise.all(finishedCurations).then((entries) => this.sendCurationNoticeFor(entries));
-    return { notices, handledIndexes, outboundFiles };
+    return { notices, failures, handledIndexes, outboundFiles };
   }
 
   private async runAdvisorWorkOperation(
@@ -7747,66 +8135,21 @@ export class Core {
     action: AdvisorSuggestedAction,
     type: AdvisorWorkOperationType,
     t: (typeof ADVISOR_TEXT)[OwnerLanguage],
-  ): Promise<string> {
-    const payload = action.payload;
-    const rawWorkId = payload?.work_id;
-    if (typeof rawWorkId !== "string" || rawWorkId.trim().length < 1 || rawWorkId.trim().length > 128) {
-      return t.workActionIncomplete(type);
-    }
-    const workId = rawWorkId.trim();
-    let body: string | undefined;
-    let reopen = false;
-    let title: string | undefined;
-    let summary: string | undefined;
-    let pauseReason = "Advisor requested pause.";
-    let cancelReason: string | undefined;
-    let resumeBody: string | undefined;
-    let projectId = "";
-
-    if (type === "send_work_instruction") {
-      const rawBody = payload?.body;
-      const requestedReopen = payload?.reopen;
-      if (typeof rawBody !== "string" || rawBody.trim().length < 1 || rawBody.length > 100_000 || (requestedReopen !== undefined && typeof requestedReopen !== "boolean")) {
-        return t.workActionIncomplete(type);
-      }
-      body = rawBody.trim();
-      reopen = requestedReopen === true;
-    } else if (type === "update_work") {
-      const rawTitle = payload?.title;
-      const rawSummary = payload?.summary;
-      if (
-        (rawTitle === undefined && rawSummary === undefined) ||
-        (rawTitle !== undefined && (typeof rawTitle !== "string" || rawTitle.trim().length < 1 || rawTitle.length > 500)) ||
-        (rawSummary !== undefined && (typeof rawSummary !== "string" || rawSummary.trim().length < 1 || rawSummary.length > 20_000))
-      ) {
-        return t.workActionIncomplete(type);
-      }
-      title = typeof rawTitle === "string" ? rawTitle.trim() : undefined;
-      summary = typeof rawSummary === "string" ? rawSummary.trim() : undefined;
-    } else if (type === "pause_work") {
-      const reason = payload?.reason;
-      if (reason !== undefined && (typeof reason !== "string" || reason.length > 1_000)) return t.workActionIncomplete(type);
-      if (typeof reason === "string") pauseReason = reason.trim();
-    } else if (type === "resume_work") {
-      const rawBody = payload?.body;
-      if (rawBody !== undefined && (typeof rawBody !== "string" || rawBody.trim().length < 1 || rawBody.length > 10_000)) return t.workActionIncomplete(type);
-      resumeBody = typeof rawBody === "string" ? rawBody.trim() : undefined;
-    } else if (type === "cancel_work") {
-      const reason = payload?.reason;
-      if (typeof reason !== "string" || reason.trim().length < 1 || reason.trim().length > 1_000) return t.workActionIncomplete(type);
-      cancelReason = reason.trim();
-    } else if (type === "move_work_to_project") {
-      const rawProjectId = payload?.project_id;
-      if (typeof rawProjectId !== "string" || rawProjectId.trim().length < 1 || rawProjectId.trim().length > 128) return t.workActionIncomplete(type);
-      projectId = rawProjectId.trim();
-    }
+  ): Promise<AdvisorActionOutcome> {
+    const fail = (code: string | null, notice: string, details: AdvisorFailureDetails = {}): AdvisorActionOutcome => ({
+      notice,
+      failure: buildAdvisorActionFailure({ index, type, action, code, message: notice, details: { work_id: advisorWorkId(action.payload) ?? undefined, ...details } }),
+    });
+    const parsedPayload = parseAdvisorWorkOperationPayload(type, action.payload);
+    if (!parsedPayload.ok) return fail("invalid_payload", t.workActionIncomplete(type));
+    const { workId, body, reopen, title, summary, pauseReason, cancelReason, resumeBody, projectId } = parsedPayload.value;
 
     const language = ownerLanguage(this.db);
     const work = this.db.get<{ title: string; display_number: number | null; state: WorkState; state_version: number }>(
       "SELECT title, display_number, state, state_version FROM works WHERE id = ?",
       workId,
     );
-    if (!work) return t.workNotFound(workId);
+    if (!work) return fail("work_not_found", t.workNotFound(workId));
     const ref = workRef(language, work.title, work.display_number, workId);
     const request = {
       request_id: turnId,
@@ -7814,66 +8157,72 @@ export class Core {
       expected_version: work.state_version,
     };
 
+    const done = (notice: string): AdvisorActionOutcome => ({ notice });
     try {
       switch (type) {
         case "send_work_instruction": {
           await this.postWorkInstruction(workId, { ...request, payload: { body: body!, reopen } });
-          return work.state === "completed" ? t.instructionSentReopened(ref) : t.instructionSent(ref);
+          return done(work.state === "completed" ? t.instructionSentReopened(ref) : t.instructionSent(ref));
         }
         case "update_work": {
           const result = await this.updateWork(workId, {
             ...request,
             payload: { ...(title === undefined ? {} : { title }), ...(summary === undefined ? {} : { summary }) },
           });
-          return result.data.changed_fields.length === 0
+          return done(result.data.changed_fields.length === 0
             ? t.workUnchanged(ref)
-            : t.workUpdated(ref, result.data.changed_fields, result.data.replan_queued);
+            : t.workUpdated(ref, result.data.changed_fields, result.data.replan_queued));
         }
         case "pause_work":
           await this.pauseWork(workId, { ...request, payload: { reason: pauseReason } });
-          return t.workPaused(ref);
+          return done(t.workPaused(ref));
         case "resume_work": {
           const result = await this.resumeWorkOrRetryDecision(workId, { ...request, payload: { source: "advisor", ...(resumeBody === undefined ? {} : { body: resumeBody }) } });
-          return result.data.resumed_by === "resume" ? t.workResumed(ref) : t.workRetried(ref);
+          return done(result.data.resumed_by === "resume" ? t.workResumed(ref) : t.workRetried(ref));
         }
         case "cancel_work":
           await this.cancelWork(workId, { ...request, payload: { reason: cancelReason!, force: false } });
-          return t.workCancelledNotice(ref);
+          return done(t.workCancelledNotice(ref));
         case "delete_work":
           await this.deleteWork(workId, { ...request, payload: {} });
-          return t.workDeletedNotice(ref);
+          return done(t.workDeletedNotice(ref));
         case "move_work_to_project": {
           const result = await this.moveWorkToProject(workId, { ...request, payload: { project_id: projectId } }, "advisor");
           const projectName = this.db.get<{ name: string }>("SELECT name FROM projects WHERE id = ?", projectId)?.name ?? projectId;
-          return t.workMovedToProject(ref, projectName, result.data.display_number);
+          return done(t.workMovedToProject(ref, projectName, result.data.display_number));
         }
       }
     } catch (error) {
       const code = isRecord(error) && typeof error.code === "string" ? error.code : null;
       const currentState = this.db.get<{ state: WorkState }>("SELECT state FROM works WHERE id = ?", workId)?.state ?? work.state;
-      if (code === "work_not_found") return t.workNotFound(workId);
+      const errorDetails = isRecord(error) && isRecord(error.details) ? error.details : null;
+      const failed = (notice: string): AdvisorActionOutcome => fail(code, notice, {
+        work_state: currentState,
+        expected_version: request.expected_version,
+        error_reason: typeof errorDetails?.reason === "string" ? errorDetails.reason : undefined,
+      });
+      if (code === "work_not_found") return failed(t.workNotFound(workId));
       if (type === "send_work_instruction") {
-        if (code === "work_cancelled") return t.instructionCancelled(ref);
-        if (code === "work_reopen_required") return t.instructionReopenRequired(ref);
+        if (code === "work_cancelled") return failed(t.instructionCancelled(ref));
+        if (code === "work_reopen_required") return failed(t.instructionReopenRequired(ref));
         if (code === "invalid_state_transition" && (currentState === "memo" || currentState === "ready")) {
-          return t.instructionNotStarted(ref);
+          return failed(t.instructionNotStarted(ref));
         }
       }
       if (type === "move_work_to_project") {
-        if (code === "work_project_already_set") return t.workProjectAlreadySet(ref);
-        if (code === "project_not_found") return t.projectNotFoundForMove(projectId);
-        if (code === "work_has_active_agents") return t.workBusyForMove(ref);
-        const details = isRecord(error) && isRecord(error.details) ? error.details : null;
-        if (code === "invalid_state_transition" && details?.reason === "task_fix_pending") {
-          const taskIds = Array.isArray(details.task_ids) ? details.task_ids.filter((id): id is string => typeof id === "string") : [];
-          return t.workFixPendingForMove(ref, taskIds);
+        if (code === "work_project_already_set") return failed(t.workProjectAlreadySet(ref));
+        if (code === "project_not_found") return failed(t.projectNotFoundForMove(projectId));
+        if (code === "work_has_active_agents") return failed(t.workBusyForMove(ref));
+        if (code === "invalid_state_transition" && errorDetails?.reason === "task_fix_pending") {
+          const taskIds = Array.isArray(errorDetails.task_ids) ? errorDetails.task_ids.filter((id): id is string => typeof id === "string") : [];
+          return failed(t.workFixPendingForMove(ref, taskIds));
         }
       }
-      if (code === "invalid_state_transition") return t.notAllowedInState(type, ref, currentState);
-      if (code === "version_conflict") return t.workActionConflict(ref);
-      if (code === "idempotency_conflict") return t.workActionAlreadyApplied(type, ref);
+      if (code === "invalid_state_transition") return failed(t.notAllowedInState(type, ref, currentState));
+      if (code === "version_conflict") return failed(t.workActionConflict(ref));
+      if (code === "idempotency_conflict") return done(t.workActionAlreadyApplied(type, ref));
       const detail = error instanceof Error ? error.message.slice(0, 300) : t.unknownCause;
-      return t.workActionFailed(type, ref, detail);
+      return failed(t.workActionFailed(type, ref, detail));
     }
   }
 
@@ -8612,6 +8961,9 @@ export class Core {
                   this.scheduleLearningRun(`Work ${workId}`);
                 }
                 this.scheduleProjectOverviewForWork(workId, workProject?.project_id ?? null, mergeRecord);
+                // Not awaited: the model call must not hold up the merge cleanup; stop() waits for it.
+                const report = this.finalReporter.generate(workId, verdict.summary).finally(() => this.finalReportRuns.delete(report));
+                this.finalReportRuns.add(report);
                 const worktrees = await this.runWorktreeReconcile(workId, "work_completed");
                 if (workProject?.project_id !== null && workProject?.project_id !== undefined) {
                   await this.deleteMergedWorkBranches(workId, this.worktreeCleanupFailure(workId, worktrees));
@@ -10996,8 +11348,10 @@ export class Core {
         return "done";
       }
       const acceptanceRevisionRequired = new Map<string, string>();
+      const acceptanceDefects = new Map<string, readonly AcceptanceDefect[]>();
       for (const id of failedTaskIds) {
         if (!pendingAcceptanceDefect(this.db, id)) continue;
+        acceptanceDefects.set(id, (failedTaskBrief(this.db, id)?.acceptance_defects ?? []) as unknown as AcceptanceDefect[]);
         const current = this.db.get<{ acceptance: string }>("SELECT acceptance FROM tasks WHERE id = ?", id);
         if (current) acceptanceRevisionRequired.set(id, current.acceptance);
       }
@@ -11026,7 +11380,7 @@ export class Core {
         ? new Map(this.db.all<{ id: string; type: string }>(`SELECT id, type FROM tasks WHERE id IN (${readyIds.map(() => "?").join(",")})`, ...readyIds).map((row) => [row.id, row.type] as const))
         : undefined;
       const automaticReplan = ownerReplan === null || ownerReplan.kind === "auto_conflict" || ownerReplan.kind === "auto_final";
-      let validated: ReplanPlan | PlanRejection = validateReplan(items, snapshot, failedTaskIds, { actions: taskActions, allowOpen: ownerReplan !== null, revisable, acceptanceRevisionRequired, differentApproachRequired, currentCriteria, automatic: automaticReplan, qualitySettings: quality });
+      let validated: ReplanPlan | PlanRejection = validateReplan(items, snapshot, failedTaskIds, { actions: taskActions, allowOpen: ownerReplan !== null, revisable, acceptanceRevisionRequired, acceptanceDefects, differentApproachRequired, currentCriteria, automatic: automaticReplan, qualitySettings: quality });
       let resolvedWaits: ReadonlyMap<string, PrerequisiteSpec> = new Map();
       if (!isPlanRejection(validated) && validated.waits.size > 0) {
         const resolved = await this.resolvePrerequisiteWaits(workId, validated.waits);
@@ -11380,6 +11734,9 @@ export class Core {
     const brief = failedTaskBrief(this.db, taskId);
     const failure = isRecord(brief?.failure) ? brief.failure : {};
     for (const key of ["summary", "reason", "question", "work_done"]) add(failure[key]);
+    if (failure.kind === "acceptance_defect" && lines.length === 0 && Array.isArray(brief?.acceptance_defects)) {
+      for (const defect of brief.acceptance_defects) add(isRecord(defect) ? defect.reason : undefined);
+    }
     const conflictFiles = failure.kind === "merge_conflict" && Array.isArray(failure.merge_conflict_files)
       ? failure.merge_conflict_files.filter((file): file is string => typeof file === "string")
       : [];
@@ -12992,6 +13349,7 @@ function toWorkDetail(row: WorkDetailDbRow): WorkDetail {
     conversation_id: row.conversation_id,
     advisor_backlog: parseAdvisorBacklog(row.advisor_backlog_json),
     prerequisites: [],
+    final_report: null,
   };
 }
 
@@ -13863,15 +14221,6 @@ function worktreeCleanupError(workId: string, cleanup: { readonly message: strin
   });
 }
 
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${stableJson(record[key])}`).join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
 function isUlidLike(value: unknown): value is string {
   return typeof value === "string" && /^[0-9A-HJKMNP-TV-Z]{26}$/u.test(value);
 }
@@ -14292,6 +14641,22 @@ function normalizeTokenRelaySettings(value: unknown, knownModels: KnownModels): 
     max_relays: settings.max_relays,
     report_threshold_tokens: settings.report_threshold_tokens,
   };
+}
+
+/** What one action returned: the Owner-facing notice, plus a failure record when it did not run. */
+interface AdvisorActionOutcome {
+  readonly notice: string;
+  readonly failure?: AdvisorActionFailure;
+}
+
+function callApiHash(method: string, path: string, body: unknown): string {
+  return createHash("sha256").update(stableJson({ method, path, body: body ?? null }), "utf8").digest("hex").slice(0, 16);
+}
+
+/** The same request_hash runAdvisorCallApi records; null when the payload is not a readable request. */
+function callApiRequestHash(payload: unknown): string | null {
+  const shape = parseAdvisorCallApiRequestShape(payload);
+  return shape.ok ? callApiHash(shape.value.method, shape.value.path, shape.value.body) : null;
 }
 
 // Researcher model names end up inside JSON argv and a TOML file, so only plain model-id characters are allowed.

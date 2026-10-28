@@ -8,8 +8,8 @@ import { join, relative } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 
-import { createDecisionTextChecks } from "../../apps/server/dist/decision-text-checks.js";
-import { createPluginManagerFromEnv, loadDecisionTextCheckSpecs, loadPluginSpecs, PluginConfigError, PluginManager } from "../../apps/server/dist/plugin-manager.js";
+import { createDecisionTextChecks, createTextChecks } from "../../apps/server/dist/decision-text-checks.js";
+import { createPluginManagerFromEnv, loadDecisionTextCheckSpecs, loadFinalReportTextCheckSpecs, loadPluginSpecs, PluginConfigError, PluginManager } from "../../apps/server/dist/plugin-manager.js";
 import { tempDir } from "../helpers/temp.mjs";
 import { waitFor } from "../helpers/wait.mjs";
 
@@ -387,6 +387,28 @@ test("loadDecisionTextCheckSpecs reads decision_text_checks, returns [] without 
     error instanceof PluginConfigError && error.field === "decision_text_checks[0].extra");
   const notArray = await writeConfig(directory, [], { decision_text_checks: {} });
   assert.throws(() => loadDecisionTextCheckSpecs(notArray), PluginConfigError);
+});
+
+test("loadFinalReportTextCheckSpecs reads final_report_text_checks, returns [] without the key, and rejects unknown keys", async (t) => {
+  const directory = await tempDir(t, "owl-plugin-test-");
+  assert.deepEqual(loadFinalReportTextCheckSpecs(await writeConfig(directory, [])), []);
+  assert.deepEqual(loadFinalReportTextCheckSpecs(await writeConfig(directory, [], { final_report_text_checks: [] })), []);
+
+  const specs = loadFinalReportTextCheckSpecs(await writeConfig(directory, [], {
+    decision_text_checks: [{ name: "other", command: "node", cwd: directory }],
+    final_report_text_checks: [
+      { name: "lint", command: "node", args: ["lint.mjs"], cwd: directory },
+      { name: "off", command: "node", cwd: directory, enabled: false },
+    ],
+  }));
+  assert.deepEqual(specs.map((spec) => [spec.name, spec.enabled]), [["lint", true], ["off", false]]);
+  assert.deepEqual(createTextChecks(specs).map((check) => check.name), ["lint"]);
+
+  const unknownKey = await writeConfig(directory, [], { final_report_text_checks: [{ name: "lint", command: "node", cwd: directory, extra: 1 }] });
+  assert.throws(() => loadFinalReportTextCheckSpecs(unknownKey), (error) =>
+    error instanceof PluginConfigError && error.field === "final_report_text_checks[0].extra");
+  const notArray = await writeConfig(directory, [], { final_report_text_checks: {} });
+  assert.throws(() => loadFinalReportTextCheckSpecs(notArray), PluginConfigError);
 });
 
 test("createDecisionTextChecks passes the input on stdin, hides OWL_ values, rejects bad exits, bad JSON and big output, and stops the child on abort", async (t) => {

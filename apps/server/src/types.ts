@@ -96,6 +96,7 @@ export interface WorkDetail extends WorkSummary {
   progress: WorkProgress;
   conversation_id: string | null;
   prerequisites: WorkPrerequisite[];
+  final_report: { summary: string; test_results: string; issues: string; created_at: string } | null;
 }
 
 /** Whether a Work's branches hold content outside its Project base branch. */
@@ -885,6 +886,8 @@ export interface CreateCoreOptions {
   /** Provider client for persistent Advisor sessions (agent-runtime's ProviderClient), forwarded to @owl/core. */
   providerClient?: unknown;
   /** Checkers of the Decision explanation texts; forwarded to @owl/core. */
+  finalReportTextChecks?: readonly { readonly name: string; run(input: never, signal: AbortSignal): Promise<unknown> }[];
+  /** Checkers of the Decision explanation texts; see above. */
   decisionTextChecks?: readonly { readonly name: string; run(input: never, signal: AbortSignal): Promise<unknown> }[];
   /** Calls Owl's own HTTP API as the Owner for the Advisor's call_api action; forwarded to @owl/core. */
   callOwnApi?: (request: { method: string; path: string; body?: unknown }) => Promise<unknown>;

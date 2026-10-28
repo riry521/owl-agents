@@ -19,7 +19,7 @@ export {
 } from "./shared/router";
 export { formatStatusResponse } from "./shared/status";
 export { asOwlLanguage, type OwlLanguage } from "./shared/language";
-export { parseOutboundFiles, readOutboundFile, appendFileResults, type OutboundFile } from "./shared/outbound-files";
+export { parseOutboundFiles, readOutboundFile, appendFileResults, reportAdvisorDelivery, type OutboundFile, type OutboundFileResult } from "./shared/outbound-files";
 export { connectorText, type ConnectorText } from "./shared/connector-text";
 export {
   createDecisionButtonId,

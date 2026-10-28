@@ -58,3 +58,10 @@ test("every manager mode prompt explains work.advisor_backlog linked and dismiss
     assert.match(prompt, /## Dismissed backlog items/, mode);
   }
 });
+
+test("replan prompt asks for a criteria_relaxations entry per changed Manager criterion of acceptance_defects and keeps verification off moving branches", () => {
+  const prompt = buildManagerPrompt({ work: { id: "w", title: "T" }, mode: "replan", context: {} }, "en");
+  assert.match(prompt, /write one auto_recovery\.criteria_relaxations entry \(criterion_id, reason, keeps\) for each criterion with origin manager that you change/);
+  assert.match(prompt, /Apart from rewriting criteria listed in acceptance_defects, in every other case auto_recovery\.criteria_relaxations is \[\]/);
+  assert.match(prompt, /must not depend on a branch that keeps moving/);
+});

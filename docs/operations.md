@@ -585,6 +585,44 @@ process.stdout.write(JSON.stringify(problems.length > 0 ? { ok: false, problems 
 
 A tool that fixes problems itself (for example full-width and half-width mixes) answers `{ "ok": true, "fixed": ... }` and changes only the texts it fixes.
 
+## Final report of a completed Work (`final_report_text_checks`)
+
+When a Work completes, the Manager's model (the `manager` role in the model settings) writes a short final report in three sections: `summary` (what was done and what changed as a result), `test_results` (the result of each acceptance criterion and of the tests), and `issues` (the goals that were not met with their reasons, and the remaining issues; a short "none" when there are none). It is written in the Owner language, stored once per Work, and returned as `final_report: { summary, test_results, issues, created_at }` by `GET /api/v1/works/{id}` (`null` while the Work is not completed, or when no report was stored). Completion notifications do not change. If the model, a check or the deadline (`decision_explanation_timeout_seconds`) fails, the Work still completes, `final_report` stays `null` and the error is logged as `[owl-core] Final report failed for <work id>`. Works completed before this feature have no report.
+Core can pass the three sections to external commands that check them before they are stored. The commands come from the plugin configuration file that `OWL_PLUGINS_FILE` points to. The file is read once at server start, so a change needs a restart.
+
+### Writing it
+
+`final_report_text_checks` is a top-level key next to `plugins` and `decision_text_checks`. Each entry has the same fields as a plugin (`name`, `command`, `args`, `cwd`, `enabled`, `env`) and the same checks (unknown keys, a missing `cwd`, and `OWL_` names in `env` are errors). There is no per-command timeout.
+
+```json
+{
+  "plugins": [],
+  "final_report_text_checks": [
+    { "name": "text-lint", "command": "node", "args": ["scripts/check-final-report.mjs"], "cwd": "/path/to/writing-rules", "env": {} }
+  ]
+}
+```
+
+Without the key, or with `[]`, no command runs. An error in `final_report_text_checks` is logged at start (`[owl-server] final_report_text_checks: ...`) and the server starts with no checks. Entries with `enabled: false` are skipped. Entries are called in the order written; the first one that reports problems stops the pass.
+
+### Input and output
+
+Each call starts the command once. The server writes one JSON to its stdin and reads one JSON from its stdout. The command gets only `PATH`, `HOME`, `LANG` and the entry's `env`; `OWL_` values are not passed.
+
+```json
+{ "language": "ja", "summary": "...", "test_results": "...", "issues": "..." }
+```
+
+The command answers one of:
+
+- `{ "ok": true }`: the sections are fine.
+- `{ "ok": false, "problems": ["one short sentence", "..."] }`: a section breaks a rule. At most 10 problems are used.
+
+### When it goes wrong
+
+- `ok: false`: the model is asked to write the report again, with the earlier three sections and the problems, exactly once. The rewritten report is checked again, but it is stored even if the check still reports problems; there is no second rewrite.
+- The command exits with a code other than 0, cannot start, writes no JSON, writes more than 64 KiB, or answers in another shape: no report is stored (`final_report` stays `null`) and the error is logged.
+
 ## Required tests
 
 - The list is `tests/required-tests.json` (per file; `flow` is one of work_lifecycle, decision_resume, agent_reports, remake_limits). It is not embedded in code.
@@ -600,6 +638,8 @@ A tool that fixes problems itself (for example full-width and half-width mixes) 
 ## Advisor Work operations
 
 Besides `create_work`, the Advisor can act on an existing Work through these actions: `send_work_instruction`, `update_work`, `pause_work`, `resume_work`, `cancel_work` and `delete_work`. The Advisor is given a list of recent Works to identify the one the operator means.
+
+If an `owl-action` fails, the Advisor gets one more turn to deal with the failure. Owl resumes an Advisor session only after its turn has completed, and resends the message once when the resumed session fails.
 
 - **`send_work_instruction`** sends an extra instruction (up to 100,000 characters, optionally with attachments) to a Work that has started. It is posted as a message on the Work's web conversation and queues a Manager replan that takes the instruction into account; if the Work was `judgement_waiting`, the instruction answers the open Decisions and restarts it. A `completed` Work is reopened only when the action asks for it (`reopen`); a `cancelled` Work or one not yet started (`memo`/`ready`) is rejected.
 - **`update_work`** changes only the Work's title (1–500 characters) and/or summary (up to 20,000 characters); at least one is required and the change is kept in the summary history. If the Work is `running`, `paused` or `judgement_waiting`, a replan is queued so the plan follows the new text; other states just store it.

@@ -30,6 +30,7 @@ export {
   ADVISOR_CALL_API_ACTION_TYPE,
   ADVISOR_CALL_API_MAX_BODY_CHARS,
   parseAdvisorCallApiPayload,
+parseAdvisorCallApiRequestShape,
   ADVISOR_SEND_FILE_ACTION_TYPE,
   ADVISOR_SEND_FILE_PATH_MAX,
   ADVISOR_SEND_FILE_COMMENT_MAX,
@@ -42,6 +43,8 @@ export {
 } from "./advisor-response.js";
 export {
   ADVISOR_CURATION_INSTRUCTION,
+ADVISOR_FOLLOWUP_INSTRUCTION,
+ADVISOR_FOLLOWUP_TURN_TEXT,
   addAdvisorReplyTargetInstruction,
   applyAdvisorInterfaceInstructions,
   buildSlackFormatInstruction,
@@ -738,6 +741,15 @@ export {
   type DecisionTexts,
   type StoredDecisionExplanation,
 } from "./decision-explanation.js";
+
+export {
+  FINAL_REPORT_SCHEMA,
+  readFinalReportCheckOutput,
+  type FinalReportCheckInput,
+  type FinalReportRequest,
+  type FinalReportSections,
+  type FinalReportRunResult,
+} from "./final-report.js";
 
 export { defuseTags, EXTERNAL_DATA_ATTR, externalJsonBlock } from "./external-data.js";
 export {

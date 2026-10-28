@@ -285,6 +285,10 @@ interface AdvisorWorkspaceApiPort {
   finishAdvisorWorkspaceForSession(request: { session_id: string; project_id: string | null }): Promise<unknown>;
 }
 
+interface AdvisorDeliveryApiPort {
+  reportAdvisorDelivery(ownerId: string, conversationId: string, payload: unknown): Promise<{ deduplicated: boolean; followup_pending: boolean; notice: string | null }>;
+}
+
 interface WorkProjectMoveApiPort {
   moveWorkToProject(workId: string, input: { project_id: string }, command: { request_id: string; idempotency_key: string; expected_version: number }): Promise<{ data: JsonObject; version: number }>;
 }
@@ -2148,6 +2152,28 @@ function requireAdvisorWorkspaceApi(core: CorePort): AdvisorWorkspaceApiPort {
   const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
   if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support Advisor workspaces.");
   return candidate;
+}
+
+function requireAdvisorDeliveryApi(core: CorePort): AdvisorDeliveryApiPort {
+  const wrapped = core as CorePort & { core?: unknown };
+  const has = (value: unknown): value is AdvisorDeliveryApiPort => isObject(value) && typeof value.reportAdvisorDelivery === "function";
+  const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
+  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not accept Advisor delivery reports.");
+  return candidate;
+}
+
+const ADVISOR_DELIVERY_ERROR_STATUS: Readonly<Record<string, number>> = { validation_error: 400, not_found: 404 };
+
+/** Core refuses a bad report with a domain code; give it its HTTP status. */
+async function advisorDeliveryCall<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    const code = isObject(error) && typeof error.code === "string" ? error.code : "";
+    const status = Object.hasOwn(ADVISOR_DELIVERY_ERROR_STATUS, code) ? ADVISOR_DELIVERY_ERROR_STATUS[code] : undefined;
+    if (status === undefined || error instanceof ApiError) throw error;
+    throw new ApiError(status, code as ApiError["code"], error instanceof Error ? error.message : code, {}, { cause: error });
+  }
 }
 
 function requireWorkProjectMoveApi(core: CorePort): WorkProjectMoveApiPort {
@@ -5065,6 +5091,17 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       return { data: cleared as unknown as JsonObject, version: 0 };
     });
     sendJson(response, 200, result);
+    return;
+  }
+
+  const advisorDeliveryMatch = pathname.match(new RegExp(`^${API_PREFIX}/conversations/([^/]+)/advisor-deliveries$`));
+  if (advisorDeliveryMatch && method === "POST") {
+    const ownerId = requireOwner(request);
+    const conversationId = pathId(advisorDeliveryMatch[1], "conversation_id");
+    const command = commandEnvelope(await readRequestBody(request));
+    const api = requireAdvisorDeliveryApi(context.core);
+    const data = await advisorDeliveryCall(() => api.reportAdvisorDelivery(ownerId, conversationId, command.payload));
+    sendJson(response, 200, { request_id: command.request_id, data, version: 0 });
     return;
   }
 

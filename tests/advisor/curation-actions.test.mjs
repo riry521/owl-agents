@@ -526,3 +526,22 @@ test("a second request for a running kind returns the running run without starti
   assert.equal(again.started, true);
   await settle(core);
 });
+
+test("a curation that cannot start is a retryable failure; starting and a repeat in one reply are not", async (t) => {
+  const { core, db } = await setup(t);
+  const { conversation_id: conversationId } = await core.getActiveConversation();
+  const responded = () => JSON.parse(db.get("SELECT payload_json FROM events WHERE type = 'advisor.responded' ORDER BY rowid DESC LIMIT 1").payload_json);
+  const actions = [{ type: "run_librarian", description: "a", payload: {} }, { type: "run_librarian", description: "b", payload: {} }];
+
+  await core.persistAdvisorReply(conversationId, "ok", createUlid(), { channel: "web" }, actions);
+  await settle(core);
+  assert.equal(Object.hasOwn(responded(), "action_failures"), false);
+
+  core.startCurationInBackground = async () => { throw new Error("cannot start"); };
+  await core.persistAdvisorReply(conversationId, "ok", createUlid(), { channel: "web" }, [...actions, { type: "run_rule_curation", description: "c", payload: {} }]);
+  const failures = responded().action_failures;
+  assert.deepEqual(failures.map((f) => [f.index, f.type, f.code, f.status, f.retryable, f.details]), [
+    [0, "run_librarian", "start_failed", "failed", true, { kind: "librarian" }],
+    [2, "run_rule_curation", "start_failed", "failed", true, { kind: "rule_curation" }],
+  ]);
+});

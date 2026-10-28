@@ -8,7 +8,7 @@ import type { BoardView as BoardData, WorkSummary } from '@/lib/types';
 import { formatDateTime, workDisplayNumber } from '@/lib/format';
 import { useLocale, type Locale, type TFunction } from '@/lib/i18n';
 import { workDetailHref } from '@/lib/work-detail-safety.mjs';
-import { groupArchivedByDay } from '@/lib/archive-list.mjs';
+import { groupArchivedByDay, groupByProject } from '@/lib/archive-list.mjs';
 import { confirmDeleteIfUnmerged, removeWorks, revealWork, useWorkRemovals } from '@/lib/work-removal';
 import { WorkStateBadge } from '@/components/StateBadge';
 import { RestoreIcon, TrashIcon } from '@/components/icons';
@@ -158,19 +158,27 @@ export function ArchiveView() {
               </h2>
               <span className="count">{t('common.items', { count: String(group.works.length) })}</span>
             </div>
-            <ul className="archive-list">
-              {group.works.map((w) => (
-                <ArchiveRow
-                  key={w.id}
-                  work={w}
-                  projectName={(w.project_id && projectNames.get(w.project_id)) || null}
-                  locale={locale}
-                  t={t}
-                  onRestore={restore}
-                  onDelete={remove}
-                />
-              ))}
-            </ul>
+            {(groupByProject(group.works, [...projectNames.keys()]) as { projectId: string | null; works: WorkSummary[] }[]).map((pg) => (
+              <div className="board-project" key={pg.projectId ?? 'none'}>
+                <h3 className="board-project__head">
+                  <span>{(pg.projectId && projectNames.get(pg.projectId)) || t('archive.noProjectGroup')}</span>
+                  <span className="board-project__count">{t('common.items', { count: String(pg.works.length) })}</span>
+                </h3>
+                <ul className="archive-list">
+                  {pg.works.map((w) => (
+                    <ArchiveRow
+                      key={w.id}
+                      work={w}
+                      projectName={(w.project_id && projectNames.get(w.project_id)) || null}
+                      locale={locale}
+                      t={t}
+                      onRestore={restore}
+                      onDelete={remove}
+                    />
+                  ))}
+                </ul>
+              </div>
+            ))}
           </section>
         ))
       )}

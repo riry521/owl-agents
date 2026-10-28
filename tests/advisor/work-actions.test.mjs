@@ -35,7 +35,8 @@ async function setup(t, coreOptions = {}) {
     db.close();
   });
   const { conversation_id: conversationId } = await core.getActiveConversation();
-  async function respond(actions, text = "Please perform this Work operation.") {
+  // `followupActions` is the reply to the automatic follow-up turn that a failed action starts.
+  async function respond(actions, text = "Please perform this Work operation.", followupActions = null) {
     const accountId = db.get("SELECT id FROM connector_accounts WHERE owner_id = 'owner:default' AND provider = 'web'").id;
     const userMessageId = createUlid();
     const now = new Date().toISOString();
@@ -62,13 +63,19 @@ async function setup(t, coreOptions = {}) {
       JSON.stringify(actions),
       "```",
     ].join("\n"));
+    if (followupActions) advisorReplies.push(["Retrying.", "```owl-actions", JSON.stringify(followupActions), "```"].join("\n"));
     await core.advisorRespond(conversationId, userMessageId, { channel: "slack" });
 
-    assert.equal(advisorRequests.length, requestCount + 1, "the user message should run through the stub Advisor");
-    assert.ok(advisorRequests.at(-1).messages.some((message) => message.source === "user" && message.body === text));
+    // A failed action runs the one follow-up Advisor turn, so the stub is called once, or twice after a failure.
+    assert.ok([requestCount + 1, requestCount + 2].includes(advisorRequests.length), "the user message should run through the stub Advisor");
+    assert.ok(advisorRequests[requestCount].messages.some((message) => message.source === "user" && message.body === text));
     const message = db.get(
-      "SELECT id, body FROM messages WHERE conversation_id = ? AND source_message_id LIKE 'advisor:%' ORDER BY rowid DESC LIMIT 1",
+      `SELECT id, body FROM messages
+        WHERE conversation_id = ? AND source_message_id LIKE 'advisor:%'
+          AND rowid > (SELECT rowid FROM messages WHERE id = ?)
+        ORDER BY rowid ASC LIMIT 1`,
       conversationId,
+      userMessageId,
     );
     return { messageId: message.id, body: message.body };
   }
@@ -709,9 +716,10 @@ test("send_file from a Slack conversation publishes the verified file in outboun
   await writeFile(join(allowed, "b.txt"), "second");
   const payload = await send("slack", { path: join(allowed, "a.txt"), comment: "note" }, join(allowed, "b.txt"));
   assert.deepEqual(payload.outbound_files, [
-    { path: await realpath(join(allowed, "a.txt")), name: "a.txt", size: content.length, sha256: createHash("sha256").update(content).digest("hex"), comment: "note" },
-    { path: await realpath(join(allowed, "b.txt")), name: "b.txt", size: 6, sha256: createHash("sha256").update("second").digest("hex") },
+    { path: await realpath(join(allowed, "a.txt")), name: "a.txt", size: content.length, sha256: createHash("sha256").update(content).digest("hex"), comment: "note", index: 0 },
+    { path: await realpath(join(allowed, "b.txt")), name: "b.txt", size: 6, sha256: createHash("sha256").update("second").digest("hex"), index: 1 },
   ]);
+  assert.equal(payload.delivery_pending, true);
   assert.deepEqual(payload.suggested_actions, []);
   assert.equal(payload.reply, "reply");
   assert.equal(payload.action_results, "");
@@ -769,3 +777,215 @@ test("the Advisor system prompt separates required acceptance criteria from goal
   assert.match(prompt, /An unmet goal is reported with its reason and does not stop the Work/u);
   assert.match(prompt, /"目標:"/u);
 });
+
+function lastResponded(db) {
+  // The follow-up reply (followup_of_turn_id set) is a separate event; these tests read the source reply.
+  return JSON.parse(db.get("SELECT payload_json FROM events WHERE type = 'advisor.responded' AND json_extract(payload_json, '$.followup_of_turn_id') IS NULL ORDER BY rowid DESC LIMIT 1").payload_json);
+}
+
+test("a failed Work operation is recorded in action_failures and a successful reply has no such field", async (t) => {
+  const { db, core, respond } = await setup(t);
+  const workId = await createWorkInState(core, db, "running", "failure");
+
+  await respond([action("update_work", { work_id: workId, title: "Renamed" })]);
+  assert.equal(Object.hasOwn(lastResponded(db), "action_failures"), false);
+
+  await respond([action("send_work_instruction", { work_id: "01NOSUCHWORK", body: "hi" }), action("update_work", { work_id: workId })]);
+  const [missing, invalid] = lastResponded(db).action_failures;
+  assert.deepEqual({ ...missing, fingerprint: undefined }, {
+    index: 0, type: "send_work_instruction", status: "failed", code: "work_not_found", fingerprint: undefined,
+    message: missing.message, retryable: true, approval: false, target: "01NOSUCHWORK", details: { work_id: "01NOSUCHWORK" },
+  });
+  assert.match(missing.fingerprint, /^[0-9a-f]{64}$/u);
+  assert.match(missing.message, /01NOSUCHWORK/u);
+  assert.equal(invalid.index, 1);
+  assert.equal(invalid.code, "invalid_payload");
+  assert.equal(invalid.approval, true);
+  assert.equal(invalid.target, workId);
+});
+
+test("call_api failures keep the body out, treat 5xx as unknown and cut the message to 300 characters", async (t) => {
+  const results = [
+    { kind: "response", status: 502, body: { error: { code: "bad_gateway", message: "x" } } },
+    { kind: "response", status: 422, body: { error: { code: "validation_error", message: `sk-test_SECRETVALUE123 ${"y".repeat(400)}` } } },
+    { kind: "response", status: 404, body: {} },
+    { kind: "not_sent", error: "ECONNREFUSED" },
+  ];
+  const ctx = await setup(t, { callOwnApi: async () => results.shift() });
+  const failuresOf = async () => {
+    await ctx.respond([action("call_api", API_PAYLOAD)]);
+    return lastResponded(ctx.db).action_failures;
+  };
+
+  const [fiveXx] = await failuresOf();
+  assert.deepEqual([fiveXx.status, fiveXx.code, fiveXx.retryable, fiveXx.details.http_status, fiveXx.details.api_error_code], ["unknown", "result_unknown", false, 502, "bad_gateway"]);
+  assert.equal(JSON.parse(callApiEvents(ctx.db, "advisor.api_call_finished")[0].payload_json).outcome, "unknown");
+
+  const [fourXx] = await failuresOf();
+  assert.deepEqual([fourXx.status, fourXx.code, fourXx.retryable, fourXx.approval], ["failed", "validation_error", true, true]);
+  assert.ok(fourXx.message.length <= 300);
+  assert.equal(JSON.stringify(lastResponded(ctx.db)).includes("secret-model-name"), false);
+  assert.equal(JSON.stringify(lastResponded(ctx.db)).includes("SECRETVALUE123"), false);
+  assert.equal(Object.hasOwn(fourXx.details, "body"), false);
+  assert.match(fourXx.details.request_hash, /^[0-9a-f]{16}$/u);
+
+  assert.equal((await failuresOf())[0].code, "http_404");
+  assert.equal((await failuresOf())[0].code, "not_sent");
+
+  await ctx.respond([action("call_api", { method: "POST", path: "/api/v1/works", body: {}, reason: "r" }), action("call_api", { method: "GET" })]);
+  const [blocked, invalid] = lastResponded(ctx.db).action_failures;
+  assert.deepEqual([blocked.status, blocked.code, blocked.retryable], ["failed", "blocked", false]);
+  assert.deepEqual([invalid.code, invalid.retryable], ["invalid_payload", true]);
+});
+
+test("send_file marks a verified reply delivery_pending with each file's index and records Core refusals", async (t) => {
+  const { allowed, outside, send } = await sendFileSetup(t, (dir) => ({ dirs: [dir] }));
+  await writeFile(join(allowed, "a.txt"), "a");
+  await writeFile(join(outside, "o.txt"), "o");
+  await writeFile(join(allowed, ".env"), "x");
+  const payload = await send("slack", join(outside, "o.txt"), join(allowed, "a.txt"), join(allowed, ".env"), {});
+  assert.equal(payload.delivery_pending, true);
+  assert.deepEqual(payload.outbound_files.map((file) => [file.name, file.index]), [["a.txt", 1]]);
+  assert.deepEqual(payload.action_failures.map((f) => [f.index, f.type, f.code, f.status, f.retryable]), [
+    [0, "send_file", "outside", "failed", true],
+    [2, "send_file", "secret", "failed", false],
+    [3, "send_file", "invalid_payload", "failed", true],
+  ]);
+  assert.equal(payload.action_failures[0].details.rejection, "outside");
+
+  const none = await send("slack", join(outside, "o.txt"));
+  assert.equal(Object.hasOwn(none, "delivery_pending"), false);
+  const web = await send("web", join(allowed, "a.txt"));
+  assert.equal(web.action_failures[0].code, "unsupported_channel");
+});
+
+test("create_work and handoff_to_window failures are recorded with their codes", async (t) => {
+  const ctx = await setup(t);
+  const valid = { title: "T", summary: "S", size: "small", project_id: null };
+  await ctx.respond([
+    action("create_work", { title: "x" }),
+    action("create_work", { ...valid, project_id: 5 }),
+    action("create_work", { ...valid, prerequisite_work_ids: ["01ARZ3NDEKTSV4RRFFQ69G5FAV"] }),
+    action("handoff_to_window", {}),
+    action("handoff_to_window", { project_id: "01MISSINGPROJECT", summary: "s" }),
+  ]);
+  const failures = lastResponded(ctx.db).action_failures;
+  assert.deepEqual(failures.map((f) => [f.index, f.type, f.code]), [
+    [0, "create_work", "invalid_payload"], [1, "create_work", "not_found"], [2, "create_work", "not_found"],
+    [3, "handoff_to_window", "invalid_payload"], [4, "handoff_to_window", "no_project"],
+  ]);
+  assert.equal(failures[4].details.target_project_id, "01MISSINGPROJECT");
+  assert.equal(failures[0].target, "x");
+
+  ctx.core.startWork = async () => { throw new Error("cannot start"); };
+  await ctx.respond([action("create_work", { ...valid, title: "Unstarted" })]);
+  const [notStarted] = lastResponded(ctx.db).action_failures;
+  assert.deepEqual([notStarted.code, notStarted.retryable, notStarted.status], ["start_failed", false, "failed"]);
+  assert.match(notStarted.details.created_work_id, /./u);
+});
+
+function latestAdvisorBody(db, conversationId) {
+  return db.get(
+    "SELECT body FROM messages WHERE conversation_id = ? AND source_message_id LIKE 'advisor:%' ORDER BY rowid DESC LIMIT 1",
+    conversationId,
+  ).body;
+}
+
+// Makes the first call of a Core method fail with a version_conflict, then lets later calls through.
+function failFirstWithVersionConflict(core, method) {
+  const original = core[method].bind(core);
+  const calls = { total: 0 };
+  core[method] = async (...args) => {
+    calls.total += 1;
+    if (calls.total === 1) throw Object.assign(new Error("stale"), { code: "version_conflict" });
+    return original(...args);
+  };
+  return calls;
+}
+
+test("an update_work that failed with version_conflict is re-run when the follow-up repeats it unchanged", async (t) => {
+  const { db, core, respond } = await setup(t);
+  const workId = await createWorkInState(core, db, "running", "retry-same");
+  const calls = failFirstWithVersionConflict(core, "updateWork");
+  const update = action("update_work", { work_id: workId, title: "Renamed once" });
+
+  await respond([update], undefined, [update]);
+
+  assert.equal(calls.total, 2);
+  assert.equal(db.get("SELECT title FROM works WHERE id = ?", workId).title, "Renamed once");
+});
+
+test("an update_work retried with different content is held for approval and the Work is unchanged", async (t) => {
+  const { db, core, conversationId, respond } = await setup(t);
+  const workId = await createWorkInState(core, db, "running", "retry-changed");
+  const calls = failFirstWithVersionConflict(core, "updateWork");
+
+  await respond(
+    [action("update_work", { work_id: workId, title: "Approved title" })],
+    undefined,
+    [action("update_work", { work_id: workId, title: "Different title" })],
+  );
+
+  assert.equal(calls.total, 1);
+  assert.equal(db.get("SELECT title FROM works WHERE id = ?", workId).title, "Work retry-changed");
+  assert.match(latestAdvisorBody(db, conversationId), /承認した内容と変わった/u);
+});
+
+test("a cancel_work retried with only a different reason is held and the Work is not cancelled", async (t) => {
+  const { db, core, conversationId, respond } = await setup(t);
+  const workId = await createWorkInState(core, db, "running", "retry-cancel");
+  const calls = failFirstWithVersionConflict(core, "cancelWork");
+
+  await respond(
+    [action("cancel_work", { work_id: workId, reason: "No longer needed" })],
+    undefined,
+    [action("cancel_work", { work_id: workId, reason: "Some other reason" })],
+  );
+
+  assert.equal(calls.total, 1);
+  assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "running");
+  assert.match(latestAdvisorBody(db, conversationId), /承認した内容と変わった/u);
+});
+
+test("a reopening send_work_instruction retried twice by the follow-up is sent only once more", async (t) => {
+  const { db, core, respond } = await setup(t);
+  const workId = await createWorkInState(core, db, "completed", "retry-reopen");
+  const calls = failFirstWithVersionConflict(core, "postWorkInstruction");
+  const send = action("send_work_instruction", { work_id: workId, body: "Please extend it", reopen: true });
+
+  await respond([send], undefined, [send, send]);
+
+  // One failed attempt plus exactly one retry; the duplicate in the follow-up is held.
+  assert.equal(calls.total, 2);
+  const workConversation = core.getWork(workId).data.conversation_id;
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM messages WHERE conversation_id = ? AND body = 'Please extend it'", workConversation).n, 1);
+});
+
+test("a body-less DELETE call_api that was not sent is re-sent when the follow-up repeats the same method and path", async (t) => {
+  const results = [{ kind: "not_sent", error: "ECONNREFUSED" }, { kind: "response", status: 200, body: {} }];
+  let calls = 0;
+  const ctx = await setup(t, { callOwnApi: async () => { calls += 1; return results.shift(); } });
+  const del = action("call_api", { method: "DELETE", path: "/api/v1/settings/model-presets/01NOSUCHPRESET", reason: "Owner approved" });
+
+  await ctx.respond([del], undefined, [del]);
+
+  assert.equal(calls, 2);
+});
+
+for (const [name, firstResult] of [
+  ["an unknown result", { kind: "unknown", error: "timeout" }],
+  ["a 5xx response", { kind: "response", status: 503, body: { error: { code: "unavailable", message: "down" } } }],
+]) {
+  test(`a call_api with ${name} is not re-sent by the follow-up, even with a changed body`, async (t) => {
+    let calls = 0;
+    const ctx = await setup(t, { callOwnApi: async () => { calls += 1; return firstResult; } });
+    const changed = action("call_api", { ...API_PAYLOAD, body: { payload: { worker: "another-model" } } });
+
+    await ctx.respond([action("call_api", API_PAYLOAD)], undefined, [action("call_api", API_PAYLOAD)]);
+    assert.equal(calls, 1);
+    assert.match(latestAdvisorBody(ctx.db, ctx.conversationId), /前の結果がわからない/u);
+
+    await ctx.respond([action("call_api", API_PAYLOAD)], undefined, [changed]);
+    assert.equal(calls, 2, "only the new source turn's own call is sent; the changed follow-up body is not");
+  });
+}

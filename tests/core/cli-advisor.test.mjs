@@ -274,3 +274,25 @@ test("owl advisor in terminal mode exits with status ok when Ctrl+D is pressed w
   ]);
   assert.equal(result.status, "ok");
 });
+
+test("owl advisor waits for the follow-up reply and joins it to the first reply with a blank line", async (t) => {
+  const stub = await startStub(t, [], (origin, push) => {
+    push(responded(0, origin, { reply: "FIRST", turn_id: "turn-1", followup_pending: true }));
+    push(responded(0, origin, { reply: "OTHER FOLLOWUP", followup_of_turn_id: "turn-x" }));
+    push(responded(0, origin, { reply: "SECOND", turn_id: "turn-2", followup_of_turn_id: "turn-1" }));
+  });
+  const result = await runAdvisor(t, stub.port, "hello\n");
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /FIRST\n\nSECOND\n/u);
+  assert.doesNotMatch(result.stdout, /OTHER FOLLOWUP/u);
+});
+
+test("owl advisor prints only the first reply when the follow-up misses the deadline", async (t) => {
+  const stub = await startStub(t, [], (origin, push) => {
+    push(responded(0, origin, { reply: "FIRST", turn_id: "turn-1", followup_pending: true }));
+  });
+  const result = await runAdvisor(t, stub.port, "hello\n", ["--timeout", "1"]);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /FIRST\n/u);
+  assert.doesNotMatch(result.stderr, /did not respond/u);
+});

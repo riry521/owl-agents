@@ -1,8 +1,9 @@
 import { spawn } from "node:child_process";
 
 import { DECISION_TEXT_CHECK_OUTPUT_MAX_BYTES, type DecisionTextCheckInput } from "../../../packages/shared/dist/decision-explanation.js";
+import type { FinalReportCheckInput } from "../../../packages/shared/dist/final-report.js";
 import { getPluginsFilePath } from "./config.js";
-import { loadDecisionTextCheckSpecs, type PluginSpec } from "./plugin-manager.js";
+import { loadDecisionTextCheckSpecs, loadFinalReportTextCheckSpecs, type PluginSpec } from "./plugin-manager.js";
 
 /** Same shape as Core's DecisionTextCheck; the server loads Core at run time, so it does not import the type. */
 export interface DecisionTextChecker {
@@ -15,7 +16,7 @@ const INHERITED_ENV = ["PATH", "HOME", "LANG"] as const;
 
 const KILL_GRACE_MS = 2000;
 
-function runOnce(spec: PluginSpec, input: DecisionTextCheckInput, signal: AbortSignal, spawnFn: typeof spawn): Promise<unknown> {
+function runOnce(spec: PluginSpec, input: unknown, signal: AbortSignal, spawnFn: typeof spawn): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const env: Record<string, string> = {};
     for (const key of INHERITED_ENV) {
@@ -66,6 +67,11 @@ function runOnce(spec: PluginSpec, input: DecisionTextCheckInput, signal: AbortS
 
 /** One checker per enabled spec; each run starts the command once, writes the input JSON to its stdin and reads one JSON from its stdout. */
 export function createDecisionTextChecks(specs: readonly PluginSpec[], options: { spawnFn?: typeof spawn } = {}): DecisionTextChecker[] {
+  return createTextChecks<DecisionTextCheckInput>(specs, options);
+}
+
+/** The same command protocol for any check input: one JSON on stdin, one JSON on stdout. */
+export function createTextChecks<Input>(specs: readonly PluginSpec[], options: { spawnFn?: typeof spawn } = {}): { readonly name: string; run(input: Input, signal: AbortSignal): Promise<unknown> }[] {
   const spawnFn = options.spawnFn ?? spawn;
   return specs.filter((spec) => spec.enabled).map((spec) => ({
     name: spec.name,
@@ -81,6 +87,18 @@ export function createDecisionTextChecksFromEnv(env: NodeJS.ProcessEnv): Decisio
     return createDecisionTextChecks(loadDecisionTextCheckSpecs(filePath));
   } catch (error) {
     console.error(`[owl-server] decision_text_checks: ${error instanceof Error ? error.message : String(error)}`);
+    return [];
+  }
+}
+
+/** The final report checkers named in OWL_PLUGINS_FILE; a configuration error is logged and leaves none, so the server still starts. */
+export function createFinalReportTextChecksFromEnv(env: NodeJS.ProcessEnv): ReturnType<typeof createTextChecks<FinalReportCheckInput>> {
+  const filePath = getPluginsFilePath(env);
+  if (!filePath) return [];
+  try {
+    return createTextChecks<FinalReportCheckInput>(loadFinalReportTextCheckSpecs(filePath));
+  } catch (error) {
+    console.error(`[owl-server] final_report_text_checks: ${error instanceof Error ? error.message : String(error)}`);
     return [];
   }
 }

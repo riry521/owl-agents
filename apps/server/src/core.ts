@@ -1341,7 +1341,7 @@ export class MemoryCore implements CorePort {
   private toWorkDetail(work: StoredWork): WorkDetail {
     const { tasks: taskIds, ...detail } = work;
     const taskStates = taskIds.map((taskId) => this.tasks.get(taskId)?.status);
-    return { ...detail, prerequisite_wait: false, waiting_on: [], prerequisites: [], progress: progressFromTaskStates(work.id, taskStates) };
+    return { ...detail, prerequisite_wait: false, waiting_on: [], prerequisites: [], final_report: null, progress: progressFromTaskStates(work.id, taskStates) };
   }
 
   private toTaskSummary(task: StoredTask): TaskSummary {
@@ -1679,7 +1679,16 @@ function externalWorkDetail(response: unknown, workId: string, computedProgress:
     prerequisite_wait: data.prerequisite_wait === true,
     waiting_on: Array.isArray(data.waiting_on) ? data.waiting_on : [],
     prerequisites: Array.isArray(data.prerequisites) ? data.prerequisites : [],
+    final_report: finalReportOrNull(data.final_report),
   };
+}
+
+function finalReportOrNull(value: unknown): WorkDetail["final_report"] {
+  if (value === null || typeof value !== "object") return null;
+  const { summary, test_results, issues, created_at } = value as Record<string, unknown>;
+  return typeof summary === "string" && typeof test_results === "string" && typeof issues === "string" && typeof created_at === "string"
+    ? { summary, test_results, issues, created_at }
+    : null;
 }
 
 function displayNumberOrNull(value: unknown): number | null {

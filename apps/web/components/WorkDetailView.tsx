@@ -45,6 +45,7 @@ import { activeRunByTask, buildRunTree, isRunActive } from '../lib/agent-run-tre
 import { reviewNotesByTask } from '../lib/work-assurance.mjs';
 import { autoRecoveryBadge } from '../lib/auto-recovery.mjs';
 import { WorkAssurancePanel } from '@/components/WorkAssurancePanel';
+import { WorkFinalReportPanel } from '@/components/WorkFinalReportPanel';
 import { workDeliverables } from '../lib/work-deliverables.mjs';
 import { useLocale, type TFunction, type Locale } from '@/lib/i18n';
 import { WorkConversation } from '@/components/WorkConversation';
@@ -408,6 +409,8 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
             )}
             {operationError && <p className="error" role="alert">{operationError}</p>}
           </section>
+
+          <WorkFinalReportPanel state={work.state} finalReport={work.final_report} locale={locale} t={t} />
 
           {/* Conversation */}
           <section className="panel work-detail__conversation" aria-labelledby="sec-conversation">

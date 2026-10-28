@@ -27,3 +27,17 @@ export function groupArchivedByDay(works) {
   }
   return groups;
 }
+
+/**
+ * Works split by project: [{ projectId, works }] in `projectIds` order (the project list order).
+ * Works without a project, or with one missing from the list, go last under projectId null.
+ */
+export function groupByProject(works, projectIds) {
+  const known = new Set(projectIds);
+  const groups = [];
+  for (const projectId of [...projectIds, null]) {
+    const inGroup = works.filter((w) => (known.has(w.project_id) ? w.project_id : null) === projectId);
+    if (inGroup.length > 0) groups.push({ projectId, works: inGroup });
+  }
+  return groups;
+}

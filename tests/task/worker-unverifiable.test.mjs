@@ -196,6 +196,7 @@ test("an unverifiable report goes to the Manager on the same Task, which then ru
   assert.equal(brief.failure.kind, "acceptance_defect");
   assert.equal(brief.acceptance_defects[0].criterion, BAD_CRITERION, "the defect names the criterion");
   assert.equal(brief.acceptance_defects[0].reason, REASON, "the defect carries the Worker's reason");
+  assert.equal(brief.failure.reason, REASON, "the failure shown on the Decision carries the defects' own reason");
 
   const event = db.get("SELECT payload_json FROM events WHERE work_id = ? AND type = ?", workId, ACCEPTANCE_DEFECT_EVENT);
   assert.ok(event, "task.acceptance_defect_reported was recorded");

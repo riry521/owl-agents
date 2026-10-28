@@ -20,6 +20,11 @@ import { renderAdvisorWorkspaceNote } from "./advisor-workspace-note";
 import { appendAdvisorProjectCatalog } from "./advisor-project-context";
 import { appendAdvisorWorkCatalog } from "./advisor-work-context";
 import { ADVISOR_TEXT, formatAdvisorRateLimitReply } from "./advisor-text";
+import {
+  buildFollowupTurnText, loadSourceActionResults, loadSourceFailures, nextTurnReceives, shouldInsertFollowup,
+  type AdvisorActionFailure,
+} from "./advisor-followup";
+import { ADVISOR_FOLLOWUP_TURN_TEXT } from "@owl/shared";
 import type { IndexInjector } from "./memory/index-injector.js";
 import { searchQuery } from "./memory/memory-injector.js";
 import { ownerLanguage, type OwnerLanguage } from "./owner-language";
@@ -44,6 +49,9 @@ import type {
   RateLimitInfo,
   WebResearchCapture,
 } from "@owl/shared";
+
+/** provider_error.code of a turn.failed whose --resume found no conversation; mirrors RESUME_FAILED_CODE in agent-runtime, which core cannot import as a value. */
+const RESUME_FAILED_CODE = "conversation_not_found";
 
 /** Snapshot of the provider/harness/model/effort/system-prompt to (re)start an Advisor session with. */
 export interface AdvisorSettingsSnapshot {
@@ -124,6 +132,7 @@ interface AdvisorTurnRow {
   origin_channel_id: string | null;
   origin_ref: string | null;
   retry_count: number;
+  followup_of_turn_id: string | null;
   usage_json: string | null;
   error: string | null;
   queued_at: string;
@@ -462,6 +471,9 @@ export class AdvisorSessionRuntime {
   ): Promise<AdvisorSession | null> {
     try {
       if (!active.provider_session_id) throw new Error("The suspended Advisor session has no provider session id to resume.");
+      // Claude writes its transcript at the first user input, so an id Owl only chose with --session-id has nothing to resume until a turn has completed.
+      const answered = this.config.db.get<{ n: number }>(`SELECT 1 AS n FROM advisor_turns WHERE session_id = ? AND status = 'completed' LIMIT 1`, active.id);
+      if (!answered) throw new Error("The suspended Advisor session never completed a turn, so its provider session id has no transcript to resume.");
       this.requireSessionSupport();
       const directory = await this.withDirectoryLock(async () => {
         const built = await this.buildWorkingDirectory(active.conversation_id);
@@ -578,6 +590,51 @@ export class AdvisorSessionRuntime {
     await writeDone;
     void this.startTurnLoop(sessionId).catch((error) => console.error(`[owl-core] Advisor turn loop failed for ${sessionId}`, error));
     return id;
+  }
+
+  /**
+   * The session a reply of `sourceTurnId` gets a follow-up turn on (6.2), or null when none should be queued.
+   * A spontaneous reply has no turn row, so the conversation's latest turn names the session.
+   */
+  public followupSessionFor(input: { sourceTurnId: string; conversationId: string; failures: readonly AdvisorActionFailure[] }): string | null {
+    const db = this.config.db;
+    const source = db.get<{ session_id: string; followup_of_turn_id: string | null }>(
+      "SELECT session_id, followup_of_turn_id FROM advisor_turns WHERE id = ?", input.sourceTurnId,
+    );
+    const sessionId = source?.session_id ?? db.get<{ session_id: string }>(
+      "SELECT session_id FROM advisor_turns WHERE conversation_id = ? ORDER BY queued_at DESC, rowid DESC LIMIT 1", input.conversationId,
+    )?.session_id ?? null;
+    const insert = shouldInsertFollowup({
+      failures: input.failures,
+      sourceIsFollowup: (source?.followup_of_turn_id ?? null) !== null,
+      followupExists: db.get("SELECT 1 FROM advisor_turns WHERE followup_of_turn_id = ?", input.sourceTurnId) !== undefined,
+      nextTurnReceives: nextTurnReceives(db, input.sourceTurnId, MAX_TURN_RETRIES),
+      sessionFound: sessionId !== null,
+    });
+    return insert ? sessionId : null;
+  }
+
+  /** Called inside the reply's write transaction; returns the new turn and its session, or null when none was queued. */
+  public insertFollowupTurn(
+    transaction: CoreWriteLaneTransaction,
+    input: { sourceTurnId: string; conversationId: string; replyMessageId: string; origin: AdvisorTurnRequest["origin"]; failures: readonly AdvisorActionFailure[] },
+  ): { turnId: string; sessionId: string } | null {
+    const sessionId = this.followupSessionFor(input);
+    if (sessionId === null) return null;
+    const turnId = createUlid();
+    const inserted = transaction.run(
+      `INSERT OR IGNORE INTO advisor_turns
+         (id, session_id, conversation_id, user_message_id, status, origin_channel, origin_channel_id, origin_ref, queued_at, followup_of_turn_id)
+       VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?)`,
+      turnId, sessionId, input.conversationId, input.replyMessageId,
+      input.origin.channel, input.origin.channel_id ?? null, input.origin.ref ?? null, utcNow(), input.sourceTurnId,
+    );
+    return inserted.changes > 0 ? { turnId, sessionId } : null;
+  }
+
+  /** After the write has committed: wakes the turn loop for the session the follow-up was queued on. */
+  public kickFollowupTurn(sessionId: string): void {
+    void this.startTurnLoop(sessionId).catch((error) => console.error(`[owl-core] Advisor turn loop failed for ${sessionId}`, error));
   }
 
   /** Whether this runtime holds a running driver for the session, or is still starting one. */
@@ -1152,22 +1209,35 @@ export class AdvisorSessionRuntime {
     // finished and a turn recovered after a restart both still carry that reply's action results.
     // Keyed by the preceding turn, not the conversation's latest reply: when that turn left no reply
     // (failed, dropped), an older reply's results were already handed over and must not come back.
-    const previousReply = this.config.db.get<{ payload_json: string }>(
-      `SELECT payload_json FROM events WHERE type = 'advisor.responded'
-         AND json_extract(payload_json, '$.turn_id') = (
-           SELECT id FROM advisor_turns WHERE conversation_id = ? AND (queued_at, rowid) < (SELECT queued_at, rowid FROM advisor_turns WHERE id = ?)
-           ORDER BY queued_at DESC, rowid DESC LIMIT 1)
-       ORDER BY rowid DESC LIMIT 1`,
-      turnRow.conversation_id, turnRow.id,
-    );
-    let actionResults = "";
-    try {
-      const value = previousReply ? JSON.parse(previousReply.payload_json).action_results : "";
-      if (typeof value === "string") actionResults = value;
-    } catch { /* an unreadable payload just means no results to hand over */ }
-    const turnRequest = actionResults
-      ? { ...loadedRequest, text: `<owl-action-results>\n${actionResults}\n</owl-action-results>\n\n${loadedRequest.text}` }
-      : loadedRequest;
+    let turnRequest = loadedRequest;
+    if (turnRow.followup_of_turn_id !== null) {
+      // The source reply is named by the row, not found by position: a spontaneous source has no turn row.
+      turnRequest = {
+        ...loadedRequest,
+        text: buildFollowupTurnText(
+          loadSourceActionResults(this.config.db, turnRow.followup_of_turn_id),
+          loadSourceFailures(this.config.db, turnRow.followup_of_turn_id),
+        ),
+      };
+    } else {
+      const previousReply = this.config.db.get<{ payload_json: string }>(
+        `SELECT payload_json FROM events WHERE type = 'advisor.responded'
+           AND json_extract(payload_json, '$.turn_id') = (
+             SELECT id FROM advisor_turns WHERE conversation_id = ? AND (queued_at, rowid) < (SELECT queued_at, rowid FROM advisor_turns WHERE id = ?)
+             ORDER BY queued_at DESC, rowid DESC LIMIT 1)
+         ORDER BY rowid DESC LIMIT 1`,
+        turnRow.conversation_id, turnRow.id,
+      );
+      let actionResults = "";
+      try {
+        const previousTurnId = previousReply ? JSON.parse(previousReply.payload_json).turn_id : null;
+        // Includes the connector's delivery failures, which a queued turn receives in place of a follow-up (6.5).
+        if (typeof previousTurnId === "string") actionResults = loadSourceActionResults(this.config.db, previousTurnId);
+      } catch { /* an unreadable payload just means no results to hand over */ }
+      turnRequest = actionResults
+        ? { ...loadedRequest, text: `<owl-action-results>\n${actionResults}\n</owl-action-results>\n\n${loadedRequest.text}` }
+        : loadedRequest;
+    }
 
     const driver = slot.driver;
     if (!driver || slot.sessionId !== sessionId) {
@@ -1346,6 +1416,10 @@ export class AdvisorSessionRuntime {
     if (cached) {
       return cached;
     }
+    if (turnRow.followup_of_turn_id !== null) {
+      // user_message_id is the source reply, not an Owner message: no attachments, status answers or handoffs.
+      return { turn_id: turnRow.id, text: ADVISOR_FOLLOWUP_TURN_TEXT, origin: this.resolveTurnOrigin(turnRow), attachment_paths: [] };
+    }
     const message = this.config.db.get<{ body: string }>(
       `SELECT body FROM messages WHERE id = ?`,
       turnRow.user_message_id,
@@ -1474,7 +1548,15 @@ export class AdvisorSessionRuntime {
           if (event.turn_id !== turnRow.id) {
             break;
           }
-          if (slot.unconfirmedResume === sessionId) slot.unconfirmedResume = null;
+          const resumeUnconfirmed = slot.unconfirmedResume === sessionId;
+          if (resumeUnconfirmed) slot.unconfirmedResume = null;
+          // The failed turn ran no owl-actions (they are read only from turn.completed), so resending it on a fresh session cannot run an action twice.
+          if (resumeUnconfirmed && event.provider_error?.code === RESUME_FAILED_CODE) {
+            console.warn(`[owl-core] Resumed Advisor session ${sessionId} found no conversation to resume: ${event.error}`);
+            slot.pendingHistoryBlock = this.buildHistoryBlock({ window_id: this.windowIdOfSession(sessionId), conversation_id: turnRow.conversation_id });
+            await this.config.sessionManager.endSession(sessionId, "resume_failed");
+            return "resume_failed";
+          }
           const rateLimit = rateLimitInfoFromEvent(event);
           if (rateLimit !== null) {
             await this.failRateLimitedTurn(sessionId, turnRow, event.error, rateLimit, event.provider_error);

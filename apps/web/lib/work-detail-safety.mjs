@@ -30,6 +30,13 @@ function nullableString(value) {
   return typeof value === 'string' ? value : null;
 }
 
+function normalizeFinalReport(value) {
+  if (!value || typeof value !== 'object') return null;
+  const { summary, test_results, issues, created_at } = value;
+  if ([summary, test_results, issues, created_at].some((field) => typeof field !== 'string')) return null;
+  return { summary, test_results, issues, created_at };
+}
+
 function normalizeAdvisorBacklogEntries(value) {
   if (!Array.isArray(value)) return [];
   return value
@@ -365,6 +372,7 @@ function normalizeWorkDetailDataUnsafe(value, requestedWorkId) {
       conversation_id: nullableString(rawWork.conversation_id),
       advisor_backlog: normalizeAdvisorBacklog(rawWork.advisor_backlog),
       prerequisites: Array.isArray(rawWork.prerequisites) ? rawWork.prerequisites : [],
+      final_report: normalizeFinalReport(rawWork.final_report),
       prerequisite_wait: rawWork.prerequisite_wait === true,
     },
     tasks: /** @type {WorkDetailView['tasks']} */ (tasks),
@@ -437,6 +445,7 @@ export function normalizeWorkDetailData(value, requestedWorkId = 'unknown-work')
         conversation_id: null,
         advisor_backlog: null,
         prerequisites: [],
+        final_report: null,
         prerequisite_wait: false,
       },
       tasks: [],

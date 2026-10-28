@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   Client,
+  DiscordAPIError,
+  RateLimitError,
   GatewayIntentBits,
   Partials,
   Events,
@@ -20,10 +22,12 @@ import {
   parseDecisionButtonId,
   parseOutboundFiles,
   readOutboundFile,
+  reportAdvisorDelivery,
   resolveDecisionButtonTarget,
   submitDecisionAnswer,
   uploadAttachment,
   FileConnectorStateStore,
+  type OutboundFileResult,
   type PendingDecision,
 } from "@owl/plugin-sdk/shared";
 import type { ChannelAdmin, OwlEvent } from "@owl/plugin-sdk";
@@ -404,10 +408,14 @@ export class DiscordConnector {
       const language = await this.core.language();
       const t = connectorText(language);
       const lines: string[] = [];
+      const results: OutboundFileResult[] = [];
       for (const file of parseOutboundFiles(event.payload.outbound_files)) {
+        const index = file.index ?? -1;
         const read = await readOutboundFile(file);
         if (!read.ok) {
-          lines.push(t.fileSendFailed(file.name, read.reason === "changed" ? t.fileSendChanged : t.fileSendUnreadable, ""));
+          const message = t.fileSendFailed(file.name, read.reason === "changed" ? t.fileSendChanged : t.fileSendUnreadable, "");
+          lines.push(message);
+          results.push({ index, outcome: "failed", code: read.reason, platform_error: null, message });
           continue;
         }
         try {
@@ -417,10 +425,15 @@ export class DiscordConnector {
             allowedMentions: NO_MENTIONS,
           });
           lines.push(t.fileSent(file.name, formatBytes(file.size)));
+          results.push({ index, outcome: "sent" });
         } catch (error) {
-          lines.push(t.fileSendFailed(file.name, formatIntegrationError("Discord", error, language), discordSendHint(error, t)));
+          const message = t.fileSendFailed(file.name, formatIntegrationError("Discord", error, language), discordSendHint(error, t));
+          lines.push(message);
+          results.push({ index, message, ...classifyDiscordUploadError(error) });
         }
       }
+      const notice = await reportAdvisorDelivery(this.core, event, results);
+      if (notice) lines.push(notice);
       const text = formatAdvisorReply(appendFileResults(reply, event.payload.action_results, lines), event.payload.suggested_actions, language);
       for (const chunk of splitAtParagraphs(text, this.charLimit)) {
         await channel.send({ content: chunk, allowedMentions: NO_MENTIONS });
@@ -592,6 +605,19 @@ function splitAtParagraphs(text: string, limit: number): string[] {
   }
   if (remaining) chunks.push(remaining);
   return chunks;
+}
+
+type UploadFailure = Required<Pick<OutboundFileResult, "outcome" | "code" | "platform_error">>;
+
+/** Failed only when Discord plainly refused the send (4xx); a 5xx, a timeout or an unrecognised error may have gone through. */
+export function classifyDiscordUploadError(error: unknown): UploadFailure {
+  if (error instanceof RateLimitError || (error instanceof DiscordAPIError && error.status === 429)) {
+    return { outcome: "failed", code: "upload_rate_limited", platform_error: null };
+  }
+  if (error instanceof DiscordAPIError && error.status >= 400 && error.status < 500) {
+    return { outcome: "failed", code: "upload_rejected", platform_error: String(error.code).slice(0, 100) };
+  }
+  return { outcome: "unknown", code: "upload_unknown", platform_error: null };
 }
 
 function discordSendHint(error: unknown, t: ReturnType<typeof connectorText>): string {

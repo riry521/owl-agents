@@ -139,8 +139,15 @@ test("the next Advisor turn's input carries the previous reply's owl-actions res
       ]),
       "```",
     ].join("\n"),
-    "Second reply.",
+    // The failed pause_work queues a follow-up turn, which fails the same way and is stopped.
+    [
+      "Retrying.",
+      "```owl-actions",
+      JSON.stringify([{ type: "pause_work", description: "Pause", payload: { work_id: "no-such-work-id" } }]),
+      "```",
+    ].join("\n"),
     "Third reply.",
+    "Fourth reply.",
   ];
   let currentTurn;
   let readySent = false;
@@ -187,22 +194,32 @@ test("the next Advisor turn's input carries the previous reply's owl-actions res
   assert.ok(workId, "the create_work action should have created the Work");
   const shownToOwner = advisorMessage().body;
 
-  const second = await insertMessage(db, conversation.conversation_id, webAccount.id, "Second request");
-  await core.advisorRespond(conversation.conversation_id, second, { channel: "web" });
+  // The failed pause_work queued a follow-up turn; the results reach it as the next turn's input.
   await waitFor(() => sentTurns.length === 2);
-  const secondText = sentTurns[1].text;
+  const followupText = sentTurns[1].text;
   const noticeLines = shownToOwner.split("\n").filter((line) => line.includes(workId) || line.includes("no-such-work-id"));
   assert.ok(noticeLines.length >= 1, "the Owner-facing reply reports the results");
-  for (const line of noticeLines) assert.ok(secondText.includes(line), `the next turn carries: ${line}`);
+  for (const line of noticeLines) assert.ok(followupText.includes(line), `the follow-up carries: ${line}`);
   assert.ok(noticeLines.some((line) => !line.includes(workId)), "the failed pause_work notice is a separate line");
-  assert.ok(secondText.indexOf("<owl-action-results>") < secondText.indexOf("Second request"));
+  assert.ok(followupText.indexOf("<owl-action-results>") < followupText.indexOf("<owl-action-failures"));
   assert.equal(sentTurns[0].text.includes("owl-action-results"), false);
+  await waitFor(() => db.get("SELECT 1 AS x FROM advisor_turns WHERE id = ? AND status = 'completed'", sentTurns[1].turn_id));
 
+  // The Owner's next turn follows the follow-up and carries the follow-up's own results.
+  const followupReply = db.get("SELECT body FROM messages WHERE conversation_id = ? AND source_message_id LIKE ?", conversation.conversation_id, `advisor:%:${sentTurns[1].turn_id}`).body;
+  const second = await insertMessage(db, conversation.conversation_id, webAccount.id, "Second request");
+  await core.advisorRespond(conversation.conversation_id, second, { channel: "web" });
+  await waitFor(() => sentTurns.length === 3);
+  const secondText = sentTurns[2].text;
+  const followupLines = followupReply.split("\n").filter((line) => line.includes("no-such-work-id"));
+  assert.ok(followupLines.length >= 1, "the follow-up reply reports its own failure");
+  for (const line of followupLines) assert.ok(secondText.includes(line), `the next turn carries: ${line}`);
+  assert.ok(secondText.indexOf("<owl-action-results>") < secondText.indexOf("Second request"));
   await waitFor(() => db.get("SELECT 1 AS x FROM advisor_turns WHERE id = ? AND status = 'completed'", currentTurn.turn_id));
   // A turn that left no reply event must not make the first reply's results come back.
   await db.createWriteLane().transact((tx) => tx.run("DELETE FROM events WHERE type = 'advisor.responded' AND json_extract(payload_json, '$.turn_id') = ?", currentTurn.turn_id));
   const third = await insertMessage(db, conversation.conversation_id, webAccount.id, "Third request");
   await core.advisorRespond(conversation.conversation_id, third, { channel: "web" });
-  await waitFor(() => sentTurns.length === 3);
-  assert.equal(sentTurns[2].text.includes("owl-action-results"), false, "results already handed over are not sent again after a reply without actions");
+  await waitFor(() => sentTurns.length === 4);
+  assert.equal(sentTurns[3].text.includes("owl-action-results"), false, "results already handed over are not sent again after a reply without actions");
 });

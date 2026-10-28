@@ -765,3 +765,33 @@ test("both drivers send attachment paths as a JSON array in <owl-attachments>, b
   const content = JSON.parse(line).message.content;
   assertTagged(typeof content === "string" ? content : content[0].text);
 });
+
+test("Claude result errors[] decide the failure text, and a missing conversation is marked as a resume failure", async (t) => {
+  const failedWith = async (errors) => {
+    const driver = await createClaudeDriver(t, [[{ type: "result", subtype: "error_during_execution", is_error: true, errors }]]);
+    await driver.send({ turn_id: "t-err", text: "hi" });
+    return (await collectEvents(driver, settled)).find((event) => event.type === "turn.failed");
+  };
+  const missing = await failedWith(["No conversation found with session ID: 11111111-2222-3333-4444-555555555555"]);
+  assert.doesNotMatch(missing?.error ?? "", /原因不明/u);
+  assert.match(missing?.error ?? "", /会話が見つからず/u);
+  assert.equal(missing?.provider_error?.code, "conversation_not_found");
+  assert.match(missing?.provider_error?.message ?? "", /No conversation found/u);
+
+  const other = await failedWith(["Connection refused (ECONNREFUSED)"]);
+  assert.doesNotMatch(other?.error ?? "", /原因不明/u);
+  assert.doesNotMatch(other?.error ?? "", /会話が見つからず/u);
+  assert.notEqual(other?.provider_error?.code, "conversation_not_found");
+  assert.match(other?.provider_error?.message ?? "", /ECONNREFUSED/u);
+
+  const unclassified = await failedWith(["Unexpected internal failure"]);
+  assert.doesNotMatch(unclassified?.error ?? "", /原因不明/u);
+  assert.match(unclassified?.error ?? "", /Unexpected internal failure/u);
+  assert.notEqual(unclassified?.provider_error?.code, "conversation_not_found");
+
+  const driver = await createClaudeDriver(t, [[{ type: "result", subtype: "success", is_error: true, errors: ["No conversation found with session ID: x"] }]]);
+  await driver.send({ turn_id: "t-err2", text: "hi" });
+  const flagged = (await collectEvents(driver, settled)).find((event) => event.type === "turn.failed");
+  assert.match(flagged?.error ?? "", /会話が見つからず/u);
+  assert.equal(flagged?.provider_error?.code, "conversation_not_found");
+});

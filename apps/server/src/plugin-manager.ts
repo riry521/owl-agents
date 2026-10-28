@@ -23,7 +23,7 @@ export class PluginConfigError extends Error {
   }
 }
 
-const topLevelFields = new Set(["plugins", "decision_text_checks"]);
+const topLevelFields = new Set(["plugins", "decision_text_checks", "final_report_text_checks"]);
 const pluginFields = new Set(["name", "command", "args", "cwd", "enabled", "env"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -65,10 +65,19 @@ export function loadPluginSpecs(filePath: string): PluginSpec[] {
 
 /** The decision_text_checks of the plugin configuration, in the same shape as plugins; [] when the key is absent. */
 export function loadDecisionTextCheckSpecs(filePath: string): PluginSpec[] {
-  const parsed = readConfigFile(filePath);
-  if (parsed.decision_text_checks === undefined) return [];
-  if (!Array.isArray(parsed.decision_text_checks)) throw new PluginConfigError("decision_text_checks must be an array.", "decision_text_checks");
-  return readSpecs(parsed.decision_text_checks, "decision_text_checks", filePath);
+  return loadCheckSpecs(filePath, "decision_text_checks");
+}
+
+/** The final_report_text_checks of the plugin configuration, in the same shape as plugins; [] when the key is absent. */
+export function loadFinalReportTextCheckSpecs(filePath: string): PluginSpec[] {
+  return loadCheckSpecs(filePath, "final_report_text_checks");
+}
+
+function loadCheckSpecs(filePath: string, key: "decision_text_checks" | "final_report_text_checks"): PluginSpec[] {
+  const entries = readConfigFile(filePath)[key];
+  if (entries === undefined) return [];
+  if (!Array.isArray(entries)) throw new PluginConfigError(`${key} must be an array.`, key);
+  return readSpecs(entries, key, filePath);
 }
 
 function readSpecs(entries: unknown[], key: string, filePath: string): PluginSpec[] {

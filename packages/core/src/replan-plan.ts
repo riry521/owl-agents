@@ -1,6 +1,7 @@
 import { PrerequisiteValidationError, validateWaitFor, type PlanWaitFor } from "../../shared/dist/prerequisite.js";
 import { DEFAULT_PLAN_QUALITY_SETTINGS, type PlanQualitySettings } from "../../shared/dist/plan-quality-settings.js";
 import { criterionRequirement, isManagerCriterion, type CriteriaRelaxation, type StoredAcceptanceCriterion } from "../../shared/dist/acceptance-criteria.js";
+import type { AcceptanceDefect } from "../../shared/dist/acceptance-defect.js";
 import { evaluateCriteriaRelaxation } from "./plan-quality";
 import type { CriterionCheck, RuleApplicability, TaskPlanItem } from "./types";
 
@@ -151,6 +152,8 @@ export interface ReplanOptions {
   /** True for a replan Core started by itself (automatic recovery, no Owner request): it may loosen Manager-made criteria only. */
   readonly automatic?: boolean;
   readonly qualitySettings?: PlanQualitySettings;
+  /** Task id -> its pending acceptance defects. A Manager criterion they name that the rewrite changed gets its criteria_relaxations entry from Core when the Manager left it out. */
+  readonly acceptanceDefects?: ReadonlyMap<string, readonly AcceptanceDefect[]>;
   /** Ready Task id -> its type. Such a Task may be rewritten in place with its existing id (Owner instruction replans only). */
   readonly revisable?: ReadonlyMap<string, string>;
 }
@@ -197,6 +200,7 @@ export function validateReplan(
     return { errors: repeated.map(([id]) => `Task ${labelOf(id)}: ${SAME_APPROACH_REASON}`) };
   }
   const required = options.acceptanceRevisionRequired ?? new Map<string, string>();
+  if (options.acceptanceDefects !== undefined && options.currentCriteria !== undefined) fillDefectRelaxations(plan, required, options.acceptanceDefects, options.currentCriteria);
   const labelOf = (id: string): string => snapshot.tasks.find((task) => task.id === id)?.manager_task_id ?? id;
   const errors: string[] = [];
   for (const [id, current] of required) {
@@ -214,6 +218,38 @@ export function validateReplan(
   }
   errors.push(...criteriaOwnershipErrors(plan, options, required, labelOf));
   return errors.length > 0 ? { errors } : plan;
+}
+
+/**
+ * The Manager rewrote a Manager-made criterion that the Task's acceptance defects name but left out its criteria_relaxations entry:
+ * Core writes the entry (reason = the defect's reason, keeps = the new check) so validation does not reject on that formality.
+ * Owner-made (or origin-less) criteria and criteria no defect names are never filled; the blocking quality checks still run on the new text.
+ */
+function fillDefectRelaxations(
+  plan: ReplanPlan,
+  required: ReadonlyMap<string, string>,
+  defects: ReadonlyMap<string, readonly AcceptanceDefect[]>,
+  currentCriteria: ReadonlyMap<string, readonly StoredAcceptanceCriterion[]>,
+): void {
+  for (const id of required.keys()) {
+    const revision = plan.revisions.get(id);
+    const named = defects.get(id) ?? [];
+    if (revision === undefined || named.length === 0) continue;
+    const existing = revision.criteria_relaxations ?? [];
+    const added: CriteriaRelaxation[] = [];
+    for (const before of (currentCriteria.get(id) ?? []).filter(isManagerCriterion)) {
+      if (existing.some((entry) => entry.criterion_id === before.id)) continue;
+      const after = (revision.acceptance_criteria ?? []).find((criterion) => criterion.id === before.id);
+      if (after === undefined || (after.text === before.text && after.check === before.check)) continue;
+      const defect = named.find((entry) => (entry.criterion_id !== "" ? entry.criterion_id === before.id : entry.criterion.trim() === before.text.trim()));
+      if (defect === undefined) continue;
+      const reason = defect.reason.trim();
+      const keeps = after.check.trim() !== "" ? after.check.trim() : after.text.trim();
+      if (reason === "" || keeps === "") continue;
+      added.push({ criterion_id: before.id, reason, keeps });
+    }
+    if (added.length > 0) (plan.revisions as Map<string, TaskRevision>).set(id, { ...revision, criteria_relaxations: [...existing, ...added] });
+  }
 }
 
 /** What an automatic replan may do to criteria: loosen Manager-made ones (recorded), never touch the Owner's (or origin-less) ones. */

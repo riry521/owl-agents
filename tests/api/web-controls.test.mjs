@@ -217,6 +217,7 @@ const { WorkDetailView } = compile(join(repoRoot, 'apps/web/components/WorkDetai
 '@/components/WorkPrerequisitesSection': { WorkPrerequisitesSection: () => null },
   '@/components/ActivityLog': { WorkPostMergeEvents: () => null },
   '@/components/WorkAssurancePanel': { WorkAssurancePanel: () => null },
+'@/components/WorkFinalReportPanel': { WorkFinalReportPanel: () => null },
   '@/components/WorkSummaryHistory': { WorkSummaryHistory: () => null },
   '@/components/CoreActivityRows': { CoreActivityRows: () => null },
   '@/lib/i18n': i18n,

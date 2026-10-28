@@ -26,7 +26,7 @@ import type {
   TokenUsage,
 } from "./types.js";
 import { readClaudeCompactionSummaries, waitForCompactionSummary } from "./compaction-summary.js";
-import { classifyProviderFailure, formatProviderError, sessionFailureMessage, turnFailureProviderError } from "./provider-error.js";
+import { classifyProviderFailure, formatProviderError, isConversationNotFound, RESUME_FAILED_CODE, sessionFailureMessage, turnFailureProviderError, withProviderDetail } from "./provider-error.js";
 import { claudeRateLimitEvidence } from "./rate-limit.js";
 import { buildAgentPermissionArgs, externalJsonBlock, extractWebResearchCapture, reapProcessGroup, type WebResearchTool } from "@owl/shared";
 
@@ -91,6 +91,8 @@ interface ClaudeStreamLine {
   readonly is_error?: unknown;
   readonly api_error_status?: unknown;
   readonly error?: unknown;
+  /** Messages the CLI lists for subtype=error_during_execution. */
+  readonly errors?: unknown;
   readonly usage?: ClaudeStreamUsage;
   readonly compact_metadata?: ClaudeCompactMetadata;
 }
@@ -160,10 +162,21 @@ function resultErrorDetail(record: ClaudeStreamLine): unknown {
   return status === undefined ? { message } : { status, message };
 }
 
+// errors[] carries the real cause (e.g. "No conversation found with session ID")
+// when the CLI ends a turn with subtype=error_during_execution.
+function resultErrorsText(record: ClaudeStreamLine): string {
+  return Array.isArray(record.errors)
+    ? record.errors.filter((item): item is string => typeof item === "string" && item.length > 0).join("\n")
+    : "";
+}
+
 function classifiedClaudeTurnFailure(record: ClaudeStreamLine, turnId: string, lastRateLimitEvent: unknown): SessionEvent {
   const detail = resultErrorDetail(record);
   const detailRecord = isRecord(detail) ? detail : null;
-  const message = typeof record.result === "string" && record.result.length > 0
+  const errorsText = resultErrorsText(record);
+  const message = errorsText.length > 0
+    ? errorsText
+    : typeof record.result === "string" && record.result.length > 0
     ? record.result
     : typeof detailRecord?.message === "string"
       ? detailRecord.message
@@ -173,7 +186,11 @@ function classifiedClaudeTurnFailure(record: ClaudeStreamLine, turnId: string, l
     : typeof detailRecord?.status === "number" && Number.isInteger(detailRecord.status)
       ? detailRecord.status
       : undefined;
-  const code = typeof detailRecord?.type === "string" ? detailRecord.type : undefined;
+  const code = isConversationNotFound(errorsText)
+    ? RESUME_FAILED_CODE
+    : typeof detailRecord?.type === "string"
+      ? detailRecord.type
+      : typeof record.subtype === "string" && record.subtype !== "success" ? record.subtype : undefined;
   const classification = classifyProviderFailure("claude", {
     exit_code: 0,
     signal: null,
@@ -190,7 +207,10 @@ function classifiedClaudeTurnFailure(record: ClaudeStreamLine, turnId: string, l
   return {
     type: "turn.failed",
     turn_id: turnId,
-    error: sessionFailureMessage(classification),
+    // A message the classifier does not recognise still shows the CLI's own words, not "unknown exit".
+    error: errorsText.length > 0
+      ? withProviderDetail({ ...classification, message: sessionFailureMessage(classification) })
+      : sessionFailureMessage(classification),
     ...(classification.rate_limit !== undefined ? { rate_limit: classification.rate_limit } : {}),
     provider_error: classification.provider_error,
   };
@@ -812,14 +832,11 @@ export class AdvisorSessionDriver implements ProviderSession {
         }
         return [{ type: "turn.completed", turn_id: turnId, reply, usage }];
       }
-      const errorText = formatProviderError(
-        "claude",
-        record.error ?? record.result ?? `advisor turn failed: subtype=${String(record.subtype)}`,
-      );
       this.currentTurnId = null;
       this.turnTextParts = [];
+      const failure = classifiedClaudeTurnFailure(record, turnId, this.lastRateLimitEvent);
       this.lastRateLimitEvent = null;
-      return [{ type: "turn.failed", turn_id: turnId, error: errorText, provider_error: turnFailureProviderError("claude", { exit_code: 0, error: record.error ?? record.result ?? `advisor turn failed: subtype=${String(record.subtype)}`, ...(typeof record.subtype === "string" ? { harness_code: record.subtype } : {}) }) }];
+      return [failure];
     }
 
     if (typeof record.type !== "string" || record.type.length === 0) {

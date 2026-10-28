@@ -6,6 +6,7 @@ import type { KnowledgeStoragePersistence } from "./knowledge-location.js";
 import type { DetectedProcessSkillsPack, ProcessSkillsFileSystem } from "./process-skills-pack.js";
 import type { NormalizedLesson } from "./final-verdict.js";
 import type { DesignBlockedReport } from "../../shared/dist/design-blocked.js";
+import type { FinalReportCheckInput } from "../../shared/dist/final-report.js";
 import type { DecisionCauseKind, DecisionTextCheckInput } from "../../shared/dist/decision-explanation.js";
 import type { WorkPrerequisiteView } from "../../shared/dist/work-prerequisite.js";
 import type { PlanWaitFor } from "../../shared/dist/prerequisite.js";
@@ -737,6 +738,8 @@ export interface DecisionTextCheck {
 }
 
 export interface CoreOptions {
+  /** Checkers called in order on the final report text of a completed Work; a problem has the model rewrite it once. None unless set. */
+  readonly finalReportTextChecks?: readonly { readonly name: string; run(input: FinalReportCheckInput, signal: AbortSignal): Promise<unknown> }[];
   /** Checkers called in order on each explanation's texts before it is stored. None unless set. */
   readonly decisionTextChecks?: readonly DecisionTextCheck[];
   /** Skill the Lead Designer uses for screen design Tasks; null or unset names none. */
@@ -997,6 +1000,8 @@ export interface WorkDetail extends WorkSummary {
   readonly advisor_backlog: WorkAdvisorBacklog | null;
   /** In the order the Owner listed them. */
   readonly prerequisites: readonly WorkPrerequisiteView[];
+  /** The summary written when the Work completed; null while it is not completed or when none was written. */
+  readonly final_report: { readonly summary: string; readonly test_results: string; readonly issues: string; readonly created_at: string } | null;
 }
 
 export interface WorkListQuery extends ListQuery {

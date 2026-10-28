@@ -9,6 +9,8 @@ import type {
   SkillFeedback,
   DecisionExplanationRequest,
   DecisionExplanationRunResult,
+  FinalReportRequest,
+  FinalReportRunResult,
 } from "@owl/shared";
 import type { TestSetupInvestigationRequest, TestSetupInvestigationRunResult } from "./test-setup-investigation";
 import type { ProjectInvestigationRequest, ProjectInvestigationRunResult } from "./project-investigation";
@@ -69,4 +71,5 @@ export interface RuntimeAgentRunner extends CoreAgentRunner {
   runProjectInvestigation?(request: ProjectInvestigationRequest): Promise<ProjectInvestigationRunResult>;
   runTestSetupInvestigation?(request: TestSetupInvestigationRequest): Promise<TestSetupInvestigationRunResult>;
   runDecisionExplanation?(request: DecisionExplanationRequest): Promise<DecisionExplanationRunResult>;
+  runFinalReport?(request: FinalReportRequest): Promise<FinalReportRunResult>;
 }

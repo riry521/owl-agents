@@ -100,6 +100,14 @@ export interface WorkAdvisorBacklog {
   dismissed: WorkAdvisorBacklogEntry[];
 }
 
+/** The final report written when the Work completed, in three sections. */
+export interface WorkFinalReport {
+  summary: string;
+  test_results: string;
+  issues: string;
+  created_at: RFC3339;
+}
+
 export interface WorkDetail extends Omit<WorkSummary, 'title' | 'state' | 'updated_at'> {
   title: string | null;
   state: WorkState | null;
@@ -114,6 +122,7 @@ export interface WorkDetail extends Omit<WorkSummary, 'title' | 'state' | 'updat
   conversation_id?: ULID | null;
   advisor_backlog?: WorkAdvisorBacklog | null;
   prerequisites?: WorkPrerequisite[];
+  final_report?: WorkFinalReport | null;
 }
 
 export interface WorkProgress {
@@ -947,6 +956,7 @@ export interface NormalizedWorkDetail extends WorkSummary {
   conversation_id: ULID | null;
   advisor_backlog: WorkAdvisorBacklog | null;
   prerequisites: WorkPrerequisite[];
+  final_report: WorkFinalReport | null;
   prerequisite_wait: boolean;
 }
 

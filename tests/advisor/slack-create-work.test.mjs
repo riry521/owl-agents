@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { createConfiguredCore } from "../../apps/server/dist/core.js";
@@ -477,7 +479,7 @@ test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and
   try {
     db = createTestDatabase(root);
 
-    let advisorRequest;
+    const advisorRequests = [];
     const secondAction = {
       type: "create_work",
       description: "Create Slack's second compatibility Work",
@@ -504,9 +506,10 @@ test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and
       "```",
     ].join("\r\n");
     const agentRunner = {
+      // The malformed fence is a failure, so the one-shot path asks the Advisor once more (the follow-up).
       runAdvisor: async (request) => {
-        advisorRequest = request;
-        return { reply: slackReply, suggested_actions: [] };
+        advisorRequests.push(request);
+        return { reply: advisorRequests.length === 1 ? slackReply : "Slack follow-up note.", suggested_actions: [] };
       },
       runManagerPlan: async () => { throw new Error("small Advisor-created Works should skip Manager planning"); },
       runWorker: async () => ({
@@ -553,11 +556,20 @@ test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and
     const inbound = await core.ingestInbound(ownerId, envelope);
     const message = await waitFor(
       () => db.get(
-        "SELECT id, body, source_message_id FROM messages WHERE conversation_id = ? AND source_message_id LIKE 'advisor:%' ORDER BY created_at DESC LIMIT 1",
+        "SELECT id, body, source_message_id FROM messages WHERE conversation_id = ? AND source_message_id LIKE 'advisor:%' ORDER BY rowid ASC LIMIT 1",
         inbound.data.conversation_id,
       ),
       { message: "one-shot Slack Advisor reply message" },
     );
+    const followupMessage = await waitFor(
+      () => db.get(
+        "SELECT id, body, source_message_id FROM messages WHERE conversation_id = ? AND source_message_id LIKE 'advisor:%' AND id <> ? LIMIT 1",
+        inbound.data.conversation_id,
+        message.id,
+      ),
+      { message: "one-shot Slack Advisor follow-up message" },
+    );
+    const advisorRequest = advisorRequests[0];
     const work = db.get("SELECT id, title FROM works WHERE title = ?", "Slack one-shot regression Work");
     const secondWork = db.get("SELECT id, title FROM works WHERE title = ?", "Slack second regression Work");
 
@@ -606,6 +618,24 @@ test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and
     assert.match(message.body, /Visible code example:\r?\n```ts\r?\nconst answer = 42;\r?\n```/u);
     assert.doesNotMatch(message.body, /```owl-actions|create_work|Create and verify the Slack compatibility origin Work/u);
     assert.doesNotMatch(message.body, /not valid JSON/u, "malformed action content must not leak into the visible reply");
+
+    assert.equal(advisorRequests.length, 2, "a failed action should run the Advisor exactly once more");
+    const followupInput = advisorRequests[1].messages.at(-1);
+    assert.equal(followupInput.source, "user");
+    assert.match(followupInput.body, /<owl-action-failures[^>]*>/u);
+    assert.match(followupInput.body, /"code":\s*"invalid_payload"/u);
+    assert.equal(
+      db.get("SELECT COUNT(*) AS count FROM messages WHERE conversation_id = ? AND body LIKE '%<owl-action-failures%'", inbound.data.conversation_id).count,
+      0,
+      "the follow-up input must not be saved to messages",
+    );
+    assert.match(followupMessage.body, /Slack follow-up note\./u);
+    const respondedEvents = db.all("SELECT payload_json FROM events WHERE type = 'advisor.responded' ORDER BY rowid ASC")
+      .map((row) => JSON.parse(row.payload_json));
+    const followupEvent = respondedEvents.find((payload) => payload.message_id === followupMessage.id);
+    assert.equal(followupEvent.followup_of_turn_id, turnId);
+    assert.deepEqual(followupEvent.origin, { channel: "slack", channel_id: slackChannelId, ref: slackThreadRef });
+    assert.equal(respondedEvents.find((payload) => payload.message_id === message.id).followup_pending, true);
 
     const event = {
       id: createUlid(),
@@ -718,4 +748,57 @@ test("a web Advisor reply without owl-actions is stored unchanged", async (t) =>
       else process.env[key] = value;
     }
   }
+});
+
+test("a one-shot Core runs the follow-up Advisor turn exactly once for a failed send_file report and not for a duplicate", async (t) => {
+  const root = await tempDir(t, "owl-advisor-delivery-one-shot-");
+  const files = await tempDir(t, "owl-advisor-delivery-files-");
+  await writeFile(join(files, "a.txt"), "first");
+  const db = createTestDatabase(root);
+  const requests = [];
+  const sendFile = [{ type: "send_file", description: "Send", payload: { path: join(files, "a.txt") } }];
+  const core = createCore({
+    db,
+    agentRunner: {
+      runAdvisor: async (request) => {
+        requests.push(request);
+        return { reply: requests.length === 1 ? ["Here.", "```owl-actions", JSON.stringify(sendFile), "```"].join("\n") : "Could not upload it.", suggested_actions: [] };
+      },
+      runManagerPlan: async () => { throw new Error("No Work should be created."); },
+      runWorker: async () => { throw new Error("No Worker should run."); },
+      runReviewer: async () => { throw new Error("No Reviewer should run."); },
+    },
+    getAdvisorSendFileSettings: () => ({ dirs: [files] }),
+    version: "advisor-delivery-one-shot-test",
+    owlRoot: root,
+    dataDir: root,
+  });
+  t.after(async () => { await core.stop({ force: true }).catch(() => {}); db.close(); });
+
+  const conversation = await core.getActiveConversation();
+  const webAccount = db.get("SELECT id FROM connector_accounts WHERE owner_id = ? AND provider = 'web'", ownerId);
+  const now = new Date().toISOString();
+  const userMessageId = createUlid();
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run(
+      `INSERT INTO messages (id, conversation_id, provider, account_id, source_message_id, body, attachment_ids_json, received_at, created_at)
+       VALUES (?, ?, 'web', ?, ?, ?, '[]', ?, ?)`,
+      userMessageId, conversation.conversation_id, webAccount.id, `web-user:${userMessageId}`, "Send the file.", now, now,
+    );
+  });
+  await core.advisorRespond(conversation.conversation_id, userMessageId, { channel: "slack", channel_id: "C1", ref: "1.1" });
+  assert.equal(requests.length, 1);
+  const responded = JSON.parse(db.get("SELECT payload_json FROM events WHERE type = 'advisor.responded' ORDER BY sequence DESC LIMIT 1").payload_json);
+  assert.equal(responded.delivery_pending, true);
+
+  const report = { turn_id: responded.turn_id, message_id: responded.message_id, results: [{ index: 0, outcome: "failed", code: "upload_rejected", platform_error: "not_in_channel", message: "no" }] };
+  const first = await core.reportAdvisorDelivery(ownerId, conversation.conversation_id, report);
+  assert.equal(first.followup_pending, true);
+  await waitFor(() => requests.length === 2, { message: "the follow-up Advisor turn ran" });
+  assert.match(JSON.stringify(requests[1]), /send_file/u);
+
+  const second = await core.reportAdvisorDelivery(ownerId, conversation.conversation_id, report);
+  assert.equal(second.deduplicated, true);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(requests.length, 2, "runOneShotFollowup ran exactly once");
 });

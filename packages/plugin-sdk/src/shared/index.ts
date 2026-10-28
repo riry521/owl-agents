@@ -14,7 +14,7 @@ export {
 export { formatStatusResponse } from "./status";
 export { asOwlLanguage, type OwlLanguage } from "./language";
 export { connectorText, type ConnectorText } from "./connector-text";
-export { parseOutboundFiles, readOutboundFile, appendFileResults, type OutboundFile } from "./outbound-files";
+export { parseOutboundFiles, readOutboundFile, appendFileResults, reportAdvisorDelivery, type OutboundFile, type OutboundFileResult } from "./outbound-files";
 export { formatAdvisorReply } from "./advisor-reply";
 export { decisionContextLines, type DecisionContextInput, type DecisionContextLines } from "./decision-sections";
 export {

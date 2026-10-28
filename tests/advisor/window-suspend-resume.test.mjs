@@ -16,7 +16,7 @@ const ownerId = "owner:default";
  */
 async function setup(t) {
   const created = [];
-  const control = { failResume: false };
+  const control = { actions: null, failResume: false, resumedTurnFails: false, freshTurnFails: false };
   const providerClient = {
     createSession: async (request) => {
       if (request.resume_provider_session_id && control.failResume) throw new Error("the provider no longer knows this session");
@@ -35,8 +35,17 @@ async function setup(t) {
             yield { type: "session.ready", provider_session_id: providerSessionId, pid: process.pid };
             for (let handled = 0; ; handled += 1) {
               await waitFor(() => sent.length > handled, { message: `${label} has turn ${handled + 1}` });
+              if (request.resume_provider_session_id && control.resumedTurnFails) {
+                yield { type: "turn.failed", turn_id: sent[handled].turn_id, error: "No conversation found with session ID", provider_error: { code: "conversation_not_found" } };
+                continue;
+              }
+              if (!request.resume_provider_session_id && control.freshTurnFails) {
+                yield { type: "turn.failed", turn_id: sent[handled].turn_id, error: "the fresh session also failed" };
+                continue;
+              }
               const marker = /MSG-[a-z0-9]+/.exec(sent[handled].text)?.[0] ?? "no-marker";
-              yield { type: "turn.completed", turn_id: sent[handled].turn_id, reply: `${label}|${marker}`, usage: null };
+              const fence = control.actions && sent[handled].text.includes("question MSG-bbb") ? `\n\`\`\`owl-actions\n${JSON.stringify(control.actions)}\n\`\`\`` : "";
+              yield { type: "turn.completed", turn_id: sent[handled].turn_id, reply: `${label}|${marker}${fence}`, usage: null };
             }
           },
         }),
@@ -214,4 +223,75 @@ test("a failed resume ends with resume_failed and the fresh session's first turn
   assert.match(firstTurn, /owl-window-history/);
   assert.equal((firstTurn.match(/"body"/g) ?? []).length, handoff, "exactly the last N messages are handed over");
   assert.match(firstTurn, /MSG-new/);
+});
+
+/** Answers one turn, then marks it failed so the session looks like one that never produced a reply, then suspends it. */
+async function suspendUnanswered(world, window) {
+  await world.send(window.conversation_id, "MSG-aaa");
+  await waitFor(() => world.replies(window.conversation_id).length === 1, { message: "first reply" });
+  await world.db.createWriteLane().transact((tx) => tx.run("UPDATE advisor_turns SET status = 'failed' WHERE status = 'completed'"));
+  await world.idleThenTick(window.window_id);
+  assert.equal(world.sessionsOf(window.window_id)[0].status, "suspended");
+}
+
+test("a suspended session that never completed a turn starts fresh without --resume and gets the window history", async (t) => {
+  const world = await setup(t);
+  const window = await world.createProjectWindow("Alpha");
+  await suspendUnanswered(world, window);
+
+  await world.send(window.conversation_id, "MSG-bbb");
+  await waitFor(() => world.replies(window.conversation_id).length === 2, { message: "reply from the fresh session" });
+
+  const fresh = world.created.at(-1);
+  assert.equal(fresh.request.resume_provider_session_id, undefined);
+  assert.match(fresh.sent[0].text, /owl-window-history/);
+  assert.equal(world.sessionsOf(window.window_id)[0].end_reason, "resume_failed");
+});
+
+test("a resumed first turn that finds no conversation is resent once on a fresh session without an error reaching the Owner", async (t) => {
+  const world = await setup(t);
+  const window = await world.createProjectWindow("Alpha");
+  await world.send(window.conversation_id, "MSG-aaa");
+  await waitFor(() => world.replies(window.conversation_id).length === 1, { message: "first reply" });
+  await world.idleThenTick(window.window_id);
+  world.control.resumedTurnFails = true;
+  world.control.actions = [{ type: "create_work", description: "Create Work", payload: { title: "Resend Work", summary: "s", size: "small", project_id: null } }];
+  const startedBefore = world.created.length;
+
+  await world.send(window.conversation_id, "MSG-bbb");
+  await waitFor(() => world.replies(window.conversation_id).length === 2, { message: "reply after the resend" });
+  const responded = world.db.all("SELECT payload_json FROM events WHERE type = 'advisor.responded'").map((row) => JSON.parse(row.payload_json));
+  assert.equal(responded.length, 2, "one reply for each message, so the resent message's owl-actions are handled once");
+  assert.equal(world.db.all("SELECT 1 FROM works WHERE title = 'Resend Work'").length, 1, "the action created exactly one Work");
+
+  assert.equal(world.created.length, startedBefore + 2, "one resumed session and one fresh session");
+  assert.equal(world.created.at(-2).sent.length, 1);
+  assert.equal(world.created.at(-1).sent.length, 1, "the message is sent once on the fresh session");
+  assert.equal(world.sessionsOf(window.window_id)[0].end_reason, "resume_failed");
+  const advisorMessages = world.core.listMessages(window.conversation_id, { limit: 50 }).data.filter((m) => m.sender !== "user");
+  assert.ok(!advisorMessages.some((m) => /No conversation found/.test(m.body)), "no failure message was posted");
+});
+
+test("when the resend also fails the error is returned and nothing is sent a third time", async (t) => {
+  const world = await setup(t);
+  const window = await world.createProjectWindow("Alpha");
+  await world.send(window.conversation_id, "MSG-aaa");
+  await waitFor(() => world.replies(window.conversation_id).length === 1, { message: "first reply" });
+  await world.idleThenTick(window.window_id);
+  world.control.resumedTurnFails = true;
+  world.control.freshTurnFails = true;
+  const startedBefore = world.created.length;
+
+  await world.send(window.conversation_id, "MSG-bbb");
+  await waitFor(() => world.db.all("SELECT 1 FROM advisor_turns WHERE status = 'failed'").length === 1, { message: "the turn fails" });
+
+  assert.equal(world.created.length, startedBefore + 2);
+  const sentTotal = world.created.slice(startedBefore).reduce((sum, driver) => sum + driver.sent.length, 0);
+  assert.equal(sentTotal, 2, "resumed send plus a single resend");
+  assert.equal(world.replies(window.conversation_id).length, 1);
+  const errors = () => world.core.listMessages(window.conversation_id, { limit: 50 }).data
+    .filter((m) => m.sender !== "user" && /the fresh session also failed|No conversation found/.test(m.body)).map((m) => m.body);
+  await waitFor(() => errors().length === 1, { message: "the error reaches the Owner" });
+  assert.match(errors()[0], /the fresh session also failed/);
+  assert.ok(!errors().some((body) => /No conversation found/.test(body)), "the first resume failure is not shown");
 });

@@ -7,6 +7,19 @@ import { rateLimitHarness, reportedRateLimitReset, resolveRateLimitReset, type R
 /** error_key of a 429 with no usage-limit code and no reported reset time: a short limit, not a used-up quota. */
 export const RATE_LIMIT_TRANSIENT_ERROR_KEY = "provider_failed:rate_limit_transient";
 
+/**
+ * provider_error.code of a turn.failed whose resume found no conversation.
+ * Why a code and not a new turn.failed field: Core already reads
+ * provider_error, and a string match on the message would break when the CLI
+ * rewords it. This is the only place that defines the phrase and the code.
+ */
+export const RESUME_FAILED_CODE = "conversation_not_found";
+const CONVERSATION_NOT_FOUND_PATTERN = /no conversation found/iu;
+
+export function isConversationNotFound(text: string): boolean {
+  return CONVERSATION_NOT_FOUND_PATTERN.test(text);
+}
+
 /** How a provider process ended, as observed by Owl rather than read from its output. */
 export type ProviderFailureKind =
   | "timeout"
@@ -174,6 +187,7 @@ interface ProviderErrorText {
   request: StatusLabelText;
   service: StatusLabelText;
   processControl: LabelText;
+  conversationNotFound: LabelText;
   signal: (signal: string) => string;
   exitCode: (code: number) => string;
   unknownExit: string;
@@ -207,6 +221,7 @@ const PROVIDER_ERROR_TEXT: Record<OwnerLanguage, ProviderErrorText> = {
     request: (label, statusText) => `${label}へのリクエストが拒否されました${statusText}。モデル名、リクエスト形式、Providerのエンドポイント設定を確認してください。`,
     service: (label, statusText) => `${label}側で処理に失敗しました${statusText}。Providerの稼働状況を確認してから再試行してください。`,
     processControl: (label) => `${label}の実行が中断されました（出力上限超過またはキャンセル）。入力サイズ、出力サイズ、停止要求を確認してください。`,
+    conversationNotFound: (label) => `${label}の会話が見つからず、再開できませんでした。`,
     signal: (signal) => `シグナル ${signal}`,
     exitCode: (code) => `終了コード ${code}`,
     unknownExit: "原因不明の終了",
@@ -237,6 +252,7 @@ const PROVIDER_ERROR_TEXT: Record<OwnerLanguage, ProviderErrorText> = {
     request: (label, statusText) => `${label} rejected the request${statusText}. Check the model name, request format, and Provider endpoint settings.`,
     service: (label, statusText) => `${label} failed on its side${statusText}. Check the Provider status and retry.`,
     processControl: (label) => `${label} was interrupted (output limit exceeded or cancelled). Check the input size, output size, and stop requests.`,
+    conversationNotFound: (label) => `${label} could not resume: the conversation was not found.`,
     signal: (signal) => `signal ${signal}`,
     exitCode: (code) => `exit code ${code}`,
     unknownExit: "exited for an unknown reason",
@@ -277,6 +293,7 @@ export function formatProviderError(
   if (context.kind === "timeout") return context.timeoutKind === "idle" ? t.idle(label) : t.timeout(label);
   if (context.kind === "cancelled" || context.kind === "output_too_large") return t.processControl(label);
   if (isArgumentSizeFailure(text)) return t.argumentSize(label);
+  if (isConversationNotFound(text)) return t.conversationNotFound(label);
   if (context.rateLimitInfo !== undefined) {
     return t.rateLimit(label, statusText, context.rateLimitInfo.resets_at);
   }

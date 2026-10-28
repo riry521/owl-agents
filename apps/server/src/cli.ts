@@ -271,6 +271,7 @@ async function waitForAdvisorReply(
 ): Promise<string> {
   const deadline = Date.now() + timeoutSeconds * 1000;
   let cursor = initialCursor;
+  let first: { turnId: unknown; reply: string } | null = null;
 
   while (Date.now() < deadline) {
     if (signal?.aborted) throw new Error("advisor wait aborted");
@@ -279,19 +280,27 @@ async function waitForAdvisorReply(
     for (const event of events) {
       cursor = Math.max(cursor, event.sequence);
       if (!isAdvisorReplyFor(event, conversationId, ref)) continue;
+      if (first !== null && event.payload.followup_of_turn_id !== first.turnId) continue;
+      let reply: string | null = null;
       const directReply = event.payload.reply;
-      if (typeof directReply === "string") return formatAdvisorReply(event, directReply);
       const messageId = event.payload.message_id;
-      if (typeof messageId === "string") {
-        const reply = await fetchAdvisorReply(baseUrl, conversationId, messageId, signal);
+      if (typeof directReply === "string") reply = formatAdvisorReply(event, directReply);
+      else if (typeof messageId === "string") {
+        const body = await fetchAdvisorReply(baseUrl, conversationId, messageId, signal);
         if (signal?.aborted) throw new Error("advisor wait aborted");
-        if (reply !== null) return formatAdvisorReply(event, reply);
+        if (body !== null) reply = formatAdvisorReply(event, body);
       }
+      if (reply === null) continue;
+      if (first !== null) return `${first.reply}\n\n${reply}`;
+      // A follow-up reply may still come; if it misses the deadline the first reply is returned alone.
+      if (event.payload.followup_pending !== true) return reply;
+      first = { turnId: event.payload.turn_id, reply };
     }
 
     await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 250));
   }
 
+  if (first !== null) return first.reply;
   throw new CliError(5, cliText('Advisorの応答が指定時間内に届きませんでした。server statusとeventsを確認するか、--timeoutで待ち時間を延ばしてください。', 'The Advisor did not respond in time. Check server status and events, or raise --timeout.'));
 }
 

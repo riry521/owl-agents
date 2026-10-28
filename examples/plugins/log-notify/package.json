@@ -1,6 +1,6 @@
 {
   "name": "@owl-example/log-notify",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "private": true,
   "type": "commonjs",
   "main": "dist/index.js",

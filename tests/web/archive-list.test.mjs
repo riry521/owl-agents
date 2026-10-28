@@ -5,7 +5,7 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import ts from 'typescript';
 
-import { groupArchivedByDay, sortArchivedWorks } from '../../apps/web/lib/archive-list.mjs';
+import { groupArchivedByDay, groupByProject, sortArchivedWorks } from '../../apps/web/lib/archive-list.mjs';
 
 import { repoRoot } from '../helpers/paths.mjs';
 const webRequire = createRequire(join(repoRoot, 'apps/web/package.json'));
@@ -274,4 +274,10 @@ test('ja and en define the same archive/work i18n keys used by the archive list'
   }
   assert.equal(ja.work.deleteAllInSection, undefined);
   assert.equal(en.work.deleteAllInSection, undefined);
+});
+
+test('groupByProject follows the project list order and puts project-less Works last', () => {
+  const works = [{ id: 'a', project_id: 'p2' }, { id: 'b', project_id: null }, { id: 'c', project_id: 'p1' }, { id: 'd', project_id: 'gone' }, { id: 'e', project_id: 'p2' }];
+  const groups = groupByProject(works, ['p1', 'p2', 'p3']);
+  assert.deepEqual(groups.map((g) => [g.projectId, g.works.map((w) => w.id)]), [['p1', ['c']], ['p2', ['a', 'e']], [null, ['b', 'd']]]);
 });

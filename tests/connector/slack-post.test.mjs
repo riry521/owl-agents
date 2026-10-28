@@ -319,3 +319,79 @@ test("Slack does not upload a file whose contents changed after Core checked it"
   assert.equal(posts.length, 1);
   assert.match(posts[0].text, /ファイルが変わりました|the file changed after it was checked/u);
 });
+
+const pendingEvent = (files, extra = {}) => {
+  const event = advisorEvent(files.map((file, index) => ({ ...file, index })));
+  return { ...event, payload: { ...event.payload, turn_id: "turn-1", message_id: "message-1", delivery_pending: true, ...extra } };
+};
+const stubCore = (connector, notice = "Checking the failed upload.") => {
+  const requests = [];
+  connector.core.request = async (path, init) => { requests.push({ path, body: init.body }); return { deduplicated: false, followup_pending: true, notice }; };
+  return requests;
+};
+const slackError = (code, extra = {}) => Object.assign(new Error(code), { code, ...extra });
+
+for (const [name, error, expected] of [
+  ["not_in_channel", slackError("slack_webapi_platform_error", { data: { ok: false, error: "not_in_channel" } }), { outcome: "failed", code: "upload_rejected", platform_error: "not_in_channel" }],
+  ["rate limiting", slackError("slack_webapi_rate_limited_error", { retryAfter: 3 }), { outcome: "failed", code: "upload_rate_limited", platform_error: null }],
+  ["a request error", slackError("slack_webapi_request_error", { original: new Error("socket hang up") }), { outcome: "unknown", code: "upload_unknown", platform_error: null }],
+]) {
+  test(`Slack reports ${name} as ${expected.code} and appends the notice Core returns`, async () => {
+    const file = await outboundFixture();
+    const { connector, posts } = outboundConnector([], error);
+    const requests = stubCore(connector);
+    await connector.handleCoreEvent(pendingEvent([file]));
+
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].path, "/conversations/slack%3AC-CONVERSATION%3Athread/advisor-deliveries");
+    assert.equal(requests[0].body.payload.turn_id, "turn-1");
+    assert.equal(requests[0].body.payload.message_id, "message-1");
+    assert.deepEqual(requests[0].body.payload.results.map(({ message, ...rest }) => rest), [{ index: 0, ...expected }]);
+    assert.match(requests[0].body.payload.results[0].message, /report\.txt/u);
+    assert.equal(posts.length, 1);
+    assert.ok(posts[0].text.includes("Checking the failed upload."), posts[0].text);
+  });
+}
+
+test("Slack reports a changed file as failed/changed and a successful upload as sent without calling the upload", async () => {
+  const changed = await outboundFixture();
+  await writeFile(changed.path, "different body!");
+  const first = outboundConnector([]);
+  const firstRequests = stubCore(first.connector);
+  await first.connector.handleCoreEvent(pendingEvent([changed]));
+  assert.equal(first.uploads.length, 0);
+  assert.deepEqual(firstRequests[0].body.payload.results.map(({ message, ...rest }) => rest), [{ index: 0, outcome: "failed", code: "changed", platform_error: null }]);
+
+  const ok = await outboundFixture();
+  const second = outboundConnector([]);
+  const secondRequests = stubCore(second.connector, "");
+  await second.connector.handleCoreEvent(pendingEvent([ok]));
+  assert.deepEqual(secondRequests[0].body.payload.results, [{ index: 0, outcome: "sent" }]);
+  assert.ok(!second.posts[0].text.includes("undefined"));
+});
+
+test("Slack still posts the reply when the delivery report fails, and does not report an event without delivery_pending", async () => {
+  const file = await outboundFixture();
+  const failing = outboundConnector([]);
+  failing.connector.core.request = async () => { throw new Error("core unreachable"); };
+  await failing.connector.handleCoreEvent(pendingEvent([file]));
+  assert.equal(failing.posts.length, 1);
+  assert.match(failing.posts[0].text, /Done\./u);
+
+  const plain = outboundConnector([]);
+  const requests = stubCore(plain.connector);
+  await plain.connector.handleCoreEvent(advisorEvent([file]));
+  assert.equal(requests.length, 0);
+  assert.equal(plain.posts.length, 1);
+});
+
+test("Slack posts a follow-up reply into the same thread with the label at the start", async () => {
+  const { connector, posts } = outboundConnector([]);
+  const label = "【フォローアップ】";
+  const event = advisorEvent([], `${label}\nRetried it.`);
+  await connector.handleCoreEvent({ ...event, event_id: "event-followup", payload: { ...event.payload, followup_of_turn_id: "turn-1", action_results: "" } });
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].channel, "C-CONVERSATION");
+  assert.equal(posts[0].thread_ts, "1712345678.000100");
+  assert.ok(posts[0].text.startsWith(label), posts[0].text);
+});

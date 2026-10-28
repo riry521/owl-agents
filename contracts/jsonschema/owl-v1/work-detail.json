@@ -20,9 +20,41 @@
     "conversation_id",
     "prerequisite_wait",
     "waiting_on",
-    "prerequisites"
+    "prerequisites",
+    "final_report"
   ],
   "properties": {
+    "final_report": {
+      "anyOf": [
+        {
+          "type": "object",
+          "required": [
+            "summary",
+            "test_results",
+            "issues",
+            "created_at"
+          ],
+          "properties": {
+            "summary": {
+              "type": "string"
+            },
+            "test_results": {
+              "type": "string"
+            },
+            "issues": {
+              "type": "string"
+            },
+            "created_at": {
+              "$ref": "common.json#/$defs/RFC3339"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "id": {
       "$ref": "common.json#/$defs/ULID"
     },
