@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { chmod, cp, mkdir, symlink, writeFile } from "node:fs/promises";
+import { chmod, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
+import { serverRunnerModuleWithout } from "../helpers/server-runner.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 
 import { createExternalAgentRunner } from "../../apps/server/dist/agent-runner.js";
@@ -108,25 +108,33 @@ test("decision explanation passes through the wrapped runner and reports unavail
     assert.equal(passed.ok, false);
     assert.notEqual(passed.error, "decision_explanation_unavailable");
   });
-  // A copy of the server build next to a runtime whose runner has no runDecisionExplanation.
-  const tree = await tempDir(t, "owl-agent-runner-old-runtime-");
-  const serverDist = path.join(tree, "apps/server/dist");
-  await mkdir(path.join(tree, "packages/agent-runtime/dist"), { recursive: true });
-  await cp(new URL("../../apps/server/dist", import.meta.url), serverDist, { recursive: true });
-  for (const name of ["shared", "core", "db"]) {
-    await symlink(fileURLToPath(new URL(`../../packages/${name}`, import.meta.url)), path.join(tree, "packages", name));
-  }
-  const realRuntime = new URL("../../packages/agent-runtime/dist/index.js", import.meta.url).href;
-  await writeFile(
-    path.join(tree, "packages/agent-runtime/dist/index.js"),
-    `import { createAgentRunner as create } from ${JSON.stringify(realRuntime)};\nexport * from ${JSON.stringify(realRuntime)};\nexport const createAgentRunner = (options) => {\n  const { runDecisionExplanation, ...rest } = create(options);\n  return rest;\n};\n`,
-    "utf8",
-  );
-  await writeFile(path.join(tree, "packages/agent-runtime/package.json"), "{\"type\":\"module\"}\n", "utf8");
-  await writeFile(path.join(tree, "apps/server/package.json"), "{\"type\":\"module\"}\n", "utf8");
+  const oldModule = await serverRunnerModuleWithout(t, ["runDecisionExplanation"]);
   await withEnvironment(environment, async () => {
-    const old = await import(pathToFileURL(path.join(serverDist, "agent-runner.js")).href);
-    const runner = await old.createExternalAgentRunner(root, false);
+    const runner = await oldModule.createExternalAgentRunner(root, false);
     assert.deepEqual(await runner.runDecisionExplanation({}), { ok: false, error: "decision_explanation_unavailable" });
+  });
+});
+
+test("decision answer triage is available for a real runtime and unavailable when the delegate lacks the method", async (t) => {
+  const root = await tempDir(t, "owl-agent-runner-triage-");
+  const executable = path.join(root, "fake-claude");
+  await writeFile(executable, "#!/bin/sh\nexit 0\n", "utf8");
+  await chmod(executable, 0o755);
+  const environment = {
+    HOME: root,
+    PATH: "/usr/bin:/bin",
+    OWL_PROVIDER: "real",
+    OWL_PROVIDER_ADAPTER: "claude-cli/v1",
+    OWL_PROVIDER_EXECUTABLE: executable,
+  };
+  const oldModule = await serverRunnerModuleWithout(t, ["runDecisionAnswerTriage"]);
+  await withEnvironment(environment, async () => {
+    const runner = await createExternalAgentRunner(root, false);
+    assert.equal(typeof runner.runDecisionAnswerTriage, "function");
+    assert.equal(await runner.decisionAnswerTriageAvailable(), true);
+    const old = await oldModule.createExternalAgentRunner(root, false);
+    assert.equal(typeof old.runDecisionAnswerTriage, "function");
+    assert.equal(await old.decisionAnswerTriageAvailable(), false);
+    assert.deepEqual(await old.runDecisionAnswerTriage({}), { ok: false, error: "decision_answer_triage_unavailable" });
   });
 });

@@ -276,6 +276,7 @@ export interface UpdateProjectInput {
   test_run?: Record<string, unknown> | null;
   test_policy?: Record<string, unknown> | null;
   report_check_commands?: string[] | null;
+  screen_paths?: { include: string[]; exclude?: string[] } | null;
   verification_plan?: VerificationCommand[];
 }
 
@@ -817,6 +818,7 @@ export interface CorePort {
   advisorRespond(conversationId: string, messageId: string, origin?: AdvisorOrigin): Promise<void>;
   readonly advisorSessions: AdvisorSessionsPort;
   restartAdvisorSession(ownerId: string, windowKey?: string): Promise<void>;
+  interruptAdvisorTurn(ownerId: string, windowKey?: string): Promise<{ status: "interrupting" | "not_running" | "unsupported"; turn_id: string | null }>;
   getIntegrations(): Promise<IntegrationStatus[]>;
   saveIntegration(provider: IntegrationProvider, config: IntegrationConfigPatch, command: CommandMeta): Promise<{ data: IntegrationStatus; version: number }>;
   testIntegration(provider: IntegrationProvider): Promise<IntegrationTestResult>;

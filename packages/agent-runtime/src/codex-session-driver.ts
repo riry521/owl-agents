@@ -242,6 +242,8 @@ export class CodexSessionDriver implements ProviderSession {
   private nextRequestId = 1;
   private currentTurnId: string | null = null;
   private currentCodexTurnId: string | null = null;
+  /** The Owl turn Owl asked to interrupt; only that turn may end as turn.interrupted. */
+  private interruptRequestedTurnId: string | null = null;
   // The current turn's agentMessage items by itemId, in arrival order.
   private turnAgentMessages = new Map<string, CodexAgentMessage>();
   private protocolError: string | null = null;
@@ -346,6 +348,7 @@ export class CodexSessionDriver implements ProviderSession {
     }
     this.currentTurnId = turn.turn_id;
     this.currentCodexTurnId = null;
+    this.interruptRequestedTurnId = null;
     this.turnAgentMessages = new Map();
     const text =
       turn.attachment_paths && turn.attachment_paths.length > 0
@@ -384,7 +387,25 @@ export class CodexSessionDriver implements ProviderSession {
     if (this.currentTurnId === turn.turn_id) {
       this.currentCodexTurnId = codexTurnId;
       this.localTurnIds.set(codexTurnId, turn.turn_id);
+      if (this.interruptRequestedTurnId === turn.turn_id) {
+        this.requestCodexInterrupt(codexTurnId);
+      }
     }
+  }
+
+  public async interrupt(turnId: string): Promise<boolean> {
+    if (this.done || this.currentTurnId !== turnId) return false;
+    if (this.interruptRequestedTurnId === turnId) return true;
+    this.interruptRequestedTurnId = turnId;
+    // Before the turn/start response the Codex turn id is unknown; send() sends the request once it is.
+    if (this.currentCodexTurnId !== null) this.requestCodexInterrupt(this.currentCodexTurnId);
+    return true;
+  }
+
+  private requestCodexInterrupt(codexTurnId: string): void {
+    this.sendRpcRequest("turn/interrupt", { threadId: this._providerSessionId, turnId: codexTurnId }).catch((cause) => {
+      console.warn(`[codex-session-driver] turn/interrupt failed: ${cause instanceof Error ? cause.message : String(cause)}`);
+    });
   }
 
   public events(): AsyncIterable<SessionEvent> {
@@ -921,6 +942,16 @@ export class CodexSessionDriver implements ProviderSession {
           usage: this.tokenUsageByTurnId.get(codexTurnId) ?? null,
         });
       }
+    } else if (status === "interrupted" && this.interruptRequestedTurnId === localTurnId) {
+      // codexTurnReply() returns null for phased messages without a final_answer, so build the partial text here.
+      const messages = this.currentTurnId === localTurnId ? [...this.turnAgentMessages.values()] : [];
+      const finals = messages.filter((message) => message.phase === "final_answer");
+      this.pushEvent({
+        type: "turn.interrupted",
+        turn_id: localTurnId,
+        partial_text: (finals.length > 0 ? finals : messages).map((message) => message.text).join(""),
+        usage: this.tokenUsageByTurnId.get(codexTurnId) ?? null,
+      });
     } else if (status === "failed") {
       this.pushEvent(codexTurnFailure(turn.error ?? "codex turn failed", localTurnId));
     } else {
@@ -1043,6 +1074,7 @@ export class CodexSessionDriver implements ProviderSession {
     }
     this.currentTurnId = null;
     this.currentCodexTurnId = null;
+    this.interruptRequestedTurnId = null;
     this.turnAgentMessages = new Map();
   }
 }

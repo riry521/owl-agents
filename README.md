@@ -255,7 +255,7 @@ Details are in [docs/operations.md](docs/operations.md).
 ### Memory and rules
 
 - **owl-memory.** Agents read knowledge pages through the read-only `owl-memory` MCP server (`index`, `page`, `search`). A Librarian keeps the pages organized.
-- **Rules in Git.** Rule files live in `rules/`, but Git tracks only the shipped defaults (`rules/system/defaults.yaml`, `safety.yaml`, `owl-defaults.yaml` and `rules/role/advisor-defaults.yaml`). Rules you add or approve stay local.
+- **Rules in Git.** Rule files live in `rules/`, but Git tracks only the shipped defaults (`rules/system/defaults.yaml`, `safety.yaml`, `owl-defaults.yaml` and `rules/role/advisor-defaults.yaml`). Rules you add or approve stay local, including project rules (`rules/project/{project_id}.yaml`, `level: project`). A project rule holds `instruction` rules only and reaches all roles of that Project's Works and the Advisor in that Project's window; edits are hot-reloaded.
 
 ## Web UI
 
@@ -276,6 +276,8 @@ The Advisor page is split into windows, and each window has its own conversation
 On a wide screen the window list is a sidebar on the left. On a narrow screen, press the window name at the top of the Advisor page to open the list as a sheet, then pick a window. The **Channels** button at the top handles per-window channels. In a Project window it shows the Slack and Discord channels bound to that window, and lets you create a channel, bind an existing channel ID, or rename a channel. In the general window (Owl) it offers none of these: it only says the channels are set under **Settings → Integrations**, with a link to Settings.
 
 You can reorder the Project windows by dragging them in the window list; the order is saved.
+
+A dot on a window in the list means it has Advisor messages you have not read. The server keeps the read state, so the dot is the same on every device and disappears once you open the window. While the Advisor is working on a turn, a stop button replaces the send button. Press it to interrupt the turn (Claude and Codex both support it).
 
 To turn a Project window on or off, open **Projects**, press **Edit** on the Project, switch **Use an Advisor window** on or off, and press **Save**. A Project that already has a channel bound stays in the list even when the switch is off.
 

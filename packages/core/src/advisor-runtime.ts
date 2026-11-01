@@ -75,7 +75,7 @@ export interface AdvisorRuntimeConfig {
   readonly providerClient: ProviderClient;
   readonly owlRoot: string;
   readonly git?: GitGateway;
-  readonly getAdvisorSettings: () => AdvisorSettingsSnapshot;
+  readonly getAdvisorSettings: (projectId?: string | null) => AdvisorSettingsSnapshot;
   /** Memory catalog for each turn (design §6): the first call of a session is the start catalog, later calls only the new items. */
   readonly memoryInjector?: Pick<IndexInjector, "compose" | "resetSession">;
   readonly isProviderPaused?: (provider: string) => boolean;
@@ -110,6 +110,7 @@ export interface AdvisorRuntimeConfig {
     origin: { channel: string; channel_id?: string; ref?: string },
     suggestedActions: readonly AdvisorSuggestedAction[],
     actionsMalformed?: boolean,
+    options?: { interrupted?: boolean },
   ) => Promise<string | null>;
   readonly onError: (
     conversationId: string,
@@ -206,6 +207,18 @@ export function parseAdvisorTurnReply(
   return malformed ? { ...parsed, malformed } : parsed;
 }
 
+/**
+ * Reply text for a turn the user interrupted: the visible partial text plus
+ * the interruption notice. Unlike parseAdvisorTurnReply it drops every action
+ * (the turn must run none) and never warns about the unclosed owl-actions
+ * fence a mid-turn stop leaves behind.
+ */
+function interruptedAdvisorReply(partialText: string, language: OwnerLanguage): string {
+  const notice = ADVISOR_TEXT[language].turnInterrupted;
+  if (partialText.trim().length === 0) return notice;
+  return `${parseSlackAdvisorResponse(partialText, () => {}).reply.trimEnd()}\n\n${notice}`;
+}
+
 /** No live Advisor session has the requested id. */
 export class AdvisorSessionNotFoundError extends Error {
   public constructor(sessionId: string) {
@@ -246,6 +259,8 @@ interface WindowSlot {
   pendingHistoryBlock: string | null;
   /** The session resumed from suspension whose first turn has not settled yet; if it dies first, the resume counts as failed. */
   unconfirmedResume: string | null;
+  /** The running turn the user asked to interrupt; it may be set before the turn's send() has returned. */
+  interruptRequestedTurnId: string | null;
 }
 
 /** Slot key for conversations that predate windows. */
@@ -290,7 +305,7 @@ export class AdvisorSessionRuntime {
       slot = {
         driver: null, sessionId: null, systemPrompt: null, lastTurnTarget: null,
         unsolicitedChain: Promise.resolve(), turnLoopRunning: false, turnLoopKick: null,
-        lock: Promise.resolve(), pendingHistoryBlock: null, unconfirmedResume: null,
+        lock: Promise.resolve(), pendingHistoryBlock: null, unconfirmedResume: null, interruptRequestedTurnId: null,
       };
       this.slots.set(slotKey, slot);
     }
@@ -663,6 +678,20 @@ export class AdvisorSessionRuntime {
     await this.notifyRetainedWorkspace(sessionId);
   }
 
+  /** Asks the provider to end the session's running turn early; the session and its queue stay alive. */
+  public async interruptTurn(sessionId: string): Promise<{ status: "interrupting" | "not_running" | "unsupported"; turn_id: string | null }> {
+    const turn = this.config.db.get<{ id: string }>(
+      "SELECT id FROM advisor_turns WHERE session_id = ? AND status = 'running' LIMIT 1", sessionId,
+    );
+    const slot = [...this.slots.values()].find((candidate) => candidate.sessionId === sessionId);
+    if (!turn || !slot || slot.driver === null) return { status: "not_running", turn_id: null };
+    if (!slot.driver.interrupt) return { status: "unsupported", turn_id: turn.id };
+    // Kept even when interrupt() returns false: the turn may not have reached send() yet.
+    slot.interruptRequestedTurnId = turn.id;
+    await slot.driver.interrupt(turn.id);
+    return { status: "interrupting", turn_id: turn.id };
+  }
+
   private forgetDriver(slot: WindowSlot): void {
     slot.driver = null;
     slot.sessionId = null;
@@ -838,6 +867,8 @@ export class AdvisorSessionRuntime {
     directory: AdvisorSessionDirectory,
     resumeProviderSessionId?: string,
   ): Promise<AdvisorSession> {
+    // The window's Project rules belong in its prompt; the caller's snapshot is project-less.
+    settings = this.config.getAdvisorSettings(this.windowProjectId(session.id));
     const workspacePath = directory.cwd;
     const createProviderSession = this.requireSessionSupport();
     let driver: ProviderSession;
@@ -1266,7 +1297,8 @@ export class AdvisorSessionRuntime {
       attachment_paths: turnRequest.attachment_paths,
     };
 
-    const currentPrompt = this.config.getAdvisorSettings().systemPrompt;
+    const currentSettings = this.config.getAdvisorSettings(windowProjectId);
+    const currentPrompt = currentSettings.systemPrompt;
     const promptUpdated = slot.systemPrompt !== null && slot.systemPrompt !== currentPrompt;
     if (promptUpdated) {
       const workspace = this.config.db.get<{ workspace_path: string | null }>(
@@ -1274,7 +1306,7 @@ export class AdvisorSessionRuntime {
         sessionId,
       );
       const directory = this.sessionDirectories.get(sessionId) ?? { kind: "direct" as const, cwd: workspace?.workspace_path ?? "" };
-      const composedPrompt = this.systemPromptFor(this.config.getAdvisorSettings(), directory);
+      const composedPrompt = this.systemPromptFor(currentSettings, directory);
       payload.text = `${OWL_INSTRUCTIONS_UPDATE_HEADER}\n--- BEGIN UPDATED OWL INSTRUCTIONS ---\n${composedPrompt}\n--- END UPDATED OWL INSTRUCTIONS ---\n\n${payload.text}`;
     }
     payload.text = this.takeHistoryBlock(slot, payload.text);
@@ -1288,6 +1320,7 @@ export class AdvisorSessionRuntime {
         throw new Error("The advisor session process has already exited.");
       }
       await driver.send(payload);
+      if (slot.interruptRequestedTurnId === turnRow.id) await driver.interrupt?.(turnRow.id);
     } catch (error) {
       const recovered = await this.retrySendOnFreshSession(slot, sessionId, turnRow, driver, payload, error, memoryRetry);
       if (recovered.driver === null) {
@@ -1475,6 +1508,19 @@ export class AdvisorSessionRuntime {
     turnRow: AdvisorTurnRow,
     driver: ProviderSession,
   ): Promise<"settled" | "resume_failed"> {
+    try {
+      return await this.consumeEvents(slot, sessionId, turnRow, driver);
+    } finally {
+      if (slot.interruptRequestedTurnId === turnRow.id) slot.interruptRequestedTurnId = null;
+    }
+  }
+
+  private async consumeEvents(
+    slot: WindowSlot,
+    sessionId: string,
+    turnRow: AdvisorTurnRow,
+    driver: ProviderSession,
+  ): Promise<"settled" | "resume_failed"> {
     const iterator = driver.events()[Symbol.asyncIterator]();
     for (;;) {
       const step = await iterator.next();
@@ -1531,6 +1577,32 @@ export class AdvisorSessionRuntime {
             this.resolveTurnOrigin(turnRow),
             parsed.suggested_actions,
             parsed.malformed,
+          );
+          await this.markTurnCompleted(turnRow.id, usageJson, replyMessageId);
+          const startedAt = this.config.db.get<{ started_at: string | null }>(
+            `SELECT started_at FROM advisor_turns WHERE id = ?`, turnRow.id,
+          )?.started_at;
+          const sessionProvider = this.config.db.get<{ provider_id: string | null }>(
+            `SELECT provider_id FROM advisor_sessions WHERE id = ?`, sessionId,
+          )?.provider_id;
+          if (sessionProvider && startedAt) await this.config.onProviderSucceeded?.(sessionProvider, startedAt);
+          this.sweepAdvisorWorkspacesInBackground();
+          return "settled";
+        }
+
+        case "turn.interrupted": {
+          if (event.turn_id !== turnRow.id) break;
+          if (slot.unconfirmedResume === sessionId) slot.unconfirmedResume = null;
+          await this.config.sessionManager.recordActivity(sessionId);
+          const usageJson = await this.recordUsageIfPresent(sessionId, event.usage);
+          const replyMessageId = await this.config.onReply(
+            turnRow.conversation_id,
+            interruptedAdvisorReply(event.partial_text, ownerLanguage(this.config.db)),
+            turnRow.id,
+            this.resolveTurnOrigin(turnRow),
+            [],
+            false,
+            { interrupted: true },
           );
           await this.markTurnCompleted(turnRow.id, usageJson, replyMessageId);
           const startedAt = this.config.db.get<{ started_at: string | null }>(

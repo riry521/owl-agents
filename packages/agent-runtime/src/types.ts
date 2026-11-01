@@ -1,4 +1,4 @@
-import type { AcceptanceDefect, CriterionRequirement, GuardTokenIssuer, ManagerTrigger, ProviderErrorRecord, RateLimitInfo, ResearchSubagentSettings, StoredAcceptanceCriterion, TaskNecessity, WebResearchCapture } from "@owl/shared";
+import type { AcceptanceDefect, CriterionRequirement, GuardTokenIssuer, ManagerTrigger, ProviderErrorRecord, RateLimitInfo, ResearchSubagentSettings, StoredAcceptanceCriterion, TaskNecessity, UiChange, WebResearchCapture } from "@owl/shared";
 
 export const REPORT_SCHEMA_VERSION = "1.1.0" as const;
 /** Reports saved before schema 1.1.0 (`verification.passed` boolean). Read-only: new agent output must not use it. */
@@ -146,6 +146,7 @@ export interface TaskDetail {
   /** Manager output: headings a doc Task must contain / test files a test Task must run (Core checks them). */
   readonly required_sections?: readonly string[];
   readonly required_tests?: readonly string[];
+  readonly ui_change?: UiChange;
   /** Manager plan output only: ids of failed Tasks this new Task replaces. */
   readonly replaces?: readonly string[];
   /** Why the Task is needed (Manager plan output and role input; each criterion carries its own too). */
@@ -446,6 +447,7 @@ export type SessionEvent =
   | { type: "tool.web_research_failed"; turn_id: string; error: string }
   | { type: "turn.completed"; turn_id: string; reply: string; usage: TokenUsage | null }
   | { type: "turn.failed"; turn_id: string; error: string; rate_limit?: RateLimitInfo; provider_error?: ProviderErrorRecord }
+  | { type: "turn.interrupted"; turn_id: string; partial_text: string; usage: TokenUsage | null }
   | {
       type: "session.compacted";
       cause: "auto" | "manual";
@@ -468,6 +470,14 @@ export interface ProviderSession {
   readonly exit_detail?: string | null;
   send(turn: { turn_id: string; text: string; attachment_paths?: readonly string[] }): Promise<void>;
   events(): AsyncIterable<SessionEvent>;
+  /**
+   * Ask the provider to end the running turn `turn_id` early. The process and
+   * the conversation context stay alive; the turn settles with a
+   * `turn.interrupted` event (or with its normal `turn.completed` when the
+   * provider finished first). Resolves false when `turn_id` is not the turn
+   * this session is running.
+   */
+  interrupt?(turn_id: string): Promise<boolean>;
   stop(reason: string, graceMs?: number): Promise<void>;
   /** Immediately terminate this Owl-owned session process group during Core shutdown. */
   terminateImmediately?(): void;

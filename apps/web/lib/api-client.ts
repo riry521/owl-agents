@@ -1581,6 +1581,11 @@ export async function listAdvisorWindows(): Promise<AdvisorWindow[]> {
   return response.data;
 }
 
+/** PUT /api/v1/advisor/windows/:key/read: 表示した返事の id までを既読にする。 */
+export async function markAdvisorWindowRead(key: string, readThroughMessageId: string): Promise<void> {
+  await command(`/advisor/windows/${encodeURIComponent(key)}/read`, { read_through_message_id: readThroughMessageId }, 0, 'PUT');
+}
+
 /** PUT /api/v1/advisor/windows/order: Project の窓の key を表示順に送る（全体の窓は含めない）。応答は並べ替えたあとの一覧。 */
 export async function reorderAdvisorWindows(keys: string[]): Promise<AdvisorWindow[]> {
   const response = await command<AdvisorWindow[]>('/advisor/windows/order', { keys }, 0, 'PUT');
@@ -1640,6 +1645,15 @@ export async function inviteOwnerToSlackChannels(): Promise<SlackOwnerInviteResu
 export async function getAdvisorSession(conversationId?: string): Promise<AdvisorSessionInfo> {
   const query = conversationId ? `?conversation_id=${encodeURIComponent(conversationId)}` : '';
   return requestJson<AdvisorSessionInfo>(`/advisor/session${query}`);
+}
+
+/** POST /api/v1/advisor/session/interrupt. */
+export async function interruptAdvisorTurn(windowKey: string): Promise<{ interrupted: boolean; turn_id: string | null }> {
+  return requestJson<{ interrupted: boolean; turn_id: string | null }>('/advisor/session/interrupt', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ window: windowKey }),
+  });
 }
 
 export async function clearAdvisorConversation(conversationId: string): Promise<void> {

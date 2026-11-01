@@ -11,6 +11,7 @@ export interface RuleCurationRelated {
   readonly rule_id?: string;
   readonly proposal_id?: string;
   readonly path?: string;
+  readonly project_id?: string;
   readonly text: string;
   readonly similarity: number;
 }
@@ -28,7 +29,7 @@ export interface RuleCurationProposal {
 
 export interface RuleCurationFinding {
   readonly kind: "duplicate" | "near_duplicate" | "possible_conflict";
-  readonly rules: Array<{ id: string; path: string | null; text: string }>;
+  readonly rules: Array<{ id: string; path: string | null; project_id: string | null; text: string }>;
   readonly similarity: number;
   readonly note: string;
 }
@@ -44,8 +45,9 @@ export interface RuleCurationResult {
 /** Threshold of the create-time fold of a new proposal into an open one (rule-proposals.ts); curation itself asks the model. */
 export const NEAR_DUPLICATE = 0.8;
 
-/** True when one rule can apply to the same role as the other (absolute and system rules apply to every role). */
-export function coApply(a: { level: string; role?: string | null }, b: { level: string; role?: string | null }): boolean {
+/** True when one rule can apply to the same role and Project as the other (absolute and system rules apply to every role; project rules only to their own Project). */
+export function coApply(a: { level: string; role?: string | null; project_id?: string | null }, b: { level: string; role?: string | null; project_id?: string | null }): boolean {
+  if (a.level === "project" && b.level === "project" && (a.project_id ?? null) !== (b.project_id ?? null)) return false;
   return a.level !== "role" || b.level !== "role" || (a.role ?? null) === (b.role ?? null);
 }
 
@@ -94,7 +96,7 @@ export async function curateRuleProposals(input: {
     const fp = fingerprint(proposal.text);
     const scoped = input.rules.promptRules.filter((r) => coApply(r, proposal));
     const relate = (rule: PromptRule, similarity: number): RuleCurationRelated =>
-      ({ rule_id: rule.id, ...(pathOf(rule) ? { path: pathOf(rule) as string } : {}), text: rule.text, similarity });
+      ({ rule_id: rule.id, ...(pathOf(rule) ? { path: pathOf(rule) as string } : {}), ...(rule.project_id ? { project_id: rule.project_id } : {}), text: rule.text, similarity });
 
     const same = scoped.find((r) => fingerprint(r.text) === fp);
     if (same) return done("duplicate_of_rule", "An existing rule already says this.", [relate(same, 1)]);
@@ -127,7 +129,7 @@ export async function curateRuleProposals(input: {
       if (!kind) continue;
       rule_findings.push({
         kind,
-        rules: [a, b].map((r) => ({ id: r.id, path: pathOf(r), text: r.text })),
+        rules: [a, b].map((r) => ({ id: r.id, path: pathOf(r), project_id: r.project_id ?? null, text: r.text })),
         similarity,
         note: kind === "possible_conflict" ? "The model judged these rules to contradict each other." : "Rules overlap.",
       });

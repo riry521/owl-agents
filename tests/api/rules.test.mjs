@@ -95,3 +95,22 @@ test("POST /rules/check applies role rules only to that role and validates role 
     assert.equal(invalid.body.error.code, "validation_error");
   }
 });
+
+test("GET /rules marks project rules with level project and their project_id", async (t) => {
+  const root = await tempDir(t, "owl-api-rules-project-");
+  await mkdir(path.join(root, "rules", "project"), { recursive: true });
+  await mkdir(path.join(root, "rules", "system"), { recursive: true });
+  await writeFile(path.join(root, "rules", "project", "proj1.yaml"), `level: project\nrules:\n  - id: proj_rule\n    kind: instruction\n    text: "Use pnpm."\n`);
+  await writeFile(path.join(root, "rules", "system", "d.yaml"), `level: system\nrules:\n  - id: sys_rule\n    kind: instruction\n    text: "Be brief."\n`);
+  const ruleStore = new RuleStore(root);
+  await ruleStore.load();
+  const server = await startTestHttpServer(t, { core: { ready: true }, webOut: root, owlRoot: root, ruleStore }, { token: "test-api-token" });
+  if (!server) return t.skip("localhost listen is unavailable");
+  const { data } = await (await server.request("GET", "/api/v1/rules")).json();
+  assert.equal(data.files.find((f) => f.level === "project").project_id, "proj1");
+  assert.equal(data.files.find((f) => f.level === "system").project_id, null);
+  const proj = data.prompt_rules.find((r) => r.id === "proj_rule");
+  assert.equal(proj.level, "project");
+  assert.equal(proj.project_id, "proj1");
+  assert.equal(data.prompt_rules.find((r) => r.id === "sys_rule").project_id, null);
+});

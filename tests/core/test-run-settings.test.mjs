@@ -179,6 +179,29 @@ test("a Project's report_check_commands save through updateProject, survive a Co
   assert.deepEqual(restarted.listProjects().data.find((project) => project.id === projectId).report_check_commands, []);
 });
 
+test("a Project's screen_paths save through updateProject, survive a Core restart, and clear with null or an empty include", async (t) => {
+  const { core, db, root, projectId, created } = await setup(t);
+  assert.equal(created.data.screen_paths, null);
+  const updated = await core.updateProject(projectId, command({ screen_paths: { include: [" apps/web/**", "apps/web/**", "src/ui/*.tsx"] } }, "screens-set"));
+  assert.deepEqual(updated.data.screen_paths, { include: ["apps/web/**", "src/ui/*.tsx"], exclude: [] });
+  const badLists = [{ include: ["/abs"] }, { include: ["~/x"] }, { include: ["a/../b"] }, { include: ["!a"] }, { include: [""] }, { include: [1] }, { include: Array.from({ length: 51 }, (_, i) => `a${i}`) }, { exclude: ["a"] }, { include: ["a"], other: [] }, { include: ["a"], exclude: ["../x"] }, [], "apps/**"];
+  for (const [index, value] of badLists.entries()) {
+    await assert.rejects(core.updateProject(projectId, command({ screen_paths: value }, `screens-bad-${index}`)), (error) => error.code === "validation_error", JSON.stringify(value));
+  }
+  await core.stop();
+
+  const { core: restarted } = await createTestCore(t, { db, owlRoot: root });
+  const stored = () => restarted.listProjects().data.find((project) => project.id === projectId).screen_paths;
+  assert.deepEqual(stored(), { include: ["apps/web/**", "src/ui/*.tsx"], exclude: [] });
+  await restarted.updateProject(projectId, command({ screen_paths: { include: ["a/**"], exclude: ["**/*.test.*"] } }, "screens-exclude"));
+  assert.deepEqual(stored(), { include: ["a/**"], exclude: ["**/*.test.*"] });
+  await restarted.updateProject(projectId, command({ screen_paths: null }, "screens-clear"));
+  assert.equal(stored(), null);
+  await restarted.updateProject(projectId, command({ screen_paths: { include: ["a/**"] } }, "screens-again"));
+  await restarted.updateProject(projectId, command({ screen_paths: { include: [], exclude: ["x"] } }, "screens-empty"));
+  assert.equal(stored(), null);
+});
+
 const unitArgv = ["runner", "{unit}"];
 
 test("unit settings: each write rule rejects its own shape", () => {

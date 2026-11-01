@@ -1,18 +1,15 @@
-import { findInternalTerms, findManagerWorkRequests, type DecisionExplanationRequest } from "../../shared/dist/decision-explanation.js";
+import { coreDecisionTexts, findInternalTerms, findManagerWorkRequests, type CoreDecisionTexts, type DecisionExplanationRequest } from "../../shared/dist/decision-explanation.js";
 
-export interface PlainExplanation {
+export interface PlainExplanation extends CoreDecisionTexts {
   readonly summary: string;
-  readonly next_steps: string;
 }
 
 const TEXT = {
   ja: {
     summary: "処理が止まりました。原因を自動で説明できなかったため、判断待ちの内容をそのまま示します。",
-    nextSteps: "下の選択肢から選んでください。どれにも当てはまらないときは、回答欄に一言書くと、Managerがそれに従って直します。",
   },
   en: {
     summary: "The work stopped, and the cause could not be explained automatically. The Decision's own text is shown as it is.",
-    nextSteps: "Pick one of the choices below. If none fits, write a word in the answer field and the Manager will follow it.",
   },
 } as const;
 
@@ -35,9 +32,13 @@ const strings = (value: unknown): string[] =>
 
 /**
  * The explanation Core writes when the model's cannot be stored, from the Task's latest report and the Decision's own texts.
+ * next_steps and option_notes are Core's own sentences, with the usable lines of the Task's question before them.
  * A line stays only when it has no internal term and is not an English diagnostic (the Manager's validation messages are English).
  */
-export function plainDecisionExplanation(request: Pick<DecisionExplanationRequest, "language" | "decision" | "reports" | "forbidden_terms">): PlainExplanation {
+export function plainDecisionExplanation(
+  request: Pick<DecisionExplanationRequest, "language" | "decision" | "reports" | "forbidden_terms">,
+  core: Parameters<typeof coreDecisionTexts>[0],
+): PlainExplanation {
   const usable = (lines: readonly string[]): string[] => [...new Set(
     lines.map((line) => codeFormat(line.trim())).filter((line) =>
       line !== "" && findInternalTerms(line, request.forbidden_terms).length === 0 && findManagerWorkRequests(line).length === 0 && !isDiagnostic(line, request.language)),
@@ -50,6 +51,6 @@ export function plainDecisionExplanation(request: Pick<DecisionExplanationReques
   const text = TEXT[request.language];
   return {
     summary: causes.length > 0 ? causes.join("\n") : text.summary,
-    next_steps: [...choices, text.nextSteps].join("\n"),
+    ...coreDecisionTexts(core, request.language, choices),
   };
 }

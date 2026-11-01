@@ -2,6 +2,7 @@ import { PrerequisiteValidationError, validateWaitFor, type PlanWaitFor } from "
 import { DEFAULT_PLAN_QUALITY_SETTINGS, type PlanQualitySettings } from "../../shared/dist/plan-quality-settings.js";
 import { criterionRequirement, isManagerCriterion, type CriteriaRelaxation, type StoredAcceptanceCriterion } from "../../shared/dist/acceptance-criteria.js";
 import type { AcceptanceDefect } from "../../shared/dist/acceptance-defect.js";
+import { designsScreens, type UiChange } from "../../shared/dist/design-documents.js";
 import { evaluateCriteriaRelaxation } from "./plan-quality";
 import type { CriterionCheck, RuleApplicability, TaskPlanItem } from "./types";
 
@@ -19,6 +20,10 @@ export interface ReplanSnapshotTask {
   readonly status: string;
   /** True when the Task failed only because a dependency failed (Task row 27). */
   readonly failed_by_dependency: boolean;
+  /** Absent in a hand-written snapshot: read as not a screen design Task. */
+  readonly type?: string;
+  readonly ui_change?: UiChange;
+  readonly assigned_designer?: string | null;
 }
 
 export interface ReplanSnapshot {
@@ -34,7 +39,7 @@ export interface ReplanSnapshot {
 /** A dependency of a retried Task: an existing Task, or a new Task of the same replan (by its local id). */
 export type ReplanDependency = { readonly task_id: string } | { readonly new_task: string };
 
-export type TaskRevision = Pick<TaskPlanItem, "title" | "acceptance" | "acceptance_criteria" | "context" | "plan_context" | "type" | "review" | "required_sections" | "required_tests" | "base_sync_only" | "assigned_designer"> & {
+export type TaskRevision = Pick<TaskPlanItem, "title" | "acceptance" | "acceptance_criteria" | "context" | "plan_context" | "type" | "review" | "required_sections" | "required_tests" | "base_sync_only" | "assigned_designer" | "ui_change"> & {
   /**
    * The retried Task's dependencies as the Manager listed them; they replace
    * its current task_dependencies edges. Absent: the edges are kept.
@@ -118,6 +123,12 @@ export function validatePlan(items: readonly TaskPlanItem[]): ReplanPlan | PlanR
   const designAliases = new Set(items.flatMap((item, index) => (item.type === "design" ? itemAliases(item, index) : [])));
   const errors = items.flatMap((item, index) => {
     if (item.type === "design") return [];
+    if (item.ui_change === "major") {
+      const id = planItemLocalId(item, index);
+      const major = `Task ${id} (type ${item.type}) has ui_change major; a major screen change needs a screen design Task first. Plan a design Task with ui_change major for its screens and leave this Task out of the first plan; add it in the design_completed replan with depends_on that design Task.`;
+      const designDependency = (item.depends_on ?? []).find((dependency) => designAliases.has(dependency));
+      return designDependency === undefined ? [major] : [major, `Task ${id} (type ${item.type}) depends on design Task ${designDependency}; leave it out of the first plan and add it in a replan after the design is completed.`];
+    }
     const blocker = (item.depends_on ?? []).find((dependency) => designAliases.has(dependency));
     return blocker === undefined
       ? []
@@ -217,7 +228,31 @@ export function validateReplan(
     }
   }
   errors.push(...criteriaOwnershipErrors(plan, options, required, labelOf));
+  errors.push(...screenDesignDependencyErrors(items, snapshot));
   return errors.length > 0 ? { errors } : plan;
+}
+
+/** A new or retried non-design Task with ui_change major must depend directly on a screen design Task (designsScreens), not through a chain. */
+function screenDesignDependencyErrors(items: readonly TaskPlanItem[], snapshot: ReplanSnapshot): string[] {
+  const screenDesigns = new Set<string>();
+  const mark = (aliases: readonly (string | null | undefined)[], designs: boolean): void => {
+    for (const alias of aliases) if (alias) void (designs ? screenDesigns.add(alias) : screenDesigns.delete(alias));
+  };
+  const snapshotByAlias = new Map<string, ReplanSnapshotTask>();
+  for (const task of snapshot.tasks) {
+    for (const alias of [task.id, task.manager_task_id]) if (alias) snapshotByAlias.set(alias, task);
+    if (task.status !== "cancelled") mark([task.id, task.manager_task_id], designsScreens({ type: task.type ?? "", ui_change: task.ui_change, assigned_designer: task.assigned_designer }));
+  }
+  // The plan's own value wins over the snapshot's; a retried item with a null assigned_designer keeps the stored one.
+  items.forEach((item, index) => {
+    const aliases = itemAliases(item, index);
+    const retried = aliases.map((alias) => snapshotByAlias.get(alias)).find((task) => task !== undefined);
+    mark([...aliases, retried?.id, retried?.manager_task_id], designsScreens({ type: item.type, ui_change: item.ui_change, assigned_designer: item.assigned_designer ?? retried?.assigned_designer }));
+  });
+  return items.flatMap((item, index) => {
+    if (item.type === "design" || item.ui_change !== "major" || (item.depends_on ?? []).some((dependency) => screenDesigns.has(dependency))) return [];
+    return [`Task ${planItemLocalId(item, index)} (type ${item.type}) has ui_change major but depends directly on no screen design Task (a design Task with ui_change major or assigned_designer lead_designer). Add that design Task's id to depends_on, adding a new design Task if none exists; declare ui_change minor only for wording or a few lines of style.`];
+  });
 }
 
 /**
@@ -421,6 +456,7 @@ function validatePlanAgainst(
         required_tests: item.required_tests,
         base_sync_only: item.base_sync_only,
         assigned_designer: item.assigned_designer,
+        ui_change: item.ui_change,
         criteria_relaxations: item.auto_recovery?.criteria_relaxations,
         criterion_checks: item.auto_recovery?.criterion_checks,
         rule_applicability: item.auto_recovery?.rule_applicability,

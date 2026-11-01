@@ -396,6 +396,7 @@ interface AdvisorWindowApiPort {
   getAdvisorWindowSettings(): Promise<AdvisorWindowSettings>;
   setAdvisorWindowSettings(input: unknown): Promise<AdvisorWindowSettings>;
   setAdvisorWindowOrder(keys: readonly string[]): Promise<AdvisorWindowSummary[]>;
+  markAdvisorWindowRead(key: string, readThroughMessageId?: string): Promise<AdvisorWindowSummary | null>;
 }
 
 interface DependencySummaryApiPort {
@@ -1536,7 +1537,7 @@ async function assertProjectPathNotRegistered(core: CorePort, canonicalPath: str
 }
 
 function validateProjectUpdatePayload(payload: JsonObject): UpdateProjectInput {
-  const allowed = ["name", "canonical_path", "auto_push", "advisor_window_enabled", "commit_language", "worktree_setup_command", "worktree_refresh_command", "post_merge_command", "post_merge_install_command", "required_test_command", "test_run", "test_policy", "report_check_commands", "verification_plan"];
+  const allowed = ["name", "canonical_path", "auto_push", "advisor_window_enabled", "commit_language", "worktree_setup_command", "worktree_refresh_command", "post_merge_command", "post_merge_install_command", "required_test_command", "test_run", "test_policy", "report_check_commands", "screen_paths", "verification_plan"];
   const extra = Object.keys(payload).filter((key) => !allowed.includes(key));
   if (extra.length > 0) {
     throw new ApiError(400, "validation_error", "UpdateProject payloadの項目が契約と一致しません。必須項目と余分な項目を確認してください。", { missing: [], extra });
@@ -1586,6 +1587,7 @@ function validateProjectUpdatePayload(payload: JsonObject): UpdateProjectInput {
   if (Object.prototype.hasOwnProperty.call(payload, "test_run")) input.test_run = testRunField(payload.test_run);
   if (Object.prototype.hasOwnProperty.call(payload, "test_policy")) input.test_policy = testPolicyField(payload.test_policy);
   if (Object.prototype.hasOwnProperty.call(payload, "report_check_commands")) input.report_check_commands = reportCheckCommandsField(payload.report_check_commands);
+  if (Object.prototype.hasOwnProperty.call(payload, "screen_paths")) input.screen_paths = screenPathsField(payload.screen_paths);
   if (Object.prototype.hasOwnProperty.call(payload, "verification_plan")) {
     if (!Array.isArray(payload.verification_plan)) {
       throw new ApiError(400, "validation_error", "verification_planが不正です。配列を指定してください。");
@@ -1614,6 +1616,17 @@ function reportCheckCommandsField(value: unknown): string[] | null {
   if (value === null) return null;
   if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) throw new ApiError(400, "validation_error", "report_check_commandsはコマンド文字列の配列かnullで指定してください。", { field: "report_check_commands" });
   return [...value];
+}
+
+/** Shape only; Core validates each pattern. */
+function screenPathsField(value: unknown): { include: string[]; exclude?: string[] } | null {
+  if (value === null) return null;
+  const isStrings = (item: unknown): item is string[] => Array.isArray(item) && item.every((entry) => typeof entry === "string");
+  const record = (typeof value === "object" && !Array.isArray(value) ? value : {}) as Record<string, unknown>;
+  if (Object.keys(record).length === 0 || Object.keys(record).some((key) => key !== "include" && key !== "exclude") || !isStrings(record.include) || (record.exclude !== undefined && !isStrings(record.exclude))) {
+    throw new ApiError(400, "validation_error", "screen_pathsは{include, exclude}（文字列の配列）かnullで指定してください。", { field: "screen_paths" });
+  }
+  return record.exclude === undefined ? { include: [...record.include] } : { include: [...record.include], exclude: [...record.exclude] };
 }
 
 function worktreeCommandField(value: unknown, field: string): string[] {
@@ -1956,6 +1969,20 @@ function requireHookSubagentApi(core: CorePort): HookSubagentApiPort {
 
 interface ReviewerTestGuardApiPort {
   checkReviewerTestCommand(input: { readonly agent_run_id: string; readonly command: string }): Promise<{ readonly denied: false } | { readonly denied: true; readonly matched: string; readonly message: string }>;
+}
+
+interface ScreenPathGuardApiPort {
+  checkScreenPathWrite(input: { readonly agent_run_id: string; readonly tool_name: string; readonly tool_input: Readonly<Record<string, unknown>>; readonly cwd: string }): Promise<{ readonly denied: false } | { readonly denied: true; readonly path: string; readonly message: string }>;
+}
+
+/**
+ * The screen-path check of a Core or its ExternalCoreAdapter, or null. Unlike the require*Api helpers this does not answer 503 when it is missing:
+ * the guard tests use a fake Core without it, and a 5xx makes the hook deny every Worker write.
+ */
+function screenPathGuardApi(core: unknown): ScreenPathGuardApiPort | null {
+  const has = (value: unknown): value is ScreenPathGuardApiPort => isObject(value) && typeof value.checkScreenPathWrite === "function";
+  const wrapped = (core as { core?: unknown }).core;
+  return has(core) ? core : has(wrapped) ? wrapped : null;
 }
 
 interface TestSetupGuardApiPort {
@@ -2440,7 +2467,8 @@ function requireAdvisorWindowApi(core: CorePort): AdvisorWindowApiPort {
     && typeof value.updateAdvisorChannelName === "function"
     && typeof value.getAdvisorWindowSettings === "function"
     && typeof value.setAdvisorWindowSettings === "function"
-    && typeof value.setAdvisorWindowOrder === "function";
+    && typeof value.setAdvisorWindowOrder === "function"
+    && typeof value.markAdvisorWindowRead === "function";
   const wrapped = core as CorePort & { core?: unknown };
   const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
   if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support Advisor windows.");
@@ -3858,6 +3886,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       if (input.test_run !== undefined) update.test_run = input.test_run;
       if (input.test_policy !== undefined) update.test_policy = input.test_policy;
       if (input.verification_plan !== undefined) update.verification_plan = input.verification_plan;
+      if (input.screen_paths !== undefined) update.screen_paths = input.screen_paths;
       if (input.canonical_path !== undefined && resolve(input.canonical_path) !== resolve(current.canonical_path)) {
         const inspection = await inspectProjectFolder(input.canonical_path).catch((error: unknown) => {
           if (error instanceof ApiError) throw error;
@@ -5309,6 +5338,30 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
+  const advisorWindowReadMatch = pathname.match(new RegExp(`^${API_PREFIX}/advisor/windows/([^/]+)/read$`));
+  if (advisorWindowReadMatch && method === "PUT") {
+    requireOwner(request);
+    const key = decodeURIComponent(advisorWindowReadMatch[1] ?? "");
+    const command = commandEnvelope(await readRequestBody(request));
+    const readThrough = isObject(command.payload) ? command.payload.read_through_message_id : undefined;
+    if (readThrough !== undefined && (typeof readThrough !== "string" || readThrough === "")) {
+      throw new ApiError(400, "validation_error", "read_through_message_id must be a message id.", { field: "read_through_message_id" });
+    }
+    const api = requireAdvisorWindowApi(context.core);
+    const result = await runCommand(context, pathname, command, 200, async () => {
+      const data = await api.markAdvisorWindowRead(key, readThrough).catch((error: unknown) => {
+        if (isObject(error) && error.code === "validation_error") {
+          throw new ApiError(400, "validation_error", error instanceof Error ? error.message : "Invalid request.", { field: "read_through_message_id" }, { cause: error });
+        }
+        throw error;
+      });
+      if (!data) throw new ApiError(404, "advisor_window_not_found", "指定されたAdvisorの窓が見つかりません。窓の一覧を読み直してください。", { key });
+      return { data: data as unknown as JsonObject, version: 0 };
+    });
+    sendJson(response, 200, result);
+    return;
+  }
+
   if (pathname === `${API_PREFIX}/advisor/channel-bindings` && method === "GET") {
     requireOwner(request);
     const provider = url.searchParams.get("provider");
@@ -5568,6 +5621,23 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
+  if (pathname === `${API_PREFIX}/advisor/session/interrupt` && method === "POST") {
+    const ownerId = requireOwner(request);
+    try {
+      const body = isJsonContentType(headerValue(request, "content-type")) ? await readRequestBody(request) : {};
+      const windowKey = isObject(body) && typeof body.window === "string" && body.window.length > 0 ? body.window : GENERAL_WINDOW_KEY;
+      const result = await context.core.interruptAdvisorTurn(ownerId, windowKey);
+      if (result.status === "unsupported") {
+        sendJson(response, 409, { error: "interrupt_unsupported" });
+        return;
+      }
+      sendJson(response, 200, { interrupted: result.status === "interrupting", turn_id: result.turn_id });
+    } catch (error) {
+      await sendApiError(response, requestIdValue, error, `${method} ${pathname}`, context.core);
+    }
+    return;
+  }
+
   if (pathname === `${API_PREFIX}/memory/save-manual` && method === "POST") {
     requireOwner(request);
     try {
@@ -5660,10 +5730,10 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     sendJson(response, 200, {
       request_id: requestIdValue,
       data: {
-        files: ruleSet.files.map((f) => ({ path: f.path, level: f.level, role: f.role ?? null, rule_count: f.rules.length })),
+        files: ruleSet.files.map((f) => ({ path: f.path, level: f.level, role: f.role ?? null, project_id: f.project_id ?? null, rule_count: f.rules.length })),
         block_rules: ruleSet.blockRules.map((r) => ({ id: r.id, level: r.level, role: r.role ?? null, pattern: r.pattern, message: ownerRuleMessage(r.id, r.message, language) })),
         block_paths: ruleSet.blockPaths.map((r) => ({ id: r.id, level: r.level, role: r.role ?? null, pattern: r.pattern, mode: r.mode, message: ownerRuleMessage(r.id, r.message, language) })),
-        prompt_rules: ruleSet.promptRules.map((r) => ({ ...r, text: ownerRuleMessage(r.id, r.text, language) })),
+        prompt_rules: ruleSet.promptRules.map((r) => ({ ...r, project_id: r.project_id ?? null, text: ownerRuleMessage(r.id, r.text, language) })),
         status: context.ruleStore.status,
       },
     });
@@ -5758,6 +5828,17 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
         sendJson(response, 200, {
           request_id: command.request_id,
           data: { allowed: false, rule_id: "test-setup-install", scope: "role", message: setupCheck.message },
+          version: command.expected_version,
+        });
+        return;
+      }
+    }
+    if (agent?.role === "worker") {
+      const screenCheck = await screenPathGuardApi(context.core)?.checkScreenPathWrite({ agent_run_id: agent.agent_run_id, tool_name: toolName, tool_input: toolInput, cwd });
+      if (screenCheck?.denied) {
+        sendJson(response, 200, {
+          request_id: command.request_id,
+          data: { allowed: false, rule_id: "screen-design-required", scope: "role", message: screenCheck.message },
           version: command.expected_version,
         });
         return;

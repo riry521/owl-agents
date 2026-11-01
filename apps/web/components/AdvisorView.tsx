@@ -3,15 +3,15 @@
 import { type FormEvent, type KeyboardEvent, type Ref, useCallback, useEffect, useLayoutEffect, memo, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { clearAdvisorConversation, getAdvisorWindowConversation, getAdvisorSession, ingestConversation, listMessages, postMessage } from '@/lib/api-client';
+import { clearAdvisorConversation, getAdvisorWindowConversation, getAdvisorSession, ingestConversation, interruptAdvisorTurn, listMessages, postMessage } from '@/lib/api-client';
 import type { AdvisorSessionInfo, Message } from '@/lib/types';
 import { formatClock, formatDateTime, formatRelative } from '@/lib/format';
 import { useLocale } from '@/lib/i18n';
 import { AdvisorChannelPanel } from '@/components/AdvisorChannelPanel';
-import { SendIcon } from '@/components/icons';
+import { SendIcon, StopIcon } from '@/components/icons';
 import { useView } from '@/lib/view-loader';
 import { replyArrived } from '@/lib/advisor-awaiting.mjs';
-import { DEFAULT_WINDOW_KEY, viaLabelKey } from '@/lib/advisor-windows.mjs';
+import { DEFAULT_WINDOW_KEY, readThroughToSend, viaLabelKey } from '@/lib/advisor-windows.mjs';
 
 const PENDING_POLL_INTERVAL_MS = 1_500;
 const AWAITING_REPLY_TIMEOUT_MS = 60_000;
@@ -36,13 +36,17 @@ interface AdvisorViewProps {
   onOpenWindowPicker?: () => void;
   windowPickerOpen?: boolean;
   windowTriggerRef?: Ref<HTMLButtonElement>;
+  // Called with the last Advisor reply on screen, each time a newer one is shown.
+  onRepliesShown?: (lastReplyId: string) => void;
 }
 
-export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationId = null, channelControls = false, windowName, windowScope, onOpenWindowPicker, windowPickerOpen = false, windowTriggerRef }: AdvisorViewProps = {}) {
+export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationId = null, channelControls = false, windowName, windowScope, onOpenWindowPicker, windowPickerOpen = false, windowTriggerRef, onRepliesShown }: AdvisorViewProps = {}) {
   const { t, locale } = useLocale();
   const [visibleCount, setVisibleCount] = useState(VISIBLE_MESSAGES_STEP);
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
   const [clearError, setClearError] = useState<string | null>(null);
   const [knowledgeSaving, setKnowledgeSaving] = useState(false);
   const [knowledgeSaveNotice, setKnowledgeSaveNotice] = useState<string | null>(null);
@@ -94,6 +98,10 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
     () => (messagesView.data ? [...messagesView.data].sort((a, b) => a.created_at.localeCompare(b.created_at)) : null),
     [messagesView.data],
   );
+  const lastReplyId = readThroughToSend(messages, visibleCount);
+  useEffect(() => {
+    if (lastReplyId !== null) onRepliesShown?.(lastReplyId);
+  }, [lastReplyId, onRepliesShown]);
   const loadErrorSource = conversationView.error ?? messagesView.error;
   const loadError = loadErrorSource ? humanizeLoadError(loadErrorSource, t) : null;
   const refreshMessages = messagesView.refresh;
@@ -197,6 +205,24 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
     URL.revokeObjectURL(url);
   }
 
+  async function handleStop() {
+    setStopping(true);
+    setStopError(null);
+    try {
+      await interruptAdvisorTurn(windowKey);
+    } catch (error) {
+      console.error('[Owl] Advisor interrupt failed', error);
+      setStopError(t('advisor.errorStop'));
+    }
+    try {
+      await refresh();
+    } catch (error) {
+      console.error('[Owl] Advisor refresh after stop failed', error);
+    } finally {
+      setStopping(false);
+    }
+  }
+
   async function handleClear() {
     setMenuOpen(false);
     if (!conversationId) return;
@@ -215,7 +241,9 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
   const pausedClock = pausedUntil === null ? '—' : isToday(pausedUntil)
     ? formatClock(pausedUntil, locale)
     : formatDateTime(pausedUntil, locale);
-  const indicatorLabel = sending || runningTurns > 0 || queuedTurns === 0
+  const indicatorLabel = stopping
+    ? t('advisor.stopping')
+    : sending || runningTurns > 0 || queuedTurns === 0
     ? t('advisor.thinking')
     : pausedUntil
       ? (pausedClock === '—'
@@ -341,18 +369,22 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
       </div>
 
       <div className="advisor__input-area">
-        <AdvisorComposer sending={sending} sendError={sendError} isTouchDevice={isTouchDevice} onSend={handleSend} />
+        <AdvisorComposer sending={sending} sendError={sendError} replying={runningTurns > 0} stopping={stopping} stopError={stopError} isTouchDevice={isTouchDevice} onSend={handleSend} onStop={handleStop} />
       </div>
     </div>
   );
 }
 
 // The input lives here, not in AdvisorView, so it never re-renders the conversation.
-function AdvisorComposer({ sending, sendError, isTouchDevice, onSend }: {
+function AdvisorComposer({ sending, sendError, replying, stopping, stopError, isTouchDevice, onSend, onStop }: {
   sending: boolean;
   sendError: string | null;
+  replying: boolean;
+  stopping: boolean;
+  stopError: string | null;
   isTouchDevice: boolean;
   onSend: (text: string) => Promise<boolean>;
+  onStop: () => void;
 }) {
   const { t } = useLocale();
   // The text stays in the uncontrolled textarea; state only tracks empty vs. not, for the send button.
@@ -445,16 +477,29 @@ function AdvisorComposer({ sending, sendError, isTouchDevice, onSend }: {
           rows={2}
           enterKeyHint="enter"
         />
-        <button
-          type="submit"
-          className="advisor__send"
-          disabled={sending || !hasText}
-          aria-label={t('advisor.sendLabel')}
-        >
-          <SendIcon />
-        </button>
+        {replying ? (
+          <button
+            type="button"
+            className="advisor__send advisor__send--stop"
+            onClick={onStop}
+            disabled={stopping}
+            aria-label={t('advisor.stopLabel')}
+          >
+            <StopIcon />
+          </button>
+        ) : (
+          <button
+            type="submit"
+            className="advisor__send"
+            disabled={sending || !hasText}
+            aria-label={t('advisor.sendLabel')}
+          >
+            <SendIcon />
+          </button>
+        )}
       </div>
       {sendError && <div className="advisor-error advisor-error--send">{sendError}</div>}
+      {stopError && <div className="advisor-error advisor-error--send">{stopError}</div>}
       <p className="advisor__hint">{t(isTouchDevice ? 'advisor.hintTouch' : 'advisor.hint')}</p>
     </form>
   );

@@ -35,6 +35,11 @@ test("hybrid Worker prompt dispatches, waits, integrates, and records delegation
   assert.ok(WORKER_REPORT_SCHEMA.required.includes("delegation"));
 });
 
+test("Worker prompt requires integration_check when the Worker itself runs a CLI for a check", () => {
+  const prompt = buildWorkerPrompt(request, undefined, null, false);
+  assert.match(prompt, /claude or codex CLI process you start yourself/);
+});
+
 async function workerProviderRequest(hybridMode) {
   const calls = [];
   const runner = createAgentRunner({

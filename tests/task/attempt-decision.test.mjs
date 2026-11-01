@@ -761,7 +761,7 @@ const tagsHistory = [[spot("src/tags.ts", 42, "empty tag")], [spot("src/tags.ts"
 test("review failure: fix_required on the same spot as the reviews before it goes back to the Manager", () => {
   const same = decisionOf(evaluate(reviewFailed({}, { findings: [spot("src/tags.ts", 47, "tag with spaces")], fixHistory: tagsHistory }), cfg()));
   assert.deepEqual([same.to, same.reason, same.managerTrigger, same.action], ["failed", "review_same_spot_repeated", true, "replan"]);
-  assert.deepEqual(same.sameSpot, [...[...tagsHistory].reverse().flat(), spot("src/tags.ts", 47, "tag with spaces")], "fixHistory is newest first; the Manager gets the earlier findings oldest first, then the current one");
+  assert.deepEqual(same.sameSpot, [...tagsHistory[0], spot("src/tags.ts", 47, "tag with spaces")], "the default threshold of 2 needs one earlier review, the newest first in fixHistory; the Manager gets it, then the current one");
   // the threshold comes from the config: 4 reviews are needed, only 3 exist
   const later = cfg({ reviewFocus: { ...DEFAULT_ATTEMPT_POLICY_CONFIG.reviewFocus, same_spot_threshold: 4 } });
   assert.equal(decisionOf(evaluate(reviewFailed({}, { findings: [spot("src/tags.ts", 47)], fixHistory: tagsHistory }), later)).reason, "review_fix_required");
@@ -779,7 +779,7 @@ test("review failure: findings scattered over other files or far lines stay a no
   assert.equal(decisionOf(evaluate(reviewFailed({}, { findings: [spot("src/tags.ts", 42)], fixHistory: apart }), cfg())).reason, "review_fix_required");
   const far = decisionOf(evaluate(reviewFailed({}, { findings: [spot("src/tags.ts", 400)], fixHistory: tagsHistory }), cfg()));
   assert.equal(far.reason, "review_fix_required");
-  const short = decisionOf(evaluate(reviewFailed({}, { findings: [spot("src/tags.ts", 42)], fixHistory: tagsHistory.slice(0, 1) }), cfg()));
+  const short = decisionOf(evaluate(reviewFailed({}, { findings: [spot("src/tags.ts", 42)], fixHistory: [] }), cfg()));
   assert.equal(short.reason, "review_fix_required");
 });
 
@@ -827,7 +827,7 @@ test("review_focus: the reducer reads the settings, tells the Manager about the 
   assert.equal(failedReview.decision.reason, "review_same_spot_repeated");
   const brief = failedTaskBrief(db, "T1");
   assert.match(brief.review_same_spot.note, /same spot/);
-  assert.deepEqual(brief.review_same_spot.findings, [...tagsHistory.flat(), spot("src/tags.ts", 44, "tag with spaces")]);
+  assert.deepEqual(brief.review_same_spot.findings, [...tagsHistory.slice(1).flat(), spot("src/tags.ts", 44, "tag with spaces")]);
 
   const replan = () => reduce("task.replanned", { base_plan_version: 1, current_plan_version: 1, dependencies_completed: true });
   const stored = () => db.get("SELECT review_attempts_refunded AS n, total_review_attempts AS total FROM tasks WHERE id = 'T1'");

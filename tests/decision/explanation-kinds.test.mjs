@@ -14,7 +14,14 @@ import {
   workPrerequisiteUnreachableBrief,
 } from "../../packages/core/dist/decision-brief.js";
 import { createUlid } from "../../packages/db/dist/index.js";
-import { DECISION_FIX_OPTION_KINDS, findDecisionTextProblems, findInternalTerms, REPORT_FORMAT_INVALID_ERROR_KEY } from "../../packages/shared/dist/index.js";
+import {
+  DECISION_ANSWER_ROUTE_TEXTS,
+  DECISION_FIX_OPTION_KINDS,
+  REPORT_FORMAT_INVALID_ERROR_KEY,
+  coreDecisionTexts,
+  findDecisionTextProblems,
+  findInternalTerms,
+} from "../../packages/shared/dist/index.js";
 import { command, createTestCore } from "../helpers/core.mjs";
 import { waitFor } from "../helpers/wait.mjs";
 
@@ -147,7 +154,7 @@ const rowOf = (db, id) => {
 };
 const openedEvents = (db, id) => db.all("SELECT payload_json FROM events WHERE type = 'decision.opened'").map((event) => JSON.parse(event.payload_json)).filter((payload) => payload.decision_id === id);
 
-/** What a model that follows the rules would answer: a note for every option, Core's recommendation or the first key, fix options only where allowed. */
+/** What a model that follows the rules would answer: a note for every option, Core's recommendation or the first key, fix options only where allowed. The model writes neither next_steps nor option_notes: Core owns those texts. */
 function answerFor(request, { cause = "work" } = {}) {
   const fix = DECISION_FIX_OPTION_KINDS.includes(request.kind);
   return {
@@ -155,12 +162,22 @@ function answerFor(request, { cause = "work" } = {}) {
     explanation: {
       summary: "The work stopped before it could be finished.",
       cause_kind: cause,
-      next_steps: "Pick one of the choices below to go on.",
-      option_notes: request.decision.options.map((option) => ({ key: option.key, note: "Carries on with this choice." })),
       options: fix ? [{ label: "Try a smaller step", description: "Splits the work into a smaller step.", instruction: "Do a smaller step and retry the Task.", criteria_rewrites: cause === "criteria" ? [{ criterion_id: "AC1", after: "Done in a smaller step.", check: "Run the page once." }] : [] }] : [],
       recommended_option_key: request.decision.recommended ?? (fix ? "fix_1" : request.decision.options[0].key),
     },
   };
+}
+
+/** The texts Core writes beside a ready explanation: from where decisionAnswerRoutes says an answer goes, and the options the Decision had when the explanation was asked for. */
+async function coreExplanationTexts(core, decisionId, options) {
+  const routes = await core.decisionAnswerRoutes(decisionId);
+  return coreDecisionTexts(
+    {
+      free_text_to: routes.free_text,
+      options: options.map((option) => ({ ...option, words_to: option.key === "retry" ? routes.retry : "unspecified" })),
+    },
+    await core.getLanguage(),
+  );
 }
 
 test("every row of the stop-kind table gives its kind, its materials, a saved explanation and one opened notice", async (t) => {
@@ -209,8 +226,10 @@ test("every row of the stop-kind table gives its kind, its materials, a saved ex
     const after = rowOf(db, id);
     assert.equal(after.explanation.kind, row.kind, row.name);
     assert.equal(after.explanation.summary, "The work stopped before it could be finished.", row.name);
-    assert.equal(after.explanation.next_steps, "Pick one of the choices below to go on.", row.name);
-    assert.deepEqual(after.explanation.option_notes.map((note) => note.key), brief.options.map((option) => option.key), row.name);
+    // next_steps and the Decision's own notes are Core's sentences, built from where the answer goes.
+    const coreTexts = await coreExplanationTexts(core, id, brief.options);
+    assert.equal(after.explanation.next_steps, coreTexts.next_steps, row.name);
+    assert.deepEqual(after.explanation.option_notes, coreTexts.option_notes, row.name);
     assert.equal(after.stateVersion, before.stateVersion, `${row.name}: state_version does not rise`);
     if (DECISION_FIX_OPTION_KINDS.includes(row.kind)) {
       assert.deepEqual(after.options.slice(1), before.options, `${row.name}: the Decision's own options stay after the fix option`);
@@ -338,21 +357,16 @@ test("the replan_failed Decision of sns-team #8 explains the cause and the Owner
     await waitFor(() => rowOf(db, id).explanation.status !== "pending", { message: "the explanation was written" });
     return { explanation: rowOf(db, id).explanation, requests };
   };
-  const answer = (request, next_steps) => ({
-    ...answerFor(request).explanation,
-    summary: "レイアウトが登録一覧になく、リポジトリの外の変更は検証できません。",
-    next_steps,
-  });
+  const answer = (request, summary) => ({ ...answerFor(request).explanation, summary });
 
-  const passed = await run((request) => ({ ok: true, explanation: answer(request, "`mikata_long` か `duo_wide` を選んでください。") }));
+  const passed = await run((request) => ({ ok: true, explanation: answer(request, "レイアウトが登録一覧になく、リポジトリの外の変更は検証できません。`mikata_long` か `duo_wide` を選んでください。") }));
   assert.deepEqual([passed.explanation.status, passed.explanation.plain], ["ready", undefined]);
-  assert.match(passed.explanation.next_steps, /`mikata_long` か `duo_wide`/);
+  assert.match(passed.explanation.summary, /`mikata_long` か `duo_wide`/u);
 
-  const rejected = await run((request) => ({ ok: true, explanation: answer(request, "mikata_long か duo_wide を選んでください。") }));
+  const rejected = await run((request) => ({ ok: true, explanation: answer(request, "レイアウトが登録一覧になく、リポジトリの外の変更は検証できません。mikata_long か duo_wide を選んでください。") }));
   assert.equal(rejected.requests.length, 3, "two rewrites, then Core's own text");
   assert.equal(rejected.explanation.plain, true);
   assert.match(rejected.explanation.summary, /登録一覧になく.*リポジトリの外/);
-  assert.match(rejected.explanation.next_steps, /`mikata_long` か `duo_wide`/);
 
   for (const { explanation } of [passed, rejected]) {
     assert.doesNotMatch(JSON.stringify(explanation), /criteria_relaxations|AC1|Rejected/);
@@ -366,7 +380,6 @@ test("the stopped layout Decision of sns-team #8 gets the neck and choices phras
     explanation: {
       ...answerFor(request).explanation,
       summary: "長尺動画の見た目の設定 `mikata_long` が今の登録一覧にありません。ほぼ同じ配置の `duo_wide` はテロップ枠が1つ多く、そのままでは先へ進めません。",
-      next_steps: "どちらかを選んでください。どちらでもないときは、回答欄に一言書くと Manager がそれに従って直します。",
       options: [
         choice("`duo_wide` を使うことにしますか？", "テロップ枠が1つ増えた見た目で動画が作られます。"),
         choice("`mikata_long` を登録し直すことにしますか？", "元の見た目のまま作れますが、登録の準備が終わるまで待つことになります。"),
@@ -389,7 +402,8 @@ test("the stopped layout Decision of sns-team #8 gets the neck and choices phras
     tx.run("UPDATE tasks SET title = ? WHERE id = ?", title, taskIds[0]);
     tx.run("UPDATE events SET payload_json = ? WHERE type = 'task.failure.classified' AND task_id = ?", JSON.stringify(partial), taskIds[0]);
   });
-  const id = await insertDecision(db, workId, coreTaskDecisionBrief(title, { report: { result: "partial" } }, "en"), { blocked: [taskIds[0]] });
+  const brief = coreTaskDecisionBrief(title, { report: { result: "partial" } }, "en");
+  const id = await insertDecision(db, workId, brief, { blocked: [taskIds[0]] });
   await core.start();
   await waitFor(() => rowOf(db, id).explanation.status !== "pending", { message: "the explanation was written" });
 
@@ -405,5 +419,47 @@ test("the stopped layout Decision of sns-team #8 gets the neck and choices phras
     assert.match(fix.label, /にしますか？$/u);
     assert.ok(fix.description.length > 0);
   }
-  assert.match(explanation.next_steps, /回答欄に一言書くと/u);
+  // The next_steps sentence is Core's, built from where an answer to this Decision goes (the Worker, for this kind).
+  const coreTexts = await coreExplanationTexts(core, id, brief.options);
+  assert.equal(explanation.next_steps, coreTexts.next_steps);
+  assert.deepEqual(explanation.option_notes, coreTexts.option_notes);
+});
+
+test("a no_progress limit that is reached hands a retry answer to the Manager: the note says so, and a bare retry answer fails the Task with owner_to_manager", async (t) => {
+  const { db, core, requests } = await openCore(t, (request) => answerFor(request));
+  const { workId, taskIds } = await seedWork(core, db);
+  const taskId = taskIds[0];
+  // The state the flow leaves behind: the no_progress count reached the limit, and Core opened the Work-scope Decision for the Task.
+  const count = 3;
+  const brief = noProgressLimitBrief({ taskId, taskTitle: TASK_TITLE, count, limit: count, gate: "worker", recent: ["Nothing changed."] }, "en");
+  const id = createUlid();
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((tx) => {
+    tx.run("UPDATE tasks SET no_progress_count = ? WHERE id = ?", count, taskId);
+    tx.run(
+      `INSERT INTO decisions (id, work_id, scope, status, blocked_task_ids_json, reason, question, tried, current_state, options_json, recommended, allow_free_text, issuer_role, state_version, created_at, explanation_json)
+       VALUES (?, ?, 'work', 'open', ?, ?, ?, ?, ?, ?, ?, 1, 'core', 0, ?, ?)`,
+      id, workId, JSON.stringify([taskId]), brief.reason, brief.question, brief.tried, brief.current_state, JSON.stringify(brief.options), brief.recommended, now, JSON.stringify(brief.explanation),
+    );
+  });
+  await core.start();
+  await waitFor(() => rowOf(db, id).explanation.status === "ready", { message: "the explanation was written" });
+
+  // A retry answer belongs to the Manager, and the stored note for the retry option ends with the Manager's sentence.
+  const routes = await core.decisionAnswerRoutes(id);
+  assert.equal(routes.retry, "manager");
+  const language = await core.getLanguage();
+  const coreTexts = await coreExplanationTexts(core, id, brief.options);
+  const { explanation, options, stateVersion } = rowOf(db, id);
+  assert.equal(explanation.next_steps, coreTexts.next_steps);
+  assert.deepEqual(explanation.option_notes, coreTexts.option_notes);
+  const retryNote = explanation.option_notes.find((note) => note.key === "retry");
+  assert.ok(retryNote, "the retry option carries a note");
+  assert.ok(retryNote.note.endsWith(DECISION_ANSWER_ROUTE_TEXTS[language].option_words.manager));
+
+  // The Web sends only the option label; retryBelongsToManager sends it to the Manager instead of the Worker.
+  const retryLabel = options.find((option) => option.key === "retry").label;
+  await core.answerDecision(id, command({ answer: retryLabel, option_key: "retry", source_message_id: null }, `answer-${id}`, stateVersion));
+  assert.equal(db.get("SELECT status FROM tasks WHERE id = ?", taskId).status, "failed", "the Task goes back to failed for the Manager's replan (owner_to_manager)");
+  assert.notEqual(requests.length, 0);
 });

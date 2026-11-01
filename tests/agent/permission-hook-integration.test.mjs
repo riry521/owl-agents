@@ -606,3 +606,120 @@ test("the guard endpoint denies a Reviewer the part of unit_argv before {unit} w
   assert.equal((await guard.check("run-reviewer", "reviewer", "Bash", "unit-runner --other")).allowed, true);
   assert.equal((await guard.check("run-worker", "worker", "Bash", "unit-runner --only tests/one")).allowed, true);
 });
+
+async function screenGuardCheck(t, screenPaths) {
+  const { core, db, root } = await createTestCore(t, { version: "screen-path-guard" }, { prefix: "owl-screen-path-guard-" });
+  const worktree = path.join(root, "wt");
+  await mkdir(path.join(worktree, "app"), { recursive: true });
+  await writeFile(path.join(worktree, "app", "old.tsx"), "x");
+  await writeFile(path.join(worktree, "app", "keep.tsx"), "x");
+  const created = await core.createProject(envelope({
+    name: "P", canonical_path: path.join(root, "p"), base_branch: "main", allowed_roots: [root], verification_plan: [],
+  }, "screen-path-guard:create"));
+  if (screenPaths !== undefined) await core.updateProject(created.data.id, envelope({ screen_paths: screenPaths }, "screen-path-guard:set"));
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run("INSERT INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Owner', ?, ?) ON CONFLICT DO NOTHING", now, now);
+    transaction.run(
+      `INSERT INTO works (id, owner_id, project_id, title, summary, size, state, rules_json, related_work_ids_json, created_at, updated_at)
+       VALUES ('W1', 'owner:default', ?, 'Work', '', 'normal', 'running', '[]', '[]', ?, ?)`,
+      created.data.id, now, now,
+    );
+    for (const [id, type, status, ui] of [["T1", "code", "running", "none"], ["D1", "design", "completed", "major"]]) {
+      transaction.run(
+        `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, worktree_path, ui_change, created_at, updated_at)
+         VALUES (?, 'W1', 'Task', ?, ?, 'normal', '', '', ?, ?, ?, ?)`,
+        id, type, status, worktree, ui, now, now,
+      );
+    }
+    for (const [runId, role] of [["run-worker", "worker"], ["run-executor", "executor"], ["run-reviewer", "reviewer"]]) {
+      transaction.run(
+        `INSERT INTO agent_runs (id, work_id, task_id, role, provider, model, status, created_at, updated_at)
+         VALUES (?, 'W1', 'T1', ?, 'anthropic', 'm', 'running', ?, ?)`,
+        runId, role, now, now,
+      );
+    }
+  });
+  const guardTokens = GuardTokenRegistry.open(path.join(root, "guard-tokens"));
+  const ruleStore = new RuleStore(root);
+  await ruleStore.ensureDirectories();
+  await ruleStore.load();
+  t.after(() => guardTokens.clear());
+  const api = await startTestHttpServer(t, { core, db, webOut: root, owlRoot: root, dataDir: root, ruleStore, guardTokens });
+  if (!api) return null;
+  // The Executor reaches the endpoint with guard role "worker", like the Worker.
+  const check = async (toolName, toolInput, runId = "run-worker") => {
+    const role = runId === "run-reviewer" ? "reviewer" : "worker";
+    const lease = guardTokens.issue({ agent_run_id: runId, role });
+    const token = (await readFile(lease.file, "utf8")).trim();
+    const response = await fetch(`${api.baseUrl}/api/v1/guard/check`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ request_id: "r", idempotency_key: "k", expected_version: 0, payload: { role, tool_name: toolName, tool_input: toolInput, cwd: worktree } }),
+    });
+    lease.release();
+    assert.equal(response.status, 200);
+    return (await response.json()).data;
+  };
+  const denials = () => db.all("SELECT payload_json FROM events WHERE type = 'task.screen_write_denied' ORDER BY rowid").map((row) => JSON.parse(row.payload_json));
+  return { db, check, denials, worktree, root };
+}
+
+const SCREEN_PATHS = { include: ["app/**"], exclude: ["**/*.test.*"] };
+
+test("the guard endpoint denies a Worker or Executor creating a screen file without a screen design and records it", async (t) => {
+  const guard = await screenGuardCheck(t, SCREEN_PATHS);
+  if (!guard) return t.skip("localhost listen is unavailable");
+  const { check, db, denials, worktree } = guard;
+  const attempts = [
+    ["Write", { file_path: path.join(worktree, "app", "new.tsx"), content: "x" }],
+    ["apply_patch", { patch: "*** Begin Patch\n*** Add File: app/added.tsx\n+x\n*** End Patch" }],
+    ["Bash", { command: "echo x > app/echoed.tsx" }],
+  ];
+  for (const [toolName, input] of attempts) {
+    const result = await check(toolName, input);
+    assert.equal(result.allowed, false, toolName);
+    assert.equal(result.rule_id, "screen-design-required", toolName);
+    assert.ok(result.message.startsWith("Screen design required"), toolName);
+  }
+  assert.equal((await check("Write", { file_path: "app/exec.tsx", content: "x" }, "run-executor")).rule_id, "screen-design-required");
+  const events = denials();
+  assert.equal(events.length, 4);
+  assert.deepEqual([events[0].path, events[0].include_pattern, events[0].tool_name], ["app/new.tsx", "app/**", "Write"]);
+
+  await db.createWriteLane().transact((tx) => tx.run("INSERT INTO task_dependencies (task_id, depends_on_task_id) VALUES ('T1', 'D1')"));
+  assert.equal((await check("Write", { file_path: "app/after-design.tsx", content: "x" })).allowed, true);
+  assert.equal((await check("Bash", { command: "echo x > app/after-design.tsx" })).allowed, true);
+  assert.equal((await check("apply_patch", { patch: "*** Begin Patch\n*** Add File: app/after-design2.tsx\n+x\n*** End Patch" })).allowed, true);
+  assert.equal(denials().length, 4);
+});
+
+test("the guard endpoint lets excluded paths, edits of existing files, renames inside the screen paths and outside paths through", async (t) => {
+  const guard = await screenGuardCheck(t, SCREEN_PATHS);
+  if (!guard) return t.skip("localhost listen is unavailable");
+  const { check, denials, worktree, root } = guard;
+  const allowed = [
+    ["Write", { file_path: "app/new.test.tsx", content: "x" }],
+    ["Write", { file_path: path.join(worktree, "app", "old.tsx"), content: "y" }],
+    ["Edit", { file_path: "app/old.tsx", old_string: "x", new_string: "y" }],
+    ["Bash", { command: "mv app/keep.tsx app/renamed.tsx" }],
+    ["Write", { file_path: path.join(root, "outside.tsx"), content: "x" }],
+    ["Write", { file_path: "other/new.tsx", content: "x" }],
+  ];
+  for (const [toolName, input] of allowed) {
+    const result = await check(toolName, input);
+    assert.equal(result.allowed, true, `${toolName} ${JSON.stringify(input)}`);
+  }
+  assert.equal(denials().length, 0);
+});
+
+test("the guard endpoint does not check screen files when the Project has no screen_paths or an empty include", async (t) => {
+  for (const screenPaths of [undefined, null, { include: [], exclude: [] }]) {
+    const guard = await screenGuardCheck(t, screenPaths);
+    if (!guard) return t.skip("localhost listen is unavailable");
+    for (const [toolName, input] of [["Write", { file_path: "app/new.tsx", content: "x" }], ["Bash", { command: "echo x > app/echoed.tsx" }], ["apply_patch", { patch: "*** Begin Patch\n*** Add File: app/patched.tsx\n+x\n*** End Patch" }]]) {
+      assert.equal((await guard.check(toolName, input)).allowed, true, `${JSON.stringify(screenPaths)} ${toolName}`);
+    }
+    assert.equal(guard.denials().length, 0);
+  }
+});

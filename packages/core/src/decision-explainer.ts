@@ -1,10 +1,13 @@
 import {
   DECISION_FIX_OPTION_PREFIX,
   applyDecisionTexts,
+  coreDecisionTexts,
   decisionTextsOf,
   findDecisionTextProblems,
   readDecisionExplanation,
   readDecisionTextCheckOutput,
+  type CoreDecisionTexts,
+  type DecisionAnswerRoute,
   type DecisionTexts,
   type DecisionExplanationCheckContext,
   type DecisionExplanationKind,
@@ -36,9 +39,14 @@ export interface DecisionExplainerDeps {
   /** Called in order on the texts of each explanation; none means the common checks decide. */
   readonly textChecks: () => readonly DecisionTextCheck[];
   readonly announce: (workId: string) => Promise<void>;
+  /** Where an answer with the retry option, and one in the answer field, would go; the explanation's sentences follow it. */
+  readonly answerRoutes: (decisionId: string) => Promise<{ readonly retry: DecisionAnswerRoute; readonly free_text: DecisionAnswerRoute }>;
 }
 
-type Outcome = { readonly report: DecisionExplanationReport } | { readonly error: string; readonly plain?: PlainExplanation };
+type Outcome = ({ readonly report: DecisionExplanationReport } & CoreDecisionTexts) | { readonly error: string; readonly plain?: PlainExplanation };
+
+/** The model's report or an error, before Core adds its own texts. */
+type Produced = { readonly report: DecisionExplanationReport } | { readonly error: string };
 
 /** Decision.explanation from the stored explanation_json. */
 export function toDecisionExplanation(json: string | null | undefined): Decision["explanation"] {
@@ -166,7 +174,7 @@ export function writeDecisionExplanationInTransaction(transaction: CoreWriteLane
   if ("error" in outcome) {
     // Core's own summary and next_steps stand in, so the Owner never sees an empty explanation.
     const stored: StoredDecisionExplanation = outcome.plain
-      ? { kind, status: "ready", summary: outcome.plain.summary, next_steps: outcome.plain.next_steps, option_notes: [], error: outcome.error, plain: true }
+      ? { kind, status: "ready", summary: outcome.plain.summary, next_steps: outcome.plain.next_steps, option_notes: outcome.plain.option_notes, error: outcome.error, plain: true }
       : { kind, status: "failed", error: outcome.error };
     transaction.run("UPDATE decisions SET explanation_json = ? WHERE id = ?", JSON.stringify(stored), decisionId);
     return true;
@@ -193,7 +201,7 @@ export function writeDecisionExplanationInTransaction(transaction: CoreWriteLane
     decisionId,
   );
   assertDecisionBrief({ ...decision!, options: options as never, recommended, allow_free_text: true });
-  const ready: StoredDecisionExplanation = { kind, status: "ready", summary: report.summary, cause_kind: report.cause_kind, next_steps: report.next_steps, option_notes: report.option_notes };
+  const ready: StoredDecisionExplanation = { kind, status: "ready", summary: report.summary, cause_kind: report.cause_kind, next_steps: outcome.next_steps, option_notes: outcome.option_notes };
   transaction.run(
     "UPDATE decisions SET explanation_json = ?, options_json = ?, recommended = ? WHERE id = ?",
     JSON.stringify(ready),
@@ -256,11 +264,18 @@ export class DecisionExplainer {
     if (!row?.explanation_json || (JSON.parse(row.explanation_json) as StoredDecisionExplanation).status !== "pending") return null;
     const base = buildExplanationRequest(db, decisionId, this.deps.language(), this.deps.rules(row.work_id));
     if (!base) return null;
-    const outcome = await this.attempt(decisionId, base);
-    return "error" in outcome ? { ...outcome, plain: plainDecisionExplanation(base) } : outcome;
+    const routes = await this.deps.answerRoutes(decisionId);
+    const core = {
+      free_text_to: routes.free_text,
+      // retry is the one option whose route Core can tell (answerDecision reads the same key).
+      options: base.decision.options.map((option) => ({ ...option, words_to: option.key === "retry" ? routes.retry : "unspecified" as const })),
+    };
+    const coreTexts = coreDecisionTexts(core, base.language);
+    const produced = await this.attempt(decisionId, base, coreTexts);
+    return "error" in produced ? { ...produced, plain: plainDecisionExplanation(base, core) } : { ...produced, ...coreTexts };
   }
 
-  private async attempt(decisionId: string, base: ExplanationBase): Promise<Outcome> {
+  private async attempt(decisionId: string, base: ExplanationBase, coreTexts: CoreDecisionTexts): Promise<Produced> {
     const runner = this.deps.runner();
     if (typeof runner.runDecisionExplanation !== "function") return { error: "runner_unavailable" };
     const model = this.deps.roleModel("manager");
@@ -272,12 +287,12 @@ export class DecisionExplainer {
     // One deadline covers the runner, every text check and the rewrite; aborting it stops a running checker.
     const controller = new AbortController();
     try {
-      const timeout = new Promise<Outcome>((resolve) => { timer = setTimeout(() => {
+      const timeout = new Promise<Produced>((resolve) => { timer = setTimeout(() => {
         controller.abort();
         if (running.name) console.error(`[owl-core] Decision text check ${running.name} failed for ${decisionId}: timeout`);
         resolve({ error: "timeout" });
       }, timeoutMs); });
-      return await Promise.race([this.produce(runner.runDecisionExplanation.bind(runner), request, base, { decisionId, signal: controller.signal, deadline, running }), timeout]);
+      return await Promise.race([this.produce(runner.runDecisionExplanation.bind(runner), request, base, coreTexts, { decisionId, signal: controller.signal, deadline, running }), timeout]);
     } catch (error) {
       return { error: error instanceof Error ? error.message : "explanation_failed" };
     } finally {
@@ -290,8 +305,9 @@ export class DecisionExplainer {
     run: (request: DecisionExplanationRequest) => Promise<DecisionExplanationRunResult>,
     first: DecisionExplanationRequest,
     base: ExplanationBase,
+    coreTexts: CoreDecisionTexts,
     ctx: CheckRun,
-  ): Promise<Outcome> {
+  ): Promise<Produced> {
     const checks = this.deps.textChecks();
     const rewritesMax = this.deps.rewritesMax();
     let request = first;
@@ -304,10 +320,10 @@ export class DecisionExplainer {
       let rejected: { readonly texts: DecisionTexts; readonly problems: readonly string[] };
       if (!checked.ok) {
         if (rewrites >= rewritesMax) return { error: checked.problem.startsWith("Rephrase without the internal terms") ? "internal_terms" : checked.problem };
-        rejected = { texts: this.textsOfAnswer(result.explanation, base), problems: [checked.problem] };
+        rejected = { texts: this.textsOfAnswer(result.explanation, base, coreTexts), problems: [checked.problem] };
       } else {
         if (checks.length === 0) return { report: checked.value };
-        const outcome = await this.runTextChecks(checked.value, base, checks, ctx);
+        const outcome = await this.runTextChecks(checked.value, base, coreTexts, checks, ctx);
         if ("report" in outcome || "error" in outcome) return outcome;
         if (rewrites >= rewritesMax) {
           console.error(`[owl-core] Decision text check ${outcome.name} failed for ${ctx.decisionId}: ${outcome.problems.join(" / ")}`);
@@ -321,9 +337,9 @@ export class DecisionExplainer {
   }
 
   /** The texts of an answer that failed the common checks, for the revision; an answer too broken to read gives empty texts. */
-  private textsOfAnswer(answer: DecisionExplanationReport, base: ExplanationBase): DecisionTexts {
+  private textsOfAnswer(answer: DecisionExplanationReport, base: ExplanationBase, coreTexts: CoreDecisionTexts): DecisionTexts {
     try {
-      return decisionTextsOf({ ...answer, options: answer.options ?? [], option_notes: answer.option_notes ?? [] }, base.decision.options);
+      return decisionTextsOf({ ...answer, options: answer.options ?? [] }, base.decision.options, coreTexts);
     } catch {
       return { summary: "", next_steps: "", options: [] };
     }
@@ -332,11 +348,12 @@ export class DecisionExplainer {
   private async runTextChecks(
     report: DecisionExplanationReport,
     base: ExplanationBase,
+    coreTexts: CoreDecisionTexts,
     checks: readonly DecisionTextCheck[],
     ctx: CheckRun,
-  ): Promise<Outcome | { readonly name: string; readonly texts: DecisionTexts; readonly problems: readonly string[] }> {
+  ): Promise<Produced | { readonly name: string; readonly texts: DecisionTexts; readonly problems: readonly string[] }> {
     const context = checkContextOf(base);
-    let texts = decisionTextsOf(report, base.decision.options);
+    let texts = decisionTextsOf(report, base.decision.options, coreTexts);
     let fixer: string | null = null;
     for (const check of checks) {
       if (ctx.signal.aborted) return { error: "timeout" };

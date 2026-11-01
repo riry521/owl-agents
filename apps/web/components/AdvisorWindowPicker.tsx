@@ -3,6 +3,7 @@
 import type { KeyboardEvent, Ref } from 'react';
 import type { AdvisorWindow } from '@/lib/types';
 import { useLocale } from '@/lib/i18n';
+import { showUnreadDot } from '@/lib/advisor-windows.mjs';
 
 interface Props {
   windows: AdvisorWindow[];
@@ -62,6 +63,7 @@ export function AdvisorWindowPicker({ windows, currentKey, onSelect, variant, li
             onClick={() => onSelect(w.key)}
           >
             <span className="advisor-window-picker__name">{nameOf(w)}</span>
+            {showUnreadDot(w, currentKey) && <span className="advisor-window-picker__unread" role="img" aria-label={t('advisorWindows.unread')} />}
             <span className="advisor-window-picker__meta">
               <span className={`advisor-window-picker__badge advisor-window-picker__badge--${w.session_status === 'starting' ? 'running' : w.session_status}`}>
                 {t(STATUS_KEYS[w.session_status])}

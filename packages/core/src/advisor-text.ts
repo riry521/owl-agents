@@ -8,6 +8,7 @@ export interface AdvisorText {
   readonly replyFailed: string;
   readonly emptyReply: string;
   readonly turnFailed: string;
+  readonly turnInterrupted: string;
   readonly rateLimited: (timing: "reset" | "retry" | "unknown", time: string | null) => string;
   readonly createIncomplete: string;
   readonly createBadProject: string;
@@ -142,6 +143,7 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     replyFailed: "⚠ Advisorの応答に失敗しました。",
     emptyReply: "（Advisorから空の応答が返されました。もう一度送信してください）",
     turnFailed: "AdvisorのProvider/Harness処理に失敗しました。設定とログを確認してください。",
+    turnInterrupted: "（中断しました）",
     rateLimited: (timing, time) => {
       const schedule = timing === "reset" && time !== null
         ? `${time}ごろ解除される見込みです。`
@@ -236,6 +238,7 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     replyFailed: "⚠ The Advisor could not reply.",
     emptyReply: "(The Advisor returned an empty reply. Please send the message again.)",
     turnFailed: "The Advisor Provider/Harness failed. Check the settings and logs.",
+    turnInterrupted: "(Interrupted.)",
     rateLimited: (timing, time) => {
       const schedule = timing === "reset" && time !== null
         ? `It is expected to reset around ${time}.`

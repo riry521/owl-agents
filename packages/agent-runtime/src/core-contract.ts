@@ -7,6 +7,8 @@ import type {
   ReviewerRunRequest as CoreReviewerRunRequest,
   WorkerRunRequest as CoreWorkerRunRequest,
   SkillFeedback,
+  DecisionAnswerTriageRequest,
+  DecisionAnswerTriageRunResult,
   DecisionExplanationRequest,
   DecisionExplanationRunResult,
   FinalReportRequest,
@@ -71,5 +73,8 @@ export interface RuntimeAgentRunner extends CoreAgentRunner {
   runProjectInvestigation?(request: ProjectInvestigationRequest): Promise<ProjectInvestigationRunResult>;
   runTestSetupInvestigation?(request: TestSetupInvestigationRequest): Promise<TestSetupInvestigationRunResult>;
   runDecisionExplanation?(request: DecisionExplanationRequest): Promise<DecisionExplanationRunResult>;
+  runDecisionAnswerTriage?(request: DecisionAnswerTriageRequest): Promise<DecisionAnswerTriageRunResult>;
+  /** Set by a runner that wraps another: whether the wrapped runner can triage. A runner with its own method may omit it. */
+  decisionAnswerTriageAvailable?(): Promise<boolean>;
   runFinalReport?(request: FinalReportRequest): Promise<FinalReportRunResult>;
 }

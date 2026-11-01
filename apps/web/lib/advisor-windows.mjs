@@ -30,6 +30,22 @@ export function projectWindowKeys(windows) {
   return windows.filter((w) => w.scope !== "general").map((w) => w.key);
 }
 
+/** 窓一覧に未読の点を出すか。今開いている窓は表示した時点で既読にするので、点を出さない。 */
+export function showUnreadDot(window, currentKey) {
+  return window.has_unread === true && window.key !== currentKey;
+}
+
+/**
+ * 既読位置として送る id。画面に描く末尾 visibleCount 件のうち、最後の Advisor のメッセージ（状況の返事も含む）。
+ * 描いていない返事と、表示中の一覧より後に届いた返事は含めない。描いた中に無ければ null。
+ */
+export function readThroughToSend(messages, visibleCount) {
+  if (!messages) return null;
+  let latest = null;
+  for (const message of messages.slice(-visibleCount)) if (message.source === "advisor") latest = message.id;
+  return latest;
+}
+
 /** Slack・Discord から来た Owner の発言の送り手の名前に付ける文言のキー。それ以外は null。 */
 export function viaLabelKey(source) {
   return source === "slack" || source === "discord" ? `advisorWindows.via.${source}` : null;

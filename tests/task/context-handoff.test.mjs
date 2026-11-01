@@ -61,7 +61,7 @@ function review(verdict, problem = null) {
   return {
     verdict,
     summary: `review ${verdict}`,
-    findings: problem === null ? [] : [{ severity: "major", subject: "other", file: "out.txt", line: 1, problem, reason: "r", fix: "f" }],
+    findings: problem === null ? [] : [{ severity: "major", subject: "other", file: `out-${problem}.txt`, line: 1, problem, reason: "r", fix: "f" }],
     tests: { ran: false, command: "none", passed: 0, failed: 0 },
   };
 }
@@ -566,4 +566,7 @@ test("loadFixContext only reads verdicts after the latest replan, restore or Dec
   assert.equal(loadFixContext(db, taskA), null, "invalid stored review shape");
   await lane.transact((tx) => tx.run("UPDATE reviews SET findings_json = '[{\"problem\":\"OK-FINDING\"}]' WHERE id = ?", reviewerRun));
   assert.deepEqual(loadFixContext(db, taskA), { previous_report: {}, reviewer_findings: [{ problem: "OK-FINDING" }] });
+  // The events Core records when the redo Worker starts must not hide the findings.
+  await event("task.started", taskA, {});
+  assert.deepEqual(loadFixContext(db, taskA), { previous_report: {}, reviewer_findings: [{ problem: "OK-FINDING" }] }, "task.started after review.failed");
 });

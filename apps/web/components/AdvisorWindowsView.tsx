@@ -1,11 +1,11 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { AdvisorView } from '@/components/AdvisorView';
 import { AdvisorWindowPicker } from '@/components/AdvisorWindowPicker';
 import { AdvisorWindowSheet } from '@/components/AdvisorWindowSheet';
-import { listAdvisorWindows, reorderAdvisorWindows } from '@/lib/api-client';
+import { listAdvisorWindows, markAdvisorWindowRead, reorderAdvisorWindows } from '@/lib/api-client';
 import { DEFAULT_WINDOW_KEY, moveProjectWindow, projectWindowKeys, resolveWindowKey, windowHref } from '@/lib/advisor-windows.mjs';
 import { useLocale } from '@/lib/i18n';
 import type { AdvisorWindow } from '@/lib/types';
@@ -13,7 +13,7 @@ import { useView } from '@/lib/view-loader';
 
 // Shown when the list cannot be loaded: the generalist works without it.
 const GENERAL_ONLY: AdvisorWindow[] = [
-  { key: DEFAULT_WINDOW_KEY, scope: 'general', project_id: null, name: null, window_id: null, conversation_id: null, session_status: 'none', channels: [], last_message_at: null },
+  { key: DEFAULT_WINDOW_KEY, scope: 'general', project_id: null, name: null, window_id: null, conversation_id: null, session_status: 'none', channels: [], last_message_at: null, has_unread: false },
 ];
 
 export function AdvisorWindowsView() {
@@ -51,6 +51,19 @@ export function AdvisorWindowsView() {
       triggerRef.current?.focus();
     }
   }, [key]);
+
+  const { refresh: refreshWindows } = windowsView;
+  const sentRead = useRef(new Map<string, string>());
+  const markRead = useCallback((lastReplyId: string) => {
+    // refreshWindows may change identity, which re-runs AdvisorView's effect; send each position once.
+    if (sentRead.current.get(key) === lastReplyId) return;
+    sentRead.current.set(key, lastReplyId);
+    markAdvisorWindowRead(key, lastReplyId).then(refreshWindows).catch((error) => {
+      // Forget the failed position so showing the window again sends it again.
+      if (sentRead.current.get(key) === lastReplyId) sentRead.current.delete(key);
+      console.error('[Owl] Advisor window read failed', error);
+    });
+  }, [key, refreshWindows]);
 
   // push, not replace: the browser's back button returns to the previous window.
   const select = (next: string) => {
@@ -91,6 +104,7 @@ export function AdvisorWindowsView() {
           onOpenWindowPicker={() => setSheetOpen(true)}
           windowPickerOpen={sheetOpen}
           windowTriggerRef={triggerRef}
+          onRepliesShown={markRead}
         />
       </div>
       <AdvisorWindowSheet open={sheetOpen} onClose={() => setSheetOpen(false)} windows={windows} currentKey={key} onReorder={windowsView.data ? reorder : undefined} onSelect={(next) => { refocus.current = next !== key; select(next); if (next === key) triggerRef.current?.focus(); }} returnFocusTo={triggerRef} />

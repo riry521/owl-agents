@@ -370,7 +370,8 @@ function evaluateReviewFailed(o: Extract<AttemptTaskObservation, { kind: "review
   const focus = c.reviewFocus;
   if (task.type !== "design" && o.findings && o.fixHistory && o.fixHistory.length >= focus.same_spot_threshold - 1) {
     const sameSpot = repeatedSpots(o.findings, o.fixHistory.slice(0, focus.same_spot_threshold - 1), focus.same_spot_line_distance);
-    if (sameSpot.length > 0) return decide(task, "failed", "review_same_spot_repeated", trigger, true, counted, { sameSpot });
+    // Why drop fixer_escalated_rejections: the Fixer did not run, so the replanned Task must restart as a Worker.
+    if (sameSpot.length > 0) return decide(task, "failed", "review_same_spot_repeated", trigger, true, { ...counted, fixer_escalated_rejections: task.fixer_escalated_rejections ?? null }, { sameSpot });
   }
   const leadStart = task.lead_designer_start_round ?? null;
   if (task.type === "design" && leadStart === null && task.review_round === planRounds - 1) {

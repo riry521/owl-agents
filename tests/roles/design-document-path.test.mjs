@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { DESIGN_MOCK_FILE_PATTERN, DESIGN_SKILL_NAME_PATTERN, designDocumentPath, designMockDirectory, isScreenDesignTask } from "../../packages/shared/dist/index.js";
+import { DESIGN_MOCK_FILE_PATTERN, DESIGN_SKILL_NAME_PATTERN, designDocumentPath, designMockDirectory, designsScreens, isScreenDesignTask } from "../../packages/shared/dist/index.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { createTestCore, command } from "../helpers/core.mjs";
 import { necessityFor, criteriaFor } from "../helpers/necessity.mjs";
@@ -177,4 +177,11 @@ test("design mock helpers fix the mock directory, file names, skill names and sc
   assert.equal(isScreenDesignTask({ type: "design", assigned_designer: "designer" }), true);
   assert.equal(isScreenDesignTask({ type: "design" }), true);
   assert.equal(isScreenDesignTask({ type: "code", assigned_designer: "lead_designer" }), false);
+});
+
+test("designsScreens is true for a major design Task or a lead_designer design Task only", () => {
+  assert.equal(designsScreens({ type: "design", ui_change: "major" }), true);
+  assert.equal(designsScreens({ type: "design", ui_change: "none", assigned_designer: "lead_designer" }), true);
+  assert.equal(designsScreens({ type: "design", ui_change: "minor" }), false);
+  assert.equal(designsScreens({ type: "code", ui_change: "major" }), false);
 });

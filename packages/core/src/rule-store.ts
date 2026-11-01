@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { lstatSync, realpathSync, statSync } from "node:fs";
 import { watch, type FSWatcher } from "node:fs";
 import { readdir, readFile, mkdir } from "node:fs/promises";
-import { join, extname, resolve } from "node:path";
+import { basename, dirname, join, extname, resolve } from "node:path";
 import { GUARD_COMMAND_KEYS, GUARD_CONTENT_KEYS, GUARD_PATH_KEYS, isRuleRole, type ActorRole } from "@owl/shared";
 import {
   analyzeShellCommand,
@@ -149,11 +149,12 @@ function stripYamlComment(value: string): string {
 
 /**
  * Where a rule applies. `absolute` and `system` apply to every role, `role`
- * only to the file's `role`. Levels never override each other; they order the
+ * only to the file's `role`, `project` only to Works of the file's project
+ * (rules/project/{project_id}.yaml). Levels never override each other; they order the
  * prompt lines and label a guard decision's scope. Work-specific rules live
  * only in works.rules_json (see parseWorkRules).
  */
-export type RuleLevel = "absolute" | "system" | "role";
+export type RuleLevel = "absolute" | "system" | "role" | "project";
 export type RuleKind = "block_command" | "block_path" | "instruction";
 export type BlockPathMode = "read" | "write" | "both";
 export type RuleRole = ActorRole;
@@ -175,6 +176,8 @@ export interface RuleFile {
   readonly level: RuleLevel;
   /** Set exactly when level is "role". */
   readonly role?: RuleRole;
+  /** Set exactly when level is "project": the file name without its extension. */
+  readonly project_id?: string;
   readonly rules: readonly RuleDefinition[];
 }
 
@@ -202,6 +205,7 @@ export interface PromptRule {
   readonly id: string;
   readonly level: RuleLevel;
   readonly role?: RuleRole;
+  readonly project_id?: string;
   readonly kind: RuleKind;
   readonly text: string;
 }
@@ -262,9 +266,10 @@ const LEVEL_PRIORITY: Record<RuleLevel, number> = {
   absolute: 0,
   system: 1,
   role: 2,
+  project: 3,
 };
 
-const RULES_SUBDIRS = ["system", "role"] as const;
+const RULES_SUBDIRS = ["system", "role", "project"] as const;
 const RELOAD_DEBOUNCE_MS = 250;
 const UNRESOLVED_PATH_RULE_ID = "guard-unresolved-path";
 /** The one prompt line standing for every block_command / block_path rule. */
@@ -535,7 +540,7 @@ export class RuleStore {
 
   /**
    * The prompt lines for `role`: one line per instruction as `[level] text`, in
-   * absolute → system → role order (file path, then written order), then the
+   * absolute → system → role → project order (file path, then written order), then the
    * Work's rules as `[work] text`. Block rules collapse into one summary line
    * (BLOCK_RULES_SUMMARY) at the place of the first one. An instruction whose
    * text was already emitted at a stronger level is skipped; guard enforcement
@@ -546,12 +551,13 @@ export class RuleStore {
    * claude and codex (and throws when the hook is not built), so there is no
    * unguarded path that would still need the full text.
    */
-  public getInstructionsForRole(role: RuleRole, workRules: readonly string[] = []): string[] {
+  public getInstructionsForRole(role: RuleRole, workRules: readonly string[] = [], projectId: string | null = null): string[] {
     const seen = new Set<string>();
     const lines: string[] = [];
     let summarized = false;
     for (const rule of this.currentRules.promptRules) {
       if (rule.level === "role" && rule.role !== role) continue;
+      if (rule.level === "project" && (projectId === null || rule.project_id !== projectId)) continue;
       if (rule.kind !== "instruction") {
         if (!summarized) {
           summarized = true;
@@ -1271,8 +1277,12 @@ export function parseRuleYaml(content: string, filePath: string): RuleFile {
   if (level === "work") {
     fail("level 'work' is not supported; Work rules live in the Work's rules (works.rules_json)", keyLines.get("level") ?? null);
   }
-  if (level !== "absolute" && level !== "system" && level !== "role") {
-    fail("level must be one of absolute, system, role", keyLines.get("level") ?? null);
+  if (level !== "absolute" && level !== "system" && level !== "role" && level !== "project") {
+    fail("level must be one of absolute, system, role, project", keyLines.get("level") ?? null);
+  }
+  const inProjectDir = basename(dirname(filePath)) === "project" && basename(dirname(dirname(filePath))) === "rules";
+  if (inProjectDir !== (level === "project")) {
+    fail("level 'project' is allowed only in rules/project/, and files there must use it", keyLines.get("level") ?? null);
   }
   const ruleLevel = level as RuleLevel;
   let role: RuleRole | undefined;
@@ -1283,6 +1293,7 @@ export function parseRuleYaml(content: string, filePath: string): RuleFile {
   } else if (data.role !== undefined) {
     fail(`role is only allowed with level 'role'`, keyLines.get("role") ?? null);
   }
+  const projectId = ruleLevel === "project" ? basename(filePath, extname(filePath)) : undefined;
   if (!Array.isArray(data.rules)) fail("rules must be a list (use [] for none)", keyLines.get("rules") ?? null);
   const rules: RuleDefinition[] = [];
   for (const [index, raw] of (data.rules as unknown[]).entries()) {
@@ -1295,6 +1306,9 @@ export function parseRuleYaml(content: string, filePath: string): RuleFile {
       fail(`${label}: kind must be one of block_command, block_path, instruction`, line);
     }
     const ruleKind = kind as RuleKind;
+    // Why not allow block rules: the guard (checkCommand, checkGuard, permission hook) knows no
+    // Work or Project, so a project's block rule could not be limited to that project.
+    if (ruleLevel === "project" && ruleKind !== "instruction") fail(`${label}: project rules allow only kind instruction`, line);
     for (const key of Object.keys(item)) {
       if (!RULE_KEYS[ruleKind].has(key)) fail(`${label}: key '${key}' is not allowed for kind ${ruleKind}`, line);
     }
@@ -1332,7 +1346,7 @@ export function parseRuleYaml(content: string, filePath: string): RuleFile {
     const ids = rules.filter((rule) => rule.id === item.id);
     if (ids.length > 1) fail(`${label}: duplicate rule id`, line);
   }
-  return { path: filePath, level: ruleLevel, ...(role !== undefined ? { role } : {}), rules };
+  return { path: filePath, level: ruleLevel, ...(role !== undefined ? { role } : {}), ...(projectId !== undefined ? { project_id: projectId } : {}), rules };
 }
 
 export class RuleRenderError extends Error {
@@ -1390,7 +1404,7 @@ function compileRuleFile(file: RuleFile): CompiledRuleFile {
   const blockRules: CompiledBlockRule[] = [];
   const blockPaths: CompiledBlockPathRule[] = [];
   const promptRules: PromptRule[] = [];
-  const scope = { level: file.level, ...(file.role !== undefined ? { role: file.role } : {}) };
+  const scope = { level: file.level, ...(file.role !== undefined ? { role: file.role } : {}), ...(file.project_id !== undefined ? { project_id: file.project_id } : {}) };
   for (const rule of file.rules) {
     if (rule.kind === "block_command") {
       const pattern = rule.pattern as string;

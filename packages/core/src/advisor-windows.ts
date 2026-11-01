@@ -115,7 +115,31 @@ export function windowOfConversation(db: Pick<CoreDatabase, "get">, conversation
   ) ?? null;
 }
 
+/** An Advisor reply and its place in message_arrival, the order replies were stored in. */
+export interface ReplyPosition { id: string; seq: number }
+
 const SESSION_STATUS_RANK: readonly AdvisorWindowSessionStatus[] = ["running", "starting", "suspended"];
+
+/** An Advisor reply is a message an advisor_turns row points at, follow-up turns included; the Owner's own messages never count. */
+const REPLY_SQL = "FROM advisor_turns t JOIN message_arrival a ON a.message_id = t.reply_message_id WHERE t.conversation_id = ?";
+
+/** The Advisor reply stored last in a conversation, or null when there is none. */
+export function latestReply(db: Pick<CoreDatabase, "get">, conversationId: string): ReplyPosition | null {
+  return db.get<ReplyPosition>(`SELECT a.message_id AS id, a.seq AS seq ${REPLY_SQL} ORDER BY a.seq DESC LIMIT 1`, conversationId) ?? null;
+}
+
+/**
+ * The given message when the Advisor wrote it in the conversation, else null. Besides replies this takes the Advisor's
+ * status replies and notes, which have no advisor_turns row: the screen shows them in line with the replies before them.
+ */
+export function replyPosition(db: Pick<CoreDatabase, "get">, conversationId: string, messageId: string): ReplyPosition | null {
+  return db.get<ReplyPosition>(
+    `SELECT a.message_id AS id, a.seq AS seq FROM messages m JOIN message_arrival a ON a.message_id = m.id
+      WHERE m.conversation_id = ? AND m.id = ?
+        AND (m.source_message_id LIKE 'advisor:%' OR EXISTS (SELECT 1 FROM advisor_turns t WHERE t.reply_message_id = m.id))`,
+    conversationId, messageId,
+  ) ?? null;
+}
 
 /** General window first, then the Projects with the window switched on or a channel bound, in the Owner's saved order (unsaved ones after, by id), whether or not its window exists yet. */
 export function listAdvisorWindows(db: Pick<CoreDatabase, "all" | "get">, ownerId: string): AdvisorWindowSummary[] {
@@ -149,6 +173,12 @@ export function listAdvisorWindows(db: Pick<CoreDatabase, "all" | "get">, ownerI
       last_message_at: window
         ? db.get<{ at: string | null }>("SELECT MAX(received_at) AS at FROM messages WHERE conversation_id = ?", window.conversation_id)?.at ?? null
         : null,
+      has_unread: window
+        ? db.get(
+          `SELECT 1 ${REPLY_SQL} AND NOT EXISTS (SELECT 1 FROM advisor_window_read r WHERE r.owner_id = ? AND r.window_key = ? AND a.seq <= r.read_through_seq)`,
+          window.conversation_id, ownerId, key,
+        ) !== undefined
+        : false,
     };
   };
   return [

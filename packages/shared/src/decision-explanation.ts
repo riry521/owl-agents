@@ -1,4 +1,5 @@
 import type { JsonObject } from "./index.js";
+import type { OwnerLanguage } from "./owner-language.js";
 import { AUTO_RECOVERY_ACTIONS, AUTO_RECOVERY_KINDS, IMMEDIATE_DECISION_REASONS } from "./auto-recovery-names.js";
 import { MANAGER_FINALIZE_OUTPUT_SCHEMA, MANAGER_FINALIZE_PAGES_OUTPUT_SCHEMA, MANAGER_PLAN_OUTPUT_SCHEMA, MANAGER_REPLAN_OUTPUT_SCHEMA } from "./manager-schema.js";
 import { MANAGER_TRIGGER_KINDS, OWNER_REPLAN_KINDS, OWNER_REQUEST_SITUATIONS, PLAN_FEEDBACK_KINDS, TASK_INTEGRATION_FAILURE_KINDS, TASK_REPLAN_TRIGGER_KINDS } from "./manager-trigger.js";
@@ -43,10 +44,6 @@ export interface DecisionExplanationReport {
   /** The neck: what keeps it from going on, in the Owner's words. */
   readonly summary: string;
   readonly cause_kind: DecisionCauseKind;
-  /** What the Owner can do now, including that a word in the answer field is followed by the Manager. */
-  readonly next_steps: string;
-  /** One note per option the Decision already has, by key: what happens when the Owner picks it. */
-  readonly option_notes: readonly { readonly key: string; readonly note: string }[];
   /** Fix options, each phrased as a question ending in "にしますか？": at least one for DECISION_FIX_OPTION_KINDS, [] for the others. */
   readonly options: readonly DecisionFixOptionReport[];
   /** One key: an option the Decision already has, or fix_1..fix_N for the fix options above. */
@@ -56,24 +53,10 @@ export interface DecisionExplanationReport {
 export const DECISION_EXPLANATION_SCHEMA: RoleSchema = {
   type: "object",
   additionalProperties: false,
-  required: ["summary", "cause_kind", "next_steps", "option_notes", "options", "recommended_option_key"],
+  required: ["summary", "cause_kind", "options", "recommended_option_key"],
   properties: {
     summary: { type: "string", minLength: 1, description: "the neck: what keeps it from going on, in the Owner's words, without internal terms" },
     cause_kind: { type: "string", enum: [...DECISION_CAUSE_KINDS], description: "work, criteria or external" },
-    next_steps: { type: "string", minLength: 1, description: "what the Owner can do now; a word in the answer field is followed by the Manager" },
-    option_notes: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["key", "note"],
-        properties: {
-          key: { type: "string", minLength: 1, description: "key of an option the Decision already has" },
-          note: { type: "string", minLength: 1, description: "what happens, from the Owner's side, when the Owner picks it" },
-        },
-      },
-      description: "one note for every option the Decision already has",
-    },
     options: {
       type: "array",
       items: {
@@ -105,6 +88,79 @@ export const DECISION_EXPLANATION_SCHEMA: RoleSchema = {
     recommended_option_key: { type: "string", minLength: 1, description: "key of the one recommended option" },
   },
 };
+
+/** Where the words an Owner writes with an answer go: Core decides it, the model never writes it. */
+export const DECISION_ANSWER_ROUTES = ["manager", "judged", "worker", "unspecified"] as const;
+export type DecisionAnswerRoute = (typeof DECISION_ANSWER_ROUTES)[number];
+
+export const DECISION_NEXT_STEPS_LEAD: Record<OwnerLanguage, string> = {
+  ja: "下の選択肢から選んでください。",
+  en: "Pick one of the choices below.",
+};
+
+type SpecifiedRoute = Exclude<DecisionAnswerRoute, "unspecified">;
+
+/** Core's own sentences on what becomes of the Owner's words; they stay in step with how Core routes an answer. */
+export const DECISION_ANSWER_ROUTE_TEXTS: Record<OwnerLanguage, {
+  readonly free_text: Record<SpecifiedRoute, string>;
+  readonly option_words: Record<SpecifiedRoute, string>;
+}> = {
+  ja: {
+    free_text: {
+      manager: "回答欄に書いた文は Manager に渡り、Manager がその文に沿って計画を直します。",
+      judged: "回答欄に書いた文は Owl が読みます。同じ受け入れ条件のまま進めるための助言だけなら次の実行で Worker に渡し、それ以外は Manager が計画を直すのに使います。",
+      worker: "回答欄に書いた文は、次の実行で Worker への助言になります。計画と受け入れ条件は変わりません。",
+    },
+    option_words: {
+      manager: "この選択肢を選ぶときに文を添えると、Manager がその文に沿って計画を直します。",
+      judged: "この選択肢を選ぶときに添えた文は Owl が読みます。助言だけなら Worker に渡し、それ以外は Manager が計画を直すのに使います。",
+      worker: "この選択肢を選ぶときに添えた文は、次の実行で Worker への助言になります。",
+    },
+  },
+  en: {
+    free_text: {
+      manager: "Words you write in the answer field go to the Manager, who fixes the plan to follow them.",
+      judged: "Owl reads the words you write in the answer field. Advice for going on with the same acceptance criteria goes to the Worker on the next run; anything else goes to the Manager to fix the plan.",
+      worker: "Words you write in the answer field go to the Worker as advice on the next run. The plan and the acceptance criteria stay the same.",
+    },
+    option_words: {
+      manager: "Words you add when you pick this choice go to the Manager, who fixes the plan to follow them.",
+      judged: "Owl reads the words you add when you pick this choice. Advice goes to the Worker; anything else goes to the Manager to fix the plan.",
+      worker: "Words you add when you pick this choice go to the Worker as advice on the next run.",
+    },
+  },
+};
+
+export interface CoreDecisionTexts {
+  readonly next_steps: string;
+  readonly option_notes: readonly { readonly key: string; readonly note: string }[];
+}
+
+/**
+ * The next_steps and option_notes Core stores, from where each answer goes. An option with an unspecified route gets no note,
+ * so the Owner reads its description. preface lines (a question the Task asked) come first, in a fixed-form explanation only.
+ */
+export function coreDecisionTexts(
+  decision: {
+    readonly free_text_to: DecisionAnswerRoute;
+    readonly options: readonly { readonly key: string; readonly description: string; readonly words_to: DecisionAnswerRoute }[];
+  },
+  language: OwnerLanguage,
+  preface: readonly string[] = [],
+): CoreDecisionTexts {
+  const texts = DECISION_ANSWER_ROUTE_TEXTS[language];
+  const lead = DECISION_NEXT_STEPS_LEAD[language];
+  const route = decision.free_text_to;
+  const joined = route === "unspecified" ? lead : `${lead}${language === "en" ? " " : ""}${texts.free_text[route]}`;
+  return {
+    next_steps: [...preface, joined].join("\n"),
+    option_notes: decision.options.flatMap((option) => {
+      if (option.words_to === "unspecified") return [];
+      const description = /[。.！？!?]$/u.test(option.description) ? option.description : `${option.description}${language === "ja" ? "。" : "."}`;
+      return [{ key: option.key, note: `${description}${language === "en" ? " " : ""}${texts.option_words[option.words_to]}` }];
+    }),
+  };
+}
 
 /** Words an Owner does not know; each Decision adds its own ids as forbidden terms. */
 export const DECISION_INTERNAL_TERM_PATTERNS: readonly RegExp[] = [
@@ -201,14 +257,15 @@ export interface DecisionTexts {
   }[];
 }
 
-/** Collect the texts of a checked report; options gives the Decision's own options in order. */
+/** Collect the texts of a checked report; options gives the Decision's own options in order; next_steps and the Decision's own notes are Core's. */
 export function decisionTextsOf(
   report: DecisionExplanationReport,
   options: readonly { readonly key: string; readonly label: string }[],
+  coreTexts: CoreDecisionTexts,
 ): DecisionTexts {
   return {
     summary: report.summary,
-    next_steps: report.next_steps,
+    next_steps: coreTexts.next_steps,
     options: [
       ...report.options.map((option, index) => ({
         key: `${DECISION_FIX_OPTION_PREFIX}${index + 1}`,
@@ -221,22 +278,19 @@ export function decisionTextsOf(
         key: option.key,
         generated: false,
         label: option.label,
-        note: report.option_notes.find((entry) => entry.key === option.key)?.note ?? "",
+        note: coreTexts.option_notes.find((entry) => entry.key === option.key)?.note ?? "",
         criteria_rewrites: [],
       })),
     ],
   };
 }
 
-/** Put texts back into the report they came from: summary, next_steps, fix labels, descriptions, rewrites by criterion_id, notes by key. */
+/** Put texts back into the report they came from: summary, fix labels, descriptions and rewrites by criterion_id. */
 export function applyDecisionTexts(report: DecisionExplanationReport, texts: DecisionTexts): DecisionExplanationReport {
   const generated = texts.options.filter((option) => option.generated);
-  const notes = new Map(texts.options.filter((option) => !option.generated).map((option) => [option.key, option.note]));
   return {
     ...report,
     summary: texts.summary,
-    next_steps: texts.next_steps,
-    option_notes: report.option_notes.map((entry) => ({ key: entry.key, note: notes.get(entry.key) ?? entry.note })),
     options: report.options.map((option, index) => {
       const text = generated[index];
       if (!text) return option;
@@ -272,9 +326,12 @@ export type DecisionTextCheckOutput =
 const isTextRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === "object" && !Array.isArray(value);
 const isFilled = (value: unknown): value is string => typeof value === "string" && value.length > 0;
 
+const CORE_TEXT_CHANGED = (where: string) => `fixed must not change next_steps or the note of ${where}: they are Core's own texts`;
+
 function readFixedTexts(value: unknown, input: DecisionTexts): { readonly ok: true; readonly value: DecisionTexts } | { readonly ok: false; readonly problem: string } {
   if (!isTextRecord(value)) return { ok: false, problem: "fixed must be an object" };
-  if (!isFilled(value.summary) || !isFilled(value.next_steps)) return { ok: false, problem: "fixed summary and next_steps must be non-empty strings" };
+  if (!isFilled(value.summary)) return { ok: false, problem: "fixed summary must be a non-empty string" };
+  if (value.next_steps !== input.next_steps) return { ok: false, problem: CORE_TEXT_CHANGED("an option of the Decision") };
   if (!Array.isArray(value.options) || value.options.length !== input.options.length) return { ok: false, problem: "fixed options must keep the options of the input" };
   const options: DecisionTexts["options"][number][] = [];
   for (const [index, expected] of input.options.entries()) {
@@ -282,8 +339,9 @@ function readFixedTexts(value: unknown, input: DecisionTexts): { readonly ok: tr
     if (!isTextRecord(option) || option.key !== expected.key || option.generated !== expected.generated) {
       return { ok: false, problem: "fixed options must keep key, generated and order" };
     }
-    if (!isFilled(option.label) || !isFilled(option.note)) return { ok: false, problem: `fixed label and note of option ${expected.key} must be non-empty strings` };
+    if (expected.generated && (!isFilled(option.label) || !isFilled(option.note))) return { ok: false, problem: `fixed label and note of option ${expected.key} must be non-empty strings` };
     if (!expected.generated && option.label !== expected.label) return { ok: false, problem: `fixed must not change the label of option ${expected.key}` };
+    if (!expected.generated && option.note !== expected.note) return { ok: false, problem: CORE_TEXT_CHANGED(`option ${expected.key}`) };
     const rewrites: unknown = option.criteria_rewrites;
     if (!Array.isArray(rewrites) || rewrites.length !== expected.criteria_rewrites.length) return { ok: false, problem: `fixed criteria_rewrites of option ${expected.key} must keep the input's` };
     const fixedRewrites: DecisionTextRewrite[] = [];
@@ -293,9 +351,9 @@ function readFixedTexts(value: unknown, input: DecisionTexts): { readonly ok: tr
       if (!isFilled(rewrite.after) || !isFilled(rewrite.check)) return { ok: false, problem: "fixed after and check must be non-empty strings" };
       fixedRewrites.push({ criterion_id: want.criterion_id, after: rewrite.after, check: rewrite.check });
     }
-    options.push({ key: expected.key, generated: expected.generated, label: option.label, note: option.note, criteria_rewrites: fixedRewrites });
+    options.push({ key: expected.key, generated: expected.generated, label: option.label as string, note: option.note as string, criteria_rewrites: fixedRewrites });
   }
-  return { ok: true, value: { summary: value.summary, next_steps: value.next_steps, options } };
+  return { ok: true, value: { summary: value.summary, next_steps: input.next_steps, options } };
 }
 
 /** Never throws. fixed must keep the shape of input.texts: option keys, generated flags and order, Core's labels, and each option's criterion_ids in order. */
@@ -351,11 +409,10 @@ export function findManagerWorkRequests(text: string): string[] {
 /** Requests for internal work and internal terms in the texts; [] when they are fine. */
 export function findDecisionTextProblems(texts: DecisionTexts, forbiddenTerms: readonly string[]): string[] {
   const problems: string[] = [];
-  // Core's own labels are fixed text, so only the labels the model wrote are checked.
+  // Core's own texts (labels, next_steps, the notes built from a Decision's own description) are not the model's requests, so only what the model wrote is checked.
   const asked = [
     texts.summary,
-    texts.next_steps,
-    ...texts.options.flatMap((option) => [...(option.generated ? [option.label] : []), option.note]),
+    ...texts.options.flatMap((option) => (option.generated ? [option.label, option.note] : [])),
   ].flatMap((text) => findManagerWorkRequests(text));
   if (asked.length > 0) {
     problems.push(`Do not ask the Owner to do the Manager's or a Worker's work (${asked.join(" / ")}). Write the way forward as choices the Owner can pick; the Manager does the work after the pick.`);
@@ -397,13 +454,7 @@ export function readDecisionExplanation(
       return { ok: false, problem: "options must have at least one choice that fits this situation, not a rewording of retry or cancel" };
     }
     if (!allowsFix && report.options.length > 0) return { ok: false, problem: "options must be []" };
-    const noteKeys = report.option_notes.map((entry) => entry.key);
     const ownKeys = context.options.map((option) => option.key);
-    if (new Set(noteKeys).size !== noteKeys.length) return { ok: false, problem: "option_notes repeats a key" };
-    const missing = ownKeys.filter((key) => !noteKeys.includes(key));
-    if (missing.length > 0) return { ok: false, problem: `option_notes lacks the options: ${missing.join(", ")}` };
-    const extra = noteKeys.filter((key) => !ownKeys.includes(key));
-    if (extra.length > 0) return { ok: false, problem: `option_notes has keys that are not options of the Decision: ${extra.join(", ")}` };
     const key = report.recommended_option_key;
     if (context.recommended !== null) {
       if (key !== context.recommended) return { ok: false, problem: `recommended_option_key must be ${context.recommended}` };
@@ -420,7 +471,7 @@ export function readDecisionExplanation(
     if (allowsFix && report.cause_kind === "criteria" && !report.options.some((option) => option.criteria_rewrites.length > 0)) {
       return { ok: false, problem: "cause_kind criteria needs an option with criteria_rewrites" };
     }
-    const problems = findDecisionTextProblems(decisionTextsOf(report, context.options), context.forbidden_terms);
+    const problems = findDecisionTextProblems(decisionTextsOf(report, context.options, { next_steps: "", option_notes: [] }), context.forbidden_terms);
     if (problems.length > 0) return { ok: false, problem: problems[0]! };
     return { ok: true, value: report };
   } catch (error) {

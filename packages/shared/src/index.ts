@@ -94,10 +94,13 @@ export { PROCESS_SKILLS_INSTALL_COMMANDS, PROCESS_SKILLS_PROMPT_FILES, PROCESS_S
 export {
   DESIGN_MOCK_FILE_PATTERN,
   DESIGN_SKILL_NAME_PATTERN,
+  UI_CHANGE_LEVELS,
   designDocumentPath,
   designMockDirectory,
+  designsScreens,
   isScreenDesignTask,
   taskReportPath,
+  type UiChange,
 } from "./design-documents.js";
 export {
   DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS,
@@ -423,9 +426,10 @@ export type SessionEvent =
   | { type: "tool.web_research_failed"; turn_id: string; error: string }
   | { type: "turn.completed"; turn_id: string; reply: string; usage: TokenUsage | null }
   | { type: "turn.failed"; turn_id: string; error: string; rate_limit?: RateLimitInfo; provider_error?: ProviderErrorRecord }
+  | { type: "turn.interrupted"; turn_id: string; partial_text: string; usage: TokenUsage | null }
   | { type: "session.compacted"; cause: "auto" | "manual"; pre_tokens: number | null; summary: string | null; transcript_path: string | null }
   | { type: "session.exited"; exit_code: number | null; signal: string | null; stderr_tail: string };
-export interface ProviderSession { readonly provider_session_id: string; readonly pid: number; /** True once the session can no longer accept turns (process exited or protocol failure). */ readonly exited?: boolean; /** Why the session became unusable (exit or protocol failure), when known. */ readonly exit_detail?: string | null; send(turn: { turn_id: string; text: string; attachment_paths?: readonly string[] }): Promise<void>; events(): AsyncIterable<SessionEvent>; stop(reason: string, graceMs?: number): Promise<void>; terminateImmediately?(): void; }
+export interface ProviderSession { readonly provider_session_id: string; readonly pid: number; /** True once the session can no longer accept turns (process exited or protocol failure). */ readonly exited?: boolean; /** Why the session became unusable (exit or protocol failure), when known. */ readonly exit_detail?: string | null; send(turn: { turn_id: string; text: string; attachment_paths?: readonly string[] }): Promise<void>; events(): AsyncIterable<SessionEvent>; /** Ask the provider to end the running turn early; the process and context stay alive and the turn settles with `turn.interrupted` (or `turn.completed` if it finished first). Resolves false when `turn_id` is not the running turn. */ interrupt?(turn_id: string): Promise<boolean>; stop(reason: string, graceMs?: number): Promise<void>; terminateImmediately?(): void; }
 export interface ProviderClient { execute(request: ProviderExecutionRequest): Promise<ProviderResponse>; createSession?(request: ProviderSessionRequest): Promise<ProviderSession>; }
 /** The execution kind an agent run represents. */
 export type AgentKind = "decision" | "task" | "executor";
@@ -716,6 +720,10 @@ export {
   type DesignBlockedReport,
 } from "./design-blocked.js";
 export {
+  DECISION_ANSWER_ROUTES,
+  DECISION_ANSWER_ROUTE_TEXTS,
+  DECISION_NEXT_STEPS_LEAD,
+  coreDecisionTexts,
   DECISION_CAUSE_KINDS,
   DECISION_EXPLANATION_KINDS,
   DECISION_EXPLANATION_SCHEMA,
@@ -728,6 +736,8 @@ export {
   findDecisionTextProblems,
   findInternalTerms,
   readDecisionExplanation,
+  type CoreDecisionTexts,
+  type DecisionAnswerRoute,
   type DecisionCauseKind,
   type DecisionCriterionRewrite,
   type DecisionExplanationCheckContext,
@@ -741,6 +751,16 @@ export {
   type DecisionTexts,
   type StoredDecisionExplanation,
 } from "./decision-explanation.js";
+
+export {
+  DECISION_ANSWER_TRIAGE_ROUTES,
+  DECISION_ANSWER_TRIAGE_SCHEMA,
+  DECISION_ANSWER_TRIAGE_UNAVAILABLE,
+  readDecisionAnswerTriage,
+  type DecisionAnswerTriageReport,
+  type DecisionAnswerTriageRequest,
+  type DecisionAnswerTriageRunResult,
+} from "./decision-answer-triage.js";
 
 export {
   FINAL_REPORT_SCHEMA,

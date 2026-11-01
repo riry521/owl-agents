@@ -42,6 +42,14 @@ export function FolderIcon({ className }: IconProps = {}) {
   );
 }
 
+export function StopIcon({ className }: IconProps = {}) {
+  return (
+    <svg className={className} width="18" height="18" viewBox="0 0 18 18" fill="currentColor" aria-hidden="true">
+      <rect x="4.5" y="4.5" width="9" height="9" rx="1.5" />
+    </svg>
+  );
+}
+
 export function SendIcon({ className }: IconProps = {}) {
   return (
     <svg className={className} width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

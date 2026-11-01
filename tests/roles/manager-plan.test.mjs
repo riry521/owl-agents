@@ -41,6 +41,11 @@ test("replan prompt tells the Manager to reflect only what the Owner changed", (
   assert.match(prompt, /updated_summary/);
 });
 
+test("replan prompt tells the Manager to give a rewritten criterion the Owner's decision answer as its origin", () => {
+  const prompt = buildManagerPrompt(request, "en");
+  assert.match(prompt, /When that request also has an "Owner's words" line, give each rewritten criterion origin kind "owner", source "decision_answer", and copy into quote one sentence of the Owner's words exactly as written\./);
+});
+
 test("pages finalize accepts lessons even if they omit theme and cross_project", () => {
   const lesson = { lesson: "x", basis: "b", applies_to: "a", kind: "fact", topic: "t", procedure: "", rule_text: "", rule_scope: "all", keywords: ["a", "b", "c"] };
   const payload = { skills_used: [], skill_proposals: [], verdict: { verdict: "complete", summary: "s", missing: [], unaddressed_backlog_items: [], lessons: [lesson] } };

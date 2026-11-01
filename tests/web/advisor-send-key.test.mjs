@@ -18,11 +18,13 @@ const realJsxRuntime = webRequire('react/jsx-runtime');
 // component's props (see web-work-detail.test.mjs's lastLinkProps).
 let capturedTextarea = null;
 let capturedHint = null;
+let capturedButton = null;
 
 function wrapJsx(originalJsx) {
   return function patchedJsx(type, props, ...rest) {
     if (type === 'textarea' && props?.className === 'advisor__textarea') capturedTextarea = props;
     if (type === 'p' && props?.className === 'advisor__hint') capturedHint = props;
+    if (type === 'button' && props?.className?.startsWith('advisor__send')) capturedButton = props;
     return originalJsx(type, props, ...rest);
   };
 }
@@ -56,6 +58,9 @@ globalThis.requestAnimationFrame ??= () => 0;
 globalThis.cancelAnimationFrame ??= () => {};
 
 let postMessageCalls = 0;
+let sessionData;
+const interruptCalls = [];
+const callLog = [];
 const componentApiClient = {
   getActiveConversation: async () => 'conv-1',
   getAdvisorSession: async () => ({ status: 'none', compaction_count: 0, model: null }),
@@ -66,6 +71,7 @@ const componentApiClient = {
   },
   ingestConversation: async () => ({ path: 'knowledge/advisor.md' }),
   clearAdvisorConversation: async () => {},
+  interruptAdvisorTurn: async (windowKey) => { callLog.push('interrupt'); interruptCalls.push(windowKey); return { interrupted: true, turn_id: 't1' }; },
 };
 const componentFormat = {
   formatRelative: () => 'just now',
@@ -112,13 +118,13 @@ const advisorViewModule = compileWebComponent(advisorViewPath, {
   '@/lib/i18n': componentI18n,
   '@/lib/advisor-awaiting.mjs': { replyArrived },
   '@/lib/advisor-windows.mjs': await import('../../apps/web/lib/advisor-windows.mjs'),
-  '@/lib/view-loader': { useView: (key, _fetcher, options) => (viewOptions[key?.split(':')[0]] = options, { data: key?.startsWith('advisor-messages:') ? [] : key === 'advisor-window:general' ? 'conv-1' : undefined, error: null, loading: false, refresh: async () => {} }) },
-  '@/components/icons': { SendIcon: () => null },
+  '@/lib/view-loader': { useView: (key, _fetcher, options) => (viewOptions[key?.split(':')[0]] = options, { data: key?.startsWith('advisor-messages:') ? [] : key === 'advisor-window:general' ? 'conv-1' : sessionData, error: null, loading: false, refresh: async () => { callLog.push('refresh:' + (key?.split(':')[0])); } }) },
+  '@/components/icons': { SendIcon: () => null, StopIcon: () => null },
   '@/components/AdvisorChannelPanel': { AdvisorChannelPanel: () => null },
 });
 
 // State order must match the useState() calls in render order, top to bottom:
-// AdvisorView: visibleCount, sending, sendError, clearError, knowledgeSaving,
+// AdvisorView: visibleCount, sending, sendError, stopping, stopError, clearError, knowledgeSaving,
 // knowledgeSaveNotice, knowledgeSaveError, menuOpen, isTouchDevice,
 // awaitingReply, channelsOpen; then AdvisorComposer: hasText.
 // AdvisorView holds three refs; the composer's textarea and composing refs follow.
@@ -126,8 +132,8 @@ const COMPOSING_REF = 4;
 const VISIBLE_STEP = 30;
 
 function createHookHarness(isTouchDevice, awaitingReply = null, hasText = false) {
-  const state = [VISIBLE_STEP, false, null, null, false, null, null, false, isTouchDevice, awaitingReply, false, true];
-  if (hasText) state[12] = true; // composer's hasText
+  const state = [VISIBLE_STEP, false, null, false, null, null, false, null, null, false, isTouchDevice, awaitingReply, false, true];
+  if (hasText) state[14] = true; // composer's hasText
   let hookIndex = 0;
   let refIndex = 0;
   // refs[3] is the composer's textarea; the text is read from it at send time.
@@ -159,17 +165,21 @@ function createHookHarness(isTouchDevice, awaitingReply = null, hasText = false)
   };
 }
 
-function renderAdvisor(isTouchDevice, awaitingReply = null, hasText = false) {
+function renderAdvisor(isTouchDevice, awaitingReply = null, hasText = false, { stopping = false, stopError = null } = {}) {
   const harness = createHookHarness(isTouchDevice, awaitingReply, hasText);
+  harness.state[3] = stopping;
+  harness.state[4] = stopError;
   capturedTextarea = null;
+  capturedButton = null;
   capturedHint = null;
   activeHookHarness = harness;
+  let html;
   try {
-    renderToStaticMarkup(React.createElement(advisorViewModule.AdvisorView));
+    html = renderToStaticMarkup(React.createElement(advisorViewModule.AdvisorView));
   } finally {
     activeHookHarness = null;
   }
-  return { harness, textarea: capturedTextarea, hint: capturedHint };
+  return { harness, textarea: capturedTextarea, hint: capturedHint, button: capturedButton, html };
 }
 
 function keyEvent({ shiftKey = false, isComposing = false, keyCode = 13 } = {}) {
@@ -299,7 +309,7 @@ test('rendered: the spinner stays through idle or stale session reads after a se
     '@/lib/advisor-awaiting.mjs': { replyArrived },
     '@/lib/advisor-windows.mjs': await import('../../apps/web/lib/advisor-windows.mjs'),
     '@/lib/view-loader': { useView: (key) => ({ data: key?.startsWith('advisor-messages:') ? messages : key === 'advisor-window:general' ? 'conv-1' : session, error: null, loading: false, refresh: async () => {} }) },
-    '@/components/icons': { SendIcon: () => null },
+    '@/components/icons': { SendIcon: () => null, StopIcon: () => null },
   '@/components/AdvisorChannelPanel': { AdvisorChannelPanel: () => null },
   });
   const state = [];
@@ -310,7 +320,7 @@ test('rendered: the spinner stays through idle or stale session reads after a se
   let hookIndex = 0;
   let effectIndex = 0;
   let refIndex = 0;
-  const init = [0, false, null, null, false, null, null, false, false, null, false, true];
+  const init = [0, false, null, false, null, null, false, null, null, false, false, null, false, true];
   const harness = {
     useState(initialValue) {
       const index = hookIndex++;
@@ -464,5 +474,75 @@ test('send clears the box before postMessage answers, restores it on failure, an
     assert.equal(ta.value, 'newer', 'text typed after the send is not overwritten');
   } finally {
     componentApiClient.postMessage = original;
+  }
+});
+
+test('the composer shows a stop button only while a turn is running, and it interrupts the window then reloads', async () => {
+  sessionData = { status: 'running', running_turns: 0, queued_turns: 1 };
+  try {
+    const queued = renderAdvisor(false);
+    assert.equal(queued.button.type, 'submit', 'queued turns alone keep the send button');
+
+    sessionData = { status: 'running', running_turns: 1, queued_turns: 0 };
+    interruptCalls.length = 0;
+    callLog.length = 0;
+    const running = renderAdvisor(false);
+    assert.equal(running.button['aria-label'], 'advisor.stopLabel');
+    assert.equal(running.button.type, 'button');
+    assert.equal(running.button.disabled, false);
+    await running.button.onClick();
+    assert.equal(interruptCalls.length, 1);
+    assert.equal(interruptCalls[0], 'general', 'the call carries the rendered window key');
+    assert.deepEqual(
+      [callLog[0], ...callLog.slice(1).sort()],
+      ['interrupt', 'refresh:advisor-messages', 'refresh:advisor-session'],
+      'session and messages are reloaded after the interrupt',
+    );
+    assert.deepEqual(running.harness.state.slice(3, 5), [false, null], 'stopping ends without an error');
+
+    sessionData = { status: 'running', running_turns: 0, queued_turns: 0 };
+    assert.equal(renderAdvisor(false).button['aria-label'], 'advisor.sendLabel', 'back to send when the turn ends');
+  } finally {
+    sessionData = undefined;
+  }
+});
+
+test('while stopping the stop button is disabled and the indicator says so; a failed stop shows the error', async () => {
+  sessionData = { status: 'running', running_turns: 1, queued_turns: 0 };
+  const original = componentApiClient.interruptAdvisorTurn;
+  try {
+    const stopping = renderAdvisor(false, null, false, { stopping: true });
+    assert.equal(stopping.button.disabled, true);
+    assert.ok(stopping.html.includes('advisor.stopping'));
+
+    componentApiClient.interruptAdvisorTurn = async () => { throw new Error('409'); };
+    const originalError = console.error;
+    console.error = () => {};
+    try {
+      const running = renderAdvisor(false);
+      await running.button.onClick();
+      assert.equal(running.harness.state[4], 'advisor.errorStop');
+    } finally {
+      console.error = originalError;
+    }
+    assert.ok(renderAdvisor(false, null, false, { stopError: 'advisor.errorStop' }).html.includes('advisor.errorStop'));
+  } finally {
+    componentApiClient.interruptAdvisorTurn = original;
+    sessionData = undefined;
+  }
+});
+
+test('Shift+Enter while a turn is running still sends and does not stop', async () => {
+  sessionData = { status: 'running', running_turns: 1, queued_turns: 0 };
+  try {
+    postMessageCalls = 0;
+    interruptCalls.length = 0;
+    const { textarea } = renderAdvisor(false);
+    textarea.onKeyDown(keyEvent({ shiftKey: true }).event);
+    await new Promise((r) => setImmediate(r));
+    assert.equal(postMessageCalls, 1);
+    assert.equal(interruptCalls.length, 0);
+  } finally {
+    sessionData = undefined;
   }
 });

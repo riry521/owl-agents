@@ -18,8 +18,8 @@ const setSetting = (tx, key, value) => tx.run(
    ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json`, key, JSON.stringify(value), NOW,
 );
 const envelope = (payload, suffix, expectedVersion = 0) => ({ request_id: createUlid(), idempotency_key: `test:${suffix}:${createUlid()}`, expected_version: expectedVersion, payload });
-const rejection = () => {
-  const review = { verdict: "fix_required", summary: "Not yet.", findings: [{ severity: "major", pre_existing: false, file: "a.ts", problem: "Wrong.", fix: "Fix." }], tests: {} };
+const rejection = (file = "a.ts") => {
+  const review = { verdict: "fix_required", summary: "Not yet.", findings: [{ severity: "major", pre_existing: false, file, problem: "Wrong.", fix: "Fix." }], tests: {} };
   return { outcome: "failed", report_valid: true, report: { kind: "review", ...review }, review };
 };
 const workerReport = (invocationId) => ({
@@ -35,7 +35,9 @@ class ChangedPathsGit extends NoopGitGateway {
   }
 }
 
-async function runRejectedTask(t, { db, owlRoot, settings, modelSettings } = {}) {
+// Each rejection names a new file unless sameSpot is set: the same spot rejected twice stops before the Fixer (review_focus.same_spot_threshold).
+async function runRejectedTask(t, { db, owlRoot, settings, modelSettings, sameSpot = false } = {}) {
+  let rejected = 0;
   const git = new ChangedPathsGit();
   // A restarted Core on a shared DB also resumes the earlier Works, so only a replan request of this run's own Work counts.
   let workId = null;
@@ -49,7 +51,7 @@ async function runRejectedTask(t, { db, owlRoot, settings, modelSettings } = {})
       await writeFile(join(request.context.worktree, "out/a.mjs"), "export const x = 1;\n");
       return { outcome: "success", report_valid: true, report: workerReport(request.invocation_id) };
     },
-    runReviewer: async () => rejection(),
+    runReviewer: async () => rejection(sameSpot ? "a.ts" : `a${rejected += 1}.ts`),
     runAdvisor: async () => ({ reply: "" }),
   });
   const built = await createTestCore(t, { agentRunner, git, dispatcher: { tick_interval_ms: 25 }, ...(db ? { db, owlRoot } : {}) }, { prefix: "owl-fixer-e2e-" });
@@ -133,4 +135,11 @@ test("the rejection count and the Fixer model come from settings, across a Core 
   assert.deepEqual(runs(custom.db, custom.workId).at(-1), { tier: "fixer", model: "custom-fixer" });
   assert.equal(taskModelRole({ type: "code", lead_designer_start_round: null, fixer_escalated_rejections: 2 }), "fixer");
   assert.equal(taskModelRole({ type: "design", lead_designer_start_round: null, fixer_escalated_rejections: 2 }), "designer");
+});
+
+test("the same spot rejected twice goes back to the Manager before the Fixer takes over", async (t) => {
+  const worker = DEFAULT_ROLE_MODELS.worker.model;
+  const stopped = await runRejectedTask(t, { sameSpot: true });
+  assert.deepEqual(runs(stopped.db, stopped.workId), [{ tier: "standard", model: worker }, { tier: "standard", model: worker }]);
+  assert.equal(stopped.db.get("SELECT fixer_escalated_rejections AS f FROM tasks WHERE work_id = ?", stopped.workId).f, null);
 });

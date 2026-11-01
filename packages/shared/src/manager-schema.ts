@@ -1,4 +1,5 @@
 import { ACCEPTANCE_CRITERION_ID_PREFIX, CRITERION_KINDS, CRITERION_ORIGIN_KINDS, CRITERION_ORIGIN_QUOTE_MAX, CRITERION_ORIGIN_SOURCES, CRITERION_REQUIREMENTS } from "./acceptance-criteria.js";
+import { UI_CHANGE_LEVELS } from "./design-documents.js";
 import { CHECK_WEIGHTS } from "./task-necessity.js";
 import { KNOWLEDGE_EXTERNAL_COMMAND_RULE } from "./agent-rules.js";
 import { objectSchema, SKILLS_USED_SCHEMA, SKILL_PROPOSALS_SCHEMA, type RoleSchema } from "./role-schema.js";
@@ -62,6 +63,11 @@ const MANAGER_TASK_SCHEMA: RoleSchema = objectSchema({
     type: ["string", "null"],
     enum: ["designer", "lead_designer", null],
     description: "design Tasks only: lead_designer for the screen design (the look, layout and HTML mocks of screens) that the Work's request leaves to the Lead Designer; designer for any other design Task; null for Tasks that are not design Tasks. In a replan, null on a retried design Task keeps its current value; on a retried Task that becomes a design Task, null leaves it to the Work's design mode",
+  },
+  ui_change: {
+    type: "string",
+    enum: [...UI_CHANGE_LEVELS],
+    description: "how much the Task changes screens: none, minor (wording, a few lines of CSS, small spacing/color/size changes) or major (a new screen, page or screen component, or a large change to a screen's layout or look); on a design Task, major means it designs screens",
   },
   replaces: {
     type: "array",

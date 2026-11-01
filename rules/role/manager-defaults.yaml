@@ -1,0 +1,6 @@
+level: role
+role: manager
+rules:
+  - id: mgr_cautions_are_not_criteria
+    kind: instruction
+    text: "Work の概要の「注意:」は Task の注意として書き写し、受け入れ条件にしないこと。"

@@ -60,11 +60,14 @@ const workerReport = (invocationId) => ({
 
 const planTask = (overrides = {}) => ({ id: "T1", title: "A", type: "code", acceptance: "Done; verified by the test.", depends_on: [], required_sections: [], required_tests: [], replaces: [], review: true, ...overrides });
 
-const reviewFailed = () => ({
+// A new file each call: findings on the same spot twice would go back to the Manager early (review_same_spot_repeated).
+let rejectedFiles = 0;
+const reviewFailed = () => reviewFailedOn(`a${rejectedFiles += 1}.txt`);
+const reviewFailedOn = (file) => ({
   outcome: "failed",
   report_valid: true,
-  report: { verdict: "fix_required", summary: "One correction remains.", findings: [{ severity: "major", subject: "other", file: "a.txt", problem: "Wrong value.", fix: "Use the right value." }], tests: { ran: false, command: "none", passed: 0, failed: 0 } },
-  review: { verdict: "fix_required", summary: "One correction remains.", findings: [{ severity: "major", subject: "other", file: "a.txt", problem: "Wrong value.", fix: "Use the right value." }], tests: { ran: false, command: "none", passed: 0, failed: 0 } },
+  report: { verdict: "fix_required", summary: "One correction remains.", findings: [{ severity: "major", subject: "other", file, problem: "Wrong value.", fix: "Use the right value." }], tests: { ran: false, command: "none", passed: 0, failed: 0 } },
+  review: { verdict: "fix_required", summary: "One correction remains.", findings: [{ severity: "major", subject: "other", file, problem: "Wrong value.", fix: "Use the right value." }], tests: { ran: false, command: "none", passed: 0, failed: 0 } },
 });
 
 /**

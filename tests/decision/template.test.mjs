@@ -4,11 +4,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { DecisionService } from "../../packages/core/dist/index.js";
-import { coreTaskDecisionBrief, coreWorkDecisionBrief, managerReplanFailureBrief } from "../../packages/core/dist/decision-brief.js";
+import { coreTaskDecisionBrief, coreWorkDecisionBrief, managerReplanFailureBrief, noProgressLimitBrief, prerequisiteExpiredBrief, remakeLimitBrief } from "../../packages/core/dist/decision-brief.js";
 import { recordAutoRecoveryInTransaction, withAutoRecoveryTried } from "../../packages/core/dist/auto-recovery.js";
 import { openDatabase } from "../../packages/db/dist/index.js";
-import { findManagerWorkRequests } from "../../packages/shared/dist/decision-explanation.js";
-import { applyDecisionTexts, decisionTextsOf, findDecisionTextProblems, findInternalTerms, readDecisionExplanation } from "../../packages/shared/dist/index.js";
+import { findManagerWorkRequests, readDecisionTextCheckOutput } from "../../packages/shared/dist/decision-explanation.js";
+import { DECISION_ANSWER_ROUTES, DECISION_ANSWER_ROUTE_TEXTS, DECISION_NEXT_STEPS_LEAD, applyDecisionTexts, coreDecisionTexts, decisionTextsOf, findDecisionTextProblems, findInternalTerms, readDecisionExplanation } from "../../packages/shared/dist/index.js";
 import { formatDecisionText, formatDecisionNextSteps, answerGuideHint } from "../../packages/plugin-sdk/dist/shared/index.js";
 import { openTestDatabase } from "../helpers/db.mjs";
 import { migrationsDir } from "../helpers/paths.mjs";
@@ -273,26 +273,29 @@ const explanationContext = (changes = {}) => ({ kind: "partial_limit", options: 
 const explanationReport = (changes = {}) => ({
   summary: "The measuring method cannot pass. The work itself is done.",
   cause_kind: "work",
-  next_steps: "Pick a fix. Or run it again.",
-  option_notes: [{ key: "retry", note: "The Task runs again." }, { key: "cancel", note: "The Task stops for good." }],
   options: [fixOption()],
   recommended_option_key: "fix_1",
   ...changes,
 });
+// Core's own texts for OWN_OPTIONS: retry goes to the Worker, cancel has no note, and the answer field goes to the Worker.
+const coreTextsOf = (language = "en", freeTextTo = "worker") =>
+  coreDecisionTexts({ free_text_to: freeTextTo, options: [{ key: "retry", description: "The Task runs again", words_to: "worker" }, { key: "cancel", description: "The Task stops for good.", words_to: "unspecified" }] }, language);
+const CORE_TEXTS = coreTextsOf();
 const readExplanation = (changes, context) => readDecisionExplanation(explanationReport(changes), explanationContext(context));
 
 test("readDecisionExplanation checks the shape, option notes, recommendation and no length limits, and requests for internal work (rules 1-5)", () => {
   assert.equal(readExplanation().ok, true);
   assert.equal(readDecisionExplanation({ summary: "x" }, explanationContext()).ok, false, "rule 1: schema");
   assert.equal(readExplanation({ summary: "One. Two. Three." }).ok, true, "rule 2: summary has no length limit");
-  assert.equal(readExplanation({ next_steps: "One. Two. Three." }).ok, true, "rule 2: next_steps has no length limit");
-  assert.equal(readExplanation({ option_notes: [{ key: "retry", note: "One. Two." }, { key: "cancel", note: "Stops." }] }).ok, true, "rule 2: note has no length limit");
   assert.equal(readExplanation({ options: [{ ...fixOption(), description: "One. Two." }] }).ok, true, "rule 2: fix description has no length limit");
-  assert.equal(readExplanation({ next_steps: "Please recreate the Task with reworded criteria." }).ok, false, "rule 2: no work for the Manager");
+  assert.equal(readExplanation({ summary: "Please recreate the Task with reworded criteria." }).ok, false, "rule 2: no work for the Manager");
   assert.equal(readExplanation({ options: [{ ...fixOption(), instruction: "Please recreate the Task and rewrite AC1." }] }).ok, true, "rule 2: the instruction is the Manager's");
-  assert.equal(readExplanation({ option_notes: [{ key: "retry", note: "Runs." }] }).ok, false, "rule 3: missing key");
-  assert.equal(readExplanation({ option_notes: [...explanationReport().option_notes, { key: "other", note: "Extra." }] }).ok, false, "rule 3: extra key");
-  assert.equal(readExplanation({ option_notes: [{ key: "retry", note: "A." }, { key: "retry", note: "B." }, { key: "cancel", note: "C." }] }).ok, false, "rule 3: duplicate key");
+  // The model no longer writes next_steps or option_notes: Core does, from where the answer goes.
+  for (const [key, value] of [["next_steps", "Pick a fix. Or run it again."], ["option_notes", [{ key: "retry", note: "The Manager fixes the plan." }]]]) {
+    const refused = readExplanation({ [key]: value });
+    assert.equal(refused.ok, false, `${key} is refused`);
+    assert.match(String(refused.problem), new RegExp(`${key}:not_allowed`, "u"), key);
+  }
   assert.equal(readExplanation({ options: [] }).ok, false, "rule 4: partial_limit needs fix options");
   assert.equal(readExplanation({ options: [fixOption(), fixOption(), fixOption(), fixOption()], recommended_option_key: "fix_4" }).ok, true, "rule 4: no upper limit");
   assert.equal(readExplanation({ options: [fixOption()] }, { kind: "merge_failed" }).ok, false, "rule 4: other kinds have none");
@@ -315,8 +318,8 @@ test("readDecisionExplanation checks criteria rewrites and internal terms (rules
     assert.equal(readExplanation({ summary }).ok, false, summary);
   }
   for (const changes of [
-    { next_steps: `Ask about ${TASK_ID}.` },
-    { option_notes: [{ key: "retry", note: "Runs judgement_waiting again." }, { key: "cancel", note: "Stops." }] },
+    { summary: `Ask about ${TASK_ID}.` },
+    { options: [{ ...fixOption(), description: "Runs judgement_waiting again." }] },
     { options: [{ ...fixOption(), label: "Fix AC1" }] },
     { options: [{ ...fixOption(), description: "Fixes partial work." }] },
     { cause_kind: "criteria", options: [fixOption([{ ...REWRITE, after: "Check AC1 again." }])] },
@@ -348,7 +351,7 @@ test("findInternalTerms finds IDs, AC numbers, partial, snake_case names, worktr
 });
 
 test("findDecisionTextProblems covers after and check of rewrites, and Core's labels are not checked", () => {
-  const texts = decisionTextsOf(explanationReport({ cause_kind: "criteria", options: [fixOption([REWRITE])] }), OWN_OPTIONS);
+  const texts = decisionTextsOf(explanationReport({ cause_kind: "criteria", options: [fixOption([REWRITE])] }), OWN_OPTIONS, CORE_TEXTS);
   assert.deepEqual(findDecisionTextProblems(texts, [TASK_ID]), []);
   const withRewrite = (rewrite) => ({ ...texts, options: texts.options.map((o) => (o.generated ? { ...o, criteria_rewrites: [rewrite] } : o)) });
   assert.ok(findDecisionTextProblems(withRewrite({ ...REWRITE, after: "Reword AC1." }), []).length > 0, "after");
@@ -359,7 +362,10 @@ test("findDecisionTextProblems covers after and check of rewrites, and Core's la
 
 test("decisionTextsOf and applyDecisionTexts round-trip the report and put edits back by id and key", () => {
   const report = explanationReport({ cause_kind: "criteria", options: [fixOption([REWRITE]), fixOption()] });
-  const texts = decisionTextsOf(report, OWN_OPTIONS);
+  const texts = decisionTextsOf(report, OWN_OPTIONS, CORE_TEXTS);
+  assert.equal(texts.next_steps, CORE_TEXTS.next_steps);
+  assert.equal(texts.options.find((o) => o.key === "retry").note, CORE_TEXTS.option_notes.find((n) => n.key === "retry").note);
+  assert.equal(texts.options.find((o) => o.key === "cancel").note, "", "an option with no route has no note");
   assert.deepEqual(texts.options.map((o) => [o.key, o.generated]), [["fix_1", true], ["fix_2", true], ["retry", false], ["cancel", false]]);
   assert.deepEqual(texts.options[0].criteria_rewrites, [REWRITE]);
   assert.deepEqual(applyDecisionTexts(report, texts), report);
@@ -367,18 +373,17 @@ test("decisionTextsOf and applyDecisionTexts round-trip the report and put edits
   const edited = {
     ...texts,
     summary: "New summary.",
-    next_steps: "New steps.",
     options: texts.options.map((o) => ({
       ...o,
-      note: o.key === "retry" || o.key === "fix_1" ? `${o.key} note.` : o.note,
+      note: o.key === "fix_1" ? `${o.key} note.` : o.note,
       label: o.generated ? `${o.label}!` : o.label,
       criteria_rewrites: o.criteria_rewrites.map((r) => ({ ...r, after: "New after.", check: "New check." })),
     })),
   };
   const applied = applyDecisionTexts(report, edited);
   assert.equal(applied.summary, "New summary.");
-  assert.equal(applied.next_steps, "New steps.");
-  assert.deepEqual(applied.option_notes, [{ key: "retry", note: "retry note." }, { key: "cancel", note: "The Task stops for good." }]);
+  assert.equal("next_steps" in applied, false, "the report carries no Core text");
+  assert.equal("option_notes" in applied, false);
   assert.deepEqual(applied.options[0].criteria_rewrites, [{ criterion_id: "AC1", after: "New after.", check: "New check." }]);
   assert.equal(applied.options[0].description, "fix_1 note.");
   assert.equal(applied.options[0].label, "Reword it!");
@@ -437,13 +442,92 @@ test("Decision briefs name the cause in the reason, in both languages", () => {
   }
 });
 
-test("the Manager's replan failure brief is written as the Owner's choice and says a word in the answer field is followed", () => {
-  for (const [language, guide] of [["ja", /回答欄に一言書くと、Managerがそれに従って直します/u], ["en", /write a word in the answer field below and the Manager will follow it/u]]) {
+// Where the Owner's words go is Core's explanation to write from the real route; a brief must not promise it.
+const ANSWER_ROUTE_WORDS = /回答欄|Worker に渡|answer field|for the Worker|current_state/u;
+
+test("the Manager's replan failure brief is written as the Owner's choice and says nothing about where the answer goes", () => {
+  for (const language of ["ja", "en"]) {
     for (const scope of ["task", "work"]) {
       const brief = managerReplanFailureBrief(scope, "The plan was rejected.", language);
-      assert.match(brief.current_state, guide, `${language} ${scope}`);
+      assert.doesNotMatch(Object.values(brief).flat().map((v) => JSON.stringify(v)).join("\n"), ANSWER_ROUTE_WORDS, `${language} ${scope}`);
       assert.match(brief.question, /[？?]$/u);
       assert.equal(findManagerWorkRequests([brief.question, brief.current_state, ...brief.options.map((option) => option.description)].join("\n")).length, 0);
     }
+  }
+});
+
+test("coreDecisionTexts writes next_steps and the notes from each route, and says nothing for an unspecified one", () => {
+  const options = (words_to) => [{ key: "retry", description: "Run this Task again", words_to }, { key: "cancel", description: "Stop it.", words_to: "unspecified" }];
+  for (const language of ["ja", "en"]) {
+    const lead = DECISION_NEXT_STEPS_LEAD[language];
+    const space = language === "en" ? " " : "";
+    for (const route of DECISION_ANSWER_ROUTES.filter((r) => r !== "unspecified")) {
+      const texts = coreDecisionTexts({ free_text_to: route, options: options(route) }, language);
+      assert.equal(texts.next_steps, `${lead}${space}${DECISION_ANSWER_ROUTE_TEXTS[language].free_text[route]}`, `${language} ${route}`);
+      assert.equal(texts.option_notes.length, 1, "cancel has no route, so no note");
+      assert.equal(texts.option_notes[0].key, "retry");
+      assert.ok(texts.option_notes[0].note.endsWith(DECISION_ANSWER_ROUTE_TEXTS[language].option_words[route]), `${language} ${route}`);
+      assert.ok(texts.option_notes[0].note.startsWith(language === "ja" ? "Run this Task again。" : "Run this Task again."), "a missing full stop is added");
+    }
+    assert.equal(coreDecisionTexts({ free_text_to: "unspecified", options: options("unspecified") }, language).next_steps, lead);
+    assert.deepEqual(coreDecisionTexts({ free_text_to: "unspecified", options: options("unspecified") }, language).option_notes, []);
+  }
+  const withPreface = coreDecisionTexts({ free_text_to: "worker", options: [] }, "en", ["Question one?", "Question two?"]);
+  assert.deepEqual(withPreface.next_steps.split("\n").slice(0, 2), ["Question one?", "Question two?"]);
+});
+
+test("every sentence Core writes about where an answer goes passes the Owner-facing text checks", () => {
+  for (const language of ["ja", "en"]) {
+    for (const route of DECISION_ANSWER_ROUTES.filter((r) => r !== "unspecified")) {
+      const texts = coreDecisionTexts({ free_text_to: route, options: [{ key: "retry", description: "Run this Task again.", words_to: route }] }, language, []);
+      const sentences = [DECISION_NEXT_STEPS_LEAD[language], DECISION_ANSWER_ROUTE_TEXTS[language].free_text[route], DECISION_ANSWER_ROUTE_TEXTS[language].option_words[route]];
+      const decisionTexts = {
+        summary: "Done.",
+        next_steps: `${texts.next_steps}\n${sentences.join("\n")}`,
+        options: [{ key: "retry", generated: false, label: "Retry", note: texts.option_notes[0].note, criteria_rewrites: [] }],
+      };
+      assert.deepEqual(findDecisionTextProblems(decisionTexts, []), [], `${language} ${route}`);
+    }
+  }
+});
+
+test("a text check may not change next_steps or a note Core wrote", () => {
+  const texts = decisionTextsOf(explanationReport(), OWN_OPTIONS, CORE_TEXTS);
+  const input = { language: "en", kind: "partial_limit", texts };
+  const fixedWith = (change) => ({ ok: true, fixed: change(JSON.parse(JSON.stringify(texts))) });
+  assert.equal(readDecisionTextCheckOutput(fixedWith((t) => t), input).ok, true, "an unchanged fixed passes");
+  assert.equal(readDecisionTextCheckOutput(fixedWith((t) => ({ ...t, summary: "A better summary." })), input).ok, true, "summary may change");
+  const changedSteps = readDecisionTextCheckOutput(fixedWith((t) => ({ ...t, next_steps: "Write in the answer field." })), input);
+  assert.equal(changedSteps.ok, false);
+  assert.match(changedSteps.problem, /Core's own texts/u);
+  const changedNote = readDecisionTextCheckOutput(fixedWith((t) => ({ ...t, options: t.options.map((o) => (o.key === "retry" ? { ...o, note: "The Manager fixes the plan." } : o)) })), input);
+  assert.equal(changedNote.ok, false);
+  assert.match(changedNote.problem, /Core's own texts/u);
+  const changedFix = readDecisionTextCheckOutput(fixedWith((t) => ({ ...t, options: t.options.map((o) => (o.generated ? { ...o, note: "New description." } : o)) })), input);
+  assert.equal(changedFix.ok, true, "a fix option's note may change");
+});
+
+test("Core's briefs do not promise where the Owner's words go", () => {
+  const briefs = [];
+  for (const language of ["ja", "en"]) {
+    for (const scope of ["task", "work"]) briefs.push(managerReplanFailureBrief(scope, "The plan was rejected.", language));
+    briefs.push(coreTaskDecisionBrief("T", { error_key: "side_effect_failure:report_result:partial", report: { result: "partial", work_done: "half" } }, language));
+    briefs.push(coreTaskDecisionBrief("T", { error_key: "e" }, language));
+    for (const gate of ["manager", "worker"]) briefs.push(noProgressLimitBrief({ taskId: "T1", taskTitle: "T", count: 3, limit: 3, gate, recent: ["no change"] }, language));
+    for (const kind of ["deadline", "unreachable", "sync_conflict", "wait_count", "owner"]) {
+      briefs.push(prerequisiteExpiredBrief({ taskTitle: "T", kind, detail: "d", reason: "r", conditions: ["c"], taskId: "T1" }, language));
+    }
+    const usage = { generations: 2, main_generations: 2, review_attempts: 3, worker_runs: 3, base_sync_generations: 0, base_sync_review_attempts: 0, base_sync_worker_runs: 0, non_functional_streak: 2, last_streak_paths: ["a.md"], history: [] };
+    const settings = { lineage_review_attempts: 3, lineage_worker_runs: 3, non_functional_remakes: 2, base_sync_lineage_review_attempts: 3, base_sync_lineage_worker_runs: 3 };
+    for (const reason of ["lineage_review_attempts", "lineage_worker_runs", "non_functional_remakes", "base_sync_lineage_review_attempts", "base_sync_lineage_worker_runs"]) {
+      briefs.push(remakeLimitBrief({ taskTitle: "T", reason, usage, settings }, language));
+    }
+  }
+  assert.equal(briefs.length, 2 * (4 + 2 + 5 + 5));
+  for (const brief of briefs) {
+    assert.doesNotMatch(JSON.stringify(brief), /回答欄|answer field|Worker に渡|for the Worker/u, JSON.stringify(brief).slice(0, 80));
+  }
+  for (const brief of briefs.slice(0, 4)) {
+    assert.equal(findManagerWorkRequests([brief.question, brief.current_state, ...brief.options.map((o) => o.description ?? "")].join("\n")).length, 0);
   }
 });

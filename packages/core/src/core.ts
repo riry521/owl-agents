@@ -22,6 +22,7 @@ import {
 } from "./work-prerequisites";
 import type { WorkPrerequisiteView } from "../../shared/dist/work-prerequisite.js";
 import type { AcceptanceDefect } from "../../shared/dist/acceptance-defect.js";
+import type { DecisionAnswerRoute, DecisionCriterionRewrite } from "../../shared/dist/decision-explanation.js";
 import { isFinalLesson, isFinalMissingItem, normalizeLesson, parseLessonBlocks, type FinalManagerVerdict } from "./final-verdict";
 import { outputResubmitLimit } from "./report-resubmit";
 import { DEFAULT_OWNER_LANGUAGE, OWNER_LANGUAGE_SETTINGS_KEY, ownerLanguage, storedOwnerLanguage, type OwnerLanguage, type SettingsReader } from "./owner-language";
@@ -152,7 +153,9 @@ import {
   ensureWebAccount,
   ensureProjectWindowInTransaction,
   findAdvisorWindow,
+  latestReply,
   listAdvisorWindows,
+  replyPosition,
   type AdvisorWindowRef,
 } from "./advisor-windows.js";
 import {
@@ -193,6 +196,7 @@ import {
   type AutoRecoverySettings,
 } from "../../shared/dist/auto-recovery-settings.js";
 import { progressGuard } from "./progress-guard.js";
+import { DecisionAnswerTriage, answerTriageTarget } from "./decision-answer-triage";
 import { DecisionExplainer, toDecisionExplanation } from "./decision-explainer";
 import { FinalReporter, readFinalReport } from "./final-report";
 import { metricsRuleCandidates, proposeFromMetrics } from "./learning-metrics.js";
@@ -371,7 +375,7 @@ import { createProviderPauseController, rethrowUnlessRateLimited, type ProviderP
 import { coreTestRunBrief, workTestRunner } from "./core-test-run";
 import { TEST_SETUP_MANUAL_TRIGGER, TestSetupService } from "./test-setup-service.js";
 import { QUARANTINE_FIX_TASK_PREFIX } from "./test-quarantine";
-import type { BaseMergeConflict, ManagerTrigger, WorkerQuestion } from "@owl/shared";
+import { UI_CHANGE_LEVELS, type BaseMergeConflict, type ManagerTrigger, type WorkerQuestion } from "@owl/shared";
 import { acceptanceCriteriaProblems, isManagerCriterion, formatAdvisorMalformed, parseTaskNecessity, readStoredAcceptanceCriteria, readStoredTaskPlanContext, renderAcceptanceCriteria, renderTaskNecessity, type AcceptanceCriterion, type CriteriaRelaxation, type StoredAcceptanceCriterion, type TaskPlanContext, resolveInstanceId, type AdvisorSuggestedAction, type ProcessSkillsInstallCommand, type ProviderClient } from "@owl/shared";
 import { MEMORY_FOLDER_KINDS_SETTINGS_KEY, MEMORY_LIBRARIAN_BATCH_SETTINGS_KEY, MEMORY_MODE_SETTINGS_KEY, MEMORY_RECALL_LIMIT_SETTINGS_KEY, MEMORY_RECALL_MIN_SIMILARITY_SETTINGS_KEY, MemorySettingsValidationError, readMemoryFolderKinds, readMemoryLibrarianBatch, readMemoryMode, readMemoryRecallLimit, readMemoryRecallMinSimilarity, validateMemoryFolderKinds, type MemoryFolderKinds, type MemoryLibrarianBatch, type MemoryMode } from "@owl/shared";
 import { EXTERNAL_DATA_POLICY, externalJsonBlock, MEMORY_ARCHIVE_SETTINGS_KEY, readMemoryArchive, REVIEW_RERUN_OPTION_KEY, TEST_SETUP_APPROVE_OPTION_KEY, TEST_SETUP_RETRY_OPTION_KEY } from "@owl/shared";
@@ -388,6 +392,10 @@ import { resolveCloneRoot } from "./clone-root";
 import { cloneBaseline, cloneUses } from "./clone-check.js";
 import { classifyInstallCommand, execInstallQuery, outsideWriteTargets, resolveInstallTarget, TestSetupRunRegistry, type InstallQuery, type TestSetupRunEntry } from "./test-setup-install-guard.js";
 import { GUARD_PATH_KEYS, GUARD_SHELL_COMMAND_KEYS, GUARD_SHELL_TOOL_NAMES, READ_ONLY_TOOL_NAMES } from "../../shared/dist/guard-inputs.js";
+import { canonicalizePath } from "./command-analysis.js";
+import { matchesGlobWithDots } from "./glob.js";
+import { designsScreens, type UiChange } from "../../shared/dist/design-documents.js";
+import { screenCreationTargets, screenDesignRequiredMessage, type FsView, type ScreenPathCheck } from "./screen-path-guard.js";
 import { matchDeniedCommand, reviewerDeniedCommands, REVIEWER_TEST_COMMAND_DENIED_MESSAGE, type ReviewerTestCommandCheck } from "./reviewer-test-guard.js";
 import { createChildRunScheduler, type ChildRunScheduler } from "./child-run-scheduler.js";
 import { TRANSIENT_RETRY_LIMIT } from "./attempt-policy.js";
@@ -725,6 +733,7 @@ interface ProjectDbRow {
   test_setup_json: string | null;
   test_policy_json: string | null;
   report_check_commands_json: string | null;
+  screen_paths_json: string | null;
 }
 
 interface MessageDbRow {
@@ -826,6 +835,7 @@ export class Core {
   private processSkillsPack: DetectedProcessSkillsPack | null = null;
 
   private readonly decisionExplainer: DecisionExplainer;
+  private readonly answerRouter: DecisionAnswerTriage;
 private readonly finalReporter: FinalReporter;
 private readonly finalReportRuns = new Set<Promise<unknown>>();
   private processSkillsMissingLogged = false;
@@ -894,6 +904,14 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       rewritesMax: () => progressGuard(this.db).decision_explanation_rewrites_max,
       textChecks: () => this.options.decisionTextChecks ?? [],
       announce: (workId) => this.announceCoreDecisions(workId),
+      answerRoutes: (decisionId) => this.decisionAnswerRoutes(decisionId),
+    });
+    this.answerRouter = new DecisionAnswerTriage({
+      db: this.db,
+      runner: () => this.options.agentRunner as ReturnType<ConstructorParameters<typeof DecisionAnswerTriage>[0]["runner"]>,
+      roleModel: (role) => resolveRoleModelFromDb(this.db, role),
+      language: () => ownerLanguage(this.db),
+      timeoutSeconds: () => progressGuard(this.db).decision_explanation_timeout_seconds,
     });
     this.finalReporter = new FinalReporter({
       db: this.db,
@@ -1133,7 +1151,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         providerClient,
         owlRoot: this.owlRoot,
         git: this.git,
-        getAdvisorSettings: () => this.getAdvisorSettingsSnapshot(),
+        getAdvisorSettings: (projectId) => this.getAdvisorSettingsSnapshot(projectId),
         memoryInjector: this.memoryInjector,
         isProviderPaused: (provider) => this.providerPauseController.isPaused(provider),
         onProviderRateLimited: (provider, rateLimit) => this.providerPauseController.recordRateLimit({
@@ -1148,8 +1166,8 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         resolveAttachmentPaths: (messageId) => this.resolveAttachmentPaths(messageId),
         resolveStatusExchangesBlock: (messageId) => this.statusExchangesBlock(messageId),
         resolveWindowHandoffBlock: (messageId) => this.windowHandoffBlock(messageId),
-        onReply: (conversationId, reply, turnId, origin, suggestedActions, actionsMalformed) =>
-          this.persistAdvisorReply(conversationId, reply, turnId, origin, suggestedActions, actionsMalformed),
+        onReply: (conversationId, reply, turnId, origin, suggestedActions, actionsMalformed, options) =>
+          this.persistAdvisorReply(conversationId, reply, turnId, origin, suggestedActions, actionsMalformed, options),
         onError: (conversationId, errorMessage, turnId, origin) =>
           this.persistAdvisorError(conversationId, errorMessage, turnId, origin),
         onWebResearchFailed: (error, context) => {
@@ -1470,6 +1488,69 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       outbox: [{ provider: "websocket" }],
     });
     return { denied: true, matched: matchedText, message: REVIEWER_TEST_COMMAND_DENIED_MESSAGE };
+  }
+
+  /**
+   * Whether a Worker's tool call creates a file under the Project's screen_paths while the Task has no completed screen design among its direct dependencies;
+   * a denial is recorded as task.screen_write_denied. An error while checking lets the call through: this check must not stop every write.
+   */
+  public async checkScreenPathWrite(input: {
+    readonly agent_run_id: string;
+    readonly tool_name: string;
+    readonly tool_input: Readonly<Record<string, unknown>>;
+    readonly cwd: string;
+    readonly fs?: FsView;
+  }): Promise<ScreenPathCheck> {
+    try {
+      const row = this.db.get<{ task_id: string; work_id: string; worktree_path: string | null; project_id: string; screen_paths_json: string | null }>(
+        `SELECT tasks.id AS task_id, tasks.work_id, tasks.worktree_path, projects.id AS project_id, projects.screen_paths_json
+           FROM agent_runs JOIN tasks ON tasks.id = agent_runs.task_id
+           JOIN works ON works.id = tasks.work_id JOIN projects ON projects.id = works.project_id
+          WHERE agent_runs.id = ? AND agent_runs.role IN ('worker', 'executor')`,
+        input.agent_run_id,
+      );
+      if (!row || row.worktree_path === null) return { denied: false };
+      const screenPaths = readScreenPaths(row.screen_paths_json, row.project_id);
+      if (screenPaths === null || screenPaths.include.length === 0) return { denied: false };
+      const designed = this.db.all<{ type: string; ui_change: UiChange; assigned_designer: string | null }>(
+        `SELECT d.type, d.ui_change, d.assigned_designer FROM task_dependencies td
+           JOIN tasks d ON d.id = td.depends_on_task_id
+          WHERE td.task_id = ? AND d.status = 'completed'`,
+        row.task_id,
+      ).some((dependency) => designsScreens(dependency));
+      if (designed) return { denied: false };
+      const worktree = canonicalizePath(row.worktree_path);
+      const relativeTo = (absolute: string): string | null => {
+        const rel = relative(worktree, canonicalizePath(absolute)).replaceAll(sep, "/");
+        return rel === "" || rel === ".." || rel.startsWith("../") || isAbsolute(rel) ? null : rel;
+      };
+      const includeOf = (rel: string): string | undefined =>
+        screenPaths.exclude.some((pattern) => matchesGlobWithDots(rel, pattern)) ? undefined : screenPaths.include.find((pattern) => matchesGlobWithDots(rel, pattern));
+      for (const creation of screenCreationTargets(input.tool_name, input.tool_input, input.cwd, input.fs)) {
+        const rel = relativeTo(creation.path);
+        if (rel === null) continue;
+        const includePattern = includeOf(rel);
+        if (includePattern === undefined) continue;
+        const fromRel = creation.from === undefined ? null : relativeTo(creation.from);
+        if (fromRel !== null && includeOf(fromRel) !== undefined) continue;
+        await this.writeLane.write({
+          mutateState: () => ({}),
+          event: {
+            idempotencyKey: `screen-write-denied:${input.agent_run_id}:${createUlid()}`,
+            type: "task.screen_write_denied",
+            workId: row.work_id,
+            taskId: row.task_id,
+            payload: { schema_version: "1.0.0", agent_run_id: input.agent_run_id, task_id: row.task_id, tool_name: input.tool_name, path: rel, include_pattern: includePattern },
+          },
+          outbox: [{ provider: "websocket" }],
+        });
+        return { denied: true, path: rel, message: screenDesignRequiredMessage(rel) };
+      }
+      return { denied: false };
+    } catch (error) {
+      console.warn(`Screen path check failed for Agent run ${input.agent_run_id}; letting the call through.`, error);
+      return { denied: false };
+    }
   }
 
   /** Starts a manual test-environment investigation; returns why nothing started instead of staying silent like schedule. */
@@ -4683,9 +4764,16 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     const designStop = this.designStopBelongsToManager(decisionId, request.payload.option_key);
     // A fix option the Owner picked is the Manager's instruction, so it goes to a replan like a design stop does.
     const fix = this.fixOptionOf(decisionId, request.payload.option_key);
-    const toManager = this.retryBelongsToManager(decisionId, request.payload.option_key) || designStop || fix || this.freeTextBelongsToManager(decisionId, request.payload.option_key, request.payload.answer);
+    const ruled = this.retryBelongsToManager(decisionId, request.payload.option_key) || designStop || fix || this.freeTextBelongsToManager(decisionId, request.payload.option_key, request.payload.answer);
+    // Only an answer no rule claims is read by the model, so fix options, design stops and the limits keep their routes.
+    const triage = ruled ? null : await this.answerRouter.judge(decisionId, request.payload.option_key, request.payload.answer);
+    const toManager = ruled || triage?.route === "manager";
     // Read before resolving: the stored question and options are what the Manager needs to understand the answer.
-    const replanText = fix || designStop ? this.chosenOptionReplanText(decisionId, request.payload.option_key, request.payload.answer) : request.payload.answer;
+    const replanText = fix || designStop
+      ? this.chosenOptionReplanText(decisionId, request.payload.option_key, request.payload.answer)
+      : triage?.route === "manager"
+        ? this.chosenOptionReplanText(decisionId, request.payload.option_key, request.payload.answer, triage.criteria_rewrites)
+        : request.payload.answer;
     const response = await this.decisions.resolve({
       ...request,
       payload: { ...request.payload, decision_id: decisionId, ...(toManager ? { to_manager: true } : {}), ...(request.payload.option_key === REVIEW_RERUN_OPTION_KEY ? { rerun_review: true } : {}), ...(isTestSetupOptionKey(request.payload.option_key) ? { rerun_verification: true } : {}) },
@@ -4786,7 +4874,30 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
   /** A sentence typed into the answer field of a Decision the Manager opened (no option chosen) is the Owner's instruction to the Manager: the next replan carries it in work.owner_guidance. */
   private freeTextBelongsToManager(decisionId: string, optionKey: string | null, answer: string): boolean {
     if (optionKey !== null || answer.trim().length === 0) return false;
+    return this.isManagerFreeTextDecision(decisionId);
+  }
+
+  private isManagerFreeTextDecision(decisionId: string): boolean {
     return this.db.get<{ id: string }>("SELECT id FROM decisions WHERE id = ? AND status = 'open' AND issuer_role = 'manager' AND allow_free_text = 1", decisionId) !== undefined;
+  }
+
+  /**
+   * Where the Owner's words go when they answer this Decision with the retry option, or in the answer field: what the explanation says.
+   * It asks the same rules and the same judgement as answerDecision, so a sentence about the route cannot drift from the route.
+   * Only a route Core can tell for sure is named; the rest is unspecified, and the explanation says nothing about it.
+   */
+  public async decisionAnswerRoutes(decisionId: string): Promise<{ retry: DecisionAnswerRoute; free_text: DecisionAnswerRoute }> {
+    const open = this.db.get<{ allow_free_text: number; options_json: string }>("SELECT allow_free_text, options_json FROM decisions WHERE id = ? AND status = 'open'", decisionId);
+    if (!open) return { retry: "unspecified", free_text: "unspecified" };
+    const hasRetry = (JSON.parse(open.options_json) as { key: string }[]).some((option) => option.key === "retry");
+    const routeOf = async (optionKey: "retry" | null): Promise<DecisionAnswerRoute> => {
+      if (optionKey === "retry" ? !hasRetry : open.allow_free_text !== 1) return "unspecified";
+      if (this.designStopBelongsToManager(decisionId, optionKey)
+        || (optionKey === "retry" ? this.retryBelongsToManager(decisionId, optionKey) : this.isManagerFreeTextDecision(decisionId))) return "manager";
+      if (answerTriageTarget(this.db, decisionId, optionKey) === null) return "unspecified";
+      return (await this.answerRouter.available()) ? "judged" : "worker";
+    };
+    return { retry: await routeOf("retry"), free_text: await routeOf(null) };
   }
 
   /**
@@ -4809,28 +4920,28 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
    * The Manager replans from the answer text alone, and the Web sends only the option label.
    * Add the question and the chosen option's label and description the design stop was written with.
    */
-  private chosenOptionReplanText(decisionId: string, optionKey: string | null, answer: string): string {
+  private chosenOptionReplanText(decisionId: string, optionKey: string | null, answer: string, rewritesOverride?: readonly DecisionCriterionRewrite[]): string {
     const decision = this.db.get<{ question: string; options_json: string; blocked_task_ids_json: string }>(
       "SELECT question, options_json, blocked_task_ids_json FROM decisions WHERE id = ?",
       decisionId,
     );
-    if (!decision || optionKey === null) return answer;
-    const chosen = (JSON.parse(decision.options_json) as readonly {
+    if (!decision || (optionKey === null && rewritesOverride === undefined)) return answer;
+    const chosen = optionKey === null ? undefined : (JSON.parse(decision.options_json) as readonly {
       key?: string; label?: string; description?: string; instruction?: string;
-      criteria_rewrites?: readonly { criterion_id: string; before: string; after: string; check: string }[];
+      criteria_rewrites?: readonly DecisionCriterionRewrite[];
     }[]).find((item) => item.key === optionKey);
-    if (!chosen) return answer;
+    if (optionKey !== null && !chosen) return answer;
     const taskId = (JSON.parse(decision.blocked_task_ids_json) as string[])[0];
     const task = taskId === undefined ? undefined : this.db.get<{ title: string }>("SELECT title FROM tasks WHERE id = ?", taskId);
-    const rewrites = chosen.criteria_rewrites ?? [];
+    const rewrites = rewritesOverride ?? chosen?.criteria_rewrites ?? [];
     return [
       `Question: ${decision.question}`,
-      `Chosen option: ${chosen.label ?? optionKey} - ${chosen.description ?? ""}`,
-      ...(chosen.instruction ? [`Instruction: ${chosen.instruction}`] : []),
+      ...(chosen ? [`Chosen option: ${chosen.label ?? optionKey} - ${chosen.description ?? ""}`] : []),
+      ...(chosen?.instruction ? [`Instruction: ${chosen.instruction}`] : []),
       ...(rewrites.length > 0
         ? [`Criteria rewrites for Task "${task?.title ?? ""}" (${taskId}):`, ...rewrites.map((r) => `- ${r.criterion_id}: "${r.before}" -> "${r.after}" (check: ${r.check})`)]
         : []),
-      ...(answer.trim() === chosen.label ? [] : [`Owner's words: ${answer}`]),
+      ...(answer.trim() === chosen?.label ? [] : [`Owner's words: ${answer}`]),
     ].join("\n");
   }
 
@@ -5091,7 +5202,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     const limit = boundLimit(query.limit ?? 50);
     const rows = this.db.all<ProjectDbRow>(
       `SELECT id, name, canonical_path, base_branch, auto_push, advisor_window_enabled, commit_language, allowed_roots_json, verification_plan_json,
-                worktree_prepare_argv_json, worktree_refresh_argv_json, post_merge_argv_json, post_merge_install_argv_json, required_test_argv_json, test_run_json, test_run_detected_json, test_setup_json, test_policy_json, report_check_commands_json
+                worktree_prepare_argv_json, worktree_refresh_argv_json, post_merge_argv_json, post_merge_install_argv_json, required_test_argv_json, test_run_json, test_run_detected_json, test_setup_json, test_policy_json, report_check_commands_json, screen_paths_json
          FROM projects
         WHERE (? IS NULL OR id > ?)
         ORDER BY id ASC LIMIT ?`,
@@ -5145,7 +5256,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     }, (transaction) => {
       const row = transaction.get<ProjectDbRow>(
         `SELECT id, name, canonical_path, base_branch, auto_push, advisor_window_enabled, commit_language, allowed_roots_json, verification_plan_json,
-                worktree_prepare_argv_json, worktree_refresh_argv_json, post_merge_argv_json, post_merge_install_argv_json, required_test_argv_json, test_run_json, test_run_detected_json, test_setup_json, test_policy_json, report_check_commands_json
+                worktree_prepare_argv_json, worktree_refresh_argv_json, post_merge_argv_json, post_merge_install_argv_json, required_test_argv_json, test_run_json, test_run_detected_json, test_setup_json, test_policy_json, report_check_commands_json, screen_paths_json
            FROM projects WHERE id = ?`,
         projectId,
       );
@@ -5194,6 +5305,8 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       const testPolicyValue = hasTestPolicy ? validateTestPolicyPayload(payload.test_policy, ownerLanguage(transaction)) : null;
       const hasReportChecks = Object.prototype.hasOwnProperty.call(payload, "report_check_commands");
       const reportChecks = hasReportChecks ? validateReportCheckCommands(payload.report_check_commands, ownerLanguage(transaction)) : [];
+      const hasScreenPaths = Object.prototype.hasOwnProperty.call(payload, "screen_paths");
+      const screenPaths = hasScreenPaths ? validateScreenPaths(payload.screen_paths, ownerLanguage(transaction)) : null;
 
       const hasVerificationPlan = Object.prototype.hasOwnProperty.call(payload, "verification_plan");
       const verificationPlanJson = hasVerificationPlan ? JSON.stringify(validateVerificationPlan(payload.verification_plan)) : row.verification_plan_json;
@@ -5246,8 +5359,10 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       const testRunJson = !hasTestRun ? row.test_run_json : (testRunValue === null ? null : JSON.stringify(testRunValue));
       const testPolicyJson = !hasTestPolicy ? row.test_policy_json : (testPolicyValue === null ? null : JSON.stringify(testPolicyValue));
       const reportChecksJson = !hasReportChecks ? row.report_check_commands_json : (reportChecks.length === 0 ? null : JSON.stringify(reportChecks));
+      const screenPathsJson = !hasScreenPaths ? row.screen_paths_json : (screenPaths === null ? null : JSON.stringify(screenPaths));
       if (
         name === row.name
+        && screenPathsJson === row.screen_paths_json
         && testRunJson === row.test_run_json
         && testPolicyJson === row.test_policy_json
         && reportChecksJson === row.report_check_commands_json
@@ -5270,7 +5385,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       transaction.run(
         `UPDATE projects
             SET name = ?, canonical_path = ?, base_branch = ?, auto_push = ?, advisor_window_enabled = ?, commit_language = ?, allowed_roots_json = ?,
-                worktree_prepare_argv_json = ?, worktree_refresh_argv_json = ?, post_merge_argv_json = ?, post_merge_install_argv_json = ?, required_test_argv_json = ?, test_run_json = ?, test_policy_json = ?, report_check_commands_json = ?, verification_plan_json = ?, test_setup_json = ?, updated_at = ?
+                worktree_prepare_argv_json = ?, worktree_refresh_argv_json = ?, post_merge_argv_json = ?, post_merge_install_argv_json = ?, required_test_argv_json = ?, test_run_json = ?, test_policy_json = ?, report_check_commands_json = ?, screen_paths_json = ?, verification_plan_json = ?, test_setup_json = ?, updated_at = ?
           WHERE id = ?`,
         name,
         canonicalPath,
@@ -5287,6 +5402,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         testRunJson,
         testPolicyJson,
         reportChecksJson,
+        screenPathsJson,
         verificationPlanJson,
         testSetupJson,
         now,
@@ -5310,6 +5426,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
           test_run_json: testRunJson,
           test_policy_json: testPolicyJson,
           report_check_commands_json: reportChecksJson,
+          screen_paths_json: screenPathsJson,
           verification_plan_json: verificationPlanJson,
           test_setup_json: testSetupJson,
         }, testSetupSettings(this.db).default_executables),
@@ -6083,6 +6200,42 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       outbox: [{ provider: "websocket" }],
     });
     return this.listAdvisorWindows();
+  }
+
+  /**
+   * Marks the window read through the given reply (default: the newest reply now); a reply that arrives later stays unread.
+   * The saved position never moves back. Returns null when the window is not in the list.
+   */
+  public async markAdvisorWindowRead(key: string, readThroughMessageId?: string): Promise<AdvisorWindowSummary | null> {
+    const find = () => listAdvisorWindows(this.db, DEFAULT_OWNER_ID).find((entry) => entry.key === key);
+    const entry = find();
+    if (!entry) return null;
+    const conversationId = entry.conversation_id;
+    const position = conversationId === null ? null
+      : readThroughMessageId === undefined ? latestReply(this.db, conversationId) : replyPosition(this.db, conversationId, readThroughMessageId);
+    if (readThroughMessageId !== undefined && position === null) {
+      throw validationError("read_through_message_id must be an Advisor message in this window.", { field: "read_through_message_id" });
+    }
+    if (position !== null) {
+      await this.writeLane.write({
+        mutateState: (transaction) => {
+          ensureOwner(transaction, DEFAULT_OWNER_ID, utcNow());
+          transaction.run(
+            `INSERT INTO advisor_window_read (owner_id, window_key, read_through_seq) VALUES (?, ?, ?)
+             ON CONFLICT(owner_id, window_key) DO UPDATE SET read_through_seq = excluded.read_through_seq
+             WHERE excluded.read_through_seq > advisor_window_read.read_through_seq`,
+            DEFAULT_OWNER_ID, key, position.seq,
+          );
+        },
+        event: {
+          idempotencyKey: `advisor-window-read:${createUlid()}`,
+          type: "advisor.window_read",
+          payload: { kind: "advisor_window_read", schema_version: "1.0.0", key, read_through_message_id: position.id },
+        },
+        outbox: [{ provider: "websocket" }],
+      });
+    }
+    return find() ?? null;
   }
 
   public async getAdvisorWindowSettings(): Promise<AdvisorWindowSettings> {
@@ -7071,7 +7224,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       messages,
       invocation_id: invocationId,
       system_prompt: addAdvisorReplyTargetInstruction(
-        `${this.buildAdvisorSystemPrompt(this.advisorHarness(advisorProvider))}\n\n${buildAdvisorProjectCatalogInstruction(this.db)}\n\n${buildAdvisorWorkCatalogInstruction(this.db)}`,
+        `${this.buildAdvisorSystemPrompt(this.advisorHarness(advisorProvider), this.db.get<{ project_id: string | null }>("SELECT project_id FROM advisor_windows WHERE conversation_id = ?", conversationId)?.project_id ?? null)}\n\n${buildAdvisorProjectCatalogInstruction(this.db)}\n\n${buildAdvisorWorkCatalogInstruction(this.db)}`,
         origin.channel,
       ),
       ...(advisorRoleModel ? {
@@ -7123,6 +7276,20 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
   }
 
   /**
+   * Interrupts the window's running Advisor turn. The session and its queued
+   * turns stay alive; the turn's reply is saved as interrupted.
+   */
+  public async interruptAdvisorTurn(ownerId: string, windowKey: string = GENERAL_WINDOW_KEY): Promise<{ status: "interrupting" | "not_running" | "unsupported"; turn_id: string | null }> {
+    if (!this.advisorRuntime) return { status: "unsupported", turn_id: null };
+    const window = findAdvisorWindow(this.db, ownerId, windowKey);
+    const session = window
+      ? this.advisorSessions.getActiveSessionForWindow(window.window_id)
+      : windowKey === GENERAL_WINDOW_KEY ? this.advisorSessions.getActiveSession(ownerId) : null;
+    if (!session) return { status: "not_running", turn_id: null };
+    return this.advisorRuntime.interruptTurn(session.id);
+  }
+
+  /**
    * Prepare the shared Advisor worktree for a running Advisor session and
    * fast-forward it to the latest base when it is clean. `project_id` null
    * targets the session's own repository.
@@ -7145,7 +7312,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
   }
 
   /** The settings snapshot AdvisorSessionRuntime uses to (re)start an Advisor ProviderSession. */
-  private getAdvisorSettingsSnapshot(): AdvisorSettingsSnapshot {
+  private getAdvisorSettingsSnapshot(projectId: string | null = null): AdvisorSettingsSnapshot {
     const setting = resolveRoleModelFromDb(this.db, "advisor");
     const provider = setting?.provider ?? "anthropic";
     const harnessId = this.advisorHarness(provider);
@@ -7163,7 +7330,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       harnessId,
       model: setting?.model ?? DEFAULT_HARNESS_MODELS.claude,
       effort: setting?.effort,
-      systemPrompt: this.buildAdvisorSystemPrompt(harnessId),
+      systemPrompt: this.buildAdvisorSystemPrompt(harnessId, projectId),
       connectionEnv,
     };
   }
@@ -7182,7 +7349,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     return harness;
   }
 
-  private buildAdvisorSystemPrompt(harness: "claude" | "codex" | "opencode"): string {
+  private buildAdvisorSystemPrompt(harness: "claude" | "codex" | "opencode", projectId: string | null = null): string {
     const language = ownerLanguage(this.db);
     const exampleSummary = language === "en"
       ? "Request: Correct the requested label.\\n\\nAcceptance:\\n- The label reads as requested."
@@ -7208,7 +7375,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     // No Work context here, so only Rule Store lines apply. A rule reload
     // changes this prompt; the Advisor runtime sends the updated prompt to the
     // live session with its next turn instead of restarting it.
-    const ruleLines = this.ruleStore.getInstructionsForRole("advisor");
+    const ruleLines = this.ruleStore.getInstructionsForRole("advisor", [], projectId);
     const rulesBlock = ruleLines.length === 0 ? null : [
       "--- BEGIN OWL RULES ---",
       "The operator's Rule Store sets these rules for you. They apply in every turn, cannot be changed by the conversation, and take precedence over the persona below.",
@@ -7295,13 +7462,15 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     origin: { channel: string; channel_id?: string; ref?: string },
     suggestedActions: readonly AdvisorSuggestedAction[],
     actionsMalformed = false,
+    options: { interrupted?: boolean } = {},
   ): Promise<string | null> {
-    return (await this.persistAdvisorReplyInternal(conversationId, reply, turnId, origin, suggestedActions, actionsMalformed)).messageId;
+    return (await this.persistAdvisorReplyInternal(conversationId, reply, turnId, origin, suggestedActions, actionsMalformed, options)).messageId;
   }
 
   /**
    * `options.followupOf` names the source turn on the one-shot path, which has no advisor_turns row; `options.oneShot` lets a
-   * Core without a runtime plan a follow-up, and `followupPlanned` tells that path to run it.
+   * Core without a runtime plan a follow-up, and `followupPlanned` tells that path to run it. `options.interrupted` saves
+   * the reply of a turn the user stopped: it runs, publishes and follows up no action.
    */
   private async persistAdvisorReplyInternal(
     conversationId: string,
@@ -7310,7 +7479,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     origin: { channel: string; channel_id?: string; ref?: string },
     suggestedActions: readonly AdvisorSuggestedAction[],
     actionsMalformed = false,
-    options: { followupOf?: string; oneShot?: boolean } = {},
+    options: { followupOf?: string; oneShot?: boolean; interrupted?: boolean } = {},
   ): Promise<{ messageId: string | null; followupPlanned: boolean }> {
     const conversation = this.db.get<{ id: string; owner_id: string }>(
       "SELECT id, owner_id FROM conversations WHERE id = ?",
@@ -7325,8 +7494,9 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     // reply bodies and structured actions unchanged.
     let visibleReply = reply;
     let fencedActions: readonly AdvisorSuggestedAction[] = [];
+    const interrupted = options.interrupted === true;
     const isSlackReply = origin.channel.trim().toLowerCase() === "slack";
-    if (isSlackReply && reply.trim().length > 0) {
+    if (isSlackReply && !interrupted && reply.trim().length > 0) {
       try {
         const parsed = parseSlackAdvisorResponse(reply, (reason, detail) => {
           actionsMalformed = true;
@@ -7338,38 +7508,44 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         console.warn("[owl-core] Could not parse Slack Advisor response; preserving its reply text.", error);
       }
     }
-    const allSuggestedActions = isSlackReply
+    const allSuggestedActions = interrupted ? [] : isSlackReply
       ? mergeAdvisorSuggestedActions(suggestedActions, fencedActions)
       : [...suggestedActions];
-    const recovery = await this.recoverAdvisorWorkActions(turnId, allSuggestedActions);
-    const recoveredApis = await this.recoverAdvisorCallApis(turnId, allSuggestedActions);
-    recovery.notices.push(...recoveredApis.notices);
-    recovery.failures.push(...recoveredApis.failures);
+    const recovery = interrupted
+      ? { notices: [] as string[], failures: [] as AdvisorActionFailure[], recoveredIndexes: new Set<number>() }
+      : await this.recoverAdvisorWorkActions(turnId, allSuggestedActions);
+    if (!interrupted) {
+      const recoveredApis = await this.recoverAdvisorCallApis(turnId, allSuggestedActions);
+      recovery.notices.push(...recoveredApis.notices);
+      recovery.failures.push(...recoveredApis.failures);
+    }
     const t = ADVISOR_TEXT[ownerLanguage(this.db)];
     const followupOf = options.followupOf ?? this.db.get<{ followup_of_turn_id: string | null }>(
       "SELECT followup_of_turn_id FROM advisor_turns WHERE id = ?", turnId,
     )?.followup_of_turn_id ?? null;
-    const reconciled = followupOf === null
+    const reconciled = followupOf === null || interrupted
       ? { heldIndexes: new Set<number>(), notices: [] as string[], failures: [] as AdvisorActionFailure[] }
       : await this.reconcileFollowupActions(conversationId, turnId, followupOf, allSuggestedActions, origin);
-    const actionResult = await this.dispatchAdvisorWorkActions(conversationId, turnId, allSuggestedActions, origin, recovery.recoveredIndexes, reconciled.heldIndexes);
+    const actionResult = interrupted
+      ? { notices: [] as string[], failures: [] as AdvisorActionFailure[], handledIndexes: new Set<number>(), outboundFiles: [] as (AdvisorOutboundFile & { index: number })[] }
+      : await this.dispatchAdvisorWorkActions(conversationId, turnId, allSuggestedActions, origin, recovery.recoveredIndexes, reconciled.heldIndexes);
     const trimmedReply = visibleReply.trimEnd();
     const allNotices = [
       ...recovery.notices,
       ...reconciled.notices,
       ...actionResult.notices,
-      ...(actionsMalformed ? [t.actionsMalformed] : []),
+      ...(actionsMalformed && !interrupted ? [t.actionsMalformed] : []),
     ];
     const actionFailures = [
       ...recovery.failures,
       ...reconciled.failures,
       ...actionResult.failures,
-      ...(actionsMalformed
+      ...(actionsMalformed && !interrupted
         ? [buildAdvisorActionFailure({ index: -1, type: "owl-actions", code: "invalid_payload", message: t.actionsMalformed })]
         : []),
     ];
     // A follow-up that fails again ends the automatic retry (7.3); a source reply with files waits for the delivery report.
-    const followupPending = followupOf === null && actionResult.outboundFiles.length === 0
+    const followupPending = !interrupted && followupOf === null && actionResult.outboundFiles.length === 0
       && (this.advisorRuntime
         ? this.advisorRuntime.followupSessionFor({ sourceTurnId: turnId, conversationId, failures: actionFailures }) != null
         : options.oneShot === true && shouldInsertFollowup({ failures: actionFailures, sourceIsFollowup: false, followupExists: false, nextTurnReceives: false, sessionFound: true }));
@@ -7418,6 +7594,8 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
           now,
           now,
         );
+        // Linked here, not only in markTurnCompleted, so the window list fetched on advisor.responded already counts it unread.
+        transaction.run("UPDATE advisor_turns SET reply_message_id = ? WHERE id = ?", messageId, turnId);
         // Same transaction as the reply, so a crash can neither lose the follow-up nor queue it twice.
         if (followupPending) {
           followupTurn = this.advisorRuntime?.insertFollowupTurn(transaction, { sourceTurnId: turnId, conversationId, replyMessageId: messageId, origin, failures: actionFailures }) ?? null;
@@ -7445,10 +7623,13 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
           ...(actionFailures.length > 0 ? { action_failures: actionFailures } : {}),
           ...(followupPending ? { followup_pending: true } : {}),
           ...(followupOf !== null ? { followup_of_turn_id: followupOf } : {}),
+          ...(interrupted ? { interrupted: true } : {}),
         },
       },
       outbox: [],
     });
+    // Nothing else dispatches after an Advisor turn, so without this the Web learns of the reply (and the window's unread dot) only at the next unrelated dispatch.
+    if (this.started) await this.dispatcher.replayPending();
     if (followupTurn) this.advisorRuntime?.kickFollowupTurn((followupTurn as { sessionId: string }).sessionId);
     return { messageId: result.state, followupPlanned: followupPending && this.advisorRuntime === null };
   }
@@ -11192,8 +11373,8 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
   }
 
   private replanSnapshot(workId: string): ReplanSnapshot {
-    const tasks = this.db.all<{ id: string; manager_task_id: string | null; status: string; failed_by_dependency_task_id: string | null }>(
-      "SELECT id, manager_task_id, status, failed_by_dependency_task_id FROM tasks WHERE work_id = ? ORDER BY created_at ASC, id ASC",
+    const tasks = this.db.all<{ id: string; manager_task_id: string | null; status: string; failed_by_dependency_task_id: string | null; type: string; ui_change: UiChange; assigned_designer: string | null }>(
+      "SELECT id, manager_task_id, status, failed_by_dependency_task_id, type, ui_change, assigned_designer FROM tasks WHERE work_id = ? ORDER BY created_at ASC, id ASC",
       workId,
     );
     const edges = this.db.all<{ task_id: string; depends_on_task_id: string }>(
@@ -11207,6 +11388,9 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         manager_task_id: task.manager_task_id,
         status: task.status,
         failed_by_dependency: task.failed_by_dependency_task_id !== null,
+        type: task.type,
+        ui_change: task.ui_change,
+        assigned_designer: task.assigned_designer,
       })),
       edges,
       plan_revision: this.db.get<{ plan_revision: number }>("SELECT plan_revision FROM works WHERE id = ?", workId)?.plan_revision ?? 0,
@@ -12057,11 +12241,11 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
 
   /** The role's Rule Store lines plus the Work's rules, one per line; null when there are none. */
   private composeRulesForRole(role: RuleRole, workId: string): string | null {
-    const row = this.db.get<{ rules_json: string | null }>(
-      "SELECT rules_json FROM works WHERE id = ?",
+    const row = this.db.get<{ rules_json: string | null; project_id: string | null }>(
+      "SELECT rules_json, project_id FROM works WHERE id = ?",
       workId,
     );
-    const lines = this.ruleStore.getInstructionsForRole(role, parseWorkRules(row?.rules_json, workId));
+    const lines = this.ruleStore.getInstructionsForRole(role, parseWorkRules(row?.rules_json, workId), row?.project_id ?? null);
     return lines.length === 0 ? null : lines.join("\n");
   }
 
@@ -13507,6 +13691,7 @@ function toProject(row: ProjectDbRow, defaultExecutables: Readonly<Record<string
     test_setup: testSetupView(readStoredTestSetup(row.test_setup_json), row.canonical_path, defaultExecutables),
     test_policy: readTestPolicy(row.test_policy_json),
     report_check_commands: row.report_check_commands_json === null ? [] : parseStringArray(row.report_check_commands_json, "report_check_commands", row.id, "Project"),
+    screen_paths: readScreenPaths(row.screen_paths_json, row.id),
     allowed_roots: parseStringArray(row.allowed_roots_json, "allowed_roots", row.id, "Project"),
     verification_plan: parseArray(row.verification_plan_json, "verification_plan", row.id, "Project") as unknown as readonly VerificationCommand[],
   };
@@ -14100,6 +14285,7 @@ function createProjectInTransaction(transaction: CoreWriteLaneTransaction, paylo
     test_setup: null,
     test_policy: readTestPolicy(testPolicy === null ? null : JSON.stringify(testPolicy)),
     report_check_commands: [],
+    screen_paths: null,
     allowed_roots: allowedRoots as readonly string[],
     verification_plan: verificationPlan,
   };
@@ -14315,6 +14501,56 @@ function validateReportCheckCommands(value: unknown, language: "ja" | "en"): str
     );
   }
   return (value as string[]).map((item) => item.trim());
+}
+
+const SCREEN_PATHS_MAX_PATTERNS = 50;
+const SCREEN_PATH_MAX_LENGTH = 256;
+
+/** A Project's screen_paths: null or an empty include clears it; patterns are relative to the worktree, and negation belongs in exclude. */
+function validateScreenPaths(value: unknown, language: "ja" | "en"): { include: string[]; exclude: string[] } | null {
+  if (value === null) return null;
+  const fail = (): never => {
+    throw validationError(
+      language === "ja"
+        ? "画面ファイルのパスは {include, exclude}（worktree からの相対 glob の配列。null か include が空で未設定）で指定してください。"
+        : "Specify screen_paths as {include, exclude}, arrays of glob patterns relative to the worktree (null or an empty include clears it).",
+      { field: "screen_paths" },
+    );
+  };
+  if (typeof value !== "object" || Array.isArray(value)) return fail();
+  const record = value as Record<string, unknown>;
+  if (Object.keys(record).some((key) => key !== "include" && key !== "exclude") || record.include === undefined) return fail();
+  const normalize = (list: unknown): string[] => {
+    if (!Array.isArray(list) || list.length > SCREEN_PATHS_MAX_PATTERNS) return fail();
+    const patterns = list.map((item) => {
+      if (typeof item !== "string") return fail();
+      const pattern = item.trim();
+      if (
+        pattern.length === 0 || pattern.length > SCREEN_PATH_MAX_LENGTH || pattern.includes("\0")
+        || pattern.startsWith("/") || pattern.startsWith("~") || pattern.startsWith("!")
+        || pattern.split(/[\\/]/).includes("..")
+      ) return fail();
+      return pattern;
+    });
+    return [...new Set(patterns)];
+  };
+  const include = normalize(record.include);
+  const exclude = record.exclude === undefined ? [] : normalize(record.exclude);
+  return include.length === 0 ? null : { include, exclude };
+}
+
+/** Reads a saved screen_paths; an unreadable value counts as not set. */
+function readScreenPaths(json: string | null, projectId: string): { include: string[]; exclude: string[] } | null {
+  if (json === null) return null;
+  try {
+    const parsed = JSON.parse(json) as { include?: unknown; exclude?: unknown };
+    const strings = (list: unknown): list is string[] => Array.isArray(list) && list.every((item) => typeof item === "string");
+    if (strings(parsed.include) && strings(parsed.exclude)) return { include: parsed.include, exclude: parsed.exclude };
+  } catch {
+    // falls through to the warning
+  }
+  console.warn(`Project ${projectId} has an unreadable screen_paths; treating it as not set.`);
+  return null;
 }
 
 /** A Project's test_run payload: null clears it; an object must pass validateTestRunSettings and its argv keys the command check. */
@@ -15341,6 +15577,7 @@ export function managerTasksToPlanItems(
       throw validationError("The Manager plan Task replaces must be an array of Task ids.", { work_id: workId, task_id: id });
     }
     const assignedDesigner = parseAssignedDesigner(candidate.assigned_designer, type, index);
+    const uiChange = parseUiChange(candidate.ui_change, index);
     const necessity = parseTaskNecessity(candidate.necessity);
     // Structured criteria are kept as written; plan quality checks their fields. Only a Task that comes without any is read from its free-text acceptance.
     const criteria = Array.isArray(candidate.acceptance_criteria) ? candidate.acceptance_criteria as AcceptanceCriterion[] : undefined;
@@ -15368,6 +15605,7 @@ export function managerTasksToPlanItems(
       ...(candidate.wait_for === undefined || candidate.wait_for === null ? {} : { wait_for: candidate.wait_for as unknown as PlanWaitFor }),
       ...(candidate.base_sync_only === undefined || candidate.base_sync_only === null ? {} : { base_sync_only: baseSyncOnly(candidate.base_sync_only, index) }),
       ...(assignedDesigner === null ? {} : { assigned_designer: assignedDesigner }),
+      ui_change: uiChange,
       ...(relaxations.length === 0 && recovery.criterion_checks.length === 0 && recovery.rule_applicability.length === 0
         ? {}
         : { auto_recovery: { criteria_relaxations: relaxations, criterion_checks: recovery.criterion_checks, rule_applicability: recovery.rule_applicability } }),
@@ -15420,6 +15658,14 @@ function parseAssignedDesigner(value: unknown, type: string, index: number): "de
     throw validationError("The Manager plan Task assigned_designer must be designer, lead_designer or null.", { field: "assigned_designer", index });
   }
   return type === "design" && typeof value === "string" ? value : null;
+}
+
+function parseUiChange(value: unknown, index: number): UiChange {
+  if (value === undefined) return "none";
+  if (typeof value !== "string" || !(UI_CHANGE_LEVELS as readonly string[]).includes(value)) {
+    throw validationError("The Manager plan Task ui_change must be none, minor or major.", { field: "ui_change", index });
+  }
+  return value as UiChange;
 }
 
 function baseSyncOnly(value: unknown, index: number): boolean {

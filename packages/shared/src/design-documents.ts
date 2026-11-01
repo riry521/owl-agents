@@ -33,3 +33,11 @@ export function designMockDirectory(dataDir: string, workId: string, taskId: str
 export function isScreenDesignTask(task: { type: string }): boolean {
   return task.type === "design";
 }
+
+export const UI_CHANGE_LEVELS = ["none", "minor", "major"] as const;
+export type UiChange = (typeof UI_CHANGE_LEVELS)[number];
+
+/** A Task that designs screens: a design Task declared major, or one the Lead Designer is assigned. Shared by the plan check, the write-time check and replanning. */
+export function designsScreens(task: { type: string; ui_change?: UiChange; assigned_designer?: string | null }): boolean {
+  return task.type === "design" && (task.ui_change === "major" || task.assigned_designer === "lead_designer");
+}

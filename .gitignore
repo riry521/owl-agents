@@ -66,6 +66,7 @@ rules/system/*
 !rules/role/
 rules/role/*
 !rules/role/advisor-defaults.yaml
+!rules/role/manager-defaults.yaml
 
 # Local design notes
 docs/designs/

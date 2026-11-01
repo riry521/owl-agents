@@ -34,11 +34,14 @@ test("the prompt carries the general writing rules for every kind", () => {
     assert.match(prompt, /setting or file name, may be written when it is in `backticks`/u);
     assert.doesNotMatch(prompt, /Never write English internal terms/u);
     assert.match(prompt, /"TERM-ONE"/u);
-    assert.match(prompt, /option_notes: for every option in Decision\.options/u);
+    assert.match(prompt, /Core itself writes what happens after the Owner answers/u);
+    assert.doesNotMatch(prompt, /option_notes: for every option/u);
+    assert.doesNotMatch(prompt, /the Manager will follow it/u);
+    assert.doesNotMatch(prompt, /"(?:next_steps|option_notes)"/u);
+    assert.doesNotMatch(prompt, /words_to|free_text_to/u);
     assert.match(prompt, /recommended_option_key: exactly one key/u);
     assert.match(prompt, /the neck, in the Owner's words/u);
     assert.match(prompt, /Never ask the Owner to do the Manager's or a Worker's work/u);
-    assert.match(prompt, /a word in the answer field is enough and the Manager will follow it/u);
     assert.doesNotMatch(prompt, /one or two sentences/u);
   }
 });
@@ -70,7 +73,7 @@ test("the prompt without its inputs has no absolute path", () => {
 });
 
 test("parseDecisionExplanationResponse returns the JSON object unchecked, leaving the content checks to Core", () => {
-  const answer = { summary: "It stopped.", cause_kind: "work", next_steps: "Retry it.", option_notes: [], options: [], recommended_option_key: "retry" };
+  const answer = { summary: "It stopped.", cause_kind: "work", options: [], recommended_option_key: "retry" };
   const response = (stdout) => ({ adapter: "claude", format: "text", stdout });
   assert.deepEqual(parseDecisionExplanationResponse(response(JSON.stringify(answer))), answer);
   assert.throws(() => parseDecisionExplanationResponse(response("not json")), { name: "OutputFormatError" });

@@ -51,7 +51,7 @@ rejected to prevent a Slack account from being sent to Discord or vice versa.
 ## Rule files
 
 Rules live in `<OWL_ROOT>/rules/**/*.yaml`. Each file has `level` (`absolute`,
-`system` or `role`), `role` only when `level: role` (one of `advisor`, `manager`,
+`system`, `role` or `project`), `role` only when `level: role` (one of `advisor`, `manager`,
 `designer`, `worker`, `reviewer`, `librarian`, `curator`), and a `rules` list. A rule is a
 `block_command` (`id`, `pattern`, optional `message`), a `block_path` (`id`,
 `pattern`, optional `mode` of `read`, `write` or `both`, optional `message`) or an
@@ -59,9 +59,16 @@ Rules live in `<OWL_ROOT>/rules/**/*.yaml`. Each file has `level` (`absolute`,
 than one simple command, and a rule id used twice are errors. Work rules are not
 files; they are stored on the Work.
 
+A project rule file is `rules/project/{project_id}.yaml` with `level: project` and
+a `rules` list. It may hold only `instruction` rules; a `block_command` or
+`block_path` makes the file fail to load. Its rules reach every role of that
+Project's Works and the Advisor in that Project's window. They do not reach other
+Projects' Works, Works without a Project or the global window. Git does not track
+`rules/project/`.
+
 Every agent receives one line per rule as `[level] text` (a block rule's text is
-its message), ordered absolute → system → role, followed by the Work's rules as
-`[work] text`. Identical lines appear once. Role rules reach only that role.
+its message), ordered absolute → system → role → project, followed by the Work's rules as
+`[work] text`. Identical lines appear once. Role rules reach only that role; project rules are described above.
 
 Owl refuses to start when any rule file is invalid and names each file, line and
 reason. After startup, rule files are reloaded when they change. A reload with an
@@ -531,6 +538,8 @@ Without the key, or with `[]`, no command runs. An error in `decision_text_check
 
 ### Input and output
 
+`next_steps` and the `note` of options with `generated: false` are Core's own sentences about where the Owner's words go after an answer; the model does not write them. A Decision's own option has an empty `note` when Core cannot tell where its answer goes.
+
 Each call starts the command once. The server writes one JSON to its stdin and reads one JSON from its stdout. The command gets only `PATH`, `HOME`, `LANG` and the entry's `env`; `OWL_` values are not passed.
 
 ```json
@@ -538,7 +547,7 @@ Each call starts the command once. The server writes one JSON to its stdin and r
     "summary": "...", "next_steps": "...",
     "options": [
       { "key": "fix_1", "generated": true, "label": "...", "note": "...", "criteria_rewrites": [ { "criterion_id": "AC1", "after": "...", "check": "..." } ] },
-      { "key": "retry", "generated": false, "label": "...", "note": "...", "criteria_rewrites": [] }
+      { "key": "retry", "generated": false, "label": "Run it again", "note": "Run this Task again. Owl reads the words you add when you pick this choice. Advice goes to the Worker; anything else goes to the Manager to fix the plan.", "criteria_rewrites": [] }
     ] } }
 ```
 
@@ -548,8 +557,8 @@ The command answers one of:
 - `{ "ok": true, "fixed": <texts> }`: use these texts instead. `fixed` has the same shape as `texts`.
 - `{ "ok": false, "problems": ["one short sentence", "..."] }`: the texts break a rule. At most 10 problems are used.
 
-What a fix may change: `summary`, `next_steps`, each option's `note`, the `label` of options with `generated: true`, and the `after` and `check` of each `criteria_rewrites` entry.
-What a fix must not change: the option `key`, `generated`, the order of options, the `label` of options with `generated: false` (they are Core's own texts and also appear on buttons), and the `criterion_id` of each rewrite and its order. No text may be empty.
+What a fix may change: `summary`, the `label` and `note` of options with `generated: true`, and the `after` and `check` of each `criteria_rewrites` entry.
+What a fix must not change: `next_steps`, the `note` of options with `generated: false` (they are Core's own texts, so Core's account of where an answer goes cannot be rewritten), the option `key`, `generated`, the order of options, the `label` of options with `generated: false` (also Core's own texts, shown on buttons), and the `criterion_id` of each rewrite and its order. `summary`, and the `label` and `note` of generated options, may not be empty. A fix that changes a Core text is refused and the result is `text_check_invalid:<name>`.
 A fix is also checked by Core's own rules (sentence limits and no internal ids or names), and so is the stored result.
 
 ### When it goes wrong
@@ -559,7 +568,7 @@ A fix is also checked by Core's own rules (sentence limits and no internal ids o
 - The output has the wrong shape (see above): `text_check_invalid:<name>`.
 - The deadline `decision_explanation_timeout_seconds` passes (it covers the model, every command and the rewrite): the command is stopped and the result is `timeout`.
 
-In all failure cases (and when the model errors, the deadline passes or there is no runner) the model's explanation is not stored; Core stores a fixed-form explanation (`status` ready, `plain` true) whose summary and next_steps are built from the Task report and the Decision's own texts, leaving out internal terms and, in Japanese, English-only lines. A broken checker never lets an unchecked text through. The reason is logged as `[owl-core] Decision text check <name> failed for <decision id>: ...` and kept in the stored explanation's `error`.
+In all failure cases (and when the model errors, the deadline passes or there is no runner) the model's explanation is not stored; Core stores a fixed-form explanation (`status` ready, `plain` true) whose summary is built from the Task report and the Decision's own texts (its next_steps and option notes are Core's sentences, as always), leaving out internal terms and, in Japanese, English-only lines. A broken checker never lets an unchecked text through. The reason is logged as `[owl-core] Decision text check <name> failed for <decision id>: ...` and kept in the stored explanation's `error`.
 
 ### Example: a generic lint command
 
@@ -641,6 +650,8 @@ Besides `create_work`, the Advisor can act on an existing Work through these act
 
 If an `owl-action` fails, the Advisor gets one more turn to deal with the failure. Owl resumes an Advisor session only after its turn has completed, and resends the message once when the resumed session fails.
 
+`GET /api/v1/advisor/windows` returns `has_unread` for each window. The server stores the read state, and `PUT /api/v1/advisor/windows/{key}/read` marks a window read (the Web UI calls it when you open the window). An Advisor turn that is running can be interrupted from the Advisor page (stop button, `POST /api/v1/advisor/session/interrupt`). The stop works for both Claude and Codex Advisor sessions.
+
 - **`send_work_instruction`** sends an extra instruction (up to 100,000 characters, optionally with attachments) to a Work that has started. It is posted as a message on the Work's web conversation and queues a Manager replan that takes the instruction into account; if the Work was `judgement_waiting`, the instruction answers the open Decisions and restarts it. A `completed` Work is reopened only when the action asks for it (`reopen`); a `cancelled` Work or one not yet started (`memo`/`ready`) is rejected.
 - **`update_work`** changes only the Work's title (1–500 characters) and/or summary (up to 20,000 characters); at least one is required and the change is kept in the summary history. If the Work is `running`, `paused` or `judgement_waiting`, a replan is queued so the plan follows the new text; other states just store it.
 
@@ -654,7 +665,7 @@ When a provider answers with a rate limit (HTTP 429, overloaded, or a reported r
 
 ## Inviting the Owner to Slack channels
 
-The Slack channel panel and **Settings → Integrations** invite the Owner (the saved Owner Slack user ID) to existing window channels with `POST /api/v1/settings/integrations/slack/invite-owner`.
+**Settings → Integrations** invites the Owner (the saved Owner Slack user ID) to existing window channels with `POST /api/v1/settings/integrations/slack/invite-owner`. The Slack channel panel invites the Owner to one window's channel with `POST /api/v1/advisor/windows/{key}/channels/slack/invite-owner`.
 
 ## Background work in Core
 
@@ -691,6 +702,11 @@ Project, and the per-Task type verification (`doc`, `config`, `test`, `code`) do
 it records `policy:test` as passed with the detail `Project test_run is off (explicit_off); test runners were not started.`. Other reasons
 (a Project with no test marker, invalid settings) keep running tests.
 
+**Screen file paths.** `screen_paths` on a Project (`PATCH /api/v1/projects/{project_id}` only; the settings screen has no field for it) lists the files that count as screens, as globs relative to the worktree:
+`{"include": ["apps/web/app/**", "apps/web/components/**"], "exclude": ["**/*.test.*", "**/__tests__/**"]}`.
+`exclude` is optional. Each side takes at most 50 patterns of at most 256 characters; a pattern cannot start with `/`, `~` or `!`, or contain a `..` path element. Duplicates and surrounding spaces are removed.
+`null` or an empty `include` clears the setting.
+
 **Commit language.** `commit_language` on a Project (`ja`, `en` or `null`; set with `POST /api/v1/projects`, `PATCH /api/v1/projects/{project_id}`)
 chooses the language of the Work's completion commit. With `en` the Manager writes an English
 imperative one-line subject (ASCII, at most 72 characters) in `verdict.commit_subject`; `ja` or `null` keeps the default.
@@ -701,4 +717,4 @@ Knowledge lives as pages under `<OWL_ROOT>/knowledge`. A SQLite index (`memory-i
 
 ## What rules are tracked in git
 
-`.gitignore` ignores `knowledge/`, `skills/` and `rules/` except the shipped defaults: `rules/system/defaults.yaml`, `rules/system/safety.yaml`, `rules/system/owl-defaults.yaml` and `rules/role/advisor-defaults.yaml`. Any other rule file, skill or knowledge note is local state and is not committed; back it up with the rest of `OWL_ROOT`.
+`.gitignore` ignores `knowledge/`, `skills/` and `rules/` except the shipped defaults: `rules/system/defaults.yaml`, `rules/system/safety.yaml`, `rules/system/owl-defaults.yaml` and `rules/role/advisor-defaults.yaml`. Any other rule file (including everything under `rules/project/`), skill or knowledge note is local state and is not committed; back it up with the rest of `OWL_ROOT`.

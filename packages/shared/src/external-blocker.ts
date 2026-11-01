@@ -2,7 +2,7 @@ import { validateRoleOutput, type RoleSchema } from "./role-schema.js";
 
 export const EXTERNAL_BLOCKER_EVENT = "task.external_blocker_reported" as const;
 /** pre_existing: a problem already on the base branch / environment: a gap in the Project environment this Task must not set up. */
-export const EXTERNAL_BLOCKER_KINDS = ["pre_existing", "environment"] as const;
+export const EXTERNAL_BLOCKER_KINDS = ["pre_existing", "environment", "screen_design"] as const;
 export type ExternalBlockerKind = (typeof EXTERNAL_BLOCKER_KINDS)[number];
 
 export interface ExternalBlocker {
@@ -18,7 +18,7 @@ export const EXTERNAL_BLOCKER_SCHEMA: RoleSchema = {
   additionalProperties: false,
   required: ["kind", "summary", "evidence", "suggested_fix"],
   properties: {
-    kind: { type: "string", enum: [...EXTERNAL_BLOCKER_KINDS], description: "pre_existing: the problem is already on the base branch; environment: the Project environment lacks something this Task must not set up" },
+    kind: { type: "string", enum: [...EXTERNAL_BLOCKER_KINDS], description: "pre_existing: the problem is already on the base branch; environment: the Project environment lacks something this Task must not set up; screen_design: the guard denied creating a file under the Project's screen paths because this Task has no screen design; Owl plans the design first" },
     summary: { type: "string", minLength: 1, description: "what blocks the criterion, in one sentence" },
     evidence: { type: "string", minLength: 1, description: "why the problem does not come from this Task's changes (commands run and output excerpts, file:line)" },
     suggested_fix: { type: "string", minLength: 1, description: "what a separate Task should fix" },

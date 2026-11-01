@@ -19,7 +19,7 @@ import { disablePlanQuality } from "../helpers/plan-quality.mjs";
 import { waitFor } from "../helpers/wait.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
 import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
-import { findInternalTerms } from "../../packages/shared/dist/decision-explanation.js";
+import { coreDecisionTexts, findInternalTerms } from "../../packages/shared/dist/decision-explanation.js";
 import { toDecisionExplanation } from "../../packages/core/dist/decision-explainer.js";
 
 // A Worker that reports a criterion as "unverifiable" must not be restarted and
@@ -156,7 +156,7 @@ test("an unverifiable required criterion still reaches the defect path, an unver
 
 test("report schema and prompt describe external_blocker", () => {
   const schema = WORKER_REPORT_SCHEMA.properties.external_blocker;
-  assert.deepEqual(schema.properties.kind.enum, ["pre_existing", "environment"]);
+  assert.deepEqual(schema.properties.kind.enum, ["pre_existing", "environment", "screen_design"]);
   assert.ok(WORKER_REPORT_SCHEMA.required.includes("external_blocker"));
   assert.equal(DESIGNER_REPORT_SCHEMA.properties.external_blocker, undefined);
   const prompt = buildWorkerPrompt({ context: { rules: null, knowledge: null, skills: null }, task: { id: "t", title: "t", acceptance: "a", type: "code" }, invocation_id: "i" });
@@ -339,6 +339,34 @@ test("a partial report with external_blocker after a side effect goes to the Man
   assert.equal(tasksOf(db, workId).length, 2, "the fix Task was added to the same Work");
   assert.equal(runner.state.t1Calls, 2);
   assert.equal(eventCount(db, workId, "task.external_blocker_reported"), 1);
+});
+
+test("a screen_design external_blocker makes the Manager add a major design Task and retry the failed Task behind it", async (t) => {
+  const SCREEN_BLOCKER = { kind: "screen_design", summary: "The settings page needs a screen design.", evidence: "Screen design required: creating app/settings.tsx adds a new file.", suggested_fix: "Design the settings page." };
+  const runner = blockerRunner([blocked({ external_blocker: SCREEN_BLOCKER })]);
+  const replan = runner.runManagerPlan;
+  runner.runManagerPlan = async (request) => {
+    const result = await replan(request);
+    if (request.mode !== "replan" && request.context?.mode !== "replan") return result;
+    const design = { ...planTask("The settings page mock is saved; verified by reading the design document."), id: "D1", type: "design", title: "Settings page design", assigned_designer: "designer", ui_change: "major" };
+    return { ...result, report: { ...result.report, tasks: [design, { ...planTask(GOOD_ACCEPTANCE), ui_change: "major", depends_on: ["D1"] }] } };
+  };
+  runner.runDesigner = async (request) => {
+    await writeFile(request.context.design_document_path, "# Design\n\nDone.\n");
+    return { outcome: "success", report_valid: true, report: { ...passedReport(request.invocation_id), external_blocker: null, pending_process: null } };
+  };
+  const { db, core } = await openCore(t, runner);
+  runner.state.db = db;
+  const workId = await startWork(core, "screen-design");
+
+  assert.ok(await waitFor(() => t1Of(db, workId)?.status === "completed"), `T1 completes (${JSON.stringify(db.all("SELECT manager_task_id, status, type FROM tasks WHERE work_id = ?", workId))})`);
+  assert.deepEqual(runner.state.replanRequests[0].trigger.tasks, [{ kind: "external_blocker", task_id: t1Of(db, workId).id, cause: "screen_design" }]);
+  assert.equal(runner.state.replanRequests[0].context.failed_tasks[0].failure.cause, "screen_design");
+  const t1 = db.get("SELECT id, ui_change FROM tasks WHERE work_id = ? AND manager_task_id = 'T1'", workId);
+  assert.equal(t1.ui_change, "major");
+  const dependsOn = db.all("SELECT d.manager_task_id AS m, d.type, d.ui_change FROM task_dependencies td JOIN tasks d ON d.id = td.depends_on_task_id WHERE td.task_id = ?", t1.id);
+  assert.deepEqual(dependsOn.map((row) => [row.m, row.type, row.ui_change]), [["D1", "design", "major"]]);
+  assert.equal(openDecisions(db, workId), 0);
 });
 
 test("an external blocker past progress_guard.external_blocker_limit asks the Owner", async (t) => {
@@ -542,8 +570,6 @@ const goodExplanation = (patch = {}) => ({
     { label: "Do you want to reword the criterion?", description: "Measure the time without startup and retry the Task.", instruction: "Reword the criterion and retry the Task.", criteria_rewrites: [{ criterion_id: "AC1", after: CRITERIA_AFTER, check: CRITERIA_CHECK }] },
     { label: "Speed up startup", description: "Keep the criterion and add work that shortens startup.", instruction: "Add work that shortens startup and retry the Task.", criteria_rewrites: [] },
   ],
-  next_steps: "Pick the first option to reword the criterion and run the Task again.",
-  option_notes: [{ key: "retry", note: "The Task runs again without changes." }, { key: "cancel", note: "Stop the Task for good." }],
   recommended_option_key: "fix_1",
   ...patch,
 });
@@ -591,8 +617,15 @@ test("two partial reports open one Decision, and the explanation, fix options an
   assert.ok(await waitFor(() => openedEvents(db, workId).length === 1));
   const opened = openedEvents(db, workId)[0];
   assert.deepEqual(opened.explanation, { summary: row.explanation.summary, cause_kind: row.explanation.cause_kind, next_steps: row.explanation.next_steps, option_notes: row.explanation.option_notes });
-  assert.equal(row.explanation.next_steps, goodExplanation().next_steps);
-  assert.deepEqual(row.explanation.option_notes, goodExplanation().option_notes);
+  // The stored next_steps and option_notes are Core's own sentences, built from the same routes answerDecision asks.
+  const routes = await core.decisionAnswerRoutes(row.id);
+  const language = await core.getLanguage();
+  const expected = coreDecisionTexts(
+    { free_text_to: routes.free_text, options: row.options.slice(2).map((option) => ({ key: option.key, description: option.description, words_to: option.key === "retry" ? routes.retry : "unspecified" })) },
+    language,
+  );
+  assert.equal(row.explanation.next_steps, expected.next_steps);
+  assert.deepEqual(row.explanation.option_notes, expected.option_notes);
   // The Decision's own options keep their key, label and description; only the fix options are added in front.
   assert.deepEqual(row.options.slice(2).map((option) => option.key), ["retry", "cancel"]);
   assert.ok(row.options.slice(2).every((option) => !("note" in option)));

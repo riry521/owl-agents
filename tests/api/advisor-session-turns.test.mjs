@@ -150,3 +150,63 @@ test("advisor session route resolves a project window from its conversation or t
   assert.equal(defaulted.status, 200);
   assert.equal(statusOf("session-general"), "ended", "no window in the body means the general window");
 });
+
+test("advisor interrupt route reaches the runtime through the adapter and maps not-running, unsupported and missing-Core cases", async (t) => {
+  const { root, db, core: durableCore } = await createTestCore(
+    t,
+    { version: "advisor-interrupt-test", now: () => NOW },
+    { prefix: "owl-api-advisor-interrupt-" },
+  );
+  const dataDir = join(root, "data");
+  await mkdir(dataDir, { recursive: true });
+  const token = randomBytes(24).toString("hex");
+  const start = async (externalCore) => startTestHttpServer(
+    t, { core: new ExternalCoreAdapter(externalCore, db, root, dataDir), db, webOut: root, owlRoot: root, dataDir }, { token },
+  );
+  const api = await start(durableCore);
+  if (!api) {
+    t.skip("localhost listen is not permitted in this environment");
+    return;
+  }
+  const interrupt = (server, body = {}) => server.request("POST", "/api/v1/advisor/session/interrupt", body);
+
+  const requested = [];
+  let outcome = { status: "interrupting", turn_id: "turn-1" };
+  durableCore.advisorRuntime = { interruptTurn: async (sessionId) => { requested.push(sessionId); return outcome; } };
+
+  const idle = await interrupt(api);
+  assert.equal(idle.status, 200);
+  assert.deepEqual(await idle.json(), { interrupted: false, turn_id: null }, "no session means nothing to interrupt");
+  assert.deepEqual(requested, []);
+
+  const conversationId = (await durableCore.getActiveConversation()).conversation_id;
+  await db.createWriteLane().transact((tx) => {
+    tx.run(
+      `INSERT INTO advisor_sessions (id, status, conversation_id, window_id, last_activity_at, provider_id, created_at, updated_at)
+       VALUES ('session-1', 'running', ?, (SELECT advisor_window_id FROM conversations WHERE id = ?), ?, 'anthropic', ?, ?)`,
+      conversationId, conversationId, NOW, NOW, NOW,
+    );
+  });
+  const running = await interrupt(api);
+  assert.equal(running.status, 200);
+  assert.deepEqual(await running.json(), { interrupted: true, turn_id: "turn-1" });
+  assert.deepEqual(requested, ["session-1"], "the request reached the runtime for the window's session");
+
+  outcome = { status: "not_running", turn_id: null };
+  const finished = await interrupt(api, { window: "general" });
+  assert.equal(finished.status, 200);
+  assert.deepEqual(await finished.json(), { interrupted: false, turn_id: null });
+  assert.equal(requested.length, 2);
+
+  outcome = { status: "unsupported", turn_id: "turn-1" };
+  const unsupported = await interrupt(api);
+  assert.equal(unsupported.status, 409);
+  assert.deepEqual(await unsupported.json(), { error: "interrupt_unsupported" });
+
+  const bare = Object.create(durableCore);
+  bare.interruptAdvisorTurn = undefined;
+  const without = await start(bare);
+  const missing = await interrupt(without);
+  assert.equal(missing.status, 503);
+  assert.equal((await missing.json()).error.code,"dependency_unavailable");
+});

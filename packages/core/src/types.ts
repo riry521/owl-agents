@@ -1,5 +1,5 @@
 import type { OwlDatabase, WriteLane, WriteLaneTransaction } from "../../db/dist/index.js";
-import type { AcceptanceCriterion, CriteriaRelaxation, AgentFailureClass, AgentProcessEvent, CuratorCandidate, CuratorProposal, CuratorRequest, CuratorRunResult, OwnerLanguage, ProcessSkillsInstallCommand, PromptObserver, ProviderErrorObserver, ProviderErrorRecord, ProcessSkillsSettings, RateLimitInfo, SkillFeedback, TaskNecessity, TaskPlanContext, TestPolicy, TokenUsage } from "@owl/shared";
+import type { AcceptanceCriterion, CriteriaRelaxation, AgentFailureClass, AgentProcessEvent, CuratorCandidate, CuratorProposal, CuratorRequest, CuratorRunResult, OwnerLanguage, ProcessSkillsInstallCommand, PromptObserver, ProviderErrorObserver, ProviderErrorRecord, ProcessSkillsSettings, RateLimitInfo, SkillFeedback, TaskNecessity, TaskPlanContext, TestPolicy, TokenUsage, UiChange } from "@owl/shared";
 import type { AttemptDecision } from "./attempt-policy";
 import type { ExecutorRuntime } from "./executor.js";
 import type { KnowledgeStoragePersistence } from "./knowledge-location.js";
@@ -1283,6 +1283,7 @@ export interface TaskRow extends JsonObject {
   design_escalated?: number;
   /** Manager's designation of a design Task; null leaves it to the Work's design_mode. */
   assigned_designer?: "designer" | "lead_designer" | null;
+  ui_change?: UiChange;
   /** Reviewer (not Worker) failures since the last replan, Decision, restore or completion. */
   reviewer_failure_count: number;
   /** Valid Reviewer verdicts across Manager replans; task.replanned keeps it. */
@@ -1379,6 +1380,7 @@ export interface ReductionResult<S extends JsonObject> {
 export interface TaskPlanItem {
   readonly id?: string;
   readonly assigned_designer?: "designer" | "lead_designer" | null;
+  readonly ui_change?: UiChange;
   readonly title: string;
   readonly type: string;
   /** Display text rendered from acceptance_criteria; Core never reads criteria back from it. */
@@ -1503,6 +1505,8 @@ export interface Project extends JsonObject {
   readonly test_policy: TestPolicy;
   /** Shell command strings the Worker runs before reporting; [] = not set (Core falls back to test detection). */
   readonly report_check_commands: readonly string[];
+  /** Glob patterns (relative to the worktree) of the Project's screen files; null = not set. */
+  readonly screen_paths: { readonly include: readonly string[]; readonly exclude: readonly string[] } | null;
   readonly allowed_roots: readonly string[];
   readonly verification_plan: readonly VerificationCommand[];
 }
@@ -1535,6 +1539,7 @@ export interface UpdateProjectPayload extends JsonObject {
   readonly test_run?: JsonObject | null;
   readonly test_policy?: JsonObject | null;
   readonly report_check_commands?: readonly string[] | null;
+  readonly screen_paths?: { readonly include: readonly string[]; readonly exclude?: readonly string[] } | null;
   readonly verification_plan?: readonly VerificationCommand[];
 }
 

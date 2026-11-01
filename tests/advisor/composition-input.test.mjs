@@ -33,6 +33,7 @@ export const getAdvisorSession = async () => ({ running_turns: 0, queued_turns: 
 export const listMessages = async () => [{ id: 'm0', conversation_id: 'conv1', source: 'advisor', body: 'hi', attachment_ids: [], created_at: '2026-01-01T00:00:00Z' }];
 export const ingestConversation = async () => {};
 export const clearAdvisorConversation = async () => {};
+export const interruptAdvisorTurn = async () => ({ interrupted: false, turn_id: null });
 export const subscribeToUpdates = () => () => {};
 export const postMessage = async (_id, body) => { (window.__posts ??= []).push(body); if (window.__hold) await new Promise((r) => { window.__release = r; }); return { message_id: 'm' + window.__posts.length }; };
 `;

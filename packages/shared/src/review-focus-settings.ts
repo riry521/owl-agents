@@ -12,7 +12,8 @@ export interface ReviewFocusSettings {
 }
 
 export const DEFAULT_REVIEW_FOCUS_SETTINGS: ReviewFocusSettings = {
-  same_spot_threshold: 3,
+  // Why 2: the Fixer takes over at the 2nd rejection (fixer_escalation), so a spot rejected twice must stop before it, not after.
+  same_spot_threshold: 2,
   same_spot_line_distance: 20,
   replan_refund: 2,
   refund_limit: 4,

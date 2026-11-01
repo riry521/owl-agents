@@ -668,6 +668,7 @@ export interface AdvisorWindow {
   session_status: 'running' | 'starting' | 'suspended' | 'none';
   channels: AdvisorWindowChannel[];
   last_message_at: string | null;
+  has_unread: boolean;
 }
 
 /** One provider entry of GET /advisor/windows/:key/channels. */

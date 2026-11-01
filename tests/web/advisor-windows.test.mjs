@@ -703,3 +703,21 @@ test('reorder wiring: the sidebar gets onReorder, and the new string exists in b
   assert.equal(typeof picker.props.onReorder, 'function');
   assert.ok(en.advisorWindows.reorderError && ja.advisorWindows.reorderError);
 });
+
+test('unread dot: shown for unread windows other than the open one, with an i18n label', () => {
+  assert.equal(windowsMod.showUnreadDot({ key: 'a', has_unread: true }, 'b'), true);
+  assert.equal(windowsMod.showUnreadDot({ key: 'a', has_unread: true }, 'a'), false);
+  assert.equal(windowsMod.showUnreadDot({ key: 'a', has_unread: false }, 'b'), false);
+  assert.ok(en.advisorWindows.unread && ja.advisorWindows.unread);
+});
+
+test('read position: the last Advisor message among the rendered ones', () => {
+  const msgs = [{ id: '1', source: 'web' }, { id: '2', source: 'advisor' }, { id: '3', source: 'web' }, { id: '4', source: 'advisor' }];
+  assert.equal(windowsMod.readThroughToSend(msgs, 20), '4');
+  assert.equal(windowsMod.readThroughToSend(msgs.slice(0, 2), 20), '2', 'a reply that has not arrived in the list is not read');
+  const later = [...msgs, { id: '5', source: 'web' }, { id: '6', source: 'web' }];
+  assert.equal(windowsMod.readThroughToSend(later, 2), null, 'replies above the rendered slice are not read');
+  assert.equal(windowsMod.readThroughToSend(later, 3), '4');
+  assert.equal(windowsMod.readThroughToSend([{ id: '1', source: 'web' }], 20), null);
+  assert.equal(windowsMod.readThroughToSend(null, 20), null);
+});

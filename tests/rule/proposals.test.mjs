@@ -558,3 +558,31 @@ test("a conflict with an existing rule wins over folding into a near-identical o
   assert.equal(f.proposals.list("awaiting_approval").length, 0);
   assert.equal(f.proposals.list("pending")[0].source_count, 1);
 });
+
+test("curateRuleProposals pairs project rules only within one Project and keeps project_id", async () => {
+  const { curateRuleProposals, coApply } = await import("../../packages/core/dist/rule-curation.js");
+  const rule = (id, level, project_id) => ({ id, level, kind: "instruction", text: "Run the tests.", ...(project_id ? { project_id } : {}) });
+  assert.equal(coApply({ level: "project", project_id: "a" }, { level: "project", project_id: "b" }), false);
+  assert.equal(coApply({ level: "project", project_id: "a" }, { level: "project", project_id: "a" }), true);
+  assert.equal(coApply({ level: "project", project_id: "a" }, { level: "system" }), true);
+  const promptRules = [rule("pa", "project", "a"), rule("pb", "project", "b"), rule("pa2", "project", "a"), rule("sys", "system")];
+  const result = await curateRuleProposals({ proposals: [], rules: { promptRules } });
+  const pairs = result.rule_findings.map((f) => f.rules.map((r) => r.id).join("+")).sort();
+  assert.deepEqual(pairs, ["pa+pa2", "pa+sys", "pa2+sys", "pb+sys"]);
+  const finding = result.rule_findings.find((f) => f.rules[0].id === "pa" && f.rules[1].id === "pa2");
+  assert.deepEqual(finding.rules.map((r) => r.project_id), ["a", "a"]);
+  assert.equal(result.rule_findings.find((f) => f.rules[0].id === "pb").rules[1].project_id, null);
+});
+
+test("curateRuleProposals relates a system proposal to project rules with project_id and the summary names the Project", async () => {
+  const { curateRuleProposals } = await import("../../packages/core/dist/rule-curation.js");
+  const { summarizeCurationReport } = await import("../../packages/core/dist/curation-summary.js");
+  const promptRules = ["a", "b"].map((p) => ({ id: `p${p}`, level: "project", kind: "instruction", text: "Run the tests.", project_id: p }));
+  const proposal = { id: "pr1", status: "pending", level: "system", role: null, text: "Run the tests.", decision: null, created_at: "2026-01-01T00:00:00Z" };
+  const result = await curateRuleProposals({ proposals: [proposal], rules: { promptRules } });
+  assert.equal(result.proposals[0].verdict, "duplicate_of_rule");
+  assert.equal(result.proposals[0].related[0].project_id, "a");
+  assert.equal(result.rule_findings.length, 0);
+  const { summary } = summarizeCurationReport("rule_curation", result, "r1", "en");
+  assert.match(summary, /project_ids: a\b/u);
+});

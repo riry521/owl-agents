@@ -223,3 +223,67 @@ test("the next Advisor turn's input carries the previous reply's owl-actions res
   await waitFor(() => sentTurns.length === 4);
   assert.equal(sentTurns[3].text.includes("owl-action-results"), false, "results already handed over are not sent again after a reply without actions");
 });
+
+for (const origin of [{ channel: "web" }, { channel: "slack", channel_id: "C1", ref: "1700000000.000100" }]) {
+  test(`an interrupted turn's reply runs no owl-actions and queues no follow-up (${origin.channel} origin)`, async (t) => {
+    const root = await tempDir(t, "owl-advisor-interrupted-reply-");
+    const partialText = [
+      "途中です",
+      "```owl-actions",
+      JSON.stringify([{ type: "create_work", description: "Create", payload: { title: "Interrupted Work", summary: "Must not exist.", size: "small", project_id: null } }]),
+      "```",
+    ].join("\n");
+    let currentTurn;
+    let readySent = false;
+    const providerClient = {
+      createSession: async () => ({
+        provider_session_id: "advisor-interrupted-session",
+        pid: process.pid,
+        send: async (turn) => { currentTurn = turn; },
+        events: () => ({
+          async *[Symbol.asyncIterator]() {
+            if (!readySent) {
+              readySent = true;
+              yield { type: "session.ready", provider_session_id: "advisor-interrupted-session", pid: process.pid };
+            }
+            yield { type: "turn.interrupted", turn_id: currentTurn.turn_id, partial_text: partialText, usage: null };
+          },
+        }),
+        stop: async () => {},
+      }),
+    };
+    const agentRunner = {
+      runManagerPlan: async () => ({ outcome: "failed", message: "unused" }),
+      runWorker: async () => ({ outcome: "failed" }),
+      runReviewer: async () => ({ outcome: "failed" }),
+      runAdvisor: async () => { throw new Error("The persistent provider session should handle Advisor replies."); },
+    };
+    const { core, db } = await createTestCore(t, {
+      agentRunner, providerClient, version: "advisor-interrupted-reply-test", owlRoot: root, dataDir: root,
+      dispatcher: { tick_interval_ms: 25 },
+    });
+    core.gitGateway().inspectAdvisorWorkspace = async () => ({ ok: true, dirty: false, message: "clean" });
+    await core.start();
+
+    const conversation = await core.getActiveConversation();
+    const webAccount = db.get("SELECT id FROM connector_accounts WHERE owner_id = ? AND provider = 'web'", ownerId);
+    const worksBefore = db.get("SELECT COUNT(*) AS n FROM works").n;
+    const messageId = await insertMessage(db, conversation.conversation_id, webAccount.id, "Do the thing");
+    await core.advisorRespond(conversation.conversation_id, messageId, origin);
+
+    const responded = await waitFor(() => {
+      const row = db.get("SELECT payload_json FROM events WHERE type = 'advisor.responded' AND json_extract(payload_json, '$.conversation_id') = ?", conversation.conversation_id);
+      return row ? JSON.parse(row.payload_json) : null;
+    }, { message: "advisor.responded for the interrupted turn" });
+
+    assert.equal(responded.interrupted, true);
+    assert.deepEqual(responded.suggested_actions, []);
+    assert.equal(responded.action_results, "");
+    assert.equal(responded.reply, "途中です\n\n（中断しました）");
+    assert.equal(responded.followup_pending, undefined);
+    assert.equal(db.get("SELECT COUNT(*) AS n FROM works").n, worksBefore, "no Work is created");
+    const turns = db.all("SELECT status, reply_message_id FROM advisor_turns WHERE conversation_id = ?", conversation.conversation_id);
+    assert.deepEqual(turns.map((turn) => turn.status), ["completed"], "no follow-up turn is queued");
+    assert.ok(turns[0].reply_message_id);
+  });
+}

@@ -1120,6 +1120,10 @@ export class MemoryCore implements CorePort {
     // Standalone mode has no persistent Advisor runtime or session ledger.
   }
 
+  async interruptAdvisorTurn(_ownerId: string, _windowKey?: string): Promise<{ status: "interrupting" | "not_running" | "unsupported"; turn_id: string | null }> {
+    return { status: "not_running", turn_id: null };
+  }
+
   async getHybridMode(): Promise<boolean> {
     return this.hybridMode;
   }
@@ -1404,6 +1408,7 @@ interface ExternalCore {
   advisorRespond?(conversationId: string, messageId: string, origin?: AdvisorOrigin): Promise<void>;
   advisorSessions?: AdvisorSessionsPort;
   restartAdvisorSession?(ownerId: string, windowKey?: string): Promise<void>;
+  interruptAdvisorTurn?(ownerId: string, windowKey?: string): Promise<{ status: "interrupting" | "not_running" | "unsupported"; turn_id: string | null }>;
   getHybridMode?(): Promise<boolean>;
   setHybridMode?(enabled: boolean): Promise<boolean>;
   getSkillActivity?(days: number): unknown;
@@ -2386,6 +2391,17 @@ export class ExternalCoreAdapter implements CorePort {
       await this.core.restartAdvisorSession(ownerId, windowKey);
     } catch (error) {
       throw externalError(error, "restartAdvisorSession");
+    }
+  }
+
+  async interruptAdvisorTurn(ownerId: string, windowKey?: string): Promise<{ status: "interrupting" | "not_running" | "unsupported"; turn_id: string | null }> {
+    if (typeof this.core.interruptAdvisorTurn !== "function") {
+      throw new ApiError(503, "dependency_unavailable", "Advisor turn interruption is not available in the loaded Core.");
+    }
+    try {
+      return await this.core.interruptAdvisorTurn(ownerId, windowKey);
+    } catch (error) {
+      throw externalError(error, "interruptAdvisorTurn");
     }
   }
 

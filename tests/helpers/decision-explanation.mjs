@@ -4,13 +4,11 @@ import { waitFor } from "./wait.mjs";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** What a model that follows the rules answers: a note for every option, Core's recommendation or the first key. */
+/** What a model that follows the rules answers: no next_steps or option_notes (Core writes those), Core's recommendation or the first key. */
 export function plainExplanation(request) {
   return {
     summary: "The work stopped before it could be finished.",
     cause_kind: "work",
-    next_steps: "Pick one of the choices below to go on.",
-    option_notes: request.decision.options.map((option) => ({ key: option.key, note: "Carries on with this choice." })),
     options: [],
     recommended_option_key: request.decision.recommended ?? request.decision.options[0].key,
   };

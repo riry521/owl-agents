@@ -64,6 +64,7 @@ export function roleTaskView(row: TaskRow, dependsOn: readonly string[]): JsonOb
     parent_task_id: row.parent_task_id,
     acceptance_criteria: readStoredAcceptanceCriteria(row.acceptance_criteria_json, row.acceptance) as unknown as JsonObject[],
     ...planContextFields(row),
+    ui_change: row.ui_change ?? "none",
     review_round: row.review_round,
     failure_count: row.failure_count,
     worker_generation: row.worker_generation,
@@ -85,6 +86,7 @@ export function reviewerTaskView(row: TaskRow, dependsOn: readonly string[]): Js
     type: row.type,
     acceptance_criteria: readStoredAcceptanceCriteria(row.acceptance_criteria_json, row.acceptance) as unknown as JsonObject[],
     ...planContextFields(row),
+    ui_change: row.ui_change ?? "none",
     review_round: row.review_round,
     depends_on: [...dependsOn],
     ...(row.review_override === null ? {} : { review: row.review_override === "true" }),
@@ -475,8 +477,8 @@ export class ContextBuilder {
   /** The role's Rule Store lines plus the Work's rules, one per line; null when there are none. */
   public rules(role: RuleRole, workId: string): string | null {
     if (!this.sources.ruleStore) return null;
-    const workRulesJson = this.db.get<{ rules_json: string | null }>("SELECT rules_json FROM works WHERE id = ?", workId)?.rules_json;
-    const lines = this.sources.ruleStore.getInstructionsForRole(role, parseWorkRules(workRulesJson, workId));
+    const row = this.db.get<{ rules_json: string | null; project_id: string | null }>("SELECT rules_json, project_id FROM works WHERE id = ?", workId);
+    const lines = this.sources.ruleStore.getInstructionsForRole(role, parseWorkRules(row?.rules_json, workId), row?.project_id ?? null);
     return lines.length === 0 ? null : lines.join("\n");
   }
 

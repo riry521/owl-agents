@@ -5,7 +5,7 @@ import { test } from "node:test";
 
 import { createAgentRunner } from "../../packages/agent-runtime/dist/index.js";
 import { isPlanRejection, validatePlan, validateReplan } from "../../packages/core/dist/replan-plan.js";
-import { evaluateCriteriaRelaxation } from "../../packages/core/dist/plan-quality.js";
+import { evaluateCriteriaRelaxation, evaluatePlanQuality } from "../../packages/core/dist/plan-quality.js";
 import { DEFAULT_PROGRESS_GUARD_SETTINGS } from "../../packages/shared/dist/progress-guard-settings.js";
 import { DEFAULT_PLAN_QUALITY_SETTINGS } from "../../packages/shared/dist/plan-quality-settings.js";
 import { createUlid } from "../../packages/db/dist/index.js";
@@ -902,6 +902,82 @@ test("first plan: a Task depending on a design Task gets plan_rejected feedback 
   assert.match(feedbacks[1].errors.join(" "), /I1.*D1.*after the design is completed/);
 });
 
+test("ui_change major: a non-design Task needs a direct screen design dependency (first plan and replan)", () => {
+  const item = (extra = {}) => ({ id: "T1", title: "A", type: "code", acceptance: "x", depends_on: [], replaces: [], ...extra });
+  const row = (id, extra = {}) => ({ id, manager_task_id: id, status: "completed", failed_by_dependency: false, type: "code", ui_change: "none", assigned_designer: null, ...extra });
+  // First plan: rejected with the design-first sentence, even without a dependency; a major design item is fine.
+  const first = validatePlan([item({ id: "D1", type: "design", ui_change: "major" }), item({ id: "I1", ui_change: "major" })]);
+  assert.ok(isPlanRejection(first));
+  assert.deepEqual(first.errors, ["Task I1 (type code) has ui_change major; a major screen change needs a screen design Task first. Plan a design Task with ui_change major for its screens and leave this Task out of the first plan; add it in the design_completed replan with depends_on that design Task."]);
+  assert.ok(!isPlanRejection(validatePlan([item({ id: "D1", type: "design", ui_change: "major" }), item({ id: "I1", ui_change: "minor" })])));
+  // Replan.
+  const snapshot = { tasks: [row("D1", { type: "design", assigned_designer: "lead_designer" }), row("D2", { type: "design", ui_change: "minor", assigned_designer: "designer" }), row("D3", { type: "design", ui_change: "major", status: "cancelled" })], edges: [{ task_id: "D2", depends_on_task_id: "D1" }] };
+  const rejected = validateReplan([item({ id: "I1", ui_change: "major" })], snapshot, []);
+  assert.ok(isPlanRejection(rejected));
+  assert.match(rejected.errors[0], /Task I1 \(type code\) has ui_change major but depends directly on no screen design Task/);
+  assert.ok(isPlanRejection(validateReplan([item({ id: "I1", ui_change: "major", depends_on: ["D2"] })], snapshot, [])), "a plain design Task is not a screen design");
+  assert.ok(isPlanRejection(validateReplan([item({ id: "I1", ui_change: "major", depends_on: ["D3"] })], snapshot, [])), "a cancelled screen design Task does not count");
+  assert.ok(!isPlanRejection(validateReplan([item({ id: "I1", ui_change: "major", depends_on: ["D1"] })], snapshot, [])), "existing lead_designer design Task");
+  assert.ok(!isPlanRejection(validateReplan([item({ id: "ND", type: "design", ui_change: "major" }), item({ id: "I1", ui_change: "major", depends_on: ["ND"] })], snapshot, [])), "new major design item");
+  assert.ok(!isPlanRejection(validateReplan([item({ id: "I1", ui_change: "minor" })], snapshot, [])), "minor needs no design");
+  const chain = { tasks: [...snapshot.tasks, row("I0", { depends_on: ["D1"] })], edges: [{ task_id: "I0", depends_on_task_id: "D1" }] };
+  assert.ok(isPlanRejection(validateReplan([item({ id: "I1", ui_change: "major", depends_on: ["I0"] })], chain, [])), "a transitive dependency is not enough");
+});
+
+test("Core hands a major Task without a screen design dependency back as plan_rejected, then applies the repaired plan with ui_change stored", async (t) => {
+  const feedbacks = [];
+  const design = { ...task("D1"), type: "design", ui_change: "major", review: false };
+  const plans = [[design, { ...task("I1"), ui_change: "major", review: false }], [design]];
+  const gate = workerGate();
+  t.after(gate.release);
+  const { db, core } = await createTestCore(t, {
+    agentRunner: {
+      runManagerPlan: async (request) => {
+        feedbacks.push(request.context?.previous_output_feedback ?? null);
+        return { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: plans[Math.min(feedbacks.length, plans.length) - 1] } };
+      },
+      runWorker: async () => {
+        await gate.promise;
+        return { outcome: "failed", failure_class: "transient", error_key: "x", retry_allowed: true, message: "x" };
+      },
+      runReviewer: async () => ({ outcome: "failed" }),
+      runAdvisor: async () => ({ reply: "" }),
+    },
+    max_parallel: 4,
+    dispatcher: { tick_interval_ms: 25, manager_retry_delay_ms: 1 },
+  }, { prefix: "owl-plan-ui-change-", start: true });
+  const created = await core.createWork(commandEnvelope({ title: "W", summary: "x", size: "normal", project_id: null }, "create"));
+  const workId = created.data.work_id;
+  inBackground(core.startWork(workId, commandEnvelope({ mode: "normal" }, "start", created.version)));
+  await waitFor(() => db.get("SELECT COUNT(*) AS n FROM tasks WHERE work_id = ?", workId).n === 1);
+  assert.equal(feedbacks[1].kind, "plan_rejected");
+  assert.match(feedbacks[1].errors.join(" "), /I1 \(type code\) has ui_change major; a major screen change needs a screen design Task first/);
+  assert.equal(db.get("SELECT ui_change FROM tasks WHERE work_id = ?", workId).ui_change, "major");
+});
+
+test("a retried Task's ui_change is overwritten by the plan's value", async (t) => {
+  const { db } = await openTestDatabase(t, { prefix: "owl-replan-ui-change-" });
+  const created = await db.createWriteLane().transact((tx) => {
+    const work = createWorkInTransaction(tx, { title: "Retry", summary: "x", size: "normal", project_id: null });
+    tx.run("UPDATE works SET state = 'running' WHERE id = ?", work.id);
+    const [task] = createTaskPlanInTransaction(tx, work.id, [{ id: "T1", title: "Task", type: "code", ui_change: "minor", acceptance: "Done", depends_on: [] }]);
+    tx.run("UPDATE tasks SET status = 'failed' WHERE id = ?", task.id);
+    return { work_id: work.id, id: task.id };
+  });
+  assert.equal(db.get("SELECT ui_change FROM tasks WHERE id = ?", created.id).ui_change, "minor");
+  await db.createWriteLane().transact((tx) => {
+    applyReplanInTransaction(tx, created.work_id, {
+      newItems: [],
+      revisions: new Map([[created.id, { title: "Task", acceptance: "Done", type: "code", ui_change: "major" }]]),
+      reopenIds: [created.id],
+      supersessions: new Map(),
+      waits: new Map(),
+      actions: new Map(),
+    }, { base_plan_revision: 0, root_statuses: new Map() }, "test");
+  });
+  assert.equal(db.get("SELECT ui_change FROM tasks WHERE id = ?", created.id).ui_change, "major");
+});
+
 /** Retry one failed Task with a revision that changes its type or designation, and read back its designer state. */
 async function retryDesignerState(t, { designMode, from, revision }) {
   const { db } = await openTestDatabase(t, { prefix: "owl-replan-designer-" });
@@ -1088,6 +1164,26 @@ test("validateReplan: an automatic replan loosens Manager criteria but never cha
     assert.ok(!isPlanRejection(validate([protectedCriterion], [protectedCriterion], [])), "unchanged is fine");
     assert.ok(!isPlanRejection(validate([protectedCriterion], [loosened(protectedCriterion)], [], false)), "an Owner replan may change it");
   }
+});
+
+test("validateReplan: a retry that rewrites an Owner summary criterion from the Owner's decision answer passes only when it is not automatic", () => {
+  const snapshot = { tasks: [{ id: "T1", manager_task_id: "T1", status: "failed", failed_by_dependency: false }], edges: [] };
+  const before = stored("AC1", OWNER);
+  const after = { ...loosened(before), origin: { kind: "owner", source: "decision_answer", quote: "Mac だけで進めてください。" } };
+  const validate = (automatic) => validateReplan([{
+    id: "T1", title: "A", type: "code", acceptance: "x", depends_on: [], replaces: [], acceptance_criteria: [after],
+  }], snapshot, ["T1"], { currentCriteria: new Map([["T1", [before]]]), automatic });
+  assert.ok(!isPlanRejection(validate(false)), "an Owner request may rewrite it");
+  assert.ok(isPlanRejection(validate(true)), "an automatic replan may not");
+});
+
+test("evaluatePlanQuality: a criterion quoting the Owner's decision answer is not unquoted when the answer is among the Owner's texts", () => {
+  const quote = "Mac だけで進めてください。";
+  const item = { id: "t1", title: "Change `foo` in packages/core/src/foo.ts", type: "code", acceptance: "x", necessity: { serves: "the request", if_omitted: "nothing works" },
+    acceptance_criteria: [{ id: "AC1", text: "Runs on this Mac only.", check: "node --test tests/a.test.mjs", serves: "the request", if_omitted: "the request is not met", check_weight: "light", weight_reason: "", kind: "work_check", requirement: "required", origin: { kind: "owner", source: "decision_answer", quote } }] };
+  const codes = (ownerTexts) => evaluatePlanQuality([item], DEFAULT_PLAN_QUALITY_SETTINGS, ownerTexts).map((warning) => warning.code);
+  assert.ok(codes([]).includes("criterion_origin_unquoted"));
+  assert.ok(!codes([`NVIDIA は使わず、${quote}`]).includes("criterion_origin_unquoted"));
 });
 
 const setProgressGuard = (db, patch) => db.createWriteLane().transact((tx) => {

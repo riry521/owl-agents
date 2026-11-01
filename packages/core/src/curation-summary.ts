@@ -70,7 +70,19 @@ export function summarizeCurationReport(
 
   const lines = [`${kind} run ${runId}: ${parts.length ? parts.join(", ") : NO_CHANGES[language]}`];
   if (typeof source.skipped === "string") lines.push(`skipped: ${source.skipped}`);
-  if (kind === "rule_curation") lines.push(RULE_READ_ONLY_SENTENCE[language]);
+  if (kind === "rule_curation") {
+    const projectIds = new Set<string>();
+    // Rule pairs carry project_id in rule_findings[].rules, proposal matches in proposals[].related.
+    for (const [arrayKey, itemKey] of [["rule_findings", "rules"], ["proposals", "related"]] as const) {
+      for (const entry of Array.isArray(source[arrayKey]) ? source[arrayKey] : []) {
+        for (const rule of isRecord(entry) && Array.isArray(entry[itemKey]) ? entry[itemKey] : []) {
+          if (isRecord(rule) && typeof rule.project_id === "string") projectIds.add(rule.project_id);
+        }
+      }
+    }
+    if (projectIds.size > 0) lines.push(`project_ids: ${[...projectIds].join(", ")}`);
+    lines.push(RULE_READ_ONLY_SENTENCE[language]);
+  }
   return { summary: lines.join("\n"), counts };
 }
 

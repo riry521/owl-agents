@@ -23,4 +23,6 @@ export interface AdvisorWindowSummary {
   readonly session_status: AdvisorWindowSessionStatus;
   readonly channels: readonly AdvisorWindowChannel[];
   readonly last_message_at: string | null;
+  /** true when an Advisor reply (follow-ups included) arrived after the position saved by PUT /advisor/windows/:key/read. */
+  readonly has_unread: boolean;
 }

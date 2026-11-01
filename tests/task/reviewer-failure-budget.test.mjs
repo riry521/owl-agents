@@ -78,13 +78,15 @@ const reviewerContractInvalid = () => ({
   message: "Reviewer contract invalid",
 });
 
+// A new file each time: findings on the same spot twice would go back to the Manager early (review_same_spot_repeated).
+let rejectedFiles = 0;
 function reviewResult(verdict) {
   const review = verdict === "pass"
     ? { verdict: "pass", summary: "Looks right.", findings: [], tests: { ran: false, command: "none", passed: 0, failed: 0 } }
     : {
         verdict,
         summary: "One correction remains.",
-        findings: [{ severity: "major", subject: "other", file: "a.txt", problem: "Wrong value.", fix: "Use the right value." }],
+        findings: [{ severity: "major", subject: "other", file: `a${rejectedFiles += 1}.txt`, problem: "Wrong value.", fix: "Use the right value." }],
         tests: { ran: false, command: "none", passed: 0, failed: 0 },
       };
   return { outcome: verdict === "pass" ? "success" : "failed", report_valid: true, report: review, review };

@@ -25,7 +25,9 @@ test("a timed-out probe stays single-flight until its pending stat completes", a
     owlRoot: join(base, "root"),
     dataDir: join(base, "data"),
     persistence: { read: () => dir, write() {} },
-    probeTimeoutMs: 25,
+    // The stalled stat never completes on its own, so a generous timeout costs one wait but keeps
+    // the unstalled initialize()/recovery probes from timing out under CPU load.
+    probeTimeoutMs: 500,
     pollIntervalMs: 60_000,
     unavailablePollIntervalMs: 60_000,
     fs: {
@@ -70,8 +72,11 @@ test("a timed-out probe stays single-flight until its pending stat completes", a
   }
 
   // The probe's cleanup (after unlink) may still be settling; wait for single-flight to release.
+  // Under CPU load the new probe itself can exceed the 25ms timeout and report "timeout"; it stays
+  // single-flight until it settles, so keep checking until the state recovers rather than stopping
+  // as soon as a second stat has started.
   let recovered = await location.check();
-  for (let i = 0; i < 50 && rootStatCalls === 1; i += 1) {
+  for (let i = 0; i < 200 && recovered.state !== "available"; i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 10));
     recovered = await location.check();
   }

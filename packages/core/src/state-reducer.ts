@@ -2638,6 +2638,7 @@ export function createTaskPlanInTransaction(
       last_error_generation: null,
       review_round: 0,
       ...designerStateAtCreation(item.type, item.assigned_designer, work.design_mode),
+      ui_change: item.ui_change ?? "none",
       reviewer_failure_count: 0,
       total_review_attempts: 0,
       base_sync_only: item.base_sync_only === true ? 1 : 0,
@@ -2665,8 +2666,8 @@ export function createTaskPlanInTransaction(
           last_error_generation, review_round, lead_designer_start_round, worker_generation, worktree_path,
           worktree_state, last_failure_class, paused_from, created_at, updated_at,
           manager_task_id, retry_no, next_attempt_at, verification_spec_json, base_sync_only, base_sync_generations,
-          assigned_designer)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          assigned_designer, ui_change)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       row.id,
       row.work_id,
       row.parent_task_id,
@@ -2700,6 +2701,7 @@ export function createTaskPlanInTransaction(
       row.base_sync_only ?? 0,
       row.base_sync_generations ?? 0,
       row.assigned_designer ?? null,
+      row.ui_change ?? "none",
     );
     rows.push(row);
   }
@@ -2999,13 +3001,14 @@ function applyTaskRevisionInTransaction(
 ): void {
   const originalTask = transaction.get<{ acceptance: string; acceptance_criteria_json: string | null }>("SELECT acceptance, acceptance_criteria_json FROM tasks WHERE id = ?", taskId);
   transaction.run(
-    "UPDATE tasks SET title = ?, acceptance = ?, acceptance_criteria_json = ?, goal_shortfalls_json = NULL, context = COALESCE(?, context), plan_context_json = COALESCE(?, plan_context_json), type = ?, review_override = ?, verification_spec_json = CASE WHEN ? THEN ? ELSE verification_spec_json END, updated_at = ? WHERE id = ?",
+    "UPDATE tasks SET title = ?, acceptance = ?, acceptance_criteria_json = ?, goal_shortfalls_json = NULL, context = COALESCE(?, context), plan_context_json = COALESCE(?, plan_context_json), type = ?, ui_change = ?, review_override = ?, verification_spec_json = CASE WHEN ? THEN ? ELSE verification_spec_json END, updated_at = ? WHERE id = ?",
     revision.title,
     revision.acceptance,
     revision.acceptance_criteria === undefined ? null : JSON.stringify(revision.acceptance_criteria),
     revision.context ?? null,
     revision.plan_context === undefined ? null : JSON.stringify(revision.plan_context),
     revision.type,
+    revision.ui_change ?? "none",
     reviewOverrideFor(revision.review),
     // The Manager restates the spec on a retry: [] clears it, absent keeps it.
     revision.required_sections !== undefined || revision.required_tests !== undefined ? 1 : 0,

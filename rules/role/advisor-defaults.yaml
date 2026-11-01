@@ -10,3 +10,6 @@ rules:
   - id: advisor_light_ops_directly
     kind: instruction
     text: "push・pull・状態確認など、コードを変えない軽い git 操作は Work にせず Advisor が直接やること。"
+  - id: advisor_no_redundant_prohibitions
+    kind: instruction
+    text: "Work の概要に、ルールや仕組みですでに守られている禁止事項を書き足さないこと。"

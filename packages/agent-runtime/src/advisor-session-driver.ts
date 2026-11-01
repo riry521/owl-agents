@@ -82,6 +82,8 @@ interface ClaudeCompactMetadata {
 interface ClaudeStreamLine {
   readonly type?: string;
   readonly subtype?: string;
+  /** Why a result ended (e.g. aborted_streaming); logged only. */
+  readonly terminal_reason?: string;
   readonly session_id?: string;
   /** Non-null on frames emitted by a subagent rather than the main agent. */
   readonly parent_tool_use_id?: string | null;
@@ -120,6 +122,7 @@ function formatClaudeApiError(error: unknown): string {
  */
 const IGNORED_STREAM_EVENT_TYPES: ReadonlySet<string> = new Set([
   "user",
+  "control_response",
   "tool",
   "tool_progress",
   "content_block_start",
@@ -274,6 +277,8 @@ export class AdvisorSessionDriver implements ProviderSession {
   private turnTextParts: string[] = [];
   /** True while a turn Claude started on its own (no Owl turn) is streaming. */
   private unsolicitedActive = false;
+  /** The Owl turn Owl asked to interrupt; only that turn may end as turn.interrupted. */
+  private interruptRequestedTurnId: string | null = null;
   private unsolicitedTextParts: string[] = [];
   private stopRequested = false;
   private _exitDetail: string | null = null;
@@ -382,6 +387,20 @@ export class AdvisorSessionDriver implements ProviderSession {
       },
     };
     await this.writeLine(JSON.stringify(payload));
+  }
+
+  /** Asks Claude to end the running turn; the process is not signalled, so the session keeps its context. */
+  public async interrupt(turnId: string): Promise<boolean> {
+    if (this.done || this.currentTurnId !== turnId || this.unsolicitedActive) return false;
+    if (this.interruptRequestedTurnId === turnId) return true;
+    this.interruptRequestedTurnId = turnId;
+    try {
+      await this.writeLine(JSON.stringify({ type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } }));
+    } catch (cause) {
+      this.interruptRequestedTurnId = null;
+      throw cause;
+    }
+    return true;
   }
 
   public events(): AsyncIterable<SessionEvent> {
@@ -807,6 +826,16 @@ export class AdvisorSessionDriver implements ProviderSession {
       if (turnId === null || this.unsolicitedActive) {
         this.finishUnsolicitedTurn(record);
         return [];
+      }
+      const interruptRequested = this.interruptRequestedTurnId === turnId;
+      this.interruptRequestedTurnId = null;
+      if (interruptRequested && record.subtype !== "success") {
+        // Not classified as a failure: an interrupt Owl asked for is neither a rate limit nor an error.
+        const partialText = this.turnTextParts.join("");
+        this.currentTurnId = null;
+        this.turnTextParts = [];
+        this.lastRateLimitEvent = null;
+        return [{ type: "turn.interrupted", turn_id: turnId, partial_text: partialText, usage: this.mapUsage(record.usage) }];
       }
       if (record.subtype === "success" && record.is_error === true) {
         // The error text in `result` must never be posted as the reply.

@@ -220,8 +220,8 @@ const TEXT = {
       conflictFiles: (files: string) => `統合でコンフリクトしたファイル: ${files}`,
       taskQuestion: "失敗したタスクをもう一度実行しますか？",
       workQuestion: "Managerにもう一度計画を立て直させますか？",
-      taskState: "失敗したタスクは判断待ちで止まっています。どの案にも当てはまらないときは、下の回答欄に一言書くと、Managerがそれに従って直します。",
-      workState: "Workは判断待ちで止まっています。どの案にも当てはまらないときは、下の回答欄に一言書くと、Managerがそれに従って直します。",
+      taskState: "失敗したタスクは判断待ちで止まっています。",
+      workState: "Workは判断待ちで止まっています。",
       noDetail: "詳細は記録されていません。",
       autoConflictReason: (files: string) => `Managerが計画を立て直せなかったため、Workの統合コンフリクトを自動で解消できませんでした。コンフリクトしたファイル: ${files}`,
       noFiles: "記録なし",
@@ -378,8 +378,8 @@ const TEXT = {
       conflictFiles: (files: string) => `Files that conflicted on merge: ${files}`,
       taskQuestion: "Run the failed Tasks again?",
       workQuestion: "Have the Manager replan again?",
-      taskState: "The failed Tasks are stopped, waiting for your decision. If no choice fits, write a word in the answer field below and the Manager will follow it.",
-      workState: "The Work is stopped, waiting for your decision. If no choice fits, write a word in the answer field below and the Manager will follow it.",
+      taskState: "The failed Tasks are stopped, waiting for your decision.",
+      workState: "The Work is stopped, waiting for your decision.",
       noDetail: "No details were recorded.",
       autoConflictReason: (files: string) => `Automatic resolution of the Work merge conflict failed because the Manager could not replan. Conflicting files: ${files}`,
       noFiles: "not recorded",
@@ -751,7 +751,7 @@ const REMAKE_TEXT = {
     noHistory: "系統の履歴はありません。",
     historyLine: (g: number, title: string, reviews: number, runs: number, kind: string) => `第${g}世代「${title}」: Reviewer 判定 ${reviews} 回 / Worker 起動 ${runs} 回 / ${kind}`,
     kinds: { functional: "機能コードを変更", non_functional: "検証パスだけを変更", other: "判定外" },
-    retry: { label: "もう一度実行する", description: "この Task をもう一度実行する（自由記述は Worker への指示になります）" },
+    retry: { label: "もう一度実行する", description: "この Task をもう一度実行する" },
   },
   en: {
     stopped: (title: string) => `Core stopped the remakes of "${title}" without creating a new Task because a limit was reached.`,
@@ -772,7 +772,7 @@ const REMAKE_TEXT = {
     noHistory: "No lineage history.",
     historyLine: (g: number, title: string, reviews: number, runs: number, kind: string) => `Generation ${g} "${title}": ${reviews} Reviewer verdicts / ${runs} Worker launches / ${kind}`,
     kinds: { functional: "functional code changed", non_functional: "verification paths only", other: "not classified" },
-    retry: { label: "Run it again", description: "Run this Task again (free text becomes instructions for the Worker)." },
+    retry: { label: "Run it again", description: "Run this Task again." },
   },
 } as const;
 
@@ -889,18 +889,18 @@ const NO_PROGRESS_TEXT = {
   ja: {
     reason: (i: NoProgressBriefInput) =>
       `Task「${i.taskTitle}」（${i.taskId}）は、進まない結果が連続 ${i.count} 回（上限 ${i.limit}）になったため、${i.gate === "manager" ? "Manager の再計画前" : "Worker の起動前"}に止めました。`,
-    question: (title: string) => `「${title}」をどう進めますか。回答の文は次の実行で Worker に渡されます。`,
+    question: (title: string) => `「${title}」をどう進めますか。`,
     currentState: "この Work は Owner の判断を待っています。上限は設定 progress_guard.no_progress_limit で変えられます。",
     none: "記録された結果はありません。",
-    retry: { label: "もう一度実行する", description: "この Task をもう一度実行する。回数は 0 に戻り、自由記述は Worker への指示になります。" },
+    retry: { label: "もう一度実行する", description: "この Task をもう一度実行する。回数は 0 に戻ります。" },
   },
   en: {
     reason: (i: NoProgressBriefInput) =>
       `Task "${i.taskTitle}" (${i.taskId}) produced ${i.count} consecutive results without progress (limit ${i.limit}), so Core stopped it before ${i.gate === "manager" ? "the Manager replan" : "the Worker launch"}.`,
-    question: (title: string) => `How should "${title}" proceed? Your answer is passed to the Worker on the next run.`,
+    question: (title: string) => `How should "${title}" proceed?`,
     currentState: "This Work is waiting for the Owner. The limit can be changed in the progress_guard.no_progress_limit setting.",
     none: "No recorded results.",
-    retry: { label: "Run it again", description: "Run this Task again. The count returns to 0 and free text becomes instructions for the Worker." },
+    retry: { label: "Run it again", description: "Run this Task again. The count returns to 0." },
   },
 } as const;
 
@@ -934,20 +934,20 @@ const PREREQUISITE_EXPIRED_TEXT = {
   ja: {
     reason: (i: PrerequisiteExpiredBriefInput) =>
       `Task「${i.taskTitle}」の前提待ちを${{ deadline: "最大待ち時間を超えたため", unreachable: "条件が満たせなくなったため", sync_conflict: "ベースブランチの取り込みで競合したため", wait_count: "長い処理を待つ回数の上限に達したため", owner: "Owner の判断が必要なため" }[i.kind]}止めました。`,
-    question: (title: string) => `「${title}」をどう進めますか。回答の文は次の実行で Worker に渡されます。`,
+    question: (title: string) => `「${title}」をどう進めますか。`,
     currentState: "この Work は Owner の判断を待っています。",
     waitingFor: "待っていた内容",
     detail: "詳細",
-    retry: { label: "もう一度実行する", description: "待ちを外して Task を実行する。回数は 0 に戻り、自由記述は Worker への指示になります。" },
+    retry: { label: "もう一度実行する", description: "待ちを外して Task を実行する。回数は 0 に戻ります。" },
   },
   en: {
     reason: (i: PrerequisiteExpiredBriefInput) =>
       `The prerequisite wait of Task "${i.taskTitle}" was stopped ${{ deadline: "because it passed its maximum wait time", unreachable: "because a condition can no longer be met", sync_conflict: "because merging the base branch conflicted", wait_count: "because the number of waits for a long process reached its limit", owner: "because it needs the Owner's decision" }[i.kind]}.`,
-    question: (title: string) => `How should "${title}" proceed? Your answer is passed to the Worker on the next run.`,
+    question: (title: string) => `How should "${title}" proceed?`,
     currentState: "This Work is waiting for the Owner.",
     waitingFor: "Waiting for",
     detail: "Detail",
-    retry: { label: "Run it again", description: "Drop the wait and run the Task. The count returns to 0 and free text becomes instructions for the Worker." },
+    retry: { label: "Run it again", description: "Drop the wait and run the Task. The count returns to 0." },
   },
 } as const;
 

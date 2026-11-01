@@ -12,7 +12,7 @@ import { providerConfigurationError, providerSelection, resolveExecutableForSele
 import type { AgentRunner } from "./types.js";
 import type { GuardTokenIssuer } from "../../../packages/shared/dist/guard-token.js";
 import type { PromptObserver, ProviderErrorObserver } from "../../../packages/shared/dist/index.js";
-import { OPENCODE_EXECUTABLE_ENV, type OpencodeChildOutcome, type OpencodeChildRun } from "../../../packages/shared/dist/index.js";
+import { DECISION_ANSWER_TRIAGE_UNAVAILABLE, OPENCODE_EXECUTABLE_ENV, type OpencodeChildOutcome, type OpencodeChildRun } from "../../../packages/shared/dist/index.js";
 import { runOpencodeChild } from "./opencode-child.js";
 import type { PlanUsageSnapshot } from "../../../packages/shared/dist/plan-usage.js";
 
@@ -269,6 +269,7 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
       runProjectInvestigation?(request: unknown): Promise<unknown>;
       runTestSetupInvestigation?(request: unknown): Promise<unknown>;
       runDecisionExplanation?(request: unknown): Promise<unknown>;
+      runDecisionAnswerTriage?(request: unknown): Promise<unknown>;
       runFinalReport?(request: unknown): Promise<unknown>;
       provider?: unknown;
       cancelAgent?: (invocationId: string, force?: boolean) => Promise<void>;
@@ -467,6 +468,18 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
           return { ok: false, error: `provider_failed:${message}` };
         }
       },
+      runDecisionAnswerTriage: async (request: unknown) => {
+        try {
+          const delegateValue = await getDelegate();
+          if (typeof delegateValue.runDecisionAnswerTriage !== "function") return { ok: false, error: DECISION_ANSWER_TRIAGE_UNAVAILABLE };
+          return await delegateValue.runDecisionAnswerTriage(request);
+        } catch (error) {
+          const message = (error instanceof Error ? error.message : String(error)).slice(0, 200);
+          return { ok: false, error: `provider_failed:${message}` };
+        }
+      },
+      // The wrapper always has runDecisionAnswerTriage, so Core cannot tell from the method alone whether the delegate can triage.
+      decisionAnswerTriageAvailable: async () => typeof (await getDelegate()).runDecisionAnswerTriage === "function",
       runFinalReport: async (request: unknown) => {
         try {
           const delegateValue = await getDelegate();

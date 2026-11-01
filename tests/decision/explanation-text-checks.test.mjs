@@ -5,6 +5,7 @@ import { DecisionExplainer, toDecisionExplanation } from "../../packages/core/di
 import { coreTaskDecisionBrief } from "../../packages/core/dist/decision-brief.js";
 import { plainDecisionExplanation } from "../../packages/core/dist/decision-plain-explanation.js";
 import { createUlid } from "../../packages/db/dist/index.js";
+import { DECISION_NEXT_STEPS_LEAD, coreDecisionTexts, readDecisionTextCheckOutput } from "../../packages/shared/dist/decision-explanation.js";
 import { command, createTestCore } from "../helpers/core.mjs";
 import { waitFor } from "../helpers/wait.mjs";
 
@@ -12,7 +13,7 @@ const TASK_ID = "01TASKAAAAAAAAAAAAAAAAAAAA";
 const TASK_TITLE = "Build the export page";
 const PARTIAL = { report: { kind: "report", result: "partial", work_done: "Built half of the page." }, verification: { checked: "partial check" } };
 
-/** An answer that follows the rules; a partial_limit one carries a fix option that rewrites AC1. */
+/** An answer that follows the rules; a partial_limit one carries a fix option that rewrites AC1. The model writes neither next_steps nor option_notes: Core owns those texts. */
 function answerFor(request, { summary = "The work stopped before it could be finished.", after = "The page exports a CSV file." } = {}) {
   const fix = request.kind === "partial_limit";
   return {
@@ -20,8 +21,6 @@ function answerFor(request, { summary = "The work stopped before it could be fin
     explanation: {
       summary,
       cause_kind: fix ? "criteria" : "work",
-      next_steps: "Pick one of the choices below to go on.",
-      option_notes: request.decision.options.map((option) => ({ key: option.key, note: "Carries on with this choice." })),
       options: fix ? [{ label: "Narrow the goal", description: "Rewrites the goal.", instruction: "Rewrite AC1.", criteria_rewrites: [{ criterion_id: "AC1", after, check: "Open the page and export." }] }] : [],
       recommended_option_key: request.decision.recommended ?? (fix ? "fix_1" : request.decision.options[0].key),
     },
@@ -64,6 +63,8 @@ async function openDecision(t, { kind, textChecks, runner, timeoutSeconds = 30, 
     roleModel: () => undefined,
     rules: () => null,
     language: () => "en",
+    // The routes of an answer, the way Core itself asks them, so the stored sentence names the real destination.
+    answerRoutes: (decisionId) => core.decisionAnswerRoutes(decisionId),
     timeoutSeconds: () => timeoutSeconds,
     rewritesMax: () => rewritesMax,
     textChecks: () => textChecks,
@@ -264,15 +265,16 @@ test("a rewrite limit, an AI error, a timeout and a missing runner each store a 
 });
 
 test("a fixed-form explanation leaves out English validation messages, also on a Japanese line and in English", () => {
+  const core = { free_text_to: "unspecified", options: [] };
   const request = (language, remaining) => ({
     language,
     forbidden_terms: [],
     decision: { reason: "", tried: "", question: "どちらにしますか？" },
     reports: [{ remaining_issues: remaining.map((issue) => ({ issue })) }],
   });
-  const ja = plainDecisionExplanation(request("ja", ["検証結果: Validation failed: unknown property.", "レイアウトが登録一覧にありません。"]));
+  const ja = plainDecisionExplanation(request("ja", ["検証結果: Validation failed: unknown property.", "レイアウトが登録一覧にありません。"]), core);
   assert.equal(ja.summary, "レイアウトが登録一覧にありません。");
-  const en = plainDecisionExplanation(request("en", ["Validation failed: unknown property foo.", "The layout is not in the list."]));
+  const en = plainDecisionExplanation(request("en", ["Validation failed: unknown property foo.", "The layout is not in the list."]), core);
   assert.equal(en.summary, "The layout is not in the list.");
 });
 
@@ -318,7 +320,7 @@ test("an answer that asks the Owner for the Manager's work, or has only the fixe
       textChecks: [],
       runner: (request, count) => withFixes(request, count === 1
         ? changes
-        : { summary: "承認の API とボタンの実装は終わっていますが、本物の CLI で確かめる条件を書き換える理由が抜けています。", next_steps: "どれにも当てはまらないときは、回答欄に一言書くと Manager がそれに従って直します。", options: [fixChoice("条件を現状に合わせることにしますか？")], recommended_option_key: "fix_1" }),
+        : { summary: "承認の API とボタンの実装は終わっていますが、本物の CLI で確かめる条件を書き換える理由が抜けています。", options: [fixChoice("条件を現状に合わせることにしますか？")], recommended_option_key: "fix_1" }),
     });
     assert.equal(requests.length, 2, JSON.stringify(changes));
     assert.equal(requests[1].revision.problems.length, 1);
@@ -336,7 +338,6 @@ test("choices written for the Owner pass on the first answer, also when they say
     kind: "partial_limit",
     textChecks: [],
     runner: (request) => withFixes(request, {
-      next_steps: "どれにも当てはまらないときは、回答欄に一言書くと Manager がそれに従って直します。",
       options: [
         { ...fixChoice("条件を書き直して進めることにしますか？"), description: "Manager が受け入れ条件を書き直し、`pnpm build` を実行して確かめます。" },
         { ...fixChoice("Do you want to rewrite the criteria and go on?"), description: "The Manager rewrites the acceptance criteria and runs `pnpm build`." },
@@ -355,8 +356,6 @@ test("a long neck, long option notes and more than three choices pass and are st
     textChecks: [],
     runner: (request) => withFixes(request, {
       summary: "One. Two. Three. Four.",
-      next_steps: "One. Two. Three.",
-      option_notes: request.decision.options.map((option) => ({ key: option.key, note: "First. Second." })),
       options: [1, 2, 3, 4].map((n) => ({ ...fixChoice(`Choice ${n}?`), description: "First. Second." })),
       recommended_option_key: "fix_4",
     }),
@@ -366,19 +365,56 @@ test("a long neck, long option notes and more than three choices pass and are st
   assert.equal(options.filter((option) => option.key.startsWith("fix_")).length, 4);
 });
 
-test("a fixed-form explanation does not ask the Owner for the Manager's work and tells them a word in the answer field is enough", () => {
+test("fixed next_steps and the Decision's own note are Core's texts: a check cannot change them (readFixedTexts)", async (t) => {
+  quiet(t);
+  // The problem a check's fixed output gets, read through the same reader the explainer uses.
+  const probeInput = (next_steps, note) => ({
+    language: "en",
+    kind: "merge_failed",
+    texts: {
+      summary: "Summary.",
+      next_steps,
+      options: [{ key: "retry", generated: false, label: "Run this Task again?", note, criteria_rewrites: [] }],
+    },
+  });
+  const nextSteps = readDecisionTextCheckOutput({ ok: true, fixed: { ...probeInput("Core line.", "Core note.").texts, next_steps: "Rewritten." } }, probeInput("Core line.", "Core note."));
+  assert.equal(nextSteps.ok, false);
+  assert.match(nextSteps.problem, /Core's own texts/u);
+  const theOption = probeInput("Core line.", "Core note.").texts.options[0];
+  const note = readDecisionTextCheckOutput({ ok: true, fixed: { ...probeInput("Core line.", "Core note.").texts, options: [{ ...theOption, note: "Rewritten." }] } }, probeInput("Core line.", "Core note."));
+  assert.equal(note.ok, false);
+  assert.match(note.problem, /Core's own texts/u);
+
+  // In the flow the check's fixed output never reaches a stored text; the explanation fails as text_check_invalid instead.
+  const broken = await openDecision(t, {
+    kind: "merge_failed",
+    textChecks: [check("lint", async ({ texts }) => ({ ok: true, fixed: { ...texts, next_steps: `${texts.next_steps} Rewritten.` } }))],
+    runner: (request) => answerFor(request),
+  });
+  assert.deepEqual([broken.explanation.status, broken.explanation.error, broken.explanation.plain], ["ready", "text_check_invalid:lint", true]);
+});
+
+test("a fixed-form explanation keeps the lead and the route sentence Core builds, and does not ask the Owner for the Manager's work", () => {
   const request = (language) => ({
     language,
     forbidden_terms: [],
     decision: { reason: "", tried: "", question: "Task を作り直してください。どちらにしますか？" },
     reports: [],
   });
-  assert.doesNotMatch(plainDecisionExplanation(request("ja")).next_steps, /作り直/u);
-  assert.match(plainDecisionExplanation(request("ja")).next_steps, /回答欄に一言書くと/u);
-  assert.match(plainDecisionExplanation(request("en")).next_steps, /word in the answer field/u);
+  const manager = { free_text_to: "manager", options: [] };
+  const worker = { free_text_to: "worker", options: [] };
+  // The question asks Core to remake a Task, so no usable line of it stays; the expected text is lead + the Manager's route sentence.
+  const plain = plainDecisionExplanation(request("ja"), manager);
+  assert.equal(plain.next_steps, coreDecisionTexts(manager, "ja").next_steps);
+  assert.ok(plain.next_steps.startsWith(DECISION_NEXT_STEPS_LEAD.ja), "the lead comes first");
+  assert.doesNotMatch(plain.next_steps, /作り直/u);
 
+  // A question Core can keep stays before the lead; the route sentence changes with the route of the answer.
   const withQuestion = { ...request("ja"), decision: { reason: "", tried: "", question: "別の設定を使うことにしますか？" } };
-  const kept = plainDecisionExplanation(withQuestion).next_steps;
-  assert.match(kept, /別の設定を使うことにしますか？/u);
-  assert.match(kept, /回答欄に一言書くと/u);
+  const kept = plainDecisionExplanation(withQuestion, manager).next_steps;
+  assert.equal(kept, coreDecisionTexts(manager, "ja", ["別の設定を使うことにしますか？"]).next_steps);
+  assert.ok(coreDecisionTexts(worker, "ja").next_steps !== coreDecisionTexts(manager, "ja").next_steps, "the route sentence differs by the route");
+  assert.equal(plainDecisionExplanation(withQuestion, worker).next_steps, coreDecisionTexts(worker, "ja", ["別の設定を使うことにしますか？"]).next_steps);
+  assert.equal(plainDecisionExplanation(request("en"), manager).next_steps, coreDecisionTexts(manager, "en").next_steps);
+  assert.equal(plainDecisionExplanation(request("en"), worker).next_steps, coreDecisionTexts(worker, "en").next_steps);
 });

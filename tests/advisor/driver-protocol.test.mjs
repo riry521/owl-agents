@@ -57,6 +57,9 @@ const itemCompleted = (threadId, item) =>
   send({ method: "item/completed", params: { threadId, turnId: "turn-c1", item, completedAtMs: 0 } });
 const turnCompleted = (threadId, items) =>
   send({ method: "turn/completed", params: { threadId, turn: { id: "turn-c1", status: "completed", items, itemsView: items.length === 0 ? "notLoaded" : "full", error: null } } });
+const turnInterrupted = (threadId) =>
+  send({ method: "turn/completed", params: { threadId, turn: { id: "turn-c1", status: "interrupted", items: [], itemsView: "notLoaded", error: null } } });
+let activeThread = null;
 function finishTurn(threadId, items) {
   delta(threadId, "i1", "hel");
   delta(threadId, "i1", "lo");
@@ -137,9 +140,23 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: { thread: { id: message.params.threadId } } });
     return;
   }
+  if (message.method === "turn/interrupt") {
+    send({ id: message.id, result: {} });
+    // interruptible stops the turn; interrupt-late has already finished it, so it completes normally.
+    if (scenario === "interruptible") turnInterrupted(activeThread);
+    else if (scenario === "interrupt-late") turnCompleted(activeThread, [agentMessage("i1", "hello")]);
+    return;
+  }
   if (message.method === "turn/start") {
     const threadId = message.params.threadId;
+    activeThread = threadId;
     send({ id: message.id, result: { turn: { id: "turn-c1", status: "inProgress", items: [] } } });
+    if (scenario === "interruptible" || scenario === "interrupt-late") {
+      // Both stream deltas and then wait for turn/interrupt.
+      delta(threadId, "i1", "hel");
+      delta(threadId, "i1", "lo");
+      return;
+    }
     if (scenario === "server-request") {
       pendingTurn = threadId;
       send({ id: 9, method: "x/y", params: {} });
@@ -764,6 +781,116 @@ test("both drivers send attachment paths as a JSON array in <owl-attachments>, b
   const [line] = (await readFile(stdinLog, "utf8")).split("\n").filter(Boolean);
   const content = JSON.parse(line).message.content;
   assertTagged(typeof content === "string" ? content : content[0].text);
+});
+
+const interruptSettled = (event) => settled(event) || event.type === "turn.interrupted";
+
+test("Claude interrupt writes a control_request, keeps the process, and the next turn completes", async (t) => {
+  const stdinLog = join(await tempDir(t, "owl-claude-stdin-"), "stdin.log");
+  const warnings = [];
+  const originalWarn = console.warn;
+  console.warn = (...args) => { warnings.push(args.join(" ")); };
+  t.after(() => { console.warn = originalWarn; });
+  const driver = await createClaudeDriver(t, [
+    [{ type: "assistant", message: { content: [{ type: "text", text: "途中の文" }] } }, { __delay: 200 }],
+    [
+      { type: "control_response", response: { subtype: "success", request_id: "x", response: { still_queued: [] } } },
+      { type: "assistant", message: { content: [{ type: "text", text: "。続き" }] }, stop_reason: null },
+      { type: "user", message: { content: [{ type: "text", text: "[Request interrupted by user]" }] } },
+      { type: "result", subtype: "error_during_execution", is_error: true, terminal_reason: "aborted_streaming" },
+    ],
+    [{ type: "result", subtype: "success", is_error: false, result: "next reply" }],
+  ], { env: { FAKE_STDIN_LOG: stdinLog } });
+  await driver.send({ turn_id: "t-int", text: "long" });
+  assert.equal(await driver.interrupt("other-turn"), false);
+  assert.equal(await driver.interrupt("t-int"), true);
+  assert.equal(await driver.interrupt("t-int"), true, "a second request is not written again");
+  const events = await collectEvents(driver, interruptSettled);
+  const interrupted = events.filter((event) => event.type === "turn.interrupted");
+  assert.equal(interrupted.length, 1);
+  assert.equal(interrupted[0].turn_id, "t-int");
+  assert.equal(interrupted[0].partial_text, "途中の文。続き");
+  assert.equal(events.some((event) => event.type === "turn.failed"), false);
+  assert.equal(warnings.some((line) => line.includes("unknown Claude stream-json event type")), false);
+  assert.equal(driver.exited, false);
+
+  const stdinLines = (await readFile(stdinLog, "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  const controls = stdinLines.filter((line) => line.type === "control_request");
+  assert.equal(controls.length, 1);
+  assert.equal(controls[0].request.subtype, "interrupt");
+  assert.equal(typeof controls[0].request_id, "string");
+
+  await driver.send({ turn_id: "t-next", text: "again" });
+  const next = await collectEvents(driver, interruptSettled);
+  assert.ok(next.some((event) => event.type === "turn.completed" && event.turn_id === "t-next" && event.reply === "next reply"));
+});
+
+test("Claude interrupt after the turn finished returns false and the next turn completes", async (t) => {
+  const driver = await createClaudeDriver(t, [
+    [{ type: "result", subtype: "success", is_error: false, result: "done" }],
+    [{ type: "result", subtype: "success", is_error: false, result: "second" }],
+  ]);
+  await driver.send({ turn_id: "t-one", text: "hi" });
+  const events = await collectEvents(driver, interruptSettled);
+  assert.deepEqual(events.map((event) => event.type).filter((type) => type !== "session.ready"), ["turn.completed"]);
+  assert.equal(await driver.interrupt("t-one"), false);
+  await driver.send({ turn_id: "t-two", text: "hi" });
+  const next = await collectEvents(driver, interruptSettled);
+  assert.ok(next.some((event) => event.type === "turn.completed" && event.turn_id === "t-two"));
+});
+
+test("Claude aborted_streaming that Owl did not request is still turn.failed", async (t) => {
+  const driver = await createClaudeDriver(t, [[
+    { type: "result", subtype: "error_during_execution", is_error: true, terminal_reason: "aborted_streaming" },
+  ]]);
+  await driver.send({ turn_id: "t-abort", text: "hi" });
+  const events = await collectEvents(driver, interruptSettled);
+  assert.ok(events.some((event) => event.type === "turn.failed" && event.turn_id === "t-abort"));
+  assert.equal(events.some((event) => event.type === "turn.interrupted"), false);
+});
+
+test("Codex interrupt sends turn/interrupt with threadId and turnId, then the next turn uses the same thread", async (t) => {
+  const { driver, log } = await createCodexDriver(t, { env: { FAKE_TURN: "interruptible" } });
+  await driver.send({ turn_id: "local-turn", text: "hello" });
+  assert.equal(await driver.interrupt("other-turn"), false);
+  await collectEvents(driver, (event) => event.type === "turn.delta" && event.text === "lo");
+  assert.equal(await driver.interrupt("local-turn"), true);
+  assert.equal(await driver.interrupt("local-turn"), true);
+  const events = await collectEvents(driver, interruptSettled);
+  const interrupted = events.filter((event) => event.type === "turn.interrupted");
+  assert.equal(interrupted.length, 1);
+  assert.equal(interrupted[0].turn_id, "local-turn");
+  assert.equal(interrupted[0].partial_text, "hello");
+  assert.equal(events.some((event) => event.type === "turn.failed"), false);
+
+  await driver.send({ turn_id: "next-turn", text: "again" });
+  const received = await readLog(log);
+  const interrupts = received.filter((message) => message.method === "turn/interrupt");
+  assert.equal(interrupts.length, 1);
+  assert.deepEqual(interrupts[0].params, { threadId: "thread-fresh", turnId: "turn-c1" });
+  const starts = received.filter((message) => message.method === "turn/start");
+  assert.equal(starts.length, 2);
+  assert.equal(starts[1].params.threadId, starts[0].params.threadId);
+});
+
+test("Codex interrupt requested before the turn/start response is sent once the turn id is known", async (t) => {
+  const { driver, log } = await createCodexDriver(t, { env: { FAKE_TURN: "interruptible" } });
+  const sending = driver.send({ turn_id: "local-turn", text: "hello" });
+  assert.equal(await driver.interrupt("local-turn"), true);
+  await sending;
+  const events = await collectEvents(driver, interruptSettled);
+  assert.ok(events.some((event) => event.type === "turn.interrupted" && event.turn_id === "local-turn"));
+  const interrupts = (await readLog(log)).filter((message) => message.method === "turn/interrupt");
+  assert.deepEqual(interrupts.map((message) => message.params), [{ threadId: "thread-fresh", turnId: "turn-c1" }]);
+});
+
+test("Codex turn that completes before the interrupt lands is a normal turn.completed", async (t) => {
+  const { driver } = await createCodexDriver(t, { env: { FAKE_TURN: "interrupt-late" } });
+  await driver.send({ turn_id: "local-turn", text: "hello" });
+  assert.equal(await driver.interrupt("local-turn"), true);
+  const events = await collectEvents(driver, interruptSettled);
+  assert.equal(events.some((event) => event.type === "turn.interrupted"), false);
+  assert.ok(events.some((event) => event.type === "turn.completed" && event.turn_id === "local-turn" && event.reply === "hello"));
 });
 
 test("Claude result errors[] decide the failure text, and a missing conversation is marked as a resume failure", async (t) => {

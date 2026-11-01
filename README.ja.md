@@ -250,7 +250,7 @@ curl http://localhost:3787/api/v1/works
 ### メモリとルール
 
 - **owl-memory**：エージェントは読み取り専用の`owl-memory` MCPサーバー（`index`、`page`、`search`）で知識ページを読みます。司書（Librarian）がページを整理します。
-- **ルールのGit追跡**：ルールファイルは`rules/`にありますが、Gitが追跡するのは同梱の既定値（`rules/system/defaults.yaml`、`safety.yaml`、`owl-defaults.yaml`と`rules/role/advisor-defaults.yaml`）だけです。追加・承認したルールはローカルに残ります。
+- **ルールのGit追跡**：ルールファイルは`rules/`にありますが、Gitが追跡するのは同梱の既定値（`rules/system/defaults.yaml`、`safety.yaml`、`owl-defaults.yaml`と`rules/role/advisor-defaults.yaml`）だけです。追加・承認したルールはローカルに残ります。Projectのルール（`rules/project/{project_id}.yaml`、`level: project`）も同じです。書けるのは`instruction`だけで、そのProjectのWorkの全役割と、そのProjectのウィンドウのAdvisorにだけ渡ります。編集はホットリロードされます。
 
 ## Web UI
 
@@ -271,6 +271,8 @@ Advisor の画面は窓に分かれていて、窓ごとに別の会話を持ち
 画面が広いときは、窓の一覧が左のサイドバーに出ます。狭いときは、Advisor 画面の上にある窓の名前を押すと、一覧がシートで開くので、窓を選びます。上にある **チャンネル** ボタンは、窓ごとのチャンネルの操作用です。プロジェクト専用の窓では、連携した Slack・Discord のチャンネルを確かめ、作成、既存のチャンネル ID の連携、名前の変更ができます。全体の窓（Owl）では、これらの操作はなく、チャンネルを **設定 → 連携** で決めるという案内と、設定画面へのリンクが出ます。
 
 プロジェクトの窓は、窓の一覧でドラッグして並べ替えられます。並びは保存されます。
+
+一覧の窓に点が付いているときは、まだ読んでいない Advisor のメッセージがあります。既読の状態はサーバーが持つので、どの端末でも同じ点が出て、その窓を開くと消えます。Advisor がターンを処理している間は、送信ボタンの代わりに停止ボタンが出ます。押すとそのターンを中断できます（Claude と Codex のどちらでも使えます）。
 
 プロジェクトの窓をオン・オフにするには、**Projects** を開き、そのプロジェクトの **編集** を押して、**Advisorの窓を使う** のスイッチを切り替え、**保存** を押します。チャンネルを連携したプロジェクトは、スイッチがオフでも一覧に残ります。
 

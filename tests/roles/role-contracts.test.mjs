@@ -5,7 +5,7 @@ import { test } from "node:test";
 
 import { createAgentRunner, MINIMAL_CODE_RULES, WORKING_STYLE_HEADING, WORKING_STYLE_RULES } from "../../packages/agent-runtime/dist/index.js";
 import { objectSchema, providerSchema, renderOutputTemplate, renderRolePrompt, splitRenderedPrompt, splitRolePrompt, validateRoleOutput } from "../../packages/agent-runtime/dist/role-contract.js";
-import { MANAGER_PLAN_OUTPUT_SCHEMA, MANAGER_REPLAN_OUTPUT_SCHEMA, MANAGER_FINALIZE_OUTPUT_SCHEMA } from "../../packages/agent-runtime/dist/manager.js";
+import { buildManagerPrompt, MANAGER_PLAN_OUTPUT_SCHEMA, MANAGER_REPLAN_OUTPUT_SCHEMA, MANAGER_FINALIZE_OUTPUT_SCHEMA } from "../../packages/agent-runtime/dist/manager.js";
 import { DESIGNER_REPORT_SCHEMA, WORKER_REPORT_SCHEMA, buildDesignerRolePrompt, buildWorkerPrompt } from "../../packages/agent-runtime/dist/worker.js";
 import { buildReviewerPrompt, REVIEW_OUTPUT_SCHEMA } from "../../packages/agent-runtime/dist/reviewer.js";
 import { validateReportEnvelope } from "../../packages/agent-runtime/dist/protocol.js";
@@ -395,10 +395,12 @@ test("the runtime rejects every malformed external_blocker and keeps a valid one
 
   assert.deepEqual((await run(withBlocker(valid))).report.external_blocker, valid);
   assert.equal((await run(withBlocker(null))).outcome, "success");
+  const screenDesign = { ...valid, kind: "screen_design" };
+  assert.deepEqual((await run(withBlocker(screenDesign))).report.external_blocker, screenDesign);
   const rejected = {
     "external_blocker:missing": ({ external_blocker, ...rest }) => rest,
     "external_blocker:expected_object_or_null_got_string": withBlocker("x"),
-    "external_blocker.kind:not_one_of_pre_existing|environment": withBlocker({ ...valid, kind: "other" }),
+    "external_blocker.kind:not_one_of_pre_existing|environment|screen_design": withBlocker({ ...valid, kind: "other" }),
     "external_blocker.evidence:missing": withBlocker({ kind: valid.kind, summary: "s", suggested_fix: "f" }),
     "external_blocker.extra:not_allowed": withBlocker({ ...valid, extra: 1 }),
     "external_blocker.summary:empty": withBlocker({ ...valid, summary: "  " }),
@@ -431,7 +433,7 @@ test("Worker prompt input has fixed context keys with null or empty defaults, in
   assert.deepEqual(slots.Project, { rules: null, skills: null, knowledge: null, check_commands: [] });
   assert.match(instructionsSection(calls[0].prompt), /Keep a new test file only when a criterion's kind is spec_test.*run every command in Project\.check_commands/su);
   // hardcode-check-allow whole-list-equal: 契約として固定された一覧の完全一致を確かめるため、現状の値を意図して比べている
-  assert.deepEqual(Object.keys(slots.Task), ["id", "work_id", "title", "type", "acceptance_criteria", "context", "manager_notes", "necessity", "parent_task_id", "depends_on"]);
+  assert.deepEqual(Object.keys(slots.Task), ["id", "work_id", "title", "type", "acceptance_criteria", "context", "manager_notes", "necessity", "parent_task_id", "ui_change", "depends_on"]);
   assert.deepEqual(slots.Task.acceptance_criteria, task.acceptance_criteria);
   assert.equal("acceptance" in slots.Task, false);
   for (const key of VOLATILE_TASK_KEYS) assert.equal(key in slots.Task, false, `Task has no ${key}`);
@@ -894,6 +896,8 @@ test("role prompts keep unrelated existing failures outside Task verification", 
   assert.match(hybrid, /check it together/u);
   assert.match(reviewer, /Do not run the Project's tests; the hook denies the Project's test commands/u);
   assert.match(reviewer, /Judge tests only from Review\.core_tests/u);
+assert.match(reviewer, /Never send the Task back for a check the Worker cannot run.*Owl's own API/u);
+  assert.match(reviewer, /comes only from a Project rule and no criterion matches it, do not invent a criterion_id/u);
   assert.match(reviewer, /Set subject to test_result on any finding about a test or check result/u);
   assert.match(reviewer, /Never send the Task back, and never report a finding, because of a test the Worker added only to check its own work or because a test asserts a hardcoded value/u);
   assert.match(reviewer, /do not repeat a passed check, and re-run the commands or searches the evidence names only when the report's evidence and the workspace disagree/u);
@@ -1167,6 +1171,28 @@ test("Manager plan and replan require assigned_designer, copy only designer valu
   }
 });
 
+test("Manager plan and replan require ui_change, read an answer without it as none, and reject other strings", async () => {
+  for (const mode of ["plan", "replan"]) {
+    const calls = [];
+    const answer = (value) => (template) => ({ tasks: [{ ...fillTemplate(template.tasks[0]), ui_change: value }] });
+    const major = await runnerAnswering(answer("major"), calls).runManagerPlan(managerRequest(mode));
+    assert.equal(major.outcome, "success", `${mode}: ${major.message}`);
+    assert.equal(major.report.tasks[0].ui_change, "major");
+    const schema = calls[0].structured_output_schema.properties.tasks.items;
+    assert.ok(schema.required.includes("ui_change"));
+    assert.deepEqual(schema.properties.ui_change.enum, ["none", "minor", "major"]);
+    const wrong = await runnerAnswering(answer("huge")).runManagerPlan(managerRequest(mode));
+    assert.equal(wrong.outcome, "failed");
+    assert.match(wrong.error_key, /^runtime:manager_plan_invalid:manager_output_schema:tasks\[0\]\.ui_change:not_one_of_/u);
+    const old = await runnerAnswering((template) => {
+      const { ui_change: _drop, ...rest } = fillTemplate(template.tasks[0]);
+      return { tasks: [rest] };
+    }).runManagerPlan(managerRequest(mode));
+    assert.equal(old.outcome, "success", old.message);
+    assert.equal(old.report.tasks[0].ui_change, "none");
+  }
+});
+
 test("provider schemas list every property of a closed object as required (OpenAI strict outputs), while omitted optional fields still validate", () => {
   const closedObjects = (node, path = "$") => {
     if (!node || typeof node !== "object") return [];
@@ -1288,4 +1314,24 @@ test("auto_recovery reaches the Worker, Designer and Manager prompts only when a
   assert.match(instructions, /context\.auto_recovery/u);
   assert.match(instructions, /budget_exhausted/u);
   assert.match(instructions, /partial_repeated/u);
+});
+
+test("the Manager, Worker and Reviewer instructions carry the ui_change declaration, the screen_design report and the replan_required send-back, and their Task inputs carry ui_change", () => {
+  const manager = instructionsSection(buildManagerPrompt({ work: { id: "w", title: "T" }, mode: "replan", context: {} }, "en"));
+  assert.match(manager, /Set ui_change on every Task/);
+  assert.match(manager, /minor: wording, a few lines of CSS/);
+  assert.match(manager, /ui_change major must depend directly on a design Task that designs screens/);
+  assert.match(manager, /cause screen_design/);
+  assert.match(manager, /ui_change major and depends_on including that design Task/);
+
+  const workerPrompt = buildWorkerPrompt({ task: { ...task, ui_change: "minor" }, context: {} }, "en");
+  assert.match(instructionsSection(workerPrompt), /message starting "Screen design required"[^]*external_blocker kind screen_design/);
+  assert.equal(renderedSlots(workerPrompt).Task.ui_change, "minor");
+  assert.equal(renderedSlots(buildWorkerPrompt({ task, context: {} }, "en")).Task.ui_change, "none");
+
+  const reviewerPrompt = buildReviewerPrompt({ task: { ...task, ui_change: "none" }, report: reviewerRequest().context.report }, "en");
+  assert.match(instructionsSection(reviewerPrompt), /If Task\.ui_change is none or minor but[^]*return verdict replan_required with an in_scope major finding/);
+  assert.equal(renderedSlots(reviewerPrompt).Task.ui_change, "none");
+  const designPrompt = buildReviewerPrompt({ task: { ...task, type: "design" }, report: reviewerRequest().context.report }, "en");
+  assert.doesNotMatch(instructionsSection(designPrompt), /If Task\.ui_change is none or minor/);
 });
