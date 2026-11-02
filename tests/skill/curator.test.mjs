@@ -673,6 +673,10 @@ test("curate() reports proposals created during the run even when now() is in th
 
 test("the server's external agent runner hands runRuleJudgments to the runtime instead of reporting it unavailable", async (t) => {
   const root = await tempDir(t, "owl-external-runner-");
+  // The runtime needs a claude executable to start; a stub path keeps the test independent of the machine's claude CLI.
+  const saved = process.env.OWL_CLAUDE_EXECUTABLE;
+  process.env.OWL_CLAUDE_EXECUTABLE = process.execPath;
+  t.after(() => { if (saved === undefined) delete process.env.OWL_CLAUDE_EXECUTABLE; else process.env.OWL_CLAUDE_EXECUTABLE = saved; });
   const runner = await createExternalAgentRunner(root, false);
   const result = await runner.runRuleJudgments({ model: { provider: "no-such-provider", model: "m", effort: "low" }, pairs: [] });
   assert.equal(result.ok, false);

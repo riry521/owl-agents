@@ -219,20 +219,25 @@ test("Slack Socket Mode routes user-authored file_share and thread_broadcast mes
 });
 
 /** A fetch whose body sends one chunk and then stalls until the request signal aborts. */
-function stalledBodyFetch() {
-  return async (_url, init = {}) => new Response(new ReadableStream({
-    start(controller) {
-      controller.enqueue(new TextEncoder().encode("partial"));
-      init.signal?.addEventListener("abort", () => controller.error(init.signal.reason ?? new Error("aborted")));
-    },
-  }), { status: 200 });
+function stalledBodyFetch(onFetch) {
+  return async (_url, init = {}) => {
+    onFetch();
+    return new Response(new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("partial"));
+        init.signal?.addEventListener("abort", () => controller.error(init.signal.reason ?? new Error("aborted")));
+      },
+    }), { status: 200 });
+  };
 }
 
 /** Settle state of a promise after letting real I/O callbacks run, without waiting on mocked timers. */
-async function settledState(promise) {
+async function settledState(promise, waitMs = 50) {
   let state = "pending";
   promise.then(() => { state = "resolved"; }, () => { state = "rejected"; });
-  for (let turn = 0; turn < 500 && state === "pending"; turn += 1) {
+  // Bounded by wall-clock time, not loop turns: file I/O before the fetch takes a machine-dependent number of turns.
+  const deadline = Date.now() + waitMs;
+  while (state === "pending" && Date.now() < deadline) {
     await new Promise((resolve) => setImmediate(resolve));
   }
   return state;
@@ -245,14 +250,18 @@ for (const [platform, download] of [
   test(`${platform} download timeout also aborts a response body that stalls after the headers, leaving no partial file`, async (t) => {
     const dir = await tempDir(t, "owl-download-stall-");
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = stalledBodyFetch();
+    // Tick only after fetch ran: the download registers its timeout before calling fetch, so the timer exists by then.
+    let fetchStarted;
+    const started = new Promise((resolve) => { fetchStarted = resolve; });
+    globalThis.fetch = stalledBodyFetch(() => fetchStarted());
     t.mock.timers.enable({ apis: ["setTimeout"] });
     try {
       const pending = download(dir);
       pending.catch(() => undefined);
+      await Promise.race([started, pending.then(() => undefined, () => undefined)]);
       assert.equal(await settledState(pending), "pending", "the body is still streaming before the timeout");
       t.mock.timers.tick(60 * 60 * 1000);
-      assert.equal(await settledState(pending), "rejected", "a stalled body must not hang the download forever");
+      assert.equal(await settledState(pending, 10_000), "rejected", "a stalled body must not hang the download forever");
       assert.deepEqual(await readdir(dir), [], "the partial download is removed");
     } finally {
       t.mock.timers.reset();

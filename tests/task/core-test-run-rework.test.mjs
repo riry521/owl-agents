@@ -177,9 +177,10 @@ test("unrequested tests are removed before the Project verification plan runs, a
   // The Project check fails while the added test file exists, so it only passes if the removal ran first.
   const projectCheckArgv = [process.execPath, "-e", "process.exit(require('fs').existsSync('tests/new.test.mjs') ? 1 : 0)"];
   for (const testRun of [undefined, { ...TEST_RUN_SETTINGS, mode: "off" }]) {
-    const { workerRequests, removed } = await runUntilVerified(t, { testRun, projectCheckArgv, workerFiles: () => ({ "tests/new.test.mjs": "x\n" }) });
+    const { db, workerRequests, removed } = await runUntilVerified(t, { testRun, projectCheckArgv, workerFiles: () => ({ "tests/new.test.mjs": "x\n" }) });
     assert.equal(workerRequests.length, 1, "removal ahead of the plan does not send the Task back");
     assert.deepEqual(removed().map(({ files }) => files), [["tests/new.test.mjs"]]);
+    await workEnded(db);
   }
 });
 
