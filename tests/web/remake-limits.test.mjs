@@ -119,6 +119,7 @@ function renderSection(state, api) {
     '@/lib/api-client': { ApiRequestError: class ApiRequestError extends Error {}, ...api },
     '@/lib/format': {}, '@/lib/model-presets': {}, '@/lib/settings-errors': { humanizeError: () => 'ERROR' },
     '@/components/OwnerInviteButton': { OwnerInviteButton: () => null }, '@/components/ModelPresetsBar': {}, '@/components/FolderPickerDialog': {},
+    '@/components/AutoWorkEntryPanel': { AutoWorkEntryPanel: () => null },
   }, {
     react: {
       useEffect: () => {},
@@ -200,6 +201,7 @@ test('child-run settings are two-level, have no concurrency-limit inputs and Sav
     '@/lib/api-client': { ApiRequestError: class extends Error {}, setChildRunSettings: async (config) => { sent = config; return config; } },
     '@/lib/format': {}, '@/lib/model-presets': {}, '@/lib/settings-errors': { humanizeError: () => 'ERROR' },
     '@/components/OwnerInviteButton': { OwnerInviteButton: () => null }, '@/components/ModelPresetsBar': { ModelPresetsBar: () => null }, '@/components/FolderPickerDialog': { FolderPickerDialog: () => null },
+    '@/components/AutoWorkEntryPanel': { AutoWorkEntryPanel: () => null },
   }, {
     react: { useEffect: () => {}, useState: (initial) => { const i = index++; return [Object.hasOwn(preset, i) ? preset[i] : initial, () => {}]; } },
     jsx: { ...realJsxRuntime, jsx: wrap(realJsxRuntime.jsx), jsxs: wrap(realJsxRuntime.jsxs) },

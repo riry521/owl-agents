@@ -3,7 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { evaluateWorkerCompletion } from "../../packages/core/dist/task-completion-gate.js";
+import { evaluateWorkerCompletion, observedSubagentsNeedingIntegration } from "../../packages/core/dist/task-completion-gate.js";
 import { WorkflowEngine } from "../../packages/core/dist/workflow-engine.js";
 import { openTestDatabase } from "../helpers/db.mjs";
 const normal = { hybrid: false, delegated_work_detected: false };
@@ -321,5 +321,78 @@ test("Workflow: goal_unmet without a reason, or on a required id, is worker_veri
     assert.equal(w.reviewerRuns(), 0);
     assert.equal(JSON.parse(w.db.get("SELECT payload_json FROM events WHERE type = 'task.failure.classified'").payload_json).error_key, "worker_verification_failed");
     assert.equal(w.db.get("SELECT goal_shortfalls_json AS j FROM tasks WHERE id = 'task-1'").j, null);
+  }
+});
+
+const gateRow = (id, over = {}) => ({ id, parent_agent_id: null, provider: "claude", hook_agent_id: null, tool_program: null, ...over });
+const classifyReport = (over = {}, extra = {}, integration = null) => report(
+  { delegation: { decomposition: "x", delegated: [], retained: [], tool_subagents: [{ cli: "claude", tool: "tools/review.sh", reason: "review.sh runs claude -p for its own review step", ...over }], ...extra } },
+  { integration_check: integration },
+);
+const needing = (r, rows) => observedSubagentsNeedingIntegration(r, rows).map((row) => row.id);
+
+test("Completion Gate (Subagent): tool-internal CLIs need no integration_check; the Worker's own and hook-reported ones do", () => {
+  const auto = gateRow("a", { tool_program: "edit-team" });
+  const shell = gateRow("s");
+  const nested = gateRow("n", { parent_agent_id: "s", provider: "codex" });
+  const hook = gateRow("h", { hook_agent_id: "h1" });
+  assert.deepEqual(needing(report(), [auto]), []);
+  assert.deepEqual(needing(report(), [shell]), ["s"]);
+  assert.deepEqual(needing(classifyReport(), [shell, nested]), []);
+  assert.deepEqual(needing(classifyReport({ cli: "codex" }), [shell]), ["s"]);
+  assert.deepEqual(needing(classifyReport(), [hook]), ["h"]);
+  assert.deepEqual(needing(classifyReport({ reason: "  " }), [shell]), ["s"]);
+  assert.deepEqual(needing(classifyReport({ cli: "/usr/local/bin/claude" }), [shell]), []);
+  const gate = (rows) => evaluateWorkerCompletion(report(), { hybrid: false, delegated_work_detected: needing(report(), rows).length > 0 });
+  assert.equal(gate([auto]).passed, true);
+  assert.equal(gate([shell]).error_key, "hybrid_integration_verification_missing");
+});
+
+test("Completion Gate: own_subagents_used and delegated keep integration_check mandatory when every observed CLI is tool-internal", () => {
+  const rows = [gateRow("a", { tool_program: "edit-team" }), gateRow("s")];
+  const child = [{ child_id: "c1", instruction: "i", provider: "p", model: "m" }];
+  for (const extra of [{ own_subagents_used: true }, { delegated: child }]) {
+    for (const [integration, key] of [[null, "hybrid_integration_verification_missing"], [integrationPassed, null]]) {
+      const r = classifyReport({}, extra, integration);
+      assert.deepEqual(needing(r, rows), []);
+      const verdict = evaluateWorkerCompletion(r, { hybrid: false, delegated_work_detected: false });
+      assert.equal(verdict.error_key, key);
+    }
+  }
+});
+
+test("Workflow (Subagent): a CLI found inside a non-shell program is stored and needs no integration_check after it exits; a shell-only or direct one does", async (t) => {
+  const cases = [
+    ["python", [{ pid: 5000010, ppid: 5000000, args: "/bin/bash -c python3 /opt/tools/edit-team run" }, { pid: 5000011, ppid: 5000010, args: "python3 /opt/tools/edit-team run" }, { pid: 5000012, ppid: 5000011, args: "codex exec" }], "edit-team", true],
+    ["shell", [{ pid: 5000020, ppid: 5000000, args: "/bin/zsh -c codex exec hi" }, { pid: 5000021, ppid: 5000020, args: "codex exec" }], null, false],
+    ["direct", [{ pid: 5000030, ppid: 5000000, args: "codex exec" }], null, false],
+  ];
+  for (const [name, tree, program, passes] of cases) {
+    const w = await openWorkflow(t);
+    await w.seedRun("run-1");
+    await w.db.createWriteLane().transact((tx) => tx.run("UPDATE agent_runs SET pid = 5000000 WHERE id = 'run-1'"));
+    await w.workflow.scanSubagents([{ pid: 5000000, ppid: 1, args: "claude -p --output-format stream-json" }, ...tree]);
+    assert.deepEqual(w.db.all("SELECT tool_program FROM agent_runs WHERE origin = 'observed'").map((row) => row.tool_program), [program], name);
+    await w.succeed("run-1", report());
+    await w.settle();
+    assert.equal(w.reviewerRuns(), passes ? 1 : 0, name);
+    if (!passes) assert.equal(JSON.parse(w.db.get("SELECT payload_json FROM events WHERE type = 'task.failure.classified'").payload_json).error_key, "hybrid_integration_verification_missing", name);
+  }
+});
+
+test("Workflow (Subagent): a report classification lets a shell-only CLI pass; a hook-reported child still needs integration_check", async (t) => {
+  const run = async (body, hook = false) => {
+    const w = await openWorkflow(t);
+    await w.seedRun("run-1");
+    await w.seedRun("sub-1", "run-1", "observed");
+    await w.db.createWriteLane().transact((tx) => tx.run(`UPDATE agent_runs SET provider = 'claude'${hook ? ", hook_agent_id = 'h1'" : ""} WHERE id = 'sub-1'`));
+    await w.succeed("run-1", body);
+    await w.settle();
+    return w;
+  };
+  assert.equal((await run(classifyReport())).reviewerRuns(), 1);
+  for (const w of [await run(report()), await run(classifyReport(), true)]) {
+    assert.equal(w.reviewerRuns(), 0);
+    assert.equal(JSON.parse(w.db.get("SELECT payload_json FROM events WHERE type = 'task.failure.classified'").payload_json).error_key, "hybrid_integration_verification_missing");
   }
 });

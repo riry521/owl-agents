@@ -10,7 +10,7 @@ const LINK_DEFS: Array<{ href: string; tKey: string; match: string[] }> = [
   { href: '/agents', tKey: 'nav.agents', match: ['/agents'] },
   { href: '/projects', tKey: 'nav.projects', match: ['/projects'] },
   { href: '/advisor', tKey: 'nav.advisor', match: ['/advisor'] },
-  { href: '/settings', tKey: 'nav.settings', match: ['/settings'] },
+  { href: '/settings', tKey: 'nav.settings', match: ['/settings', '/settings/auto-work'] },
   { href: '/knowledge', tKey: 'nav.knowledge', match: ['/knowledge'] },
   {
     href: '/skills',
@@ -32,7 +32,7 @@ const BOTTOM_TABS: Array<{ href: string; tKey: string; match: string[]; icon: st
 ];
 
 const MORE_LINKS: Array<{ href: string; tKey: string; match: string[] }> = [
-  { href: '/settings', tKey: 'nav.settings', match: ['/settings'] },
+  { href: '/settings', tKey: 'nav.settings', match: ['/settings', '/settings/auto-work'] },
   { href: '/projects', tKey: 'nav.projects', match: ['/projects'] },
   {
     href: '/skills',

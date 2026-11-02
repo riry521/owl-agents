@@ -63,6 +63,16 @@ const WORKER_REPORT_PROPERTIES: Readonly<Record<string, RoleSchema>> = {
       description: "each Owl-dispatched child only, its instruction, provider, and model; [] if none",
     },
     own_subagents_used: { type: "boolean", description: "true if you used your own provider built-in subagents or forks (not Owl dispatch); then write integration_check with its status and evidence (required true only for Owl-dispatched children)" },
+    tool_subagents: {
+      type: "array",
+      items: objectSchema({
+        cli: { type: "string", minLength: 1, description: "command name of the agent CLI the tool started (claude, codex, ...)" },
+        tool: { type: "string", minLength: 1, description: "the existing tool or program that started it" },
+        reason: { type: "string", minLength: 1, description: "why the CLI runs as part of that tool's own work and is not your delegation" },
+      }),
+      example: [],
+      description: "agent CLIs that an existing tool or program you ran started inside itself, not you; Core does not count them as your subagents; [] if none",
+    },
     retained: {
       type: "array",
       items: objectSchema({
@@ -72,7 +82,7 @@ const WORKER_REPORT_PROPERTIES: Readonly<Record<string, RoleSchema>> = {
       description: "parts kept by the Worker and why; [] if none",
     },
     }),
-    // `own_subagents_used` is optional so reports that omit it stay valid.
+    // `own_subagents_used` and `tool_subagents` are optional so reports that omit them stay valid.
     required: ["decomposition", "delegated", "retained"],
   },
   changes: {
@@ -349,7 +359,7 @@ const RESULT_RULES: readonly string[] = [
   "- \"partial\": the task was cut short (you ran out of time/turns, a required resource was unavailable partway through), or an essential verification could not be run and no alternative evidence shows the criterion is met. Never report \"partial\" only because a goal criterion is not met.",
   "- \"failed\": the task could not be done at all (the requested change is impossible, a hard blocker prevented any progress, or you made no meaningful progress).",
   "verification: give each numbered acceptance criterion its own entry in verification.acceptance with a status and evidence, and use a distinct criterion_id for each. Status \"passed\" only when you verified that criterion in the final workspace; \"failed\" when the check ran and the criterion is not met; \"blocked\" when an essential verification (a test, build, or check the criterion depends on) could not be run and cannot be replaced by other evidence. Never report a check you could not run as passed. verification.status is \"passed\" only when every acceptance entry and every check passed, \"failed\" if any failed, otherwise \"blocked\". verification.status covers the required criteria and the checks only. Use result \"success\" only with verification.status \"passed\", needs_replanning false and question_for_manager null. A check that fails for a reason unrelated to this Task does not make it failed, but say so in verification.method. If you found a defect during verification, fix it before reporting, then re-verify the whole Task.",
-  "verification.integration_check: set it to null unless you delegated children or used your own subagents; when you did, run an integration check on the combined result and report its status and evidence. Set required true only when you dispatched children through Owl. Also treat any claude or codex CLI process you start yourself for a check as an observed subagent: record it in integration_check (not null), or the completion gate rejects the report.",
+  "verification.integration_check: set it to null unless you delegated children or used your own subagents; when you did, run an integration check on the combined result and report its status and evidence. Set required true only when you dispatched children through Owl. Also treat any claude or codex CLI process you start yourself for a check as an observed subagent: record it in integration_check (not null), or the completion gate rejects the report An agent CLI that an existing tool or program started inside itself as part of its own work (for example a project script that calls claude -p) is not your subagent: list it in delegation.tool_subagents with the CLI name, the tool and the reason, and it then needs no integration_check. Never list a CLI there that you started yourself to do part of this Task, directly or through a command or script you wrote; if you also started the same CLI yourself, set own_subagents_used to true.",
 ];
 
 /** Finalization: what the Worker does between "implementation written" and "report returned". */

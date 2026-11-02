@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "enabled": false,
+  "judge_role": "manager",
+  "judge_timeout_seconds": 120,
+  "candidate_limit": 20,
+  "max_detail_chars": 4000,
+  "limits": {
+    "max_works_per_day": 3,
+    "max_works_per_day_all": 10,
+    "day_start_time": "00:00",
+    "cooldown_hours": 24,
+    "alert_cooldown_minutes": 60
+  },
+  "scheduled_check": {
+    "times": ["09:00"],
+    "items": ["nightly_test_failed", "backlog_open"]
+  },
+  "watch": {
+    "poll_seconds": 30,
+    "context_lines": 5,
+    "command_timeout_seconds": 60,
+    "logs": [],
+    "commands": []
+  },
+  "github": {
+    "repo": null,
+    "poll_minutes": 10,
+    "per_page": 100,
+    "max_items_per_poll": 200,
+    "since_margin_seconds": 120,
+    "max_item_attempts": 3,
+    "output_limit_bytes": 4194304,
+    "initial_lookback_hours": 24,
+    "timeout_seconds": 60,
+    "allowed_users": ["@me"],
+    "require_labels": [],
+    "watch": ["issues", "issue_comments", "pr_comments"],
+    "mention": "@owl",
+    "owl_url": null,
+    "comments": {
+      "created": "Owl が Work #{work_number}「{work_title}」を作りました（{state}）。",
+      "completed": "Owl の Work #{work_number} が完了しました。PR: {pr_url}",
+      "completed_no_pr": "Owl の Work #{work_number} が完了しました。ブランチ: {branch}",
+      "cancelled": "Owl の Work #{work_number} は取り消されました。"
+    }
+  },
+  "rules": [
+    { "id": "failure-notice", "source": "failure_notice", "kinds": ["process_failed", "process_stopped", "log_error"], "min_occurrences": 2, "window_minutes": 60, "action": "draft", "size": "normal", "intent": "動いているものが止まった、または失敗が続いているときに、原因を調べて直す Work を作る。" },
+    { "id": "nightly-test-failed", "source": "scheduled_check", "kinds": ["nightly_test_failed"], "min_occurrences": 1, "window_minutes": 0, "action": "draft", "size": "normal", "intent": "夜間テストの失敗が放置されているときに、直す Work を作る。" },
+    { "id": "backlog-open", "source": "scheduled_check", "kinds": ["backlog_open"], "min_occurrences": 1, "window_minutes": 0, "action": "draft", "size": "normal", "intent": "未着手のバックログ項目がたまっているときに、まとめて片付ける Work を作る。", "params": { "min_items": 5, "min_age_days": 7, "max_items": 10 } },
+    { "id": "github-issue", "source": "github", "kinds": ["issue_opened", "issue_comment", "pr_comment"], "min_occurrences": 1, "window_minutes": 0, "action": "draft", "size": "normal", "intent": "許可された人が GitHub に書いた依頼や不具合の報告を Work にする。" }
+  ]
+}

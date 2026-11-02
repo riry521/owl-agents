@@ -63,6 +63,9 @@ rules/system/*
 !rules/system/defaults.yaml
 !rules/system/safety.yaml
 !rules/system/owl-defaults.yaml
+!rules/auto-work/
+rules/auto-work/*
+!rules/auto-work/defaults.json
 !rules/role/
 rules/role/*
 !rules/role/advisor-defaults.yaml

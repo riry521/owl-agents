@@ -54,6 +54,43 @@ function isObj(value: unknown): value is Obj {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/** An observed run under the Worker, as the gate needs it to tell the Worker's own subagents from a tool's. */
+export interface ObservedSubagent {
+  readonly id: string;
+  readonly parent_agent_id: string | null;
+  readonly provider: string;
+  readonly hook_agent_id: string | null;
+  readonly tool_program: string | null;
+}
+
+/** The command name of a reported CLI: first word, last path part, lower case. */
+function cliName(value: string): string {
+  return (value.trim().split(/\s+/)[0] ?? "").split("/").pop()!.toLowerCase();
+}
+
+/**
+ * Observed runs that still make integration_check mandatory. A process-detected run is left out when the
+ * process scan found a non-shell program above it (tool_program), when the report's
+ * delegation.tool_subagents names its CLI with a tool and a reason, or when an observed run above it is
+ * left out. Hook-reported runs always stay: the harness reports only the Worker's own subagents.
+ */
+export function observedSubagentsNeedingIntegration(report: unknown, observed: readonly ObservedSubagent[]): readonly ObservedSubagent[] {
+  const delegation: Obj = isObj(report) && isObj(report.delegation) ? report.delegation : {};
+  const declared = new Set<string>();
+  for (const item of Array.isArray(delegation.tool_subagents) ? delegation.tool_subagents : []) {
+    if (isObj(item) && typeof item.cli === "string" && isNonBlankReason(item.tool) && isNonBlankReason(item.reason)) declared.add(cliName(item.cli));
+  }
+  const byId = new Map(observed.map((run) => [run.id, run]));
+  const excluded = (run: ObservedSubagent, seen: Set<string>): boolean => {
+    if (run.hook_agent_id !== null || seen.has(run.id)) return false;
+    seen.add(run.id);
+    if (run.tool_program !== null || declared.has(run.provider.toLowerCase())) return true;
+    const parent = run.parent_agent_id === null ? undefined : byId.get(run.parent_agent_id);
+    return parent !== undefined && excluded(parent, seen);
+  };
+  return observed.filter((run) => !excluded(run, new Set()));
+}
+
 export function evaluateWorkerCompletion(report: unknown, options: WorkerCompletionOptions): WorkerCompletionVerdict {
   const reasons: string[] = [];
   const keys = new Set<WorkerCompletionErrorKey>();

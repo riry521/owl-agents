@@ -38,6 +38,7 @@ export { WORKING_STYLE_HEADING } from "./role-contract";
 export { buildCuratorPrompt, CURATOR_OUTPUT_SCHEMA, parseCuratorOutput, parseCuratorResponse } from "./curator";
 export { buildProjectInvestigationPrompt, parseProjectInvestigationResponse, PROJECT_INVESTIGATION_OUTPUT_SCHEMA, projectInvestigationProviderSchema } from "./project-investigation";
 export { buildFinalReportPrompt, finalReportProviderSchema, parseFinalReportResponse } from "./final-report";
+export { autoWorkJudgmentProviderSchema, buildAutoWorkJudgmentPrompt, parseAutoWorkJudgmentResponse } from "./auto-work-judgment";
 export { buildDecisionAnswerTriagePrompt, decisionAnswerTriageProviderSchema, parseDecisionAnswerTriageResponse } from "./decision-answer-triage";
 export { buildDecisionExplanationPrompt, decisionExplanationProviderSchema, parseDecisionExplanationResponse } from "./decision-explanation";
 export { buildTestSetupInvestigationPrompt, parseTestSetupResponse, TEST_SETUP_OUTPUT_SCHEMA, testSetupProviderSchema } from "./test-setup-investigation";

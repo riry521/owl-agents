@@ -87,7 +87,12 @@ AutoRecoverySettings,
   SkillState,
   ProcessSkillsSettingsData,
   KnowledgeAutomationSettingsInput,
+  AutoWorkEventFilter,
   KnowledgeAutomationSettingsData,
+  AutoWorkSettings,
+  AutoWorkEventView,
+  AutoWorkEventDetail,
+  AutoWorkRunResult,
   PlanUsageSettings,
   PlanUsageView,
   TokenUsagePeriod,
@@ -98,6 +103,7 @@ AutoRecoverySettings,
 } from '@/lib/types';
 import type { Locale } from '@/lib/i18n';
 import { linkableWorks } from './backlog-link.mjs';
+import { eventsQuery as autoWorkEventsQuery } from './auto-work.mjs';
 import { normalizeWorkDetailData } from '@/lib/work-detail-safety.mjs';
 
 type ApiEnvelope<T> = {
@@ -1966,6 +1972,48 @@ export async function setKnowledgeAutomationSettings(
   input: KnowledgeAutomationSettingsInput,
 ): Promise<KnowledgeAutomationSettingsData> {
   const response = await command<KnowledgeAutomationSettingsData>('/settings/knowledge-automation', input, 0, 'PUT');
+  return response.data;
+}
+
+/** GET /api/v1/auto-work/settings. `version` is what putAutoWorkSettings must send back as expected_version. */
+export async function getAutoWorkSettings(): Promise<AutoWorkSettings & { version: number }> {
+  const response = await requestJson<ApiEnvelope<AutoWorkSettings>>('/auto-work/settings');
+  return { ...response.data, version: response.version };
+}
+
+/** PUT /api/v1/auto-work/settings. Only `enabled` is writable; null returns it to the file value. */
+export async function putAutoWorkSettings(
+  input: { enabled?: boolean | null; projects?: Record<string, { enabled: boolean | null }> },
+  expectedVersion: number,
+): Promise<AutoWorkSettings & { version: number }> {
+  const response = await command<AutoWorkSettings>('/auto-work/settings', input, expectedVersion, 'PUT');
+  return { ...response.data, version: response.version };
+}
+
+/** GET /api/v1/auto-work/events, newest first. `next_offset` is null on the last page. */
+export async function listAutoWorkEvents(
+  filter: AutoWorkEventFilter = {},
+): Promise<{ items: AutoWorkEventView[]; next_offset: number | null }> {
+  const query = autoWorkEventsQuery(filter);
+  const response = await requestJson<ApiEnvelope<{ items: AutoWorkEventView[]; next_offset: number | null }>>(
+    `/auto-work/events${query ? `?${query}` : ''}`,
+  );
+  return response.data;
+}
+
+/** GET /api/v1/auto-work/events/{id}: one row with its body and the model's answer. */
+export async function getAutoWorkEvent(id: string): Promise<AutoWorkEventDetail> {
+  const response = await requestJson<ApiEnvelope<AutoWorkEventDetail>>(`/auto-work/events/${encodeURIComponent(id)}`);
+  return response.data;
+}
+
+/** POST /api/v1/auto-work/projects/{id}/run. */
+export async function runAutoWorkNow(projectId: string, what: 'github' | 'scheduled_check'): Promise<AutoWorkRunResult> {
+  // Unlike the other writes, this route takes the bare body `{ what }`, not a command envelope.
+  const response = await requestJson<ApiEnvelope<AutoWorkRunResult>>(`/auto-work/projects/${encodeURIComponent(projectId)}/run`, {
+    method: 'POST',
+    body: JSON.stringify({ what }),
+  });
   return response.data;
 }
 

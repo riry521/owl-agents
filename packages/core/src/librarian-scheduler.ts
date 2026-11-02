@@ -145,3 +145,8 @@ export function nextLibrarianRunAt(times: readonly string[], after: Date): Date 
   }
   return best;
 }
+
+/** The local calendar day of `date`, shared by the nightly tests and the automatic Work limits. */
+export function localDayKey(date: Date): string {
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+}

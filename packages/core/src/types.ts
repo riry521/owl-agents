@@ -775,6 +775,12 @@ export interface CoreOptions {
     readonly clock?: import("./librarian-scheduler.js").LibrarianSchedulerClock;
     readonly timeoutMs?: number;
   };
+  /** Automatic Work creation. `clock`, `gh` and `commandRunner` let tests run without real time, GitHub or commands. */
+  readonly autoWork?: {
+    readonly clock?: import("./librarian-scheduler.js").LibrarianSchedulerClock;
+    readonly gh?: import("@owl/shared").GhRunner;
+    readonly commandRunner?: (argv: readonly string[], cwd: string, timeoutMs: number) => Promise<{ exit_code: number | null; stdout: string; stderr: string; timed_out: boolean }>;
+  };
   /** `clock` lets tests drive the scheduled Librarian, skill curation and rule curation runs without real time. */
   readonly knowledgeSchedule?: { readonly clock?: import("./librarian-scheduler.js").LibrarianSchedulerClock };
   /**

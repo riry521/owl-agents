@@ -40,7 +40,7 @@ const overrides = {
   '@/lib/advisor-windows.mjs': windowsMod,
   '@/lib/advisor-awaiting.mjs': { replyArrived: () => false },
   '@/lib/format': { formatClock: () => '', formatDateTime: () => '', formatRelative: () => '' },
-  '@/components/icons': { SendIcon: () => React.createElement('svg') },
+  '@/components/icons': { SendIcon: () => React.createElement('svg'), TrashIcon: () => React.createElement('svg') },
   '@/components/AdvisorChannelPanel': { AdvisorChannelPanel: () => null },
   '@/lib/api-client': {},
   '@/lib/view-loader': {

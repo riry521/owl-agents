@@ -8,6 +8,7 @@ import { useLocale, type Locale } from '@/lib/i18n';
 import { REMAKE_TASK_TYPES, remakeLimitsToDraft, draftToRemakeLimits } from '@/lib/remake-limits.mjs';
 import { humanizeError } from '@/lib/settings-errors';
 import { presetMatchesSettings } from '@/lib/model-presets';
+import { AutoWorkEntryPanel } from '@/components/AutoWorkEntryPanel';
 import { ModelPresetsBar } from '@/components/ModelPresetsBar';
 import { OwnerInviteButton } from '@/components/OwnerInviteButton';
 import { FolderPickerDialog } from '@/components/FolderPickerDialog';
@@ -550,6 +551,7 @@ export function SettingsView() {
       <AutoRecoverySection />
       <KnowledgeStorageSection />
       <KnowledgeAutomationSection />
+      <AutoWorkEntryPanel />
       <ProviderManagementSection providerModels={providerModels} onModelsUpdate={(id, models) => setProviderModels(prev => ({ ...prev, [id]: models }))} />
       <IntegrationsSection />
       <TypesafeSection />

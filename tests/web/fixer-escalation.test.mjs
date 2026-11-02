@@ -57,6 +57,7 @@ function render(name, preset, api, capture) {
     '@/lib/format': { roleDisplayName }, '@/lib/model-presets': { presetMatchesSettings: () => true },
     '@/lib/settings-errors': { humanizeError: () => 'ERROR' },
     '@/components/OwnerInviteButton': { OwnerInviteButton: () => null }, '@/components/ModelPresetsBar': { ModelPresetsBar: () => null }, '@/components/FolderPickerDialog': { FolderPickerDialog: () => null },
+    '@/components/AutoWorkEntryPanel': { AutoWorkEntryPanel: () => null },
   }, {
     react: {
       useEffect: () => {},

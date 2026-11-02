@@ -14,6 +14,230 @@
     "langSwitch": "JP",
     "more": "More"
   },
+  "autoWork": {
+    "title": "Auto Work creation",
+    "subtitle": "Owl creates Works by the rules when a trigger arrives (a failure or stop notice, a scheduled check, a GitHub issue or PR comment). Rules are changed in the config files. This screen only switches things on and off.",
+    "on": "On",
+    "off": "Off",
+    "none": "None",
+    "count": "{{n}}",
+    "decidedBy": "Decided by: {{from}}",
+    "today": "Today {{created}} / {{cap}}",
+    "atCap": "(at the limit)",
+    "resetToFile": "Reset to the file value",
+    "viewHistory": "View history",
+    "showDetails": "Details",
+    "overridden": "Overridden: {{fields}}",
+    "lastError": "Last error",
+    "summaryLine": "Checks {{times}} · {{watch}} · GitHub {{github}} · {{rules}} rules",
+    "summaryWatch": "{{n}} watched",
+    "summaryNoWatch": "Nothing watched",
+    "summaryNoGithub": "Not set",
+    "tabs": {
+      "settings": "Settings",
+      "history": "History"
+    },
+    "from": {
+      "db": "Changed on screen",
+      "project_file": "Project config file",
+      "local_file": "Shared config file",
+      "defaults": "Default rules"
+    },
+    "source": {
+      "failure_notice": "Failure or stop notice",
+      "scheduled_check": "Scheduled check",
+      "github": "GitHub"
+    },
+    "origin": {
+      "defaults": "Default",
+      "local": "Custom (shared)",
+      "project": "Custom (this Project)"
+    },
+    "configFile": {
+      "present": "Has a Project config file",
+      "absent": "No Project config file"
+    },
+    "rulesSummary": {
+      "defaultsOnly": "Rules: defaults only",
+      "custom": "Rules: custom ({{parts}})",
+      "local": "shared {{n}}",
+      "project": "this Project {{n}}",
+      "overridden": "overridden {{n}}"
+    },
+    "action": {
+      "draft": "Draft",
+      "start": "Start now"
+    },
+    "verdict": {
+      "created_draft": "Created (draft)",
+      "created_started": "Created (started)",
+      "created_deleted": "Created (Work deleted)",
+      "judging": "Judging",
+      "duplicate": "Skipped: duplicate",
+      "below_threshold": "Skipped: too few times",
+      "daily_cap": "Skipped: daily limit",
+      "unauthorized": "Skipped: not allowed",
+      "no_rule": "Skipped: no rule",
+      "disabled": "Skipped: off",
+      "not_worth": "Skipped: AI said not needed",
+      "judge_failed": "Judging failed"
+    },
+    "actionError": {
+      "badge": "Follow-up failed",
+      "text": "The step after creation failed: {{error}}"
+    },
+    "state": {
+      "loading": "Loading…",
+      "loadFailed": "Could not load the settings.",
+      "staleError": "Could not get the latest settings (showing old data)",
+      "retry": "Retry",
+      "emptyProjects": "No Projects yet. Once you register one, checks start with the default rules.",
+      "emptyEvents": "No records yet. When a trigger is judged, the Works created and the reasons for skipping appear here.",
+      "emptyFiltered": "No records match these filters.",
+      "toggling": "Switching…",
+      "toggled": "Switched",
+      "toggleFailed": "Could not switch: {{error}}",
+      "versionConflict": "Settings changed on another screen, so they were reloaded. Please try again",
+      "configError": "This feature stays stopped until it is fixed",
+      "globalOff": "Everything is off"
+    },
+    "run": {
+      "scheduled": "Check now",
+      "scheduledRunning": "Checking…",
+      "github": "Fetch from GitHub now",
+      "githubRunning": "Fetching…",
+      "result": "Checked: {{created}} created, {{skipped}} skipped (see History)",
+      "resultNone": "Checked: no new triggers",
+      "offline": "Cannot run while off",
+      "noRepo": "No GitHub repository is set",
+      "offNow": "Cannot run while off. Turn it on first",
+      "failed": "Could not run: {{error}}"
+    },
+    "global": {
+      "title": "Overall",
+      "label": "Overall on / off",
+      "hint": "When off, judging stops for every Project (triggers stay in History as \"off\")."
+    },
+    "limits": {
+      "title": "Daily limit",
+      "all": "Overall",
+      "todaySuffix": "today",
+      "perProject": "Default per Project",
+      "cooldown": "Gap for the same item",
+      "hours": "{{n}} h",
+      "dayStart": "Day starts at"
+    },
+    "judge": {
+      "title": "AI judge",
+      "role": "Role used",
+      "change": "(change it in model settings)"
+    },
+    "files": {
+      "title": "Config files",
+      "defaults": "Default rules",
+      "local": "Shared custom",
+      "projects": "Per Project",
+      "notCreated": "(not created)"
+    },
+    "projects": {
+      "title": "Settings per Project"
+    },
+    "rules": {
+      "title": "Rules",
+      "id": "Rule",
+      "source": "Trigger",
+      "kinds": "What happened (kind)",
+      "occurrences": "Count / window",
+      "occurrencesWindow": "{{count}} times / {{minutes}} min",
+      "occurrencesOnce": "Once",
+      "action": "How it is made",
+      "size": "Size",
+      "origin": "Origin",
+      "status": "Status",
+      "enabled": "Enabled",
+      "disabled": "Disabled"
+    },
+    "check": {
+      "title": "Scheduled checks",
+      "times": "Times",
+      "items": "Items",
+      "next": "Next",
+      "last": "Last",
+      "noNext": "(none planned)",
+      "noLast": "(never run)"
+    },
+    "watch": {
+      "title": "Log and command watch",
+      "logs": "Logs",
+      "commands": "Commands"
+    },
+    "github": {
+      "notWatched": "GitHub watch: none",
+      "repo": "Repository",
+      "allowedUsers": "Allowed users",
+      "requireLabels": "Required labels",
+      "mention": "Trigger word",
+      "poll": "Fetch interval",
+      "pollMinutes": "{{n}} min",
+      "maxItems": "Limit per fetch",
+      "margin": "Margin",
+      "marginSeconds": "{{n}} s",
+      "lastPolled": "Last fetch",
+      "issues": "Issues / PRs",
+      "comments": "Comments",
+      "pending": "{{n}} pending",
+      "failed": "{{n}} failed"
+    },
+    "history": {
+      "heading": "Trigger records",
+      "filters": "History filters",
+      "allProjects": "All Projects",
+      "source": "Trigger",
+      "verdict": "Verdict",
+      "all": "All",
+      "verdictCreated": "Created",
+      "clearFilters": "Clear filters",
+      "updated": "Updated {{time}} · refreshes every {{seconds}} s",
+      "staleError": "Could not get the latest records",
+      "loadFailed": "Could not load the history.",
+      "loadMore": "Load more",
+      "hasMore": "There are more",
+      "judging": "The AI is judging…",
+      "unauthorizedTitle": "(Not an allowed user, so the title and body are not recorded)",
+      "reason": "Reason:",
+      "rule": "Rule",
+      "author": "Author",
+      "work": "Work #{{number}} \"{{title}}\"",
+      "workDeleted": "The Work that was created has been deleted",
+      "duplicateWork": "Work #{{number}} for the same cause",
+      "duplicateEvent": "The same item is being judged (see record {{id}}…)",
+      "issue": "GitHub Issue #{{number}} ↗",
+      "pr": "GitHub PR #{{number}} ↗",
+      "comment": "Owl's comment ↗",
+      "detail": "Details",
+      "close": "Close",
+      "noBody": "No body was recorded",
+      "detailFailed": "Could not load the details.",
+      "body": "Body (detail)",
+      "judge": "AI judgment (judge_json)",
+      "noJudge": "No AI judgment (skipped before judging)"
+    },
+    "entry": {
+      "title": "Create Works automatically",
+      "open": "Open settings and history",
+      "loadFailed": "Could not load the status.",
+      "configError": "Config file error",
+      "treatedAsOff": "treated as off",
+      "todayCreated": "Created today",
+      "todayValue": "{{created}} / {{cap}} (overall limit)",
+      "projects": "Projects",
+      "projectsValue": "{{on}} on · {{off}} off",
+      "judgeRole": "AI judge role",
+      "hintOn": "Works are created automatically from triggers (failure notices, scheduled checks, GitHub issues and comments). Check rules and history on the dedicated screen.",
+      "hintNoProjects": "No Projects yet. Once you register one, checks start with the default rules.",
+      "hintOff": "Triggers do not create Works right now. Open the dedicated screen to turn it on."
+    }
+  },
   "tokens": {
     "title": "Token usage",
     "subtitle": "Plan usage and token consumption by Work.",

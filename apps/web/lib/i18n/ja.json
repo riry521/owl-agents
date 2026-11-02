@@ -14,6 +14,230 @@
     "langSwitch": "EN",
     "more": "その他"
   },
+  "autoWork": {
+    "title": "自動 Work 作成",
+    "subtitle": "きっかけ（失敗や停止の知らせ・定期の見回り・GitHub の Issue／PR コメント）を受けて、ルールに沿って Owl が Work を作ります。ルールの中身は設定ファイルで変えます。この画面ではオン・オフだけを切り替えます。",
+    "on": "オン",
+    "off": "オフ",
+    "none": "なし",
+    "count": "{{n}} 件",
+    "decidedBy": "決めた場所: {{from}}",
+    "today": "今日 {{created}} / {{cap}} 件",
+    "atCap": "（上限）",
+    "resetToFile": "ファイルの値に戻す",
+    "viewHistory": "履歴を見る",
+    "showDetails": "詳しく",
+    "overridden": "上書き: {{fields}}",
+    "lastError": "最後のエラー",
+    "summaryLine": "見回り {{times}}・{{watch}}・GitHub {{github}}・ルール {{rules}} 件",
+    "summaryWatch": "監視 {{n}} 件",
+    "summaryNoWatch": "監視なし",
+    "summaryNoGithub": "未設定",
+    "tabs": {
+      "settings": "設定",
+      "history": "履歴"
+    },
+    "from": {
+      "db": "画面で変更",
+      "project_file": "Project の設定ファイル",
+      "local_file": "共通の設定ファイル",
+      "defaults": "基本のルール"
+    },
+    "source": {
+      "failure_notice": "失敗や停止の知らせ",
+      "scheduled_check": "定期の見回り",
+      "github": "GitHub"
+    },
+    "origin": {
+      "defaults": "基本",
+      "local": "独自（共通）",
+      "project": "独自（この Project）"
+    },
+    "configFile": {
+      "present": "Project 固有の設定ファイルあり",
+      "absent": "Project 固有の設定ファイルなし"
+    },
+    "rulesSummary": {
+      "defaultsOnly": "ルール: 基本のみ",
+      "custom": "ルール: 独自あり（{{parts}}）",
+      "local": "共通 {{n}}",
+      "project": "この Project {{n}}",
+      "overridden": "上書き {{n}}"
+    },
+    "action": {
+      "draft": "下書き",
+      "start": "すぐ始める"
+    },
+    "verdict": {
+      "created_draft": "作成（下書き）",
+      "created_started": "作成（開始済み）",
+      "created_deleted": "作成（Work は削除済み）",
+      "judging": "判定中",
+      "duplicate": "見送り: 重複",
+      "below_threshold": "見送り: 回数不足",
+      "daily_cap": "見送り: 1日の上限",
+      "unauthorized": "見送り: 許可外",
+      "no_rule": "見送り: ルールなし",
+      "disabled": "見送り: オフ",
+      "not_worth": "見送り: AI が不要と判断",
+      "judge_failed": "判定に失敗"
+    },
+    "actionError": {
+      "badge": "作成後の処理に失敗",
+      "text": "作成後の処理に失敗しました: {{error}}"
+    },
+    "state": {
+      "loading": "読み込み中…",
+      "loadFailed": "設定を読み込めませんでした。",
+      "staleError": "最新の設定を取れませんでした（表示は古いままです）",
+      "retry": "再試行",
+      "emptyProjects": "Project がまだありません。Project を登録すると、基本のルールで見回りが始まります。",
+      "emptyEvents": "まだ記録がありません。きっかけが来て判定されると、作られた Work と見送った理由がここに並びます。",
+      "emptyFiltered": "この条件に合う記録はありません。",
+      "toggling": "切り替え中…",
+      "toggled": "切り替えました",
+      "toggleFailed": "切り替えに失敗しました: {{error}}",
+      "versionConflict": "他の画面で設定が変わったため読み直しました。もう一度操作してください",
+      "configError": "直すまで、この機能は止まっています",
+      "globalOff": "全体がオフです"
+    },
+    "run": {
+      "scheduled": "今すぐ見回る",
+      "scheduledRunning": "見回り中…",
+      "github": "GitHub を今すぐ取りに行く",
+      "githubRunning": "取得中…",
+      "result": "見回りました: 作成 {{created}} 件、見送り {{skipped}} 件（履歴で確かめられます）",
+      "resultNone": "見回りました: 新しいきっかけはありませんでした",
+      "offline": "オフのため動かせません",
+      "noRepo": "GitHub のリポジトリが設定されていません",
+      "offNow": "オフのため動かせません。先にオンにしてください",
+      "failed": "実行に失敗しました: {{error}}"
+    },
+    "global": {
+      "title": "全体",
+      "label": "全体のオン・オフ",
+      "hint": "オフにすると、すべての Project で判定を止めます（きっかけは「オフ」として履歴に残ります）。"
+    },
+    "limits": {
+      "title": "1日の上限",
+      "all": "全体",
+      "todaySuffix": "件（今日）",
+      "perProject": "Project ごとの既定",
+      "cooldown": "同じ件の間隔",
+      "hours": "{{n}} 時間",
+      "dayStart": "日付の区切り"
+    },
+    "judge": {
+      "title": "AI 判定",
+      "role": "使う役割",
+      "change": "（モデル設定で変える）"
+    },
+    "files": {
+      "title": "設定ファイル",
+      "defaults": "基本のルール",
+      "local": "共通の独自",
+      "projects": "Project ごと",
+      "notCreated": "（未作成）"
+    },
+    "projects": {
+      "title": "Project ごとの設定"
+    },
+    "rules": {
+      "title": "ルール",
+      "id": "ルール",
+      "source": "きっかけ",
+      "kinds": "何が起きたか（kind）",
+      "occurrences": "回数・幅",
+      "occurrencesWindow": "{{count}} 回 / {{minutes}} 分",
+      "occurrencesOnce": "1 回",
+      "action": "作り方",
+      "size": "大きさ",
+      "origin": "出どころ",
+      "status": "状態",
+      "enabled": "有効",
+      "disabled": "無効"
+    },
+    "check": {
+      "title": "定期の見回り",
+      "times": "時刻",
+      "items": "項目",
+      "next": "次回",
+      "last": "前回",
+      "noNext": "（予定なし）",
+      "noLast": "（未実行）"
+    },
+    "watch": {
+      "title": "ログ・コマンドの監視",
+      "logs": "ログ",
+      "commands": "コマンド"
+    },
+    "github": {
+      "notWatched": "GitHub の監視: なし",
+      "repo": "リポジトリ",
+      "allowedUsers": "許可ユーザー",
+      "requireLabels": "必須ラベル",
+      "mention": "合図",
+      "poll": "取得の間隔",
+      "pollMinutes": "{{n}} 分",
+      "maxItems": "1 回の上限",
+      "margin": "余白",
+      "marginSeconds": "{{n}} 秒",
+      "lastPolled": "前回取得",
+      "issues": "Issue・PR",
+      "comments": "コメント",
+      "pending": "未処理 {{n}}",
+      "failed": "失敗 {{n}}"
+    },
+    "history": {
+      "heading": "きっかけの記録",
+      "filters": "履歴の絞り込み",
+      "allProjects": "すべての Project",
+      "source": "きっかけ",
+      "verdict": "判定",
+      "all": "すべて",
+      "verdictCreated": "作成した",
+      "clearFilters": "絞り込みを消す",
+      "updated": "最終更新 {{time}}・{{seconds}} 秒ごとに読み直します",
+      "staleError": "最新の記録を取れませんでした",
+      "loadFailed": "履歴を読み込めませんでした。",
+      "loadMore": "さらに読み込む",
+      "hasMore": "続きがあります",
+      "judging": "AI が判定しています…",
+      "unauthorizedTitle": "（許可されていないユーザーのため、題と本文は記録していません）",
+      "reason": "理由:",
+      "rule": "ルール",
+      "author": "作者",
+      "work": "Work #{{number}} 「{{title}}」",
+      "workDeleted": "作った Work は削除されています",
+      "duplicateWork": "同じ原因の Work #{{number}}",
+      "duplicateEvent": "同じ件が判定中です（記録 {{id}}… を見る）",
+      "issue": "GitHub Issue #{{number}} ↗",
+      "pr": "GitHub PR #{{number}} ↗",
+      "comment": "Owl のコメント ↗",
+      "detail": "詳細",
+      "close": "閉じる",
+      "noBody": "本文は記録していません",
+      "detailFailed": "詳細を読み込めませんでした。",
+      "body": "本文（detail）",
+      "judge": "AI の判定（judge_json）",
+      "noJudge": "AI の判定はありません（判定前に見送り）"
+    },
+    "entry": {
+      "title": "自動で Work を作る",
+      "open": "設定と履歴を開く",
+      "loadFailed": "状態を読み込めませんでした。",
+      "configError": "設定ファイルのエラー",
+      "treatedAsOff": "オフ扱い",
+      "todayCreated": "今日の作成",
+      "todayValue": "{{created}} / {{cap}} 件（全体の上限）",
+      "projects": "Project",
+      "projectsValue": "オン {{on}} 件・オフ {{off}} 件",
+      "judgeRole": "AI 判定の役割",
+      "hintOn": "きっかけ（失敗の知らせ・定期の見回り・GitHub の Issue やコメント）から Work を自動で作ります。ルールと履歴は専用の画面で確かめます。",
+      "hintNoProjects": "Project がまだありません。Project を登録すると、基本のルールで見回りが始まります。",
+      "hintOff": "今はきっかけが来ても Work を作りません。オンにするには専用の画面を開きます。"
+    }
+  },
   "tokens": {
     "title": "トークン使用量",
     "subtitle": "プランの使用率と Work ごとのトークン消費を表示します。",

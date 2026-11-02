@@ -59,6 +59,7 @@ export const ADVISOR_BLOCKED_APIS: readonly AdvisorBlockedApi[] = [
   callApi("POST", "/advisor/windows/{key}/channels/{provider}", "Creating a Slack / Discord channel changes the Owner's workspace."),
   callApi("PUT", "/advisor/windows/{key}/channels/{provider}", "Binding a channel changes where the Owner's messages go."),
   callApi("PATCH", "/advisor/windows/{key}/channels/{provider}", "Renaming a channel changes the Owner's workspace."),
+  callApi("POST", "/auto-work/notices", "Advisor already has its own way to create a Work; failure notices come from outside monitors."),
   callApi("POST", "/backlog/delete", "Deleting backlog items is irreversible."),
   callApi("DELETE", "/backlog/{item_id}", "Deleting a backlog item is irreversible."),
   callApi("POST", "/rule-proposals/{proposal_id}/approve", "Approving a rule proposal changes or deletes rules."),

@@ -269,23 +269,30 @@ export async function withDetachedWorktree<T>(input: { readonly repo: string; re
 
 /**
  * Runs one argv without a shell in its own process group. stdout and stderr are
- * kept apart, each cut to outputLimitBytes. A timeout or abort stops the group
+ * kept apart, each cut to outputLimitBytes (and flagged *_truncated). With `input`, it is written to stdin and stdin is closed. A timeout or abort stops the group
  * (SIGTERM, then SIGKILL after the grace period); a timeout sets timed_out.
  */
-export function spawnTestCommand(argv: readonly string[], cwd: string, env: Record<string, string>, timeoutMs: number, outputLimitBytes: number, signal?: AbortSignal, onOutput?: () => void): Promise<TestCommandResult> {
+export function spawnTestCommand(argv: readonly string[], cwd: string, env: Record<string, string>, timeoutMs: number, outputLimitBytes: number, signal?: AbortSignal, onOutput?: () => void, input?: string): Promise<TestCommandResult> {
   return new Promise<TestCommandResult>((resolve) => {
     const startedAt = Date.now();
     const [command, ...args] = argv;
     const out = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
+    const truncated = { stdout: false, stderr: false };
     let timedOut = false;
     let settled = false;
-    const child = spawn(command ?? "", args, { cwd, env, shell: false, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command ?? "", args, { cwd, env, shell: false, detached: true, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
     const collect = (key: "stdout" | "stderr") => (chunk: Buffer) => {
       onOutput?.();
+      if (out[key].length + chunk.length > outputLimitBytes) truncated[key] = true;
       if (out[key].length < outputLimitBytes) out[key] = Buffer.concat([out[key], chunk]).subarray(0, outputLimitBytes);
     };
-    child.stdout.on("data", collect("stdout"));
-    child.stderr.on("data", collect("stderr"));
+    if (input !== undefined) {
+      // A process that exits without reading its stdin ends the pipe with EPIPE; the exit code already says what happened.
+      child.stdin?.on("error", () => undefined);
+      child.stdin?.end(input, "utf8");
+    }
+    child.stdout?.on("data", collect("stdout"));
+    child.stderr?.on("data", collect("stderr"));
     const stop = () => { void reapProcessGroup(child.pid, { graceMs: KILL_GRACE_MS }); };
     const timer = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
     if (signal?.aborted) stop();
@@ -302,6 +309,8 @@ export function spawnTestCommand(argv: readonly string[], cwd: string, env: Reco
         stdout: out.stdout.toString("utf8"),
         stderr: out.stderr.toString("utf8"),
         duration_ms: Date.now() - startedAt,
+        stdout_truncated: truncated.stdout,
+        stderr_truncated: truncated.stderr,
         ...(error === undefined ? {} : { error }),
       });
     };

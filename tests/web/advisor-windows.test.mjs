@@ -56,7 +56,7 @@ const baseOverrides = {
   '@/lib/advisor-windows.mjs': windowsMod,
   '@/lib/advisor-awaiting.mjs': { replyArrived: () => false },
   '@/lib/format': { formatClock: () => '', formatDateTime: () => '', formatRelative: () => 'now' },
-  '@/components/icons': { SendIcon: () => React.createElement('svg') },
+  '@/components/icons': { SendIcon: () => React.createElement('svg'), TrashIcon: () => React.createElement('svg') },
   '@/lib/api-client': {
     clearAdvisorConversation: async () => {},
     getAdvisorWindowConversation: async () => 'x',
@@ -327,7 +327,7 @@ test('Advisor Turn is memoized so typing in the draft does not re-parse every me
 // ---- heading and window picker ---------------------------------------------
 
 // What <AdvisorView /> rendered for Home and Board before the window props existed.
-const OMITTED_PROPS_MARKUP = '<link rel="preload" as="image" href="/owl/icon.png"/><div class="advisor"><div class="advisor__header"><div class="advisor__header-left"><img src="/owl/icon.png" alt="Owl" class="advisor__header-icon" width="24" height="24"/><span class="advisor__header-title">Owl Advisor</span><div class="advisor__session-badges" aria-label="Advisor session status"><span class="advisor__session-badge advisor__session-badge--model">m1</span><span class="advisor__session-badge advisor__session-badge--none">No session</span><span class="advisor__session-badge">Compactions: 2</span></div></div><div class="advisor__kebab-wrap"><button class="advisor__kebab" aria-label="Menu">⋮</button></div></div><div class="advisor__messages"><div class="advisor__empty"><div class="advisor__empty-icon"><img src="/owl/icon.png" alt="Owl" width="48" height="48" style="border-radius:10px"/></div><h2>Owl Advisor</h2><p>Get advice on strategy and direction.<br/>Type a message below to start.</p></div></div><div class="advisor__input-area"><form class="advisor__form"><div class="advisor__input-wrap"><textarea class="advisor__textarea" placeholder="Ask the Advisor a question" maxLength="100000" rows="2" enterKeyHint="enter"></textarea><button type="submit" class="advisor__send" disabled="" aria-label="Send"><svg></svg></button></div><p class="advisor__hint">Shift+Enter to send / Enter for new line</p></form></div></div>';
+const OMITTED_PROPS_MARKUP = '<link rel="preload" as="image" href="/owl/icon.png"/><div class="advisor"><div class="advisor__header"><div class="advisor__header-left"><img src="/owl/icon.png" alt="Owl" class="advisor__header-icon" width="24" height="24"/><span class="advisor__header-title">Owl Advisor</span><div class="advisor__session-badges" aria-label="Advisor session status"><span class="advisor__session-badge advisor__session-badge--model">m1</span><span class="advisor__session-badge advisor__session-badge--none">No session</span><span class="advisor__session-badge">Compactions: 2</span></div></div><div class="advisor__header-actions"><button type="button" class="advisor__kebab advisor__clear" aria-label="Clear Conversation" title="Clear Conversation"><svg></svg></button><div class="advisor__kebab-wrap"><button class="advisor__kebab" aria-label="Menu">⋮</button></div></div></div><div class="advisor__messages"><div class="advisor__empty"><div class="advisor__empty-icon"><img src="/owl/icon.png" alt="Owl" width="48" height="48" style="border-radius:10px"/></div><h2>Owl Advisor</h2><p>Get advice on strategy and direction.<br/>Type a message below to start.</p></div></div><div class="advisor__input-area"><form class="advisor__form"><div class="advisor__input-wrap"><textarea class="advisor__textarea" placeholder="Ask the Advisor a question" maxLength="100000" rows="2" enterKeyHint="enter"></textarea><button type="submit" class="advisor__send" disabled="" aria-label="Send"><svg></svg></button></div><p class="advisor__hint">Shift+Enter to send / Enter for new line</p></form></div></div>';
 
 function renderAdvisor(props, session = { status: 'none' }) {
   viewData = { 'advisor-window:general': 'c', 'advisor-messages:c': [], 'advisor-session:c': session };
@@ -613,6 +613,7 @@ const { SettingsView } = loadTsx('apps/web/components/SettingsView.tsx', {
   '@/lib/model-presets': {},
   '@/components/ModelPresetsBar': {},
   '@/components/FolderPickerDialog': {},
+  '@/components/AutoWorkEntryPanel': { AutoWorkEntryPanel: () => null },
 });
 
 // IntegrationsSection is private: reach it as an element of SettingsView and pre-seed its state (integrations, editing, testResult, ownerUserId).

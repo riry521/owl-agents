@@ -22,6 +22,9 @@ export interface TestCommandResult {
   readonly stdout: string;
   readonly stderr: string;
   readonly duration_ms: number;
+  /** stdout / stderr was cut at the output limit. Only callers that read the output as a whole (the gh runner) look at these. */
+  readonly stdout_truncated?: boolean;
+  readonly stderr_truncated?: boolean;
   /** The process could not be started. */
   readonly error?: string;
 }

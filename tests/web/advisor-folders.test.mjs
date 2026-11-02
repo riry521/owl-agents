@@ -238,6 +238,7 @@ function renderAdvisorFolders(state, apiClientOverrides) {
       '@/lib/model-presets': { presetMatchesSettings: () => false },
       '@/components/OwnerInviteButton': { OwnerInviteButton: () => null }, '@/components/ModelPresetsBar': { ModelPresetsBar: () => null },
       '@/components/FolderPickerDialog': { FolderPickerDialog: () => null },
+      '@/components/AutoWorkEntryPanel': { AutoWorkEntryPanel: () => null },
     },
   });
   renderToStaticMarkup(React.createElement(module.AdvisorFoldersSection));

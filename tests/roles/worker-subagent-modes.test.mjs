@@ -32,6 +32,14 @@ test("the prompt keeps dispatch rules and bans own subagents and fork when hybri
   assert.match(p, /Do not use your own subagents \(for example Claude's Agent tool\), forks, or other provider-native subagent/);
 });
 
+test("both modes tell the Worker to list tool-internal agent CLIs in delegation.tool_subagents", () => {
+  for (const hybrid of [false, true]) {
+    const p = buildWorkerPrompt(request, undefined, null, hybrid);
+    assert.match(p, /list it in delegation\.tool_subagents/);
+    assert.match(p, /if you also started the same CLI yourself, set own_subagents_used to true/);
+  }
+});
+
 const researcher = researchSubagentPromptRef("claude");
 
 test("with the researcher, hybrid on allows only Owl's read-only researcher and waits for every result before finishing", () => {

@@ -77,7 +77,7 @@ function loadComponent(dict) {
     '@/lib/api-client': { sendWorkInstruction: (...args) => { sendCalls.push(args); return sendImpl(...args); } },
     '@/lib/format': { formatRelative: () => 'now' },
     '@/lib/i18n': { useLocale: () => ({ locale: 'en', t: translations(dict) }) },
-    '@/components/icons': { SendIcon: () => React.createElement('svg') },
+    '@/components/icons': { SendIcon: () => React.createElement('svg'), TrashIcon: () => React.createElement('svg') },
     '../lib/work-conversation.mjs': pure,
   };
   const loaded = new Module(modulePath);

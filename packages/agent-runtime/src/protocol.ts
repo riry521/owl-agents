@@ -192,12 +192,17 @@ function legacyVerificationField(payload: Record<string, unknown>): LegacyReport
   return { passed: value.passed, method: value.method };
 }
 
+const DELEGATION_KEYS = ["decomposition", "delegated", "retained", "own_subagents_used", "tool_subagents"];
+
 function delegationField(payload: Record<string, unknown>): WorkerDelegation {
   const value = required(payload, "delegation");
   if (
     !isRecord(value) ||
-    ![3, 4].includes(Object.keys(value).length) ||
-    (Object.keys(value).length === 4 && typeof value.own_subagents_used !== "boolean") ||
+    Object.keys(value).some((key) => !DELEGATION_KEYS.includes(key)) ||
+    (value.own_subagents_used !== undefined && typeof value.own_subagents_used !== "boolean") ||
+    (value.tool_subagents !== undefined && (!Array.isArray(value.tool_subagents) ||
+      value.tool_subagents.some((item) => !isRecord(item) || !hasStringFields(item, ["cli", "tool", "reason"]) ||
+        Object.values(item).some((field) => (field as string).trim().length === 0)))) ||
     typeof value.decomposition !== "string" || value.decomposition.trim().length === 0 ||
     !Array.isArray(value.delegated) ||
     value.delegated.some((item) => !isRecord(item) || !hasStringFields(item, ["child_id", "instruction", "provider", "model"]) ||
@@ -213,6 +218,7 @@ function delegationField(payload: Record<string, unknown>): WorkerDelegation {
     delegated: value.delegated as WorkerDelegation["delegated"],
     retained: value.retained as WorkerDelegation["retained"],
     ...(typeof value.own_subagents_used === "boolean" ? { own_subagents_used: value.own_subagents_used } : {}),
+    ...(Array.isArray(value.tool_subagents) ? { tool_subagents: value.tool_subagents as WorkerDelegation["tool_subagents"] } : {}),
   };
 }
 

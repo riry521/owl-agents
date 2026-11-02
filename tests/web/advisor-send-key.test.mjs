@@ -119,7 +119,7 @@ const advisorViewModule = compileWebComponent(advisorViewPath, {
   '@/lib/advisor-awaiting.mjs': { replyArrived },
   '@/lib/advisor-windows.mjs': await import('../../apps/web/lib/advisor-windows.mjs'),
   '@/lib/view-loader': { useView: (key, _fetcher, options) => (viewOptions[key?.split(':')[0]] = options, { data: key?.startsWith('advisor-messages:') ? [] : key === 'advisor-window:general' ? 'conv-1' : sessionData, error: null, loading: false, refresh: async () => { callLog.push('refresh:' + (key?.split(':')[0])); } }) },
-  '@/components/icons': { SendIcon: () => null, StopIcon: () => null },
+  '@/components/icons': { SendIcon: () => null, StopIcon: () => null, TrashIcon: () => null },
   '@/components/AdvisorChannelPanel': { AdvisorChannelPanel: () => null },
 });
 
@@ -309,7 +309,7 @@ test('rendered: the spinner stays through idle or stale session reads after a se
     '@/lib/advisor-awaiting.mjs': { replyArrived },
     '@/lib/advisor-windows.mjs': await import('../../apps/web/lib/advisor-windows.mjs'),
     '@/lib/view-loader': { useView: (key) => ({ data: key?.startsWith('advisor-messages:') ? messages : key === 'advisor-window:general' ? 'conv-1' : session, error: null, loading: false, refresh: async () => {} }) },
-    '@/components/icons': { SendIcon: () => null, StopIcon: () => null },
+    '@/components/icons': { SendIcon: () => null, StopIcon: () => null, TrashIcon: () => null },
   '@/components/AdvisorChannelPanel': { AdvisorChannelPanel: () => null },
   });
   const state = [];

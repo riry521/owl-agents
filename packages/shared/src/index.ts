@@ -702,6 +702,7 @@ export { DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, OUTPUT_
 export * from "./role-schema.js";
 export * from "./manager-schema.js";
 export * from "./auto-recovery-names.js";
+export * from "./auto-work.js";
 export {
   EXTERNAL_BLOCKER_EVENT,
   EXTERNAL_BLOCKER_KINDS,

@@ -120,7 +120,18 @@ import { advisorWorkId, parseAdvisorWorkOperationPayload } from "./advisor-work-
 import { AdvisorSessionNotFoundError, AdvisorSessionRuntime, type AdvisorSettingsSnapshot } from "./advisor-runtime.js";
 import { MemorySaver } from "./memory-saver.js";
 import { slugifyKnowledgeContentName } from "./knowledge-naming.js";
-import { LibrarianScheduler, parseLibrarianTime } from "./librarian-scheduler.js";
+import { autoWorkDbToggle, type AutoWorkSettingsValue, type AutoWorkSignal } from "@owl/shared";
+import { AutoWorkConfigLoader } from "./auto-work/config.js";
+import { AutoWorkService } from "./auto-work/service.js";
+import { AutoWorkStore } from "./auto-work/store.js";
+import { ScheduledCheckTrigger } from "./auto-work/triggers/scheduled-check.js";
+import {
+  AUTO_WORK_LIST_LIMIT, AUTO_WORK_RULES_DIR, buildAutoWorkSettingsData, toAutoWorkEventDetailView, toAutoWorkEventView,
+  type AutoWorkEventFilter,
+} from "./auto-work/views.js";
+import { FailureWatchTrigger, readFailureNotice, spawnAutoWorkCommand } from "./auto-work/triggers/failure-notice.js";
+import { createGhRunner, GithubTrigger } from "./auto-work/triggers/github.js";
+import { LibrarianScheduler, localDayKey, parseLibrarianTime } from "./librarian-scheduler.js";
 import {
   DEFAULT_NIGHTLY_TEST_TIME,
   NIGHTLY_TEST_SETTINGS_KEY,
@@ -847,6 +858,10 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
   private indexBuilder: IndexBuilder | null = null;
   private readonly librarianScheduler: LibrarianScheduler;
   private readonly nightlyScheduler: LibrarianScheduler;
+  private readonly autoWorkConfig: AutoWorkConfigLoader;
+  private readonly autoWorkStore: AutoWorkStore;
+  /** Automatic Work creation. The triggers hand signals to `receive`; they register their handlers on it. */
+  public readonly autoWork: AutoWorkService;
   private readonly nightlyExecutor: NightlyTestExecutor;
   private readonly nightlyAbort = new AbortController();
   private nightlyRun: Promise<NightlyRunSummary[]> | null = null;
@@ -1200,6 +1215,46 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       workspaceRoot: this.workspaceLayout.root,
       timeoutMs: options.nightlyTests?.timeoutMs ?? NIGHTLY_TEST_TIMEOUT_MS,
     });
+    this.autoWorkConfig = new AutoWorkConfigLoader({
+      directory: join(this.owlRoot, AUTO_WORK_RULES_DIR),
+      onAlert: (kind, detail) => this.recordBackgroundFailure(kind, new Error(detail), {}),
+    });
+    this.autoWorkStore = new AutoWorkStore(this.db);
+    this.autoWork = new AutoWorkService({
+      db: this.db,
+      store: this.autoWorkStore,
+      clock: options.autoWork?.clock,
+      config: (projectId) => this.autoWorkConfig.effective(projectId, autoWorkDbToggle(this.readAutoWorkSettings(), projectId)),
+      runner: () => this.options.agentRunner as unknown as ReturnType<ConstructorParameters<typeof AutoWorkService>[0]["runner"]>,
+      roleModel: (role) => requireRoleModel(this.db, role),
+      language: () => ownerLanguage(this.db),
+      projectOverview: async (projectId) => {
+        const note = await this.knowledgeNotes.getProjectOverview(projectId);
+        return note ? [note.summary, ...note.claims.map((claim) => claim.text)].filter(Boolean).join("\n") : null;
+      },
+      startWork: (workId, request) => this.startWork(workId, request),
+      logger: console,
+    });
+    const scheduledCheck = new ScheduledCheckTrigger({ db: this.db, clock: options.autoWork?.clock, receive: (signal) => this.autoWork.receive(signal), logger: console });
+    this.autoWork.registerTrigger(scheduledCheck);
+    this.autoWork.registerRunNow("scheduled_check", (projectId) => scheduledCheck.runNow(projectId));
+    this.autoWork.registerTrigger(new FailureWatchTrigger({
+      clock: options.autoWork?.clock,
+      commandRunner: options.autoWork?.commandRunner ?? spawnAutoWorkCommand,
+      projectPath: (projectId) => this.db.get<{ canonical_path: string }>("SELECT canonical_path FROM projects WHERE id = ?", projectId)?.canonical_path ?? null,
+      onAlert: (kind, detail) => this.recordBackgroundFailure(kind, new Error(detail), {}),
+      logger: console,
+    }));
+    new GithubTrigger({
+      db: this.db,
+      store: new AutoWorkStore(this.db),
+      gh: options.autoWork?.gh ?? createGhRunner(this.owlRoot),
+      clock: options.autoWork?.clock,
+      config: (projectId) => this.autoWorkConfig.effective(projectId, autoWorkDbToggle(this.readAutoWorkSettings(), projectId)),
+      language: () => ownerLanguage(this.db),
+      alert: (detail) => this.recordBackgroundFailure("auto_work_github_failed", new Error(detail), {}),
+      logger: console,
+    }).attachTo(this.autoWork);
     this.nightlyScheduler = new LibrarianScheduler({
       run: async () => {
         // A time change after today's run must not run the tests a second time the same day.
@@ -2314,6 +2369,12 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     this.retryWorkAfterRoleChange();
     this.librarianScheduler.start(this.readKnowledgeAutomationSettings().librarian_times);
     this.nightlyScheduler.start([this.readNightlyTestTime()]);
+    // A root without rules/auto-work does not have the feature: nothing is read, watched or reported.
+    if (existsSync(join(this.owlRoot, "rules", "auto-work"))) {
+      await this.autoWorkConfig.reload();
+      this.autoWorkConfig.watch(() => this.autoWork.reconfigure());
+    }
+    await this.autoWork.start();
     this.planUsageService.start();
   }
 
@@ -2893,6 +2954,8 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       await Promise.allSettled([...this.worktreeReconciles]);
       this.nightlyAbort.abort();
       await this.nightlyScheduler.stop();
+      await this.autoWork.stop();
+      await this.autoWorkConfig.stop();
       await this.librarianScheduler.stop();
       await this.memory.stop(); // memory (stage ①-1)
       await this.knowledgeLocation.stop();
@@ -2907,6 +2970,8 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     this.started = false;
     this.nightlyAbort.abort();
     await this.nightlyScheduler.stop();
+    await this.autoWork.stop();
+    await this.autoWorkConfig.stop();
     await this.librarianScheduler.stop();
     await this.memory.stop(); // memory (stage ①-1)
     await this.knowledgeLocation.stop();
@@ -3687,6 +3752,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     });
     await this.announceDecisionCancellations(cancelledDecisionIds);
     this.workDriver.unregister(workId);
+    this.notifyAutoWorkFinished(workId, "cancelled");
     await this.wakeWorkDependents(workId);
     const unstopped = await this.stopWorkAgents(workId, closedLaunchRunIds, request.payload.force === true);
     if (unstopped.length > 0) return { ...response, data: { ...response.data, worktree_cleanup: agentStopFailure(unstopped) } };
@@ -5813,6 +5879,137 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     const row = await this.providerPauseController.resumeNow(provider);
     if (!row || row.state === "active") throw providerPauseNotFound(provider, await this.getLanguage());
     return toProviderPauseView(row);
+  }
+
+  private readAutoWorkSettings(): AutoWorkSettingsValue | null {
+    const row = this.db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", "auto_work");
+    return row ? JSON.parse(row.value_json) as AutoWorkSettingsValue : null;
+  }
+
+  /** Called after the Work row is committed, outside the transaction; a failure is logged and never reaches the caller. */
+  private notifyAutoWorkFinished(workId: string, state: "completed" | "cancelled"): void {
+    void this.autoWork.onWorkFinished(workId, state).catch((error) => {
+      console.warn("[owl-core] Could not tell the automatic Work source that a Work finished", workId, error);
+    });
+  }
+
+  /** Hands one signal to automatic Work creation; used by the triggers and by tests. */
+  public receiveAutoWorkSignal(signal: AutoWorkSignal): ReturnType<AutoWorkService["receive"]> {
+    return this.autoWork.receive(signal);
+  }
+
+  /** The settings screen's data; `version` is the DB switches' version, which `updateAutoWorkSettings` expects back. */
+  public getAutoWorkSettings(): { version: number; data: ReturnType<typeof buildAutoWorkSettingsData> } {
+    const settings = this.readAutoWorkSettings();
+    // The global part needs no Project's file; "" names none, so it reads defaults.json, local.json and the global switch only.
+    const globalConfig = this.autoWorkConfig.effective("", autoWorkDbToggle(settings, ""));
+    const files = {
+      defaults: `${AUTO_WORK_RULES_DIR}/defaults.json`,
+      local: `${AUTO_WORK_RULES_DIR}/local.json`,
+      projects_dir: `${AUTO_WORK_RULES_DIR}/projects`,
+    };
+    const data = buildAutoWorkSettingsData(
+      { db: this.db, store: this.autoWorkStore, loader: this.autoWorkConfig, settings, now: this.autoWorkNow() },
+      globalConfig,
+      files,
+    );
+    return { version: settings?.version ?? 0, data };
+  }
+
+  public async updateAutoWorkSettings(
+    request: CommandRequest<JsonObject>,
+  ): Promise<CommandResponse<ReturnType<typeof buildAutoWorkSettingsData>>> {
+    const payload = request.payload as { enabled?: boolean | null; projects?: Record<string, { enabled: boolean | null }> };
+    const language = ownerLanguage(this.db);
+    const response = await this.runCommand(request, {
+      type: "settings.auto_work_updated",
+      payload: { kind: "auto_work_settings_updated", schema_version: "1.0.0" },
+    }, (transaction) => {
+      const current = this.readAutoWorkSettings();
+      const currentVersion = current?.version ?? 0;
+      if (request.expected_version !== currentVersion) throw versionConflict(request.expected_version, currentVersion);
+      const projects = { ...(current?.projects ?? {}) };
+      for (const [projectId, change] of Object.entries(payload.projects ?? {})) {
+        if (!transaction.get("SELECT id FROM projects WHERE id = ?", projectId)) throw projectNotFound(projectId, language);
+        if (change.enabled === null) delete projects[projectId];
+        else projects[projectId] = { enabled: change.enabled };
+      }
+      const nextVersion = currentVersion + 1;
+      const next: AutoWorkSettingsValue = {
+        schema_version: "1.0.0",
+        version: nextVersion,
+        enabled: payload.enabled === undefined ? current?.enabled ?? null : payload.enabled,
+        projects,
+      };
+      const now = utcNow();
+      ensureOwner(transaction, DEFAULT_OWNER_ID, now);
+      transaction.run(
+        `INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
+        "auto_work", DEFAULT_OWNER_ID, next.schema_version, JSON.stringify(next), now,
+      );
+      return { data: {}, version: nextVersion };
+    });
+    this.autoWork.reconfigure();
+    return { request_id: response.request_id, data: this.getAutoWorkSettings().data, version: response.version };
+  }
+
+  public listAutoWorkEvents(filter: AutoWorkEventFilter = {}): { items: ReturnType<typeof toAutoWorkEventView>[]; next_offset: number | null } {
+    const limit = filter.limit ?? AUTO_WORK_LIST_LIMIT;
+    const offset = filter.offset ?? 0;
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > AUTO_WORK_LIST_LIMIT) {
+      throw validationError(`The history limit must be an integer between 1 and ${AUTO_WORK_LIST_LIMIT}.`, { field: "limit" });
+    }
+    if (!Number.isSafeInteger(offset) || offset < 0) throw validationError("The history offset must be a non-negative integer.", { field: "offset" });
+    // One extra row tells whether another page follows.
+    const rows = this.autoWorkStore.listEvents({ ...filter, limit: limit + 1, offset });
+    const page = rows.slice(0, limit);
+    return { items: page.map((event) => toAutoWorkEventView(this.db, event)), next_offset: rows.length > limit ? offset + limit : null };
+  }
+
+  public getAutoWorkEvent(id: string): ReturnType<typeof toAutoWorkEventDetailView> | null {
+    const event = this.autoWorkStore.getEvent(id);
+    return event ? toAutoWorkEventDetailView(this.db, event) : null;
+  }
+
+  /** Runs the Project's GitHub fetch or scheduled check once; the events it recorded are what the caller sees. */
+  public async runAutoWorkNow(projectId: string, what: "github" | "scheduled_check"): Promise<{ project_id: string; what: string; events: ReturnType<typeof toAutoWorkEventView>[] }> {
+    if (!this.db.get("SELECT id FROM projects WHERE id = ?", projectId)) throw projectNotFound(projectId, ownerLanguage(this.db));
+    // The handler names the events it recorded; a "newer than before" query would drop same-millisecond ids and mix in other runs.
+    const results = await this.autoWork.runAutoWorkNow(what, projectId);
+    const events = results.flatMap(({ event_id }) => this.autoWorkStore.getEvent(event_id) ?? []);
+    return { project_id: projectId, what, events: events.map((event) => toAutoWorkEventView(this.db, event)) };
+  }
+
+  private autoWorkNow(): Date {
+    return this.options.autoWork?.clock?.now() ?? new Date();
+  }
+
+  /** A failure notice from the HTTP API (design 3.2.1): judged now, and the history row it left is returned. */
+  public async receiveAutoWorkNotice(request: CommandRequest): Promise<{ data: JsonObject; version: number }> {
+    const signal = readFailureNotice(request.payload, new Date());
+    if (!this.db.get("SELECT 1 FROM projects WHERE id = ?", signal.project_id)) throw projectNotFound(signal.project_id, ownerLanguage(this.db));
+    const { event_id } = await this.autoWork.receive(signal);
+    return { data: this.autoWorkEventView(event_id), version: 0 };
+  }
+
+  /** The history row without its `detail`, with the names a person needs to find the Work it made or repeated. */
+  private autoWorkEventView(eventId: string): JsonObject {
+    const event = new AutoWorkStore(this.db).getEvent(eventId);
+    if (!event) throw notFound("auto_work_event", eventId);
+    const names = this.db.get<Record<string, unknown>>(
+      `SELECT p.name AS project_name, w.display_number AS work_display_number, w.title AS work_title, w.state AS work_state,
+              d.display_number AS duplicate_of_work_display_number
+         FROM auto_work_events e
+         JOIN projects p ON p.id = e.project_id
+         LEFT JOIN works w ON w.id = e.work_id
+         LEFT JOIN works d ON d.id = e.duplicate_of_work_id
+        WHERE e.id = ?`,
+      eventId,
+    );
+    const { detail: _detail, ...view } = event;
+    return { ...view, ...names } as unknown as JsonObject;
   }
 
   public getModelSettings(): { version: number; roles: readonly RoleModelSetting[] } {
@@ -9137,6 +9334,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
                 lessons: verdict.lessons.map(normalizeLesson),
               }, verdict.unaddressed_backlog_items.map((entry) => entry.item_id));
               if (completed) {
+                this.notifyAutoWorkFinished(workId, "completed");
                 await this.proposeRulesFromMetrics(workId);
                 if (verdict.lessons.length > 0) {
                   this.scheduleLearningRun(`Work ${workId}`);
@@ -15685,10 +15883,6 @@ class ReplayCommand extends Error {
     super("idempotent command replay");
     this.name = "ReplayCommand";
   }
-}
-
-function localDayKey(date: Date): string {
-  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
 }
 
 /** Ids of the Tasks the trigger names as partial_repeated. */

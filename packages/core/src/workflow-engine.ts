@@ -57,8 +57,8 @@ import { EXTERNAL_BLOCKER_EVENT, reportedExternalBlocker, type ExternalBlocker }
 import { registerReviewBacklogInTransaction, settleWorkBacklogOnCompletionInTransaction } from "./review-backlog.js";
 import { assertAgentRunNotStopped, isAgentRunStopped, isStoppedAgentStatus } from "./agent-run-stop.js";
 import { clearPausedReviewerWait, readPausedReviewerWait, recordPausedReviewerWait } from "./provider-pause-reviewer-wait.js";
-import { agentCliNames, installedAgentCliMatches, listProcesses, planSubagentReconciliation } from "./subagent-watcher.js";
-import { evaluateWorkerCompletion, goalOnlyShortfallReport, type WorkerChild } from "./task-completion-gate.js";
+import { agentCliNames, installedAgentCliMatches, listProcesses, passThroughNames, planSubagentReconciliation } from "./subagent-watcher.js";
+import { evaluateWorkerCompletion, goalOnlyShortfallReport, observedSubagentsNeedingIntegration, type ObservedSubagent, type WorkerChild } from "./task-completion-gate.js";
 import { isNonBlankReason, type GoalShortfall } from "../../shared/dist/acceptance-criteria.js";
 import { goalCriterionIds, goalShortfallsFromReport, goalShortfallsOfWork, recordTaskGoalShortfalls, replaceTaskGoalShortfalls } from "./goal-shortfalls.js";
 import { NO_CORE_ACTIVITY, type CoreActivityReporter } from "./core-activity.js";
@@ -555,7 +555,7 @@ export class WorkflowEngine {
         "SELECT id, work_id, task_id, pid, origin FROM agent_runs WHERE hook_agent_id IS NULL AND status IN ('launch_pending','spawned','running','cancel_requested')",
       );
       if (runs.length === 0) return;
-      const plan = planSubagentReconciliation(processes, runs, agentCliNames(), installedAgentCliMatches);
+      const plan = planSubagentReconciliation(processes, runs, agentCliNames(), installedAgentCliMatches, passThroughNames());
       const runById = new Map(runs.map((run) => [run.id, run]));
       for (const runId of plan.exited) {
         const run = runById.get(runId);
@@ -596,8 +596,8 @@ export class WorkflowEngine {
             transaction.run(
               `INSERT INTO agent_runs
                  (id, work_id, task_id, parent_agent_id, role, origin, provider, model, status, label, pid,
-                  process_start_time, process_cmdline_sha256, started_at, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, 'executor', 'observed', ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)`,
+                  process_start_time, process_cmdline_sha256, started_at, created_at, updated_at, tool_program)
+                 VALUES (?, ?, ?, ?, 'executor', 'observed', ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)`,
               runId,
               parent.work_id,
               parent.task_id,
@@ -611,6 +611,7 @@ export class WorkflowEngine {
               identity.process_start_time ?? now,
               now,
               now,
+              found.tool_program,
             );
             return { agent_run_id: runId };
           },
@@ -1823,12 +1824,12 @@ export class WorkflowEngine {
     await this.scanSubagents();
     const type = taskType ?? this.db.get<{ type: string }>("SELECT type FROM tasks WHERE id = ?", taskId)?.type;
     // Observed children can sit under the Worker or under any of its descendants (e.g. a dispatched executor).
-    const observed = this.db.all<{ id: string; status: string }>(
+    const observed = this.db.all<ObservedSubagent & { status: string }>(
       `WITH RECURSIVE tree(id) AS (
          SELECT id FROM agent_runs WHERE parent_agent_id = ?
          UNION SELECT r.id FROM agent_runs r JOIN tree ON r.parent_agent_id = tree.id
        )
-       SELECT r.id, r.status FROM agent_runs r JOIN tree ON tree.id = r.id WHERE r.origin = 'observed'`,
+       SELECT r.id, r.status, r.parent_agent_id, r.provider, r.hook_agent_id, r.tool_program FROM agent_runs r JOIN tree ON tree.id = r.id WHERE r.origin = 'observed'`,
       agentRunId,
     );
     const children: WorkerChild[] = [
@@ -1837,7 +1838,7 @@ export class WorkflowEngine {
     ];
     return evaluateWorkerCompletion(result.report, {
       hybrid: type !== "design" && hybridAtLaunch,
-      delegated_work_detected: observed.length > 0,
+      delegated_work_detected: observedSubagentsNeedingIntegration(result.report, observed).length > 0,
       children,
       goal_criterion_ids: goalCriterionIds(this.storedCriteriaOf(taskId)),
     });

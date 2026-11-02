@@ -1,0 +1,17 @@
+{
+  "id": 100,
+  "node_id": "MDEyOklzc3VlQ29tbWVudDE=",
+  "url": "https://api.github.com/repos/octocat/Hello-World/issues/comments/100",
+  "html_url": "https://github.com/octocat/Hello-World/issues/1347#issuecomment-100",
+  "body": "@owl please take a look at this.",
+  "user": {
+    "login": "octocat",
+    "id": 1,
+    "type": "User",
+    "site_admin": false
+  },
+  "created_at": "2026-06-01T10:05:00Z",
+  "updated_at": "2026-06-01T10:05:00Z",
+  "issue_url": "https://api.github.com/repos/octocat/Hello-World/issues/1347",
+  "author_association": "OWNER"
+}

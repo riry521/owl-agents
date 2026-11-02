@@ -1249,6 +1249,131 @@ export interface KnowledgeAutomationSettingsData extends KnowledgeAutomationSett
   time_zone: string;
 }
 
+// ---- Automatic Work creation ----------------------------------------------
+
+export type AutoWorkSource = 'failure_notice' | 'scheduled_check' | 'github';
+export type AutoWorkVerdict =
+  | 'judging' | 'created' | 'duplicate' | 'below_threshold' | 'daily_cap' | 'unauthorized'
+  | 'no_rule' | 'disabled' | 'not_worth' | 'judge_failed';
+export type AutoWorkEnabledFrom = 'db' | 'project_file' | 'local_file' | 'defaults';
+export type AutoWorkRuleOrigin = 'defaults' | 'local' | 'project';
+
+export interface AutoWorkEnabled {
+  effective: boolean;
+  from: AutoWorkEnabledFrom;
+}
+
+export interface AutoWorkRule {
+  id: string;
+  source: AutoWorkSource;
+  kinds: string[];
+  min_occurrences: number;
+  window_minutes: number;
+  action: 'draft' | 'start';
+  size: 'small' | 'normal' | 'large' | null;
+  disabled: boolean;
+  origin: AutoWorkRuleOrigin;
+  overridden_fields: string[];
+}
+
+export interface AutoWorkListState {
+  since: string | null;
+  last_polled_at: string | null;
+  last_completed_at: string | null;
+  last_error: string | null;
+  pending_items: number;
+  failed_items: number;
+}
+
+export interface AutoWorkProjectSettings {
+  project_id: string;
+  project_name: string | null;
+  enabled: AutoWorkEnabled;
+  config_file_present: boolean;
+  scheduled_check: { times: string[]; items: string[]; next_run_at: string | null; last_run_at: string | null };
+  watch: { logs: number; commands: number; last_error: string | null };
+  github: {
+    repo: string | null;
+    poll_minutes: number;
+    max_items_per_poll: number;
+    since_margin_seconds: number;
+    allowed_users: string[];
+    require_labels: string[];
+    mention: string | null;
+    last_polled_at: string | null;
+    last_error: string | null;
+    lists: { issues: AutoWorkListState; comments: AutoWorkListState };
+  };
+  rules: AutoWorkRule[];
+  today: { created: number; cap: number };
+}
+
+export interface AutoWorkSettings {
+  enabled: AutoWorkEnabled;
+  judge_role: string | null;
+  limits: {
+    max_works_per_day: number | null;
+    max_works_per_day_all: number | null;
+    day_start_time: string | null;
+    cooldown_hours: number | null;
+  };
+  config_error: string | null;
+  files: { defaults: string; local: string | null; projects_dir: string };
+  today: { day_key: string | null; created_all: number; cap_all: number | null };
+  projects: AutoWorkProjectSettings[];
+}
+
+export interface AutoWorkEventView {
+  id: string;
+  project_id: string;
+  project_name: string | null;
+  source: AutoWorkSource;
+  kind: string;
+  rule_id: string | null;
+  title: string;
+  verdict: AutoWorkVerdict;
+  verdict_reason: string;
+  work_id: string | null;
+  work_display_number: number | null;
+  work_title: string | null;
+  work_state: string | null;
+  duplicate_of_work_id: string | null;
+  duplicate_of_work_display_number: number | null;
+  duplicate_of_event_id: string | null;
+  action: 'draft' | 'start' | null;
+  action_error: string | null;
+  github_repo: string | null;
+  github_issue_number: number | null;
+  github_author: string | null;
+  github_url: string | null;
+  github_comment_url: string | null;
+  github_pr_url: string | null;
+  occurred_at: string;
+  created_at: string;
+}
+
+export interface AutoWorkEventDetail extends AutoWorkEventView {
+  detail: string;
+  judge_json: unknown | null;
+  dedupe_key: string;
+  day_key: string;
+  github_updated_at: string | null;
+}
+
+export interface AutoWorkEventFilter {
+  projectId?: string;
+  source?: string;
+  verdict?: string;
+  offset?: number;
+  limit?: number;
+}
+
+export interface AutoWorkRunResult {
+  project_id: string;
+  what: string;
+  events: AutoWorkEventView[];
+}
+
 // ---- Usage reporting ------------------------------------------------------
 
 export type TokenUsagePeriod = 'today' | '7d' | '30d';

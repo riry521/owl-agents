@@ -7,6 +7,8 @@ import type {
   ReviewerRunRequest as CoreReviewerRunRequest,
   WorkerRunRequest as CoreWorkerRunRequest,
   SkillFeedback,
+  AutoWorkJudgmentRequest,
+  AutoWorkJudgmentRunResult,
   DecisionAnswerTriageRequest,
   DecisionAnswerTriageRunResult,
   DecisionExplanationRequest,
@@ -76,5 +78,6 @@ export interface RuntimeAgentRunner extends CoreAgentRunner {
   runDecisionAnswerTriage?(request: DecisionAnswerTriageRequest): Promise<DecisionAnswerTriageRunResult>;
   /** Set by a runner that wraps another: whether the wrapped runner can triage. A runner with its own method may omit it. */
   decisionAnswerTriageAvailable?(): Promise<boolean>;
+  runAutoWorkJudgment?(request: AutoWorkJudgmentRequest): Promise<AutoWorkJudgmentRunResult>;
   runFinalReport?(request: FinalReportRequest): Promise<FinalReportRunResult>;
 }

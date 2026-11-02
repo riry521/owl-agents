@@ -250,7 +250,65 @@ curl http://localhost:3787/api/v1/works
 ### メモリとルール
 
 - **owl-memory**：エージェントは読み取り専用の`owl-memory` MCPサーバー（`index`、`page`、`search`）で知識ページを読みます。司書（Librarian）がページを整理します。
-- **ルールのGit追跡**：ルールファイルは`rules/`にありますが、Gitが追跡するのは同梱の既定値（`rules/system/defaults.yaml`、`safety.yaml`、`owl-defaults.yaml`と`rules/role/advisor-defaults.yaml`）だけです。追加・承認したルールはローカルに残ります。Projectのルール（`rules/project/{project_id}.yaml`、`level: project`）も同じです。書けるのは`instruction`だけで、そのProjectのWorkの全役割と、そのProjectのウィンドウのAdvisorにだけ渡ります。編集はホットリロードされます。
+- **ルールのGit追跡**：ルールファイルは`rules/`にありますが、Gitが追跡するのは同梱の既定値（`rules/system/defaults.yaml`、`safety.yaml`、`owl-defaults.yaml`と`rules/role/advisor-defaults.yaml`、自動Work作成用の`rules/auto-work/defaults.json`）だけです。追加・承認したルールはローカルに残ります。Projectのルール（`rules/project/{project_id}.yaml`、`level: project`）も同じです。書けるのは`instruction`だけで、そのProjectのWorkの全役割と、そのProjectのウィンドウのAdvisorにだけ渡ります。編集はホットリロードされます。
+
+## 自動でWorkを作る
+
+対応が必要なことが起きたとき、OwlがWorkを自動で作れます。既定ではオフです。作られるWorkは、ルールに `start` とない限り下書き（メモ）で、概要の末尾に由来が付きます。
+
+きっかけは3種類です。
+
+- **失敗や停止の知らせ。** 見張っているプロセスの失敗や停止、ログのエラー行（`watch.logs`、`watch.commands`）、または `POST /api/v1/auto-work/notices` に送られた知らせ。
+- **定期の見回り。** Projectごとに1日1回（`scheduled_check.times`）、夜間テストの失敗と、たまった未着手のバックログを調べます。
+- **GitHub。** Projectのリポジトリにできた新しいIssue、Issueのコメント、PRのコメント。`gh` CLIで読みます（先に `gh auth login` でログインします）。コメントは、`mention` の文字列（既定は `@owl`）を含むものだけが対象です。
+
+どのきっかけも2段階で判定します。1段目は機械的なルール（有効か、許可された作者か、重複、回数、1日の上限）、2段目は `judge_role` の役割（既定は `manager`）によるAI判定です。モデルはモデル設定から選ばれます。
+
+### オンにする手順
+
+1. 設定 → 自動 Work 作成を開き、全体と、使いたいProjectをオンにします。このスイッチはデータベースに保存され、ファイルより優先されます。ファイルの `local.json` や `projects/<project_id>.json` に `"enabled": true` と書いても構いません。
+2. 下の設定ファイルを書きます（`<project_id>` はProjectのULIDです）。
+3. 同じ画面の「今すぐ見回る」（または `POST /api/v1/auto-work/projects/<project_id>/run`）でProjectを1回確かめます。履歴タブに、何が起きたかとその理由が出ます。
+
+### 設定ファイル
+
+`rules/auto-work/defaults.json` はgitで管理する共通の既定値です（オフで、個人の値は入っていません）。自分の値は、gitが無視する次の2つに書きます。`rules/auto-work/local.json`（全Project共通）と `rules/auto-work/projects/<project_id>.json`（1つのProject）です。優先順位は、データベースのスイッチ > `projects/<id>.json` > `local.json` > `defaults.json` です。ファイルを変えると自動で読み直します。重ね方の詳細は [docs/operations.md](docs/operations.md#automatic-work-creation) にあります。
+
+`projects/<project_id>.json` の例:
+
+```json
+{
+  "enabled": true,
+  "scheduled_check": { "times": ["08:30"] },
+  "limits": { "max_works_per_day": 2 },
+  "watch": {
+    "logs": [{ "path": "/path/to/app.log", "pattern": "ERROR|FATAL", "kind": "log_error" }],
+    "commands": [{ "argv": ["systemctl", "--user", "is-active", "app"], "interval_minutes": 5, "kind": "process_stopped" }]
+  },
+  "github": {
+    "repo": "owner/name",
+    "allowed_users": ["@me", "collaborator-login"],
+    "require_labels": ["owl"]
+  },
+  "rules": [
+    { "id": "failure-notice", "min_occurrences": 1 },
+    { "id": "github-issue", "action": "start" },
+    { "id": "deploy-failed", "source": "failure_notice", "kinds": ["process_failed"], "min_occurrences": 1, "window_minutes": 0, "action": "draft", "size": "small", "intent": "デプロイのコマンドが失敗したら直す。" }
+  ]
+}
+```
+
+`local.json` には `github.repo` 以外の同じキーを書けます（例: `{ "limits": { "cooldown_hours": 12 } }`）。
+
+### GitHubからWorkを作れる人
+
+`github.allowed_users` にあるloginだけです。`require_labels` を書くと、そのラベルがすべて付いた件だけになります。既定は `["@me"]` で、`@me` は `gh` にログインしているアカウント本人を指します。実行時に解決するので、ファイルに名前は残りません。Botは常に拒否します。ほかの人の件は、本文を残さず `unauthorized` として記録します。`@me` を解決できないときは、その回の取得を行いません。
+
+### 上限と下書き
+
+- 1日に作るWorkは、Projectごとに最大3件（`limits.max_works_per_day`）、全体で最大10件（`limits.max_works_per_day_all`）です。日の区切りは `limits.day_start_time`（既定 `00:00`）です。同じ問題は、`limits.cooldown_hours`（既定24）の間、またはそのWorkが終わるまで、もう一度作りません。
+- ルールは既定で下書きを作ります（`"action": "draft"`）。すぐ始めたいルールには `"action": "start"` を書きます。
+- 設定ファイルには `token`、`secret`、`password`、`api_key`、`model`、`provider` を含むキーを置けません。
 
 ## Web UI
 
@@ -272,7 +330,7 @@ Advisor の画面は窓に分かれていて、窓ごとに別の会話を持ち
 
 プロジェクトの窓は、窓の一覧でドラッグして並べ替えられます。並びは保存されます。
 
-一覧の窓に点が付いているときは、まだ読んでいない Advisor のメッセージがあります。既読の状態はサーバーが持つので、どの端末でも同じ点が出て、その窓を開くと消えます。Advisor がターンを処理している間は、送信ボタンの代わりに停止ボタンが出ます。押すとそのターンを中断できます（Claude と Codex のどちらでも使えます）。
+一覧の窓に点が付いているときは、まだ読んでいない Advisor のメッセージがあります。既読の状態はサーバーが持つので、どの端末でも同じ点が出て、その窓を開くと消えます。Advisor がターンを処理している間は、送信ボタンの代わりに停止ボタンが出ます。押すとそのターンを中断できます（Claude と Codex のどちらでも使えます）。停止ボタンは送信ボタンと同じく赤いグラデーションです。窓のメニューの隣にあるゴミ箱ボタンで、その窓の会話を1回の操作で消せます。
 
 プロジェクトの窓をオン・オフにするには、**Projects** を開き、そのプロジェクトの **編集** を押して、**Advisorの窓を使う** のスイッチを切り替え、**保存** を押します。チャンネルを連携したプロジェクトは、スイッチがオフでも一覧に残ります。
 

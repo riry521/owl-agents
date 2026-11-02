@@ -9,12 +9,14 @@ import {
   installedAgentCliMatches,
   listProcesses,
   modelFromArgs,
+  passThroughNames,
   planSubagentReconciliation,
   subagentLabel,
+  toolProgramOf,
 } from "../../packages/core/dist/subagent-watcher.js";
 import { validateReportEnvelope } from "../../packages/agent-runtime/dist/index.js";
-import { WORKER_REPORT_SCHEMA } from "../../packages/agent-runtime/dist/worker.js";
-import { renderOutputTemplate } from "../../packages/agent-runtime/dist/role-contract.js";
+import { DESIGNER_REPORT_SCHEMA, WORKER_REPORT_SCHEMA } from "../../packages/agent-runtime/dist/worker.js";
+import { providerSchema, renderOutputTemplate } from "../../packages/agent-runtime/dist/role-contract.js";
 import { evaluateWorkerCompletion } from "../../packages/core/dist/task-completion-gate.js";
 import { command, createTestCore } from "../helpers/core.mjs";
 import { repoRoot } from "../helpers/paths.mjs";
@@ -84,6 +86,59 @@ test("process tree reconciliation finds nested agent CLIs of any provider under 
     ],
   );
   assert.deepEqual([...plan.exited].sort(), ["RUN_GONE", "RUN_REUSED"]);
+});
+
+test("an agent CLI started inside a non-shell program records that program; shells, launchers and agent CLIs in between record none", () => {
+  const processes = [
+    { pid: 200, ppid: 1, args: "claude -p --output-format stream-json --verbose" },
+    { pid: 210, ppid: 200, args: "/bin/bash -c python3 /opt/tools/edit-team run" },
+    { pid: 211, ppid: 210, args: "python3 /opt/tools/edit-team run" },
+    { pid: 212, ppid: 211, args: "claude -p" },
+    { pid: 220, ppid: 200, args: "/bin/zsh -c node scripts/review.mjs" },
+    { pid: 221, ppid: 220, args: "node scripts/review.mjs" },
+    { pid: 222, ppid: 221, args: "codex exec" },
+    { pid: 230, ppid: 200, args: "/bin/zsh -c claude -p hi" },
+    { pid: 231, ppid: 230, args: "claude -p" },
+    { pid: 240, ppid: 200, args: "codex exec" },
+    { pid: 250, ppid: 200, args: "/bin/zsh -c timeout 600 npx claude -p" },
+    { pid: 251, ppid: 250, args: "timeout 600 npx claude -p" },
+    { pid: 252, ppid: 251, args: "node /opt/homebrew/bin/npx claude -p" },
+    { pid: 253, ppid: 252, args: "sh -c claude -p" },
+    { pid: 254, ppid: 253, args: "claude -p" },
+    { pid: 260, ppid: 200, args: "/bin/zsh -c env A=1 claude -p" },
+    { pid: 261, ppid: 260, args: "/usr/bin/env A=1 claude -p" },
+    { pid: 262, ppid: 261, args: "claude -p" },
+    { pid: 300, ppid: 1, args: "node /opt/homebrew/bin/codex exec --json" },
+    { pid: 301, ppid: 300, args: "/opt/codex/vendor/bin/codex exec --json" },
+    { pid: 310, ppid: 301, args: "/bin/bash -c claude -p" },
+    { pid: 311, ppid: 310, args: "claude -p" },
+  ];
+  const runs = [
+    { id: "RUN_CLAUDE", pid: 200, origin: null },
+    { id: "RUN_CODEX", pid: 300, origin: null },
+  ];
+  const installed = (name, path) => name === "codex" && ["/opt/homebrew/bin/codex", "/opt/codex/vendor/bin/codex"].includes(path);
+  const plan = planSubagentReconciliation(processes, runs, names, installed);
+  const found = plan.detected.map((entry) => [entry.pid, entry.parent_run_id, entry.tool_program]);
+  for (const expected of [
+    [212, "RUN_CLAUDE", "edit-team"],
+    [222, "RUN_CLAUDE", "review"],
+    [231, "RUN_CLAUDE", null],
+    [240, "RUN_CLAUDE", null],
+    [254, "RUN_CLAUDE", null],
+    [262, "RUN_CLAUDE", null],
+    [311, "RUN_CODEX", null],
+  ]) assert.deepEqual(found.find((entry) => entry[0] === expected[0]), expected);
+  assert.equal(found.length, 7);
+
+  const passThrough = passThroughNames({});
+  assert.equal(toolProgramOf("python3 -c import subprocess", names, installed, passThrough), "python3");
+  assert.equal(toolProgramOf("make review", names, installed, passThrough), "make");
+  assert.equal(toolProgramOf("python3 /tmp/we!rd", names, installed, passThrough), "unknown");
+  assert.equal(toolProgramOf("rtk proxy claude -p", names, installed, passThrough), "rtk");
+  const extra = passThroughNames({ OWL_SUBAGENT_PASSTHROUGH_NAMES: "rtk, bad name" });
+  assert.equal(toolProgramOf("rtk proxy claude -p", names, installed, extra), null);
+  assert.equal(extra.has("bad name"), false);
 });
 
 test("installed CLI paths and symlinks count while temporary scripts do not", async (t) => {
@@ -274,6 +329,25 @@ test("own subagent use is declared in the report schema, template and validation
   const withDeclaration = { ...gateReport({}, { status: "passed", evidence: "ok", required: true }), delegation: { decomposition: "x", delegated: [], retained: [], own_subagents_used: true } };
   assert.doesNotThrow(() => validateReportEnvelope(withDeclaration));
   assert.throws(() => validateReportEnvelope({ ...withDeclaration, delegation: { ...withDeclaration.delegation, own_subagents_used: "yes" } }));
+});
+
+test("tool subagents are declared in the report schema, template, provider schema and validation", () => {
+  for (const schema of [WORKER_REPORT_SCHEMA, DESIGNER_REPORT_SCHEMA]) {
+    assert.equal(schema.properties.delegation.properties.tool_subagents.type, "array");
+  }
+  assert.deepEqual(renderOutputTemplate(WORKER_REPORT_SCHEMA).delegation.tool_subagents, []);
+  const delegation = providerSchema(WORKER_REPORT_SCHEMA).properties.delegation;
+  assert.ok(delegation.required.includes("tool_subagents"));
+  assert.deepEqual(delegation.properties.tool_subagents.items.required, ["cli", "tool", "reason"]);
+  const base = gateReport({}, { status: "passed", evidence: "ok", required: true });
+  const withTools = (tool_subagents) => ({ ...base, delegation: { ...base.delegation, tool_subagents } });
+  const item = { cli: "claude", tool: "tools/review.sh", reason: "r" };
+  assert.doesNotThrow(() => validateReportEnvelope(withTools([item])));
+  assert.doesNotThrow(() => validateReportEnvelope(withTools([])));
+  assert.doesNotThrow(() => validateReportEnvelope(base));
+  for (const bad of [[{ ...item, reason: "  " }], [{ ...item, extra: "x" }], "claude"]) {
+    assert.throws(() => validateReportEnvelope(withTools(bad)), { reason: "report_delegation_invalid" });
+  }
 });
 
 test("a declaration or a hook detection alone makes integration_check mandatory", () => {

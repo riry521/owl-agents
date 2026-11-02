@@ -26,6 +26,7 @@ export type ApiErrorCode =
   | "knowledge_move_failed"
   | "invalid_query"
   | "invalid_state_transition"
+  | "invalid_state"
   | "retag_in_progress"
   | "work_not_archived"
   | "work_has_active_agents"
@@ -157,6 +158,7 @@ const HTTP_ERROR_TEXT: Partial<Record<ApiErrorCode, string>> = {
   validation_error: "The request is invalid. Check the supplied fields and try again.",
   invalid_query: "The query is invalid. Check its parameters and try again.",
   invalid_state_transition: "This action is not available in the current state.",
+  invalid_state: "This action is not available in the current state.",
   work_not_archived: "Archive the Work before continuing.",
   work_has_active_agents: "The Work still has active agents.",
   work_has_open_decisions: "Resolve the open Decisions before continuing.",

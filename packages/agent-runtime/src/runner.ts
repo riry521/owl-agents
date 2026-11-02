@@ -29,6 +29,7 @@ import {
 } from "./page-integration";
 import { buildTestSetupInvestigationPrompt, parseTestSetupResponse, testSetupProviderSchema, type TestSetupInvestigationRequest, type TestSetupInvestigationRunResult } from "./test-setup-investigation";
 import { buildFinalReportPrompt, finalReportProviderSchema, parseFinalReportResponse } from "./final-report";
+import { autoWorkJudgmentProviderSchema, buildAutoWorkJudgmentPrompt, parseAutoWorkJudgmentResponse } from "./auto-work-judgment";
 import { buildDecisionAnswerTriagePrompt, decisionAnswerTriageProviderSchema, parseDecisionAnswerTriageResponse } from "./decision-answer-triage";
 import { buildDecisionExplanationPrompt, decisionExplanationProviderSchema, parseDecisionExplanationResponse } from "./decision-explanation";
 import { buildProjectInvestigationPrompt, parseProjectInvestigationResponse, projectInvestigationProviderSchema, type ProjectInvestigationRequest, type ProjectInvestigationRunResult } from "./project-investigation";
@@ -90,6 +91,8 @@ import {
   isOwnerLanguage,
   parseAdvisorResponse as parseSharedAdvisorResponse,
   type OwnerLanguage,
+  type AutoWorkJudgmentRequest,
+  type AutoWorkJudgmentRunResult,
   type DecisionAnswerTriageRequest,
   type DecisionAnswerTriageRunResult,
   type DecisionExplanationRequest,
@@ -1645,6 +1648,47 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     }
   };
 
+  const runAutoWorkJudgment = async (input: AutoWorkJudgmentRequest): Promise<AutoWorkJudgmentRunResult> => {
+    const invocationId = input.invocation_id ?? invocationIdFactory();
+    let directory: string | undefined;
+    try {
+      // The model settings arrive nested, as for the Librarian. Flattening AutoWorkJudgmentRequest instead
+      // would change the shared type and Core's request for one reader; the runner unpacks it here.
+      const overrides = resolveOverrides({ ...input.model }, options);
+      directory = await mkdtemp(join(tmpdir(), "owl-auto-work-judgment-"));
+      const request = requestForProvider(
+        "manager",
+        invocationId,
+        buildAutoWorkJudgmentPrompt(input),
+        options,
+        undefined,
+        overrides.model,
+        overrides.adapter,
+        overrides.effort,
+        directory,
+        { ...overrides.env, OWL_PROVIDER_TIMEOUT_MS: String(input.timeout_ms) },
+        autoWorkJudgmentProviderSchema(),
+      );
+      const outcome = await runAndParse(
+        request,
+        await executeProviderWithPlanUsage(request),
+        (answer) => parseAutoWorkJudgmentResponse(answer),
+        resubmitLimitFor(),
+        executeProviderWithPlanUsage,
+      );
+      if (!outcome.ok) {
+        if (outcome.error instanceof OutputFormatError) return { ok: false, error: outcome.error.problem };
+        throw outcome.error;
+      }
+      return { ok: true, judgment: outcome.value };
+    } catch (error) {
+      const reason = error instanceof AgentRuntimeError ? error.reason : error instanceof Error ? error.message : String(error);
+      return { ok: false, error: /provider_timeout/u.test(reason) ? "timeout" : `provider_failed:${reason.slice(0, 200)}` };
+    } finally {
+      if (directory) await rm(directory, { recursive: true, force: true }).catch(() => undefined);
+    }
+  };
+
   const runFinalReport = async (input: FinalReportRequest): Promise<FinalReportRunResult> => {
     const invocationId = input.invocation_id ?? invocationIdFactory();
     let directory: string | undefined;
@@ -1699,6 +1743,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     runTestSetupInvestigation,
     runDecisionExplanation,
     runDecisionAnswerTriage,
+    runAutoWorkJudgment,
     runFinalReport,
     provider: observedProvider,
     cancelAgent: async (invocationId: string, force?: boolean) => {
@@ -1789,7 +1834,9 @@ export function createStubAgentRunner(): RuntimeAgentRunner {
   };
   // No runCurator: without a provider there is no Curator, and Core keeps
   // skill proposals queued instead of spending their attempts.
-  return { runManagerPlan, runDesigner, runWorker, runReviewer, runAdvisor, provider: undefined } as RuntimeAgentRunner;
+  return {
+    runManagerPlan, runDesigner, runWorker, runReviewer, runAdvisor, provider: undefined,
+  } as RuntimeAgentRunner;
 }
 
 

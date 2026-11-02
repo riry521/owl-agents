@@ -150,6 +150,7 @@ test('KnowledgeAutomationSection shows the next run of all three scheduled kinds
     '@/lib/model-presets': {},
     '@/components/OwnerInviteButton': { OwnerInviteButton: () => null }, '@/components/ModelPresetsBar': {},
     '@/components/FolderPickerDialog': {},
+    '@/components/AutoWorkEntryPanel': { AutoWorkEntryPanel: () => null },
   };
   const originalLoad = Module._load;
   Module._load = function (request, parent, isMain) {

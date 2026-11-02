@@ -70,6 +70,27 @@ export function listProcesses(): readonly ProcessEntry[] | null {
 
 const INTERPRETERS = new Set(["node", "nodejs", "bun", "deno", "python", "python3", "ruby", "npx", "bunx", "pnpm", "sh", "bash", "zsh"]);
 
+/** Shells pass a command on; a script run through one is still the agent's own launch. */
+export const DEFAULT_SHELL_NAMES: readonly string[] = ["sh", "bash", "zsh", "dash", "ksh", "fish"];
+
+/** Wrappers and package runners that only start the next program. */
+export const DEFAULT_LAUNCHER_NAMES: readonly string[] = [
+  "env", "timeout", "gtimeout", "nohup", "nice", "time", "stdbuf", "xargs", "caffeinate", "setsid",
+  "sandbox-exec", "bwrap", "codex-linux-sandbox", "npx", "pnpx", "bunx", "pnpm", "npm", "yarn", "uv", "uvx",
+];
+
+/** Only decides how a program's name is read; unlisted runtimes fall through to the last rule with the same result. */
+const SCRIPT_RUNTIMES = new Set(["node", "nodejs", "bun", "deno", "python", "python3", "ruby", "perl"]);
+
+/** Shells and launchers; extra names come from OWL_SUBAGENT_PASSTHROUGH_NAMES (comma separated). */
+export function passThroughNames(env: NodeJS.ProcessEnv = process.env): ReadonlySet<string> {
+  const extra = (env.OWL_SUBAGENT_PASSTHROUGH_NAMES ?? "")
+    .split(",")
+    .map((name) => name.trim().toLowerCase())
+    .filter((name) => /^[A-Za-z0-9._-]{1,64}$/u.test(name));
+  return new Set([...DEFAULT_SHELL_NAMES, ...DEFAULT_LAUNCHER_NAMES, ...extra]);
+}
+
 export type InstalledAgentCliCheck = (name: string, path: string) => boolean;
 
 const installedCliPaths = new Map<string, string | null>();
@@ -129,6 +150,34 @@ export function agentCliOf(args: string, names: ReadonlySet<string>, installedCl
   return names.has(scriptName) && (!script.includes("/") || installedCliMatches(scriptName, script)) ? scriptName : null;
 }
 
+/**
+ * The program a process between an AgentRun and an agent CLI stands for, or
+ * null when it only passes the command on. A name that is unsafe to store
+ * becomes "unknown" so prompt text never reaches the DB.
+ */
+export function toolProgramOf(
+  args: string,
+  names: ReadonlySet<string>,
+  installedCliMatches: InstalledAgentCliCheck,
+  passThrough: ReadonlySet<string>,
+): string | null {
+  const tokens = args.trim().split(/\s+/u);
+  if (tokens.length === 0 || tokens[0].length === 0) return null;
+  if (agentCliOf(args, names, installedCliMatches) !== null) return null;
+  const first = executableName(tokens[0]).toLowerCase();
+  if (passThrough.has(first)) return null;
+  let program = first;
+  if (SCRIPT_RUNTIMES.has(first)) {
+    const scriptIndex = tokens.findIndex((token, index) => index > 0 && !token.startsWith("-"));
+    const inline = tokens.slice(1, scriptIndex < 0 ? undefined : scriptIndex).some((token) => token === "-c" || token === "-e" || token === "--eval");
+    if (scriptIndex >= 0 && !inline) {
+      program = executableName(tokens[scriptIndex]).toLowerCase();
+      if (passThrough.has(program)) return null;
+    }
+  }
+  return /^[A-Za-z0-9._+-]{1,64}$/u.test(program) ? program : "unknown";
+}
+
 const SAFE_TOKEN = /^[A-Za-z0-9._:/@-]{1,80}$/u;
 
 /** `--model X`, `--model=X` or `-m X`; only a plain model-name token is kept. */
@@ -172,6 +221,8 @@ export interface DetectedSubagent {
   readonly provider: string;
   readonly model: string | null;
   readonly label: string;
+  /** First non-shell program between the owner and the CLI; null when started directly or via shells and launchers only. */
+  readonly tool_program: string | null;
 }
 
 export interface SubagentReconciliation {
@@ -191,6 +242,7 @@ export function planSubagentReconciliation(
   runs: readonly ActiveRunRef[],
   names: ReadonlySet<string>,
   installedCliMatches: InstalledAgentCliCheck,
+  passThrough: ReadonlySet<string> = passThroughNames({}),
 ): SubagentReconciliation {
   const byPid = new Map(processes.map((entry) => [entry.pid, entry]));
   const runByPid = new Map<number, ActiveRunRef>();
@@ -212,14 +264,15 @@ export function planSubagentReconciliation(
     if (provider === null) continue;
     const parent = byPid.get(entry.ppid);
     if (parent && agentCliOf(parent.args, names, installedCliMatches) === provider) continue;
-    const owner = nearestRun(entry, byPid, runByPid);
+    const owner = nearestRun(entry, byPid, runByPid, (args) => toolProgramOf(args, names, installedCliMatches, passThrough));
     if (!owner) continue;
     detected.push({
       pid: entry.pid,
-      parent_run_id: owner.id,
+      parent_run_id: owner.run.id,
       provider,
       model: modelFromArgs(entry.args),
       label: subagentLabel(provider, entry.args),
+      tool_program: owner.tool_program,
     });
   }
   return { detected, exited };
@@ -229,12 +282,15 @@ function nearestRun(
   entry: ProcessEntry,
   byPid: ReadonlyMap<number, ProcessEntry>,
   runByPid: ReadonlyMap<number, ActiveRunRef>,
-): ActiveRunRef | null {
+  programOf: (args: string) => string | null,
+): { run: ActiveRunRef; tool_program: string | null } | null {
   const seen = new Set<number>([entry.pid]);
+  let toolProgram: string | null = null;
   let current = byPid.get(entry.ppid);
   while (current && !seen.has(current.pid)) {
     const run = runByPid.get(current.pid);
-    if (run) return run;
+    if (run) return { run, tool_program: toolProgram };
+    toolProgram ??= programOf(current.args);
     seen.add(current.pid);
     if (current.ppid <= 1) return null;
     current = byPid.get(current.ppid);

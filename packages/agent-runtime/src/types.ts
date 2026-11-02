@@ -71,11 +71,20 @@ export interface RemainingIssue {
   readonly next_step: string;
 }
 
+/** An agent CLI that a tool the Worker ran started inside itself; Core does not count it as the Worker's subagent. */
+export interface ToolSubagent {
+  readonly cli: string;
+  readonly tool: string;
+  readonly reason: string;
+}
+
 /** A Worker record of how work was split, delegated, and retained. */
 export interface WorkerDelegation {
   readonly decomposition: string;
   /** The Worker used its own provider subagents/forks (not Owl dispatch). Optional so stored reports stay valid. */
   readonly own_subagents_used?: boolean;
+  /** Agent CLIs a tool started inside itself. Optional so stored reports stay valid. */
+  readonly tool_subagents?: readonly ToolSubagent[];
   readonly delegated: readonly {
     readonly child_id: string;
     readonly instruction: string;

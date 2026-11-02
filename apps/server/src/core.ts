@@ -1430,10 +1430,16 @@ interface ExternalCore {
   listCurationRuns?(query: JsonObject): { items: readonly unknown[]; next_cursor: string | null };
   getCurationRun?(id: string): unknown;
   listBacklogItems?(filter: { status?: string; project_id?: string; work_id?: string; limit?: number; offset?: number }): { items: readonly unknown[]; next_offset: number | null };
+  getAutoWorkSettings?(): { version: number; data: JsonObject };
+  updateAutoWorkSettings?(request: JsonObject): Promise<ExternalCommandResponse>;
+  listAutoWorkEvents?(filter: JsonObject): { items: readonly unknown[]; next_offset: number | null };
+  getAutoWorkEvent?(id: string): unknown;
+  runAutoWorkNow?(projectId: string, what: string): Promise<unknown>;
   dismissBacklogItems?(request: JsonObject): Promise<ExternalCommandResponse>;
   deleteBacklogItems?(request: JsonObject): Promise<ExternalCommandResponse>;
   issueBacklogWork?(request: JsonObject): Promise<ExternalCommandResponse>;
   linkBacklogItems?(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
+  receiveAutoWorkNotice?(request: JsonObject): Promise<ExternalCommandResponse>;
   getSkillSettings?(): unknown;
   setSkillSettings?(value: unknown): Promise<unknown>;
   getLanguage?(): Promise<OwnerLanguage>;
@@ -2579,6 +2585,53 @@ export class ExternalCoreAdapter implements CorePort {
     }
   }
 
+  getAutoWorkSettings(): { version: number; data: JsonObject } {
+    if (typeof this.core.getAutoWorkSettings !== "function") throw skillApiUnavailable("Automatic Work settings");
+    try {
+      return this.core.getAutoWorkSettings();
+    } catch (error) {
+      throw externalError(error, "getAutoWorkSettings");
+    }
+  }
+
+  async updateAutoWorkSettings(request: JsonObject): Promise<{ data: JsonObject; version: number }> {
+    if (typeof this.core.updateAutoWorkSettings !== "function") throw skillApiUnavailable("Automatic Work settings update");
+    try {
+      const response = await this.core.updateAutoWorkSettings(request);
+      return { data: response.data, version: response.version };
+    } catch (error) {
+      throw externalError(error, "updateAutoWorkSettings");
+    }
+  }
+
+  listAutoWorkEvents(filter: JsonObject): { items: unknown[]; next_offset: number | null } {
+    if (typeof this.core.listAutoWorkEvents !== "function") throw skillApiUnavailable("Automatic Work history");
+    try {
+      const result = this.core.listAutoWorkEvents(filter);
+      return { items: [...result.items], next_offset: result.next_offset };
+    } catch (error) {
+      throw externalError(error, "listAutoWorkEvents");
+    }
+  }
+
+  getAutoWorkEvent(id: string): unknown {
+    if (typeof this.core.getAutoWorkEvent !== "function") throw skillApiUnavailable("Automatic Work history lookup");
+    try {
+      return this.core.getAutoWorkEvent(id);
+    } catch (error) {
+      throw externalError(error, "getAutoWorkEvent");
+    }
+  }
+
+  async runAutoWorkNow(projectId: string, what: string): Promise<unknown> {
+    if (typeof this.core.runAutoWorkNow !== "function") throw skillApiUnavailable("Automatic Work run");
+    try {
+      return await this.core.runAutoWorkNow(projectId, what);
+    } catch (error) {
+      throw externalError(error, "runAutoWorkNow");
+    }
+  }
+
   async dismissBacklogItems(request: JsonObject): Promise<{ data: JsonObject; version: number }> {
     if (typeof this.core.dismissBacklogItems !== "function") throw skillApiUnavailable("Review backlog dismissal");
     try {
@@ -2596,6 +2649,16 @@ export class ExternalCoreAdapter implements CorePort {
       return { data: response.data, version: response.version };
     } catch (error) {
       throw externalError(error, "deleteBacklogItems");
+    }
+  }
+
+  async receiveAutoWorkNotice(request: JsonObject): Promise<{ data: JsonObject; version: number }> {
+    if (typeof this.core.receiveAutoWorkNotice !== "function") throw skillApiUnavailable("Automatic Work creation");
+    try {
+      const response = await this.core.receiveAutoWorkNotice(request);
+      return { data: response.data, version: response.version };
+    } catch (error) {
+      throw externalError(error, "receiveAutoWorkNotice");
     }
   }
 

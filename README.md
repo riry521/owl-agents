@@ -255,7 +255,65 @@ Details are in [docs/operations.md](docs/operations.md).
 ### Memory and rules
 
 - **owl-memory.** Agents read knowledge pages through the read-only `owl-memory` MCP server (`index`, `page`, `search`). A Librarian keeps the pages organized.
-- **Rules in Git.** Rule files live in `rules/`, but Git tracks only the shipped defaults (`rules/system/defaults.yaml`, `safety.yaml`, `owl-defaults.yaml` and `rules/role/advisor-defaults.yaml`). Rules you add or approve stay local, including project rules (`rules/project/{project_id}.yaml`, `level: project`). A project rule holds `instruction` rules only and reaches all roles of that Project's Works and the Advisor in that Project's window; edits are hot-reloaded.
+- **Rules in Git.** Rule files live in `rules/`, but Git tracks only the shipped defaults (`rules/system/defaults.yaml`, `safety.yaml`, `owl-defaults.yaml` and `rules/role/advisor-defaults.yaml`, and `rules/auto-work/defaults.json` for [automatic Work creation](#creating-works-automatically)). Rules you add or approve stay local, including project rules (`rules/project/{project_id}.yaml`, `level: project`). A project rule holds `instruction` rules only and reaches all roles of that Project's Works and the Advisor in that Project's window; edits are hot-reloaded.
+
+## Creating Works automatically
+
+Owl can create a Work by itself when something needs attention. It is off by default. Every Work it creates is a draft (memo) unless a rule says `start`, and the Work summary ends with where it came from.
+
+Three kinds of triggers feed it:
+
+- **Failure notices.** A failed or stopped process, or an error line in a log, that you watch (`watch.logs`, `watch.commands`), or a notice sent to `POST /api/v1/auto-work/notices`.
+- **Scheduled check.** Once a day per Project (`scheduled_check.times`), Owl looks for a failed nightly test and for open backlog items that have piled up.
+- **GitHub.** New Issues, Issue comments and PR comments in the Project's repository, read with the `gh` CLI (log in first with `gh auth login`). A comment is picked up only when it contains the `mention` text (default `@owl`).
+
+Each trigger goes through two stages: mechanical rules (enabled, allowed author, duplicate, count, daily cap), then an AI judgment by the `judge_role` role (default `manager`; its model comes from the model settings).
+
+### Turn it on
+
+1. Open Settings → Auto Work creation and switch it on for all Projects and for each Project you want. The switch is saved in the database and wins over the files. Or set `"enabled": true` in `local.json` / `projects/<project_id>.json`.
+2. Write the settings files below for the Project (`<project_id>` is the Project's ULID).
+3. Use "Run now" on the same page (or `POST /api/v1/auto-work/projects/<project_id>/run`) to check a Project once; the history tab shows what happened and why.
+
+### Configuration files
+
+`rules/auto-work/defaults.json` is tracked in git and holds the shared defaults (off, no personal values). Your own values go in two files that git ignores: `rules/auto-work/local.json` (all Projects) and `rules/auto-work/projects/<project_id>.json` (one Project). Priority: database switch > `projects/<id>.json` > `local.json` > `defaults.json`. Files are reloaded when they change. See [docs/operations.md](docs/operations.md#automatic-work-creation) for the layering rules.
+
+`projects/<project_id>.json`:
+
+```json
+{
+  "enabled": true,
+  "scheduled_check": { "times": ["08:30"] },
+  "limits": { "max_works_per_day": 2 },
+  "watch": {
+    "logs": [{ "path": "/path/to/app.log", "pattern": "ERROR|FATAL", "kind": "log_error" }],
+    "commands": [{ "argv": ["systemctl", "--user", "is-active", "app"], "interval_minutes": 5, "kind": "process_stopped" }]
+  },
+  "github": {
+    "repo": "owner/name",
+    "allowed_users": ["@me", "collaborator-login"],
+    "require_labels": ["owl"]
+  },
+  "rules": [
+    { "id": "failure-notice", "min_occurrences": 1 },
+    { "id": "github-issue", "action": "start" },
+    { "id": "deploy-failed", "source": "failure_notice", "kinds": ["process_failed"], "min_occurrences": 1, "window_minutes": 0, "action": "draft", "size": "small", "intent": "Fix the deploy command when it fails." }
+  ]
+}
+```
+
+`local.json` takes the same keys except `github.repo`, for example `{ "limits": { "cooldown_hours": 12 } }`.
+
+### Who may trigger a Work from GitHub
+
+Only the logins in `github.allowed_users` (and, with `require_labels`, only items that carry all those labels). The default is `["@me"]`: `@me` means the account `gh` is logged in as, resolved at run time, so no name is stored in the files. Bots are always refused. Items from other people are recorded as `unauthorized` without their text. If `@me` cannot be resolved, that poll is skipped.
+
+### Limits and drafts
+
+- At most 3 Works per Project per day (`limits.max_works_per_day`) and 10 in total (`limits.max_works_per_day_all`); the day starts at `limits.day_start_time` (default `00:00`). The same problem is not raised again within `limits.cooldown_hours` (default 24) or while its Work is still open.
+- Rules create drafts (`"action": "draft"`) by default. Set `"action": "start"` on a rule to start the Work at once.
+- Settings files cannot hold keys such as `token`, `secret`, `password`, `api_key`, `model` or `provider`.
 
 ## Web UI
 
@@ -277,7 +335,7 @@ On a wide screen the window list is a sidebar on the left. On a narrow screen, p
 
 You can reorder the Project windows by dragging them in the window list; the order is saved.
 
-A dot on a window in the list means it has Advisor messages you have not read. The server keeps the read state, so the dot is the same on every device and disappears once you open the window. While the Advisor is working on a turn, a stop button replaces the send button. Press it to interrupt the turn (Claude and Codex both support it).
+A dot on a window in the list means it has Advisor messages you have not read. The server keeps the read state, so the dot is the same on every device and disappears once you open the window. While the Advisor is working on a turn, a stop button replaces the send button. Press it to interrupt the turn (Claude and Codex both support it). The stop button is red like the send button. Next to the window menu, a trash button clears the window's conversation in one click.
 
 To turn a Project window on or off, open **Projects**, press **Edit** on the Project, switch **Use an Advisor window** on or off, and press **Save**. A Project that already has a channel bound stays in the list even when the switch is off.
 

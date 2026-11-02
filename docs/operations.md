@@ -715,6 +715,71 @@ imperative one-line subject (ASCII, at most 72 characters) in `verdict.commit_su
 
 Knowledge lives as pages under `<OWL_ROOT>/knowledge`. A SQLite index (`memory-index.sqlite` in `OWL_DATA_DIR`) is rebuilt from those files and can be rebuilt on demand with `POST /api/v1/memory/reindex` (Owner only); embeddings are optional (see the README). Agents read it through the `owl-memory` stdio MCP server (`apps/server/src/memory-mcp.ts`), which exposes three read-only tools: `index` (overview), `page` (open a page) and `search`. The Librarian integrates pending pages (`GET /api/v1/memory/pages/pending`, `POST /api/v1/memory/pages/integrate`) and runs daily at the times in the knowledge automation settings (`librarian_times`).
 
+## Automatic Work creation
+
+Owl can create Works from failure notices, a daily check per Project, and GitHub Issues and comments. See the README for the overview; this section covers the files, the API and the failure behaviour.
+
+### Configuration files
+
+| File | Tracked | Holds |
+|---|---|---|
+| `rules/auto-work/defaults.json` | git | Shared defaults with no personal values. `enabled` is `false`. |
+| `rules/auto-work/local.json` | no | Overrides for every Project. It cannot set `github.repo`. |
+| `rules/auto-work/projects/<project_id>.json` | no | Overrides for one Project (`<project_id>` is the Project's ULID). |
+| settings key `auto_work` | database | Only the `enabled` switch for all Projects and for each Project (`PUT /api/v1/auto-work/settings`). |
+
+Priority, highest first: database switch, `projects/<id>.json`, `local.json`, `defaults.json`. Nothing is written into a Project's own repository.
+
+How the layers combine:
+
+- A scalar comes from the highest layer that sets it.
+- An array (`scheduled_check.times`, `github.allowed_users`, `watch.logs` and so on) is replaced whole, never appended.
+- `github.comments` is overridden key by key.
+- `rules` are matched by `id`. A higher layer overrides only the fields it writes (`params` key by key). An `id` that only a higher layer has is a new rule and needs `source`, `kinds`, `min_occurrences`, `window_minutes`, `action`, `size` and `intent`. `"disabled": true` takes a rule out of matching; rules are never deleted, so history keeps its `rule_id`.
+- `judge_role`, `judge_timeout_seconds`, `candidate_limit`, `max_detail_chars`, `limits.max_works_per_day_all`, `limits.day_start_time` and `limits.alert_cooldown_minutes` are shared by all Projects. Only `defaults.json` and `local.json` may set them; a Project file that does is rejected.
+
+Files are validated when they are read: unknown keys, wrong types, a bad `HH:MM`, an invalid `pattern`, a relative `watch.logs[].path` or `cwd`, and any key containing `token`, `secret`, `password` or `api_key`, or named `model` or `provider`, are refused (the model comes from the model settings). `local.json` example: `{ "limits": { "cooldown_hours": 12 }, "github": { "mention": "@owl" } }`. A Project file example is in the README.
+
+The files are watched and reloaded after a change. If a file is invalid, Owl keeps using the last good content, the settings API returns `config_error`, and a `system.alert` (`auto_work_config_invalid`, then `auto_work_config_restored` when fixed) is raised. If `defaults.json` was never read, the feature stays off; Owl still starts.
+
+### Git
+
+`.gitignore` tracks only `rules/auto-work/defaults.json` in that directory (`!rules/auto-work/`, `rules/auto-work/*`, `!rules/auto-work/defaults.json`). `local.json` and `projects/` stay local; back them up with the rest of `OWL_ROOT`.
+
+### API
+
+All routes need the Owner (loopback, or `Authorization: Bearer <OWL_API_TOKEN>` from elsewhere). Advisor agent calls are not allowed.
+
+| Route | Purpose |
+|---|---|
+| `GET /api/v1/auto-work/settings` | Effective settings, per-Project state, rules with `origin` and `overridden_fields`, today's counts, `config_error`. Returns `version`. |
+| `PUT /api/v1/auto-work/settings` | Command envelope with `expected_version` and payload `{ "enabled": true, "projects": { "<id>": { "enabled": false } } }`. A Project's `enabled: null` removes its database override. 409 `version_conflict` on a stale version. |
+| `GET /api/v1/auto-work/events` | History, newest first. Query: `project_id`, `source`, `verdict`, `work_id`, `limit`, `offset`. |
+| `GET /api/v1/auto-work/events/<event_id>` | One record with `detail` and `judge_json`. 404 `not_found`. |
+| `POST /api/v1/auto-work/projects/<project_id>/run` | Body `{ "what": "github" \| "scheduled_check" }`. Runs one GitHub poll or one check now, even if the check already ran today. 409 `invalid_state` when the feature is off for the Project. |
+| `POST /api/v1/auto-work/notices` | Command envelope; payload `project_id`, `kind` (`process_failed`, `process_stopped` or `log_error`), `title`, and optionally `detail`, `dedupe_hint`, `occurred_at`, `exit_code`, `command`, `log_path`. The judgment is synchronous and the response is the history record (`verdict`, `work_id`). The same limits apply as for any trigger. |
+
+### History and verdicts
+
+Every signal is recorded, including the ones that create nothing. The `verdict` is one of `created`, `duplicate`, `below_threshold`, `daily_cap`, `unauthorized`, `no_rule`, `disabled`, `not_worth`, `judge_failed` (and `judging` while the AI is deciding), with a reason. `unauthorized` records keep no title or text. The same history is in Settings → Auto Work creation. When a Work from a GitHub item finishes, Owl comments on the Issue with the PR URL or the branch name, or with a cancellation notice.
+
+### GitHub
+
+Owl runs `gh` with only `PATH` and `HOME`, so it uses your `gh auth login`; it never reads or stores a token. It needs `gh` installed and logged in. `@me` in `github.allowed_users` is resolved with `gh api user`; if that fails, the whole poll is skipped (nobody is allowed). Logins are compared case-insensitively, bots are always refused, and `require_labels` must all be present. Comments on Issues need the `mention` text. Owl writes to GitHub only as Issue or PR comments.
+
+### When something fails
+
+| Case | Behaviour |
+|---|---|
+| `gh` missing, not logged in, rate limit | That list is not fetched, its `since` time does not advance, `last_error` is set and `auto_work_github_failed` is raised. The next poll retries from the same time. |
+| `gh` output too large, or an unexpected response | Same, with `last_error` `output_truncated` or `unexpected_response`. |
+| One item fails to process | It is retried on later polls up to `github.max_item_attempts`, then marked failed until the item is updated. |
+| AI judgment fails or times out (`judge_timeout_seconds`) | Recorded as `judge_failed`, no Work, no retry, alert raised. |
+| Starting the Work (`start`) fails | The draft stays; `action_error` is recorded and an alert is raised. |
+| GitHub comment fails | The Work stays; `action_error` is recorded and an alert is raised; no retry. |
+| Core stops during a judgment | At the next start the record becomes `judge_failed` (`interrupted`). |
+| One Project's check fails | The other Projects still run. |
+
 ## What rules are tracked in git
 
-`.gitignore` ignores `knowledge/`, `skills/` and `rules/` except the shipped defaults: `rules/system/defaults.yaml`, `rules/system/safety.yaml`, `rules/system/owl-defaults.yaml` and `rules/role/advisor-defaults.yaml`. Any other rule file (including everything under `rules/project/`), skill or knowledge note is local state and is not committed; back it up with the rest of `OWL_ROOT`.
+`.gitignore` ignores `knowledge/`, `skills/` and `rules/` except the shipped defaults: `rules/system/defaults.yaml`, `rules/system/safety.yaml`, `rules/system/owl-defaults.yaml` and `rules/role/advisor-defaults.yaml`, plus `rules/auto-work/defaults.json` for automatic Work creation. Any other rule file (including everything under `rules/project/`, and `rules/auto-work/local.json` and `rules/auto-work/projects/`), skill or knowledge note is local state and is not committed; back it up with the rest of `OWL_ROOT`.

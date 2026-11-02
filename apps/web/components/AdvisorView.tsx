@@ -8,7 +8,7 @@ import type { AdvisorSessionInfo, Message } from '@/lib/types';
 import { formatClock, formatDateTime, formatRelative } from '@/lib/format';
 import { useLocale } from '@/lib/i18n';
 import { AdvisorChannelPanel } from '@/components/AdvisorChannelPanel';
-import { SendIcon, StopIcon } from '@/components/icons';
+import { SendIcon, StopIcon, TrashIcon } from '@/components/icons';
 import { useView } from '@/lib/view-loader';
 import { replyArrived } from '@/lib/advisor-awaiting.mjs';
 import { DEFAULT_WINDOW_KEY, readThroughToSend, viaLabelKey } from '@/lib/advisor-windows.mjs';
@@ -304,21 +304,23 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
             {t('advisorWindows.channelsButton')}
           </button>
         )}
-        <div className="advisor__kebab-wrap">
-          <button className="advisor__kebab" onClick={() => setMenuOpen(!menuOpen)} aria-label="Menu">⋮</button>
-          {menuOpen && (
-            <div className="advisor__menu">
-              <button className="advisor__menu-item" onClick={handleSaveSummary} disabled={knowledgeSaving}>
-                <span className="advisor__menu-icon">📋</span>{t('advisor.menuSaveSummary')}
-              </button>
-              <button className="advisor__menu-item" onClick={handleExport}>
-                <span className="advisor__menu-icon">📤</span>{t('advisor.menuExport')}
-              </button>
-              <button className="advisor__menu-item advisor__menu-item--danger" onClick={handleClear}>
-                <span className="advisor__menu-icon">🗑</span>{t('advisor.menuClear')}
-              </button>
-            </div>
-          )}
+        <div className="advisor__header-actions">
+          <button type="button" className="advisor__kebab advisor__clear" onClick={handleClear} disabled={!conversationId} aria-label={t('advisor.menuClear')} title={t('advisor.menuClear')}>
+            <TrashIcon />
+          </button>
+          <div className="advisor__kebab-wrap">
+            <button className="advisor__kebab" onClick={() => setMenuOpen(!menuOpen)} aria-label="Menu">⋮</button>
+            {menuOpen && (
+              <div className="advisor__menu">
+                <button className="advisor__menu-item" onClick={handleSaveSummary} disabled={knowledgeSaving}>
+                  <span className="advisor__menu-icon">📋</span>{t('advisor.menuSaveSummary')}
+                </button>
+                <button className="advisor__menu-item" onClick={handleExport}>
+                  <span className="advisor__menu-icon">📤</span>{t('advisor.menuExport')}
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 

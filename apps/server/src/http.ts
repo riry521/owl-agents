@@ -14,6 +14,7 @@ import { createUlid, isUlid } from "./ids.js";
 import { resolveDataDir, type ContractManifest } from "./contracts.js";
 import { configuredApiToken } from "./config.js";
 import { externalError } from "./core.js";
+import { AUTO_WORK_SOURCES, AUTO_WORK_VERDICTS } from "../../../packages/shared/dist/auto-work.js";
 import { validatePrerequisiteWorkIds } from "../../../packages/shared/dist/work-prerequisite.js";
 import { KnowledgeBase, type KnowledgeSearchResult } from "../../../packages/core/dist/knowledge-base.js";
 import { RuleStore } from "../../../packages/core/dist/rule-store.js";
@@ -359,6 +360,15 @@ interface BacklogApiPort {
   deleteBacklogItems(request: JsonObject): Promise<SkillCommandResult>;
   issueBacklogWork(request: JsonObject): Promise<SkillCommandResult>;
   linkBacklogItems(workId: string, request: JsonObject): Promise<SkillCommandResult>;
+}
+
+interface AutoWorkApiPort {
+  getAutoWorkSettings(): { version: number; data: JsonObject };
+  updateAutoWorkSettings(request: JsonObject): Promise<{ data: JsonObject; version: number }>;
+  listAutoWorkEvents(filter: JsonObject): { items: unknown[]; next_offset: number | null };
+  getAutoWorkEvent(id: string): unknown;
+  runAutoWorkNow(projectId: string, what: string): Promise<unknown>;
+  receiveAutoWorkNotice(request: JsonObject): Promise<SkillCommandResult>;
 }
 
 interface ReviewMetricsApiPort {
@@ -2961,6 +2971,59 @@ function requireBacklogApi(core: CorePort): BacklogApiPort {
   return candidate as BacklogApiPort;
 }
 
+/** The wrapped Core is looked at too: the adapter may not carry every feature, and a missing one must be a 503, not a skipped call. */
+function requireAutoWorkApi(
+  core: CorePort,
+  methods: Array<keyof AutoWorkApiPort> = ["getAutoWorkSettings", "updateAutoWorkSettings", "listAutoWorkEvents", "getAutoWorkEvent", "runAutoWorkNow"],
+): AutoWorkApiPort {
+  const has = (candidate: unknown) => isObject(candidate as JsonObject) && methods.every((method) => typeof (candidate as Record<string, unknown>)[method] === "function");
+  const inner = (core as { core?: unknown }).core;
+  if (has(core)) return core as unknown as AutoWorkApiPort;
+  if (has(inner)) return inner as AutoWorkApiPort;
+  throw new ApiError(503, "core_not_ready", "The loaded Core does not support the automatic Work API.");
+}
+
+function parseAutoWorkEventsQuery(url: URL): JsonObject {
+  const oneOf = (name: string, allowed: readonly string[]) => {
+    const value = url.searchParams.get(name);
+    if (value === null) return {};
+    if (!allowed.includes(value)) throw new ApiError(400, "validation_error", `${name}が不正です。${allowed.join("、")}のいずれかを指定してください。`, { field: name });
+    return { [name]: value };
+  };
+  const id = (name: string) => {
+    const value = url.searchParams.get(name);
+    return value === null ? {} : { [name]: pathId(value, name) };
+  };
+  const limit = url.searchParams.get("limit");
+  return {
+    ...id("project_id"), ...oneOf("source", AUTO_WORK_SOURCES), ...oneOf("verdict", AUTO_WORK_VERDICTS), ...id("work_id"),
+    ...(limit === null || limit === "" ? {} : { limit: parseBacklogLimit(limit) }),
+    offset: parseBacklogOffset(url.searchParams.get("offset")),
+  };
+}
+
+function validateUpdateAutoWorkSettingsPayload(payload: JsonObject): JsonObject {
+  exactKeys(payload, [], "UpdateAutoWorkSettings payload", ["enabled", "projects"]);
+  const toggle = (value: unknown, field: string) => {
+    if (value !== null && typeof value !== "boolean") throw new ApiError(400, "validation_error", `${field}はtrue、false、nullのいずれかで指定してください。`, { field });
+    return value;
+  };
+  const result: JsonObject = {};
+  if (payload.enabled !== undefined) result.enabled = toggle(payload.enabled, "enabled") as boolean | null;
+  if (payload.projects !== undefined) {
+    if (!isObject(payload.projects)) throw new ApiError(400, "validation_error", "projectsはJSON objectで指定してください。", { field: "projects" });
+    const projects: JsonObject = {};
+    for (const [projectId, change] of Object.entries(payload.projects)) {
+      pathId(projectId, "projects");
+      if (!isObject(change)) throw new ApiError(400, "validation_error", "projectsの値はJSON objectで指定してください。", { field: "projects" });
+      exactKeys(change, ["enabled"], "projects entry");
+      projects[projectId] = { enabled: toggle(change.enabled, "projects.enabled") as boolean | null };
+    }
+    result.projects = projects;
+  }
+  return result;
+}
+
 function validateBacklogProjectId(value: string | null): string | undefined {
   if (value === null) return undefined;
   if (!isUlid(value)) throw new ApiError(400, "validation_error", "project_idはULIDで指定してください。", { field: "project_id" });
@@ -4587,6 +4650,63 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
+  // ---- Automatic Work creation ----
+  if (pathname === `${API_PREFIX}/auto-work/settings` && method === "GET") {
+    requireOwner(request);
+    const { version, data } = requireAutoWorkApi(context.core).getAutoWorkSettings();
+    sendJson(response, 200, { request_id: requestIdValue, data, version });
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/auto-work/settings` && method === "PUT") {
+    requireOwner(request);
+    const command = commandEnvelope(await readRequestBody(request));
+    const payload = validateUpdateAutoWorkSettingsPayload(command.payload);
+    const result = await runCommand(context, pathname, command, 200, async () => {
+      const updated = await requireAutoWorkApi(context.core).updateAutoWorkSettings({ ...command, payload });
+      return { data: updated.data, version: updated.version };
+    });
+    sendJson(response, 200, result);
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/auto-work/events` && method === "GET") {
+    requireOwner(request);
+    const result = requireAutoWorkApi(context.core).listAutoWorkEvents(parseAutoWorkEventsQuery(url));
+    sendJson(response, 200, { request_id: requestIdValue, data: { items: result.items, next_offset: result.next_offset } });
+    return;
+  }
+
+  const autoWorkEventMatch = pathname.match(new RegExp(`^${API_PREFIX}/auto-work/events/([^/]+)$`));
+  if (autoWorkEventMatch && method === "GET") {
+    requireOwner(request);
+    const event = requireAutoWorkApi(context.core).getAutoWorkEvent(pathId(autoWorkEventMatch[1], "event_id"));
+    if (event === null || event === undefined) throw new ApiError(404, "not_found", "The automatic Work history entry was not found.");
+    sendJson(response, 200, { request_id: requestIdValue, data: event as JsonObject });
+    return;
+  }
+
+  const autoWorkRunMatch = pathname.match(new RegExp(`^${API_PREFIX}/auto-work/projects/([^/]+)/run$`));
+  if (autoWorkRunMatch && method === "POST") {
+    requireOwner(request);
+    const projectId = pathId(autoWorkRunMatch[1], "project_id");
+    const body = await readRequestBody(request);
+    if (!isObject(body)) throw new ApiError(400, "validation_error", "リクエスト本文はJSON objectで指定してください。");
+    exactKeys(body, ["what"], "auto-work run");
+    if (body.what !== "github" && body.what !== "scheduled_check") {
+      throw new ApiError(400, "validation_error", "whatはgithubまたはscheduled_checkを指定してください。", { field: "what" });
+    }
+    try {
+      const result = await requireAutoWorkApi(context.core).runAutoWorkNow(projectId, body.what);
+      sendJson(response, 200, { request_id: requestIdValue, data: result as JsonObject });
+    } catch (error) {
+      // The design names this refusal invalid_state; Core's own name for it is shared with every other state refusal.
+      if (error instanceof ApiError && error.code === "invalid_state_transition") throw new ApiError(409, "invalid_state", error.message, error.details, { cause: error });
+      throw error;
+    }
+    return;
+  }
+
   // ---- Review backlog ----
   if (pathname === `${API_PREFIX}/backlog` && method === "GET") {
     requireOwner(request);
@@ -4630,6 +4750,17 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       return { data: deleted.data, version: deleted.version };
     });
     sendJson(response, 200, result);
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/auto-work/notices` && method === "POST") {
+    requireOwner(request);
+    const command = commandEnvelope(await readRequestBody(request));
+    const result = await runCommand(context, pathname, command, 201, async () => {
+      const received = await requireAutoWorkApi(context.core, ["receiveAutoWorkNotice"]).receiveAutoWorkNotice(command);
+      return { data: received.data, version: received.version };
+    });
+    sendJson(response, 201, result);
     return;
   }
 
