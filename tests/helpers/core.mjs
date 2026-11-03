@@ -27,7 +27,9 @@ export async function createTestCore(t, coreOptions = {}, { prefix = "owl-test-"
       try {
         if (ownsDb) db.close();
       } finally {
-        if (ownsRoot) await rm(root, { recursive: true, force: true });
+        // A forced stop does not wait for an in-flight pipeline, which may still be
+        // writing under root (git worktrees, logs); retry instead of failing the hook.
+        if (ownsRoot) await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       }
     }
   });

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { serenaConfigPath, unregisterSerenaProject } from "./serena-registry.js";
 import { createHash as createFileHash } from "node:crypto";
 import { constants, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { copyFile, lstat, mkdir, readFile, rename, rm, rmdir, stat, unlink, writeFile } from "node:fs/promises";
@@ -1030,7 +1031,11 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       runs: (ids) => this.sweepRunInfo(ids),
     });
     if (this.git instanceof GitWorktreeGateway) {
-      this.git.onBeforeWorktreeRemoval(async (path) => { await this.workspaceSweeper.sweep({ path }); });
+      this.git.onBeforeWorktreeRemoval(async (path) => {
+        await this.workspaceSweeper.sweep({ path });
+        const tooling = options.workspaceTooling;
+        if (tooling) await unregisterSerenaProject(serenaConfigPath(tooling.env(), tooling.home), path);
+      });
       this.git.onCoreActivity(this.coreActivity.report);
     }
     this.researchRecorder = new ResearchRecorder({

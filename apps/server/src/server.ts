@@ -31,7 +31,7 @@ import { prepareConnectorConfig } from "./secret-config.js";
 import { resolveInstanceId } from "../../../packages/shared/dist/instance-id.js";
 import { classifyProviderFailure, executorProviderError } from "../../../packages/agent-runtime/dist/index.js";
 
-const SERVER_VERSION = "0.12.1";
+const SERVER_VERSION = "0.12.2";
 
 async function recordServerFailure(referenceId: string, context: string, error: unknown): Promise<void> {
   const raw = error instanceof Error ? (error.stack ?? error.message) : String(error);

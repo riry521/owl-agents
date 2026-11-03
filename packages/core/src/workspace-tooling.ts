@@ -4,6 +4,7 @@ import { chmod, copyFile, lstat, mkdir, readFile, realpath, stat } from "node:fs
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { GitLanes } from "./git-lane.js";
+import { registerSerenaProject, serenaConfigPath } from "./serena-registry.js";
 import {
   parseClaudeMcpList,
   parseCodexMcpList,
@@ -360,6 +361,11 @@ export class WorkspaceTooling {
       }
       this.freshWorktrees.add(input.worktree);
     }
+
+    // Registered before any agent starts, so Serena finds the worktree registered and never writes its config itself.
+    await registerSerenaProject(serenaConfigPath(this.deps.env(), this.deps.home), input.worktree).catch((error) => {
+      console.warn(`[owl-core] Could not register ${input.worktree} with Serena`, error);
+    });
 
     const fingerprint = await this.computeFingerprint(input);
     let rehearsal: RehearsalReport | null = null;
