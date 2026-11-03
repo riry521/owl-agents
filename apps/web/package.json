@@ -8,7 +8,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "next": "15.5.24",
+    "next": "15.5.28",
     "react": "19.1.2",
     "react-dom": "19.1.2",
     "react-markdown": "^10.1.0",
