@@ -2,7 +2,7 @@ import type { OwnerLanguage } from "../../../packages/shared/dist/owner-language
 import type { ModelHarness } from "../../../packages/shared/dist/harness-models.js";
 import type { GuardTokenIssuer } from "../../../packages/shared/dist/guard-token.js";
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
-import type { OpencodeChildOutcome, OpencodeChildRun, ProviderErrorRecord } from "../../../packages/shared/dist/index.js";
+import type { OpencodeChildOutcome, OpencodeChildRun, ProviderErrorRecord, SessionActivity } from "../../../packages/shared/dist/index.js";
 import type { KnowledgeAutomationSettings, KnowledgeAutomationSnapshot } from "../../../packages/shared/dist/knowledge-automation.js";
 import type { WebResearchCapture } from "../../../packages/shared/dist/web-research.js";
 import type {
@@ -340,11 +340,33 @@ export interface ModelPreset {
   updated_at: string;
 }
 
-export interface MessageMetadata {
+export interface InstructionReplyMetadata {
   kind: "instruction_reply";
   in_reply_to: string[];
   outcome: "tasks_changed" | "no_change" | "decision_opened";
   plan_revision: number | null;
+}
+
+export type MessageMetadata = InstructionReplyMetadata | AdvisorFileDeliveryMetadata;
+
+export interface AdvisorFileDeliveryMetadata {
+  kind: "advisor_file_delivery";
+  destination: {
+    provider: "slack" | "discord";
+    channel_id: string;
+    display_name: string;
+    source: "window_binding" | "default_destination";
+  } | null;
+  refusal: "preferred_provider_unset" | "default_destination_unset" | "default_provider_not_configured" | "default_channel_unavailable" | null;
+  files: {
+    index: number;
+    name: string;
+    size: number | null;
+    status: "pending" | "sent" | "failed" | "unknown" | "rejected";
+    code?: string;
+    message?: string;
+  }[];
+  notice?: string;
 }
 
 export interface Message {
@@ -353,13 +375,15 @@ export interface Message {
   source: "slack" | "discord" | "web" | "advisor" | "manager" | string;
   body: string;
   attachment_ids: string[];
+  /** Present only when the message has attachments. Never carries a file path. */
+  attachments?: { id: string; filename: string; mime: string; bytes: number; status: "stored" | "quarantined" }[];
   created_at: string;
   metadata?: MessageMetadata | null;
 }
 
 export interface InstructionStatus {
   status: "queued" | "processing" | "answered";
-  outcome: MessageMetadata["outcome"] | null;
+  outcome: InstructionReplyMetadata["outcome"] | null;
   reply_message_id: string | null;
 }
 
@@ -819,6 +843,7 @@ export interface CorePort {
   readonly advisorSessions: AdvisorSessionsPort;
   restartAdvisorSession(ownerId: string, windowKey?: string): Promise<void>;
   interruptAdvisorTurn(ownerId: string, windowKey?: string): Promise<{ status: "interrupting" | "not_running" | "unsupported"; turn_id: string | null }>;
+  getAdvisorActivity(sessionId: string, conversationId: string | null): Promise<SessionActivity | null>;
   getIntegrations(): Promise<IntegrationStatus[]>;
   saveIntegration(provider: IntegrationProvider, config: IntegrationConfigPatch, command: CommandMeta): Promise<{ data: IntegrationStatus; version: number }>;
   testIntegration(provider: IntegrationProvider): Promise<IntegrationTestResult>;
@@ -838,6 +863,8 @@ export interface CorePort {
   setAdvisorPersona(persona: string): Promise<string>;
   getAdvisorFolders(): Promise<AdvisorFoldersSnapshot>;
   setAdvisorFolders(sharedDir: string, screenshotDir: string): Promise<AdvisorFoldersSnapshot>;
+  getAdvisorFileDestinationSettings(): Promise<import("./app-settings-store.js").FileDestinationSettings>;
+  setAdvisorFileDestinationSettings(input: import("./app-settings-store.js").FileDestinationSettings): Promise<import("./app-settings-store.js").FileDestinationSettings>;
   clearConversation(conversationId: string): Promise<{ cleared: boolean }>;
   getActiveConversation(): Promise<{ conversation_id: string }>;
   listProviders(): Promise<DetectedProvider[]>;
@@ -865,6 +892,8 @@ export interface CorePort {
   subscribeControl?(listener: CoreControlListener): () => void;
   activeAgentCount(): number;
   shutdown(options: { force: boolean; timeoutMs: number }): Promise<void>;
+  /** Synchronous, non-throwing kill of Owl-owned Agent and Advisor processes; safe to call repeatedly. */
+  forceTerminateProcesses?(): void;
 }
 
 export interface AgentRunner {
@@ -896,6 +925,11 @@ export interface CreateCoreOptions {
   getTypesafeApiKey?: () => string;
   getAdvisorPersona?: () => string;
   getAdvisorFolders?: () => { sharedDir: string; screenshotDir: string } | null;
+  getAdvisorFileDestinationSettings?: () => {
+    preferredProvider: "slack" | "discord" | null;
+    defaultDestination: { provider: "slack" | "discord"; channel_id: string; display_name: string } | null;
+    integrations: readonly { provider: "slack" | "discord"; configured: boolean; conversationChannelIds: readonly string[] }[];
+  };
   getAdvisorSharedDir?: () => string | null;
   getProviderHarness?: (providerId: string) => ModelHarness | undefined;
   /** Environment and CLI paths for Hybrid Executor processes, forwarded to @owl/core. */

@@ -32,17 +32,28 @@ const reactStub = {
 const t = (key) => key.split('.').reduce((node, part) => node?.[part], en) ?? key;
 const viewData = { 'advisor-window:general': 'conv-g', 'advisor-messages:conv-g': [], 'advisor-session:conv-g': { status: 'none' } };
 
+const attachmentPure = await import('../../apps/web/lib/attachment-draft.mjs');
 const overrides = {
   react: reactStub,
   'react-markdown': { __esModule: true, default: () => null },
   'remark-gfm': { __esModule: true, default: () => {} },
   '@/lib/i18n': { useLocale: () => ({ locale: 'en', t }) },
   '@/lib/advisor-windows.mjs': windowsMod,
+  '@/lib/advisor-file-delivery.mjs': webRequire(join(repoRoot, 'apps/web/lib/advisor-file-delivery.mjs')),
   '@/lib/advisor-awaiting.mjs': { replyArrived: () => false },
+'@/lib/advisor-indicator.mjs': webRequire(join(repoRoot, 'apps/web/lib/advisor-indicator.mjs')),
   '@/lib/format': { formatClock: () => '', formatDateTime: () => '', formatRelative: () => '' },
   '@/components/icons': { SendIcon: () => React.createElement('svg'), TrashIcon: () => React.createElement('svg') },
   '@/components/AdvisorChannelPanel': { AdvisorChannelPanel: () => null },
-  '@/lib/api-client': {},
+  '@/lib/api-client': { getOwnerFileRoots: async () => ({ roots: [] }) },
+  '@/lib/owner-file-links.mjs': webRequire(join(repoRoot, 'apps/web/lib/owner-file-links.mjs')),
+  '@/lib/use-attachment-draft': {
+    useAttachmentDraft: () => ({ items: [], notices: [], hint: null, attachmentIds: [], add() {}, remove() {}, retry() {}, dismissNotices() {}, clear() {} }),
+    useFileDrop: () => ({ dragging: false, dropProps: {} }),
+  },
+  '@/lib/attachment-draft.mjs': attachmentPure,
+  '@/components/AttachmentTray': { AttachButton: () => null, AttachmentTray: () => null, DropOverlay: () => null },
+  '@/components/MessageAttachments': { MessageAttachments: () => null },
   '@/lib/view-loader': {
     useView: (key) => { viewKeys.push(key); return { data: key === null ? undefined : viewData[key], error: null, refresh: async () => {} }; },
   },

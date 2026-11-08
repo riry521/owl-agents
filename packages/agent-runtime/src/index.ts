@@ -78,6 +78,7 @@ export type {
   ReviewResult,
   ReviewTests,
   ReviewerRequest,
+  SessionActivity,
   SessionEvent,
   TaskDetail,
   TaskType,

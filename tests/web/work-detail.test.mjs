@@ -80,6 +80,7 @@ const componentTranslations = {
   'work.noTasks': 'No tasks yet',
   'work.deliverables': 'Deliverables',
   'work.noDeliverables': 'No deliverables',
+  'mdViewer.open': 'Read',
   'work.workerReport': 'Worker report',
   'work.noReports': 'No reports',
   'work.decisions': 'Decisions',
@@ -326,6 +327,7 @@ const boardPageModule = compileWebComponent(join(repoRoot, 'apps/web/app/board/p
 });
 const moveHelpers = await import('../../apps/web/lib/work-project-move.mjs');
 const workFinalReportPanelModule = compileWebComponent(join(repoRoot, 'apps/web/components/WorkFinalReportPanel.tsx'), {
+  'next/link': linkModule,
   '@/lib/format': componentFormat,
 });
 const workProjectMoveStub = { WorkProjectMove: ({ work }) => React.createElement('span', { 'data-move': String(work.project_id === null) }) };
@@ -550,7 +552,7 @@ function successfulApiFetch(input, options) {
       : apiWork({ id, title, summary, state, size, display_number });
     return jsonResponse({
       request_id: 'request-1',
-      data: { work, tasks: taskRows, runs: [], child_runs: [], reports: [], decisions: [], messages: [], auto_recovery: options.autoRecovery, goal_shortfalls: options.goalShortfalls },
+      data: { work, tasks: taskRows, runs: options.runs ?? [], child_runs: [], reports: options.reports ?? [], decisions: [], messages: [], auto_recovery: options.autoRecovery, goal_shortfalls: options.goalShortfalls },
       version: 7,
     });
   }
@@ -2086,4 +2088,40 @@ test('Work detail shows the final report in three sections between the overview 
 
   const partial = await renderWithFinalReport('completed', { ...report, test_results: '  ', issues: '' });
   assert.ok(partial.includes('Brief report') && !partial.includes('Test results') && !partial.includes('>Issues<'));
+});
+
+test('Work detail links md deliverable rows and md paths in the final report to the viewer', async () => {
+  const client = loadApiClient();
+  const originalFetch = globalThis.fetch;
+  const id = 'work-md-links';
+  const mdPath = '/data/memory/materials/report.md';
+  const workData = {
+    ...apiWork({ id, title: 'Linked', summary: 'Do it', state: 'completed', size: 'small' }),
+    final_report: { summary: `Read ${mdPath} and notes.`, test_results: 'ok', issues: '', created_at: '2026-10-28T05:32:00.000Z' },
+  };
+  const changes = [
+    { file: 'docs/design.md', action: 'created' },
+    { file: 'CLAUDE.md, docs/other.md', action: 'edited' },
+    { file: 'src/index.ts', action: 'edited' },
+  ];
+  try {
+    globalThis.fetch = (input) => successfulApiFetch(input, {
+      state: 'completed',
+      workData,
+      taskRows: [{ id: 't1', work_id: id, title: 'T', status: 'completed' }],
+      runs: [{ id: 'r1', task_id: 't1' }],
+      reports: [{ id: 'p1', agent_run_id: 'r1', created_at: '2026-10-28T00:00:00.000Z', payload: { changes } }],
+    });
+    const board = renderBoardWorkLink({ id, title: 'Linked', state: 'completed', updated_at: '2026-09-23T00:00:00.000Z' });
+    const html = (await renderDetailFromRoute(board.href, client)).html;
+    const rows = html.slice(html.indexOf('id="sec-deliverables"'));
+    assert.ok(rows.includes('<a class="row row--doc-link" href="/work/markdown?id=work-md-links&amp;path=docs%2Fdesign.md"><div class="row__main"><div class="row__title mono">docs/design.md</div>'));
+    assert.equal(rows.split('row__open').length - 1, 1);
+    assert.ok(rows.includes('<div class="row"><div class="row__main"><div class="row__title mono">CLAUDE.md, docs/other.md</div>'));
+    assert.ok(rows.includes('<div class="row"><div class="row__main"><div class="row__title mono">src/index.ts</div>'));
+    assert.ok(html.includes(`class="doc-link" href="/work/markdown?id=work-md-links&amp;path=${encodeURIComponent(mdPath)}">${mdPath}</a>`));
+    assert.ok(html.includes(' and notes.'));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

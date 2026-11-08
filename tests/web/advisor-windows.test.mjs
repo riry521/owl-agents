@@ -54,10 +54,21 @@ const baseOverrides = {
   'remark-gfm': { __esModule: true, default: () => {} },
   '@/lib/i18n': { useLocale: () => ({ locale: 'en', t: translations(en) }) },
   '@/lib/advisor-windows.mjs': windowsMod,
+  '@/lib/advisor-file-delivery.mjs': webRequire(join(repoRoot, 'apps/web/lib/advisor-file-delivery.mjs')),
   '@/lib/advisor-awaiting.mjs': { replyArrived: () => false },
+'@/lib/advisor-indicator.mjs': webRequire(join(repoRoot, 'apps/web/lib/advisor-indicator.mjs')),
   '@/lib/format': { formatClock: () => '', formatDateTime: () => '', formatRelative: () => 'now' },
   '@/components/icons': { SendIcon: () => React.createElement('svg'), TrashIcon: () => React.createElement('svg') },
+  '@/lib/use-attachment-draft': {
+    useAttachmentDraft: () => ({ items: [], notices: [], hint: null, attachmentIds: [], add() {}, remove() {}, retry() {}, dismissNotices() {}, clear() {} }),
+    useFileDrop: () => ({ dragging: false, dropProps: {} }),
+  },
+  '@/lib/attachment-draft.mjs': await import('../../apps/web/lib/attachment-draft.mjs'),
+  '@/components/AttachmentTray': { AttachButton: () => null, AttachmentTray: () => null, DropOverlay: () => null },
+  '@/components/MessageAttachments': { MessageAttachments: () => null },
+  '@/lib/owner-file-links.mjs': webRequire(join(repoRoot, 'apps/web/lib/owner-file-links.mjs')),
   '@/lib/api-client': {
+    getOwnerFileRoots: async () => ({ roots: [] }),
     clearAdvisorConversation: async () => {},
     getAdvisorWindowConversation: async () => 'x',
     getAdvisorSession: async () => ({}),
@@ -186,7 +197,7 @@ test('AdvisorView for P reads advisor-window:P and posts to the conversation of 
   find(composerView, (n) => n.type === 'textarea').props.ref.current = { value: 'hello', focus() {} };
   find(composerView, (n) => n.type === 'form').props.onSubmit({ preventDefault() {} });
   await new Promise((r) => setTimeout(r, 0));
-  assert.deepEqual(postCalls, [['conv-P', 'hello']]);
+  assert.deepEqual(postCalls, [['conv-P', 'hello', []]]);
 });
 
 test('owner messages from Slack and Discord carry the channel in the sender name', () => {
@@ -476,6 +487,8 @@ test('a refetch with equal content and a clock tick do not re-render the Markdow
   const { AdvisorView: View } = loadTsx('apps/web/components/AdvisorView.tsx', {
     react: React,
     '@/components/AdvisorChannelPanel': { AdvisorChannelPanel },
+    // The folder list never resolves: its one-time arrival re-renders each body once, which this test does not cover.
+    '@/lib/api-client': { ...baseOverrides['@/lib/api-client'], getOwnerFileRoots: () => new Promise(() => {}) },
     'react-markdown': { __esModule: true, default: ({ children }) => { markdownRenders += 1; return React.createElement('p', null, children); } },
     '@/lib/view-loader': { useView: (key) => ({ data: key === null ? undefined : viewData[key], error: null, refresh: async () => {} }) },
   });
@@ -721,4 +734,89 @@ test('read position: the last Advisor message among the rendered ones', () => {
   assert.equal(windowsMod.readThroughToSend(later, 3), '4');
   assert.equal(windowsMod.readThroughToSend([{ id: '1', source: 'web' }], 20), null);
   assert.equal(windowsMod.readThroughToSend(null, 20), null);
+});
+
+// ---- file delivery card -----------------------------------------------------
+
+const deliveryMod = webRequire(join(repoRoot, 'apps/web/lib/advisor-file-delivery.mjs'));
+const slackDestination = { provider: 'slack', channel_id: 'C0PROJA', display_name: 'proj-a', source: 'window_binding' };
+const deliveryMeta = (files, overrides = {}) => ({
+  kind: 'advisor_file_delivery',
+  destination: slackDestination,
+  refusal: null,
+  files: files.map((status, index) => ({ index, name: `f${index}.pdf`, size: 182044, status })),
+  ...overrides,
+});
+
+test('fileDeliveryView builds the heading and rows for pending, sent, failed, unknown and refused', () => {
+  const view = (meta) => deliveryMod.fileDeliveryView(meta);
+  const pending = view(deliveryMeta(['pending']));
+  assert.equal(pending.state, 'pending');
+  assert.equal(pending.headingKey, 'advisor.fileDelivery.heading.pending');
+  assert.deepEqual(pending.platform, { provider: 'slack', label: 'Slack' });
+  assert.equal(pending.headingParams.channel, 'proj-a');
+  assert.equal(pending.subKey, 'advisor.fileDelivery.subPending');
+  assert.equal(pending.files[0].size, '178KB');
+
+  const sent = view(deliveryMeta(['sent', 'sent'], { destination: { ...slackDestination, source: 'default_destination' } }));
+  assert.equal(sent.state, 'sent');
+  assert.equal(sent.sourceKey, 'advisor.fileDelivery.sourceDefault');
+  assert.equal(view(deliveryMeta(['sent'])).sourceKey, 'advisor.fileDelivery.sourceWindow');
+
+  assert.equal(view(deliveryMeta(['sent', 'failed'])).state, 'failed');
+  assert.equal(view(deliveryMeta(['failed', 'pending'])).state, 'pending', 'still sending until every report is in');
+  assert.equal(view(deliveryMeta(['rejected'])).state, 'failed', 'only Core-refused files: heading follows failed');
+  assert.equal(view(deliveryMeta(['sent', 'rejected'])).state, 'sent', 'a refused file does not change the heading');
+
+  const unknown = view(deliveryMeta(['unknown']));
+  assert.equal(unknown.state, 'unknown');
+  assert.equal(unknown.headingKey, 'advisor.fileDelivery.headingUnknown');
+  assert.equal(unknown.subKey, 'advisor.fileDelivery.subUnknown');
+  assert.equal(unknown.files[0].statusKey, 'advisor.fileDelivery.status.unknown');
+
+  const refused = view(deliveryMeta(['rejected'], { destination: null, refusal: 'preferred_provider_unset', notice: 'n' }));
+  assert.equal(refused.state, 'refused');
+  assert.equal(refused.headingKey, 'advisor.fileDelivery.headingRefused');
+  assert.equal(refused.subKey, 'advisor.fileDelivery.refusal.preferred_provider_unset');
+  assert.equal(refused.settingsHref, '/settings#sec-advisor-send-file-destination');
+  assert.equal(refused.notice, 'n');
+  assert.equal(view(deliveryMeta([], { destination: null, refusal: 'toString' })).subKey, 'advisor.fileDelivery.refusal.default_destination_unset');
+});
+
+test('Turn shows the file delivery card only for advisor_file_delivery metadata', () => {
+  const base = { conversation_id: 'conv-P', source: 'advisor', attachment_ids: [], created_at: '2026-01-01T00:00:00Z' };
+  const messages = [
+    { ...base, id: 1, body: 'plain reply' },
+    { ...base, id: 2, body: 'instruction reply', metadata: { kind: 'instruction_reply', in_reply_to: [], outcome: 'no_change', plan_revision: null } },
+    { ...base, id: 3, body: 'file reply', metadata: deliveryMeta(['pending']) },
+  ];
+  const { AdvisorView: View } = loadTsx('apps/web/components/AdvisorView.tsx', {
+    '@/components/AdvisorChannelPanel': { AdvisorChannelPanel },
+    '@/lib/view-loader': { useView: (key) => ({ data: key === null ? undefined : { 'advisor-window:general': 'c', 'advisor-messages:c': messages, 'advisor-session:c': { status: 'none' } }[key], error: null, refresh: async () => {} }) },
+  });
+  state.length = 0; si = 0;
+  const html = renderToStaticMarkup(View(undefined));
+  assert.equal(html.match(/class="delivery /g)?.length, 1);
+  assert.match(html, /delivery--pending/);
+  assert.match(html, /Slack<\/span>/);
+  assert.match(html, /proj-a/);
+});
+
+test('English and Japanese define the same advisor.fileDelivery keys', () => {
+  const flatten = (node, prefix = '') => Object.entries(node).flatMap(([key, value]) => (typeof value === 'string' ? [prefix + key] : flatten(value, `${prefix}${key}.`)));
+  const english = flatten(en.advisor.fileDelivery).sort();
+  assert.ok(english.length > 0);
+  assert.deepEqual(english, flatten(ja.advisor.fileDelivery).sort());
+  // Every key fileDeliveryView can return exists.
+  const lookup = (dict, key) => key.split('.').reduce((node, part) => node?.[part], dict);
+  const metas = [deliveryMeta(['pending']), deliveryMeta(['sent']), deliveryMeta(['failed']), deliveryMeta(['unknown']),
+    ...['preferred_provider_unset', 'default_destination_unset', 'default_provider_not_configured', 'default_channel_unavailable']
+      .map((refusal) => deliveryMeta(['rejected'], { destination: null, refusal }))];
+  for (const meta of metas) {
+    const v = deliveryMod.fileDeliveryView(meta);
+    for (const key of [v.headingKey, v.sourceKey, v.subKey, ...v.files.map((f) => f.statusKey)].filter(Boolean)) {
+      assert.equal(typeof lookup(en, key), 'string', `en ${key}`);
+      assert.equal(typeof lookup(ja, key), 'string', `ja ${key}`);
+    }
+  }
 });

@@ -462,3 +462,52 @@ test("Discord reports the Attach Files permission when the upload is refused", a
   assert.match(reply, /⚠ ファイルを送れませんでした: report\.txt/);
   assert.match(reply, /Attach Files/);
 });
+
+async function webFileEvent(provider = "discord", channelId = "D-PROJECT") {
+  const base = await pendingFileEvent();
+  return { ...base, payload: { ...base.payload, origin: { channel: "web" }, delivery_target: { provider, channel_id: channelId, display_name: "proj-a", source: "window_binding" } } };
+}
+
+function webDeliveryConnector(bound) {
+  return reportingConnector().then(({ connector, reports, sends }) => {
+    connector.core.request = async (path, init) => {
+      reports.push({ path, body: init?.body });
+      return path.startsWith("/advisor/channel-bindings") ? { bindings: bound.map((channel_id) => ({ channel_id })) } : { notice: null };
+    };
+    return { connector, reports, sends };
+  });
+}
+
+test("Discord sends a Web-origin file to the delivery_target channel with no mentions, reports it and posts no reply", async () => {
+  const { connector, reports, sends } = await webDeliveryConnector(["D-PROJECT"]);
+  connector.boundChannelIds = new Set(["D-PROJECT"]);
+  await connector.handleAdvisorResponse(await webFileEvent());
+
+  assert.equal(sends.length, 1);
+  assert.equal(sends[0].channelId, "D-PROJECT");
+  assert.equal(sends[0].message.files[0].name, "report.txt");
+  assert.deepEqual(sends[0].message.allowedMentions, { parse: [] });
+  assert.deepEqual(reports.map((r) => r.path), ["/conversations/discord%3AD-CONVERSATION/advisor-deliveries"]);
+  assert.deepEqual(reports[0].body.payload.results, [{ index: 0, outcome: "sent" }]);
+});
+
+test("Discord ignores a Web-origin file whose delivery_target is Slack", async () => {
+  const { connector, reports, sends } = await webDeliveryConnector(["D-PROJECT"]);
+  await connector.handleAdvisorResponse(await webFileEvent("slack"));
+
+  assert.equal(sends.length + reports.length, 0);
+});
+
+test("Discord refreshes the bindings, then reports upload_rejected for a channel outside the allow-list or that cannot be fetched", async () => {
+  const { connector, reports, sends } = await webDeliveryConnector([]);
+  await connector.handleAdvisorResponse(await webFileEvent());
+  assert.equal(sends.length, 0);
+  assert.equal(reports.filter((r) => r.path.startsWith("/advisor/channel-bindings")).length, 1);
+  assert.equal(reports.find((r) => r.path.endsWith("/advisor-deliveries")).body.payload.results[0].code, "upload_rejected");
+
+  const second = await webDeliveryConnector(["D-PROJECT"]);
+  second.connector.client.channels.fetch = async () => { throw new Error("Unknown Channel"); };
+  await second.connector.handleAdvisorResponse(await webFileEvent());
+  assert.equal(second.sends.length, 0);
+  assert.equal(second.reports.find((r) => r.path.endsWith("/advisor-deliveries")).body.payload.results[0].code, "upload_rejected");
+});

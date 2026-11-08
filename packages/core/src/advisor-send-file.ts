@@ -71,7 +71,7 @@ export async function openPinnedFile(real: string):
   return { ok: true, handle };
 }
 
-function isInside(root: string, target: string): boolean {
+export function isInside(root: string, target: string): boolean {
   const rel = relative(root, target);
   return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }

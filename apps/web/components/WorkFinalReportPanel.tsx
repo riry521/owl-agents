@@ -1,16 +1,19 @@
+import Link from 'next/link';
 import { formatDateTime } from '@/lib/format';
 import type { Locale, TFunction } from '@/lib/i18n';
 import type { WorkFinalReport } from '@/lib/types';
+import { markdownViewerHref, splitMarkdownPaths } from '../lib/markdown-path-links.mjs';
 
 interface WorkFinalReportPanelProps {
   state: string;
   finalReport: WorkFinalReport | null | undefined;
+  workId: string;
   locale: Locale;
   t: TFunction;
 }
 
 /** The Manager's closing report of a completed Work, split into three sections. Hidden unless completed with a report. */
-export function WorkFinalReportPanel({ state, finalReport, locale, t }: WorkFinalReportPanelProps) {
+export function WorkFinalReportPanel({ state, finalReport, workId, locale, t }:WorkFinalReportPanelProps) {
   if (state !== 'completed' || !finalReport) return null;
   const sections = [
     { key: 'summary', title: t('work.finalReportSummary'), text: finalReport.summary },
@@ -29,7 +32,15 @@ export function WorkFinalReportPanel({ state, finalReport, locale, t }: WorkFina
       {sections.map((section) => (
         <div key={section.key}>
           <h3 className="final-report__heading">{section.title}</h3>
-          <p className="final-report__text">{section.text}</p>
+          <p className="final-report__text">
+            {splitMarkdownPaths(section.text).map((segment, index) =>
+              segment.path === null ? (
+                segment.text
+              ) : (
+                <Link className="doc-link" key={index} href={markdownViewerHref(workId, segment.path)}>{segment.text}</Link>
+              ),
+            )}
+          </p>
         </div>
       ))}
     </section>

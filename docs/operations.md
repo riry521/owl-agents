@@ -650,6 +650,16 @@ Besides `create_work`, the Advisor can act on an existing Work through these act
 
 If an `owl-action` fails, the Advisor gets one more turn to deal with the failure. Owl resumes an Advisor session only after its turn has completed, and resends the message once when the resumed session fails.
 
+While a turn runs, `GET /api/v1/advisor/session` reports the session's `activity` (`state`: thinking, tool or subagent, with `tool_name`, and `background_count`). The Web chat indicator shows it.
+
+**Attachments.** The Web UI attaches files to Advisor messages and Work instructions. One file is up to 50 MiB and a message carries up to 20 (the same limits as Slack and Discord). An executable file is quarantined and is not passed to the agents.
+
+**Sending files from the Web UI.** `send_file` from a Web conversation goes to the Slack or Discord channel bound to the conversation's window. With both, it goes to `advisor_send_file_preferred_provider` in `app-settings.json` (`slack` or `discord`); if that is unset, nothing is sent and the refusal reason (`preferred_provider_unset`) is returned. With no window channel, it goes to `advisor_send_file_default_destination` (`provider`, `channel_id`, `display_name`), which must be a conversation channel or a window channel of a configured connector; otherwise the refusal reason is returned (`default_destination_unset`, `default_provider_not_configured`, `default_channel_unavailable`). Both are set in **Settings → File destination**.
+
+**Owner files.** `GET /api/v1/owner-files/{root}/{path}` serves a file, or lists a folder, under the materials folder or the Advisor shared folder. The Web chat turns such paths in Advisor replies into links. Paths outside these folders, `..` segments, symlinks that lead out, and secret-looking files are refused.
+
+**Markdown viewer.** The Work detail page opens Markdown files in a viewer (`/work/markdown`). It reads only `.md` files in the Work's Project (the integrated version, or the Work branch before integration) and in the materials folder, up to 2 MiB, and refuses secret-looking paths.
+
 `GET /api/v1/advisor/windows` returns `has_unread` for each window. The server stores the read state, and `PUT /api/v1/advisor/windows/{key}/read` marks a window read (the Web UI calls it when you open the window). An Advisor turn that is running can be interrupted from the Advisor page (stop button, `POST /api/v1/advisor/session/interrupt`). The stop works for both Claude and Codex Advisor sessions.
 
 - **`send_work_instruction`** sends an extra instruction (up to 100,000 characters, optionally with attachments) to a Work that has started. It is posted as a message on the Work's web conversation and queues a Manager replan that takes the instruction into account; if the Work was `judgement_waiting`, the instruction answers the open Decisions and restarts it. A `completed` Work is reopened only when the action asks for it (`reopen`); a `cancelled` Work or one not yet started (`memo`/`ready`) is rejected.
@@ -658,6 +668,18 @@ If an `owl-action` fails, the Advisor gets one more turn to deal with the failur
 - **Pause** stops new Task launches; Tasks waiting on a Decision (`judgement_waiting`) stay as they are. **Resume** continues the Work.
 - **Cancel** needs a reason (1–1000 characters), stops running agents and removes the Work's worktrees and files. The Work stays in the database as `cancelled`.
 - **Delete** works only on `memo`, `ready`, `completed` or `cancelled` Works with no open Decision. It removes the Work, its Tasks, runs, reports, events and conversations from the database, so the Work number becomes free again.
+
+## Shutdown and recovery
+
+The server gives its shutdown a deadline: `OWL_SHUTDOWN_TIMEOUT_MS` (default 25000 ms). Each shutdown stage is logged with its elapsed time. When the deadline passes, or a second signal arrives during shutdown, the server stops the Agent and Advisor processes it owns, removes its PID and state files, and exits with code 1. A watchdog thread sends SIGKILL a little later if the process is still stuck. A killed embedder child is stopped with SIGKILL after 5 seconds if it ignores SIGTERM.
+
+The CLI waits for the deadline plus 5 seconds by default (`owl stop --timeout`). It signals a PID from the state file only when the process is an Owl server (the recorded start time and command line match, or the command line runs `dist/server.js`). A reused PID is never signalled.
+
+- `owl status` shows `unresponsive` (exit code 4) when the server process is alive but `/api/v1/health` does not answer in 3 seconds. `owl start` refuses to start a second server in that case and points to the recovery commands.
+- `owl stop --force` sends SIGINT, then SIGKILL after the wait. It does not need `system/status` to answer.
+- `owl restart` sends SIGTERM, then SIGINT after the wait, then SIGKILL, and starts the server once the old one has exited.
+
+Every line the server writes to `server.log` starts with an ISO 8601 time. At startup, a Worktree whose discard Git refused because of ignored files is not retried on every start while those files remain; the refusal is recorded as a `worktree.reconcile_blocked` event, and the discard runs again once the files are gone.
 
 ## Provider rate limits
 

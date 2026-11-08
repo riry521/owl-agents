@@ -364,13 +364,13 @@ const rejectedFile = (index) => ({ index, outcome: "failed", code: "upload_rejec
  * A runtime Core whose send_file allow-list is a directory holding a.txt and b.txt. `script(files)` returns the provider replies;
  * report() posts a delivery report for the reply of a turn.
  */
-async function deliverySetup(t, script) {
+async function deliverySetup(t, script, extraOptions = {}) {
   const dir = await mkdtemp(join(tmpdir(), "owl-followup-files-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
   await writeFile(join(dir, "a.txt"), "first");
   await writeFile(join(dir, "b.txt"), "second");
   const files = [join(dir, "a.txt"), join(dir, "b.txt")];
-  const env = await setup(t, script(files), { getAdvisorSendFileSettings: () => ({ dirs: [dir] }) });
+  const env = await setup(t, script(files), { getAdvisorSendFileSettings: () => ({ dirs: [dir] }), ...extraOptions });
   const report = (turnId, results) => env.core.reportAdvisorDelivery(ownerId, env.conversationId, {
     turn_id: turnId, message_id: env.responded(turnId).message_id, results,
   });
@@ -400,6 +400,42 @@ test("a failed send_file report queues one follow-up whose input carries the sen
   assert.deepEqual(none, { deduplicated: false, followup_pending: false, notice: null });
   await new Promise((resolve) => setTimeout(resolve, 150));
   assert.equal(env.turns().length, 3, "an all-sent report queues nothing");
+});
+
+const webDefaultDestination = {
+  getAdvisorFileDestinationSettings: () => ({
+    preferredProvider: null,
+    defaultDestination: { provider: "slack", channel_id: "CDEF", display_name: "owl" },
+    integrations: [{ provider: "slack", configured: true, conversationChannelIds: ["CDEF"] }],
+  }),
+};
+
+test("a failed delivery of a Web reply queues one follow-up whose origin is web", async (t) => {
+  const env = await deliverySetup(t, (files) => [sendFiles(...files), "Sent the rest."], webDefaultDestination);
+  await env.ask("Send them");
+  const [source] = await env.settled(1);
+  const payload = env.responded(source.id);
+  assert.equal(payload.origin.channel, "web");
+  assert.equal(payload.delivery_target.channel_id, "CDEF");
+
+  const result = await env.report(source.id, [sentFile(0), rejectedFile(1)]);
+  assert.deepEqual(result, { deduplicated: false, followup_pending: true, notice: text.followupPending });
+  const [, followup] = await env.settled(2);
+  assert.equal(followup.followup_of_turn_id, source.id);
+  assert.equal(followup.origin_channel, "web");
+  assert.equal(env.turns().length, 2);
+});
+
+test("a Web send_file with no destination queues no follow-up", async (t) => {
+  const env = await deliverySetup(t, (files) => [sendFiles(...files), "unused"]);
+  await env.ask("Send them");
+  const [source] = await env.settled(1);
+  const payload = env.responded(source.id);
+  assert.deepEqual(payload.action_failures.map((f) => [f.code, f.retryable]), [["no_destination", false], ["no_destination", false]]);
+  assert.equal(payload.followup_pending, undefined);
+  assert.equal(payload.outbound_files, undefined);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(env.turns().length, 1, "no follow-up turn");
 });
 
 test("a delivery failure on a reply that is itself a follow-up queues no row and returns the stop notice", async (t) => {

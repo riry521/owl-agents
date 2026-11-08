@@ -1,5 +1,7 @@
 import type { OwnerLanguage } from "@owl/shared";
 
+import type { FileDestinationRefusal } from "./advisor-file-destination.js";
+
 /**
  * Owl's own messages in the Advisor conversation (not the Advisor's reply).
  * They follow the Owner language (owner-language.ts).
@@ -73,6 +75,8 @@ export interface AdvisorText {
   readonly sendFileIncomplete: (reason: string) => string;
   readonly sendFileUnsupportedChannel: (name: string) => string;
   readonly sendFileRejected: (name: string, reason: string) => string;
+  /** `platform` and `channel` are the names to put in the sentence; they come from the destination settings. */
+  readonly sendFileNoDestination: (name: string, reason: FileDestinationRefusal, platform: string, channel: string) => string;
   readonly sendFileReason: {
     readonly outside: string; readonly symlinkEscape: string; readonly secret: string;
     readonly notFound: string; readonly notAFile: string; readonly unreadable: string; readonly noFolder: string;
@@ -222,6 +226,12 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     sendFileIncomplete: (reason) => `⚠ send_file を実行しませんでした: ${reason}`,
     sendFileUnsupportedChannel: (name) => `⚠ ${name} は送っていません。ファイルの送信は Slack と Discord の会話でだけ使えます。`,
     sendFileRejected: (name, reason) => `⚠ ${name} は送っていません: ${reason}`,
+    sendFileNoDestination: (name, reason, platform, channel) => `⚠ ${name} は送っていません: ${{
+      preferred_provider_unset: "この窓には Slack と Discord の両方にチャンネルがあります。設定の「ファイルの送信先」で優先するプラットフォームを選んでください。",
+      default_destination_unset: "この会話の窓にはチャンネルがありません。設定の「ファイルの送信先」で既定の送信先を選んでください。",
+      default_provider_not_configured: `既定の送信先の ${platform} は連携が設定されていません。連携設定か「ファイルの送信先」を見直してください。`,
+      default_channel_unavailable: `既定の送信先 #${channel} は今は使えません。設定の「ファイルの送信先」で選び直してください。`,
+    }[reason]}`,
     sendFileReason: {
       outside: "送信できるフォルダの外にあります",
       symlinkEscape: "リンク先が送信できるフォルダの外にあります",
@@ -317,6 +327,12 @@ export const ADVISOR_TEXT: Record<OwnerLanguage, AdvisorText> = {
     sendFileIncomplete: (reason) => `⚠ send_file was not run: ${reason}`,
     sendFileUnsupportedChannel: (name) => `⚠ ${name} was not sent. Sending files works only in Slack and Discord conversations.`,
     sendFileRejected: (name, reason) => `⚠ ${name} was not sent: ${reason}`,
+    sendFileNoDestination: (name, reason, platform, channel) => `⚠ ${name} was not sent: ${{
+      preferred_provider_unset: "This window has both a Slack and a Discord channel. Choose the preferred platform under Settings > File destination.",
+      default_destination_unset: "This conversation's window has no channel. Choose a default destination under Settings > File destination.",
+      default_provider_not_configured: `The default destination is on ${platform}, which is not set up. Check the integration or Settings > File destination.`,
+      default_channel_unavailable: `The default destination #${channel} is no longer available. Choose it again under Settings > File destination.`,
+    }[reason]}`,
     sendFileReason: {
       outside: "it is outside the send-file folders",
       symlinkEscape: "its link target is outside the send-file folders",

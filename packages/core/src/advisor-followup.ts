@@ -68,7 +68,7 @@ const NOT_RETRYABLE_CODES: Readonly<Record<string, ReadonlySet<string>>> = Objec
   delete_work: new Set(WORK_OPERATION_STATE_CODES),
   move_work_to_project: new Set(["window_project_mismatch", "work_project_already_set", "work_has_active_agents", ...WORK_OPERATION_STATE_CODES]),
   call_api: new Set(["blocked", "unavailable"]),
-  send_file: new Set(["symlink_escape", "secret", "too_large", "unreadable", "no_folder", "unsupported_channel", "upload_rejected"]),
+  send_file: new Set(["symlink_escape", "secret", "too_large", "unreadable", "no_folder", "unsupported_channel", "no_destination", "upload_rejected"]),
   handoff_to_window: new Set(["no_project", "same_window"]),
 });
 
@@ -313,7 +313,8 @@ export interface ShouldInsertFollowupInput {
 
 /** The "do not insert" table of 6.2, used at reply time and at delivery-report time. */
 export function shouldInsertFollowup(input: ShouldInsertFollowupInput): boolean {
-  return input.failures.some((f) => f.status === "failed" || f.status === "unknown")
+  // Why not queue for no_destination: only an Owner setting change fixes it, so a follow-up turn could do nothing but repeat the reply's notice.
+  return input.failures.some((f) => (f.status === "failed" || f.status === "unknown") && f.code !== "no_destination")
     && !input.sourceIsFollowup
     && !input.followupExists
     && !input.nextTurnReceives

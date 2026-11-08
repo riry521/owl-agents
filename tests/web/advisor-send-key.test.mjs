@@ -19,10 +19,14 @@ const realJsxRuntime = webRequire('react/jsx-runtime');
 let capturedTextarea = null;
 let capturedHint = null;
 let capturedButton = null;
+let capturedForm = null;
+let capturedAttachButton = null;
+let capturedTray = null;
 
 function wrapJsx(originalJsx) {
   return function patchedJsx(type, props, ...rest) {
     if (type === 'textarea' && props?.className === 'advisor__textarea') capturedTextarea = props;
+    if (type === 'form' && props?.className === 'advisor__form') capturedForm = props;
     if (type === 'p' && props?.className === 'advisor__hint') capturedHint = props;
     if (type === 'button' && props?.className?.startsWith('advisor__send')) capturedButton = props;
     return originalJsx(type, props, ...rest);
@@ -57,15 +61,38 @@ function translateForComponent(key) {
 globalThis.requestAnimationFrame ??= () => 0;
 globalThis.cancelAnimationFrame ??= () => {};
 
+// Spy for use-attachment-draft: every input path must hand the same File[] to add().
+const addCalls = [];
+const draftSpy = { items: [], notices: [], hint: null, attachmentIds: [], clears: 0 };
+const attachmentPure = await import('../../apps/web/lib/attachment-draft.mjs');
+const attachmentOverrides = {
+  '@/lib/use-attachment-draft': {
+    useAttachmentDraft: () => ({ ...draftSpy, add: (files) => addCalls.push(files), remove() {}, retry() {}, dismissNotices() {}, clear: () => { draftSpy.clears += 1; } }),
+    useFileDrop: (onFiles, disabled) => ({ dragging: false, dropProps: { onDrop: (files) => { if (!disabled) onFiles(files); } } }),
+  },
+  '@/lib/attachment-draft.mjs': attachmentPure,
+  '@/components/AttachmentTray': {
+    AttachButton: (props) => { capturedAttachButton = props; return null; },
+    AttachmentTray: (props) => { capturedTray = props; return props.notices.length > 0 ? React.createElement('div', { role: 'alert' }, props.notices.join('|')) : null; },
+    DropOverlay: () => null,
+  },
+  '@/components/MessageAttachments': {
+    MessageAttachments: ({ attachments }) => React.createElement('div', { 'data-files': true }, (attachments ?? []).map((a) => `${a.filename}${a.status === 'quarantined' ? '[badge]' : ''}`).join(',')),
+  },
+};
+let advisorMessages = [];
+let postMessageArgs = [];
 let postMessageCalls = 0;
 let sessionData;
 const interruptCalls = [];
 const callLog = [];
 const componentApiClient = {
+  getOwnerFileRoots: async () => ({ roots: [] }),
   getActiveConversation: async () => 'conv-1',
   getAdvisorSession: async () => ({ status: 'none', compaction_count: 0, model: null }),
   listMessages: async () => [],
-  postMessage: async () => {
+  postMessage: async (...args) => {
+    postMessageArgs.push(args);
     postMessageCalls += 1;
     return { message_id: 'm1', advisor_run_id: null };
   },
@@ -100,6 +127,7 @@ function compileWebComponent(modulePath, overrides = {}) {
     if (request === 'react') return componentReact;
     if (request === 'react/jsx-runtime') return patchedJsxRuntime;
     if (Object.hasOwn(overrides, request)) return overrides[request];
+    if (Object.hasOwn(attachmentOverrides, request)) return attachmentOverrides[request];
     return originalLoad.call(this, request, parent, isMain);
   };
   try {
@@ -112,13 +140,18 @@ function compileWebComponent(modulePath, overrides = {}) {
 
 const viewOptions = {};
 const { replyArrived } = await import('../../apps/web/lib/advisor-awaiting.mjs');
+const indicatorModule = await import('../../apps/web/lib/advisor-indicator.mjs');
+const { advisorIndicatorLabel, advisorSessionBusy } = indicatorModule;
 const advisorViewModule = compileWebComponent(advisorViewPath, {
   '@/lib/api-client': componentApiClient,
   '@/lib/format': componentFormat,
   '@/lib/i18n': componentI18n,
+  '@/lib/owner-file-links.mjs': await import('../../apps/web/lib/owner-file-links.mjs'),
   '@/lib/advisor-awaiting.mjs': { replyArrived },
+'@/lib/advisor-indicator.mjs': indicatorModule,
   '@/lib/advisor-windows.mjs': await import('../../apps/web/lib/advisor-windows.mjs'),
-  '@/lib/view-loader': { useView: (key, _fetcher, options) => (viewOptions[key?.split(':')[0]] = options, { data: key?.startsWith('advisor-messages:') ? [] : key === 'advisor-window:general' ? 'conv-1' : sessionData, error: null, loading: false, refresh: async () => { callLog.push('refresh:' + (key?.split(':')[0])); } }) },
+  '@/lib/advisor-file-delivery.mjs': await import('../../apps/web/lib/advisor-file-delivery.mjs'),
+  '@/lib/view-loader': { useView: (key, _fetcher, options) => (viewOptions[key?.split(':')[0]] = options, { data: key?.startsWith('advisor-messages:') ? advisorMessages : key === 'advisor-window:general' ? 'conv-1' : sessionData, error: null, loading: false, refresh: async () => { callLog.push('refresh:' + (key?.split(':')[0])); } }) },
   '@/components/icons': { SendIcon: () => null, StopIcon: () => null, TrashIcon: () => null },
   '@/components/AdvisorChannelPanel': { AdvisorChannelPanel: () => null },
 });
@@ -172,6 +205,10 @@ function renderAdvisor(isTouchDevice, awaitingReply = null, hasText = false, { s
   capturedTextarea = null;
   capturedButton = null;
   capturedHint = null;
+  capturedForm = null;
+  capturedAttachButton = null;
+  capturedTray = null;
+  addCalls.length = 0;
   activeHookHarness = harness;
   let html;
   try {
@@ -179,7 +216,7 @@ function renderAdvisor(isTouchDevice, awaitingReply = null, hasText = false, { s
   } finally {
     activeHookHarness = null;
   }
-  return { harness, textarea: capturedTextarea, hint: capturedHint, button: capturedButton, html };
+  return { harness, textarea: capturedTextarea, hint: capturedHint, button: capturedButton, form: capturedForm, attachButton: capturedAttachButton, tray: capturedTray, html };
 }
 
 function keyEvent({ shiftKey = false, isComposing = false, keyCode = 13 } = {}) {
@@ -306,8 +343,11 @@ test('rendered: the spinner stays through idle or stale session reads after a se
     '@/lib/api-client': componentApiClient,
     '@/lib/format': componentFormat,
     '@/lib/i18n': componentI18n,
-    '@/lib/advisor-awaiting.mjs': { replyArrived },
+    '@/lib/owner-file-links.mjs': await import('../../apps/web/lib/owner-file-links.mjs'),
+  '@/lib/advisor-awaiting.mjs': { replyArrived },
+    '@/lib/advisor-indicator.mjs': indicatorModule,
     '@/lib/advisor-windows.mjs': await import('../../apps/web/lib/advisor-windows.mjs'),
+    '@/lib/advisor-file-delivery.mjs': await import('../../apps/web/lib/advisor-file-delivery.mjs'),
     '@/lib/view-loader': { useView: (key) => ({ data: key?.startsWith('advisor-messages:') ? messages : key === 'advisor-window:general' ? 'conv-1' : session, error: null, loading: false, refresh: async () => {} }) },
     '@/components/icons': { SendIcon: () => null, StopIcon: () => null, TrashIcon: () => null },
   '@/components/AdvisorChannelPanel': { AdvisorChannelPanel: () => null },
@@ -544,5 +584,166 @@ test('Shift+Enter while a turn is running still sends and does not stop', async 
     assert.equal(interruptCalls.length, 0);
   } finally {
     sessionData = undefined;
+  }
+});
+
+// Real ja/en strings with {{name}} filled in; translateForComponent only echoes keys.
+function realT(locale) {
+  const dict = JSON.parse(readFileSync(join(repoRoot, `apps/web/lib/i18n/${locale}.json`), 'utf8'));
+  return (key, params = {}) => key.split('.').reduce((node, part) => node?.[part], dict).replace(/\{\{(\w+)\}\}/g, (_, name) => params[name]);
+}
+const tJa = realT('ja');
+const tEn = realT('en');
+const label = (t, session, extra = {}) => advisorIndicatorLabel({ t, session, sending: false, stopping: false, pausedLabel: null, ...extra });
+const act = (state, tool_name = null, background_count = 0) => ({ activity: { state, tool_name, background_count } });
+
+test('the indicator names each activity', () => {
+  assert.equal(label(tJa, { running_turns: 1, ...act('thinking') }), '考え中…');
+  assert.equal(label(tJa, { running_turns: 1, ...act('tool', 'Bash') }), 'Bash を実行中…');
+  assert.equal(label(tJa, { running_turns: 1, ...act('subagent') }), 'サブエージェント実行中…');
+  assert.equal(label(tJa, { running_turns: 0, ...act(null, null, 2) }), 'バックグラウンドで実行中（2件）');
+  assert.equal(label(tEn, { running_turns: 1, ...act('tool', 'Bash') }), 'Running Bash…');
+  assert.equal(label(tEn, { running_turns: 1, ...act('subagent') }), 'Subagent running…');
+  assert.equal(label(tEn, { running_turns: 0, ...act(null, null, 2) }), 'Running in background (2)');
+});
+
+test('the indicator priority', () => {
+  const busy = { running_turns: 1, queued_turns: 1 };
+  assert.equal(label(tJa, { ...busy, ...act('tool', 'Bash') }, { stopping: true }), '止めています…');
+  assert.equal(label(tJa, { ...busy, ...act('tool', 'Bash') }, { pausedLabel: 'P' }), 'Bash を実行中…');
+  assert.equal(label(tJa, { ...busy, ...act('subagent') }), 'サブエージェント実行中…');
+  assert.equal(label(tJa, { ...busy, ...act('thinking') }, { pausedLabel: 'P' }), '考え中…');
+  assert.equal(label(tJa, { running_turns: 0, queued_turns: 1 }, { sending: true, pausedLabel: 'P' }), '考え中…');
+  assert.equal(label(tJa, { running_turns: 0, queued_turns: 1 }, { pausedLabel: 'P' }), 'P');
+  assert.equal(label(tJa, { running_turns: 0, queued_turns: 1 }), '順番待ち…');
+  assert.equal(label(tJa, { running_turns: 0, queued_turns: 0, ...act(null, null, 1) }), 'バックグラウンドで実行中（1件）');
+  assert.equal(label(tJa, { running_turns: 0, queued_turns: 0 }), '考え中…');
+});
+
+test('background is added to the main label', () => {
+  assert.equal(label(tJa, { running_turns: 1, ...act('tool', 'Bash', 2) }), 'Bash を実行中… / バックグラウンドで実行中（2件）');
+  assert.equal(label(tJa, { running_turns: 1, ...act('thinking', null, 1) }), '考え中… / バックグラウンドで実行中（1件）');
+  assert.equal(label(tJa, { running_turns: 1, ...act(null, null, 1) }, { stopping: true }), '止めています… / バックグラウンドで実行中（1件）');
+  assert.equal(label(tJa, { running_turns: 0, ...act(null, null, 2) }), 'バックグラウンドで実行中（2件）');
+});
+
+test('without activity the indicator matches the old rule', () => {
+  const old = ({ stopping, sending, running_turns, queued_turns, pausedLabel }) => stopping ? 'STOP'
+    : sending || running_turns > 0 || queued_turns === 0 ? 'THINK'
+    : pausedLabel ?? 'QUEUE';
+  const t = (key) => ({ 'advisor.stopping': 'STOP', 'advisor.thinking': 'THINK', 'advisor.waitingInQueue': 'QUEUE' })[key];
+  for (const activity of [undefined, null, { state: null, tool_name: null, background_count: 0 }]) {
+    for (const stopping of [false, true]) for (const sending of [false, true])
+      for (const running_turns of [0, 1]) for (const queued_turns of [0, 2]) for (const pausedLabel of [null, 'PAUSED']) {
+        const session = { running_turns, queued_turns, activity };
+        assert.equal(advisorIndicatorLabel({ t, session, sending, stopping, pausedLabel }), old({ stopping, sending, running_turns, queued_turns, pausedLabel }));
+      }
+  }
+  assert.equal(advisorIndicatorLabel({ t, session: undefined, sending: false, stopping: false, pausedLabel: null }), 'THINK');
+});
+
+test('background keeps the indicator and both polls after the reply', () => {
+  try {
+    sessionData = { status: 'running', running_turns: 0, queued_turns: 0, activity: { state: null, tool_name: null, background_count: 1 } };
+    const shown = renderAdvisor(false);
+    assert.ok(shown.html.includes('advisor.activityBackground'));
+    assert.equal(viewOptions['advisor-session'].refreshMs(sessionData), 1500);
+    assert.equal(viewOptions['advisor-messages'].refreshMs, 1500);
+
+    sessionData = { status: 'running', running_turns: 0, queued_turns: 0, activity: { state: null, tool_name: null, background_count: 0 } };
+    const gone = renderAdvisor(false);
+    assert.ok(!gone.html.includes('advisor.activityBackground') && !gone.html.includes('advisor.thinking'));
+    assert.equal(viewOptions['advisor-session'].refreshMs(sessionData), null);
+    assert.equal(viewOptions['advisor-messages'].refreshMs, null);
+    assert.equal(advisorSessionBusy(null), false);
+  } finally {
+    sessionData = undefined;
+  }
+});
+
+test('a turn Claude starts on its own shows without a stop button', () => {
+  try {
+    sessionData = { status: 'running', running_turns: 0, queued_turns: 0, activity: { state: 'thinking', tool_name: null, background_count: 0 } };
+    const view = renderAdvisor(false);
+    assert.ok(view.html.includes('advisor.thinking'));
+    assert.equal(view.button['aria-label'], 'advisor.sendLabel');
+  } finally {
+    sessionData = undefined;
+  }
+});
+
+function resetDraftSpy(overrides = {}) {
+  Object.assign(draftSpy, { items: [], notices: [], hint: null, attachmentIds: [], clears: 0 }, overrides);
+  postMessageArgs = [];
+  postMessageCalls = 0;
+}
+
+test('drop, paste and the clip button reach the same add() with the same files; text paste does not', () => {
+  resetDraftSpy();
+  const { form, textarea, attachButton } = renderAdvisor(false);
+  const files = [new File(['a'], 'a.png', { type: 'image/png' })];
+  form.onDrop(files);
+  const paste = { clipboardData: { files }, preventDefault() { this.prevented = true; } };
+  textarea.onPaste(paste);
+  attachButton.onFiles(files);
+  assert.equal(addCalls.length, 3);
+  for (const call of addCalls) assert.deepEqual(call, files);
+  assert.equal(paste.prevented, true);
+  const textPaste = { clipboardData: { files: [] }, preventDefault() { this.prevented = true; } };
+  textarea.onPaste(textPaste);
+  assert.equal(addCalls.length, 3);
+  assert.notEqual(textPaste.prevented, true);
+});
+
+test('an uploading item disables the send button, shows the hint and blocks Shift+Enter', async () => {
+  resetDraftSpy({ items: [{ id: 'u1', status: 'uploading' }], hint: 'attachments.waitUploading' });
+  const { button, hint, textarea } = renderAdvisor(false, null, true);
+  assert.equal(button.disabled, true);
+  assert.equal(hint.children, 'attachments.waitUploading');
+  textarea.onKeyDown(keyEvent({ shiftKey: true }).event);
+  await new Promise((r) => setImmediate(r));
+  assert.equal(postMessageCalls, 0);
+});
+
+test('attachment only and body plus attachment each post once with the attachment ids', async () => {
+  for (const [text, expectedBody] of [['', ''], ['hello', 'hello']]) {
+    resetDraftSpy({ items: [{ id: 'i1', status: 'ready', attachmentId: 'a1' }], attachmentIds: ['a1'] });
+    const { button, harness, textarea } = renderAdvisor(false, null, false);
+    assert.equal(button.disabled, false, 'an attachment alone enables the send button');
+    harness.refs[3].current.value = text;
+    textarea.onKeyDown(keyEvent({ shiftKey: true }).event);
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(postMessageArgs, [['conv-1', expectedBody, ['a1']]]);
+    assert.equal(draftSpy.clears, 1);
+  }
+});
+
+test('a body-only send passes an empty attachment list', async () => {
+  resetDraftSpy();
+  const { textarea } = renderAdvisor(false);
+  textarea.onKeyDown(keyEvent({ shiftKey: true }).event);
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(postMessageArgs, [['conv-1', 'hello', []]]);
+});
+
+test('a limit rejection is shown with role="alert"', () => {
+  resetDraftSpy({ notices: ['big.mov is 72.4 MB'] });
+  assert.match(renderAdvisor(false).html, /role="alert">big\.mov is 72\.4 MB/);
+});
+
+test('Turn shows body and file names, a quarantined badge, and no body box when the body is empty', () => {
+  resetDraftSpy();
+  advisorMessages = [
+    { id: 'm1', source: 'web', body: 'see this', created_at: '1', attachments: [{ id: 'f1', filename: 'a.png', status: 'ready' }] },
+    { id: 'm2', source: 'web', body: '', created_at: '2', attachments: [{ id: 'f2', filename: 'run.exe', status: 'quarantined' }] },
+  ];
+  try {
+    const { html } = renderAdvisor(false);
+    assert.match(html, /see this/);
+    assert.match(html, /a\.png/);
+    assert.match(html, /run\.exe\[badge\]/);
+    assert.equal(html.split('class="turn__body').length - 1, 1, 'only the non-empty body gets a box');
+  } finally {
+    advisorMessages = [];
   }
 });

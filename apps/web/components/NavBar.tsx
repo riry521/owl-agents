@@ -6,7 +6,7 @@ import { useMemo, useState } from 'react';
 import { useLocale } from '@/lib/i18n';
 
 const LINK_DEFS: Array<{ href: string; tKey: string; match: string[] }> = [
-  { href: '/board', tKey: 'nav.board', match: ['/', '/board', '/archive', '/work', '/decision'] },
+  { href: '/board', tKey: 'nav.board', match: ['/', '/board', '/archive', '/work', '/work/markdown', '/decision'] },
   { href: '/agents', tKey: 'nav.agents', match: ['/agents'] },
   { href: '/projects', tKey: 'nav.projects', match: ['/projects'] },
   { href: '/advisor', tKey: 'nav.advisor', match: ['/advisor'] },
@@ -24,7 +24,7 @@ const LINK_DEFS: Array<{ href: string; tKey: string; match: string[] }> = [
 ];
 
 const BOTTOM_TABS: Array<{ href: string; tKey: string; match: string[]; icon: string }> = [
-  { href: '/board', tKey: 'nav.board', match: ['/', '/board', '/archive', '/work', '/decision'], icon: 'board' },
+  { href: '/board', tKey: 'nav.board', match: ['/', '/board', '/archive', '/work', '/work/markdown', '/decision'], icon: 'board' },
   { href: '/advisor', tKey: 'nav.advisor', match: ['/advisor'], icon: 'chat' },
   { href: '/agents', tKey: 'nav.agents', match: ['/agents'], icon: 'agents' },
   { href: '/knowledge', tKey: 'nav.knowledge', match: ['/knowledge'], icon: 'knowledge' },

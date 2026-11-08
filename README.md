@@ -226,12 +226,14 @@ Details are in [docs/operations.md](docs/operations.md).
 - **Draft Works.** Tell the Advisor "draft" or "just register it" and it creates the Work as a memo without starting it. Start it later with the Start button on the Work detail page.
 - **Lead Designer.** A Work created with `design_mode: "lead"` (default `auto`) plans a design Task first and adds the implementation Tasks after the design is done.
 - **Backlog.** The `/backlog` page lists review follow-ups per Project. Link an item to a Work, issue a Work from it, or dismiss it.
+- **Attachments.** In the Advisor chat and the Work instruction box, attach files by drag and drop, paste, or the clip button. A file can be up to 50 MiB, and a message can carry up to 20 files. An executable file is quarantined and not passed to the agents. A message with only attachments can be sent.
 - **Advisor sessions.** Owl resumes an Advisor session only after its turn has finished, and sends the message again once if it fails. When an `owl-action` fails, the Advisor gets one more turn to deal with the failure.
 - **Steering from the Advisor.** The Advisor can send an instruction to a Work (`send_work_instruction`), edit its title or summary (`update_work`), and pause, resume, cancel or delete it (`pause_work`, `resume_work`, `cancel_work`, `delete_work`).
 - **Cancel vs. delete.** Cancel stops the agents, cleans up the Work's worktree and keeps the Work as cancelled. Delete removes the Work from the database and frees its number.
 - **Pause and instructions.** Pausing a Work stops the agents that are running and starts no new Tasks; resuming it runs the stopped Tasks again. Sending an instruction also stops the running agents, and the Manager replans from the new state.
 - **Board and Archive by Project.** The Board and the Archive group Works under a heading for each Project. On the Board, each heading has a rule and the number of Works in that Project.
 - **Final report.** The top of a completed Work's detail page shows the Manager's final report: a summary, the test results and the remaining issues.
+- **Markdown viewer.** A Markdown file named in a Work's deliverables or final report opens in a viewer with a table of contents. It reads only `.md` files in the Work's Project and the materials folder (up to 2 MiB, never files that may hold secrets). Before the Work is integrated, it shows the Work branch and says the content may still change.
 - **Required and goal criteria.** Each acceptance criterion is either required or a goal. A Work can complete when every required criterion is met, even if a goal is not. The Work detail page lists the goals that were not met, with the reason.
 
 ### Keeping it running
@@ -250,7 +252,8 @@ Details are in [docs/operations.md](docs/operations.md).
 ### When a Work stops
 
 - **Decisions.** When a Work cannot go on, a Decision page opens. It explains the stop in two parts: "The bottleneck" (why it stopped) and "Options" (what you can do). Pick one option, or write a free-text answer. Options include "Let the Manager fix it" and "Replan", where the Manager repairs the plan itself. A Decision that only flags an unconfirmed stop closes by itself once the stopped work finishes. To check the explanation texts with your own commands, see [docs/operations.md](docs/operations.md#checking-the-texts-of-decision-explanations-decision_text_checks).
-- **Sending files.** The Advisor can send a file to Slack or Discord with the `send_file` tool of `owl-action`. The folders it may send from and the size limits are set in `app-settings.json`; see [Talk to Owl from Slack or Discord](#talk-to-owl-from-slack-or-discord).
+- **Sending files.** The Advisor can send a file to Slack or Discord with the `send_file` tool of `owl-action`. The folders it may send from and the size limits are set in `app-settings.json`; see [Talk to Owl from Slack or Discord](#talk-to-owl-from-slack-or-discord). From the Web UI, the file goes to the Slack or Discord channel bound to the conversation's window. If the window has both, it goes to the preferred platform; with no preference set, nothing is sent and the reason is returned. A conversation whose window has no channel uses the default destination. Set the preferred platform and the default destination in **Settings → File destination**.
+- **Opening files from replies.** A path under the materials folder or the Advisor's shared folder in a reply becomes a link that opens the file or folder in a new tab. Nothing outside these two folders opens, and neither do files that may hold secrets.
 
 ### Memory and rules
 
@@ -335,7 +338,7 @@ On a wide screen the window list is a sidebar on the left. On a narrow screen, p
 
 You can reorder the Project windows by dragging them in the window list; the order is saved.
 
-A dot on a window in the list means it has Advisor messages you have not read. The server keeps the read state, so the dot is the same on every device and disappears once you open the window. While the Advisor is working on a turn, a stop button replaces the send button. Press it to interrupt the turn (Claude and Codex both support it). The stop button is red like the send button. Next to the window menu, a trash button clears the window's conversation in one click.
+A dot on a window in the list means it has Advisor messages you have not read. The server keeps the read state, so the dot is the same on every device and disappears once you open the window. While the Advisor is working on a turn, the indicator shows what it is doing: thinking, running a tool, running a subagent, or running in the background (with the count). A stop button replaces the send button. Press it to interrupt the turn (Claude and Codex both support it). The stop button is red like the send button. Next to the window menu, a trash button clears the window's conversation in one click.
 
 To turn a Project window on or off, open **Projects**, press **Edit** on the Project, switch **Use an Advisor window** on or off, and press **Save**. A Project that already has a channel bound stays in the list even when the switch is off.
 
@@ -347,7 +350,8 @@ When you turn a window on, Owl creates a channel for it in each connected Slack 
 owl start          # Start server (background)
 owl open           # Open the Web UI in your browser (starts Owl if needed)
 owl stop           # Stop Owl and its project-managed helper processes
-owl restart        # Restart server
+owl stop --force   # Stop a server that does not respond to a normal stop
+owl restart        # Restart server (escalates to a forced stop if needed)
 owl status         # Show server status
 owl doctor         # Run health checks (--json, --strict)
 owl cleanup        # Remove stale workspaces
@@ -479,6 +483,8 @@ v0.7.0 added three Bot Token Scopes to the manifest: `channels:manage` and `chan
 4. In Owl, open **Settings → Integrations → Discord**, enter the token and channel IDs, and save.
 
 You can also use `owl setup` or the variables in `.env` (see `.env.example`). Tokens are kept in `.env` with mode `600`.
+
+The server gives its shutdown a deadline (`OWL_SHUTDOWN_TIMEOUT_MS`, default 25000 ms). When it passes, the server stops the remaining child processes and exits. If the server is alive but does not respond, `owl status` shows `unresponsive`; recover with `owl stop --force` or `owl restart`. Each line of `server.log` starts with an ISO 8601 time.
 
 ## Running connectors as a separate process (advanced)
 

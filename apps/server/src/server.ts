@@ -1,4 +1,5 @@
 import { cliText, cliLanguage } from "./cli-language.js";
+import { unlinkSync } from "node:fs";
 import { access, appendFile, chmod, mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -6,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { scrubLegacySettings } from "./app-settings-store.js";
 import { createConfiguredAgentRunner, createExternalAgentRunner, createHybridExecutorRuntime } from "./agent-runner.js";
 import { isProcessAlive } from "./process-state.js";
+import { readProcessIdentity } from "../../../packages/core/dist/process-identity.js";
 import { refreshCodexModelCatalog, refreshOpencodeModelCatalog } from "./model-catalog.js";
 import {
   assertStaticExport,
@@ -16,7 +18,9 @@ import {
   validateContractArtifacts,
   type ContractManifest,
 } from "./contracts.js";
-import { agentTimeoutConfigurationError, configuredApiToken, configuredBind, configuredIdempotencyTtlMs, configuredPort, configuredScreenViewLimits, providerMode, serverExposureError } from "./config.js";
+import { agentTimeoutConfigurationError, configuredApiToken, configuredBind, configuredIdempotencyTtlMs, configuredPort, configuredScreenViewLimits, providerMode, serverExposureError, shutdownTimeoutMs } from "./config.js";
+import { installTimestampedConsole, timestampLines } from "./log-format.js";
+import { createShutdownDeadline, timedStage } from "./shutdown-deadline.js";
 import { createConfiguredCore } from "./core.js";
 import { createDecisionTextChecksFromEnv, createFinalReportTextChecksFromEnv } from "./decision-text-checks.js";
 import { createOwnApiCaller } from "./own-api-caller.js";
@@ -31,7 +35,9 @@ import { prepareConnectorConfig } from "./secret-config.js";
 import { resolveInstanceId } from "../../../packages/shared/dist/instance-id.js";
 import { classifyProviderFailure, executorProviderError } from "../../../packages/agent-runtime/dist/index.js";
 
-const SERVER_VERSION = "0.12.3";
+const SERVER_VERSION = "0.13.0";
+/** Extra time after the deadline before the watchdog thread sends SIGKILL. */
+const SHUTDOWN_KILL_GRACE_MS = 5_000;
 
 async function recordServerFailure(referenceId: string, context: string, error: unknown): Promise<void> {
   const raw = error instanceof Error ? (error.stack ?? error.message) : String(error);
@@ -39,7 +45,7 @@ async function recordServerFailure(referenceId: string, context: string, error: 
   const logPath = join(dataDir, "server.log");
   try {
     await mkdir(dataDir, { recursive: true, mode: 0o700 });
-    await appendFile(logPath, "[" + referenceId + "] " + context + ": " + raw + "\n", { encoding: "utf8", mode: 0o640 });
+    await appendFile(logPath, timestampLines("[" + referenceId + "] " + context + ": " + raw) + "\n", { encoding: "utf8", mode: 0o640 });
   } catch {
     console.error(cliText('server logへ記録できませんでした。参照ID: ', 'Could not write to the server log. Reference ID: ') + referenceId);
   }
@@ -63,6 +69,7 @@ export interface RunningServer {
 
 interface DatabaseModule {
   openDatabase?: (filename: string) => unknown;
+  acquireServerLock?: (path: string) => { release(): void } | null;
 }
 
 function parsePort(value: string | undefined): number {
@@ -185,7 +192,55 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
   }
 }
 
+/**
+ * Takes the data-directory lock (also in standalone mode), then records the
+ * pid file at once: startup takes seconds and must not look unowned.
+ * A failed start releases both; shutdown releases the lock.
+ */
 async function startServerWithGuard(options: ServerOptions, guardApiBase: string): Promise<RunningServer> {
+  const dataDir = resolveDataDir(resolveOwlRoot());
+  await mkdir(dataDir, { recursive: true, mode: 0o700 });
+  const dbPath = join(serverPackageRoot(), "../../packages/db/dist/index.js");
+  const unavailable = (cause?: unknown, exportName?: string): ApiError =>
+    new ApiError(503, "dependency_unavailable", cliText('DB実行基盤を読み込めませんでした。ビルド成果物を確認してください。', 'Could not load the database runtime. Check the build artifacts.'), { dependency: "packages/db/dist/index.js", ...(exportName ? { export: exportName } : {}) }, { cause });
+  let loaded: DatabaseModule;
+  try {
+    loaded = (await import(pathToFileURL(dbPath).href)) as DatabaseModule;
+  } catch (error) {
+    throw unavailable(error);
+  }
+  if (typeof loaded.acquireServerLock !== "function") throw unavailable(undefined, "acquireServerLock");
+  const lock = loaded.acquireServerLock(join(dataDir, "owl-server.lock"));
+  if (!lock) {
+    throw new ApiError(409, "idempotency_conflict", cliText('owl-coreはすでに起動しています。statusを確認してから再試行してください。', 'owl-core is already running. Check status before retrying.'));
+  }
+  const pidFile = join(dataDir, "owl-server.pid");
+  let pidWritten = false;
+  try {
+    // Kept for older servers that hold no lock.
+    await ensurePidAvailable(pidFile);
+    pidWritten = true;
+    await writeFile(pidFile, String(process.pid), { encoding: "utf8", mode: 0o600 });
+    const running = await startServerLocked(options, guardApiBase, () => lock.release());
+    return {
+      ...running,
+      shutdown: async (force, timeoutMs) => {
+        try {
+          await running.shutdown(force, timeoutMs);
+        } finally {
+          lock.release();
+        }
+      },
+    };
+  } catch (error) {
+    // Only remove a pid file this process wrote, and before the lock is released.
+    if (pidWritten) await unlink(pidFile).catch(() => undefined);
+    lock.release();
+    throw error;
+  }
+}
+
+async function startServerLocked(options: ServerOptions, guardApiBase: string, releaseLock: () => void): Promise<RunningServer> {
   const owlRoot = resolveOwlRoot();
   const dataDir = resolveDataDir(owlRoot);
   const webOut = resolveWebOut(owlRoot);
@@ -214,7 +269,6 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
   const contract = await validateContractArtifacts(owlRoot);
   const pidFile = join(dataDir, "owl-server.pid");
   const stateFile = join(dataDir, "owl-server.json");
-  await ensurePidAvailable(pidFile);
   // Tokens from an earlier server process are invalid; the directory starts empty.
   const guardTokens = GuardTokenRegistry.open(join(dataDir, "guard-tokens"));
   const guard = { apiBase: guardApiBase, issueToken: guardTokens.issue };
@@ -414,7 +468,7 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
   }) : () => undefined;
 
   await writeFile(pidFile, String(process.pid), { encoding: "utf8", mode: 0o600 });
-  await writeFile(stateFile, JSON.stringify({ pid: process.pid, bind: options.bind, port: options.port, started_at: new Date().toISOString() }), { encoding: "utf8", mode: 0o600 });
+  await writeFile(stateFile, JSON.stringify({ pid: process.pid, bind: options.bind, port: options.port, started_at: new Date().toISOString(), ...readProcessIdentity(process.pid) }), { encoding: "utf8", mode: 0o600 });
   let shutdownPromise: Promise<void> | null = null;
   const shutdown = async (force: boolean, timeoutMs: number): Promise<void> => {
     if (shutdownPromise) return shutdownPromise;
@@ -430,7 +484,7 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
         }
         if (pluginManager) {
           try {
-            await pluginManager.stopAll();
+            await timedStage("plugins", () => pluginManager!.stopAll());
           } catch (error) {
             console.error("[owl-server] plugins: Could not stop plugins during shutdown.", error);
           }
@@ -438,36 +492,40 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
         if (!coreRuleStore) ruleStore.stopWatching();
         // close() synchronously stops accepting requests and destroys open
         // sockets. Process exit below owns the final resource teardown.
-        void http.close().catch((error) =>
+        void timedStage("http close", () => http.close()).catch((error) =>
           console.error("[owl-server] HTTP close failed during shutdown", error));
-        await core.shutdown({ force, timeoutMs });
+        await timedStage("core shutdown", () => core.shutdown({ force, timeoutMs }));
       } finally {
         guardTokens.clear();
-        await removeRuntimeFile(pidFile);
-        await removeRuntimeFile(stateFile);
+        await timedStage("runtime files", async () => {
+          await removeRuntimeFile(pidFile);
+          await removeRuntimeFile(stateFile);
+        });
       }
     })();
     return shutdownPromise;
   };
 
-  const handleSignal = (signal: NodeJS.Signals, force: boolean) => {
-    void (async () => {
-      try {
-        await shutdown(force, 30_000);
-        // Async cleanup can leave SDK sockets, file watchers, or native DB
-        // handles in the event loop. Exit only after cleanup has completed so
-        // owl stop can observe a definitive process termination.
-        process.exit(0);
-      } catch (error) {
-        const referenceId = newReferenceId();
-        await recordServerFailure(referenceId, signal + " shutdown failed", error);
-        console.error(cliText('安全停止に失敗しました。ログの参照IDを確認してください: ', 'Safe shutdown failed. Check the logs using reference ID: ') + referenceId);
-        process.exit(1);
-      }
-    })();
+  const unlinkQuietly = (path: string): void => {
+    try { unlinkSync(path); } catch { /* already gone */ }
   };
-  process.once("SIGTERM", () => handleSignal("SIGTERM", false));
-  process.once("SIGINT", () => handleSignal("SIGINT", true));
+  const deadline = createShutdownDeadline({
+    deadlineMs: shutdownTimeoutMs(),
+    graceMs: SHUTDOWN_KILL_GRACE_MS,
+    run: (coreTimeoutMs, force) => shutdown(force, coreTimeoutMs),
+    forceTerminate: () => core.forceTerminateProcesses?.(),
+    // Lock last: while the pid file exists, the CLI can still find this process.
+    cleanup: () => {
+      unlinkQuietly(pidFile);
+      unlinkQuietly(stateFile);
+      releaseLock();
+    },
+    exit: (code) => process.exit(code),
+    log: (line) => console.log(line),
+  });
+  // on, not once: a second signal while shutting down means "stop now".
+  process.on("SIGTERM", () => deadline.handleSignal("SIGTERM", false));
+  process.on("SIGINT", () => deadline.handleSignal("SIGINT", true));
 
   if (process.env.OWL_CORE_MODE !== "standalone" && providerMode() !== "stub") {
     void refreshCodexModelCatalog();
@@ -508,10 +566,11 @@ export function parseServerArgs(argv: readonly string[]): ServerOptions {
 
 export async function runServerProcess(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
   const running = await startServer(parseServerArgs(argv));
-  console.log(JSON.stringify({ command: "server", pid: running.pid, api_base: "/api/v1", scope: "mvp" }));
+  process.stdout.write(JSON.stringify({ command: "server", pid: running.pid, api_base: "/api/v1", scope: "mvp" }) + "\n");
 }
 
 export async function main(): Promise<void> {
+  installTimestampedConsole();
   try {
     await runServerProcess();
   } catch (error) {

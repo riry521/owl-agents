@@ -53,6 +53,11 @@ const SAFE_REF = /^[A-Za-z0-9._/-]{1,200}$/u;
 const safeRef = (ref: string): boolean => SAFE_REF.test(ref) && !ref.startsWith("-");
 const safePath = (path: string): boolean => !/[\0\n]/u.test(path) && !/^[-/]/u.test(path) && !path.split("/").includes("..");
 
+export type RegularBlobRead =
+  | { readonly kind: "missing" }
+  | { readonly kind: "too_large"; readonly size: number }
+  | { readonly kind: "ok"; readonly bytes: Buffer };
+
 export class GitProjectSourceReader implements ProjectSourceReader {
   public async listFiles(repo: string, ref: string): Promise<string[] | null> {
     if (!safeRef(ref)) return null;
@@ -65,6 +70,19 @@ export class GitProjectSourceReader implements ProjectSourceReader {
     const size = Number(await this.git(repo, ["cat-file", "-s", `${ref}:${path}`]));
     if (!Number.isFinite(size) || size > maxBytes) return null;
     return this.git(repo, ["cat-file", "blob", `${ref}:${path}`]);
+  }
+
+  /** Bytes of a regular-file blob at a commit; a symlink blob holds the link target, not a body, so it is "missing". */
+  public async readRegularBlob(repo: string, commit: string, path: string, maxBytes: number): Promise<RegularBlobRead> {
+    const missing = { kind: "missing" } as const;
+    if (!safeRef(commit) || !safePath(path)) return missing;
+    const listing = await this.git(repo, ["ls-tree", "-z", "-l", commit, "--", path], { GIT_LITERAL_PATHSPECS: "1" });
+    const entry = listing?.split("\0")[0]?.match(/^(\d+) blob ([0-9a-f]+)\s+(\d+)\t/u);
+    if (!entry || (entry[1] !== "100644" && entry[1] !== "100755")) return missing;
+    const size = Number(entry[3]);
+    if (size > maxBytes) return { kind: "too_large", size };
+    const bytes = await this.git(repo, ["cat-file", "blob", entry[2]], {}, "buffer");
+    return bytes === null ? missing : { kind: "ok", bytes };
   }
 
   public async changedPaths(repo: string, from: string, to: string): Promise<string[] | null> {
@@ -93,10 +111,14 @@ export class GitProjectSourceReader implements ProjectSourceReader {
     return (await this.git(repo, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]))?.trim() || null;
   }
 
-  private async git(repo: string, args: string[]): Promise<string | null> {
+  private async git(repo: string, args: string[]): Promise<string | null>;
+  private async git(repo: string, args: string[], env: Record<string, string>): Promise<string | null>;
+  private async git(repo: string, args: string[], env: Record<string, string>, encoding: "buffer"): Promise<Buffer | null>;
+  private async git(repo: string, args: string[], env: Record<string, string> = {}, encoding: "utf8" | "buffer" = "utf8"): Promise<string | Buffer | null> {
     try {
       const { stdout } = await execFileAsync("git", ["-C", repo, ...args], {
-        env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" },
+        encoding,
+        env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", ...env },
         timeout: 10_000,
         // Why not 1 MiB: `ls-tree -r` of a repository with ~17k paths exceeds it and the whole listing became null.
         maxBuffer: 64 * 1024 * 1024,

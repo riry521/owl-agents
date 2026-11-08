@@ -207,7 +207,7 @@ function createHookHarness(initialState) {
   };
 }
 
-function renderAdvisorFolders(state, apiClientOverrides) {
+function renderAdvisorFolders(state, apiClientOverrides, componentName = 'AdvisorFoldersSection') {
   capturedResetButton = null;
   capturedSaveButton = null;
   const harness = createHookHarness(state);
@@ -241,8 +241,8 @@ function renderAdvisorFolders(state, apiClientOverrides) {
       '@/components/AutoWorkEntryPanel': { AutoWorkEntryPanel: () => null },
     },
   });
-  renderToStaticMarkup(React.createElement(module.AdvisorFoldersSection));
-  return { harness, resetButton: capturedResetButton, saveButton: capturedSaveButton };
+  const html = renderToStaticMarkup(React.createElement(module[componentName]));
+  return { harness, html, resetButton: capturedResetButton, saveButton: capturedSaveButton };
 }
 
 test('the reset button clears that field, and Save then sends "" for it', async () => {
@@ -302,4 +302,73 @@ test('English and Japanese settings.json define the exact same key set overall',
   const english = JSON.parse(readFileSync(join(repoRoot, 'apps/web/lib/i18n/en.json'), 'utf8'));
   const japanese = JSON.parse(readFileSync(join(repoRoot, 'apps/web/lib/i18n/ja.json'), 'utf8'));
   assert.deepEqual(Object.keys(english.settings).sort(), Object.keys(japanese.settings).sort());
+});
+
+// ---- Advisor send-file destination ------------------------------------------
+
+const destinationData = (overrides = {}) => ({
+  preferred_provider: 'slack',
+  default_destination: { provider: 'slack', channel_id: 'C0OWL', display_name: 'owl', available: true },
+  providers: [
+    { provider: 'slack', configured: true, running: true, candidates: [{ channel_id: 'C0OWL', display_name: 'owl', kind: 'conversation' }] },
+    { provider: 'discord', configured: false, running: false, candidates: [] },
+  ],
+  ...overrides,
+});
+
+test('getAdvisorSendFileDestination GETs and putAdvisorSendFileDestination PUTs the payload', async () => {
+  const { getAdvisorSendFileDestination, putAdvisorSendFileDestination } = loadApiClient();
+  const data = destinationData();
+  const seen = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = fakeFetch({
+    '/api/v1/settings/advisor-send-file-destination': (url, init) => {
+      seen.push({ method: init.method ?? 'GET', body: init.body ? JSON.parse(init.body) : null });
+      return new Response(JSON.stringify({ request_id: 'r1', data, version: 1 }), { status: 200 });
+    },
+  });
+  try {
+    assert.deepEqual(await getAdvisorSendFileDestination(), data);
+    const input = { preferred_provider: 'discord', default_destination: { provider: 'slack', channel_id: 'C0OWL' } };
+    assert.deepEqual(await putAdvisorSendFileDestination(input), data);
+    assert.equal(seen[0].method, 'GET');
+    assert.equal(seen[1].method, 'PUT');
+    assert.deepEqual(seen[1].body.payload, input);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('the send-file destination section shows the unset, no-integration and unavailable-default sentences', () => {
+  // useState order: open, data, preferred, selected, loading, saving, notice, error.
+  const render = (data) => renderAdvisorFolders([true, data, data.preferred_provider, '', false, false, null, null], {}, 'AdvisorSendFileDestinationSection').html;
+  assert.match(render(destinationData({ preferred_provider: null, default_destination: null })), /settings\.sendFileDestinationUnset\b/);
+  const none = destinationData({ default_destination: null, providers: destinationData().providers.map((p) => ({ ...p, configured: false })) });
+  assert.match(render(none), /settings\.sendFileDestinationNoIntegration/);
+  const unavailable = destinationData({ default_destination: { provider: 'slack', channel_id: 'C0OLD', display_name: 'old', available: false } });
+  assert.match(render(unavailable), /settings\.sendFileDestinationUnavailable/);
+  assert.match(render(destinationData()), /settings\.sendFileDestinationNotConfigured/, 'Discord card carries the not-configured badge');
+});
+
+test('saving the send-file destination section sends the chosen provider and channel only', async () => {
+  const data = destinationData({ preferred_provider: null, default_destination: null });
+  let payload = null;
+  const { saveButton } = renderAdvisorFolders(
+    [true, data, 'discord', 'slack:C0OWL', false, false, null, null],
+    { putAdvisorSendFileDestination: async (input) => { payload = input; return data; } },
+    'AdvisorSendFileDestinationSection',
+  );
+  assert.equal(saveButton.disabled, false);
+  await saveButton.onClick();
+  assert.deepEqual(payload, { preferred_provider: 'discord', default_destination: { provider: 'slack', channel_id: 'C0OWL' } });
+  const unchanged = renderAdvisorFolders([true, data, null, '', false, false, null, null], {}, 'AdvisorSendFileDestinationSection');
+  assert.equal(unchanged.saveButton.disabled, true);
+});
+
+test('English and Japanese define the same settings.sendFileDestination* keys', () => {
+  const english = JSON.parse(readFileSync(join(repoRoot, 'apps/web/lib/i18n/en.json'), 'utf8'));
+  const japanese = JSON.parse(readFileSync(join(repoRoot, 'apps/web/lib/i18n/ja.json'), 'utf8'));
+  const keys = (dict) => Object.keys(dict.settings).filter((key) => key.startsWith('sendFileDestination')).sort();
+  assert.ok(keys(english).length > 0);
+  assert.deepEqual(keys(english), keys(japanese));
 });

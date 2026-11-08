@@ -39,6 +39,25 @@ export function parseOutboundFiles(value: unknown): OutboundFile[] {
   return files;
 }
 
+export interface DeliveryTarget {
+  readonly provider: "slack" | "discord";
+  readonly channel_id: string;
+  readonly display_name: string | null;
+}
+
+/** Reads the destination Core chose for a Web-origin reply; null when absent or malformed. */
+export function parseDeliveryTarget(event: OwlEvent): DeliveryTarget | null {
+  const raw = event.payload.delivery_target;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const read = (key: string): unknown => (Object.hasOwn(raw, key) ? (raw as Record<string, unknown>)[key] : undefined);
+  const provider = read("provider");
+  const channelId = read("channel_id");
+  const displayName = read("display_name");
+  if (provider !== "slack" && provider !== "discord") return null;
+  if (typeof channelId !== "string" || channelId.length < 1 || channelId.length > 200) return null;
+  return { provider, channel_id: channelId, display_name: typeof displayName === "string" ? displayName : null };
+}
+
 /** Re-reads the file Core checked and verifies size and sha256. */
 export async function readOutboundFile(
   file: OutboundFile,

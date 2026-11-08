@@ -13,6 +13,8 @@ import {
   parseOutboundFiles,
   readOutboundFile,
   reportAdvisorDelivery,
+parseDeliveryTarget,
+type OutboundFile,
   formatStatusResponse,
   parseDecisionButtonId,
   resolveDecisionButtonTarget,
@@ -417,7 +419,11 @@ export class SlackConnector {
 
   private async handleAdvisorResponse(event: OwlEvent): Promise<void> {
     const origin = asRecord(event.payload.origin);
-    if (origin?.channel !== "slack") return;
+    if (origin?.channel !== "slack") {
+      const target = parseDeliveryTarget(event);
+      if (origin?.channel === "web" && target?.provider === "slack") await this.deliverToChannel(event, target.channel_id);
+      return;
+    }
 
     const threadTs = typeof origin.ref === "string" ? origin.ref : undefined;
     const channel = resolveSlackAdvisorChannel(event, [...this.conversationChannelIds, ...this.boundChannelIds], this.threadChannels, threadTs);
@@ -430,35 +436,7 @@ export class SlackConnector {
       // parsed and dispatched any action fence before emitting this event, so
       // `reply` is the text Core decided to show, as-is.
       const language = await this.core.language();
-      const t = connectorText(language);
-      const lines: string[] = [];
-      const results: OutboundFileResult[] = [];
-      for (const file of parseOutboundFiles(event.payload.outbound_files)) {
-        const index = file.index ?? -1;
-        const read = await readOutboundFile(file);
-        if (!read.ok) {
-          const message = t.fileSendFailed(file.name, read.reason === "changed" ? t.fileSendChanged : t.fileSendUnreadable, "");
-          lines.push(message);
-          results.push({ index, outcome: "failed", code: read.reason, platform_error: null, message });
-          continue;
-        }
-        try {
-          const upload = {
-            channel_id: channel,
-            file: read.bytes,
-            filename: file.name,
-            ...(file.comment ? { initial_comment: markdownToMrkdwn(file.comment) } : {}),
-          };
-          // The SDK types thread_ts as required once present, so the two shapes are separate calls.
-          await (threadTs ? this.web.filesUploadV2({ ...upload, thread_ts: threadTs }) : this.web.filesUploadV2(upload));
-          lines.push(t.fileSent(file.name, formatBytes(file.size)));
-          results.push({ index, outcome: "sent" });
-        } catch (error) {
-          const message = t.fileSendFailed(file.name, formatIntegrationError("Slack", error, language), slackSendHint(error, t));
-          lines.push(message);
-          results.push({ index, message, ...classifySlackUploadError(error) });
-        }
-      }
+      const { lines, results } = await this.uploadOutboundFiles(channel, threadTs, parseOutboundFiles(event.payload.outbound_files));
       const notice = await reportAdvisorDelivery(this.core, event, results);
       if (notice) lines.push(notice);
       await postSlackMessage(this.web, {
@@ -471,6 +449,63 @@ export class SlackConnector {
     } catch (error) {
       await this.reportMessageError(channel, error);
     }
+  }
+
+  /** Web-origin files go to the channel Core chose; the reply text stays in the Web chat. */
+  private async deliverToChannel(event: OwlEvent, channelId: string): Promise<void> {
+    const files = parseOutboundFiles(event.payload.outbound_files);
+    if (!this.isConversationChannel(channelId)) await this.refreshBindings();
+    if (!this.isConversationChannel(channelId)) {
+      const message = `Slack のチャンネル ${channelId} は Connector の配送先に入っていません。`;
+      await reportAdvisorDelivery(this.core, event, files.map((file) => ({
+        index: file.index ?? -1, outcome: "failed", code: "upload_rejected", platform_error: null, message,
+      })));
+      return;
+    }
+    try {
+      const { results } = await this.uploadOutboundFiles(channelId, undefined, files);
+      await reportAdvisorDelivery(this.core, event, results);
+    } catch (error) {
+      await this.reportMessageError(channelId, error);
+    }
+  }
+
+  private async uploadOutboundFiles(
+    channel: string,
+    threadTs: string | undefined,
+    files: readonly OutboundFile[],
+  ): Promise<{ lines: string[]; results: OutboundFileResult[] }> {
+    const language = await this.core.language();
+    const t = connectorText(language);
+    const lines: string[] = [];
+    const results: OutboundFileResult[] = [];
+    for (const file of files) {
+      const index = file.index ?? -1;
+      const read = await readOutboundFile(file);
+      if (!read.ok) {
+        const message = t.fileSendFailed(file.name, read.reason === "changed" ? t.fileSendChanged : t.fileSendUnreadable, "");
+        lines.push(message);
+        results.push({ index, outcome: "failed", code: read.reason, platform_error: null, message });
+        continue;
+      }
+      try {
+        const upload = {
+          channel_id: channel,
+          file: read.bytes,
+          filename: file.name,
+          ...(file.comment ? { initial_comment: markdownToMrkdwn(file.comment) } : {}),
+        };
+        // The SDK types thread_ts as required once present, so the two shapes are separate calls.
+        await (threadTs ? this.web.filesUploadV2({ ...upload, thread_ts: threadTs }) : this.web.filesUploadV2(upload));
+        lines.push(t.fileSent(file.name, formatBytes(file.size)));
+        results.push({ index, outcome: "sent" });
+      } catch (error) {
+        const message = t.fileSendFailed(file.name, formatIntegrationError("Slack", error, language), slackSendHint(error, t));
+        lines.push(message);
+        results.push({ index, message, ...classifySlackUploadError(error) });
+      }
+    }
+    return { lines, results };
   }
 
   private async fetchAdvisorReply(event: OwlEvent): Promise<string> {

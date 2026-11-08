@@ -10,6 +10,7 @@ import {
   Events,
   type Message,
   type Interaction,
+  type MessageCreateOptions,
 } from "discord.js";
 import { CoreClient, commandEnvelope, formatIntegrationError } from "@owl/plugin-sdk";
 import {
@@ -23,6 +24,8 @@ import {
   parseOutboundFiles,
   readOutboundFile,
   reportAdvisorDelivery,
+parseDeliveryTarget,
+type OutboundFile,
   resolveDecisionButtonTarget,
   submitDecisionAnswer,
   uploadAttachment,
@@ -388,7 +391,11 @@ export class DiscordConnector {
 
   private async handleAdvisorResponse(event: OwlEvent): Promise<void> {
     const origin = asRecord(event.payload.origin);
-    if (origin?.channel !== "discord") return;
+    if (origin?.channel !== "discord") {
+      const target = parseDeliveryTarget(event);
+      if (origin?.channel === "web" && target?.provider === "discord") await this.deliverToChannel(event, target.channel_id);
+      return;
+    }
 
     const channelId = resolveDiscordAdvisorChannel(event, [...this.conversationChannelIds, ...this.boundChannelIds]);
     if (!channelId) {
@@ -406,32 +413,7 @@ export class DiscordConnector {
       // decided to show. Append any structured suggested_actions it left
       // unhandled, the same way the Slack connector does.
       const language = await this.core.language();
-      const t = connectorText(language);
-      const lines: string[] = [];
-      const results: OutboundFileResult[] = [];
-      for (const file of parseOutboundFiles(event.payload.outbound_files)) {
-        const index = file.index ?? -1;
-        const read = await readOutboundFile(file);
-        if (!read.ok) {
-          const message = t.fileSendFailed(file.name, read.reason === "changed" ? t.fileSendChanged : t.fileSendUnreadable, "");
-          lines.push(message);
-          results.push({ index, outcome: "failed", code: read.reason, platform_error: null, message });
-          continue;
-        }
-        try {
-          await channel.send({
-            ...(file.comment ? { content: file.comment } : {}),
-            files: [{ attachment: read.bytes, name: file.name }],
-            allowedMentions: NO_MENTIONS,
-          });
-          lines.push(t.fileSent(file.name, formatBytes(file.size)));
-          results.push({ index, outcome: "sent" });
-        } catch (error) {
-          const message = t.fileSendFailed(file.name, formatIntegrationError("Discord", error, language), discordSendHint(error, t));
-          lines.push(message);
-          results.push({ index, message, ...classifyDiscordUploadError(error) });
-        }
-      }
+      const { lines, results } = await this.uploadOutboundFiles(channel, parseOutboundFiles(event.payload.outbound_files));
       const notice = await reportAdvisorDelivery(this.core, event, results);
       if (notice) lines.push(notice);
       const text = formatAdvisorReply(appendFileResults(reply, event.payload.action_results, lines), event.payload.suggested_actions, language);
@@ -441,6 +423,68 @@ export class DiscordConnector {
     } catch (error) {
       await this.reportChannelError(channelId, error);
     }
+  }
+
+  /** Web-origin files go to the channel Core chose; the reply text stays in the Web chat. */
+  private async deliverToChannel(event: OwlEvent, channelId: string): Promise<void> {
+    const files = parseOutboundFiles(event.payload.outbound_files);
+    const fetchAllowed = async () => {
+      if (!this.isConversationChannel(channelId)) return null;
+      const channel = await this.client.channels.fetch(channelId).catch(() => null);
+      return channel && channel.isTextBased() && "send" in channel ? channel : null;
+    };
+    let channel = await fetchAllowed();
+    if (!channel) {
+      await this.refreshBindings();
+      channel = await fetchAllowed();
+    }
+    if (!channel) {
+      const message = `Discord のチャンネル ${channelId} は Connector の配送先に入っていないか、取得できません。`;
+      await reportAdvisorDelivery(this.core, event, files.map((file) => ({
+        index: file.index ?? -1, outcome: "failed", code: "upload_rejected", platform_error: null, message,
+      })));
+      return;
+    }
+    try {
+      const { results } = await this.uploadOutboundFiles(channel, files);
+      await reportAdvisorDelivery(this.core, event, results);
+    } catch (error) {
+      await this.reportChannelError(channelId, error);
+    }
+  }
+
+  private async uploadOutboundFiles(
+    channel: { send(options: MessageCreateOptions): Promise<unknown> },
+    files: readonly OutboundFile[],
+  ): Promise<{ lines: string[]; results: OutboundFileResult[] }> {
+    const language = await this.core.language();
+    const t = connectorText(language);
+    const lines: string[] = [];
+    const results: OutboundFileResult[] = [];
+    for (const file of files) {
+      const index = file.index ?? -1;
+      const read = await readOutboundFile(file);
+      if (!read.ok) {
+        const message = t.fileSendFailed(file.name, read.reason === "changed" ? t.fileSendChanged : t.fileSendUnreadable, "");
+        lines.push(message);
+        results.push({ index, outcome: "failed", code: read.reason, platform_error: null, message });
+        continue;
+      }
+      try {
+        await channel.send({
+          ...(file.comment ? { content: file.comment } : {}),
+          files: [{ attachment: read.bytes, name: file.name }],
+          allowedMentions: NO_MENTIONS,
+        });
+        lines.push(t.fileSent(file.name, formatBytes(file.size)));
+        results.push({ index, outcome: "sent" });
+      } catch (error) {
+        const message = t.fileSendFailed(file.name, formatIntegrationError("Discord", error, language), discordSendHint(error, t));
+        lines.push(message);
+        results.push({ index, message, ...classifyDiscordUploadError(error) });
+      }
+    }
+    return { lines, results };
   }
 
   private async fetchAdvisorReply(event: OwlEvent): Promise<string> {

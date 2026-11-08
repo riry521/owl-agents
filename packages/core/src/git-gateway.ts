@@ -181,12 +181,17 @@ async function holdsContent(directory: string): Promise<boolean> {
   return false;
 }
 
+/** True for a directory with nothing to lose: it holds only (nested) empty directories. */
+export async function isEmptyDirectoryTree(path: string): Promise<boolean> {
+  const info = await lstat(path).catch(() => null);
+  return info?.isDirectory() === true && !await holdsContent(path);
+}
+
 /** Ignored paths that hold something to lose; an empty ignored directory is not one of them. */
 async function ignoredContent(root: string, paths: readonly string[]): Promise<string[]> {
   const kept: string[] = [];
   for (const path of paths) {
-    const info = await lstat(join(root, path)).catch(() => null);
-    if (info?.isDirectory() && !await holdsContent(join(root, path))) continue;
+    if (await isEmptyDirectoryTree(join(root, path))) continue;
     kept.push(path);
   }
   return kept;
@@ -2327,7 +2332,7 @@ export class GitWorktreeGateway implements GitGateway {
         ? []
         : await ignoredContent(path, this.withoutToolState(request.work_id, status.message.split("\0").filter((line) => line.startsWith("!! ")).map((line) => line.slice(3))));
       if (ignored.length > 0) {
-        return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: `Ignored contents remain: ${ignored.slice(0, 10).join(", ")}.` };
+        return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: `Ignored contents remain: ${ignored.slice(0, 10).join(", ")}.`, ignored_paths: ignored.slice(0, 10) };
       }
       await this.beforeRemoval(path);
       return this.git(canonical, ["worktree", "remove", "--force", path]);
@@ -2341,7 +2346,7 @@ export class GitWorktreeGateway implements GitGateway {
     if (!ignored.ok) return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: ignored.message };
     const ignoredPaths = await ignoredContent(path, this.withoutToolState(request.work_id, ignored.paths));
     if (ignoredPaths.length > 0) {
-      return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: `Ignored contents remain: ${ignoredPaths.slice(0, 10).join(", ")}.` };
+      return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: `Ignored contents remain: ${ignoredPaths.slice(0, 10).join(", ")}.`, ignored_paths: ignoredPaths.slice(0, 10) };
     }
     try {
       await this.backupUnregisteredWorkspace(request.work_id, {
@@ -2467,7 +2472,7 @@ export class GitWorktreeGateway implements GitGateway {
       ? []
       : await ignoredContent(path, status.message.split("\0").filter((line) => line.startsWith("!! ")).map((line) => line.slice(3)));
     if (ignored.length > 0) {
-      return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: `Ignored contents remain: ${ignored.slice(0, 10).join(", ")}.` };
+      return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: `Ignored contents remain: ${ignored.slice(0, 10).join(", ")}.`, ignored_paths: ignored.slice(0, 10) };
     }
     await this.beforeRemoval(path);
     return this.git(canonical, ["worktree", "remove", "--force", path]);

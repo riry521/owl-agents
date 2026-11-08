@@ -295,3 +295,142 @@ test("registerInboundUpload requires exactly one of conversation_id/conversation
     "an attachment still in 'registered' status must be rejected",
   );
 });
+
+// ---- Web attachments (uploadWebAttachment) ----
+
+const webOwner = "owner:default";
+const idleRunner = {
+  runManagerPlan: () => new Promise(() => {}),
+  runWorker: async () => { throw new Error("not used"); },
+  runReviewer: async () => { throw new Error("not used"); },
+  runAdvisor: async () => { throw new Error("not used"); },
+};
+
+function advisorProvider(sentTurns) {
+  let currentTurn;
+  let readySent = false;
+  return {
+    createSession: async () => ({
+      provider_session_id: "web-attachments-session",
+      pid: process.pid,
+      send: async (turn) => { currentTurn = turn; sentTurns.push(turn); },
+      events: () => ({
+        async *[Symbol.asyncIterator]() {
+          if (!readySent) {
+            readySent = true;
+            yield { type: "session.ready", provider_session_id: "web-attachments-session", pid: process.pid };
+          }
+          yield { type: "turn.completed", turn_id: currentTurn.turn_id, reply: "ok", usage: null };
+        },
+      }),
+      stop: async () => {},
+    }),
+  };
+}
+
+async function webCore(t, sentTurns = [], { start = false } = {}) {
+  const made = await createTestCore(t, {
+    agentRunner: idleRunner,
+    providerClient: advisorProvider(sentTurns),
+    version: "web-attachments-test",
+    dispatcher: { tick_interval_ms: 25 },
+  });
+  made.core.gitGateway().inspectAdvisorWorkspace = async () => ({ ok: true, dirty: false, message: "clean" });
+  if (start) await made.core.start();
+  const { conversation_id: conversationId } = await made.core.getActiveConversation();
+  return { ...made, conversationId, sentTurns };
+}
+
+const webUpload = (core, conversationId, name, content, key, mime = "text/plain") =>
+  core.uploadWebAttachment(webOwner, { conversation_id: conversationId }, { filename: name, mime, content }, { request_id: `r-${key}`, idempotency_key: key });
+
+test("web attachments: text plus files reach the Advisor turn with the original bytes, and the message lists attachments without paths", async (t) => {
+  const { core, db, root, conversationId, sentTurns } = await webCore(t, [], { start: true });
+  const content = Buffer.from("Web report body\n", "utf8");
+  const uploaded = await webUpload(core, conversationId, "report.txt", content, "web-1");
+  assert.equal(uploaded.status, "stored");
+  assert.equal(db.get("SELECT id FROM inbound_uploads WHERE id = ?", uploaded.attachment_id)?.id, uploaded.attachment_id);
+
+  const posted = await core.postMessage(conversationId, commandEnvelope({ body: "See file", attachment_ids: [uploaded.attachment_id] }, "web-post-1"));
+  await core.advisorRespond(conversationId, posted.data.message_id);
+  await waitUntil(() => db.get("SELECT status FROM advisor_turns WHERE conversation_id = ? ORDER BY queued_at DESC LIMIT 1", conversationId)?.status === "completed", "Advisor turn completes");
+  assert.equal(sentTurns.length, 1);
+  assert.ok(sentTurns[0].text.startsWith("See file"));
+  assert.equal(sentTurns[0].attachment_paths.length, 1);
+  assert.deepEqual(await readFile(sentTurns[0].attachment_paths[0]), content);
+
+  const listed = core.listMessages(conversationId, {}).data.find((m) => m.id === posted.data.message_id);
+  assert.deepEqual(listed.attachments, [{ id: uploaded.attachment_id, filename: "report.txt", mime: "text/plain", bytes: content.byteLength, status: "stored" }]);
+  assert.equal(JSON.stringify(listed).includes(root), false, "no file path in the message output");
+});
+
+test("web attachments: attachments-only (body empty) and text-only each store one message; an empty send is rejected", async (t) => {
+  const { core, db, conversationId } = await webCore(t);
+  const up = await webUpload(core, conversationId, "only.txt", Buffer.from("x"), "web-2");
+  const only = await core.postMessage(conversationId, commandEnvelope({ body: "", attachment_ids: [up.attachment_id] }, "web-post-2"));
+  assert.equal(db.get("SELECT body FROM messages WHERE id = ?", only.data.message_id).body, "");
+  const text = await core.postMessage(conversationId, commandEnvelope({ body: "just text", attachment_ids: [] }, "web-post-3"));
+  const textMessage = core.listMessages(conversationId, {}).data.find((m) => m.id === text.data.message_id);
+  assert.equal(textMessage.attachments, undefined);
+  await assert.rejects(
+    () => core.postMessage(conversationId, commandEnvelope({ body: "  ", attachment_ids: [] }, "web-post-4")),
+    (error) => error?.code === "validation_error",
+  );
+});
+
+test("web attachments: size limit, unsafe filename, executable quarantine, and limits come from upload-limits", async (t) => {
+  const { MAX_UPLOAD_BYTES, MAX_MESSAGE_ATTACHMENTS } = await import("../../packages/core/dist/upload-limits.js");
+  const { core, conversationId } = await webCore(t);
+  assert.equal(MAX_MESSAGE_ATTACHMENTS, 20);
+  await assert.rejects(
+    () => webUpload(core, conversationId, "big.bin", Buffer.alloc(MAX_UPLOAD_BYTES + 1), "web-big", "application/octet-stream"),
+    (error) => error?.code === "upload_too_large" && error?.details?.max_bytes === MAX_UPLOAD_BYTES,
+  );
+  await assert.rejects(
+    () => webUpload(core, conversationId, "a/b.txt", Buffer.from("x"), "web-bad"),
+    (error) => error?.code === "validation_error",
+  );
+  const script = await webUpload(core, conversationId, "run.sh", Buffer.from("#!/bin/sh\n"), "web-sh", "text/x-shellscript");
+  assert.equal(script.status, "quarantined");
+});
+
+test("web attachments: another conversation's or an incomplete upload is rejected, and a replayed upload key yields one row", async (t) => {
+  const { core, db, conversationId } = await webCore(t);
+  const first = await webUpload(core, conversationId, "r.txt", Buffer.from("same"), "web-replay");
+  const again = await webUpload(core, conversationId, "r.txt", Buffer.from("same"), "web-replay");
+  assert.equal(again.attachment_id, first.attachment_id);
+  assert.equal(db.get("SELECT COUNT(*) AS n FROM inbound_uploads WHERE id = ?", first.attachment_id).n, 1);
+
+  const otherConversation = createUlid();
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((tx) => {
+    tx.run("INSERT INTO conversations (id, owner_id, work_id, channel, is_active, created_at, updated_at) VALUES (?, ?, NULL, 'web', 0, ?, ?)", otherConversation, webOwner, now, now);
+  });
+  await assert.rejects(
+    () => core.postMessage(otherConversation, commandEnvelope({ body: "x", attachment_ids: [first.attachment_id] }, "web-cross")),
+    (error) => error?.code === "validation_error",
+  );
+  const registered = await core.registerInboundUpload(webOwner, commandEnvelope({
+    provider: "web", account_id: db.get("SELECT id FROM connector_accounts WHERE provider = 'web'").id,
+    external_attachment_id: "web:incomplete", filename: "i.txt", declared_mime: "text/plain", declared_bytes: 1,
+    sha256: null, work_id: null, conversation_id: conversationId, conversation_hint: null,
+  }, "web-incomplete"));
+  await assert.rejects(
+    () => core.postMessage(conversationId, commandEnvelope({ body: "x", attachment_ids: [registered.data.upload_id] }, "web-incomplete-post")),
+    (error) => error?.code === "validation_error",
+  );
+});
+
+test("web attachments: an attachments-only Work instruction stays queued with a later text instruction (both message ids kept)", async (t) => {
+  const { core, db, conversationId } = await webCore(t);
+  const created = await core.createWork(commandEnvelope({ title: "W", summary: "Queue instructions.", size: "normal", project_id: null }, "queue-create"));
+  const workId = created.data.work_id;
+  await core.startWork(workId, commandEnvelope({ mode: "normal" }, "queue-start", created.version));
+  const up = await core.uploadWebAttachment(webOwner, { work_id: workId }, { filename: "q.txt", mime: "text/plain", content: Buffer.from("q") }, { request_id: "r-q", idempotency_key: "web-q" });
+  const version = () => db.get("SELECT state_version FROM works WHERE id = ?", workId).state_version;
+  const first = await core.postWorkInstruction(workId, commandEnvelope({ body: "", attachment_ids: [up.attachment_id] }, "queue-1", version()));
+  const second = await core.postWorkInstruction(workId, commandEnvelope({ body: "explain", attachment_ids: [] }, "queue-2", version()));
+  const marker = JSON.parse(db.get("SELECT response_json FROM idempotency_keys WHERE key = ?", `owner-replan:${workId}`).response_json);
+  assert.deepEqual([...marker.message_ids].sort(), [first.data.message_id, second.data.message_id].sort());
+  void conversationId;
+});

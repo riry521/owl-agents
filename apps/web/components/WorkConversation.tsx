@@ -7,6 +7,11 @@ import { sendWorkInstruction } from '@/lib/api-client';
 import { formatRelative } from '@/lib/format';
 import { useLocale } from '@/lib/i18n';
 import { SendIcon } from '@/components/icons';
+import { AttachButton, AttachmentTray, DropOverlay } from '@/components/AttachmentTray';
+import { MessageAttachments } from '@/components/MessageAttachments';
+import { useAttachmentDraft, useFileDrop } from '@/lib/use-attachment-draft';
+import { canSend } from '@/lib/attachment-draft.mjs';
+import type { MessageAttachment } from '@/lib/types';
 import {
   humanizeInstructionError,
   instructionBadge,
@@ -24,6 +29,7 @@ export type WorkConversationMessage = {
   created_at: string;
   instruction?: { status: 'queued' | 'processing' | 'answered'; outcome: string | null; reply_message_id: string | null } | null;
   in_reply_to?: string[];
+  attachments?: MessageAttachment[];
 };
 
 export type WorkConversationProps = {
@@ -53,6 +59,9 @@ export function WorkConversation({ work, conversation, onWorkChanged }: WorkConv
   const block = instructionBlock(work.state);
   const sending = sendState.kind === 'sending';
   const disabled = block.blocked || sending;
+  const attachments = useAttachmentDraft({ kind: 'work', id: work.id });
+  const { dragging, dropProps } = useFileDrop(attachments.add, block.blocked);
+  const sendable = !disabled && canSend({ body: draft, items: attachments.items, sending });
   const summary = latestInstructionSummary(messages, work.state);
   const processing = messages.some((m) => m.instruction?.status === 'processing');
 
@@ -96,12 +105,13 @@ export function WorkConversation({ work, conversation, onWorkChanged }: WorkConv
 
   async function handleSend() {
     const body = draft.trim();
-    if (!body || disabled) return;
+    if (!sendable) return;
     if (block.reopen && !window.confirm(t(block.confirmKey ?? "work.instructionReopenConfirm"))) return;
     setSendState({ kind: 'sending' });
     try {
-      await sendWorkInstruction(work.id, body, { reopen: block.reopen, expectedVersion: work.state_version });
+      await sendWorkInstruction(work.id, body, { reopen: block.reopen, expectedVersion: work.state_version, attachmentIds: attachments.attachmentIds });
       setDraft('');
+      attachments.clear();
       setSendState({ kind: 'idle' });
       followMessagesRef.current = true;
       onWorkChanged();
@@ -142,8 +152,11 @@ export function WorkConversation({ work, conversation, onWorkChanged }: WorkConv
       {summary && <p className="work-chat__status" role="status" aria-live="polite">{t('workChat.latestInstruction', { status: t(summary.labelKey) })}</p>}
       {block.blocked && <p className="work-chat__blocked">{t(block.reasonKey)}</p>}
       <div className="advisor__input-area work-chat__input-area">
-        <form onSubmit={onSubmit} className="advisor__form">
+        <form onSubmit={onSubmit} className="advisor__form" {...dropProps}>
+          <DropOverlay visible={dragging} />
+          <AttachmentTray items={attachments.items} notices={attachments.notices} onRemove={attachments.remove} onRetry={attachments.retry} onDismissNotices={attachments.dismissNotices} />
           <div className="advisor__input-wrap">
+            <AttachButton onFiles={attachments.add} disabled={disabled} />
             <textarea
               ref={textareaRef}
               className="advisor__textarea work-chat__textarea"
@@ -161,17 +174,22 @@ export function WorkConversation({ work, conversation, onWorkChanged }: WorkConv
                 if (sendState.kind === 'failed') setSendState({ kind: 'idle' });
               }}
               onKeyDown={onKeyDown}
+              onPaste={(ev) => {
+                if (disabled || ev.clipboardData.files.length === 0) return;
+                ev.preventDefault();
+                attachments.add(Array.from(ev.clipboardData.files));
+              }}
               placeholder={t('workChat.placeholder')}
               maxLength={100000}
               disabled={disabled}
               rows={2}
               enterKeyHint="enter"
             />
-            <button type="submit" className="advisor__send" disabled={disabled || !draft.trim()} aria-label={t('workChat.send')}>
+            <button type="submit" className="advisor__send" disabled={!sendable} aria-label={t('workChat.send')}>
               <SendIcon />
             </button>
           </div>
-          <p className="advisor__hint">{t(isTouchDevice ? 'workChat.hintTouch' : 'workChat.hint')}</p>
+          <p className="advisor__hint">{attachments.hint ?? t(isTouchDevice ? 'workChat.hintTouch' : 'workChat.hint')}</p>
         </form>
         {sendState.kind === 'failed' && <p className="advisor-error work-chat__error" role="alert">{t(sendState.messageKey)}</p>}
       </div>
@@ -198,9 +216,12 @@ function ConversationTurn({ message, workState, now, locale, t }: {
           <span className="turn__time">{formatRelative(message.created_at, now, locale)}</span>
           {badge && <span className={`work-chat__badge work-chat__badge--${badge.tone}`}>{t(badge.labelKey)}</span>}
         </div>
-        <div className={`turn__body${role === 'owner' ? ' turn__body--plain' : ''}`}>
-          {role === 'owner' ? message.body : <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>{message.body}</ReactMarkdown>}
-        </div>
+        {(role !== 'owner' || message.body) && (
+          <div className={`turn__body${role === 'owner' ? ' turn__body--plain' : ''}`}>
+            {role === 'owner' ? message.body : <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>{message.body}</ReactMarkdown>}
+          </div>
+        )}
+        <MessageAttachments attachments={message.attachments} />
         {badge?.noteKey && <p className="work-chat__note">{t(badge.noteKey)}</p>}
       </div>
     </article>

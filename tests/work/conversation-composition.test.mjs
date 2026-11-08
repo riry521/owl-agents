@@ -41,6 +41,13 @@ async function mount() {
     '@/lib/format': { formatRelative: () => '' },
     '@/lib/i18n': { useLocale: () => ({ locale: 'ja', t: (k) => k }) },
     '@/components/icons': { SendIcon: () => null },
+    '@/lib/use-attachment-draft': {
+      useAttachmentDraft: () => ({ items: [], notices: [], hint: null, attachmentIds: [], add() {}, remove() {}, retry() {}, dismissNotices() {}, clear() {} }),
+      useFileDrop: () => ({ dragging: false, dropProps: {} }),
+    },
+      '@/lib/attachment-draft.mjs': await import('../../apps/web/lib/attachment-draft.mjs'),
+      '@/components/AttachmentTray': { AttachButton: () => null, AttachmentTray: () => null, DropOverlay: () => null },
+      '@/components/MessageAttachments': { MessageAttachments: () => null },
     '../lib/work-conversation.mjs': lib,
   };
   const { readFileSync } = await import('node:fs');

@@ -6,9 +6,11 @@ import { gzipSync } from "node:zlib";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { Socket } from "node:net";
 
+import { buildFileDestinationCandidates, isDefaultAvailable, parseFileDestinationPut, type FileDestinationProviderView } from "./advisor-file-destination-settings.js";
 import { ApiError, type ApiErrorCode, errorBody, humanUnexpectedMessage, newReferenceId } from "./errors.js";
 import { MEMORY_GET_OPERATIONS, MEMORY_OPERATIONS, memoryContext, runMemoryOperation } from "./http-memory.js";
 import { AdvisorFolderError } from "./advisor-folders.js";
+import { renderOwnerFolder, sendOwnerFile, sendOwnerFolder } from "./owner-files-http.js";
 import { listHostDirectories } from "./fs-directories.js";
 import { createUlid, isUlid } from "./ids.js";
 import { resolveDataDir, type ContractManifest } from "./contracts.js";
@@ -18,6 +20,8 @@ import { AUTO_WORK_SOURCES, AUTO_WORK_VERDICTS } from "../../../packages/shared/
 import { validatePrerequisiteWorkIds } from "../../../packages/shared/dist/work-prerequisite.js";
 import { KnowledgeBase, type KnowledgeSearchResult } from "../../../packages/core/dist/knowledge-base.js";
 import { RuleStore } from "../../../packages/core/dist/rule-store.js";
+import { MAX_MESSAGE_ATTACHMENTS, MAX_UPLOAD_BYTES } from "../../../packages/core/dist/upload-limits.js";
+import type { WebAttachmentFile, WebAttachmentResult, WebAttachmentTarget } from "../../../packages/core/dist/core.js";
 import { assertValidPage, PageRejectedError } from "../../../packages/core/dist/memory/page-format.js";
 import { KnowledgeAutomationValidationError, validateKnowledgeAutomationSettings } from "../../../packages/shared/dist/knowledge-automation.js";
 import { MemorySettingsValidationError, validateMemoryFolderKinds, type MemoryFolderKinds } from "../../../packages/shared/dist/memory-settings.js";
@@ -71,7 +75,6 @@ declare module "./types.js" {
 const API_PREFIX = "/api/v1";
 const STATIC_PREFIX = "/owl/";
 const MAX_BODY_BYTES = 1024 * 1024;
-const MAX_UPLOAD_BODY_BYTES = 50 * 1024 * 1024;
 const MAX_ADVISOR_PERSONA_LENGTH = 8_000;
 const MAX_WEBSOCKET_MESSAGE_BYTES = 1024 * 1024;
 /** Events sent per page while replaying missed history for a WebSocket `resume`. */
@@ -321,6 +324,15 @@ interface KnowledgeStorageApiPort {
   checkKnowledgeStorage(): Promise<{ custom: boolean; state: string }>;
   moveKnowledgeStorage(input: { path: string; mode?: "move" | "relink" }): Promise<unknown>;
   withKnowledgeAccess<T>(kind: "read" | "write", fn: () => Promise<T>): Promise<T>;
+}
+
+interface WebAttachmentApiPort {
+  uploadWebAttachment(
+    ownerId: string,
+    target: WebAttachmentTarget,
+    file: WebAttachmentFile,
+    command: { request_id: string; idempotency_key: string },
+  ): Promise<WebAttachmentResult>;
 }
 
 interface WorkConversationApiPort {
@@ -701,14 +713,14 @@ async function readRequestBody(request: IncomingMessage): Promise<unknown> {
 async function readRawBody(request: IncomingMessage, limit: number): Promise<Buffer> {
   const contentLength = headerValue(request, "content-length");
   if (contentLength !== undefined && (!/^\d+$/u.test(contentLength) || Number(contentLength) > limit)) {
-    throw new ApiError(413, "upload_too_large", "リクエスト本文が許可されたuploadサイズを超えています。");
+    throw new ApiError(413, "upload_too_large", "リクエスト本文が許可されたuploadサイズを超えています。", { max_bytes: limit });
   }
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     total += buffer.length;
-    if (total > limit) throw new ApiError(413, "upload_too_large", "リクエスト本文が許可されたuploadサイズを超えています。");
+    if (total > limit) throw new ApiError(413, "upload_too_large", "リクエスト本文が許可されたuploadサイズを超えています。", { max_bytes: limit });
     chunks.push(buffer);
   }
   return Buffer.concat(chunks);
@@ -1273,18 +1285,11 @@ function validateWorkInstructionPayload(payload: JsonObject): WorkInstructionInp
   if (extra.length > 0) {
     throw new ApiError(400, "validation_error", "Work指示のpayloadの項目が契約と一致しません。余分な項目を除いてください。", { missing: [], extra });
   }
-  const body = stringField(payload.body, "body", 1, 100000);
-  if (body.trim().length === 0) {
-    throw new ApiError(400, "validation_error", "bodyが不正です。空白以外の文字を含めてください。");
-  }
-  const attachmentIds = payload.attachment_ids ?? [];
-  if (!Array.isArray(attachmentIds) || !attachmentIds.every((item) => typeof item === "string")) {
-    throw new ApiError(400, "validation_error", "attachment_idsが不正です。文字列の配列を指定してください。");
-  }
+  const { body, attachment_ids: attachmentIds } = validateMessageContent(payload.body, payload.attachment_ids ?? []);
   if (payload.reopen !== undefined && typeof payload.reopen !== "boolean") {
     throw new ApiError(400, "validation_error", "reopenが不正です。trueまたはfalseを指定してください。");
   }
-  return { body, attachment_ids: attachmentIds as string[], ...(payload.reopen === undefined ? {} : { reopen: payload.reopen }) };
+  return { body, attachment_ids: attachmentIds, ...(payload.reopen === undefined ? {} : { reopen: payload.reopen }) };
 }
 
 function validateUpdateWorkPayload(payload: JsonObject): { title?: string; summary?: string } {
@@ -1682,11 +1687,25 @@ function projectCreatePayload(name: string, repository: { canonical_path: string
 
 function validatePostMessagePayload(payload: JsonObject): PostMessageInput {
   exactKeys(payload, ["body", "attachment_ids"], "PostMessage payload");
-  const body = stringField(payload.body, "body", 1, 100000);
-  if (!Array.isArray(payload.attachment_ids) || !payload.attachment_ids.every((item) => typeof item === "string")) {
-    throw new ApiError(400, "validation_error", "attachment_idsが不正です。文字列の配列を指定してください。");
+  return validateMessageContent(payload.body, payload.attachment_ids);
+}
+
+/** A message needs text or at least one attachment. Whitespace-only text sent with files is stored as "". */
+function validateMessageContent(bodyValue: unknown, attachmentValue: unknown): PostMessageInput {
+  const body = stringField(bodyValue, "body", 0, 100000);
+  if (
+    !Array.isArray(attachmentValue)
+    || !attachmentValue.every((item) => typeof item === "string" && isUlid(item))
+    || attachmentValue.length > MAX_MESSAGE_ATTACHMENTS
+    || new Set(attachmentValue).size !== attachmentValue.length
+  ) {
+    throw new ApiError(400, "validation_error", `attachment_idsは重複しない最大${MAX_MESSAGE_ATTACHMENTS}件のULID配列で指定してください。`);
   }
-  return { body, attachment_ids: payload.attachment_ids as string[] };
+  const blank = body.trim().length === 0;
+  if (blank && attachmentValue.length === 0) {
+    throw new ApiError(400, "validation_error", "本文を入力するか、ファイルを添付してください。");
+  }
+  return { body: blank ? "" : body, attachment_ids: attachmentValue as string[] };
 }
 
 function validateInboundMessage(value: unknown): InboundMessageInput {
@@ -1710,8 +1729,8 @@ function validateInboundMessage(value: unknown): InboundMessageInput {
   const work_id = nullableUlid(value.conversation_hint.work_id, "conversation_hint.work_id");
   const dm_ref = stringField(value.conversation_hint.dm_ref, "conversation_hint.dm_ref", 1, 200);
   const thread_ref = value.conversation_hint.thread_ref === null ? null : stringField(value.conversation_hint.thread_ref, "conversation_hint.thread_ref", 1, 200);
-  if (!Array.isArray(value.attachment_ids) || value.attachment_ids.length > 20 || !value.attachment_ids.every((id) => isUlid(id))) {
-    throw new ApiError(400, "validation_error", "attachment_idsは最大20件のULID配列で指定してください。");
+  if (!Array.isArray(value.attachment_ids) || value.attachment_ids.length > MAX_MESSAGE_ATTACHMENTS || !value.attachment_ids.every((id) => isUlid(id))) {
+    throw new ApiError(400, "validation_error", `attachment_idsは最大${MAX_MESSAGE_ATTACHMENTS}件のULID配列で指定してください。`);
   }
   return {
     provider: value.provider,
@@ -1734,7 +1753,7 @@ function validateUploadRegister(value: unknown): import("./types.js").InboundUpl
   if (value.provider !== "slack" && value.provider !== "discord" && value.provider !== "web") throw new ApiError(400, "validation_error", "providerが不正です。");
   const filename = stringField(value.filename, "filename", 1, 255);
   if (/[\\/\0\x00-\x1f\x7f]/u.test(filename) || filename === "." || filename === "..") throw new ApiError(400, "validation_error", "filenameにpath separatorまたはcontrol characterは指定できません。");
-  if (!Number.isSafeInteger(value.declared_bytes) || Number(value.declared_bytes) < 0 || Number(value.declared_bytes) > MAX_UPLOAD_BODY_BYTES) throw new ApiError(413, "upload_too_large", "declared_bytesが許可されたuploadサイズを超えています。");
+  if (!Number.isSafeInteger(value.declared_bytes) || Number(value.declared_bytes) < 0 || Number(value.declared_bytes) > MAX_UPLOAD_BYTES) throw new ApiError(413, "upload_too_large", "declared_bytesが許可されたuploadサイズを超えています。");
   const sha256 = value.sha256 === null ? null : stringField(value.sha256, "sha256", 64, 64);
   if (sha256 !== null && !/^[0-9a-f]{64}$/u.test(sha256)) throw new ApiError(400, "validation_error", "sha256はlowercase SHA-256 hexで指定してください。");
   const conversation_id = value.conversation_id === null ? null : pathId(stringField(value.conversation_id, "conversation_id", 1, 128), "conversation_id");
@@ -2039,6 +2058,57 @@ function requireChildRunApi(core: CorePort): ChildRunApiPort {
   return candidate;
 }
 
+interface WorkMarkdownApiPort {
+  readWorkMarkdown(workId: string, path: string): Promise<unknown>;
+}
+
+function requireWorkMarkdownApi(core: CorePort): WorkMarkdownApiPort {
+  const has = (value: unknown): value is WorkMarkdownApiPort => isObject(value) && typeof value.readWorkMarkdown === "function";
+  const wrapped = core as CorePort & { core?: unknown };
+  const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
+  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support reading Work Markdown.");
+  return candidate;
+}
+
+const WORK_MARKDOWN_ERROR_STATUS: Readonly<Record<string, number>> = {
+  validation_error: 400,
+  markdown_path_denied: 403,
+  work_not_found: 404,
+  markdown_not_found: 404,
+  markdown_not_integrated: 404,
+  markdown_too_large: 413,
+  markdown_unreadable: 422,
+  // The owner-files route reuses this table and workMarkdownCall for the same reason.
+  owner_file_denied: 403,
+  owner_file_not_found: 404,
+};
+
+/** The .core path skips externalError, so give Core's domain codes their HTTP status here. */
+async function workMarkdownCall<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    const code = isObject(error) && typeof error.code === "string" ? error.code : "";
+    const status = Object.hasOwn(WORK_MARKDOWN_ERROR_STATUS, code) ? WORK_MARKDOWN_ERROR_STATUS[code] : undefined;
+    if (status === undefined || error instanceof ApiError) throw error;
+    throw new ApiError(status, code as ApiError["code"], error instanceof Error ? error.message : code, isObject((error as { details?: unknown }).details) ? (error as { details: Record<string, unknown> }).details : {}, { cause: error });
+  }
+}
+
+interface OwnerFilesApiPort {
+  listOwnerFileRoots(): Promise<Array<{ key: string; path: string }>>;
+  openOwnerFile(key: string, segments: readonly string[]): Promise<import("../../../packages/core/dist/owner-files.js").OwnerFileOpened>;
+}
+
+function requireOwnerFilesApi(core: CorePort): OwnerFilesApiPort {
+  const has = (value: unknown): value is OwnerFilesApiPort => isObject(value)
+    && typeof value.listOwnerFileRoots === "function" && typeof value.openOwnerFile === "function";
+  const wrapped = core as CorePort & { core?: unknown };
+  const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
+  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support opening Owner files.");
+  return candidate;
+}
+
 function requireDesignMockApi(core: CorePort): DesignMockApiPort {
   const has = (value: unknown): value is DesignMockApiPort => isObject(value)
     && ["saveDesignMock", "deleteDesignMock", "listWorkDesignMocks", "readWorkDesignMock"].every((method) => typeof value[method] === "function");
@@ -2291,6 +2361,14 @@ function requireTestSetupInvestigateApi(core: CorePort): TestSetupInvestigateApi
   return candidate;
 }
 
+function requireWebAttachmentApi(core: CorePort): WebAttachmentApiPort {
+  const has = (value: unknown): value is WebAttachmentApiPort => isObject(value) && typeof value.uploadWebAttachment === "function";
+  const wrapped = core as CorePort & { core?: unknown };
+  const candidate = has(core) ? core : has(wrapped.core) ? wrapped.core : null;
+  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support Web attachments.");
+  return candidate;
+}
+
 function requireWorkConversationApi(core: CorePort): WorkConversationApiPort {
   const has = (value: unknown): value is WorkConversationApiPort => isObject(value) && typeof value.getWorkConversation === "function";
   const wrapped = core as CorePort & { core?: unknown };
@@ -2501,6 +2579,36 @@ async function integrationOf(context: RequestContext, provider: ChannelProvider)
     .flatMap((value) => (value ?? "").split(/[\s,]+/u))
     .filter((id) => id.length > 0);
   return { configured: status?.configured ?? false, channelIds: new Set(ids) };
+}
+
+/** Per-provider candidates for the Web send_file destination; names come from Slack/Discord when the Connector runs. */
+async function fileDestinationProviders(context: RequestContext): Promise<FileDestinationProviderView[]> {
+  const statuses = await context.core.getIntegrations();
+  const windows = await requireAdvisorWindowApi(context.core).listAdvisorWindows();
+  const names = new Map<string, string>();
+  const integrations = [];
+  for (const provider of CHANNEL_PROVIDERS) {
+    const status = statuses.find((entry) => entry.provider === provider);
+    const admin = context.channelAdmins?.channelAdmin(provider) ?? null;
+    const conversationChannelIds = (status?.conversation_channel_id ?? "").split(/[\s,]+/u).filter((id) => id.length > 0);
+    for (const id of conversationChannelIds) {
+      const info = admin ? await admin.describeChannel(id).catch(() => null) : null;
+      if (info?.name) names.set(`${provider}:${id}`, info.name);
+    }
+    integrations.push({ provider, configured: status?.configured ?? false, running: admin !== null, conversationChannelIds });
+  }
+  return buildFileDestinationCandidates(integrations, windows, names);
+}
+
+async function fileDestinationData(context: RequestContext, providers: FileDestinationProviderView[]): Promise<JsonObject> {
+  const settings = await context.core.getAdvisorFileDestinationSettings();
+  return {
+    preferred_provider: settings.preferredProvider,
+    default_destination: settings.defaultDestination
+      ? { ...settings.defaultDestination, available: isDefaultAvailable(settings, providers) }
+      : null,
+    providers: providers as unknown as JsonObject[],
+  };
 }
 
 async function requireChannelAdmin(context: RequestContext, provider: ChannelProvider): Promise<ChannelAdmin> {
@@ -3280,6 +3388,44 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     const html = await requireDesignMockApi(context.core).readWorkDesignMock(workId, taskId, name);
     if (html === null) throw notFound();
     sendDesignMock(response, html);
+    return;
+  }
+
+  const ownerFilesMatch = rawPathname.match(new RegExp(`^${API_PREFIX}/owner-files(?:/(.*))?$`, "u"));
+  if (ownerFilesMatch && (method === "GET" || method === "HEAD")) {
+    requireOwner(request);
+    const files = requireOwnerFilesApi(context.core);
+    const rest = ownerFilesMatch[1] ?? "";
+    if (rest === "roots") {
+      const roots = await files.listOwnerFileRoots();
+      sendJson(response, 200, { request_id: requestIdValue, data: { roots } });
+      return;
+    }
+    const parts = rest.split("/");
+    const key = decodeRouteValue(parts[0]!, "root");
+    const trailingSlash = parts.length > 1 && parts[parts.length - 1] === "";
+    const segments = parts.slice(1, trailingSlash ? -1 : undefined).map((part) => decodeRouteValue(part, "path"));
+    const opened = await workMarkdownCall(() => files.openOwnerFile(key, segments));
+    if (opened.kind === "file") {
+      sendOwnerFile(request, response, opened);
+      return;
+    }
+    // Relative links in the listing only resolve against a URL that ends in "/".
+    if (!trailingSlash) {
+      response.writeHead(308, { location: `${rawPathname}/${url.search}`, "cache-control": "no-store" });
+      response.end();
+      return;
+    }
+    sendOwnerFolder(response, renderOwnerFolder([key, ...segments].join("/") + "/", opened.entries), method === "HEAD");
+    return;
+  }
+
+  const workMarkdownMatch = pathname.match(new RegExp(`^${API_PREFIX}/works/([^/]+)/markdown$`));
+  if (workMarkdownMatch && method === "GET") {
+    requireOwner(request);
+    const workId = pathId(workMarkdownMatch[1], "work_id");
+    const data = await workMarkdownCall(() => requireWorkMarkdownApi(context.core).readWorkMarkdown(workId, url.searchParams.get("path") ?? ""));
+    sendJson(response, 200, { request_id: requestIdValue, data: data as unknown as JsonObject });
     return;
   }
 
@@ -5048,6 +5194,25 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
+  if (pathname === `${API_PREFIX}/settings/advisor-send-file-destination` && method === "GET") {
+    requireOwner(request);
+    const data = await fileDestinationData(context, await fileDestinationProviders(context));
+    sendJson(response, 200, { request_id: requestIdValue, data, version: 0 });
+    return;
+  }
+
+  if (pathname === `${API_PREFIX}/settings/advisor-send-file-destination` && method === "PUT") {
+    requireOwner(request);
+    const cmd = commandEnvelope(await readRequestBody(request));
+    const result = await runCommand(context, pathname, cmd, 200, async () => {
+      const providers = await fileDestinationProviders(context);
+      await context.core.setAdvisorFileDestinationSettings(parseFileDestinationPut(cmd.payload, providers));
+      return { data: await fileDestinationData(context, providers), version: 0 };
+    });
+    sendJson(response, 200, result);
+    return;
+  }
+
   if (pathname === `${API_PREFIX}/settings/knowledge-storage` && method === "GET") {
     requireOwner(request);
     const api = requireKnowledgeStorageApi(context.core);
@@ -5300,6 +5465,46 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     return;
   }
 
+  if (pathname === `${API_PREFIX}/uploads/limits` && method === "GET") {
+    requireOwner(request);
+    sendJson(response, 200, { data: { max_bytes: MAX_UPLOAD_BYTES, max_files: MAX_MESSAGE_ATTACHMENTS } });
+    return;
+  }
+
+  const webAttachmentMatch = pathname.match(new RegExp(`^${API_PREFIX}/(conversations|works)/([^/]+)/attachments$`));
+  if (webAttachmentMatch && method === "POST") {
+    const ownerId = requireOwner(request);
+    const target: WebAttachmentTarget = webAttachmentMatch[1] === "works"
+      ? { work_id: pathId(webAttachmentMatch[2], "work_id") }
+      : { conversation_id: pathId(webAttachmentMatch[2], "conversation_id") };
+    const filenameHeader = headerValue(request, "x-owl-filename");
+    const requestHeader = headerValue(request, "x-request-id");
+    const idempotencyHeader = headerValue(request, "idempotency-key");
+    const contentLengthHeader = headerValue(request, "content-length");
+    if (!filenameHeader || !requestHeader || !idempotencyHeader || !contentLengthHeader || !/^\d+$/u.test(contentLengthHeader)) {
+      throw new ApiError(400, "validation_error", "X-Owl-Filename、X-Request-Id、Idempotency-Key、Content-Length headerは必須です。");
+    }
+    let filename: string;
+    try {
+      filename = decodeURIComponent(filenameHeader);
+    } catch (error) {
+      throw new ApiError(400, "validation_error", "X-Owl-Filenameを復号できません。", { field: "filename" }, { cause: error });
+    }
+    const requestIdText = stringField(requestHeader, "X-Request-Id", 1, 128);
+    const idempotencyKey = stringField(idempotencyHeader, "Idempotency-Key", 1, 128);
+    const content = await readRawBody(request, MAX_UPLOAD_BYTES);
+    if (Number(contentLengthHeader) !== content.byteLength) throw new ApiError(400, "validation_error", "Content-Lengthと実際のupload bytesが一致しません。");
+    const mime = headerValue(request, "content-type")?.trim() || "application/octet-stream";
+    const data = await requireWebAttachmentApi(context.core).uploadWebAttachment(
+      ownerId,
+      target,
+      { filename, mime, content },
+      { request_id: requestIdText, idempotency_key: idempotencyKey },
+    );
+    sendJson(response, 201, { data });
+    return;
+  }
+
   const uploadContentMatch = pathname.match(new RegExp(`^${API_PREFIX}/inbound/uploads/([^/]+)/content$`));
   if (uploadContentMatch && method === "PUT") {
     const ownerId = requireOwner(request);
@@ -5311,7 +5516,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
       throw new ApiError(400, "validation_error", "Content-Type、Content-Length、Digest: sha-256=<base64> headerは必須です。");
     }
     if (!/^\d+$/u.test(contentLengthHeader)) throw new ApiError(400, "validation_error", "Content-Lengthが不正です。");
-    const content = await readRawBody(request, MAX_UPLOAD_BODY_BYTES);
+    const content = await readRawBody(request, MAX_UPLOAD_BYTES);
     if (Number(contentLengthHeader) !== content.byteLength) throw new ApiError(400, "validation_error", "Content-Lengthと実際のupload bytesが一致しません。");
     const digestBase64 = digestHeader.slice(digestHeader.indexOf("=") + 1).trim();
     let suppliedDigest: Buffer;
@@ -5719,6 +5924,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
         last_compaction_at: database ? compactionRow?.last_compaction_at ?? null : session.last_compaction_at ?? null,
         queued_turns: Number(database ? queuedRow?.count ?? 0 : 0),
         running_turns: Number(database ? runningRow?.count ?? 0 : 0),
+        activity: await context.core.getAdvisorActivity(session.id, turnConversationId),
         provider_paused_until: pause?.resume_at ?? null,
         created_at: sessionRow ? sessionRow.created_at : session.started_at ?? null,
         resumed_count: Number(sessionRow ? sessionRow.resumed_count : session.resumed_count ?? 0),

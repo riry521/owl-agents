@@ -28,8 +28,10 @@ import type {
 import { readClaudeCompactionSummaries, waitForCompactionSummary } from "./compaction-summary.js";
 import { classifyProviderFailure, formatProviderError, isConversationNotFound, RESUME_FAILED_CODE, sessionFailureMessage, turnFailureProviderError, withProviderDetail } from "./provider-error.js";
 import { claudeRateLimitEvidence } from "./rate-limit.js";
+import { SessionActivityTracker } from "./session-activity.js";
 import { buildAgentPermissionArgs, externalJsonBlock, extractWebResearchCapture, reapProcessGroup, type WebResearchTool } from "@owl/shared";
 
+const SUBAGENT_TOOL_NAMES: ReadonlySet<string> = new Set(["Agent"]); // name Claude gives its subagent tool
 const STDERR_RING_BUFFER_BYTES = 8 * 1024;
 const DEFAULT_STOP_GRACE_MS = 5000;
 const MAX_PENDING_WEB_TOOLS = 64;
@@ -97,6 +99,8 @@ interface ClaudeStreamLine {
   readonly errors?: unknown;
   readonly usage?: ClaudeStreamUsage;
   readonly compact_metadata?: ClaudeCompactMetadata;
+  readonly tasks?: unknown;
+  readonly task_id?: unknown;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -293,14 +297,17 @@ export class AdvisorSessionDriver implements ProviderSession {
   private pendingCompactions = 0;
   private endRequested = false;
   private readonly heldEvents: SessionEvent[] = [];
+  private readonly activity: SessionActivityTracker;
 
   private constructor(
     child: ChildProcess,
     providerSessionId: string,
     private readonly onUnsolicitedReply: ProviderSessionRequest["on_unsolicited_reply"],
+    onActivity: ProviderSessionRequest["on_activity"],
     private readonly onStdoutLine: ProviderSessionRequest["on_stdout_line"],
     private readonly reapGraceMs?: number,
   ) {
+    this.activity = new SessionActivityTracker(onActivity);
     this.child = child;
     this._providerSessionId = providerSessionId;
     this._pid = child.pid ?? 0;
@@ -354,7 +361,7 @@ export class AdvisorSessionDriver implements ProviderSession {
     } catch (cause) {
       throw new Error(formatProviderError("claude", cause));
     }
-    const driver = new AdvisorSessionDriver(child, freshSessionId, request.on_unsolicited_reply, request.on_stdout_line, options.reapGraceMs);
+    const driver = new AdvisorSessionDriver(child, freshSessionId, request.on_unsolicited_reply, request.on_activity, request.on_stdout_line, options.reapGraceMs);
     driver.transcriptLocation = {
       configDir: request.env.CLAUDE_CONFIG_DIR || join(request.env.HOME || homedir(), ".claude"),
       cwd: request.cwd,
@@ -648,6 +655,7 @@ export class AdvisorSessionDriver implements ProviderSession {
       return this.protocolFailureEvents();
     }
     const record = parsed as ClaudeStreamLine;
+    this.trackActivity(record);
 
     // Subagent output is never part of an Owl turn and never a protocol
     // failure. Keep its pending WebFetch / WebSearch tools so the existing
@@ -924,6 +932,43 @@ export class AdvisorSessionDriver implements ProviderSession {
     }
   }
 
+  /** Display-only classification of one line. Never throws and never affects the turn. */
+  private trackActivity(record: ClaudeStreamLine): void {
+    const inner = typeof record.parent_tool_use_id === "string";
+    const parts = Array.isArray(record.message?.content) ? record.message.content : [];
+    if (record.type === "system") {
+      if (record.subtype === "background_tasks_changed") {
+        if (!Array.isArray(record.tasks)) return;
+        this.activity.backgroundChanged(
+          record.tasks.flatMap((task) => (isRecord(task) && typeof task.task_id === "string" ? [task.task_id] : [])),
+        );
+      } else if (record.subtype === "task_notification") {
+        if (typeof record.task_id === "string") this.activity.backgroundEnded(record.task_id);
+      } else if (!inner && record.subtype === "init") {
+        this.activity.turnStarted();
+      } else if (!inner && record.subtype === "api_error") {
+        this.activity.turnEnded();
+      }
+      return;
+    }
+    if (record.type === "error" || record.type === "result") {
+      if (!inner) this.activity.turnEnded();
+      return;
+    }
+    if (inner) return;
+    if (record.type === "assistant") {
+      for (const part of parts) {
+        if (part?.type === "tool_use" && typeof part.id === "string" && typeof part.name === "string") {
+          this.activity.toolStarted(part.id, SUBAGENT_TOOL_NAMES.has(part.name) ? "subagent" : "tool", part.name);
+        }
+      }
+    } else if (record.type === "user") {
+      for (const part of parts) {
+        if (part?.type === "tool_result" && typeof part.tool_use_id === "string") this.activity.toolEnded(part.tool_use_id);
+      }
+    }
+  }
+
   private protocolFailureEvents(): SessionEvent[] {
     const error = formatProviderError("claude", "invalid provider protocol");
     this.exitHandled = true;
@@ -949,6 +994,7 @@ export class AdvisorSessionDriver implements ProviderSession {
 
   /** Ends the event stream, but only after a pending compaction summary and the events held behind it are delivered. */
   private endStream(): void {
+    this.activity.processEnded();
     if (this.pendingCompactions > 0) {
       this.endRequested = true;
       return;

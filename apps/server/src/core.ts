@@ -71,15 +71,18 @@ import type {
   AdvisorSessionsPort,
 } from "./types.js";
 import { configuredDesignSkill } from "./config.js";
+import type { SessionActivity } from "../../../packages/shared/dist/index.js";
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
 import type { WebResearchCapture } from "../../../packages/shared/dist/web-research.js";
 import { validatePrerequisiteWorkIds } from "../../../packages/shared/dist/work-prerequisite.js";
 import type { ChildDispatchRequest, ChildDispatchResponse, ChildRunListFilter, ChildRunRecord, ChildRunSettings, ChildWaitRequest, ChildWaitResponse } from "../../../packages/shared/dist/child-runs.js";
 
-import { IntegrationStore } from "./integration-store.js";
-import { AppSettingsStore, type CustomProviderConfig } from "./app-settings-store.js";
+import { IntegrationStore, parseChannelIds } from "./integration-store.js";
+import { AppSettingsStore, parseFileDestinationSettings, type CustomProviderConfig } from "./app-settings-store.js";
 import { AdvisorFolderError, advisorFolderDefaults, ensureAdvisorSharedDir, isGitIgnoredDirectory, normalizeAdvisorFolder } from "./advisor-folders.js";
 import type { WorkSummaryRevision } from "../../../packages/core/dist/work-summary-history.js";
+import { MAX_UPLOAD_BYTES } from "../../../packages/core/dist/upload-limits.js";
+import type { WebAttachmentFile, WebAttachmentResult, WebAttachmentTarget } from "../../../packages/core/dist/core.js";
 import { detectProcessSkillsPack } from "../../../packages/core/dist/process-skills-pack.js";
 import { defaultOwlRoot as defaultCoreOwlRoot, resolveWorkspacesRoot } from "../../../packages/core/dist/workspace-layout.js";
 import { buildAgentEnv } from "./agent-env.js";
@@ -441,7 +444,7 @@ export class MemoryCore implements CorePort {
   async getWorkConversation(workId: string, opts: { limit: number }): Promise<WorkConversation> {
     const conversationId = this.requireWork(workId).conversation_id;
     const all = conversationId ? this.conversationMessages.get(conversationId) ?? [] : [];
-    const messages = all.slice(-opts.limit).map((m) => ({ ...m, received_at: m.created_at, instruction: null, in_reply_to: m.metadata?.in_reply_to ?? [] }));
+    const messages = all.slice(-opts.limit).map((m) => ({ ...m, received_at: m.created_at, instruction: null, in_reply_to: m.metadata?.kind === "instruction_reply" ? m.metadata.in_reply_to : [] }));
     return { work_id: workId, conversation_id: conversationId ?? null, truncated: all.length > opts.limit, messages };
   }
 
@@ -1068,7 +1071,7 @@ export class MemoryCore implements CorePort {
     // groups with it once the message arrives.
     const conversationId = input.conversation_id
       ?? `${input.provider}:${input.conversation_hint?.thread_ref ?? input.conversation_hint?.dm_ref ?? uploadId}`;
-    const ticket: InboundUploadTicket = { upload_id: uploadId, put_path: `/api/v1/inbound/uploads/${uploadId}/content`, expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), max_bytes: 50 * 1024 * 1024, conversation_id: conversationId };
+    const ticket: InboundUploadTicket = { upload_id: uploadId, put_path: `/api/v1/inbound/uploads/${uploadId}/content`, expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), max_bytes: MAX_UPLOAD_BYTES, conversation_id: conversationId };
     this.uploads.set(uploadId, { owner_id: ownerId, input, status: "registered" });
     return { data: ticket, version: 0 };
   }
@@ -1118,6 +1121,10 @@ export class MemoryCore implements CorePort {
 
   async restartAdvisorSession(_ownerId: string, _windowKey?: string): Promise<void> {
     // Standalone mode has no persistent Advisor runtime or session ledger.
+  }
+
+  async getAdvisorActivity(_sessionId: string, _conversationId: string | null): Promise<SessionActivity | null> {
+    return null;
   }
 
   async interruptAdvisorTurn(_ownerId: string, _windowKey?: string): Promise<{ status: "interrupting" | "not_running" | "unsupported"; turn_id: string | null }> {
@@ -1201,6 +1208,17 @@ export class MemoryCore implements CorePort {
     this.advisorSharedDir = shared;
     this.advisorScreenshotDir = screenshot;
     return this.getAdvisorFolders();
+  }
+
+  private fileDestinationSettings: import("./app-settings-store.js").FileDestinationSettings = { preferredProvider: null, defaultDestination: null };
+
+  async getAdvisorFileDestinationSettings(): Promise<import("./app-settings-store.js").FileDestinationSettings> {
+    return parseFileDestinationSettings(this.fileDestinationSettings);
+  }
+
+  async setAdvisorFileDestinationSettings(input: import("./app-settings-store.js").FileDestinationSettings): Promise<import("./app-settings-store.js").FileDestinationSettings> {
+    this.fileDestinationSettings = parseFileDestinationSettings(input);
+    return this.getAdvisorFileDestinationSettings();
   }
 
   async clearConversation(conversationId: string): Promise<{ cleared: boolean }> {
@@ -1405,9 +1423,11 @@ interface ExternalCore {
     readonly cwd: string;
     readonly normalized_segments?: readonly (readonly string[])[];
   }): Promise<void>;
+  uploadWebAttachment?(ownerId: string, target: WebAttachmentTarget, file: WebAttachmentFile, command: { request_id: string; idempotency_key: string }): Promise<WebAttachmentResult>;
   advisorRespond?(conversationId: string, messageId: string, origin?: AdvisorOrigin): Promise<void>;
   advisorSessions?: AdvisorSessionsPort;
   restartAdvisorSession?(ownerId: string, windowKey?: string): Promise<void>;
+  getAdvisorActivity?(sessionId: string, conversationId: string | null): SessionActivity | null;
   interruptAdvisorTurn?(ownerId: string, windowKey?: string): Promise<{ status: "interrupting" | "not_running" | "unsupported"; turn_id: string | null }>;
   getHybridMode?(): Promise<boolean>;
   setHybridMode?(enabled: boolean): Promise<boolean>;
@@ -1458,6 +1478,8 @@ interface ExternalCore {
   setChildRunSettings?(settings: ChildRunSettings): ChildRunSettings | Promise<ChildRunSettings>;
   start(): Promise<void>;
   stop(options?: { force?: boolean; timeoutMs?: number }): Promise<void>;
+  /** Synchronous, non-throwing kill of Owl-owned Agent and Advisor processes; safe to call repeatedly. */
+  terminateOwnedProcessesImmediately?(): void;
   status(): { services: readonly { name: string; state: string; pid: number | null }[]; mvp_scope: string; version: string };
   subscribe(handler: (event: CoreEvent) => void | Promise<void>): () => void;
   listEventsAfter?: (cursor?: string | number | null, limit?: number) => readonly CoreEvent[];
@@ -1797,11 +1819,11 @@ export class ExternalCoreAdapter implements CorePort {
     owlRoot: string,
     private readonly dataDir: string,
     appSettings?: AppSettingsStore,
-    options: { detectProviderAvailability?: ProviderAvailabilityDetector } = {},
+    options: { detectProviderAvailability?: ProviderAvailabilityDetector; integrationStore?: IntegrationStore } = {},
   ) {
     this.detectProviderAvailability = options.detectProviderAvailability ?? detectBuiltinProviders;
     this.advisorSessions = core.advisorSessions ?? { getActiveSession: () => null };
-    this.integrationStore = new IntegrationStore(owlRoot, dataDir);
+    this.integrationStore = options.integrationStore ?? new IntegrationStore(owlRoot, dataDir);
     this.appSettings = appSettings ?? new AppSettingsStore(owlRoot, dataDir);
     this.ruleStore = core.ruleStore;
     this.unsubscribeExternal = core.subscribe((event) => {
@@ -2379,6 +2401,20 @@ export class ExternalCoreAdapter implements CorePort {
     }
   }
 
+  async uploadWebAttachment(
+    ownerId: string,
+    target: WebAttachmentTarget,
+    file: WebAttachmentFile,
+    command: { request_id: string; idempotency_key: string },
+  ): Promise<WebAttachmentResult> {
+    try {
+      if (typeof this.core.uploadWebAttachment !== "function") throw new ApiError(503, "dependency_unavailable", "Core does not support Web attachments.");
+      return await this.core.uploadWebAttachment(ownerId, target, file, command);
+    } catch (error) {
+      throw externalError(error, "uploadWebAttachment");
+    }
+  }
+
   async advisorRespond(conversationId: string, messageId: string, origin?: AdvisorOrigin): Promise<void> {
     if (typeof this.core.advisorRespond === "function") {
       try {
@@ -2397,6 +2433,16 @@ export class ExternalCoreAdapter implements CorePort {
       await this.core.restartAdvisorSession(ownerId, windowKey);
     } catch (error) {
       throw externalError(error, "restartAdvisorSession");
+    }
+  }
+
+  async getAdvisorActivity(sessionId: string, conversationId: string | null): Promise<SessionActivity | null> {
+    // Display-only data: a Core without it must not fail the whole /advisor/session response.
+    if (typeof this.core.getAdvisorActivity !== "function") return null;
+    try {
+      return this.core.getAdvisorActivity(sessionId, conversationId);
+    } catch (error) {
+      throw externalError(error, "getAdvisorActivity");
     }
   }
 
@@ -2854,6 +2900,14 @@ export class ExternalCoreAdapter implements CorePort {
     return saved;
   }
 
+  async getAdvisorFileDestinationSettings(): Promise<import("./app-settings-store.js").FileDestinationSettings> {
+    return this.appSettings.getAdvisorFileDestinationSettings();
+  }
+
+  async setAdvisorFileDestinationSettings(input: import("./app-settings-store.js").FileDestinationSettings): Promise<import("./app-settings-store.js").FileDestinationSettings> {
+    return this.appSettings.setAdvisorFileDestinationSettings(input);
+  }
+
   async clearConversation(conversationId: string): Promise<{ cleared: boolean }> {
     try {
       return await this.core.clearConversation(conversationId);
@@ -3194,6 +3248,10 @@ export class ExternalCoreAdapter implements CorePort {
     return 0;
   }
 
+  forceTerminateProcesses(): void {
+    this.core.terminateOwnedProcessesImmediately?.();
+  }
+
   async shutdown(options: { force: boolean; timeoutMs: number }): Promise<void> {
     try {
       await this.core.stop({ force: options.force, timeoutMs: options.timeoutMs });
@@ -3304,6 +3362,8 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
   }
   const owlRoot = options.owlRoot ?? defaultCoreOwlRoot();
   const appSettings = new AppSettingsStore(owlRoot, options.dataDir);
+  // One instance shared with the adapter: IntegrationStore keeps its config in memory, so a second one would not see saved changes.
+  const integrationStore = new IntegrationStore(owlRoot, options.dataDir ?? resolveDataDir(owlRoot));
   // A built-in provider id never has a custom-settings entry; both callbacks
   // below use this to decide whether a provider needs any override at all.
   const isBuiltinProviderId = (normalized: string): boolean => builtinProviderHarness(normalized) !== null;
@@ -3338,6 +3398,12 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
       return { sharedDir, screenshotDir: appSettings.getAdvisorScreenshotDir() || defaults.screenshotDir };
     },
     getAdvisorSendFileSettings: () => appSettings.getAdvisorSendFileSettings(),
+    getAdvisorFileDestinationSettings: () => ({
+      ...appSettings.getAdvisorFileDestinationSettings(),
+      integrations: integrationStore.list().flatMap((status) => status.provider === "slack" || status.provider === "discord"
+        ? [{ provider: status.provider, configured: status.configured, conversationChannelIds: parseChannelIds(status.conversation_channel_id ?? undefined) }]
+        : []),
+    }),
     getAdvisorSharedDir: () => appSettings.getAdvisorSharedDir() || advisorFolderDefaults(options.dataDir ?? resolveDataDir(owlRoot)).sharedDir,
     knownModels: (harness: ModelHarness): ReadonlySet<string> | undefined =>
       harness === "codex" ? codexKnownModels() : harness === "opencode" ? opencodeKnownModels() : undefined,
@@ -3381,5 +3447,6 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
     owlRoot,
     options.dataDir ?? resolveDataDir(owlRoot),
     appSettings,
+    { integrationStore },
   );
 }

@@ -28,6 +28,43 @@ interface StoredAppSettings {
   advisor_send_file_dirs?: string[];
   advisor_send_file_slack_max_bytes?: number;
   advisor_send_file_discord_max_bytes?: number;
+  /** Optional and absent from DEFAULTS: a missing key means unset. */
+  advisor_send_file_preferred_provider?: FileDestinationProvider;
+  advisor_send_file_default_destination?: StoredFileDestination;
+}
+
+export type FileDestinationProvider = "slack" | "discord";
+export interface StoredFileDestination { provider: FileDestinationProvider; channel_id: string; display_name: string }
+export interface FileDestinationSettings {
+  preferredProvider: FileDestinationProvider | null;
+  defaultDestination: StoredFileDestination | null;
+}
+
+const FILE_DESTINATION_PROVIDERS: readonly string[] = ["slack", "discord"];
+
+function isBoundedString(value: unknown): value is string {
+  return typeof value === "string" && value.length >= 1 && value.length <= 200;
+}
+
+/** Shared by load() and the setter so a value the setter accepts always loads back. */
+export function parseFileDestinationSettings(input: { preferredProvider?: unknown; defaultDestination?: unknown }): FileDestinationSettings {
+  const { preferredProvider, defaultDestination } = input;
+  if (preferredProvider != null && (typeof preferredProvider !== "string" || !FILE_DESTINATION_PROVIDERS.includes(preferredProvider))) {
+    throw new Error("advisor_send_file_preferred_provider must be slack or discord");
+  }
+  if (defaultDestination != null) {
+    const d = defaultDestination as Record<string, unknown>;
+    const keys = typeof d === "object" && !Array.isArray(d) ? Object.keys(d).sort().join(",") : "";
+    if (keys !== "channel_id,display_name,provider"
+      || typeof d.provider !== "string" || !FILE_DESTINATION_PROVIDERS.includes(d.provider)
+      || !isBoundedString(d.channel_id) || !isBoundedString(d.display_name)) {
+      throw new Error("advisor_send_file_default_destination must be {provider, channel_id, display_name} with 1-200 character strings");
+    }
+  }
+  return {
+    preferredProvider: (preferredProvider ?? null) as FileDestinationProvider | null,
+    defaultDestination: defaultDestination == null ? null : { ...(defaultDestination as StoredFileDestination) },
+  };
 }
 
 /** The .env variable that holds the Typesafe API key saved from the settings UI. */
@@ -352,7 +389,13 @@ export class AppSettingsStore {
         if (typeof value === "number" && Number.isSafeInteger(value) && value >= 1) return value;
         throw new Error(`${key} must be an integer of at least 1`);
       };
+      const fileDestination = parseFileDestinationSettings({
+        preferredProvider: parsed.advisor_send_file_preferred_provider,
+        defaultDestination: parsed.advisor_send_file_default_destination,
+      });
       return {
+        ...(fileDestination.preferredProvider === null ? {} : { advisor_send_file_preferred_provider: fileDestination.preferredProvider }),
+        ...(fileDestination.defaultDestination === null ? {} : { advisor_send_file_default_destination: fileDestination.defaultDestination }),
         ...(sendFileDirs === undefined ? {} : { advisor_send_file_dirs: sendFileDirs as string[] }),
         ...(parsed.advisor_send_file_slack_max_bytes === undefined ? {} : { advisor_send_file_slack_max_bytes: sendFileLimit("advisor_send_file_slack_max_bytes") }),
         ...(parsed.advisor_send_file_discord_max_bytes === undefined ? {} : { advisor_send_file_discord_max_bytes: sendFileLimit("advisor_send_file_discord_max_bytes") }),
@@ -446,6 +489,33 @@ export class AppSettingsStore {
       return [];
     });
     return { dirs, slackMaxBytes: this.settings.advisor_send_file_slack_max_bytes, discordMaxBytes: this.settings.advisor_send_file_discord_max_bytes };
+  }
+
+  getAdvisorFileDestinationSettings(): FileDestinationSettings {
+    return parseFileDestinationSettings({
+      preferredProvider: this.settings.advisor_send_file_preferred_provider,
+      defaultDestination: this.settings.advisor_send_file_default_destination,
+    });
+  }
+
+  /** null clears a key. Restores the previous values when save() fails. */
+  setAdvisorFileDestinationSettings(input: FileDestinationSettings): FileDestinationSettings {
+    const next = parseFileDestinationSettings(input);
+    const previous = this.getAdvisorFileDestinationSettings();
+    const apply = (value: FileDestinationSettings): void => {
+      if (value.preferredProvider === null) delete this.settings.advisor_send_file_preferred_provider;
+      else this.settings.advisor_send_file_preferred_provider = value.preferredProvider;
+      if (value.defaultDestination === null) delete this.settings.advisor_send_file_default_destination;
+      else this.settings.advisor_send_file_default_destination = value.defaultDestination;
+    };
+    apply(next);
+    try {
+      this.save();
+    } catch (error) {
+      apply(previous);
+      throw error;
+    }
+    return next;
   }
 
   getKnowledgeDir(): string { return this.settings.knowledge_dir; }

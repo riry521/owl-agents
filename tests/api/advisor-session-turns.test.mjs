@@ -210,3 +210,43 @@ test("advisor interrupt route reaches the runtime through the adapter and maps n
   assert.equal(missing.status, 503);
   assert.equal((await missing.json()).error.code,"dependency_unavailable");
 });
+
+test("advisor session route returns the activity through the adapter and reports null when there is none", async (t) => {
+  const { root, db, core: durableCore } = await createTestCore(
+    t,
+    { version: "advisor-activity-test", now: () => NOW },
+    { prefix: "owl-api-advisor-activity-" },
+  );
+  const dataDir = join(root, "data");
+  await mkdir(dataDir, { recursive: true });
+  const token = randomBytes(24).toString("hex");
+  const api = await startTestHttpServer(
+    t, { core: new ExternalCoreAdapter(durableCore, db, root, dataDir), db, webOut: root, owlRoot: root, dataDir }, { token },
+  );
+  if (!api) {
+    t.skip("localhost listen is not permitted in this environment");
+    return;
+  }
+  const getSession = async (query = "") => (await api.request("GET", `/api/v1/advisor/session${query}`)).json();
+
+  assert.deepEqual(await getSession(), { status: "none" });
+
+  const conversationId = (await durableCore.getActiveConversation()).conversation_id;
+  await db.createWriteLane().transact((tx) => tx.run(
+    `INSERT INTO advisor_sessions (id, status, conversation_id, window_id, last_activity_at, provider_id, created_at, updated_at)
+     VALUES ('session-1', 'running', ?, (SELECT advisor_window_id FROM conversations WHERE id = ?), ?, 'anthropic', ?, ?)`,
+    conversationId, conversationId, NOW, NOW, NOW,
+  ));
+
+  const none = await getSession();
+  assert.equal(none.activity, null);
+  assert.equal(none.running_turns, 0);
+  assert.equal(none.status, "running");
+
+  const calls = [];
+  const activity = { state: "tool", tool_name: "Bash", background_count: 2 };
+  durableCore.getAdvisorActivity = (sessionId, conversation) => { calls.push([sessionId, conversation]); return activity; };
+  assert.deepEqual((await getSession(`?conversation_id=${conversationId}`)).activity, activity);
+  assert.deepEqual((await getSession()).activity, activity);
+  assert.deepEqual(calls, [["session-1", conversationId], ["session-1", null]]);
+});

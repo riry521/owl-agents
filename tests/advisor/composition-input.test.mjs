@@ -22,7 +22,11 @@ try {
 const skip = esbuild ? false : "playwright-core / esbuild not available";
 
 const stubApi = `
+export class ApiRequestError extends Error {}
+export const getUploadLimits = async () => ({ max_bytes: 1, max_attachments: 1 });
+export const uploadAttachment = async () => ({});
 export const getOwnerLanguage = async () => 'ja';
+export const getOwnerFileRoots = async () => ({ roots: [] });
 export const getAdvisorWindowConversation = async () => 'conv1';
 export const getAdvisorWindowChannels = async () => [];
 export const createAdvisorWindowChannel = async () => {};

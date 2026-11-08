@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { cp, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
-import { chmodSync, existsSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createConnection, createServer } from "node:net";
 import { once } from "node:events";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 
 import { OPENCODE_HARNESS_GAPS } from "../../packages/shared/dist/index.js";
@@ -18,6 +19,7 @@ import { connectorConfigStatus } from "../../apps/server/dist/secret-config.js";
 import { isOwnerRequestAuthorized } from "../../apps/server/dist/http.js";
 import { isExternalBind, isLoopbackBind, serverExposureError } from "../../apps/server/dist/config.js";
 import { providerConfigurationError, providerSelection } from "../../apps/server/dist/provider-selection.js";
+import { readProcessIdentity } from "../../packages/core/dist/process-identity.js";
 import { SecretStore } from "../../packages/core/dist/secret-store.js";
 import { createAgentRunner } from "../../packages/agent-runtime/dist/index.js";
 import { command } from "../helpers/core.mjs";
@@ -799,4 +801,293 @@ test("owl stop also stops a server launched directly outside the owl start comma
   assert.equal(exitCode, 0);
   assert.equal(existsSync(join(dataDir, "owl-server.json")), false);
   assert.equal(existsSync(join(dataDir, "owl-server.pid")), false);
+});
+
+// --- single-instance lock and unresponsive-server recovery ---
+
+const IGNORE_SIGNALS = `
+process.on("SIGTERM", () => {});
+process.on("SIGINT", () => {});
+console.log("ready");
+setInterval(() => {}, 1000);
+`;
+
+/** A live process that ignores SIGTERM and SIGINT and listens on nothing. */
+async function startStubbornProcess(t) {
+  const child = spawn(process.execPath, ["-e", IGNORE_SIGNALS], { stdio: ["ignore", "pipe", "ignore"] });
+  t.after(() => {
+    if (child.exitCode === null) child.kill("SIGKILL");
+  });
+  await once(child.stdout, "data");
+  return child;
+}
+
+async function standaloneRoot(t, prefix) {
+  const root = await tempDir(t, prefix);
+  await cp(join(repoRoot, "contracts"), join(root, "contracts"), { recursive: true });
+  await mkdir(join(root, "apps", "web"), { recursive: true });
+  await cp(join(repoRoot, "apps", "web", "out"), join(root, "apps", "web", "out"), { recursive: true });
+  return { root, dataDir: join(root, "runtime") };
+}
+
+function standaloneEnv(root, dataDir, port) {
+  return envWith({
+    OWL_ROOT: root,
+    OWL_DATA_DIR: dataDir,
+    OWL_CORE_MODE: "standalone",
+    OWL_PROVIDER: "stub",
+    OWL_BIND: "127.0.0.1",
+    OWL_PORT: String(port),
+    OWL_TAILSCALE_SERVE: "",
+    OWL_SHUTDOWN_TIMEOUT_MS: "1",
+  });
+}
+
+function runCli(args, env) {
+  return spawnSync(process.execPath, [cliPath, ...args], { cwd: repoRoot, env, encoding: "utf8", timeout: 60_000 });
+}
+
+async function writeServerState(dataDir, pid, port, identity) {
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(join(dataDir, "owl-server.pid"), String(pid));
+  await writeFile(join(dataDir, "owl-server.json"), JSON.stringify({ pid, bind: "127.0.0.1", port, started_at: new Date().toISOString(), ...identity }));
+}
+
+function spawnStandaloneServer(t, root, dataDir, port) {
+  const child = spawn(process.execPath, [join(repoRoot, "apps", "server", "dist", "server.js"), "--bind", "127.0.0.1", "--port", String(port)], {
+    cwd: repoRoot,
+    env: standaloneEnv(root, dataDir, port),
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+  t.after(() => {
+    if (child.exitCode === null) child.kill("SIGKILL");
+  });
+  return child;
+}
+
+test("owl status reports a live PID with a closed port, and stop --force kills it with SIGKILL", async (t) => {
+  const port = await freePort();
+  if (port === null) return t.skip("localhost listen is not permitted in this environment");
+  const { root, dataDir } = await standaloneRoot(t, "owl-unresponsive-");
+  const env = standaloneEnv(root, dataDir, port);
+  const child = await startStubbornProcess(t);
+  await writeServerState(dataDir, child.pid, port, readProcessIdentity(child.pid));
+
+  const status = runCli(["status"], env);
+  assert.notEqual(status.status, 0);
+  assert.match(status.stdout, new RegExp(`unresponsive\\s+${child.pid}`));
+  const json = runCli(["status", "--json"], env);
+  assert.notEqual(json.status, 0);
+  assert.deepEqual(JSON.parse(json.stdout).services, [{ name: "owl-core", state: "unresponsive", pid: child.pid }]);
+
+  const exited = once(child, "exit");
+  const stop = runCli(["stop", "--force", "--timeout", "1"], env);
+  assert.equal(stop.status, 0, stop.stderr);
+  const [, signal] = await exited;
+  assert.equal(signal, "SIGKILL");
+  assert.equal(existsSync(join(dataDir, "owl-server.json")), false);
+  assert.equal(existsSync(join(dataDir, "owl-server.pid")), false);
+});
+
+test("owl restart escalates to SIGKILL for an unresponsive server and starts a new one", async (t) => {
+  const port = await freePort();
+  if (port === null) return t.skip("localhost listen is not permitted in this environment");
+  const { root, dataDir } = await standaloneRoot(t, "owl-restart-");
+  const env = standaloneEnv(root, dataDir, port);
+  const child = await startStubbornProcess(t);
+  await writeServerState(dataDir, child.pid, port, readProcessIdentity(child.pid));
+
+  const exited = once(child, "exit");
+  const restart = runCli(["restart"], env);
+  assert.equal(restart.status, 0, restart.stderr);
+  const [, signal] = await exited;
+  assert.equal(signal, "SIGKILL");
+  const state = JSON.parse(await readFile(join(dataDir, "owl-server.json"), "utf8"));
+  assert.notEqual(state.pid, child.pid);
+  t.after(() => {
+    try { process.kill(state.pid, "SIGKILL"); } catch { /* already stopped */ }
+  });
+  assert.equal((await fetch(`http://127.0.0.1:${port}/api/v1/health`)).status, 200);
+});
+
+test("a second server on the same data directory is refused while the first keeps running", async (t) => {
+  const first = await freePort();
+  const second = await freePort();
+  if (first === null || second === null) return t.skip("localhost listen is not permitted in this environment");
+  const { root, dataDir } = await standaloneRoot(t, "owl-lock-");
+  const one = spawnStandaloneServer(t, root, dataDir, first);
+  await waitForPath(join(dataDir, "owl-server.pid"));
+
+  const two = spawnStandaloneServer(t, root, dataDir, second);
+  const [exitCode] = await once(two, "exit");
+  assert.notEqual(exitCode, 0);
+  await waitForPath(join(dataDir, "owl-server.json"));
+  assert.equal(one.exitCode, null);
+  assert.equal((await fetch(`http://127.0.0.1:${first}/api/v1/health`)).status, 200);
+});
+
+test("a server starts again after the previous one was killed with SIGKILL and left its files", async (t) => {
+  const first = await freePort();
+  const second = await freePort();
+  if (first === null || second === null) return t.skip("localhost listen is not permitted in this environment");
+  const { root, dataDir } = await standaloneRoot(t, "owl-sigkill-");
+  const one = spawnStandaloneServer(t, root, dataDir, first);
+  await waitForPath(join(dataDir, "owl-server.json"));
+  const killed = once(one, "exit");
+  one.kill("SIGKILL");
+  await killed;
+  assert.equal(existsSync(join(dataDir, "owl-server.pid")), true);
+  assert.equal(existsSync(join(dataDir, "owl-server.json")), true);
+  assert.equal(existsSync(join(dataDir, "owl-server.lock")), true);
+
+  const two = spawnStandaloneServer(t, root, dataDir, second);
+  await waitFor(() => {
+    try { return JSON.parse(readFileSync(join(dataDir, "owl-server.json"), "utf8")).pid === two.pid; } catch { return false; }
+  }, { timeoutMs: 10_000, intervalMs: 50, message: "second server state" });
+  assert.equal((await fetch(`http://127.0.0.1:${second}/api/v1/health`)).status, 200);
+});
+
+test("stop --force and restart refuse to signal a PID whose recorded identity does not match", async (t) => {
+  const port = await freePort();
+  if (port === null) return t.skip("localhost listen is not permitted in this environment");
+  const { root, dataDir } = await standaloneRoot(t, "owl-foreign-pid-");
+  const env = standaloneEnv(root, dataDir, port);
+  const child = await startStubbornProcess(t);
+  const identity = readProcessIdentity(child.pid);
+  await writeServerState(dataDir, child.pid, port, { ...identity, process_cmdline_sha256: "0".repeat(64) });
+
+  for (const args of [["stop", "--force", "--timeout", "1"], ["restart"]]) {
+    const result = runCli(args, env);
+    assert.notEqual(result.status, 0, args.join(" "));
+    assert.equal(child.exitCode, null);
+    assert.equal(child.signalCode, null);
+  }
+  process.kill(child.pid, 0);
+});
+
+test("the server lock survives garbage collection of the caller's reference", async (t) => {
+  const { dataDir } = await standaloneRoot(t, "owl-lock-gc-");
+  await mkdir(dataDir, { recursive: true });
+  const script = `
+    import { acquireServerLock } from ${JSON.stringify(new URL("../../packages/db/dist/index.js", import.meta.url).href)};
+    const path = process.argv[1];
+    acquireServerLock(path);
+    for (let i = 0; i < 5; i++) global.gc();
+    process.stdout.write(acquireServerLock(path) === null ? "held" : "lost");
+  `;
+  const out = execFileSync(process.execPath, ["--expose-gc", "--input-type=module", "-e", script, join(dataDir, "gc.lock")], { encoding: "utf8" });
+  assert.equal(out, "held");
+});
+
+// --- shutdown deadline and timestamped log ---
+
+const DEADLINE_CHILD = `
+import { createShutdownDeadline, timedStage } from ${JSON.stringify(pathToFileURL(join(repoRoot, "apps", "server", "dist", "shutdown-deadline.js")).href)};
+import { appendFileSync, unlinkSync, writeFileSync } from "node:fs";
+const [mode, pidPath, markerPath, deadlineMs, graceMs] = process.argv.slice(1);
+writeFileSync(pidPath, String(process.pid));
+const deadline = createShutdownDeadline({
+  deadlineMs: Number(deadlineMs),
+  graceMs: Number(graceMs),
+  run: () => timedStage("hang", () => {
+    if (mode === "sync") for (;;) {}
+    return new Promise(() => {});
+  }),
+  forceTerminate: () => appendFileSync(markerPath, "forced\\n"),
+  cleanup: () => unlinkSync(pidPath),
+  exit: (code) => process.exit(code),
+  log: (line) => console.log(line),
+});
+process.on("SIGTERM", () => deadline.handleSignal("SIGTERM", false));
+process.on("SIGINT", () => deadline.handleSignal("SIGINT", true));
+setInterval(() => {}, 1000);
+console.log("ready");
+`;
+
+async function spawnDeadlineChild(t, mode, deadlineMs, graceMs) {
+  const dir = await tempDir(t, "owl-deadline-");
+  const pidPath = join(dir, "child.pid");
+  const markerPath = join(dir, "forced.txt");
+  const child = spawn(process.execPath, ["--input-type=module", "-e", DEADLINE_CHILD, mode, pidPath, markerPath, String(deadlineMs), String(graceMs)], {
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  t.after(() => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  });
+  let output = "";
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  await waitFor(() => output.includes("ready"), { timeoutMs: 10_000, intervalMs: 20, message: "child ready" });
+  return { child, pidPath, markerPath, output: () => output };
+}
+
+test("a shutdown stage that never resolves is cut at the deadline: children are force-terminated and the pid file is removed just before exit", async (t) => {
+  const { child, pidPath, markerPath, output } = await spawnDeadlineChild(t, "promise", 400, 4_000);
+  const exited = once(child, "close");
+  const startedAt = Date.now();
+  child.kill("SIGTERM");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(existsSync(pidPath), true, "pid file stays during shutdown");
+  const [code, signal] = await exited;
+  assert.ok(Date.now() - startedAt < 4_000, "exits by the deadline, before the watchdog grace");
+  assert.equal(code, 1);
+  assert.equal(signal, null);
+  assert.equal(existsSync(markerPath), true, "forceTerminateProcesses was called");
+  assert.equal(existsSync(pidPath), false);
+  assert.match(output(), /shutdown stage start: hang/);
+  assert.match(output(), /shutdown aborted \(deadline 400ms exceeded\); unfinished stages: hang/);
+});
+
+test("a shutdown that blocks the event loop synchronously is killed by the watchdog thread within deadline plus grace", async (t) => {
+  const { child } = await spawnDeadlineChild(t, "sync", 300, 500);
+  const exited = once(child, "close");
+  const startedAt = Date.now();
+  child.kill("SIGTERM");
+  const [, signal] = await exited;
+  assert.equal(signal, "SIGKILL");
+  assert.ok(Date.now() - startedAt < 5_000);
+});
+
+test("SIGINT during a stuck SIGTERM shutdown force-terminates and exits without waiting for the deadline", async (t) => {
+  const { child, pidPath, markerPath, output } = await spawnDeadlineChild(t, "promise", 60_000, 60_000);
+  const exited = once(child, "close");
+  child.kill("SIGTERM");
+  await waitFor(() => output().includes("shutdown start"), { timeoutMs: 5_000, intervalMs: 20, message: "shutdown start" });
+  assert.equal(existsSync(pidPath), true);
+  child.kill("SIGINT");
+  const [code] = await exited;
+  assert.equal(code, 1);
+  assert.equal(existsSync(markerPath), true);
+  assert.equal(existsSync(pidPath), false);
+  assert.match(output(), /SIGINT received during shutdown/);
+});
+
+test("the real server logs every line with a time and each shutdown stage on SIGTERM", async (t) => {
+  const port = await freePort();
+  if (port === null) return t.skip("localhost listen is not permitted in this environment");
+  const { root, dataDir } = await standaloneRoot(t, "owl-shutdown-log-");
+  const logPath = join(root, "server-output.log");
+  await writeFile(logPath, "");
+  const fd = openSync(logPath, "a");
+  const child = spawn(process.execPath, [join(repoRoot, "apps", "server", "dist", "server.js"), "--bind", "127.0.0.1", "--port", String(port)], {
+    cwd: repoRoot,
+    env: { ...standaloneEnv(root, dataDir, port), OWL_SHUTDOWN_TIMEOUT_MS: "20000" },
+    stdio: ["ignore", fd, fd],
+  });
+  t.after(() => {
+    closeSync(fd);
+    if (child.exitCode === null) child.kill("SIGKILL");
+  });
+  // The result line comes after the signal handlers are registered.
+  await waitFor(() => readFileSync(logPath, "utf8").includes('"command":"server"'), { timeoutMs: 10_000, intervalMs: 50, message: "server started" });
+  const exited = once(child, "close");
+  child.kill("SIGTERM");
+  const [code] = await exited;
+  assert.equal(code, 0);
+  const lines = readFileSync(logPath, "utf8").split("\n").filter((line) => line && !line.startsWith("{"));
+  assert.ok(lines.length > 0);
+  for (const line of lines) assert.match(line, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z /, line);
+  const text = lines.join("\n");
+  for (const expected of ["received SIGTERM", "shutdown start", "stage start: core shutdown", "stage done: core shutdown", "stage done: runtime files", "shutdown complete"]) {
+    assert.ok(text.includes(expected), expected + "\n" + text);
+  }
 });

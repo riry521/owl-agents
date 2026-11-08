@@ -1,8 +1,8 @@
 'use client';
 
 import { Fragment, type FormEvent, useEffect, useRef, useState } from 'react';
-import { getModelSettings, getSettingsView, updateModelSettings, saveIntegration, testIntegration, deleteIntegration, setHybridMode, setChildRunSettings, createProvider, deleteProvider, testProvider, saveProvider, getProviderModels, setProviderModels as setProviderModelsApi, setTypesafeApiKey, setAdvisorPersona, putAdvisorFolders, putRemakeLimitSettings, putFixerEscalationSettings, putAutoRecoverySettings, getKnowledgeStorage, putKnowledgeStorage, setOwnerLanguage, inviteOwnerToSlackChannels, setKnowledgeAutomationSettings, ApiRequestError } from '@/lib/api-client';
-import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ChildRunSettings, ChildRunHarnessChoice, ProviderInfo, SaveProviderPayload, AdvisorFolders, RemakeLimitSettings, FixerEscalationSettings, AutoRecoverySettings, KnowledgeStorageStatus, KnowledgeAutomationSettingsData, KnowledgeAutomationSettingsInput } from '@/lib/types';
+import { getModelSettings, getSettingsView, updateModelSettings, saveIntegration, testIntegration, deleteIntegration, setHybridMode, setChildRunSettings, createProvider, deleteProvider, testProvider, saveProvider, getProviderModels, setProviderModels as setProviderModelsApi, setTypesafeApiKey, setAdvisorPersona, putAdvisorFolders, getAdvisorSendFileDestination, putAdvisorSendFileDestination, putRemakeLimitSettings, putFixerEscalationSettings, putAutoRecoverySettings, getKnowledgeStorage, putKnowledgeStorage, setOwnerLanguage, inviteOwnerToSlackChannels, setKnowledgeAutomationSettings, ApiRequestError } from '@/lib/api-client';
+import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ChildRunSettings, ChildRunHarnessChoice, ProviderInfo, SaveProviderPayload, AdvisorFolders, AdvisorSendFileDestination, FileDestinationProvider, RemakeLimitSettings, FixerEscalationSettings, AutoRecoverySettings, KnowledgeStorageStatus, KnowledgeAutomationSettingsData, KnowledgeAutomationSettingsInput } from '@/lib/types';
 import { roleDisplayName } from '@/lib/format';
 import { useLocale, type Locale } from '@/lib/i18n';
 import { REMAKE_TASK_TYPES, remakeLimitsToDraft, draftToRemakeLimits } from '@/lib/remake-limits.mjs';
@@ -546,6 +546,7 @@ export function SettingsView() {
       <OwnerLanguageSection />
       <AdvisorPersonaSection />
       <AdvisorFoldersSection />
+      <AdvisorSendFileDestinationSection />
       <RemakeLimitsSection />
       <FixerEscalationSection />
       <AutoRecoverySection />
@@ -915,6 +916,211 @@ export function AdvisorFoldersSection() {
         }}
         onClose={() => setPicker(null)}
       />
+    </section>
+  );
+}
+
+const FILE_DESTINATION_PROVIDERS: { provider: FileDestinationProvider; label: string }[] = [
+  { provider: 'slack', label: 'Slack' },
+  { provider: 'discord', label: 'Discord' },
+];
+
+function destinationValue(destination: { provider: string; channel_id: string } | null): string {
+  return destination ? `${destination.provider}:${destination.channel_id}` : '';
+}
+
+// Exported so tests can render it in isolation.
+export function AdvisorSendFileDestinationSection() {
+  const { t } = useLocale();
+  const [open, setOpen] = useState(false);
+  const [data, setData] = useState<AdvisorSendFileDestination | null>(null);
+  const [preferred, setPreferred] = useState<FileDestinationProvider | null>(null);
+  const [selected, setSelected] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  function adopt(value: AdvisorSendFileDestination) {
+    setData(value);
+    setPreferred(value.preferred_provider);
+    setSelected(value.default_destination?.available ? destinationValue(value.default_destination) : '');
+  }
+
+  // Opened on demand: the GET asks Slack/Discord for channel names, so it is not part of /settings/view.
+  useEffect(() => {
+    if (!open || data) return;
+    let alive = true;
+    setLoading(true);
+    getAdvisorSendFileDestination()
+      .then((value) => { if (alive) { adopt(value); setError(null); } })
+      .catch(() => { if (alive) setError(t('settings.sendFileDestinationError')); })
+      .finally(() => { if (alive) setLoading(false); });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  async function handleSave() {
+    setSaving(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const separator = selected.indexOf(':');
+      const saved = await putAdvisorSendFileDestination({
+        preferred_provider: preferred,
+        default_destination: selected
+          ? { provider: selected.slice(0, separator) as FileDestinationProvider, channel_id: selected.slice(separator + 1) }
+          : null,
+      });
+      adopt(saved);
+      setNotice(t('settings.sendFileDestinationSavedNotice'));
+    } catch (err) {
+      // The server already localizes validation messages (422); surface those verbatim.
+      setError(err instanceof ApiRequestError && err.code === 'validation_error' ? err.rawMessage : humanizeError(err, t));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const savedSelected = data?.default_destination?.available ? destinationValue(data.default_destination) : '';
+  const changed = data !== null && (preferred !== data.preferred_provider || selected !== savedSelected);
+  const configured = (provider: FileDestinationProvider) => data?.providers.find((p) => p.provider === provider)?.configured ?? false;
+  const noIntegration = data !== null && !configured('slack') && !configured('discord');
+  const preferredCards: { value: FileDestinationProvider | null; title: string; desc: string }[] = [
+    { value: 'slack', title: 'Slack', desc: t('settings.sendFileDestinationPreferredSlack') },
+    { value: 'discord', title: 'Discord', desc: t('settings.sendFileDestinationPreferredDiscord') },
+    { value: null, title: t('settings.sendFileDestinationPreferredNoneTitle'), desc: t('settings.sendFileDestinationPreferredNone') },
+  ];
+  const savedDefault = data?.default_destination ?? null;
+
+  return (
+    <section className="panel advisor-persona-panel" aria-labelledby="sec-advisor-send-file-destination">
+      <button
+        type="button"
+        className="settings-disclosure"
+        aria-expanded={open}
+        aria-controls="advisor-send-file-destination-panel"
+        onClick={() => setOpen((current) => !current)}
+      >
+        <span className="settings-disclosure__info">
+          <span className="settings-disclosure__icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M22 2L11 13" />
+              <path d="M22 2l-7 20-4-9-9-4 20-7z" />
+            </svg>
+          </span>
+          <span className="settings-disclosure__copy">
+            <strong id="sec-advisor-send-file-destination">{t('settings.sendFileDestination')}</strong>
+            <small>{t('settings.sendFileDestinationDescription')}</small>
+          </span>
+        </span>
+        <span className="settings-disclosure__right">
+          <svg
+            className={`settings-disclosure__chevron ${open ? 'settings-disclosure__chevron--open' : ''}`}
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            aria-label={open ? t('settings.sendFileDestinationClose') : t('settings.sendFileDestinationOpen')}
+          >
+            <path d="M6 9l6 6 6-6" />
+          </svg>
+        </span>
+      </button>
+
+      {open && (
+        <div id="advisor-send-file-destination-panel" className="settings-disclosure__body" aria-busy={loading || saving}>
+          {loading ? (
+            <p className="empty">{t('common.loading')}</p>
+          ) : data && (
+            <>
+              {noIntegration ? (
+                <p className="note note--block" role="status">
+                  {t('settings.sendFileDestinationNoIntegration')} <a href="#sec-integrations">{t('settings.sendFileDestinationIntegrationLink')}</a>
+                </p>
+              ) : savedDefault && !savedDefault.available ? (
+                <p className="note note--block" role="status">{t('settings.sendFileDestinationUnavailable', { name: savedDefault.display_name })}</p>
+              ) : !savedDefault ? (
+                <p className="note note--block" role="status">{t('settings.sendFileDestinationUnset')}</p>
+              ) : null}
+
+              <p className="field-title" id="send-file-preferred-title">{t('settings.sendFileDestinationPreferredLabel')}</p>
+              <p className="settings-disclosure__hint">{t('settings.sendFileDestinationPreferredHint')}</p>
+              <div className="radio-card-group" role="radiogroup" aria-labelledby="send-file-preferred-title">
+                {preferredCards.map((card) => (
+                  <label key={card.value ?? 'none'} className={`radio-card${preferred === card.value ? ' radio-card--selected' : ''}`}>
+                    <input
+                      type="radio"
+                      name="send-file-preferred"
+                      checked={preferred === card.value}
+                      disabled={saving || noIntegration}
+                      onChange={() => { setPreferred(card.value); setNotice(null); }}
+                    />
+                    <span>
+                      <span className="radio-card__title">
+                        {card.title}
+                        {card.value && !configured(card.value) && <span className="badge badge--amber">{t('settings.sendFileDestinationNotConfigured')}</span>}
+                      </span>
+                      <div className="radio-card__desc">{card.desc}</div>
+                    </span>
+                  </label>
+                ))}
+              </div>
+
+              <label className="form-field" style={{ marginTop: '16px' }}>
+                <span>{t('settings.sendFileDestinationDefaultLabel')}</span>
+                <select
+                  className="select"
+                  value={selected}
+                  disabled={saving || noIntegration}
+                  onChange={(ev) => { setSelected(ev.target.value); setNotice(null); }}
+                >
+                  <option value="">{t('settings.sendFileDestinationNone')}</option>
+                  {FILE_DESTINATION_PROVIDERS.map(({ provider, label }) => {
+                    const state = data.providers.find((p) => p.provider === provider);
+                    const isConfigured = state?.configured ?? false;
+                    return (
+                      <optgroup
+                        key={provider}
+                        label={isConfigured ? label : t('settings.sendFileDestinationProviderOff', { provider: label })}
+                        disabled={!isConfigured}
+                      >
+                        {(state?.candidates ?? []).map((candidate) => (
+                          <option key={candidate.channel_id} value={`${provider}:${candidate.channel_id}`}>
+                            {candidate.kind === 'window'
+                              ? t('settings.sendFileDestinationWindow', { name: candidate.display_name, window: candidate.window_name ?? '' })
+                              : t('settings.sendFileDestinationConversation', { name: candidate.display_name })}
+                          </option>
+                        ))}
+                      </optgroup>
+                    );
+                  })}
+                </select>
+              </label>
+              <p className="settings-disclosure__hint">{t('settings.sendFileDestinationDefaultHint')}</p>
+              {savedDefault?.available && (
+                <p className="settings-disclosure__hint">
+                  {t('settings.sendFileDestinationSaved', {
+                    provider: savedDefault.provider === 'slack' ? 'Slack' : 'Discord',
+                    name: savedDefault.display_name,
+                  })}{' '}
+                  <span className="badge badge--green">{t('settings.sendFileDestinationAvailable')}</span>
+                </p>
+              )}
+
+              <div className="btn-row" style={{ marginTop: '16px' }}>
+                <button type="button" className="btn btn--primary btn--small" onClick={handleSave} disabled={saving || !changed}>
+                  {saving ? t('common.saving') : t('settings.sendFileDestinationSave')}
+                </button>
+                {notice && <span className="note note--success">{notice}</span>}
+              </div>
+            </>
+          )}
+          {error && <div className="error" style={{ marginTop: '12px' }}>{error}</div>}
+        </div>
+      )}
     </section>
   );
 }

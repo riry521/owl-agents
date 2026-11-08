@@ -128,9 +128,10 @@ test("a missing transcript yields no summary", async (t) => {
 test("Claude driver delivers the compaction summary even when a protocol failure ends a running turn", async (t) => {
   const configDir = await tempDir(t, "owl-claude-config-");
   const { AdvisorSessionDriver } = await import("../../agent-runtime/dist/advisor-session-driver.js");
+  const { SessionActivityTracker } = await import("../../agent-runtime/dist/session-activity.js");
   const driver = Object.create(AdvisorSessionDriver.prototype);
   Object.assign(driver, {
-    eventQueue: [], eventResolvers: [], heldEvents: [], pendingCompactions: 0, endRequested: false, done: false,
+    activity: new SessionActivityTracker(), eventQueue: [], eventResolvers: [], heldEvents: [], pendingCompactions: 0, endRequested: false, done: false,
     exitHandled: false, childClosed: true, currentTurnId: "turn-1", turnTextParts: [], unsolicitedTextParts: [],
     transcriptLocation: { configDir, cwd: "/work/space.x/task" }, _providerSessionId: "sess-9", markUnusable() {}, stderrTail: () => "",
   });

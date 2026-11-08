@@ -395,3 +395,51 @@ test("Slack posts a follow-up reply into the same thread with the label at the s
   assert.equal(posts[0].thread_ts, "1712345678.000100");
   assert.ok(posts[0].text.startsWith(label), posts[0].text);
 });
+
+const webFileEvent = (file, provider = "slack", channel_id = "C-PROJECT") => {
+  const event = pendingEvent([file]);
+  return { ...event, payload: { ...event.payload, origin: { channel: "web" }, delivery_target: { provider, channel_id, display_name: "proj-a", source: "window_binding" } } };
+};
+const bindingCore = (connector, bound) => {
+  const requests = [];
+  connector.core.request = async (path, init) => {
+    requests.push({ path, body: init?.body });
+    return path.startsWith("/advisor/channel-bindings") ? { bindings: bound.map((channel_id) => ({ channel_id })) } : { notice: null };
+  };
+  return requests;
+};
+
+test("Slack uploads a Web-origin file to the delivery_target channel without a thread or reply post, and reports it", async () => {
+  const { connector, posts, uploads } = outboundConnector([]);
+  connector.boundChannelIds = new Set(["C-PROJECT"]);
+  const requests = bindingCore(connector, ["C-PROJECT"]);
+  await connector.handleCoreEvent(webFileEvent(await outboundFixture()));
+
+  assert.equal(uploads.length, 1);
+  assert.equal(uploads[0].channel_id, "C-PROJECT");
+  assert.ok(!("thread_ts" in uploads[0]));
+  assert.equal(posts.length, 0);
+  const reports = requests.filter((r) => r.path.endsWith("/advisor-deliveries"));
+  assert.deepEqual(reports.map((r) => r.path), ["/conversations/slack%3AC-CONVERSATION%3Athread/advisor-deliveries"]);
+  assert.deepEqual(reports[0].body.payload.results, [{ index: 0, outcome: "sent" }]);
+});
+
+test("Slack ignores a Web-origin file whose delivery_target is Discord", async () => {
+  const { connector, posts, uploads } = outboundConnector([]);
+  const requests = bindingCore(connector, ["C-PROJECT"]);
+  await connector.handleCoreEvent(webFileEvent(await outboundFixture(), "discord"));
+
+  assert.equal(uploads.length + posts.length + requests.length, 0);
+});
+
+test("Slack refreshes the bindings once for an unknown channel, then reports upload_rejected without uploading", async () => {
+  const { connector, posts, uploads } = outboundConnector([]);
+  const requests = bindingCore(connector, []);
+  await connector.handleCoreEvent(webFileEvent(await outboundFixture()));
+
+  assert.equal(uploads.length, 0);
+  assert.equal(posts.length, 0);
+  assert.equal(requests.filter((r) => r.path.startsWith("/advisor/channel-bindings")).length, 1);
+  const report = requests.find((r) => r.path.endsWith("/advisor-deliveries"));
+  assert.deepEqual(report.body.payload.results.map(({ message, ...rest }) => rest), [{ index: 0, outcome: "failed", code: "upload_rejected", platform_error: null }]);
+});

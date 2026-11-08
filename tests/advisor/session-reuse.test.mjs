@@ -788,3 +788,71 @@ test("an interrupt requested before send() returns reaches the driver right afte
   assert.ok(provider.interrupts.length >= 1 && provider.interrupts.every((id) => id === running));
   assert.equal(live.replies[0].reply, "（中断しました）");
 });
+
+test("the window keeps the latest activity and shows it to its conversation only", async (t) => {
+  const live = await createLiveRuntime(t, [fakeProviderSession(741)]);
+  const one = await live.runtime.ensureSession(live.ownerId, live.conversationId);
+  const [request] = live.createRequests;
+  const activity = { state: "tool", tool_name: "Bash", background_count: 2 };
+  request.on_activity(activity);
+  await live.sendTurn(one.id, "question");
+  await waitFor(() => live.replies.length === 1, { message: "turn reply" });
+  request.on_activity(activity);
+
+  assert.deepEqual(live.runtime.getActivity(one.id, live.conversationId), activity);
+  assert.deepEqual(live.runtime.getActivity(one.id, null), activity);
+  assert.deepEqual(live.runtime.getActivity(one.id, "other-conversation"), { state: null, tool_name: null, background_count: 2 });
+});
+
+test("an activity update after the turn reaches the window", async (t) => {
+  const live = await createLiveRuntime(t, [fakeProviderSession(742)]);
+  const one = await live.runtime.ensureSession(live.ownerId, live.conversationId);
+  const [request] = live.createRequests;
+  await live.sendTurn(one.id, "question");
+  await waitFor(() => live.replies.length === 1, { message: "turn reply" });
+  request.on_activity({ state: null, tool_name: null, background_count: 0 });
+  assert.equal(live.runtime.getActivity(one.id, live.conversationId).background_count, 0);
+  request.on_activity({ state: null, tool_name: null, background_count: 3 });
+  assert.equal(live.runtime.getActivity(one.id, live.conversationId).background_count, 3);
+});
+
+test("a driver that never reports gives no activity", async (t) => {
+  const live = await createLiveRuntime(t, [fakeProviderSession(743)]);
+  const one = await live.runtime.ensureSession(live.ownerId, live.conversationId);
+  assert.equal(live.runtime.getActivity(one.id, live.conversationId), null);
+});
+
+test("activity is forgotten with the driver", async (t) => {
+  const report = { state: "thinking", tool_name: null, background_count: 1 };
+  // Session stop: cleared, and a late report is ignored.
+  const stopped = await createLiveRuntime(t, [fakeProviderSession(744)]);
+  const one = await stopped.runtime.ensureSession(stopped.ownerId, stopped.conversationId);
+  const [request] = stopped.createRequests;
+  request.on_activity(report);
+  assert.deepEqual(stopped.runtime.getActivity(one.id, null), report);
+  await stopped.runtime.stopSession(one.id, "cleared");
+  assert.equal(stopped.runtime.getActivity(one.id, null), null);
+  request.on_activity(report);
+  assert.equal(stopped.runtime.getActivity(one.id, null), null);
+
+  // Process exit.
+  const driver = fakeProviderSession(745);
+  const exited = await createLiveRuntime(t, [driver]);
+  const two = await exited.runtime.ensureSession(exited.ownerId, exited.conversationId);
+  exited.createRequests[0].on_activity(report);
+  driver.exited = true;
+  assert.equal(exited.runtime.getActivity(two.id, null), null);
+
+  // Idle suspension.
+  const idle = await createLiveRuntime(t, [fakeProviderSession(746)]);
+  const three = await idle.runtime.ensureSession(idle.ownerId, idle.conversationId);
+  const idleRequest = idle.createRequests[0];
+  idleRequest.on_activity(report);
+  const stale = new Date(Date.now() - 3 * 24 * 3600 * 1000).toISOString();
+  await idle.db.createWriteLane().transact((tx) => tx.run("UPDATE advisor_sessions SET last_activity_at = ? WHERE id = ?", stale, three.id));
+  await idle.runtime.suspendIdleWindows();
+  assert.equal(idle.sessionRow(three.id).status, "suspended");
+  assert.equal(idle.runtime.getActivity(three.id, null), null);
+  idleRequest.on_activity(report);
+  assert.equal(idle.runtime.getActivity(three.id, null), null);
+});

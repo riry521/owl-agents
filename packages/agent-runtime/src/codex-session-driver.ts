@@ -14,6 +14,7 @@ import type {
   TokenUsage,
 } from "./types.js";
 import { readCodexCompactionSummaries, waitForCompactionSummary } from "./compaction-summary.js";
+import { SessionActivityTracker } from "./session-activity.js";
 import { codexErrorInfoOf } from "./codex-error-info.js";
 import { classifyProviderFailure, formatProviderError, sessionFailureMessage, turnFailureProviderError } from "./provider-error.js";
 import { agentUserInstructionEnv, buildAgentPermissionArgs, buildCodexCustomProviderArgs, externalJsonBlock, reapProcessGroup, uncachedInputTokens } from "@owl/shared";
@@ -54,6 +55,9 @@ function owlClientVersion(): string {
   cachedClientVersion = version;
   return version;
 }
+
+/** Keyed by item.type, which comes from the server; a Map keeps "constructor" and the like from matching. */
+const CODEX_TOOL_NAMES = new Map([["commandExecution", "Shell"], ["fileChange", "Edit"], ["webSearch", "WebSearch"]]);
 
 class CodexRpcError extends Error {
   public readonly code: number | null;
@@ -258,12 +262,15 @@ export class CodexSessionDriver implements ProviderSession {
   private pendingCompactions = 0;
   private endRequested = false;
   private readonly heldEvents: SessionEvent[] = [];
+  private readonly activity: SessionActivityTracker;
 
   private constructor(
     child: ChildProcess,
     private readonly onStdoutLine: ProviderSessionRequest["on_stdout_line"],
+    onActivity: ProviderSessionRequest["on_activity"],
     private readonly reapGraceMs?: number,
   ) {
+    this.activity = new SessionActivityTracker(onActivity);
     this.child = child;
     this._pid = child.pid ?? 0;
     this.readyPromise = new Promise<string>((resolve, reject) => {
@@ -321,7 +328,7 @@ export class CodexSessionDriver implements ProviderSession {
       throw new Error(formatProviderError("codex", cause));
     }
 
-    const driver = new CodexSessionDriver(child, request.on_stdout_line, options.reapGraceMs);
+    const driver = new CodexSessionDriver(child, request.on_stdout_line, request.on_activity, options.reapGraceMs);
     driver.requestedEffort = request.effort;
     driver.codexHome = request.env.CODEX_HOME || join(request.env.HOME || homedir(), ".codex");
     try {
@@ -350,6 +357,7 @@ export class CodexSessionDriver implements ProviderSession {
     this.currentCodexTurnId = null;
     this.interruptRequestedTurnId = null;
     this.turnAgentMessages = new Map();
+    this.activity.turnStarted();
     const text =
       turn.attachment_paths && turn.attachment_paths.length > 0
         ? `${turn.text}\n\n${externalJsonBlock("owl-attachments", turn.attachment_paths)}`
@@ -367,6 +375,7 @@ export class CodexSessionDriver implements ProviderSession {
         this.currentTurnId = null;
         this.currentCodexTurnId = null;
         this.turnAgentMessages = new Map();
+        this.activity.turnEnded();
       }
       throw cause;
     }
@@ -377,6 +386,7 @@ export class CodexSessionDriver implements ProviderSession {
         this.currentTurnId = null;
         this.currentCodexTurnId = null;
         this.turnAgentMessages = new Map();
+        this.activity.turnEnded();
       }
       throw new Error(formatProviderError("codex", "invalid provider response"));
     }
@@ -816,6 +826,9 @@ export class CodexSessionDriver implements ProviderSession {
       case "item/agentMessage/delta":
         this.handleAgentMessageDelta(params as Record<string, unknown>);
         return;
+      case "item/started":
+        this.handleItemStarted(params);
+        return;
       case "item/completed":
         this.handleItemCompleted(params as Record<string, unknown>);
         return;
@@ -867,7 +880,25 @@ export class CodexSessionDriver implements ProviderSession {
     this.pushEvent({ type: "turn.delta", turn_id: localTurnId, text: delta });
   }
 
+  /** Display only: a notification of an unexpected shape is ignored, never a protocol error. */
+  private handleItemStarted(params: unknown): void {
+    if (!isRecord(params) || !isRecord(params.item)) return;
+    const { id, type } = params.item;
+    const codexTurnId = getString(params.turnId);
+    if (typeof id !== "string" || typeof type !== "string" || !codexTurnId) return;
+    const localTurnId = this.localTurnIdForNotification(codexTurnId);
+    if (!localTurnId || localTurnId !== this.currentTurnId) return;
+    if (type === "collabAgentToolCall" || type === "subAgentActivity") {
+      this.activity.toolStarted(id, "subagent", "");
+      return;
+    }
+    const name = CODEX_TOOL_NAMES.get(type)
+      ?? (type === "mcpToolCall" || type === "dynamicToolCall" ? getString(params.item.tool) : null);
+    if (name) this.activity.toolStarted(id, "tool", name);
+  }
+
   private handleItemCompleted(params: Record<string, unknown>): void {
+    if (isRecord(params.item) && typeof params.item.id === "string") this.activity.toolEnded(params.item.id);
     if (!isRecord(params.item)) {
       this.handleProtocolError();
       return;
@@ -1076,5 +1107,6 @@ export class CodexSessionDriver implements ProviderSession {
     this.currentCodexTurnId = null;
     this.interruptRequestedTurnId = null;
     this.turnAgentMessages = new Map();
+    this.activity.turnEnded();
   }
 }

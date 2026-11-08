@@ -287,6 +287,17 @@ test("Manager replan passes tasks, the failed_tasks brief and final_verdict to t
   assert.deepEqual(input.context.final_verdict, finalVerdict);
 });
 
+test("Manager replan prompt explains owner_requests attachments and passes them through", async () => {
+  const calls = [];
+  const attachments = [{ filename: "a.txt", mime: "text/plain", bytes: 1, status: "stored", path: "/tmp/a.txt" }];
+  const result = await runnerAnswering((template) => fillTemplate(template), calls).runManagerPlan(managerRequest("replan", {
+    owner_requests: [{ kind: "instruction", text: "", message_ids: ["m1"], attachments }],
+  }));
+  assert.equal(result.outcome, "success", result.message);
+  assert.deepEqual(renderedInput(calls[0].prompt, "Manager input").context.owner_requests[0].attachments, attachments);
+  assert.match(calls[0].prompt, /text is empty when the Owner sent only files[^]*attachments, the files the Owner sent[^]*read each file at path before you plan[^]*quarantined file has path null/u);
+});
+
 test("Manager replan accepts an empty task list because the provider schema has no minItems", async () => {
   const calls = [];
   const result = await runnerAnswering(() => ({ tasks: [] }), calls).runManagerPlan(managerRequest("replan", {

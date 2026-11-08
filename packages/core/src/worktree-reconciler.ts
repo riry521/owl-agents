@@ -1,6 +1,8 @@
+import { createHash } from "node:crypto";
 import { lstat, rm, rmdir } from "node:fs/promises";
-import { basename, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import type { WriteLane } from "../../db/dist/index.js";
+import { isEmptyDirectoryTree } from "./git-gateway.js";
 import { isTerminalTaskState, reduceTaskInTransaction } from "./state-reducer.js";
 import { saveProjectlessWorkOutputs } from "./outputs-store.js";
 import { safeSegment, WorkspaceLayout } from "./workspace-layout.js";
@@ -45,6 +47,8 @@ export interface WorktreeReconcileFailure {
   readonly work_id: string;
   readonly path: string;
   readonly message: string;
+  /** True when the discard was not retried because the recorded ignored files are still there. */
+  readonly blocked?: boolean;
 }
 
 /** Prepare every disk/Git resource while the Work rows are still available. */
@@ -108,6 +112,75 @@ async function gitResult(path: string, operation: () => Promise<GitOperationResu
     const message = error instanceof Error ? error.message : String(error);
     return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message };
   }
+}
+
+type BlockKind = "discard" | "merged";
+type BlockableResult = GitOperationResult & { readonly blocked?: boolean };
+
+/**
+ * Run a discard, except while a recorded `worktree.reconcile_blocked` event
+ * for this path names ignored paths that all still hold content: git would
+ * refuse again for the same reason. Ignored files are never deleted here; once
+ * one is gone the discard runs again. A new refusal is recorded so the skip
+ * survives a restart. `blocked` tells the caller not to log it again.
+ */
+/** The recorded refusal message for `path` while all its ignored paths still hold content, else null. */
+export async function recordedWorktreeBlock(db: Pick<CoreDatabase, "all">, workId: string, path: string, kind?: BlockKind): Promise<string | null> {
+  // work_id first so the (work_id, type, sequence) index narrows the scan.
+  const rows = db.all<{ payload_json: string }>(
+    "SELECT payload_json FROM events WHERE work_id = ? AND type = 'worktree.reconcile_blocked' AND json_extract(payload_json, '$.path') = ? ORDER BY sequence DESC",
+    workId,
+    path,
+  );
+  // The merged-Work path force-removes ignored files, so only a refusal it recorded itself may skip it.
+  // Records without `kind` come from the plain discard paths.
+  const matches = (recorded: { kind?: BlockKind }) => kind === undefined || (recorded.kind ?? "discard") === kind;
+  // The gateway does not refuse over an empty ignored directory, so one does not count as remaining.
+  const remains = async (ignored: string) => await pathExists(join(path, ignored)) && !await isEmptyDirectoryTree(join(path, ignored));
+  for (const row of rows) {
+    const recorded = JSON.parse(row.payload_json) as { ignored_paths: string[]; message: string; kind?: BlockKind };
+    if (matches(recorded) && recorded.ignored_paths.length > 0 && (await Promise.all(recorded.ignored_paths.map(remains))).every(Boolean)) return recorded.message;
+  }
+  return null;
+}
+
+async function guardedDiscard(
+  deps: WorktreeReconcilerDeps,
+  workId: string,
+  taskId: string | null,
+  path: string,
+  operation: () => Promise<GitOperationResult>,
+  kind: BlockKind = "discard",
+): Promise<BlockableResult> {
+  const blockedMessage = await recordedWorktreeBlock(deps.db, workId, path, kind);
+  if (blockedMessage !== null) return { ok: false, exit_code: 1, recorded: false, worktree_path: path, message: blockedMessage, blocked: true };
+  const result = await gitResult(path, operation);
+  if (!result.ok && result.ignored_paths && result.ignored_paths.length > 0) {
+    const digest = createHash("sha256").update(JSON.stringify([path, kind, [...result.ignored_paths].sort()])).digest("hex");
+    const key = `worktree-reconcile-blocked:${digest}`;
+    try {
+      if (!deps.db.get("SELECT 1 FROM events WHERE idempotency_key = ?", key)) {
+        await deps.writeLane.write({
+          mutateState: () => undefined,
+          event: {
+            idempotencyKey: key,
+            type: "worktree.reconcile_blocked",
+            workId,
+            taskId: taskId !== null && deps.db.get("SELECT 1 FROM tasks WHERE id = ?", taskId) !== undefined ? taskId : null, // an orphan has no row to reference
+            payload: { work_id: workId, task_id: taskId, path, kind, ignored_paths: result.ignored_paths, message: result.message },
+          },
+          outbox: [],
+        });
+      }
+    } catch (error) {
+      console.warn(`[owl-core] Worktree reconcile could not record the blocked discard of ${path}`, error);
+    }
+  }
+  return result;
+}
+
+function warnUnlessBlocked(result: BlockableResult, message: string): void {
+  if (!result.blocked) console.warn(message);
 }
 
 function activeRunCount(reader: Pick<CoreDatabase, "get">, taskId: string): number {
@@ -248,14 +321,14 @@ async function removeWorkDirectoryIfEmpty(layout: WorkspaceLayout, workId: strin
 /** Discard one candidate Task's worktree. Returns false (skip) without touching anything if an agent run is active. */
 async function discardCandidate(deps: WorktreeReconcilerDeps, task: CandidateTask): Promise<boolean> {
   if (activeRunCount(deps.db, task.id) > 0) return false;
-  const result = await gitResult(task.worktree_path, () => deps.git.discardTaskWorktree({
+  const result = await guardedDiscard(deps, task.work_id, task.id, task.worktree_path, () => deps.git.discardTaskWorktree({
     work_id: task.work_id,
     task_id: task.id,
     worktree_path: task.worktree_path,
     discard_changes: task.type === "design" && isFinishedWorkState(task.work_state),
   }));
   if (!result.ok) {
-    console.warn(`[owl-core] Worktree reconcile could not discard Task ${task.id}'s worktree: ${result.message}`);
+    warnUnlessBlocked(result, `[owl-core] Worktree reconcile could not discard Task ${task.id}'s worktree: ${result.message}`);
     return false;
   }
   await recordDiscarded(deps, task.work_id, task.id, task.worker_generation, task.worktree_path);
@@ -313,13 +386,13 @@ async function discardMergedWorkspaces(
       console.warn(`[owl-core] Worktree reconcile left merged Work workspace ${entry.path} in place: ${message}`);
       continue;
     }
-    const result = await gitResult(entry.path, () => basename(entry.path) === "__work__"
+    const result = await guardedDiscard(deps, workId, entry.task_id, entry.path, () => basename(entry.path) === "__work__"
       ? deps.git.removeMergedIntegrationWorktree({ work_id: workId })
-      : deps.git.discardMergedWorktree({ work_id: workId, task_id: entry.task_id, worktree_path: entry.path }));
+      : deps.git.discardMergedWorktree({ work_id: workId, task_id: entry.task_id, worktree_path: entry.path }), "merged");
     if (!result.ok) {
       skipped.push(entry.path);
-      failures.push({ work_id: workId, path: entry.path, message: result.message });
-      console.warn(`[owl-core] Worktree reconcile could not discard merged Work workspace ${entry.path}: ${result.message}`);
+      failures.push({ work_id: workId, path: entry.path, message: result.message, ...(result.blocked ? { blocked: true } : {}) });
+      warnUnlessBlocked(result, `[owl-core] Worktree reconcile could not discard merged Work workspace ${entry.path}: ${result.message}`);
       continue;
     }
 
@@ -426,9 +499,9 @@ export async function reconcileWorktrees(
         }
       } else {
         const workId = scope.work_id;
-        const removal = await gitResult(layoutOf(deps).workDir(workId), () => deps.git.removeIntegrationWorktree({ work_id: workId }));
+        const removal = await guardedDiscard(deps, workId, null, layoutOf(deps).integrationPath(workId), () => deps.git.removeIntegrationWorktree({ work_id: workId }));
         if (!removal.ok) {
-          console.warn(`[owl-core] Worktree reconcile could not remove the integration worktree for Work ${scope.work_id}: ${removal.message}`);
+          warnUnlessBlocked(removal, `[owl-core] Worktree reconcile could not remove the integration worktree for Work ${scope.work_id}: ${removal.message}`);
         } else if (activeRunCountForWork(deps.db, scope.work_id) === 0) {
           await discardWorkLeftovers(deps, scope.work_id, discarded, skipped);
         }
@@ -456,12 +529,12 @@ async function discardWorkLeftovers(deps: WorktreeReconcilerDeps, workId: string
     return;
   }
   for (const entry of entries) {
-    const result = await gitResult(entry.path, () => deps.git.discardTaskWorktree({ work_id: workId, task_id: entry.task_id, worktree_path: entry.path }));
+    const result = await guardedDiscard(deps, workId, entry.task_id, entry.path, () => deps.git.discardTaskWorktree({ work_id: workId, task_id: entry.task_id, worktree_path: entry.path }));
     if (result.ok) {
       discarded.push(entry.path);
     } else {
       skipped.push(entry.path);
-      console.warn(`[owl-core] Worktree reconcile could not discard ${entry.path}: ${result.message}`);
+      warnUnlessBlocked(result, `[owl-core] Worktree reconcile could not discard ${entry.path}: ${result.message}`);
     }
   }
 }
@@ -526,8 +599,8 @@ async function reconcileStartupWorkspaces(
       const work = deps.db.get<{ state: string }>("SELECT state FROM works WHERE id = ?", entry.work_id);
       if (!work || work.state !== "cancelled" && work.state !== "completed") continue;
       if (!budgetLeft()) { stopWarning(); break; }
-      removals += 1;
-      const removal = await gitResult(entry.path, () => deps.git.removeIntegrationWorktree({ work_id: entry.work_id }));
+      const removal = await guardedDiscard(deps, entry.work_id, null, entry.path, () => deps.git.removeIntegrationWorktree({ work_id: entry.work_id }));
+      if (!removal.blocked) removals += 1;
       (removal.ok ? discarded : skipped).push(`${entry.work_id}:__work__`);
       continue;
     }
@@ -538,8 +611,8 @@ async function reconcileStartupWorkspaces(
       // once nothing at all is active for its Work.
       if (activeRunCountForWork(deps.db, entry.work_id) > 0) { skipped.push(entry.path); continue; }
       if (!budgetLeft()) { stopWarning(); break; }
-      removals += 1;
-      const result = await gitResult(entry.path, () => deps.git.discardTaskWorktree({ work_id: entry.work_id, task_id: null, worktree_path: entry.path }));
+      const result = await guardedDiscard(deps, entry.work_id, null, entry.path, () => deps.git.discardTaskWorktree({ work_id: entry.work_id, task_id: null, worktree_path: entry.path }));
+      if (!result.blocked) removals += 1;
       (result.ok ? discarded : skipped).push(entry.path);
       continue;
     }
@@ -559,16 +632,16 @@ async function reconcileStartupWorkspaces(
     if (!orphaned && !leftoverAfterDiscard && !terminalIdle) continue;
 
     if (!budgetLeft()) { stopWarning(); break; }
-    removals += 1;
-    const result = await gitResult(entry.path, () => deps.git.discardTaskWorktree({
+    const result = await guardedDiscard(deps, entry.work_id, entry.task_id, entry.path, () => deps.git.discardTaskWorktree({
       work_id: entry.work_id,
       task_id: entry.task_id,
       worktree_path: entry.path,
       discard_changes: task?.type === "design" && work !== undefined && isFinishedWorkState(work.state),
     }));
+    if (!result.blocked) removals += 1;
     if (!result.ok) {
       skipped.push(entry.task_id);
-      console.warn(`[owl-core] Worktree reconcile could not discard ${entry.path}: ${result.message}`);
+      warnUnlessBlocked(result, `[owl-core] Worktree reconcile could not discard ${entry.path}: ${result.message}`);
       continue;
     }
     if (task !== undefined && task.worktree_state !== "discarded") {

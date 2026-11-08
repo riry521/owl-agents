@@ -10,6 +10,8 @@ import { insertProviderError, listProviderErrors } from "./provider-error-store.
 import type { StoredProviderError } from "./types.js";
 import { DecisionService, type OpenDecisionPayload } from "./decision";
 import { DesignMockStore, type DesignMockSummary } from "./design-mocks";
+import { OwnerFilesReader, type OwnerFileOpened, type OwnerFileRoot } from "./owner-files.js";
+import { DEFAULT_WORK_MARKDOWN_LIMITS, WorkMarkdownReader, type WorkMarkdownDocument } from "./work-markdown.js";
 import { DECISION_CANCEL_OPTION_KEY, managerReplanFailureBrief, prerequisiteExpiredBrief, RESOLVE_CONFLICT_OPTION_KEY, type ReplanFailureCause } from "./decision-brief";
 import { evaluatePrerequisite, type PrerequisiteFacts } from "./prerequisite-monitor";
 import {
@@ -121,7 +123,7 @@ import { advisorWorkId, parseAdvisorWorkOperationPayload } from "./advisor-work-
 import { AdvisorSessionNotFoundError, AdvisorSessionRuntime, type AdvisorSettingsSnapshot } from "./advisor-runtime.js";
 import { MemorySaver } from "./memory-saver.js";
 import { slugifyKnowledgeContentName } from "./knowledge-naming.js";
-import { autoWorkDbToggle, type AutoWorkSettingsValue, type AutoWorkSignal } from "@owl/shared";
+import { autoWorkDbToggle, type AutoWorkSettingsValue, type AutoWorkSignal, type SessionActivity } from "@owl/shared";
 import { AutoWorkConfigLoader } from "./auto-work/config.js";
 import { AutoWorkService } from "./auto-work/service.js";
 import { AutoWorkStore } from "./auto-work/store.js";
@@ -285,13 +287,17 @@ import { DEFAULT_POST_MERGE_DEPENDENCY_FILES, DEFAULT_POST_MERGE_INSTALL_RULES, 
 import { AgentWorkspacePreparer, withWorkspacePreparation, worktreeHarnesses } from "./agent-workspace-preparer.js";
 import { redactCredentials } from "./git-push.js";
 import { recoverOrphanedState } from "./startup-recovery.js";
-import { cleanupWorkForDeletion, reconcileWorktrees, type WorktreeReconcileFailure } from "./worktree-reconciler.js";
+import { COMPLETED_PROJECT_WORKS_SQL } from "./completed-project-works-query.js";
+import { cleanupWorkForDeletion, reconcileWorktrees, recordedWorktreeBlock, type WorktreeReconcileFailure } from "./worktree-reconciler.js";
 import { processIdentityMatches, readProcessIdentity } from "./process-identity.js";
 import { formatRuntimeFailure } from "./error-display.js";
 import { ADVISOR_TEXT, workRef } from "./advisor-text.js";
+import { MAX_MESSAGE_ATTACHMENTS, MAX_UPLOAD_BYTES } from "./upload-limits.js";
+import { assertMessageAttachmentsInTransaction, messageAttachmentViews, resolveMessageAttachments, type MessageAttachmentView } from "./message-attachments.js";
 import { INSTRUCTION_REPLY_TEXT, type ReplanSummary } from "./instruction-reply-text.js";
 import { ownerGuidance } from "./owner-guidance.js";
 import { failedTaskBrief, pendingAcceptanceDefect, pendingExternalBlocker } from "./task-context.js";
+import { resolveAdvisorFileDestination, type FileDestinationChannel, type FileDestinationRefusal, type FileDestinationResult, type FileDestinationSource } from "./advisor-file-destination.js";
 import { DEFAULT_ADVISOR_SEND_FILE_MAX_BYTES, formatSendFileSize, prepareAdvisorSendFile, sendFileNotice, type AdvisorOutboundFile, type AdvisorSendFileSettings } from "./advisor-send-file.js";
 import { planContextFields } from "./context-builder.js";
 import { detectProcessSkillsPack, type DetectedProcessSkillsPack } from "./process-skills-pack.js";
@@ -777,6 +783,8 @@ export class Core {
   private readonly db: CoreDatabase;
   private readonly writeLane;
   private readonly designMocks: DesignMockStore;
+  private readonly workMarkdown: WorkMarkdownReader;
+  private readonly ownerFiles: OwnerFilesReader;
   private readonly testSetupRuns = new TestSetupRunRegistry();
   private readonly testSetup: TestSetupService;
   private readonly coreActivity: CoreActivityRegistry;
@@ -1307,6 +1315,24 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       now: () => new Date(options.now?.() ?? utcNow()),
     });
     this.designMocks = new DesignMockStore({ db: this.db, writeLane: this.writeLane, dataDir: this.dataDir, now: () => options.now?.() ?? utcNow() });
+    this.workMarkdown = new WorkMarkdownReader({
+      db: this.db,
+      materials: {
+        root: () => join(this.knowledgeLocation.path, MATERIALS_DIR),
+        withRead: (read) => this.knowledgeLocation.withRead(read),
+      },
+      blobs: new GitProjectSourceReader(),
+      limits: DEFAULT_WORK_MARKDOWN_LIMITS,
+    });
+    this.ownerFiles = new OwnerFilesReader({
+      folders: () => {
+        const shared = this.options.getAdvisorFolders?.()?.sharedDir;
+        return [
+          { key: "materials", dir: join(this.knowledgeLocation.path, MATERIALS_DIR) },
+          ...(shared ? [{ key: "shared", dir: shared }] : []),
+        ];
+      },
+    });
     this.learningJobs = new LearningJobs({ db: this.db, writeLane: this.writeLane, now: options.now });
     this.ruleProposals = new RuleProposals({
       db: this.db,
@@ -2326,13 +2352,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     const startupWorktrees = await this.runWorktreeReconcile(undefined, "startup");
     // Only Works whose merge into the base was recorded, and whose branches
     // were not deleted yet, are cleaned up.
-    const completedProjectWorks = this.db.all<{ id: string }>(
-      `SELECT works.id AS id FROM works
-        WHERE works.state = 'completed' AND works.project_id IS NOT NULL
-          AND EXISTS (SELECT 1 FROM events WHERE events.work_id = works.id AND events.type = 'work.completed'
-                        AND json_extract(events.payload_json, '$.merge') IS NOT NULL)
-          AND NOT EXISTS (SELECT 1 FROM events WHERE events.work_id = works.id AND events.type = 'work.branches_deleted')`,
-    );
+    const completedProjectWorks = this.db.all<{ id: string }>(COMPLETED_PROJECT_WORKS_SQL);
     for (const work of completedProjectWorks) {
       await this.deleteMergedWorkBranches(work.id, this.worktreeCleanupFailure(work.id, startupWorktrees));
     }
@@ -2950,82 +2970,106 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     }
   }
 
-  public async stop(options: { force?: boolean } = {}): Promise<void> {
+  /** Waits for `wait` at most until `deadline`; a step past its deadline is abandoned (not rejected) so later steps still run. */
+  private async stopStep(name: string, deadline: number, wait: () => unknown): Promise<void> {
+    const startedAt = Date.now();
+    console.log(`[owl-core] stop step=${name} start`);
+    const pending = (async () => wait())();
+    let timer: NodeJS.Timeout | undefined;
+    const expired = new Promise<"timeout">((resolve) => {
+      timer = setTimeout(() => resolve("timeout"), Math.max(0, deadline - Date.now()));
+    });
+    try {
+      const outcome = await Promise.race([pending.then(() => "done" as const), expired]);
+      console.log(`[owl-core] stop step=${name} ${outcome} elapsed_ms=${Date.now() - startedAt}`);
+      // Why not leave it: a step abandoned at its deadline may reject after stop() returned, and that must not be uncaught.
+      if (outcome === "timeout") pending.catch(() => undefined);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Synchronous, idempotent and non-throwing: kills Agent process groups and the Advisor's children. Used first by stop() and by callers whose own deadline passed. */
+  public terminateOwnedProcessesImmediately(): void {
+    const attempt = (label: string, run: () => void): void => {
+      try { run(); } catch (error) { console.error(`[owl-core] ${label} failed during forced termination`, error); }
+    };
+    attempt("workDriver.stopScheduling", () => this.workDriver.stopScheduling());
+    attempt("workflow.stopImmediately", () => this.workflow.stopImmediately());
+    attempt("terminateActiveAgentProcesses", () => this.terminateActiveAgentProcessesImmediately());
+    attempt("advisorRuntime.stopImmediately", () => this.advisorRuntime?.stopImmediately());
+  }
+
+  public async stop(options: { force?: boolean; timeoutMs?: number } = {}): Promise<void> {
+    const deadline = Date.now() + (options.timeoutMs ?? this.options.stopTimeoutMs ?? 10_000);
+    const step = (name: string, wait: () => unknown) => this.stopStep(name, deadline, wait);
     this.planUsageService.stop();
     this.postMergeCommands.stop();
     this.providerPauseController.stop();
-    await this.childRuns.stop();
-    if (!this.started) {
-      await Promise.allSettled([...this.worktreeReconciles]);
-      this.nightlyAbort.abort();
-      await this.nightlyScheduler.stop();
-      await this.autoWork.stop();
-      await this.autoWorkConfig.stop();
-      await this.librarianScheduler.stop();
-      await this.memory.stop(); // memory (stage ①-1)
-      await this.knowledgeLocation.stop();
-      this.skillCurator.stop();
-      await Promise.allSettled([...this.activeCurations.values()]);
-      await this.learningTask;
-      await this.projectOverviews.idle();
-      await Promise.allSettled([...this.overviewRuns, ...this.finalReportRuns, ...this.cloneRootResolutions]);
-      await this.researchRecorder.idle();
-      return;
+    const wasStarted = this.started;
+    // Shutdown ends the Owl system, not the Work itself. Terminate every Owl-owned Agent process group first,
+    // so a stuck wait below cannot leave children behind; durable active rows are left for startup recovery.
+    // started=false first: a Manager tick failing because we killed its Agent must not be recorded as a Work failure.
+    if (wasStarted) {
+      this.started = false;
+      if (this.advisorKeepAliveTimer !== null) {
+        clearInterval(this.advisorKeepAliveTimer);
+        this.advisorKeepAliveTimer = null;
+      }
+      if (this.workspaceSweepTimer !== null) {
+        clearInterval(this.workspaceSweepTimer);
+        this.workspaceSweepTimer = null;
+      }
+      if (this.skillTimer !== null) {
+        clearInterval(this.skillTimer);
+        this.skillTimer = null;
+      }
+      if (this.learningTimer !== null) {
+        clearInterval(this.learningTimer);
+        this.learningTimer = null;
+      }
+      if (this.workPrerequisiteTimer !== null) {
+        clearTimeout(this.workPrerequisiteTimer);
+        this.workPrerequisiteTimer = null;
+      }
+      this.ruleStore.stopWatching();
+      this.terminateOwnedProcessesImmediately();
     }
-    this.started = false;
+    await step("childRuns.stop", () => this.childRuns.stop());
+    if (!wasStarted) {
+      await step("worktreeReconciles", () => Promise.allSettled([...this.worktreeReconciles]));
+    }
     this.nightlyAbort.abort();
-    await this.nightlyScheduler.stop();
-    await this.autoWork.stop();
-    await this.autoWorkConfig.stop();
-    await this.librarianScheduler.stop();
-    await this.memory.stop(); // memory (stage ①-1)
-    await this.knowledgeLocation.stop();
     // Stopping the Curator releases a curation that is waiting on its provider.
     this.skillCurator.stop();
-    await Promise.allSettled([...this.activeCurations.values()]);
-    if (this.advisorKeepAliveTimer !== null) {
-      clearInterval(this.advisorKeepAliveTimer);
-      this.advisorKeepAliveTimer = null;
+    await step("nightlyScheduler", () => this.nightlyScheduler.stop());
+    await step("autoWork", () => this.autoWork.stop());
+    await step("autoWorkConfig", () => this.autoWorkConfig.stop());
+    await step("librarianScheduler", () => this.librarianScheduler.stop());
+    await step("memory.stop", () => this.memory.stop()); // memory (stage ①-1)
+    await step("knowledgeLocation", () => this.knowledgeLocation.stop());
+    await step("activeCurations", () => Promise.allSettled([...this.activeCurations.values()]));
+    if (wasStarted) {
+      await step("skillReconcilePromise", () => this.skillReconcilePromise);
+      await step("agentStops", () => Promise.allSettled([...this.agentStops]));
+      await step("workflow.stop", () => this.workflow.stop());
+      // Ticks already in flight must finish before the DB closes; stopScheduling only stops new ones.
+      await step("workDriver.stop", () => this.workDriver.stop());
+      await step("worktreeReconciles", () => Promise.allSettled([...this.worktreeReconciles, ...this.repositoryDetections.values()]));
     }
-    if (this.workspaceSweepTimer !== null) {
-      clearInterval(this.workspaceSweepTimer);
-      this.workspaceSweepTimer = null;
+    await step("learningTask", () => this.learningTask);
+    await step("projectOverviews.idle", () => this.projectOverviews.idle());
+    await step("backgroundRuns", () => Promise.allSettled([...this.overviewRuns, ...this.finalReportRuns, ...this.cloneRootResolutions]));
+    if (!wasStarted) {
+      await step("researchRecorder.idle", () => this.researchRecorder.idle());
+      return;
     }
-    if (this.skillTimer !== null) {
-      clearInterval(this.skillTimer);
-      this.skillTimer = null;
-    }
-    if (this.learningTimer !== null) {
-      clearInterval(this.learningTimer);
-      this.learningTimer = null;
-    }
-    if (this.workPrerequisiteTimer !== null) {
-      clearTimeout(this.workPrerequisiteTimer);
-      this.workPrerequisiteTimer = null;
-    }
-    await this.skillReconcilePromise;
-    this.ruleStore.stopWatching();
-    // Shutdown ends the Owl system, not the Work itself. Stop scheduling,
-    // terminate every Owl-owned Agent process group, and leave durable active
-    // rows for startup recovery instead of waiting for provider calls to finish.
-    this.workDriver.stopScheduling();
-    await Promise.allSettled([...this.agentStops]);
-    this.workflow.stopImmediately();
-    this.terminateActiveAgentProcessesImmediately();
-    this.advisorRuntime?.stopImmediately();
-    await this.workflow.stop();
-    // Ticks already in flight must finish before the DB closes; stopScheduling only stops new ones.
-    await this.workDriver.stop();
-    await Promise.allSettled([...this.worktreeReconciles, ...this.repositoryDetections.values()]);
-    await this.learningTask;
-    await this.projectOverviews.idle();
-    await Promise.allSettled([...this.overviewRuns, ...this.finalReportRuns, ...this.cloneRootResolutions]);
-    await this.dispatcher.stop();
+    await step("dispatcher.stop", () => this.dispatcher.stop());
     // Before the drain: a failing research write records its own alert through the lane, and that write must not land after the drain.
-    await this.researchRecorder.idle();
+    await step("researchRecorder.idle", () => this.researchRecorder.idle());
     // These lanes contain only serialized SQLite mutations. Drain them so
     // already-queued state changes commit before the database connection closes.
-    await this.writeLane.drain();
+    await step("writeLane.drain", () => this.writeLane.drain());
   }
 
   private async emitProviderPauseEvent(event: ProviderPauseEvent): Promise<void> {
@@ -3341,6 +3385,18 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
   public async listWorkDesignMocks(workId: string): Promise<{ mocks: DesignMockSummary[] }> {
     if (!this.db.get<{ id: string }>("SELECT id FROM works WHERE id = ?", workId)) throw notFound("work", workId);
     return { mocks: this.designMocks.listWorkDesignMocks(workId) };
+  }
+
+  public listOwnerFileRoots(): Promise<OwnerFileRoot[]> {
+    return this.ownerFiles.roots();
+  }
+
+  public openOwnerFile(key: string, segments: readonly string[]): Promise<OwnerFileOpened> {
+    return this.ownerFiles.open(key, segments);
+  }
+
+  public readWorkMarkdown(workId: string, path: string): Promise<WorkMarkdownDocument> {
+    return this.workMarkdown.read(workId, path);
   }
 
   public async readWorkDesignMock(workId: string, taskId: string, name: string): Promise<string | null> {
@@ -4339,14 +4395,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     workId: string,
     request: CommandRequest<{ body: string; attachment_ids?: string[]; reopen?: boolean }>,
   ): Promise<CommandResponse<{ work_id: string; conversation_id: string; message_id: string; status: "queued" }>> {
-    const body = request.payload.body;
-    if (typeof body !== "string" || body.trim().length < 1 || body.length > 100000) {
-      throw validationError("Instruction body must contain between 1 and 100,000 characters.", { field: "body" });
-    }
-    const attachmentIds = request.payload.attachment_ids ?? [];
-    if (!Array.isArray(attachmentIds) || !attachmentIds.every((item): item is string => typeof item === "string")) {
-      throw validationError("Instruction attachment_ids must be an array of strings.", { field: "attachment_ids" });
-    }
+    const { body: messageBody, attachmentIds } = validateMessageContent(request.payload.body, request.payload.attachment_ids ?? []);
     const reopen = request.payload.reopen === true;
     let reopened = false;
     // Collected in the instruction transaction; stays empty when the request is replayed.
@@ -4364,6 +4413,12 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       if (work.state === "cancelled") throw workCancelled(workId);
       if (work.state === "completed" && !reopen) throw workReopenRequired(workId);
       const now = utcNow();
+      const { conversation, account } = ensureWorkWebConversationInTransaction(transaction, workId, work.owner_id, now);
+      const attachments = assertMessageAttachmentsInTransaction(transaction, conversation.id, attachmentIds);
+      // An attachments-only instruction has no text, but a Decision answer or a reopen reason needs some.
+      const body = messageBody.length > 0
+        ? messageBody
+        : INSTRUCTION_REPLY_TEXT[ownerLanguage(this.db)].attachmentsOnly(attachments.map((attachment) => attachment.filename));
       const events: { type: string; payload: JsonObject; createdAt: string }[] = [];
       let version = 0;
       if (work.state === "completed") {
@@ -4380,32 +4435,6 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         events.push({ type: "work.reopened", payload: { work_id: workId, reason: body }, createdAt: now });
         reopened = true;
       }
-      ensureOwner(transaction, work.owner_id, now);
-      let conversation = transaction.get<{ id: string }>(
-        `SELECT id FROM conversations
-          WHERE work_id = ? AND channel = 'web' AND is_active = 1 AND archived_at IS NULL`,
-        workId,
-      );
-      if (!conversation) {
-        conversation = { id: createUlid() };
-        transaction.run(
-          `INSERT INTO conversations (id, owner_id, work_id, channel, is_active, created_at, updated_at)
-           VALUES (?, ?, ?, 'web', 1, ?, ?)`,
-          conversation.id, work.owner_id, workId, now, now,
-        );
-      }
-      let account = transaction.get<{ id: string }>(
-        "SELECT id FROM connector_accounts WHERE owner_id = ? AND provider = 'web'",
-        work.owner_id,
-      );
-      if (!account) {
-        account = { id: createUlid() };
-        transaction.run(
-          `INSERT INTO connector_accounts (id, owner_id, provider, external_account_id, created_at)
-           VALUES (?, ?, 'web', ?, ?)`,
-          account.id, work.owner_id, work.owner_id === DEFAULT_OWNER_ID ? "web-default" : `web-${work.owner_id}`, now,
-        );
-      }
       const messageId = createUlid();
       transaction.run(
         `INSERT INTO messages
@@ -4416,12 +4445,13 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         conversation.id,
         account.id,
         `api:${conversation.id}:${request.idempotency_key}`,
-        body,
+        messageBody,
         JSON.stringify(attachmentIds),
         now,
         now,
       );
-      mergeOwnerReplanInTransaction(transaction, workId, { kind: "instruction", answer: body, message_ids: [messageId] });
+      // owner_requests carries only the Owner's own words, so the attachments-only text stays out of it.
+      mergeOwnerReplanInTransaction(transaction, workId, { kind: "instruction", answer: messageBody, message_ids: [messageId] });
       if (work.state === "judgement_waiting") {
         // The instruction restarts the Work through the Manager's replan, so it answers the Decisions that held the Work.
         const open = transaction.all<{ id: string; state_version: number }>(
@@ -6151,7 +6181,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       query.cursor ?? null,
       limit + 1,
     );
-    return listResponse(query.request_id, rows.slice(0, limit).map(toMessage), rows.length > limit, limit);
+    return listResponse(query.request_id, withMessageAttachments(this.db, rows.slice(0, limit).map(toMessage)), rows.length > limit, limit);
   }
 
   /** What Core is running in the background for the Work right now (in memory; empty after a restart). */
@@ -6197,18 +6227,20 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     } catch {
       // A malformed marker carries no instruction state.
     }
-    const messages = rows.slice(0, limit).reverse().map((row) => ({ message: toMessage(row), received_at: row.received_at ?? row.created_at }));
-    const replies = messages.filter(({ message }) => message.metadata);
+    const shown = rows.slice(0, limit).reverse();
+    const withAttachments = withMessageAttachments(this.db, shown.map(toMessage));
+    const messages = shown.map((row, index) => ({ message: withAttachments[index], received_at: row.received_at ?? row.created_at }));
+    const replies = messages.filter(({ message }) => message.metadata?.kind === "instruction_reply");
     const result = messages.map(({ message, received_at }): WorkConversationMessage => {
       const { metadata, ...rest } = message;
       let instruction: InstructionStatus | null = null;
       if (message.source !== "manager" && message.source !== "advisor") {
-        const reply = [...replies].reverse().find(({ message: r }) => r.metadata!.in_reply_to.includes(message.id));
+        const reply = [...replies].reverse().find(({ message: r }) => r.metadata?.kind === "instruction_reply" && r.metadata.in_reply_to.includes(message.id));
         if (markerStatus === "queued" && markerIds.includes(message.id)) instruction = { status: "queued", outcome: null, reply_message_id: null };
-        else if (reply) instruction = { status: "answered", outcome: reply.message.metadata!.outcome, reply_message_id: reply.message.id };
+        else if (reply) instruction = { status: "answered", outcome: (reply.message.metadata as InstructionReplyMetadata).outcome, reply_message_id: reply.message.id };
         else if ((markerStatus === "attempted" && markerIds.includes(message.id)) || processingIds.includes(message.id)) instruction = { status: "processing", outcome: null, reply_message_id: null };
       }
-      return { ...rest, received_at, instruction, in_reply_to: metadata?.in_reply_to ?? [] };
+      return { ...rest, received_at, instruction, in_reply_to: metadata?.kind === "instruction_reply" ? metadata.in_reply_to : [] };
     });
     return { work_id: workId, conversation_id: conversation.id, truncated: rows.length > limit, messages: result };
   }
@@ -6547,14 +6579,8 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         );
         conversation = { id: conversationId, owner_id: DEFAULT_OWNER_ID };
       }
-      const body = request.payload.body;
-      if (typeof body !== "string" || body.length < 1 || body.length > 100000) {
-        throw validationError("Message body must contain between 1 and 100,000 characters.", { field: "body" });
-      }
-      const attachmentIds = request.payload.attachment_ids;
-      if (!Array.isArray(attachmentIds) || !attachmentIds.every((item): item is string => typeof item === "string")) {
-        throw validationError("Message attachment_ids must be an array of strings.", { field: "attachment_ids" });
-      }
+      const { body, attachmentIds } = validateMessageContent(request.payload.body, request.payload.attachment_ids);
+      assertMessageAttachmentsInTransaction(transaction, conversationId, attachmentIds);
       // Migrated Owners may have only Slack/Discord accounts, so the web account is created on first post.
       const now = utcNow();
       const account = ensureWebAccount(transaction, conversation.owner_id, now);
@@ -6624,8 +6650,8 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       if (payload.conversation_hint.thread_ref !== null && payload.conversation_hint.thread_ref.length > 200) {
         throw validationError("Inbound conversation_hint.thread_ref is invalid.", { field: "conversation_hint.thread_ref" });
       }
-      if (!Array.isArray(payload.attachment_ids) || payload.attachment_ids.length > 20 || !payload.attachment_ids.every((id) => isUlidLike(id))) {
-        throw validationError("Inbound attachment_ids must contain at most 20 ULIDs.", { field: "attachment_ids" });
+      if (!Array.isArray(payload.attachment_ids) || payload.attachment_ids.length > MAX_MESSAGE_ATTACHMENTS || !payload.attachment_ids.every((id) => isUlidLike(id))) {
+        throw validationError(`Inbound attachment_ids must contain at most ${MAX_MESSAGE_ATTACHMENTS} ULIDs.`, { field: "attachment_ids" });
       }
       ensureOwner(transaction, ownerId, utcNow());
       const account = transaction.get<{ id: string; owner_id: string; provider: string }>(
@@ -6671,19 +6697,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       }
 
       const conversation = resolveInboundConversation(transaction, ownerId, payload.provider, payload.conversation_hint);
-      for (const attachmentId of payload.attachment_ids) {
-        const upload = transaction.get<{ conversation_id: string | null; status: string }>(
-          "SELECT conversation_id, status FROM inbound_uploads WHERE id = ?",
-          attachmentId,
-        );
-        if (!upload) throw notFound("inbound_upload", attachmentId);
-        if (upload.conversation_id !== conversation.id) {
-          throw validationError("Inbound attachment_ids must belong to the resolved conversation.", { field: "attachment_ids" });
-        }
-        if (upload.status !== "stored" && upload.status !== "quarantined") {
-          throw validationError("Inbound attachment_ids must reference a completed upload.", { field: "attachment_ids" });
-        }
-      }
+      assertMessageAttachmentsInTransaction(transaction, conversation.id, payload.attachment_ids);
       const messageId = createUlid();
       const ackId = createUlid();
       const now = utcNow();
@@ -7032,6 +7046,76 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     }
   }
 
+  /**
+   * One-call upload for the Web UI. It runs the same register, put and complete steps as Slack and Discord,
+   * so the size limit, filename check, sha256 check and quarantine apply unchanged.
+   * A replay with the same idempotency key returns the same upload.
+   */
+  public async uploadWebAttachment(
+    ownerId: string,
+    target: WebAttachmentTarget,
+    file: WebAttachmentFile,
+    command: { readonly request_id: string; readonly idempotency_key: string },
+  ): Promise<WebAttachmentResult> {
+    const destination = await this.writeLane.transact((transaction) => {
+      const now = utcNow();
+      if ("conversation_id" in target) {
+        const conversation = transaction.get<{ id: string; owner_id: string; work_id: string | null }>(
+          "SELECT id, owner_id, work_id FROM conversations WHERE id = ?",
+          target.conversation_id,
+        );
+        if (!conversation || conversation.owner_id !== ownerId) throw notFound("conversation", target.conversation_id);
+        return { conversationId: conversation.id, workId: conversation.work_id, accountId: ensureWebAccount(transaction, ownerId, now).id };
+      }
+      const work = transaction.get<{ state: WorkState; owner_id: string }>("SELECT state, owner_id FROM works WHERE id = ?", target.work_id);
+      if (!work || work.owner_id !== ownerId) throw notFound("work", target.work_id);
+      // The same states that refuse an instruction refuse its files; a completed Work is reopened when the message is sent.
+      if (work.state === "memo" || work.state === "ready" || hasOpenWorkPrerequisiteDecision(transaction, target.work_id)) {
+        throw invalidStateTransition("Start the Work before sending an instruction.", { work_id: target.work_id, state: work.state });
+      }
+      if (work.state === "cancelled") throw workCancelled(target.work_id);
+      const { conversation, account } = ensureWorkWebConversationInTransaction(transaction, target.work_id, ownerId, now);
+      return { conversationId: conversation.id, workId: target.work_id, accountId: account.id };
+    });
+    const sha256 = createFileHash("sha256").update(file.content).digest("hex");
+    const registered = await this.registerInboundUpload(ownerId, {
+      request_id: command.request_id,
+      idempotency_key: `${command.idempotency_key}:register`,
+      expected_version: 0,
+      payload: {
+        provider: "web",
+        account_id: destination.accountId,
+        external_attachment_id: `web:${command.idempotency_key}`,
+        filename: file.filename,
+        declared_mime: file.mime,
+        declared_bytes: file.content.byteLength,
+        sha256,
+        work_id: destination.workId,
+        conversation_id: destination.conversationId,
+        conversation_hint: null,
+      },
+    });
+    const uploadId = registered.data.upload_id;
+    const current = this.db.get<{ status: string }>("SELECT status FROM inbound_uploads WHERE id = ?", uploadId);
+    if (current?.status === "registered") {
+      await this.putInboundUpload(ownerId, uploadId, { content: file.content, sha256, mime: file.mime });
+    }
+    const completed = await this.completeInboundUpload(ownerId, uploadId, {
+      request_id: command.request_id,
+      idempotency_key: `${command.idempotency_key}:complete`,
+      expected_version: 0,
+      payload: { bytes: file.content.byteLength, sha256, mime: file.mime },
+    });
+    return {
+      attachment_id: uploadId,
+      filename: file.filename,
+      mime: file.mime,
+      bytes: completed.data.bytes,
+      sha256: completed.data.sha256,
+      status: completed.data.status,
+    };
+  }
+
   private async copyUploadToShared(uploadId: string, artifactId: string, filename: string, source: string): Promise<void> {
     try {
       const dir = this.options.getAdvisorSharedDir?.();
@@ -7076,21 +7160,9 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     const text = ADVISOR_TEXT[ownerLanguage(this.db)];
     const paths: string[] = [];
     const notes: string[] = [];
-    for (const attachmentId of attachmentIds) {
-      const upload = this.db.get<{ filename: string; status: string; artifact_path: string | null; shared_copy_path: string | null }>(
-        `SELECT u.filename AS filename, u.status AS status, u.shared_copy_path AS shared_copy_path, a.path AS artifact_path
-           FROM inbound_uploads u LEFT JOIN artifacts a ON a.id = u.artifact_id
-          WHERE u.id = ?`,
-        attachmentId,
-      );
-      if (!upload) continue;
-      if (upload.status === "quarantined") {
-        notes.push(text.attachmentQuarantined(upload.filename));
-        continue;
-      }
-      if (upload.status === "stored" && upload.artifact_path) {
-        paths.push(upload.shared_copy_path && existsSync(upload.shared_copy_path) ? upload.shared_copy_path : join(this.owlRoot, upload.artifact_path));
-      }
+    for (const attachment of resolveMessageAttachments(this.db, this.owlRoot, attachmentIds)) {
+      if (attachment.status === "quarantined") notes.push(text.attachmentQuarantined(attachment.filename));
+      else if (attachment.path) paths.push(attachment.path);
     }
     return { paths, notes };
   }
@@ -7477,6 +7549,11 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     await this.advisorSessions.endSession(session.id, "owner_requested");
   }
 
+  /** What the session's live driver last reported (display only), or null when unknown. */
+  public getAdvisorActivity(sessionId: string, conversationId: string | null): SessionActivity | null {
+    return this.advisorRuntime?.getActivity(sessionId, conversationId) ?? null;
+  }
+
   /**
    * Interrupts the window's running Advisor turn. The session and its queued
    * turns stay alive; the turn's reply is saved as interrupted.
@@ -7611,7 +7688,8 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       sendFile.dirs.length === 0
         ? "- No send-file folder is configured; send_file is unavailable. Tell the operator the file path instead."
         : `- send_file may send regular files inside: ${sendFile.dirs.join(", ")}`,
-      `- Size limits per file: Slack ${formatSendFileSize(sendFile.maxBytes.slack)}, Discord ${formatSendFileSize(sendFile.maxBytes.discord)}`,
+      `- Size limits per file (the limit of the platform the file goes to applies): Slack ${formatSendFileSize(sendFile.maxBytes.slack)}, Discord ${formatSendFileSize(sendFile.maxBytes.discord)}`,
+      "- In a Web conversation Core picks the Slack or Discord channel from the Owner's settings; the payload has no destination field.",
     ].join("\n");
     return [base, rulesBlock, personaBlock, foldersBlock, sendFileBlock].filter((part): part is string => part !== null).join("\n\n");
   }
@@ -7626,6 +7704,42 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         discord: configured?.discordMaxBytes ?? DEFAULT_ADVISOR_SEND_FILE_MAX_BYTES.discord,
       },
     };
+  }
+
+  /** Gathers the inputs of `resolveAdvisorFileDestination` for a Web conversation. A missing option means no preference, no default and no integration. */
+  private resolveWebFileDestination(conversationId: string): WebFileDestination {
+    const settings = this.options.getAdvisorFileDestinationSettings?.();
+    const windowId = this.db.get<{ advisor_window_id: string | null }>("SELECT advisor_window_id FROM conversations WHERE id = ?", conversationId)?.advisor_window_id ?? null;
+    const windowBindings = windowId === null ? [] : this.db.all<FileDestinationChannel>(
+      "SELECT provider, channel_id, display_name FROM advisor_channel_bindings WHERE window_id = ? ORDER BY provider", windowId);
+    const providers = (settings?.integrations ?? []).map((integration) => ({
+      provider: integration.provider,
+      configured: integration.configured,
+      channel_ids: [
+        ...integration.conversationChannelIds,
+        ...this.db.all<{ channel_id: string }>("SELECT channel_id FROM advisor_channel_bindings WHERE provider = ?", integration.provider).map((row) => row.channel_id),
+      ],
+    }));
+    const saved = settings?.defaultDestination ?? null;
+    // A bound channel's current name wins over the name saved with the setting, so a rename does not leave the old one behind.
+    const boundName = saved === null ? undefined : this.db.get<{ display_name: string }>(
+      "SELECT display_name FROM advisor_channel_bindings WHERE provider = ? AND channel_id = ?", saved.provider, saved.channel_id)?.display_name;
+    const defaultDestination = saved === null ? null : { ...saved, display_name: boundName ?? saved.display_name };
+    const result = resolveAdvisorFileDestination({
+      window_bindings: windowBindings,
+      preferred_provider: settings?.preferredProvider ?? null,
+      default_destination: defaultDestination,
+      providers,
+    });
+    const provider = defaultDestination?.provider ?? "";
+    return { result, platform: provider.charAt(0).toUpperCase() + provider.slice(1), channel: defaultDestination?.display_name ?? "" };
+  }
+
+  /** The channel name `prepareAdvisorSendFile` checks: the origin's own, or for Web the provider the destination resolves to ("web" when refused). */
+  private sendFileChannelFor(conversationId: string, origin: { channel: string }, memo: { resolved?: WebFileDestination }): string {
+    if (origin.channel.trim().toLowerCase() !== "web") return origin.channel;
+    memo.resolved ??= this.resolveWebFileDestination(conversationId);
+    return memo.resolved.result.kind === "resolved" ? memo.resolved.result.destination.provider : "web";
   }
 
   private advisorProcessSkillsLines(harness: "claude" | "codex" | "opencode"): string[] {
@@ -7729,7 +7843,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       ? { heldIndexes: new Set<number>(), notices: [] as string[], failures: [] as AdvisorActionFailure[] }
       : await this.reconcileFollowupActions(conversationId, turnId, followupOf, allSuggestedActions, origin);
     const actionResult = interrupted
-      ? { notices: [] as string[], failures: [] as AdvisorActionFailure[], handledIndexes: new Set<number>(), outboundFiles: [] as (AdvisorOutboundFile & { index: number })[] }
+      ? { notices: [] as string[], failures: [] as AdvisorActionFailure[], handledIndexes: new Set<number>(), outboundFiles: [] as (AdvisorOutboundFile & { index: number })[], fileDelivery: null as AdvisorFileDeliveryPlan | null }
       : await this.dispatchAdvisorWorkActions(conversationId, turnId, allSuggestedActions, origin, recovery.recoveredIndexes, reconciled.heldIndexes);
     const trimmedReply = visibleReply.trimEnd();
     const allNotices = [
@@ -7778,6 +7892,9 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     const replyKeySuffix = priorReplyCount === 0 ? "" : `:retry${priorReplyCount}`;
     const sourceMessageId = `advisor:${conversationId}:${turnId}${replyKeySuffix}`;
 
+    const plan = actionResult.fileDelivery;
+    const fileDeliveryMetadata: AdvisorFileDeliveryMetadata | null = plan === null ? null : { kind: "advisor_file_delivery", ...plan };
+    const deliveryTarget = actionResult.outboundFiles.length > 0 ? plan?.destination ?? null : null;
     let followupTurn: { turnId: string; sessionId: string } | null = null;
     const result = await this.writeLane.write({
       mutateState: (transaction) => {
@@ -7785,8 +7902,8 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         transaction.run(
           `INSERT INTO messages
              (id, conversation_id, provider, account_id, source_message_id, body,
-              attachment_ids_json, received_at, created_at)
-           VALUES (?, ?, 'web', ?, ?, ?, ?, ?, ?)`,
+              attachment_ids_json, received_at, created_at, metadata_json)
+           VALUES (?, ?, 'web', ?, ?, ?, ?, ?, ?, ?)`,
           messageId,
           conversationId,
           account.id,
@@ -7795,6 +7912,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
           JSON.stringify([]),
           now,
           now,
+          fileDeliveryMetadata === null ? null : JSON.stringify(fileDeliveryMetadata),
         );
         // Linked here, not only in markTurnCompleted, so the window list fetched on advisor.responded already counts it unread.
         transaction.run("UPDATE advisor_turns SET reply_message_id = ? WHERE id = ?", messageId, turnId);
@@ -7822,6 +7940,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
           suggested_actions: publishedActions,
           origin,
           ...(actionResult.outboundFiles.length > 0 ? { outbound_files: actionResult.outboundFiles, delivery_pending: true } : {}),
+          ...(deliveryTarget === null ? {} : { delivery_target: deliveryTarget }),
           ...(actionFailures.length > 0 ? { action_failures: actionFailures } : {}),
           ...(followupPending ? { followup_pending: true } : {}),
           ...(followupOf !== null ? { followup_of_turn_id: followupOf } : {}),
@@ -7927,6 +8046,25 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     try {
     await this.writeLane.write({
       mutateState: (transaction) => {
+        // Same write as the event, so the card on the reply and the report cannot disagree.
+        const stored = transaction.get<{ metadata_json: string | null }>("SELECT metadata_json FROM messages WHERE id = ?", messageId);
+        const card = parseMessageMetadata(stored?.metadata_json);
+        if (card?.kind === "advisor_file_delivery") {
+          const byIndex = new Map(results.map((r) => [r.index, r]));
+          const updated: AdvisorFileDeliveryMetadata = {
+            ...card,
+            files: card.files.map((file) => {
+              const r = byIndex.get(file.index);
+              if (!r) return file;
+              const { code: _code, message: _message, ...rest } = file;
+              return r.outcome === "sent"
+                ? { ...rest, status: "sent" as const }
+                : { ...rest, status: r.outcome as "failed" | "unknown", code: r.code!, message: (r.message ?? `${file.name}: ${r.code}`).slice(0, 300) };
+            }),
+            ...(notice === null ? {} : { notice }),
+          };
+          transaction.run("UPDATE messages SET metadata_json = ? WHERE id = ?", JSON.stringify(updated), messageId);
+        }
         if (followupPending) {
           followupTurn = this.advisorRuntime?.insertFollowupTurn(transaction, { sourceTurnId: turnId, conversationId, replyMessageId: messageId, origin, failures }) ?? null;
         }
@@ -7982,6 +8120,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
   ): Promise<{ heldIndexes: Set<number>; notices: string[]; failures: AdvisorActionFailure[] }> {
     const t = ADVISOR_TEXT[ownerLanguage(this.db)];
     const candidates: { index: number; action: AdvisorSuggestedAction; candidate: FollowupCandidate }[] = [];
+    const destinationMemo: { resolved?: WebFileDestination } = {};
     for (const [index, action] of actions.entries()) {
       const executedByCore = ADVISOR_CURATION_ACTION_TYPES.has(action.type) || ADVISOR_WINDOW_ACTION_TYPES.has(action.type)
         || action.type === ADVISOR_CALL_API_ACTION_TYPE || action.type === ADVISOR_SEND_FILE_ACTION_TYPE
@@ -7989,7 +8128,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       if (!executedByCore) continue;
       // The real path of a file is a second key: the same file written differently is still the same file.
       const prepared = action.type === ADVISOR_SEND_FILE_ACTION_TYPE
-        ? await prepareAdvisorSendFile(action.payload, origin.channel, this.resolveAdvisorSendFileSettings())
+        ? await prepareAdvisorSendFile(action.payload, this.sendFileChannelFor(conversationId, origin, destinationMemo), this.resolveAdvisorSendFileSettings())
         : null;
       candidates.push({
         index,
@@ -8292,10 +8431,12 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     origin: { channel: string; channel_id?: string; ref?: string },
     recoveredIndexes: ReadonlySet<number> = new Set(),
     heldIndexes: ReadonlySet<number> = new Set(),
-  ): Promise<{ notices: string[]; failures: AdvisorActionFailure[]; handledIndexes: Set<number>; outboundFiles: (AdvisorOutboundFile & { index: number })[] }> {
+  ): Promise<{ notices: string[]; failures: AdvisorActionFailure[]; handledIndexes: Set<number>; outboundFiles: (AdvisorOutboundFile & { index: number })[]; fileDelivery: AdvisorFileDeliveryPlan | null }> {
     const notices: string[] = [];
     const failures: AdvisorActionFailure[] = [];
     const outboundFiles: (AdvisorOutboundFile & { index: number })[] = [];
+    const fileResults: AdvisorFileDeliveryMetadata["files"][number][] = [];
+    const destinationMemo: { resolved?: WebFileDestination } = {};
     const add = (outcome: AdvisorActionOutcome): void => {
       notices.push(outcome.notice);
       if (outcome.failure) failures.push(outcome.failure);
@@ -8373,13 +8514,22 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       if (action.type === ADVISOR_SEND_FILE_ACTION_TYPE) {
         // Kept out of suggested_actions: a raw path must not appear as a suggestion.
         handledIndexes.add(index);
-        const prepared = await prepareAdvisorSendFile(action.payload, origin.channel, this.resolveAdvisorSendFileSettings());
+        const prepared = await prepareAdvisorSendFile(action.payload, this.sendFileChannelFor(conversationId, origin, destinationMemo), this.resolveAdvisorSendFileSettings());
+        const resolved = destinationMemo.resolved;
         if (prepared.ok) {
           outboundFiles.push({ ...prepared.file, index });
+          fileResults.push({ index, name: prepared.file.name, size: prepared.file.size, status: "pending" });
+        } else if (prepared.kind === "unsupported_channel" && resolved?.result.kind === "refused") {
+          const reason = resolved.result.reason;
+          const notice = t.sendFileNoDestination(prepared.name, reason, resolved.platform, resolved.channel);
+          fail(index, action, "no_destination", notice, { name: prepared.name, reason });
+          fileResults.push({ index, name: prepared.name, size: null, status: "rejected", code: "no_destination", message: notice.slice(0, 300) });
         } else if (prepared.kind === "rejected") {
-          fail(index, action, prepared.rejection, sendFileNotice(prepared, t), {
+          const notice = sendFileNotice(prepared, t);
+          fail(index, action, prepared.rejection, notice, {
             name: prepared.name, rejection: prepared.rejection, size: prepared.size, limit: prepared.limit, channel: prepared.channel,
           });
+          fileResults.push({ index, name: prepared.name, size: prepared.size ?? null, status: "rejected", code: prepared.rejection, message: notice.slice(0, 300) });
         } else if (prepared.kind === "unsupported_channel") {
           fail(index, action, "unsupported_channel", sendFileNotice(prepared, t), { name: prepared.name, channel: origin.channel });
         } else {
@@ -8509,7 +8659,15 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       }
     }
     if (finishedCurations.length > 0) void Promise.all(finishedCurations).then((entries) => this.sendCurationNoticeFor(entries));
-    return { notices, failures, handledIndexes, outboundFiles };
+    const webDestination = destinationMemo.resolved;
+    const fileDelivery: AdvisorFileDeliveryPlan | null = fileResults.length > 0 && origin.channel.trim().toLowerCase() === "web"
+      ? {
+          destination: webDestination?.result.kind === "resolved" ? webDestination.result.destination : null,
+          refusal: webDestination?.result.kind === "refused" ? webDestination.result.reason : null,
+          files: fileResults,
+        }
+      : null;
+    return { notices, failures, handledIndexes, outboundFiles, fileDelivery };
   }
 
   private async runAdvisorWorkOperation(
@@ -8845,17 +9003,19 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         { work_id: workId, reason },
       );
       failures.push(...(result.failures ?? []));
+      const onDisk = new Map<string, { path: string; blocked: boolean }>();
       for (const entry of await this.git.listWorkspaces()) {
         if (this.db.get("SELECT 1 FROM works WHERE id = ?", entry.work_id) === undefined) continue; // another Owl instance's Work
-        if (!failures.some((failure) => failure.work_id === entry.work_id)) {
-          failures.push({
-            work_id: entry.work_id,
-            path: entry.path,
-            message: `Worktree ${entry.path} is still on disk after reconciliation.`,
-          });
-        }
+        if (failures.some((failure) => failure.work_id === entry.work_id)) continue;
+        const blocked = await recordedWorktreeBlock(this.db, entry.work_id, entry.path) !== null;
+        const seen = onDisk.get(entry.work_id);
+        // One entry that is not blocked makes the whole Work unblocked, whatever the list order.
+        onDisk.set(entry.work_id, { path: seen?.path ?? entry.path, blocked: (seen?.blocked ?? true) && blocked });
       }
-      if (workId !== undefined && failures.some((failure) => failure.work_id === workId)) {
+      for (const [work, { path, blocked }] of onDisk) {
+        failures.push({ work_id: work, path, message: `Worktree ${path} is still on disk after reconciliation.`, ...(blocked ? { blocked: true } : {}) });
+      }
+      if (workId !== undefined && failures.some((failure) => failure.work_id === workId && !failure.blocked)) {
         console.warn(`[owl-core] Worktree reconcile left worktrees for Work ${workId}; merged branch cleanup will be retried later.`);
       }
       return { verified: true, failures };
@@ -11455,6 +11615,23 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
    * The one place a Manager replan request is built. `attempt` 2 carries the
    * previous answer's problems in `previous_output_feedback`; `trigger` stays the original one.
    */
+  /** Adds the files the Owner sent with an instruction (found through its messages); an item without files gets no attachments key. */
+  private withAttachments(request: OwnerRequestInput): OwnerRequestInput | Record<string, unknown> {
+    if (request.kind === "work_update" || request.message_ids.length === 0) return request;
+    const ids = request.message_ids.flatMap((messageId) => {
+      const row = this.db.get<{ attachment_ids_json: string }>("SELECT attachment_ids_json FROM messages WHERE id = ?", messageId);
+      return row ? parseStringArray(row.attachment_ids_json, "attachment_ids", messageId, "Message") : [];
+    });
+    const attachments = resolveMessageAttachments(this.db, this.owlRoot, ids).map((attachment) => ({
+      filename: attachment.filename,
+      mime: attachment.mime,
+      bytes: attachment.bytes,
+      status: attachment.status,
+      path: attachment.path,
+    }));
+    return attachments.length > 0 ? { ...request, attachments } : request;
+  }
+
   private buildReplanRequest(
     workId: string,
     failedTaskIds: readonly string[],
@@ -11502,7 +11679,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         design_documents: this.completedDesignDocuments(workId),
         trigger: trigger as unknown as JsonObject,
         worker_questions: workerQuestions as unknown as JsonObject[],
-        owner_requests: ownerRequests as unknown as JsonObject[],
+        owner_requests: ownerRequests.map((request) => this.withAttachments(request)) as unknown as JsonObject[],
         ...(ownerReplanKind === "instruction" ? { stopped_task_ids: this.stoppedTaskIds(workId) } : {}),
         base_merge_conflict: baseConflict as unknown as JsonObject | null,
         final_verdict: finalVerdict,
@@ -13984,17 +14161,56 @@ interface StatusExchangeMetadata {
   readonly carried_by?: string;
 }
 
-interface MessageMetadata {
+interface InstructionReplyMetadata {
   readonly kind: "instruction_reply";
   readonly in_reply_to: readonly string[];
   readonly outcome: InstructionOutcome;
   readonly plan_revision: number | null;
 }
 
+/** What a Web reply with send_file shows: where the files go and how each one fared. */
+interface AdvisorFileDeliveryMetadata {
+  readonly kind: "advisor_file_delivery";
+  readonly destination: (FileDestinationChannel & { readonly source: FileDestinationSource }) | null;
+  readonly refusal: FileDestinationRefusal | null;
+  readonly files: readonly {
+    readonly index: number;
+    readonly name: string;
+    readonly size: number | null;
+    readonly status: "pending" | "sent" | "failed" | "unknown" | "rejected";
+    readonly code?: string;
+    readonly message?: string;
+  }[];
+  readonly notice?: string;
+}
+
+type AdvisorFileDeliveryPlan = Pick<AdvisorFileDeliveryMetadata, "destination" | "refusal" | "files">;
+
+type WebFileDestination = { result: FileDestinationResult; platform: string; channel: string };
+
+type MessageMetadata = InstructionReplyMetadata | AdvisorFileDeliveryMetadata;
+
 export interface InstructionStatus {
   readonly status: "queued" | "processing" | "answered";
   readonly outcome: InstructionOutcome | null;
   readonly reply_message_id: string | null;
+}
+
+export type WebAttachmentTarget = { readonly conversation_id: string } | { readonly work_id: string };
+
+export interface WebAttachmentFile {
+  readonly filename: string;
+  readonly mime: string;
+  readonly content: Buffer;
+}
+
+export interface WebAttachmentResult extends JsonObject {
+  readonly attachment_id: string;
+  readonly filename: string;
+  readonly mime: string;
+  readonly bytes: number;
+  readonly sha256: string;
+  readonly status: "stored" | "quarantined";
 }
 
 export interface WorkConversationMessage extends Message {
@@ -14025,7 +14241,7 @@ function insertInstructionReply(
   );
   if (!origin) return;
   const now = utcNow();
-  const metadata: MessageMetadata = { kind: "instruction_reply", in_reply_to: messageIds, outcome, plan_revision: planRevision };
+  const metadata: InstructionReplyMetadata = { kind: "instruction_reply", in_reply_to: messageIds, outcome, plan_revision: planRevision };
   transaction.run(
     `INSERT INTO messages
        (id, conversation_id, provider, account_id, source_message_id, body,
@@ -14040,10 +14256,76 @@ function parseMessageMetadata(json: string | null | undefined): MessageMetadata 
   try {
     const value = JSON.parse(json) as unknown;
     if (isRecord(value) && value.kind === "instruction_reply" && Array.isArray(value.in_reply_to)) return value as unknown as MessageMetadata;
+    if (isRecord(value) && value.kind === "advisor_file_delivery" && Array.isArray(value.files)) return value as unknown as MessageMetadata;
   } catch {
     // The CHECK constraint rejects invalid JSON; anything else is treated as no metadata.
   }
   return null;
+}
+
+/** The Work's active web conversation and the Owner's web account, created when missing. Shared by instructions and attachment uploads so both land in one conversation. */
+function ensureWorkWebConversationInTransaction(
+  transaction: CoreWriteLaneTransaction,
+  workId: string,
+  ownerId: string,
+  now: string,
+): { conversation: { id: string }; account: { id: string } } {
+  ensureOwner(transaction, ownerId, now);
+  let conversation = transaction.get<{ id: string }>(
+    `SELECT id FROM conversations
+      WHERE work_id = ? AND channel = 'web' AND is_active = 1 AND archived_at IS NULL`,
+    workId,
+  );
+  if (!conversation) {
+    conversation = { id: createUlid() };
+    transaction.run(
+      `INSERT INTO conversations (id, owner_id, work_id, channel, is_active, created_at, updated_at)
+       VALUES (?, ?, ?, 'web', 1, ?, ?)`,
+      conversation.id, ownerId, workId, now, now,
+    );
+  }
+  let account = transaction.get<{ id: string }>(
+    "SELECT id FROM connector_accounts WHERE owner_id = ? AND provider = 'web'",
+    ownerId,
+  );
+  if (!account) {
+    account = { id: createUlid() };
+    transaction.run(
+      `INSERT INTO connector_accounts (id, owner_id, provider, external_account_id, created_at)
+       VALUES (?, ?, 'web', ?, ?)`,
+      account.id, ownerId, ownerId === DEFAULT_OWNER_ID ? "web-default" : `web-${ownerId}`, now,
+    );
+  }
+  return { conversation, account };
+}
+
+/** A message needs text or at least one attachment; whitespace-only text with files is stored as "". */
+function validateMessageContent(bodyValue: unknown, attachmentValue: unknown): { body: string; attachmentIds: string[] } {
+  if (typeof bodyValue !== "string" || bodyValue.length > 100000) {
+    throw validationError("Message body must be a string of at most 100,000 characters.", { field: "body" });
+  }
+  if (
+    !Array.isArray(attachmentValue)
+    || attachmentValue.length > MAX_MESSAGE_ATTACHMENTS
+    || !attachmentValue.every((item): item is string => typeof item === "string" && isUlidLike(item))
+    || new Set(attachmentValue).size !== attachmentValue.length
+  ) {
+    throw validationError(`Message attachment_ids must be at most ${MAX_MESSAGE_ATTACHMENTS} unique ULIDs.`, { field: "attachment_ids" });
+  }
+  const blank = bodyValue.trim().length === 0;
+  if (blank && attachmentValue.length === 0) {
+    throw validationError("本文を入力するか、ファイルを添付してください。", { field: "body" });
+  }
+  return { body: blank ? "" : bodyValue, attachmentIds: attachmentValue };
+}
+
+/** Adds `attachments` to the messages that have any, reading all uploads in one query. */
+function withMessageAttachments<T extends Message>(db: CoreDatabase, messages: readonly T[]): (T & { attachments?: readonly MessageAttachmentView[] })[] {
+  const views = messageAttachmentViews(db, messages.flatMap((message) => message.attachment_ids));
+  return messages.map((message) => {
+    const attachments = message.attachment_ids.flatMap((id) => views.get(id) ?? []);
+    return attachments.length > 0 ? { ...message, attachments } : message;
+  });
 }
 
 function toMessage(row: MessageDbRow): Message & { metadata?: MessageMetadata | null } {
@@ -14081,7 +14363,6 @@ class WorkNotRunningAbort extends Error {
 }
 
 const DEFAULT_OWNER_ID = "owner:default";
-const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 const UPLOAD_EXPIRY_MS = 60 * 60 * 1000;
 const MODEL_SETTINGS_KEY = "model_settings";
 const MODEL_PRESETS_KEY = "model_presets";
@@ -15514,6 +15795,11 @@ function queueOwnerReplanInTransaction(
   );
 }
 
+/** Join owner answers, skipping empty ones (an attachments-only instruction has answer ""). */
+function joinOwnerAnswers(...answers: readonly string[]): string {
+  return answers.filter((text) => text.length > 0).join("\n\n");
+}
+
 /** Hand a Decision answer to the Manager as a replan at the next tick. */
 function queueDecisionReplanInTransaction(transaction: CoreWriteLaneTransaction, workId: string, answer: string): void {
   mergeOwnerReplanInTransaction(transaction, workId, { kind: "decision", answer });
@@ -15539,14 +15825,14 @@ function mergeOwnerReplanInTransaction(
     // Keep the body of the request being handled so a requeue can restore it.
     if (isRecord(value) && value.status === "attempted" && typeof value.answer === "string") processingRequest = { kind: value.kind as OwnerReplanRequest["kind"], answer: value.answer, requests: ownerRequestsOf(value) };
     else if (isRecord(value) && typeof value.processing_answer === "string") processingRequest = { kind: value.processing_kind as OwnerReplanRequest["kind"], answer: value.processing_answer, requests: ownerRequestsOf({ requests: value.processing_requests, kind: value.processing_kind, answer: value.processing_answer, message_ids: value.processing_message_ids }) };
-    if (isRecord(value) && value.status === "queued" && typeof value.answer === "string" && value.answer.length > 0) {
+    if (isRecord(value) && value.status === "queued" && typeof value.answer === "string") {
       merged = {
         kind: value.kind === "instruction" || request.kind === "instruction"
           ? "instruction"
           : value.kind === "work_update" || request.kind === "work_update"
             ? "work_update"
             : request.kind,
-        answer: `${value.answer}\n\n${request.answer}`,
+        answer: joinOwnerAnswers(value.answer, request.answer),
         message_ids: [...new Set([...markerMessageIds(value.message_ids), ...(request.message_ids ?? [])])],
         requests: [...ownerRequestsOf(value), ...ownerRequestsOf(request)],
       };
@@ -15612,7 +15898,7 @@ function requeueOwnerReplanInTransaction(transaction: CoreWriteLaneTransaction, 
       kind: kind(value.processing_kind) === "instruction" || kind(value.kind) === "instruction" ? "instruction"
         : kind(value.processing_kind) === "work_update" || kind(value.kind) === "work_update" ? "work_update"
           : value.kind as OwnerReplanRequest["kind"],
-      answer: `${value.processing_answer}\n\n${value.answer}`,
+      answer: joinOwnerAnswers(value.processing_answer, value.answer),
       message_ids: [...new Set([...markerMessageIds(value.processing_message_ids), ...markerMessageIds(value.message_ids)])],
       requests: [
         ...ownerRequestsOf({ requests: value.processing_requests, kind: value.processing_kind, answer: value.processing_answer, message_ids: value.processing_message_ids }),

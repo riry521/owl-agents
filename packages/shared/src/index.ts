@@ -417,7 +417,13 @@ export interface ProviderExecutionRequest {
   readonly on_spawn?: (pid: number) => void;
 }
 export interface ProviderResponse { readonly adapter: string; readonly stdout: string; readonly stderr: string; readonly exit_code: number | null; readonly signal: string | null; readonly pid?: number; readonly provider_session_id?: string; readonly format?: "provider-json" | "canonical-jsonl" | "plain-text"; }
-export interface ProviderSessionRequest { readonly adapter: string; readonly role: "advisor"; readonly model: string; readonly effort?: string; readonly cwd: string; readonly env: Readonly<Record<string, string>>; readonly system_prompt: string; /** The provider-native session id of a suspended session to continue; omitted to start a new one. */ readonly resume_provider_session_id?: string; /** How the provider should write its compaction summary; only sent to providers that can be told (T10 design §4). */ readonly compact_instructions?: string; readonly on_unsolicited_reply?: (reply: { readonly reply: string; readonly usage: TokenUsage | null }) => void; }
+/** What a provider session is doing now. For display only; never a turn outcome. */
+export interface SessionActivity {
+  readonly state: "thinking" | "tool" | "subagent" | null;
+  readonly tool_name: string | null;
+  readonly background_count: number;
+}
+export interface ProviderSessionRequest { readonly adapter: string; readonly role: "advisor"; readonly model: string; readonly effort?: string; readonly cwd: string; readonly env: Readonly<Record<string, string>>; readonly system_prompt: string; /** The provider-native session id of a suspended session to continue; omitted to start a new one. */ readonly resume_provider_session_id?: string; /** How the provider should write its compaction summary; only sent to providers that can be told (T10 design §4). */ readonly compact_instructions?: string; readonly on_unsolicited_reply?: (reply: { readonly reply: string; readonly usage: TokenUsage | null }) => void; readonly on_activity?: (activity: SessionActivity) => void; }
 export interface TokenUsage { readonly input_tokens?: number; readonly output_tokens?: number; readonly cache_read_tokens?: number; readonly cache_write_tokens?: number; }
 export type SessionEvent =
   | { type: "session.ready"; provider_session_id: string; pid: number }

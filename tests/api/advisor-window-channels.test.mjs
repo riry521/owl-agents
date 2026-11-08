@@ -412,3 +412,63 @@ test("Discord invite-owner is 422 invite_not_supported and never calls inviteUse
   assert.equal((await errorOf(response)).code, "invite_not_supported");
   assert.equal(discord.invites.length, 0);
 });
+
+const destinationPath = "/settings/advisor-send-file-destination";
+const putDestination = (api, payload, id) => api.request("PUT", destinationPath, command(payload, id));
+const saveSlack = (api, channels, id) => api.request("PUT", "/settings/integrations/slack", command({ bot_token: "xoxb-test", app_token: "xapp-test", ...channels }, id));
+
+test("send-file destination GET lists conversation and window channels per provider without duplicates or notification channels", async (t) => {
+  const slack = fakeAdmin({ describeChannel: async (id) => { if (id === "C-BROKEN") throw new Error("down"); return { channel_id: id, name: `named-${id}`, bot_is_member: true }; } });
+  const api = await startApi(t, { slack });
+  if (!api) return;
+  assert.equal((await saveSlack(api, { conversation_channel_id: "C-CONV,C-BROKEN", notification_channel_id: "C-NOTIFY" }, "dest-save-slack")).status, 200);
+  await bindSlack(api, await api.project("Dest Project"), "C-WIN");
+  await bindSlack(api, await api.project("Dest Dup"), "C-CONV");
+  const body = (await (await api.request("GET", destinationPath)).json()).data;
+  assert.equal(body.preferred_provider, null);
+  assert.equal(body.default_destination, null);
+  const slackView = body.providers.find((entry) => entry.provider === "slack");
+  assert.equal(slackView.configured, true);
+  assert.equal(slackView.running, true);
+  assert.deepEqual(slackView.candidates.map((entry) => [entry.channel_id, entry.display_name, entry.kind]), [
+    ["C-CONV", "named-C-CONV", "conversation"], ["C-BROKEN", "C-BROKEN", "conversation"], ["C-WIN", "name-C-WIN", "window"],
+  ]);
+  assert.equal(slackView.candidates[2].window_name, "Dest Project");
+  assert.deepEqual(body.providers.find((entry) => entry.provider === "discord"), { provider: "discord", configured: false, running: false, candidates: [] });
+});
+
+test("send-file destination PUT saves with a server-decided name, validates, clears with null and flags a vanished default", async (t) => {
+  const api = await startApi(t, { slack: fakeAdmin() });
+  if (!api) return;
+  await saveSlack(api, { conversation_channel_id: "C-CONV" }, "dest-put-slack");
+  await bindSlack(api, await api.project("Dest Put"), "C-WIN");
+
+  const saved = await putDestination(api, { preferred_provider: "discord", default_destination: { provider: "slack", channel_id: "C-WIN" } }, "dest-put-1");
+  assert.equal(saved.status, 200);
+  const data = (await saved.json()).data;
+  assert.equal(data.preferred_provider, "discord");
+  assert.deepEqual(data.default_destination, { provider: "slack", channel_id: "C-WIN", display_name: "name-C-WIN", available: true });
+  assert.deepEqual(await api.core.getAdvisorFileDestinationSettings(), {
+    preferredProvider: "discord", defaultDestination: { provider: "slack", channel_id: "C-WIN", display_name: "name-C-WIN" },
+  });
+
+  const status = async (payload, id) => (await putDestination(api, payload, id)).status;
+  assert.equal(await status({ preferred_provider: null, default_destination: { provider: "discord", channel_id: "D-1" } }, "dest-put-2"), 422);
+  assert.equal(await status({ preferred_provider: null, default_destination: { provider: "slack", channel_id: "C-OTHER" } }, "dest-put-3"), 422);
+  assert.equal(await status({ preferred_provider: null, default_destination: null, extra: 1 }, "dest-put-4"), 400);
+  assert.equal(await status({ preferred_provider: "teams", default_destination: null }, "dest-put-5"), 400);
+  assert.equal(await status({ preferred_provider: null, default_destination: { provider: "slack", channel_id: "C-WIN", display_name: "x" } }, "dest-put-6"), 400);
+  assert.equal(await status({ preferred_provider: null }, "dest-put-7"), 400);
+  assert.equal((await api.core.getAdvisorFileDestinationSettings()).defaultDestination.channel_id, "C-WIN");
+
+  assert.equal((await putDestination(api, { preferred_provider: null, default_destination: { provider: "slack", channel_id: "C-CONV" } }, "dest-put-conv")).status, 200);
+  await saveSlack(api, { conversation_channel_id: "C-CONV-NEW" }, "dest-put-slack-2");
+  assert.equal((await (await api.request("GET", destinationPath)).json()).data.default_destination.available, false);
+
+  const cleared = await putDestination(api, { preferred_provider: null, default_destination: null }, "dest-put-8");
+  assert.equal(cleared.status, 200);
+  const clearedData = (await cleared.json()).data;
+  assert.equal(clearedData.preferred_provider, null);
+  assert.equal(clearedData.default_destination, null);
+  assert.deepEqual(await api.core.getAdvisorFileDestinationSettings(), { preferredProvider: null, defaultDestination: null });
+});

@@ -31,6 +31,12 @@ export function configuredIdempotencyTtlMs(): number | undefined {
   return Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
+/** OWL_SHUTDOWN_TIMEOUT_MS: how long the server waits for a graceful shutdown before giving up; default 25000. */
+export function shutdownTimeoutMs(): number {
+  const value = Number(process.env.OWL_SHUTDOWN_TIMEOUT_MS);
+  return Number.isSafeInteger(value) && value > 0 ? value : 25_000;
+}
+
 const warnedDesignSkills = new Set<string>();
 
 /**

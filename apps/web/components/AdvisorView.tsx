@@ -1,9 +1,11 @@
 'use client';
 
-import { type FormEvent, type KeyboardEvent, type Ref, useCallback, useEffect, useLayoutEffect, memo, useMemo, useRef, useState } from 'react';
-import ReactMarkdown from 'react-markdown';
+import { type ComponentProps, type FormEvent,type KeyboardEvent, type Ref, useCallback, useEffect, useLayoutEffect, memo, useMemo, useRef, useState } from 'react';
+import Link from 'next/link';
+import ReactMarkdown, { type Components } from 'react-markdown';
+import { ownerFileAnchorProps, remarkOwnerFileLinks } from '@/lib/owner-file-links.mjs';
 import remarkGfm from 'remark-gfm';
-import { clearAdvisorConversation, getAdvisorWindowConversation, getAdvisorSession, ingestConversation, interruptAdvisorTurn, listMessages, postMessage } from '@/lib/api-client';
+import { getOwnerFileRoots, clearAdvisorConversation, getAdvisorWindowConversation, getAdvisorSession, ingestConversation, interruptAdvisorTurn, listMessages, postMessage } from '@/lib/api-client';
 import type { AdvisorSessionInfo, Message } from '@/lib/types';
 import { formatClock, formatDateTime, formatRelative } from '@/lib/format';
 import { useLocale } from '@/lib/i18n';
@@ -11,7 +13,13 @@ import { AdvisorChannelPanel } from '@/components/AdvisorChannelPanel';
 import { SendIcon, StopIcon, TrashIcon } from '@/components/icons';
 import { useView } from '@/lib/view-loader';
 import { replyArrived } from '@/lib/advisor-awaiting.mjs';
+import { advisorIndicatorLabel, advisorSessionBusy } from '@/lib/advisor-indicator.mjs';
+import { AttachButton, AttachmentTray, DropOverlay } from '@/components/AttachmentTray';
+import { MessageAttachments } from '@/components/MessageAttachments';
+import { useAttachmentDraft, useFileDrop } from '@/lib/use-attachment-draft';
+import { blockedHintKey, canSend } from '@/lib/attachment-draft.mjs';
 import { DEFAULT_WINDOW_KEY, readThroughToSend, viaLabelKey } from '@/lib/advisor-windows.mjs';
+import { fileDeliveryView, isFileDeliveryMetadata } from '@/lib/advisor-file-delivery.mjs';
 
 const PENDING_POLL_INTERVAL_MS = 1_500;
 const AWAITING_REPLY_TIMEOUT_MS = 60_000;
@@ -86,12 +94,12 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
   const sessionView = useView<AdvisorSessionInfo>(
     conversationId ? `advisor-session:${conversationId}` : null,
     () => getAdvisorSession(conversationId ?? undefined),
-    { refreshMs: (session) => ((session.running_turns ?? 0) > 0 || (session.queued_turns ?? 0) > 0 || awaitingReply !== null ? PENDING_POLL_INTERVAL_MS : null) },
+    { refreshMs: (session) => (advisorSessionBusy(session) || awaitingReply !== null ? PENDING_POLL_INTERVAL_MS : null) },
   );
   const messagesView = useView<Message[]>(
     conversationId ? `advisor-messages:${conversationId}` : null,
     () => listMessages(conversationId ?? ''),
-    { refreshMs: awaitingReply !== null || (sessionView.data?.running_turns ?? 0) > 0 || (sessionView.data?.queued_turns ?? 0) > 0 ? PENDING_POLL_INTERVAL_MS : null },
+    { refreshMs: awaitingReply !== null || advisorSessionBusy(sessionView.data) ? PENDING_POLL_INTERVAL_MS : null },
   );
   const sessionInfo = sessionView.data ?? null;
   const messages = useMemo(
@@ -115,9 +123,7 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
   }, [messagesView.error]);
 
   const runningTurns = sessionInfo?.running_turns ?? 0;
-  const queuedTurns = sessionInfo?.queued_turns ?? 0;
-  const turnPending = runningTurns > 0 || queuedTurns > 0;
-  const showIndicator = sending || awaitingReply !== null || turnPending;
+  const showIndicator = sending || awaitingReply !== null || advisorSessionBusy(sessionInfo);
 
   // Only the reply (or the timeout) ends the wait: the turn is enqueued after the send returns, so an
   // idle or stale session says nothing about this send. A running turn keeps the indicator on past the timeout.
@@ -151,17 +157,17 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
   }
 
   // Resolves true when the message was posted; false tells the composer to restore its draft.
-  async function handleSend(text: string): Promise<boolean> {
+  async function handleSend(text: string, attachmentIds: string[]): Promise<boolean> {
     if (!conversationId) return false;
     const body = text.trim();
-    if (!body) {
+    if (!body && attachmentIds.length === 0) {
       setSendError(t('advisor.messageRequired'));
       return false;
     }
     setSending(true);
     setSendError(null);
     try {
-      const posted = await postMessage(conversationId, body);
+      const posted = await postMessage(conversationId, body, attachmentIds);
       setAwaitingReply({ messageId: posted.message_id });
       // Not awaited: the composer is already empty, and the reply is polled anyway.
       refresh().catch((error) => console.error('[Owl] Advisor refresh after send failed', error));
@@ -241,15 +247,12 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
   const pausedClock = pausedUntil === null ? '—' : isToday(pausedUntil)
     ? formatClock(pausedUntil, locale)
     : formatDateTime(pausedUntil, locale);
-  const indicatorLabel = stopping
-    ? t('advisor.stopping')
-    : sending || runningTurns > 0 || queuedTurns === 0
-    ? t('advisor.thinking')
-    : pausedUntil
-      ? (pausedClock === '—'
-        ? t('advisor.providerPaused')
-        : t('advisor.providerPausedUntil', { time: pausedClock }))
-      : t('advisor.waitingInQueue');
+  const pausedLabel = pausedUntil
+    ? (pausedClock === '—'
+      ? t('advisor.providerPaused')
+      : t('advisor.providerPausedUntil', { time: pausedClock }))
+    : null;
+  const indicatorLabel = advisorIndicatorLabel({ t, session: sessionInfo, sending, stopping, pausedLabel });
 
   if (!conversationId || messages === null) {
     return loadError ? <div className="advisor-error">{loadError}</div> : <p className="advisor-loading">{t('common.loading')}</p>;
@@ -371,24 +374,27 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
       </div>
 
       <div className="advisor__input-area">
-        <AdvisorComposer sending={sending} sendError={sendError} replying={runningTurns > 0} stopping={stopping} stopError={stopError} isTouchDevice={isTouchDevice} onSend={handleSend} onStop={handleStop} />
+        <AdvisorComposer conversationId={conversationId} sending={sending} sendError={sendError} replying={runningTurns > 0} stopping={stopping} stopError={stopError} isTouchDevice={isTouchDevice} onSend={handleSend} onStop={handleStop} />
       </div>
     </div>
   );
 }
 
 // The input lives here, not in AdvisorView, so it never re-renders the conversation.
-function AdvisorComposer({ sending, sendError, replying, stopping, stopError, isTouchDevice, onSend, onStop }: {
+function AdvisorComposer({ conversationId, sending, sendError, replying, stopping, stopError, isTouchDevice, onSend, onStop }: {
+  conversationId: string | null;
   sending: boolean;
   sendError: string | null;
   replying: boolean;
   stopping: boolean;
   stopError: string | null;
   isTouchDevice: boolean;
-  onSend: (text: string) => Promise<boolean>;
+  onSend: (text: string, attachmentIds: string[]) => Promise<boolean>;
   onStop: () => void;
 }) {
   const { t } = useLocale();
+  const draft = useAttachmentDraft({ kind: 'conversation', id: conversationId ?? '' });
+  const { dragging, dropProps } = useFileDrop(draft.add, !conversationId);
   // The text stays in the uncontrolled textarea; state only tracks empty vs. not, for the send button.
   const [hasText, setHasText] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -418,8 +424,9 @@ function AdvisorComposer({ sending, sendError, replying, stopping, stopError, is
 
   async function send() {
     const ta = textareaRef.current;
-    if (!ta || sendingRef.current) return;
+    if (!ta || sendingRef.current || blockedHintKey(draft.items)) return;
     const text = ta.value;
+    const attachmentIds = draft.attachmentIds;
     const clear = text.trim() !== '';
     sendingRef.current = true;
     if (clear) {
@@ -429,11 +436,12 @@ function AdvisorComposer({ sending, sendError, replying, stopping, stopError, is
     }
     let posted = false;
     try {
-      posted = await onSend(text);
+      posted = await onSend(text, attachmentIds);
     } finally {
       sendingRef.current = false;
       ta.focus();
     }
+    if (posted) draft.clear();
     // Restore only into an empty box: text typed since the send is newer than the failed draft and must not be overwritten.
     if (!posted && clear && ta.value === '') {
       ta.value = text;
@@ -458,8 +466,11 @@ function AdvisorComposer({ sending, sendError, replying, stopping, stopError, is
   }
 
   return (
-    <form onSubmit={onSubmit} className="advisor__form">
+    <form onSubmit={onSubmit} className="advisor__form" {...dropProps}>
+      <DropOverlay visible={dragging} />
+      <AttachmentTray items={draft.items} notices={draft.notices} onRemove={draft.remove} onRetry={draft.retry} onDismissNotices={draft.dismissNotices} />
       <div className="advisor__input-wrap">
+        <AttachButton onFiles={draft.add} disabled={!conversationId} />
         <textarea
           ref={textareaRef}
           className="advisor__textarea"
@@ -474,6 +485,11 @@ function AdvisorComposer({ sending, sendError, replying, stopping, stopError, is
             scheduleResize();
           }}
           onKeyDown={onKeyDown}
+          onPaste={(ev) => {
+            if (ev.clipboardData.files.length === 0) return;
+            ev.preventDefault();
+            draft.add(Array.from(ev.clipboardData.files));
+          }}
           placeholder={t('advisor.placeholder')}
           maxLength={100000}
           rows={2}
@@ -493,7 +509,7 @@ function AdvisorComposer({ sending, sendError, replying, stopping, stopError, is
           <button
             type="submit"
             className="advisor__send"
-            disabled={sending || !hasText}
+            disabled={!canSend({ body: hasText ? 'x' : '', items: draft.items, sending })}
             aria-label={t('advisor.sendLabel')}
           >
             <SendIcon />
@@ -502,7 +518,7 @@ function AdvisorComposer({ sending, sendError, replying, stopping, stopError, is
       </div>
       {sendError && <div className="advisor-error advisor-error--send">{sendError}</div>}
       {stopError && <div className="advisor-error advisor-error--send">{stopError}</div>}
-      <p className="advisor__hint">{t(isTouchDevice ? 'advisor.hintTouch' : 'advisor.hint')}</p>
+      <p className="advisor__hint">{draft.hint ?? t(isTouchDevice ? 'advisor.hintTouch' : 'advisor.hint')}</p>
     </form>
   );
 }
@@ -520,17 +536,87 @@ const Turn = memo(function Turn({ message }: { message: Message }) {
           <span className="turn__name">{fromAdvisor ? t('advisor.nameAdvisor') : t('advisor.nameYou') + (viaKey ? t(viaKey) : '')}</span>
           <span className="turn__time"><RelativeTime iso={message.created_at} /></span>
         </div>
-        <div className={`turn__body${fromAdvisor ? '' : ' turn__body--plain'}`}>
-          {fromAdvisor ? <MarkdownBody body={message.body} /> : message.body}
-        </div>
+        {(fromAdvisor || message.body) && (
+          <div className={`turn__body${fromAdvisor ? '' : ' turn__body--plain'}`}>
+            {fromAdvisor ? <MarkdownBody body={message.body} /> : message.body}
+          </div>
+        )}
+        {!fromAdvisor && <MessageAttachments attachments={message.attachments} />}
+        {fromAdvisor && isFileDeliveryMetadata(message.metadata) && <FileDeliveryCard metadata={message.metadata} />}
       </div>
     </div>
   );
 });
 
+// Shows where Core sent (or refused to send) the files an Advisor reply asked for.
+function FileDeliveryCard({ metadata }: { metadata: Message['metadata'] }) {
+  const { t } = useLocale();
+  const view = fileDeliveryView(metadata);
+  const icon = view.state === 'pending' ? <span className="spinner" /> : { sent: '✓', failed: '!', unknown: '?', refused: '×' }[view.state];
+  return (
+    <section className={`delivery delivery--${view.state}`} aria-live="polite">
+      <div className="delivery__head">
+        <span className="delivery__icon" aria-hidden="true">{icon}</span>
+        <span>
+          {view.platform && (
+            <span className="platform">
+              <span className={`platform-dot platform-dot--${view.platform.provider ?? 'other'}`} aria-hidden="true" />
+              {view.platform.label}
+            </span>
+          )}{' '}
+          {t(view.headingKey, view.headingParams)}
+        </span>
+        {view.sourceKey && <span className="delivery__source">{t(view.sourceKey)}</span>}
+      </div>
+      {view.subKey && <p className="delivery__sub">{t(view.subKey, view.subParams)}</p>}
+      {view.files.length > 0 && (
+        <ul className="files">
+          {view.files.map((file, index) => (
+            <li key={index}>
+              <span className="files__name">{file.size ? `${file.name} · ${file.size}` : file.name}</span>
+              <span className={`files__status files__status--${file.status}`}>{t(file.statusKey)}</span>
+              {file.reason && <span className="files__reason">{file.reason}</span>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {view.notice && <p className="delivery__notice">{view.notice}</p>}
+      {view.settingsHref && (
+        <div className="delivery__actions">
+          <Link className="btn" href={view.settingsHref}>{t('advisor.fileDelivery.openSettings')}</Link>
+        </div>
+      )}
+    </section>
+  );
+}
+
 // Keyed on the body string, so a refetch that returns equal text never re-parses the Markdown.
+// One fetch shared by every message; a failure is forgotten so a later render retries, and meanwhile replies show unconverted.
+let ownerFileRootsPromise: ReturnType<typeof getOwnerFileRoots> | null = null;
+function loadOwnerFileRoots() {
+  ownerFileRootsPromise ??= getOwnerFileRoots().catch((error) => {
+    ownerFileRootsPromise = null;
+    throw error;
+  });
+  return ownerFileRootsPromise;
+}
+
 const MarkdownBody = memo(function MarkdownBody({ body }: { body: string }) {
-  return <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>{body}</ReactMarkdown>;
+  const [folders, setFolders] = useState<Awaited<ReturnType<typeof getOwnerFileRoots>> | null>(null);
+  useEffect(() => {
+    let active = true;
+    loadOwnerFileRoots().then((value) => active && setFolders(value), () => undefined);
+    return () => { active = false; };
+  }, []);
+  const apiBase = folders?.apiBase ?? '';
+  const plugins = useMemo<NonNullable<ComponentProps<typeof ReactMarkdown>['remarkPlugins']>>(
+    () => (folders && folders.roots.length > 0 ? [remarkGfm, [remarkOwnerFileLinks, { roots: folders.roots, apiBase }]] : [remarkGfm]),
+    [folders, apiBase],
+  );
+  const components = useMemo<Components>(() => ({
+    a: ({ href, children }: ComponentProps<'a'>) => <a href={href} {...ownerFileAnchorProps(href, apiBase)}>{children}</a>,
+  }), [apiBase]);
+  return <ReactMarkdown remarkPlugins={plugins} components={components} skipHtml>{body}</ReactMarkdown>;
 });
 
 // Owns the clock so ticking re-renders only this label, not the Turn around it.

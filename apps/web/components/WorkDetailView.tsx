@@ -47,6 +47,7 @@ import { autoRecoveryBadge } from '../lib/auto-recovery.mjs';
 import { WorkAssurancePanel } from '@/components/WorkAssurancePanel';
 import { WorkFinalReportPanel } from '@/components/WorkFinalReportPanel';
 import { workDeliverables } from '../lib/work-deliverables.mjs';
+import { markdownLinkPath, markdownViewerHref } from '../lib/markdown-path-links.mjs';
 import { useLocale, type TFunction, type Locale } from '@/lib/i18n';
 import { WorkConversation } from '@/components/WorkConversation';
 import { WorkSummaryHistory } from '@/components/WorkSummaryHistory';
@@ -410,7 +411,7 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
             {operationError && <p className="error" role="alert">{operationError}</p>}
           </section>
 
-          <WorkFinalReportPanel state={work.state} finalReport={work.final_report} locale={locale} t={t} />
+          <WorkFinalReportPanel state={work.state} finalReport={work.final_report} workId={work.id} locale={locale} t={t} />
 
           {/* Conversation */}
           <section className="panel work-detail__conversation" aria-labelledby="sec-conversation">
@@ -627,16 +628,29 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
               <p className="empty">{t('work.noDeliverables')}</p>
             ) : (
               <div className="list panel__scroll">
-                {deliverables.map((item) => (
-                  <div className="row" key={item.file}>
+                {deliverables.map((item) => {
+                  const body = (
                     <div className="row__main">
                       <div className="row__title mono">{item.file}</div>
                       <div className="row__sub">
                         {[item.action, taskTitle(item.task_id)].filter((part) => part.length > 0).join(' · ')}
                       </div>
                     </div>
-                  </div>
-                ))}
+                  );
+                  const docPath = markdownLinkPath(item.file);
+                  if (docPath === null) return <div className="row" key={item.file}>{body}</div>;
+                  return (
+                    <Link className="row row--doc-link" key={item.file} href={markdownViewerHref(work.id, docPath)}>
+                      {body}
+                      <div className="row__end">
+                        <span className="row__open">
+                          {t('mdViewer.open')}
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+                        </span>
+                      </div>
+                    </Link>
+                  );
+                })}
               </div>
             )}
           </section>

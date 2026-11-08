@@ -594,19 +594,63 @@ export interface ProjectSetupInput {
   path: string;
 }
 
+export interface MessageAttachment {
+  id: ULID;
+  filename: string;
+  mime: string;
+  bytes: number;
+  status: 'stored' | 'quarantined';
+}
+
+export interface UploadedAttachment {
+  attachment_id: ULID;
+  filename: string;
+  mime: string;
+  bytes: number;
+  sha256: string;
+  status: 'stored' | 'quarantined';
+}
+
+export interface UploadLimits {
+  max_bytes: number;
+  max_files: number;
+}
+
 export interface Message {
   id: ULID;
   conversation_id: ULID;
   source: 'slack' | 'discord' | 'web' | 'advisor' | 'manager' | (string & {});
   body: string;
   attachment_ids: ULID[];
+  attachments?: MessageAttachment[];
   created_at: RFC3339;
   metadata?: {
     kind: 'instruction_reply';
     in_reply_to: ULID[];
     outcome: 'tasks_changed' | 'no_change' | 'decision_opened';
     plan_revision: number | null;
+  } | AdvisorFileDeliveryMetadata | null;
+}
+
+/** Message.metadata of a Web Advisor reply that asked Core to send files. */
+export interface AdvisorFileDeliveryMetadata {
+  kind: 'advisor_file_delivery';
+  destination: {
+    provider: FileDestinationProvider;
+    channel_id: string;
+    display_name: string;
+    source: 'window_binding' | 'default_destination';
   } | null;
+  refusal: 'preferred_provider_unset' | 'default_destination_unset' | 'default_provider_not_configured' | 'default_channel_unavailable' | null;
+  files: {
+    index: number;
+    name: string;
+    size: number | null;
+    status: 'pending' | 'sent' | 'failed' | 'unknown' | 'rejected';
+    code?: string;
+    message?: string;
+  }[];
+  notice?: string;
 }
 
 export interface InstructionStatus {
@@ -681,6 +725,12 @@ export interface AdvisorWindowChannelState {
   owner_user_id_set: boolean;
 }
 
+export interface AdvisorActivity {
+  state: 'thinking' | 'tool' | 'subagent' | null;
+  tool_name: string | null;
+  background_count: number;
+}
+
 export interface AdvisorSessionInfo {
   status: AdvisorSessionStatus;
   provider_session_id?: string | null;
@@ -690,6 +740,7 @@ export interface AdvisorSessionInfo {
   last_compaction_at?: RFC3339 | null;
   queued_turns?: number;
   running_turns?: number;
+  activity?: AdvisorActivity | null;
   provider_paused_until?: RFC3339 | null;
   created_at?: RFC3339 | null;
   resumed_count?: number;
@@ -735,6 +786,25 @@ export interface RemakeLimitSettings {
   lead_review_rejections: number;
   verification_paths: string[];
   checked_task_types: string[];
+}
+
+export type FileDestinationProvider = 'slack' | 'discord';
+
+/** GET/PUT /api/v1/settings/advisor-send-file-destination. */
+export interface AdvisorSendFileDestination {
+  preferred_provider: FileDestinationProvider | null;
+  default_destination: { provider: FileDestinationProvider; channel_id: string; display_name: string; available: boolean } | null;
+  providers: {
+    provider: FileDestinationProvider;
+    configured: boolean;
+    running: boolean;
+    candidates: { channel_id: string; display_name: string; kind: 'conversation' | 'window'; window_name?: string }[];
+  }[];
+}
+
+export interface AdvisorSendFileDestinationInput {
+  preferred_provider: FileDestinationProvider | null;
+  default_destination: { provider: FileDestinationProvider; channel_id: string } | null;
 }
 
 export interface AdvisorFoldersInput {

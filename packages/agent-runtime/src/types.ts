@@ -423,6 +423,13 @@ export interface ProviderResponse {
  * ProviderExecutionRequest, this is not one-shot: the returned ProviderSession
  * stays alive across many turns until stop() is called.
  */
+/** What a provider session is doing now. For display only; never a turn outcome. */
+export interface SessionActivity {
+  readonly state: "thinking" | "tool" | "subagent" | null;
+  readonly tool_name: string | null;
+  readonly background_count: number;
+}
+
 export interface ProviderSessionRequest {
   readonly adapter: string;
   readonly role: "advisor";
@@ -440,6 +447,8 @@ export interface ProviderSessionRequest {
    * example when a background task finishes) while no Owl turn was in flight.
    */
   readonly on_unsolicited_reply?: (reply: { readonly reply: string; readonly usage: TokenUsage | null }) => void;
+  /** Called with the whole current activity each time it changes, in or outside a turn. */
+  readonly on_activity?: (activity: SessionActivity) => void;
 }
 
 export interface TokenUsage {

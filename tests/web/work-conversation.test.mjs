@@ -43,6 +43,13 @@ const translations = (dict) => (key, values = {}) => {
   return value.replace(/\{\{(\w+)\}\}/g, (_, name) => String(values[name]));
 };
 
+const draftPure = await import('../../apps/web/lib/attachment-draft.mjs');
+// Spy for use-attachment-draft: the component under test must hand every input path the same add().
+const addCalls = [];
+const draftSpy = { items: [], notices: [], hint: null, attachmentIds: [], clears: 0 };
+const MockAttachButton = (props) => React.createElement('button', { 'data-attach': true, disabled: props.disabled });
+const MockTray = (props) => React.createElement('ul', null, props.notices.length > 0 ? React.createElement('li', { role: 'alert' }, props.notices.join('|')) : null);
+const MockMessageAttachments = ({ attachments }) => React.createElement('div', { 'data-files': true }, (attachments ?? []).map((a) => `${a.filename}${a.status === 'quarantined' ? '[badge]' : ''}`).join(','));
 const sendCalls = [];
 let sendImpl = async () => ({});
 const pure = {
@@ -78,6 +85,13 @@ function loadComponent(dict) {
     '@/lib/format': { formatRelative: () => 'now' },
     '@/lib/i18n': { useLocale: () => ({ locale: 'en', t: translations(dict) }) },
     '@/components/icons': { SendIcon: () => React.createElement('svg'), TrashIcon: () => React.createElement('svg') },
+    '@/components/AttachmentTray': { AttachButton: MockAttachButton, AttachmentTray: MockTray, DropOverlay: () => null },
+    '@/components/MessageAttachments': { MessageAttachments: MockMessageAttachments },
+    '@/lib/use-attachment-draft': {
+      useAttachmentDraft: () => ({ ...draftSpy, add: (files) => addCalls.push(files), remove() {}, retry() {}, dismissNotices() {}, clear: () => { draftSpy.clears += 1; } }),
+      useFileDrop: (onFiles, disabled) => ({ dragging: false, dropProps: { onDrop: (files) => { if (!disabled) onFiles(files); } } }),
+    },
+    '@/lib/attachment-draft.mjs': draftPure,
     '../lib/work-conversation.mjs': pure,
   };
   const loaded = new Module(modulePath);
@@ -121,6 +135,8 @@ const conversation = {
 function freshProps(overrides = {}) {
   harness.state.length = 0;
   sendCalls.length = 0;
+  addCalls.length = 0;
+  Object.assign(draftSpy, { items: [], notices: [], hint: null, attachmentIds: [], clears: 0 });
   return { work: { id: 'w1', state: 'running', state_version: 7 }, conversation, onWorkChanged: () => {}, ...overrides };
 }
 
@@ -159,7 +175,7 @@ test('completed Work confirms, then sends reopen:true with expectedVersion', asy
   globalThis.window = { confirm: () => { confirms += 1; return true; } };
   await typeAndSubmit(props, 'again');
   assert.equal(confirms, 1);
-  assert.deepEqual(sendCalls, [['w1', 'again', { reopen: true, expectedVersion: 9 }]]);
+  assert.deepEqual(sendCalls, [['w1', 'again', { reopen: true, expectedVersion: 9, attachmentIds: [] }]]);
 
   sendCalls.length = 0;
   globalThis.window = { confirm: () => false };
@@ -174,7 +190,7 @@ test('409 version_conflict shows an alert, keeps the draft and calls onWorkChang
   sendImpl = async () => { throw Object.assign(new Error('version_conflict'), { code: 'version_conflict' }); };
   const { html } = await typeAndSubmit(props, 'keep me');
   sendImpl = async () => ({});
-  assert.deepEqual(sendCalls[0], ['w1', 'keep me', { reopen: false, expectedVersion: 7 }]);
+  assert.deepEqual(sendCalls[0], ['w1', 'keep me', { reopen: false, expectedVersion: 7, attachmentIds: [] }]);
   assert.equal(changed, 1);
   assert.match(html, /role="alert"/);
   assert.match(html, /The Work changed/);
@@ -196,4 +212,62 @@ test('non-409 failures (network, 500) show an alert and call onWorkChanged once'
 test('workChat keys match between ja and en', () => {
   assert.ok(ja.workChat && en.workChat);
   assert.deepEqual(Object.keys(ja.workChat).sort(), Object.keys(en.workChat).sort());
+});
+
+test('drop, paste and the clip button all reach the same add() with the same files; text paste does not', () => {
+  const { tree } = render(freshProps());
+  const files = [new File(['a'], 'a.png', { type: 'image/png' })];
+  find(tree, (n) => n.type === 'form').props.onDrop(files);
+  const pasteEvent = (clipboardFiles) => ({ clipboardData: { files: clipboardFiles }, preventDefault() { this.prevented = true; } });
+  const paste = pasteEvent(files);
+  find(tree, (n) => n.type === 'textarea').props.onPaste(paste);
+  find(tree, (n) => n.type === MockAttachButton).props.onFiles(files);
+  assert.equal(addCalls.length, 3);
+  for (const call of addCalls) assert.deepEqual(call, files);
+  assert.equal(paste.prevented, true);
+  const textPaste = pasteEvent([]);
+  find(tree, (n) => n.type === 'textarea').props.onPaste(textPaste);
+  assert.equal(addCalls.length, 3);
+  assert.notEqual(textPaste.prevented, true);
+});
+
+test('a Work that cannot take instructions stops the clip button and the drop', () => {
+  const { tree } = render(freshProps({ work: { id: 'w1', state: 'cancelled', state_version: 1 } }));
+  assert.equal(find(tree, (n) => n.type === MockAttachButton).props.disabled, true);
+  find(tree, (n) => n.type === 'form').props.onDrop([new File(['a'], 'a.txt')]);
+  assert.equal(addCalls.length, 0);
+});
+
+test('body only, attachment only and both send once with attachmentIds', async () => {
+  for (const [text, ids, expectedBody] of [['hi', [], 'hi'], ['', ['a1'], ''], ['hi', ['a1', 'a2'], 'hi']]) {
+    const props = freshProps();
+    draftSpy.items = ids.map((id) => ({ id, status: 'ready', attachmentId: id }));
+    draftSpy.attachmentIds = ids;
+    await typeAndSubmit(props, text);
+    assert.deepEqual(sendCalls, [['w1', expectedBody, { reopen: false, expectedVersion: 7, attachmentIds: ids }]]);
+    assert.equal(draftSpy.clears, 1);
+  }
+});
+
+test('an uploading item disables the send button and sets the hint; submit sends nothing', async () => {
+  const props = freshProps();
+  draftSpy.items = [{ id: 'u1', status: 'uploading' }];
+  draftSpy.hint = 'attachments.waitUploading';
+  const { tree, html } = await typeAndSubmit(props, 'hi');
+  assert.equal(find(tree, (n) => n.type === 'button' && n.props.type === 'submit').props.disabled, true);
+  assert.match(html, /attachments\.waitUploading/);
+  assert.equal(sendCalls.length, 0);
+});
+
+test('a limit rejection is shown with role="alert"', () => {
+  const props = freshProps();
+  draftSpy.notices = ['big.mov is 72.4 MB'];
+  assert.match(render(props).html, /role="alert"[^>]*>big\.mov is 72\.4 MB/);
+});
+
+test('ConversationTurn shows file names with a quarantined badge and omits an empty body box', () => {
+  const messages = [{ id: 'm9', source: 'web', body: '', created_at: '2026-01-01T00:00:00Z', attachments: [{ id: 'f1', filename: 'a.png', status: 'ready' }, { id: 'f2', filename: 'run.exe', status: 'quarantined' }] }];
+  const { html } = render(freshProps({ conversation: { messages } }));
+  assert.match(html, /a\.png,run\.exe\[badge\]/);
+  assert.doesNotMatch(html, /turn__body/);
 });

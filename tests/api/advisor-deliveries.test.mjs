@@ -25,15 +25,20 @@ async function setup(t) {
       runAdvisor: async (request) => { calls.push(request); return { reply: "Looked into it." }; },
     },
     getAdvisorSendFileSettings: () => ({ dirs: [dir] }),
+    getAdvisorFileDestinationSettings: () => ({
+      preferredProvider: null,
+      defaultDestination: { provider: "slack", channel_id: "CDEF", display_name: "owl" },
+      integrations: [{ provider: "slack", configured: true, conversationChannelIds: ["CDEF"] }],
+    }),
   }, { prefix: "owl-api-deliveries-", start: true });
   const server = await startTestHttpServer(t, { core: new ExternalCoreAdapter(core, db, root, join(root, "data")), webOut: root, owlRoot: root }, { token: "deliveries-token" });
   if (!server) return null;
   const { conversation_id: conversationId } = await core.getActiveConversation();
   await writeFile(join(dir, "a.txt"), "first");
   await writeFile(join(dir, "b.txt"), "second");
-  const reply = async () => {
+  const reply = async (origin = { channel: "slack", channel_id: "C1", ref: "1.1" }) => {
     const turnId = createUlid();
-    await core.persistAdvisorReply(conversationId, "here", turnId, { channel: "slack", channel_id: "C1", ref: "1.1" },
+    await core.persistAdvisorReply(conversationId, "here", turnId, origin,
       ["a.txt", "b.txt"].map((name) => ({ type: "send_file", description: "send", payload: { path: join(dir, name) } })));
     const payload = JSON.parse(db.get("SELECT payload_json FROM events WHERE type = 'advisor.responded' ORDER BY rowid DESC LIMIT 1").payload_json);
     return { turnId, messageId: payload.message_id };
@@ -67,6 +72,26 @@ test("a delivery report goes through ExternalCoreAdapter, is saved once and queu
   await waitFor(() => env.calls.length === 1, { message: "the follow-up Advisor turn ran" });
   assert.equal(env.db.all("SELECT 1 FROM events WHERE type = 'advisor.responded' AND json_extract(payload_json, '$.followup_of_turn_id') = ?", turnId).length, 1);
   assert.equal(env.calls.length, 1);
+});
+
+test("a report on a Web reply updates the card metadata in the same write and a repeated report changes nothing", async (t) => {
+  const env = await setup(t);
+  if (!env) return t.skip("listen not permitted");
+  const { turnId, messageId } = await env.reply({ channel: "web" });
+  const card = () => JSON.parse(env.db.get("SELECT metadata_json FROM messages WHERE id = ?", messageId).metadata_json);
+  assert.deepEqual(card().files.map((f) => f.status), ["pending", "pending"]);
+  assert.equal(card().destination.channel_id, "CDEF");
+
+  const results = [{ index: 0, outcome: "sent" }, failed];
+  assert.equal((await env.report(turnId, messageId, results)).status, 200);
+  const after = card();
+  assert.deepEqual(after.files.map((f) => [f.status, f.code, f.message]), [["sent", undefined, undefined], ["failed", "upload_rejected", failed.message]]);
+  assert.equal(after.notice, text.followupPending);
+  assert.deepEqual(after.destination, { provider: "slack", channel_id: "CDEF", display_name: "owl", source: "default_destination" });
+
+  assert.equal((await env.report(turnId, messageId, results)).status, 200);
+  assert.deepEqual(card(), after);
+  assert.equal(env.reported().length, 1);
 });
 
 test("a delivery report where every file was sent queues no follow-up", async (t) => {

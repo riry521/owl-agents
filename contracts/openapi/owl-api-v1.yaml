@@ -395,6 +395,88 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/works/{work_id}/markdown:
+    parameters:
+      - $ref: '#/components/parameters/WorkId'
+    get:
+      operationId: getWorkMarkdown
+      summary: Read one Markdown file of a Work
+      description: Reads a .md file inside the Work's Project or the materials folder.
+      security:
+        - ownerBearer: []
+      parameters:
+        - name: path
+          in: query
+          required: true
+          description: Absolute, Project-relative, or materials/-prefixed path.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 4096
+      responses:
+        '200':
+          description: The file's Markdown text.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WorkMarkdownResponse'
+        '400':
+          description: validation_error
+          x-error-codes:
+            - validation_error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: markdown_path_denied; details.reason is outside, symlink_escape, traversal, secret or not_markdown.
+          x-error-codes:
+            - markdown_path_denied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: work_not_found, markdown_not_found, or markdown_not_integrated for a Work that is not finished.
+          x-error-codes:
+            - work_not_found
+            - markdown_not_found
+            - markdown_not_integrated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: markdown_too_large; details has size_bytes and limit_bytes.
+          x-error-codes:
+            - markdown_too_large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: markdown_unreadable
+          x-error-codes:
+            - markdown_unreadable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: knowledge_storage_unavailable or dependency_unavailable
+          x-error-codes:
+            - knowledge_storage_unavailable
+            - dependency_unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/works/{work_id}/conversation:
     parameters:
       - $ref: '#/components/parameters/WorkId'
@@ -1198,7 +1280,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/PostWorkInstructionResponse'
         '400':
-          description: validation_error (unknown payload keys, blank body, or invalid attachment_ids or reopen).
+          description: validation_error (unknown payload keys, no text and no attachments, or invalid attachment_ids or reopen).
           x-error-codes:
             - validation_error
           content:
@@ -3507,6 +3589,74 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/settings/advisor-send-file-destination:
+    get:
+      operationId: getAdvisorSendFileDestination
+      summary: Get where files sent from the Web chat go
+      security:
+        - ownerBearer: []
+      responses:
+        '200':
+          description: Settings with the selectable channels per provider.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdvisorSendFileDestinationResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    put:
+      operationId: updateAdvisorSendFileDestination
+      summary: Save where files sent from the Web chat go
+      description: display_name is decided by the server from the candidates. null clears a value.
+      security:
+        - ownerBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AdvisorSendFileDestinationCommand'
+      responses:
+        '200':
+          description: Saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdvisorSendFileDestinationResponse'
+        '400':
+          description: Request validation failure.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Forbidden.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: The provider is not configured or the channel is not a candidate.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/advisor/windows/order:
     put:
       operationId: updateAdvisorWindowOrder
@@ -4104,6 +4254,197 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/uploads/limits:
+    get:
+      operationId: getUploadLimits
+      summary: Get the upload limits shared by every provider
+      security:
+        - ownerBearer: []
+      responses:
+        '200':
+          description: Upload limits.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadLimitsResponse'
+  /api/v1/conversations/{conversation_id}/attachments:
+    parameters:
+      - $ref: '#/components/parameters/ConversationId'
+    post:
+      operationId: uploadConversationAttachment
+      summary: Upload one file to attach to the next message
+      description: >-
+        The request body is the file itself. The file passes the same checks as Slack and Discord uploads
+        (size limit, filename, sha256, quarantine of executables). Send the returned attachment_id in the
+        attachment_ids of a message to this conversation.
+      security:
+        - ownerBearer: []
+      parameters:
+        - in: header
+          name: X-Owl-Filename
+          required: true
+          description: The file name, encoded with encodeURIComponent.
+          schema:
+            type: string
+        - in: header
+          name: X-Request-Id
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+        - in: header
+          name: Content-Length
+          required: true
+          schema:
+            type: integer
+            minimum: 0
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: File stored (or quarantined).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadedAttachmentResponse'
+        '400':
+          description: validation_error (missing header, unsafe filename, or Content-Length mismatch).
+          x-error-codes:
+            - validation_error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Conversation not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The Work cannot take instructions, the idempotency key was reused with different content, or the checksum did not match.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: upload_too_large (details.max_bytes)
+          x-error-codes:
+            - upload_too_large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: dependency_unavailable (the loaded Core cannot take Web attachments).
+          x-error-codes:
+            - dependency_unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/works/{work_id}/attachments:
+    parameters:
+      - $ref: '#/components/parameters/WorkId'
+    post:
+      operationId: uploadWorkAttachment
+      summary: Upload one file to attach to the next message
+      description: >-
+        The request body is the file itself. The file passes the same checks as Slack and Discord uploads
+        (size limit, filename, sha256, quarantine of executables). Send the returned attachment_id in the
+        attachment_ids of a message to this work.
+      security:
+        - ownerBearer: []
+      parameters:
+        - in: header
+          name: X-Owl-Filename
+          required: true
+          description: The file name, encoded with encodeURIComponent.
+          schema:
+            type: string
+        - in: header
+          name: X-Request-Id
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+        - in: header
+          name: Content-Length
+          required: true
+          schema:
+            type: integer
+            minimum: 0
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '201':
+          description: File stored (or quarantined).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadedAttachmentResponse'
+        '400':
+          description: validation_error (missing header, unsafe filename, or Content-Length mismatch).
+          x-error-codes:
+            - validation_error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Work not found.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: The Work cannot take instructions, the idempotency key was reused with different content, or the checksum did not match.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: upload_too_large (details.max_bytes)
+          x-error-codes:
+            - upload_too_large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: dependency_unavailable (the loaded Core cannot take Web attachments).
+          x-error-codes:
+            - dependency_unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/inbound/uploads:
     post:
       operationId: registerInboundUpload
@@ -4656,6 +4997,52 @@ components:
         - advisor
         - manager
     MessageMetadata:
+      oneOf:
+        - $ref: '#/components/schemas/InstructionReplyMetadata'
+        - $ref: '#/components/schemas/AdvisorFileDeliveryMetadata'
+      discriminator:
+        propertyName: kind
+        mapping:
+          instruction_reply: '#/components/schemas/InstructionReplyMetadata'
+          advisor_file_delivery: '#/components/schemas/AdvisorFileDeliveryMetadata'
+    AdvisorFileDeliveryMetadata:
+      type: object
+      required: [kind, destination, refusal, files]
+      properties:
+        kind:
+          type: string
+          enum: [advisor_file_delivery]
+        destination:
+          type: object
+          nullable: true
+          required: [provider, channel_id, display_name, source]
+          properties:
+            provider: { type: string, enum: [slack, discord] }
+            channel_id: { type: string }
+            display_name: { type: string }
+            source: { type: string, enum: [window_binding, default_destination] }
+          additionalProperties: false
+        refusal:
+          type: string
+          nullable: true
+          enum: [preferred_provider_unset, default_destination_unset, default_provider_not_configured, default_channel_unavailable]
+        files:
+          type: array
+          items:
+            type: object
+            required: [index, name, size, status]
+            properties:
+              index: { type: integer }
+              name: { type: string }
+              size: { type: integer, nullable: true }
+              status: { type: string, enum: [pending, sent, failed, unknown, rejected] }
+              code: { type: string }
+              message: { type: string, maxLength: 300 }
+            additionalProperties: false
+        notice:
+          type: string
+      additionalProperties: false
+    InstructionReplyMetadata:
       type: object
       required:
         - kind
@@ -5636,6 +6023,38 @@ components:
         updated_at:
           $ref: '#/components/schemas/RFC3339'
       additionalProperties: false
+    WorkMarkdownResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/WorkMarkdown'
+    WorkMarkdown:
+      type: object
+      required:
+        - path
+        - name
+        - source
+        - markdown
+        - size_bytes
+      properties:
+        path:
+          type: string
+        name:
+          type: string
+        source:
+          type: string
+          enum:
+            - project
+            - work_branch
+            - materials
+        markdown:
+          type: string
+        size_bytes:
+          type: integer
+          minimum: 0
+      additionalProperties: false
     WorkDesignMockListResponse:
       allOf:
         - $ref: '#/components/schemas/Response'
@@ -6010,13 +6429,16 @@ components:
       properties:
         body:
           type: string
-          minLength: 1
+          minLength: 0
           maxLength: 100000
-          description: Must not be blank.
+          description: Send text, attachments, or both. A body that is blank while attachment_ids is empty is rejected; a blank body with attachments is stored as an empty string.
         attachment_ids:
           type: array
+          maxItems: 20
+          uniqueItems: true
           items:
-            type: string
+            $ref: '#/components/schemas/ULID'
+          description: Completed uploads of this Work's conversation (see the attachments endpoint).
         reopen:
           type: boolean
           description: Required to send an instruction to a completed work; the work is reopened first.
@@ -6484,6 +6906,11 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ULID'
+        attachments:
+          type: array
+          description: Present only when the message has attachments.
+          items:
+            $ref: '#/components/schemas/MessageAttachment'
         created_at:
           $ref: '#/components/schemas/RFC3339'
         metadata:
@@ -6508,12 +6935,96 @@ components:
       properties:
         body:
           type: string
-          minLength: 1
+          minLength: 0
           maxLength: 100000
+          description: Send text, attachments, or both. A body that is blank while attachment_ids is empty is rejected; a blank body with attachments is stored as an empty string.
         attachment_ids:
           type: array
+          maxItems: 20
+          uniqueItems: true
           items:
             $ref: '#/components/schemas/ULID'
+          description: Completed uploads of this conversation (see the attachments endpoint).
+      additionalProperties: false
+    UploadLimits:
+      type: object
+      required:
+        - max_bytes
+        - max_files
+      properties:
+        max_bytes:
+          type: integer
+          description: The largest size of one file.
+        max_files:
+          type: integer
+          description: The most attachments on one message.
+      additionalProperties: false
+    UploadLimitsResponse:
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          $ref: '#/components/schemas/UploadLimits'
+      additionalProperties: false
+    UploadedAttachment:
+      type: object
+      required:
+        - attachment_id
+        - filename
+        - mime
+        - bytes
+        - sha256
+        - status
+      properties:
+        attachment_id:
+          $ref: '#/components/schemas/ULID'
+        filename:
+          type: string
+        mime:
+          type: string
+        bytes:
+          type: integer
+        sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        status:
+          type: string
+          enum:
+            - stored
+            - quarantined
+      additionalProperties: false
+    UploadedAttachmentResponse:
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          $ref: '#/components/schemas/UploadedAttachment'
+      additionalProperties: false
+    MessageAttachment:
+      type: object
+      description: A file attached to a message. It never carries a file path.
+      required:
+        - id
+        - filename
+        - mime
+        - bytes
+        - status
+      properties:
+        id:
+          $ref: '#/components/schemas/ULID'
+        filename:
+          type: string
+        mime:
+          type: string
+        bytes:
+          type: integer
+        status:
+          type: string
+          enum:
+            - stored
+            - quarantined
       additionalProperties: false
     CreateMessageCommand:
       allOf:
@@ -8362,6 +8873,77 @@ components:
           properties:
             payload:
               $ref: '#/components/schemas/UpdateAdvisorFoldersPayload'
+    AdvisorSendFileDestinationInput:
+      type: object
+      required: [preferred_provider, default_destination]
+      properties:
+        preferred_provider:
+          type: string
+          nullable: true
+          enum: [slack, discord]
+        default_destination:
+          type: object
+          nullable: true
+          required: [provider, channel_id]
+          properties:
+            provider: { type: string, enum: [slack, discord] }
+            channel_id: { type: string, minLength: 1, maxLength: 200 }
+          additionalProperties: false
+      additionalProperties: false
+    AdvisorSendFileDestinationCommand:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+        - type: object
+          properties:
+            payload:
+              $ref: '#/components/schemas/AdvisorSendFileDestinationInput'
+    AdvisorSendFileDestinationSettings:
+      type: object
+      required: [preferred_provider, default_destination, providers]
+      properties:
+        preferred_provider:
+          type: string
+          nullable: true
+          enum: [slack, discord]
+        default_destination:
+          type: object
+          nullable: true
+          required: [provider, channel_id, display_name, available]
+          properties:
+            provider: { type: string, enum: [slack, discord] }
+            channel_id: { type: string }
+            display_name: { type: string }
+            available: { type: boolean }
+          additionalProperties: false
+        providers:
+          type: array
+          items:
+            type: object
+            required: [provider, configured, running, candidates]
+            properties:
+              provider: { type: string, enum: [slack, discord] }
+              configured: { type: boolean }
+              running: { type: boolean }
+              candidates:
+                type: array
+                items:
+                  type: object
+                  required: [channel_id, display_name, kind]
+                  properties:
+                    channel_id: { type: string }
+                    display_name: { type: string }
+                    kind: { type: string, enum: [conversation, window] }
+                    window_name: { type: string, nullable: true }
+                  additionalProperties: false
+            additionalProperties: false
+      additionalProperties: false
+    AdvisorSendFileDestinationResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/AdvisorSendFileDestinationSettings'
     UpdateAdvisorWindowOrderCommand:
       allOf:
         - $ref: '#/components/schemas/CommandRequest'

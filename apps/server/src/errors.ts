@@ -56,6 +56,13 @@ export type ApiErrorCode =
   | "design_document_not_found"
   | "design_mock_not_found"
   | "design_mock_write_failed"
+  | "markdown_path_denied"
+  | "markdown_not_found"
+  | "markdown_not_integrated"
+  | "markdown_too_large"
+  | "markdown_unreadable"
+  | "owner_file_denied"
+  | "owner_file_not_found"
   | "decision_not_found"
   | "decision_already_resolved"
   | "agent_run_not_found"
@@ -184,6 +191,13 @@ const HTTP_ERROR_TEXT: Partial<Record<ApiErrorCode, string>> = {
   design_document_not_found: "The design document was not found.",
   design_mock_not_found: "The design mock was not found.",
   design_mock_write_failed: "The design mock could not be written.",
+  markdown_path_denied: "The Markdown file is outside what the viewer may read.",
+  markdown_not_found: "The Markdown file was not found.",
+  markdown_not_integrated: "The Markdown file is not in the Work branch or the base branch yet.",
+  markdown_too_large: "The Markdown file is too large to show.",
+  markdown_unreadable: "The Markdown file could not be read.",
+  owner_file_denied: "This path is outside the folders the Owner may open.",
+  owner_file_not_found: "The file or folder was not found.",
   decision_not_found: "The Decision was not found.",
   decision_already_resolved: "The Decision has already been resolved.",
   agent_run_not_found: "The agent run was not found.",

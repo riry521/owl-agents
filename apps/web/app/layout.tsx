@@ -5,6 +5,7 @@ import { ProviderPauseBanner } from '@/components/ProviderPauseBanner';
 import { RemovalErrorToast } from '@/components/RemovalErrorToast';
 import { LocaleProvider } from '@/lib/i18n';
 import './globals.css';
+import './attachments.css';
 
 export const metadata: Metadata = {
   title: 'Owl-Agent',

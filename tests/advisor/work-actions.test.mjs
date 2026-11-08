@@ -4,6 +4,7 @@ import { mkdir, readFile, realpath, symlink, writeFile } from "node:fs/promises"
 import { join } from "node:path";
 import { test } from "node:test";
 
+import { resolveAdvisorFileDestination } from "../../packages/core/dist/advisor-file-destination.js";
 import { openPinnedFile } from "../../packages/core/dist/advisor-send-file.js";
 import { createCore } from "../../packages/core/dist/index.js";
 import { createUlid } from "../../packages/db/dist/index.js";
@@ -659,13 +660,13 @@ test("a retried turn saves the prerequisites that were never stored and reports 
   }
 });
 
-async function sendFileSetup(t, settings) {
+async function sendFileSetup(t, settings, extraOptions = {}) {
   const dir = await tempDir(t, "owl-send-file-");
   const allowed = join(dir, "allowed");
   const outside = join(dir, "outside");
   await mkdir(allowed);
   await mkdir(outside);
-  const ctx = await setup(t, settings === undefined ? {} : { getAdvisorSendFileSettings: () => settings(allowed) });
+  const ctx = await setup(t, { ...(settings === undefined ? {} : { getAdvisorSendFileSettings: () => settings(allowed) }), ...extraOptions });
   const send = async (channel, ...paths) => {
     const turnId = createUlid();
     const origin = { channel, channel_id: "C1", ref: "1.1" };
@@ -725,19 +726,182 @@ test("send_file from a Slack conversation publishes the verified file in outboun
   assert.equal(payload.action_results, "");
 });
 
-test("send_file from a Web conversation reports that sending works only in Slack and Discord", async (t) => {
-  const { allowed, send } = await sendFileSetup(t, (dir) => ({ dirs: [dir] }));
-  await writeFile(join(allowed, "a.txt"), "x");
-  const payload = await send("web", join(allowed, "a.txt"));
-  assert.equal(payload.outbound_files, undefined);
-  assert.match(payload.reply, /a\.txt は送っていません。ファイルの送信は Slack と Discord/u);
+/** The Core option that feeds the Web destination; every integration is configured unless `over` says otherwise. */
+const destinationOptions = (over = {}) => ({
+  getAdvisorFileDestinationSettings: () => ({
+    preferredProvider: null,
+    defaultDestination: null,
+    integrations: [
+      { provider: "slack", configured: true, conversationChannelIds: ["CCONV"] },
+      { provider: "discord", configured: true, conversationChannelIds: [] },
+    ],
+    ...over,
+  }),
+});
+
+/** Binds channels to the active conversation's window straight in the table (the binding API refuses the general window). */
+async function bindChannels(ctx, ...bindings) {
+  const windowId = ctx.db.get("SELECT advisor_window_id AS id FROM conversations WHERE id = ?", ctx.conversationId).id;
+  assert.ok(windowId, "the active conversation belongs to a window");
+  await ctx.db.createWriteLane().transact((tx) => {
+    for (const [provider, channelId, name] of bindings) {
+      tx.run(`INSERT INTO advisor_channel_bindings (id, window_id, provider, channel_id, display_name, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))`, createUlid(), windowId, provider, channelId, name);
+    }
+  });
+}
+
+test("resolveAdvisorFileDestination follows the order of design 3.3 row by row", () => {
+  const slack = { provider: "slack", channel_id: "CS", display_name: "s" };
+  const discord = { provider: "discord", channel_id: "CD", display_name: "d" };
+  const fallback = { provider: "discord", channel_id: "CF", display_name: "fallback" };
+  const providers = (slackOk = true, discordOk = true, ids = ["CF"]) => [
+    { provider: "slack", configured: slackOk, channel_ids: ["CS"] },
+    { provider: "discord", configured: discordOk, channel_ids: ids },
+  ];
+  const base = { window_bindings: [], preferred_provider: null, default_destination: null, providers: providers() };
+  const resolve = (over) => resolveAdvisorFileDestination({ ...base, ...over });
+  const resolved = (channel, source) => ({ kind: "resolved", destination: { ...channel, source } });
+  const refused = (reason) => ({ kind: "refused", reason });
+
+  assert.deepEqual(resolve({ window_bindings: [slack] }), resolved(slack, "window_binding"));
+  assert.deepEqual(resolve({ window_bindings: [slack], preferred_provider: "discord" }), resolved(slack, "window_binding"));
+  assert.deepEqual(resolve({ window_bindings: [slack, discord], preferred_provider: "discord" }), resolved(discord, "window_binding"));
+  assert.deepEqual(resolve({ window_bindings: [slack, discord], preferred_provider: "slack" }), resolved(slack, "window_binding"));
+  assert.deepEqual(resolve({ window_bindings: [slack, discord] }), refused("preferred_provider_unset"));
+  // A binding on a provider without a Connector is not counted, so one usable binding is left.
+  assert.deepEqual(resolve({ window_bindings: [slack, discord], providers: providers(true, false) }), resolved(slack, "window_binding"));
+  assert.deepEqual(resolve({ window_bindings: [discord], providers: providers(true, false), default_destination: fallback }), refused("default_provider_not_configured"));
+  assert.deepEqual(resolve({ default_destination: fallback }), resolved(fallback, "default_destination"));
+  assert.deepEqual(resolve({}), refused("default_destination_unset"));
+  assert.deepEqual(resolve({ default_destination: fallback, providers: providers(true, false) }), refused("default_provider_not_configured"));
+  assert.deepEqual(resolve({ default_destination: fallback, providers: providers(true, true, []) }), refused("default_channel_unavailable"));
+});
+
+test("send_file from a Web conversation goes to the window's one usable binding, the preferred one of two, or the default destination", async (t) => {
+  const ctx = await sendFileSetup(t, (dir) => ({ dirs: [dir] }), destinationOptions({ defaultDestination: { provider: "slack", channel_id: "CCONV", display_name: "owl" } }));
+  await writeFile(join(ctx.allowed, "a.txt"), "x");
+  const file = join(ctx.allowed, "a.txt");
+  const targetOf = async () => (await ctx.send("web", file)).delivery_target;
+
+  assert.deepEqual(await targetOf(), { provider: "slack", channel_id: "CCONV", display_name: "owl", source: "default_destination" });
+  await bindChannels(ctx, ["slack", "CPROJ", "proj"]);
+  assert.deepEqual(await targetOf(), { provider: "slack", channel_id: "CPROJ", display_name: "proj", source: "window_binding" });
+
+  await bindChannels(ctx, ["discord", "DPROJ", "proj-d"]);
+  const refusedPayload = await ctx.send("web", file);
+  assert.equal(refusedPayload.outbound_files, undefined);
+  assert.match(refusedPayload.reply, /a\.txt は送っていません: この窓には Slack と Discord の両方にチャンネルがあります/u);
+  assert.equal(refusedPayload.action_failures[0].code, "no_destination");
+  assert.equal(refusedPayload.action_failures[0].details.reason, "preferred_provider_unset");
+  assert.equal(refusedPayload.action_failures[0].retryable, false);
+});
+
+test("a Web send_file with a preferred provider and two bindings goes to that provider's row", async (t) => {
+  const ctx = await sendFileSetup(t, (dir) => ({ dirs: [dir] }), destinationOptions({ preferredProvider: "discord" }));
+  await writeFile(join(ctx.allowed, "a.txt"), "x");
+  await bindChannels(ctx, ["slack", "CPROJ", "proj"], ["discord", "DPROJ", "proj-d"]);
+  const payload = await ctx.send("web", join(ctx.allowed, "a.txt"));
+  assert.deepEqual(payload.delivery_target, { provider: "discord", channel_id: "DPROJ", display_name: "proj-d", source: "window_binding" });
+});
+
+test("a Web send_file with no usable destination says why in the reply, in Japanese and English", async (t) => {
+  const noDiscord = [{ provider: "slack", configured: true, conversationChannelIds: [] }, { provider: "discord", configured: false, conversationChannelIds: [] }];
+  const cases = [
+    [destinationOptions(), "default_destination_unset", /この会話の窓にはチャンネルがありません/u, /has no channel/u],
+    [destinationOptions({ defaultDestination: { provider: "discord", channel_id: "DX", display_name: "x" }, integrations: noDiscord }),
+      "default_provider_not_configured", /既定の送信先の Discord は連携が設定されていません/u, /The default destination is on Discord, which is not set up/u],
+    [destinationOptions({ defaultDestination: { provider: "slack", channel_id: "GONE", display_name: "gone" } }),
+      "default_channel_unavailable", /既定の送信先 #gone は今は使えません/u, /The default destination #gone is no longer available/u],
+    [{}, "default_destination_unset", /この会話の窓にはチャンネルがありません/u, /has no channel/u],
+  ];
+  for (const [options, reason, ja, en] of cases) {
+    const ctx = await sendFileSetup(t, (dir) => ({ dirs: [dir] }), options);
+    const file = join(ctx.allowed, "a.txt");
+    await writeFile(file, "x");
+    const payload = await ctx.send("web", file);
+    assert.equal(payload.outbound_files, undefined);
+    assert.equal(Object.hasOwn(payload, "delivery_target"), false);
+    assert.equal(payload.action_failures[0].code, "no_destination");
+    assert.equal(payload.action_failures[0].details.reason, reason);
+    assert.match(payload.reply, ja);
+    await ctx.core.setLanguage("en");
+    assert.match((await ctx.send("web", file)).reply, en);
+  }
+});
+
+test("a Web binding on a provider without a Connector is not counted and a renamed binding shows its current name", async (t) => {
+  const integrations = [{ provider: "slack", configured: true, conversationChannelIds: [] }, { provider: "discord", configured: false, conversationChannelIds: [] }];
+  const ctx = await sendFileSetup(t, (dir) => ({ dirs: [dir] }), destinationOptions({ integrations, defaultDestination: { provider: "slack", channel_id: "CPROJ", display_name: "old-name" } }));
+  const file = join(ctx.allowed, "a.txt");
+  await writeFile(file, "x");
+  await bindChannels(ctx, ["discord", "DPROJ", "proj-d"]);
+  // Only the Discord binding exists and it is not counted, so the default destination applies; its channel is not yet a Slack binding either.
+  assert.match((await ctx.send("web", file)).reply, /既定の送信先 #old-name は今は使えません/u);
+  await bindChannels(ctx, ["slack", "CPROJ", "new-name"]);
+  assert.equal((await ctx.send("web", file)).delivery_target.display_name, "new-name");
+});
+
+test("send_file from a Slack or Discord conversation still goes to the reply's channel with the destination settings in place", async (t) => {
+  const ctx = await sendFileSetup(t, (dir) => ({ dirs: [dir] }), destinationOptions({ defaultDestination: { provider: "slack", channel_id: "CCONV", display_name: "owl" } }));
+  await writeFile(join(ctx.allowed, "a.txt"), "x");
+  await bindChannels(ctx, ["slack", "CPROJ", "proj"]);
+  for (const channel of ["slack", "discord"]) {
+    const payload = await ctx.send(channel, join(ctx.allowed, "a.txt"));
+    assert.deepEqual(payload.outbound_files.map((file) => file.name), ["a.txt"]);
+    assert.deepEqual(payload.origin, { channel, channel_id: "C1", ref: "1.1" });
+    assert.equal(Object.hasOwn(payload, "delivery_target"), false);
+    assert.equal(ctx.db.get("SELECT metadata_json FROM messages WHERE id = ?", payload.message_id).metadata_json, null);
+  }
+});
+
+test("a Web reply with files keeps origin web, carries delivery_target and writes the card metadata that listMessages reads", async (t) => {
+  const ctx = await sendFileSetup(t, (dir) => ({ dirs: [dir], slackMaxBytes: 100, discordMaxBytes: 10 }), destinationOptions());
+  await writeFile(join(ctx.allowed, "small.txt"), "x");
+  await writeFile(join(ctx.allowed, "big.txt"), "x".repeat(30));
+  await writeFile(join(ctx.allowed, ".env"), "x");
+  await bindChannels(ctx, ["slack", "CPROJ", "proj"]);
+  const slack = await ctx.send("web", join(ctx.allowed, "big.txt"), join(ctx.allowed, "small.txt"), join(ctx.allowed, ".env"));
+  assert.deepEqual(slack.origin, { channel: "web", channel_id: "C1", ref: "1.1" });
+  assert.equal(slack.delivery_pending, true);
+  assert.deepEqual(slack.outbound_files.map((file) => [file.name, file.index]), [["big.txt", 0], ["small.txt", 1]]);
+  assert.deepEqual(slack.delivery_target, { provider: "slack", channel_id: "CPROJ", display_name: "proj", source: "window_binding" });
+  const stored = JSON.parse(ctx.db.get("SELECT metadata_json FROM messages WHERE id = ?", slack.message_id).metadata_json);
+  assert.equal(stored.kind, "advisor_file_delivery");
+  assert.deepEqual(stored.destination, slack.delivery_target);
+  assert.equal(stored.refusal, null);
+  assert.deepEqual(stored.files.map((file) => [file.index, file.name, file.size, file.status, file.code]), [
+    [0, "big.txt", 30, "pending", undefined], [1, "small.txt", 1, "pending", undefined], [2, ".env", null, "rejected", "secret"],
+  ]);
+  assert.match(stored.files[2].message, /\.env は送っていません: 秘密情報/u);
+  const listed = ctx.core.listMessages(ctx.conversationId).data.find((message) => message.id === slack.message_id);
+  assert.deepEqual(listed.metadata, stored);
+
+  // The same files bound for Discord use Discord's limit: big.txt is 30 bytes against 10.
+  await ctx.db.createWriteLane().transact((tx) => tx.run("DELETE FROM advisor_channel_bindings"));
+  await bindChannels(ctx, ["discord", "DPROJ", "proj-d"]);
+  const discord = await ctx.send("web", join(ctx.allowed, "big.txt"), join(ctx.allowed, "small.txt"));
+  assert.deepEqual(discord.outbound_files.map((file) => file.name), ["small.txt"]);
+  assert.equal(discord.delivery_target.provider, "discord");
+  assert.equal(discord.action_failures[0].code, "too_large");
+  assert.match(discord.reply, /30B あり、Discord の上限 10B/u);
+  const rejected = JSON.parse(ctx.db.get("SELECT metadata_json FROM messages WHERE id = ?", discord.message_id).metadata_json).files[0];
+  assert.deepEqual([rejected.status, rejected.code, rejected.size], ["rejected", "too_large", 30]);
+});
+
+test("a refused Web send_file leaves a card with refusal and no destination", async (t) => {
+  const ctx = await sendFileSetup(t, (dir) => ({ dirs: [dir] }), destinationOptions());
+  await writeFile(join(ctx.allowed, "a.txt"), "x");
+  const payload = await ctx.send("web", join(ctx.allowed, "a.txt"));
+  const stored = JSON.parse(ctx.db.get("SELECT metadata_json FROM messages WHERE id = ?", payload.message_id).metadata_json);
+  assert.deepEqual([stored.destination, stored.refusal, stored.files[0].status, stored.files[0].code], [null, "default_destination_unset", "rejected", "no_destination"]);
 });
 
 test("send_file with a missing or malformed payload reports the reason", async (t) => {
   const { send } = await sendFileSetup(t, () => ({}));
-  const payload = await send("slack", {}, { path: 1 }, { path: "/x", extra: true }, { path: "relative/a.txt" });
+  const payload = await send("slack", {}, { path: 1 }, { path: "/x", extra: true }, { path: "/x", channel_id: "C1" }, { path: "relative/a.txt" });
   assert.equal(payload.outbound_files, undefined);
-  assert.equal((payload.action_results.match(/send_file を実行しませんでした/gu) ?? []).length, 4);
+  assert.equal((payload.action_results.match(/send_file を実行しませんでした/gu) ?? []).length, 5);
   assert.match(payload.action_results, /must be absolute/u);
 });
 
@@ -856,7 +1020,7 @@ test("send_file marks a verified reply delivery_pending with each file's index a
   const none = await send("slack", join(outside, "o.txt"));
   assert.equal(Object.hasOwn(none, "delivery_pending"), false);
   const web = await send("web", join(allowed, "a.txt"));
-  assert.equal(web.action_failures[0].code, "unsupported_channel");
+  assert.equal(web.action_failures[0].code, "no_destination");
 });
 
 test("create_work and handoff_to_window failures are recorded with their codes", async (t) => {

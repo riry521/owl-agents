@@ -25,6 +25,8 @@ import type {
   DecisionAnswerResult,
   DecisionView,
   Message,
+  UploadedAttachment,
+  UploadLimits,
   Project,
   ProjectDeletionImpact,
   ProjectFolderBrowserResult,
@@ -64,6 +66,8 @@ AdvisorWindow,
   AdvisorWindowChannelState,
   AdvisorFolders,
   AdvisorFoldersInput,
+  AdvisorSendFileDestination,
+  AdvisorSendFileDestinationInput,
   RemakeLimitSettings,
   FixerEscalationSettings,
 AutoRecoverySettings,
@@ -551,6 +555,28 @@ export async function getWorkDesignMocks(id: ULID): Promise<{ mocks: WorkDesignM
   return { mocks: response.data?.mocks ?? [] };
 }
 
+export interface WorkMarkdownDocument {
+  path: string;
+  name: string;
+  source: 'project' | 'work_branch' | 'materials';
+  markdown: string;
+  size_bytes: number;
+}
+
+/** GET /api/v1/works/{id}/markdown?path=…; the path holds `/`, so it travels in the query. */
+export async function getWorkMarkdown(id: ULID, path: string): Promise<WorkMarkdownDocument> {
+  const query = new URLSearchParams({ path });
+  const response = await requestJson<{ data: WorkMarkdownDocument }>(`/works/${encodeURIComponent(id)}/markdown?${query}`);
+  return response.data;
+}
+
+/** GET /api/v1/owner-files/roots: the folders the owner-files route serves, with their absolute paths. */
+export async function getOwnerFileRoots(): Promise<{ roots: { key: string; path: string }[]; apiBase: string }> {
+  const config = await runtimeConfig();
+  const response = await requestJson<{ data: { roots: { key: string; path: string }[] } }>('/owner-files/roots');
+  return { roots: response.data.roots, apiBase: config.api_base.replace(/\/$/, '') };
+}
+
 /** iframe src of one mock; the API serves the HTML itself, so the browser loads it directly. */
 export async function designMockUrl(id: ULID, taskId: ULID, name: string): Promise<string> {
   const config = await runtimeConfig();
@@ -846,11 +872,11 @@ export async function reopenWork(
 export async function sendWorkInstruction(
   workId: ULID,
   body: string,
-  options: { reopen?: boolean; expectedVersion?: number } = {},
+  options: { reopen?: boolean; expectedVersion?: number; attachmentIds?: ULID[] } = {},
 ): Promise<{ work_id: ULID; conversation_id: ULID; message_id: ULID; status: 'queued' }> {
   const response = await command<{ work_id: ULID; conversation_id: ULID; message_id: ULID; status: 'queued' }>(
     `/works/${encodeURIComponent(workId)}/messages`,
-    { body, attachment_ids: [], ...(options.reopen ? { reopen: true } : {}) },
+    { body, attachment_ids: options.attachmentIds ?? [], ...(options.reopen ? { reopen: true } : {}) },
     options.expectedVersion ?? 0,
   );
   return response.data;
@@ -1121,11 +1147,70 @@ export async function listMessages(conversationId: string): Promise<Message[]> {
   }
 }
 
+let uploadLimitsPromise: Promise<UploadLimits> | null = null;
+
+/** GET /api/v1/uploads/limits; fetched once per page load and reused (a failure is not cached). */
+export function getUploadLimits(): Promise<UploadLimits> {
+  if (!uploadLimitsPromise) {
+    uploadLimitsPromise = requestJson<ApiEnvelope<UploadLimits>>('/uploads/limits')
+      .then((response) => response.data)
+      .catch((error) => {
+        uploadLimitsPromise = null;
+        throw error;
+      });
+  }
+  return uploadLimitsPromise;
+}
+
+export type AttachmentTarget = { kind: 'conversation' | 'work'; id: ULID };
+
+/**
+ * POST the file as the raw request body. requestWithResponse always sends
+ * JSON, so this builds its own request and reuses only URL and error handling.
+ */
+export async function uploadAttachment(
+  target: AttachmentTarget,
+  file: File,
+  options: { signal?: AbortSignal } = {},
+): Promise<UploadedAttachment> {
+  const config = await runtimeConfig();
+  const collection = target.kind === 'work' ? 'works' : 'conversations';
+  const url = resolveApiUrl(config.api_base, `/${collection}/${encodeURIComponent(target.id)}/attachments`);
+  const requestId = createRequestId();
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      cache: 'no-store',
+      signal: options.signal,
+      body: file,
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': file.type || 'application/octet-stream',
+        'X-Owl-Filename': encodeURIComponent(file.name),
+        'X-Request-Id': requestId,
+        'Idempotency-Key': `web-attachment:${requestId}`,
+      },
+    });
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    console.error('[Owl] attachment upload network request failed', { url, error });
+    throw new ApiRequestError('network_error', 'サーバーへ接続できません。', null);
+  }
+  const body = await parseJson(response, `POST ${url}`);
+  if (!response.ok) throw apiErrorFromBody(body, response.status, url);
+  const data = isRecord(body) ? body.data : null;
+  if (!isRecord(data) || typeof data.attachment_id !== 'string') {
+    throw new ApiRequestError('invalid_response', 'サーバーから受け取ったデータを解釈できません。', response.status);
+  }
+  return data as unknown as UploadedAttachment;
+}
+
 /** POST /api/v1/conversations/{id}/messages with the command envelope. */
-export async function postMessage(conversationId: string, body: string): Promise<{ message_id: string }> {
+export async function postMessage(conversationId: string, body: string, attachmentIds: string[] = []): Promise<{ message_id: string }> {
   const response = await command<{ message_id: string; advisor_run_id: string | null }>(
     `/conversations/${encodeURIComponent(conversationId)}/messages`,
-    { body, attachment_ids: [] },
+    { body, attachment_ids: attachmentIds },
     0,
   );
   return response.data;
@@ -1445,6 +1530,16 @@ export async function getAdvisorFolders(): Promise<AdvisorFolders> {
 
 export async function putAdvisorFolders(input: AdvisorFoldersInput): Promise<AdvisorFolders> {
   const response = await command<AdvisorFolders>('/settings/advisor-folders', input, 0, 'PUT');
+  return response.data;
+}
+
+export async function getAdvisorSendFileDestination(): Promise<AdvisorSendFileDestination> {
+  const response = await requestJson<ApiEnvelope<AdvisorSendFileDestination>>('/settings/advisor-send-file-destination');
+  return response.data;
+}
+
+export async function putAdvisorSendFileDestination(input: AdvisorSendFileDestinationInput): Promise<AdvisorSendFileDestination> {
+  const response = await command<AdvisorSendFileDestination>('/settings/advisor-send-file-destination', input, 0, 'PUT');
   return response.data;
 }
 

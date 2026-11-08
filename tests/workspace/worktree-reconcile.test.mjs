@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { access, chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { reconcileWorktrees } from "../../packages/core/dist/index.js";
+import { recordedWorktreeBlock } from "../../packages/core/dist/worktree-reconciler.js";
 import { GitWorktreeGateway } from "../../packages/core/dist/git-gateway.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { command, createTestCore } from "../helpers/core.mjs";
@@ -565,4 +566,255 @@ test("Core reconcile does not report a workspace of a Work this database has no 
   assert.equal(outcome.verified, true);
   assert.deepEqual(outcome.failures, []);
   await access(foreign.worktree_path);
+});
+
+// --- Repeated refusals because of ignored files ----------------------------
+
+async function ignoredLeftover(t, taskId = "T1") {
+  const fixture = await reconcileFixture(t);
+  await writeFile(join(fixture.projectPath, ".gitignore"), ".venv/\n");
+  git(fixture.projectPath, "add", ".gitignore");
+  git(fixture.projectPath, "commit", "-m", "ignore venv");
+  await insertWork(fixture.writeLane, "W", { state: "running" });
+  const prepared = await fixture.gateway.prepareWorktree({ work_id: "W", task_id: taskId });
+  const ignoredFile = join(prepared.worktree_path, ".venv", "lib.txt");
+  await mkdir(dirname(ignoredFile), { recursive: true });
+  await writeFile(ignoredFile, "ignored\n");
+  const calls = [];
+  const spy = Object.create(fixture.gateway);
+  spy.discardTaskWorktree = (request) => { calls.push(request); return fixture.gateway.discardTaskWorktree(request); };
+  const warnings = [];
+  t.mock.method(console, "warn", (...args) => { warnings.push(args.join(" ")); });
+  return { ...fixture, prepared, ignoredFile, calls, spy, warnings };
+}
+
+test("a worktree refused for ignored files is not discarded or logged again, even with new deps on the same DB", async (t) => {
+  const f = await ignoredLeftover(t);
+  await insertTask(f.writeLane, "T1", "W", { status: "cancelled", worktreeState: "active", worktreePath: f.prepared.worktree_path });
+
+  const first = await reconcileWorktrees({ db: f.db, writeLane: f.writeLane, git: f.spy }, { work_id: "W", reason: "r" });
+  assert.deepEqual(first, { discarded: [], skipped: ["T1"] });
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.warnings.length, 1);
+  assert.equal(f.db.all("SELECT 1 FROM events WHERE type = 'worktree.reconcile_blocked'").length, 1);
+
+  await reconcileWorktrees({ db: f.db, writeLane: f.writeLane, git: f.spy }, { work_id: "W", reason: "r" });
+  // Fresh deps over the same DB stand in for a restart.
+  await reconcileWorktrees({ db: f.db, writeLane: f.writeLane, git: Object.create(f.spy) }, { work_id: "W", reason: "startup" });
+  assert.equal(f.calls.length, 1, "no further discard");
+  assert.equal(f.warnings.length, 1, "no further warning");
+  assert.equal(f.db.all("SELECT 1 FROM events WHERE type = 'worktree.reconcile_blocked'").length, 1);
+});
+
+test("a blocked worktree is discarded again once its ignored files are gone; reconcile never deletes ignored files", async (t) => {
+  const f = await ignoredLeftover(t);
+  await insertTask(f.writeLane, "T1", "W", { status: "cancelled", worktreeState: "active", worktreePath: f.prepared.worktree_path });
+  const deps = { db: f.db, writeLane: f.writeLane, git: f.spy };
+
+  await reconcileWorktrees(deps, { work_id: "W", reason: "r" });
+  await reconcileWorktrees(deps, { work_id: "W", reason: "r" });
+  await access(f.ignoredFile);
+  assert.equal(f.calls.length, 1);
+
+  await rm(join(f.prepared.worktree_path, ".venv"), { recursive: true });
+  const result = await reconcileWorktrees(deps, { work_id: "W", reason: "r" });
+  assert.deepEqual(result, { discarded: ["T1"], skipped: [] });
+  assert.equal(f.calls.length, 2);
+  await assert.rejects(access(f.prepared.worktree_path));
+});
+
+test("a full-tree reconcile skips an orphaned worktree blocked by ignored files until they are removed", async (t) => {
+  const f = await ignoredLeftover(t, "ghost");
+  const deps = { db: f.db, writeLane: f.writeLane, git: f.spy };
+
+  assert.deepEqual(await reconcileWorktrees(deps, { reason: "startup" }), { discarded: [], skipped: ["ghost"] });
+  await reconcileWorktrees(deps, { reason: "startup" });
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.warnings.length, 1);
+
+  await rm(join(f.prepared.worktree_path, ".venv"), { recursive: true });
+  assert.deepEqual(await reconcileWorktrees(deps, { reason: "startup" }), { discarded: ["ghost"], skipped: [] });
+});
+
+test("a merged Work keeps reporting a blocked workspace as a failure without retrying or logging it", async (t) => {
+  const f = await ignoredLeftover(t);
+  await f.writeLane.transact((tx) => { tx.run("UPDATE works SET state = 'completed' WHERE id = 'W'"); return null; });
+  await recordMergedCompletion(f.writeLane, f.db, "W");
+  await insertTask(f.writeLane, "T1", "W", { status: "cancelled", worktreeState: "active", worktreePath: f.prepared.worktree_path });
+  const calls = [];
+  const merged = Object.create(f.gateway);
+  merged.discardMergedWorktree = async (request) => {
+    calls.push(request);
+    return { ok: false, exit_code: 1, recorded: false, worktree_path: f.prepared.worktree_path, message: "Ignored contents remain: .venv.", ignored_paths: [".venv"] };
+  };
+  const deps = { db: f.db, writeLane: f.writeLane, git: merged, owlRoot: f.owlRoot, dataDir: join(f.owlRoot, "data") };
+
+  const first = await reconcileWorktrees(deps, { work_id: "W", reason: "r" });
+  const second = await reconcileWorktrees(deps, { work_id: "W", reason: "r" });
+  assert.equal(calls.length, 1);
+  assert.equal(f.warnings.length, 1);
+  assert.equal(first.failures.some((x) => x.path === f.prepared.worktree_path && !x.blocked), true);
+  assert.equal(second.failures.some((x) => x.path === f.prepared.worktree_path && x.blocked === true), true, "stays in failures");
+});
+
+test("a refusal that is not about ignored files is retried and logged on every reconcile", async (t) => {
+  const f = await ignoredLeftover(t);
+  await insertTask(f.writeLane, "T1", "W", { status: "cancelled", worktreeState: "active", worktreePath: f.prepared.worktree_path });
+  let calls = 0;
+  const failing = Object.create(f.gateway);
+  failing.discardTaskWorktree = async () => { calls += 1; return { ok: false, exit_code: 1, recorded: false, message: "boom" }; };
+  const deps = { db: f.db, writeLane: f.writeLane, git: failing };
+
+  await reconcileWorktrees(deps, { work_id: "W", reason: "r" });
+  await reconcileWorktrees(deps, { work_id: "W", reason: "r" });
+  assert.equal(calls, 2);
+  assert.equal(f.warnings.length, 2);
+  assert.equal(f.db.all("SELECT 1 FROM events WHERE type = 'worktree.reconcile_blocked'").length, 0);
+});
+
+test("a worktree stays blocked when its ignored-path set changed from A to B and back to A while A remains", async (t) => {
+  const f = await ignoredLeftover(t);
+  const record = async (n, paths) => {
+    const sequence = f.db.get("SELECT COALESCE(MAX(sequence), 0) + 1 AS next FROM events").next;
+    await f.writeLane.transact((tx) => {
+      tx.run(
+        `INSERT INTO events (id, sequence, idempotency_key, type, work_id, payload_json, status, created_at)
+         VALUES (?, ?, ?, 'worktree.reconcile_blocked', 'W', ?, 'handled', ?)`,
+        createUlid(), sequence, `aba:${n}`,
+        JSON.stringify({ work_id: "W", task_id: "T1", path: f.prepared.worktree_path, ignored_paths: paths, message: "Ignored contents remain." }), new Date().toISOString(),
+      );
+      return null;
+    });
+  };
+  await record(1, [".venv"]);
+  await record(2, ["gone-b"]);
+  await record(3, [".venv"]);
+  await record(4, ["gone-c"]);
+  assert.equal(await recordedWorktreeBlock(f.db, "W", f.prepared.worktree_path), "Ignored contents remain.");
+  await rm(join(f.prepared.worktree_path, ".venv"), { recursive: true });
+  assert.equal(await recordedWorktreeBlock(f.db, "W", f.prepared.worktree_path), null);
+});
+
+test("a worktree blocked by an ignored directory is discarded again once only the empty directory is left", async (t) => {
+  const f = await ignoredLeftover(t);
+  await insertTask(f.writeLane, "T1", "W", { status: "cancelled", worktreeState: "active", worktreePath: f.prepared.worktree_path });
+  const deps = { db: f.db, writeLane: f.writeLane, git: f.spy };
+
+  await reconcileWorktrees(deps, { work_id: "W", reason: "r" });
+  const recorded = f.db.get("SELECT payload_json FROM events WHERE type = 'worktree.reconcile_blocked'");
+  assert.deepEqual(JSON.parse(recorded.payload_json).ignored_paths, [".venv/"]);
+
+  await rm(f.ignoredFile);
+  const result = await reconcileWorktrees(deps, { work_id: "W", reason: "r" });
+  assert.deepEqual(result, { discarded: ["T1"], skipped: [] });
+  assert.equal(f.calls.length, 2);
+  await assert.rejects(access(f.prepared.worktree_path));
+});
+
+async function ignoredIntegration(t) {
+  const fixture = await reconcileFixture(t);
+  await writeFile(join(fixture.projectPath, ".gitignore"), ".venv/\n");
+  git(fixture.projectPath, "add", ".gitignore");
+  git(fixture.projectPath, "commit", "-m", "ignore venv");
+  await insertWork(fixture.writeLane, "W", { state: "completed" });
+  const prepared = await fixture.gateway.prepareWorktree({ work_id: "W", task_id: "T1" });
+  await writeFile(join(prepared.worktree_path, "done.txt"), "merged\n");
+  const integrated = await fixture.gateway.integrateTask({ work_id: "W", task_id: "T1", worktree_path: prepared.worktree_path });
+  assert.equal(integrated.merged, true, integrated.message);
+  await insertTask(fixture.writeLane, "T1", "W", { status: "completed", worktreeState: "merged", worktreePath: null });
+  const integrationPath = join(fixture.owlRoot, ".owl-workspaces", "W", "__work__");
+  await mkdir(join(integrationPath, ".venv"), { recursive: true });
+  await writeFile(join(integrationPath, ".venv", "lib.txt"), "ignored\n");
+  const calls = [];
+  const spy = Object.create(fixture.gateway);
+  spy.removeIntegrationWorktree = (request) => { calls.push(request); return fixture.gateway.removeIntegrationWorktree(request); };
+  const warnings = [];
+  t.mock.method(console, "warn", (...args) => { warnings.push(args.join(" ")); });
+  return { ...fixture, integrationPath, calls, spy, warnings };
+}
+
+for (const scope of ["work", "full"]) {
+  test(`a completed Work's __work__ blocked by ignored files is not removed or logged again (${scope} reconcile), and is removed once they are gone`, async (t) => {
+    const f = await ignoredIntegration(t);
+    const deps = { db: f.db, writeLane: f.writeLane, git: f.spy, owlRoot: f.owlRoot, dataDir: join(f.owlRoot, "data") };
+    const request = scope === "work" ? { work_id: "W", reason: "r" } : { reason: "startup" };
+
+    await reconcileWorktrees(deps, request);
+    const warned = f.warnings.length;
+    await reconcileWorktrees({ ...deps, git: Object.create(f.spy) }, request);
+    assert.equal(f.calls.length, 1, "no further removal");
+    assert.equal(f.warnings.length, warned, "no further warning");
+    await access(join(f.integrationPath, ".venv", "lib.txt"));
+
+    await rm(join(f.integrationPath, ".venv"), { recursive: true });
+    await reconcileWorktrees(deps, request);
+    assert.equal(f.calls.length, 2);
+    await assert.rejects(access(f.integrationPath));
+  });
+}
+
+for (const scope of ["work", "full"]) {
+  test(`a blocked __work__ is removed once only its empty ignored directory is left (${scope} reconcile)`, async (t) => {
+    const f = await ignoredIntegration(t);
+    const deps = { db: f.db, writeLane: f.writeLane, git: f.spy, owlRoot: f.owlRoot, dataDir: join(f.owlRoot, "data") };
+    const request = scope === "work" ? { work_id: "W", reason: "r" } : { reason: "startup" };
+
+    await reconcileWorktrees(deps, request);
+    await rm(join(f.integrationPath, ".venv", "lib.txt"));
+    await reconcileWorktrees(deps, request);
+    assert.equal(f.calls.length, 2);
+    await assert.rejects(access(f.integrationPath));
+  });
+}
+
+test("Core reconcile keeps a blocked __work__ in failures without a new warning, and warns while another entry is not blocked, in any order", async (t) => {
+  const f = await ignoredIntegration(t);
+  const { core } = await createTestCore(t, { db: f.db, owlRoot: f.owlRoot });
+  const leftWarnings = () => f.warnings.filter((line) => line.includes("left worktrees")).length;
+
+  await core.runWorktreeReconcile("W", "r");
+  const afterFirst = leftWarnings();
+  const second = await core.runWorktreeReconcile("W", "r");
+  assert.equal(leftWarnings(), afterFirst, "no new warning");
+  assert.equal(second.verified, true);
+  assert.equal(second.failures.some((x) => x.work_id === "W" && x.blocked === true), true);
+
+  // A second, unblocked entry in the same Work must produce the warning whatever the list order.
+  await f.gateway.prepareWorktree({ work_id: "W", task_id: "T2" });
+  const listed = await f.gateway.listWorkspaces();
+  for (const order of [listed, [...listed].reverse()]) {
+    core.git.listWorkspaces = async () => order;
+    const before = leftWarnings();
+    const outcome = await core.runWorktreeReconcile("W", "r");
+    assert.equal(leftWarnings(), before + 1);
+    assert.equal(outcome.failures.some((x) => x.work_id === "W" && !x.blocked), true);
+  }
+});
+
+test("a refusal recorded before the merge does not stop the merged-Work force removal of a Task worktree", async (t) => {
+  const f = await ignoredLeftover(t);
+  await insertTask(f.writeLane, "T1", "W", { status: "cancelled", worktreeState: "active", worktreePath: f.prepared.worktree_path });
+  const deps = { db: f.db, writeLane: f.writeLane, git: f.gateway, owlRoot: f.owlRoot, dataDir: join(f.owlRoot, "data") };
+
+  await reconcileWorktrees(deps, { work_id: "W", reason: "r" });
+  assert.equal(f.db.all("SELECT 1 FROM events WHERE type = 'worktree.reconcile_blocked'").length, 1);
+  await f.writeLane.transact((tx) => { tx.run("UPDATE works SET state = 'completed' WHERE id = 'W'"); return null; });
+  await recordMergedCompletion(f.writeLane, f.db, "W");
+
+  const result = await reconcileWorktrees(deps, { work_id: "W", reason: "r" });
+  assert.deepEqual(result.failures ?? [], []);
+  await assert.rejects(access(f.prepared.worktree_path));
+});
+
+test("a refusal recorded before the merge does not stop the merged-Work force removal of __work__", async (t) => {
+  const f = await ignoredIntegration(t);
+  const deps = { db: f.db, writeLane: f.writeLane, git: f.gateway, owlRoot: f.owlRoot, dataDir: join(f.owlRoot, "data") };
+
+  await reconcileWorktrees(deps, { work_id: "W", reason: "r" });
+  assert.equal(f.db.all("SELECT 1 FROM events WHERE type = 'worktree.reconcile_blocked'").length, 1);
+  await recordMergedCompletion(f.writeLane, f.db, "W");
+
+  const result = await reconcileWorktrees(deps, { work_id: "W", reason: "r" });
+  assert.deepEqual(result.failures ?? [], []);
+  await assert.rejects(access(f.integrationPath));
 });

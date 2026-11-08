@@ -55,6 +55,8 @@ const delta = (threadId, itemId, text) =>
 const agentMessage = (id, text, phase) => ({ type: "agentMessage", id, text, ...(phase === undefined ? {} : { phase }) });
 const itemCompleted = (threadId, item) =>
   send({ method: "item/completed", params: { threadId, turnId: "turn-c1", item, completedAtMs: 0 } });
+const itemStarted = (threadId, item) =>
+  send({ method: "item/started", params: { threadId, turnId: "turn-c1", item, startedAtMs: 0 } });
 const turnCompleted = (threadId, items) =>
   send({ method: "turn/completed", params: { threadId, turn: { id: "turn-c1", status: "completed", items, itemsView: items.length === 0 ? "notLoaded" : "full", error: null } } });
 const turnInterrupted = (threadId) =>
@@ -69,6 +71,33 @@ function finishTurn(threadId, items) {
 const commentary = agentMessage("i1", "thinking...", "commentary");
 const finalAnswer = agentMessage("i2", "hello", "final_answer");
 function phasedTurn(threadId) {
+  if (scenario === "activity") {
+    const steps = [
+      { type: "reasoning", id: "a1" },
+      { type: "commandExecution", id: "a2" },
+      { type: "reasoning", id: "a3" },
+      { type: "mcpToolCall", id: "a4", tool: "lookup" },
+      { type: "userMessage", id: "a5" },
+      { type: "collabAgentToolCall", id: "a6" },
+    ];
+    for (const item of steps) {
+      itemStarted(threadId, item);
+      itemCompleted(threadId, item);
+    }
+    delta(threadId, "i2", "hello");
+    turnCompleted(threadId, [finalAnswer]);
+    return;
+  }
+  if (scenario === "malformed-started") {
+    send({ method: "item/started", params: { threadId, turnId: "turn-c1" } });
+    send({ method: "item/started", params: { threadId, turnId: "turn-c1", item: "x" } });
+    send({ method: "item/started", params: { threadId, turnId: "turn-c1", item: { type: "commandExecution" } } });
+    send({ method: "item/started", params: { threadId, item: { type: "commandExecution", id: "z" } } });
+    send({ method: "item/started" });
+    delta(threadId, "i2", "hello");
+    turnCompleted(threadId, [finalAnswer]);
+    return;
+  }
   if (scenario === "delta-missing-item-id") {
     send({ method: "item/agentMessage/delta", params: { threadId, turnId: "turn-c1", delta: "hello" } });
     return;
@@ -107,7 +136,7 @@ function phasedTurn(threadId) {
     turnCompleted(threadId, []);
   }
 }
-const PHASED = new Set(["turn-failed-429", "turn-failed-usage", "phased", "phased-items-only", "phased-delta-only", "commentary-only", "legacy-multi", "delta-missing-item-id"]);
+const PHASED = new Set(["activity", "malformed-started", "turn-failed-429", "turn-failed-usage", "phased", "phased-items-only", "phased-delta-only", "commentary-only", "legacy-multi", "delta-missing-item-id"]);
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line);
   fs.appendFileSync(log, JSON.stringify(message) + "\\n");
@@ -265,6 +294,25 @@ async function codexTurn(t, scenario) {
   const events = await collectEvents(driver, (event) => event.type === "turn.completed" || event.type === "turn.failed");
   return { driver, events, completed: events.find((event) => event.type === "turn.completed") };
 }
+
+test("Codex items map to the activity states", async (t) => {
+  const seen = [];
+  const { driver } = await createCodexDriver(t, {
+    env: { FAKE_TURN: "activity" },
+    request: { on_activity: (activity) => seen.push(activity) },
+  });
+  await driver.send({ turn_id: "local-turn", text: "hello" });
+  await collectEvents(driver, (event) => event.type === "turn.completed" || event.type === "turn.failed");
+  const shape = seen.map((a) => `${a.state}/${a.tool_name}`);
+  assert.deepEqual(shape, ["thinking/null", "tool/Shell", "thinking/null", "tool/lookup", "thinking/null", "subagent/null", "thinking/null", "null/null"]);
+  assert.ok(seen.every((a) => a.background_count === 0));
+});
+
+test("a malformed item/started is ignored", async (t) => {
+  const { events, completed } = await codexTurn(t, "malformed-started");
+  assert.equal(completed?.reply, "hello");
+  assert.equal(events.some((event) => event.type === "turn.failed"), false);
+});
 
 test("Codex reply is the final_answer item only, never the commentary", async (t) => {
   const { events, completed } = await codexTurn(t, "phased");
@@ -921,4 +969,180 @@ test("Claude result errors[] decide the failure text, and a missing conversation
   const flagged = (await collectEvents(driver, settled)).find((event) => event.type === "turn.failed");
   assert.match(flagged?.error ?? "", /会話が見つからず/u);
   assert.equal(flagged?.provider_error?.code, "conversation_not_found");
+});
+
+// Lines below keep the shape the real Claude CLI 2.1.314 prints (long fields omitted).
+const toolUse = (id, name, extra = {}, parent) => ({
+  type: "assistant",
+  ...(parent ? { parent_tool_use_id: parent } : {}),
+  message: { content: [{ type: "tool_use", id, name, input: {}, ...extra }] },
+});
+const toolResult = (id) => ({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: id, content: "ok" }] } });
+const backgroundTasks = (...ids) => ({
+  type: "system",
+  subtype: "background_tasks_changed",
+  tasks: ids.map((task_id) => ({ task_id, run_id: `run-${task_id}`, task_type: "local_bash", description: "Sleep 30s" })),
+});
+const idle = { state: null, tool_name: null, background_count: 0 };
+const activity = (state, tool_name = null, background_count = 0) => ({ state, tool_name, background_count });
+
+async function runActivityTurn(t, lines, request = {}) {
+  const seen = [];
+  const driver = await createClaudeDriver(t, [lines], { on_activity: (value) => seen.push(value), ...request });
+  await driver.send({ turn_id: "turn-1", text: "go" });
+  await collectEvents(driver, settled);
+  return { driver, seen };
+}
+
+test("the driver reports thinking, tool and subagent from Claude's lines", async (t) => {
+  const { seen } = await runActivityTurn(t, [
+    { type: "system", subtype: "thinking_tokens" },
+    toolUse("toolu_1", "Bash"),
+    { type: "system", subtype: "task_started", task_id: "b1", tool_use_id: "toolu_1", is_backgrounded: false, task_type: "local_bash" },
+    toolResult("toolu_1"),
+    toolUse("toolu_2", "Agent"),
+    toolUse("toolu_in", "Read", {}, "toolu_2"),
+    { type: "system", subtype: "task_progress", task_id: "a1" },
+    toolResult("toolu_2"),
+    successResult("done"),
+  ]);
+  assert.deepEqual(seen, [
+    activity("thinking"),
+    activity("tool", "Bash"),
+    activity("thinking"),
+    activity("subagent"),
+    activity("thinking"),
+    idle,
+  ]);
+});
+
+test("concurrently open tools fall back to the one still open", async (t) => {
+  const { seen } = await runActivityTurn(t, [
+    { type: "assistant", message: { content: [
+      { type: "tool_use", id: "toolu_a", name: "Read", input: {} },
+      { type: "tool_use", id: "toolu_b", name: "Grep", input: {} },
+    ] } },
+    toolResult("toolu_b"),
+    toolResult("toolu_a"),
+    successResult("done"),
+  ]);
+  assert.deepEqual(seen, [
+    activity("thinking"),
+    activity("tool", "Read"),
+    activity("tool", "Grep"),
+    activity("tool", "Read"),
+    activity("thinking"),
+    idle,
+  ]);
+});
+
+test("the background count outlives the reply and falls as tasks end", async (t) => {
+  const seen = [];
+  const unsolicited = [];
+  const driver = await createClaudeDriver(
+    t,
+    [[
+      toolUse("toolu_1", "Bash", { input: { run_in_background: true } }),
+      backgroundTasks("bg1", "bg2"),
+      { type: "system", subtype: "task_started", task_id: "bg1", tool_use_id: "toolu_1", is_backgrounded: true },
+      toolResult("toolu_1"),
+      successResult("started"),
+      { __delay: 150 },
+      { type: "system", subtype: "task_updated", task_id: "bg1", patch: { status: "completed" } },
+      { type: "system", subtype: "task_notification", task_id: "bg1", tool_use_id: "toolu_1", status: "completed" },
+      backgroundTasks("bg2"),
+      { type: "system", subtype: "init", session_id: "s" },
+      assistantText("bg1 finished"),
+      { ...successResult("bg1 finished"), origin: { kind: "task-notification", producer: "session-task" } },
+      backgroundTasks(),
+    ]],
+    { on_activity: (value) => seen.push(value), on_unsolicited_reply: (reply) => unsolicited.push(reply) },
+  );
+  await driver.send({ turn_id: "turn-1", text: "go" });
+  await collectEvents(driver, settled);
+  await sleep(60);
+  assert.deepEqual(seen.at(-1), activity(null, null, 2));
+  for (let i = 0; i < 40 && unsolicited.length === 0; i += 1) await sleep(50);
+  await sleep(50);
+  assert.deepEqual(seen.slice(-4), [activity(null, null, 1), activity("thinking", null, 1), activity(null, null, 1), idle]);
+  assert.equal(unsolicited.length, 1);
+});
+
+test("a background task that ends mid-reply leaves the foreground alone", async (t) => {
+  const { seen } = await runActivityTurn(t, [
+    backgroundTasks("bg1"),
+    toolUse("toolu_1", "Bash"),
+    backgroundTasks(),
+    toolResult("toolu_1"),
+    successResult("done"),
+  ]);
+  assert.deepEqual(seen, [
+    activity("thinking"),
+    activity("thinking", null, 1),
+    activity("tool", "Bash", 1),
+    activity("tool", "Bash", 0),
+    activity("thinking"),
+    idle,
+  ]);
+});
+
+test("task_notification alone lowers the background count", async (t) => {
+  const { seen } = await runActivityTurn(t, [
+    backgroundTasks("bg1", "bg2"),
+    { type: "system", subtype: "task_notification", task_id: "bg1", status: "stopped" },
+    { type: "system", subtype: "task_notification", task_id: "not-background", status: "completed" },
+    successResult("done"),
+  ]);
+  assert.deepEqual(seen.map((value) => value.background_count), [0, 2, 1, 1]);
+});
+
+test("a failed turn clears the foreground but keeps the background count", async (t) => {
+  const isError = await runActivityTurn(t, [
+    backgroundTasks("bg1"),
+    toolUse("toolu_1", "Bash"),
+    { type: "result", subtype: "success", is_error: true, result: "API Error: boom" },
+  ]);
+  assert.deepEqual(isError.seen.at(-1), activity(null, null, 1));
+
+  const seen = [];
+  const apiError = await createClaudeDriver(
+    t,
+    [[backgroundTasks("bg1"), toolUse("toolu_1", "Bash"), { type: "system", subtype: "api_error", error: { message: "boom" } }]],
+    { on_activity: (value) => seen.push(value) },
+  );
+  await apiError.send({ turn_id: "turn-1", text: "go" });
+  await collectEvents(apiError, settled);
+  assert.deepEqual(seen.at(-1), activity(null, null, 1));
+});
+
+test("the process exit clears the activity", async (t) => {
+  const { driver, seen } = await runActivityTurn(t, [backgroundTasks("bg1"), successResult("done")]);
+  assert.deepEqual(seen.at(-1), activity(null, null, 1));
+  await driver.stop("test", 1000);
+  assert.deepEqual(seen.at(-1), idle);
+});
+
+test("malformed task lines are ignored", async (t) => {
+  const { driver, seen } = await runActivityTurn(t, [
+    backgroundTasks("bg1"),
+    { type: "system", subtype: "background_tasks_changed", tasks: "nope" },
+    { type: "system", subtype: "background_tasks_changed", tasks: [{ no_id: true }, null, { task_id: "bg2" }] },
+    { type: "system", subtype: "task_notification" },
+    { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash" }] } },
+    successResult("done"),
+  ]);
+  assert.equal(driver.exited, false);
+  assert.deepEqual(seen.map((value) => value.background_count), [0, 1, 1]);
+});
+
+test("a throwing on_activity does not break the turn", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  const driver = await createClaudeDriver(t, [[toolUse("toolu_1", "Bash"), toolResult("toolu_1"), successResult("done")]], {
+    on_activity: () => { throw new Error("display failed"); },
+  });
+  await driver.send({ turn_id: "turn-1", text: "go" });
+  const events = await collectEvents(driver, settled);
+  assert.equal(events.at(-1)?.type, "turn.completed");
+  assert.equal(events.at(-1)?.reply, "done");
+  assert.equal(driver.exited, false);
 });

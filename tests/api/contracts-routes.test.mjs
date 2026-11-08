@@ -346,3 +346,20 @@ test("PUT /settings/auto-recovery saves a valid limit (200) and rejects bad bodi
   assert.deepEqual(view.auto_recovery, (await (await server.request("GET", "/api/v1/settings/auto-recovery")).json()).data);
   assert.notEqual(stored.limit, view.auto_recovery.limit);
 });
+
+test("OpenAPI documents GET /works/{work_id}/markdown with the path query, its response schemas and error codes", () => {
+  const route = yamlBlock(openapi, "  /api/v1/works/{work_id}/markdown:");
+  assert.match(route, /operationId: getWorkMarkdown/u);
+  assert.match(route, /name: path\n\s+in: query\n\s+required: true/u);
+  assert.match(route, /maxLength: 4096/u);
+  assert.match(route, /#\/components\/schemas\/WorkMarkdownResponse/u);
+  for (const code of ["validation_error", "markdown_path_denied", "work_not_found", "markdown_not_found", "markdown_not_integrated", "markdown_too_large", "markdown_unreadable", "knowledge_storage_unavailable", "dependency_unavailable"]) {
+    assert.match(route, new RegExp(`- ${code}\\n`, "u"), code);
+  }
+  assert.match(route, /outside, symlink_escape, traversal, secret or not_markdown/u);
+  const document = yamlBlock(openapi, "    WorkMarkdown:");
+  for (const field of ["path", "name", "source", "markdown", "size_bytes"]) assert.match(document, new RegExp(`- ${field}\\n`, "u"), field);
+  for (const source of ["project", "work_branch", "materials"]) assert.match(document, new RegExp(`- ${source}\\n`, "u"), source);
+  assert.match(yamlBlock(openapi, "    WorkMarkdownResponse:"), /#\/components\/schemas\/WorkMarkdown'/u);
+  assert.match(http, /\/works\/\(\[\^\/\]\+\)\/markdown\$/u);
+});

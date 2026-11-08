@@ -197,6 +197,31 @@ test("an instruction to a judgement_waiting Work resolves its open Decision, res
   assert.equal(db.get("SELECT COUNT(*) AS n FROM decisions WHERE work_id = ?", runningId).n, 0);
 });
 
+test("a files-only instruction to a judgement_waiting Work answers the Decision with the attachmentsOnly sentence", async (t) => {
+  const { db, core } = await setup(t);
+  const workId = await createWorkInState(core, db, "judgement_waiting", "files-only");
+  const taskId = createUlid();
+  const decisionId = createUlid();
+  const now = "2020-01-01T00:00:00.000Z";
+  await db.createWriteLane().transact((tx) => {
+    tx.run(
+      `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, state_version, failure_count, same_error_count, review_round, worker_generation, created_at, updated_at, retry_no, manager_task_id)
+       VALUES (?, ?, 'blocked', 'research', 'judgement_waiting', 'normal', '', 'Done.', 0, 0, 0, 0, 0, ?, ?, 0, 'T1')`,
+      taskId, workId, now, now,
+    );
+    tx.run(
+      `INSERT INTO decisions (id, work_id, scope, status, blocked_task_ids_json, reason, tried, current_state, options_json, recommended, allow_free_text, issuer_role, state_version, created_at)
+       VALUES (?, ?, 'task', 'open', ?, 'stuck', 'Core', 'judgement_waiting', '[]', NULL, 0, 'core', 0, ?)`,
+      decisionId, workId, JSON.stringify([taskId]), now,
+    );
+    return null;
+  });
+  const upload = await core.uploadWebAttachment("owner:default", { work_id: workId }, { filename: "spec.txt", mime: "text/plain", content: Buffer.from("x") }, { request_id: "r-fo", idempotency_key: "k-fo" });
+  await core.postWorkInstruction(workId, command({ body: "", attachment_ids: [upload.attachment_id] }, "files-only", 1));
+  const answer = JSON.parse(db.get("SELECT answer_json FROM decision_answers WHERE decision_id = ?", decisionId).answer_json).answer;
+  assert.ok(["（本文なし。添付ファイル: spec.txt）", "(No text. Attached files: spec.txt)"].includes(answer), answer);
+});
+
 // An instruction stops the running Agents, confirms they ended, then replans.
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -680,4 +705,44 @@ test("an instruction during the Manager call for a failure discards that plan an
   assert.equal(db.get("SELECT COUNT(*) AS n FROM tasks WHERE title = 'Discarded plan'").n, 0, "the first plan was not applied");
   await waitFor(() => db.get("SELECT COUNT(*) AS n FROM tasks WHERE title = 'Applied plan'").n === 1, { message: "the second plan to be applied" });
   assertFailureAndInstruction(r.state.requests[1], "Mid-call instruction");
+});
+
+// ---- attachments reach the Manager in owner_requests ----
+
+async function failT1WithInstruction(t, payloadOf) {
+  const r = raceRunner({ stops: true });
+  const { db, core, workId } = await openRace(t, r);
+  const upload = (name, mime, content, key) =>
+    core.uploadWebAttachment("owner:default", { work_id: workId }, { filename: name, mime, content: Buffer.from(content) }, { request_id: `r-${key}`, idempotency_key: key });
+  const sent = await payloadOf({ upload });
+  const version = db.get("SELECT state_version FROM works WHERE id = ?", workId).state_version;
+  const response = await core.postWorkInstruction(workId, command(sent, "att-instruction", version));
+  r.state.t1Fail();
+  await waitFor(() => r.state.replans >= 1, { message: "the replan" });
+  return { entries: JSON.parse(r.state.requests[0]).context.owner_requests, response };
+}
+
+test("an instruction's text and files reach the Manager as one owner_requests entry with readable attachments", async (t) => {
+  const { entries, response } = await failT1WithInstruction(t, async ({ upload }) => {
+    const a = await upload("note.txt", "text/plain", "hello file", "att-a");
+    const b = await upload("run.sh", "text/plain", "echo hi", "att-b");
+    return { body: "Read these", attachment_ids: [a.attachment_id, b.attachment_id] };
+  });
+  const own = entries.filter((item) => item.message_ids?.includes(response.data.message_id));
+  assert.equal(own.length, 1);
+  assert.equal(own[0].text, "Read these");
+  const [stored, quarantined] = own[0].attachments;
+  assert.deepEqual({ ...stored, path: undefined }, { filename: "note.txt", mime: "text/plain", bytes: 10, status: "stored", path: undefined });
+  assert.equal(await readFile(stored.path, "utf8"), "hello file");
+  assert.equal(quarantined.status, "quarantined");
+  assert.equal(quarantined.path, null);
+});
+
+test("a files-only instruction reaches the Manager with empty text; a text-only one has no attachments key", async (t) => {
+  const only = await failT1WithInstruction(t, async ({ upload }) => ({ body: "", attachment_ids: [(await upload("a.txt", "text/plain", "x", "att-c")).attachment_id] }));
+  const entry = only.entries.find((item) => item.message_ids?.includes(only.response.data.message_id));
+  assert.equal(entry.text, "");
+  assert.equal(entry.attachments.length, 1);
+  const plain = await failT1WithInstruction(t, async () => ({ body: "Just words" }));
+  assert.equal("attachments" in plain.entries.find((item) => item.text === "Just words"), false);
 });

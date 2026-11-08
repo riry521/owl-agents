@@ -30,6 +30,21 @@
         "$ref": "common.json#/$defs/ULID"
       }
     },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "filename", "mime", "bytes", "status"],
+        "properties": {
+          "id": { "$ref": "common.json#/$defs/ULID" },
+          "filename": { "type": "string" },
+          "mime": { "type": "string" },
+          "bytes": { "type": "integer" },
+          "status": { "enum": ["stored", "quarantined"] }
+        },
+        "additionalProperties": false
+      }
+    },
     "created_at": {
       "$ref": "common.json#/$defs/RFC3339"
     },

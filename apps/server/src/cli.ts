@@ -5,6 +5,7 @@
 // project), then the server recorded in the data-directory state file.
 
 import { closeSync, constants, openSync } from "node:fs";
+import { timestampLines } from "./log-format.js";
 import { access, appendFile, mkdir, readFile, rename, rm, stat } from "node:fs/promises";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
@@ -19,9 +20,10 @@ import { CliError, ContractValidationError, newReferenceId } from "./errors.js";
 import { resolveDataDir, resolveOwlRoot, serverPackageRoot } from "./contracts.js";
 import { LEGACY_WORKSPACES_DIRNAME, resolveWorkspacesRoot } from "../../../packages/core/dist/workspace-layout.js";
 import { stopManagedAuxiliaryProcesses } from "./lifecycle-stop.js";
-import { isProcessAlive } from "./process-state.js";
+import { isProcessAlive, readProcessCommand } from "./process-state.js";
+import { processIdentityMatches, readProcessIdentity } from "../../../packages/core/dist/process-identity.js";
 import { startServer, type RunningServer, type ServerOptions } from "./server.js";
-import { configuredBind, configuredPort, deprecatedConfigurationWarnings, serverExposureError, tailscaleServeEnabled } from "./config.js";
+import { configuredBind, configuredPort, deprecatedConfigurationWarnings, serverExposureError, shutdownTimeoutMs, tailscaleServeEnabled } from "./config.js";
 import { connectorConfigStatus, prepareConnectorConfig } from "./secret-config.js";
 import { resolveAgentExecutables } from "./agent-runner.js";
 import { OPENCODE_HARNESS_GAPS, splitOpencodeModel } from "../../../packages/shared/dist/index.js";
@@ -35,6 +37,8 @@ interface ServerState {
   bind: string;
   port: number;
   started_at: string;
+  process_start_time?: string | null;
+  process_cmdline_sha256?: string | null;
 }
 
 interface StatusResponse {
@@ -66,7 +70,7 @@ async function recordCliFailure(referenceId: string, error: unknown): Promise<vo
   const dataDir = resolveDataDir(resolveOwlRoot());
   try {
     await mkdir(dataDir, { recursive: true, mode: 0o700 });
-    await appendFile(join(dataDir, "server.log"), "[" + referenceId + "] owl command failed: " + raw + "\n", { encoding: "utf8", mode: 0o640 });
+    await appendFile(join(dataDir, "server.log"), timestampLines("[" + referenceId + "] owl command failed: " + raw) + "\n", { encoding: "utf8", mode: 0o640 });
   } catch {
     process.stderr.write(cliText('ログへ記録できませんでした。参照ID: ', 'Could not write to the log. Reference ID: ') + referenceId + "\n");
   }
@@ -135,9 +139,14 @@ function parseAdvisorArgs(argv: readonly string[]): ParsedAdvisor {
   return { conversationId, timeoutSeconds };
 }
 
+/** The server's own shutdown deadline plus a margin, so a normal shutdown ends inside the CLI's wait. */
+function defaultStopTimeoutSeconds(): number {
+  return Math.ceil((shutdownTimeoutMs() + 5_000) / 1000);
+}
+
 function parseStopArgs(argv: readonly string[]): { force: boolean; timeoutSeconds: number } {
   let force = false;
-  let timeoutSeconds = 30;
+  let timeoutSeconds = defaultStopTimeoutSeconds();
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === "--force") {
@@ -168,6 +177,34 @@ async function readState(): Promise<ServerState | null> {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw new CliError(3, cliText('owl-coreのstateを読み込めません。dataディレクトリと設定を確認してください。', 'Could not read owl-core state. Check the data directory and configuration.'), { cause: error });
   }
+}
+
+/**
+ * Whether the state's PID is an Owl server. A recorded identity must match;
+ * a state written by an older server has none, so its command line must run
+ * dist/server.js. A reused PID fails both, so it is never signalled.
+ */
+function pidIsOwlServer(state: ServerState): boolean {
+  if (state.process_start_time && state.process_cmdline_sha256) {
+    return processIdentityMatches(
+      { process_start_time: state.process_start_time, process_cmdline_sha256: state.process_cmdline_sha256 },
+      readProcessIdentity(state.pid),
+    );
+  }
+  return readProcessCommand(state.pid)?.includes("dist/server.js") === true;
+}
+
+async function isResponding(state: ServerState): Promise<boolean> {
+  try {
+    await fetch(`http://${connectionHost(state.bind)}:${state.port}/api/v1/health`, { signal: AbortSignal.timeout(3_000) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function unresponsiveMessage(pid: number): string {
+  return cliText(`owl-core(PID ${pid})は生きていますが応答しません。owl stop --force または owl restart で復旧できます。`, `owl-core (PID ${pid}) is alive but not responding. Recover with owl stop --force or owl restart.`);
 }
 
 function connectionHost(bind: string): string {
@@ -518,7 +555,8 @@ async function startBackground(options: ServerOptions): Promise<ServerState> {
     throw new CliError(4, cliText('serverのbuild成果物がありません。先にnpx tsc -p tsconfig.jsonを実行してください。', 'The server build is missing. Run npx tsc -p tsconfig.json first.'), { cause: error });
   }
   const current = await readState();
-  if (current && isAlive(current.pid)) {
+  if (current && isAlive(current.pid) && pidIsOwlServer(current)) {
+    if (!(await isResponding(current))) throw new CliError(3, unresponsiveMessage(current.pid));
     throw new CliError(3, cliText('owl-coreはすでに起動しています。statusを確認してから再試行してください.', 'owl-core is already running. Check status before trying again.'));
   }
   let serverLogOffset = 0;
@@ -604,6 +642,12 @@ async function runStart(options: ParsedStart): Promise<Record<string, unknown>> 
 async function runStatus(args: { json: boolean }): Promise<Record<string, unknown>> {
   const state = await readState();
   if (!state || !isAlive(state.pid)) throw new CliError(4, cliText('owl-coreは起動していません。startを実行してください。', 'owl-core is not running. Run start.'));
+  if (pidIsOwlServer(state) && !(await isResponding(state))) {
+    writeStdout(args.json
+      ? { services: [{ name: "owl-core", state: "unresponsive", pid: state.pid }], works: {} }
+      : { table: `NAME\tSTATE\tPID\nowl-core\tunresponsive\t${state.pid}` });
+    throw new CliError(4, unresponsiveMessage(state.pid));
+  }
   const body = await fetchJson(`http://${connectionHost(state.bind)}:${state.port}/api/v1/system/status`);
   const status = body as unknown as StatusResponse;
   if (!Array.isArray(status.services)) throw new CliError(4, cliText('system statusのservicesが契約と一致しません。server versionを確認してください。', 'The system status services do not match the contract. Check the server version.'));
@@ -624,7 +668,8 @@ async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
   return !isAlive(pid);
 }
 
-async function runStop(args: { force: boolean; timeoutSeconds: number }, silent = false): Promise<Record<string, unknown>> {
+/** restart escalates SIGTERM, SIGINT, SIGKILL on its own; stop --force skips SIGTERM. */
+async function runStop(args: { force: boolean; timeoutSeconds: number; restart?: boolean }, silent = false): Promise<Record<string, unknown>> {
   const root = resolveOwlRoot();
   const auxiliaryResults = await stopManagedAuxiliaryProcesses(root, args);
   const failedAuxiliary = auxiliaryResults.filter((entry) => entry.status === "failed");
@@ -642,16 +687,24 @@ async function runStop(args: { force: boolean; timeoutSeconds: number }, silent 
     }
     throw new CliError(6, cliText('停止対象のowlが見つかりません。statusを確認してください。', 'No Owl process was found to stop. Check status.'));
   }
-  const status = await fetchJson(`http://${connectionHost(state.bind)}:${state.port}/api/v1/system/status`);
-  const services = status.services;
-  if (!Array.isArray(services) || !services.some((service) => typeof service === "object" && service !== null && (service as { pid?: unknown }).pid === state.pid)) {
-    throw new CliError(6, cliText('PID stateとsystem statusが一致しません。別プロセスを停止せず、stateを確認してください。', 'PID state and system status differ. Check the state before stopping a process.'));
+  if (!pidIsOwlServer(state)) {
+    throw new CliError(6, cliText(`stateのPID ${state.pid}はowl-coreではありません。シグナルを送らず中止しました。stateを確認してください。`, `PID ${state.pid} in the state is not owl-core. No signal was sent; check the state.`));
   }
-  process.kill(state.pid, args.force ? "SIGINT" : "SIGTERM");
-  let exited = await waitForExit(state.pid, args.timeoutSeconds * 1000);
-  if (!exited && args.force) {
-    process.kill(state.pid, "SIGKILL");
-    exited = await waitForExit(state.pid, 5_000);
+  // The matching process identity is enough; a failing or hung system/status must not block recovery.
+  const steps: Array<[NodeJS.Signals, number]> = args.restart
+    ? [["SIGTERM", args.timeoutSeconds * 1000], ["SIGINT", 5_000], ["SIGKILL", 5_000]]
+    : args.force ? [["SIGINT", args.timeoutSeconds * 1000], ["SIGKILL", 5_000]] : [["SIGTERM", args.timeoutSeconds * 1000]];
+  let exited = false;
+  for (const [signal, waitMs] of steps) {
+    try { process.kill(state.pid, signal); } catch { /* already gone */ }
+    exited = await waitForExit(state.pid, waitMs);
+    if (exited) break;
+  }
+  if (exited) {
+    // A killed server cannot remove its own runtime files.
+    const dataDir = resolveDataDir(root);
+    await rm(join(dataDir, "owl-server.pid"), { force: true });
+    await rm(join(dataDir, "owl-server.json"), { force: true });
   }
   if (!exited) throw new CliError(5, cliText('owl-coreが指定時間内に停止しませんでした。--forceで再試行できます。', 'owl-core did not stop in time. Retry with --force.'));
   const result = { command: "stop", services: [...new Set([...stoppedAuxiliary, "owl-core"])], status: "ok" };
@@ -660,7 +713,7 @@ async function runStop(args: { force: boolean; timeoutSeconds: number }, silent 
 }
 
 async function runRestart(args: ParsedStart): Promise<Record<string, unknown>> {
-  await runStop({ force: false, timeoutSeconds: 30 }, true);
+  await runStop({ force: true, restart: true, timeoutSeconds: defaultStopTimeoutSeconds() }, true);
   const result = await runStart({ ...args, foreground: false });
   return { command: "restart", pid: result.pid, status: "ok" };
 }

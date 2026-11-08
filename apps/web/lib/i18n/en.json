@@ -873,7 +873,7 @@
     "errorStop": "Could not stop the reply. Please try again.",
     "hint": "Shift+Enter to send / Enter for new line",
     "hintTouch": "Tap send to send",
-    "messageRequired": "Please enter a message.",
+    "messageRequired": "Enter a message or attach a file.",
     "nameAdvisor": "Advisor",
     "nameYou": "You",
     "sessionStatusLabel": "Advisor session status",
@@ -881,6 +881,10 @@
     "sessionSuspended": "Suspended",
     "sessionNone": "No session",
     "thinking": "Thinking…",
+    "activityTool": "Running {{tool}}…",
+    "activitySubagent": "Subagent running…",
+    "activityBackground": "Running in background ({{count}})",
+    "activityWithBackground": "{{main}} / {{background}}",
     "waitingInQueue": "Waiting in queue…",
     "providerPaused": "Paused",
     "providerPausedUntil": "Paused (resumes ~{{time}})",
@@ -900,7 +904,34 @@
     "errorSaveValidation": "This conversation could not be saved to knowledge. Refresh and try again.",
     "errorSaveNetwork": "Cannot save the conversation. Check the server status and network.",
     "errorSaveInvalid": "Cannot verify the save response. Ask an administrator to check the configuration.",
-    "errorSaveDefault": "Could not save the conversation. Please try again later."
+    "errorSaveDefault": "Could not save the conversation. Please try again later.",
+    "fileDelivery": {
+      "heading": {
+        "pending": "Sending to #{{channel}}",
+        "sent": "Sent to #{{channel}}",
+        "failed": "Some files could not be sent to #{{channel}}"
+      },
+      "headingUnknown": "Cannot confirm the files were sent",
+      "headingRefused": "No destination was chosen, so nothing was sent",
+      "sourceWindow": "Window channel",
+      "sourceDefault": "Default destination",
+      "subPending": "The connector will send them when it picks this up.",
+      "subUnknown": "Check #{{channel}} on {{platform}}.",
+      "refusal": {
+        "preferred_provider_unset": "This window has both a Slack and a Discord channel. Choose the preferred platform.",
+        "default_destination_unset": "This conversation's window has no channel and no default destination is set.",
+        "default_provider_not_configured": "The platform of the default destination is not set up.",
+        "default_channel_unavailable": "The channel of the default destination is no longer available."
+      },
+      "status": {
+        "pending": "Sending",
+        "sent": "Sent",
+        "failed": "Failed",
+        "unknown": "Unknown",
+        "rejected": "Not sent"
+      },
+      "openSettings": "Open settings →"
+    }
   },
   "projects": {
     "title": "Projects",
@@ -1296,7 +1327,34 @@
     "autoRecoverySave": "Save automatic recovery",
     "autoRecoverySaved": "Saved.",
     "autoRecoveryError": "Could not load the automatic recovery setting.",
-    "autoRecoveryInvalid": "Enter an integer from 0 to 10."
+    "autoRecoveryInvalid": "Enter an integer from 0 to 10.",
+    "sendFileDestination": "File destination",
+    "sendFileDestinationDescription": "Choose where on Slack or Discord files requested from the Web chat are sent.",
+    "sendFileDestinationOpen": "Open file destination settings",
+    "sendFileDestinationClose": "Close file destination settings",
+    "sendFileDestinationPreferredLabel": "Preferred platform",
+    "sendFileDestinationPreferredHint": "Used when a window has both a Slack and a Discord channel.",
+    "sendFileDestinationPreferredSlack": "Send to Slack when both exist.",
+    "sendFileDestinationPreferredDiscord": "Send to Discord when both exist.",
+    "sendFileDestinationPreferredNone": "When both exist, send nothing and explain why.",
+    "sendFileDestinationPreferredNoneTitle": "No preference",
+    "sendFileDestinationNotConfigured": "Connector not set up",
+    "sendFileDestinationDefaultLabel": "Default destination",
+    "sendFileDestinationDefaultHint": "Used when the conversation has no channel of its own (the generalist, for example).",
+    "sendFileDestinationNone": "None",
+    "sendFileDestinationProviderOff": "{{provider}} (connector not set up)",
+    "sendFileDestinationConversation": "#{{name}} (conversation channel)",
+    "sendFileDestinationWindow": "#{{name}} (window: {{window}})",
+    "sendFileDestinationSaved": "Saved: {{provider}} #{{name}}",
+    "sendFileDestinationAvailable": "Available",
+    "sendFileDestinationUnsetBadge": "Not set",
+    "sendFileDestinationUnset": "No default destination yet. Files requested from a conversation without a channel are not sent; the reason is returned instead.",
+    "sendFileDestinationNoIntegration": "Neither Slack nor Discord is connected. Set up a connector in the integration settings below.",
+    "sendFileDestinationIntegrationLink": "Integration settings",
+    "sendFileDestinationUnavailable": "The saved default destination #{{name}} is no longer available. Choose a channel again.",
+    "sendFileDestinationSave": "Save",
+    "sendFileDestinationSavedNotice": "Saved.",
+    "sendFileDestinationError": "Could not load or save the file destination settings."
   },
   "folderPicker": {
     "title": "Choose a folder",
@@ -1871,5 +1929,66 @@
     "invited": "Invited",
     "already_in_channel": "Already in the channel",
     "failed": "Failed: {{message}}"
+  },
+  "mdViewer": {
+    "backToWork": "Back to Work details",
+    "toc": "Contents",
+    "tocClose": "Close contents",
+    "open": "Read",
+    "reload": "Load again",
+    "tableRegion": "Scrollable table",
+    "image": "Image: {{alt}}",
+    "empty": "This file is empty.",
+    "sourceWorkBranch": "This content is not integrated yet. It may change before the Work is completed.",
+    "denied": {
+      "title": "This file cannot be opened",
+      "outside": "Only md files in this Work's project and the materials folder can be opened.",
+      "secret": "Files that may contain secrets cannot be opened.",
+      "notMarkdown": "Only md files can be opened."
+    },
+    "notFound": {
+      "title": "File not found",
+      "text": "There is no file at this path. It may have been moved or deleted."
+    },
+    "notIntegrated": {
+      "title": "Not integrated yet, or the file does not exist",
+      "text": "This file will be integrated later, or the path is wrong. Load it again after the Task is completed."
+    },
+    "tooLarge": {
+      "title": "This file is too large",
+      "text": "Files up to {{limit}} can be shown. This file is {{size}}."
+    },
+    "unreadable": {
+      "title": "This file cannot be read",
+      "text": "It is not UTF-8, or read permission is missing."
+    },
+    "storage": {
+      "title": "The materials folder cannot be read"
+    },
+    "loadFailed": {
+      "title": "Could not load the file",
+      "network": "The server did not respond. Wait a moment and load it again.",
+      "server": "The server returned an error. Wait a moment and load it again."
+    },
+    "invalidUrl": {
+      "title": "This URL is not valid",
+      "text": "Open the link again from the Work details."
+    }
+  },
+  "attachments": {
+    "add": "Attach files",
+    "dropHere": "Drop here to attach",
+    "dropHint": "Up to {max} per file, {count} files",
+    "remove": "Remove {name}",
+    "retry": "Retry",
+    "uploading": "Uploading",
+    "quarantined": "Executable file; it will not be passed to the agents",
+    "quarantinedBadge": "Quarantined",
+    "tooLarge": "{name} is {size}. You can attach files up to {max}.",
+    "tooMany": "You can attach up to {max} files. {name} was not added.",
+    "waitUploading": "You can send once uploads finish",
+    "blockedByFailed": "Some files could not be sent. Retry or remove them",
+    "badName": "The file name has characters that are not allowed. Rename the file and attach it again.",
+    "uploadFailed": "Upload failed. Please retry."
   }
 }

@@ -873,13 +873,17 @@
     "errorStop": "返答を止められませんでした。もう一度お試しください。",
     "hint": "Shift+Enterで送信 · Enterで改行",
     "hintTouch": "送信ボタンで送信",
-    "messageRequired": "メッセージを入力してください。",
+    "messageRequired": "メッセージを入力するか、ファイルを添付してください。",
     "nameAdvisor": "Advisor",
     "nameYou": "You",
     "sessionStatusLabel": "Advisorセッションの状態",
     "sessionRunning": "実行中",
     "sessionSuspended": "一時停止",
     "thinking": "考え中…",
+    "activityTool": "{{tool}} を実行中…",
+    "activitySubagent": "サブエージェント実行中…",
+    "activityBackground": "バックグラウンドで実行中（{{count}}件）",
+    "activityWithBackground": "{{main}} / {{background}}",
     "waitingInQueue": "順番待ち…",
     "providerPaused": "一時停止中",
     "providerPausedUntil": "一時停止中（〜{{time}} に再開）",
@@ -900,7 +904,34 @@
     "errorSaveValidation": "この会話をナレッジに保存できませんでした。更新してから再試行してください。",
     "errorSaveNetwork": "会話を保存できません。サーバーの起動状態とネットワークを確認してください。",
     "errorSaveInvalid": "保存結果を確認できません。管理者に設定を確認してもらってください。",
-    "errorSaveDefault": "会話を保存できませんでした。しばらくしてからもう一度お試しください。"
+    "errorSaveDefault": "会話を保存できませんでした。しばらくしてからもう一度お試しください。",
+    "fileDelivery": {
+      "heading": {
+        "pending": "#{{channel}} へ送っています",
+        "sent": "#{{channel}} に送りました",
+        "failed": "#{{channel}} に送れなかったファイルがあります"
+      },
+      "headingUnknown": "送れたか確認できません",
+      "headingRefused": "送り先が決まらないため、送っていません",
+      "sourceWindow": "窓のチャンネル",
+      "sourceDefault": "既定の送信先",
+      "subPending": "Connector が受け取ると送ります。",
+      "subUnknown": "{{platform}} の #{{channel}} を確かめてください。",
+      "refusal": {
+        "preferred_provider_unset": "この窓には Slack と Discord の両方にチャンネルがあります。優先するプラットフォームを選んでください。",
+        "default_destination_unset": "この会話の窓にはチャンネルがなく、既定の送信先も設定されていません。",
+        "default_provider_not_configured": "既定の送信先のプラットフォームは連携が設定されていません。",
+        "default_channel_unavailable": "既定の送信先のチャンネルは今は使えません。"
+      },
+      "status": {
+        "pending": "送信中",
+        "sent": "送信済み",
+        "failed": "失敗",
+        "unknown": "不明",
+        "rejected": "送っていません"
+      },
+      "openSettings": "設定を開く →"
+    }
   },
   "projects": {
     "title": "プロジェクト",
@@ -1296,7 +1327,34 @@
     "autoRecoverySave": "自動の復旧を保存",
     "autoRecoverySaved": "保存しました。",
     "autoRecoveryError": "自動の復旧の設定を読み込めませんでした。",
-    "autoRecoveryInvalid": "0 から 10 の整数を入れてください。"
+    "autoRecoveryInvalid": "0 から 10 の整数を入れてください。",
+    "sendFileDestination": "ファイルの送信先",
+    "sendFileDestinationDescription": "Web のチャットから頼んだファイルを、Slack か Discord のどこへ送るかを決めます。",
+    "sendFileDestinationOpen": "ファイルの送信先の設定を開く",
+    "sendFileDestinationClose": "ファイルの送信先の設定を閉じる",
+    "sendFileDestinationPreferredLabel": "優先するプラットフォーム",
+    "sendFileDestinationPreferredHint": "窓に Slack と Discord の両方のチャンネルがあるときに使います。",
+    "sendFileDestinationPreferredSlack": "両方あるときは Slack に送ります。",
+    "sendFileDestinationPreferredDiscord": "両方あるときは Discord に送ります。",
+    "sendFileDestinationPreferredNone": "両方あるときは送らずに理由を返します。",
+    "sendFileDestinationPreferredNoneTitle": "指定しない",
+    "sendFileDestinationNotConfigured": "Connector 未設定",
+    "sendFileDestinationDefaultLabel": "既定の送信先",
+    "sendFileDestinationDefaultHint": "窓にチャンネルが無い会話（ジェネラリストなど）から送るときに使います。",
+    "sendFileDestinationNone": "なし",
+    "sendFileDestinationProviderOff": "{{provider}}（Connector 未設定）",
+    "sendFileDestinationConversation": "#{{name}}（会話チャンネル）",
+    "sendFileDestinationWindow": "#{{name}}（窓: {{window}}）",
+    "sendFileDestinationSaved": "保存済み: {{provider}} #{{name}}",
+    "sendFileDestinationAvailable": "使えます",
+    "sendFileDestinationUnsetBadge": "未設定",
+    "sendFileDestinationUnset": "既定の送信先はまだありません。窓にチャンネルが無い会話から送ると、送らずに理由を返します。",
+    "sendFileDestinationNoIntegration": "Slack も Discord も連携されていません。下の連携設定で Connector を設定してください。",
+    "sendFileDestinationIntegrationLink": "連携設定",
+    "sendFileDestinationUnavailable": "保存した既定の送信先 #{{name}} は今は使えません。チャンネルを選び直してください。",
+    "sendFileDestinationSave": "保存",
+    "sendFileDestinationSavedNotice": "保存しました。",
+    "sendFileDestinationError": "ファイルの送信先の設定を取得・保存できませんでした。"
   },
   "folderPicker": {
     "title": "フォルダを選ぶ",
@@ -1871,5 +1929,66 @@
     "invited": "招待しました",
     "already_in_channel": "招待済みです",
     "failed": "失敗しました: {{message}}"
+  },
+  "mdViewer": {
+    "backToWork": "Work 詳細に戻る",
+    "toc": "目次",
+    "tocClose": "目次を閉じる",
+    "open": "読む",
+    "reload": "もう一度読み込む",
+    "tableRegion": "横に動かせる表",
+    "image": "画像: {{alt}}",
+    "empty": "このファイルは空です",
+    "sourceWorkBranch": "取り込み前の内容です。Work の完了までに変わることがあります。",
+    "denied": {
+      "title": "このファイルは開けません",
+      "outside": "開けるのは、この Work のプロジェクトと資料フォルダの中にある md ファイルだけです。",
+      "secret": "秘密の情報が入っている可能性があるファイルは開けません。",
+      "notMarkdown": "開けるのは md ファイルだけです。"
+    },
+    "notFound": {
+      "title": "ファイルが見つかりません",
+      "text": "このパスにファイルがありません。移動したか、削除された可能性があります。"
+    },
+    "notIntegrated": {
+      "title": "まだ取り込まれていないか、ファイルがありません",
+      "text": "このファイルはこれから取り込まれるか、パスが誤っています。Task が完了してから、もう一度読み込んでください。"
+    },
+    "tooLarge": {
+      "title": "ファイルが大きすぎます",
+      "text": "表示できるのは {{limit}} までです。このファイルは {{size}} あります。"
+    },
+    "unreadable": {
+      "title": "このファイルは読み取れません",
+      "text": "文字コードが UTF-8 でないか、読み取りの権限がありません。"
+    },
+    "storage": {
+      "title": "資料フォルダを読めません"
+    },
+    "loadFailed": {
+      "title": "読み込めませんでした",
+      "network": "サーバーから応答がありませんでした。少し待ってから、もう一度読み込んでください。",
+      "server": "サーバーがエラーを返しました。少し待ってから、もう一度読み込んでください。"
+    },
+    "invalidUrl": {
+      "title": "URL が正しくありません",
+      "text": "Work 詳細からリンクを開き直してください。"
+    }
+  },
+  "attachments": {
+    "add": "ファイルを添付",
+    "dropHere": "ここにドロップして添付",
+    "dropHint": "1 ファイル {max} まで、{count} 件まで",
+    "remove": "{name} を外す",
+    "retry": "再試行",
+    "uploading": "アップロード中",
+    "quarantined": "実行ファイルのため、エージェントには渡しません",
+    "quarantinedBadge": "隔離",
+    "tooLarge": "{name} は {size} です。添付できるのは {max} までです。",
+    "tooMany": "添付は {max} 件までです。{name} は追加していません。",
+    "waitUploading": "アップロードが終わると送信できます",
+    "blockedByFailed": "送れないファイルがあります。再試行するか外してください",
+    "badName": "ファイル名に使えない文字があります。名前を変えて添付してください。",
+    "uploadFailed": "アップロードできませんでした。再試行してください。"
   }
 }

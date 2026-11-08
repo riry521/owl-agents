@@ -13,6 +13,8 @@ export interface InstructionReplyText {
   readonly tasksChanged: (summary: ReplanSummary) => string;
   readonly noChange: string;
   readonly decisionOpened: (detail: string) => string;
+  /** Stands in for the text of an instruction that carries only files. */
+  readonly attachmentsOnly: (filenames: readonly string[]) => string;
 }
 
 const MAX_LISTED = 10;
@@ -33,6 +35,7 @@ export const INSTRUCTION_REPLY_TEXT: Record<OwnerLanguage, InstructionReplyText>
     ].join("\n"),
     noChange: "指示を確認しました。今の計画のまま対応できるため、Taskの変更はありません。",
     decisionOpened: (detail) => `指示を計画に反映できませんでした（${detail}）。判断待ちに回答してください。`,
+    attachmentsOnly: (filenames) => `（本文なし。添付ファイル: ${filenames.join("、")}）`,
   },
   en: {
     tasksChanged: (s) => [
@@ -43,5 +46,6 @@ export const INSTRUCTION_REPLY_TEXT: Record<OwnerLanguage, InstructionReplyText>
     ].join("\n"),
     noChange: "I reviewed your instruction. The current plan already covers it, so no Tasks changed.",
     decisionOpened: (detail) => `I could not apply your instruction to the plan (${detail}). Please answer the open Decision.`,
+    attachmentsOnly: (filenames) => `(No text. Attached files: ${filenames.join(", ")})`,
   },
 };

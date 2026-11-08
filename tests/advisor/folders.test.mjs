@@ -231,10 +231,29 @@ test("send-file settings load from app-settings.json, keep an explicit folder li
   t.after(() => { console.warn = warn; });
   assert.deepEqual(new AppSettingsStore(root, await write("rel", { advisor_send_file_dirs: ["relative/dir"] })).getAdvisorSendFileSettings().dirs, []);
   for (const [name, settings] of [["t1", { advisor_send_file_dirs: "x" }], ["t2", { advisor_send_file_dirs: [1] }],
-    ["t3", { advisor_send_file_slack_max_bytes: 0 }], ["t4", { advisor_send_file_discord_max_bytes: "5" }]]) {
+    ["t3", { advisor_send_file_slack_max_bytes: 0 }], ["t4", { advisor_send_file_discord_max_bytes: "5" }],
+    ["t5", { advisor_send_file_preferred_provider: "teams" }],
+    ["t6", { advisor_send_file_default_destination: { provider: "slack", channel_id: "C1" } }],
+    ["t7", { advisor_send_file_default_destination: { provider: "slack", channel_id: "", display_name: "n" } }],
+    ["t8", { advisor_send_file_default_destination: { provider: "slack", channel_id: "C1", display_name: "n", extra: 1 } }]]) {
     const data = await write(name, settings);
     assert.throws(() => new AppSettingsStore(root, data), /app-settings\.json is corrupt/u);
   }
+});
+
+test("file destination settings save, read back after the store is recreated, return null when unset and reject bad values in the setter", async (t) => {
+  const root = await tempDir(t, "owl-file-destination-settings-");
+  const data = join(root, "data");
+  const store = new AppSettingsStore(root, data);
+  assert.deepEqual(store.getAdvisorFileDestinationSettings(), { preferredProvider: null, defaultDestination: null });
+  const destination = { provider: "discord", channel_id: "D1", display_name: "general" };
+  store.setAdvisorFileDestinationSettings({ preferredProvider: "slack", defaultDestination: destination });
+  assert.deepEqual(new AppSettingsStore(root, data).getAdvisorFileDestinationSettings(), { preferredProvider: "slack", defaultDestination: destination });
+  assert.throws(() => store.setAdvisorFileDestinationSettings({ preferredProvider: "teams", defaultDestination: null }), /preferred_provider/u);
+  assert.throws(() => store.setAdvisorFileDestinationSettings({ preferredProvider: null, defaultDestination: { ...destination, channel_id: "x".repeat(201) } }), /default_destination/u);
+  assert.equal(store.getAdvisorFileDestinationSettings().preferredProvider, "slack");
+  store.setAdvisorFileDestinationSettings({ preferredProvider: null, defaultDestination: null });
+  assert.deepEqual(new AppSettingsStore(root, data).getAdvisorFileDestinationSettings(), { preferredProvider: null, defaultDestination: null });
 });
 
 test("Advisor prompt lists the send-file folders and size limits", async (t) => {
@@ -243,5 +262,7 @@ test("Advisor prompt lists the send-file folders and size limits", async (t) => 
     getAdvisorSendFileSettings: () => ({ dirs: [join(root, "send")], slackMaxBytes: 2048, discordMaxBytes: 3 * 1024 * 1024 }),
   }, { prefix: "owl-send-file-prompt-" });
   const prompt = core.getAdvisorSettingsSnapshot().systemPrompt;
-  for (const part of ["send_file", "## Send-file folders", join(root, "send"), "Slack 2.0KB", "Discord 3.0MB"]) assert.ok(prompt.includes(part), part);
+  for (const part of ["send_file", "## Send-file folders", join(root, "send"), "Slack 2.0KB", "Discord 3.0MB", "the limit of the platform the file goes to applies", "Core picks the Slack or Discord channel from the Owner's settings"]) assert.ok(prompt.includes(part), part);
+  assert.ok(prompt.includes("never ask the operator for a destination"));
+  assert.ok(!prompt.includes("send_file works only in Slack and Discord conversations"));
 });

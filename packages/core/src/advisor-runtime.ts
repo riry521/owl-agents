@@ -42,6 +42,7 @@ import type {
   ProviderClient,
   ProviderSession,
   ProviderSessionRequest,
+  SessionActivity,
   SessionEvent,
   TokenUsage,
   AdvisorSuggestedAction,
@@ -244,6 +245,8 @@ interface WindowTarget {
 interface WindowSlot {
   driver: ProviderSession | null;
   sessionId: string | null;
+  /** The latest state the live driver reported through on_activity; for display only. */
+  activity: SessionActivity | null;
   /** The Owl system prompt the live session currently follows (its start prompt, or the latest update sent to it). */
   systemPrompt: string | null;
   /** The conversation and origin of the most recent turn sent to the live session; unsolicited replies are posted there. */
@@ -303,7 +306,7 @@ export class AdvisorSessionRuntime {
     let slot = this.slots.get(slotKey);
     if (!slot) {
       slot = {
-        driver: null, sessionId: null, systemPrompt: null, lastTurnTarget: null,
+        driver: null, sessionId: null, activity: null, systemPrompt: null, lastTurnTarget: null,
         unsolicitedChain: Promise.resolve(), turnLoopRunning: false, turnLoopKick: null,
         lock: Promise.resolve(), pendingHistoryBlock: null, unconfirmedResume: null, interruptRequestedTurnId: null,
       };
@@ -561,9 +564,7 @@ export class AdvisorSessionRuntime {
     if (!session || session.status !== "running") return;
     if (Date.now() - Date.parse(session.last_activity_at) < session.idle_timeout_seconds * 1000) return;
     if (this.config.db.get("SELECT 1 FROM advisor_turns WHERE session_id = ? AND status IN ('queued', 'running') LIMIT 1", sessionId)) return;
-    slot.driver = null;
-    slot.sessionId = null;
-    slot.systemPrompt = null;
+    this.forgetDriver(slot);
     await driver.stop("idle_timeout");
     await this.config.sessionManager.suspendSession(sessionId);
   }
@@ -678,6 +679,21 @@ export class AdvisorSessionRuntime {
     await this.notifyRetainedWorkspace(sessionId);
   }
 
+  /**
+   * What the session's live driver last reported, or null when nothing is known.
+   * The foreground part is hidden from a conversation other than the one the last
+   * turn came from; background tasks belong to the whole session, so they stay.
+   */
+  public getActivity(sessionId: string, conversationId: string | null): SessionActivity | null {
+    const slot = this.slotForSession(sessionId);
+    if (slot.sessionId !== sessionId || slot.driver === null || slot.driver.exited === true || slot.activity === null) return null;
+    const target = slot.lastTurnTarget;
+    if (conversationId !== null && target !== null && target.sessionId === sessionId && target.conversationId !== conversationId) {
+      return { state: null, tool_name: null, background_count: slot.activity.background_count };
+    }
+    return slot.activity;
+  }
+
   /** Asks the provider to end the session's running turn early; the session and its queue stay alive. */
   public async interruptTurn(sessionId: string): Promise<{ status: "interrupting" | "not_running" | "unsupported"; turn_id: string | null }> {
     const turn = this.config.db.get<{ id: string }>(
@@ -696,6 +712,7 @@ export class AdvisorSessionRuntime {
     slot.driver = null;
     slot.sessionId = null;
     slot.systemPrompt = null;
+    slot.activity = null;
   }
 
   /**
@@ -884,6 +901,7 @@ export class AdvisorSessionRuntime {
         ...(resumeProviderSessionId ? { resume_provider_session_id: resumeProviderSessionId } : {}),
         ...(this.config.canInstructCompaction?.(settings.harnessId) ? { compact_instructions: CONVERSATION_COMPACT_INSTRUCTIONS } : {}),
         on_unsolicited_reply: (unsolicited) => this.handleUnsolicitedReply(slot, session.id, unsolicited),
+        on_activity: (activity) => { if (slot.sessionId === session.id) slot.activity = activity; },
       });
     } catch (error) {
       await this.config.sessionManager.endSession(session.id, resumeProviderSessionId ? "resume_failed" : "spawn_failed");

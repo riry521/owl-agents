@@ -55,6 +55,8 @@ export interface EmbedderConfig {
   /** After a second consecutive failure the next attempt waits this long (design §16). */
   readonly retryMs: number;
   readonly requestTimeoutMs: number;
+  /** stop() sends SIGKILL when the child ignores SIGTERM this long. Defaults to 5000. */
+  readonly killGraceMs?: number;
   /** Fusion weights chosen on the dev split (see docs/designs … §4.3 and meta rrf_w_*). */
   readonly weights: { readonly fts: number; readonly vec: number };
   readonly profile: RetrievalProfile;
@@ -303,7 +305,14 @@ export class ChildEmbedder implements Embedder {
     this.startedAt = null;
     child.removeAllListeners("exit");
     this.rejectAll(new Error("embedder stopped"));
-    if (child.exitCode === null && child.signalCode === null) await new Promise<void>((resolve) => { child.once("exit", () => resolve()); child.kill("SIGTERM"); });
+    if (child.exitCode === null && child.signalCode === null) {
+      await new Promise<void>((resolve) => {
+        // Why not wait for exit alone: a child that ignores SIGTERM would block shutdown forever.
+        const killTimer = setTimeout(() => { child.kill("SIGKILL"); }, this.config.killGraceMs ?? 5_000);
+        child.once("exit", () => { clearTimeout(killTimer); resolve(); });
+        child.kill("SIGTERM");
+      });
+    }
   }
 }
 

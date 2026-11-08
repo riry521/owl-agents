@@ -544,7 +544,7 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
 
   /** A Task cancellation marks child AgentRuns cancel_requested; stop their processes. */
   function watchCancellations(): void {
-    if (cancelTimer) return;
+    if (cancelTimer || stopped) return;
     cancelTimer = setInterval(() => {
       for (const { child_run_id } of db.all<{ child_run_id: string }>(
         "SELECT child_run_id FROM agent_runs WHERE child_run_id IS NOT NULL AND status = 'cancel_requested'",
@@ -748,6 +748,8 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
 
     async stop() {
       stopped = true;
+      // Cleared before any await: a timed-out stop must not leave a poller touching a closed DB.
+      if (cancelTimer) { clearInterval(cancelTimer); cancelTimer = undefined; }
       for (const [id, controller] of controllers) { abortKinds.set(id, "cancelled"); controller.abort(); }
       await pumpChain;
       await Promise.all([...runs.values()]);

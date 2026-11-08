@@ -240,6 +240,8 @@ export interface GitOperationResult {
   /** prepareWorktree: true when this call created the worktree rather than reusing one. */
   readonly created?: boolean;
   readonly stderr_tail?: string;
+  /** Worktree-relative ignored paths that stopped a discard ("Ignored contents remain"). */
+  readonly ignored_paths?: readonly string[];
 }
 
 /** Outcome of integrating one Task branch into its Work branch. */
@@ -755,6 +757,8 @@ export interface CoreOptions {
   /** Cap on active non-Executor agent runs per Work. Unlimited unless set. */
   readonly max_parallel?: number;
   readonly dispatcher?: CoreDispatcherOptions;
+  /** Total time stop() may take when the caller passes no timeoutMs. Defaults to 10000. */
+  readonly stopTimeoutMs?: number;
   /** Owl's own repository root, used to resolve `dataDir` and the legacy `<owlRoot>/.owl-workspaces` worktrees directory. Defaults to process.cwd() (a temporary directory under the Node test runner). */
   readonly owlRoot?: string;
   /** Durable runtime data directory. Defaults to `<owlRoot>/data`. */
@@ -839,6 +843,12 @@ export interface CoreOptions {
     readonly dirs?: readonly string[];
     readonly slackMaxBytes?: number;
     readonly discordMaxBytes?: number;
+  };
+  /** Where a Web conversation's send_file goes (design 3.2). Absent: no preference, no default, no integration. */
+  readonly getAdvisorFileDestinationSettings?: () => {
+    readonly preferredProvider: "slack" | "discord" | null;
+    readonly defaultDestination: { readonly provider: "slack" | "discord"; readonly channel_id: string; readonly display_name: string } | null;
+    readonly integrations: readonly { readonly provider: "slack" | "discord"; readonly configured: boolean; readonly conversationChannelIds: readonly string[] }[];
   };
   readonly getAdvisorSharedDir?: () => string | null;
   /** Resolves a configured provider id to its harness without guessing between harnesses. */
@@ -1635,8 +1645,18 @@ export interface Message extends JsonObject {
   readonly source: string;
   readonly body: string;
   readonly attachment_ids: readonly string[];
+  /** Present only when the message has attachments. Never carries a file path. */
+  readonly attachments?: readonly MessageAttachment[];
   readonly created_at: string;
 }
+
+export type MessageAttachment = {
+  readonly id: string;
+  readonly filename: string;
+  readonly mime: string;
+  readonly bytes: number;
+  readonly status: "stored" | "quarantined";
+};
 
 export interface MessageListQuery extends ListQuery {}
 
