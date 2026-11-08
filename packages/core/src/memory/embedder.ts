@@ -1,7 +1,9 @@
 import { fork, type ChildProcess } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+
+import { findModelDir } from "./model-files.js";
 
 export type EmbedderState = "disabled" | "unavailable" | "missing" | "idle" | "starting" | "ready" | "failed";
 
@@ -16,6 +18,8 @@ export interface Embedder {
   readonly model: string | null;
   health(): EmbedderHealth;
   isReady(): boolean;
+  /** True when embed() can run now: enabled, model files present, and not waiting to retry. Background work starts only then. */
+  canEmbed(): boolean;
   warmup(): void;
   embed(kind: "query" | "passage", texts: readonly string[], options?: { timeoutMs?: number; maxTokens?: number }): Promise<Float32Array[]>;
   stop(): Promise<void>;
@@ -50,6 +54,10 @@ export interface EmbedderConfig {
   readonly model: string;
   /** Searched in order; the first directory that holds the model wins. */
   readonly modelsDirs: readonly string[];
+  /** Page types that get vectors; vectors of other types are removed. */
+  readonly pageTypes: readonly string[];
+  /** Where `owl embeddings` downloads model files from. Search never downloads. */
+  readonly modelHost: string;
   /** The child is stopped after this long without a request (design §4.3: 10 minutes). */
   readonly idleMs: number;
   /** After a second consecutive failure the next attempt waits this long (design §16). */
@@ -71,6 +79,8 @@ export const DEFAULT_EMBEDDER_CONFIG: EmbedderConfig = {
   enabled: false,
   model: "Xenova/multilingual-e5-small",
   modelsDirs: [],
+  pageTypes: ["clipping", "material"],
+  modelHost: "https://huggingface.co",
   idleMs: 10 * 60_000,
   retryMs: 10 * 60_000,
   requestTimeoutMs: 120_000,
@@ -81,11 +91,11 @@ export const DEFAULT_EMBEDDER_CONFIG: EmbedderConfig = {
 const disabledWarning = "埋め込みは設定で無効です。利用するには memory_embeddings.enabled を true にしてください（OWL_MEMORY_EMBEDDINGS_ENABLED=true でも設定できます）。";
 
 export function embeddingUnavailableWarning(detail?: string): string {
-  return `埋め込みを利用できません${detail ? `（${detail}）` : ""}。有効化するには optional 依存を除外せず pnpm install を実行し、node scripts/memory-models.mjs pull Xenova/multilingual-e5-small を実行してから、memory_embeddings.enabled を true に設定してください。`;
+  return `埋め込みを利用できません${detail ? `（${detail}）` : ""}。有効化するには optional 依存を除外せず pnpm install を実行し、owl embeddings を実行してから、memory_embeddings.enabled を true に設定してください。`;
 }
 
 function missingModelWarning(model: string, dirs: readonly string[]): string {
-  return `モデル ${model} が見つかりません（検索先: ${dirs.join(", ")}）。自動取得は行いません。node scripts/memory-models.mjs pull ${model} を実行してください。`;
+  return `モデル ${model} が見つかりません（検索先: ${dirs.join(", ")}）。検索中の自動取得は行いません。owl embeddings を実行してください。`;
 }
 
 /** `<dataDir>/models` (design §4.3), then `~/.owl/models`, which is outside data/. `memory-embedder.json` and OWL_MEMORY_* override. */
@@ -102,6 +112,8 @@ export function loadEmbedderConfig(dataDir: string, env: NodeJS.ProcessEnv = pro
     ...config,
     enabled: envEnabled ?? (typeof file.enabled === "boolean" ? file.enabled : false),
     model: env.OWL_MEMORY_EMBED_MODEL ?? config.model,
+    pageTypes: Array.isArray(file.pageTypes) && file.pageTypes.every((t) => typeof t === "string") ? file.pageTypes : DEFAULT_EMBEDDER_CONFIG.pageTypes,
+    modelHost: env.OWL_MEMORY_MODEL_HOST ?? (typeof file.modelHost === "string" ? file.modelHost : DEFAULT_EMBEDDER_CONFIG.modelHost),
     idleMs: num(env.OWL_MEMORY_EMBED_IDLE_MS) ?? config.idleMs,
     modelsDirs: [...(env.OWL_MEMORY_MODELS_DIR ? [env.OWL_MEMORY_MODELS_DIR] : file.modelsDirs ?? []), join(dataDir, "models"), join(homedir(), ".owl", "models")],
   };
@@ -135,6 +147,7 @@ export class NullEmbedder implements Embedder {
   }
 
   public isReady(): boolean { return false; }
+  public canEmbed(): boolean { return false; }
   public warmup(): void { /* nothing to start */ }
   public embed(): Promise<Float32Array[]> { return Promise.reject(new Error(this.reason)); }
   public stop(): Promise<void> { return Promise.resolve(); }
@@ -171,12 +184,12 @@ export class ChildEmbedder implements Embedder {
   }
 
   public health(): EmbedderHealth {
-    const modelDir = this.model ? this.modelDir() : null;
+    const modelDir = this.model ? findModelDir(this.config.modelsDirs, this.config.model) : null;
     const missing = this.config.enabled === true && this.state === "idle" && !modelDir;
     const state = missing ? "missing" : this.state;
     const lastError = missing ? `model ${this.config.model} not found in ${this.config.modelsDirs.join(", ")}` : this.lastError;
     return {
-      model: this.model, model_path: modelDir && this.model ? join(modelDir, this.model) : null, dim: this.dim, state, last_error: lastError,
+      model: this.model, model_path: modelDir, dim: this.dim, state, last_error: lastError,
       retry_after: this.retryAt > Date.now() ? new Date(this.retryAt).toISOString() : null,
       pid: this.child?.pid ?? null, started_at: this.startedAt, pending_passages: this.inFlight, warning: this.warning(state, lastError),
     };
@@ -196,15 +209,16 @@ export class ChildEmbedder implements Embedder {
     this.start().catch(() => undefined);
   }
 
-  private modelDir(): string | null {
-    return this.config.modelsDirs.find((dir) => existsSync(join(dir, this.config.model, "config.json"))) ?? null;
+  public canEmbed(): boolean {
+    return this.config.enabled === true && this.retryAt <= Date.now() && findModelDir(this.config.modelsDirs, this.config.model) !== null;
   }
 
   private start(): Promise<void> {
     if (this.config.enabled !== true) return Promise.reject(new Error(disabledWarning));
     if (this.ready && this.child) return this.ready;
     if (this.retryAt > Date.now()) return Promise.reject(new Error(this.lastError ?? "embedder is waiting to retry"));
-    const dir = this.modelDir();
+    // The child wants the directory that holds `<model>`, not the model directory itself.
+    const dir = this.config.modelsDirs.find((d) => findModelDir([d], this.config.model));
     if (!dir) return this.fail("missing", `model ${this.config.model} not found in ${this.config.modelsDirs.join(", ")}`, false);
     this.state = "starting";
     const child = (this.config.forkChild ?? fork)(this.config.childPath ?? join(__dirname, "embedder-child.js"), [], { serialization: "advanced", stdio: ["ignore", "ignore", "inherit", "ipc"], execArgv: [] });

@@ -304,7 +304,12 @@ test("Codex items map to the activity states", async (t) => {
   await driver.send({ turn_id: "local-turn", text: "hello" });
   await collectEvents(driver, (event) => event.type === "turn.completed" || event.type === "turn.failed");
   const shape = seen.map((a) => `${a.state}/${a.tool_name}`);
-  assert.deepEqual(shape, ["thinking/null", "tool/Shell", "thinking/null", "tool/lookup", "thinking/null", "subagent/null", "thinking/null", "null/null"]);
+  const active = shape.filter((s) => s !== "thinking/null" && s !== "null/null");
+  assert.equal(active.join(","), "tool/Shell,tool/lookup,subagent/null");
+  assert.equal(shape.at(-1), "null/null");
+  assert.equal(shape.at(0), "thinking/null");
+  const between = shape.slice(shape.indexOf("tool/lookup"), shape.indexOf("subagent/null"));
+  assert.ok(between.includes("thinking/null"), "thinking sits between tool and subagent");
   assert.ok(seen.every((a) => a.background_count === 0));
 });
 

@@ -1,5 +1,8 @@
 level: system
 rules:
+  - id: owl_web_pages_via_webfetch
+    kind: instruction
+    text: "Web ページや GitHub リポジトリの本文は WebFetch（検索は WebSearch）で読むこと。gh・curl など Bash で取った内容は調査の自動保存（research/）に残らないので、スター数など細かい数値を取るときだけ使う。"
   - id: owl_no_hardcoding_generic_code
     kind: instruction
     text: "特別な条件がない限り、ハードコードは禁止。値・パス・名前・件数などは設定や引数から受け取り、汎用的に使えるコードを書くこと。"

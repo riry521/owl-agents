@@ -27,7 +27,7 @@ const vec = (text) => {
   return Float32Array.from(v, (x) => x / norm);
 };
 const fakeEmbedder = {
-  model: "fake-keywords", isReady: () => true, warmup() {}, stop: async () => {},
+  model: "fake-keywords", isReady: () => true, canEmbed: () => true, warmup() {}, stop: async () => {},
   health: () => ({ model: "fake-keywords", state: "ready", warning: null }),
   embed: async (_kind, texts) => texts.map(vec),
 };

@@ -59,6 +59,8 @@ interface PreparedResearch {
   readonly links: readonly { readonly title: string; readonly url: string }[];
   readonly points: readonly string[];
   readonly summary: string;
+  /** Japanese keywords from the model; empty when it gave none. */
+  readonly keywords?: readonly string[];
   readonly researchedAt: string;
   readonly attribution: ResearchAttribution;
   readonly tool: WebResearchCapture["tool"];
@@ -229,11 +231,12 @@ export class ResearchRecorder {
     });
   }
 
-  private async saveUnlocked(prepared: PreparedResearch): Promise<ResearchRecordResult> {
+  private async saveUnlocked(initial: PreparedResearch): Promise<ResearchRecordResult> {
     try {
-      const relPath = `research/${prepared.filename}`;
+      const relPath = `research/${initial.filename}`;
+      const { tags, summary, keywords } = await this.contentTags(initial);
+      const prepared: PreparedResearch = { ...initial, summary: summary ?? initial.summary, keywords };
       const body = this.renderBody(prepared);
-      const tags = await this.contentTags(prepared);
       try {
         await this.options.knowledge.get(relPath);
         await this.update(relPath, prepared, body, tags);
@@ -253,7 +256,7 @@ export class ResearchRecorder {
         }
       }
     } catch (error) {
-      return this.writeFailure(error, prepared.attribution);
+      return this.writeFailure(error, initial.attribution);
     }
   }
 
@@ -281,6 +284,7 @@ export class ResearchRecorder {
       query: prepared.tool === "WebSearch" ? prepared.query : "",
       title: truncate(prepared.title, CLIPPING_TITLE_CHARS),
       summary: truncate(prepared.summary, CLIPPING_SUMMARY_CHARS),
+      ...(prepared.keywords?.length ? { keywords: prepared.keywords.join(", ") } : {}),
       researched_at: prepared.researchedAt,
       ...(firstResearchedAt ? { first_researched_at: firstResearchedAt } : {}),
       agent_role: prepared.attribution.role,
@@ -295,9 +299,10 @@ export class ResearchRecorder {
   }
 
   /** Content tags from the model, normalized here; never throws, so a model failure cannot lose the clipping. */
-  private async contentTags(prepared: PreparedResearch): Promise<string[]> {
+  private async contentTags(prepared: PreparedResearch): Promise<{ tags: string[]; summary?: string; keywords: string[] }> {
+    const none = { tags: [], keywords: [] };
     const tagger = this.options.tagger;
-    if (!tagger) return [];
+    if (!tagger) return none;
     try {
       const { min, max } = this.options.tagRange?.() ?? { min: DEFAULT_RESEARCH_TAGS_MIN, max: DEFAULT_RESEARCH_TAGS_MAX };
       const limit = this.options.existingTagsLimit?.() ?? DEFAULT_RESEARCH_EXISTING_TAGS_MAX;
@@ -306,11 +311,16 @@ export class ResearchRecorder {
       const existing = [...counts].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, Math.max(0, limit)).map(([tag]) => tag).sort();
       const result = await tagger({
         title: prepared.title, summary: prepared.summary, points: prepared.points, existing_tags: existing, min, max,
-      }) as { ok?: boolean; output?: { tags?: unknown } } | null;
-      return result?.ok === true ? normalizeClippingTags(result.output?.tags, max) : [];
+      }) as { ok?: boolean; output?: { tags?: unknown; summary?: unknown; keywords?: unknown } } | null;
+      if (result?.ok !== true) return none;
+      const raw = result.output?.summary;
+      const summary = typeof raw === "string" ? truncate(normalizeWhitespace(raw), CLIPPING_SUMMARY_CHARS) : "";
+      const rawKeywords = Array.isArray(result.output?.keywords) ? result.output.keywords as unknown[] : [];
+      const keywords = [...new Set(rawKeywords.filter((k): k is string => typeof k === "string").map((k) => normalizeWhitespace(k).replace(/,/gu, " ")).filter(Boolean))].slice(0, Math.max(0, max));
+      return { tags: normalizeClippingTags(result.output?.tags, max), ...(summary ? { summary } : {}), keywords };
     } catch (error) {
       console.warn("[owl-core] Research tagging failed; saving the note without tags.", error);
-      return [];
+      return none;
     }
   }
 
@@ -335,7 +345,7 @@ export class ResearchRecorder {
     const workId = prepared.attribution.work_id ? safeBodyText(prepared.attribution.work_id) : "";
     const workTitle = prepared.attribution.work_title ? safeBodyText(prepared.attribution.work_title) : "";
     const work = [workId, workTitle].filter(Boolean).join(" — ");
-    const lines = [`# ${prepared.title}`, "", "## 出典", ...source, "", "## 要点", ...prepared.points.map((point) => `- ${point}`), "", "## 関係する Project", `- ${work ? `${labels.work}: ${work}` : labels.none}`];
+    const lines = [`# ${prepared.title}`, "", "## 出典", ...source, "", "## 要点", ...prepared.points.map((point) => `- ${point}`), "", ...(prepared.keywords?.length ? ["## キーワード", prepared.keywords.join(", "), ""] : []), "## 関係する Project", `- ${work ? `${labels.work}: ${work}` : labels.none}`];
     return lines.join("\n");
   }
 

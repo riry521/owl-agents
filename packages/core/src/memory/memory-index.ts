@@ -236,9 +236,9 @@ export class MemoryIndex {
 
   public hasVectors(): boolean { return this.vecError === null && hasVectors(this.db()); }
   public nearest(query: Float32Array): { body: number[]; head: number[]; similarity: Map<number, number> } { return knn(this.db(), query); }
-  public embedPending(embedder: Embedder, profile: RetrievalProfile, meta: Record<string, string>): Promise<number> {
+  public embedPending(embedder: Embedder, profile: RetrievalProfile, meta: Record<string, string>, pageTypes?: readonly string[]): Promise<number> {
     if (this.vecError) return Promise.reject(new Error(`sqlite-vec unavailable: ${this.vecError}`));
-    return embedPending(this.db(), embedder, profile, meta, (key, value) => setMeta(this.db(), key, value));
+    return embedPending(this.db(), embedder, profile, meta, (key, value) => setMeta(this.db(), key, value), { pageTypes });
   }
 
   private quarantine(reason: unknown): void {
@@ -421,7 +421,8 @@ export class MemoryIndex {
     if (!getMeta(db, "built_at")) setMeta(db, "built_at", nowIso);
     setMeta(db, "move_id", markerId);
     setMeta(db, "storage_dir", await realpath(dir).catch(() => dir));
-    this.options.onScanned?.();
+    // Why not for a rebuild's temp index: the callback embeds into the live index, which is replaced right after; rebuild() calls it after the swap.
+    if (db === this.database) this.options.onScanned?.();
     return { mode, ...result, duration_ms: Date.now() - started, errors };
   }
 
@@ -465,6 +466,7 @@ export class MemoryIndex {
       this.open();
       this.lastError = null;
       this.lastScanFailed = false;
+      this.options.onScanned?.();
       this.options.logger?.info?.(`memory index rebuilt (${reason}): ${result.added} notes`);
       return result;
     } finally {

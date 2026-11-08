@@ -196,6 +196,16 @@ else
   warn "$(msg 'doctorが要対応項目を報告しました。`./bin/owl doctor`でremediationを確認してください。provider CLIは自動インストールされません。' 'Doctor reported items requiring attention. Run ./bin/owl doctor for guidance. Provider CLIs are not installed automatically.')"
 fi
 
+# --- embedding model ---
+# Downloads the model and turns semantic search on. Search still works with
+# word matching alone, so a failure here never stops setup.
+echo "$(msg '多言語の埋め込みモデルを用意しています（初回は約 130 MB をダウンロード）...' 'Preparing the multilingual embedding model (the first run downloads about 130 MB)...')"
+if ./bin/owl embeddings; then
+  info "$(msg '埋め込みモデルを用意しました' 'The embedding model is ready')"
+else
+  warn "$(msg '埋め込みモデルを用意できませんでした。検索は言葉の一致だけで動きます。ネットワークを確認し、あとで owl embeddings を実行してください。' 'Could not prepare the embedding model. Search keeps working with word matching only. Check the network and run owl embeddings later.')"
+fi
+
 # --- pre-push private word guard ---
 if [ -n "${OWL_PRIVATE_WORDS_FILE:-}" ] || [ -f data/private-words.txt ]; then
   if sh scripts/git-hooks/install.sh; then

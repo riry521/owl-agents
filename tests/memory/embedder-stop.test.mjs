@@ -1,3 +1,4 @@
+import { writeModelFiles } from "../../packages/core/test/memory/model-fixture.mjs";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -10,7 +11,7 @@ test("embedder stop() sends SIGKILL after the grace period when the child ignore
   const dir = mkdtempSync(join(tmpdir(), "owl-embedder-stop-"));
   const modelsDir = join(dir, "models");
   mkdirSync(join(modelsDir, "test-model"), { recursive: true });
-  writeFileSync(join(modelsDir, "test-model", "config.json"), "{}");
+  writeModelFiles(join(modelsDir, "test-model"));
   const childPath = join(dir, "child.mjs");
   writeFileSync(childPath, 'process.on("SIGTERM", () => {});\nprocess.on("message", (m) => { if (m.op === "init") process.send({ op: "ready", dim: 3 }); });\nsetInterval(() => {}, 1000);\n');
   const embedder = new ChildEmbedder({ ...DEFAULT_EMBEDDER_CONFIG, enabled: true, model: "test-model", modelsDirs: [modelsDir], childPath, killGraceMs: 200, requestTimeoutMs: 5_000 });

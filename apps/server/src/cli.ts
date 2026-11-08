@@ -1432,6 +1432,7 @@ Usage:
   owl open
   owl status [--json]
   owl doctor [--json] [--strict]
+  owl embeddings
   owl serve [--off]
   owl setup
 
@@ -1457,6 +1458,7 @@ const HELP_TEXT_JA = `Owl-Agent CLI
   owl open
   owl status [--json]
   owl doctor [--json] [--strict]
+  owl embeddings
   owl serve [--off]
   owl setup
 
@@ -1498,13 +1500,23 @@ export async function runCli(argv: readonly string[] = process.argv.slice(2)): P
   if (!command) {
     throw new CliError(
       2,
-      cliText('コマンドを指定してください。--helpで使い方を表示できます。owl start|open|status|stop|restart|cleanup|doctor|serve|setup|advisorを使用してください。', 'Specify a command. Run --help for usage. Available commands: start, open, status, stop, restart, cleanup, doctor, serve, setup, advisor.'),
+      cliText('コマンドを指定してください。--helpで使い方を表示できます。owl start|open|status|stop|restart|cleanup|doctor|embeddings|serve|setup|advisorを使用してください。', 'Specify a command. Run --help for usage. Available commands: start, open, status, stop, restart, cleanup, doctor, embeddings, serve, setup, advisor.'),
     );
   }
   if (command === "doctor") {
     const { exitCode, output } = await runDoctor(parseDoctorArgs(rest));
     process.stdout.write(`${output}\n`);
     process.exitCode = exitCode;
+    return;
+  }
+  if (command === "embeddings") {
+    if (rest.length > 0) throw new CliError(2, cliText(`embeddingsは引数をとりません: ${rest[0]}\n使い方: owl embeddings`, `embeddings takes no arguments: ${rest[0]}\nUsage: owl embeddings`));
+    const { runEmbeddingsCommand } = await import("./embeddings-command.js");
+    process.exitCode = await runEmbeddingsCommand({
+      dataDir: resolveDataDir(resolveOwlRoot()), env: process.env, isTTY: process.stdout.isTTY,
+      out: (line) => process.stdout.write(`${line}\n`), err: (line) => process.stderr.write(`${line}\n`),
+      serverRunning: async () => { const state = await readState(); return state !== null && isAlive(state.pid); },
+    });
     return;
   }
   let result: Record<string, unknown>;

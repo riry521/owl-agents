@@ -30,7 +30,7 @@ test("files that match no template are not knowledge (search, recall, page searc
   for (const [path, text] of Object.entries(NON_TEMPLATE)) write(path, text);
   write("notes/legacy-note.md", `---\nid: 01JCCCCCCCCCCCCCCCCCCCCC01\ntitle: 旧ノート\ntags: []\nsources: []\nlinks: []\nproject_ids: []\ncreated: 2026-09-01T00:00:00.000Z\nupdated: 2026-09-02T00:00:00.000Z\n---\n\n## Summary\n旧\n\n## Claims\n- [fact] ${KEYWORD} <!-- claim:aaaa -->\n\n## Related notes\n`);
   const storage = { isAvailable: () => true, activeDir: () => vault, withRead: async (op) => op(), status: () => ({ available: true, dir: vault, since: null }) };
-  const service = new MemoryService({ dataDir, storage, embedder: { enabled: false, health: () => ({}), stop: async () => {} }, indexOptions: { watch: false } });
+  const service = new MemoryService({ dataDir, storage, embedder: { enabled: false, canEmbed: () => false, health: () => ({}), stop: async () => {} }, indexOptions: { watch: false } });
   await service.start();
   try {
     await service.reindex({ mode: "full" });

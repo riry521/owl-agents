@@ -1,3 +1,4 @@
+import { writeModelFiles } from "./model-fixture.mjs";
 import { clippingText } from "./clipping-text.mjs";
 import assert from "node:assert/strict";
 import { fork } from "node:child_process";
@@ -48,7 +49,7 @@ test("disabled embeddings do not start a child or call fetch and explain the opt
   const root = mkdtempSync(join(tmpdir(), "owl-disabled-embedder-"));
   const modelDir = join(root, "models", DEFAULT_EMBEDDER_CONFIG.model);
   mkdirSync(modelDir, { recursive: true });
-  writeFileSync(join(modelDir, "config.json"), "{}");
+  writeModelFiles(modelDir);
   let starts = 0;
   let fetches = 0;
   const originalFetch = globalThis.fetch;
@@ -82,12 +83,12 @@ test("enabled embeddings do not download a missing model and show the explicit p
   });
   try {
     assert.equal(embedder.health().state, "missing");
-    assert.match(embedder.health().warning, /node scripts\/memory-models\.mjs pull Xenova\/multilingual-e5-small/u);
+    assert.match(embedder.health().warning, /owl embeddings/u);
     await assert.rejects(embedder.embed("query", ["fictional sample"]));
     assert.equal(starts, 0);
     assert.equal(fetches, 0);
     assert.equal(embedder.health().state, "missing");
-    assert.match(embedder.health().warning, /node scripts\/memory-models\.mjs pull Xenova\/multilingual-e5-small/u);
+    assert.match(embedder.health().warning, /owl embeddings/u);
   } finally {
     globalThis.fetch = originalFetch;
     await embedder.stop();
@@ -118,7 +119,7 @@ test("missing sqlite-vec keeps FTS search and combines the disabled setting with
     const warning = (await service.health()).embedder.warning;
     assert.match(warning, /設定で無効/u);
     assert.match(warning, /pnpm install/u);
-    assert.match(warning, /node scripts\/memory-models\.mjs pull Xenova\/multilingual-e5-small/u);
+    assert.match(warning, /owl embeddings/u);
     assert.match(warning, /memory_embeddings\.enabled を true/u);
   } finally {
     try { await done(); }
@@ -130,7 +131,7 @@ test("transformers import failure while enabled keeps FTS search and reports val
   const root = mkdtempSync(join(tmpdir(), "owl-enabled-import-failure-"));
   const modelDir = join(root, "models", "fake-model");
   mkdirSync(modelDir, { recursive: true });
-  writeFileSync(join(modelDir, "config.json"), "{}");
+  writeModelFiles(modelDir);
   const embedder = new ChildEmbedder({
     ...DEFAULT_EMBEDDER_CONFIG, enabled: true, model: "fake-model", modelsDirs: [join(root, "models")], childPath: MISSING_TRANSFORMERS,
   });
@@ -145,7 +146,7 @@ test("transformers import failure while enabled keeps FTS search and reports val
     assert.deepEqual(result.items.map((item) => item.title), ["Apricot Notes"]);
     const warning = (await service.health()).embedder.warning;
     assert.match(warning, /optional 依存を除外せず pnpm install/u);
-    assert.match(warning, /node scripts\/memory-models\.mjs pull Xenova\/multilingual-e5-small/u);
+    assert.match(warning, /owl embeddings/u);
     assert.match(warning, /memory_embeddings\.enabled/u);
   } finally {
     await done();

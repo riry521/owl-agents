@@ -39,8 +39,10 @@ export async function resolveKnowledgeFilename(
   dir: string,
   slug: string,
   source?: { key: string; value: string; kind?: string; match?: Record<string, string> },
+  keepCase = false,
 ): Promise<{ filename: string; existing: boolean }> {
-  const safeSlug = slugifyKnowledgeName(slug);
+  // keepCase: the caller already built a safe name whose letter case carries meaning (an ID), so it is not slugified again.
+  const safeSlug = keepCase ? slug : slugifyKnowledgeName(slug);
   let entries: Dirent[];
   try {
     entries = await readdir(dir, { withFileTypes: true });

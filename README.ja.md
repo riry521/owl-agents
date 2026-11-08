@@ -144,6 +144,15 @@ owl doctor
 リポジトリを移動した場合は、`./setup.sh`をもう一度実行してください。それまでは、
 リポジトリのルートで`./bin/owl`が使えます。
 
+### 埋め込みモデル
+
+`./setup.sh`は、ビルドと`owl doctor`のあとに`owl embeddings`を実行します。初回は多言語の
+埋め込みモデル（約130 MB）を`data/models`にダウンロードします。この場所は git が無視します。
+ダウンロードに失敗しても、setupは警告を出して先へ進みます。その間のメモリ検索は言葉の一致だけで
+答えます。あとで`owl embeddings`をもう一度実行してください。オフラインなどでダウンロードを省くには、
+setupの前に`.env`へ`OWL_MEMORY_EMBEDDINGS_ENABLED=false`を書きます。詳しくは
+[メモリ検索の埋め込み](#メモリ検索の埋め込み)を見てください。
+
 CLIとセットアップの表示言語は`OWL_LANG=ja`または`OWL_LANG=en`で指定できます。
 未設定なら`LC_ALL`、`LC_MESSAGES`、`LANG`の順でOSロケールを参照します。
 
@@ -360,40 +369,54 @@ OWL_BIND=0.0.0.0 OWL_API_TOKEN='use-a-long-random-value' owl start
 
 ## メモリ検索の埋め込み
 
-埋め込みは任意の機能で、既定では無効です。`@huggingface/transformers`、
-`sqlite-vec`、`onnxruntime-node` は任意依存です。依存がない場合や読み込みに失敗した場合
-（nativeバイナリの破損を含む）も、メモリ検索は SQLite FTS5 の trigram 検索と `LIKE` で
-動作します。`/api/v1/memory/health` は埋め込みが使えない理由と有効化手順を warning に
-表示します。有効にしても、モデルは自動ダウンロードされません。
-`--no-optional` を付けてインストールした場合は、埋め込みを有効にする前に
-そのオプションを外して `pnpm install` を実行し、任意依存を追加してください。
+埋め込みは、モデルを用意する `./setup.sh` を実行すると使えるようになります。モデルがないときは
+無効のままです。`@huggingface/transformers`、`sqlite-vec`、`onnxruntime-node` は任意依存です。
+依存がない場合や読み込みに失敗した場合（nativeバイナリの破損を含む）も、メモリ検索は
+SQLite FTS5 の trigram 検索と `LIKE` で動作します。`/api/v1/memory/health` は埋め込みが
+使えない理由と有効化手順を warning に表示します。検索のときにはモデルをダウンロードしません。
+ダウンロードするのは `./setup.sh` と `owl embeddings` だけです。
+`--no-optional` を付けてインストールした場合は、先にそのオプションを外して
+`pnpm install` を実行し、任意依存を追加してください。
 
-有効にするには、`memory_embeddings.enabled` を `true` にします。
-`<dataDir>/memory-embedder.json` を次のように設定します。
+setup のあとに実行するコマンドは `owl embeddings` です。次の設定を読んで、次の順に動きます。
 
-```json
-{ "enabled": true }
-```
-
-または、サーバーの環境変数に `OWL_MEMORY_EMBEDDINGS_ENABLED=1` を設定します。
-その後、既定モデルを取得してサーバーを再起動します。
+1. モデルを `<dataDir>/models/<org>/<name>` にダウンロードします（既定のモデルで約 130 MB）。
+   すでにあるファイルは取り直しません。
+2. `enabled` がどこにも書かれていなければ、`<dataDir>/memory-embedder.json` に
+   `{ "enabled": true }` を書きます。ほかのキーはそのまま残します。`false` にしてある場合
+   （ファイル、または `OWL_MEMORY_EMBEDDINGS_ENABLED=false`）は、無効になっていると表示して何もしません。
+3. `<dataDir>/memory-index.sqlite` があれば、ベクトルのない記事だけを埋め込み、件数と
+   かかった時間を表示します。やることがなければ 0 件で終わります。索引がまだないときは、
+   サーバーの初回起動で索引が作られ、そのあと裏でベクトルが作られます。
 
 ```bash
-node scripts/memory-models.mjs pull Xenova/multilingual-e5-small
-node scripts/memory-models.mjs list
+owl embeddings
 ```
 
-モデルファイルはこのリポジトリには含めていません。利用者が
-`node scripts/memory-models.mjs pull <org/name>` で取得してください。依存とモデルの
-ライセンス、出典は [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を確認してください。
+モデル名か区切り方（chunking の profile）が変わったときは、全件を作り直します。`pageTypes` に
+種類を足したときは足した種類だけを埋め込み、減らしたときは外れた種類のベクトルを消します。
+サーバーが動いていても実行できます。このコマンドが埋め込みを有効にした場合は、検索に反映する
+ために `owl restart` を実行するよう表示します。
 
-`node scripts/memory-models.mjs enable` は、埋め込みの有効化と既定モデルの準備をまとめて
-行います。シェルに `OWL_DATA_DIR` が設定されていない場合は、サーバーのdataDirを指定して
-実行してください。設定変更またはモデル取得の後はサーバーを再起動してください。
+設定は `<dataDir>/memory-embedder.json` か環境変数で行います（環境変数が優先されます）。
+
+| キー | 環境変数 | 意味 |
+|---|---|---|
+| `enabled` | `OWL_MEMORY_EMBEDDINGS_ENABLED` | `true`/`1` または `false`/`0` |
+| `model` | `OWL_MEMORY_EMBED_MODEL` | Hugging Face の id（`org/name`）。既定は `Xenova/multilingual-e5-small` |
+| `pageTypes` | | 埋め込む記事の種類。既定は `clipping` と `material` |
+| `modelHost` | `OWL_MEMORY_MODEL_HOST` | ダウンロード元。既定は `https://huggingface.co` |
+| `modelsDirs` | `OWL_MEMORY_MODELS_DIR` | 追加の models ディレクトリ。最初に探し、ダウンロード先にもなります |
+
+モデルファイルはこのリポジトリには含めず、git でも追跡しません（`data/` は無視されます）。
+依存とモデルのライセンス、出典は [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) を確認してください。
+`node scripts/memory-models.mjs`（`pull`、`enable`、`list`）も使えます。ダウンロードの処理は同じです。
 `/api/v1/memory/health` でembedderの状態とwarningを確認できます。
 
-オフラインの PC では、ネットワークにつながる別の PC でモデルを取得し、モデルの
-ディレクトリ全体をオフライン側の `<dataDir>/models` または `~/.owl/models` にコピーします。
+オフラインの PC でダウンロードを省くには、`./setup.sh` の前に `.env` へ
+`OWL_MEMORY_EMBEDDINGS_ENABLED=false` を書きます。あとから使うときは、ネットワークにつながる別の PC で
+モデルを取得し、モデルのディレクトリ全体をオフライン側の `<dataDir>/models` または
+`~/.owl/models` にコピーします。
 
 ```bash
 # ネットワークにつながる PC で実行。--dir はモデルを取得する models ディレクトリです。
@@ -402,10 +425,9 @@ node scripts/memory-models.mjs pull Xenova/multilingual-e5-small --dir /path/to/
 # <dataDir>/models/Xenova/multilingual-e5-small にコピーします。
 ```
 
-コピー先は `~/.owl/models` の下でも構いません。別の models ディレクトリを使う場合は
-`OWL_MEMORY_MODELS_DIR` で指定できます。オフライン側で埋め込みを有効にしてサーバーを
-再起動してください。`list` でmodelsディレクトリ内のモデルを確認できます。ローカルの
-embedderの実行にネットワーク接続は必要ありません。
+別の models ディレクトリを使う場合は `OWL_MEMORY_MODELS_DIR` で指定できます。オフライン側では
+`enabled` を `true` にしてサーバーを再起動してください。`list` でmodelsディレクトリ内のモデルを
+確認できます。ローカルのembedderの実行にネットワーク接続は必要ありません。
 
 次の表は、量子化 ONNX（`q8`）embedderが使う設定・tokenizerファイルと
 `onnx/model_quantized.onnx` を取得して測定した値です。ディスク容量は `du -sh` の出力、

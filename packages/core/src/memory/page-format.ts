@@ -65,7 +65,7 @@ export const UPDATES_SECTION = "更新履歴";
 export const THEME_SECTIONS = ["概要", "決まりごと", "落とし穴", "手順", "関連ページ", UPDATES_SECTION] as const;
 export const INDEX_SECTIONS = ["概要", "必読（決まりごと・落とし穴）", "テーマ", "共通テーマ"] as const;
 export const WORK_LOG_SECTIONS = ["何をしたか", "学んだこと", "反映先"] as const;
-export const CLIPPING_SECTIONS = ["出典", "要点", "使いどころ", "関係する Project"] as const;
+export const CLIPPING_SECTIONS = ["出典", "要点", "キーワード", "使いどころ", "関係する Project"] as const;
 /** A source label in a line's trailing （…）: a Work (W123) or a conversation log (会話2026-10-04-1). */
 export const SOURCE_LABEL = "(?:W\\d+|会話\\d{4}-\\d{2}-\\d{2}-\\d+)";
 export const CONVERSATION_LOG_SECTIONS = ["話したこと", "決まったこと", "学んだこと", "反映先", "原文"] as const;
@@ -81,7 +81,7 @@ const TEMPLATES: Readonly<Record<PageKind, Template>> = {
   theme: { sections: THEME_SECTIONS, optional: [], tokens: PAGE_LIMITS.theme_tokens, lines: { 概要: 8, 決まりごと: 12, 落とし穴: 15, 手順: 3, 関連ページ: 8, 更新履歴: 8 } },
   "project-index": { sections: INDEX_SECTIONS, optional: [], tokens: PAGE_LIMITS.index_tokens, lines: { "必読（決まりごと・落とし穴）": 10, テーマ: 20, 共通テーマ: 6 } },
   "work-log": { sections: WORK_LOG_SECTIONS, optional: [], tokens: Infinity, lines: { 何をしたか: 6, 学んだこと: 12 } },
-  clipping: { sections: CLIPPING_SECTIONS, optional: ["使いどころ"], tokens: PAGE_LIMITS.clipping_tokens, lines: { 出典: 3, 要点: 7, "関係する Project": 3 } },
+  clipping: { sections: CLIPPING_SECTIONS, optional: ["キーワード", "使いどころ"], tokens: PAGE_LIMITS.clipping_tokens, lines: { 出典: 3, 要点: 7, "関係する Project": 3 } },
   "conversation-log": { sections: CONVERSATION_LOG_SECTIONS, optional: ["原文"], tokens: Infinity, lines: {} },
 };
 

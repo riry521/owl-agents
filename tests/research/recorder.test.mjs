@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "../helpers/temp.mjs";
 
-import { KnowledgeBase, ResearchRecorder, extractResearchKeyPoints } from "../../packages/core/dist/index.js";
+import { KnowledgeBase, ResearchRecorder, assertValidPage, extractResearchKeyPoints } from "../../packages/core/dist/index.js";
 
 async function setup(t, options = {}) {
   const root = await tempDir(t, "owl-research-recorder-");
@@ -424,4 +424,29 @@ test("re-recording a note keeps its existing tags when the tagger returns none o
 
   const retagged = await make(async () => ({ ok: true, output: { tags: ["typescript"] } })).record(capture(url), { role: "worker" });
   assert.match(await read(retagged), /^tags: \[typescript\]$/mu);
+});
+
+test("the model's one-line summary and Japanese keywords are saved for WebFetch and WebSearch; without them the summary stays the first point", async (t) => {
+  const { knowledge } = await setup(t);
+  const make = (tagger) => new ResearchRecorder({ knowledge, isEnabled: () => true, language: () => "ja", ...(tagger ? { tagger } : {}) });
+  const read = async (result) => readFile(join(knowledge.knowledgeDir, result.path), "utf8");
+  const tagger = async () => ({ ok: true, output: { tags: ["paper-cut", "claude-code"], summary: "切り紙風の縦型解説リールを作る Claude Code スキル", keywords: ["切り紙", "リール", "スキル"] } });
+  const english = "- Generates paper-cut style vertical explainer reels from a prompt.\n\nThe skill renders each scene as layered paper.";
+  const search = { tool: "WebSearch", url: null, query: "paper cut reel", prompt: null, title: "Paper reel", content: english, links: [], http_status: 200, is_error: false };
+
+  for (const input of [capture("https://tags.example.test/fetch", english), search]) {
+    const note = await read(await make(tagger).record(input, { role: "worker" }));
+    assert.match(note, /^summary: 切り紙風の縦型解説リールを作る Claude Code スキル$/mu);
+    assert.match(note, /^keywords: 切り紙, リール, スキル$/mu);
+    assertValidPage(note);
+    assert.match(note, /^tags: \[paper-cut, claude-code\]$/mu);
+  }
+
+  const failing = async () => { throw new Error("model down"); };
+  const noSummary = async () => ({ ok: true, output: { tags: ["x"] } });
+  for (const [i, tg] of [undefined, failing, noSummary].entries()) {
+    const note = await read(await make(tg).record(capture(`https://tags.example.test/plain-${i}`, english), { role: "worker" }));
+    assert.match(note, /^summary: Generates paper-cut style vertical explainer reels from a prompt\.$/mu);
+    assert.doesNotMatch(note, /^keywords:/mu);
+  }
 });

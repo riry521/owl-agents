@@ -265,6 +265,7 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
       runKeywordExtraction?(request: unknown): Promise<unknown>;
       runLibrarianOperations?(request: unknown): Promise<unknown>;
       runClippingTags?(request: unknown): Promise<unknown>;
+      runConversationSummary?(request: unknown): Promise<unknown>;
       runRuleJudgments?(request: unknown): Promise<unknown>;
       runProjectInvestigation?(request: unknown): Promise<unknown>;
       runTestSetupInvestigation?(request: unknown): Promise<unknown>;
@@ -443,6 +444,11 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
         const delegateValue = await getDelegate();
         if (typeof delegateValue.runClippingTags !== "function") return { ok: false, error: "clipping_tags_unavailable" };
         return delegateValue.runClippingTags(request);
+      },
+      runConversationSummary: async (request: unknown) => {
+        const delegateValue = await getDelegate();
+        if (typeof delegateValue.runConversationSummary !== "function") return { ok: false, error: "conversation_summary_unavailable" };
+        return delegateValue.runConversationSummary(request);
       },
       runRuleJudgments: async (request: unknown) => {
         const delegateValue = await getDelegate();

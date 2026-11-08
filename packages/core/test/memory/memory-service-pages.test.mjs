@@ -32,7 +32,7 @@ async function setup({ available = true, extra = {} } = {}) {
     status: () => ({ available, dir: vault, since: null }),
   };
   const service = new MemoryService({
-    dataDir, storage, embedder: { enabled: false, health: () => ({}), stop: async () => {} }, indexOptions: { watch: false },
+    dataDir, storage, embedder: { enabled: false, canEmbed: () => false, health: () => ({}), stop: async () => {} }, indexOptions: { watch: false },
     mode: () => "pages", ...extra,
   });
   await service.start();
@@ -159,7 +159,7 @@ test("an unconnected vault answers from the index with stale: true", async () =>
   const t = await setup();
   try {
     const offline = new MemoryService({
-      dataDir: join(t.root, "data"), embedder: { enabled: false, health: () => ({}), stop: async () => {} }, indexOptions: { watch: false },
+      dataDir: join(t.root, "data"), embedder: { enabled: false, canEmbed: () => false, health: () => ({}), stop: async () => {} }, indexOptions: { watch: false },
       storage: { isAvailable: () => false, activeDir: () => { throw new Error("unavailable"); }, withRead: async (op) => op(), status: () => ({ available: false, dir: null, since: null }) },
     });
     await offline.start();

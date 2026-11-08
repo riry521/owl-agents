@@ -735,7 +735,16 @@ imperative one-line subject (ASCII, at most 72 characters) in `verdict.commit_su
 
 ## owl-memory
 
-Knowledge lives as pages under `<OWL_ROOT>/knowledge`. A SQLite index (`memory-index.sqlite` in `OWL_DATA_DIR`) is rebuilt from those files and can be rebuilt on demand with `POST /api/v1/memory/reindex` (Owner only); embeddings are optional (see the README). Agents read it through the `owl-memory` stdio MCP server (`apps/server/src/memory-mcp.ts`), which exposes three read-only tools: `index` (overview), `page` (open a page) and `search`. The Librarian integrates pending pages (`GET /api/v1/memory/pages/pending`, `POST /api/v1/memory/pages/integrate`) and runs daily at the times in the knowledge automation settings (`librarian_times`).
+Knowledge lives as pages under `<OWL_ROOT>/knowledge`. A SQLite index (`memory-index.sqlite` in `OWL_DATA_DIR`) is rebuilt from those files and can be rebuilt on demand with `POST /api/v1/memory/reindex` (Owner only); vector embeddings are prepared by `./setup.sh` and the `owl embeddings` command (see below and the README). Agents read it through the `owl-memory` stdio MCP server (`apps/server/src/memory-mcp.ts`), which exposes three read-only tools: `index` (overview), `page` (open a page) and `search`. The Librarian integrates pending pages (`GET /api/v1/memory/pages/pending`, `POST /api/v1/memory/pages/integrate`) and runs daily at the times in the knowledge automation settings (`librarian_times`).
+
+**`owl embeddings`.** Downloads the embedding model (default `Xenova/multilingual-e5-small`, about 130 MB) into `<OWL_DATA_DIR>/models`, writes `enabled: true` to `memory-embedder.json` when `enabled` is unset, and embeds the notes of the configured `pageTypes` (default `clipping` and `material`) that have no vectors in an existing `memory-index.sqlite`. It prints the count and the time taken. `./setup.sh` runs it once; a download failure there is a warning, not an error. It exits 0 on success or when nothing needs doing (embeddings disabled, or no index yet; the server builds the index on its first start and then the vectors in the background), 1 on failure, and 2 on a bad argument or model name.
+
+- Differences only: a second run with nothing to embed reports 0 notes.
+- Everything is rebuilt when the model name or the chunking profile (`chunkChars`, `maxChunks`, `prefix`, `headVec`, `maxTokens`) changes. Adding a `pageTypes` entry embeds only the added type; removing one deletes the vectors of that type.
+- It can run while the server runs (the index uses WAL and a 3-second busy timeout). A running server only needs `owl restart` when the command just turned embeddings on; the command prints that and does not restart the server.
+- Setting `enabled` to `false` (file or `OWL_MEMORY_EMBEDDINGS_ENABLED=false`) makes the command a no-op.
+
+**Word matching only.** In each of these cases search does not fail; it answers from FTS alone and the result's `mode` is `"fts"`: embeddings are off; the model files are missing (state `missing`, no child process starts); `@huggingface/transformers` or onnxruntime is absent (`unavailable`); the model cannot load (`failed`; after two failures in a row it is not retried for `retryMs`); embedding the query takes more than 30 seconds; sqlite-vec cannot load or no vectors exist yet. `GET /api/v1/memory/health` shows the reason and points to `owl embeddings`. Search itself never downloads a model.
 
 ## Automatic Work creation
 

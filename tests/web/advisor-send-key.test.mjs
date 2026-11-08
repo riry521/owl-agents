@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createRequire, Module } from 'node:module';
 import { dirname, join } from 'node:path';
-import { test } from 'node:test';
+import { mock, test } from 'node:test';
 import ts from 'typescript';
 
 import { repoRoot } from '../helpers/paths.mjs';
@@ -22,12 +22,14 @@ let capturedButton = null;
 let capturedForm = null;
 let capturedAttachButton = null;
 let capturedTray = null;
+let capturedSave = null;
 
 function wrapJsx(originalJsx) {
   return function patchedJsx(type, props, ...rest) {
     if (type === 'textarea' && props?.className === 'advisor__textarea') capturedTextarea = props;
     if (type === 'form' && props?.className === 'advisor__form') capturedForm = props;
     if (type === 'p' && props?.className === 'advisor__hint') capturedHint = props;
+    if (type === 'button' && props?.className === 'advisor__menu-item') capturedSave ??= props;
     if (type === 'button' && props?.className?.startsWith('advisor__send')) capturedButton = props;
     return originalJsx(type, props, ...rest);
   };
@@ -160,8 +162,8 @@ const advisorViewModule = compileWebComponent(advisorViewPath, {
 // AdvisorView: visibleCount, sending, sendError, stopping, stopError, clearError, knowledgeSaving,
 // knowledgeSaveNotice, knowledgeSaveError, menuOpen, isTouchDevice,
 // awaitingReply, channelsOpen; then AdvisorComposer: hasText.
-// AdvisorView holds three refs; the composer's textarea and composing refs follow.
-const COMPOSING_REF = 4;
+// AdvisorView holds four refs (the last is the save-notice timer); the composer's textarea and composing refs follow.
+const COMPOSING_REF = 5;
 const VISIBLE_STEP = 30;
 
 function createHookHarness(isTouchDevice, awaitingReply = null, hasText = false) {
@@ -169,11 +171,12 @@ function createHookHarness(isTouchDevice, awaitingReply = null, hasText = false)
   if (hasText) state[14] = true; // composer's hasText
   let hookIndex = 0;
   let refIndex = 0;
-  // refs[3] is the composer's textarea; the text is read from it at send time.
+  // refs[4] is the composer's textarea; the text is read from it at send time.
   const refs = [];
-  refs[3] = { current: { value: 'hello', focus() {} } };
+  refs[4] = { current: { value: 'hello', focus() {} } };
   // setCalls counts every state setter call; changes counts those that would re-render.
   const counts = { setCalls: 0, changes: 0 };
+  const effects = [];
   return {
     refs,
     state,
@@ -193,15 +196,18 @@ function createHookHarness(isTouchDevice, awaitingReply = null, hasText = false)
       if (!(index in refs)) refs[index] = { current: initialValue };
       return refs[index];
     },
-    useEffect() {},
+    effects,
+    useEffect(effect) { effects.push(effect); },
     useLayoutEffect() {},
   };
 }
 
-function renderAdvisor(isTouchDevice, awaitingReply = null, hasText = false, { stopping = false, stopError = null } = {}) {
+function renderAdvisor(isTouchDevice, awaitingReply = null, hasText = false, { stopping = false, stopError = null, menuOpen = false } = {}) {
   const harness = createHookHarness(isTouchDevice, awaitingReply, hasText);
   harness.state[3] = stopping;
   harness.state[4] = stopError;
+  harness.state[9] = menuOpen;
+  capturedSave = null;
   capturedTextarea = null;
   capturedButton = null;
   capturedHint = null;
@@ -216,7 +222,7 @@ function renderAdvisor(isTouchDevice, awaitingReply = null, hasText = false, { s
   } finally {
     activeHookHarness = null;
   }
-  return { harness, textarea: capturedTextarea, hint: capturedHint, button: capturedButton, form: capturedForm, attachButton: capturedAttachButton, tray: capturedTray, html };
+  return { harness, textarea: capturedTextarea, hint: capturedHint, button: capturedButton, form: capturedForm, save: capturedSave, attachButton: capturedAttachButton, tray: capturedTray, html };
 }
 
 function keyEvent({ shiftKey = false, isComposing = false, keyCode = 13 } = {}) {
@@ -355,7 +361,7 @@ test('rendered: the spinner stays through idle or stale session reads after a se
   const state = [];
   const effects = [];
   const refs = [];
-  refs[3] = { current: { value: 'hello', focus() {} } };
+  refs[4] = { current: { value: 'hello', focus() {} } };
   let dirty = false;
   let hookIndex = 0;
   let effectIndex = 0;
@@ -473,14 +479,14 @@ test('without field-sizing, the scheduled resize writes no height while composin
   withBrowserGlobals(false, () => {
     const { textarea, harness } = renderAdvisor(false);
     const writes = [];
-    harness.refs[3].current = { scrollHeight: 80, style: { set height(v) { writes.push(v); } } };
+    harness.refs[4].current = { scrollHeight: 80, style: { set height(v) { writes.push(v); } } };
     let frame;
     globalThis.requestAnimationFrame = (fn) => { frame = fn; return 1; };
-    harness.refs[4].current = true;
+    harness.refs[5].current = true;
     textarea.onChange({ target: { value: 'x' } });
     frame();
     assert.deepEqual(writes, []);
-    harness.refs[4].current = false;
+    harness.refs[5].current = false;
     textarea.onChange({ target: { value: 'xy' } });
     frame();
     assert.deepEqual(writes, ['', '80px']);
@@ -495,7 +501,7 @@ test('send clears the box before postMessage answers, restores it on failure, an
   try {
     const { textarea, harness } = renderAdvisor(false);
     assert.equal(textarea.disabled, undefined, 'textarea is never disabled');
-    const ta = harness.refs[3].current;
+    const ta = harness.refs[4].current;
     textarea.onKeyDown(keyEvent({ shiftKey: true }).event);
     assert.equal(ta.value, '', 'cleared before the API answers');
     ta.value = 'again';
@@ -710,7 +716,7 @@ test('attachment only and body plus attachment each post once with the attachmen
     resetDraftSpy({ items: [{ id: 'i1', status: 'ready', attachmentId: 'a1' }], attachmentIds: ['a1'] });
     const { button, harness, textarea } = renderAdvisor(false, null, false);
     assert.equal(button.disabled, false, 'an attachment alone enables the send button');
-    harness.refs[3].current.value = text;
+    harness.refs[4].current.value = text;
     textarea.onKeyDown(keyEvent({ shiftKey: true }).event);
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(postMessageArgs, [['conv-1', expectedBody, ['a1']]]);
@@ -745,5 +751,45 @@ test('Turn shows body and file names, a quarantined badge, and no body box when 
     assert.equal(html.split('class="turn__body').length - 1, 1, 'only the non-empty body gets a box');
   } finally {
     advisorMessages = [];
+  }
+});
+
+test('the save-success notice clears after 5s, restarts on a repeat save, is cancelled on unmount, and errors stay', async () => {
+  const original = componentApiClient.ingestConversation;
+  const savedMessages = advisorMessages;
+  advisorMessages = [{ id: 'm1', source: 'web', created_at: '1' }];
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const { harness, save } = renderAdvisor(false, null, false, { menuOpen: true });
+    const NOTICE = 7;
+    await save.onClick();
+    assert.match(harness.state[NOTICE], /advisor\.saveSuccess/);
+    mock.timers.tick(4000);
+    assert.notEqual(harness.state[NOTICE], null, 'still shown before 5s');
+    await save.onClick();
+    mock.timers.tick(4000);
+    assert.notEqual(harness.state[NOTICE], null, 'the first save timer does not clear the second notice');
+    mock.timers.tick(1000);
+    assert.equal(harness.state[NOTICE], null, 'cleared 5s after the latest save');
+
+    await save.onClick();
+    const unmount = harness.effects.filter((e) => String(e).includes('clearTimeout')).map((e) => e())[0];
+    unmount();
+    const before = harness.counts.setCalls;
+    mock.timers.tick(10000);
+    assert.equal(harness.counts.setCalls, before, 'no state update after unmount');
+
+    componentApiClient.ingestConversation = async () => { throw new Error('boom'); };
+    const failed = renderAdvisor(false, null, false, { menuOpen: true });
+    const quiet = console.error;
+    console.error = () => {};
+    try { await failed.save.onClick(); } finally { console.error = quiet; }
+    assert.notEqual(failed.harness.state[8], null);
+    mock.timers.tick(60000);
+    assert.notEqual(failed.harness.state[8], null, 'the error is not auto-dismissed');
+  } finally {
+    componentApiClient.ingestConversation = original;
+    advisorMessages = savedMessages;
+    mock.timers.reset();
   }
 });

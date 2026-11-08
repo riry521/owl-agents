@@ -1,3 +1,4 @@
+import { writeModelFiles } from "./model-fixture.mjs";
 import assert from "node:assert/strict";
 import { fork } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -39,7 +40,7 @@ function makeService(embedderOverrides) {
   const dataDir = join(root, "data");
   mkdirSync(join(vault, "research"), { recursive: true });
   mkdirSync(join(root, "models", "fake-model"), { recursive: true });
-  writeFileSync(join(root, "models", "fake-model", "config.json"), "{}");
+  writeModelFiles(join(root, "models", "fake-model"));
   mkdirSync(dataDir);
   writeFileSync(join(vault, "research", "a.md"), clippingText("Orchard", "the apple harvest was good"));
   writeFileSync(join(vault, "research", "b.md"), clippingText("Garage", "the car needs new tires"));
@@ -133,7 +134,7 @@ test("transformers import failure keeps search on FTS and health gives dependenc
     assert.equal(health.embedder.state, "unavailable");
     assert.match(health.embedder.warning, /pnpm install/u);
     assert.match(health.embedder.warning, /memory_embeddings\.enabled/u);
-    assert.match(health.embedder.warning, /node scripts\/memory-models\.mjs pull Xenova\/multilingual-e5-small/u);
+    assert.match(health.embedder.warning, /owl embeddings/u);
   } finally {
     await done();
   }

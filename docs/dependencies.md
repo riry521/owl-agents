@@ -111,6 +111,13 @@ all of `apps/*` and `packages/*` — and also builds native modules and
 generates the dist output for every package. `--frozen-lockfile` ensures setup
 never silently produces a dependency graph that differs from the manifest.
 
+After the build and `owl doctor`, setup runs `./bin/owl embeddings`, which
+downloads the embedding model `Xenova/multilingual-e5-small` (about 130 MB;
+the files are not in the lockfile) into `data/models` (`<OWL_DATA_DIR>/models`).
+`data/` is ignored by git. A failed download is a warning and setup continues;
+search then uses word matching only. Set `OWL_MEMORY_EMBEDDINGS_ENABLED=false`
+in `.env` to skip this step.
+
 The workspace treats pnpm as the source of truth, so nested npm lockfiles are
 not kept. When you change a dependency, update only the root
 `pnpm-lock.yaml`, then verify it with `pnpm install --frozen-lockfile`.

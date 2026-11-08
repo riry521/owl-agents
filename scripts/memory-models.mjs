@@ -1,12 +1,9 @@
 #!/usr/bin/env node
 // Manage the local models used by the optional memory embedder.
-import { createWriteStream } from "node:fs";
 import { lstat, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
 import { randomUUID } from "node:crypto";
 import { parseArgs } from "node:util";
 import { fileURLToPath } from "node:url";
@@ -42,8 +39,13 @@ function validModel(model) {
   return /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(model);
 }
 
+// The same data directory the server and `owl embeddings` use: OWL_DATA_DIR, else <repo>/data.
+function defaultDataDir() {
+  return process.env.OWL_DATA_DIR || join(dirname(dirname(fileURLToPath(import.meta.url))), "data");
+}
+
 function defaultModelRoot(dataDir) {
-  return join(dataDir ?? join(homedir(), ".owl"), "models");
+  return join(dataDir ?? defaultDataDir(), "models");
 }
 
 async function optionalEmbedderConfig(dataDir) {
@@ -124,36 +126,18 @@ function offlineSteps(model, destination) {
 }
 
 async function pullModel(model, root) {
-  if (!validModel(model)) throw new Error(`invalid model id: ${model} (expected org/name)`);
-  const target = join(root, ...model.split("/"));
-  await mkdir(target, { recursive: true });
-  let saved = 0;
-  let skipped = 0;
+  // Same download code and default location as `owl embeddings`: core's downloadModel.
+  const { downloadModel, isValidModelName, loadEmbedderConfig } = await import("../packages/core/dist/index.js");
+  if (!isValidModelName(model)) throw new Error(`invalid model id: ${model} (expected org/name)`);
+  const host = loadEmbedderConfig(defaultDataDir()).modelHost;
   try {
-    for (const file of MODEL_FILES) {
-      const destination = join(target, file);
-      if (await fileExists(destination)) { skipped += 1; continue; }
-      const url = `https://huggingface.co/${model}/resolve/main/${file.split("/").map(encodeURIComponent).join("/")}`;
-      const response = await fetch(url, { redirect: "follow" });
-      if (!response.ok || !response.body) throw new Error(`download failed (${response.status}) for ${url}`);
-      await mkdir(dirname(destination), { recursive: true });
-      const temporary = `${destination}.tmp-${process.pid}-${randomUUID()}`;
-      try {
-        await pipeline(Readable.fromWeb(response.body), createWriteStream(temporary, { flags: "wx" }));
-        await rename(temporary, destination);
-      } catch (error) {
-        await unlink(temporary).catch(() => undefined);
-        throw error;
-      }
-      saved += 1;
-      console.log(`  saved ${file}`);
-    }
+    const result = await downloadModel({ model, modelsDir: root, host, onProgress: (file) => console.log(`  saved ${file}`) });
+    console.log(`${model}: ${result.downloaded.length} file(s) downloaded, ${result.skipped.length} existing file(s) kept; ${humanSize(await directorySize(result.dir))} at ${result.dir}`);
   } catch (error) {
     console.error(`Could not pull ${model}: ${error.message}`);
     offlineSteps(model, root);
     return false;
   }
-  console.log(`${model}: ${saved} file(s) downloaded, ${skipped} existing file(s) kept; ${humanSize(await directorySize(target))} at ${target}`);
   return true;
 }
 
@@ -190,7 +174,7 @@ function dependencyStatus() {
 
 async function enable({ model, noPull, yes }) {
   const explicitDataDir = process.env.OWL_DATA_DIR || undefined;
-  const dataDir = explicitDataDir ?? join(homedir(), ".owl");
+  const dataDir = explicitDataDir ?? defaultDataDir();
   if (!explicitDataDir && !yes) {
     console.log(`OWL_DATA_DIR is not set. Default config location: ${join(dataDir, "memory-embedder.json")}`);
     console.log(`Default model location: ${defaultModelRoot(dataDir)}`);
@@ -227,7 +211,7 @@ async function main() {
   if (args.command === "list") { await listModels(args.dir); return; }
   if (args.command === "pull") {
     if (!validModel(args.model)) { console.error(`invalid model id: ${args.model} (expected org/name)`); process.exitCode = 2; return; }
-    const root = args.dir ?? defaultModelRoot(process.env.OWL_DATA_DIR || undefined);
+    const root = args.dir ?? defaultModelRoot();
     if (!(await pullModel(args.model, root))) process.exitCode = 1;
     return;
   }

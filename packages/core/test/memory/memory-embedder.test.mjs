@@ -1,9 +1,10 @@
+import { writeModelFiles } from "./model-fixture.mjs";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { ChildEmbedder, DEFAULT_EMBEDDER_CONFIG, embeddingText } from "../../dist/memory/embedder.js";
+import { ChildEmbedder, DEFAULT_EMBEDDER_CONFIG, embeddingText, loadEmbedderConfig } from "../../dist/memory/embedder.js";
 
 const FAKE = new URL("./fixtures/fake-embedder-child.cjs", import.meta.url).pathname;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -11,7 +12,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function setup(overrides = {}) {
   const root = mkdtempSync(join(tmpdir(), "owl-embedder-"));
   mkdirSync(join(root, "models", "fake-model"), { recursive: true });
-  writeFileSync(join(root, "models", "fake-model", "config.json"), "{}");
+  writeModelFiles(join(root, "models", "fake-model"));
   const embedder = new ChildEmbedder({ ...DEFAULT_EMBEDDER_CONFIG, enabled: true, model: "fake-model", modelsDirs: [join(root, "models")], childPath: FAKE, idleMs: 200, retryMs: 60_000, ...overrides });
   return { root, embedder, done: async () => { await embedder.stop(); rmSync(root, { recursive: true, force: true }); delete process.env.FAKE_MODE; } };
 }
@@ -98,5 +99,33 @@ test("a child that cannot start reports state failed", async () => {
     assert.ok(embedder.health().last_error);
   } finally {
     await done();
+  }
+});
+
+test("OWL_MEMORY_EMBED_MODEL beats the file's model; pageTypes and modelHost come from the file and the host is overridable", () => {
+  const root = mkdtempSync(join(tmpdir(), "owl-embed-config-"));
+  try {
+    writeFileSync(join(root, "memory-embedder.json"), JSON.stringify({ model: "a/from-file", pageTypes: ["clipping"], modelHost: "http://mirror.example" }));
+    assert.equal(loadEmbedderConfig(root, {}).model, "a/from-file");
+    assert.equal(loadEmbedderConfig(root, { OWL_MEMORY_EMBED_MODEL: "b/from-env" }).model, "b/from-env");
+    const config = loadEmbedderConfig(root, {});
+    assert.deepEqual(config.pageTypes, ["clipping"]);
+    assert.equal(config.modelHost, "http://mirror.example");
+    assert.equal(loadEmbedderConfig(root, { OWL_MEMORY_MODEL_HOST: "http://127.0.0.1:1" }).modelHost, "http://127.0.0.1:1");
+    assert.deepEqual(loadEmbedderConfig(mkdtempSync(join(tmpdir(), "owl-embed-empty-")), {}).pageTypes, DEFAULT_EMBEDDER_CONFIG.pageTypes);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a model with only some of its files is missing, not ready to start", () => {
+  const { root, embedder, done } = setup();
+  try {
+    assert.equal(embedder.canEmbed(), true);
+    rmSync(join(root, "models", "fake-model", "tokenizer.json"));
+    assert.equal(embedder.health().state, "missing");
+    assert.equal(embedder.canEmbed(), false);
+  } finally {
+    return done();
   }
 });

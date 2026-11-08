@@ -208,9 +208,10 @@ export class MemorySaver {
     baseName: string,
     content: string,
     source?: { key: string; value: string; kind?: string; match?: Record<string, string> },
+    keepCase = false,
   ): Promise<string> {
-    if (!this.gate) return this.writeKnowledgeFileUnlocked(folder, baseName, content, source);
-    return this.gate.withWrite(() => this.writeKnowledgeFileUnlocked(folder, baseName, content, source));
+    if (!this.gate) return this.writeKnowledgeFileUnlocked(folder, baseName, content, source, keepCase);
+    return this.gate.withWrite(() => this.writeKnowledgeFileUnlocked(folder, baseName, content, source, keepCase));
   }
 
   private async writeKnowledgeFileUnlocked(
@@ -218,13 +219,14 @@ export class MemorySaver {
     baseName: string,
     content: string,
     source?: { key: string; value: string; kind?: string; match?: Record<string, string> },
+    keepCase = false,
   ): Promise<string> {
     const directory = join(this.knowledge.knowledgeDir, folder);
     await mkdir(directory, { recursive: true });
 
-    const slug = slugifyKnowledgeName(baseName);
+    const slug = keepCase ? baseName : slugifyKnowledgeName(baseName);
     for (;;) {
-      const { filename, existing } = await resolveKnowledgeFilename(directory, slug, source);
+      const { filename, existing } = await resolveKnowledgeFilename(directory, slug, source, keepCase);
       const absolutePath = join(directory, filename);
       if (!existing) {
         try {

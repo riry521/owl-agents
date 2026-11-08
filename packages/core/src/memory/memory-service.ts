@@ -128,8 +128,8 @@ export type PageReadOutput =
   | { readonly error: "clipping_budget_exceeded"; readonly budget: PageBudget }
   | { readonly error: "unknown_sections"; readonly outline: readonly { section: string; lines: number }[] }
   | { readonly error: "index_unavailable" };
-export interface PageSearchItem { readonly path: string; readonly title: string; readonly summary: string; readonly score: number }
-export interface PageSearchOutput { readonly items: readonly PageSearchItem[]; readonly stale: boolean; readonly note?: string; readonly error?: "index_unavailable" | "search_budget_exceeded" }
+export interface PageSearchItem { readonly path: string; readonly title: string; readonly summary: string; readonly score: number; readonly match: "fts" | "vec" | "both" }
+export interface PageSearchOutput { readonly items: readonly PageSearchItem[]; readonly stale: boolean; readonly mode?: "hybrid" | "fts"; readonly note?: string; readonly error?: "index_unavailable" | "search_budget_exceeded" }
 
 /** Cuts at a code point so the estimate stays within `limit`. */
 function cutToTokens(text: string, limit: number): { text: string; truncated: boolean } {
@@ -153,6 +153,8 @@ export interface MemoryServiceOptions {
   /** Fusion weights, recorded in the index meta when embeddings are written. */
   readonly weights?: { readonly fts: number; readonly vec: number };
   readonly profile?: RetrievalProfile;
+  /** Page types that get vectors (EmbedderConfig.pageTypes); every type when omitted. */
+  readonly pageTypes?: readonly string[];
   readonly now?: () => Date;
   readonly logger?: MemoryLogger;
   readonly indexOptions?: Partial<MemoryIndexOptions>;
@@ -193,6 +195,7 @@ export class MemoryService {
   private readonly ledger: MemoryReadLedger;
   private failed: string | null = null;
   private embedding: Promise<number> | null = null;
+  private stopping = false;
 
   public constructor(options: MemoryServiceOptions) {
     this.options = options;
@@ -206,8 +209,9 @@ export class MemoryService {
     this.profile = options.profile ?? DEFAULT_EMBEDDER_CONFIG.profile;
     this.index = new MemoryIndex({
       dataDir: options.dataDir, storage: options.storage, now: options.now, logger: options.logger,
-      // Edits are embedded only while the child is already up; a stopped child waits for the next search.
-      onScanned: () => { if (this.embedder.model && this.embedder.isReady()) void this.embedPending().catch((error: unknown) => this.logger?.warn("Background embedding failed", error)); },
+      // Why not the download here: only `owl embeddings` fetches the model; a scan embeds only when the model is already usable.
+      // Why wait for a run in flight: it may have listed the pending notes before this scan, and joining it would leave the new notes unembedded.
+      onScanned: () => { if (this.embedder.canEmbed()) void (this.embedding ?? Promise.resolve()).catch(() => 0).then(() => (this.stopping ? 0 : this.embedPending())).catch((error: unknown) => this.logger?.warn("Background embedding failed", error)); },
       ...options.indexOptions,
     });
     this.searcher = new MemorySearch({ index: this.index, embedder: this.embedder, weights: this.weights, profile: this.profile, now: this.now, logger: this.logger });
@@ -215,6 +219,7 @@ export class MemoryService {
 
   /** Never throws: a failing index is reported through `health().index.last_error`. */
   public async start(): Promise<void> {
+    this.stopping = false;
     try {
       await this.index.start();
     } catch (error) {
@@ -232,6 +237,9 @@ export class MemoryService {
   }
 
   public async stop(): Promise<void> {
+    this.stopping = true;
+    // Why wait: a background embedding writes to the index, so closing it first would fail the run mid-way.
+    await this.embedding?.catch(() => undefined);
     await this.index.stop().catch((error) => this.logger?.warn("memory index failed to stop", error));
     await this.embedder.stop();
   }
@@ -243,15 +251,19 @@ export class MemoryService {
 
   /** Single-flight: embeds the notes that have no vectors yet. Rejects when the embedder or sqlite-vec is unavailable. */
   private embedPending(): Promise<number> {
-    this.embedding ??= this.index.embedPending(this.embedder, this.profile, { rrf_w_fts: String(this.weights.fts), rrf_w_vec: String(this.weights.vec) })
+    this.embedding ??= this.index.embedPending(this.embedder, this.profile, { rrf_w_fts: String(this.weights.fts), rrf_w_vec: String(this.weights.vec) }, this.options.pageTypes)
       .finally(() => { this.embedding = null; });
     return this.embedding;
   }
 
+  /** Collects leftovers without delaying the search, which answers from the vectors that exist. Why not when !canEmbed: a missing model would log a failure on every search. */
+  private embedInBackground(): void {
+    if (!this.stopping && this.embedder.canEmbed()) this.embedPending().catch((error) => this.logger?.warn("memory embedding failed", error));
+  }
+
   public async search(input: MemorySearchInput, _ctx?: MemoryRequestContext): Promise<MemorySearchOutput> {
     if (this.failed) return { items: [], stale: true, index_at: null, mode: "fts", note: UNAVAILABLE_NOTE };
-    // The first search starts the child and embeds in the background; this search answers from what exists.
-    if (this.embedder.model) this.embedPending().catch((error) => this.logger?.warn("memory embedding failed", error));
+    this.embedInBackground();
     try {
       const result = await this.searcher.search({ ...input, limit: Math.min(input.limit ?? 8, 30), ...this.templateOnly() });
       return {
@@ -451,6 +463,7 @@ export class MemoryService {
       const charge = this.ledger.chargeSearch(this.budgetKey(ctx), ctx.caller);
       if (!charge.ok) return { items: [], stale: false, error: "search_budget_exceeded" };
     }
+    this.embedInBackground();
     try {
       const result = await this.searcher.search({
         query: input.query, limit: PAGE_LIMITS.search_items, include_raw: true, ...this.templateOnly(),
@@ -458,9 +471,9 @@ export class MemoryService {
         ...(input.include_work_log && ctx.project_id ? { work_log_project_id: ctx.project_id } : {}),
       });
       const items = result.hits.slice(0, PAGE_LIMITS.search_items).map((h): PageSearchItem => ({
-        path: h.row.path, title: h.row.title, summary: [...h.row.summary].slice(0, 100).join(""), score: Math.round(h.rel * 1e4) / 1e4,
+        path: h.row.path, title: h.row.title, summary: [...h.row.summary].slice(0, 100).join(""), score: Math.round(h.rel * 1e4) / 1e4, match: h.match,
       }));
-      let out: PageSearchOutput = { items, stale: result.stale, ...(items.length === 0 ? { note: "0 件" } : {}) };
+      let out: PageSearchOutput = { items, stale: result.stale, mode: result.mode, ...(items.length === 0 ? { note: "0 件" } : {}) };
       while (out.items.length > 0 && estimatePageTokens(JSON.stringify(out)) > PAGE_LIMITS.search_tokens) {
         out = { ...out, items: out.items.slice(0, -1) };
       }
@@ -526,6 +539,8 @@ export class MemoryService {
 
   public async reindex(input: { mode: "diff" | "full"; embed?: boolean }): Promise<MemoryReindexOutput> {
     const scan = await (input.mode === "full" ? this.index.rebuild("manual") : this.index.refreshChanged());
+    // Why settle a run in flight first: a full rebuild swaps the database, so a run started before it fails on the closed handle and must not be joined.
+    if (input.embed) await this.embedding?.catch(() => undefined);
     return input.embed ? { ...scan, embedded: await this.embedPending() } : scan;
   }
 

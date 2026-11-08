@@ -85,6 +85,8 @@ export const parseLibrarianOperationsResponse = (response: Pick<ProviderResponse
 
 export const CLIPPING_TAGS_OUTPUT_SCHEMA: RoleSchema = objectSchema({
   tags: { type: "array", items: { type: "string", minLength: 1 }, description: "tags describing the content of the article" },
+  summary: { type: "string", minLength: 1, description: "one short sentence saying what this material is" },
+  keywords: { type: "array", items: { type: "string", minLength: 1 }, description: "Japanese keywords, including Japanese paraphrases of the English terms" },
 });
 
 export function buildClippingTagsPrompt(request: ClippingTagsRequest): string {
@@ -93,6 +95,8 @@ export function buildClippingTagsPrompt(request: ClippingTagsRequest): string {
     instructions: [
       `Return ${request.min} to ${request.max} tags that describe what the article is about (topics, technologies, subjects).`,
       "Write each tag in lowercase English letters, digits and hyphens only (for example `date-library`).",
+      "Also return `summary`: one short Japanese sentence saying what this material is (for example 「切り紙風の縦型解説リールを作る Claude Code スキル」), not a copy of the first point.",
+      `Also return \`keywords\`: up to ${request.max} Japanese words someone might search with, including Japanese paraphrases of the English terms.`,
       "Reuse a tag from Existing tags when it means the same thing; add a new tag only when none fits.",
       "Do not use tags that name the kind of page, such as research, web-search or web-fetch.",
     ],
@@ -108,6 +112,38 @@ export function buildClippingTagsPrompt(request: ClippingTagsRequest): string {
 
 export const parseClippingTagsResponse = (response: Pick<ProviderResponse, "adapter" | "stdout" | "format">) =>
   parseWith(CLIPPING_TAGS_OUTPUT_SCHEMA, "clipping_tags_stdout_not_single_json_object", "clipping_tags", response);
+
+export interface ConversationSummaryRequest {
+  /** The conversation messages to summarise, already formatted as text, oldest first. */
+  readonly messages: readonly string[];
+  readonly model: LibrarianModelSetting;
+  readonly language?: OwnerLanguage;
+}
+
+export const CONVERSATION_SUMMARY_OUTPUT_SCHEMA: RoleSchema = objectSchema({
+  title: { type: "string", minLength: 1, description: "a short title that says what the conversation was about" },
+  talked: { type: "array", items: { type: "string" }, description: "what was talked about, one short sentence each" },
+  decided: { type: "array", items: { type: "string" }, description: "what the Owner and Advisor agreed on, one short sentence each" },
+  undecided: { type: "array", items: { type: "string" }, description: "open questions and unfinished matters, one short sentence each" },
+});
+
+export function buildConversationSummaryPrompt(request: ConversationSummaryRequest): string {
+  return renderRolePrompt({
+    role: "You are Owl's Advisor. Summarise a conversation with the Owner so that it can be saved as a note.",
+    instructions: [
+      "Write a summary in your own words. Do not copy the messages.",
+      "List what was talked about, what was decided and what is still undecided. Use an empty list when a part has nothing.",
+      "Give a short title that says what the conversation was about. Do not put IDs in the title.",
+    ],
+    output: CONVERSATION_SUMMARY_OUTPUT_SCHEMA,
+    outputRules: [],
+    language: request.language ?? "ja",
+    inputs: [{ name: "Conversation", value: externalJsonBlock("owl-conversation", request.messages) }],
+  });
+}
+
+export const parseConversationSummaryResponse = (response: Pick<ProviderResponse, "adapter" | "stdout" | "format">) =>
+  parseWith(CONVERSATION_SUMMARY_OUTPUT_SCHEMA, "conversation_summary_stdout_not_single_json_object", "conversation_summary", response);
 
 export interface RuleJudgmentsRequest {
   readonly model: LibrarianModelSetting;

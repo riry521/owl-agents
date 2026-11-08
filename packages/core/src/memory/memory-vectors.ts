@@ -60,17 +60,26 @@ export function chunkNote(title: string, summary: string, body: string, profile:
 
 const toBlob = (vector: Float32Array): Buffer => Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength);
 
-/** Embeds every note that has no chunks yet. Returns the number of notes embedded. */
-export async function embedPending(db: Database.Database, embedder: Embedder, profile: RetrievalProfile, meta: Record<string, string>, setMeta: (key: string, value: string) => void): Promise<number> {
+/** Embeds every note of `pageTypes` (all when omitted) that has no chunks yet, and removes the vectors of other types. Returns the number of notes embedded. */
+export async function embedPending(
+  db: Database.Database, embedder: Embedder, profile: RetrievalProfile, meta: Record<string, string>, setMeta: (key: string, value: string) => void,
+  options: { pageTypes?: readonly string[]; onProgress?: (done: number, total: number) => void } = {},
+): Promise<number> {
   const current = (db.prepare("SELECT value FROM meta WHERE key = 'embed_model'").get() as { value: string } | undefined)?.value;
   const currentProfile = (db.prepare("SELECT value FROM meta WHERE key = 'profile'").get() as { value: string } | undefined)?.value;
   const chunking = JSON.stringify([profile.chunkChars, profile.maxChunks, profile.prefix, profile.headVec > 0, profile.maxTokens]);
   if ((current !== undefined && current !== embedder.model) || (currentProfile !== undefined && (JSON.parse(currentProfile) as { chunking: string }).chunking !== chunking)) {
     db.exec("DROP TABLE IF EXISTS notes_vec; DELETE FROM note_chunks;");
   }
+  const types = options.pageTypes;
+  const typeSql = types ? `n.page_type IN (${types.map(() => "?").join(",") || "NULL"})` : "1";
+  if (types) {
+    const stale = db.prepare(`SELECT DISTINCT c.note_rowid AS rowid FROM note_chunks c JOIN notes n ON n.rowid = c.note_rowid WHERE NOT (${typeSql})`).all(...types) as { rowid: number }[];
+    db.transaction(() => { for (const { rowid } of stale) removeVectors(db, rowid); })();
+  }
   const pending = db.prepare(
-    "SELECT n.rowid, n.title, n.summary, n.body FROM notes n WHERE NOT EXISTS (SELECT 1 FROM note_chunks c WHERE c.note_rowid = n.rowid) ORDER BY n.path",
-  ).all() as { rowid: number; title: string; summary: string; body: string }[];
+    `SELECT n.rowid, n.title, n.summary, n.body FROM notes n WHERE ${typeSql} AND NOT EXISTS (SELECT 1 FROM note_chunks c WHERE c.note_rowid = n.rowid) ORDER BY n.path`,
+  ).all(...(types ?? [])) as { rowid: number; title: string; summary: string; body: string }[];
   let done = 0;
   for (const note of pending) {
     const texts = chunkNote(note.title, note.summary, note.body, profile);
@@ -88,6 +97,7 @@ export async function embedPending(db: Database.Database, embedder: Embedder, pr
       });
     })();
     done += 1;
+    options.onProgress?.(done, pending.length);
   }
   for (const [key, value] of Object.entries({ ...meta, profile: JSON.stringify({ ...profile, chunking }), embed_model: embedder.model ?? "", embed_at: new Date().toISOString() })) setMeta(key, value);
   return done;

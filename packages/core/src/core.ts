@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { serenaConfigPath, unregisterSerenaProject } from "./serena-registry.js";
 import { createHash as createFileHash } from "node:crypto";
 import { constants, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { copyFile, lstat, mkdir, readFile, rename, rm, rmdir, stat, unlink, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readdir, readFile, rename, rm, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { createUlid, utcNow } from "../../db/dist/index.js";
@@ -122,7 +122,7 @@ import {
 import { advisorWorkId, parseAdvisorWorkOperationPayload } from "./advisor-work-payload.js";
 import { AdvisorSessionNotFoundError, AdvisorSessionRuntime, type AdvisorSettingsSnapshot } from "./advisor-runtime.js";
 import { MemorySaver } from "./memory-saver.js";
-import { slugifyKnowledgeContentName } from "./knowledge-naming.js";
+import { slugifyKnowledgeNameOrNull } from "./knowledge-naming.js";
 import { autoWorkDbToggle, type AutoWorkSettingsValue, type AutoWorkSignal, type SessionActivity } from "@owl/shared";
 import { AutoWorkConfigLoader } from "./auto-work/config.js";
 import { AutoWorkService } from "./auto-work/service.js";
@@ -1101,6 +1101,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       rebuildProjectIndex: (project_id) => this.knowledgeLocation.withWrite(() => this.indexBuilder!.rebuildAll([{ kind: "project", project_id }])),
       onAdvisorPageShown: (sessionId, path) => this.noteMemoryShown(sessionId, path),
       embedder: new ChildEmbedder(embedderConfig),
+      pageTypes: embedderConfig.pageTypes,
       weights: embedderConfig.weights,
       profile: embedderConfig.profile,
       now: options.now ? () => new Date(options.now!()) : undefined,
@@ -6276,11 +6277,29 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
   }
 
   public async ingestConversation(conversationId: string): Promise<{ path: string }> {
-    const messages = this.listMessages(conversationId, {}).data;
+    const folder = join("advisor", "conversations");
+    const after = await this.lastSavedMessageId(join(this.knowledgeLocation.activeDir(), folder), conversationId);
+    const messages: Message[] = [];
+    for (let cursor = after; ;) {
+      const page = this.listMessages(conversationId, { cursor, limit: MAX_LIST_LIMIT });
+      messages.push(...page.data);
+      if (!page.has_more || page.data.length === 0) break;
+      cursor = page.data[page.data.length - 1].id;
+    }
+    if (messages.length === 0) throw validationError("There are no new messages to summarise.", { conversation_id: conversationId });
+    const runner = this.options.agentRunner as { runConversationSummary?: (request: unknown) => Promise<unknown> };
+    if (typeof runner.runConversationSummary !== "function") throw new Error("Conversation summary is not available.");
+    const result = await runner.runConversationSummary({
+      messages: messages.map(formatConversationMessage),
+      model: resolveRoleModelFromDb(this.db, "librarian"),
+      language: ownerLanguage(this.db),
+    }) as { ok?: boolean; error?: string; output?: { title?: unknown; talked?: unknown; decided?: unknown; undecided?: unknown } };
+    const output = result?.output;
+    const title = typeof output?.title === "string" ? output.title.trim() : "";
+    if (result?.ok !== true || !title) throw new Error(`The conversation summary could not be made${result?.error ? `: ${result.error}` : "."}`);
+    const list = (value: unknown) => (Array.isArray(value) ? value : []).filter((item): item is string => typeof item === "string" && item.trim() !== "");
+    const section = (heading: string, items: string[]) => `## ${heading}\n\n${items.length > 0 ? items.map((item) => `- ${item.trim()}`).join("\n") : "- なし"}`;
     const created = new Date().toISOString().slice(0, 10);
-    const messageContent = messages.map((message) => message.body).join("\n\n");
-    const body = messages.map(formatConversationMessage).join("\n\n---\n\n");
-    const baseName = slugifyKnowledgeContentName(messageContent, "advisor");
     const frontmatter = [
       "---",
       "tags: [advisor-conversation]",
@@ -6288,16 +6307,37 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       "source: advisor",
       "type: conversation",
       `conversation_id: ${conversationId}`,
+      `last_message_id: ${messages[messages.length - 1].id}`,
       "---",
     ].join("\n");
-    const content = `${frontmatter}\n\n# Advisor Conversation — ${created}\n\n${body}\n`;
-    const path = await this.memorySaver.writeKnowledgeFile(
-      join("advisor", "conversations"),
-      baseName,
-      content,
-      { key: "conversation_id", value: conversationId },
-    );
+    const content = `${frontmatter}\n\n# ${title}\n\n${[
+      section("話したこと", list(output?.talked)),
+      section("決まったこと", list(output?.decided)),
+      section("未決のこと", list(output?.undecided)),
+    ].join("\n\n")}\n`;
+    // No `source` key: a new summary never replaces the file of an earlier save of the same conversation, so its name and text stay as they were.
+    const titleSlug = slugifyKnowledgeNameOrNull(title, 30);
+    const path = await this.memorySaver.writeKnowledgeFile(folder, titleSlug ? `${conversationId}-${titleSlug}` : conversationId, content, undefined, true);
     return { path };
+  }
+
+  /** The newest message id already summarised for the conversation, read from the `last_message_id` of its saved files; undefined when none. */
+  private async lastSavedMessageId(directory: string, conversationId: string): Promise<string | undefined> {
+    let names: string[];
+    try {
+      names = await readdir(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    let last: string | undefined;
+    for (const name of names.filter((entry) => entry.endsWith(".md"))) {
+      const head = (await readFile(join(directory, name), "utf8")).match(/^---\r?\n([\s\S]*?)\r?\n---/u)?.[1] ?? "";
+      if (!head.split(/\r?\n/u).includes(`conversation_id: ${conversationId}`)) continue;
+      const id = head.match(/^last_message_id: (\S+)\s*$/mu)?.[1];
+      if (id && (!last || id > last)) last = id;
+    }
+    return last;
   }
 
   public async getActiveConversation(): Promise<{ conversation_id: string }> {

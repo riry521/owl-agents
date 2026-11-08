@@ -24,6 +24,7 @@ import { fileDeliveryView, isFileDeliveryMetadata } from '@/lib/advisor-file-del
 const PENDING_POLL_INTERVAL_MS = 1_500;
 const AWAITING_REPLY_TIMEOUT_MS = 60_000;
 const RELATIVE_TIME_TICK_MS = 30_000;
+const KNOWLEDGE_SAVE_NOTICE_MS = 5_000;
 // Turns rendered when a window opens; "show earlier" adds this many more. Each advisor turn parses Markdown.
 const VISIBLE_MESSAGES_STEP = 30;
 
@@ -68,6 +69,8 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
   const [awaitingReply, setAwaitingReply] = useState<AwaitingReply | null>(null);
   const [channelsOpen, setChannelsOpen] = useState(false);
   const channelsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current); }, []);
 
   // No fallback id on failure: a conversation made up here would belong to no window.
   const conversationView = useView<string>(knownConversationId ? null : `advisor-window:${windowKey}`, () => getAdvisorWindowConversation(windowKey));
@@ -185,11 +188,13 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
     setMenuOpen(false);
     if (!conversationId || !messages || messages.length === 0) return;
     setKnowledgeSaving(true);
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current);
     setKnowledgeSaveNotice(null);
     setKnowledgeSaveError(null);
     try {
       const result = await ingestConversation(conversationId);
       setKnowledgeSaveNotice(t('advisor.saveSuccess', { path: result.path }));
+      noticeTimerRef.current = setTimeout(() => setKnowledgeSaveNotice(null), KNOWLEDGE_SAVE_NOTICE_MS);
     } catch (error) {
       console.error('[Owl] Save conversation to knowledge failed', error);
       setKnowledgeSaveError(humanizeKnowledgeError(error, t));

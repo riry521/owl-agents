@@ -144,6 +144,16 @@ already there. Open a new terminal (or `source` that file) before using `owl`.
 If you move the repo, run `./setup.sh` again. Until then, `./bin/owl` works
 from the repo root.
 
+### Embedding model
+
+After the build and `owl doctor`, `./setup.sh` runs `owl embeddings`. The first
+run downloads the multilingual embedding model (about 130 MB) into
+`data/models`, which git ignores. If the download fails, setup prints a warning
+and continues; memory search then uses word matching only. Run `owl embeddings`
+again later. To skip the download (for example offline), put
+`OWL_MEMORY_EMBEDDINGS_ENABLED=false` in `.env` before running setup. See
+[Memory search embeddings](#memory-search-embeddings).
+
 Set `OWL_LANG=ja` or `OWL_LANG=en` for CLI and setup messages. If unset,
 `LC_ALL`, then `LC_MESSAGES`, then `LANG` determines the language.
 
@@ -365,44 +375,60 @@ OWL_BIND=0.0.0.0 OWL_API_TOKEN='use-a-long-random-value' owl start
 
 ## Memory search embeddings
 
-Embeddings are optional and off by default. The optional dependencies are
+Embeddings are on by default after `./setup.sh`, which prepares the model; if
+the model is missing they stay off. The optional dependencies are
 `@huggingface/transformers`, `sqlite-vec`, and `onnxruntime-node`. If a dependency
 is absent or cannot load (including a broken native binary), memory search still
 uses SQLite FTS5 trigram search and `LIKE`; `/api/v1/memory/health` reports a
-warning with the steps to enable embeddings. When embeddings are enabled, models
-are still never downloaded automatically.
+warning with the steps to enable embeddings. Search never downloads a model:
+only `./setup.sh` and `owl embeddings` do.
 If you installed with `--no-optional`, run `pnpm install` without that flag to
-install the optional dependencies before enabling embeddings.
+install the optional dependencies first.
 
-To opt in, set `memory_embeddings.enabled` to `true`. In
-`<dataDir>/memory-embedder.json`, use:
+`owl embeddings` is the command to run after setup. It reads the settings below
+and does the following:
 
-```json
-{ "enabled": true }
-```
-
-Or set `OWL_MEMORY_EMBEDDINGS_ENABLED=1` in the server's environment. Then pull
-the default model and restart the server:
+1. Downloads the model into `<dataDir>/models/<org>/<name>` (about 130 MB for the
+   default). Files that are already there are not fetched again.
+2. Writes `{ "enabled": true }` to `<dataDir>/memory-embedder.json` when
+   `enabled` is not set anywhere. Other keys in the file are kept. If you set
+   it to `false` (in the file or with `OWL_MEMORY_EMBEDDINGS_ENABLED=false`),
+   the command prints that embeddings are disabled and does nothing.
+3. If `<dataDir>/memory-index.sqlite` exists, embeds only the notes that have no
+   vectors yet and prints the count and the time taken. Running it again with
+   nothing to do embeds 0 notes. If there is no index yet, the server builds it
+   on its first start and then builds the vectors in the background.
 
 ```bash
-node scripts/memory-models.mjs pull Xenova/multilingual-e5-small
-node scripts/memory-models.mjs list
+owl embeddings
 ```
 
-Model files are not included in this repository. Users fetch them with
-`node scripts/memory-models.mjs pull <org/name>`. See
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for dependency and model
-licenses and sources.
+Everything is rebuilt when the model name or the chunking profile changes.
+Adding a type to `pageTypes` embeds only the added types; removing one deletes
+the vectors of that type. The command can run while the server is running. If it
+turned embeddings on, it tells you to run `owl restart` for search to use them.
 
-`node scripts/memory-models.mjs enable` enables embeddings and prepares the
-default model in one command. Run it with `OWL_DATA_DIR` set to the server's
-data directory if that variable is not already set in the shell. Restart the
-server after changing the setting or downloading a model. Check
-`/api/v1/memory/health` for the embedder state and any warning.
+Settings, in `<dataDir>/memory-embedder.json` or the environment (the
+environment wins):
 
-For an offline machine, pull the model on a connected machine, then copy the
-entire model directory into the offline machine's `<dataDir>/models` or
-`~/.owl/models` directory:
+| Key | Environment variable | Meaning |
+|---|---|---|
+| `enabled` | `OWL_MEMORY_EMBEDDINGS_ENABLED` | `true`/`1` or `false`/`0` |
+| `model` | `OWL_MEMORY_EMBED_MODEL` | Hugging Face id, `org/name` (default `Xenova/multilingual-e5-small`) |
+| `pageTypes` | | Note types to embed (default `clipping`, `material`) |
+| `modelHost` | `OWL_MEMORY_MODEL_HOST` | Download host (default `https://huggingface.co`) |
+| `modelsDirs` | `OWL_MEMORY_MODELS_DIR` | Extra models directory, searched first and used as the download target |
+
+Model files are not included in this repository and are not tracked by git
+(`data/` is ignored). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for
+dependency and model licenses and sources. `node scripts/memory-models.mjs`
+(`pull`, `enable`, `list`) is still available and uses the same download code.
+Check `/api/v1/memory/health` for the embedder state and any warning.
+
+To skip the download on an offline machine, put `OWL_MEMORY_EMBEDDINGS_ENABLED=false`
+in `.env` before `./setup.sh`. To use embeddings there later, fetch the model on
+a connected machine and copy the entire model directory into the offline
+machine's `<dataDir>/models` or `~/.owl/models` directory:
 
 ```bash
 # On the connected machine; --dir names the models directory to pull into.
@@ -411,11 +437,10 @@ node scripts/memory-models.mjs pull Xenova/multilingual-e5-small --dir /path/to/
 # <dataDir>/models/Xenova/multilingual-e5-small on the offline machine.
 ```
 
-The same copied directory can be placed under `~/.owl/models`, or another models
-directory can be selected with `OWL_MEMORY_MODELS_DIR`. Enable embeddings on the
-offline machine and restart its server. `list` shows the models found in a
-models directory. The server does not need network access to run the local
-embedder.
+Another models directory can be selected with `OWL_MEMORY_MODELS_DIR`. On the
+offline machine set `enabled` to `true` and restart the server. `list` shows the
+models found in a models directory. The server does not need network access to
+run the local embedder.
 
 The table gives measured sizes for the files used by the quantized ONNX (`q8`)
 embedder: model config, tokenizer files, and `onnx/model_quantized.onnx`. Disk

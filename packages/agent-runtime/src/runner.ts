@@ -24,7 +24,7 @@ import { OutputFormatError, outputResubmitPrompt, runWithOutputResubmit, type Ou
 import { DEFAULT_SIDE_EFFECT_TOOLS, isSideEffectTool } from "./side-effects";
 import { buildKeywordPrompt, keywordProviderSchema, parseKeywordResponse, type KeywordExtractionRequest, type KeywordExtractionRunResult } from "./keyword-extraction";
 import {
-  buildClippingTagsPrompt, buildLibrarianOperationsPrompt, buildRuleJudgmentsPrompt, parseClippingTagsResponse, parseRuleJudgmentsResponse, parseLibrarianOperationsResponse,
+  buildClippingTagsPrompt, buildConversationSummaryPrompt, parseConversationSummaryResponse, type ConversationSummaryRequest, buildLibrarianOperationsPrompt, buildRuleJudgmentsPrompt, parseClippingTagsResponse, parseRuleJudgmentsResponse, parseLibrarianOperationsResponse,
   type ClippingTagsRequest, type RuleJudgmentsRequest, type LibrarianModelSetting, type LibrarianOperationsRequest, type LibrarianRunResult,
 } from "./page-integration";
 import { buildTestSetupInvestigationPrompt, parseTestSetupResponse, testSetupProviderSchema, type TestSetupInvestigationRequest, type TestSetupInvestigationRunResult } from "./test-setup-investigation";
@@ -1467,6 +1467,9 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
   const runClippingTags = (input: ClippingTagsRequest): Promise<LibrarianRunResult> =>
     runLibrarianJson(input, "owl-clipping-tags-", buildClippingTagsPrompt(input), undefined, parseClippingTagsResponse, "clipping_tags_failed");
 
+  const runConversationSummary = (input: ConversationSummaryRequest): Promise<LibrarianRunResult> =>
+    runLibrarianJson(input, "owl-conversation-summary-", buildConversationSummaryPrompt(input), undefined, parseConversationSummaryResponse, "conversation_summary_failed");
+
   // Resubmission is off: one judgement is one model call, and Core treats an unreadable answer as "no judgement".
   const runRuleJudgments = (input: RuleJudgmentsRequest): Promise<LibrarianRunResult> =>
     runLibrarianJson(input, "owl-rule-judgments-", buildRuleJudgmentsPrompt(input), undefined, parseRuleJudgmentsResponse, "rule_judgments_failed", 0);
@@ -1738,6 +1741,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     runKeywordExtraction,
     runLibrarianOperations,
     runClippingTags,
+    runConversationSummary,
     runRuleJudgments,
     runProjectInvestigation,
     runTestSetupInvestigation,

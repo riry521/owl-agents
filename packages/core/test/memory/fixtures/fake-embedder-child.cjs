@@ -1,7 +1,8 @@
 // Stand-in for dist/memory/embedder-child.js: same IPC protocol, keyword-group vectors, failure modes chosen by FAKE_MODE.
 const fs = require("node:fs");
 
-const GROUPS = [["apple", "fruit"], ["car", "vehicle"], ["tax", "money"]];
+// FAKE_GROUPS (JSON array of word lists) replaces the default groups, e.g. to put a Japanese and an English word in one direction.
+const GROUPS = process.env.FAKE_GROUPS ? JSON.parse(process.env.FAKE_GROUPS) : [["apple", "fruit"], ["car", "vehicle"], ["tax", "money"]];
 const vec = (text) => {
   const v = [...GROUPS.map((g) => (g.some((w) => text.toLowerCase().includes(w)) ? 1 : 0)), 0.1];
   const norm = Math.hypot(...v);
