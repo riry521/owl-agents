@@ -1,14 +1,15 @@
 import { writeModelFiles } from "../../packages/core/test/memory/model-fixture.mjs";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { ChildEmbedder, DEFAULT_EMBEDDER_CONFIG } from "../../packages/core/dist/memory/embedder.js";
 
-test("embedder stop() sends SIGKILL after the grace period when the child ignores SIGTERM", async () => {
+test("embedder stop() sends SIGKILL after the grace period when the child ignores SIGTERM", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "owl-embedder-stop-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
   const modelsDir = join(dir, "models");
   mkdirSync(join(modelsDir, "test-model"), { recursive: true });
   writeModelFiles(join(modelsDir, "test-model"));

@@ -400,6 +400,10 @@ export class WorkflowEngine {
     });
   }
 
+  public pruneStoredArtifacts(retentionMs: number): Promise<string[]> {
+    return this.artifacts.pruneStoredArtifacts(retentionMs);
+  }
+
   private projectIdOf(workId: string): { project_id?: string } {
     const projectId = this.db.get<{ project_id: string | null }>("SELECT project_id FROM works WHERE id = ?", workId)?.project_id;
     return projectId ? { project_id: projectId } : {};
@@ -1732,7 +1736,8 @@ export class WorkflowEngine {
           workId,
           taskId,
           agentRunId,
-          payload: { outcome: "success", report_valid: true, report: result.report, ...usage },
+          // The report is in reports and the usage in agent_runs.usage_json; nothing reads them from this event.
+          payload: { outcome: "success", report_valid: true },
         },
         outbox: [{ provider: "websocket" }],
       });

@@ -130,7 +130,7 @@ test("agent.started names the harness and its gaps only for an opencode run", as
   await observe(opencodeRunId, { type: "spawned", pid: process.pid, harness: "opencode" });
   const payload = (runId) => JSON.parse(db.get("SELECT payload_json FROM events WHERE type = 'agent.started' AND agent_run_id = ?", runId).payload_json);
 
-  assert.deepEqual(Object.keys(payload(claudeRunId)).sort(), ["agent_run_id", "pid", "process_cmdline_sha256", "process_start_time"]);
+  assert.deepEqual(payload(claudeRunId), {});
   const started = payload(opencodeRunId);
   assert.equal(started.harness, "opencode");
   assert.ok(started.harness_gaps.length > 0);

@@ -1,6 +1,6 @@
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, readlink, rename, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, readlink, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { createUlid, utcNow } from "../../db/dist/index.js";
 import { validationError } from "./errors";
 import { taskDependencyIds } from "./task-context.js";
@@ -97,6 +97,29 @@ export class ArtifactCapture {
     }
   }
 
+  /**
+   * Removes the archived bytes under data/artifacts that nothing reads any more. Only materializeDependencyArtifacts reads
+   * them, and only for a running Project-less Work (a Project's changes stay in git). A Project-less Work's folder is kept
+   * until `retentionMs` after it ended. Artifact rows are left alone; the reader already skips a file that is gone.
+   * Why scan folders rather than rows: marking rows would need a new event type, and a folder name is the Work id.
+   * Returns the Work ids whose folder was removed.
+   */
+  public async pruneStoredArtifacts(retentionMs: number, now: number = Date.now()): Promise<string[]> {
+    const root = join(this.deps.dataDir, "artifacts");
+    const removed: string[] = [];
+    for (const workId of await readdir(root).catch(() => [] as string[])) {
+      const work = this.deps.db.get<{ project_id: string | null; state: string; ended_at: string }>(
+        "SELECT project_id, state, COALESCE(completed_at, cancelled_at, updated_at) AS ended_at FROM works WHERE id = ?",
+        workId,
+      );
+      const ended = work && (work.state === "completed" || work.state === "cancelled") && Date.parse(work.ended_at) <= now - retentionMs;
+      if (work && !work.project_id && !ended) continue;
+      await rm(join(root, workId), { recursive: true, force: true });
+      removed.push(workId);
+    }
+    return removed;
+  }
+
   public async captureArtifacts(workId: string, taskId: string, agentRunId: string, worktreePath: string | null): Promise<void> {
     if (!worktreePath) return;
     const root = resolve(worktreePath);
@@ -162,7 +185,9 @@ export class ArtifactCapture {
     // row never points at a path that is about to disappear. The hash makes a
     // repeated capture safe; a mismatching pre-existing target is refused.
     const createdArchives: string[] = [];
-    for (const file of files) {
+    // A Project's changed files are committed to git, and only a Project-less Work reads the archive back.
+    const archived = this.deps.projectIdOf(workId).project_id ? [] : files;
+    for (const file of archived) {
       await mkdir(dirname(file.storage_path), { recursive: true, mode: 0o700 });
       const temporary = `${file.storage_path}.${createUlid()}.tmp`;
       try {
@@ -215,7 +240,7 @@ export class ArtifactCapture {
               file.mime,
               Number(version?.version_no ?? 0) + 1,
               now,
-              file.storage_path,
+              archived.length > 0 ? file.storage_path : null,
             );
             inserted += 1;
           }

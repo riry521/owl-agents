@@ -452,7 +452,7 @@ export function testRunStatus(execution: TestExecution, classified: NewTestRun["
   return failing ? "failed" : "passed";
 }
 
-/** Writes test_runs and its test_run_files rows; returns the run id. */
+/** Writes test_runs and its test_run_files rows; returns the run id. Nothing reads the output of a passed file, so it is stored empty. */
 export function recordTestRunInTransaction(tx: CoreWriteLaneTransaction, run: NewTestRun, now: string): string {
   const id = run.id ?? createUlid();
   tx.run(
@@ -465,7 +465,7 @@ export function recordTestRunInTransaction(tx: CoreWriteLaneTransaction, run: Ne
     const failures = run.classified.get(file.file) ?? file.failures.map(inScope);
     tx.run(
       `INSERT INTO test_run_files (run_id, file, status, duration_ms, exit_code, attempts, failures_json, output_tail) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      id, file.file, file.status, file.duration_ms, file.exit_code, file.attempts, JSON.stringify(failures), file.output_tail,
+      id, file.file, file.status, file.duration_ms, file.exit_code, file.attempts, JSON.stringify(failures), file.status === "passed" ? "" : file.output_tail,
     );
   }
   return id;

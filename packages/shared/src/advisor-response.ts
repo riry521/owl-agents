@@ -417,11 +417,40 @@ function parseSuggestedActions(value: unknown): AdvisorSuggestedAction[] {
     const index = /^\[(\d+)\]/u.exec(problem)?.[1];
     throw new SuggestedActionError(`Advisor suggested actions are invalid: ${problem}`, index === undefined ? undefined : Number(index));
   }
-  return (value as Record<string, unknown>[]).map((item) => ({
-    type: item.type as string,
-    description: item.description as string,
-    ...(item.payload !== undefined ? { payload: item.payload as Record<string, unknown> } : {}),
-  }));
+  return (value as Record<string, unknown>[]).map((item) => {
+    const payload = liftMisplacedPayloadKeys(item);
+    return {
+      type: item.type as string,
+      description: item.description as string,
+      ...(payload !== undefined ? { payload } : {}),
+    };
+  });
+}
+
+/**
+ * Payload keys each action type takes, which the Advisor sometimes writes
+ * beside `payload` (typically after closing it early behind a long summary).
+ */
+const ACTION_PAYLOAD_KEYS: Readonly<Record<string, readonly string[]>> = {
+  create_work: [
+    "title", "summary", "size", "project_id", "draft", "design_mode",
+    "backlog_item_ids", "dismiss_backlog_item_ids", "prerequisite_work_ids",
+  ],
+};
+
+/**
+ * Move a known payload key written at the action's top level into `payload`.
+ * A key already inside `payload` wins, so the move never overwrites what the
+ * Advisor put where it belongs. Rejecting the action instead would only make
+ * the Advisor resend it, and the same slip tends to repeat.
+ */
+function liftMisplacedPayloadKeys(item: Record<string, unknown>): Record<string, unknown> | undefined {
+  const payload = item.payload as Record<string, unknown> | undefined;
+  const keys = Object.hasOwn(ACTION_PAYLOAD_KEYS, item.type as string) ? ACTION_PAYLOAD_KEYS[item.type as string] : undefined;
+  if (!keys) return payload;
+  const lifted = keys.filter((key) => Object.hasOwn(item, key) && !(payload && Object.hasOwn(payload, key)));
+  if (lifted.length === 0) return payload;
+  return { ...payload, ...Object.fromEntries(lifted.map((key) => [key, item[key]])) };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

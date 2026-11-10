@@ -25,13 +25,13 @@ import { tempDir } from "../helpers/temp.mjs";
 
 test("Designer model lookup uses the shared default when settings are absent or omit Designer", () => {
   const noSettings = { get: () => undefined };
-  assert.deepEqual(resolveRoleModel(noSettings, "designer"), { provider: "anthropic", model: "claude-fable-5-1", effort: "high" });
+  assert.deepEqual(resolveRoleModel(noSettings, "designer"), { provider: "anthropic", model: "claude-fable-5-2", effort: "high" });
 
   const oldSettings = { get: () => ({ value_json: JSON.stringify({ roles: [
     { role: "manager", provider: "anthropic", model: "manager-model", effort: "high" },
     { role: "worker", provider: "openai", model: "worker-model", effort: "high" },
   ] }) }) };
-  assert.deepEqual(resolveRoleModel(oldSettings, "designer"), { provider: "anthropic", model: "claude-fable-5-1", effort: "high" });
+  assert.deepEqual(resolveRoleModel(oldSettings, "designer"), { provider: "anthropic", model: "claude-fable-5-2", effort: "high" });
 
   const explicitSettings = { get: () => ({ value_json: JSON.stringify({ roles: [
     { role: "designer", provider: "custom-provider", model: "design-model", effort: "medium" },
@@ -206,7 +206,7 @@ test("Core warns at startup about saved models its harness no longer offers, wit
   // test, so the permissive list must still cover them for the save to pass.
   // The default child-agent Claude model is saved too, so it must be covered.
   const defaultClaudeModels = [
-    DEFAULT_HARNESS_MODELS.claude, "claude-opus-5-5", "claude-opus-5", "claude-fable-5-1", "claude-haiku-5-5",
+    DEFAULT_HARNESS_MODELS.claude, "claude-opus-5-5", "claude-opus-5", "claude-fable-5-2", "claude-haiku-5-5",
     DEFAULT_CHILD_RUN_SETTINGS.executor_by_harness.claude.model,
   ];
   const permissiveKnownModels = (harness) =>

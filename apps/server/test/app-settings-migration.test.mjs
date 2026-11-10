@@ -19,10 +19,10 @@ test("default anthropic models are the latest generation and stored legacy model
   const dataDir = join(root, "data");
   await mkdir(dataDir, { recursive: true });
   const fresh = new AppSettingsStore(root, dataDir).getProviderModels();
-  assert.deepEqual(fresh.anthropic, ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
+  assert.deepEqual(fresh.anthropic, ["claude-fable-5-2", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]);
   await writeFile(join(dataDir, "app-settings.json"), JSON.stringify({ provider_models: { anthropic: ["claude-opus-4-8", "claude-haiku-4-5"] } }));
   const stored = new AppSettingsStore(root, dataDir).getProviderModels().anthropic;
-  for (const model of ["claude-opus-4-8", "claude-haiku-4-5", "claude-fable-5-1"]) assert.ok(stored.includes(model));
+  for (const model of ["claude-opus-4-8", "claude-haiku-4-5", "claude-fable-5-2"]) assert.ok(stored.includes(model));
 });
 
 test("an HTTP server starts and serves the settings view and provider models with legacy models stored", async (t) => {
@@ -53,6 +53,6 @@ test("an HTTP server starts and serves the settings view and provider models wit
   const models = await fetch(`${origin}/provider-models`, { headers });
   assert.equal(models.status, 200);
   const anthropic = (await models.json()).data.anthropic;
-  for (const model of ["claude-opus-4-8", "claude-sonnet-5", "claude-fable-5-1"]) assert.ok(anthropic.includes(model));
+  for (const model of ["claude-opus-4-8", "claude-sonnet-5", "claude-fable-5-2"]) assert.ok(anthropic.includes(model));
   assert.equal((await fetch(`${origin}/view`, { headers })).status, 200);
 });

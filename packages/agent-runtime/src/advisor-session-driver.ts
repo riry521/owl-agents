@@ -29,7 +29,7 @@ import { readClaudeCompactionSummaries, waitForCompactionSummary } from "./compa
 import { classifyProviderFailure, formatProviderError, isConversationNotFound, RESUME_FAILED_CODE, sessionFailureMessage, turnFailureProviderError, withProviderDetail } from "./provider-error.js";
 import { claudeRateLimitEvidence } from "./rate-limit.js";
 import { SessionActivityTracker } from "./session-activity.js";
-import { buildAgentPermissionArgs, externalJsonBlock, extractWebResearchCapture, reapProcessGroup, type WebResearchTool, signalProcessGroup } from "@owl/shared";
+import { buildAgentPermissionArgs, externalJsonBlock, extractWebResearchCapture, reapProcessGroup, releaseTempConfigFiles, type WebResearchTool, signalProcessGroup } from "@owl/shared";
 
 const SUBAGENT_TOOL_NAMES: ReadonlySet<string> = new Set(["Agent"]); // name Claude gives its subagent tool
 const STDERR_RING_BUFFER_BYTES = 8 * 1024;
@@ -342,8 +342,18 @@ export class AdvisorSessionDriver implements ProviderSession {
         stdio: ["pipe", "pipe", "pipe"],
       }) as unknown as ChildProcess;
     } catch (cause) {
+      releaseTempConfigFiles(argv);
       throw new Error(formatProviderError("claude", cause));
     }
+    // Released when the child is gone, not right after spawn: Claude may still be reading its --mcp-config files.
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      releaseTempConfigFiles(argv);
+    };
+    child.once("close", release);
+    child.once("error", () => { if (child.pid === undefined) release(); });
     const driver = new AdvisorSessionDriver(child, freshSessionId, request.on_unsolicited_reply, request.on_activity, request.on_stdout_line, options.reapGraceMs);
     driver.transcriptLocation = {
       configDir: request.env.CLAUDE_CONFIG_DIR || join(request.env.HOME || homedir(), ".claude"),

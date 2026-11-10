@@ -2,7 +2,8 @@
 // argv a fake harness receives must carry the run's guard token file and the
 // Work/Task/Project ids (unset where the role has none).
 import assert from "node:assert/strict";
-import { chmod, readFile, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { chmod, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -18,9 +19,12 @@ import { tempDir } from "../helpers/temp.mjs";
 const baseEnv = { PATH: process.env.PATH || `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: process.env.HOME || tmpdir(), OWL_ROOT: process.cwd(), OWL_GUARD_API_BASE: "http://127.0.0.1:9/api/v1" };
 const IDS = { OWL_WORK_ID: "work-1", OWL_TASK_ID: "task-1", OWL_PROJECT_ID: "project-1" };
 
-// Reports its argv and the guard token file as a Claude result or Codex message.
+// Reports its argv, the --mcp-config contents it read and the guard token file as a Claude result or Codex message.
 const FAKE_HARNESS = `#!/usr/bin/env node
-const report = JSON.stringify({ argv: process.argv.slice(2), file: process.env.OWL_GUARD_TOKEN_FILE ?? null });
+const argv = process.argv.slice(2);
+const at = argv.indexOf("--mcp-config");
+const mcpConfig = at < 0 ? null : require("node:fs").readFileSync(argv[at + 1], "utf8");
+const report = JSON.stringify({ argv, mcpConfig, file: process.env.OWL_GUARD_TOKEN_FILE ?? null });
 process.stdin.resume();
 process.stdin.on("end", () => {
   const line = process.argv.includes("exec")
@@ -40,10 +44,13 @@ async function setup(t) {
   return { root, executable, registry };
 }
 
-/** The owl-memory MCP server env found in the argv a harness received. */
-async function memoryEnv(argv) {
+/** The owl-memory MCP server env found in what a harness received; a Claude config file is gone once the run ends. */
+function memoryEnv({ argv, mcpConfig }) {
   const index = argv.indexOf("--mcp-config");
-  if (index >= 0) return JSON.parse(await readFile(argv[index + 1], "utf8")).mcpServers["owl-memory"].env;
+  if (index >= 0) {
+    assert.equal(existsSync(argv[index + 1]), false, "the --mcp-config file is deleted when the run ends");
+    return JSON.parse(mcpConfig).mcpServers["owl-memory"].env;
+  }
   const table = argv.find((arg) => arg.startsWith("mcp_servers.owl-memory.env="));
   assert.ok(table, "owl-memory is registered");
   return Object.fromEntries([...table.matchAll(/(\w+)="([^"]*)"/gu)].map((match) => [match[1], match[2]]));
@@ -61,7 +68,7 @@ for (const [adapter, role] of [["claude-cli/v1", "reviewer"], ["codex-cli/v1", "
     });
     const text = adapter.startsWith("codex") ? JSON.parse(response.stdout.trim().split("\n").at(-1)).item.text : JSON.parse(response.stdout).result;
     const report = JSON.parse(text);
-    const env = await memoryEnv(report.argv);
+    const env = memoryEnv(report);
     assert.equal(env.OWL_ROLE, role);
     assert.equal(env.OWL_AGENT_RUN_ID, "run-1");
     assert.equal(env.OWL_GUARD_TOKEN_FILE, report.file, "the MCP server reads the token file of this very process");
@@ -112,7 +119,7 @@ test("a Hybrid Executor's MCP config carries its worker token file and the Task'
     );
     assert.equal(result.success, true, result.output);
     const report = JSON.parse(result.output);
-    const env = await memoryEnv(report.argv);
+    const env = memoryEnv(report);
     assert.equal(env.OWL_ROLE, "worker");
     assert.equal(env.OWL_AGENT_RUN_ID, "sub-1");
     assert.equal(env.OWL_GUARD_TOKEN_FILE, report.file);

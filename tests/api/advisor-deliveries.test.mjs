@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -8,6 +8,7 @@ import { ADVISOR_TEXT } from "../../packages/core/dist/advisor-text.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { scriptedProvider } from "../helpers/advisor-provider.mjs";
 import { createTestCore } from "../helpers/core.mjs";
+import { tempDir } from "../helpers/temp.mjs";
 import { waitFor } from "../helpers/wait.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
 
@@ -17,8 +18,7 @@ const text = ADVISOR_TEXT.ja;
 async function setup(t) {
   const script = [];
   const { providerClient, sent: calls } = scriptedProvider(script);
-  const dir = join((await import("node:os")).tmpdir(), `owl-deliveries-${createUlid()}`);
-  await mkdir(dir, { recursive: true });
+  const dir = await tempDir(t, "owl-deliveries-");
   const { root, db, core } = await createTestCore(t, {
     agentRunner: {
       runManagerPlan: async () => ({ outcome: "failed", message: "unused" }),

@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { access, chmod, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { GitWorktreeGateway } from "../../packages/core/dist/git-gateway.js";
@@ -197,6 +198,22 @@ test("a repository's own core.excludesFile still applies alongside Owl's list", 
     assert.equal(files.includes("x.generated"), false);
     assert.equal(files.includes(".serena/tool.json"), false);
   });
+});
+
+test("when the data dir is not writable, Owl's exclude list lives in the process's temp dir and is deleted when the process exits", async (t) => {
+  const root = await tempDir(t, "owl-excludes-fallback-");
+  await writeFile(join(root, "not-a-dir"), "");
+  const script = `
+    import { existsSync } from "node:fs";
+    const { GitWorktreeGateway } = await import(${JSON.stringify(new URL("../../packages/core/dist/git-gateway.js", import.meta.url).href)});
+    const gateway = new GitWorktreeGateway(null, process.argv[1], undefined, process.argv[2]);
+    console.log(JSON.stringify({ file: gateway.excludesFile, exists: existsSync(gateway.excludesFile) }));
+  `;
+  const report = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script, root, join(root, "not-a-dir", "data")], { encoding: "utf8" }));
+  assert.equal(report.exists, true, "the fallback file exists while the process runs");
+  assert.match(report.file, /owl-process-[^/]+\/owl-git-excludes$/u);
+  assert.equal(existsSync(report.file), false);
+  assert.equal(existsSync(dirname(report.file)), false);
 });
 
 test("dirty files are listed from NUL-separated status: renames give the destination, names keep spaces and non-ASCII", async (t) => {

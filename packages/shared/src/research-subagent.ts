@@ -3,10 +3,7 @@
  * Worker prompt reference, and the tool decision the permission hook enforces.
  * The hook loads this file from dist directly, so it imports nothing that needs Owl's runtime setup.
  */
-import { createHash } from "node:crypto";
-import { writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { holdTempConfigFile } from "./temp-config-files.js";
 import { EXTERNAL_DATA_POLICY, type ResearcherPromptRef } from "./agent-rules.js";
 import { tomlString } from "./permission-args.js";
 import type { ResearchSubagentSettings } from "./child-runs.js";
@@ -101,8 +98,7 @@ function codexResearcherArgs(settings: ResearchSubagentSettings): string[] {
     `developer_instructions = ${tomlString(researchSubagentInstructions("codex", settings))}`,
     "",
   ].join("\n");
-  const path = join(tmpdir(), `owl-researcher-${createHash("sha256").update(content).digest("hex").slice(0, 16)}.toml`);
-  writeFileSync(path, content, { mode: 0o600 });
+  const path = holdTempConfigFile("owl-researcher", ".toml", content);
   return [
     "--config", `agents.${RESEARCH_SUBAGENT_NAMES.codex}.description=${tomlString(researchSubagentDescription("codex"))}`,
     "--config", `agents.${RESEARCH_SUBAGENT_NAMES.codex}.config_file=${tomlString(path)}`,

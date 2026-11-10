@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { existsSync, readFileSync } from "node:fs";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { test } from "node:test";
@@ -9,6 +8,7 @@ import { createUlid } from "../../packages/db/dist/index.js";
 import { command, createTestCore } from "../helpers/core.mjs";
 import { necessityFor, criteriaFor } from "../helpers/necessity.mjs";
 import { git } from "../helpers/git.mjs";
+import { tempDir } from "../helpers/temp.mjs";
 import { waitFor as pollFor } from "../helpers/wait.mjs";
 
 function commandEnvelope(payload, suffix, expectedVersion = 0) {
@@ -45,8 +45,8 @@ function managerComplete(request) {
 
 const waitForValue = (read) => pollFor(read, { timeoutMs: 15_000, intervalMs: 25 });
 
-function markerPlan() {
-  const mark = join(mkdtempSync(join(tmpdir(), "owl-merge-mark-")), "runs");
+async function markerPlan(t) {
+  const mark = join(await tempDir(t, "owl-merge-mark-"), "runs");
   const plan = [{
     command_id: "mark-check",
     argv: ["node", "-e", `require("node:fs").appendFileSync(process.argv[1], "x")`, mark],
@@ -518,7 +518,7 @@ test("Core includes the local pre-push hook's rejection reason in its alert", as
 });
 
 test("Core skips the pre-merge verification when the squash tree equals the integration-verified tree", async (t) => {
-  const { plan, runs } = markerPlan();
+  const { plan, runs } = await markerPlan(t);
   let runsBeforeMerge = -1;
   const { project, db, core, projectId } = await openFixture(t, {
     verificationPlan: plan,
@@ -541,7 +541,7 @@ test("Core skips the pre-merge verification when the squash tree equals the inte
 });
 
 test("Core re-verifies before merging when the base moved after the integration verification", async (t) => {
-  const { plan, runs } = markerPlan();
+  const { plan, runs } = await markerPlan(t);
   let project;
   let runsBeforeMerge = -1;
   const fixture = await openFixture(t, {
@@ -563,7 +563,7 @@ test("Core re-verifies before merging when the base moved after the integration 
 });
 
 test("Core re-verifies on the newest base and merges, without a Decision, when main moves during the merge verification", async (t) => {
-  const { plan, runs } = markerPlan();
+  const { plan, runs } = await markerPlan(t);
   let project;
   const fixture = await openFixture(t, {
     verificationPlan: plan,

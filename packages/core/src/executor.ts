@@ -40,6 +40,7 @@ import {
   type OpencodeChildRun,
   type RequestTokenUsage,
   type TokenUsage,
+  releaseTempConfigFiles,
 } from "@owl/shared";
 import { formatRuntimeFailure, redactSecrets } from "./error-display.js";
 
@@ -485,18 +486,22 @@ export async function runExecutorProcess(
         console.warn(`[owl] Relay state file could not be prepared; only the stop limit applies: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    const removeRelayDir = (): void => { if (relayDir) rmSync(relayDir, { recursive: true, force: true }); };
+    let command: string[] = [];
+    // Every path that ends this launch calls this, so the config files its argv holds go with the relay dir.
+    const releaseLaunchFiles = (): void => {
+      releaseTempConfigFiles(command);
+      if (relayDir) rmSync(relayDir, { recursive: true, force: true });
+    };
     const processEnv = environment(task, runtime, guardLease, observer.agent_run_id, config.provider, relayStateFile);
     if (config.provider === "opencode") {
       void runOpencodeChild(task, config, observer, sink, runtime, processEnv, guardLease, idleTimeoutMs, started).then(resolve);
       return;
     }
-    let command: string[];
     try {
       command = argv(config, runtime, task.workspace_dir, processEnv);
     } catch (error) {
       guardLease?.release();
-      removeRelayDir();
+      releaseLaunchFiles();
       resolve({
         subtask_id: task.subtask_id,
         success: false,
@@ -518,7 +523,7 @@ export async function runExecutorProcess(
       });
     } catch (error) {
       guardLease?.release();
-      removeRelayDir();
+      releaseLaunchFiles();
       resolve({
         subtask_id: task.subtask_id,
         success: false,
@@ -550,7 +555,7 @@ export async function runExecutorProcess(
       if (idleTimer !== undefined) clearTimeout(idleTimer);
       if (killTimer !== undefined) clearTimeout(killTimer);
       observer.signal?.removeEventListener("abort", cancel);
-      removeRelayDir();
+      releaseLaunchFiles();
       resolve(result);
     };
     const cancel = (): void => {

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -93,4 +94,42 @@ test("a fix round that leaves the files unchanged still completes the Task", asy
   assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE type = 'agent.crashed'").n, 0);
   assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE type = 'artifact.created'").n, 2);
   assert.equal(db.get("SELECT COUNT(*) AS n FROM artifacts WHERE path = 'a.mjs'").n, 1);
+  // A Project-less Work still archives the bytes for its dependent Tasks.
+  assert.ok(db.get("SELECT storage_path FROM artifacts WHERE path = 'a.mjs'").storage_path);
+});
+
+test("pruning data/artifacts removes Project and expired finished Work folders, and keeps running, recent and uploaded files", async (t) => {
+  const { root, db, core } = await createTestCore(t, {}, { prefix: "owl-artifact-prune-" });
+  const day = 86_400_000;
+  const nowIso = new Date().toISOString();
+  const oldIso = new Date(Date.now() - 20 * day).toISOString();
+  await db.createWriteLane().transact((tx) => {
+    tx.run("INSERT INTO owners (id, display_name, created_at, updated_at) VALUES ('owner:default', 'Owner', ?, ?)", nowIso, nowIso);
+    tx.run(
+      `INSERT INTO projects (id, owner_id, name, canonical_path, base_branch, allowed_roots_json, verification_plan_json, worktree_prepare_argv_json, created_at, updated_at)
+       VALUES ('P1', 'owner:default', 'P', '/tmp/p1', 'main', '[]', '{}', '[]', ?, ?)`,
+      nowIso, nowIso,
+    );
+    const work = (id, projectId, state, updatedAt) => tx.run(
+      `INSERT INTO works (id, owner_id, project_id, title, summary, size, state, rules_json, related_work_ids_json, created_at, updated_at)
+       VALUES (?, 'owner:default', ?, 'w', '', 'normal', ?, '[]', '[]', ?, ?)`,
+      id, projectId, state, updatedAt, updatedAt,
+    );
+    work("W-project", "P1", "running", nowIso);
+    work("W-running", null, "running", oldIso);
+    work("W-recent", null, "completed", nowIso);
+    work("W-old", null, "completed", oldIso);
+  });
+  for (const id of ["W-project", "W-running", "W-recent", "W-old", "W-deleted"]) {
+    await mkdir(join(root, "data", "artifacts", id, "T1"), { recursive: true });
+    await writeFile(join(root, "data", "artifacts", id, "T1", "hash"), "x");
+  }
+  await mkdir(join(root, "data", "uploads"), { recursive: true });
+  await writeFile(join(root, "data", "uploads", "received.txt"), "from the Owner");
+
+  const removed = await core.workflow.pruneStoredArtifacts(14 * day);
+
+  assert.deepEqual(removed.sort(), ["W-deleted", "W-old", "W-project"]);
+  assert.deepEqual((await readdir(join(root, "data", "artifacts"))).sort(), ["W-recent", "W-running"]);
+  assert.equal(existsSync(join(root, "data", "uploads", "received.txt")), true);
 });

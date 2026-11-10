@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
@@ -12,6 +11,7 @@ import {
   readReviewRoutingSettings,
   validateReviewRoutingSettings,
 } from "../../packages/shared/dist/review-routing-settings.js";
+import { createRetryingTestCore } from "../helpers/cleanup.mjs";
 import { createTestCore } from "../helpers/core.mjs";
 import { git } from "../helpers/git.mjs";
 import { disablePlanQuality } from "../helpers/plan-quality.mjs";
@@ -175,9 +175,7 @@ async function runSkippedReviewTask(t, files, configure, opts = {}) {
     }),
     runAdvisor: async () => ({ reply: "" }),
   };
-  // Core keeps writing worktrees in the background after stop(), so removing the root races with it; the root is left to OS temp cleanup.
-  const ownedRoot = await realpath(await mkdtemp(join(tmpdir(), "owl-review-routing-"))); // helpers-exempt: removing the root after core.stop() races with Core background worktree work
-  const { root, db, core } = await createTestCore(t, { agentRunner, owlRoot: ownedRoot, dispatcher: { tick_interval_ms: 25 } });
+  const { root, db, core } = await createRetryingTestCore(t, { agentRunner, dispatcher: { tick_interval_ms: 25 } }, { prefix: "owl-review-routing-" });
   const project = join(root, "repo");
   await mkdir(project, { recursive: true });
   git(project, "init", "--initial-branch=main");

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { mkdir, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { NoopGitGateway } from "../../packages/core/dist/index.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { command, createTestCore } from "../helpers/core.mjs";
+import { tempDir } from "../helpers/temp.mjs";
 import { waitFor } from "../helpers/wait.mjs";
 
 function commandEnvelope(payload, suffix, expectedVersion = 0) {
@@ -94,14 +94,15 @@ const noopAgentRunner = {
 
 /** A controllable GitGateway: which Task branches are already merged is set per test, and every integrateTask/removeWorktree call is recorded. */
 class FakeGit extends NoopGitGateway {
-  constructor() {
+  constructor(worktreeRoot) {
     super();
+    this.worktreeRoot = worktreeRoot;
     this.merged = new Map();
     this.integrateTaskCalls = [];
     this.removeWorktreeCalls = [];
   }
   async prepareWorktree(request) {
-    const worktree_path = join(tmpdir(), "owl-fake-git-worktrees", request.task_id ?? "work");
+    const worktree_path = join(this.worktreeRoot, request.task_id ?? "work");
     await mkdir(worktree_path, { recursive: true });
     return { ...(await super.prepareWorktree(request)), worktree_path };
   }
@@ -120,7 +121,7 @@ class FakeGit extends NoopGitGateway {
 }
 
 test("a verifying Task without review whose branch is already merged completes on startup without relaunching a Worker", async (t) => {
-  const git = new FakeGit();
+  const git = new FakeGit(await tempDir(t, "owl-fake-git-worktrees-"));
   const { db, core } = await createCore(t, noopAgentRunner, git);
   const workId = await createRunningWork(core, db, "verify-no-review");
   const taskId = createUlid();
@@ -147,7 +148,7 @@ test("a verifying Task without review whose branch is already merged completes o
 });
 
 test("a verifying Task with review whose branch is already merged completes on startup and its orphaned Reviewer run is closed as failed", async (t) => {
-  const git = new FakeGit();
+  const git = new FakeGit(await tempDir(t, "owl-fake-git-worktrees-"));
   const { db, core } = await createCore(t, noopAgentRunner, git);
   const workId = await createRunningWork(core, db, "verify-review");
   const taskId = createUlid();
@@ -175,7 +176,7 @@ test("a verifying Task with review whose branch is already merged completes on s
 });
 
 test("a completed Task whose worktree is still marked active is repaired on startup, and a later restart does not repeat it", async (t) => {
-  const git = new FakeGit();
+  const git = new FakeGit(await tempDir(t, "owl-fake-git-worktrees-"));
   const { root, db, core } = await createCore(t, noopAgentRunner, git);
 
   const projectId = createUlid();
@@ -212,7 +213,7 @@ test("a completed Task whose worktree is still marked active is repaired on star
 });
 
 test("integrateTask reuses an already-merged Task branch instead of merging it again", async (t) => {
-  const git = new FakeGit();
+  const git = new FakeGit(await tempDir(t, "owl-fake-git-worktrees-"));
   const agentRunner = {
     runManagerPlan: async () => ({ outcome: "failed", message: "unexpected manager call" }),
     runWorker: async (request) => {

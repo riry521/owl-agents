@@ -1,7 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, mkdirSync, writeFileSync, type Dirent } from "node:fs";
-import { tmpdir } from "node:os";
 import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -35,7 +34,7 @@ import { NO_CORE_ACTIVITY, type CoreActivityHandle, type CoreActivityKind, type 
 import { GitLanes } from "./git-lane.js";
 import { basePushArgs, classifyPushFailure, parsePushPorcelain, PUSH_HOOK_WARNING_MARKER, redactCredentials, safeRemoteName } from "./git-push.js";
 import { OWL_GIT_EXCLUDES_CONTENT } from "./owl-git-excludes.js";
-import { OWL_INSTANCE_ID_ENV, createOutputCapture, resolveInstanceId, runProcess } from "@owl/shared";
+import { OWL_INSTANCE_ID_ENV, createOutputCapture, processTempDir, resolveInstanceId, runProcess } from "@owl/shared";
 import { workVerificationMarker } from "./workspace-process-sweeper.js";
 import { ADVISOR_HOME_DIRNAME, ADVISOR_SHARED_DIRNAME, safeSegment, WorkspaceLayout } from "./workspace-layout.js";
 import { commitExcludePathspecs } from "./workspace-tooling.js";
@@ -3100,7 +3099,10 @@ function parsePorcelainZ(output: string): string[] {
   return paths;
 }
 
-/** Write Owl's exclude list under the data dir, or a content-hashed temp path when that is not writable. */
+/**
+ * Write Owl's exclude list under the data dir, or under this process's temp dir when that is not writable.
+ * The gateway passes the file to git for as long as the process runs, so the fallback goes when the process exits.
+ */
 function writeOwlExcludesFile(dataDir: string): string {
   const primary = join(dataDir, "owl-git-excludes");
   try {
@@ -3108,8 +3110,7 @@ function writeOwlExcludesFile(dataDir: string): string {
     writeFileSync(primary, OWL_GIT_EXCLUDES_CONTENT);
     return primary;
   } catch {
-    const hash = createHash("sha256").update(OWL_GIT_EXCLUDES_CONTENT).digest("hex").slice(0, 16);
-    const fallback = join(tmpdir(), `owl-git-excludes-${hash}`);
+    const fallback = join(processTempDir(), "owl-git-excludes");
     writeFileSync(fallback, OWL_GIT_EXCLUDES_CONTENT);
     return fallback;
   }

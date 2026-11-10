@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
@@ -33,6 +33,9 @@ function testScratchDir(name: string): string {
   if (!dir) {
     dir = mkdtempSync(join(tmpdir(), `owl-test-${name}-`));
     testScratchDirs.set(name, dir);
+    const created = dir;
+    // The directory lives for the whole test process, so it is removed when that process exits.
+    process.once("exit", () => rmSync(created, { recursive: true, force: true }));
   }
   return dir;
 }

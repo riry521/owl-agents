@@ -201,6 +201,7 @@ import { DecisionExplainer, toDecisionExplanation } from "./decision-explainer";
 import { FinalReporter, readFinalReport } from "./final-report";
 import { metricsRuleCandidates, proposeFromMetrics } from "./learning-metrics.js";
 import { learningMetrics } from "./learning-metrics-settings.js";
+import { pruneFinishedWorkData } from "./work-data-retention.js";
 import {
   type ProgressGuardSettings,
 } from "../../shared/dist/progress-guard-settings.js";
@@ -867,6 +868,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
   private advisorResidentSession: { id: string; upAt: number } | null = null;
   private skillTimer: ReturnType<typeof setInterval> | null = null;
   private workspaceSweepTimer: ReturnType<typeof setInterval> | null = null;
+  private artifactPruneTimer: ReturnType<typeof setInterval> | null = null;
   private readonly workspaceSweeper: WorkspaceProcessSweeper;
   private learningTimer: ReturnType<typeof setInterval> | null = null;
   private learningTask: Promise<void> = Promise.resolve();
@@ -1413,10 +1415,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
           type: "agent.started",
           agentRunId: invocationId,
           payload: {
-            agent_run_id: invocationId,
-            pid,
-            process_start_time: identity.process_start_time,
-            process_cmdline_sha256: identity.process_cmdline_sha256,
+            // pid and process identity are in agent_runs (recordAgentRunProcess); only the harness is kept here.
             ...(processEvent.harness === "opencode" ? { harness: "opencode", harness_gaps: OPENCODE_HARNESS_GAPS.map((gap) => gap.key) } : {}),
           },
         },
@@ -2096,6 +2095,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       console.warn("[owl-core] Could not check saved models against known model lists", error);
     }
     this.started = true;
+    await this.pruneWorkData(null);
     await this.checkWorkspacesRootInsideRepository();
     await this.knowledgeLocation.initialize();
     if (this.knowledgeLocation.isAvailable()) await this.knowledge.ensureDirectories();
@@ -2171,6 +2171,13 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       void this.workspaceSweeper.sweep();
     }, WORKSPACE_SWEEP_INTERVAL_MS);
     this.workspaceSweepTimer.unref();
+    const pruneArtifacts = (): void => {
+      const days = this.options.artifactRetentionDays ?? DEFAULT_ARTIFACT_RETENTION_DAYS;
+      void this.workflow.pruneStoredArtifacts(days * 86_400_000).catch((error) => console.warn("[owl-core] Pruning data/artifacts failed:", error));
+    };
+    pruneArtifacts();
+    this.artifactPruneTimer = setInterval(pruneArtifacts, ARTIFACT_PRUNE_INTERVAL_MS);
+    this.artifactPruneTimer.unref();
     this.skillTimer = setInterval(() => {
       this.refreshProcessSkillsPack();
       this.scheduleSkillReconciliation();
@@ -2819,6 +2826,10 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       if (this.workspaceSweepTimer !== null) {
         clearInterval(this.workspaceSweepTimer);
         this.workspaceSweepTimer = null;
+      }
+      if (this.artifactPruneTimer !== null) {
+        clearInterval(this.artifactPruneTimer);
+        this.artifactPruneTimer = null;
       }
       if (this.skillTimer !== null) {
         clearInterval(this.skillTimer);
@@ -3625,6 +3636,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     await this.announceDecisionCancellations(cancelledDecisionIds);
     this.workDriver.unregister(workId);
     this.notifyAutoWorkFinished(workId, "cancelled");
+    await this.pruneWorkData(workId);
     await this.wakeWorkDependents(workId);
     const unstopped = await this.stopWorkAgents(workId, closedLaunchRunIds, request.payload.force === true);
     if (unstopped.length > 0) return { ...response, data: { ...response.data, worktree_cleanup: agentStopFailure(unstopped) } };
@@ -7137,7 +7149,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     const sectionLabel = (key: "acceptance" | "goals"): string => workSummaryLabel(WORK_SUMMARY_SECTIONS.find((section) => section.key === key)!, language);
     const base = [
       "You are the Owl Advisor, the operator's front door to Owl. Answer questions and discuss ideas directly. By default, every concrete request to perform work (make, fix, change, investigate, or build something), regardless of size, must become an Owl Work that you dispatch; ordinary wording like 'please do this' does not authorize you to do it yourself. In Japanese, 'これやっといて' is a normal Work request; phrases like '直接やって', 'Workにせず直接', or 'Advisor自身で実装して' explicitly ask you to bypass Work. Only bypass Work when the operator explicitly asks you to do the work directly yourself or without creating a Work. For that explicit exception, first prepare your Advisor workspace as described under Advisor workspace, do the work only there, and do not create a Work. Never claim you lack permission to create a Work.",
-      "When you issue a Work for a concrete request without an explicit direct-work instruction (the rules below decide when), append exactly one ```owl-actions``` fenced JSON array containing {type:\"create_work\", description, payload:{title,summary,size,project_id}}. Core will create the Work and start it, unless payload.draft is true. When the operator says \"draft\", \"just register it\", \"don't run it yet\", '下書き', '登録だけ', or 'まだ動かさないで', set the optional payload.draft to true: Core then creates the Work as a memo and does not start it, and the operator starts it with the Start button on the Work detail page. Omit draft otherwise. Use size \"small\" for a focused, lightweight change so it goes directly to the Worker; use \"normal\" or \"large\" for work that needs Manager planning. Before returning create_work, compare the full request and conversation context against the complete current Project catalog in context. Set the exact project_id when one Project matches, use null only when none matches, and ask which Project to use if multiple are plausible. Project registration is optional. The payload may also carry the optional backlog_item_ids (IDs of open backlog items from GET /api/v1/backlog (status=open) to link to the new Work; they become in_progress), dismiss_backlog_item_ids (backlog item IDs to dismiss; every backlog ID must belong to the same Project as the Work), and prerequisite_work_ids (IDs of Works that must complete before this Work starts). Example: ```owl-actions\n[{\"type\":\"create_work\",\"description\":\"Fix the label\",\"payload\":{\"title\":\"Fix the label\",\"summary\":\"" + exampleSummary + "\",\"size\":\"small\",\"project_id\":null}}]\n```.",
+      "When you issue a Work for a concrete request without an explicit direct-work instruction (the rules below decide when), append exactly one ```owl-actions``` fenced JSON array containing {type:\"create_work\", description, payload:{title,size,project_id,summary}}. Core will create the Work and start it, unless payload.draft is true. When the operator says \"draft\", \"just register it\", \"don't run it yet\", '下書き', '登録だけ', or 'まだ動かさないで', set the optional payload.draft to true: Core then creates the Work as a memo and does not start it, and the operator starts it with the Start button on the Work detail page. Omit draft otherwise. Use size \"small\" for a focused, lightweight change so it goes directly to the Worker; use \"normal\" or \"large\" for work that needs Manager planning. Before returning create_work, compare the full request and conversation context against the complete current Project catalog in context. Set the exact project_id when one Project matches, use null only when none matches, and ask which Project to use if multiple are plausible. Project registration is optional. Write size and project_id before the long summary, all inside payload. The payload may also carry the optional backlog_item_ids (IDs of open backlog items from GET /api/v1/backlog (status=open) to link to the new Work; they become in_progress), dismiss_backlog_item_ids (backlog item IDs to dismiss; every backlog ID must belong to the same Project as the Work), and prerequisite_work_ids (IDs of Works that must complete before this Work starts). Example: ```owl-actions\n[{\"type\":\"create_work\",\"description\":\"Fix the label\",\"payload\":{\"title\":\"Fix the label\",\"size\":\"small\",\"project_id\":null,\"summary\":\"" + exampleSummary + "\"}}]\n```.",
       "First classify every request as small, normal, or large.",
       "When the operator explicitly asks for the strongest or Lead Designer to handle the design from the start, set create_work payload.design_mode to \"lead\" and size to \"normal\" or \"large\" so Manager plans a design Task. When the operator asks the Lead Designer only for the screen design, omit design_mode and keep that request in the Work summary; Manager then assigns the screen design Task to the Lead Designer. Otherwise omit design_mode (automatic routing). Never infer this override merely from Work size.",
       "For a small request whose goal, target, and completion condition are unambiguous, you may emit create_work in that turn.",
@@ -7991,6 +8003,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
               }, verdict.unaddressed_backlog_items.map((entry) => entry.item_id));
               if (completed) {
                 this.notifyAutoWorkFinished(workId, "completed");
+                await this.pruneWorkData(workId);
                 await this.proposeRulesFromMetrics(workId);
                 if (verdict.lessons.length > 0) {
                   this.scheduleLearningRun(`Work ${workId}`);
@@ -8239,6 +8252,15 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     console.error(`[owl-core] workflow driver halted for Work ${workId} after tick failure`, error);
     await this.announceCoreDecisions(workId);
     await this.dispatcher.replayPending();
+  }
+
+  /** Clears unread rows of finished Works (null: all of them). A failure only logs; the rows stay for the next start. */
+  private async pruneWorkData(workId: string | null): Promise<void> {
+    try {
+      await pruneFinishedWorkData(this.db, this.writeLane, workId);
+    } catch (error) {
+      console.warn(`[owl-core] Could not clear finished Work data${workId === null ? "" : ` for Work ${workId}`}`, error);
+    }
   }
 
   /** Turns low first-review pass rates into rule proposals; the Owner approves them. A failure only logs. */
@@ -9929,6 +9951,8 @@ function toProject(row: ProjectDbRow, defaultExecutables: Readonly<Record<string
 
 const PROJECT_LOCKING_WORK_STATES_SQL = PROJECT_LOCKING_WORK_STATES.map(() => "?").join(", ");
 const WORKSPACE_SWEEP_INTERVAL_MS = 10 * 60_000;
+const ARTIFACT_PRUNE_INTERVAL_MS = 60 * 60_000;
+const DEFAULT_ARTIFACT_RETENTION_DAYS = 14;
 export const AGENT_STOP_WAIT_MS = 10_000;
 /** The tick resends a forced stop after this many agentStopWaitMs, and opens a Decision after twice that. */
 export const OWNER_STOP_CONFIRM_FACTOR = 3;

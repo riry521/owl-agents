@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -336,7 +336,7 @@ test("connector-authored Discord messages (Advisor replies, acknowledgements, er
   assert.ok(replies.length >= 1, "the Decision acknowledgement was sent");
 });
 
-test("notification cards show the Work title in embed title, description and content", async () => {
+test("notification cards show the Work title in embed title, description and content", async (t) => {
   const { sends, client } = discordClient();
   await sendNotification(client, event("work.completed", { work_id: WORK_ID, work_title: "請求書整理" }, { work_id: WORK_ID }), "D-NOTIFICATIONS");
   assert.match(sends[0].message.content, /請求書整理/u);
@@ -347,8 +347,10 @@ test("notification cards show the Work title in embed title, description and con
   assert.ok(embedData(sends[1]).description.startsWith("請求書整理\n"));
 });
 
-async function outboundFileEvent(content, comment) {
-  const path = join(await mkdtemp(join(tmpdir(), "owl-discord-file-")), "report.txt");
+async function outboundFileEvent(t, content, comment) {
+  const dir = await mkdtemp(join(tmpdir(), "owl-discord-file-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "report.txt");
   await writeFile(path, content);
   return event("advisor.responded", {
     origin: { channel: "discord", channel_id: "D-CONVERSATION" },
@@ -360,11 +362,11 @@ async function outboundFileEvent(content, comment) {
   });
 }
 
-test("Discord uploads each outbound file before the reply and appends the result line", async () => {
+test("Discord uploads each outbound file before the reply and appends the result line", async (t) => {
   const { connector } = await decisionReplyConnector();
   const { sends, client } = discordClient();
   connector.client.channels.fetch = client.channels.fetch;
-  await connector.handleAdvisorResponse(await outboundFileEvent("hello", "@everyone look"));
+  await connector.handleAdvisorResponse(await outboundFileEvent(t, "hello", "@everyone look"));
 
   assert.equal(sends.length, 2);
   const upload = sends[0];
@@ -379,8 +381,8 @@ test("Discord uploads each outbound file before the reply and appends the result
 const discordJs = createRequire(new URL("../../packages/connector-discord/package.json", import.meta.url))("discord.js");
 const apiError = (code, status) => new discordJs.DiscordAPIError({ code, message: "refused" }, code, status, "POST", "https://discord.test/api", {});
 
-async function pendingFileEvent(extra = {}) {
-  const base = await outboundFileEvent("hello");
+async function pendingFileEvent(t, extra = {}) {
+  const base = await outboundFileEvent(t, "hello");
   base.payload.outbound_files[0].index = 0;
   return { ...base, payload: { ...base.payload, conversation_id: "discord:D-CONVERSATION", turn_id: "turn-1", message_id: "message-1", delivery_pending: true, ...extra } };
 }
@@ -403,9 +405,9 @@ for (const [name, error, expected] of [
   ["a 429 response", apiError(0, 429), { outcome: "failed", code: "upload_rate_limited", platform_error: null }],
   ["an HTTPError", new discordJs.HTTPError(502, "Bad Gateway", "POST", "https://discord.test/api", {}), { outcome: "unknown", code: "upload_unknown", platform_error: null }],
 ]) {
-  test(`Discord reports ${name} as ${expected.code} and appends the notice Core returns`, async () => {
+  test(`Discord reports ${name} as ${expected.code} and appends the notice Core returns`, async (t) => {
     const { connector, reports, sends } = await reportingConnector(error);
-    await connector.handleAdvisorResponse(await pendingFileEvent());
+    await connector.handleAdvisorResponse(await pendingFileEvent(t));
 
     assert.equal(reports.length, 1);
     assert.equal(reports[0].path, "/conversations/discord%3AD-CONVERSATION/advisor-deliveries");
@@ -416,9 +418,9 @@ for (const [name, error, expected] of [
   });
 }
 
-test("Discord reports a sent file, still posts the reply when the report fails and does not report without delivery_pending", async () => {
+test("Discord reports a sent file, still posts the reply when the report fails and does not report without delivery_pending", async (t) => {
   const sentCase = await reportingConnector();
-  await sentCase.connector.handleAdvisorResponse(await pendingFileEvent());
+  await sentCase.connector.handleAdvisorResponse(await pendingFileEvent(t));
   assert.deepEqual(sentCase.reports[0].body.payload.results, [{ index: 0, outcome: "sent" }]);
 
   const failing = await reportingConnector();
@@ -426,14 +428,14 @@ test("Discord reports a sent file, still posts the reply when the report fails a
   const originalError = console.error;
   console.error = () => {};
   try {
-    await failing.connector.handleAdvisorResponse(await pendingFileEvent());
+    await failing.connector.handleAdvisorResponse(await pendingFileEvent(t));
   } finally {
     console.error = originalError;
   }
   assert.match(failing.sends.at(-1).message.content, /^done/);
 
   const plain = await reportingConnector();
-  await plain.connector.handleAdvisorResponse(await outboundFileEvent("hello"));
+  await plain.connector.handleAdvisorResponse(await outboundFileEvent(t, "hello"));
   assert.equal(plain.reports.length, 0);
 });
 
@@ -448,14 +450,14 @@ test("Discord posts a follow-up reply into the same channel with the label at th
   assert.ok(sends[0].message.content.startsWith(label), sends[0].message.content);
 });
 
-test("Discord reports the Attach Files permission when the upload is refused", async () => {
+test("Discord reports the Attach Files permission when the upload is refused", async (t) => {
   const { connector } = await decisionReplyConnector();
   const { sends, client } = discordClient((message) => {
     if (message.files) throw Object.assign(new Error("Missing Permissions"), { code: 50013 });
     return { id: "M1" };
   });
   connector.client.channels.fetch = client.channels.fetch;
-  await connector.handleAdvisorResponse(await outboundFileEvent("hello"));
+  await connector.handleAdvisorResponse(await outboundFileEvent(t, "hello"));
 
   const reply = sends.at(-1).message.content;
   assert.match(reply, /^done/);
@@ -463,8 +465,8 @@ test("Discord reports the Attach Files permission when the upload is refused", a
   assert.match(reply, /Attach Files/);
 });
 
-async function webFileEvent(provider = "discord", channelId = "D-PROJECT") {
-  const base = await pendingFileEvent();
+async function webFileEvent(t, provider = "discord", channelId = "D-PROJECT") {
+  const base = await pendingFileEvent(t);
   return { ...base, payload: { ...base.payload, origin: { channel: "web" }, delivery_target: { provider, channel_id: channelId, display_name: "proj-a", source: "window_binding" } } };
 }
 
@@ -478,10 +480,10 @@ function webDeliveryConnector(bound) {
   });
 }
 
-test("Discord sends a Web-origin file to the delivery_target channel with no mentions, reports it and posts no reply", async () => {
+test("Discord sends a Web-origin file to the delivery_target channel with no mentions, reports it and posts no reply", async (t) => {
   const { connector, reports, sends } = await webDeliveryConnector(["D-PROJECT"]);
   connector.boundChannelIds = new Set(["D-PROJECT"]);
-  await connector.handleAdvisorResponse(await webFileEvent());
+  await connector.handleAdvisorResponse(await webFileEvent(t));
 
   assert.equal(sends.length, 1);
   assert.equal(sends[0].channelId, "D-PROJECT");
@@ -491,23 +493,23 @@ test("Discord sends a Web-origin file to the delivery_target channel with no men
   assert.deepEqual(reports[0].body.payload.results, [{ index: 0, outcome: "sent" }]);
 });
 
-test("Discord ignores a Web-origin file whose delivery_target is Slack", async () => {
+test("Discord ignores a Web-origin file whose delivery_target is Slack", async (t) => {
   const { connector, reports, sends } = await webDeliveryConnector(["D-PROJECT"]);
-  await connector.handleAdvisorResponse(await webFileEvent("slack"));
+  await connector.handleAdvisorResponse(await webFileEvent(t, "slack"));
 
   assert.equal(sends.length + reports.length, 0);
 });
 
-test("Discord refreshes the bindings, then reports upload_rejected for a channel outside the allow-list or that cannot be fetched", async () => {
+test("Discord refreshes the bindings, then reports upload_rejected for a channel outside the allow-list or that cannot be fetched", async (t) => {
   const { connector, reports, sends } = await webDeliveryConnector([]);
-  await connector.handleAdvisorResponse(await webFileEvent());
+  await connector.handleAdvisorResponse(await webFileEvent(t));
   assert.equal(sends.length, 0);
   assert.equal(reports.filter((r) => r.path.startsWith("/advisor/channel-bindings")).length, 1);
   assert.equal(reports.find((r) => r.path.endsWith("/advisor-deliveries")).body.payload.results[0].code, "upload_rejected");
 
   const second = await webDeliveryConnector(["D-PROJECT"]);
   second.connector.client.channels.fetch = async () => { throw new Error("Unknown Channel"); };
-  await second.connector.handleAdvisorResponse(await webFileEvent());
+  await second.connector.handleAdvisorResponse(await webFileEvent(t));
   assert.equal(second.sends.length, 0);
   assert.equal(second.reports.find((r) => r.path.endsWith("/advisor-deliveries")).body.payload.results[0].code, "upload_rejected");
 });

@@ -73,7 +73,7 @@ const ENV_REFERENCE = /^env:([A-Za-z_][A-Za-z0-9_]*)$/u;
 
 const DEFAULT_PROVIDER_MODELS: Record<string, string[]> = {
   anthropic: [
-    "claude-fable-5-1",
+    "claude-fable-5-2",
     "claude-opus-5-5",
     "claude-sonnet-5-5",
     "claude-haiku-5-5",

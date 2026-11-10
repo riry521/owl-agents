@@ -39,6 +39,10 @@ test("a failing Work-level test run makes the Manager add only fix Tasks, and th
       if (request.mode === "finalize") return { outcome: "success", report_valid: true, report: { tasks: [], event: null, verdict: complete } };
       if (request.mode === "replan") {
         replanRequests.push(request);
+        // Stored while the Work still runs (nothing cleared yet): the unread keys are never written.
+        const stored = (type) => holder.db.all("SELECT payload_json FROM events WHERE type = ?", type).map((row) => JSON.parse(row.payload_json));
+        assert.ok(stored("agent.exited").length > 0 && stored("agent.exited").every((p) => !("report" in p) && !("usage" in p)), "agent.exited has no report or usage");
+        assert.ok(stored("test_run.completed").length > 0 && stored("test_run.completed").every((p) => Object.keys(p).length === 0), "test_run.completed payload is empty");
         t1AgentRunsAtReplan = holder.db.get("SELECT COUNT(*) AS n FROM agent_runs WHERE task_id = (SELECT id FROM tasks WHERE manager_task_id = 'T1')").n;
         replanTasksReturned = [plannedTask("T2", "Fix b")];
         return { outcome: "success", report_valid: true, report: { event: "task.replanned", tasks: replanTasksReturned } };

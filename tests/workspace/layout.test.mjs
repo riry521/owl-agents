@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { realpathSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -114,4 +115,14 @@ test("listWorkspaces returns entries under the root", async (t) => {
 
   const entries = await gateway.listWorkspaces();
   assert.deepEqual(entries.map((entry) => entry.path), [join(workspacesRoot, "WNew", "T1")]);
+});
+
+test("the per-process scratch root created under the test runner is removed when the process exits", () => {
+  const script = `import(${JSON.stringify(new URL("../../packages/core/dist/workspace-layout.js", import.meta.url).href)}).then((m) => { const dir = m.defaultOwlRoot(); console.log(dir + "|" + require("node:fs").existsSync(dir)); });`;
+  const result = spawnSync(process.execPath, ["-e", script], { encoding: "utf8", env: { ...process.env, NODE_TEST_CONTEXT: "child-v8" } });
+  assert.equal(result.status, 0, result.stderr);
+  const [dir, existedWhileRunning] = result.stdout.trim().split("|");
+  assert.equal(existedWhileRunning, "true");
+  assert.match(dir, /owl-test-root-/);
+  assert.equal(existsSync(dir), false);
 });

@@ -276,20 +276,7 @@ export async function runCoreTests(deps: CoreTestRunDeps, req: CoreTestRunReques
       type: "test_run.completed",
       workId: req.work_id,
       taskId: record.task_id,
-      payload: {
-        schema_version: "1.0.0",
-        run_id: runId,
-        project_id: req.project_id,
-        work_id: req.work_id,
-        task_id: record.task_id,
-        scope: req.scope,
-        mode: selection.mode,
-        status,
-        file_count: execution.files.length,
-        failed_file_count: failedFiles.length,
-        pre_existing_count: preExisting.length,
-        quarantined_count: skipped.length,
-      },
+      payload: {}, // no reader of this payload exists, so none is stored
     },
     outbox: [{ provider: "websocket" }],
   });

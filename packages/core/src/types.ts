@@ -717,6 +717,8 @@ export interface CoreOptions {
   /** Cap on active non-Executor agent runs per Work. Unlimited unless set. */
   readonly max_parallel?: number;
   readonly dispatcher?: CoreDispatcherOptions;
+  /** Days a finished Project-less Work keeps its archived artifact bytes under data/artifacts before they are removed. Defaults to 14. */
+  readonly artifactRetentionDays?: number;
   /** Total time stop() may take when the caller passes no timeoutMs. Defaults to 10000. */
   readonly stopTimeoutMs?: number;
   /** Owl's own repository root, used to resolve `dataDir` and the default `<owlRoot>/.owl-workspaces` worktrees directory. Defaults to process.cwd() (a temporary directory under the Node test runner). */

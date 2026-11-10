@@ -1,7 +1,6 @@
-import { createHash } from "node:crypto";
-import { chmodSync, existsSync, statSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { existsSync, statSync } from "node:fs";
+import { resolve } from "node:path";
+import { holdTempConfigFile } from "./temp-config-files.js";
 
 export const DESIGN_MOCK_MCP_ENABLE_ENV = "OWL_DESIGN_MOCK_MCP";
 export const DESIGN_MOCK_MCP_SERVER_NAME = "owl-design";
@@ -110,7 +109,7 @@ export function owlMcpServers(configuration: OwlMcpConfiguration): McpServerSpec
   return servers;
 }
 
-/** One temporary --mcp-config per server; never --strict-mcp-config, so user-scope servers stay available. */
+/** One temporary --mcp-config per server, held until the launch releases its argv; never --strict-mcp-config, so user-scope servers stay available. */
 export function claudeMcpArgs(servers: readonly McpServerSpec[]): string[] {
   return servers.flatMap((server) => {
     const content = JSON.stringify({
@@ -123,10 +122,7 @@ export function claudeMcpArgs(servers: readonly McpServerSpec[]): string[] {
         },
       },
     });
-    const path = join(tmpdir(), `${server.configFilePrefix}-${createHash("sha256").update(content).digest("hex").slice(0, 16)}.json`);
-    writeFileSync(path, content, { mode: 0o600 });
-    chmodSync(path, 0o600);
-    return ["--mcp-config", path];
+    return ["--mcp-config", holdTempConfigFile(server.configFilePrefix, ".json", content)];
   });
 }
 

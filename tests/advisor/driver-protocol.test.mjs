@@ -3,6 +3,7 @@
 // and start arguments. The drivers are exercised against fake harness
 // executables written to a temp dir; no real Codex or Claude process is started.
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -580,6 +581,18 @@ test("Claude Advisor passes the configured model and a fresh session id on start
   assert.equal(freshArgv.includes("--resume"), false);
 
   assert.equal(optionValue(freshArgv, "--session-id"), fresh.provider_session_id);
+});
+
+test("Claude Advisor keeps its --mcp-config files for the session and deletes them when the child exits", async (t) => {
+  const driver = await createClaudeDriver(t, [[{ type: "result", subtype: "success", is_error: false, result: "ok" }]], { env: { OWL_ROOT: process.cwd() } });
+  await driver.send({ turn_id: "turn-mcp", text: "hello" });
+  await collectEvents(driver, settled);
+  const argv = JSON.parse(await readFile(driver.argvLog, "utf8"));
+  const configs = argv.filter((_, index) => argv[index - 1] === "--mcp-config");
+  assert.ok(configs.length > 0);
+  for (const config of configs) assert.equal(existsSync(config), true, config);
+  await driver.stop("test", 1000);
+  for (const config of configs) assert.equal(existsSync(config), false, config);
 });
 
 test("Claude Advisor resumes the given provider session with --resume and no --session-id", async (t) => {

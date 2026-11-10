@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { buildArgv, createCliProvider } from "../../packages/agent-runtime/dist/provider.js";
-import { buildResearchSubagentArgs, DEFAULT_CHILD_RUN_SETTINGS, RELAY_STATE_FILE_ENV, researchSubagentDefinitionArgs, researchSubagentPromptRef } from "../../packages/shared/dist/index.js";
+import { buildResearchSubagentArgs, DEFAULT_CHILD_RUN_SETTINGS, processTempDir, RELAY_STATE_FILE_ENV, releaseTempConfigFiles, researchSubagentDefinitionArgs, researchSubagentPromptRef } from "../../packages/shared/dist/index.js";
 import { repoRoot } from "../helpers/paths.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 
@@ -176,6 +177,28 @@ test("the Codex researcher definition passes the configured model, instructions 
   const changedToml = await readFile(codexRoleOf(researchSubagentDefinitionArgs("codex", changed)).configFile, "utf8");
   assert.match(changedToml, /^model = "gpt-other-model"$/m);
   assert.match(changedToml, /Stop within 7 turns/);
+});
+
+test("a launch's config files live in this process's temp dir and are deleted when the last launch holding them releases its argv", async (t) => {
+  await withDispatchServer(t, async ({ env }) => {
+    const research = { ...DEFAULT_CHILD_RUN_SETTINGS.research_subagent, codex: { model: "gpt-release-check", max_turns: 3 } };
+    const first = researchSubagentDefinitionArgs("codex", research);
+    const second = researchSubagentDefinitionArgs("codex", research);
+    const toml = codexRoleOf(first).configFile;
+    assert.equal(codexRoleOf(second).configFile, toml, "the same content shares one file");
+    assert.equal(dirname(toml), processTempDir());
+    releaseTempConfigFiles(first);
+    assert.equal(existsSync(toml), true, "a launch that still holds the file keeps it");
+    releaseTempConfigFiles(second);
+    assert.equal(existsSync(toml), false);
+
+    const claude = argvFor("claude-cli/v1", "worker", env);
+    const configs = claude.filter((_, i) => claude[i - 1] === "--mcp-config");
+    assert.ok(configs.length > 0);
+    for (const config of configs) assert.equal(dirname(config), processTempDir());
+    releaseTempConfigFiles(claude);
+    for (const config of configs) assert.equal(existsSync(config), false, config);
+  });
 });
 
 test("for an enabled adapter the Worker entry point returns the definition, and buildArgv never calls the unchecked builder", async () => {

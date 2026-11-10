@@ -24,6 +24,7 @@ import {
   CodexProgressTracker,
   ClaudeStreamReader,
   GUARD_TOKEN_FILE_ENV,
+  releaseTempConfigFiles,
   type AgentTimeoutKind,
   type GuardTokenIssuer,
   type GuardTokenLease,
@@ -317,6 +318,7 @@ export function createCliProvider(options: AgentRunnerOptions): ProviderClient {
       };
       let outputSchemaDirectory: string | undefined;
       let guardLease: GuardTokenLease | undefined;
+      let argv: string[] = [];
       try {
         let outputSchemaPath: string | undefined;
         if (request.structured_output_schema && isCodexAdapter(requestAdapter)) {
@@ -327,7 +329,7 @@ export function createCliProvider(options: AgentRunnerOptions): ProviderClient {
         const workspaceCwd = resolve(requestCwd);
         // The guard token is issued before argv so the owl-memory MCP config can name its token file.
         guardLease = issueGuardToken(options.guardToken, request.role, request.env.OWL_AGENT_RUN_ID || request.invocation_id);
-        const argv = buildArgv({
+        argv = buildArgv({
           ...request,
           adapter: requestAdapter,
           model: requestModel,
@@ -522,6 +524,7 @@ export function createCliProvider(options: AgentRunnerOptions): ProviderClient {
         };
       } finally {
         guardLease?.release();
+        releaseTempConfigFiles(argv);
         if (outputSchemaDirectory) {
           try {
             rmSync(outputSchemaDirectory, { recursive: true, force: true });

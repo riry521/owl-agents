@@ -11,6 +11,9 @@ export interface SqlitePragmas {
   readonly foreignKeys: number;
 }
 
+// Migrations that free a lot of space and need a VACUUM to give it back to the disk.
+const VACUUM_AFTER_VERSIONS: ReadonlySet<string> = new Set(["091"]);
+
 export class OwlDatabase {
   private readonly handle: Database.Database;
   private readonly writeLane: WriteLane;
@@ -41,7 +44,17 @@ export class OwlDatabase {
   }
 
   public migrate(migrationsDirectory: string = resolve(__dirname, "..", "migrations")): MigrationRunResult {
-    return runMigrations(this.handle, migrationsDirectory);
+    const result = runMigrations(this.handle, migrationsDirectory);
+    // The applied version is recorded in schema_migrations, so the VACUUM runs once and not at every startup.
+    // If it fails (for example, not enough free disk), the data is already cleared: start anyway and warn.
+    if (result.applied.some((version) => VACUUM_AFTER_VERSIONS.has(version))) {
+      try {
+        this.handle.exec("VACUUM");
+      } catch (error) {
+        console.warn("[owl-db] VACUUM after migration failed; the database file keeps its size", error);
+      }
+    }
+    return result;
   }
 
   public createWriteLane(): WriteLane {

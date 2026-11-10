@@ -13,6 +13,7 @@ import { testFailureKey } from "../../packages/core/dist/nightly-tests.js";
 import { ensureBaselineRun, triageTestFailures } from "../../packages/core/dist/test-failure-triage.js";
 import { DEFAULT_TEST_RUN_SETTINGS, readTestRunSettings, validateTestRunSettings } from "../../packages/shared/dist/test-run-settings.js";
 import { git, createTestRepo } from "../helpers/git.mjs";
+import { tempDir } from "../helpers/temp.mjs";
 import { openTestDatabase } from "../helpers/db.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -72,6 +73,23 @@ test("a run stores per-file status, commit, duration and failed test names", asy
   const row = db.get("SELECT duration_ms, attempts FROM test_run_files WHERE file = 'tests/b.test.mjs'");
   assert.equal(row.attempts, 2);
   assert.ok(row.duration_ms > 0);
+});
+
+test("a run stores the output of failed, error and timed_out files, and an empty output for passed files", async (t) => {
+  const { db } = await openTestDatabase(t);
+  await seed(db);
+  const file = (name, status) => ({ file: name, status, duration_ms: 1, exit_code: 0, attempts: 1, failures: [], output_tail: `out-${name}` });
+  const execution = { duration_ms: 1, error: null, files: [file("a", "passed"), file("b", "failed"), file("c", "error"), file("d", "timed_out")] };
+  await db.createWriteLane().transact((tx) => {
+    recordTestRunInTransaction(tx, {
+      project_id: "p", work_id: null, task_id: null, agent_run_id: null, scope: "baseline", mode: "full",
+      commit_sha: "c1", base_commit: null, selection: {}, started_at: new Date().toISOString(), execution, classified: new Map(),
+    }, new Date().toISOString());
+  });
+  assert.deepEqual(
+    db.all("SELECT file, status, output_tail FROM test_run_files ORDER BY file").map((r) => [r.file, r.status, r.output_tail]),
+    [["a", "passed", ""], ["b", "failed", "out-b"], ["c", "error", "out-c"], ["d", "timed_out", "out-d"]],
+  );
 });
 
 test("listTestFiles lists test files inside dot-directories such as .github", async (t) => {
@@ -374,15 +392,14 @@ test("prepareCheckout runs setup_argvs in order, then prepare, in test_run.cwd, 
   assert.deepEqual(calls.map((call) => call.argv), ["one", "two"]);
 });
 
-test("setup_argvs read cwd-relative paths in a subfolder, and a checkout-relative path is not doubled", async () => {
-  const root = await mkdtemp(join(tmpdir(), "owl-setup-root-"));
+test("setup_argvs read cwd-relative paths in a subfolder, and a checkout-relative path is not doubled", async (t) => {
+  const root = await tempDir(t, "owl-setup-root-");
   await mkdir(join(root, "backend"));
   await writeFile(join(root, "backend", "requirements.txt"), "x\n");
   const read = (path) => [process.execPath, "-e", `require('node:fs').readFileSync(${JSON.stringify(path)})`];
   const settingsFor = (path) => readTestRunSettings({ mode: "whole", whole_argv: ["suite"], cwd: "backend", setup_argvs: [read(path)] });
   assert.equal(await prepareCheckout({ root, settings: settingsFor("requirements.txt"), run: nodeRunner }), null);
   assert.match(await prepareCheckout({ root, settings: settingsFor("backend/requirements.txt"), run: nodeRunner }), /^setup failed/u);
-  await rm(root, { recursive: true, force: true });
 });
 
 test("test_run.cwd is relative without .., and every mode accepts a subfolder", () => {

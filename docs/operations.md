@@ -39,6 +39,17 @@ or print Token values in shell debug output. The Typesafe API key is currently s
 in the protected settings JSON for compatibility and is returned through the API only
 in masked form.
 
+## Data retention
+
+Owl removes data that nothing reads after a Work ends, so `owl.sqlite` and `data/` grow only with the records that stay.
+
+- Test runs: the output of a passed test file is not stored. Only failed files keep their output tail.
+- Finished Works: when a Work completes or is cancelled, and for every finished Work at startup, Core clears delivered outbox rows, clone-use rows of completed Tasks, review verification reports, every report but each Task's latest, and the payloads of `test_run.completed`, `agent.started` and the report and usage of `agent.exited`. Work, Task and event rows stay. To keep everything, set the `work_data_retention` row of the `settings` table to `{"enabled": false}`.
+- Artifacts: files under `data/artifacts` are removed 14 days after their Work ended. Core checks once an hour.
+- Temp files: config files that Core hands to agent CLIs live in one `owl-process-*` directory per process under the system temp directory, and are removed when no launch uses them or when the process exits.
+
+SQLite reuses freed pages but does not shrink the file by itself. To shrink it, stop the server, back up `owl.sqlite`, and run `sqlite3 owl.sqlite "PRAGMA wal_checkpoint(TRUNCATE); VACUUM;"`. Upgrading to 0.16.0 runs one VACUUM at the first startup, which can take a few minutes on a large database.
+
 ## Standalone connector account IDs
 
 Connector Account IDs belong to a provider. `node apps/connectors/dist/cli.js

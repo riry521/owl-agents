@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 
 import { repoRoot as root } from "../helpers/paths.mjs";
+import { tempDir } from "../helpers/temp.mjs";
 
 const runner = path.join(root, "scripts/run-required-tests.mjs");
 const listFile = path.join(root, "tests/required-tests.json");
@@ -22,8 +22,8 @@ test("required-tests.json lists existing, unique test files for every main flow"
   }
 });
 
-test("run-required-tests exits with code 2 and names the file when a listed file does not exist", () => {
-  const dir = mkdtempSync(path.join(tmpdir(), "required-tests-"));
+test("run-required-tests exits with code 2 and names the file when a listed file does not exist", async (t) => {
+  const dir = await tempDir(t, "required-tests-");
   const listPath = path.join(dir, "list.json");
   writeFileSync(listPath, JSON.stringify({ files: [{ path: "tests/no-such-file.test.mjs", flow: "work_lifecycle" }] }));
   const result = spawnSync(process.execPath, [runner, listPath], { cwd: root, encoding: "utf8" });
@@ -31,8 +31,8 @@ test("run-required-tests exits with code 2 and names the file when a listed file
   assert.match(result.stderr, /tests\/no-such-file\.test\.mjs/);
 });
 
-test("run-required-tests runs only the listed files and prints TAP", () => {
-  const dir = mkdtempSync(path.join(tmpdir(), "required-tests-"));
+test("run-required-tests runs only the listed files and prints TAP", async (t) => {
+  const dir = await tempDir(t, "required-tests-");
   // 検査は *.test.mjs を要求するので、fixture は一時 checkout に .test.mjs としてコピーする。
   mkdirSync(path.join(dir, "tests"));
   writeFileSync(path.join(dir, "tests/only.test.mjs"), readFileSync(path.join(root, "tests/fixtures/required-tests/pass.fixture.mjs")));
@@ -45,10 +45,10 @@ test("run-required-tests runs only the listed files and prints TAP", () => {
   assert.match(result.stdout, /# tests 1\b/);
 });
 
-test("prepare-test-checkout copies a missing better-sqlite3 binding from the source checkout", () => {
+test("prepare-test-checkout copies a missing better-sqlite3 binding from the source checkout", async (t) => {
   const rel = "node_modules/.pnpm/better-sqlite3@9.9.9/node_modules/better-sqlite3/build/Release/better_sqlite3.node";
-  const source = mkdtempSync(path.join(tmpdir(), "src-"));
-  const checkout = mkdtempSync(path.join(tmpdir(), "dst-"));
+  const source = await tempDir(t, "src-");
+  const checkout = await tempDir(t, "dst-");
   mkdirSync(path.dirname(path.join(source, rel)), { recursive: true });
   writeFileSync(path.join(source, rel), "binding");
   mkdirSync(path.join(checkout, "node_modules/.pnpm/better-sqlite3@9.9.9"), { recursive: true });

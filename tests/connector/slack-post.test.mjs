@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -215,7 +215,7 @@ test("Advisor parsing preserves Markdown for non-Slack consumers", () => {
   });
 });
 
-test("Slack notifications show the Work title in the header and text", async () => {
+test("Slack notifications show the Work title in the header and text", async (t) => {
   const posts = [];
   const client = { chat: { postMessage: async (message) => { posts.push(message); return { ts: "1.1" }; } } };
   const base = { kind: "event", sequence: 1, cursor: "1", schema_version: "1.0.0" };
@@ -230,8 +230,9 @@ test("Slack notifications show the Work title in the header and text", async () 
   assert.match(posts[1].attachments[0].blocks[0].text.text, /^請求書整理\n/u);
 });
 
-async function outboundFixture(content = "file body") {
+async function outboundFixture(t, content = "file body") {
   const dir = await mkdtemp(join(tmpdir(), "owl-slack-outbound-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
   const path = join(dir, "report.txt");
   await writeFile(path, content);
   const sha256 = createHash("sha256").update(content).digest("hex");
@@ -276,8 +277,8 @@ const advisorEvent = (outbound_files, reply = "Done.\n\nNotice line") => ({
   },
 });
 
-test("Slack uploads each outbound file before the reply and appends the sent line after Core notices", async () => {
-  const file = await outboundFixture();
+test("Slack uploads each outbound file before the reply and appends the sent line after Core notices", async (t) => {
+  const file = await outboundFixture(t);
   const order = [];
   const { connector, posts, uploads } = outboundConnector(order);
   await connector.handleCoreEvent(advisorEvent([{ ...file, comment: "**here**" }]));
@@ -292,8 +293,8 @@ test("Slack uploads each outbound file before the reply and appends the sent lin
   assert.match(posts[0].text, /Notice line\n✓ ファイルを送りました: report\.txt（9B）$|Notice line\n✓ Sent the file: report\.txt \(9B\)$/u);
 });
 
-test("Slack reports the files:write hint when the upload lacks the scope and still posts the reply", async () => {
-  const file = await outboundFixture();
+test("Slack reports the files:write hint when the upload lacks the scope and still posts the reply", async (t) => {
+  const file = await outboundFixture(t);
   const order = [];
   const error = Object.assign(new Error("An API error occurred: missing_scope"), {
     code: "slack_webapi_platform_error",
@@ -308,8 +309,8 @@ test("Slack reports the files:write hint when the upload lacks the scope and sti
   assert.match(posts[0].text, /files:write/u);
 });
 
-test("Slack does not upload a file whose contents changed after Core checked it", async () => {
-  const file = await outboundFixture();
+test("Slack does not upload a file whose contents changed after Core checked it", async (t) => {
+  const file = await outboundFixture(t);
   await writeFile(file.path, "different body!");
   const order = [];
   const { connector, posts, uploads } = outboundConnector(order);
@@ -336,8 +337,8 @@ for (const [name, error, expected] of [
   ["rate limiting", slackError("slack_webapi_rate_limited_error", { retryAfter: 3 }), { outcome: "failed", code: "upload_rate_limited", platform_error: null }],
   ["a request error", slackError("slack_webapi_request_error", { original: new Error("socket hang up") }), { outcome: "unknown", code: "upload_unknown", platform_error: null }],
 ]) {
-  test(`Slack reports ${name} as ${expected.code} and appends the notice Core returns`, async () => {
-    const file = await outboundFixture();
+  test(`Slack reports ${name} as ${expected.code} and appends the notice Core returns`, async (t) => {
+    const file = await outboundFixture(t);
     const { connector, posts } = outboundConnector([], error);
     const requests = stubCore(connector);
     await connector.handleCoreEvent(pendingEvent([file]));
@@ -353,8 +354,8 @@ for (const [name, error, expected] of [
   });
 }
 
-test("Slack reports a changed file as failed/changed and a successful upload as sent without calling the upload", async () => {
-  const changed = await outboundFixture();
+test("Slack reports a changed file as failed/changed and a successful upload as sent without calling the upload", async (t) => {
+  const changed = await outboundFixture(t);
   await writeFile(changed.path, "different body!");
   const first = outboundConnector([]);
   const firstRequests = stubCore(first.connector);
@@ -362,7 +363,7 @@ test("Slack reports a changed file as failed/changed and a successful upload as 
   assert.equal(first.uploads.length, 0);
   assert.deepEqual(firstRequests[0].body.payload.results.map(({ message, ...rest }) => rest), [{ index: 0, outcome: "failed", code: "changed", platform_error: null }]);
 
-  const ok = await outboundFixture();
+  const ok = await outboundFixture(t);
   const second = outboundConnector([]);
   const secondRequests = stubCore(second.connector, "");
   await second.connector.handleCoreEvent(pendingEvent([ok]));
@@ -370,8 +371,8 @@ test("Slack reports a changed file as failed/changed and a successful upload as 
   assert.ok(!second.posts[0].text.includes("undefined"));
 });
 
-test("Slack still posts the reply when the delivery report fails, and does not report an event without delivery_pending", async () => {
-  const file = await outboundFixture();
+test("Slack still posts the reply when the delivery report fails, and does not report an event without delivery_pending", async (t) => {
+  const file = await outboundFixture(t);
   const failing = outboundConnector([]);
   failing.connector.core.request = async () => { throw new Error("core unreachable"); };
   await failing.connector.handleCoreEvent(pendingEvent([file]));
@@ -409,11 +410,11 @@ const bindingCore = (connector, bound) => {
   return requests;
 };
 
-test("Slack uploads a Web-origin file to the delivery_target channel without a thread or reply post, and reports it", async () => {
+test("Slack uploads a Web-origin file to the delivery_target channel without a thread or reply post, and reports it", async (t) => {
   const { connector, posts, uploads } = outboundConnector([]);
   connector.boundChannelIds = new Set(["C-PROJECT"]);
   const requests = bindingCore(connector, ["C-PROJECT"]);
-  await connector.handleCoreEvent(webFileEvent(await outboundFixture()));
+  await connector.handleCoreEvent(webFileEvent(await outboundFixture(t)));
 
   assert.equal(uploads.length, 1);
   assert.equal(uploads[0].channel_id, "C-PROJECT");
@@ -424,18 +425,18 @@ test("Slack uploads a Web-origin file to the delivery_target channel without a t
   assert.deepEqual(reports[0].body.payload.results, [{ index: 0, outcome: "sent" }]);
 });
 
-test("Slack ignores a Web-origin file whose delivery_target is Discord", async () => {
+test("Slack ignores a Web-origin file whose delivery_target is Discord", async (t) => {
   const { connector, posts, uploads } = outboundConnector([]);
   const requests = bindingCore(connector, ["C-PROJECT"]);
-  await connector.handleCoreEvent(webFileEvent(await outboundFixture(), "discord"));
+  await connector.handleCoreEvent(webFileEvent(await outboundFixture(t), "discord"));
 
   assert.equal(uploads.length + posts.length + requests.length, 0);
 });
 
-test("Slack refreshes the bindings once for an unknown channel, then reports upload_rejected without uploading", async () => {
+test("Slack refreshes the bindings once for an unknown channel, then reports upload_rejected without uploading", async (t) => {
   const { connector, posts, uploads } = outboundConnector([]);
   const requests = bindingCore(connector, []);
-  await connector.handleCoreEvent(webFileEvent(await outboundFixture()));
+  await connector.handleCoreEvent(webFileEvent(await outboundFixture(t)));
 
   assert.equal(uploads.length, 0);
   assert.equal(posts.length, 0);
