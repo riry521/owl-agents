@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { NoopGitGateway, createProviderPauseStore, createTaskPlanInTransaction, createWorkInTransaction } from "../../packages/core/dist/index.js";
+import { readPausedReviewerWait } from "../../packages/core/dist/provider-pause-reviewer-wait.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { createTestCore } from "../helpers/core.mjs";
 import { createTestDatabase } from "../helpers/db.mjs";
@@ -49,7 +50,7 @@ function reviewerAgentRunner({ thrown = false } = {}) {
     runner: {
       runWorker: async (request) => (await writeValidFile(request), {
         outcome: "success", report_valid: true,
-        report: { result: "success", verification: { passed: true } },
+        report: { result: "success", verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [] } },
         skill_feedback: null,
       }),
       runReviewer: async () => {
@@ -157,7 +158,7 @@ test("Core restart preserves a rate-limited Reviewer wait and retries it when th
   assert.equal(db.get("SELECT reviewer_failure_count FROM tasks WHERE id = ?", taskId).reviewer_failure_count, 0);
   assert.equal(db.get("SELECT status FROM agent_runs WHERE role = 'reviewer' AND task_id = ?", taskId).status, "exited");
   assert.equal(createProviderPauseStore(db).list().find((pause) => pause.provider === "anthropic")?.state, "paused");
-  assert.ok(db.get("SELECT key FROM idempotency_keys WHERE key = ?", `paused-reviewer-wait:${taskId}`));
+  assert.ok(readPausedReviewerWait(db, taskId));
 
   await firstCore.stop({ force: true });
   const restartedCore = await makeCore(t, db, root, agent.runner);
@@ -170,7 +171,7 @@ test("Core restart preserves a rate-limited Reviewer wait and retries it when th
   await waitUntil(() => agent.reviewerAttempts === 2 && db.get("SELECT status FROM tasks WHERE id = ?", taskId).status === "completed", "Reviewer retry after provider resume");
   assert.equal(db.get("SELECT reviewer_failure_count FROM tasks WHERE id = ?", taskId).reviewer_failure_count, 0);
   assert.equal(db.get("SELECT COUNT(*) AS count FROM agent_runs WHERE role = 'reviewer' AND task_id = ?", taskId).count, 2);
-  assert.equal(db.get("SELECT COUNT(*) AS count FROM idempotency_keys WHERE key = ?", `paused-reviewer-wait:${taskId}`).count, 0);
+  assert.equal(readPausedReviewerWait(db, taskId), undefined);
 });
 
 test("Core restart retries a rate-limited Reviewer when another call already resumed its provider", async (t) => {
@@ -183,7 +184,7 @@ test("Core restart retries a rate-limited Reviewer when another call already res
   await db.createWriteLane().transact((tx) => tx.run("UPDATE works SET state = 'running' WHERE id = ?", workId));
   await firstCore.tick(workId);
   await firstCore.workflow.drainPipelines();
-  assert.ok(db.get("SELECT key FROM idempotency_keys WHERE key = ?", `paused-reviewer-wait:${taskId}`));
+  assert.ok(readPausedReviewerWait(db, taskId));
 
   const pauseStore = createProviderPauseStore(db, () => NOW);
   await pauseStore.resume("anthropic");
@@ -199,7 +200,7 @@ test("Core restart retries a rate-limited Reviewer when another call already res
 
   assert.equal(db.get("SELECT reviewer_failure_count FROM tasks WHERE id = ?", taskId).reviewer_failure_count, 0);
   assert.equal(db.get("SELECT COUNT(*) AS count FROM agent_runs WHERE role = 'reviewer' AND task_id = ?", taskId).count, 2);
-  assert.equal(db.get("SELECT COUNT(*) AS count FROM idempotency_keys WHERE key = ?", `paused-reviewer-wait:${taskId}`).count, 0);
+  assert.equal(readPausedReviewerWait(db, taskId), undefined);
 });
 
 test("restart preserves every Reviewer wait for one paused Provider, including Tasks with no Reviewer run", async (t) => {
@@ -225,7 +226,7 @@ test("restart preserves every Reviewer wait for one paused Provider, including T
       await writeValidFile(request);
       return {
         outcome: "success", report_valid: true,
-        report: { result: "success", verification: { passed: true } },
+        report: { result: "success", verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [] } },
         skill_feedback: null,
       };
     },
@@ -257,7 +258,7 @@ test("restart preserves every Reviewer wait for one paused Provider, including T
 
   assert.deepEqual(taskIds.map((taskId) => db.get("SELECT status FROM tasks WHERE id = ?", taskId).status), ["verifying", "verifying"]);
   assert.deepEqual(taskIds.map((taskId) => db.get("SELECT reviewer_failure_count FROM tasks WHERE id = ?", taskId).reviewer_failure_count), [0, 0]);
-  assert.equal(db.get("SELECT COUNT(*) AS count FROM idempotency_keys WHERE key LIKE 'paused-reviewer-wait:%'").count, 2);
+  assert.equal(db.get("SELECT COUNT(*) AS count FROM paused_reviewer_waits").count, 2);
   assert.equal(db.get("SELECT COUNT(*) AS count FROM agent_runs WHERE role = 'reviewer' AND task_id = ?", taskIds[0]).count, 1);
   assert.equal(db.get("SELECT COUNT(*) AS count FROM agent_runs WHERE role = 'reviewer' AND task_id = ?", taskIds[1]).count, 0);
 
@@ -267,15 +268,15 @@ test("restart preserves every Reviewer wait for one paused Provider, including T
   await new Promise((resolvePromise) => setImmediate(resolvePromise));
   assert.deepEqual(taskIds.map((taskId) => db.get("SELECT status FROM tasks WHERE id = ?", taskId).status), ["verifying", "verifying"]);
   assert.deepEqual(taskIds.map((taskId) => db.get("SELECT reviewer_failure_count FROM tasks WHERE id = ?", taskId).reviewer_failure_count), [0, 0]);
-  assert.equal(db.get("SELECT COUNT(*) AS count FROM idempotency_keys WHERE key LIKE 'paused-reviewer-wait:%'").count, 2);
+  assert.equal(db.get("SELECT COUNT(*) AS count FROM paused_reviewer_waits").count, 2);
 
   t.mock.timers.tick(90_000);
   await waitUntil(() => reviewerAttempts === 3, "both Reviewers to restart");
-  assert.equal(db.get("SELECT COUNT(*) AS count FROM idempotency_keys WHERE key LIKE 'paused-reviewer-wait:%'").count, 0);
+  assert.equal(db.get("SELECT COUNT(*) AS count FROM paused_reviewer_waits").count, 0);
   releaseResumedReviewers();
   await waitUntil(() => taskIds.every((taskId) => db.get("SELECT status FROM tasks WHERE id = ?", taskId).status === "completed"), "both Reviewers after Provider resume");
   assert.deepEqual(taskIds.map((taskId) => db.get("SELECT reviewer_failure_count FROM tasks WHERE id = ?", taskId).reviewer_failure_count), [0, 0]);
-  assert.equal(db.get("SELECT COUNT(*) AS count FROM idempotency_keys WHERE key LIKE 'paused-reviewer-wait:%'").count, 0);
+  assert.equal(db.get("SELECT COUNT(*) AS count FROM paused_reviewer_waits").count, 0);
 });
 
 test("startup counts an ordinary orphaned Reviewer while its Provider is paused for another Task", async (t) => {

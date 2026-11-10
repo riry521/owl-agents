@@ -2,20 +2,23 @@ import {
   DEFAULT_PROGRESS_GUARD_SETTINGS,
   PROGRESS_GUARD_SETTINGS_KEY,
   readProgressGuardSettings,
+  validateProgressGuardSettings,
   type ProgressGuardSettings,
 } from "../../shared/dist/progress-guard-settings.js";
 import type { SettingsReader } from "./owner-language";
+import { readSetting, type SettingSpec } from "./settings-store";
+
+export const PROGRESS_GUARD_SETTING: SettingSpec<ProgressGuardSettings> = {
+  key: PROGRESS_GUARD_SETTINGS_KEY,
+  defaults: DEFAULT_PROGRESS_GUARD_SETTINGS,
+  read: readProgressGuardSettings,
+  warnPrefix: "progress_guard: ",
+  readFailure: "Could not read progress_guard; using defaults",
+  validate: validateProgressGuardSettings,
+  event: { type: "settings.progress_guard_updated", idempotencyPrefix: "settings-progress-guard" },
+};
 
 /** The stored progress guard settings; missing or invalid values fall back to the defaults. A failed read never blocks a transition. */
 export function progressGuard(reader: SettingsReader): ProgressGuardSettings {
-  try {
-    const row = reader.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", PROGRESS_GUARD_SETTINGS_KEY);
-    if (!row) return DEFAULT_PROGRESS_GUARD_SETTINGS;
-    return readProgressGuardSettings(JSON.parse(row.value_json) as unknown, (message) => {
-      console.warn(`[owl-core] progress_guard: ${message}`);
-    });
-  } catch (error) {
-    console.warn("[owl-core] Could not read progress_guard; using defaults", error);
-    return DEFAULT_PROGRESS_GUARD_SETTINGS;
-  }
+  return readSetting(reader, PROGRESS_GUARD_SETTING);
 }

@@ -276,6 +276,19 @@ test("initial plan: a plan the parser rejects (criteria_relaxations not a list) 
   assert.equal(startedRecords(db, workId).length, 0, "no recovery was started before the limit");
 });
 
+test("initial plan: a plan that keeps missing fields or fails to parse opens a Decision after the limit instead of throwing", async (t) => {
+  const missing = managerTask("A", [criterion(1, "x", { check: "" })]);
+  const unparsable = { ...managerTask("A", small), auto_recovery: { criteria_relaxations: "AC1" } };
+  for (const bad of [missing, unparsable]) {
+    const seen = [];
+    const { db, core } = await openCore(t, [[bad]], seen);
+    const workId = await startWork(core);
+    assert.ok(await waitFor(() => decisionCount(db, workId) === 1), "a Decision opens");
+    assert.match(seen[1], /"kind":"fields_missing"/);
+    assert.equal(taskCount(db, workId), 0);
+  }
+});
+
 test("evaluatePlanQuality: an owner criterion needs a quote found in the Owner's words, and is then exempt from the weight checks", () => {
   const ownerTexts = ["Please check the 本番のデータ\n and run it on 全件 before release."];
   const owner = (quote, text = "ok", extra = {}) => item([criterion(1, text, { origin: { kind: "owner", source: "summary", quote }, ...extra })]);
@@ -299,6 +312,20 @@ test("evaluatePlanQuality: an owner criterion keeps the requirement of the Work 
   assert.deepEqual(run([owner("The build passes", undefined)]), [], "no requirement reads as required");
   assert.deepEqual(run([owner("Make it required", "goal", "instruction")]), [], "an instruction quote is not checked");
   assert.deepEqual(run([owner("Make it required", "required", "decision_answer")]), []);
+});
+
+test("evaluatePlanQuality: a summary quote is owner only from the Acceptance and Goals sections", () => {
+  const summary = "依頼: x\n\n背景:\n- The intake rejected 3 files\n\n方針:\n- Route it through the intake\n\n注意:\n- Keep the old endpoint\n\n受け入れ条件:\n- The build passes\n\n目標:\n- Add at least 10 tests";
+  const owner = (quote, requirement, source = "summary") => item([criterion(1, "ok", { origin: { kind: "owner", source, quote }, requirement })]);
+  const run = (list) => evaluatePlanQuality(list, S, [summary, "Route it through the intake"], summary).map((warning) => warning.code);
+  for (const quote of ["The intake rejected 3 files", "Route it through the intake", "Keep the old endpoint"]) {
+    assert.deepEqual(run([owner(quote, "required")]), ["criterion_origin_unquoted"], quote);
+    assert.deepEqual(run([owner(quote, "goal")]), ["criterion_origin_unquoted"], quote);
+  }
+  assert.deepEqual(run([owner("Route it through the intake", "required", "instruction")]), []);
+  assert.deepEqual(run([owner("Route it through the intake", "required", "decision_answer")]), []);
+  assert.deepEqual(run([owner("The build passes", "required")]), []);
+  assert.deepEqual(run([owner("Add at least 10 tests", "goal")]), []);
 });
 
 test("the default plan quality settings make criterion_requirement_mismatch blocking", () => {

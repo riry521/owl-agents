@@ -136,9 +136,7 @@ test("connectors CLI runs its entry point when installed under a directory with 
   // Only cli.js is copied, so its own URL carries the encoded directory; its
   // imports are symlinks that resolve back into this checkout.
   await copyFile(join(repoRoot, "apps/connectors/dist/cli.js"), join(dist, "cli.js"));
-  for (const name of ["slack-connector.js", "discord-connector.js"]) {
-    await symlink(join(repoRoot, "apps/connectors/dist", name), join(dist, name));
-  }
+  await symlink(join(repoRoot, "apps/connectors/node_modules"), join(root, "apps", "connectors", "node_modules"));
   await symlink(join(repoRoot, "packages/shared/dist/env.js"), join(root, "packages/shared/dist/env.js"));
 
   // No provider flag: a CLI that actually ran main() fails with its usage message.

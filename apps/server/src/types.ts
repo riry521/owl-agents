@@ -1,3 +1,4 @@
+import type { TaskStateValue, WorkStateValue } from "../../../packages/shared/dist/index.js";
 import type { OwnerLanguage } from "../../../packages/shared/dist/owner-language.js";
 import type { ModelHarness } from "../../../packages/shared/dist/harness-models.js";
 import type { GuardTokenIssuer } from "../../../packages/shared/dist/guard-token.js";
@@ -35,27 +36,9 @@ export interface IssueBacklogWorkResult {
   items: Array<JsonObject & { id: string; status: BacklogStatus }>;
 }
 
-export type WorkState =
-  | "memo"
-  | "ready"
-  | "running"
-  | "paused"
-  | "judgement_waiting"
-  | "completed"
-  | "cancelled"
-  | (string & {});
+export type WorkState = WorkStateValue | (string & {});
 
-export type TaskState =
-  | "waiting"
-  | "ready"
-  | "running"
-  | "paused"
-  | "verifying"
-  | "review_fix_waiting"
-  | "failed"
-  | "judgement_waiting"
-  | "completed"
-  | "cancelled";
+export type TaskState = TaskStateValue;
 
 export interface WorkSummary {
   id: string;
@@ -96,6 +79,7 @@ export interface WorkDetail extends WorkSummary {
   progress: WorkProgress;
   conversation_id: string | null;
   prerequisites: WorkPrerequisite[];
+  can_move_to_project: boolean;
   final_report: { summary: string; test_results: string; issues: string; created_at: string } | null;
 }
 
@@ -593,7 +577,6 @@ export type IntegrationProvider = "slack" | "discord";
 export interface IntegrationConfig {
   bot_token: string;
   app_token?: string;
-  signing_secret?: string;
   /** Legacy channel setting. A comma/newline-separated list applies to both roles. */
   channel_id?: string;
   /** Channels that receive user messages and Advisor replies (comma/newline separated). */
@@ -699,6 +682,8 @@ export interface AdvisorFoldersSnapshot {
 export interface CorePort {
   readonly version: string;
   readonly ready: boolean;
+  listLearningJobs(status?: string): unknown[];
+  retryLearningJob(jobId: string): Promise<void>;
   status(): {
     services: readonly { name: string; state: string; pid: number | null }[];
     mvp_scope: string;

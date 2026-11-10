@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { createOwnApiCaller } from "../../apps/server/dist/own-api-caller.js";
-import { createCore as createMemoryCore, ExternalCoreAdapter } from "../../apps/server/dist/core.js";
+import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { GuardTokenRegistry } from "../../apps/server/dist/guard-tokens.js";
 import { GitWorktreeGateway } from "../../packages/core/dist/git-gateway.js";
 import { createUlid } from "../../packages/db/dist/index.js";
@@ -40,16 +40,6 @@ function withEnv(values, fn) {
   }
 }
 
-async function startServer(t, core) {
-  const root = await tempDir(t, "owl-api-advisor-actions-");
-  const api = await startTestHttpServer(t, { core, webOut: root, owlRoot: root });
-  if (!api) {
-    t.skip("localhost listen is not permitted in this environment");
-    return null;
-  }
-  return { base: api.baseUrl };
-}
-
 async function startAdapterServer(t) {
   const { root, db, core } = await createTestCore(t, { version: "api-advisor-actions-test", dispatcher: { tick_interval_ms: 60_000 } }, { prefix: "owl-api-advisor-actions-adapter-" });
   const dataDir = join(root, "data");
@@ -78,8 +68,7 @@ function action(overrides) {
 
 test("/advisor/actions honors each action's own expected_version instead of a batch-wide one", async (t) => {
   await withEnv({ OWL_API_TOKEN: undefined }, async () => {
-    const core = createMemoryCore({ version: "1.0.0", agentRunner: { start: async () => {} } });
-    const server = await startServer(t, core);
+    const server = await startAdapterServer(t);
     if (!server) return;
 
     const created = await post(server.base, "/api/v1/works", envelope({ title: "Batch actions", summary: "", size: "normal", project_id: null }, "create"));
@@ -88,14 +77,14 @@ test("/advisor/actions honors each action's own expected_version instead of a ba
     assert.equal(created.body.data.state_version, 0);
 
     // start_work needs expected_version 0 (the Work's current version); the
-    // pause_work that follows in the same batch needs expected_version 1,
+    // cancel_work that follows in the same batch needs expected_version 1,
     // the version start_work leaves behind. A batch-wide expected_version
     // could satisfy at most one of these.
     const { response, body } = await post(server.base, "/api/v1/advisor/actions", envelope({
       invocation_id: createUlid(),
       actions: [
         action({ sequence: 1, type: "start_work", payload: { work_id: workId }, expected_version: 0 }),
-        action({ sequence: 2, type: "pause_work", payload: { work_id: workId }, expected_version: 1 }),
+        action({ sequence: 2, type: "cancel_work", payload: { work_id: workId }, expected_version: 1 }),
       ],
     }, "batch"));
 
@@ -106,15 +95,14 @@ test("/advisor/actions honors each action's own expected_version instead of a ba
 
     const detail = await fetch(`${server.base}/api/v1/works/${workId}`);
     const detailBody = await detail.json();
-    assert.equal(detailBody.data.state, "paused");
+    assert.equal(detailBody.data.state, "cancelled");
     assert.equal(detailBody.data.state_version, 2);
   });
 });
 
 test("/advisor/actions rejects the whole batch when an action omits expected_version", async (t) => {
   await withEnv({ OWL_API_TOKEN: undefined }, async () => {
-    const core = createMemoryCore({ version: "1.0.0", agentRunner: { start: async () => {} } });
-    const server = await startServer(t, core);
+    const server = await startAdapterServer(t);
     if (!server) return;
 
     const raw = { action_id: createUlid(), sequence: 1, type: "start_work", payload: {} };

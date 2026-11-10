@@ -6,6 +6,7 @@ import { mock, test } from 'node:test';
 import ts from 'typescript';
 
 import { repoRoot } from '../helpers/paths.mjs';
+const apiErrorKeys = await import('../../apps/web/lib/api-error-keys.mjs');
 const advisorViewPath = join(repoRoot, 'apps/web/components/AdvisorView.tsx');
 
 const webRequire = createRequire(join(repoRoot, 'apps/web/package.json'));
@@ -147,6 +148,7 @@ const { advisorIndicatorLabel, advisorSessionBusy } = indicatorModule;
 const advisorViewModule = compileWebComponent(advisorViewPath, {
   '@/lib/api-client': componentApiClient,
   '@/lib/format': componentFormat,
+  '@/lib/api-error-keys.mjs': apiErrorKeys,
   '@/lib/i18n': componentI18n,
   '@/lib/owner-file-links.mjs': await import('../../apps/web/lib/owner-file-links.mjs'),
   '@/lib/advisor-awaiting.mjs': { replyArrived },
@@ -348,6 +350,7 @@ test('rendered: the spinner stays through idle or stale session reads after a se
   const compiled = compileWebComponent(advisorViewPath, {
     '@/lib/api-client': componentApiClient,
     '@/lib/format': componentFormat,
+    '@/lib/api-error-keys.mjs': apiErrorKeys,
     '@/lib/i18n': componentI18n,
     '@/lib/owner-file-links.mjs': await import('../../apps/web/lib/owner-file-links.mjs'),
   '@/lib/advisor-awaiting.mjs': { replyArrived },

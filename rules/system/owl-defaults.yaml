@@ -21,9 +21,9 @@ rules:
   - id: owl_no_internal_docs_in_git
     kind: instruction
     text: "設計・計画・検証・レビュー結果・作業記録などの内部資料は git で追跡しないこと。git add -f や .gitignore の例外（!）で無視設定を破らないこと。テストやコードが内部資料のファイルを読む作りにしないこと（必要な値はテストやコード側に持たせる）。"
-  - id: owl_full_test_when_required
-    kind: instruction
-    text: "「全部を確かめるときは代表サンプルにする」という決まりは、全件の実行を禁止するものではない。受け入れ条件が全件のテストを求めているとき、または Core・共有の型・API の戻り値・プロンプトを変えるときは、全件の実行に理由があるものとして扱い、全件を実行すること。全件の実行を避けるために partial や blocked で報告しないこと。"
   - id: owl_no_cloned_repos_in_project
     kind: instruction
     text: "clone やダウンロードした外部のリポジトリ・ツールは別のプロジェクトとして扱い、プロジェクトの外に置くこと。プロジェクトにはコミットせず、一部を写すこともしない。clone は取ってきたままにし、手を加えない。"
+  - id: owl_fix_root_cause_before_adding
+    kind: instruction
+    text: "問題に対処するときは、まず記録やコードで原因を確かめること。新しい仕組みやルールを足す前に、同じ問題を扱う既存の仕組みを探し、それを直すか消すかで済まないかを先に考える。"

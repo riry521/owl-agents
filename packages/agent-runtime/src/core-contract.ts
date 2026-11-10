@@ -1,8 +1,6 @@
 import type {
   AgentRunResult,
   AgentRunner as CoreAgentRunner,
-  AdvisorRunRequest as CoreAdvisorRunRequest,
-  AdvisorRunResult,
   ManagerPlanRequest as CoreManagerPlanRequest,
   ReviewerRunRequest as CoreReviewerRunRequest,
   WorkerRunRequest as CoreWorkerRunRequest,
@@ -19,8 +17,6 @@ import type {
 import type { TestSetupInvestigationRequest, TestSetupInvestigationRunResult } from "./test-setup-investigation";
 import type { ProjectInvestigationRequest, ProjectInvestigationRunResult } from "./project-investigation";
 import type {
-  AdvisorRequest,
-  AdvisorResponse,
   ManagerPlanInput,
   ManagerPlanResult,
   ProviderClient,
@@ -35,9 +31,7 @@ import type { PlanUsageSnapshot } from "../../shared/dist/plan-usage.js";
 /** Core's generated declaration is the authoritative AgentRunner contract. */
 export type AgentRunner = CoreAgentRunner;
 export type {
-  AdvisorRunResult,
   AgentRunResult,
-  CoreAdvisorRunRequest,
   CoreManagerPlanRequest,
   CoreReviewerRunRequest,
   CoreWorkerRunRequest,
@@ -70,8 +64,6 @@ export interface RuntimeAgentRunner extends CoreAgentRunner {
   runWorker(request: WorkerInput): Promise<ReportEnvelope>;
   runReviewer(request: CoreReviewerRunRequest): Promise<RuntimeAgentRunResult>;
   runReviewer(request: ReviewerRequest): Promise<ReviewResult>;
-  runAdvisor(request: CoreAdvisorRunRequest): Promise<AdvisorRunResult>;
-  runAdvisor(request: AdvisorRequest): Promise<AdvisorResponse>;
   runProjectInvestigation?(request: ProjectInvestigationRequest): Promise<ProjectInvestigationRunResult>;
   runTestSetupInvestigation?(request: TestSetupInvestigationRequest): Promise<TestSetupInvestigationRunResult>;
   runDecisionExplanation?(request: DecisionExplanationRequest): Promise<DecisionExplanationRunResult>;

@@ -22,7 +22,7 @@ import { openTestDatabase } from "../helpers/db.mjs";
 // The lineage a Task is counted against is the chain of Tasks it replaced,
 // not every Task that shares a root; an Owner answer counts from 0 again.
 
-const SETTINGS = { ...DEFAULT_REMAKE_LIMIT_SETTINGS, lineage_worker_runs: 3, lineage_review_attempts: 1000, non_functional_remakes: 1000 };
+const SETTINGS = { ...DEFAULT_REMAKE_LIMIT_SETTINGS, lineage_worker_runs: 3, lineage_review_attempts: 1000 };
 // Stamps start an hour ago so the real-time stamp of a reducer commit falls between "before" and "after" (see afterReal).
 const base = Date.now() - 3600_000;
 let clock = 0;
@@ -154,14 +154,14 @@ test("a cancelled ancestor is totalled; a cancelled Task of the same root that i
   assert.equal(lineageUsage(db, "T3", SETTINGS).worker_runs, 3);
 });
 
-test("base_sync_only runs stay out of the main count", async (t) => {
+test("base_sync_only runs count in the main total and are also shown apart", async (t) => {
   const { db, task, run } = await setup(t);
   await task("T1");
   await run("T1", { baseSync: 1 });
   await run("T1", { baseSync: 1 });
   await run("T1");
   const usage = lineageUsage(db, "T1", SETTINGS);
-  assert.equal(usage.worker_runs, 1);
+  assert.equal(usage.worker_runs, 3);
   assert.equal(usage.base_sync_worker_runs, 2);
 });
 
@@ -228,26 +228,6 @@ test("the Decision answer (decision.resolved) restarts the lineage count; using 
   assert.equal(blocked(db, "T2"), false);
   await run("T2");
   assert.equal(blocked(db, "T2"), true);
-});
-
-test("non-functional remakes: siblings and units from before the answer are not in the streak", async (t) => {
-  const { db, task, measure, restart } = await setup(t);
-  const settings = { ...DEFAULT_REMAKE_LIMIT_SETTINGS, lineage_worker_runs: 1000, lineage_review_attempts: 1000, non_functional_remakes: 2 };
-  await task("T1");
-  await task("R1", { root: "T1", replaces: ["T1"], generation: 2 });
-  await task("R2", { root: "T1", replaces: ["T1"], generation: 2 });
-  await measure("T1", 1, ["src/a.ts"]);
-  await measure("R1", 2, ["src/a.ts", "tests/a.test.mjs"]);
-  await measure("R2", 2, ["src/a.ts", "tests/b.test.mjs"]);
-  assert.equal(lineageUsage(db, "R2", settings).non_functional_streak, 1, "R1 is a sibling and does not extend R2's streak");
-  assert.equal(blocked(db, "R2", settings), false);
-  await task("R3", { root: "T1", replaces: ["R2"], generation: 3 });
-  await measure("R3", 3, ["src/a.ts", "tests/b.test.mjs", "tests/c.test.mjs"]);
-  assert.equal(lineageUsage(db, "R3", settings).non_functional_streak, 2);
-  assert.equal(blocked(db, "R3", settings), true);
-  await restart("R3");
-  assert.equal(lineageUsage(db, "R3", settings).non_functional_streak, 0, "units from before the answer no longer count");
-  assert.equal(blocked(db, "R3", settings), false);
 });
 
 test("review.failed after the answer counts from 0: continues below the limit, stops at it", async (t) => {

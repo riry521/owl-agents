@@ -15,6 +15,20 @@ import { backlogLocation, backlogWorkDraft } from '@/lib/backlog-draft.mjs';
 import { backlogStatusBadge, showsLinkedWork } from '@/lib/backlog-link.mjs';
 import { useLocale } from '@/lib/i18n';
 import { useView } from '@/lib/view-loader';
+import { humanizeApiErrorFields } from '@/lib/api-error-keys.mjs';
+
+// ApiRequestError 以外の失敗は code と kind を持たないものとして扱う。
+const ACTION_ERROR_KEYS = {
+  validation: 'backlog.error.validation',
+  network: 'backlog.error.network',
+  networkFrom: 'kind',
+  fallback: 'backlog.error.default',
+  codes: {
+    invalid_state_transition: 'backlog.error.invalidState',
+    work_not_found: 'backlog.error.workNotFound',
+    backlog_item_not_found: 'backlog.error.notFound',
+  },
+} as const;
 
 export function BacklogView() {
   const { locale, t } = useLocale();
@@ -66,17 +80,6 @@ export function BacklogView() {
   const selectedProjects = new Set(selectedItems.map((item) => item.project_id));
   const mixedProjects = selectedProjects.size > 1;
 
-  function classifyError(error: unknown): string {
-    const code = error instanceof ApiRequestError ? error.code : '';
-    const kind = error instanceof ApiRequestError ? error.kind : '';
-    if (code === 'invalid_state_transition') return t('backlog.error.invalidState');
-    if (code === 'work_not_found') return t('backlog.error.workNotFound');
-    if (code === 'backlog_item_not_found') return t('backlog.error.notFound');
-    if (code === 'validation_error') return t('backlog.error.validation');
-    if (kind === 'network_error') return t('backlog.error.network');
-    return t('backlog.error.default');
-  }
-
   function changeProject(value: string) {
     setProjectId(value);
     setSelectedIds(new Set());
@@ -115,7 +118,7 @@ export function BacklogView() {
       setIssueOpen(false);
       retry();
     } catch (error) {
-      setActionError(classifyError(error));
+      setActionError(humanizeApiErrorFields(error instanceof ApiRequestError ? error : null, t, ACTION_ERROR_KEYS));
       if (error instanceof ApiRequestError && (error.code === 'invalid_state_transition' || error.code === 'backlog_item_not_found')) {
         setSelectedIds(new Set());
         retry();
@@ -154,7 +157,7 @@ export function BacklogView() {
       setStatus(result.status);
       retry();
     } catch (error) {
-      setActionError(classifyError(error));
+      setActionError(humanizeApiErrorFields(error instanceof ApiRequestError ? error : null, t, ACTION_ERROR_KEYS));
       if (error instanceof ApiRequestError && ['invalid_state_transition', 'backlog_item_not_found', 'work_not_found', 'validation_error'].includes(error.code)) {
         setSelectedIds(new Set());
         setLinkOpen(false);
@@ -197,7 +200,7 @@ export function BacklogView() {
       setStatus('in_progress');
       retry();
     } catch (error) {
-      setActionError(classifyError(error));
+      setActionError(humanizeApiErrorFields(error instanceof ApiRequestError ? error : null, t, ACTION_ERROR_KEYS));
       if (error instanceof ApiRequestError && (error.code === 'invalid_state_transition' || error.code === 'backlog_item_not_found')) {
         setSelectedIds(new Set());
         setIssueOpen(false);

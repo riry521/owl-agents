@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { KnowledgeBase } from "../../packages/core/dist/knowledge-base.js";
-import { MemorySaver } from "../../packages/core/dist/memory-saver.js";
 import { resolveKnowledgeFilename, slugifyKnowledgeContent, slugifyKnowledgeName } from "../../packages/core/dist/knowledge-naming.js";
 import { tempDir } from "../helpers/temp.mjs";
 

@@ -17,14 +17,15 @@ export const WAIT = {
     { kind: "owner", target: "", paths: [], description: "Owner confirms the export job finished on the staging server" },
   ],
 };
-export const WORK_SUMMARY = "Add the export job.";
+export const SUMMARY_LINE = "Add the export job.";
+export const WORK_SUMMARY = `受け入れ条件:\n- ${SUMMARY_LINE}`;
 export const CRITERION_BEFORE = "The export job runs on staging; verified by the test.";
 
 /** The Task's first criterion is the Owner's, quoted from the Work summary, as in Work #11. */
 const ownerCriterion = (text, check, origin) => ({
   id: "AC1", text, check, serves: "test fixture", if_omitted: "test fixture", check_weight: "light", weight_reason: "", kind: "work_check", requirement: "required", origin,
 });
-const FIRST_CRITERIA = [ownerCriterion(CRITERION_BEFORE, "node --test", { kind: "owner", source: "summary", quote: WORK_SUMMARY })];
+const FIRST_CRITERIA = [ownerCriterion(CRITERION_BEFORE, "node --test", { kind: "owner", source: "summary", quote: SUMMARY_LINE })];
 
 const planTask = (extra = {}) => ({
   id: "T1", title: TITLE, type: "code", acceptance: CRITERION_BEFORE, acceptance_criteria: FIRST_CRITERIA,

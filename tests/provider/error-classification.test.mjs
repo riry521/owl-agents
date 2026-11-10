@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { classifyProviderFailure, providerFailureCause } from "../../packages/agent-runtime/dist/index.js";
 import { providerFailed } from "../../packages/agent-runtime/dist/errors.js";
 import { harnessFailureDetail, unwrapClaudeCliResult } from "../../packages/agent-runtime/dist/protocol.js";
-import { spawnProvider } from "../../packages/providers/dist/spawn.js";
+import { createCliProvider } from "../../packages/agent-runtime/dist/provider.js";
 
 function exited(fields) {
   return { exit_code: 1, signal: null, kind: "exit", ...fields };
@@ -111,14 +111,19 @@ test("a harness that cannot be started is a configuration failure", () => {
   assert.match(failure.message, /実行設定が不正です/u);
 });
 
-test("spawnProvider rejects a missing executable as spawn_failed without an unhandled rejection", async (t) => {
+test("createCliProvider execute rejects a missing executable as spawn_failed without an unhandled rejection", async (t) => {
   const unhandled = [];
   const onUnhandled = (reason) => unhandled.push(reason);
   process.on("unhandledRejection", onUnhandled);
   t.after(() => process.off("unhandledRejection", onUnhandled));
   await assert.rejects(
-    spawnProvider({ adapter: "claude-cli/v1", argv: ["/nonexistent-owl-provider/claude"], cwd: process.cwd(), env: {} }),
-    (error) => error.errorKey === "spawn_failed" && error.reasonCode === "child_process_error",
+    createCliProvider({
+      adapter: "claude-cli/v1",
+      executablePath: "/nonexistent-owl-provider/claude",
+      model: "m",
+      env: { PATH: process.env.PATH || "/usr/bin", HOME: process.env.HOME || "/tmp" },
+    }).execute({ adapter: "claude-cli/v1", role: "worker", model: "m", prompt: "p", invocation_id: "inv-1", cwd: process.cwd(), env: {} }),
+    (error) => error.reason === "child_process_error",
   );
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(unhandled, []);

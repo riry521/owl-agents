@@ -82,12 +82,12 @@ function managerInput(prompt) {
 function workerReport(invocationId) {
   return {
     kind: "report",
-    schema_version: "1.0.0",
+    schema_version: "1.1.0",
     invocation_id: invocationId,
     result: "success",
     work_done: "Done.",
     changes: [],
-    verification: { passed: true, method: "Checked." },
+    verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked.", integration_check: null },
     remaining_issues: [],
     next_action: "none",
     needs_replanning: false,
@@ -223,7 +223,7 @@ function markers(db, taskIds) {
 
 /**
  * T1 <- T2 plan in a running Work, with T1 failed as a root failure and T2
- * cascade-failed (Task row 27) through the real cascade path. The Work is not
+ * cascade-failed (task.dependency_failed) through the real cascade path. The Work is not
  * registered with the driver: nothing moves until the test acts.
  */
 async function seedCascade(core, db) {
@@ -372,7 +372,7 @@ test("replacing only the root Task keeps the cascaded dependent and re-points it
 });
 
 test("a retried Task whose dependency is not completed goes to waiting, not ready", async (t) => {
-  // Reducer rows 20/20b.
+  // Reducer: a Manager replan (task.replanned) waits for an unfinished dependency.
   const failedRow = {
     id: "task-a4", work_id: "work-a4", status: "failed", state_version: 3, failure_count: 2, same_error_count: 2,
     last_error_key: "a".repeat(64), last_error_generation: 1, review_round: 1, reviewer_failure_count: 1,
@@ -385,7 +385,7 @@ test("a retried Task whose dependency is not completed goes to waiting, not read
   assert.equal(reduceTask(failedRow, replan(true)).next.status, "ready");
   assert.throws(() => reduceTask(failedRow, { event: "task.replanned", payload: { base_plan_version: 1, current_plan_version: 1 } }), /dependencies_completed/);
 
-  // End to end: T1 fails twice with the same error (row 7), T2 cascades, and
+  // End to end: T1 fails twice with the same error (deterministic failure limit), T2 cascades, and
   // the Manager retries T1 (the root failure). T2 returns to waiting on its
   // own and waits until T1 completes.
   const order = [];

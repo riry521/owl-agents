@@ -1,3 +1,4 @@
+import { apiErrorKeyForCode } from './api-error-keys.mjs';
 import type {
   Project,
   ProjectDeletionImpact,
@@ -231,16 +232,12 @@ export function projectErrorKey(error: unknown, context: 'load' | 'edit' | 'dele
     ? record.code
     : typeof record.message === 'string' ? record.message : '';
   const details = isRecord(record.details) ? record.details : {};
+  const inspection = isRecord(details.inspection) ? details.inspection : {};
+  const validation = context === 'edit' && (inspection.kind === 'not_git' || inspection.kind === 'git_needs_initial_commit')
+    ? 'projects.editNeedsGit'
+    : context === 'edit' && typeof details.project_id === 'string' ? 'projects.errorDuplicate' : 'projects.errorValidation';
 
   switch (code) {
-    case 'validation_error': {
-      const inspection = isRecord(details.inspection) ? details.inspection : {};
-      if (context === 'edit' && (inspection.kind === 'not_git' || inspection.kind === 'git_needs_initial_commit')) {
-        return 'projects.editNeedsGit';
-      }
-      if (context === 'edit' && typeof details.project_id === 'string') return 'projects.errorDuplicate';
-      return 'projects.errorValidation';
-    }
     case 'project_path_conflict':
       return context === 'delete' ? 'projects.errorDefault' : 'projects.errorDuplicate';
     case 'project_has_running_works':
@@ -253,13 +250,12 @@ export function projectErrorKey(error: unknown, context: 'load' | 'edit' | 'dele
       return 'projects.errorNotFound';
     case 'worktree_cleanup_failed':
       return context === 'delete' ? 'projects.errorCleanupFailed' : 'projects.errorDefault';
-    case 'network_error':
-    case 'runtime_config_unavailable':
-      return 'projects.errorNetwork';
-    case 'invalid_runtime_config':
-    case 'invalid_response':
-      return 'projects.errorInvalidResponse';
     default:
-      return 'projects.errorDefault';
+      return apiErrorKeyForCode(code, '', {
+        validation,
+        network: 'projects.errorNetwork',
+        invalidResponse: 'projects.errorInvalidResponse',
+        fallback: 'projects.errorDefault',
+      });
   }
 }

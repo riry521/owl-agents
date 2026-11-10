@@ -10,6 +10,7 @@ import { TaskStateBadge } from '@/components/StateBadge';
 import { decisionDisplay } from '@/lib/decision-sections.mjs';
 import { workDisplayNumber } from '@/lib/format';
 import { useLocale } from '@/lib/i18n';
+import { apiErrorKeyForCode } from '@/lib/api-error-keys.mjs';
 
 export function DecisionView() {
   const { t } = useLocale();
@@ -22,7 +23,7 @@ export function DecisionView() {
   const view = useView<DecisionData | null>(id ? `decision:${id}` : null, () => getDecision(id ?? ''));
   const { refresh } = view;
   const data = id ? view.data : null;
-  const loadError = id && view.error ? humanizeError(view.error, t) : null;
+  const loadError = id && view.error ? t(apiErrorKeyForCode(decisionErrorCode(view.error), '', DECISION_ERROR_KEYS)) : null;
 
   useEffect(() => {
     if (view.error) console.error('[Owl] Decision load failed', view.error);
@@ -68,7 +69,7 @@ export function DecisionView() {
       setResult(r);
       void refresh();
     } catch (e) {
-      setError(humanizeError(e, t));
+      setError(t(apiErrorKeyForCode(decisionErrorCode(e), '', DECISION_ERROR_KEYS)));
     } finally {
       setBusy(false);
     }
@@ -284,24 +285,17 @@ export function DecisionView() {
   );
 }
 
-function humanizeError(e: unknown, t: (key: string) => string): string {
-  const code = e instanceof Error ? e.message : String(e);
-  switch (code) {
-    case 'decision_already_resolved':
-      return t('decision.errorAlreadyResolved');
-    case 'decision_not_found':
-      return t('decision.errorNotFound');
-    case 'validation_error':
-      return t('decision.errorValidation');
-    case 'version_conflict':
-      return t('decision.errorVersionConflict');
-    case 'network_error':
-    case 'runtime_config_unavailable':
-      return t('decision.errorNetwork');
-    case 'invalid_runtime_config':
-    case 'invalid_response':
-      return t('decision.errorInvalidResponse');
-    default:
-      return t('decision.errorDefault');
-  }
-}
+const DECISION_ERROR_KEYS = {
+  validation: 'decision.errorValidation',
+  versionConflict: 'decision.errorVersionConflict',
+  network: 'decision.errorNetwork',
+  invalidResponse: 'decision.errorInvalidResponse',
+  fallback: 'decision.errorDefault',
+  codes: {
+    decision_already_resolved: 'decision.errorAlreadyResolved',
+    decision_not_found: 'decision.errorNotFound',
+  },
+};
+
+/** Error 以外（文字列など）で失敗したときも、その文字列を code として扱う。 */
+const decisionErrorCode = (e: unknown): string => (e instanceof Error ? e.message : String(e));

@@ -1,5 +1,5 @@
 import { realpathSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { guardConfig, guardRequest } from "./guard-client.js";
 import { createInterface } from "node:readline";
 import { pathToFileURL } from "node:url";
 import { KIND_OF_SECTION } from "../../../packages/core/dist/memory/page-router.js";
@@ -51,27 +51,19 @@ const CONTEXT_HEADERS: readonly (readonly [string, string])[] = [
   ["OWL_TASK_ID", "x-owl-task-id"], ["OWL_PROJECT_ID", "x-owl-project-id"],
 ];
 
-async function request(): Promise<{ root: string; headers: Record<string, string> } | null> {
-  const base = process.env.OWL_GUARD_API_BASE ?? process.env.OWL_API_BASE;
-  if (!base) return null;
-  const headers: Record<string, string> = { "content-type": "application/json" };
-  const tokenFile = process.env.OWL_GUARD_TOKEN_FILE;
-  const token = tokenFile ? (await readFile(tokenFile, "utf8")).trim() : process.env.OWL_API_TOKEN;
-  if (token) headers.authorization = `Bearer ${token}`;
-  for (const [env, header] of CONTEXT_HEADERS) if (process.env[env]) headers[header] = process.env[env]!;
-  return { root: base.replace(/\/$/u, "").replace(/\/api\/v1$/u, ""), headers };
-}
+const memoryRoot = (base: string): string => base.replace(/\/$/u, "").replace(/\/api\/v1$/u, "");
 
 export async function callTool(name: unknown, args: unknown): Promise<unknown> {
   if (typeof name !== "string" || !Object.hasOwn(PAGES_BY_NAME, name) || !toolsForRole().includes(PAGES_BY_NAME[name])) return { error: "unknown_tool" };
   const tool = PAGES_BY_NAME[name];
   try {
-    const target = await request();
-    if (!target) return { error: "owl_unreachable" };
-    const { root, headers } = target;
-    const response = await fetch(`${root}/api/v1/memory/${tool.route ?? tool.name}`, {
+    const guard = guardConfig({ roleVar: "OWL_ROLE", fallback: { baseVar: "OWL_API_BASE", tokenVar: "OWL_API_TOKEN" } });
+    if (!guard) return { error: "owl_unreachable" };
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    for (const [env, header] of CONTEXT_HEADERS) if (process.env[env]) headers[header] = process.env[env]!;
+    const { response } = await guardRequest(guard, `/api/v1/memory/${tool.route ?? tool.name}`, {
       method: tool.method, headers, ...(tool.method === "POST" ? { body: JSON.stringify(typeof args === "object" && args !== null ? args : {}) } : {}),
-      signal: AbortSignal.timeout(30_000),
+      timeoutMs: 30_000, normalizeBase: memoryRoot,
     });
     return await response.json();
   } catch (error) {

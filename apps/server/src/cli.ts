@@ -18,7 +18,7 @@ import "./config.js";
 import { cliText } from "./cli-language.js";
 import { CliError, ContractValidationError, newReferenceId } from "./errors.js";
 import { resolveDataDir, resolveOwlRoot, serverPackageRoot } from "./contracts.js";
-import { LEGACY_WORKSPACES_DIRNAME, resolveWorkspacesRoot } from "../../../packages/core/dist/workspace-layout.js";
+import { resolveWorkspacesRoot } from "../../../packages/core/dist/workspace-layout.js";
 import { stopManagedAuxiliaryProcesses } from "./lifecycle-stop.js";
 import { isProcessAlive, readProcessCommand } from "./process-state.js";
 import { processIdentityMatches, readProcessIdentity } from "../../../packages/core/dist/process-identity.js";
@@ -26,7 +26,7 @@ import { startServer, type RunningServer, type ServerOptions } from "./server.js
 import { configuredBind, configuredPort, deprecatedConfigurationWarnings, serverExposureError, shutdownTimeoutMs, tailscaleServeEnabled } from "./config.js";
 import { connectorConfigStatus, prepareConnectorConfig } from "./secret-config.js";
 import { resolveAgentExecutables } from "./agent-runner.js";
-import { OPENCODE_HARNESS_GAPS, splitOpencodeModel } from "../../../packages/shared/dist/index.js";
+import { OPENCODE_HARNESS_GAPS, runCliVersion, splitOpencodeModel } from "../../../packages/shared/dist/index.js";
 import type { OpencodeServer } from "../../../packages/agent-runtime/dist/index.js";
 import { parseOpencodeModels } from "./model-catalog.js";
 import { opencodeCliStatus, opencodeRoles, opencodeUnsupportedMessage, withPrivateOpencodeServe } from "./opencode-status.js";
@@ -744,31 +744,25 @@ async function fetchTerminalWorkIds(bind: string, port: number, state: "complete
   return ids;
 }
 
-/** Manual Workspace cleanup: removes `<work_id>` under both the legacy `.owl-workspaces` directory and the current workspaces root, for every Work already in a terminal state (completed/cancelled). Running Works are left untouched. */
+/** Manual Workspace cleanup: removes `<work_id>` under the workspaces root the server uses, for every Work already in a terminal state (completed/cancelled). Running Works are left untouched. */
 async function runCleanup(): Promise<Record<string, unknown>> {
   const state = await readState();
   if (!state || !isAlive(state.pid)) {
     throw new CliError(4, cliText('owl-coreは起動していません。startを実行してから再試行してください。', 'owl-core is not running. Run start and try again.'));
   }
-  const owlRoot = resolveOwlRoot();
-  const workspacesRoots = [join(owlRoot, LEGACY_WORKSPACES_DIRNAME), resolveWorkspacesRoot(process.env, homedir())];
+  const workspacesRoot = resolveWorkspacesRoot(process.env, homedir());
   const completed = await fetchTerminalWorkIds(state.bind, state.port, "completed");
   const cancelled = await fetchTerminalWorkIds(state.bind, state.port, "cancelled");
   const terminalWorkIds = [...completed, ...cancelled];
   let removed = 0;
   for (const workId of terminalWorkIds) {
     const name = workId.replace(/[^a-zA-Z0-9_:-]/g, "_");
-    let removedAny = false;
-    for (const workspacesBase of workspacesRoots) {
-      const dir = join(workspacesBase, name);
-      try {
-        await rm(dir, { recursive: true, force: true });
-        removedAny = true;
-      } catch {
-        // Best-effort: one Workspace failing to delete must not abort the batch.
-      }
+    try {
+      await rm(join(workspacesRoot, name), { recursive: true, force: true });
+      removed += 1;
+    } catch {
+      // Best-effort: one Workspace failing to delete must not abort the batch.
     }
-    if (removedAny) removed += 1;
   }
   return { command: "cleanup", checked: terminalWorkIds.length, removed };
 }
@@ -902,29 +896,11 @@ function safeProviderCheckReason(error: unknown): string {
 // Login checks talk to an external CLI, so a hung command must not hang doctor.
 const LOGIN_CHECK_TIMEOUT_MS = 15_000;
 
-function runCommandVersion(command: string, args: readonly string[] = ["--version"], timeout?: number): Promise<{ ok: boolean; reason?: string }> {
-  return new Promise((resolvePromise) => {
-    let settled = false;
-    let child;
-    try {
-      child = spawn(command, [...args], { stdio: "ignore", ...(timeout ? { timeout } : {}) });
-    } catch (error) {
-      resolvePromise({ ok: false, reason: safeProviderCheckReason(error) });
-      return;
-    }
-    child.on("error", (error) => {
-      if (!settled) {
-        settled = true;
-        resolvePromise({ ok: false, reason: safeProviderCheckReason(error) });
-      }
-    });
-    child.on("close", (code) => {
-      if (!settled) {
-        settled = true;
-        resolvePromise({ ok: code === 0, ...(code === 0 ? {} : { reason: cliText(`終了コード ${String(code ?? "不明")} が返りました。`, `Exited with code ${String(code ?? "unknown")}.`) }) });
-      }
-    });
-  });
+async function runCommandVersion(command: string, args: readonly string[] = ["--version"], timeout?: number): Promise<{ ok: boolean; reason?: string }> {
+  const result = await runCliVersion(command, args, timeout, { ignoreStdio: true });
+  if (result.spawnError) return { ok: false, reason: safeProviderCheckReason(result.spawnError) };
+  const code = result.exitCode;
+  return { ok: code === 0, ...(code === 0 ? {} : { reason: cliText(`終了コード ${String(code ?? "不明")} が返りました。`, `Exited with code ${String(code ?? "unknown")}.`) }) };
 }
 
 async function checkProvider(): Promise<DoctorCheckResult> {

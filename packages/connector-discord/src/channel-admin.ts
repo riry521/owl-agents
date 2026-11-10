@@ -1,5 +1,6 @@
 import { ChannelType, PermissionFlagsBits, type Client, type Guild, type GuildBasedChannel } from "discord.js";
 import { ChannelAdminError, isChannelAdminError, type ChannelAdmin, type ChannelAdminErrorCode, type ChannelInfo } from "@owl/plugin-sdk";
+import { asRecord } from "@owl/plugin-sdk/shared";
 
 const MANAGE = "ManageChannels";
 const MEMBER_PERMISSIONS: readonly [bigint, string][] = [
@@ -13,14 +14,10 @@ const ERROR_CODES: ReadonlyMap<number, ChannelAdminErrorCode> = new Map([
   [50035, "invalid_name"],
 ]);
 
-function record(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null ? value as Record<string, unknown> : null;
-}
-
 /** Maps a discord.js failure to a ChannelAdminError by DiscordAPIError code or HTTP 429. */
 export function toChannelAdminError(error: unknown): ChannelAdminError {
   if (isChannelAdminError(error)) return error;
-  const value = record(error);
+  const value = asRecord(error);
   const code = value && Object.hasOwn(value, "code") ? value.code : undefined;
   if (code === 50013) return missingManage("50013");
   if (value?.status === 429 || value?.name === "RateLimitError") {

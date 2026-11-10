@@ -8,7 +8,8 @@ import type {
   CuratorRunResult,
 } from "@owl/shared";
 import type { AgentRunner, CoreDatabase, CoreWriteLaneTransaction } from "./types.js";
-import type { SkillBox, SkillRecord } from "./skill-box.js";
+import { SKILLS_SETTINGS_KEY, type SkillBox, type SkillRecord } from "./skill-box.js";
+import { storedSettingJson } from "./settings-store.js";
 import { hashSkillFiles, parseSkillMd, renderSkillMd, validateSkillFilePath, validateSkillName } from "./skill-files.js";
 
 export interface SkillCurationResult {
@@ -757,10 +758,10 @@ export class SkillCurator {
   }
 
   private settings(): SkillSettings {
-    const row = this.db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = 'skills'");
-    if (!row) return { mode: "autonomous", confidence_threshold: 0.5, stale_days: 60, archived_days: 30, trial_unused_days: 14 };
+    const json = storedSettingJson(this.db, SKILLS_SETTINGS_KEY);
+    if (json === undefined) return { mode: "autonomous", confidence_threshold: 0.5, stale_days: 60, archived_days: 30, trial_unused_days: 14 };
     try {
-      const value: unknown = JSON.parse(row.value_json);
+      const value: unknown = JSON.parse(json);
       if (!isRecord(value)) return { mode: "autonomous", confidence_threshold: 0.5, stale_days: 60, archived_days: 30, trial_unused_days: 14 };
       const mode: SkillCuratorMode = value.mode === "conservative" ? "conservative" : "autonomous";
       const configuredThreshold = value.confidence_threshold ?? value.threshold;

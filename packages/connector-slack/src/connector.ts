@@ -14,13 +14,20 @@ import {
   readOutboundFile,
   reportAdvisorDelivery,
 parseDeliveryTarget,
-type OutboundFile,
+  type OutboundFile,
   formatStatusResponse,
   parseDecisionButtonId,
   resolveDecisionButtonTarget,
   submitDecisionAnswer,
   uploadAttachment,
   FileConnectorStateStore,
+  asRecord,
+  deliverNotification,
+  fetchAdvisorReply,
+  fetchPendingDecisions,
+  formatBytes,
+  parseChannelIds,
+  reportNotificationFailure,
   type OutboundFileResult,
   type PendingDecision,
 } from "@owl/plugin-sdk/shared";
@@ -32,8 +39,6 @@ import { downloadFile } from "./files.js";
 import { postSlackMessage } from "./posting.js";
 import { markdownToMrkdwn } from "./markdown.js";
 
-const PENDING_DECISION_PAGE_LIMIT = 50;
-const MAX_PENDING_DECISION_PAGES = 10_000;
 const USER_MESSAGE_SUBTYPES: ReadonlySet<string> = new Set(["file_share", "thread_broadcast"]);
 
 export class SlackConnector {
@@ -360,39 +365,14 @@ export class SlackConnector {
       return;
     }
     if (!shouldNotify(event.type, event.payload)) return;
-    const decisionId = event.type === "decision.opened" || event.type === "decision.resolved" || event.type === "decision.cancelled"
-      ? (typeof event.payload.decision_id === "string" ? event.payload.decision_id : null)
-      : null;
-
-    if (event.type === "decision.resolved" || event.type === "decision.cancelled") {
-      const posted = decisionId ? this.core.decisionMessage(decisionId) : null;
-      if (posted) {
-        try {
-          await updateNotification(this.web, posted, event, await this.core.language());
-        } catch (error) {
-          await this.reportNotificationFailure(event, error);
-        }
-        if (decisionId) await this.core.forgetDecisionMessage(decisionId);
-        return;
-      }
-    }
-
-    try {
-      await sendNotification(this.web, event, this.notificationChannelIds.map((channelId) => ({ channelId })), {
-        language: await this.core.language(),
-        onPosted: async ({ channelId, ts }) => {
-          if (decisionId) {
-            await this.core.rememberDecisionMessage(decisionId, {
-              channel_id: channelId,
-              message_ref: ts,
-              posted_at: new Date().toISOString(),
-            });
-          }
-        },
-      });
-    } catch (error) {
-      await this.reportNotificationFailure(event, error);
-    }
+    await deliverNotification(this.core, event, {
+      update: (posted, language) => updateNotification(this.web, posted, event, language),
+      send: (language, remember) => sendNotification(this.web, event, this.notificationChannelIds.map((channelId) => ({ channelId })), {
+        language,
+        onPosted: ({ channelId, ts }) => remember(channelId, ts),
+      }),
+      fail: (error) => this.reportNotificationFailure(event, error),
+    });
   }
 
   /** Decision whose notification thread this message replies in, if known. */
@@ -404,17 +384,9 @@ export class SlackConnector {
     return null;
   }
 
-  /** Surface a notification that failed after retries, with the event sequence. */
-  private async reportNotificationFailure(event: OwlEvent, error: unknown): Promise<void> {
-    const decisionId = typeof event.payload.decision_id === "string" ? event.payload.decision_id : null;
-    const t = connectorText(await this.core.language());
-    const subject = t.notificationSubject(event.sequence, event.type, decisionId ? decisionShortId(decisionId) : null);
-    const message = formatIntegrationError("Slack", error, await this.core.language());
-    console.error(`[slack] Notification delivery failed (event #${event.sequence} ${event.type}, event_id ${event.event_id}): ${formatIntegrationError("Slack", error, "en")}`);
-    for (const channelId of this.conversationChannelIds) {
-      await postSlackMessage(this.web, { channel: channelId, text: t.notificationFailed(subject, message) })
-        .catch((postError) => console.error(`[slack] Could not post notification failure to ${channelId}:`, postError));
-    }
+  private reportNotificationFailure(event: OwlEvent, error: unknown): Promise<void> {
+    return reportNotificationFailure(this.core, event, error, { tag: "slack", label: "Slack" }, this.conversationChannelIds,
+      async (channelId, text) => { await postSlackMessage(this.web, { channel: channelId, text }); });
   }
 
   private async handleAdvisorResponse(event: OwlEvent): Promise<void> {
@@ -431,7 +403,7 @@ export class SlackConnector {
       throw new Error("Could not determine the Slack channel for the Advisor reply.");
     }
     try {
-      const reply = await this.fetchAdvisorReply(event);
+      const reply = await fetchAdvisorReply(this.core, event);
       // Core is the sole parsing point for Advisor replies: it has already
       // parsed and dispatched any action fence before emitting this event, so
       // `reply` is the text Core decided to show, as-is.
@@ -508,55 +480,9 @@ export class SlackConnector {
     return { lines, results };
   }
 
-  private async fetchAdvisorReply(event: OwlEvent): Promise<string> {
-    for (const candidate of [event.payload.reply, event.payload.text]) {
-      if (typeof candidate === "string" && candidate.trim().length > 0) return candidate;
-    }
-
-    const conversationId = event.payload.conversation_id;
-    const messageId = event.payload.message_id;
-    if (typeof conversationId !== "string" || typeof messageId !== "string") {
-      throw new Error("The Advisor reply event has no conversation id or message id.");
-    }
-
-    const response = await this.core.request<unknown>(`/conversations/${encodeURIComponent(conversationId)}/messages?limit=200`);
-    const messages = Array.isArray(response)
-      ? response
-      : asRecord(response)?.data && Array.isArray(asRecord(response)?.data)
-        ? asRecord(response)?.data as unknown[]
-        : null;
-    if (!messages) throw new Error("Core returned a malformed Advisor message list.");
-    const message = messages.find((candidate) => asRecord(candidate)?.id === messageId);
-    const body = asRecord(message)?.body;
-    if (typeof body !== "string" || body.trim().length === 0) {
-      throw new Error("Could not read the Advisor reply body from Core.");
-    }
-    return body;
-  }
-
-  private async fetchPendingDecisions(): Promise<PendingDecision[]> {
-    const decisions: PendingDecision[] = [];
-    const seenCursors = new Set<string>();
-    let cursor: string | null = null;
-
-    for (let pageCount = 0; pageCount < MAX_PENDING_DECISION_PAGES; pageCount += 1) {
-      const query = new URLSearchParams({ status: "open", limit: String(PENDING_DECISION_PAGE_LIMIT) });
-      if (cursor !== null) query.set("cursor", cursor);
-      const page = await this.core.requestPage<PendingDecision[]>(`/decisions?${query.toString()}`);
-      if (!Array.isArray(page.data)) {
-        throw new Error("Core pending decisions response returned invalid data");
-      }
-      decisions.push(...page.data);
-      if (!page.has_more) return decisions;
-
-      if (!page.cursor || seenCursors.has(page.cursor)) {
-        throw new Error("Core pending decisions response returned a non-advancing cursor");
-      }
-      seenCursors.add(page.cursor);
-      cursor = page.cursor;
-    }
-
-    throw new Error("Core pending decisions pagination exceeded the safety limit");
+  /** Instance seam over the shared reader so tests can stub the open Decisions. */
+  private fetchPendingDecisions(): Promise<PendingDecision[]> {
+    return fetchPendingDecisions(this.core);
   }
 
   private async reportMessageError(channelId: string | undefined, error: unknown): Promise<void> {
@@ -609,10 +535,6 @@ export function resolveSlackAdvisorChannel(
   return channel && allowedChannels.includes(channel) ? channel : null;
 }
 
-function parseChannelIds(value: string): string[] {
-  return [...new Set(value.split(/[\s,]+/u).map((item) => item.trim()).filter((item) => item.length > 0))];
-}
-
 /** Socket Mode emits all interactive envelopes under the `interactive` event. */
 export function isSlackBlockActionsPayload(value: unknown): value is {
   readonly type: "block_actions";
@@ -625,12 +547,6 @@ export function isSlackBlockActionsPayload(value: unknown): value is {
 function advisorThreadRef(event: OwlEvent): string | undefined {
   const origin = asRecord(event.payload.origin);
   return typeof origin?.ref === "string" ? origin.ref : undefined;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
 }
 
 type UploadFailure = Required<Pick<OutboundFileResult, "outcome" | "code" | "platform_error">>;
@@ -659,12 +575,6 @@ function slackSendHint(error: unknown, t: ReturnType<typeof connectorText>): str
   const wrapper = asRecord(error);
   const data = wrapper && Object.hasOwn(wrapper, "data") ? asRecord(wrapper.data) : null;
   return data && Object.hasOwn(data, "error") && data.error === "missing_scope" ? t.fileSendHint.slackScope : "";
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }
 
 function slackTimestampToIso(value: string): string {

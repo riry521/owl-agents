@@ -8,7 +8,7 @@ import { resolveRoleModel } from "../../packages/core/dist/workflow-engine.js";
 import { buildDesignerRolePrompt, DESIGNER_REPORT_SCHEMA, normalizeWorkerResponseWithFeedback } from "../../packages/agent-runtime/dist/worker.js";
 import { readDesignBlocked } from "../../packages/shared/dist/index.js";
 import { createUlid } from "../../packages/db/dist/index.js";
-import { managerTasksToPlanItems } from "../../packages/core/dist/core.js";
+import { managerTasksToPlanItems } from "../../packages/core/dist/manager-orchestrator.js";
 import { dependencyContext } from "../../packages/core/dist/context-builder.js";
 import { DEFAULT_REMAKE_LIMIT_SETTINGS } from "../../packages/shared/dist/remake-limit-settings.js";
 import { createTestCore } from "../helpers/core.mjs";
@@ -153,8 +153,8 @@ test("readDesignBlocked rejects an out-of-range recommended_option", () => {
 // ---- end to end: a design Task stopped after escalation ----
 const e2eEnvelope = (payload, suffix, expectedVersion = 0) => ({ request_id: createUlid(), idempotency_key: `test:${suffix}:${createUlid()}`, expected_version: expectedVersion, payload });
 const e2eReport = (invocationId, extra = {}) => ({
-  kind: "report", schema_version: "1.0.0", invocation_id: invocationId, result: "success", work_done: "Done.", changes: [],
-  verification: { passed: true, method: "Checked." }, remaining_issues: [], next_action: "none", needs_replanning: false, question_for_manager: null, ...extra,
+  kind: "report", schema_version: "1.1.0", invocation_id: invocationId, result: "success", work_done: "Done.", changes: [],
+  verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked.", integration_check: null }, remaining_issues: [], next_action: "none", needs_replanning: false, question_for_manager: null, ...extra,
 });
 const e2eRejection = () => {
   const review = { verdict: "fix_required", summary: "Premise is wrong.", findings: [{ severity: "major", pre_existing: false, file: "design.md", problem: "Wrong premise.", fix: "Rethink." }], tests: {} };

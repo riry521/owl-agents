@@ -4,12 +4,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { createUlid } from "../../packages/db/dist/index.js";
-import { KnowledgeBase } from "../../packages/core/dist/knowledge-base.js";
-import { KnowledgeNotes } from "../../packages/core/dist/knowledge-notes.js";
 import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { createTestCore, command as coreCommand } from "../helpers/core.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
-import { seedNote } from "../helpers/seed-knowledge.mjs";
 
 const apiRoot = "/api/v1";
 const token = "rule-proposal-api-owner-token";
@@ -54,57 +51,27 @@ test("extensionless static pages resolve when the web output path contains a dot
   assert.equal(await response.text(), "Rule approvals page");
 });
 
-test("rule proposal routes require Owner access, create from notes, approve, reject, and preserve exact rule text", async (t) => {
-  const api = await startServer(t);
-  const notes = new KnowledgeNotes(new KnowledgeBase(api.root));
-  const text = `Preserve "quoted" values, 'single quotes', # comments, C:\\rules:entry.`;
-  const source = await seedNote(notes, {
-    topic: "Rule proposal API quote handling",
-    kind: "fact",
-    text,
-    work_id: createUlid(),
-    project_id: null,
-    tags: ["rules"],
-  });
 
-  const notePath = (await new KnowledgeBase(api.root).list("notes"))[0].path;
-  const noteResponse = await api.get(`/knowledge/${encodeURIComponent(notePath)}`);
-  assert.equal(noteResponse.status, 200);
-  const noteEntry = (await noteResponse.json()).data;
-  assert.equal(noteEntry.note_id, source.note_id);
-  assert.match(noteEntry.path, /^notes\/[a-z0-9-]+\.md$/u, "notes are stored with slug filenames");
+test("rule proposal routes require Owner access, list, approve, reject, and preserve exact rule text", async (t) => {
+  const api = await startServer(t);
+  const text = `Preserve "quoted" values, 'single quotes', # comments, C:\\rules:entry.`;
+  const propose = (ref, level, role) => api.durableCore.ruleProposals.create({
+    origin: "legacy_policy",
+    source: { kind: "legacy_policy", ref },
+    level,
+    ...(role ? { role } : {}),
+    text,
+    rationale: "Seeded for the API test.",
+    applies_to: "api test",
+    project_id: null,
+  });
 
   const unauthenticated = await api.get("/rule-proposals", { auth: false });
   assert.equal(unauthenticated.status, 403);
 
-  const createResponse = await api.write("POST", "/rule-proposals", {
-    note_id: source.note_id,
-    claim_fingerprint: (await notes.get(source.note_id)).claims[0].fingerprint,
-    level: "system",
-  });
-  assert.equal(createResponse.status, 201);
-  assert.equal((await createResponse.json()).data.status, "pending", "one source is below the minimum of two");
-  const secondSource = await seedNote(notes, {
-    topic: "Rule proposal API second source",
-    kind: "fact",
-    text,
-    work_id: createUlid(),
-    project_id: null,
-    tags: ["rules"],
-  });
-  const secondResponse = await api.write("POST", "/rule-proposals", {
-    note_id: secondSource.note_id,
-    claim_fingerprint: (await notes.get(secondSource.note_id)).claims[0].fingerprint,
-    level: "system",
-  }, { suffix: "second-source" });
-  const created = (await secondResponse.json()).data;
+  await propose("policies/a.md#1", "system");
+  const created = await propose("policies/a.md#2", "system");
   assert.equal(created.status, "awaiting_approval");
-  const createdEvent = api.db.get(
-    "SELECT status FROM events WHERE type = ? AND json_extract(payload_json, '$.proposal_id') = ?",
-    "rule_proposal.awaiting_approval",
-    created.proposal_id,
-  );
-  assert.equal(createdEvent?.status, "handled", "proposal creation dispatches its pending event");
 
   const listedResponse = await api.get("/rule-proposals?status=awaiting_approval");
   assert.equal(listedResponse.status, 200);
@@ -120,52 +87,12 @@ test("rule proposal routes require Owner access, create from notes, approve, rej
   const invalidTransition = await api.write("POST", `/rule-proposals/${created.proposal_id}/approve`, {}, { suffix: "again" });
   assert.equal(invalidTransition.status, 409);
 
-  const rejectedSource = await seedNote(notes, {
-    topic: "Rule proposal API rejection",
-    kind: "pitfall",
-    text: "Keep the rejection available for review.",
-    work_id: createUlid(),
-    project_id: null,
-    tags: ["rules"],
-  });
-  const rejectedCreateResponse = await api.write("POST", "/rule-proposals", {
-    note_id: rejectedSource.note_id,
-    claim_fingerprint: (await notes.get(rejectedSource.note_id)).claims[0].fingerprint,
-    level: "role",
-    role: "worker",
-  });
-  assert.equal(rejectedCreateResponse.status, 201);
-  const rejectedSecond = await seedNote(notes, {
-    topic: "Rule proposal API rejection second source",
-    kind: "pitfall",
-    text: "Keep the rejection available for review.",
-    work_id: createUlid(),
-    project_id: null,
-    tags: ["rules"],
-  });
-  const rejectedProposal = (await (await api.write("POST", "/rule-proposals", {
-    note_id: rejectedSecond.note_id,
-    claim_fingerprint: (await notes.get(rejectedSecond.note_id)).claims[0].fingerprint,
-    level: "role",
-    role: "worker",
-  }, { suffix: "rejected-second-source" })).json()).data;
-  assert.equal(rejectedProposal.status, "awaiting_approval");
+  await propose("policies/b.md#1", "role", "worker");
+  const rejectedProposal = await propose("policies/b.md#2", "role", "worker");
   const rejectResponse = await api.write("POST", `/rule-proposals/${rejectedProposal.proposal_id}/reject`, {});
   assert.equal(rejectResponse.status, 200);
   assert.equal((await rejectResponse.json()).data.status, "rejected");
 
   const rejectAgain = await api.write("POST", `/rule-proposals/${rejectedProposal.proposal_id}/reject`, {}, { suffix: "reject-again" });
   assert.equal(rejectAgain.status, 409);
-  assert.equal((await notes.get(source.note_id)).promotions[0].status, "applied");
-  assert.equal((await notes.get(rejectedSource.note_id)).promotions.at(-1).status, "rejected");
-
-  const legacyNote = await new KnowledgeBase(api.root).create({
-    folder: "notes",
-    filename: "legacy-note-without-id",
-    tags: [],
-    body: "No note frontmatter id.",
-  });
-  const legacyResponse = await api.get(`/knowledge/${encodeURIComponent(legacyNote.path)}`);
-  assert.equal(legacyResponse.status, 200);
-  assert.equal(Object.hasOwn((await legacyResponse.json()).data, "note_id"), false);
 });

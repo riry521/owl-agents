@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { scrubLegacySettings } from "./app-settings-store.js";
-import { createConfiguredAgentRunner, createExternalAgentRunner, createHybridExecutorRuntime } from "./agent-runner.js";
+import { createExternalAgentRunner, createHybridExecutorRuntime } from "./agent-runner.js";
 import { isProcessAlive } from "./process-state.js";
 import { readProcessIdentity } from "../../../packages/core/dist/process-identity.js";
 import { refreshCodexModelCatalog, refreshOpencodeModelCatalog } from "./model-catalog.js";
@@ -35,7 +35,7 @@ import { prepareConnectorConfig } from "./secret-config.js";
 import { resolveInstanceId } from "../../../packages/shared/dist/instance-id.js";
 import { classifyProviderFailure, executorProviderError } from "../../../packages/agent-runtime/dist/index.js";
 
-const SERVER_VERSION = "0.14.0";
+const SERVER_VERSION = "0.15.0";
 /** Extra time after the deadline before the watchdog thread sends SIGKILL. */
 const SHUTDOWN_KILL_GRACE_MS = 5_000;
 
@@ -112,9 +112,6 @@ async function ensurePidAvailable(pidFile: string): Promise<void> {
 }
 
 async function loadDatabase(owlRoot: string, dataDir: string): Promise<unknown> {
-  if (process.env.OWL_CORE_MODE === "standalone") {
-    return null;
-  }
   const dbPath = join(serverPackageRoot(), "../../packages/db/dist/index.js");
   try {
     await access(dbPath);
@@ -193,7 +190,7 @@ export async function startServer(options: ServerOptions): Promise<RunningServer
 }
 
 /**
- * Takes the data-directory lock (also in standalone mode), then records the
+ * Takes the data-directory lock, then records the
  * pid file at once: startup takes seconds and must not look unowned.
  * A failed start releases both; shutdown releases the lock.
  */
@@ -274,15 +271,13 @@ async function startServerLocked(options: ServerOptions, guardApiBase: string, r
   const guard = { apiBase: guardApiBase, issueToken: guardTokens.issue };
 
   const db = await loadDatabase(owlRoot, dataDir);
-  const agentRunner = process.env.OWL_CORE_MODE !== "standalone"
-    ? await createExternalAgentRunner(owlRoot, providerMode() === "stub", guard)
-    : createConfiguredAgentRunner();
+  const agentRunner = await createExternalAgentRunner(owlRoot, providerMode() === "stub", guard);
   // Forward the agent-runtime ProviderClient to Core so every real deployment
   // uses the same persistent Advisor session path. A missing or
-  // non-session-capable provider is a startup error; silently switching to the
-  // legacy one-shot path hides authentication, harness, and protocol failures.
+  // non-session-capable provider is a startup error, so authentication, harness,
+  // and protocol failures are not hidden.
   let providerClient: unknown = null;
-  if (process.env.OWL_CORE_MODE !== "standalone" && providerMode() !== "stub") {
+  if (providerMode() !== "stub") {
     const getProvider = (agentRunner as { getProvider?: () => Promise<unknown> }).getProvider;
     if (typeof getProvider !== "function") {
       throw new ApiError(
@@ -329,8 +324,7 @@ async function startServerLocked(options: ServerOptions, guardApiBase: string, r
     },
   });
   // Core owns the RuleStore and its watcher. Reuse it for HTTP so Core and the
-  // API never observe different rule generations; standalone MemoryCore still
-  // gets a local store for its compatibility mode.
+  // API never observe different rule generations.
   const { RuleStore } = await import("../../../packages/core/dist/rule-store.js");
   const coreRuleStore = (core as unknown as { ruleStore?: InstanceType<typeof RuleStore> }).ruleStore;
   const ruleStore = coreRuleStore ?? new RuleStore(owlRoot);
@@ -527,7 +521,7 @@ async function startServerLocked(options: ServerOptions, guardApiBase: string, r
   process.on("SIGTERM", () => deadline.handleSignal("SIGTERM", false));
   process.on("SIGINT", () => deadline.handleSignal("SIGINT", true));
 
-  if (process.env.OWL_CORE_MODE !== "standalone" && providerMode() !== "stub") {
+  if (providerMode() !== "stub") {
     void refreshCodexModelCatalog();
     void refreshOpencodeModelCatalog();
   }

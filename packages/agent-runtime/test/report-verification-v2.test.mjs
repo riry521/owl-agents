@@ -69,41 +69,9 @@ test("shape rules: duplicate ids, empty AC list, bad status, extra fields, empty
   assert.equal(validateReportEnvelope(report({ verification: verification({ integration_check: { status: "passed", evidence: "built" } }) })).verification.integration_check.status, "passed");
 });
 
-test("success with a failed verification is rejected", () => {
-  const failed = validateReportEnvelope(report({ verification: verification({ status: "failed", acceptance: [ac("AC1", "failed")] }) }));
-  assert.match(reason(() => validateReportSemantics(failed)), /success_with_verification_failed/);
-  const itemFailed = validateReportEnvelope(report({ verification: verification({ acceptance: [ac("AC1"), ac("AC2", "failed")] }) }));
-  assert.match(reason(() => validateReportSemantics(itemFailed)), /success_with_failed_item/);
-});
-
-test("success with a blocked verification is rejected, and blocked is not failed", () => {
-  const blocked = validateReportEnvelope(report({ verification: verification({ status: "blocked", acceptance: [ac("AC1", "blocked")] }) }));
-  assert.match(reason(() => validateReportSemantics(blocked)), /success_with_verification_blocked/);
-  const partial = validateReportEnvelope(report({ result: "partial", verification: verification({ status: "blocked", acceptance: [ac("AC1", "blocked")] }) }));
-  assert.equal(reason(() => validateReportSemantics(partial)), null);
-});
-
-test("success with needs_replanning or a question is rejected", () => {
-  assert.match(reason(() => validateReportSemantics(validateReportEnvelope(report({ needs_replanning: true })))), /needs_replanning/);
-  assert.match(reason(() => validateReportSemantics(validateReportEnvelope(report({ question_for_manager: "Which?" })))), /question_for_manager/);
-});
-
 const delegatedReport = () => ({
   ...report().delegation,
   delegated: [{ child_id: "c1", instruction: "do", provider: "claude", model: "sonnet" }],
-});
-
-test("Hybrid: ok needs a passed integration check; retry needs retry_subtasks", () => {
-  const noIntegration = validateReportEnvelope(report());
-  const delegation = delegatedReport();
-  const delegatedNoIntegration = validateReportEnvelope(report({ delegation }));
-  assert.match(reason(() => validateReportSemantics(delegatedNoIntegration, { verdict: "ok", retry_subtasks: [] })), /hybrid_ok_without_passed_integration/);
-  const failedIntegration = validateReportEnvelope(report({ delegation, verification: verification({ integration_check: { status: "failed", evidence: "x" } }) }));
-  assert.match(reason(() => validateReportSemantics(failedIntegration, { verdict: "ok", retry_subtasks: [] })), /hybrid_ok_without_passed_integration/);
-  const passedIntegration = validateReportEnvelope(report({ verification: verification({ integration_check: { status: "passed", evidence: "x" } }) }));
-  assert.equal(reason(() => validateReportSemantics(passedIntegration, { verdict: "ok", retry_subtasks: [] })), null);
-  assert.match(reason(() => validateReportSemantics(noIntegration, { verdict: "retry", retry_subtasks: [] })), /hybrid_retry_without_subtasks/);
-  assert.equal(reason(() => validateReportSemantics(noIntegration, { verdict: "retry", retry_subtasks: [{ subtask_id: "s1" }] })), null);
 });
 
 const legacy = () => report({ schema_version: "1.0.0", verification: { passed: true, method: "Checked." } });
@@ -113,17 +81,6 @@ test("a stored legacy 1.0.0 report is still readable", () => {
   assert.equal(stored.schema_version, "1.0.0");
   assert.equal(stored.verification.passed, true);
   assert.equal(readStoredReport(report()).schema_version, "1.1.0");
-});
-
-test("Hybrid success without delegated children passes with integration_check null", () => {
-  assert.doesNotThrow(() => validateReportSemantics(report(), { verdict: "ok", retry_subtasks: [] }));
-});
-
-test("Hybrid success with delegated children still needs a passed integration_check", () => {
-  for (const integration_check of [null, { status: "failed", evidence: "x" }]) {
-    const r = validateReportEnvelope(report({ delegation: delegatedReport(), verification: verification({ integration_check }) }));
-    assert.match(reason(() => validateReportSemantics(r, { verdict: "ok", retry_subtasks: [] })), /hybrid_ok_without_passed_integration/);
-  }
 });
 
 test("new agent output in the legacy format is a contract failure", () => {

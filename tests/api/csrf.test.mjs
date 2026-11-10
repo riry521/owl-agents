@@ -65,7 +65,7 @@ function fakeCore(calls) {
       calls.push(["putInboundUpload", uploadId, content.mime]);
       return { upload_id: uploadId, status: "stored" };
     },
-    memorySaver: { saveManualSnapshot: async () => "", saveExplicitMemory: async () => "" },
+    rememberExplicit: async () => "",
     runCuration: async () => {
       calls.push(["librarian.run"]);
       return { id: "run", status: "succeeded", summary: "", error: null, report: {} };

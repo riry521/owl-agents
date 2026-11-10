@@ -19,7 +19,6 @@ function slackErrorText(body: unknown, language: OwnerLanguage): string {
 interface StoredMeta {
   provider: IntegrationProvider;
   has_app_token: boolean;
-  has_signing_secret: boolean;
   has_channel_id?: boolean;
   channel_id?: string;
   has_conversation_channel_id: boolean;
@@ -57,7 +56,6 @@ function secretEnvNames(provider: IntegrationProvider): Record<string, string> {
     ? {
         bot_token: "SLACK_BOT_TOKEN",
         app_token: "SLACK_APP_TOKEN",
-        signing_secret: "SLACK_SIGNING_SECRET",
       }
     : {
         bot_token: "DISCORD_BOT_TOKEN",
@@ -174,7 +172,7 @@ export class IntegrationStore {
     if (!botToken) return null;
 
     const config: IntegrationConfig = { bot_token: botToken };
-    for (const field of ["app_token", "signing_secret"] as const) {
+    for (const field of ["app_token"] as const) {
       const envName = secrets[field];
       if (envName && process.env[envName]?.trim()) config[field] = process.env[envName]!.trim();
     }
@@ -241,7 +239,7 @@ export class IntegrationStore {
   private writeEnvSecrets(provider: IntegrationProvider, config: IntegrationConfig): void {
     const names = secretEnvNames(provider);
     const updates: Record<string, string> = {};
-    for (const field of ["bot_token", "app_token", "signing_secret"] as const) {
+    for (const field of ["bot_token", "app_token"] as const) {
       const envName = names[field];
       const value = config[field];
       if (envName && value) updates[envName] = value;
@@ -305,7 +303,6 @@ export class IntegrationStore {
     return {
       provider,
       has_app_token: Boolean(config.app_token),
-      has_signing_secret: Boolean(config.signing_secret),
       ...(config.channel_id ? { has_channel_id: true, channel_id: config.channel_id } : { has_channel_id: false }),
       has_conversation_channel_id: Boolean(channels.conversation),
       ...(channels.conversation ? { conversation_channel_id: channels.conversation } : {}),
@@ -361,8 +358,7 @@ export class IntegrationStore {
     for (const key of [
       "bot_token",
       "app_token",
-      "signing_secret",
-      "channel_id",
+        "channel_id",
       "conversation_channel_id",
       "notification_channel_id",
       "account_id",
@@ -402,9 +398,7 @@ export class IntegrationStore {
     if (!isUlid(merged.account_id)) throw new Error("Integration account_id must be a canonical ULID.");
 
     merged.bot_token = merged.bot_token.trim();
-    for (const key of ["app_token", "signing_secret"] as const) {
-      if (merged[key]) merged[key] = merged[key]!.trim();
-    }
+    if (merged.app_token) merged.app_token = merged.app_token.trim();
     this.writeEnvSecrets(provider, merged);
     this.configs.set(provider, cloneIntegrationConfig(merged));
     const entry = this.metadataFor(provider, merged, existing);
@@ -604,7 +598,6 @@ function parseIntegrationConfig(value: unknown): IntegrationConfig | null {
   const config: IntegrationConfig = { bot_token: record.bot_token };
   for (const key of [
     "app_token",
-    "signing_secret",
     "channel_id",
     "conversation_channel_id",
     "notification_channel_id",
@@ -624,7 +617,6 @@ function cloneIntegrationConfig(config: IntegrationConfig): IntegrationConfig {
   const clone: IntegrationConfig = { bot_token: config.bot_token };
   for (const key of [
     "app_token",
-    "signing_secret",
     "channel_id",
     "conversation_channel_id",
     "notification_channel_id",
@@ -648,7 +640,6 @@ function normalizeIntegrationPatch(config: IntegrationConfigPatch): IntegrationC
   for (const key of [
     "bot_token",
     "app_token",
-    "signing_secret",
     "channel_id",
     "conversation_channel_id",
     "notification_channel_id",

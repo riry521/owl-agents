@@ -47,6 +47,12 @@ async function createWork(core, projectId, key) {
   return (await core.createWork(command({ title: key, summary: "", size: "small", project_id: projectId }, key))).data.work_id;
 }
 
+async function canMove(api, workId) {
+  const detail = await api.request(`/works/${workId}`, undefined, "GET");
+  assert.equal(detail.status, 200);
+  return detail.body.data.can_move_to_project;
+}
+
 function moveCommand(projectId, key, expectedVersion = 0) {
   return { request_id: createUlid(), idempotency_key: key, expected_version: expectedVersion, payload: { project_id: projectId } };
 }
@@ -107,9 +113,11 @@ test("HTTP moves Project-less Works, reallocates the number, preserves state/ver
   const alreadyAttached = await api.request(`/works/${attachedWorkId}/project`, moveCommand(api.project.id, "already-attached"));
   assert.equal(alreadyAttached.status, 409);
   assert.equal(alreadyAttached.body.error.code, "work_project_already_set");
+  assert.equal(await canMove(api, attachedWorkId), false);
   for (const [index, state] of ["memo", "ready", "paused", "judgement_waiting"].entries()) {
     const workId = await createWork(api.core, null, `move-${state}-${index}`);
     await api.db.createWriteLane().transact((tx) => tx.run("UPDATE works SET state = ?, state_version = 7 WHERE id = ?", state, workId));
+    assert.equal(await canMove(api, workId), true, state);
     const input = moveCommand(api.project.id, `move-key-${state}` , 7);
     const first = await api.request(`/works/${workId}/project`, input);
     const replay = await api.request(`/works/${workId}/project`, input);
@@ -152,30 +160,6 @@ test("an ExternalCoreAdapter without move support returns dependency_unavailable
   assert.equal(api.db.get("SELECT project_id FROM works WHERE id = ?", workId).project_id, null);
 });
 
-test("HTTP wraps the raw Core fallback when an adapter omits its move method", async (t) => {
-  const api = await setup(t);
-  if (!api) return;
-  const workId = await createWork(api.core, null, "raw-core-fallback");
-  Object.defineProperty(api.httpCore, "moveWorkToProject", { configurable: true, value: undefined });
-  const stale = await api.request(`/works/${workId}/project`, { ...moveCommand(api.project.id, "raw-core-stale-key"), expected_version: 1 });
-  assert.equal(stale.status, 409);
-  assert.equal(stale.body.error.code, "version_conflict");
-  assert.equal(api.db.get("SELECT project_id FROM works WHERE id = ?", workId).project_id, null);
-  const result = await api.request(`/works/${workId}/project`, moveCommand(api.project.id, "raw-core-fallback-key"));
-  assert.equal(result.status, 200);
-  assert.equal(result.body.data.project_id, api.project.id);
-  assert.equal(api.db.get("SELECT project_id FROM works WHERE id = ?", workId).project_id, api.project.id);
-  const again = await api.request(`/works/${workId}/project`, moveCommand(api.project.id, "raw-core-again-key", result.body.version));
-  assert.equal(again.status, 409);
-  assert.equal(again.body.error.code, "work_project_already_set");
-  const otherWork = await createWork(api.core, null, "raw-core-unsupported");
-  api.httpCore.core = new Proxy(api.core, { get(target, property, receiver) { return property === "moveWorkToProject" ? undefined : Reflect.get(target, property, receiver); } });
-  const unsupported = await api.request(`/works/${otherWork}/project`, moveCommand(api.project.id, "raw-core-unsupported-key"));
-  assert.equal(unsupported.status, 503);
-  assert.equal(unsupported.body.error.code, "dependency_unavailable");
-  assert.equal(api.db.get("SELECT project_id FROM works WHERE id = ?", otherWork).project_id, null);
-});
-
 test("move rejects terminal states, active Agents and isolated fix work without changing membership or workspace", async (t) => {
   const api = await setup(t);
   if (!api) return;
@@ -183,6 +167,7 @@ test("move rejects terminal states, active Agents and isolated fix work without 
   for (const state of ["running", "completed", "cancelled"]) {
     const workId = await createWork(api.core, null, `reject-${state}`);
     await api.db.createWriteLane().transact((tx) => tx.run("UPDATE works SET state = ? WHERE id = ?", state, workId));
+    assert.equal(await canMove(api, workId), false, state);
     await assert.rejects(api.core.moveWorkToProject(workId, command({ project_id: api.project.id }, `reject-key-${state}`)), { code: "invalid_state_transition" });
     assert.equal(api.db.get("SELECT project_id FROM works WHERE id = ?", workId).project_id, null);
   }
@@ -192,7 +177,16 @@ test("move rejects terminal states, active Agents and isolated fix work without 
     tx.run("UPDATE works SET state = 'paused' WHERE id = ?", activeWork);
     tx.run(`INSERT INTO agent_runs (id, work_id, role, provider, model, status, created_at, updated_at) VALUES (?, ?, 'worker', 'test', 'test', 'running', ?, ?)`, activeRun, activeWork, now, now);
   });
+  assert.equal(await canMove(api, activeWork), false);
   await assert.rejects(api.core.moveWorkToProject(activeWork, command({ project_id: api.project.id }, "active-agent-key")), { code: "work_has_active_agents" });
+  const activeTaskWork = await createWork(api.core, null, "active-task");
+  await api.db.createWriteLane().transact((tx) => {
+    tx.run("UPDATE works SET state = 'paused' WHERE id = ?", activeTaskWork);
+    tx.run(`INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, created_at, updated_at)
+      VALUES (?, ?, 'running task', 'code', 'running', 'normal', '', '', ?, ?)`, createUlid(), activeTaskWork, now, now);
+  });
+  assert.equal(await canMove(api, activeTaskWork), false);
+  await assert.rejects(api.core.moveWorkToProject(activeTaskWork, command({ project_id: api.project.id }, "active-task-key")), { code: "work_has_active_agents" });
   assert.equal(api.db.get("SELECT project_id FROM works WHERE id = ?", activeWork).project_id, null);
   const fixWork = await createWork(api.core, null, "fix-pending");
   const taskId = createUlid();
@@ -204,6 +198,7 @@ test("move rejects terminal states, active Agents and isolated fix work without 
       VALUES (?, ?, 'fix', 'code', 'paused', 'normal', '', '', ?, 'review_fix_waiting', ?, ?)`, taskId, fixWork, taskPath, now, now);
   });
   await writeFile(join(taskPath, "keep.txt"), "work in progress");
+  assert.equal(await canMove(api, fixWork), false);
   await assert.rejects(api.core.moveWorkToProject(fixWork, command({ project_id: api.project.id }, "fix-pending-key")), (error) => error.code === "invalid_state_transition" && error.details.reason === "task_fix_pending");
   assert.equal(api.db.get("SELECT project_id FROM works WHERE id = ?", fixWork).project_id, null);
   assert.equal(api.db.get("SELECT 1 FROM tasks WHERE id = ?", taskId) !== undefined, true);
@@ -223,6 +218,7 @@ test("move rejects terminal states, active Agents and isolated fix work without 
       VALUES (?, ?, ?, 'verification.completed', ?, ?, ?, 'handled', 0, ?)`, createUlid(), sequence, `failed-verification:${failedVerificationTask}`, failedVerificationWork, failedVerificationTask, JSON.stringify({ outcome: "fail", verification: { source: "core", commands: [], error: "verification failed" } }), now);
   });
   assert.notEqual(loadFixContext(api.db, failedVerificationTask), null);
+  assert.equal(await canMove(api, failedVerificationWork), false);
   await assert.rejects(api.core.moveWorkToProject(failedVerificationWork, command({ project_id: api.project.id }, "failed-verification-fix-pending-key")), (error) => error.code === "invalid_state_transition" && error.details.reason === "task_fix_pending");
   assert.equal(api.db.get("SELECT project_id FROM works WHERE id = ?", failedVerificationWork).project_id, null);
   assert.equal(await (await import("node:fs/promises")).readFile(join(failedVerificationPath, "keep.txt"), "utf8"), "verification fix in progress");

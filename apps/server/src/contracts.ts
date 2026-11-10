@@ -171,15 +171,11 @@ export async function validateContractArtifacts(owlRoot: string): Promise<Contra
     const absolutePath = resolve(owlRoot, artifactPath);
     assertWithinRoot(owlRoot, absolutePath);
     const text = await readText(absolutePath);
-    if (role === "rest_ws") {
-      if (!text.includes("openapi: 3.1.0") || !text.includes("x-contract-version: 1.0.0")) {
-        throw new ContractValidationError(cliText('OpenAPI artifactのversionまたはdialectが不正です。', 'The OpenAPI artifact version or dialect is invalid.'));
-      }
-    } else {
-      const schema = parseJson(text, absolutePath);
-      if (schema.$schema !== "https://json-schema.org/draft/2020-12/schema") {
-        throw new ContractValidationError(cliText(`JSON Schemaのdialectが不正です: ${artifactPath}`, `The JSON Schema dialect is invalid: ${artifactPath}`));
-      }
+    if (role !== "rest_ws") {
+      throw new ContractValidationError(cliText(`契約artifactのroleが未対応です: ${artifactPath}`, `The contract artifact role is not supported: ${artifactPath}`));
+    }
+    if (!text.includes("openapi: 3.1.0") || !text.includes("x-contract-version: 1.0.0")) {
+      throw new ContractValidationError(cliText('OpenAPI artifactのversionまたはdialectが不正です。', 'The OpenAPI artifact version or dialect is invalid.'));
     }
     artifacts.push({
       path: artifactPath,

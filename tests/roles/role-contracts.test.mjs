@@ -194,7 +194,7 @@ test("Manager plan parses its rendered template and sends the schema to the prov
   assert.equal(result.report.event, "work.planned");
   assert.equal(result.tasks.length, 1);
   const schema = calls[0].structured_output_schema;
-  assert.deepEqual(schema.required, ["tasks", "skills_used"]);
+  assert.deepEqual(schema.required, ["tasks", "work_full_test_run", "skills_used"]);
   assert.equal(schema.additionalProperties, false);
   assert.equal(JSON.stringify(schema).includes("\"example\""), false);
 });
@@ -898,8 +898,9 @@ test("role prompts keep unrelated existing failures outside Task verification", 
   assert.match(manager, /require the build and the tests related to what the Task changes/u);
   assert.doesNotMatch(manager, /adds no new failures/u);
   assert.match(manager, /do not require comparing failures with the base branch \(main\)/u);
-  assert.match(manager, /Reviewer sends such failures to the backlog/u);
+  assert.match(manager, /Core quarantines test files that also fail on the base and lists them in one backlog item per Project/u);
   assert.match(worker, /Never run the whole test suite, a test directory or a glob of test files: Core runs the tests related to your changes/u);
+  assert.match(worker, /even if an acceptance criterion or a rule says to run the whole suite, do not run it inside the Task/u);
   assert.match(worker, /Do not compare results with the base branch/u);
   assert.doesNotMatch(worker, /fails without your changes/u);
   assert.match(worker, /report it in remaining_issues as pre-existing and say so in verification\.method/u);
@@ -1242,7 +1243,6 @@ test("every role prompt carries the external-data policy exactly once", async ()
   const { buildKeywordPrompt } = await import("../../packages/agent-runtime/dist/keyword-extraction.js");
   const { buildProjectInvestigationPrompt } = await import("../../packages/agent-runtime/dist/project-investigation.js");
   const { buildLibrarianOperationsPrompt } = await import("../../packages/agent-runtime/dist/page-integration.js");
-  const { buildAdvisorPrompt } = await import("../../packages/agent-runtime/dist/runner.js");
   const task = { id: "t", title: "t", acceptance: "a", type: "code" };
   const count = (prompt) => prompt.split(EXTERNAL_DATA_POLICY).length - 1;
   const prompts = {
@@ -1254,11 +1254,8 @@ test("every role prompt carries the external-data policy exactly once", async ()
     keyword: buildKeywordPrompt({ items: [] }),
     investigation: buildProjectInvestigationPrompt({ project_name: "p", known_facts: {}, recent_works: [] }),
     librarian: buildLibrarianOperationsPrompt({ rules: "R", max_output_tokens: 10, pages: [], dormant_candidates: [] }),
-    advisorDefault: buildAdvisorPrompt({ conversation_id: "c", messages: [] }),
-    advisorWithPolicy: buildAdvisorPrompt({ conversation_id: "c", messages: [], system_prompt: `You are X.\n\n${EXTERNAL_DATA_POLICY}` }),
   };
   for (const [name, prompt] of Object.entries(prompts)) assert.equal(count(prompt), 1, name);
-  assert.equal(count(buildAdvisorPrompt({ conversation_id: "c", messages: [], system_prompt: "You are X." })), 1);
   // lessons description (Manager finalize) tells the model not to copy outside commands into knowledge
   const finalize = buildManagerPrompt({ mode: "finalize", work: { id: "w", title: "w", summary: "s" }, context: {} }, "en");
   assert.ok(finalize.includes(KNOWLEDGE_EXTERNAL_COMMAND_RULE));

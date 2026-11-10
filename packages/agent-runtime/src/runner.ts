@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
-import { AgentRuntimeError, providerConfigInvalid, providerFailed, reportInvalid } from "./errors";
+import { AgentRuntimeError, providerConfigInvalid, providerFailed } from "./errors";
 import {
   classifyProviderFailure,
   RATE_LIMIT_TRANSIENT_ERROR_KEY,
@@ -13,8 +13,8 @@ import {
 } from "./provider-error";
 import { asManagerRequest, buildManagerPrompt, managerOutputSchema, parseManagerPlanWithFeedback } from "./manager";
 import { statSync } from "node:fs";
-import { EXTERNAL_DATA_POLICY, AgentTimeoutSettingError, readStoredAcceptanceCriteria, DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, OPENCODE_API_KEY_ENV_ENV, OPENCODE_BASE_URL_ENV, PROCESS_SKILLS_PROMPT_FILES, renderProcessSkills, parseResearchSubagentSettings, researchSubagentPromptRef, type CuratorRequest, type ResearcherPromptRef, type ResearchSubagentSettings, type CuratorRunResult, type ProcessSkillsRole, type PromptObserver, type ProviderErrorObserver, type ModelHarness, harnessOfAdapter, roleSessionContextLimit, rateLimitRetrySettings } from "@owl/shared";
-import { type ReportCorrection, extractProviderUsage, harnessFailureDetail, isClaudeReportFormatFailure, isRecord, parseSingleJsonObject, unwrapCliResult } from "./protocol";
+import { AgentTimeoutSettingError, readStoredAcceptanceCriteria, DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, OPENCODE_API_KEY_ENV_ENV, OPENCODE_BASE_URL_ENV, PROCESS_SKILLS_PROMPT_FILES, renderProcessSkills, parseResearchSubagentSettings, researchSubagentPromptRef, type CuratorRequest, type ResearcherPromptRef, type ResearchSubagentSettings, type CuratorRunResult, type ProcessSkillsRole, type PromptObserver, type ProviderErrorObserver, type ModelHarness, harnessOfAdapter, roleSessionContextLimit, rateLimitRetrySettings } from "@owl/shared";
+import { type ReportCorrection, extractProviderUsage, harnessFailureDetail, isClaudeReportFormatFailure, isRecord, parseSingleJsonObject } from "./protocol";
 import { extractRoleOutputObject, providerSchema } from "./role-contract";
 import { providerResponseFailure, waitForRateLimitRetry } from "./rate-limit-retry";
 import { RoleSessionManager } from "./role-session-manager";
@@ -53,7 +53,6 @@ import {
   validateReviewInput,
 } from "./reviewer";
 import type {
-  CoreAdvisorRunRequest,
   CoreManagerPlanRequest,
   CoreReviewerRunRequest,
   CoreWorkerRunRequest,
@@ -63,8 +62,6 @@ import type {
 } from "./core-contract";
 import {
   REPORT_SCHEMA_VERSION,
-  type AdvisorRequest,
-  type AdvisorResponse,
   type AgentRunnerOptions,
   type ManagerPlanInput,
   type ManagerPlanRequest,
@@ -86,10 +83,8 @@ import {
   DEFAULT_OWNER_LANGUAGE,
   DESIGN_MOCK_MCP_ENABLE_ENV,
   DISPATCH_MCP_ENABLE_ENV,
-  formatAdvisorMalformed,
   generateUlid,
   isOwnerLanguage,
-  parseAdvisorResponse as parseSharedAdvisorResponse,
   type OwnerLanguage,
   type AutoWorkJudgmentRequest,
   type AutoWorkJudgmentRunResult,
@@ -720,6 +715,7 @@ function managerAsCoreResult(
       verdict: result.verdict,
       updated_title: result.updated_title ?? null,
       updated_summary: result.updated_summary ?? null,
+      work_full_test_run: result.work_full_test_run === true,
       task_actions: result.task_actions ?? [],
     },
     tasks: result.tasks,
@@ -751,14 +747,6 @@ function reviewAsCoreResult(
   };
 }
 
-
-function extractInnerStdout(response: { readonly adapter: string; readonly stdout: string; readonly format?: string }): string {
-  if (response.format === "plain-text") return response.stdout;
-  if ((response.format ?? "provider-json") === "provider-json") {
-    return unwrapCliResult(response.adapter, response.stdout);
-  }
-  return response.stdout;
-}
 
 export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunner {
   const provider: ProviderClient = options.provider ?? createCliProvider(options);
@@ -1290,28 +1278,6 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     });
   };
 
-  const runAdvisor = async (
-    input: CoreAdvisorRunRequest | AdvisorRequest,
-  ): Promise<AdvisorResponse> => {
-    const request: AdvisorRequest = "conversation_id" in input && "messages" in input && !("work_id" in input)
-      ? input as AdvisorRequest
-      : {
-          conversation_id: (input as CoreAdvisorRunRequest).conversation_id,
-          messages: [...(input as CoreAdvisorRunRequest).messages],
-          system_prompt: (input as CoreAdvisorRunRequest).system_prompt,
-        };
-    const invocationId = "invocation_id" in input ? (input as CoreAdvisorRunRequest).invocation_id : invocationIdFactory();
-    const { model, adapter, effort, env } = resolveOverrides(input as unknown as Record<string, unknown>, options);
-    try {
-      const response = await executeProvider(
-        requestForProvider("advisor", invocationId, buildAdvisorPrompt(request), options, undefined, model, adapter, effort, undefined, env),
-      );
-      assertProviderCompleted(response);
-      return parseAdvisorResponse(extractInnerStdout(response));
-    } finally {
-      rateLimitRetries.delete(invocationId);
-    }
-  };
 
   const runCurator = async (input: CuratorRequest): Promise<CuratorRunResult> => {
     const invocationId = input.invocation_id ?? invocationIdFactory();
@@ -1736,7 +1702,6 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     runDesigner,
     runWorker,
     runReviewer,
-    runAdvisor,
     runCurator,
     runKeywordExtraction,
     runLibrarianOperations,
@@ -1831,64 +1796,9 @@ export function createStubAgentRunner(): RuntimeAgentRunner {
     }
     return stubReview((input as ReviewerRequest).report);
   };
-  const runAdvisor = async (
-    _input: CoreAdvisorRunRequest | AdvisorRequest,
-  ): Promise<AdvisorResponse> => {
-    return { reply: "This is a stub advisor response.", suggested_actions: [] };
-  };
   // No runCurator: without a provider there is no Curator, and Core keeps
   // skill proposals queued instead of spending their attempts.
   return {
-    runManagerPlan, runDesigner, runWorker, runReviewer, runAdvisor, provider: undefined,
+    runManagerPlan, runDesigner, runWorker, runReviewer, provider: undefined,
   } as RuntimeAgentRunner;
-}
-
-
-export function buildAdvisorPrompt(request: AdvisorRequest): string {
-  const systemPrompt = request.system_prompt?.trim() || "You are the Owl Advisor. Answer the operator's question or continue the conversation below. You may inspect and implement code changes when useful.";
-  const shape = JSON.stringify({
-    reply: "<your reply to the conversation>",
-    suggested_actions: [],
-  }, null, 2);
-  return [
-    systemPrompt,
-    ...(systemPrompt.includes(EXTERNAL_DATA_POLICY) ? [] : [EXTERNAL_DATA_POLICY]),
-    "Return exactly one JSON object (no markdown fences, no extra text before or after) in this exact shape:",
-    shape,
-    "reply: a helpful, direct answer or response to the latest message.",
-    "suggested_actions: optional array of {type, description} objects for concrete next steps you recommend. Use an empty array if none.",
-    "Here is the conversation and any relevant work context:",
-    JSON.stringify(
-      {
-        conversation_id: request.conversation_id,
-        messages: request.messages,
-        work_context: request.work_context ?? null,
-      },
-      null,
-      2,
-    ),
-  ].join("\n\n");
-}
-
-/**
- * Parses the Advisor's raw stdout into a reply plus optional suggested
- * actions. The persistent-session contract lets the Advisor reply in natural
- * language instead of the
- * original strict single-JSON-object contract, since turns now stream out of
- * a long-lived provider session rather than being wrapped by a one-shot
- * prompt that demanded JSON. Three shapes are accepted, in order:
- *   1. Backward compat: the entire response is one JSON object with a
- *      string `.reply` (the pre-persistent-session contract).
- *   2. Natural text containing a ```owl-actions``` fenced JSON array: the
- *      fence supplies suggested_actions, the surrounding text is the reply.
- *   3. Plain natural text: the whole response is the reply, no actions.
- */
-export function parseAdvisorResponse(rawStdout: string): AdvisorResponse {
-  try {
-    return parseSharedAdvisorResponse(rawStdout, (reason, detail) => {
-      console.warn(`[agent-runtime] Ignoring malformed Advisor owl-actions block (${formatAdvisorMalformed(reason, detail)}); keeping reply text.`);
-    });
-  } catch (error) {
-    throw reportInvalid("advisor_response_invalid", error);
-  }
 }

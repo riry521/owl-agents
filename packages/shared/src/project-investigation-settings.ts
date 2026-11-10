@@ -1,3 +1,5 @@
+import { isRecord } from "./settings-validation.js";
+
 export const PROJECT_INVESTIGATION_OUTPUT_SETTINGS_KEY = "project_investigation_output";
 
 export interface ProjectInvestigationOutputSettings {
@@ -45,7 +47,6 @@ export const DEFAULT_PROJECT_INVESTIGATION_OUTPUT_SETTINGS: ProjectInvestigation
   },
 };
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const isCount = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value >= 1;
 const isRegexSource = (value: unknown, flags: string): value is string => {
   if (typeof value !== "string" || !value) return false;

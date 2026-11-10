@@ -40,7 +40,7 @@ function runnerWith({ needsReplanning }) {
         await mkdir(join(request.context.worktree, "src"), { recursive: true });
         await writeFile(join(request.context.worktree, "src/feature.mjs"), "export const f = 1;\n");
       }
-      const report = { kind: "report", schema_version: "1.0.0", invocation_id: request.invocation_id, result: question ? "partial" : "success", work_done: "Done.", changes: [], verification: { passed: true, method: "Checked." }, remaining_issues: [], next_action: "none", needs_replanning: needsReplanning, question_for_manager: question };
+      const report = { kind: "report", schema_version: "1.1.0", invocation_id: request.invocation_id, result: question ? "partial" : "success", work_done: "Done.", changes: [], verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked.", integration_check: null }, remaining_issues: [], next_action: "none", needs_replanning: needsReplanning, question_for_manager: question };
       return { outcome: "success", report_valid: true, report };
     },
     runReviewer: async () => ({ outcome: "success", report_valid: true, report: review, review }),

@@ -1,3 +1,5 @@
+import { isRecord, SettingsValidationError } from "./settings-validation.js";
+
 export const VERIFICATION_POLICY_SETTINGS_KEY = "verification_policy";
 
 /** How a required section name is compared with a heading: "exact" or "folded" (Unicode NFKC, case-insensitive). */
@@ -43,11 +45,8 @@ export type VerificationPolicyPatch = {
   readonly [K in keyof VerificationPolicySettings]?: Partial<VerificationPolicySettings[K]>;
 };
 
-export class VerificationPolicySettingsValidationError extends Error {
-  constructor(message: string, readonly field: string) {
-    super(message);
-    this.name = "VerificationPolicySettingsValidationError";
-  }
+export class VerificationPolicySettingsValidationError extends SettingsValidationError {
+  public override name = "VerificationPolicySettingsValidationError";
 }
 
 /** The one place the per-type verification rules are defined; settings override it per key. */
@@ -75,10 +74,6 @@ export const DEFAULT_VERIFICATION_POLICY_SETTINGS: VerificationPolicySettings = 
   },
   limits: { timeout_seconds: 120, stdout_limit_bytes: 65536, stderr_limit_bytes: 65536, max_files_per_check: 50, max_read_bytes: 1048576, env_allowlist: [] },
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 const stringList = (value: unknown): boolean => Array.isArray(value) && value.every((item) => typeof item === "string" && item.length > 0);
 const commandList = (value: unknown): boolean =>

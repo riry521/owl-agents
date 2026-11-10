@@ -65,5 +65,5 @@ export const MINIMAL_CODE_RULES: readonly string[] = [
   "No abstractions, options, configuration, or generality that the Task did not ask for. Deleting code beats adding it; boring beats clever; fewest files and the shortest working diff.",
   "For a bug, fix the root cause once where it lives; do not patch symptoms at call sites.",
   "Never skimp on: understanding the problem first, input validation at trust boundaries, error handling that prevents data loss, security, and anything the Task explicitly requests.",
-  "Non-trivial logic leaves one runnable check behind (a test or a documented command); trivial one-liners need none.",
+  "Non-trivial logic leaves one runnable check behind (a test in the existing feature test file, or a documented command; a new test file is kept only when a criterion's kind is spec_test); trivial one-liners need none.",
 ];

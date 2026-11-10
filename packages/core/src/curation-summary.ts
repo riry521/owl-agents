@@ -88,7 +88,7 @@ export function summarizeCurationReport(
 
 /**
  * Why a librarian report must be recorded as failed, or null when it is fine.
- * A report with `skipped` (retag running, storage unavailable) is not a failure: it is a deliberate
+ * A report with `skipped` (storage unavailable) is not a failure: it is a deliberate
  * non-run that the next slot retries, and failing it would alert the Owner on every transient skip.
  * Only the librarian is judged; the other kinds have no `pages`/`remaining` contract.
  */

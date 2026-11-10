@@ -1,5 +1,7 @@
 // Advisor ページの窓の選び方。純関数。
 // DEFAULT_WINDOW_KEY は shared の GENERAL_WINDOW_KEY と同じ値（テストで確かめる）。
+import { apiErrorKeyForCode } from "./api-error-keys.mjs";
+
 export const DEFAULT_WINDOW_KEY = "general";
 
 /** ?window= の値を一覧にある鍵へ解決する。一覧に無い鍵はジェネラリストにし、found を false にする。 */
@@ -64,7 +66,6 @@ const ERROR_KEYS = {
   channel_in_use: "channelInUse",
   channel_already_bound: "channelAlreadyBound",
   channel_binding_not_found: "bindingNotFound",
-  validation_error: "invalidName",
   channel_name_taken: "nameTaken",
   channel_not_found: "channelNotFound",
   integration_not_authorized: "notAuthorized",
@@ -88,6 +89,6 @@ export function channelErrorMessage(code, details, provider) {
   }
   const retry = details?.retry_after_seconds;
   const values = { needed: "", seconds: String(typeof retry === "number" ? retry : "") };
-  const name = Object.hasOwn(ERROR_KEYS, code) ? ERROR_KEYS[code] : "generic";
+  const name = apiErrorKeyForCode(code, "", { validation: "invalidName", codes: ERROR_KEYS, fallback: "generic" });
   return { key: `advisorWindows.channelError.${name}`, steps: [], values };
 }

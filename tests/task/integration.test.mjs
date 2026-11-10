@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 
 import { GitWorktreeGateway } from "../../packages/core/dist/git-gateway.js";
+import { DETERMINISTIC_FAILURE_LIMIT } from "../../packages/core/dist/attempt-policy.js";
 import { evaluateTaskTypePolicy } from "../../packages/core/dist/task-verification-policy.js";
 import { DEFAULT_VERIFICATION_POLICY_SETTINGS } from "../../packages/shared/dist/verification-policy-settings.js";
 import { mergeConflictPaths } from "../../packages/core/dist/workflow-engine.js";
@@ -152,8 +153,8 @@ test("Task integration reports a rejected commit as a commit failure with stderr
 
 function workerReport(invocationId, changes) {
   return {
-    kind: "report", schema_version: "1.0.0", invocation_id: invocationId, result: "success",
-    work_done: "Done.", changes, verification: { passed: true, method: "Checked the result." }, remaining_issues: [], next_action: "none",
+    kind: "report", schema_version: "1.1.0", invocation_id: invocationId, result: "success",
+    work_done: "Done.", changes, verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked the result.", integration_check: null }, remaining_issues: [], next_action: "none",
     needs_replanning: false, question_for_manager: null,
   };
 }
@@ -268,7 +269,7 @@ test("design Tasks stay outside Git and hand their document to dependent impleme
         git(worktree, "add", "committed.txt");
         git(worktree, "commit", "-m", "designer commit");
         const report = workerReport(request.invocation_id, [{ file: documentPath, action: "created" }]);
-        return { outcome: "success", report_valid: true, report: { ...report, verification: { passed: false, method: "The draft misses the acceptance criteria." } } };
+        return { outcome: "partial", failure_class: "deterministic", error_key: "report_result:partial", retry_allowed: true, report_valid: true, report: { ...report, result: "partial", verification: { status: "failed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "failed", evidence: "no" }], checks: [], method: "The draft misses the acceptance criteria.", integration_check: null } } };
       }
       if (designerAttempts === 2) {
         // The document left by the previous attempt does not count.
@@ -347,7 +348,7 @@ test("design Tasks stay outside Git and hand their document to dependent impleme
   assert.deepEqual(reviewed, ["design", "code"], "the design Task and the code Task added by design_completed are both reviewed");
   assert.equal(designerAttempts, 3, "a failed self-check and a stale document retry through the normal Task failure path");
   assert.equal(db.get("SELECT COUNT(*) AS count FROM events WHERE type = 'task.failure.classified' AND json_extract(payload_json, '$.error_key') = 'design_document_missing'")?.count, 1);
-  assert.equal(db.get("SELECT COUNT(*) AS count FROM events WHERE type = 'task.failure.classified' AND task_id = ? AND json_extract(payload_json, '$.error_key') = 'worker_verification_failed'", designTaskId)?.count, 1, "the completion gate rejects the failed self-check before Core verification");
+  assert.equal(db.get("SELECT COUNT(*) AS count FROM events WHERE type = 'task.failure.classified' AND task_id = ? AND json_extract(payload_json, '$.error_key') = 'report_result:partial'", designTaskId)?.count, 1, "a corrected partial retries through the normal Task failure path");
   const alerts = db.all("SELECT payload_json FROM events WHERE type = 'system.alert' AND task_id = ? ORDER BY sequence", designTaskId)
     .map((row) => JSON.parse(row.payload_json))
     .filter((payload) => payload.kind === "design_changes_discarded");
@@ -467,7 +468,7 @@ test("a reviewed design Task goes back to the Designer when its document is blan
   assert.equal(db.get("SELECT COUNT(*) AS count FROM events WHERE type = 'system.alert' AND task_id = ?", taskId).count, 0);
 });
 
-test("two design_document_missing failures in a row send the Task to the Manager before the third Designer run", async (t) => {
+test("design_document_missing failures reaching DETERMINISTIC_FAILURE_LIMIT send the Task to the Manager and no further Designer runs", async (t) => {
   let designerAttempts = 0;
   const managerTriggers = [];
   const agentRunner = {
@@ -491,8 +492,8 @@ test("two design_document_missing failures in a row send the Task to the Manager
   const { db, workId } = await startProjectlessWork(t, "owl-task-design-same-error-", agentRunner, "design-same-error");
   const stopped = await waitFor(() => managerTriggers.length > 0, { timeoutMs: 15_000, message: "the Manager to be called" }).catch(() => JSON.stringify({ designerAttempts, tasks: db.all("SELECT status, failure_count, same_error_count, last_error_key, last_error_generation, worker_generation FROM tasks WHERE work_id = ?", workId), ev: db.all("SELECT type FROM events WHERE work_id = ? ORDER BY sequence", workId).map((r) => r.type) }));
   assert.equal(stopped, true, JSON.stringify({ designerAttempts, managerTriggers, tasks: db.all("SELECT status, failure_count, same_error_count, last_error_key FROM tasks WHERE work_id = ?", workId) }));
-  assert.equal(designerAttempts, 2);
-  assert.equal(db.get("SELECT COUNT(*) AS count FROM events WHERE work_id = ? AND type = 'task.failure.classified' AND json_extract(payload_json, '$.error_key') = 'design_document_missing'", workId).count, 2);
+  assert.equal(designerAttempts, DETERMINISTIC_FAILURE_LIMIT);
+  assert.equal(db.get("SELECT COUNT(*) AS count FROM events WHERE work_id = ? AND type = 'task.failure.classified' AND json_extract(payload_json, '$.error_key') = 'design_document_missing'", workId).count, DETERMINISTIC_FAILURE_LIMIT);
   assert.equal(managerTriggers.length, 1);
   assert.equal(managerTriggers[0].kind, "task_failed");
   assert.equal(managerTriggers[0].tasks[0].kind, "failure_threshold");

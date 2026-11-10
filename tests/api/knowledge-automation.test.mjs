@@ -1,21 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { MemoryCore, ExternalCoreAdapter } from "../../apps/server/dist/core.js";
+import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { startTestHttpServer } from "../helpers/http.mjs";
 import { createTestCore } from "../helpers/core.mjs";
-import { tempDir } from "../helpers/temp.mjs";
 
 async function startServer(t) {
-  const root = await tempDir(t, "owl-api-knowledge-automation-");
+  const { root, db, core: realCore } = await createTestCore(t, { version: "test" }, { prefix: "owl-api-knowledge-automation-" });
   const token = "test-knowledge-automation-token";
-  const core = new MemoryCore({ version: "test" });
+  const core = new ExternalCoreAdapter(realCore, db, root, root);
   const calls = [];
   core.runCuration = async () => { calls.push("run"); return { id: "run-1", status: "succeeded", summary: "ok", error: null, report: { ok: true } }; };
   core.startCurationInBackground = async () => ({ run: { id: "run-1", status: "running", summary: "" }, started: true });
   core.listCurationRuns = () => ({ items: [], next_cursor: null });
   core.getCurationRun = () => null;
-  const server = await startTestHttpServer(t, { core, webOut: root, owlRoot: root }, { token });
+  const server = await startTestHttpServer(t, { core, db, webOut: root, owlRoot: root, dataDir: root }, { token });
   if (!server) {
     t.skip("localhost listen is not permitted in this environment");
     return null;
@@ -40,7 +39,7 @@ async function startServer(t) {
   };
 }
 
-test("knowledge automation settings GET defaults and PUT round-trips through MemoryCore", async (t) => {
+test("knowledge automation settings GET defaults and PUT round-trips through the Core", async (t) => {
   const api = await startServer(t);
   if (!api) return;
 
@@ -71,6 +70,10 @@ test("knowledge automation settings GET defaults and PUT round-trips through Mem
   assert.deepEqual(updatedBody.data, {
     librarian_times: ["08:30", "19:15"],
     research_autosave: false,
+    research_source_links: 5,
+    research_source_links_max: 20,
+    research_tags_min: 3,
+    research_tags_max: 5,
     next_librarian_run_at: null,
     next_skill_curation_run_at: null,
     next_rule_curation_run_at: null,
@@ -111,27 +114,6 @@ test("knowledge automation settings reject invalid payloads, require Owner and r
   assert.equal(manual.status, 200);
   assert.deepEqual((await manual.json()).data, { run_id: "run-1", status: "succeeded", summary: "ok", report: { ok: true } });
   assert.deepEqual(api.calls, ["run"]);
-});
-
-test("ExternalCoreAdapter keeps knowledge automation settings in its in-memory fallback", async (t) => {
-  const root = await tempDir(t, "owl-core-knowledge-automation-");
-  const external = {
-    subscribe: () => () => {},
-    status: () => ({ services: [], mvp_scope: "test", version: "test" }),
-    start: async () => {},
-    stop: async () => {},
-  };
-  const adapter = new ExternalCoreAdapter(external, null, root, root);
-  assert.deepEqual((await adapter.getKnowledgeAutomationSettings()).librarian_times, ["03:00", "15:00"]);
-  await adapter.setKnowledgeAutomationSettings({ librarian_times: [], research_autosave: false });
-  assert.deepEqual(await adapter.getKnowledgeAutomationSettings(), {
-    librarian_times: [],
-    research_autosave: false,
-    next_librarian_run_at: null,
-    next_skill_curation_run_at: null,
-    next_rule_curation_run_at: null,
-    time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone || "local",
-  });
 });
 
 test("updating the times reschedules all three runs and GET returns their next run times", async (t) => {

@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { RESEARCH_REDACTIONS } from "@owl/shared";
 
 import { extractWebResearchCapture, type WebResearchCapture, type WebResearchLink } from "@owl/shared";
 
@@ -113,17 +114,7 @@ export function redactResearchText(text: string): { readonly text: string; reado
     });
   };
 
-  replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/gu, "[REDACTED]");
-  replace(/https:\/\/hooks\.slack\.com\/services\/[A-Za-z0-9/_-]+/giu, "[REDACTED]");
-  replace(/https:\/\/discord(?:app)?\.com\/api\/webhooks\/[A-Za-z0-9/_-]+/giu, "[REDACTED]");
-  replace(/\/\/([^/@\s:]+):([^/@\s]*)@/gu, "//[REDACTED]@", (match) => Math.max(0, match.length - 3));
-  replace(
-    /(["']?)(\b(?:authorization|bearer|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|secret|token|password|passwd|pwd)\b)\1(\s*[:=]\s*)(?:"([^"\r\n]+)"|'([^'\r\n]+)'|(?:Bearer\s+)?([^\s"',;]+))/giu,
-    (_match, quote, key, separator) => `${quote}${key}${quote}${separator}[REDACTED]`,
-    (_match, _quote, _key, _separator, doubleValue, singleValue, bareValue) => (doubleValue ?? singleValue ?? bareValue ?? "").length,
-  );
-  replace(/\bBearer\s+([A-Za-z0-9._~+/-]+=*)/giu, "Bearer [REDACTED]", (_match, token) => token.length);
-  replace(/\b(?:sk-(?:ant-)?[A-Za-z0-9_-]{12,}|(?:sk|rk)_live_[A-Za-z0-9]{12,}|gh[porus]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{10,}|xapp-[A-Za-z0-9-]{10,}|(?:AKIA|ASIA)[A-Z0-9]{16}|AIza[A-Za-z0-9_-]{35}|ya29\.[A-Za-z0-9._-]{10,}|eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,}|npm_[A-Za-z0-9]{10,}|glpat-[A-Za-z0-9_-]{10,})\b/gu, "[REDACTED]");
+  for (const { pattern, replacement, lengthOf } of RESEARCH_REDACTIONS) replace(pattern, replacement, lengthOf);
   return { text: result, redactions, redacted_chars: redactedChars };
 }
 

@@ -3,7 +3,7 @@ import { lstat, mkdir, readdir, readFile, rename, rm, rmdir, unlink, writeFile }
 import { dirname, join, relative, resolve } from "node:path";
 import { createUlid, utcNow } from "../../db/dist/index.js";
 import { fingerprint } from "./learning-fingerprint";
-import { ensureOwner } from "./state-reducer.js";
+import { storedSettingJson, upsertSetting } from "./settings-store.js";
 import { GUARD_CONTENT_KEYS, GUARD_PATH_KEYS } from "@owl/shared";
 import type { SkillFeedback } from "@owl/shared";
 import type { CoreDatabase, CoreWriteLaneTransaction } from "./types.js";
@@ -14,6 +14,8 @@ import { hashSkillFiles, isValidSkillScope, parseSkillMd, renderSkillMd, validat
 export type SkillState = "active" | "stale" | "archived";
 export type SkillActor = "curator" | "user";
 export type SkillAction = "create" | "update" | "merge" | "state_change" | "scope_change" | "restore" | "rollback" | "external_edit";
+
+export const SKILLS_SETTINGS_KEY = "skills";
 
 export interface ApplyRevisionInput {
   readonly name: string;
@@ -548,15 +550,7 @@ export class SkillBox {
     return this.enqueue(async () => {
       await this.writeLane.write({
         mutateState: (transaction: CoreWriteLaneTransaction) => {
-          const now = this.now();
-          ensureOwner(transaction, "owner:default", now);
-          transaction.run(
-            `INSERT INTO settings (key, owner_id, schema_version, value_json, updated_at)
-             VALUES ('skills', 'owner:default', '1.0.0', ?, ?)
-             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,
-            JSON.stringify(settings),
-            now,
-          );
+          upsertSetting(transaction, { key: SKILLS_SETTINGS_KEY, valueJson: JSON.stringify(settings), now: this.now() });
           return settings;
         },
         event: {
@@ -1213,10 +1207,10 @@ export class SkillBox {
   }
 
   private readIndexSettings(): Record<string, unknown> {
-    const row = this.db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = 'skills'");
-    if (!row) return {};
+    const json = storedSettingJson(this.db, SKILLS_SETTINGS_KEY);
+    if (json === undefined) return {};
     try {
-      const parsed: unknown = JSON.parse(row.value_json);
+      const parsed: unknown = JSON.parse(json);
       return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
     } catch (error) {
       console.warn("[owl-core] Could not parse the skills setting; using defaults.", error);

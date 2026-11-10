@@ -168,7 +168,6 @@ test("an unconnected vault answers from the index with stale: true", async () =>
       assert.equal(out.found, true);
       assert.equal(out.stale, true);
       assert.equal((await offline.readIndex({}, ctx())).stale, true);
-      assert.equal(offline.mode(), "pages");
     } finally { await offline.stop(); }
   } finally { await t.cleanup(); }
 });

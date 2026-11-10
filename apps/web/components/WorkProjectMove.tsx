@@ -11,6 +11,7 @@ interface MovableWork {
   state: string;
   state_version: number;
   project_id: string | null;
+  can_move_to_project?: boolean;
   display_number?: number | null;
 }
 

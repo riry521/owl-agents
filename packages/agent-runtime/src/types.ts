@@ -240,6 +240,8 @@ export interface ManagerPlanResult {
   readonly verdict: ManagerVerdict | null;
   readonly updated_title?: string | null;
   readonly updated_summary?: string | null;
+  /** Plan and replan: the Work's final Core test run must run the whole suite. Absent reads as false. */
+  readonly work_full_test_run?: boolean;
   /** Replan only: open Tasks the Manager cancels or treats as done. */
   readonly task_actions?: readonly { readonly task_id: string; readonly action: "cancel" | "complete"; readonly reason: string }[];
 }

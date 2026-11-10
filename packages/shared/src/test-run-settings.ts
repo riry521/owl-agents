@@ -1,3 +1,5 @@
+import { isRecord } from "./settings-validation.js";
+
 /** A rewrite applied to a module path a test imports, so a built file maps back to its source. */
 export interface SourceMapRule {
   /** Regular expression matched against the repo-relative import target. */
@@ -79,10 +81,6 @@ export const DEFAULT_TEST_RUN_SETTINGS: TestRunSettings = {
   unit_argv: [],
   unit_markers: [],
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 const strings = (value: unknown): boolean => Array.isArray(value) && value.every((item) => typeof item === "string");
 const nonEmptyStrings = (value: unknown): boolean => strings(value) && (value as string[]).every((item) => item.length > 0);

@@ -1,16 +1,15 @@
 import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { access } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import type { Core } from "../../../packages/core/dist/core.js";
 import { resolveDataDir, serverPackageRoot } from "./contracts.js";
 import { ApiError, humanUnexpectedMessage } from "./errors.js";
-import { createUlid, isUlid, utcNow } from "./ids.js";
+import { isUlid } from "./ids.js";
 import type {
   AgentRun,
-  AgentRunner,
   CommandMeta,
   CommandResult,
   CoreControlListener,
@@ -48,7 +47,6 @@ import type {
   UpdateProjectInput,
   WorkState,
   WorkCreateInput,
-  IntegrationConfig,
   IntegrationConfigPatch,
   IntegrationProvider,
   IntegrationStatus,
@@ -74,85 +72,29 @@ import { configuredDesignSkill } from "./config.js";
 import type { SessionActivity } from "../../../packages/shared/dist/index.js";
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
 import type { WebResearchCapture } from "../../../packages/shared/dist/web-research.js";
-import { validatePrerequisiteWorkIds } from "../../../packages/shared/dist/work-prerequisite.js";
 import type { ChildDispatchRequest, ChildDispatchResponse, ChildRunListFilter, ChildRunRecord, ChildRunSettings, ChildWaitRequest, ChildWaitResponse } from "../../../packages/shared/dist/child-runs.js";
 
 import { IntegrationStore, parseChannelIds } from "./integration-store.js";
-import { AppSettingsStore, parseFileDestinationSettings, type CustomProviderConfig } from "./app-settings-store.js";
+import { AppSettingsStore, type CustomProviderConfig } from "./app-settings-store.js";
 import { AdvisorFolderError, advisorFolderDefaults, ensureAdvisorSharedDir, isGitIgnoredDirectory, normalizeAdvisorFolder } from "./advisor-folders.js";
-import type { WorkSummaryRevision } from "../../../packages/core/dist/work-summary-history.js";
-import { MAX_UPLOAD_BYTES } from "../../../packages/core/dist/upload-limits.js";
 import type { WebAttachmentFile, WebAttachmentResult, WebAttachmentTarget } from "../../../packages/core/dist/core.js";
-import { detectProcessSkillsPack } from "../../../packages/core/dist/process-skills-pack.js";
 import { defaultOwlRoot as defaultCoreOwlRoot, resolveWorkspacesRoot } from "../../../packages/core/dist/workspace-layout.js";
 import { buildAgentEnv } from "./agent-env.js";
 import { customProviderApiKeyEnvNames } from "./agent-runner.js";
 import { providerSelection } from "./provider-selection.js";
-import {
-  DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS,
-  KnowledgeAutomationValidationError,
-  validateKnowledgeAutomationSettings,
-} from "../../../packages/shared/dist/knowledge-automation.js";
 import type { KnowledgeAutomationSettings, KnowledgeAutomationSnapshot } from "../../../packages/shared/dist/knowledge-automation.js";
 import {
   DEFAULT_OWNER_LANGUAGE,
   ownerLanguageFromLocale,
   type OwnerLanguage,
 } from "../../../packages/shared/dist/owner-language.js";
-import { builtinProviderHarness, type ModelHarness, CODEX_BUILTIN_MODELS, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, OPENCODE_API_KEY_ENV_ENV, OPENCODE_BASE_URL_ENV, DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, PROCESS_SKILLS_INSTALL_COMMANDS } from "../../../packages/shared/dist/index.js";
+import { builtinProviderHarness, type ModelHarness, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, OPENCODE_API_KEY_ENV_ENV, OPENCODE_BASE_URL_ENV, PROCESS_SKILLS_INSTALL_COMMANDS } from "../../../packages/shared/dist/index.js";
 import { codexKnownModels, mergeOfficialModels, opencodeKnownModels } from "./model-catalog.js";
 import { detectProviders, type BuiltinHarnessInfo, type BuiltinProviderInfo } from "./provider-detection.js";
 
 function coreText(language: OwnerLanguage, ja: string, en: string): string {
   return language === "ja" ? ja : en;
 }
-
-interface StoredWork {
-  id: string;
-  display_number: number | null;
-  title: string;
-  state: WorkState;
-  state_version: number;
-  updated_at: string;
-  archived_at: string | null;
-  owner_id: string;
-  project_id: string | null;
-  summary: string;
-  size: "small" | "normal" | "large";
-  plan_revision: number;
-  conversation_id: string | null;
-  tasks: string[];
-}
-
-interface StoredTask extends TaskDetail {
-  report: Report | null;
-}
-
-function page<T>(items: T[], limit: number, cursor: string | null): Page<T> {
-  const offset = cursor === null ? 0 : Number.parseInt(cursor, 10);
-  if (!Number.isInteger(offset) || offset < 0) {
-    throw new ApiError(400, "invalid_query", "一覧のcursorが不正です。位置を確認して再試行してください。");
-  }
-  const data = items.slice(offset, offset + limit);
-  const next = offset + data.length;
-  return {
-    data,
-    cursor: next < items.length ? String(next) : null,
-    has_more: next < items.length,
-  };
-}
-
-function matchesFilter(value: string | null, expected: string): boolean {
-  return value === null || value === expected;
-}
-
-const DEFAULT_MODEL_SETTINGS: readonly RoleModelSetting[] = Object.entries(DEFAULT_ROLE_MODELS).map(([role, setting]) => ({
-  role: role as RoleModelSetting["role"],
-  provider: setting.provider === "openai" ? "Codex" : "Anthropic",
-  model: setting.model,
-  effort: setting.effort,
-  catalog_version: "1.0.0",
-}));
 
 function cloneModelPreset(preset: ModelPreset): ModelPreset {
   return { ...preset, roles: preset.roles.map((role) => ({ ...role })) };
@@ -161,30 +103,6 @@ function cloneModelPreset(preset: ModelPreset): ModelPreset {
 function modelPresetCommandResult(response: ExternalCommandResponse): CommandResult<{ preset: ModelPreset; presets: ModelPreset[] }> {
   const data = response.data as { preset: ModelPreset; presets: readonly ModelPreset[] };
   return { data: { preset: cloneModelPreset(data.preset), presets: data.presets.map(cloneModelPreset) }, version: response.version };
-}
-
-function validateMemoryPresetName(value: unknown, presets: ModelPreset[], excludedId?: string): string {
-  const name = typeof value === "string" ? value.trim() : "";
-  if (name.length < 1 || name.length > 60 || presets.some((preset) => preset.id !== excludedId && preset.name.toLowerCase() === name.toLowerCase())) {
-    throw new ApiError(400, "validation_error", "Model preset name must be unique and contain 1 to 60 characters.", { field: "name" });
-  }
-  return name;
-}
-
-function validateMemoryPresetRoles(input: RoleModelSettingInput[], previous: RoleModelSetting[]): RoleModelSetting[] {
-  const expected = new Set(DEFAULT_MODEL_SETTINGS.map((role) => role.role));
-  if (!Array.isArray(input) || input.length !== expected.size || new Set(input.map((role) => role.role)).size !== expected.size) {
-    throw new ApiError(400, "validation_error", "Model preset roles must contain all eight roles exactly once.", { field: "roles" });
-  }
-  return input.map((role) => {
-    if (!expected.has(role.role) || typeof role.provider !== "string" || !role.provider.trim() || typeof role.model !== "string" || !role.model.trim() || !["low", "medium", "high", "xhigh", "max"].includes(role.effort)) {
-      throw new ApiError(400, "validation_error", "Model preset roles contain an invalid setting.", { field: "roles" });
-    }
-    if (builtinProviderHarness(role.provider.trim().toLowerCase()) === "codex" && !CODEX_BUILTIN_MODELS.includes(role.model.trim() as typeof CODEX_BUILTIN_MODELS[number])) {
-      throw new ApiError(400, "validation_error", `Model ${role.model} is not available for ${role.provider}.`, { field: "roles" });
-    }
-    return { ...role, provider: role.provider.trim().toLowerCase(), catalog_version: previous.find((entry) => entry.role === role.role)?.catalog_version ?? "1.0.0" };
-  });
 }
 
 const BUILTIN_HARNESSES: readonly BuiltinHarnessInfo[] = [
@@ -211,29 +129,6 @@ const BUILTIN_PROVIDER_PRESETS: readonly BuiltinProviderInfo[] = [
   },
 ];
 
-const BUILTIN_PROVIDER_EXTRAS: Readonly<Record<string, { defaultModel?: string }>> = {
-  "anthropic": { defaultModel: DEFAULT_HARNESS_MODELS.claude },
-  "openai": { defaultModel: DEFAULT_HARNESS_MODELS.codex },
-};
-
-function validateProcessSkillsSettings(input: ProcessSkillsSettingsInput): void {
-  if (typeof input?.enabled !== "boolean" || (input.path !== null && typeof input.path !== "string")) {
-    throw new ApiError(400, "validation_error", "Process skills settings must contain a boolean enabled value and a nullable path.", { field: "process_skills" });
-  }
-  if (input.path === null) return;
-  if (input.path.length === 0 || !isAbsolute(input.path)) {
-    throw new ApiError(400, "validation_error", "The process skills path must be an absolute path.", { field: "path" });
-  }
-  const detected = detectProcessSkillsPack({
-    env: process.env,
-    settings: { enabled: true, path: input.path },
-    homedir: homedir(),
-  });
-  if (!detected || detected.source !== "setting") {
-    throw new ApiError(400, "validation_error", "The process skills path must contain the required skill files.", { field: "path" });
-  }
-}
-
 /** Reports which provider harnesses are usable on this system. */
 export type ProviderAvailabilityDetector = () => readonly { harnessId: string; available: boolean }[];
 
@@ -254,45 +149,6 @@ function processSkillsInstallCommands(detected: readonly { harnessId: string; av
     .map((harness) => ({ harness, command: PROCESS_SKILLS_INSTALL_COMMANDS[harness] }));
 }
 
-function detectProcessSkillsSettings(
-  settings: ProcessSkillsSettingsInput,
-  installCommands: ProcessSkillsInstallCommand[] = processSkillsInstallCommands(detectBuiltinProviders()),
-): ProcessSkillsSettingsSnapshot {
-  return {
-    ...settings,
-    detected: detectProcessSkillsPack({ env: process.env, settings, homedir: homedir() }),
-    install_commands: installCommands,
-  };
-}
-
-function validateKnowledgeAutomationSettingsInput(value: unknown): KnowledgeAutomationSettings {
-  try {
-    return validateKnowledgeAutomationSettings(value);
-  } catch (error) {
-    if (error instanceof KnowledgeAutomationValidationError) {
-      throw new ApiError(400, "validation_error", error.message, { field: error.field });
-    }
-    throw error;
-  }
-}
-
-function knowledgeAutomationSnapshot(settings: KnowledgeAutomationSettings): KnowledgeAutomationSnapshot {
-  let timeZone = "local";
-  try {
-    timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "local";
-  } catch {
-    // Keep the design's fallback when the runtime cannot resolve the host zone.
-  }
-  return {
-    ...settings,
-    librarian_times: [...settings.librarian_times],
-    next_librarian_run_at: null,
-    next_skill_curation_run_at: null,
-    next_rule_curation_run_at: null,
-    time_zone: timeZone,
-  };
-}
-
 function builtinProviderToRecord(provider: BuiltinProviderInfo): ProviderConfigRecord {
   return {
     id: provider.id,
@@ -303,1104 +159,9 @@ function builtinProviderToRecord(provider: BuiltinProviderInfo): ProviderConfigR
   };
 }
 
-export class MemoryCore implements CorePort {
-  readonly ready = true;
-  readonly advisorSessions: AdvisorSessionsPort = {
-    getActiveSession: () => null,
-  };
-  private readonly works = new Map<string, StoredWork>();
-  private readonly tasks = new Map<string, StoredTask>();
-  private readonly decisions = new Map<string, Decision>();
-  private readonly agents = new Map<string, AgentRun>();
-  private readonly listeners = new Set<CoreEventListener>();
-  private readonly eventLog: CoreEvent[] = [];
-  private sequence = 0;
-  private shuttingDown = false;
-  private readonly projects = new Map<string, Project>();
-  private readonly conversationMessages = new Map<string, Message[]>();
-  private readonly uploads = new Map<string, { owner_id: string; input: InboundUploadRegisterInput; content?: Buffer; sha256?: string; mime?: string; status: "registered" | "receiving" | "stored" | "quarantined" }>();
-  // MemoryCore (standalone mode) has no conversation registry of its own; any conversationId is
-  // accepted lazily. The DB-backed Core in packages/core enforces FK existence and web-account resolution.
-  private hybridMode = false;
-  private language: OwnerLanguage = DEFAULT_OWNER_LANGUAGE;
-  private processSkillsSettings: ProcessSkillsSettingsInput = { enabled: true, path: null };
-  private knowledgeAutomationSettings: KnowledgeAutomationSettings = {
-    ...DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS,
-    librarian_times: [...DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS.librarian_times],
-  };
-  private advisorPersona = "";
-  private advisorSharedDir = "";
-  private advisorScreenshotDir = "";
-  private modelSettings: { version: number; roles: RoleModelSetting[] } = {
-    version: 0,
-    roles: DEFAULT_MODEL_SETTINGS.map((role) => ({ ...role })),
-  };
-  private modelPresets: { version: number; presets: ModelPreset[] } = { version: 0, presets: [] };
-
-  constructor(private readonly options: CreateCoreOptions) {}
-
-  private readonly summaryRevisions = new Map<string, WorkSummaryRevision[]>();
-
-  getWorkCoreActivity(workId: string): { work_id: string; activities: readonly never[] } {
-    return { work_id: workId, activities: [] };
-  }
-
-  listWorkSummaryRevisions(workId: string): { work_id: string; truncated: false; revisions: readonly WorkSummaryRevision[] } {
-    return { work_id: workId, truncated: false, revisions: this.summaryRevisions.get(workId) ?? [] };
-  }
-
-  /** Applies a Manager's rewrite of a Work summary and records the revision, like the real Core's replan path. */
-  applyManagerWorkSummary(
-    workId: string,
-    summary: string,
-    trigger: { kind: WorkSummaryRevision["trigger"]["kind"]; message_ids?: readonly string[]; text: string | null },
-    agentRunId: string | null = null,
-  ): void {
-    const work = this.requireWork(workId);
-    const before = { title: work.title, summary: work.summary };
-    work.summary = summary;
-    work.updated_at = utcNow();
-    const revision: WorkSummaryRevision = {
-      id: createUlid(),
-      work_id: workId,
-      actor: "manager",
-      agent_run_id: agentRunId,
-      trigger: { kind: trigger.kind, message_ids: trigger.message_ids ?? [], text: trigger.text },
-      changed_fields: ["summary"],
-      before,
-      after: { title: work.title, summary },
-      created_at: work.updated_at,
-    };
-    this.summaryRevisions.set(workId, [revision, ...(this.summaryRevisions.get(workId) ?? [])]);
-    this.emit("work.updated", { work_id: workId, changed_fields: ["summary"], title: work.title });
-  }
-
-  get version(): string {
-    return this.options.version;
-  }
-
-  status(): { services: readonly { name: string; state: string; pid: number | null }[]; mvp_scope: string; version: string } {
-    return {
-      services: [{ name: "owl-core", state: this.shuttingDown ? "stopping" : "running", pid: process.pid }],
-      mvp_scope: "owl-core+rest+ws+static-web",
-      version: this.version,
-    };
-  }
-
-  async listWorks(query: { state: string | null; archived: "exclude" | "include" | "only"; limit: number; cursor: string | null }): Promise<Page<WorkSummary>> {
-    const items = [...this.works.values()]
-      .filter((work) => matchesFilter(query.state, work.state))
-      .filter((work) => query.archived === "include" || (query.archived === "only" ? work.archived_at !== null : work.archived_at === null))
-      .map((work) => this.toWorkSummary(work));
-    return page(items, query.limit, query.cursor);
-  }
-
-  async createWork(input: WorkCreateInput, _command: CommandMeta): Promise<CommandResult<{
-    work_id: string;
-    state: "memo" | "ready";
-    state_version: number;
-  }>> {
-    this.assertWritable();
-    if (input.project_id !== null) {
-      throw new ApiError(404, "project_not_found", "指定されたProjectが見つかりません。Projectを登録してから再試行してください。");
-    }
-    const id = createUlid();
-    const now = utcNow();
-    const work: StoredWork = {
-      id,
-      display_number: null,
-      title: input.title,
-      state: "memo",
-      state_version: 0,
-      updated_at: now,
-      archived_at: null,
-      owner_id: "owner:default",
-      project_id: input.project_id,
-      summary: input.summary,
-      size: input.size,
-      plan_revision: 0,
-      conversation_id: null,
-      tasks: [],
-    };
-    this.works.set(id, work);
-    this.emit("work.ready", { work_id: id, state: work.state });
-    return { data: { work_id: id, state: "memo", state_version: work.state_version }, version: work.state_version };
-  }
-
-  async getWork(workId: string): Promise<WorkDetail> {
-    return this.toWorkDetail(this.requireWork(workId));
-  }
-
-  async getWorkBranchStatus(workId: string): Promise<WorkBranchStatus> {
-    const work = this.requireWork(workId);
-    return { work_id: workId, unmerged_changes: work.project_id === null ? "absent" : "unknown" };
-  }
-
-  async getWorkDesigns(workId: string): Promise<WorkDesignList> {
-    this.requireWork(workId);
-    return { designs: [] };
-  }
-
-  async getWorkConversation(workId: string, opts: { limit: number }): Promise<WorkConversation> {
-    const conversationId = this.requireWork(workId).conversation_id;
-    const all = conversationId ? this.conversationMessages.get(conversationId) ?? [] : [];
-    const messages = all.slice(-opts.limit).map((m) => ({ ...m, received_at: m.created_at, instruction: null, in_reply_to: m.metadata?.kind === "instruction_reply" ? m.metadata.in_reply_to : [] }));
-    return { work_id: workId, conversation_id: conversationId ?? null, truncated: all.length > opts.limit, messages };
-  }
-
-  async getWorkDesign(workId: string, _taskId: string): Promise<WorkDesignDetail | null> {
-    this.requireWork(workId);
-    return null;
-  }
-
-  async startWork(workId: string, mode: "normal" | "small", command: CommandMeta): Promise<CommandResult<{
-    work_id: string;
-    state: "running" | "ready" | "judgement_waiting";
-    started: boolean;
-    waiting_for_prerequisites: boolean;
-  }>> {
-    this.assertWritable();
-    const work = this.requireWork(workId);
-    this.assertVersion(work.state_version, command.expected_version);
-    if (work.state !== "memo" && work.state !== "ready") {
-      throw new ApiError(409, "invalid_state_transition", "このWorkは開始できない状態です。現在の状態を確認してから再試行してください。", { state: work.state });
-    }
-    const runner = this.options.agentRunner as Partial<AgentRunner>;
-    if (typeof runner.start !== "function") {
-      throw new ApiError(503, "dependency_unavailable", "Agent実行基盤の公開APIが利用できません。agent-runtimeのdistを確認してください。");
-    }
-    await runner.start(workId, mode);
-    work.state = "running";
-    work.state_version += 1;
-    work.updated_at = utcNow();
-    this.emit("work.started", { work_id: workId, state: work.state });
-    return { data: { work_id: workId, state: "running", started: true, waiting_for_prerequisites: false }, version: work.state_version };
-  }
-
-  /** MemoryCore keeps no wait state: it stores no prerequisite rows, so a Work never becomes ready. */
-  async replaceWorkPrerequisites(workId: string, input: { prerequisite_work_ids: string[] }, command: CommandMeta): Promise<CommandResult<JsonObject>> {
-    this.assertWritable();
-    const work = this.requireWork(workId);
-    this.assertVersion(work.state_version, command.expected_version);
-    if (work.state !== "memo" && work.state !== "ready") {
-      throw new ApiError(409, "invalid_state_transition", "Prerequisites can be changed only before the Work starts.", { state: work.state });
-    }
-    let ids: string[];
-    try {
-      ids = validatePrerequisiteWorkIds(input.prerequisite_work_ids);
-    } catch (error) {
-      throw new ApiError(400, "validation_error", (error as Error).message, { field: "prerequisite_work_ids" });
-    }
-    if (ids.includes(workId)) throw new ApiError(400, "validation_error", "A Work cannot be its own prerequisite.", { field: "prerequisite_work_ids" });
-    const missing = ids.find((id) => !this.works.has(id));
-    if (missing) throw new ApiError(404, "prerequisite_work_not_found", `Prerequisite Work ${missing} was not found.`, { work_id: missing });
-    return { data: { work_id: workId, state: work.state, prerequisites: [] }, version: work.state_version };
-  }
-
-  async releaseWorkPrerequisiteWait(workId: string, _command: CommandMeta): Promise<CommandResult<JsonObject>> {
-    const work = this.requireWork(workId);
-    throw new ApiError(409, "invalid_state_transition", "Only a Work waiting for its prerequisites can be released.", { work_id: workId, state: work.state });
-  }
-
-  async pauseWork(workId: string, _reason: string, command: CommandMeta): Promise<CommandResult<{
-    work_id: string;
-    state: "paused";
-    signal: "pause_requested";
-  }>> {
-    this.assertWritable();
-    const work = this.requireWork(workId);
-    this.assertVersion(work.state_version, command.expected_version);
-    if (work.state !== "running") {
-      throw new ApiError(409, "invalid_state_transition", "実行中のWorkだけ一時停止できます。現在の状態を確認してください。", { state: work.state });
-    }
-    work.state = "paused";
-    work.state_version += 1;
-    work.updated_at = utcNow();
-    this.emit("work.paused", { work_id: workId, state: work.state });
-    return { data: { work_id: workId, state: "paused", signal: "pause_requested" }, version: work.state_version };
-  }
-
-  async resumeWork(workId: string, command: CommandMeta): Promise<CommandResult<{
-    work_id: string;
-    state: "running";
-  }>> {
-    this.assertWritable();
-    const work = this.requireWork(workId);
-    this.assertVersion(work.state_version, command.expected_version);
-    if (work.state !== "paused") {
-      throw new ApiError(409, "invalid_state_transition", "一時停止中のWorkだけ再開できます。現在の状態を確認してください。", { state: work.state });
-    }
-    work.state = "running";
-    work.state_version += 1;
-    work.updated_at = utcNow();
-    this.emit("work.resumed", { work_id: workId, state: work.state });
-    return { data: { work_id: workId, state: "running" }, version: work.state_version };
-  }
-
-  async resumeWorkOrRetryDecision(workId: string, command: CommandMeta, body?: string): Promise<CommandResult<{
-    work_id: string;
-    state: "running" | "judgement_waiting";
-    resumed_by: "resume" | "retry_decision";
-    decision_id: string | null;
-  }>> {
-    if (this.requireWork(workId).state !== "paused") {
-      throw new ApiError(409, "invalid_state_transition", "一時停止中のWorkだけ再開できます。現在の状態を確認してください。", { reason: "not_resumable" });
-    }
-    const response = await this.resumeWork(workId, command);
-    return {
-      data: { work_id: workId, state: response.data.state, resumed_by: "resume", decision_id: null },
-      version: response.version,
-    };
-  }
-
-  async cancelWork(workId: string, _reason: string, _force: boolean, command: CommandMeta): Promise<CommandResult<{
-    work_id: string;
-    state: "cancelled";
-    cancel_requested: boolean;
-  }>> {
-    this.assertWritable();
-    const work = this.requireWork(workId);
-    this.assertVersion(work.state_version, command.expected_version);
-    if (work.state === "completed" || work.state === "cancelled") {
-      throw new ApiError(409, "invalid_state_transition", "完了済みのWorkは中止できません。現在の状態を確認してください。", { state: work.state });
-    }
-    work.state = "cancelled";
-    work.state_version += 1;
-    work.updated_at = utcNow();
-    this.emit("work.cancelled", { work_id: workId, state: work.state });
-    return { data: { work_id: workId, state: "cancelled", cancel_requested: true }, version: work.state_version };
-  }
-
-  async reopenWork(workId: string, _reason: string, command: CommandMeta): Promise<CommandResult<{
-    work_id: string;
-    state: "running";
-  }>> {
-    this.assertWritable();
-    const work = this.requireWork(workId);
-    this.assertVersion(work.state_version, command.expected_version);
-    if (work.state !== "completed") {
-      throw new ApiError(409, "invalid_state_transition", "完了状態のWorkだけ再開できます。", { state: work.state });
-    }
-    work.state = "running";
-    work.state_version += 1;
-    work.updated_at = utcNow();
-    this.emit("work.reopened", { work_id: workId, state: work.state });
-    return { data: { work_id: workId, state: "running" }, version: work.state_version };
-  }
-
-  async postWorkInstruction(workId: string, input: WorkInstructionInput, command: CommandMeta): Promise<CommandResult<WorkInstructionResult>> {
-    this.assertWritable();
-    const work = this.requireWork(workId);
-    if (work.state === "memo" || work.state === "ready") {
-      throw new ApiError(409, "invalid_state_transition", "Workを開始してから指示を送ってください。", { state: work.state });
-    }
-    if (work.state === "cancelled") throw new ApiError(409, "work_cancelled", "このWorkはキャンセルされているため指示を送れません。", { state: work.state });
-    if (work.state === "completed") {
-      if (input.reopen !== true) throw new ApiError(409, "work_reopen_required", "このWorkは完了しています。指示を送るには再開してください。", { state: work.state });
-      await this.reopenWork(workId, input.body, command);
-    }
-    const conversationId = work.conversation_id ?? createUlid();
-    work.conversation_id = conversationId;
-    const posted = await this.postMessage(conversationId, { body: input.body, attachment_ids: input.attachment_ids ?? [] }, command);
-    return { data: { work_id: workId, conversation_id: conversationId, message_id: posted.data.message_id, status: "queued" }, version: posted.version };
-  }
-
-  async updateWork(workId: string, input: { title?: string; summary?: string }, command: CommandMeta): Promise<CommandResult<{
-    work_id: string;
-    title: string;
-    summary: string;
-    state: WorkState;
-    changed_fields: readonly ("title" | "summary")[];
-    replan_queued: boolean;
-  }>> {
-    this.assertWritable();
-    const work = this.requireWork(workId);
-    this.assertVersion(work.state_version, command.expected_version);
-    if (work.state === "completed" || work.state === "cancelled") {
-      throw new ApiError(409, "invalid_state_transition", "完了またはキャンセル済みのWorkは編集できません。", { state: work.state });
-    }
-    const changed_fields: ("title" | "summary")[] = [];
-    if (input.title !== undefined && input.title !== work.title) {
-      work.title = input.title;
-      changed_fields.push("title");
-    }
-    if (input.summary !== undefined && input.summary !== work.summary) {
-      work.summary = input.summary;
-      changed_fields.push("summary");
-    }
-    if (changed_fields.length > 0) {
-      work.updated_at = utcNow();
-      this.emit("work.updated", { work_id: workId, changed_fields, title: work.title });
-    }
-    return {
-      data: { work_id: workId, title: work.title, summary: work.summary, state: work.state, changed_fields, replan_queued: false },
-      version: work.state_version,
-    };
-  }
-
-  async archiveWork(workId: string, command: CommandMeta): Promise<CommandResult<{ work_id: string; archived_at: string | null }>> {
-    this.assertWritable();
-    const work = this.requireWork(workId);
-    this.assertVersion(work.state_version, command.expected_version);
-    if (work.state !== "completed" && work.state !== "cancelled") {
-      throw new ApiError(409, "invalid_state_transition", "完了またはキャンセル済みのWorkだけ操作できます。", { state: work.state });
-    }
-    const taskIds = new Set(work.tasks);
-    if ([...this.agents.values()].some((run) => run.task_id !== null && taskIds.has(run.task_id) && ["launch_pending", "spawned", "running", "cancel_requested"].includes(run.status))) {
-      throw new ApiError(409, "work_has_active_agents", "稼働中のAgentが残っているため操作できません。", { work_id: workId });
-    }
-    if ([...this.decisions.values()].some((decision) => decision.work_id === workId && decision.status === "open")) {
-      throw new ApiError(409, "work_has_open_decisions", "未解決のDecisionが残っているため操作できません。", { work_id: workId });
-    }
-    if (work.archived_at === null) {
-      work.archived_at = utcNow();
-      this.emit("work.archived", { work_id: workId, archived_at: work.archived_at });
-    }
-    return { request_id: command.request_id, data: { work_id: workId, archived_at: work.archived_at }, version: work.state_version };
-  }
-
-  async unarchiveWork(workId: string, command: CommandMeta): Promise<CommandResult<{ work_id: string; archived_at: null }>> {
-    this.assertWritable();
-    const work = this.requireWork(workId);
-    this.assertVersion(work.state_version, command.expected_version);
-    if (work.state !== "completed" && work.state !== "cancelled") {
-      throw new ApiError(409, "invalid_state_transition", "完了またはキャンセル済みのWorkだけ操作できます。", { state: work.state });
-    }
-    if (work.archived_at !== null) {
-      work.archived_at = null;
-      this.emit("work.unarchived", { work_id: workId, archived_at: null });
-    }
-    return { request_id: command.request_id, data: { work_id: workId, archived_at: null }, version: work.state_version };
-  }
-
-  async deleteWork(workId: string, command: CommandMeta): Promise<CommandResult<{ work_id: string; deleted: true }>> {
-    this.assertWritable();
-    const work = this.requireWork(workId);
-    this.assertVersion(work.state_version, command.expected_version);
-    if (work.state !== "completed" && work.state !== "cancelled") {
-      throw new ApiError(409, "invalid_state_transition", "完了またはキャンセル済みのWorkだけ操作できます。", { state: work.state });
-    }
-    const taskIds = new Set(work.tasks);
-    if ([...this.agents.values()].some((run) => run.task_id !== null && taskIds.has(run.task_id) && ["launch_pending", "spawned", "running", "cancel_requested"].includes(run.status))) {
-      throw new ApiError(409, "work_has_active_agents", "稼働中のAgentが残っているため削除できません。", { work_id: workId });
-    }
-    if ([...this.decisions.values()].some((decision) => decision.work_id === workId && decision.status === "open")) {
-      throw new ApiError(409, "work_has_open_decisions", "未解決のDecisionが残っているため削除できません。", { work_id: workId });
-    }
-    for (const taskId of taskIds) this.tasks.delete(taskId);
-    for (const [runId, run] of this.agents) if (run.task_id !== null && taskIds.has(run.task_id)) this.agents.delete(runId);
-    for (const [decisionId, decision] of this.decisions) if (decision.work_id === workId) this.decisions.delete(decisionId);
-    this.works.delete(workId);
-    for (let i = this.eventLog.length - 1; i >= 0; i--) if (this.eventLog[i].work_id === workId) this.eventLog.splice(i, 1);
-    return { request_id: command.request_id, data: { work_id: workId, deleted: true }, version: work.state_version };
-  }
-
-  async listTasks(workId: string, query: { status: string | null; limit: number; cursor: string | null }): Promise<Page<TaskSummary>> {
-    const work = this.requireWork(workId);
-    const items = work.tasks
-      .map((taskId) => this.tasks.get(taskId))
-      .filter((task): task is StoredTask => task !== undefined)
-      .filter((task) => matchesFilter(query.status, task.status))
-      .map((task) => this.toTaskSummary(task));
-    return page(items, query.limit, query.cursor);
-  }
-
-  async getTask(taskId: string, includeReport: boolean): Promise<{ data: TaskDetail; report: Report | null; version: number }> {
-    const task = this.tasks.get(taskId);
-    if (!task) {
-      throw new ApiError(404, "task_not_found", "指定されたTaskが見つかりません。IDを確認して再試行してください.");
-    }
-    return { data: this.toTaskDetail(task), report: includeReport ? task.report : null, version: task.state_version };
-  }
-
-  async listDecisions(query: { status: "open" | "resolved" | "cancelled"; limit: number; cursor: string | null }): Promise<Page<Decision>> {
-    const items = [...this.decisions.values()].filter((decision) => decision.status === query.status);
-    return page(items, query.limit, query.cursor);
-  }
-
-  async answerDecision(decisionId: string, _input: { answer: string; option_key: string | null; source: "web" | "slack" | "discord" | "advisor"; source_message_id: string | null }, command: CommandMeta): Promise<CommandResult<{
-    decision_id: string;
-    status: "resolved";
-    winner: boolean;
-    resumed_task_ids: string[];
-  }>> {
-    this.assertWritable();
-    const decision = this.decisions.get(decisionId);
-    if (!decision) {
-      throw new ApiError(404, "decision_not_found", "指定されたDecisionが見つかりません。IDを確認して再試行してください。");
-    }
-    this.assertVersion(decision.state_version, command.expected_version);
-    if (decision.status !== "open") {
-      throw new ApiError(409, "decision_already_resolved", "この判断はすでに回答済みです。現在の回答を確認してください。");
-    }
-    if (_input.option_key === null && decision.allow_free_text !== true) {
-      throw new ApiError(400, "validation_error", "このDecisionは自由記述の回答を許可していません。保存済みの選択肢を指定してください。", {
-        decision_id: decision.id,
-        allow_free_text: false,
-      });
-    }
-    if (_input.option_key !== null) {
-      const selected = decision.options.find((option) => option.key === _input.option_key);
-      if (!selected) {
-        throw new ApiError(400, "validation_error", "選択されたDecision optionが保存済みの選択肢にありません。", {
-          decision_id: decision.id,
-          option_key: _input.option_key,
-        });
-      }
-      if (_input.answer !== selected.label) {
-        throw new ApiError(400, "validation_error", "answerは選択したoptionのlabelと一致させてください。", {
-          decision_id: decision.id,
-          option_key: _input.option_key,
-        });
-      }
-    }
-    decision.status = "resolved";
-    decision.state_version += 1;
-    this.emit("decision.resolved", { decision_id: decisionId, status: decision.status });
-    return { data: { decision_id: decisionId, status: "resolved", winner: true, resumed_task_ids: decision.blocked_task_ids }, version: decision.state_version };
-  }
-
-  async listAgents(query: { status: string | null; work_id: string | null; limit: number; cursor: string | null }): Promise<Page<AgentRun>> {
-    const runs = [...this.agents.values()];
-    const items = runs.filter((agent) => matchesFilter(query.status, agent.status));
-    if (query.work_id !== null) {
-      const work = this.works.get(query.work_id);
-      if (!work) return page([], query.limit, query.cursor);
-
-      const taskWorkIds = new Map<string, string>();
-      for (const candidate of this.works.values()) {
-        for (const taskId of candidate.tasks) taskWorkIds.set(taskId, candidate.id);
-      }
-      const runsById = new Map(runs.map((agent) => [agent.id, agent]));
-      const workMembership = new Map<string, boolean>();
-      const belongsToWork = (agent: AgentRun, ancestors = new Set<string>()): boolean => {
-        const cached = workMembership.get(agent.id);
-        if (cached !== undefined) return cached;
-        if (ancestors.has(agent.id)) return false;
-
-        if (agent.task_id !== null) {
-          const taskWorkId = taskWorkIds.get(agent.task_id);
-          if (taskWorkId !== undefined) {
-            const belongs = taskWorkId === work.id;
-            workMembership.set(agent.id, belongs);
-            return belongs;
-          }
-        }
-
-        ancestors.add(agent.id);
-        const parent = agent.parent_agent_id === null ? undefined : runsById.get(agent.parent_agent_id);
-        const belongs = parent !== undefined && belongsToWork(parent, ancestors);
-        ancestors.delete(agent.id);
-        workMembership.set(agent.id, belongs);
-        return belongs;
-      };
-
-      return page(items.filter((agent) => belongsToWork(agent)), query.limit, query.cursor);
-    }
-    return page(items, query.limit, query.cursor);
-  }
-
-  async cancelAgent(agentRunId: string, _reason: string, force: boolean, command: CommandMeta): Promise<CommandResult<{
-    agent_run_id: string;
-    status: "cancel_requested" | "cancelled";
-  }>> {
-    this.assertWritable();
-    const agent = this.agents.get(agentRunId);
-    if (!agent) {
-      throw new ApiError(404, "agent_run_not_found", "指定されたAgent Runが見つかりません。IDを確認して再試行してください。");
-    }
-    if (agent.status === "completed" || agent.status === "failed" || agent.status === "cancelled") {
-      throw new ApiError(409, "invalid_state_transition", "終了済みのAgent Runは中止できません。現在の状態を確認してください。", { status: agent.status });
-    }
-    const status: "cancel_requested" | "cancelled" = force ? "cancelled" : "cancel_requested";
-    agent.status = status;
-    if (agent.pid !== null) {
-      try {
-        process.kill(agent.pid, force ? "SIGKILL" : "SIGTERM");
-      } catch {
-        // Best-effort: the process may already have exited.
-      }
-    }
-    if (force) {
-      agent.ended_at = utcNow();
-    }
-    this.emit("agent.cancelled", { agent_run_id: agentRunId, status });
-    return { data: { agent_run_id: agentRunId, status }, version: command.expected_version };
-  }
-
-  async listProjects(query: { limit: number; cursor: string | null }): Promise<Page<Project>> {
-    return page([...this.projects.values()], query.limit, query.cursor);
-  }
-
-  // TODO: Implement artifact persistence for standalone MemoryCore; production Core reads artifacts from the database.
-  listArtifacts(_workId: string): Array<{ id: string; work_id: string; task_id: string | null; path: string; kind: string; created_at: string }> {
-    return [];
-  }
-
-  async createProject(input: CreateProjectInput, _command: CommandMeta): Promise<{ data: Project; version: number }> {
-    this.assertWritable();
-    for (const existing of this.projects.values()) {
-      if (existing.canonical_path === input.canonical_path) {
-        throw new ApiError(409, "project_path_conflict", "指定されたcanonical_pathには既にProjectが存在します。既存のProjectを利用するか、別のパスを指定してください。", { canonical_path: input.canonical_path });
-      }
-    }
-    const id = createUlid();
-    const project: Project = {
-      id,
-      name: input.name,
-      canonical_path: input.canonical_path,
-      base_branch: input.base_branch,
-      auto_push: false,
-      worktree_setup_command: [],
-      worktree_refresh_command: [],
-      post_merge_command: input.post_merge_command ? [...input.post_merge_command] : null,
-      post_merge_install_command: input.post_merge_install_command ? [...input.post_merge_install_command] : null,
-      required_test_command: input.required_test_command?.length ? [...input.required_test_command] : null,
-      test_run: input.test_run ?? null,
-      allowed_roots: [...input.allowed_roots],
-      verification_plan: input.verification_plan.map((command) => ({ ...command })),
-    };
-    this.projects.set(id, project);
-    this.emit("project.created", { project_id: id });
-    return { data: project, version: 0 };
-  }
-
-  async updateProject(projectId: string, input: UpdateProjectInput, _command: CommandMeta): Promise<{ data: Project; version: number }> {
-    this.assertWritable();
-    const project = this.projects.get(projectId);
-    if (!project) throw new ApiError(404, "project_not_found", "指定されたProjectが見つかりません。Project一覧を再読み込みしてください。", { resource: "project", id: projectId });
-    const name = input.name?.trim() ?? project.name;
-    const canonicalPath = input.canonical_path ?? project.canonical_path;
-    const autoPush = input.auto_push ?? project.auto_push;
-    const advisorWindowEnabled = input.advisor_window_enabled ?? project.advisor_window_enabled ?? false;
-    const setupCommand = input.worktree_setup_command ?? project.worktree_setup_command;
-    const refreshCommand = input.worktree_refresh_command ?? project.worktree_refresh_command;
-    const postMerge = input.post_merge_command !== undefined ? input.post_merge_command : project.post_merge_command;
-    const postMergeInstall = input.post_merge_install_command !== undefined ? input.post_merge_install_command : project.post_merge_install_command;
-    const requiredTest = input.required_test_command !== undefined ? input.required_test_command : project.required_test_command;
-    const testRun = input.test_run !== undefined ? input.test_run : project.test_run;
-    if (
-      name === project.name
-      && canonicalPath === project.canonical_path
-      && autoPush === project.auto_push
-      && advisorWindowEnabled === (project.advisor_window_enabled ?? false)
-      && JSON.stringify(setupCommand) === JSON.stringify(project.worktree_setup_command)
-      && JSON.stringify(refreshCommand) === JSON.stringify(project.worktree_refresh_command)
-      && JSON.stringify(postMerge) === JSON.stringify(project.post_merge_command)
-      && JSON.stringify(postMergeInstall) === JSON.stringify(project.post_merge_install_command)
-      && JSON.stringify(requiredTest) === JSON.stringify(project.required_test_command)
-      && JSON.stringify(testRun) === JSON.stringify(project.test_run)
-    ) return { data: project, version: 0 };
-    for (const existing of this.projects.values()) {
-      if (existing.id !== projectId && existing.canonical_path === canonicalPath) {
-        throw new ApiError(400, "validation_error", "指定されたcanonical_pathには既にProjectが存在します。別のパスを指定してください。", { canonical_path: canonicalPath, project_id: existing.id });
-      }
-    }
-    const allowedRoots = input.canonical_path === undefined
-      ? project.allowed_roots
-      : [...new Set([canonicalPath, ...project.allowed_roots.filter((path) => path !== project.canonical_path)])];
-    const updated: Project = {
-      ...project,
-      name,
-      canonical_path: canonicalPath,
-      base_branch: input.canonical_path === undefined ? project.base_branch : input.base_branch ?? project.base_branch,
-      auto_push: autoPush,
-      advisor_window_enabled: advisorWindowEnabled,
-      worktree_setup_command: [...setupCommand],
-      worktree_refresh_command: [...refreshCommand],
-      post_merge_command: postMerge === null ? null : [...postMerge],
-      post_merge_install_command: postMergeInstall === null ? null : [...postMergeInstall],
-      required_test_command: requiredTest === null || requiredTest.length === 0 ? null : [...requiredTest],
-      test_run: testRun,
-      allowed_roots: allowedRoots,
-    };
-    this.projects.set(projectId, updated);
-    this.emit("project.updated", { project_id: projectId });
-    return { data: updated, version: 0 };
-  }
-
-  async getProjectDeletionImpact(projectId: string): Promise<ProjectDeletionImpact> {
-    if (!this.projects.has(projectId)) throw new ApiError(404, "project_not_found", "指定されたProjectが見つかりません。Project一覧を再読み込みしてください。", { resource: "project", id: projectId });
-    return {
-      project_id: projectId,
-      work_count: 0,
-      running_work_count: 0,
-      active_agent_count: 0,
-      backlog_item_count: 0,
-      running_works: [],
-      blockers: [],
-      deletable: true,
-    };
-  }
-
-  async deleteProject(projectId: string, input: DeleteProjectInput, _command: CommandMeta): Promise<{ data: DeleteProjectResult; version: number }> {
-    this.assertWritable();
-    if (!this.projects.has(projectId)) throw new ApiError(404, "project_not_found", "指定されたProjectが見つかりません。Project一覧を再読み込みしてください。", { resource: "project", id: projectId });
-    const impact = await this.getProjectDeletionImpact(projectId);
-    if (input.confirmed_work_count !== impact.work_count) {
-      throw new ApiError(409, "project_deletion_impact_changed", "確認後にこのProjectのWork数が変わりました。", { project_id: projectId, confirmed_work_count: input.confirmed_work_count, impact });
-    }
-    this.projects.delete(projectId);
-    this.emit("project.deleted", { project_id: projectId });
-    return { data: { project_id: projectId, deleted: true, detached_work_count: 0, detached_backlog_item_count: 0, detached_works: [] }, version: 0 };
-  }
-
-  async getModelSettings(): Promise<{ version: number; roles: RoleModelSetting[] }> {
-    return { version: this.modelSettings.version, roles: this.modelSettings.roles.map((role) => ({ ...role })) };
-  }
-
-  async updateModelSettings(input: { roles: RoleModelSettingInput[] }, command: CommandMeta): Promise<CommandResult<{ roles: RoleModelSetting[] }>> {
-    this.assertWritable();
-    this.assertVersion(this.modelSettings.version, command.expected_version);
-    const previousByRole = new Map(this.modelSettings.roles.map((role) => [role.role, role]));
-    const roles = input.roles.map((role) => ({
-      ...role,
-      catalog_version: previousByRole.get(role.role)?.catalog_version ?? "1.0.0",
-    }));
-    this.modelSettings = { version: this.modelSettings.version + 1, roles };
-    this.emit("settings.model_updated", {});
-    return { data: { roles: roles.map((role) => ({ ...role })) }, version: this.modelSettings.version };
-  }
-
-  async getModelPresets(): Promise<{ version: number; presets: ModelPreset[] }> {
-    return { version: this.modelPresets.version, presets: this.modelPresets.presets.map(cloneModelPreset) };
-  }
-
-  async createModelPreset(input: { name: string; roles: RoleModelSettingInput[] }, command: CommandMeta): Promise<CommandResult<{ preset: ModelPreset; presets: ModelPreset[] }>> {
-    this.assertWritable();
-    this.assertVersion(this.modelPresets.version, command.expected_version);
-    if (this.modelPresets.presets.length >= 20) throw new ApiError(400, "validation_error", "Model presets are limited to 20.", { field: "presets" });
-    const name = validateMemoryPresetName(input.name, this.modelPresets.presets);
-    const roles = validateMemoryPresetRoles(input.roles, this.modelSettings.roles);
-    const now = utcNow();
-    const preset = { id: createUlid(), name, roles, created_at: now, updated_at: now };
-    this.modelPresets.presets.push(preset);
-    this.modelPresets.version += 1;
-    this.emit("settings.model_presets_updated", {});
-    return { data: { preset: cloneModelPreset(preset), presets: this.modelPresets.presets.map(cloneModelPreset) }, version: this.modelPresets.version };
-  }
-
-  async updateModelPreset(id: string, input: { name?: string; roles?: RoleModelSettingInput[] }, command: CommandMeta): Promise<CommandResult<{ preset: ModelPreset; presets: ModelPreset[] }>> {
-    this.assertWritable();
-    this.assertVersion(this.modelPresets.version, command.expected_version);
-    const index = this.modelPresets.presets.findIndex((preset) => preset.id === id);
-    if (index < 0) throw new ApiError(404, "model_preset_not_found", `Model preset ${id} was not found.`);
-    if (input.name === undefined && input.roles === undefined) throw new ApiError(400, "validation_error", "Provide a name or roles to update.");
-    const previous = this.modelPresets.presets[index]!;
-    const name = input.name === undefined ? previous.name : validateMemoryPresetName(input.name, this.modelPresets.presets, id);
-    const roles = input.roles === undefined ? previous.roles : validateMemoryPresetRoles(input.roles, previous.roles);
-    const preset = { ...previous, name, roles, updated_at: utcNow() };
-    this.modelPresets.presets[index] = preset;
-    this.modelPresets.version += 1;
-    this.emit("settings.model_presets_updated", {});
-    return { data: { preset: cloneModelPreset(preset), presets: this.modelPresets.presets.map(cloneModelPreset) }, version: this.modelPresets.version };
-  }
-
-  async deleteModelPreset(id: string, command: CommandMeta): Promise<CommandResult<{ presets: ModelPreset[] }>> {
-    this.assertWritable();
-    this.assertVersion(this.modelPresets.version, command.expected_version);
-    const index = this.modelPresets.presets.findIndex((preset) => preset.id === id);
-    if (index < 0) throw new ApiError(404, "model_preset_not_found", `Model preset ${id} was not found.`);
-    this.modelPresets.presets.splice(index, 1);
-    this.modelPresets.version += 1;
-    this.emit("settings.model_presets_updated", {});
-    return { data: { presets: this.modelPresets.presets.map(cloneModelPreset) }, version: this.modelPresets.version };
-  }
-
-  async listMessages(conversationId: string, query: { limit: number; cursor: string | null }): Promise<Page<Message>> {
-    const messages = this.conversationMessages.get(conversationId);
-    if (!messages) {
-      throw new ApiError(404, "conversation_not_found", "指定されたConversationが見つかりません。IDを確認して再試行してください。");
-    }
-    return page(messages, query.limit, query.cursor);
-  }
-
-  async ingestConversation(_conversationId: string): Promise<{ path: string }> {
-    throw new ApiError(503, "dependency_unavailable", "スタンドアロンモードではKnowledge ingestionを利用できません。外部Coreモードで起動してください。");
-  }
-
-  async postMessage(conversationId: string, input: PostMessageInput, _command: CommandMeta): Promise<CommandResult<{ message_id: string; advisor_run_id: string | null }>> {
-    this.assertWritable();
-    const messages = this.conversationMessages.get(conversationId) ?? [];
-    const message: Message = {
-      id: createUlid(),
-      conversation_id: conversationId,
-      source: "web",
-      body: input.body,
-      attachment_ids: [...input.attachment_ids],
-      created_at: utcNow(),
-    };
-    messages.push(message);
-    this.conversationMessages.set(conversationId, messages);
-    this.emit("message.posted", { conversation_id: conversationId, message_id: message.id });
-    return { data: { message_id: message.id, advisor_run_id: null }, version: messages.length };
-  }
-
-  async ingestInbound(ownerId: string, input: InboundMessageInput, command: CommandMeta): Promise<CommandResult<InboundMessageResult>> {
-    const conversationId = `${input.provider}:${input.conversation_hint.thread_ref ?? input.thread_id ?? input.channel_id}`;
-    const result = await this.postMessage(conversationId, { body: input.text, attachment_ids: input.attachment_ids }, command);
-    if (input.status_reply === undefined) void this.advisorRespond(conversationId, result.data.message_id, {
-      channel: input.provider,
-      channel_id: input.channel_id,
-      ref: input.conversation_hint.thread_ref ?? input.thread_id ?? undefined,
-    });
-    return {
-      data: {
-        request_id: command.request_id,
-        ack_id: createUlid(),
-        message_id: result.data.message_id,
-        event_id: null,
-        deduplicated: false,
-        status: "accepted",
-        conversation_id: conversationId,
-        advisor_run_id: null,
-      },
-      version: result.version,
-    };
-  }
-
-  async ensureConnectorAccount(_ownerId: string, _provider: "slack" | "discord", accountId: string): Promise<string> {
-    return accountId;
-  }
-
-  async registerInboundUpload(ownerId: string, input: InboundUploadRegisterInput, _command: CommandMeta): Promise<CommandResult<InboundUploadTicket>> {
-    const uploadId = createUlid();
-    // MemoryCore has no real conversations table: a hint synthesizes the
-    // same kind of id ingestInbound() would land the eventual message in
-    // (see line ~500), so an upload registered ahead of its message still
-    // groups with it once the message arrives.
-    const conversationId = input.conversation_id
-      ?? `${input.provider}:${input.conversation_hint?.thread_ref ?? input.conversation_hint?.dm_ref ?? uploadId}`;
-    const ticket: InboundUploadTicket = { upload_id: uploadId, put_path: `/api/v1/inbound/uploads/${uploadId}/content`, expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(), max_bytes: MAX_UPLOAD_BYTES, conversation_id: conversationId };
-    this.uploads.set(uploadId, { owner_id: ownerId, input, status: "registered" });
-    return { data: ticket, version: 0 };
-  }
-
-  async putInboundUpload(ownerId: string, uploadId: string, input: { content: Buffer; sha256: string; mime: string }): Promise<InboundUploadContentResult> {
-    const upload = this.uploads.get(uploadId);
-    if (!upload || upload.owner_id !== ownerId) throw new ApiError(404, "not_found", "指定されたuploadが見つかりません。");
-    if (upload.input.declared_bytes !== input.content.byteLength) throw new ApiError(400, "validation_error", "uploaded bytesがdeclared_bytesと一致しません。");
-    const digest = createHash("sha256").update(input.content).digest("hex");
-    if (digest !== input.sha256) throw new ApiError(409, "upload_checksum_mismatch", "upload checksumが一致しません。");
-    upload.content = input.content;
-    upload.sha256 = digest;
-    upload.mime = input.mime;
-    upload.status = "receiving";
-    return { upload_id: uploadId, bytes: input.content.byteLength, sha256: digest, status: "receiving" };
-  }
-
-  async completeInboundUpload(ownerId: string, uploadId: string, input: InboundUploadCompleteInput, _command: CommandMeta): Promise<CommandResult<InboundUploadCompleteResult>> {
-    const upload = this.uploads.get(uploadId);
-    if (!upload || upload.owner_id !== ownerId || !upload.content || upload.status !== "receiving") throw new ApiError(404, "not_found", "指定されたuploadが見つかりません。");
-    if (upload.content.byteLength !== input.bytes || upload.sha256 !== input.sha256) throw new ApiError(409, "upload_checksum_mismatch", "upload checksumが一致しません。");
-    const artifactId = createUlid();
-    const status = /(?:x-executable|x-dosexec|x-shellscript)/iu.test(input.mime) ? "quarantined" : "stored";
-    upload.status = status;
-    return { data: { upload_id: uploadId, artifact_id: artifactId, status, sha256: input.sha256, bytes: input.bytes, mime: input.mime }, version: 0 };
-  }
-
-  async advisorRespond(conversationId: string, _messageId: string, origin?: AdvisorOrigin): Promise<void> {
-    const messages = this.conversationMessages.get(conversationId) ?? [];
-    if (messages.length === 0) return;
-    const advisorReply: Message = {
-      id: createUlid(),
-      conversation_id: conversationId,
-      source: "advisor",
-      body: "This is a stub advisor response.",
-      attachment_ids: [],
-      created_at: utcNow(),
-    };
-    messages.push(advisorReply);
-    this.conversationMessages.set(conversationId, messages);
-    this.emit("advisor.responded", {
-      conversation_id: conversationId,
-      message_id: advisorReply.id,
-      origin: origin ?? { channel: "web" },
-    });
-  }
-
-  async restartAdvisorSession(_ownerId: string, _windowKey?: string): Promise<void> {
-    // Standalone mode has no persistent Advisor runtime or session ledger.
-  }
-
-  async getAdvisorActivity(_sessionId: string, _conversationId: string | null): Promise<SessionActivity | null> {
-    return null;
-  }
-
-  async interruptAdvisorTurn(_ownerId: string, _windowKey?: string): Promise<{ status: "interrupting" | "not_running" | "unsupported"; turn_id: string | null }> {
-    return { status: "not_running", turn_id: null };
-  }
-
-  async getHybridMode(): Promise<boolean> {
-    return this.hybridMode;
-  }
-
-  async setHybridMode(enabled: boolean): Promise<boolean> {
-    this.hybridMode = enabled;
-    return enabled;
-  }
-
-  async getLanguage(): Promise<OwnerLanguage> {
-    return this.language;
-  }
-
-  async setLanguage(language: OwnerLanguage): Promise<OwnerLanguage> {
-    this.language = language;
-    return language;
-  }
-
-  async recordAgentResearch(
-    _agent: GuardTokenAgent,
-    _capture: WebResearchCapture,
-  ): Promise<{ readonly accepted: boolean; readonly reason?: string }> {
-    return { accepted: false, reason: "unavailable" };
-  }
-
-  async getProcessSkillsSettings(): Promise<ProcessSkillsSettingsSnapshot> {
-    return detectProcessSkillsSettings(this.processSkillsSettings);
-  }
-
-  async setProcessSkillsSettings(input: ProcessSkillsSettingsInput): Promise<ProcessSkillsSettingsSnapshot> {
-    validateProcessSkillsSettings(input);
-    this.processSkillsSettings = { enabled: input.enabled, path: input.path };
-    return detectProcessSkillsSettings(this.processSkillsSettings);
-  }
-
-  async getKnowledgeAutomationSettings(): Promise<KnowledgeAutomationSnapshot> {
-    return knowledgeAutomationSnapshot(this.knowledgeAutomationSettings);
-  }
-
-  async setKnowledgeAutomationSettings(input: KnowledgeAutomationSettings): Promise<KnowledgeAutomationSnapshot> {
-    this.knowledgeAutomationSettings = validateKnowledgeAutomationSettingsInput(input);
-    return knowledgeAutomationSnapshot(this.knowledgeAutomationSettings);
-  }
-
-  async getTypesafeApiKey(): Promise<string> {
-    return "";
-  }
-
-  async setTypesafeApiKey(key: string): Promise<string> {
-    return key;
-  }
-
-  async getAdvisorPersona(): Promise<string> {
-    return this.advisorPersona;
-  }
-
-  async setAdvisorPersona(persona: string): Promise<string> {
-    this.advisorPersona = persona;
-    return persona;
-  }
-
-  async getAdvisorFolders(): Promise<import("./types.js").AdvisorFoldersSnapshot> {
-    const defaults = advisorFolderDefaults(this.options.dataDir ?? resolveDataDir(this.options.owlRoot ?? defaultCoreOwlRoot()));
-    return { shared_dir: this.advisorSharedDir || defaults.sharedDir, screenshot_dir: this.advisorScreenshotDir || defaults.screenshotDir,
-      defaults: { shared_dir: defaults.sharedDir, screenshot_dir: defaults.screenshotDir },
-      custom: { shared_dir: !!this.advisorSharedDir, screenshot_dir: !!this.advisorScreenshotDir } };
-  }
-
-  async setAdvisorFolders(sharedDir: string, screenshotDir: string): Promise<import("./types.js").AdvisorFoldersSnapshot> {
-    const shared = normalizeAdvisorFolder(sharedDir);
-    const screenshot = normalizeAdvisorFolder(screenshotDir);
-    const defaults = advisorFolderDefaults(this.options.dataDir ?? resolveDataDir(this.options.owlRoot ?? defaultCoreOwlRoot()));
-    if (!isGitIgnoredDirectory(shared || defaults.sharedDir)) throw new AdvisorFolderError("tracked");
-    ensureAdvisorSharedDir(shared || defaults.sharedDir);
-    this.advisorSharedDir = shared;
-    this.advisorScreenshotDir = screenshot;
-    return this.getAdvisorFolders();
-  }
-
-  private fileDestinationSettings: import("./app-settings-store.js").FileDestinationSettings = { preferredProvider: null, defaultDestination: null };
-
-  async getAdvisorFileDestinationSettings(): Promise<import("./app-settings-store.js").FileDestinationSettings> {
-    return parseFileDestinationSettings(this.fileDestinationSettings);
-  }
-
-  async setAdvisorFileDestinationSettings(input: import("./app-settings-store.js").FileDestinationSettings): Promise<import("./app-settings-store.js").FileDestinationSettings> {
-    this.fileDestinationSettings = parseFileDestinationSettings(input);
-    return this.getAdvisorFileDestinationSettings();
-  }
-
-  async clearConversation(conversationId: string): Promise<{ cleared: boolean }> {
-    const existed = this.conversationMessages.has(conversationId);
-    if (existed) {
-      this.conversationMessages.set(conversationId, []);
-    }
-    return { cleared: existed };
-  }
-
-  private activeConversationId: string | null = null;
-
-  async getActiveConversation(): Promise<{ conversation_id: string }> {
-    if (!this.activeConversationId) {
-      this.activeConversationId = createUlid();
-    }
-    return { conversation_id: this.activeConversationId };
-  }
-
-  async listProviders(): Promise<DetectedProvider[]> {
-    return [];
-  }
-
-  async listProviderPauses(): Promise<ProviderPauseView[]> {
-    return [];
-  }
-
-  async resumeProviderPause(provider: string): Promise<ProviderPauseView | null> {
-    throw new ApiError(404, "provider_pause_not_found", `プロバイダーの一時停止が見つかりません。 / The provider pause was not found: ${provider}`);
-  }
-
-  async getProvider(_id: string): Promise<ProviderConfigRecord | null> {
-    return null;
-  }
-
-  async saveProvider(id: string, input: SaveProviderInput): Promise<ProviderConfigRecord> {
-    if (input.displayName.trim().length === 0) {
-      throw new ApiError(400, "validation_error", "displayNameは空にできません。Provider名を指定してください。");
-    }
-    return { id, ...input, isBuiltin: false };
-  }
-
-  async deleteProvider(_id: string): Promise<{ deleted: boolean }> {
-    return { deleted: false };
-  }
-
-  async testProvider(_id: string): Promise<{ ok: boolean; detail: string }> {
-    return { ok: false, detail: coreText(this.language, "スタンドアロンモードでは接続テストを実行できません。外部コアモードで起動してください。", "Connection tests are unavailable in standalone mode. Start Owl in external Core mode.") };
-  }
-
-  async getProviderModels(): Promise<Record<string, string[]>> { return {}; }
-
-  async setProviderModels(_providerId: string, models: string[]): Promise<string[]> { return [...models]; }
-
-    async getIntegrations(): Promise<IntegrationStatus[]> {
-    return [];
-  }
-
-  async saveIntegration(_provider: IntegrationProvider, _config: IntegrationConfigPatch, _command: CommandMeta): Promise<{ data: IntegrationStatus; version: number }> {
-    throw new ApiError(503, "dependency_unavailable", "スタンドアロンモードでは連携設定を保存できません。外部コアモードで起動してください。");
-  }
-
-  async testIntegration(_provider: IntegrationProvider): Promise<IntegrationTestResult> {
-    throw new ApiError(503, "dependency_unavailable", "スタンドアロンモードでは接続テストを実行できません。外部コアモードで起動してください。");
-  }
-
-  async deleteIntegration(_provider: IntegrationProvider, _command: CommandMeta): Promise<{ data: { provider: string }; version: number }> {
-    throw new ApiError(503, "dependency_unavailable", "スタンドアロンモードでは連携設定を削除できません。外部コアモードで起動してください。");
-  }
-
-  subscribe(listener: CoreEventListener): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
-  }
-
-  eventsAfter(cursor: number, limit?: number): CoreEvent[] {
-    return latestEvents(this.eventLog.filter((event) => event.sequence > cursor), limit);
-  }
-
-  eventsBefore(before: number | null, limit: number): CoreEvent[] {
-    const older = (before === null ? this.eventLog : this.eventLog.filter((event) => event.sequence < before)).filter(isActivityEvent);
-    return newestFirst(older, limit);
-  }
-
-  oldestEventSequence(): number | null {
-    return this.eventLog[0]?.sequence ?? null;
-  }
-
-  latestEventCursor(): string {
-    return this.eventLog.at(-1)?.cursor ?? "0";
-  }
-
-  activeAgentCount(): number {
-    const runner = this.options.agentRunner as Partial<AgentRunner>;
-    return typeof runner.activeCount === "function" ? runner.activeCount() : 0;
-  }
-
-  async shutdown(options: { force: boolean; timeoutMs: number }): Promise<void> {
-    this.shuttingDown = true;
-    const deadline = Date.now() + options.timeoutMs;
-    while (!options.force && this.activeAgentCount() > 0 && Date.now() < deadline) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 25));
-    }
-    if (!options.force && this.activeAgentCount() > 0) {
-      throw new ApiError(409, "core_not_ready", "稼働中のAgentが終了するまで停止を待機しましたが、まだ残っています。--forceで再実行できます。");
-    }
-    const runner = this.options.agentRunner as Partial<AgentRunner>;
-    if (typeof runner.stopAll === "function") {
-      await runner.stopAll(options.force);
-    }
-    const candidate = this.options.db as { close?: () => void } | null;
-    if (candidate && typeof candidate.close === "function") {
-      candidate.close();
-    }
-  }
-
-  private assertWritable(): void {
-    if (this.shuttingDown) {
-      throw new ApiError(503, "core_not_ready", "サーバーは停止処理中です。停止完了後に再試行してください。");
-    }
-  }
-
-  private assertVersion(current: number, expected: number): void {
-    if (current !== expected) {
-      throw new ApiError(409, "version_conflict", "状態が更新されています。最新の状態を取得してから再試行してください。", { expected_version: expected, current_version: current });
-    }
-  }
-
-  private requireWork(workId: string): StoredWork {
-    const work = this.works.get(workId);
-    if (!work) {
-      throw new ApiError(404, "work_not_found", "指定されたWorkが見つかりません。IDを確認して再試行してください。");
-    }
-    return work;
-  }
-
-  private toWorkSummary(work: StoredWork): WorkSummary {
-    const { id, display_number, title, state, state_version, updated_at, archived_at, project_id } = work;
-    return { id, display_number, title, state, state_version, updated_at, archived_at, project_id, prerequisite_wait: false, waiting_on: [] };
-  }
-
-  private toWorkDetail(work: StoredWork): WorkDetail {
-    const { tasks: taskIds, ...detail } = work;
-    const taskStates = taskIds.map((taskId) => this.tasks.get(taskId)?.status);
-    return { ...detail, prerequisite_wait: false, waiting_on: [], prerequisites: [], final_report: null, progress: progressFromTaskStates(work.id, taskStates) };
-  }
-
-  private toTaskSummary(task: StoredTask): TaskSummary {
-    const { id, work_id, title, status, type, state_version, updated_at } = task;
-    return { id, work_id, title, status, type, state_version, updated_at };
-  }
-
-  private toTaskDetail(task: StoredTask): TaskDetail {
-    const { report: _report, ...detail } = task;
-    return detail;
-  }
-
-  private emit(type: string, payload: JsonObject): void {
-    const event: CoreEvent = {
-      kind: "event",
-      event_id: createUlid(),
-      sequence: ++this.sequence,
-      cursor: String(this.sequence),
-      type,
-      schema_version: "1.0.0",
-      payload,
-    };
-    this.eventLog.push(event);
-    if (this.eventLog.length > 10000) this.eventLog.splice(0, this.eventLog.length - 10000);
-    for (const listener of this.listeners) {
-      listener(event);
-    }
-  }
-}
-
 /** Wires the persisted knowledge_dir setting into Core's knowledge location. */
 export function knowledgeStorageOptions(appSettings: AppSettingsStore): { read(): string; write(value: string): void } {
   return { read: () => appSettings.getKnowledgeDir(), write: (value) => { appSettings.setKnowledgeDir(value); } };
-}
-
-export function createCore(options: CreateCoreOptions): CorePort {
-  return new MemoryCore(options);
 }
 
 interface ExternalCoreModule {
@@ -1413,149 +174,8 @@ interface ExternalCommandResponse {
   version: number;
 }
 
-interface ExternalCore {
-  ruleStore?: unknown;
-  recordAgentResearch?(agent: GuardTokenAgent, capture: WebResearchCapture): Promise<{ readonly accepted: boolean; readonly reason?: string }>;
-  recordSkillReads?(input: {
-    readonly agent_run_id: string;
-    readonly tool_name: string;
-    readonly tool_input: Readonly<Record<string, unknown>>;
-    readonly cwd: string;
-    readonly normalized_segments?: readonly (readonly string[])[];
-  }): Promise<void>;
-  uploadWebAttachment?(ownerId: string, target: WebAttachmentTarget, file: WebAttachmentFile, command: { request_id: string; idempotency_key: string }): Promise<WebAttachmentResult>;
-  advisorRespond?(conversationId: string, messageId: string, origin?: AdvisorOrigin): Promise<void>;
-  advisorSessions?: AdvisorSessionsPort;
-  restartAdvisorSession?(ownerId: string, windowKey?: string): Promise<void>;
-  getAdvisorActivity?(sessionId: string, conversationId: string | null): SessionActivity | null;
-  interruptAdvisorTurn?(ownerId: string, windowKey?: string): Promise<{ status: "interrupting" | "not_running" | "unsupported"; turn_id: string | null }>;
-  getHybridMode?(): Promise<boolean>;
-  setHybridMode?(enabled: boolean): Promise<boolean>;
-  getSkillActivity?(days: number): unknown;
-  listSkills?(filter: { query?: string; state?: string; scope?: string; trial?: boolean }): readonly unknown[];
-  getSkill?(name: string): Promise<unknown>;
-  readSkillFile?(name: string, path: string): Promise<string>;
-  listSkillRevisions?(name: string): readonly unknown[];
-  getSkillRevision?(name: string, revisionId: string): unknown;
-  restoreSkill?(name: string, revisionId: string): Promise<{ revision_id: string; revision: number }>;
-  updateSkill?(name: string, patch: { state?: string; scope?: string }): Promise<unknown>;
-  listSkillProposals?(status?: string): readonly unknown[];
-  approveSkillProposal?(proposalId: string): Promise<unknown>;
-  rejectSkillProposal?(proposalId: string): Promise<unknown>;
-  listLearningJobs?(status?: string): readonly unknown[];
-  retryLearningJob?(jobId: string): Promise<void>;
-  runCuration?(input: JsonObject): Promise<unknown>;
-  startCurationInBackground?(input: JsonObject): Promise<unknown>;
-  retagKnowledgeNotes?(input: { dry_run: boolean; force?: boolean }): Promise<unknown>;
-  listCurationRuns?(query: JsonObject): { items: readonly unknown[]; next_cursor: string | null };
-  getCurationRun?(id: string): unknown;
-  listBacklogItems?(filter: { status?: string; project_id?: string; work_id?: string; limit?: number; offset?: number }): { items: readonly unknown[]; next_offset: number | null };
-  getAutoWorkSettings?(): { version: number; data: JsonObject };
-  updateAutoWorkSettings?(request: JsonObject): Promise<ExternalCommandResponse>;
-  listAutoWorkEvents?(filter: JsonObject): { items: readonly unknown[]; next_offset: number | null };
-  getAutoWorkEvent?(id: string): unknown;
-  runAutoWorkNow?(projectId: string, what: string): Promise<unknown>;
-  dismissBacklogItems?(request: JsonObject): Promise<ExternalCommandResponse>;
-  deleteBacklogItems?(request: JsonObject): Promise<ExternalCommandResponse>;
-  issueBacklogWork?(request: JsonObject): Promise<ExternalCommandResponse>;
-  linkBacklogItems?(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  receiveAutoWorkNotice?(request: JsonObject): Promise<ExternalCommandResponse>;
-  getSkillSettings?(): unknown;
-  setSkillSettings?(value: unknown): Promise<unknown>;
-  getLanguage?(): Promise<OwnerLanguage>;
-  setLanguage?(language: OwnerLanguage): Promise<OwnerLanguage>;
-  initializeLanguage?(language: OwnerLanguage): Promise<OwnerLanguage>;
-  getProcessSkillsSettings?(): Promise<ProcessSkillsSettingsSnapshot>;
-  setProcessSkillsSettings?(input: ProcessSkillsSettingsInput): Promise<ProcessSkillsSettingsSnapshot>;
-  getKnowledgeAutomationSettings?(): Promise<KnowledgeAutomationSnapshot>;
-  setKnowledgeAutomationSettings?(input: KnowledgeAutomationSettings): Promise<KnowledgeAutomationSnapshot>;
-  listProviderPauses?(): ProviderPauseView[];
-  resumeProviderPause?(provider: string): Promise<ProviderPauseView | null>;
-  dispatchChildRun?(parentAgentRunId: string, request: ChildDispatchRequest, requestKey: string): Promise<ChildDispatchResponse>;
-  waitChildRuns?(parentAgentRunId: string, request: ChildWaitRequest, signal: AbortSignal): Promise<ChildWaitResponse>;
-  listChildRuns?(filter: ChildRunListFilter): readonly ChildRunRecord[];
-  getChildRunSettings?(): ChildRunSettings;
-  setChildRunSettings?(settings: ChildRunSettings): ChildRunSettings | Promise<ChildRunSettings>;
-  start(): Promise<void>;
-  stop(options?: { force?: boolean; timeoutMs?: number }): Promise<void>;
-  /** Synchronous, non-throwing kill of Owl-owned Agent and Advisor processes; safe to call repeatedly. */
-  terminateOwnedProcessesImmediately?(): void;
-  status(): { services: readonly { name: string; state: string; pid: number | null }[]; mvp_scope: string; version: string };
-  subscribe(handler: (event: CoreEvent) => void | Promise<void>): () => void;
-  listEventsAfter?: (cursor?: string | number | null, limit?: number) => readonly CoreEvent[];
-  createWork(request: JsonObject): Promise<ExternalCommandResponse>;
-  listWorks(query: JsonObject): { data: readonly WorkSummary[]; cursor: string | null; has_more: boolean };
-  getWork(workId: string, query?: JsonObject): ExternalCommandResponse;
-  getWorkBranchStatus?(workId: string): Promise<WorkBranchStatus>;
-  getWorkDesigns?(workId: string): Promise<WorkDesignList>;
-  getWorkConversation?(workId: string, opts: { limit: number }): Promise<WorkConversation>;
-  getWorkAssurance?(workId: string): WorkAssurance | Promise<WorkAssurance>;
-  getWorkView?(workId: string, query: { conversation_limit?: number }): JsonObject;
-  getDecisionView?(decisionId: string): JsonObject;
-  getBoardView?(query: { archived: "exclude" | "only"; limit: number; cursor?: string | null }): JsonObject;
-  listLinkableWorks?(projectId: string | null, query: { limit: number; cursor?: string | null }): JsonObject;
-  getBacklogListView?(filter: { status?: string; project_id?: string; work_id?: string; issued_work_id?: string; limit?: number; offset?: number }): JsonObject;
-  getTokensView?(input: { period: "today" | "7d" | "30d"; top: number }): Promise<JsonObject>;
-  getWorkDesign?(workId: string, taskId: string): Promise<WorkDesignDetail | null>;
-  startWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  moveWorkToProject?(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  replaceWorkPrerequisites?(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  releaseWorkPrerequisiteWait?(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  pauseWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  resumeWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  resumeWorkOrRetryDecision(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  cancelWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  reopenWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  postWorkInstruction(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  updateWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  archiveWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  unarchiveWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  deleteWork(workId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  listTasks(workId: string, query?: JsonObject): { data: readonly TaskSummary[]; cursor: string | null; has_more: boolean };
-  getTask(taskId: string, query?: JsonObject): ExternalCommandResponse;
-  listDecisions(query?: JsonObject): { data: readonly Decision[]; cursor: string | null; has_more: boolean };
-  answerDecision(decisionId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  listAgentRuns(query?: JsonObject): { data: readonly AgentRun[]; cursor: string | null; has_more: boolean };
-  cancelAgent(agentRunId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  listArtifacts(workId: string): Array<{ id: string; work_id: string; task_id: string | null; path: string; kind: string; created_at: string }>;
-  listProjects(query?: JsonObject): { data: readonly Project[]; cursor: string | null; has_more: boolean };
-  createProject(request: JsonObject): Promise<ExternalCommandResponse>;
-  updateProject?(projectId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  getProjectDeletionImpact?(projectId: string): ProjectDeletionImpact | Promise<ProjectDeletionImpact>;
-  deleteProject?(projectId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  getModelSettings(): { version: number; roles: readonly RoleModelSetting[] };
-  updateModelSettings(request: JsonObject): Promise<ExternalCommandResponse>;
-  getModelPresets(): { version: number; presets: readonly ModelPreset[] };
-  createModelPreset(request: JsonObject): Promise<ExternalCommandResponse>;
-  updateModelPreset(id: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  deleteModelPreset(id: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  listMessages(conversationId: string, query?: JsonObject): { data: readonly Message[]; cursor: string | null; has_more: boolean };
-  ingestConversation(conversationId: string): Promise<{ path: string }>;
-  postMessage(conversationId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  ingestInbound(ownerId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  ensureConnectorAccount(ownerId: string, provider: "slack" | "discord", accountId: string): Promise<string>;
-  registerInboundUpload(ownerId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  putInboundUpload(ownerId: string, uploadId: string, request: JsonObject): Promise<JsonObject>;
-  completeInboundUpload(ownerId: string, uploadId: string, request: JsonObject): Promise<ExternalCommandResponse>;
-  getActiveConversation(): Promise<{ conversation_id: string }>;
-  clearConversation(conversationId: string): Promise<{ cleared: boolean }>;
-}
-
 function isRecord(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function progressFromTaskStates(workId: string, states: readonly unknown[]): WorkProgress {
-  if (states.some((state) => typeof state !== "string")) {
-    throw workDetailCoreError(workId, "progress", "Work contains a Task reference that cannot be resolved.");
-  }
-  const total_tasks = states.length;
-  const completed_tasks = states.filter((state) => state === "completed").length;
-  return {
-    total_tasks,
-    completed_tasks,
-    percent: total_tasks === 0 ? 0 : Math.round((completed_tasks / total_tasks) * 100),
-  };
 }
 
 function validWorkProgress(value: unknown): WorkProgress | null {
@@ -1584,7 +204,7 @@ function workDetailCoreError(workId: string, field: string, reason: string): Api
   );
 }
 
-function externalWorkProgress(core: ExternalCore, workId: string): WorkProgress {
+function externalWorkProgress(core: Core, workId: string): WorkProgress {
   let total_tasks = 0;
   let completed_tasks = 0;
   let cursor: string | null = null;
@@ -1712,6 +332,7 @@ function externalWorkDetail(response: unknown, workId: string, computedProgress:
     prerequisite_wait: data.prerequisite_wait === true,
     waiting_on: Array.isArray(data.waiting_on) ? data.waiting_on : [],
     prerequisites: Array.isArray(data.prerequisites) ? data.prerequisites : [],
+    can_move_to_project: data.can_move_to_project === true,
     final_report: finalReportOrNull(data.final_report),
   };
 }
@@ -1804,17 +425,12 @@ export class ExternalCoreAdapter implements CorePort {
   private readonly unsubscribeExternal: () => void;
   private readonly integrationStore: IntegrationStore;
   private readonly appSettings: AppSettingsStore;
-  private processSkillsSettings: ProcessSkillsSettingsInput = { enabled: true, path: null };
-  private knowledgeAutomationSettings: KnowledgeAutomationSettings = {
-    ...DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS,
-    librarian_times: [...DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS.librarian_times],
-  };
   private readonly detectProviderAvailability: ProviderAvailabilityDetector;
   private processSkillsInstallCommandList: ProcessSkillsInstallCommand[] | null = null;
   readonly ruleStore: unknown;
 
   constructor(
-    private readonly core: ExternalCore,
+    private readonly core: Core,
     private readonly db: unknown,
     owlRoot: string,
     private readonly dataDir: string,
@@ -1858,8 +474,8 @@ export class ExternalCoreAdapter implements CorePort {
 
   async createWork(input: WorkCreateInput, command: CommandMeta): Promise<CommandResult<{ work_id: string; state: "memo" | "ready"; state_version: number }>> {
     try {
-      const response = await this.core.createWork({ ...command, payload: input });
-      const { version: _version, ...data } = response.data;
+      const response = await this.core.createWork({ ...command, payload: input as never });
+      const { version: _version, ...data } = response.data as JsonObject;
       return { data: data as { work_id: string; state: "memo" | "ready"; state_version: number }, version: response.version };
     } catch (error) {
       throw externalError(error, "createWork");
@@ -1906,7 +522,7 @@ export class ExternalCoreAdapter implements CorePort {
     try {
       await this.core.getWork(workId);
       if (!this.core.getWorkConversation) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support work conversations.");
-      return await this.core.getWorkConversation(workId, opts);
+      return (await this.core.getWorkConversation(workId, opts)) as unknown as WorkConversation;
     } catch (error) {
       throw externalError(error, "getWorkConversation");
     }
@@ -1951,7 +567,7 @@ export class ExternalCoreAdapter implements CorePort {
   getBacklogListView(filter: { status?: string; project_id?: string; work_id?: string; issued_work_id?: string; limit?: number; offset?: number }): JsonObject {
     try {
       if (!this.core.getBacklogListView) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support the Backlog screen API.");
-      return this.core.getBacklogListView(filter);
+      return this.core.getBacklogListView(filter as never);
     } catch (error) {
       throw externalError(error, "getBacklogListView");
     }
@@ -1970,7 +586,7 @@ export class ExternalCoreAdapter implements CorePort {
     try {
       await this.core.getWork(workId);
       if (!this.core.getWorkAssurance) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support work assurance.");
-      return await this.core.getWorkAssurance(workId);
+      return (await this.core.getWorkAssurance(workId)) as WorkAssurance;
     } catch (error) {
       throw externalError(error, "getWorkAssurance");
     }
@@ -1989,7 +605,7 @@ export class ExternalCoreAdapter implements CorePort {
   async startWork(workId: string, mode: "normal" | "small", command: CommandMeta): Promise<CommandResult<{ work_id: string; state: "running" | "ready" | "judgement_waiting"; started: boolean; waiting_for_prerequisites: boolean }>> {
     try {
       const response = await this.core.startWork(workId, { ...command, payload: { mode } });
-      const { version: _version, ...data } = response.data;
+      const { version: _version, ...data } = response.data as JsonObject;
       return { data: data as { work_id: string; state: "running" | "ready" | "judgement_waiting"; started: boolean; waiting_for_prerequisites: boolean }, version: response.version };
     } catch (error) {
       throw externalError(error, "startWork");
@@ -2000,7 +616,7 @@ export class ExternalCoreAdapter implements CorePort {
     try {
       if (!this.core.replaceWorkPrerequisites) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support Work prerequisites.");
       const response = await this.core.replaceWorkPrerequisites(workId, { ...command, payload: input });
-      const { version: _version, ...data } = response.data;
+      const { version: _version, ...data } = response.data as JsonObject;
       return { data, version: response.version };
     } catch (error) {
       throw externalError(error, "replaceWorkPrerequisites");
@@ -2011,7 +627,7 @@ export class ExternalCoreAdapter implements CorePort {
     try {
       if (!this.core.releaseWorkPrerequisiteWait) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support Work prerequisites.");
       const response = await this.core.releaseWorkPrerequisiteWait(workId, { ...command, payload: {} });
-      const { version: _version, ...data } = response.data;
+      const { version: _version, ...data } = response.data as JsonObject;
       return { data, version: response.version };
     } catch (error) {
       throw externalError(error, "releaseWorkPrerequisiteWait");
@@ -2022,7 +638,7 @@ export class ExternalCoreAdapter implements CorePort {
     try {
       if (!this.core.moveWorkToProject) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support moving a Work into a Project.");
       const response = await this.core.moveWorkToProject(workId, { ...command, payload: input });
-      const { version: _version, ...data } = response.data;
+      const { version: _version, ...data } = response.data as JsonObject;
       return { data, version: response.version };
     } catch (error) {
       throw externalError(error, "moveWorkToProject");
@@ -2032,7 +648,7 @@ export class ExternalCoreAdapter implements CorePort {
   async pauseWork(workId: string, reason: string, command: CommandMeta): Promise<CommandResult<{ work_id: string; state: "paused"; signal: "pause_requested" }>> {
     try {
       const response = await this.core.pauseWork(workId, { ...command, payload: { reason } });
-      const { version: _version, ...data } = response.data;
+      const { version: _version, ...data } = response.data as JsonObject;
       return { data: data as { work_id: string; state: "paused"; signal: "pause_requested" }, version: response.version };
     } catch (error) {
       throw externalError(error, "pauseWork");
@@ -2042,7 +658,7 @@ export class ExternalCoreAdapter implements CorePort {
   async resumeWork(workId: string, command: CommandMeta): Promise<CommandResult<{ work_id: string; state: "running" }>> {
     try {
       const response = await this.core.resumeWork(workId, { ...command, payload: {} });
-      const { version: _version, ...data } = response.data;
+      const { version: _version, ...data } = response.data as JsonObject;
       return { data: data as { work_id: string; state: "running" }, version: response.version };
     } catch (error) {
       throw externalError(error, "resumeWork");
@@ -2057,7 +673,7 @@ export class ExternalCoreAdapter implements CorePort {
   }>> {
     try {
       const response = await this.core.resumeWorkOrRetryDecision(workId, { ...command, payload: { source: "advisor", ...(body === undefined ? {} : { body }) } });
-      const { version: _version, ...data } = response.data;
+      const { version: _version, ...data } = response.data as JsonObject;
       return {
         data: data as unknown as {
           work_id: string;
@@ -2075,7 +691,7 @@ export class ExternalCoreAdapter implements CorePort {
   async cancelWork(workId: string, reason: string, force: boolean, command: CommandMeta): Promise<CommandResult<{ work_id: string; state: "cancelled"; cancel_requested: boolean; worktree_cleanup?: { ok: boolean; message: string; details?: JsonObject } }>> {
     try {
       const response = await this.core.cancelWork(workId, { ...command, payload: { reason, force } });
-      const { version: _version, ...data } = response.data;
+      const { version: _version, ...data } = response.data as JsonObject;
       return { data: data as { work_id: string; state: "cancelled"; cancel_requested: boolean; worktree_cleanup?: { ok: boolean; message: string; details?: JsonObject } }, version: response.version };
     } catch (error) {
       throw externalError(error, "cancelWork");
@@ -2085,7 +701,7 @@ export class ExternalCoreAdapter implements CorePort {
   async reopenWork(workId: string, reason: string, command: CommandMeta): Promise<CommandResult<{ work_id: string; state: "running" }>> {
     try {
       const response = await this.core.reopenWork(workId, { ...command, payload: { reason } });
-      const { version: _version, ...data } = response.data;
+      const { version: _version, ...data } = response.data as JsonObject;
       return { data: data as { work_id: string; state: "running" }, version: response.version };
     } catch (error) {
       throw externalError(error, "reopenWork");
@@ -2095,7 +711,7 @@ export class ExternalCoreAdapter implements CorePort {
   async postWorkInstruction(workId: string, input: WorkInstructionInput, command: CommandMeta): Promise<CommandResult<WorkInstructionResult>> {
     try {
       const response = await this.core.postWorkInstruction(workId, { ...command, payload: input });
-      const { version: _version, ...data } = response.data;
+      const { version: _version, ...data } = response.data as JsonObject;
       return { data: data as unknown as WorkInstructionResult, version: response.version };
     } catch (error) {
       throw externalError(error, "postWorkInstruction");
@@ -2112,7 +728,7 @@ export class ExternalCoreAdapter implements CorePort {
   }>> {
     try {
       const response = await this.core.updateWork(workId, { ...command, payload: input });
-      const { version: _version, ...data } = response.data;
+      const { version: _version, ...data } = response.data as JsonObject;
       return {
         data: data as unknown as {
           work_id: string;
@@ -2132,7 +748,7 @@ export class ExternalCoreAdapter implements CorePort {
   async archiveWork(workId: string, command: CommandMeta): Promise<CommandResult<{ work_id: string; archived_at: string | null }>> {
     try {
       const response = await this.core.archiveWork(workId, { ...command, payload: {} });
-      const { version: _version, ...data } = response.data;
+      const { version: _version, ...data } = response.data as JsonObject;
       return { request_id: response.request_id, data: data as { work_id: string; archived_at: string | null }, version: response.version };
     } catch (error) {
       throw externalError(error, "archiveWork");
@@ -2142,7 +758,7 @@ export class ExternalCoreAdapter implements CorePort {
   async unarchiveWork(workId: string, command: CommandMeta): Promise<CommandResult<{ work_id: string; archived_at: null }>> {
     try {
       const response = await this.core.unarchiveWork(workId, { ...command, payload: {} });
-      const { version: _version, ...data } = response.data;
+      const { version: _version, ...data } = response.data as JsonObject;
       return { request_id: response.request_id, data: data as { work_id: string; archived_at: null }, version: response.version };
     } catch (error) {
       throw externalError(error, "unarchiveWork");
@@ -2152,7 +768,7 @@ export class ExternalCoreAdapter implements CorePort {
   async deleteWork(workId: string, command: CommandMeta): Promise<CommandResult<{ work_id: string; deleted: true }>> {
     try {
       const response = await this.core.deleteWork(workId, { ...command, payload: {} });
-      const { version: _version, ...data } = response.data;
+      const { version: _version, ...data } = response.data as JsonObject;
       return { request_id: response.request_id, data: data as { work_id: string; deleted: true }, version: response.version };
     } catch (error) {
       throw externalError(error, "deleteWork");
@@ -2162,9 +778,9 @@ export class ExternalCoreAdapter implements CorePort {
   async listTasks(workId: string, query: { status: string | null; limit: number; cursor: string | null }): Promise<Page<TaskSummary>> {
     try {
       // The durable Core returns an empty page for an unknown work_id. Match
-      // the standalone Core and REST contract by surfacing work_not_found.
+      // the REST contract by surfacing work_not_found.
       this.core.getWork(workId);
-      return this.core.listTasks(workId, query);
+      return this.core.listTasks(workId, query as never) as unknown as Page<TaskSummary>;
     } catch (error) {
       throw externalError(error, "listTasks");
     }
@@ -2182,7 +798,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async listDecisions(query: { status: "open" | "resolved" | "cancelled"; limit: number; cursor: string | null }): Promise<Page<Decision>> {
     try {
-      return this.core.listDecisions(query);
+      return this.core.listDecisions(query) as unknown as Page<Decision>;
     } catch (error) {
       throw externalError(error, "listDecisions");
     }
@@ -2200,7 +816,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async listAgents(query: { status: string | null; work_id: string | null; limit: number; cursor: string | null }): Promise<Page<AgentRun>> {
     try {
-      return this.core.listAgentRuns(query);
+      return this.core.listAgentRuns(query) as unknown as Page<AgentRun>;
     } catch (error) {
       throw externalError(error, "listAgentRuns");
     }
@@ -2209,7 +825,7 @@ export class ExternalCoreAdapter implements CorePort {
   async cancelAgent(agentRunId: string, reason: string, force: boolean, command: CommandMeta): Promise<CommandResult<{ agent_run_id: string; status: "cancel_requested" | "cancelled" }>> {
     try {
       const response = await this.core.cancelAgent(agentRunId, { ...command, payload: { reason, force } });
-      const { version: _version, ...data } = response.data;
+      const { version: _version, ...data } = response.data as JsonObject;
       return { data: data as { agent_run_id: string; status: "cancel_requested" | "cancelled" }, version: response.version };
     } catch (error) {
       throw externalError(error, "cancelAgent");
@@ -2218,7 +834,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async listProjects(query: { limit: number; cursor: string | null }): Promise<Page<Project>> {
     try {
-      return this.core.listProjects(query);
+      return this.core.listProjects(query) as unknown as Page<Project>;
     } catch (error) {
       throw externalError(error, "listProjects");
     }
@@ -2234,8 +850,8 @@ export class ExternalCoreAdapter implements CorePort {
 
   async createProject(input: CreateProjectInput, command: CommandMeta): Promise<{ data: Project; version: number }> {
     try {
-      const response = await this.core.createProject({ ...command, payload: input });
-      const { version: _version, ...data } = response.data;
+      const response = await this.core.createProject({ ...command, payload: input as never });
+      const { version: _version, ...data } = response.data as JsonObject;
       return { data: data as unknown as Project, version: response.version };
     } catch (error) {
       throw externalError(error, "createProject");
@@ -2245,8 +861,8 @@ export class ExternalCoreAdapter implements CorePort {
   async updateProject(projectId: string, input: UpdateProjectInput, command: CommandMeta): Promise<{ data: Project; version: number }> {
     try {
       if (!this.core.updateProject) throw new ApiError(503, "core_not_ready", "The loaded Core does not support updateProject.");
-      const response = await this.core.updateProject(projectId, { ...command, payload: input });
-      const { version: _version, ...data } = response.data;
+      const response = await this.core.updateProject(projectId, { ...command, payload: input as never });
+      const { version: _version, ...data } = response.data as JsonObject;
       return { data: data as unknown as Project, version: response.version };
     } catch (error) {
       throw externalError(error, "updateProject");
@@ -2256,7 +872,7 @@ export class ExternalCoreAdapter implements CorePort {
   async getProjectDeletionImpact(projectId: string): Promise<ProjectDeletionImpact> {
     try {
       if (!this.core.getProjectDeletionImpact) throw new ApiError(503, "core_not_ready", "The loaded Core does not support getProjectDeletionImpact.");
-      return await this.core.getProjectDeletionImpact(projectId);
+      return (await this.core.getProjectDeletionImpact(projectId)) as unknown as ProjectDeletionImpact;
     } catch (error) {
       throw externalError(error, "getProjectDeletionImpact");
     }
@@ -2265,8 +881,8 @@ export class ExternalCoreAdapter implements CorePort {
   async deleteProject(projectId: string, input: DeleteProjectInput, command: CommandMeta): Promise<{ data: DeleteProjectResult; version: number }> {
     try {
       if (!this.core.deleteProject) throw new ApiError(503, "core_not_ready", "The loaded Core does not support deleteProject.");
-      const response = await this.core.deleteProject(projectId, { ...command, payload: input });
-      const { version: _version, ...data } = response.data;
+      const response = await this.core.deleteProject(projectId, { ...command, payload: input as never });
+      const { version: _version, ...data } = response.data as JsonObject;
       return { data: data as unknown as DeleteProjectResult, version: response.version };
     } catch (error) {
       throw externalError(error, "deleteProject");
@@ -2284,7 +900,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async updateModelSettings(input: { roles: RoleModelSettingInput[] }, command: CommandMeta): Promise<CommandResult<{ roles: RoleModelSetting[] }>> {
     try {
-      const response = await this.core.updateModelSettings({ ...command, payload: input });
+      const response = await this.core.updateModelSettings({ ...command, payload: input as never });
       const { version: _version, ...data } = response.data as { version?: unknown; roles: readonly RoleModelSetting[] };
       return { data: { roles: [...data.roles] }, version: response.version };
     } catch (error) {
@@ -2295,7 +911,7 @@ export class ExternalCoreAdapter implements CorePort {
   async getModelPresets(): Promise<{ version: number; presets: ModelPreset[] }> {
     try {
       const result = this.core.getModelPresets();
-      return { version: result.version, presets: result.presets.map(cloneModelPreset) };
+      return { version: result.version, presets: (result.presets as unknown as readonly ModelPreset[]).map(cloneModelPreset) };
     } catch (error) {
       throw externalError(error, "getModelPresets");
     }
@@ -2303,7 +919,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async createModelPreset(input: { name: string; roles: RoleModelSettingInput[] }, command: CommandMeta): Promise<CommandResult<{ preset: ModelPreset; presets: ModelPreset[] }>> {
     try {
-      const response = await this.core.createModelPreset({ ...command, payload: input });
+      const response = await this.core.createModelPreset({ ...command, payload: input as never });
       return modelPresetCommandResult(response);
     } catch (error) {
       throw externalError(error, "createModelPreset");
@@ -2312,7 +928,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async updateModelPreset(id: string, input: { name?: string; roles?: RoleModelSettingInput[] }, command: CommandMeta): Promise<CommandResult<{ preset: ModelPreset; presets: ModelPreset[] }>> {
     try {
-      const response = await this.core.updateModelPreset(id, { ...command, payload: input });
+      const response = await this.core.updateModelPreset(id, { ...command, payload: input as never });
       return modelPresetCommandResult(response);
     } catch (error) {
       throw externalError(error, "updateModelPreset");
@@ -2322,7 +938,7 @@ export class ExternalCoreAdapter implements CorePort {
   async deleteModelPreset(id: string, command: CommandMeta): Promise<CommandResult<{ presets: ModelPreset[] }>> {
     try {
       const response = await this.core.deleteModelPreset(id, { ...command, payload: {} });
-      const data = response.data as { presets: readonly ModelPreset[] };
+      const data = response.data as unknown as { presets: readonly ModelPreset[] };
       return { data: { presets: data.presets.map(cloneModelPreset) }, version: response.version };
     } catch (error) {
       throw externalError(error, "deleteModelPreset");
@@ -2331,7 +947,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async listMessages(conversationId: string, query: { limit: number; cursor: string | null }): Promise<Page<Message>> {
     try {
-      return this.core.listMessages(conversationId, query);
+      return this.core.listMessages(conversationId, query) as unknown as Page<Message>;
     } catch (error) {
       throw externalError(error, "listMessages");
     }
@@ -2347,8 +963,8 @@ export class ExternalCoreAdapter implements CorePort {
 
   async postMessage(conversationId: string, input: PostMessageInput, command: CommandMeta): Promise<CommandResult<{ message_id: string; advisor_run_id: string | null }>> {
     try {
-      const response = await this.core.postMessage(conversationId, { ...command, payload: input });
-      const { version: _version, ...data } = response.data;
+      const response = await this.core.postMessage(conversationId, { ...command, payload: input as never });
+      const { version: _version, ...data } = response.data as JsonObject;
       return { data: data as { message_id: string; advisor_run_id: string | null }, version: response.version };
     } catch (error) {
       throw externalError(error, "postMessage");
@@ -2357,8 +973,8 @@ export class ExternalCoreAdapter implements CorePort {
 
   async ingestInbound(ownerId: string, input: InboundMessageInput, command: CommandMeta): Promise<CommandResult<InboundMessageResult>> {
     try {
-      const response = await this.core.ingestInbound(ownerId, { ...command, payload: input });
-      const { version: _version, ...data } = response.data;
+      const response = await this.core.ingestInbound(ownerId, { ...command, payload: input as never });
+      const { version: _version, ...data } = response.data as JsonObject;
       return { data: data as InboundMessageResult, version: response.version };
     } catch (error) {
       throw externalError(error, "ingestInbound");
@@ -2376,7 +992,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async registerInboundUpload(ownerId: string, input: InboundUploadRegisterInput, command: CommandMeta): Promise<CommandResult<InboundUploadTicket>> {
     try {
-      const response = await this.core.registerInboundUpload(ownerId, { ...command, payload: input });
+      const response = await this.core.registerInboundUpload(ownerId, { ...command, payload: input as never });
       return { data: response.data as unknown as InboundUploadTicket, version: response.version };
     } catch (error) {
       throw externalError(error, "registerInboundUpload");
@@ -2394,7 +1010,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async completeInboundUpload(ownerId: string, uploadId: string, input: InboundUploadCompleteInput, command: CommandMeta): Promise<CommandResult<InboundUploadCompleteResult>> {
     try {
-      const response = await this.core.completeInboundUpload(ownerId, uploadId, { ...command, payload: input });
+      const response = await this.core.completeInboundUpload(ownerId, uploadId, { ...command, payload: input as never });
       return { data: response.data as unknown as InboundUploadCompleteResult, version: response.version };
     } catch (error) {
       throw externalError(error, "completeInboundUpload");
@@ -2437,8 +1053,6 @@ export class ExternalCoreAdapter implements CorePort {
   }
 
   async getAdvisorActivity(sessionId: string, conversationId: string | null): Promise<SessionActivity | null> {
-    // Display-only data: a Core without it must not fail the whole /advisor/session response.
-    if (typeof this.core.getAdvisorActivity !== "function") return null;
     try {
       return this.core.getAdvisorActivity(sessionId, conversationId);
     } catch (error) {
@@ -2458,25 +1072,19 @@ export class ExternalCoreAdapter implements CorePort {
   }
 
   async getHybridMode(): Promise<boolean> {
-    if (typeof this.core.getHybridMode === "function") {
-      try {
-        return await this.core.getHybridMode();
-      } catch (error) {
-        throw externalError(error, "getHybridMode");
-      }
+    try {
+      return await this.core.getHybridMode();
+    } catch (error) {
+      throw externalError(error, "getHybridMode");
     }
-    return this.appSettings.getHybridMode();
   }
 
   async setHybridMode(enabled: boolean): Promise<boolean> {
-    if (typeof this.core.setHybridMode === "function") {
-      try {
-        return await this.core.setHybridMode(enabled);
-      } catch (error) {
-        throw externalError(error, "setHybridMode");
-      }
+    try {
+      return await this.core.setHybridMode(enabled);
+    } catch (error) {
+      throw externalError(error, "setHybridMode");
     }
-    return this.appSettings.setHybridMode(enabled);
   }
 
   listSkills(filter: { query?: string; state?: string; scope?: string; trial?: boolean }): unknown[] {
@@ -2596,24 +1204,19 @@ export class ExternalCoreAdapter implements CorePort {
     }
   }
 
-  retagKnowledgeNotes(input: { dry_run: boolean; force?: boolean }): Promise<unknown> {
-    if (typeof this.core.retagKnowledgeNotes !== "function") throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support knowledge retagging.");
-    return this.core.retagKnowledgeNotes(input);
-  }
-
   runCuration(input: JsonObject): Promise<unknown> {
     if (typeof this.core.runCuration !== "function") throw skillApiUnavailable("Curation runs");
-    return this.core.runCuration(input);
+    return this.core.runCuration(input as never);
   }
 
   startCurationInBackground(input: JsonObject): Promise<unknown> {
     if (typeof this.core.startCurationInBackground !== "function") throw skillApiUnavailable("Curation runs");
-    return this.core.startCurationInBackground(input);
+    return this.core.startCurationInBackground(input as never);
   }
 
   listCurationRuns(query: JsonObject): { items: readonly unknown[]; next_cursor: string | null } {
     if (typeof this.core.listCurationRuns !== "function") throw skillApiUnavailable("Curation run listing");
-    return this.core.listCurationRuns(query);
+    return this.core.listCurationRuns(query as never);
   }
 
   getCurationRun(id: string): unknown {
@@ -2624,7 +1227,7 @@ export class ExternalCoreAdapter implements CorePort {
   listBacklogItems(filter: { status?: string; project_id?: string; work_id?: string; limit?: number; offset?: number }): { items: unknown[]; next_offset: number | null } {
     if (typeof this.core.listBacklogItems !== "function") throw skillApiUnavailable("Review backlog listing");
     try {
-      const result = this.core.listBacklogItems(filter);
+      const result = this.core.listBacklogItems(filter as never);
       return { items: [...result.items], next_offset: result.next_offset };
     } catch (error) {
       throw externalError(error, "listBacklogItems");
@@ -2643,7 +1246,7 @@ export class ExternalCoreAdapter implements CorePort {
   async updateAutoWorkSettings(request: JsonObject): Promise<{ data: JsonObject; version: number }> {
     if (typeof this.core.updateAutoWorkSettings !== "function") throw skillApiUnavailable("Automatic Work settings update");
     try {
-      const response = await this.core.updateAutoWorkSettings(request);
+      const response = await this.core.updateAutoWorkSettings(request as never);
       return { data: response.data, version: response.version };
     } catch (error) {
       throw externalError(error, "updateAutoWorkSettings");
@@ -2672,7 +1275,7 @@ export class ExternalCoreAdapter implements CorePort {
   async runAutoWorkNow(projectId: string, what: string): Promise<unknown> {
     if (typeof this.core.runAutoWorkNow !== "function") throw skillApiUnavailable("Automatic Work run");
     try {
-      return await this.core.runAutoWorkNow(projectId, what);
+      return await this.core.runAutoWorkNow(projectId, what as never);
     } catch (error) {
       throw externalError(error, "runAutoWorkNow");
     }
@@ -2681,7 +1284,7 @@ export class ExternalCoreAdapter implements CorePort {
   async dismissBacklogItems(request: JsonObject): Promise<{ data: JsonObject; version: number }> {
     if (typeof this.core.dismissBacklogItems !== "function") throw skillApiUnavailable("Review backlog dismissal");
     try {
-      const response = await this.core.dismissBacklogItems(request);
+      const response = await this.core.dismissBacklogItems(request as never);
       return { data: response.data, version: response.version };
     } catch (error) {
       throw externalError(error, "dismissBacklogItems");
@@ -2691,7 +1294,7 @@ export class ExternalCoreAdapter implements CorePort {
   async deleteBacklogItems(request: JsonObject): Promise<{ data: JsonObject; version: number }> {
     if (typeof this.core.deleteBacklogItems !== "function") throw skillApiUnavailable("Review backlog deletion");
     try {
-      const response = await this.core.deleteBacklogItems(request);
+      const response = await this.core.deleteBacklogItems(request as never);
       return { data: response.data, version: response.version };
     } catch (error) {
       throw externalError(error, "deleteBacklogItems");
@@ -2701,7 +1304,7 @@ export class ExternalCoreAdapter implements CorePort {
   async receiveAutoWorkNotice(request: JsonObject): Promise<{ data: JsonObject; version: number }> {
     if (typeof this.core.receiveAutoWorkNotice !== "function") throw skillApiUnavailable("Automatic Work creation");
     try {
-      const response = await this.core.receiveAutoWorkNotice(request);
+      const response = await this.core.receiveAutoWorkNotice(request as never);
       return { data: response.data, version: response.version };
     } catch (error) {
       throw externalError(error, "receiveAutoWorkNotice");
@@ -2711,7 +1314,7 @@ export class ExternalCoreAdapter implements CorePort {
   async issueBacklogWork(request: JsonObject): Promise<{ data: JsonObject; version: number }> {
     if (typeof this.core.issueBacklogWork !== "function") throw skillApiUnavailable("Review backlog Work issuance");
     try {
-      const response = await this.core.issueBacklogWork(request);
+      const response = await this.core.issueBacklogWork(request as never);
       return { data: response.data, version: response.version };
     } catch (error) {
       throw externalError(error, "issueBacklogWork");
@@ -2721,7 +1324,7 @@ export class ExternalCoreAdapter implements CorePort {
   async linkBacklogItems(workId: string, request: JsonObject): Promise<{ data: JsonObject; version: number }> {
     if (typeof this.core.linkBacklogItems !== "function") throw skillApiUnavailable("Review backlog linking");
     try {
-      const response = await this.core.linkBacklogItems(workId, request);
+      const response = await this.core.linkBacklogItems(workId, request as never);
       return { data: response.data, version: response.version };
     } catch (error) {
       throw externalError(error, "linkBacklogItems");
@@ -2747,7 +1350,6 @@ export class ExternalCoreAdapter implements CorePort {
   }
 
   async getLanguage(): Promise<OwnerLanguage> {
-    if (typeof this.core.getLanguage !== "function") return DEFAULT_OWNER_LANGUAGE;
     try {
       return await this.core.getLanguage();
     } catch (error) {
@@ -2759,7 +1361,6 @@ export class ExternalCoreAdapter implements CorePort {
     agent: GuardTokenAgent,
     capture: WebResearchCapture,
   ): Promise<{ readonly accepted: boolean; readonly reason?: string }> {
-    if (typeof this.core.recordAgentResearch !== "function") return { accepted: false, reason: "unavailable" };
     try {
       return await this.core.recordAgentResearch(agent, capture);
     } catch (error) {
@@ -2767,8 +1368,7 @@ export class ExternalCoreAdapter implements CorePort {
     }
   }
 
-  async recordSkillReads(input: Parameters<NonNullable<ExternalCore["recordSkillReads"]>>[0]): Promise<void> {
-    if (typeof this.core.recordSkillReads !== "function") return;
+  async recordSkillReads(input: Parameters<Core["recordSkillReads"]>[0]): Promise<void> {
     try {
       await this.core.recordSkillReads(input);
     } catch (error) {
@@ -2794,54 +1394,39 @@ export class ExternalCoreAdapter implements CorePort {
   }
 
   async getProcessSkillsSettings(): Promise<ProcessSkillsSettingsSnapshot> {
-    if (typeof this.core.getProcessSkillsSettings === "function") {
-      let snapshot: ProcessSkillsSettingsSnapshot;
-      try {
-        snapshot = await this.core.getProcessSkillsSettings();
-      } catch (error) {
-        throw externalError(error, "getProcessSkillsSettings");
-      }
-      return { ...snapshot, install_commands: this.processSkillsInstallCommands() };
+    let snapshot: ProcessSkillsSettingsSnapshot;
+    try {
+      snapshot = (await this.core.getProcessSkillsSettings()) as ProcessSkillsSettingsSnapshot;
+    } catch (error) {
+      throw externalError(error, "getProcessSkillsSettings");
     }
-    return detectProcessSkillsSettings(this.processSkillsSettings, this.processSkillsInstallCommands());
+    return { ...snapshot, install_commands: this.processSkillsInstallCommands() };
   }
 
   async setProcessSkillsSettings(input: ProcessSkillsSettingsInput): Promise<ProcessSkillsSettingsSnapshot> {
-    if (typeof this.core.setProcessSkillsSettings === "function") {
-      let snapshot: ProcessSkillsSettingsSnapshot;
-      try {
-        snapshot = await this.core.setProcessSkillsSettings(input);
-      } catch (error) {
-        throw externalError(error, "setProcessSkillsSettings");
-      }
-      return { ...snapshot, install_commands: this.processSkillsInstallCommands() };
+    let snapshot: ProcessSkillsSettingsSnapshot;
+    try {
+      snapshot = (await this.core.setProcessSkillsSettings(input as never)) as ProcessSkillsSettingsSnapshot;
+    } catch (error) {
+      throw externalError(error, "setProcessSkillsSettings");
     }
-    validateProcessSkillsSettings(input);
-    this.processSkillsSettings = { enabled: input.enabled, path: input.path };
-    return detectProcessSkillsSettings(this.processSkillsSettings, this.processSkillsInstallCommands());
+    return { ...snapshot, install_commands: this.processSkillsInstallCommands() };
   }
 
   async getKnowledgeAutomationSettings(): Promise<KnowledgeAutomationSnapshot> {
-    if (typeof this.core.getKnowledgeAutomationSettings === "function") {
-      try {
-        return await this.core.getKnowledgeAutomationSettings();
-      } catch (error) {
-        throw externalError(error, "getKnowledgeAutomationSettings");
-      }
+    try {
+      return await this.core.getKnowledgeAutomationSettings!();
+    } catch (error) {
+      throw externalError(error, "getKnowledgeAutomationSettings");
     }
-    return knowledgeAutomationSnapshot(this.knowledgeAutomationSettings);
   }
 
   async setKnowledgeAutomationSettings(input: KnowledgeAutomationSettings): Promise<KnowledgeAutomationSnapshot> {
-    if (typeof this.core.setKnowledgeAutomationSettings === "function") {
-      try {
-        return await this.core.setKnowledgeAutomationSettings(input);
-      } catch (error) {
-        throw externalError(error, "setKnowledgeAutomationSettings");
-      }
+    try {
+      return await this.core.setKnowledgeAutomationSettings!(input);
+    } catch (error) {
+      throw externalError(error, "setKnowledgeAutomationSettings");
     }
-    this.knowledgeAutomationSettings = validateKnowledgeAutomationSettingsInput(input);
-    return knowledgeAutomationSnapshot(this.knowledgeAutomationSettings);
   }
 
   async getTypesafeApiKey(): Promise<string> {
@@ -3138,7 +1723,7 @@ export class ExternalCoreAdapter implements CorePort {
   eventsAfter(cursor: number, limit?: number): CoreEvent[] {
     if (this.core.listEventsAfter) {
       try {
-        // The standalone adapter uses -1 to mean "from the beginning"; the durable Core uses 0.
+        // The adapter API uses -1 to mean "from the beginning"; the durable Core uses 0.
         const externalCursor = cursor < 0 ? 0 : cursor;
         return [...this.core.listEventsAfter(externalCursor, limit)];
       } catch (error) {
@@ -3325,9 +1910,6 @@ export function customProviderConnectionEnv(
 }
 
 export async function createConfiguredCore(options: CreateCoreOptions): Promise<CorePort> {
-  if (process.env.OWL_CORE_MODE === "standalone") {
-    return createCore(options);
-  }
   const corePath = join(serverPackageRoot(), "../../packages/core/dist/index.js");
   try {
     await access(corePath);
@@ -3425,9 +2007,9 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
       return customProviderConnectionEnv(providerId, custom, process.env);
     },
   };
-  let external: ExternalCore;
+  let external: Core;
   try {
-    external = loaded.createCore(enrichedOptions) as ExternalCore;
+    external = loaded.createCore(enrichedOptions) as Core;
     if (!external || typeof external.start !== "function" || typeof external.stop !== "function" || typeof external.subscribe !== "function") {
       throw new Error("Core createCore returned an incompatible object");
     }

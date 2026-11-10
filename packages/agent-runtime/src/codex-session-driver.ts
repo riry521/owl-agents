@@ -17,7 +17,7 @@ import { readCodexCompactionSummaries, waitForCompactionSummary } from "./compac
 import { SessionActivityTracker } from "./session-activity.js";
 import { codexErrorInfoOf } from "./codex-error-info.js";
 import { classifyProviderFailure, formatProviderError, sessionFailureMessage, turnFailureProviderError } from "./provider-error.js";
-import { agentUserInstructionEnv, buildAgentPermissionArgs, buildCodexCustomProviderArgs, externalJsonBlock, reapProcessGroup, uncachedInputTokens } from "@owl/shared";
+import { agentUserInstructionEnv, buildAgentPermissionArgs, buildCodexCustomProviderArgs, externalJsonBlock, reapProcessGroup, uncachedInputTokens, signalProcessGroup } from "@owl/shared";
 
 const STDERR_RING_BUFFER_BYTES = 8 * 1024;
 const DEFAULT_STOP_GRACE_MS = 5000;
@@ -66,21 +66,6 @@ class CodexRpcError extends Error {
     super(message);
     this.name = "CodexRpcError";
     this.code = code;
-  }
-}
-
-function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
-  const pid = child.pid;
-  if (pid === undefined) {
-    child.kill(signal);
-    return;
-  }
-  try {
-    process.kill(-pid, signal);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
-      try { child.kill(signal); } catch { /* already gone */ }
-    }
   }
 }
 
@@ -449,14 +434,14 @@ export class CodexSessionDriver implements ProviderSession {
       return;
     }
     this.appendStderr(`\n[codex-session-driver] stop requested: ${reason}\n`);
-    signalProcessGroup(this.child, "SIGTERM");
+    signalProcessGroup(this.child, "SIGTERM", { skipFallbackWhenGone: true });
     await new Promise<void>((resolve) => {
       if (this.childClosed) {
         resolve();
         return;
       }
       const timer = setTimeout(() => {
-        if (!this.childClosed) signalProcessGroup(this.child, "SIGKILL");
+        if (!this.childClosed) signalProcessGroup(this.child, "SIGKILL", { skipFallbackWhenGone: true });
       }, graceMs);
       this.child.once("close", () => {
         clearTimeout(timer);
@@ -468,7 +453,7 @@ export class CodexSessionDriver implements ProviderSession {
   public terminateImmediately(): void {
     if (this.childClosed) return;
     this.appendStderr("\n[codex-session-driver] immediate termination requested\n");
-    signalProcessGroup(this.child, "SIGKILL");
+    signalProcessGroup(this.child, "SIGKILL", { skipFallbackWhenGone: true });
   }
 
   private async initialize(request: ProviderSessionRequest): Promise<void> {
@@ -1050,7 +1035,7 @@ export class CodexSessionDriver implements ProviderSession {
     }
     this.sessionExitEmitted = true;
     this.endStream();
-    if (!this.childClosed) signalProcessGroup(this.child, "SIGTERM");
+    if (!this.childClosed) signalProcessGroup(this.child, "SIGTERM", { skipFallbackWhenGone: true });
   }
 
   private localTurnIdForNotification(codexTurnId: string): string | null {

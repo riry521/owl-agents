@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { guardConfig, guardRequest } from "./guard-client.js";
 import { createInterface } from "node:readline";
 
 // Layer order: server wait 240s < fetch 270s < undici default 300s < CLI tool timeout 330s.
@@ -58,23 +58,15 @@ function errorCode(error: unknown): string {
 }
 
 async function post(path: string, id: unknown, payload: Json, timeoutMs: number): Promise<unknown> {
-  const role = process.env.OWL_ROLE;
-  const base = process.env.OWL_GUARD_API_BASE;
-  const tokenFile = process.env.OWL_GUARD_TOKEN_FILE;
-  if (role !== "worker" || !process.env.OWL_AGENT_RUN_ID || !base || !tokenFile) {
+  const guard = guardConfig({ roleVar: "OWL_ROLE", role: "worker", requireRunId: true });
+  if (!guard) {
     throw new ToolError("owl_dispatch_unavailable", "Worker の OWL_ROLE / OWL_AGENT_RUN_ID / OWL_GUARD_API_BASE / OWL_GUARD_TOKEN_FILE が設定されていません。");
   }
   const key = `${nonce}:${String(id)}`;
   const body = JSON.stringify({ request_id: key, idempotency_key: key, expected_version: 0, payload });
   for (let attempt = 0; ; attempt += 1) {
     try {
-      const token = readFileSync(tokenFile, "utf8").trim();
-      const response = await fetch(`${base.replace(/\/+$/, "")}/api/v1/agent/child-runs${path}`, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-        body,
-        signal: AbortSignal.timeout(timeoutMs),
-      });
+      const { response } = await guardRequest(guard, `/api/v1/agent/child-runs${path}`, { headers: { "content-type": "application/json" }, body, timeoutMs, authorizeEmptyToken: true });
       const text = await response.text();
       let parsed: { data?: unknown; error?: { code?: string; message?: string } } = {};
       try { parsed = JSON.parse(text); } catch { /* non-JSON body */ }

@@ -1,39 +1,11 @@
 import { ApiError } from "./errors.js";
 import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
 import type { MemoryNoteType, MemoryRequestContext } from "../../../packages/core/dist/memory/memory-types.js";
-import type { MemoryAppendOutput, MemoryHealth, MemoryExpandOutput, MemoryRecallOutput, MemoryReindexOutput, MemorySearchOutput, PageReadOutput, PageSearchOutput } from "../../../packages/core/dist/memory/memory-service.js";
-import type { MemorySearchInput } from "../../../packages/core/dist/memory/memory-search.js";
+import { requireMemoryFeature } from "./core-feature.js";
 
 export const MEMORY_OPERATIONS: ReadonlySet<string> = new Set(["search", "expand", "recall", "health", "reindex", "index", "page", "pages/search", "mode", "append"]);
 /** Operations answered to GET; the rest are POST. */
 export const MEMORY_GET_OPERATIONS: ReadonlySet<string> = new Set(["health", "mode"]);
-
-/** The Core memory window (`core.memory`). */
-interface MemoryApiPort {
-  search(input: MemorySearchInput, ctx: MemoryRequestContext): Promise<MemorySearchOutput>;
-  expand(input: { note: string; include_body?: boolean; max_bytes?: number }, ctx: MemoryRequestContext): Promise<MemoryExpandOutput>;
-  recall(input: { topic?: string; types?: MemoryNoteType[]; limit?: number; explain?: boolean }, ctx: MemoryRequestContext): Promise<MemoryRecallOutput>;
-  health(): Promise<MemoryHealth>;
-  reindex(input: { mode: "diff" | "full" }): Promise<MemoryReindexOutput>;
-  // Theme-page tools; an older Core lacks them (503), and its mode is legacy.
-  mode?(): "pages";
-  readIndex?(input: { project_id?: string | null }, ctx: MemoryRequestContext): Promise<PageReadOutput>;
-  page?(input: { page: string; sections?: readonly string[] }, ctx: MemoryRequestContext): Promise<PageReadOutput>;
-  append?(input: { project_id?: string; section: string; text: string; theme?: string; procedure?: string }, ctx: MemoryRequestContext): Promise<MemoryAppendOutput>;
-  searchPages?(input: { query: string; include_work_log?: boolean }, ctx: MemoryRequestContext): Promise<PageSearchOutput>;
-}
-
-const METHODS = ["search", "expand", "recall", "health", "reindex"] as const;
-const isMemoryApi = (value: unknown): value is MemoryApiPort =>
-  typeof value === "object" && value !== null && METHODS.every((m) => typeof (value as Record<string, unknown>)[m] === "function");
-
-/** Resolves `core.memory`, falling back to the ExternalCoreAdapter's wrapped `.core`; 503 when absent. */
-export function requireMemoryApi(core: unknown): MemoryApiPort {
-  const memoryOf = (c: unknown): unknown => (typeof c === "object" && c !== null ? (c as { memory?: unknown }).memory : undefined);
-  const candidate = [memoryOf(core), memoryOf((core as { core?: unknown } | null)?.core)].find(isMemoryApi);
-  if (!candidate) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support the memory API.");
-  return candidate;
-}
 
 const TYPES = new Set(["preference", "decision", "lesson", "procedure", "reference", "overview", "north-star", "reflection", "log", "raw"]);
 const SCOPES = new Set(["global", "project", "all"]);
@@ -76,7 +48,7 @@ export function memoryContext(agent: GuardTokenAgent | null, hint: (name: string
 }
 
 export async function runMemoryOperation(core: unknown, op: string, rawBody: unknown, ctx: MemoryRequestContext): Promise<unknown> {
-  const api = requireMemoryApi(core);
+  const api = requireMemoryFeature(core);
   if (op === "health") {
     const health = (await api.health()) as unknown as Record<string, unknown>;
     return { ...health, injection: health.injection ?? INJECTION_DEFAULT };

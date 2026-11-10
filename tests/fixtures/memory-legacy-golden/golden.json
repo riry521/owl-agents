@@ -466,11 +466,6 @@
         "skill_proposal_ids": [
           "<ULID>"
         ],
-        "note_ids": [
-          "<ULID>",
-          "<ULID>",
-          "<ULID>"
-        ],
         "rule_proposal_ids": [
           "<ULID>"
         ],

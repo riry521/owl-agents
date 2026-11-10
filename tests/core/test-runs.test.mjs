@@ -280,17 +280,26 @@ test("per_file: a Task check runs only the tests related to the change, the Work
     ran.push(argv.at(-1));
     return { exit_code: 0, timed_out: false, stdout: "", stderr: "", duration_ms: 1 };
   };
-  const check = (scope, force_full) => runCoreTests(
+  const check = (scope, force_full, changed = ["src/lib.mjs"], workChanged = ["src/lib.mjs"]) => runCoreTests(
     { db, writeLane: db.createWriteLane(), workspaceRoot: repo, baselineRunner: run, baselineLocks: new Map() },
     {
       scope, project_id: "p", work_id: "w", task_id: scope === "task" ? "t" : null, agent_run_id: null, root: repo, commit: git(repo, "rev-parse", "HEAD"),
-      base_commit: null, repo, changed_files: ["src/lib.mjs"], work_changed_files: ["src/lib.mjs"], required_tests: [], force_full,
+      base_commit: null, repo, changed_files: changed, work_changed_files: workChanged, required_tests: [], force_full,
       settings: readTestRunSettings({ test_patterns: ["tests/**/*.test.mjs"], concurrency: 1 }), run,
     },
   );
   const task = await check("task", null);
   assert.deepEqual([task.selection.mode, task.selection.files], ["selected", ["tests/d.test.mjs"]]);
   assert.deepEqual(ran, ["tests/d.test.mjs"]);
+  ran.length = 0;
+  // A re-check whose newly changed file has no related test selects by the whole Task change set; with no related test there either, nothing runs.
+  const recheck = await check("task", null, ["README.md"], ["src/lib.mjs", "README.md"]);
+  assert.deepEqual(recheck.selection.files, ["tests/d.test.mjs"]);
+  // The since-checked set may be as large as the Task set (a file reverted, another changed): it still falls back to the Task set.
+  const equal = await check("task", null, ["old-types.ts", "new-types.ts"], ["src/lib.mjs", "new-types.ts"]);
+  assert.deepEqual(equal.selection.files, ["tests/d.test.mjs"]);
+  const none = await check("task", null, ["README.md"], ["README.md", "types.ts"]);
+  assert.deepEqual([none.selection.files, none.status], [[], "skipped"]);
   ran.length = 0;
   const work = await check("work", "first_work_run");
   assert.deepEqual([work.selection.mode, work.selection.full_reason], ["full", "first_work_run"]);

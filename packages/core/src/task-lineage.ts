@@ -2,7 +2,7 @@ import type { RemakeLimitSettings } from "../../shared/dist/remake-limit-setting
 import { EXTERNAL_BLOCKER_EVENT } from "../../shared/dist/external-blocker.js";
 import { workerAcceptanceDefects } from "../../shared/dist/acceptance-defect.js";
 import { HumanReadableError } from "./errors";
-import { classifyRemakeUnit, nonFunctionalStreak, type MeasuredFile, type RemakeUnit, type RemakeUnitClass } from "./remake-gate";
+import { classifyRemakeUnit, type MeasuredFile, type RemakeUnit, type RemakeUnitClass } from "./remake-gate";
 import type { ChangedFile, CoreSqlValue, CoreWriteLaneTransaction } from "./types";
 import { createUlid, utcNow } from "../../db/dist/index.js";
 
@@ -32,14 +32,12 @@ export interface LineageUsage {
   readonly generations: number;
   /** generations without the base-sync-only ones. */
   readonly main_generations: number;
-  /** Main work only: base-sync-only verdicts and launches are counted below. */
+  /** Includes the base-sync-only verdicts and launches counted again below. */
   readonly review_attempts: number;
   readonly worker_runs: number;
   readonly base_sync_generations: number;
   readonly base_sync_review_attempts: number;
   readonly base_sync_worker_runs: number;
-  readonly non_functional_streak: number;
-  readonly last_streak_paths: readonly string[];
   readonly history: readonly LineageHistoryLine[];
 }
 
@@ -472,7 +470,6 @@ export function lineageUsage(reader: LineageReader, taskId: string, settings: Re
   const baseSyncReviewsOf = (row: (typeof tasks)[number]): number => (row.base_sync_review_attempts ?? 0) - (resets.get(row.id)?.base_sync_review_attempts ?? 0);
   const baseSyncGenerationsOf = (row: (typeof tasks)[number]): number => (row.base_sync_generations ?? 0) - (resets.get(row.id)?.base_sync_generations ?? 0);
   const units = lineageUnits(reader, members, cutoffs);
-  const streak = nonFunctionalStreak(units, settings);
   const kindByTask = new Map<string, LineageHistoryLine["kind"]>();
   for (const unit of units) {
     if (!kindByTask.has(unit.task_id)) kindByTask.set(unit.task_id, unit.measured ? classifyRemakeUnit(unit, settings).kind : "unmeasured");
@@ -497,13 +494,11 @@ export function lineageUsage(reader: LineageReader, taskId: string, settings: Re
     root_task_id: rootId,
     generations,
     main_generations: Math.max(0, generations - baseSyncGenerations),
-    review_attempts: sum(tasks.map(reviewsOf)) - baseSyncReviews,
-    worker_runs: sum(runs.filter((row) => row.base_sync_only !== 1).map((row) => row.count)),
+    review_attempts: sum(tasks.map(reviewsOf)),
+    worker_runs: sum(runs.map((row) => row.count)),
     base_sync_generations: baseSyncGenerations,
     base_sync_review_attempts: baseSyncReviews,
     base_sync_worker_runs: sum(runs.filter((row) => row.base_sync_only === 1).map((row) => row.count)),
-    non_functional_streak: streak.streak,
-    last_streak_paths: streak.paths,
     history,
   };
 }

@@ -1,5 +1,5 @@
-export const MEMORY_MODE_SETTINGS_KEY = "memory_mode";
-export const MEMORY_FOLDER_KINDS_SETTINGS_KEY = "memory_folder_kinds";
+import { isRecord } from "./settings-validation.js";
+
 export const MEMORY_RECALL_LIMIT_SETTINGS_KEY = "memory_recall_limit";
 export const MEMORY_RECALL_MIN_SIMILARITY_SETTINGS_KEY = "memory_recall_min_similarity";
 
@@ -28,75 +28,6 @@ export function readMemoryArchive(value: unknown): MemoryArchive {
     dir: typeof dir === "string" ? dir : DEFAULT_MEMORY_ARCHIVE.dir,
     exclude: Array.isArray(exclude) && exclude.every((x) => typeof x === "string") ? exclude : DEFAULT_MEMORY_ARCHIVE.exclude,
   };
-}
-
-export type MemoryMode = "legacy" | "pages";
-export const DEFAULT_MEMORY_MODE: MemoryMode = "pages";
-
-export const FOLDER_KIND_TYPES = ["clipping", "work-log"] as const;
-export type FolderKindType = typeof FOLDER_KIND_TYPES[number];
-
-export interface FolderKindRule {
-  /** Vault-relative glob; only `**` and `*` are special. */
-  readonly glob: string;
-  readonly type: FolderKindType;
-  /** `optional`: links into this folder need not resolve. */
-  readonly links?: "optional";
-}
-export interface MemoryFolderKinds {
-  readonly version: 1;
-  readonly rules: readonly FolderKindRule[];
-}
-
-export const DEFAULT_MEMORY_FOLDER_KINDS: MemoryFolderKinds = {
-  version: 1,
-  rules: [
-    { glob: "research/**", type: "clipping", links: "optional" },
-    { glob: "works/**", type: "work-log" },
-  ],
-};
-
-export class MemorySettingsValidationError extends Error {
-  public constructor(message: string) {
-    super(message);
-    this.name = "MemorySettingsValidationError";
-  }
-}
-
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
-
-/** Strict validation for settings writes. */
-export function validateMemoryFolderKinds(value: unknown): MemoryFolderKinds {
-  if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.rules)) {
-    throw new MemorySettingsValidationError("memory_folder_kinds must be {version: 1, rules: [...]}.");
-  }
-  const rules = value.rules.map((rule, i): FolderKindRule => {
-    if (!isRecord(rule) || typeof rule.glob !== "string" || rule.glob === "" || rule.glob.startsWith("/") || rule.glob.includes("..")) {
-      throw new MemorySettingsValidationError(`rules[${i}].glob must be a relative glob.`);
-    }
-    if (!(FOLDER_KIND_TYPES as readonly unknown[]).includes(rule.type)) {
-      throw new MemorySettingsValidationError(`rules[${i}].type must be one of ${FOLDER_KIND_TYPES.join(", ")}.`);
-    }
-    if (rule.links !== undefined && rule.links !== "optional") throw new MemorySettingsValidationError(`rules[${i}].links must be "optional".`);
-    return { glob: rule.glob, type: rule.type as FolderKindType, ...(rule.links ? { links: "optional" as const } : {}) };
-  });
-  return { version: 1, rules };
-}
-
-/** Tolerant parsing of stored values: anything invalid falls back to the default. */
-export function readMemoryFolderKinds(value: unknown, warn?: (message: string) => void): MemoryFolderKinds {
-  if (value === undefined || value === null) return DEFAULT_MEMORY_FOLDER_KINDS;
-  try {
-    return validateMemoryFolderKinds(value);
-  } catch (error) {
-    warn?.(`Invalid memory_folder_kinds; using defaults: ${(error as Error).message}`);
-    return DEFAULT_MEMORY_FOLDER_KINDS;
-  }
-}
-
-/** `pages` is the only mode. A `legacy` (or any other) value an older build saved is read as `pages`. */
-export function readMemoryMode(_value: unknown): MemoryMode {
-  return DEFAULT_MEMORY_MODE;
 }
 
 /** Integer 1–3; anything else gives the default. */

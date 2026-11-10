@@ -116,18 +116,6 @@ process.stdin.on("end", () => {
   assert.equal((await agentRunner.runKeywordExtraction({ items: [] })).ok, true);
   await db.createWriteLane().drain();
   assert.equal(db.all("SELECT origin FROM plan_usage_snapshots WHERE origin = 'claude_rate_limit_event'").length, 1);
-  await agentRunner.runAdvisor({
-    conversation_id: "claude-observation",
-    invocation_id: "claude-observation",
-    provider: "claude",
-    messages: [{ source: "owner", body: "check usage" }],
-  });
-  await agentRunner.runAdvisor({
-    conversation_id: "codex-observation",
-    invocation_id: "codex-observation",
-    provider: "codex",
-    messages: [{ source: "owner", body: "check usage" }],
-  });
   await db.createWriteLane().drain();
 
   const rows = db.all("SELECT harness, origin, status, snapshot_json FROM plan_usage_snapshots ORDER BY harness, origin");

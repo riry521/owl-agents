@@ -39,10 +39,7 @@ path.
 
 The current default selects the built Core package and fails fast if its
 relative `packages/core/dist/index.js` artifact exposes no compatible
-`createCore({db, agentRunner, git, version})` contract. Use
-`OWL_CORE_MODE=standalone` only as an explicit temporary mode while the
-parallel package build is incomplete; standalone is never selected
-automatically. The default agent mode is the real provider boundary unless `.env`
+`createCore({db, agentRunner, git, version})` contract. The default agent mode is the real provider boundary unless `.env`
 selects the safe example value `OWL_PROVIDER=stub`. Stub mode does not require
 Claude, Codex, or network access. Real mode checks the selected
 adapter/model/executable and reports remediation; it does not install provider CLIs.

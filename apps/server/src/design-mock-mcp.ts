@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { guardConfig, guardRequest } from "./guard-client.js";
 import { createInterface } from "node:readline";
 
 const FETCH_TIMEOUT_MS = 30_000;
@@ -47,23 +47,15 @@ function errorCode(error: unknown): string {
 }
 
 async function post(path: string, id: unknown, payload: Json): Promise<unknown> {
-  const role = process.env.OWL_ROLE;
-  const base = process.env.OWL_GUARD_API_BASE;
-  const tokenFile = process.env.OWL_GUARD_TOKEN_FILE;
-  if (role !== "designer" || !process.env.OWL_AGENT_RUN_ID || !base || !tokenFile) {
+  const guard = guardConfig({ roleVar: "OWL_ROLE", role: "designer", requireRunId: true });
+  if (!guard) {
     throw new ToolError("owl_design_unavailable", "Designer の OWL_ROLE / OWL_AGENT_RUN_ID / OWL_GUARD_API_BASE / OWL_GUARD_TOKEN_FILE が設定されていません。");
   }
   const key = `${nonce}:${String(id)}`;
   const body = JSON.stringify({ request_id: key, idempotency_key: key, expected_version: 0, payload });
   for (let attempt = 0; ; attempt += 1) {
     try {
-      const token = readFileSync(tokenFile, "utf8").trim();
-      const response = await fetch(`${base.replace(/\/+$/, "")}${path}`, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-        body,
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      });
+      const { response } = await guardRequest(guard, path, { headers: { "content-type": "application/json" }, body, timeoutMs: FETCH_TIMEOUT_MS, authorizeEmptyToken: true });
       const text = await response.text();
       let parsed: { data?: unknown; error?: { code?: string; message?: string } } = {};
       try { parsed = JSON.parse(text); } catch { /* non-JSON body */ }

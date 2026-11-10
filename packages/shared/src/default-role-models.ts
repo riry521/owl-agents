@@ -13,3 +13,12 @@ export const DEFAULT_ROLE_MODELS = {
   librarian: { provider: "anthropic", model: CLAUDE_OPUS_5_5_MODEL, effort: "high" },
   curator: { provider: "anthropic", model: CLAUDE_HAIKU_5_5_MODEL, effort: "low" },
 } as const;
+
+export type ModelSettingRole = keyof typeof DEFAULT_ROLE_MODELS;
+
+/** Every role that has a model setting, in the order the settings list them. */
+export const MODEL_SETTING_ROLES = Object.keys(DEFAULT_ROLE_MODELS) as readonly ModelSettingRole[];
+
+export const MODEL_SETTING_EFFORTS: readonly string[] = ["low", "medium", "high", "xhigh", "max"];
+
+export const MODEL_PRESET_NAME_MAX_LENGTH = 60;

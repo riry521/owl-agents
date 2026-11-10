@@ -4,7 +4,7 @@ import { mkdir, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { ExternalCoreAdapter, createCore as createMemoryCore } from "../../apps/server/dist/core.js";
+import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { createTestCore } from "../helpers/core.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
@@ -246,8 +246,11 @@ test("a materials path answers 503 knowledge_storage_unavailable while the stora
 });
 
 test("answers 503 dependency_unavailable when the loaded Core cannot read Markdown", async (t) => {
-  const root = await tempDir(t, "owl-work-markdown-memory-");
-  const api = await startTestHttpServer(t, { core: createMemoryCore({ version: "test" }), owlRoot: root, webOut: root }, { token });
+  const { root, db, core } = await createTestCore(t, {}, { prefix: "owl-work-markdown-503-" });
+  const limited = Object.create(core, { readWorkMarkdown: { value: undefined } });
+  const adapter = new ExternalCoreAdapter(limited, db, root, join(root, "data"));
+  t.after(() => adapter.shutdown({ force: true, timeoutMs: 0 }).catch(() => undefined));
+  const api = await startTestHttpServer(t, { core: adapter, db, webOut: root, owlRoot: root }, { token });
   if (!api) return t.skip("localhost listen is unavailable");
   const res = await api.request("GET", `/api/v1/works/${createUlid()}/markdown?path=a.md`);
   assert.equal(res.status, 503);

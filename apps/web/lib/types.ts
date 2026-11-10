@@ -12,6 +12,8 @@
  * fetches later without touching components.
  */
 
+import type { TaskStateValue, WorkStateValue } from "../../../packages/shared/dist/index.js";
+
 // ---- common scalars ---------------------------------------------------------
 
 /** string(pattern ^[0-9A-HJKMNP-TV-Z]{26}$) */
@@ -22,28 +24,10 @@ export type RFC3339 = string;
 // ---- states ------------------------------------------------------------------
 
 /** Known Work states plus future values returned by newer servers. */
-export type WorkState =
-  | 'memo'
-  | 'ready'
-  | 'running'
-  | 'paused'
-  | 'judgement_waiting'
-  | 'completed'
-  | 'cancelled'
-  | (string & {});
+export type WorkState = WorkStateValue | (string & {});
 
-/** Task states: every value that appears in the Task transition table. */
-export type TaskState =
-  | 'waiting'
-  | 'ready'
-  | 'running'
-  | 'verifying'
-  | 'review_fix_waiting'
-  | 'failed'
-  | 'judgement_waiting'
-  | 'completed'
-  | 'paused'
-  | 'cancelled';
+/** Known Task states plus future values returned by newer servers. */
+export type TaskState = TaskStateValue | (string & {});
 
 /** agent_runs.status CHECK. */
 export type AgentRunStatus =
@@ -122,6 +106,7 @@ export interface WorkDetail extends Omit<WorkSummary, 'title' | 'state' | 'updat
   conversation_id?: ULID | null;
   advisor_backlog?: WorkAdvisorBacklog | null;
   prerequisites?: WorkPrerequisite[];
+  can_move_to_project?: boolean;
   final_report?: WorkFinalReport | null;
 }
 
@@ -780,9 +765,6 @@ export interface AutoRecoverySettings {
 export interface RemakeLimitSettings {
   lineage_review_attempts: number;
   lineage_worker_runs: number;
-  non_functional_remakes: number;
-  base_sync_lineage_review_attempts: number;
-  base_sync_lineage_worker_runs: number;
   lead_review_rejections: number;
   verification_paths: string[];
   checked_task_types: string[];
@@ -1115,13 +1097,6 @@ export interface RuleProposalCommandResult {
   applied_path: string | null;
 }
 
-export interface RuleProposalCreateResult {
-  proposal_id: ULID;
-  status: RuleProposalStatus;
-  already_recorded: boolean;
-  merged_into?: ULID;
-  last_error?: string;
-}
 
 // ---- Skill Box types -------------------------------------------------------
 

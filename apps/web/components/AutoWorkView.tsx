@@ -9,7 +9,7 @@ import {
   AUTO_WORK_SETTINGS_VIEW_KEY, fromLabelKey, originLabelKey, rulesSummary, sourceLabelKey, summarizeRun,
 } from '@/lib/auto-work.mjs';
 import { useLocale, type TFunction } from '@/lib/i18n';
-import { humanizeError } from '@/lib/settings-errors';
+import { humanizeSettingsError } from '@/lib/api-error-keys.mjs';
 import type { AutoWorkListState, AutoWorkProjectSettings, AutoWorkRule, AutoWorkSettings } from '@/lib/types';
 import { useView } from '@/lib/view-loader';
 
@@ -259,7 +259,7 @@ function SettingsTab({ data, error, loading, refresh }: {
         setFailure(t('autoWork.state.versionConflict'));
         await refresh();
       } else {
-        setFailure(t('autoWork.state.toggleFailed', { error: humanizeError(err, t) }));
+        setFailure(t('autoWork.state.toggleFailed', { error: humanizeSettingsError(err, t) }));
       }
     } finally {
       setBusyScopes((current) => current.filter((item) => item !== key));
@@ -279,7 +279,7 @@ function SettingsTab({ data, error, loading, refresh }: {
       await refresh();
     } catch (err) {
       console.error('[Owl] Auto Work run failed', err);
-      setFailure(err instanceof ApiRequestError && err.code === 'invalid_state' ? t('autoWork.run.offNow') : t('autoWork.run.failed', { error: humanizeError(err, t) }));
+      setFailure(err instanceof ApiRequestError && err.code === 'invalid_state' ? t('autoWork.run.offNow') : t('autoWork.run.failed', { error: humanizeSettingsError(err, t) }));
     } finally {
       setRunning(null);
     }

@@ -14,7 +14,6 @@ import { createUlid, utcNow } from "../../db/dist/index.js";
 import { applyAdvisorInterfaceInstructions, externalJsonBlock, formatAdvisorMalformed, parseAdvisorResponse, parseSlackAdvisorResponse } from "@owl/shared";
 import type { AdvisorSessionDirectory, AdvisorTurnRequest, AdvisorWorkspacePreparation, CoreDatabase, CoreWriteLaneTransaction, GitGateway } from "./types";
 import type { AdvisorSession, AdvisorSessionManager } from "./advisor-session";
-import type { MemorySaver } from "./memory-saver";
 import { resolveAdvisorWorkingDirectory } from "./advisor-working-directory";
 import { renderAdvisorWorkspaceNote } from "./advisor-workspace-note";
 import { appendAdvisorProjectCatalog } from "./advisor-project-context";
@@ -68,9 +67,8 @@ export interface AdvisorSettingsSnapshot {
 export interface AdvisorRuntimeConfig {
   readonly db: CoreDatabase;
   readonly sessionManager: AdvisorSessionManager;
-  readonly memorySaver: MemorySaver;
-  /** With `conversationLog` set a compaction summary becomes a conversation-log page instead of a legacy session note. */
-  readonly conversationLog?: { readonly writer: Pick<ConversationLogWriter, "write"> };
+  /** A compaction summary becomes a conversation-log page. */
+  readonly conversationLog: { readonly writer: Pick<ConversationLogWriter, "write"> };
   /** Harness ids whose compaction summary format can be set when the session starts (T10 design: none of the built-in ones). */
   readonly canInstructCompaction?: (harnessId: string) => boolean;
   readonly providerClient: ProviderClient;
@@ -1721,13 +1719,9 @@ export class AdvisorSessionRuntime {
     const provider = sessionRow?.provider_id ?? "unknown";
     const model = sessionRow?.model ?? "unknown";
     const index = (sessionRow?.compaction_count ?? 0) + 1;
-    const { path, captured } = await (this.config.conversationLog
-      ? this.config.conversationLog.writer.write({
-        sessionId, conversationId, cause: event.cause, summary: event.summary, transcriptPath: event.transcript_path, provider, model, index,
-      }).then((result) => ({ path: result.path, captured: result.path !== null }))
-      : this.config.memorySaver.saveCompactionSummary(sessionId, {
-        conversationId, cause: event.cause, preTokens: event.pre_tokens, summary: event.summary, provider, model, index, transcriptPath: event.transcript_path,
-      })).catch((error: unknown) => {
+    const { path, captured } = await this.config.conversationLog.writer.write({
+      sessionId, conversationId, cause: event.cause, summary: event.summary, transcriptPath: event.transcript_path, provider, model, index,
+    }).then((result) => ({ path: result.path, captured: result.path !== null })).catch((error: unknown) => {
       console.warn("[owl-core] Could not save the compaction summary", error);
       return { path: null, captured: false };
     });

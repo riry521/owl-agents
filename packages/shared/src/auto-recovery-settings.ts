@@ -1,3 +1,5 @@
+import { exactKeysValidator, SettingsValidationError } from "./settings-validation.js";
+
 export const AUTO_RECOVERY_SETTINGS_KEY = "auto_recovery";
 export const AUTO_RECOVERY_LIMIT_MIN = 0;
 export const AUTO_RECOVERY_LIMIT_MAX = 10;
@@ -9,15 +11,8 @@ export interface AutoRecoverySettings {
 
 export const DEFAULT_AUTO_RECOVERY_SETTINGS: AutoRecoverySettings = { limit: 2 };
 
-export class AutoRecoverySettingsValidationError extends Error {
-  public constructor(message: string, public readonly field: string) {
-    super(message);
-    this.name = "AutoRecoverySettingsValidationError";
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+export class AutoRecoverySettingsValidationError extends SettingsValidationError {
+  public override name = "AutoRecoverySettingsValidationError";
 }
 
 function checkLimit(value: unknown): number {
@@ -28,14 +23,11 @@ function checkLimit(value: unknown): number {
 }
 
 /** For PUT: exactly the one key, with a valid value. Throws AutoRecoverySettingsValidationError. */
-export function validateAutoRecoverySettings(value: unknown): AutoRecoverySettings {
-  if (!isRecord(value)) throw new AutoRecoverySettingsValidationError("Settings must be an object.", "payload");
-  const own = Reflect.ownKeys(value);
-  if (own.length !== 1 || own[0] !== "limit") {
-    throw new AutoRecoverySettingsValidationError("Settings must contain exactly limit.", "payload");
-  }
-  return { limit: checkLimit(value.limit) };
-}
+export const validateAutoRecoverySettings = exactKeysValidator<AutoRecoverySettings>({
+  keys: ["limit"],
+  check: (_key, value) => checkLimit(value),
+  error: AutoRecoverySettingsValidationError,
+});
 
 /** For reads: an invalid stored value falls back to the default and is reported in warnings. */
 export function readAutoRecoverySettings(value: unknown): { readonly settings: AutoRecoverySettings; readonly warnings: readonly string[] } {

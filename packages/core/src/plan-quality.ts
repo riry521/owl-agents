@@ -69,10 +69,12 @@ export function evaluatePlanQuality(items: readonly TaskPlanItem[], settings: Pl
     const ownerSet = criteria.filter((criterion) => criterion.origin?.kind === "owner");
     const unquoted = ownerSet.filter((criterion) => {
       const quote = squeezed(criterion.origin?.quote ?? "");
-      return quote === "" || !ownerTexts.some((text) => squeezed(text).includes(quote));
+      if (quote === "" || !ownerTexts.some((text) => squeezed(text).includes(quote))) return true;
+      // Why not accept any summary line: a Manager-derived condition quoted from Policy or Background became owner and could not be relaxed.
+      return summary !== null && criterion.origin?.source === "summary" && !goalLines.some((line) => line.includes(quote)) && !acceptanceLines.some((line) => line.includes(quote));
     });
     if (unquoted.length > 0) {
-      warnings.push({ ...base, code: "criterion_origin_unquoted", detail: `A criterion marked origin owner does not quote the Owner (${unquoted.map((criterion) => criterion.id).join(", ")}). Copy the Owner's sentence from the Work summary, an instruction or a Decision answer into origin.quote, or mark the criterion origin manager.`, measured: unquoted.map((criterion) => criterion.id), threshold: null });
+      warnings.push({ ...base, code: "criterion_origin_unquoted", detail: `A criterion marked origin owner does not quote the Owner (${unquoted.map((criterion) => criterion.id).join(", ")}). Copy the Owner's sentence from a line of the Work summary's Acceptance (受け入れ条件) or Goals (目標) section (other sections such as Policy or Background are manager), an instruction or a Decision answer into origin.quote, or mark the criterion origin manager.`, measured: unquoted.map((criterion) => criterion.id), threshold: null });
     }
     // Instruction and Decision answer quotes are not checked: the Owner may move a criterion between required and goal by saying so.
     const mismatched = ownerSet.filter((criterion) => {
@@ -103,7 +105,7 @@ export function evaluatePlanQuality(items: readonly TaskPlanItem[], settings: Pl
       const longest = [...lengths].sort((a, b) => b.chars - a.chars).map((entry) => `${entry.id} ${entry.chars}`).join(", ");
       warnings.push({ ...base, code: "acceptance_chars_over", detail: `Task ${base.task_ref}: the acceptance is ${chars} characters in total (limit ${settings.max_acceptance_chars}); characters of text and check per criterion, longest first: ${longest}. Shorten the longest criteria or split the Task.`, measured: chars, threshold: settings.max_acceptance_chars });
     }
-    const external = criteria.filter((criterion) => !forOwner.has(criterion)).map(fields).filter((text) => {
+    const external = criteria.filter((criterion) => !forOwner.has(criterion) && criterionRequirement(criterion) !== "goal").map(fields).filter((text) => {
       const remaining = withoutExempt(settings.external_state_exempt_patterns, text);
       return matchesAny(settings.external_state_patterns, remaining) && matchesAny(settings.state_comparison_patterns, remaining);
     });
@@ -123,6 +125,8 @@ export function evaluateCriteriaRelaxation(
   revised: readonly AcceptanceCriterion[],
   relaxations: readonly CriteriaRelaxation[],
   settings: PlanQualitySettings,
+  /** Criteria an acceptance defect names: these alone may also move from required to goal. */
+  goalAllowed: ReadonlySet<string> = new Set(),
 ): string[] {
   const errors: string[] = [];
   for (const before of current.filter(isManagerCriterion)) {
@@ -133,7 +137,8 @@ export function evaluateCriteriaRelaxation(
     }
     const requirementChanged = criterionRequirement(after) !== criterionRequirement(before);
     if (after.text === before.text && after.check === before.check && !requirementChanged) continue;
-    if (requirementChanged) errors.push(`Criterion ${before.id}: requirement must stay ${criterionRequirement(before)} when loosening.`);
+    const toGoal = goalAllowed.has(before.id) && criterionRequirement(before) === "required" && criterionRequirement(after) === "goal";
+    if (requirementChanged && !toGoal) errors.push(`Criterion ${before.id}: requirement must stay ${criterionRequirement(before)} when loosening.`);
     if (after.text.trim() === "" || after.check.trim() === "") errors.push(`Criterion ${before.id}: text and check must not be empty after loosening.`);
     if ((after.kind ?? "work_check") !== (before.kind ?? "work_check")) errors.push(`Criterion ${before.id}: kind must stay ${before.kind ?? "work_check"} when loosening.`);
     const record = relaxations.find((entry) => entry.criterion_id === before.id);

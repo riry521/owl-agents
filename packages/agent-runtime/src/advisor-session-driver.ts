@@ -29,29 +29,12 @@ import { readClaudeCompactionSummaries, waitForCompactionSummary } from "./compa
 import { classifyProviderFailure, formatProviderError, isConversationNotFound, RESUME_FAILED_CODE, sessionFailureMessage, turnFailureProviderError, withProviderDetail } from "./provider-error.js";
 import { claudeRateLimitEvidence } from "./rate-limit.js";
 import { SessionActivityTracker } from "./session-activity.js";
-import { buildAgentPermissionArgs, externalJsonBlock, extractWebResearchCapture, reapProcessGroup, type WebResearchTool } from "@owl/shared";
+import { buildAgentPermissionArgs, externalJsonBlock, extractWebResearchCapture, reapProcessGroup, type WebResearchTool, signalProcessGroup } from "@owl/shared";
 
 const SUBAGENT_TOOL_NAMES: ReadonlySet<string> = new Set(["Agent"]); // name Claude gives its subagent tool
 const STDERR_RING_BUFFER_BYTES = 8 * 1024;
 const DEFAULT_STOP_GRACE_MS = 5000;
 const MAX_PENDING_WEB_TOOLS = 64;
-
-function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
-  const pid = child.pid;
-  if (pid === undefined) {
-    child.kill(signal);
-    return;
-  }
-  try {
-    process.kill(-pid, signal);
-  } catch (error) {
-    // A detached group may already have exited. Fall back to the direct child
-    // so stop() still works on platforms without negative-PID process groups.
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") {
-      try { child.kill(signal); } catch { /* already gone */ }
-    }
-  }
-}
 
 interface ClaudeStreamMessageContentPart {
   readonly type?: string;
@@ -441,14 +424,14 @@ export class AdvisorSessionDriver implements ProviderSession {
     }
     this.stopRequested = true;
     this.stderrBuffer.push(`\n[advisor-session-driver] stop requested: ${reason}\n`);
-    signalProcessGroup(this.child, "SIGTERM");
+    signalProcessGroup(this.child, "SIGTERM", { skipFallbackWhenGone: true });
     await new Promise<void>((resolve) => {
       if (this.childClosed) {
         resolve();
         return;
       }
       const timer = setTimeout(() => {
-        if (!this.childClosed) signalProcessGroup(this.child, "SIGKILL");
+        if (!this.childClosed) signalProcessGroup(this.child, "SIGKILL", { skipFallbackWhenGone: true });
       }, graceMs);
       this.child.once("close", () => {
         clearTimeout(timer);
@@ -461,7 +444,7 @@ export class AdvisorSessionDriver implements ProviderSession {
     if (this.childClosed) return;
     this.stopRequested = true;
     this.stderrBuffer.push("\n[advisor-session-driver] immediate termination requested\n");
-    signalProcessGroup(this.child, "SIGKILL");
+    signalProcessGroup(this.child, "SIGKILL", { skipFallbackWhenGone: true });
   }
 
   private attachStdout(): void {
@@ -726,7 +709,7 @@ export class AdvisorSessionDriver implements ProviderSession {
           stderr_tail: this.startupError,
         });
         this.endStream();
-        if (!this.childClosed) signalProcessGroup(this.child, "SIGTERM");
+        if (!this.childClosed) signalProcessGroup(this.child, "SIGTERM", { skipFallbackWhenGone: true });
         return [];
       }
       this.currentTurnId = null;
@@ -983,12 +966,12 @@ export class AdvisorSessionDriver implements ProviderSession {
       this.pushEvent({ type: "session.exited", exit_code: null, signal: null, stderr_tail: error });
       this.pushEvent({ type: "turn.failed", turn_id: turnId, error, provider_error: turnFailureProviderError("claude", { error, stderr: error }) });
       this.endStream();
-      if (!this.childClosed) signalProcessGroup(this.child, "SIGTERM");
+      if (!this.childClosed) signalProcessGroup(this.child, "SIGTERM", { skipFallbackWhenGone: true });
       return [];
     }
     this.startupError = error;
     this.endStream();
-    if (!this.childClosed) signalProcessGroup(this.child, "SIGTERM");
+    if (!this.childClosed) signalProcessGroup(this.child, "SIGTERM", { skipFallbackWhenGone: true });
     return [];
   }
 

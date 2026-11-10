@@ -12,6 +12,7 @@ import { createUlid } from "../../packages/db/dist/index.js";
 import { openTestDatabase } from "../helpers/db.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 import { command } from "../helpers/core.mjs";
+import { readOwnerReplan } from "../../packages/core/dist/replan-queue-store.js";
 
 function commandEnvelope(payload, suffix, expectedVersion = 0) {
   return command(payload, `test:${suffix}:${createUlid()}`, expectedVersion);
@@ -428,7 +429,7 @@ test("a conflict on a paused Work is left alone", async (t) => {
 
   assert.deepEqual(result, { handled: true });
   assert.equal(autoAlerts(db, workId).length, 0);
-  assert.equal(db.get("SELECT COUNT(*) AS n FROM idempotency_keys WHERE key = ?", `owner-replan:${workId}`).n, 0);
+  assert.equal(readOwnerReplan(db, workId), undefined);
 });
 
 test("the third merge conflict opens the Decision and says automatic resolution was already tried", async (t) => {
@@ -635,7 +636,7 @@ test("retry after a merge failure reruns the final check and merge without a Man
 
   assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "completed");
   assert.equal(git.calls.filter(([name]) => name === "mergeWorkIntoBase").length, 2);
-  assert.equal(db.get("SELECT COUNT(*) AS n FROM idempotency_keys WHERE key = ?", `owner-replan:${workId}`).n, 0);
+  assert.equal(readOwnerReplan(db, workId), undefined);
 });
 
 test("retry follows the alert behind the answered Decision, not a later alert", async (t) => {
@@ -660,5 +661,5 @@ test("retry follows the alert behind the answered Decision, not a later alert", 
 
   assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "completed");
   assert.equal(git.calls.filter(([name]) => name === "mergeWorkIntoBase").length, 2);
-  assert.equal(db.get("SELECT COUNT(*) AS n FROM idempotency_keys WHERE key = ?", `owner-replan:${workId}`).n, 0);
+  assert.equal(readOwnerReplan(db, workId), undefined);
 });

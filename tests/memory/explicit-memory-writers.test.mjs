@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { tempDir } from "../helpers/temp.mjs";
 import { KnowledgeBase } from "../../packages/core/dist/knowledge-base.js";
-import { MemorySaver } from "../../packages/core/dist/memory-saver.js";
+import { routeExplicitMemory } from "../../packages/core/dist/memory/explicit-memory.js";
 import { ResearchRecorder } from "../../packages/core/dist/research-recorder.js";
 import { ProjectOverviewService } from "../../packages/core/dist/project-overview-note.js";
 import { PageRouter, STORAGE_UNAVAILABLE_CODE } from "../../packages/core/dist/memory/page-router.js";
@@ -28,12 +28,11 @@ async function readThemePage(root, name) {
   return parsePage(await readFile(join(root, "projects", slug, `${name}.md`), "utf8"));
 }
 
-test("saveExplicitMemory files a negative statement as a pitfall and the rest as a decision, and uses common/ when there is no Project", async (t) => {
+test("routeExplicitMemory files a negative statement as a pitfall and the rest as a decision, and uses common/ when there is no Project", async (t) => {
   const { root, router } = await vault(t);
-  const saver = new MemorySaver(new KnowledgeBase(root), () => "ja", undefined, { enabled: () => true, router });
-  const pitfall = await saver.saveExplicitMemory("本番の data/ には直接書き込まない", [], PROJECT_ID);
-  const decision = await saver.saveExplicitMemory("ビルドは pnpm build を使う", [], PROJECT_ID);
-  const common = await saver.saveExplicitMemory("返信は日本語にする");
+  const pitfall = await routeExplicitMemory(router, "本番の data/ には直接書き込まない", PROJECT_ID);
+  const decision = await routeExplicitMemory(router, "ビルドは pnpm build を使う", PROJECT_ID);
+  const common = await routeExplicitMemory(router, "返信は日本語にする", null);
   assert.match(pitfall, /^projects\/.+\/その他の注意\.md$/u);
   const page = await readThemePage(root, "その他の注意");
   assert.ok(sections(page, "落とし穴").some((line) => line.includes("本番の data/ には直接書き込まない")));
@@ -46,20 +45,18 @@ test("saveExplicitMemory files a negative statement as a pitfall and the rest as
   assert.ok(sections(commonPage, "決まりごと").some((line) => line.includes("返信は日本語にする")));
 });
 
-test("saveExplicitMemory throws storage_unavailable when the vault is not connected", async (t) => {
+test("routeExplicitMemory throws storage_unavailable when the vault is not connected", async (t) => {
   const { root, router: _ } = await vault(t);
   const router = new PageRouter({
     knowledgeDir: () => root,
     withWrite: async () => { throw Object.assign(new Error("unavailable"), { code: STORAGE_UNAVAILABLE_CODE }); },
   });
-  const saver = new MemorySaver(new KnowledgeBase(root), () => "ja", undefined, { enabled: () => true, router });
-  await assert.rejects(() => saver.saveExplicitMemory("何かを覚える", []), (error) => error.code === "storage_unavailable");
+  await assert.rejects(() => routeExplicitMemory(router, "何かを覚える", null), (error) => error.code === "storage_unavailable");
 });
 
-test("saveExplicitMemory saves to the conversation Project when no project_id is given", async (t) => {
+test("routeExplicitMemory saves to the given Project", async (t) => {
   const { root, router } = await vault(t);
-  const saver = new MemorySaver(new KnowledgeBase(root), () => "ja", undefined, { enabled: () => true, router, conversationProject: () => PROJECT_ID });
-  assert.match(await saver.saveExplicitMemory("ビルドは pnpm build を使う"), /^projects\/.+\/その他の注意\.md$/u);
+  assert.match(await routeExplicitMemory(router, "ビルドは pnpm build を使う", PROJECT_ID), /^projects\/.+\/その他の注意\.md$/u);
 });
 
 const FILES = ["README.md", "package.json", "src/index.ts"];
@@ -156,7 +153,7 @@ test("ResearchRecorder saves a clipping with the frontmatter keys and sections o
   assert.deepEqual(validatePage(updated, { writer: "owl" }).errors, []);
 });
 
-test("memory-saver reads no free-text AI output: the fence/brace-hunting extraction is gone", async () => {
-  const source = await readFile(new URL("../../packages/core/src/memory-saver.ts", import.meta.url), "utf8");
+test("explicit-memory reads no free-text AI output: the fence/brace-hunting extraction is gone", async () => {
+  const source = await readFile(new URL("../../packages/core/src/memory/explicit-memory.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /parseJsonObject|extractJsonObject|parseExtractionResponse/u);
 });

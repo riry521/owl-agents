@@ -8,6 +8,8 @@ import { FakeClock } from "../helpers/clock.mjs";
 import { createTestCore } from "../helpers/core.mjs";
 
 const T0 = new Date(2026, 5, 1, 10, 0, 0);
+// The overview is read from page files (real I/O), so microtask flushing is not enough.
+const settle = () => new Promise((resolve) => setTimeout(resolve, 100));
 const at = (day, hour, minute = 0) => new Date(2026, 5, day, hour, minute, 0);
 
 const worth = {
@@ -72,7 +74,7 @@ test("the scheduled check runs once a day at its time, makes a Work and links th
   const first = await seedFailedRun("run1", ["a"], at(1, 4));
 
   await clock.advanceTo(at(2, 9));
-  for (let i = 0; i < 50; i += 1) await Promise.resolve();
+  await settle();
   const [event, ...others] = events();
   assert.equal(others.length, 0);
   assert.equal(event.verdict, "created");
@@ -89,7 +91,7 @@ test("the scheduled check runs once a day at its time, makes a Work and links th
   core.autoWork.reconfigure();
   const second = await seedFailedRun("run2", ["b"], at(2, 9, 1));
   await clock.advanceTo(at(2, 9, 31));
-  for (let i = 0; i < 50; i += 1) await Promise.resolve();
+  await settle();
   assert.equal(events().length, 1);
   assert.equal(item(second).status, "open");
 

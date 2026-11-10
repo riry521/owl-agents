@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { createUlid } from "../../packages/db/dist/index.js";
+import { MemoryIndex } from "../../packages/core/dist/memory/memory-index.js";
+import { parsePage, validatePage } from "../../packages/core/dist/memory/page-format.js";
 import { createTestCore } from "../helpers/core.mjs";
 
 const NOW = "2026-01-01T00:00:00.000Z";
@@ -41,52 +43,48 @@ async function setup(t, summarize) {
         );
       }
     });
-  const dir = join(root, "knowledge", "advisor", "conversations");
+  const dir = join(root, "knowledge", "conversations", new Date().toISOString().slice(0, 7));
   return { core, conversationId, requests, addMessages, dir };
 }
 
 const ok = () => ({ ok: true, output: SUMMARY });
 
-test("the saved file holds the summary under three headings, not the messages", async (t) => {
+test("the saved file holds the summary under the conversation-log headings, not the messages", async (t) => {
   const { core, conversationId, addMessages, dir } = await setup(t, ok);
   await addMessages(3);
 
   const { path } = await core.ingestConversation(conversationId);
   const text = await readFile(join(dir, path.split("/").pop()), "utf8");
 
-  for (const heading of ["## 話したこと", "## 決まったこと", "## 未決のこと"]) assert.ok(text.includes(heading), heading);
+  for (const heading of ["## 話したこと", "## 決まったこと", "## 学んだこと", "## 反映先"]) assert.ok(text.includes(heading), heading);
   for (const line of ["Talked about the deploy plan", "Ship on Friday", "Who owns rollback"]) assert.ok(text.includes(line), line);
   assert.doesNotMatch(text, /secret-body/u);
 });
 
-test("the file name starts with the conversation_id even when the first message starts with another ULID", async (t) => {
+test("the saved file is a conversation-log page, not a legacy note, and nothing is written under advisor/conversations", async (t) => {
   const { core, conversationId, addMessages, dir } = await setup(t, ok);
-  await addMessages(2, () => `${OTHER_ULID} please look at this`);
+  await addMessages(2);
 
-  await core.ingestConversation(conversationId);
-  const [name] = await readdir(dir);
-  const text = await readFile(join(dir, name), "utf8");
+  const { path } = await core.ingestConversation(conversationId);
+  const text = await readFile(join(dir, path.split("/").pop()), "utf8");
+  const page = parsePage(text);
 
-  assert.match(text, new RegExp(`^conversation_id: ${conversationId}$`, "mu"));
-  assert.ok(name.startsWith(`${conversationId}-deploy-plan`), name);
-  assert.ok(!name.toLowerCase().includes(OTHER_ULID.toLowerCase()), name);
-});
+  assert.match(path, /^conversations\/\d{4}-\d{2}\/\d{4}-\d{2}-\d{2}-\d+\.md$/u);
+  assert.equal(page.frontmatter.type, "conversation-log");
+  assert.equal(page.frontmatter.conversation_id, conversationId);
+  assert.equal(validatePage(page, { writer: "owner" }).ok, true);
+  assert.deepEqual(await readdir(join(dir, "..", "..", "advisor", "conversations")).catch(() => []), []);
 
-test("saving a long conversation again names the new file from the new title and leaves the old file alone", async (t) => {
-  const { core, conversationId, addMessages, dir } = await setup(t, ok);
-  await mkdir(dir, { recursive: true });
-  const oldName = `${conversationId}-old-title.md`;
-  const oldText = `---\nconversation_id: ${conversationId}\nlast_message_id: 01MSG000000000000000000000\n---\n\n# Old title\n`;
-  await writeFile(join(dir, oldName), oldText);
-  const hash = (text) => createHash("sha256").update(text).digest("hex");
-  await addMessages(60);
-
-  await core.ingestConversation(conversationId);
-  const names = (await readdir(dir)).filter((name) => name !== oldName);
-
-  assert.equal(names.length, 1);
-  assert.ok(names[0].includes("deploy-plan") && !names[0].includes("old-title"), names[0]);
-  assert.equal(hash(await readFile(join(dir, oldName), "utf8")), hash(oldText));
+  const vault = join(dir, "..", "..");
+  const storage = { isAvailable: () => true, activeDir: () => vault, withRead: async (op) => op(), status: () => ({ available: true, dir: vault, since: null }) };
+  const index = new MemoryIndex({ dataDir: join(vault, "..", "index-data"), storage, watch: false });
+  await index.start();
+  try {
+    await index.rebuild("manual");
+    assert.equal(index.getPageColumns(path)?.page_type, "conversation-log");
+  } finally {
+    await index.stop();
+  }
 });
 
 test("only messages after the previous save are summarised, from the first message on the first save", async (t) => {

@@ -224,7 +224,7 @@ async function assertPagesOffline(core, v) {
   assert.equal(found.items.length, 0);
   assert.equal(JSON.stringify(await core.memory.readIndex({ project_id: PROJECT }, ctx)).includes(SECRET), false);
   assert.equal(JSON.stringify(await core.memory.searchPages({ query: SECRET }, ctx)).includes(SECRET), false);
-  await assert.rejects(core.memorySaver.saveExplicitMemory("覚えておく"), /pages_unavailable/u);
+  await assert.rejects(core.rememberExplicit("覚えておく"), /pages_unavailable/u);
   assert.deepEqual(listing(v.vault), vaultBefore, "saving wrote nothing");
 }
 

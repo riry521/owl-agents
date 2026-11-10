@@ -233,7 +233,7 @@ function renderAdvisorFolders(state, apiClientOverrides, componentName = 'Adviso
       },
       '@/lib/view-loader': { useView: () => ({ data: undefined, error: null, loading: false, refresh: async () => {} }) },
       '@/lib/format': { roleDisplayName: (role) => role },
-      '@/lib/settings-errors': { humanizeError: () => 'ERROR' },
+      '@/lib/api-error-keys.mjs': { humanizeSettingsError: () => 'ERROR' },
       '@/lib/remake-limits.mjs': {},
       '@/lib/model-presets': { presetMatchesSettings: () => false },
       '@/components/OwnerInviteButton': { OwnerInviteButton: () => null }, '@/components/ModelPresetsBar': { ModelPresetsBar: () => null },

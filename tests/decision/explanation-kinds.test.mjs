@@ -29,9 +29,9 @@ const TASK_ID = "01TASKAAAAAAAAAAAAAAAAAAAA";
 const TASK_TITLE = "Build the export page";
 const USAGE = {
   generations: 2, main_generations: 2, review_attempts: 3, worker_runs: 3, base_sync_generations: 0, base_sync_review_attempts: 0,
-  base_sync_worker_runs: 0, non_functional_streak: 2, last_streak_paths: ["docs/a.md"], history: [],
+  base_sync_worker_runs: 0, history: [],
 };
-const SETTINGS = { lineage_review_attempts: 3, lineage_worker_runs: 3, non_functional_remakes: 2, base_sync_lineage_review_attempts: 3, base_sync_lineage_worker_runs: 3 };
+const SETTINGS = { lineage_review_attempts: 3, lineage_worker_runs: 3 };
 const ENV_BLOCK = { signal: "missing_tool", evidence: "tool not found", argv: ["make", "test"], explicit: false, tried: ["Checked the setup."], missing: ["make"], outside_installs: [] };
 const PREREQUISITE = { taskTitle: TASK_TITLE, detail: "waited", reason: "waiting for the data", conditions: ["data is ready"] };
 const DEFECTS = [{ criterion_id: "AC1", criterion: "Done.", reason: "cannot be measured here" }];
@@ -56,7 +56,7 @@ const ROWS = [
     kind: "test_environment", recommended: "approve_test_setup_installs", scope: "task", report: true,
   },
   { name: "test environment of a Work", brief: () => testEnvironmentBrief({ subject: { kind: "work" }, block: ENV_BLOCK }, "en"), kind: "test_environment", recommended: "retry_test_setup", scope: "work" },
-  ...["lineage_review_attempts", "lineage_worker_runs", "non_functional_remakes", "base_sync_lineage_review_attempts"].map((reason) => ({
+  ...["lineage_review_attempts", "lineage_worker_runs"].map((reason) => ({
     name: `remake limit ${reason}`, brief: () => remakeLimitBrief({ taskTitle: TASK_TITLE, reason, usage: USAGE, settings: SETTINGS }, "en"), kind: "remake_limit", recommended: null, scope: "task", report: true,
   })),
   { name: "design blocked by rejections", brief: () => designBlockedBrief({ taskTitle: TASK_TITLE, trigger: "lead_review_rejections", rejections: 3, limit: 3, report: null, latestFindings: ["The layout is unclear."] }, "en"), kind: "design_blocked", recommended: null, scope: "task" },

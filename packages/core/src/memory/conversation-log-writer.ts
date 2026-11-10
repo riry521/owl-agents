@@ -25,6 +25,8 @@ export interface ConversationLogInput {
   readonly provider: string;
   readonly model: string;
   readonly index: number;
+  /** The newest message the summary covers, when it was made from messages (the 会話を保存 button). */
+  readonly lastMessageId?: string;
 }
 
 export interface ConversationLogResult {
@@ -86,6 +88,7 @@ export class ConversationLogWriter {
       compaction_index: input.index, provider: input.provider, model: input.model, cause: input.cause, summary_source: "provider",
       extraction: parsed ? "program" : "pending",
       ...(project ? { project_id: project } : {}),
+      ...(input.lastMessageId ? { last_message_id: input.lastMessageId } : {}),
       ...(input.transcriptPath ? { transcript_path: input.transcriptPath } : {}),
       created: today,
     };

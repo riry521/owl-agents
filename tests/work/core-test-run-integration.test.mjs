@@ -313,3 +313,65 @@ test("a failed Work diff stops the Work-level test run as an error and goes to t
   assert.equal(replanRequests[0].context.work_verification.core_tests.status, "error");
   assert.notEqual(workState(db, workId), "completed");
 });
+
+// A whole-suite criterion never reaches the Worker; the Work's last Core run then runs the whole suite whatever the diff.
+
+const crit2 = (id, text) => ({ id, text, check: "node --test tests/a.test.mjs", serves: "fixture", if_omitted: "fixture", check_weight: "light", weight_reason: "", kind: "work_check", origin: { kind: "manager", source: null, quote: "" } });
+
+async function runWithPlan(t, { criteria, workFullTestRun }) {
+  const { run } = createStubTestRunner(() => false);
+  const holder = { seen: null };
+  const agentRunner = {
+    runManagerPlan: async (request) => {
+      if (request.mode === "finalize") {
+        // The previous Work run exists and nothing changed since: only a mark can make this run the whole suite.
+        holder.again = await holder.core.workflow.runWorkCoreTests(holder.workId);
+        return { outcome: "success", report_valid: true, report: { tasks: [], event: null, verdict: complete } };
+      }
+      return { outcome: "success", report_valid: true, report: { event: "work.planned", work_full_test_run: workFullTestRun, tasks: [{ ...plannedTask("T1"), acceptance_criteria: criteria }] } };
+    },
+    runWorker: async (request) => {
+      holder.seen = request.context.task.acceptance_criteria;
+      await writeFile(join(request.context.worktree, "src/b.mjs"), "export const b = 2;\n");
+      return { outcome: "success", report_valid: true, report: workerReport(request.invocation_id, ["src/b.mjs"]) };
+    },
+    runReviewer: async (request) => ({
+      outcome: "success", report_valid: true, report: { kind: "review", invocation_id: request.invocation_id },
+      review: { verdict: "pass", findings: [], tests: {} },
+    }),
+    runAdvisor: async () => ({ reply: "" }),
+  };
+  const { db, core, projectId, envelope } = await openTestRunCore(t, { agentRunner, runner: run, prefix: "owl-work-full-mark-" });
+  holder.core = core;
+  holder.db = db;
+  holder.workId = await startWork(core, projectId, envelope);
+  await waitFor(() => workState(db, holder.workId) === "completed", { timeoutMs: 60_000, message: "the Work to complete" });
+  holder.mark = db.get("SELECT full_test_run_at_end AS mark FROM works WHERE id = ?", holder.workId).mark;
+  holder.runs = workRuns(db, holder.workId).map((row) => JSON.parse(row.selection_json));
+  return holder;
+}
+
+test("a whole-suite criterion is removed before the Worker sees it and the Work's next Core run is the whole suite", async (t) => {
+  const holder = await runWithPlan(t, { criteria: [crit2("AC1", "既存のテストがすべて通る"), crit2("AC2", "tests/a.test.mjs が通る")], workFullTestRun: false });
+  assert.deepEqual(holder.seen.map((c) => [c.id, c.text]), [["AC1", "tests/a.test.mjs が通る"]]);
+  assert.equal(holder.mark, 1);
+  assert.equal(holder.runs.length, 2);
+  assert.equal(holder.runs[1].mode, "full");
+  assert.equal(holder.runs[1].full_reason, "work_full_test_run");
+});
+
+test("the Manager's work_full_test_run runs the whole suite on a later Work run and leaves the criteria alone", async (t) => {
+  const holder = await runWithPlan(t, { criteria: [crit2("AC1", "tests/a.test.mjs が通る")], workFullTestRun: true });
+  assert.deepEqual(holder.seen.map((c) => c.text), ["tests/a.test.mjs が通る"]);
+  assert.equal(holder.mark, 1);
+  assert.equal(holder.runs[1].full_reason, "work_full_test_run");
+});
+
+test("without the mark a later Work run with nothing new selects nothing, and specific-test criteria stay", async (t) => {
+  const holder = await runWithPlan(t, { criteria: [crit2("AC1", "tests/a.test.mjs が通る"), crit2("AC2", "npm run build が通る")], workFullTestRun: false });
+  assert.deepEqual(holder.seen.map((c) => c.text), ["tests/a.test.mjs が通る", "npm run build が通る"]);
+  assert.equal(holder.mark, 0);
+  assert.equal(holder.runs.length, 1);
+  assert.equal(holder.again.outcome.status, "skipped");
+  assert.equal(holder.again.outcome.mode, "selected");
+});

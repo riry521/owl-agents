@@ -47,8 +47,8 @@ test("deleteWork removes FK-linked execution rows in one transaction and removes
     run: createUlid(), report: createUlid(),
     decision: createUlid(), answer: createUlid(), conversation: createUlid(),
     account: createUlid(), event: createUlid(), delivery: createUlid(),
-    artifact: createUlid(), activity: createUlid(), receipt: createUlid(),
-    upload: createUlid(), secret: createUlid(), audit: createUlid(),
+    artifact: createUlid(), receipt: createUlid(),
+    upload: createUlid(),
   };
   const now = new Date().toISOString();
   const ownerId = db.get("SELECT owner_id FROM works WHERE id = ?", workId).owner_id;
@@ -116,11 +116,6 @@ test("deleteWork removes FK-linked execution rows in one transaction and removes
       ids.artifact, workId, ids.taskA, "b".repeat(64), ids.event, now,
     );
     transaction.run(
-      `INSERT INTO agent_activity (id, agent_run_id, work_id, task_id, kind, summary, source_event_id, created_at)
-       VALUES (?, ?, ?, ?, 'status', 'done', ?, ?)`,
-      ids.activity, ids.run, workId, ids.taskA, ids.event, now,
-    );
-    transaction.run(
       `INSERT INTO inbound_receipts (id, provider, account_id, external_message_id, request_id, idempotency_key, request_hash,
                                      ack_id, status, event_id, created_at)
        VALUES (?, 'web', ?, ?, ?, ?, ?, ?, 'accepted', ?, ?)`,
@@ -132,16 +127,6 @@ test("deleteWork removes FK-linked execution rows in one transaction and removes
        VALUES (?, 'web', ?, ?, ?, ?, ?, ?, ?, 'upload.txt', 1, 1, ?, 'stored', ?, ?)`,
       ids.upload, ids.account, `attachment:${ids.upload}`, `req:${ids.upload}`, `key:${ids.upload}`, "d".repeat(64),
       workId, ids.conversation, now, ids.artifact, now,
-    );
-    transaction.run(
-      `INSERT INTO secret_records (id, name, owner_id, scope_json, version_no, updated_at)
-       VALUES (?, ?, ?, '{}', 1, ?)`,
-      ids.secret, `secret:${ids.secret}`, ownerId, now,
-    );
-    transaction.run(
-      `INSERT INTO secret_audit (id, secret_id, agent_run_id, operation, result, correlation_id, created_at)
-       VALUES (?, ?, ?, 'use', 'allowed', ?, ?)`,
-      ids.audit, ids.secret, ids.run, ids.audit, now,
     );
     transaction.run(
       `INSERT INTO idempotency_keys (key, request_hash, response_json, status_code, created_at, expires_at)
@@ -169,7 +154,6 @@ test("deleteWork removes FK-linked execution rows in one transaction and removes
   assert.equal(db.get("SELECT id FROM artifacts WHERE id = ?", ids.artifact), undefined);
   assert.equal(db.get("SELECT id FROM inbound_uploads WHERE id = ?", ids.upload), undefined);
   assert.equal(db.get("SELECT event_id FROM inbound_receipts WHERE id = ?", ids.receipt).event_id, null);
-  assert.equal(db.get("SELECT agent_run_id FROM secret_audit WHERE id = ?", ids.audit).agent_run_id, null);
   assert.deepEqual(JSON.parse(db.get("SELECT related_work_ids_json FROM works WHERE id = ?", externalWorkId).related_work_ids_json), []);
   assert.equal(db.get("SELECT key FROM idempotency_keys WHERE key = ?", `old-work-cache:${workId}`), undefined);
   assert.equal(db.get("SELECT key FROM idempotency_keys WHERE key = ?", `work.delete:${workId}:-:-:-:${request.idempotency_key}`), undefined);
@@ -908,13 +892,13 @@ test("deleteWork compares files by real path: aliases, outputs and symlinks neve
   await assert.rejects(access(files.ownOut));
 });
 
-test("deleteWork leaves agent_activity, inbound_uploads and skill_usages rows of another Work unchanged", async (t) => {
+test("deleteWork leaves inbound_uploads and skill_usages rows of another Work unchanged", async (t) => {
   const { db, core } = await setup(t);
   const workId = (await core.createWork(command({ title: "Mine", summary: "", size: "small", project_id: null }, "create:mine"))).data.work_id;
   const otherId = (await core.createWork(command({ title: "Theirs", summary: "", size: "small", project_id: null }, "create:theirs"))).data.work_id;
   await insertCompletedWork(db, workId);
   const ownerId = db.get("SELECT owner_id FROM works WHERE id = ?", workId).owner_id;
-  const ids = { run: createUlid(), conversation: createUlid(), account: createUlid(), activity: createUlid(), upload: createUlid() };
+  const ids = { run: createUlid(), conversation: createUlid(), account: createUlid(), upload: createUlid() };
   const now = "2026-09-25T00:00:00.000Z";
   await db.createWriteLane().transact((transaction) => {
     transaction.run(

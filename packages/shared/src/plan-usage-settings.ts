@@ -1,3 +1,4 @@
+import { exactKeysValidator, isRecord, SettingsValidationError } from "./settings-validation.js";
 import type { PlanUsageHarness, PlanUsageOrigin, PlanUsageSnapshot, PlanUsageStatus } from "./plan-usage.js";
 
 export const PLAN_USAGE_SETTINGS_KEY = "plan_usage";
@@ -13,42 +14,27 @@ export const DEFAULT_PLAN_USAGE_SETTINGS: PlanUsageSettings = {
   poll_interval_minutes: 5,
 };
 
-export class PlanUsageSettingsValidationError extends Error {
-  public constructor(message: string, public readonly field: "claude_usage_api_enabled" | "poll_interval_minutes" | "payload") {
-    super(message);
-    this.name = "PlanUsageSettingsValidationError";
-  }
+export class PlanUsageSettingsValidationError extends SettingsValidationError<"claude_usage_api_enabled" | "poll_interval_minutes" | "payload"> {
+  public override name = "PlanUsageSettingsValidationError";
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function exactSettings(value: unknown): Record<string, unknown> {
-  if (!isRecord(value)) throw new PlanUsageSettingsValidationError("Settings must be an object.", "payload");
-  const keys = Reflect.ownKeys(value);
-  if (keys.length !== 2 || !keys.includes("claude_usage_api_enabled") || !keys.includes("poll_interval_minutes")) {
-    throw new PlanUsageSettingsValidationError("Settings must contain exactly claude_usage_api_enabled and poll_interval_minutes.", "payload");
-  }
-  return value;
-}
-
-function settingsFields(value: Record<string, unknown>): PlanUsageSettings {
-  if (typeof value.claude_usage_api_enabled !== "boolean") {
-    throw new PlanUsageSettingsValidationError("claude_usage_api_enabled must be a boolean.", "claude_usage_api_enabled");
-  }
-  if (typeof value.poll_interval_minutes !== "number" || !PLAN_USAGE_POLL_INTERVALS.includes(value.poll_interval_minutes)) {
-    throw new PlanUsageSettingsValidationError("poll_interval_minutes is not supported.", "poll_interval_minutes");
-  }
-  return {
-    claude_usage_api_enabled: value.claude_usage_api_enabled,
-    poll_interval_minutes: value.poll_interval_minutes,
-  };
-}
-
-export function validatePlanUsageSettings(value: unknown): PlanUsageSettings {
-  return settingsFields(exactSettings(value));
-}
+export const validatePlanUsageSettings = exactKeysValidator<PlanUsageSettings>({
+  keys: ["claude_usage_api_enabled", "poll_interval_minutes"],
+  exactKeysMessage: "Settings must contain exactly claude_usage_api_enabled and poll_interval_minutes.",
+  check: (key, value) => {
+    if (key === "claude_usage_api_enabled") {
+      if (typeof value !== "boolean") {
+        throw new PlanUsageSettingsValidationError("claude_usage_api_enabled must be a boolean.", "claude_usage_api_enabled");
+      }
+      return value;
+    }
+    if (typeof value !== "number" || !PLAN_USAGE_POLL_INTERVALS.includes(value)) {
+      throw new PlanUsageSettingsValidationError("poll_interval_minutes is not supported.", "poll_interval_minutes");
+    }
+    return value;
+  },
+  error: PlanUsageSettingsValidationError,
+});
 
 export function readPlanUsageSettings(value: unknown, warn?: (message: string) => void): PlanUsageSettings {
   const settings = isRecord(value) ? value : {};

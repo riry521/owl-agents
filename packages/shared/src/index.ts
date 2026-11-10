@@ -123,30 +123,17 @@ export {
   PAGES_LAYOUT,
   readMemoryArchive,
   type MemoryArchive,
-  DEFAULT_MEMORY_FOLDER_KINDS,
   DEFAULT_MEMORY_LIBRARIAN_BATCH,
   MEMORY_LIBRARIAN_MAX_BATCHES_LIMIT,
-  DEFAULT_MEMORY_MODE,
-  FOLDER_KIND_TYPES,
-  MEMORY_FOLDER_KINDS_SETTINGS_KEY,
   MEMORY_LIBRARIAN_BATCH_SETTINGS_KEY,
-  MEMORY_MODE_SETTINGS_KEY,
   MEMORY_RECALL_LIMIT_SETTINGS_KEY,
   MEMORY_RECALL_MIN_SIMILARITY_SETTINGS_KEY,
   DEFAULT_MEMORY_RECALL_LIMIT,
   DEFAULT_MEMORY_RECALL_MIN_SIMILARITY,
-  MemorySettingsValidationError,
   readMemoryRecallLimit,
   readMemoryRecallMinSimilarity,
-  readMemoryFolderKinds,
   readMemoryLibrarianBatch,
-  readMemoryMode,
-  validateMemoryFolderKinds,
-  type FolderKindRule,
-  type FolderKindType,
-  type MemoryFolderKinds,
   type MemoryLibrarianBatch,
-  type MemoryMode,
 } from "./memory-settings.js";
 export { renderWorkspaceToolsNote } from "./workspace-tools-note.js";
 export {
@@ -160,7 +147,8 @@ export {
   type VerificationPolicyPatch,
   type VerificationPolicySettings,
 } from "./verification-policy-settings.js";
-export { DEFAULT_ROLE_MODELS } from "./default-role-models.js";
+export { DEFAULT_ROLE_MODELS, MODEL_SETTING_ROLES, MODEL_SETTING_EFFORTS, MODEL_PRESET_NAME_MAX_LENGTH } from "./default-role-models.js";
+export type { ModelSettingRole } from "./default-role-models.js";
 export {
   builtinProviderHarness,
   harnessOfAdapter,
@@ -287,16 +275,6 @@ export interface CuratorResultItem {
   readonly reason: string;
 }
 export type CuratorRunResult = { readonly ok: true; readonly results: readonly CuratorResultItem[] } | { readonly ok: false; readonly error: string };
-export interface AdvisorRunRequest {
-  readonly conversation_id: string;
-  readonly messages: readonly { source: string; body: string }[];
-  readonly invocation_id: string;
-  readonly model?: string;
-  readonly provider?: string;
-  readonly effort?: string;
-  readonly system_prompt?: string;
-}
-export interface AdvisorRunResult { readonly reply: string; readonly suggested_actions?: readonly AdvisorSuggestedAction[]; }
 export type AgentOutcome = "success" | "failed" | "partial";
 export type FailureClass = "transient" | "deterministic";
 export interface SkillFeedback {
@@ -327,7 +305,6 @@ export interface AgentRunner {
   runManagerPlan(request: ManagerPlanRequest): Promise<AgentRunResult>;
   runWorker(request: WorkerRunRequest): Promise<AgentRunResult>;
   runReviewer(request: ReviewerRunRequest): Promise<AgentRunResult>;
-  runAdvisor(request: AdvisorRunRequest): Promise<AdvisorRunResult>;
   runCurator?(request: CuratorRequest): Promise<CuratorRunResult>;
   cancelAgent?(invocationId: string, force?: boolean): Promise<void>;
   setProcessObserver?(observer: (invocationId: string, event: AgentProcessEvent) => void | Promise<void>): void;
@@ -489,6 +466,10 @@ export enum TaskState {
   Paused = "paused",
   Cancelled = "cancelled"
 }
+
+/** String-literal unions of the enum values, for wire types that carry plain strings. */
+export type WorkStateValue = `${WorkState}`;
+export type TaskStateValue = `${TaskState}`;
 
 /** Human-readable, actionable errors suitable for a UI or notification. */
 export type HumanReadableErrorCode =
@@ -693,13 +674,14 @@ export function isCanonicalEventType(value: string): value is CanonicalEventType
 
 export { ClaudeStreamReader } from "./agent-stream.js";
 export * from "./token-relay.js";
-export { PROCESS_GROUP_REAP_GRACE_MS, isProcessGroupAlive, reapProcessGroup, type ReapProcessGroupOptions } from "./process-group.js";
+export { PROCESS_GROUP_REAP_GRACE_MS, appendCapped, createOutputCapture, isPidAlive, isProcessGroupAlive, reapProcessGroup, runCliVersion, runProcess, signalProcessGroup, type CliVersionResult, type ReapProcessGroupOptions, type RunProcessOptions, type RunProcessResult, type SignalableProcess, type SignalProcessGroupOptions } from "./process-group.js";
 export { OWL_INSTANCE_ID_ENV, OWL_MARKER_PATTERN, resolveInstanceId } from "./instance-id.js";
 export * from "./child-runs.js";
 export * from "./acceptance-defect.js";
 export * from "./task-necessity.js";
 export * from "./manager-trigger.js";
 export * from "./acceptance-criteria.js";
+export * from "./full-test-criteria.js";
 export * from "./test-policy.js";
 export * from "./advisor-api-policy.js";
 export { MEMORY_MCP_SERVER_NAME, owlMcpServers, claudeMcpArgs, codexMcpArgs, opencodeMcpConfig, type McpServerSpec } from "./owl-mcp-servers.js";
@@ -823,3 +805,4 @@ export {
   validateAutoRecoverySettings,
   type AutoRecoverySettings,
 } from "./auto-recovery-settings.js";
+export * from "./secret-patterns.js";

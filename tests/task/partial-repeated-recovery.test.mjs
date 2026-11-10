@@ -187,7 +187,7 @@ async function open(t, agentRunner, { limit = 2, checkCommands = [PASS_ARGV], te
   // The helper turns the plan quality gate off; deleting its setting brings the default (enabled) back.
   if (planQuality) await opened.core.writeLane.transact((tx) => tx.run("DELETE FROM settings WHERE key = 'plan_quality'"));
   agentRunner.state.db = opened.db;
-  const created = await opened.core.createWork(opened.envelope({ title: "partial", summary: "Exercise kind 8.", size: "normal", project_id: opened.projectId }, "work"));
+  const created = await opened.core.createWork(opened.envelope({ title: "partial", summary: "受け入れ条件:\n- Exercise kind 8.", size: "normal", project_id: opened.projectId }, "work"));
   await opened.core.startWork(created.data.work_id, { ...opened.envelope({ mode: "normal" }, "start"), expected_version: created.version });
   return { ...opened, workId: created.data.work_id };
 }

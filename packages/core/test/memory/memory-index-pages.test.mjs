@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import Database from "better-sqlite3";
-import { DEFAULT_MEMORY_FOLDER_KINDS, DEFAULT_MEMORY_MODE, readMemoryFolderKinds, readMemoryMode, validateMemoryFolderKinds } from "@owl/shared";
 import { MemoryIndex, MEMORY_INDEX_FILE, MEMORY_INDEX_SCHEMA_VERSION, PAGE_RULES_VERSION } from "../../dist/memory/memory-index.js";
 import { bodySha256 } from "../../dist/memory/page-format.js";
 
@@ -187,19 +186,105 @@ test("a row that cannot be read keeps the rules version back, so the next refres
   }
 });
 
-test("memory_mode is always pages; memory_folder_kinds validates and falls back", () => {
-  assert.equal(DEFAULT_MEMORY_MODE, "pages");
-  assert.equal(readMemoryMode(undefined), "pages");
-  assert.equal(readMemoryMode("legacy"), "pages");
-  assert.equal(readMemoryMode("pages"), "pages");
-  assert.deepEqual(DEFAULT_MEMORY_FOLDER_KINDS.rules.map((r) => [r.glob, r.type]), [["research/**", "clipping"], ["works/**", "work-log"]]);
-  assert.deepEqual(readMemoryFolderKinds(undefined), DEFAULT_MEMORY_FOLDER_KINDS);
-  const warnings = [];
-  assert.deepEqual(readMemoryFolderKinds({ version: 2 }, (m) => warnings.push(m)), DEFAULT_MEMORY_FOLDER_KINDS);
-  assert.equal(warnings.length, 1);
-  assert.throws(() => validateMemoryFolderKinds({ version: 1, rules: [{ glob: "a/**", type: "log" }] }));
-  assert.throws(() => validateMemoryFolderKinds({ version: 1, rules: [{ glob: "a/**", type: "theme" }] }));
-  assert.deepEqual(validateMemoryFolderKinds({ version: 1, rules: [{ glob: "a/**", type: "clipping", links: "optional" }] }).rules[0], { glob: "a/**", type: "clipping", links: "optional" });
+test("owner hand edits: broken template gives valid=0; secrets, size and duplicate names are reported", async () => {
+  const t = setup();
+  try {
+    const secret = `sk-${"a1B2".repeat(8)}`;
+    t.write("projects/p/壊れた.md", fixture("theme", "C").replace("summary: 日付・乱数・並び順に依存して落ちるテストの直し方\n", ""));
+    t.write("projects/p/欄なし.md", fixture("theme", "D").replace("## 手順", "## 手順メモ"));
+    t.write("projects/p/秘密.md", fixture("theme", "E").replace("テスト用の DB は毎回作り直す", `鍵は ${secret}`));
+    t.write("projects/p/大きい.md", fixture("theme", "F").replace("テスト用の DB は毎回作り直す", "あ".repeat(3100)));
+    t.write("projects/a/同じ名前.md", fixture("clipping", "G"));
+    t.write("projects/b/同じ名前.md", fixture("clipping", "H"));
+    const index = t.make();
+    await index.start();
+    await index.rebuild("manual");
+    try {
+      const broken = index.getPageColumns("projects/p/壊れた.md");
+      assert.equal(broken.valid, false);
+      assert.equal(broken.template_valid, 0);
+      assert.deepEqual(broken.invalid_reasons, ["template:missing_key:summary"]);
+      assert.deepEqual(index.getPageColumns("projects/p/欄なし.md").invalid_reasons, ["template:unexpected_section:手順メモ", "template:missing_section:手順"]);
+      assert.equal(index.getPageColumns("projects/p/秘密.md").valid, true);
+      const report = index.pageReport();
+      const warned = Object.fromEntries(report.template_warnings.map((w) => [w.path, w.warnings]));
+      assert.deepEqual(warned["projects/p/秘密.md"], ["secret_pattern"]);
+      assert.deepEqual(warned["projects/p/大きい.md"], ["over_budget"]);
+      assert.deepEqual(report.duplicate_filenames, { 同じ名前: ["projects/a/同じ名前.md", "projects/b/同じ名前.md"] });
+      assert.ok(!JSON.stringify(report).includes(secret));
+    } finally { await index.stop(); }
+  } finally { t.cleanup(); }
+});
+
+test("pages under materials/ are material even when they declare type: theme", async () => {
+  const t = setup();
+  try {
+    t.write("materials/projects/kotori-kakeibo/x.md", fixture("theme"));
+    t.write("materials/common/y.md", "---\ntitle: 資料\n---\n本文\n");
+    const index = t.make();
+    await index.start();
+    await index.rebuild("manual");
+    for (const path of ["materials/projects/kotori-kakeibo/x.md", "materials/common/y.md"]) {
+      assert.equal(index.getPageColumns(path).page_type, "material", path);
+    }
+    assert.deepEqual(index.listPages({ types: ["theme"] }), []);
+    await index.stop();
+  } finally { t.cleanup(); }
+});
+
+test("a row left as theme by the old code under materials/ is retyped by refresh, without a rebuild", async () => {
+  const t = setup();
+  try {
+    t.write("materials/projects/kotori-kakeibo/予測方式.md", fixture("theme"));
+    t.write("projects/kotori-kakeibo/テストの落とし穴.md", fixture("theme", "B"));
+    const index = t.make();
+    await index.start();
+    await index.rebuild("manual");
+    try {
+      // An index written by the old rules: the row predates the materials/ rule and the meta carries the older rules version.
+      const db = new Database(join(t.dataDir, MEMORY_INDEX_FILE));
+      db.prepare("UPDATE notes SET page_type = 'theme', page_type_source = 'frontmatter', template_valid = 1, title_key = ? WHERE path = ?")
+        .run("予測方式", "materials/projects/kotori-kakeibo/予測方式.md");
+      db.prepare("UPDATE meta SET value = ? WHERE key = 'page_rules_version'").run(String(PAGE_RULES_VERSION - 1));
+      db.close();
+      await index.refreshChanged();
+      assert.equal(index.getPageColumns("materials/projects/kotori-kakeibo/予測方式.md").page_type, "material");
+      assert.deepEqual(index.listPages({ types: ["theme"] }).map((r) => r.path), ["projects/kotori-kakeibo/テストの落とし穴.md"]);
+      // The rules version is saved, so the next diff scan reuses both rows as they are.
+      const again = await index.refreshChanged();
+      assert.equal(again.unchanged, 2);
+      assert.equal(again.added + again.updated, 0);
+    } finally { await index.stop(); }
+  } finally { t.cleanup(); }
+});
+
+test("a row that cannot be read keeps the rules version back, so the next refresh retries it", async (t) => {
+  if (process.getuid?.() === 0) return t.skip("root ignores file permissions");
+  const env = setup();
+  const path = "materials/projects/kotori-kakeibo/予測方式.md";
+  const file = join(env.vault, path);
+  try {
+    env.write(path, fixture("theme"));
+    const index = env.make();
+    await index.start();
+    await index.rebuild("manual");
+    try {
+      const db = new Database(join(env.dataDir, MEMORY_INDEX_FILE));
+      db.prepare("UPDATE notes SET page_type = 'theme' WHERE path = ?").run(path);
+      db.prepare("UPDATE meta SET value = ? WHERE key = 'page_rules_version'").run(String(PAGE_RULES_VERSION - 1));
+      db.close();
+      chmodSync(file, 0o000); // the file cannot be read, so its page columns cannot be recomputed
+      const blocked = await index.refreshChanged();
+      assert.equal(blocked.errors.length, 1);
+      assert.equal(index.getPageColumns(path).page_type, "theme");
+      chmodSync(file, 0o644);
+      await index.refreshChanged();
+      assert.equal(index.getPageColumns(path).page_type, "material");
+    } finally { await index.stop(); }
+  } finally {
+    chmodSync(file, 0o644);
+    env.cleanup();
+  }
 });
 
 test("owner hand edits with a bad project_id give valid=0 on a full rebuild (work-log, theme common, project-index)", async () => {

@@ -8,6 +8,7 @@ import { backlogLocation, backlogWorkDraft } from '../../apps/web/lib/backlog-dr
 import { backlogStatusBadge, linkableWorks, showsLinkedWork } from '../../apps/web/lib/backlog-link.mjs';
 
 import { repoRoot } from '../helpers/paths.mjs';
+const apiErrorKeys = await import('../../apps/web/lib/api-error-keys.mjs');
 const apiClientPath = join(repoRoot, 'apps/web/lib/api-client.ts');
 const translations = {
   'backlog.item.general': '(no file)',
@@ -349,6 +350,7 @@ function mountBacklog({ items, works, link }) {
     'next/link': { __esModule: true, default: ({ href, children }) => React.createElement('a', { href }, children) },
     '@/lib/api-client': api,
     '@/lib/view-loader': { useView },
+    '@/lib/api-error-keys.mjs': apiErrorKeys,
     '@/lib/i18n': { useLocale: () => ({ locale: 'en', t: enT }) },
     '@/lib/backlog-draft.mjs': { backlogLocation, backlogWorkDraft },
     '@/lib/backlog-link.mjs': { backlogStatusBadge, showsLinkedWork },

@@ -1,4 +1,4 @@
-import { clip, seedNote } from "../helpers/seed-knowledge.mjs";
+import { clip } from "../helpers/seed-knowledge.mjs";
 import assert from "node:assert/strict";
 import { copyFile, mkdir, readFile, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -10,7 +10,6 @@ import { createTestCore } from "../helpers/core.mjs";
 import { createTestDatabase } from "../helpers/db.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 
-const WORK_A = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
 const WORK_B = "01ARZ3NDEKTSV4RRFFQ69G5FAW";
 const CANARY_VERIFY =
   "架空の画面を検査するときは、操作説明にも載る「青い三角」を判定用の目印にしてはいけない。判定は結果欄だけで行う。画面全体を検索すると、見本と実際の目印を区別できない。";
@@ -50,13 +49,6 @@ async function listFiles(dir, rel = "") {
   return out.sort();
 }
 
-test("an absolute knowledge_dir of any name is accepted for retag; relative ones are rejected", async (t) => {
-  const { dir, core } = await setup(t, { name: "anything" });
-  await assert.rejects(core.retagKnowledgeNotes({ knowledge_dir: "relative/x", dry_run: true, extract: async () => ({ ok: true, items: [] }) }), /knowledge_dir/u);
-  const report = await core.retagKnowledgeNotes({ knowledge_dir: dir, dry_run: true, extract: async () => ({ ok: true, items: [] }) });
-  assert.equal(report.scanned, 0);
-});
-
 test("the storage becomes unavailable when its directory disappears, Work APIs keep working, and it recovers", async (t) => {
   const { base, dir, core, db } = await setup(t);
   await core.start();
@@ -72,9 +64,8 @@ test("the storage becomes unavailable when its directory disappears, Work APIs k
   // Knowledge features stop with the designed error ...
   for (const operation of [
     () => core.knowledge.list(),
-    () => core.memorySaver.saveExplicitMemory("remember this"),
+    () => core.rememberExplicit("remember this"),
     () => core.runCuration({ kind: "librarian", trigger: "manual_api", actor: "owner" }),
-    () => core.retagKnowledgeNotes({ dry_run: true, extract: async () => ({ ok: true, items: [] }) }),
   ]) {
     await assert.rejects(operation(), (error) => /^(knowledge_)?storage_unavailable$/u.test(error.code) && (error.details?.reason ?? "missing") === "missing");
   }
@@ -92,7 +83,7 @@ test("the storage becomes unavailable when its directory disappears, Work APIs k
   assert.equal(recovered.state, "available");
   assert.equal(recovered.reason, null);
   assert.equal((await core.knowledge.list()).length, 1);
-  await core.memorySaver.saveExplicitMemory("remember this");
+  await core.rememberExplicit("remember this");
 });
 
 test("removing only the marker file makes a custom storage unavailable", async (t) => {
@@ -162,7 +153,7 @@ test("move switches Core and every KnowledgeBase on the same provider without a 
   await assert.rejects(stat(dir), /ENOENT/u, "the emptied source is removed");
   assert.equal((await other.list()).length, 2);
   assert.equal((await core.knowledge.list()).length, 2);
-  await core.memorySaver.saveExplicitMemory("after the move");
+  await core.rememberExplicit("after the move");
   assert.ok((await listFiles(target)).some((file) => file.startsWith("common/")));
   assert.equal(core.getKnowledgeStorage().last_move.to, target);
 });
@@ -352,21 +343,3 @@ test("an interrupted move is reported on start and a finished-but-not-cleaned on
   await assert.rejects(stat(join(dataDir, "knowledge-move.json")), /ENOENT/u);
 });
 
-test("retag items keep summary and claims separate and drop whole claims from the end over the limit", async () => {
-  const { clipSummaryAndClaims } = await import("../../packages/core/dist/knowledge-retag.js");
-  assert.deepEqual(clipSummaryAndClaims("sum", ["aaaa", "bbbb", "cc"], 11), { summary: "sum", claims: ["aaaa", "bbbb"] });
-  assert.deepEqual(clipSummaryAndClaims("sum", ["aaaa"], 2), { summary: "su", claims: [] });
-});
-
-test("retag passes summary and claims as separate unmodified fields", async (t) => {
-  const { dir, core } = await setup(t, { name: "retag-fields" });
-  await core.start();
-  const text = 'first line\n"quoted" claim';
-  await seedNote(core.knowledgeNotes, { topic: "retag fields", kind: "fact", text, work_id: WORK_A });
-  let seen = [];
-  await core.retagKnowledgeNotes({ knowledge_dir: dir, dry_run: true, extract: async (items) => { seen = items; return { ok: true, items: [] }; } });
-  assert.equal(seen.length, 1);
-  assert.equal(seen[0].summary, text);
-  assert.deepEqual(seen[0].claims, [text]);
-  assert.equal("text" in seen[0], false);
-});

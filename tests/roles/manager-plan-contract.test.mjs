@@ -144,3 +144,47 @@ test("the Manager output schemas take requirement, criterion_ref and goals_met a
   assert.equal(result.outcome, "success");
   assert.equal(result.report.tasks[0].acceptance_criteria[0].requirement, "goal");
 });
+
+// A criterion that asks for the whole test suite is Core's job at the end of the Work, not a Worker's inside its time limit.
+const crit = (id, text, check = "node --test tests/x.test.mjs") => ({ ...criterion, id, text, check });
+
+test("work_full_test_run is a boolean in the plan and replan schemas and reaches the parsed plan, defaulting to false", async () => {
+  const { MANAGER_PLAN_OUTPUT_SCHEMA, MANAGER_REPLAN_OUTPUT_SCHEMA } = await import("../../packages/shared/dist/manager-schema.js");
+  for (const schema of [MANAGER_PLAN_OUTPUT_SCHEMA, MANAGER_REPLAN_OUTPUT_SCHEMA]) assert.equal(schema.properties.work_full_test_run.type, "boolean");
+  const parse = async (body, mode) => (await runnerReturning(body).runManagerPlan({
+    invocation_id: `m-${mode}`, work_id: "w", task_id: null, attempt: 1, context: { mode, work: { id: "w", title: "t", summary: "s" } },
+  })).report;
+  assert.equal((await parse(promptCompliantPlan, "plan")).work_full_test_run, false);
+  assert.equal((await parse({ ...promptCompliantPlan, work_full_test_run: true }, "plan")).work_full_test_run, true);
+  assert.equal((await parse({ ...promptCompliantPlan, work_full_test_run: true }, "replan")).work_full_test_run, true);
+});
+
+test("stripFullTestCriteria removes only whole-suite criteria, renumbers the rest and keeps one when none remain", async () => {
+  const { stripFullTestCriteria, isFullTestCriterion } = await import("../../packages/shared/dist/full-test-criteria.js");
+  for (const text of ["既存のテストがすべて通る", "全件の実行結果を載せる", "the whole test suite passes", "All existing tests pass"]) {
+    assert.equal(isFullTestCriterion(crit("AC1", text)), true, text);
+  }
+  const scoped = [
+    "tests/work/core-test-run-integration.test.mjs が通る", "tests/a.test.mjs 内のすべてのテストが通る", "tests/plan/ のテストがすべて通る",
+    "packages/core のテストが全件通る", "all tests in tests/a.test.mjs pass", "every test under tests/work/ passes", "npm run build が通る",
+    "all tests in the core package pass", "core パッケージのテストがすべて通る",
+  ];
+  for (const text of scoped) {
+    assert.equal(isFullTestCriterion(crit("AC1", text, "pnpm run build")), false, text);
+    assert.equal(isFullTestCriterion(crit("AC1", text, text)), false, `${text} (in the check too)`);
+    if (!text.includes("build")) assert.equal(isFullTestCriterion(crit("AC1", text, "全件の実行結果を確認する")), false, `${text} (with a whole-run check of that scope)`);
+  }
+  assert.equal(isFullTestCriterion(crit("AC1", "変更が入っている", "全件の実行結果を確認する")), true, "a check decides when the text names no scope");
+  assert.equal(isFullTestCriterion(crit("AC1", "変更が入っている", "tests/a.test.mjs の全件の実行結果を確認する")), false, "a scoped check");
+  assert.equal(stripFullTestCriteria(scoped.map((text, index) => crit(`AC${index + 1}`, text))).removed, 0);
+  assert.equal(isFullTestCriterion(crit("AC1", "all tests in tests/a.test.mjs pass"), undefined, []), true, "the scope phrases can be replaced");
+  const mixed = stripFullTestCriteria([crit("AC1", "既存のテストがすべて通る"), crit("AC2", "ビルドが通る"), crit("AC3", "x.test.mjs が通る")]);
+  assert.equal(mixed.removed, 1);
+  assert.deepEqual(mixed.criteria.map((c) => [c.id, c.text]), [["AC1", "ビルドが通る"], ["AC2", "x.test.mjs が通る"]]);
+  const none = stripFullTestCriteria([crit("AC1", "the whole test suite passes")]);
+  assert.equal(none.criteria.length, 1);
+  assert.equal(none.criteria[0].id, "AC1");
+  assert.equal(isFullTestCriterion(none.criteria[0]), false);
+  assert.equal(stripFullTestCriteria([crit("AC1", "ビルドが通る")]).removed, 0);
+  assert.equal(stripFullTestCriteria([crit("AC1", "ビルドが通る")], ["ビルド"]).removed, 1);
+});

@@ -20,6 +20,7 @@ import { useAttachmentDraft, useFileDrop } from '@/lib/use-attachment-draft';
 import { blockedHintKey, canSend } from '@/lib/attachment-draft.mjs';
 import { DEFAULT_WINDOW_KEY, readThroughToSend, viaLabelKey } from '@/lib/advisor-windows.mjs';
 import { fileDeliveryView, isFileDeliveryMetadata } from '@/lib/advisor-file-delivery.mjs';
+import { humanizeApiError } from '@/lib/api-error-keys.mjs';
 
 const PENDING_POLL_INTERVAL_MS = 1_500;
 const AWAITING_REPLY_TIMEOUT_MS = 60_000;
@@ -114,7 +115,7 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
     if (lastReplyId !== null) onRepliesShown?.(lastReplyId);
   }, [lastReplyId, onRepliesShown]);
   const loadErrorSource = conversationView.error ?? messagesView.error;
-  const loadError = loadErrorSource ? humanizeLoadError(loadErrorSource, t) : null;
+  const loadError = loadErrorSource ? humanizeApiError(loadErrorSource, t, LOAD_ERROR_KEYS) : null;
   const refreshMessages = messagesView.refresh;
   const refreshSession = sessionView.refresh;
   const refresh = useCallback(async () => {
@@ -177,7 +178,7 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
       return true;
     } catch (error) {
       console.error('[Owl] Advisor message send failed', error);
-      setSendError(humanizeSendError(error, t));
+      setSendError(humanizeApiError(error, t, SEND_ERROR_KEYS));
       return false;
     } finally {
       setSending(false);
@@ -197,7 +198,7 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
       noticeTimerRef.current = setTimeout(() => setKnowledgeSaveNotice(null), KNOWLEDGE_SAVE_NOTICE_MS);
     } catch (error) {
       console.error('[Owl] Save conversation to knowledge failed', error);
-      setKnowledgeSaveError(humanizeKnowledgeError(error, t));
+      setKnowledgeSaveError(humanizeApiError(error, t, KNOWLEDGE_ERROR_KEYS));
     } finally {
       setKnowledgeSaving(false);
     }
@@ -647,49 +648,23 @@ function sessionStatusLabel(status: AdvisorSessionInfo['status'], t: (key: strin
   return t('advisor.sessionRunning');
 }
 
-function humanizeLoadError(error: unknown, t: (key: string) => string): string {
-  const code = error instanceof Error ? error.message : '';
-  switch (code) {
-    case 'network_error':
-    case 'runtime_config_unavailable':
-      return t('advisor.errorLoadNetwork');
-    case 'invalid_runtime_config':
-    case 'invalid_response':
-      return t('advisor.errorLoadInvalid');
-    default:
-      return t('advisor.errorLoadDefault');
-  }
-}
+const LOAD_ERROR_KEYS = {
+  network: 'advisor.errorLoadNetwork',
+  invalidResponse: 'advisor.errorLoadInvalid',
+  fallback: 'advisor.errorLoadDefault',
+};
 
-function humanizeSendError(error: unknown, t: (key: string) => string): string {
-  const code = error instanceof Error ? error.message : '';
-  switch (code) {
-    case 'validation_error':
-      return t('advisor.errorSendValidation');
-    case 'network_error':
-    case 'runtime_config_unavailable':
-      return t('advisor.errorSendNetwork');
-    case 'invalid_runtime_config':
-    case 'invalid_response':
-      return t('advisor.errorSendInvalid');
-    default:
-      return t('advisor.errorSendDefault');
-  }
-}
+const SEND_ERROR_KEYS = {
+  validation: 'advisor.errorSendValidation',
+  network: 'advisor.errorSendNetwork',
+  invalidResponse: 'advisor.errorSendInvalid',
+  fallback: 'advisor.errorSendDefault',
+};
 
-function humanizeKnowledgeError(error: unknown, t: (key: string) => string): string {
-  const code = error instanceof Error ? error.message : '';
-  switch (code) {
-    case 'validation_error':
-    case 'conversation_not_found':
-      return t('advisor.errorSaveValidation');
-    case 'network_error':
-    case 'runtime_config_unavailable':
-      return t('advisor.errorSaveNetwork');
-    case 'invalid_runtime_config':
-    case 'invalid_response':
-      return t('advisor.errorSaveInvalid');
-    default:
-      return t('advisor.errorSaveDefault');
-  }
-}
+const KNOWLEDGE_ERROR_KEYS = {
+  validation: 'advisor.errorSaveValidation',
+  network: 'advisor.errorSaveNetwork',
+  invalidResponse: 'advisor.errorSaveInvalid',
+  fallback: 'advisor.errorSaveDefault',
+  codes: { conversation_not_found: 'advisor.errorSaveValidation' },
+};

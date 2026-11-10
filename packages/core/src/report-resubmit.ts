@@ -1,5 +1,6 @@
 import { OUTPUT_RESUBMIT_LIMIT_SETTINGS_KEY, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_OPTION_KEY } from "@owl/shared";
 import type { SettingsReader } from "./owner-language";
+import { storedSettingJson } from "./settings-store";
 
 export const REPORT_RESUBMIT_LIMIT_KEY = "report_resubmit_limit";
 export const DEFAULT_REPORT_RESUBMIT_LIMIT = 2;
@@ -7,9 +8,9 @@ export const MAX_REPORT_RESUBMIT_LIMIT = 10;
 
 function storedLimit(reader: SettingsReader, key: string): number | null {
   try {
-    const row = reader.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", key);
-    if (!row) return null;
-    const value = JSON.parse(row.value_json) as unknown;
+    const json = storedSettingJson(reader, key);
+    if (json === undefined) return null;
+    const value = JSON.parse(json) as unknown;
     return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= MAX_REPORT_RESUBMIT_LIMIT ? value : null;
   } catch {
     return null;

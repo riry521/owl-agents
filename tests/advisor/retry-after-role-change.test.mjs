@@ -63,7 +63,6 @@ async function harness(t, { pausedProviders = ["anthropic"], hold = null } = {})
   const runtime = new AdvisorSessionRuntime({
     db,
     sessionManager: new AdvisorSessionManager(db),
-    memorySaver: {},
     providerClient: { createSession: async () => fakeProviderSession(sent, hold) },
     owlRoot: root,
     git: { resolveAdvisorSessionDirectory: async () => ({ kind: "direct", cwd: root }) },

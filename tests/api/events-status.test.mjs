@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { ExternalCoreAdapter, createCore as createMemoryCore } from "../../apps/server/dist/core.js";
+import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { startTestHttpServer } from "../helpers/http.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 
@@ -142,36 +142,6 @@ test("GET /events?order=desc leaves out system alerts that carry no message", as
 
   const newest = await (await fetch(`${server.base}/api/v1/events?order=desc&limit=3`)).json();
   assert.deepEqual(newest.data.events.map((event) => event.sequence), [10, 7, 6]);
-});
-
-test("GET /events?order=desc works for the standalone MemoryCore too", async (t) => {
-  const previousToken = process.env.OWL_API_TOKEN;
-  delete process.env.OWL_API_TOKEN;
-  t.after(() => {
-    if (previousToken === undefined) delete process.env.OWL_API_TOKEN;
-    else process.env.OWL_API_TOKEN = previousToken;
-  });
-  const core = createMemoryCore({ version: "1.0.0" });
-  const server = await startServer(t, core);
-  if (!server) return;
-  for (let index = 0; index < 4; index += 1) {
-    const response = await fetch(`${server.base}/api/v1/works`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        request_id: `req-${index}`,
-        idempotency_key: `idem-${index}`,
-        expected_version: 0,
-        payload: { title: `Work ${index}`, summary: "", size: "small", project_id: null },
-      }),
-    });
-    assert.equal(response.status, 201, await response.text());
-  }
-  const all = await (await fetch(`${server.base}/api/v1/events?limit=200`)).json();
-  const sequences = all.data.events.map((event) => event.sequence);
-  assert.ok(sequences.length >= 4);
-  const desc = await (await fetch(`${server.base}/api/v1/events?order=desc&limit=2`)).json();
-  assert.deepEqual(desc.data.events.map((event) => event.sequence), sequences.slice(-2).reverse());
 });
 
 test("integration.saved/deleted are process-local control signals and never collide with durable sequences", async (t) => {

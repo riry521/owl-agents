@@ -40,7 +40,9 @@ const workerReport = (invocationId, result, extra = {}) => ({
   result,
   work_done: "Done.",
   changes: [],
-  verification: { passed: true, method: "Checked." },
+  verification: result === "success"
+    ? { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked.", integration_check: null }
+    : { status: "blocked", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "blocked", evidence: "not run yet" }], checks: [], method: "Not checked.", integration_check: null },
   remaining_issues: [],
   next_action: "none",
   needs_replanning: false,
@@ -48,7 +50,7 @@ const workerReport = (invocationId, result, extra = {}) => ({
   ...extra,
 });
 
-/** `script` gives, per Worker launch (the last repeats), "pending", "partial" or "success". */
+/** `script` gives, per Worker launch (the last repeats), "pending", "pending-off" (a pending report in the runner's failure form, for a wait that is off), "partial" or "success". */
 function runnerWith(script) {
   const state = { calls: 0, replans: 0, requests: [], worktree: null };
   return {
@@ -69,9 +71,11 @@ function runnerWith(script) {
       state.worktree = request.context.worktree;
       await mkdir(join(request.context.worktree, "src"), { recursive: true });
       await writeFile(join(request.context.worktree, "src/feature.mjs"), "export const f = 1;\n");
-      const report = kind === "pending"
+      const report = kind === "pending" || kind === "pending-off"
         ? workerReport(request.invocation_id, "partial", { pending_process: pending() })
         : workerReport(request.invocation_id, kind);
+      // agent-runtime marks a partial report without a pending process as a deterministic failure (report_result:partial).
+      if (kind === "partial" || kind === "pending-off") return { outcome: "partial", report_valid: true, report, failure_class: "deterministic", error_key: "report_result:partial", retry_allowed: true };
       return { outcome: "success", report_valid: true, report };
     },
     runReviewer: async () => {
@@ -214,7 +218,7 @@ test("process_wait_max_count ends the waits: the report after the last allowed w
 });
 
 test("process_wait_max_count 0 turns the wait off", async (t) => {
-  const runner = runnerWith(["pending"]);
+  const runner = runnerWith(["pending-off"]);
   const { db, core } = await openCore(t, runner, { process_wait_max_count: 0 });
   const workId = await startWork(core);
   assert.ok(await waitFor(() => eventCount(db, workId, "task.failure.classified") > 0));

@@ -8,10 +8,9 @@ import {
   createKnowledgeEntry,
   updateKnowledgeEntry,
   deleteKnowledgeEntry,
-  createRuleProposalFromNote,
   getKnowledgeStorage,
 } from '@/lib/api-client';
-import type { KnowledgeEntry, KnowledgeSearchResult, RuleProposalRole } from '@/lib/types';
+import type { KnowledgeEntry, KnowledgeSearchResult } from '@/lib/types';
 import { formatRelative } from '@/lib/format';
 import { useLocale } from '@/lib/i18n';
 import { useView } from '@/lib/view-loader';
@@ -19,10 +18,6 @@ import { useView } from '@/lib/view-loader';
 type ViewMode = 'list' | 'view' | 'edit' | 'create';
 type NoteClaim = { kind: string; text: string; fingerprint: string; sources: string[] };
 type RelatedNote = { id: string; title: string };
-type RulePromotion = { date: string; proposalId: string; status: 'applied' | 'rejected'; path: string };
-
-const RULE_ROLES: RuleProposalRole[] = ['advisor', 'manager', 'designer', 'worker', 'reviewer', 'librarian', 'curator'];
-
 function parseNoteBody(body: string) {
   const sections = new Map<string, string[]>();
   let section = '';
@@ -58,26 +53,8 @@ function parseNoteBody(body: string) {
     const match = line.match(/^- \[\[([^\]|]+)\|([^\]]+)\]\]$/u);
     return match ? [{ id: match[1], title: match[2] }] : [];
   });
-  const promotions = (sections.get('Rule promotion') ?? []).flatMap((line) => {
-    const match = line.match(/^- (\S+) proposal (\S+) (applied|rejected) →(.*)$/u);
-    return match ? [{ date: match[1], proposalId: match[2], status: match[3] as RulePromotion['status'], path: match[4].trim() }] : [];
-  });
   const summary = (sections.get('Summary') ?? []).join('\n').trim();
-  return { summary, claims, links, promotions };
-}
-
-function noteId(entry: KnowledgeEntry): string | null {
-  if (entry.note_id !== undefined) {
-    return typeof entry.note_id === 'string' && /^[0-9A-HJKMNP-TV-Z]{26}$/u.test(entry.note_id)
-      ? entry.note_id
-      : null;
-  }
-  const id = (entry as KnowledgeEntry & { id?: unknown }).id;
-  if (typeof id === 'string' && /^[0-9A-HJKMNP-TV-Z]{26}$/u.test(id)) return id;
-  const frontmatterId = entry.body.match(/^id:\s*([0-9A-HJKMNP-TV-Z]{26})$/mu)?.[1];
-  if (frontmatterId) return frontmatterId;
-  const filenameId = entry.path.match(/(?:^|\/)([0-9A-HJKMNP-TV-Z]{26})\.md$/u)?.[1];
-  return filenameId ?? null;
+  return { summary, claims, links };
 }
 
 export function KnowledgeView() {
@@ -97,9 +74,6 @@ export function KnowledgeView() {
   const [formTags, setFormTags] = useState('');
   const [formBody, setFormBody] = useState('');
   const [saving, setSaving] = useState(false);
-  const [promotionLevels, setPromotionLevels] = useState<Record<string, 'system' | 'role'>>({});
-  const [promotionRoles, setPromotionRoles] = useState<Record<string, RuleProposalRole>>({});
-  const [promotionStates, setPromotionStates] = useState<Record<string, { busy?: boolean; message?: string; error?: string }>>({});
 
   const folders = [
     { key: '', label: t('knowledge.folderAll') },
@@ -207,44 +181,6 @@ export function KnowledgeView() {
     }
   }
 
-  async function handleCreateRuleProposal(claim: NoteClaim) {
-    if (!selected) return;
-    const selectedNoteId = noteId(selected);
-    if (!selectedNoteId) {
-      setPromotionStates((previous) => ({ ...previous, [claim.fingerprint]: { error: t('knowledge.ruleProposalNoteIdUnavailable') } }));
-      return;
-    }
-    const level = promotionLevels[claim.fingerprint] ?? 'system';
-    setPromotionStates((previous) => ({ ...previous, [claim.fingerprint]: { busy: true } }));
-    try {
-      const result = await createRuleProposalFromNote({
-        note_id: selectedNoteId,
-        claim_fingerprint: claim.fingerprint,
-        level,
-        ...(level === 'role' ? { role: promotionRoles[claim.fingerprint] ?? 'worker' } : {}),
-      });
-      const message = t(`knowledge.ruleProposalResult.${result.status}`);
-      setPromotionStates((previous) => ({
-        ...previous,
-        [claim.fingerprint]: {
-          message,
-          ...(result.last_error ? { error: result.last_error } : {}),
-        },
-      }));
-      try {
-        setSelected(await getKnowledgeEntry(selected.path));
-      } catch (refreshError) {
-        console.error('[Owl] Knowledge refresh after rule proposal failed', refreshError);
-      }
-    } catch (e) {
-      setPromotionStates((previous) => ({
-        ...previous,
-        [claim.fingerprint]: { error: t('knowledge.ruleProposalError') },
-      }));
-      console.error('[Owl] Rule proposal creation error', e);
-    }
-  }
-
   if (mode === 'view' && selected) {
     const isNote = selected.path.startsWith('notes/');
     const note = isNote ? parseNoteBody(selected.body) : null;
@@ -288,8 +224,6 @@ export function KnowledgeView() {
                 {note.claims.length === 0 ? <p className="empty">{t('knowledge.noteNoClaims')}</p> : (
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
                     {note.claims.map((claim) => {
-                      const level = promotionLevels[claim.fingerprint] ?? 'system';
-                      const result = promotionStates[claim.fingerprint];
                       return (
                         <article key={claim.fingerprint || claim.text} className="card">
                           <div className="proposal-card__head">
@@ -300,43 +234,6 @@ export function KnowledgeView() {
                           <div className="proposal-judgement__label">{t('knowledge.noteClaimSources')}</div>
                           <div className="proposal-judgement__value">
                             {claim.sources.length > 0 ? claim.sources.join(', ') : t('knowledge.noteNoSources')}
-                          </div>
-                          <div className="form-grid mt-10">
-                            <label className="form-field">
-                              <span>{t('knowledge.ruleProposalLevel')}</span>
-                              <select
-                                className="select"
-                                value={level}
-                                onChange={(event) => setPromotionLevels((previous) => ({ ...previous, [claim.fingerprint]: event.target.value as 'system' | 'role' }))}
-                              >
-                                <option value="system">{t('knowledge.ruleProposalSystem')}</option>
-                                <option value="role">{t('knowledge.ruleProposalRole')}</option>
-                              </select>
-                            </label>
-                            {level === 'role' && (
-                              <label className="form-field">
-                                <span>{t('knowledge.ruleProposalRoleLabel')}</span>
-                                <select
-                                  className="select"
-                                  value={promotionRoles[claim.fingerprint] ?? 'worker'}
-                                  onChange={(event) => setPromotionRoles((previous) => ({ ...previous, [claim.fingerprint]: event.target.value as RuleProposalRole }))}
-                                >
-                                  {RULE_ROLES.map((role) => <option key={role} value={role}>{role}</option>)}
-                                </select>
-                              </label>
-                            )}
-                          </div>
-                          {result?.message && <div className="note" role="status">{result.message}</div>}
-                          {result?.error && <div className="error" role="alert">{result.error}</div>}
-                          <div className="btn-row mt-10">
-                            <button
-                              type="button"
-                              className="btn btn--primary"
-                              disabled={Boolean(result?.busy) || !claim.fingerprint}
-                              onClick={() => void handleCreateRuleProposal(claim)}
-                            >
-                              {result?.busy ? t('knowledge.ruleProposalCreating') : t('knowledge.ruleProposalCreate')}
-                            </button>
                           </div>
                         </article>
                       );
@@ -349,19 +246,6 @@ export function KnowledgeView() {
                 {note.links.length > 0
                   ? <ul>{note.links.map((link) => <li key={link.id}>{link.title} <code>{link.id}</code></li>)}</ul>
                   : <p className="empty">{t('knowledge.noteNoRelated')}</p>}
-              </section>
-              <section className="rules-section">
-                <h2 className="rules-section-title">{t('knowledge.noteRulePromotion')}</h2>
-                {note.promotions.length > 0 ? (
-                  <ul>
-                    {note.promotions.map((promotion) => (
-                      <li key={`${promotion.proposalId}:${promotion.date}`}>
-                        {t(`knowledge.ruleProposalResult.${promotion.status}`)} · {promotion.date} · <code>{promotion.proposalId}</code>
-                        {promotion.path && <> · <code>{promotion.path}</code></>}
-                      </li>
-                    ))}
-                  </ul>
-                ) : <p className="empty">{t('knowledge.noteNoPromotions')}</p>}
               </section>
             </div>
           ) : <div className="kb-body">{selected.body}</div>}

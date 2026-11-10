@@ -11,6 +11,7 @@ import { SlackConnector } from "../../packages/connector-slack/dist/index.js";
 import { command } from "../helpers/core.mjs";
 import { createTestDatabase } from "../helpers/db.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
+import { scriptedProvider } from "../helpers/advisor-provider.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 import { waitFor } from "../helpers/wait.mjs";
 const ownerId = "owner:default";
@@ -465,8 +466,8 @@ test("Slack and web Advisor turns parse owl-actions and create Works end to end"
   }
 });
 
-test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and runs create_work", async (t) => {
-  const root = await tempDir(t, "owl-advisor-slack-one-shot-");
+test("a Slack Advisor turn strips owl-actions fences from the reply and runs create_work", async (t) => {
+  const root = await tempDir(t, "owl-advisor-slack-session-");
   const previousEnvironment = Object.fromEntries(
     ["OWL_CORE_MODE", "OWL_API_TOKEN", "OWL_OWNER_ID"].map((key) => [key, process.env[key]]),
   );
@@ -479,10 +480,9 @@ test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and
   try {
     db = createTestDatabase(root);
 
-    const advisorRequests = [];
     const secondAction = {
       type: "create_work",
-      description: "Create Slack's second compatibility Work",
+      description: "Create Slack's second Work",
       payload: {
         title: "Slack second regression Work",
         summary: "Verify a second action fence is parsed and dispatched.",
@@ -491,7 +491,7 @@ test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and
       },
     };
     const slackReply = [
-      advisorReply("Slack one-shot regression Work", "Slack compatibility"),
+      advisorReply("Slack session regression Work", "Slack session"),
       "Visible text between action fences.",
       "```owl-actions json",
       JSON.stringify([secondAction]),
@@ -505,17 +505,14 @@ test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and
       "const answer = 42;",
       "```",
     ].join("\r\n");
+    // The malformed fence is a failure, so the runtime asks the Advisor once more (the follow-up).
+    const { providerClient, sent, requests } = scriptedProvider([slackReply, "Slack follow-up note."]);
     const agentRunner = {
-      // The malformed fence is a failure, so the one-shot path asks the Advisor once more (the follow-up).
-      runAdvisor: async (request) => {
-        advisorRequests.push(request);
-        return { reply: advisorRequests.length === 1 ? slackReply : "Slack follow-up note.", suggested_actions: [] };
-      },
       runManagerPlan: async () => { throw new Error("small Advisor-created Works should skip Manager planning"); },
       runWorker: async () => ({
         outcome: "failed",
         failure_class: "deterministic",
-        error_key: "advisor_slack_one_shot_test",
+        error_key: "advisor_slack_session_test",
         retry_allowed: false,
         message: "Test stops after verifying the Work was dispatched.",
       }),
@@ -524,7 +521,8 @@ test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and
     core = createCore({
       db,
       agentRunner,
-      version: "advisor-slack-one-shot-test",
+      providerClient,
+      version: "advisor-slack-session-test",
       owlRoot: root,
       dataDir: root,
     });
@@ -536,7 +534,7 @@ test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and
     };
 
     await core.getActiveConversation();
-    const slackChannelId = "C-SLACK-ONE-SHOT";
+    const slackChannelId = "C-SLACK-SESSION";
     const slackThreadRef = "1712345678.000200";
     const slackAccountId = createUlid();
     await core.ensureConnectorAccount(ownerId, "slack", slackAccountId);
@@ -545,7 +543,7 @@ test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and
       provider: "slack",
       account_id: slackAccountId,
       external_message_id: "1712345678.000250",
-      user_id: "U-SLACK-ONE-SHOT",
+      user_id: "U-SLACK-SESSION",
       channel_id: slackChannelId,
       thread_id: slackThreadRef,
       received_at: new Date().toISOString(),
@@ -559,7 +557,7 @@ test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and
         "SELECT id, body, source_message_id FROM messages WHERE conversation_id = ? AND source_message_id LIKE 'advisor:%' ORDER BY rowid ASC LIMIT 1",
         inbound.data.conversation_id,
       ),
-      { message: "one-shot Slack Advisor reply message" },
+      { message: "Slack Advisor reply message" },
     );
     const followupMessage = await waitFor(
       () => db.get(
@@ -567,17 +565,15 @@ test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and
         inbound.data.conversation_id,
         message.id,
       ),
-      { message: "one-shot Slack Advisor follow-up message" },
+      { message: "Slack Advisor follow-up message" },
     );
-    const advisorRequest = advisorRequests[0];
-    const work = db.get("SELECT id, title FROM works WHERE title = ?", "Slack one-shot regression Work");
+    const work = db.get("SELECT id, title FROM works WHERE title = ?", "Slack session regression Work");
     const secondWork = db.get("SELECT id, title FROM works WHERE title = ?", "Slack second regression Work");
 
-    assert.ok(advisorRequest, "the one-shot Advisor should receive the Slack-originated turn");
-    assert.match(advisorRequest.system_prompt, /Slack mrkdwn: use \*bold\* with single asterisks, _italic_, ~strike~/u);
-    assert.ok(work, "Core should execute the create_work fence on the compatibility path");
+    assert.match(sent[0].text, /Slack mrkdwn: use \*bold\* with single asterisks, _italic_, ~strike~/u);
+    assert.ok(work, "Core should execute the create_work fence");
     assert.ok(secondWork, "Core should execute multiple Slack create_work fences in source order");
-    assert.equal(db.get("SELECT COUNT(*) AS count FROM works WHERE title = ?", "Slack one-shot regression Work").count, 1);
+    assert.equal(db.get("SELECT COUNT(*) AS count FROM works WHERE title = ?", "Slack session regression Work").count, 1);
     assert.equal(db.get("SELECT COUNT(*) AS count FROM works WHERE title = ?", "Slack second regression Work").count, 1);
     const turnId = message.source_message_id.split(":").at(-1);
     assert.equal(createWorkCalls.length, 2, "each Slack create_work action should invoke Core's existing create-work path exactly once");
@@ -592,8 +588,8 @@ test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and
         idempotency_key: `advisor-work:${turnId}:0:create`,
         expected_version: 0,
         payload: {
-          title: "Slack one-shot regression Work",
-          summary: "Create and verify the Slack compatibility origin regression Work.",
+          title: "Slack session regression Work",
+          summary: "Create and verify the Slack session origin regression Work.",
           size: "small",
           project_id: null,
         },
@@ -610,20 +606,18 @@ test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and
         },
       },
     ]);
-    assert.match(message.body, /^Slack compatibility-originated \*\*reply\*\*/u);
-    assert.match(message.body, /Work「Slack one-shot regression Work」を起票し/u);
+    assert.match(message.body, /^Slack session-originated \*\*reply\*\*/u);
+    assert.match(message.body, /Work「Slack session regression Work」を起票し/u);
     assert.match(message.body, /Work「Slack second regression Work」を起票し/u);
     assert.match(message.body, /Visible text between action fences\./u);
     assert.match(message.body, /Visible text after the second action fence\./u);
     assert.match(message.body, /Visible code example:\r?\n```ts\r?\nconst answer = 42;\r?\n```/u);
-    assert.doesNotMatch(message.body, /```owl-actions|create_work|Create and verify the Slack compatibility origin Work/u);
+    assert.doesNotMatch(message.body, /```owl-actions|create_work|Create and verify the Slack session origin Work/u);
     assert.doesNotMatch(message.body, /not valid JSON/u, "malformed action content must not leak into the visible reply");
 
-    assert.equal(advisorRequests.length, 2, "a failed action should run the Advisor exactly once more");
-    const followupInput = advisorRequests[1].messages.at(-1);
-    assert.equal(followupInput.source, "user");
-    assert.match(followupInput.body, /<owl-action-failures[^>]*>/u);
-    assert.match(followupInput.body, /"code":\s*"invalid_payload"/u);
+    assert.equal(sent.length, 2, "a failed action should run the Advisor exactly once more");
+    assert.match(sent[1].text, /<owl-action-failures[^>]*>/u);
+    assert.match(sent[1].text, /"code":\s*"invalid_payload"/u);
     assert.equal(
       db.get("SELECT COUNT(*) AS count FROM messages WHERE conversation_id = ? AND body LIKE '%<owl-action-failures%'", inbound.data.conversation_id).count,
       0,
@@ -649,8 +643,8 @@ test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and
     };
 
     const connector = new SlackConnector({
-      botToken: "xoxb-advisor-slack-one-shot-test",
-      appToken: "xapp-advisor-slack-one-shot-test",
+      botToken: "xoxb-advisor-slack-session-test",
+      appToken: "xapp-advisor-slack-session-test",
       conversationChannelId: slackChannelId,
       notificationChannelId: "C-SLACK-NOTIFICATIONS",
       coreApiBase: "http://127.0.0.1:1/api/v1",
@@ -667,12 +661,12 @@ test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and
 
     assert.equal(posts.length, 1);
     assert.equal(posts[0].channel, slackChannelId);
-    assert.match(posts[0].text, /Work「Slack one-shot regression Work」を起票し/u);
+    assert.match(posts[0].text, /Work「Slack session regression Work」を起票し/u);
     assert.match(posts[0].text, /Work「Slack second regression Work」を起票し/u);
-    assert.match(posts[0].text, /^Slack compatibility-originated \*reply\* with a /u);
+    assert.match(posts[0].text, /^Slack session-originated \*reply\* with a /u);
     assert.match(posts[0].text, /Visible text after the second action fence\./u);
     assert.match(posts[0].text, /Visible code example:/u);
-    assert.doesNotMatch(posts[0].text, /```owl-actions|create_work|Create and verify the Slack compatibility origin Work/u);
+    assert.doesNotMatch(posts[0].text, /```owl-actions|create_work|Create and verify the Slack session origin Work/u);
     assert.doesNotMatch(posts[0].text, /not valid JSON/u);
   } finally {
     if (core) await core.stop({ force: true }).catch(() => {});
@@ -686,90 +680,70 @@ test("a one-shot Slack Advisor turn strips owl-actions fences from the reply and
 
 test("a web Advisor reply without owl-actions is stored unchanged", async (t) => {
   const root = await tempDir(t, "owl-advisor-nonslack-passthrough-");
-  const previousEnvironment = Object.fromEntries(
-    ["OWL_CORE_MODE", "OWL_API_TOKEN", "OWL_OWNER_ID"].map((key) => [key, process.env[key]]),
-  );
-  process.env.OWL_CORE_MODE = "external";
-  process.env.OWL_API_TOKEN = apiToken;
-  process.env.OWL_OWNER_ID = ownerId;
-
-  let db;
-  let core;
-  const originalReply = "  Plain **visible** reply.\r\n```ts\r\nconst answer = 42;\r\n```\r\n";
-  try {
-    db = createTestDatabase(root);
-    core = createCore({
-      db,
-      agentRunner: {
-        runAdvisor: async () => ({ reply: originalReply, suggested_actions: [] }),
-        runManagerPlan: async () => { throw new Error("No Work should be created in the passthrough test."); },
-        runWorker: async () => { throw new Error("No Worker should run in the passthrough test."); },
-        runReviewer: async () => { throw new Error("No Reviewer should run in the passthrough test."); },
-      },
-      version: "advisor-nonslack-passthrough-test",
-      owlRoot: root,
-      dataDir: root,
-    });
-
-    const conversation = await core.getActiveConversation();
-    const webAccount = db.get("SELECT id FROM connector_accounts WHERE owner_id = ? AND provider = 'web'", ownerId);
-    assert.ok(webAccount);
-    const now = new Date().toISOString();
-    const userMessageId = createUlid();
-    await db.createWriteLane().transact((transaction) => {
-      transaction.run(
-        `INSERT INTO messages
-           (id, conversation_id, provider, account_id, source_message_id, body,
-            attachment_ids_json, received_at, created_at)
-         VALUES (?, ?, 'web', ?, ?, ?, ?, ?, ?)`,
-        userMessageId,
-        conversation.conversation_id,
-        webAccount.id,
-        `web-user:${userMessageId}`,
-        "Reply with the supplied text.",
-        JSON.stringify([]),
-        now,
-        now,
-      );
-    });
-
-    await core.advisorRespond(conversation.conversation_id, userMessageId, { channel: "web" });
-    const storedReply = db.get(
-      "SELECT body FROM messages WHERE conversation_id = ? AND source_message_id LIKE 'advisor:%' ORDER BY created_at DESC LIMIT 1",
-      conversation.conversation_id,
-    );
-    assert.ok(storedReply);
-    assert.equal(storedReply.body, originalReply);
-  } finally {
-    if (core) await core.stop({ force: true }).catch(() => {});
-    if (db) db.close();
-    for (const [key, value] of Object.entries(previousEnvironment)) {
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-    }
-  }
-});
-
-test("a one-shot Core runs the follow-up Advisor turn exactly once for a failed send_file report and not for a duplicate", async (t) => {
-  const root = await tempDir(t, "owl-advisor-delivery-one-shot-");
-  const files = await tempDir(t, "owl-advisor-delivery-files-");
-  await writeFile(join(files, "a.txt"), "first");
   const db = createTestDatabase(root);
-  const requests = [];
-  const sendFile = [{ type: "send_file", description: "Send", payload: { path: join(files, "a.txt") } }];
+  const originalReply = "Plain **visible** reply.\n```ts\nconst answer = 42;\n```";
+  const { providerClient } = scriptedProvider([originalReply]);
   const core = createCore({
     db,
     agentRunner: {
-      runAdvisor: async (request) => {
-        requests.push(request);
-        return { reply: requests.length === 1 ? ["Here.", "```owl-actions", JSON.stringify(sendFile), "```"].join("\n") : "Could not upload it.", suggested_actions: [] };
-      },
+      runManagerPlan: async () => { throw new Error("No Work should be created in the passthrough test."); },
+      runWorker: async () => { throw new Error("No Worker should run in the passthrough test."); },
+      runReviewer: async () => { throw new Error("No Reviewer should run in the passthrough test."); },
+    },
+    providerClient,
+    version: "advisor-nonslack-passthrough-test",
+    owlRoot: root,
+    dataDir: root,
+  });
+  t.after(async () => { await core.stop({ force: true }).catch(() => {}); db.close(); });
+
+  const conversation = await core.getActiveConversation();
+  const webAccount = db.get("SELECT id FROM connector_accounts WHERE owner_id = ? AND provider = 'web'", ownerId);
+  assert.ok(webAccount);
+  const now = new Date().toISOString();
+  const userMessageId = createUlid();
+  await db.createWriteLane().transact((transaction) => {
+    transaction.run(
+      `INSERT INTO messages
+         (id, conversation_id, provider, account_id, source_message_id, body,
+          attachment_ids_json, received_at, created_at)
+       VALUES (?, ?, 'web', ?, ?, ?, ?, ?, ?)`,
+      userMessageId, conversation.conversation_id, webAccount.id, `web-user:${userMessageId}`,
+      "Reply with the supplied text.", JSON.stringify([]), now, now,
+    );
+  });
+
+  await core.advisorRespond(conversation.conversation_id, userMessageId, { channel: "web" });
+  const storedReply = await waitFor(
+    () => db.get(
+      "SELECT body FROM messages WHERE conversation_id = ? AND source_message_id LIKE 'advisor:%' ORDER BY created_at DESC LIMIT 1",
+      conversation.conversation_id,
+    ),
+    { message: "the web Advisor reply is stored" },
+  );
+  assert.equal(storedReply.body, originalReply);
+});
+
+test("a Core with a session-capable provider runs the follow-up Advisor turn exactly once for a failed send_file report and not for a duplicate", async (t) => {
+  const root = await tempDir(t, "owl-advisor-delivery-session-");
+  const files = await tempDir(t, "owl-advisor-delivery-files-");
+  await writeFile(join(files, "a.txt"), "first");
+  const db = createTestDatabase(root);
+  const sendFile = [{ type: "send_file", description: "Send", payload: { path: join(files, "a.txt") } }];
+  const { providerClient, sent } = scriptedProvider([
+    ["Here.", "```owl-actions", JSON.stringify(sendFile), "```"].join("\n"),
+    "Could not upload it.",
+  ]);
+  const core = createCore({
+    db,
+    agentRunner: {
       runManagerPlan: async () => { throw new Error("No Work should be created."); },
       runWorker: async () => { throw new Error("No Worker should run."); },
       runReviewer: async () => { throw new Error("No Reviewer should run."); },
     },
+    providerClient,
     getAdvisorSendFileSettings: () => ({ dirs: [files] }),
-    version: "advisor-delivery-one-shot-test",
+    version: "advisor-delivery-session-test",
     owlRoot: root,
     dataDir: root,
   });
@@ -787,18 +761,21 @@ test("a one-shot Core runs the follow-up Advisor turn exactly once for a failed 
     );
   });
   await core.advisorRespond(conversation.conversation_id, userMessageId, { channel: "slack", channel_id: "C1", ref: "1.1" });
-  assert.equal(requests.length, 1);
-  const responded = JSON.parse(db.get("SELECT payload_json FROM events WHERE type = 'advisor.responded' ORDER BY sequence DESC LIMIT 1").payload_json);
+  const responded = JSON.parse((await waitFor(
+    () => db.get("SELECT payload_json FROM events WHERE type = 'advisor.responded' ORDER BY sequence DESC LIMIT 1"),
+    { message: "the Advisor reply is recorded" },
+  )).payload_json);
+  assert.equal(sent.length, 1);
   assert.equal(responded.delivery_pending, true);
 
   const report = { turn_id: responded.turn_id, message_id: responded.message_id, results: [{ index: 0, outcome: "failed", code: "upload_rejected", platform_error: "not_in_channel", message: "no" }] };
   const first = await core.reportAdvisorDelivery(ownerId, conversation.conversation_id, report);
   assert.equal(first.followup_pending, true);
-  await waitFor(() => requests.length === 2, { message: "the follow-up Advisor turn ran" });
-  assert.match(JSON.stringify(requests[1]), /send_file/u);
+  await waitFor(() => sent.length === 2, { message: "the follow-up Advisor turn ran" });
+  assert.match(sent[1].text, /send_file/u);
 
   const second = await core.reportAdvisorDelivery(ownerId, conversation.conversation_id, report);
   assert.equal(second.deduplicated, true);
   await new Promise((resolve) => setTimeout(resolve, 150));
-  assert.equal(requests.length, 2, "runOneShotFollowup ran exactly once");
+  assert.equal(sent.length, 2, "the follow-up ran exactly once");
 });

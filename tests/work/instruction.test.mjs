@@ -10,6 +10,7 @@ import { git } from "../helpers/git.mjs";
 import { disablePlanQuality } from "../helpers/plan-quality.mjs";
 import { waitFor } from "../helpers/wait.mjs";
 import { openTestRunCore, plannedTask, workerReport as testRunWorkerReport } from "../helpers/test-run-core.mjs";
+import { readOwnerReplan, writeOwnerReplan } from "../../packages/core/dist/replan-queue-store.js";
 
 async function setup(t) {
   const { db, core } = await createTestCore(t, { version: "work-instruction-test", dispatcher: { tick_interval_ms: 60_000 } }, { prefix: "owl-work-instruction-" });
@@ -27,8 +28,7 @@ async function createWorkInState(core, db, state, suffix) {
 }
 
 function marker(db, workId) {
-  const row = db.get("SELECT response_json FROM idempotency_keys WHERE key = ?", `owner-replan:${workId}`);
-  return row ? JSON.parse(row.response_json) : null;
+  return readOwnerReplan(db, workId) ?? null;
 }
 
 test("an instruction on a running Work records the message and queues an owner replan", async (t) => {
@@ -60,13 +60,7 @@ test("an instruction keeps a pending decision answer", async (t) => {
   const { db, core } = await setup(t);
   const workId = await createWorkInState(core, db, "paused", "pending");
   await db.createWriteLane().transact((transaction) => {
-    transaction.run(
-      `INSERT INTO idempotency_keys (key, request_hash, response_json, status_code, created_at, expires_at)
-       VALUES (?, ?, ?, 202, ?, ?)`,
-      `owner-replan:${workId}`, "0".repeat(64),
-      JSON.stringify({ work_id: workId, status: "queued", kind: "decision", answer: "Retry it" }),
-      "2020-01-01T00:00:00.000Z", "2999-01-01T00:00:00.000Z",
-    );
+    writeOwnerReplan(transaction, workId, { kind: "decision", answer: "Retry it", message_ids: [], processing_message_ids: [] }, "replace", new Date().toISOString());
   });
   await core.postWorkInstruction(workId, command({ body: "Also this" }, "pending", 1));
   const queued = marker(db, workId);
@@ -229,8 +223,8 @@ const envelope = (payload, suffix, expectedVersion = 0) => command(payload, `tes
 const workVersion = (db, workId) => db.get("SELECT state_version FROM works WHERE id = ?", workId).state_version;
 const planTask = { id: "T1", title: "A", type: "code", acceptance: "Done; verified by the test.", depends_on: [], required_sections: [], required_tests: [], replaces: [], review: false };
 const workerReport = (invocationId) => ({
-  kind: "report", schema_version: "1.0.0", invocation_id: invocationId, result: "success", work_done: "Done.", changes: [],
-  verification: { passed: true, method: "Checked." }, remaining_issues: [], next_action: "none", needs_replanning: false, question_for_manager: null,
+  kind: "report", schema_version: "1.1.0", invocation_id: invocationId, result: "success", work_done: "Done.", changes: [],
+  verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked.", integration_check: null }, remaining_issues: [], next_action: "none", needs_replanning: false, question_for_manager: null,
 });
 
 // `stops: false` makes cancelAgent a no-op, so a stopped Worker never ends until `release()`.

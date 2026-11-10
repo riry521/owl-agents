@@ -24,10 +24,8 @@ export interface RemakeUnit {
 export type RemakeUnitClass = "original" | "neutral" | "functional" | "non_functional";
 export type RemakeGateReason =
   | "lineage_review_attempts"
-  | "lineage_worker_runs"
-  | "non_functional_remakes"
-  | "base_sync_lineage_review_attempts"
-  | "base_sync_lineage_worker_runs";
+  | "lineage_worker_runs";
+
 
 /** Paths that differ from the baseline: changed or new in the unit, or present in the baseline but gone from the unit. */
 export function touchedPaths(files: readonly MeasuredFile[], baseline: readonly MeasuredFile[]): string[] {
@@ -48,28 +46,11 @@ export function classifyRemakeUnit(unit: RemakeUnit, settings: RemakeLimitSettin
   return { kind: functional ? "functional" : "non_functional", touched };
 }
 
-/** Consecutive newest remakes that changed only verification paths. `units` is newest first. */
-export function nonFunctionalStreak(units: readonly RemakeUnit[], settings: RemakeLimitSettings): { streak: number; paths: string[] } {
-  let streak = 0;
-  const paths = new Set<string>();
-  for (const unit of units) {
-    const { kind, touched } = classifyRemakeUnit(unit, settings);
-    if (kind === "original" || kind === "functional") break;
-    if (kind === "neutral") continue;
-    streak += 1;
-    for (const path of touched) paths.add(path);
-  }
-  return { streak, paths: [...paths].sort().slice(0, 20) };
-}
-
 export function evaluateRemakeGate(
-  usage: { readonly review_attempts: number; readonly worker_runs: number; readonly non_functional_streak: number; readonly base_sync_review_attempts: number; readonly base_sync_worker_runs: number },
+  usage: { readonly review_attempts: number; readonly worker_runs: number },
   settings: RemakeLimitSettings,
 ): { blocked: false } | { blocked: true; reason: RemakeGateReason } {
   if (usage.review_attempts >= settings.lineage_review_attempts) return { blocked: true, reason: "lineage_review_attempts" };
   if (usage.worker_runs >= settings.lineage_worker_runs) return { blocked: true, reason: "lineage_worker_runs" };
-  if (usage.non_functional_streak >= settings.non_functional_remakes) return { blocked: true, reason: "non_functional_remakes" };
-  if (usage.base_sync_review_attempts >= settings.base_sync_lineage_review_attempts) return { blocked: true, reason: "base_sync_lineage_review_attempts" };
-  if (usage.base_sync_worker_runs >= settings.base_sync_lineage_worker_runs) return { blocked: true, reason: "base_sync_lineage_worker_runs" };
   return { blocked: false };
 }

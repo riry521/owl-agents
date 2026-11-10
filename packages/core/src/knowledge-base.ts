@@ -86,12 +86,7 @@ export class KnowledgeBase {
     source: { key: string; value: string; kind?: string },
   ): Promise<string>;
   public async resolveFilename(
-    subdir: "advisor/conversations",
-    title: string,
-    source: { key: string; value: string; kind?: string },
-  ): Promise<string>;
-  public async resolveFilename(
-    subdir: (typeof KNOWLEDGE_SUBDIRS)[number] | "advisor/conversations",
+    subdir: (typeof KNOWLEDGE_SUBDIRS)[number],
     title: string,
     source: { key: string; value: string; kind?: string },
   ): Promise<string> {

@@ -34,7 +34,6 @@ within the same repository.
 | `@owl/db` | `better-sqlite3 12.6.2` | `@types/better-sqlite3 9.6.0`, `@types/node ^20`, `typescript ^5.8.2` |
 | `@owl/core` | `@owl/db`, `@owl/shared`, `@typesafe-ai/sdk ^0.6.0 (0.6.0)` | `@types/node ^20`, `typescript ^5.8.2` |
 | `@owl/agent-runtime` | `@owl/shared` | `typescript ^5.8.2` |
-| `@owl/providers` | none | uses the root TypeScript toolchain |
 | `@owl/plugin-sdk` | none | `typescript ^5.0.0` |
 | `@owl/connector-slack` | `@owl/plugin-sdk`, `@slack/socket-mode ^2.0.0 (2.0.7)`, `@slack/web-api ^7.0.0 (7.19.0)` | `typescript ^5.6.0` |
 | `@owl/connector-discord` | `@owl/plugin-sdk`, `discord.js ^14.16.0 (14.27.0)` | `typescript ^5.6.0` |
@@ -50,7 +49,7 @@ within the same repository.
   redundantly declare the Slack/Discord SDKs directly.
 - `web`'s `next@15.5.24` transitively uses `sharp`. Because Next's optional
   range allows multiple majors, the root `pnpm.overrides` pins it to the
-  already-patched `sharp@0.35.4`.
+  already-patched `sharp@0.35.5`.
 - Similarly, because Next pins an older `postcss`, the root `pnpm.overrides`
   pins it to the already-patched `postcss@8.5.23`.
 - `better-sqlite3` and `sharp` are targets of native builds. The root
@@ -68,7 +67,7 @@ These are not npm packages, so `pnpm install` does not install them.
 | `claude` CLI | Using Claude in real mode where `OWL_PROVIDER` is not `stub` | PATH, or `OWL_CLAUDE_EXECUTABLE` |
 | `codex` CLI | Using the Codex provider / persistent Advisor | PATH, or `OWL_CODEX_EXECUTABLE` |
 | Typesafe API | Using the Librarian's external triage/scoring | UI setting, or `TYPESAFE_API_KEY` |
-| Slack credentials | Starting the Slack connector | Tokens live in the mode-0600 `.env`: `SLACK_BOT_TOKEN`, plus `SLACK_APP_TOKEN` for Socket Mode. `SLACK_SIGNING_SECRET` is optional, kept only for storage compatibility. The conversation channel is `SLACK_CONVERSATION_CHANNEL_ID`, and the task notification channel is `SLACK_NOTIFICATION_CHANNEL_ID` (multiple values separated by commas or newlines). The legacy `SLACK_CHANNEL_ID` falls back to both. |
+| Slack credentials | Starting the Slack connector | Tokens live in the mode-0600 `.env`: `SLACK_BOT_TOKEN`, plus `SLACK_APP_TOKEN` for Socket Mode. `SLACK_SIGNING_SECRET` is no longer read; a leftover value is ignored. The conversation channel is `SLACK_CONVERSATION_CHANNEL_ID`, and the task notification channel is `SLACK_NOTIFICATION_CHANNEL_ID` (multiple values separated by commas or newlines). The legacy `SLACK_CHANNEL_ID` falls back to both. |
 | Discord credentials | Starting the Discord connector | Tokens live in the mode-0600 `.env`: `DISCORD_BOT_TOKEN`. The conversation channel is `DISCORD_CONVERSATION_CHANNEL_ID`, and the task notification channel is `DISCORD_NOTIFICATION_CHANNEL_ID` (multiple values separated by commas or newlines). The legacy `DISCORD_CHANNEL_ID` falls back to both. No additional Application ID is needed even standalone. |
 | Tailscale | Only when using `owl serve` or remote HTTPS exposure | `tailscale` CLI + login |
 

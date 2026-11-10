@@ -12,7 +12,7 @@ import { groupArchivedByDay, groupByProject } from '@/lib/archive-list.mjs';
 import { confirmDeleteIfUnmerged, removeWorks, revealWork, useWorkRemovals } from '@/lib/work-removal';
 import { WorkStateBadge } from '@/components/StateBadge';
 import { RestoreIcon, TrashIcon } from '@/components/icons';
-import { humanizeError } from '@/components/BoardView';
+import { humanizeBoardError } from '@/lib/api-error-keys.mjs';
 
 /** Permanently deletes an archived Work; nothing is removed unless the Owner confirms. */
 export function deleteArchivedWork(work: WorkSummary, t: TFunction): Promise<boolean> {
@@ -78,7 +78,7 @@ export function ArchiveView() {
   const { hiddenIds } = useWorkRemovals();
   const { data: viewData, error, refresh } = useView<BoardData>('archive', () => getBoard({ archived: 'only' }));
   const data = viewData ?? null;
-  const loadError = error ? humanizeError(error, t) : null;
+  const loadError = error ? humanizeBoardError(error, t) : null;
   const hasProjects = data?.projects !== undefined;
   const projectNames = data?.projects ? new Map(data.projects.map((project) => [project.id, project.name])) : fallbackProjects;
 

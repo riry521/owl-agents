@@ -119,7 +119,7 @@ for (const [name, row, event, payload, status, managerTrigger, action, reason] o
 }
 
 const { plan_review_rounds: planRounds, total_review_attempts: reviewLimit } = DEFAULT_REVIEW_LIMIT_SETTINGS;
-const lineage = (extra = {}) => ({ otherReviewAttempts: 0, otherBaseSyncReviewAttempts: 0, limit: reviewLimit * 10, baseSyncLimit: reviewLimit * 10, generations: 1, ...extra });
+const lineage = (extra = {}) => ({ otherReviewAttempts: 0, limit: reviewLimit * 10, generations: 1, ...extra });
 const waitSpec = { source: "worker", reason: "r", conditions: [{ kind: "process", pid: 1, log_path: "l.log", description: "d" }], base_head: null, deadline_at: "2026-10-01T00:00:00.000Z", replan_question: null };
 const stop = JSON.stringify({ trigger: "designer", rejections: null, limit: null, at: "2026-09-24T00:00:00.000Z" });
 const failedReview = { verdict: "fix_required" };
@@ -131,7 +131,7 @@ const detailed = [
   ["design blocked", { type: "design", design_stop_json: stop }, "task.rate_limited", { provider: "p" }, {}, "judgement_waiting", ["core_decision_required"], false, {}, "owner_decision", "design_blocked"],
   ["reviewer output invalid", { status: "verifying" }, "agent.crashed", { role: "reviewer", error_key: "output_format_invalid" }, {}, "judgement_waiting", ["core_decision_required"], false, {}, "owner_decision", "reviewer_output_invalid"],
   ["lineage budget", { status: "verifying" }, "review.failed", failedReview, { lineage: lineage({ limit: 3, otherReviewAttempts: 2 }) }, "judgement_waiting", ["core_decision_required"], false, { total_review_attempts: 1 }, "owner_decision", "lineage_budget_exhausted"],
-  ["base sync lineage budget", { status: "verifying", base_sync_only: 1 }, "review.failed", failedReview, { lineage: lineage({ baseSyncLimit: 1 }) }, "judgement_waiting", ["core_decision_required"], false, { total_review_attempts: 1, base_sync_review_attempts: 1 }, "owner_decision", "base_sync_lineage_budget_exhausted"],
+  ["base sync counts toward the lineage budget", { status: "verifying", base_sync_only: 1 }, "review.failed", failedReview, { lineage: lineage({ limit: 3, otherReviewAttempts: 2 }) }, "judgement_waiting", ["core_decision_required"], false, { total_review_attempts: 1, base_sync_review_attempts: 1 }, "owner_decision", "lineage_budget_exhausted"],
   ["lead rejections", { status: "verifying", type: "design", lead_designer_start_round: planRounds, design_escalated: 1 }, "review.failed", failedReview, { lineage: lineage({ leadRejectionLimit: 1 }) }, "review_fix_waiting", ["replacement_worker_reserved"], false, { total_review_attempts: 1, lead_review_rejections: 1 }, "fix", "lead_rejections_exhausted"],
   ["review budget reached", { status: "verifying", total_review_attempts: reviewLimit - 1 }, "review.failed", failedReview, {}, "failed", ["manager_trigger_required"], true, { total_review_attempts: reviewLimit }, "replan", "review_budget_reached"],
   ["design escalated to lead", { status: "verifying", type: "design", review_round: planRounds - 1 }, "review.failed", failedReview, {}, "review_fix_waiting", ["replacement_worker_reserved"], false, { total_review_attempts: 1, review_round: planRounds, lead_designer_start_round: planRounds, design_escalated: 1 }, "fix", "design_escalated_to_lead"],
@@ -290,8 +290,8 @@ const decisionOf = (result) => {
   assert.equal(result.outcome, "decision");
   return result.decision;
 };
-const lineageLimits = (over = {}) => ({ reviewAttempts: 9, baseSyncReviewAttempts: 9, leadReviewRejections: 1, ...over });
-const lineageSeen = (over = {}) => ({ otherReviewAttempts: 0, otherBaseSyncReviewAttempts: 0, generations: 1, ...over });
+const lineageLimits = (over = {}) => ({ reviewAttempts: 9, leadReviewRejections: 1, ...over });
+const lineageSeen = (over = {}) => ({ otherReviewAttempts: 0, generations: 1, ...over });
 const reviewFailed = (task, over = {}) => ({
   kind: "review_failed", task: taskRow({ status: "verifying", ...task }), verdict: "fix_required", reviewAttemptsBase: undefined, lineage: null, ...over,
 });
@@ -304,7 +304,7 @@ function deepFreeze(value) {
 test("the default config holds today's thresholds", () => {
   const c = DEFAULT_ATTEMPT_POLICY_CONFIG;
   assert.equal(c.transientRetryLimit, TRANSIENT_RETRY_LIMIT);
-  assert.equal(c.deterministicSameErrorLimit, 2);
+  assert.equal("deterministicSameErrorLimit" in c, false);
   assert.equal(c.deterministicFailureLimit, 3);
   assert.equal(c.reviewerFailureLimit, REVIEWER_FAILURE_LIMIT);
   assert.equal(REVIEWER_FAILURE_LIMIT, 3);
@@ -420,11 +420,10 @@ test("deterministic failure: retry_not_allowed wins, thresholds decide retry or 
   assert.equal(decisionOf(evaluate(observe({ failure_count: 1 }, { escalatedFromTransient: true }), cfg())).reason, "transient_budget_exhausted");
   const total = decisionOf(evaluate(observe({ failure_count: 2 }), cfg()));
   assert.deepEqual([total.to, total.action, total.reason, total.managerTrigger], ["failed", "replan", "deterministic_threshold", true]);
-  const repeated = { failure_count: 0, same_error_count: 1, last_error_key: key64, last_error_generation: 1 };
-  assert.equal(decisionOf(evaluate(observe(repeated), cfg())).reason, "deterministic_threshold");
-  assert.equal(decisionOf(evaluate(observe({ ...repeated, last_error_generation: 0 }), cfg())).reason, "deterministic_failure");
+  // The same error_key twice no longer stops by itself: only the failure total does.
+  const repeated = { failure_count: 1, same_error_count: 1, last_error_key: key64, last_error_generation: 1 };
+  assert.equal(decisionOf(evaluate(observe(repeated), cfg())).reason, "deterministic_failure");
   assert.equal(decisionOf(evaluate(observe({ failure_count: 2 }), cfg({ deterministicFailureLimit: 4 }))).reason, "deterministic_failure");
-  assert.equal(decisionOf(evaluate(observe(repeated), cfg({ deterministicSameErrorLimit: 3 }))).reason, "deterministic_failure");
 });
 
 test("deterministic failure: a plain partial has its own limit and leaves the failure counters alone", () => {
@@ -453,7 +452,7 @@ test("deterministic failure: the same error_key stored as a hash counts up; anot
   const stored = { failure_count: 1, same_error_count: 1, last_error_key: normalizeErrorKey("design_document_missing"), last_error_generation: 1 };
   const observe = (task, errorKey) => ({ kind: "deterministic_failure", task: taskRow(task), errorKey, retryAllowed: true, escalatedFromTransient: false });
   const same = decisionOf(evaluate(observe(stored, "design_document_missing"), cfg()));
-  assert.deepEqual([same.patch.same_error_count, same.to, same.reason, same.managerTrigger], [2, "failed", "deterministic_threshold", true]);
+  assert.deepEqual([same.patch.same_error_count, same.to, same.reason, same.managerTrigger], [2, "ready", "deterministic_failure", false]);
   assert.equal(decisionOf(evaluate(observe(stored, "other_error"), cfg())).patch.same_error_count, 1);
   assert.equal(decisionOf(evaluate(observe({ ...stored, last_error_generation: 0 }, "design_document_missing"), cfg())).patch.same_error_count, 1);
 });
@@ -516,18 +515,10 @@ test("review failure: lineage limit comes before the total review budget", () =>
   assert.equal(result.lineageBudget.generations, 2);
 });
 
-test("review failure: a base-sync generation stops at the base-sync lineage limit below the main limit", () => {
-  const config = cfg({ lineageLimits: lineageLimits({ reviewAttempts: 50, baseSyncReviewAttempts: 2 }) });
-  const result = decisionOf(evaluate(reviewFailed({ base_sync_only: 1 }, { lineage: lineageSeen({ otherBaseSyncReviewAttempts: 1 }) }), config));
-  assert.equal(result.reason, "base_sync_lineage_budget_exhausted");
-  assert.deepEqual([result.lineageBudget.reason, result.lineageBudget.attempts, result.lineageBudget.limit], ["base_sync_lineage_review_attempts", 2, 2]);
-});
-
-test("review failure: a partial lineage limit (undefined base-sync limit) never stops a base-sync generation", () => {
-  const config = cfg({ lineageLimits: { reviewAttempts: 50 } });
-  const result = decisionOf(evaluate(reviewFailed({ base_sync_only: 1 }, { lineage: lineageSeen({ otherBaseSyncReviewAttempts: 99 }) }), config));
-  assert.equal(result.reason, "review_fix_required");
-  assert.equal(result.lineageBudget, undefined);
+test("review failure: base-sync verdicts of the lineage count toward the main lineage limit", () => {
+  const config = cfg({ lineageLimits: lineageLimits({ reviewAttempts: 2 }) });
+  const result = decisionOf(evaluate(reviewFailed({ base_sync_only: 1 }, { lineage: lineageSeen({ otherReviewAttempts: 1 }) }), config));
+  assert.deepEqual([result.reason, result.lineageBudget.reason, result.lineageBudget.attempts, result.lineageBudget.limit], ["lineage_budget_exhausted", "lineage_review_attempts", 2, 2]);
 });
 
 test("review failure: lead rejection limit comes before the total budget and records a design stop; undefined skips it", () => {
@@ -709,12 +700,12 @@ test("reducer applies evaluate: transient retries just below and at the limit", 
   assert.equal(evaluate({ kind: "transient_failure", task: taskRow(), retryNo: TRANSIENT_RETRY_LIMIT + 1, nextAttemptAt: null }, cfg()).outcome, "reject");
 });
 
-test("reducer applies evaluate: the same deterministic error retries once, then stops", () => {
+test("reducer applies evaluate: the same deterministic error retries until the failure total stops it", () => {
   const command = { event: "task.failure.classified", payload: det({ error_key: key64 }) };
   const observe = (task) => ({ kind: "deterministic_failure", task, errorKey: key64, retryAllowed: true, escalatedFromTransient: false });
   const first = taskRow();
   assert.equal(assertReducerFollowsEvaluate(first, command, observe(first)).next.status, "ready");
-  const repeated = taskRow({ same_error_count: 1, last_error_key: key64, last_error_generation: 1 });
+  const repeated = taskRow({ failure_count: 2, same_error_count: 2, last_error_key: key64, last_error_generation: 1 });
   assert.equal(assertReducerFollowsEvaluate(repeated, command, observe(repeated)).next.status, "failed");
 });
 

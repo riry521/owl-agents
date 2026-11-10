@@ -8,7 +8,8 @@ import { bodySha256, estimatePageTokens, findSecretPatterns, lineHash, maskSecre
 import { newLinesOf, type MemoryLibrarianSetting } from "./page-integration.js";
 import type { RouteInput, RouteResult } from "./page-router.js";
 import { applyOperations, itemsOf, parseOperationsOutput, stripNew, type PageOpsContext, type PageOpsState, type PageOpsWarning } from "./page-operations.js";
-import { OTHER_NOTES_TITLE, writeAtomic } from "./page-router.js";
+import { OWNED_DIR_WRITE, writeAtomic } from "../atomic-write.js";
+import { OTHER_NOTES_TITLE } from "./page-router.js";
 import { normalizeOp, type OpDefinitions } from "../op-shape.js";
 
 /** The page librarian (design §3, §4): the model names operations, the applier of page-operations.ts is the only writer of page text. */
@@ -600,7 +601,7 @@ export class PageLibrarian {
           if (original === null) {
             await rm(join(root, page), { force: true });
             ctx.created.delete(page);
-          } else await writeAtomic(join(root, page), original);
+          } else await writeAtomic(join(root, page), original, OWNED_DIR_WRITE);
           // What an earlier operation of this run wrote stays registered; only this operation's own traces are removed.
           if (original !== null && touchedBefore.has(page)) ctx.written.set(page, bodySha256(original));
           else { ctx.touched.delete(page); ctx.written.delete(page); }
@@ -647,7 +648,7 @@ export class PageLibrarian {
         if (next === null) return "not_applicable";
         try {
           await this.backup(ctx, rel);
-          await writeAtomic(join(root, rel), next);
+          await writeAtomic(join(root, rel), next, OWNED_DIR_WRITE);
         } catch {
           return "write_failed"; // only this entry stays pending; entries already settled keep their result
         }
@@ -768,7 +769,7 @@ export class PageLibrarian {
       try {
         await this.backup(ctx, path);
         await mkdir(dirname(join(root, path)), { recursive: true });
-        await writeAtomic(join(root, path), text);
+        await writeAtomic(join(root, path), text, OWNED_DIR_WRITE);
       } catch (error) {
         throw new WriteError(path, error);
       }
@@ -835,7 +836,7 @@ export class PageLibrarian {
               continue;
             }
             await mkdir(dirname(join(root, rel)), { recursive: true });
-            await writeAtomic(join(root, rel), original);
+            await writeAtomic(join(root, rel), original, OWNED_DIR_WRITE);
           } catch (error) {
             this.options.logger?.warn(`Could not restore ${rel} from the original text`, error);
           }

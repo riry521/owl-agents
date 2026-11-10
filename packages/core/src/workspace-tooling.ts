@@ -1,8 +1,7 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { appendCapped, createOutputCapture, runProcess } from "@owl/shared";
 import { createHash } from "node:crypto";
 import { chmod, copyFile, lstat, mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { StringDecoder } from "node:string_decoder";
 import { GitLanes } from "./git-lane.js";
 import { registerSerenaProject, serenaConfigPath } from "./serena-registry.js";
 import {
@@ -34,16 +33,7 @@ export type CommandRunner = (
 ) => Promise<CommandResult>;
 
 const OUTPUT_CAP_BYTES = 1024 * 1024;
-
-/** Appends decoded `text` to `current`, keeping only the last `cap` bytes without splitting a UTF-8 code point. */
-function appendCapped(current: string, text: string, cap: number): string {
-  if (cap <= 0) return current;
-  const combined = Buffer.from(current + text);
-  if (combined.byteLength <= cap) return combined.toString("utf8");
-  let start = combined.byteLength - cap;
-  while (start < combined.byteLength && (combined[start]! & 0xc0) === 0x80) start += 1;
-  return combined.subarray(start).toString("utf8");
-}
+export { appendCapped };
 
 /**
  * Runs a command with no shell involved, capping each output stream at
@@ -52,62 +42,25 @@ function appendCapped(current: string, text: string, cap: number): string {
  * group is killed (SIGTERM, then SIGKILL after 2s if it is still alive).
  * Never rejects: spawn failures and signal kills both come back as a result.
  */
-export const runCommand: CommandRunner = (command, args, options) => {
-  return new Promise((resolveResult) => {
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-    let settled = false;
-    let child: ChildProcess;
-
-    try {
-      child = spawn(command, args, {
-        cwd: options.cwd,
-        env: options.env,
-        shell: false,
-        detached: true,
-        stdio: [options.input !== undefined ? "pipe" : "ignore", "pipe", "pipe"],
-      });
-    } catch (error) {
-      resolveResult({ exit_code: null, stdout: "", stderr: "", timed_out: false, error: error instanceof Error ? error.message : String(error) });
-      return;
-    }
-
-    if (options.input !== undefined) {
-      child.stdin?.on("error", () => { /* the process may exit before consuming its input */ });
-      child.stdin?.end(options.input);
-    }
-
-    // A decoder per stream holds back a code point split across chunks instead of turning it into U+FFFD.
-    const stdoutDecoder = new StringDecoder("utf8");
-    const stderrDecoder = new StringDecoder("utf8");
-    child.stdout?.on("data", (chunk: Buffer) => { stdout = appendCapped(stdout, stdoutDecoder.write(chunk), OUTPUT_CAP_BYTES); });
-    child.stderr?.on("data", (chunk: Buffer) => { stderr = appendCapped(stderr, stderrDecoder.write(chunk), OUTPUT_CAP_BYTES); });
-
-    const killGroup = (signal: NodeJS.Signals): void => {
-      if (child.pid === undefined) return;
-      try { process.kill(-child.pid, signal); } catch { try { child.kill(signal); } catch { /* already exited */ } }
-    };
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      killGroup("SIGTERM");
-      setTimeout(() => killGroup("SIGKILL"), 2_000).unref();
-    }, Math.max(1, options.timeout_ms));
-
-    child.once("error", (error) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolveResult({ exit_code: null, stdout, stderr, timed_out: timedOut, error: error.message });
-    });
-    child.once("close", (code) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolveResult({ exit_code: code, stdout, stderr, timed_out: timedOut });
-    });
+export const runCommand: CommandRunner = async (command, args, options) => {
+  // A decoder per stream holds back a code point split across chunks instead of turning it into U+FFFD.
+  const stdout = createOutputCapture(OUTPUT_CAP_BYTES, "tail", { decodeChunks: true });
+  const stderr = createOutputCapture(OUTPUT_CAP_BYTES, "tail", { decodeChunks: true });
+  const result = await runProcess(command, args, {
+    cwd: options.cwd,
+    env: options.env,
+    timeoutMs: Math.max(1, options.timeout_ms),
+    killGraceMs: 2_000,
+    ...(options.input !== undefined ? { input: options.input } : {}),
+    onData: (stream, chunk) => (stream === "stdout" ? stdout : stderr).push(chunk),
   });
+  return {
+    exit_code: result.code,
+    stdout: stdout.text(),
+    stderr: stderr.text(),
+    timed_out: result.timedOut,
+    ...(result.error !== undefined ? { error: result.error } : {}),
+  };
 };
 
 function splitNul(text: string): string[] {

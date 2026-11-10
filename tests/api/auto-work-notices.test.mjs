@@ -5,18 +5,16 @@ import { test } from "node:test";
 
 import { NoopGitGateway } from "../../packages/core/dist/index.js";
 import { createUlid } from "../../packages/db/dist/index.js";
-import { ExternalCoreAdapter, MemoryCore } from "../../apps/server/dist/core.js";
+import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { GuardTokenRegistry } from "../../apps/server/dist/guard-tokens.js";
 import { command, createTestCore } from "../helpers/core.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
-import { tempDir } from "../helpers/temp.mjs";
 
 const apiRoot = "/api/v1";
 const token = "auto-work-notices-owner-token";
 const judgment = { ok: true, judgment: { worth_fixing: true, reason: "直す価値がある", duplicate_of_work_id: null, duplicate_reason: null, work: { title: "自動 Work", summary: "原因を調べて直す", size: "normal" } } };
 
-/** @param wrap "external" puts the Core behind ExternalCoreAdapter; "memory" assigns the method to a MemoryCore. */
-async function startServer(t, wrap) {
+async function startServer(t) {
   const judged = [];
   const { root, db, core: durable } = await createTestCore(t, {
     git: new NoopGitGateway(),
@@ -43,12 +41,7 @@ async function startServer(t, wrap) {
     );
   });
   await durable.start();
-  let core;
-  if (wrap === "external") core = new ExternalCoreAdapter(durable, db, root, join(root, "data"));
-  else {
-    core = new MemoryCore({ version: "test" });
-    core.receiveAutoWorkNotice = (request) => durable.receiveAutoWorkNotice(request);
-  }
+  const core = new ExternalCoreAdapter(durable, db, root, join(root, "data"));
   const guardTokens = GuardTokenRegistry.open(join(root, "guard-tokens"));
   t.after(() => guardTokens.clear());
   const server = await startTestHttpServer(t, { core, db, webOut: root, owlRoot: root, guardTokens }, { token });
@@ -67,38 +60,36 @@ async function startServer(t, wrap) {
   return { post, notice, rows, works, judged, projectId, guardTokens };
 }
 
-for (const wrap of ["external", "memory"]) {
-  test(`a matching notice makes a draft Work and one history row (${wrap})`, async (t) => {
-    const s = await startServer(t, wrap);
-    if (!s) return;
-    const response = await s.post(s.notice({ dedupe_hint: "deploy.sh", exit_code: 1, command: "./deploy.sh" }));
-    assert.equal(response.status, 201);
-    const { data } = await response.json();
-    assert.equal(data.verdict, "created");
-    assert.equal(data.source, "failure_notice");
-    assert.equal(data.project_name, "Project 1");
-    assert.equal(data.work_state, "memo");
-    assert.equal("detail" in data, false);
-    assert.equal(s.rows().length, 1);
-    assert.equal(s.rows()[0].id, data.id);
-    assert.equal(s.works().length, 1);
-    assert.equal(s.works()[0].id, data.work_id);
-  });
+test("a matching notice makes a draft Work and one history row", async (t) => {
+  const s = await startServer(t);
+  if (!s) return;
+  const response = await s.post(s.notice({ dedupe_hint: "deploy.sh", exit_code: 1, command: "./deploy.sh" }));
+  assert.equal(response.status, 201);
+  const { data } = await response.json();
+  assert.equal(data.verdict, "created");
+  assert.equal(data.source, "failure_notice");
+  assert.equal(data.project_name, "Project 1");
+  assert.equal(data.work_state, "memo");
+  assert.equal("detail" in data, false);
+  assert.equal(s.rows().length, 1);
+  assert.equal(s.rows()[0].id, data.id);
+  assert.equal(s.works().length, 1);
+  assert.equal(s.works()[0].id, data.work_id);
+});
 
-  test(`a notice no rule covers is recorded and makes no Work (${wrap})`, async (t) => {
-    const s = await startServer(t, wrap);
-    if (!s) return;
-    const response = await s.post(s.notice({ kind: "other" }));
-    assert.equal(response.status, 201);
-    assert.equal((await response.json()).data.verdict, "no_rule");
-    assert.equal(s.rows().length, 1);
-    assert.equal(s.works().length, 0);
-    assert.equal(s.judged.length, 0);
-  });
-}
+test("a notice no rule covers is recorded and makes no Work", async (t) => {
+  const s = await startServer(t);
+  if (!s) return;
+  const response = await s.post(s.notice({ kind: "other" }));
+  assert.equal(response.status, 201);
+  assert.equal((await response.json()).data.verdict, "no_rule");
+  assert.equal(s.rows().length, 1);
+  assert.equal(s.works().length, 0);
+  assert.equal(s.judged.length, 0);
+});
 
 test("the same idempotency key returns the saved result without a second row", async (t) => {
-  const s = await startServer(t, "external");
+  const s = await startServer(t);
   if (!s) return;
   const first = await (await s.post(s.notice(), { key: "same-key" })).json();
   const second = await (await s.post(s.notice(), { key: "same-key" })).json();
@@ -107,7 +98,7 @@ test("the same idempotency key returns the saved result without a second row", a
 });
 
 test("a repeated notice with the same dedupe_hint is a duplicate", async (t) => {
-  const s = await startServer(t, "external");
+  const s = await startServer(t);
   if (!s) return;
   await s.post(s.notice({ dedupe_hint: "deploy.sh" }));
   const second = await (await s.post(s.notice({ dedupe_hint: "deploy.sh" }))).json();
@@ -116,7 +107,7 @@ test("a repeated notice with the same dedupe_hint is a duplicate", async (t) => 
 });
 
 test("errors: 400 validation_error, 404 project_not_found, 401, advisor refused", async (t) => {
-  const s = await startServer(t, "external");
+  const s = await startServer(t);
   if (!s) return;
   for (const patch of [
     { kind: "bogus" }, { title: "" }, { title: "x".repeat(501) },
@@ -138,8 +129,11 @@ test("errors: 400 validation_error, 404 project_not_found, 401, advisor refused"
 });
 
 test("a Core without the feature answers 503 core_not_ready", async (t) => {
-  const root = await tempDir(t, "owl-api-auto-work-notices-503-");
-  const server = await startTestHttpServer(t, { core: new MemoryCore({ version: "test" }), webOut: root, owlRoot: root }, { token });
+  const { root, db, core: durable } = await createTestCore(t, {}, { prefix: "owl-api-auto-work-notices-503-" });
+  const limited = Object.create(durable, { receiveAutoWorkNotice: { value: undefined } });
+  const core = new ExternalCoreAdapter(limited, db, root, join(root, "data"));
+  t.after(() => core.shutdown({ force: true, timeoutMs: 0 }).catch(() => undefined));
+  const server = await startTestHttpServer(t, { core, db, webOut: root, owlRoot: root }, { token });
   if (!server) return t.skip("localhost listen is not permitted in this environment");
   const response = await server.request("POST", `${apiRoot}/auto-work/notices`, command({ project_id: createUlid(), kind: "other", title: "x" }, createUlid()));
   assert.equal(response.status, 503);

@@ -5,7 +5,9 @@ import { createRequire, Module } from 'node:module';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import ts from 'typescript';
-import { createCore as createMemoryCore } from '../../apps/server/dist/core.js';
+import { ExternalCoreAdapter } from '../../apps/server/dist/core.js';
+import { createUlid } from '../../packages/db/dist/index.js';
+import { command, createTestCore } from '../helpers/core.mjs';
 import { startTestHttpServer } from '../helpers/http.mjs';
 import { repoRoot } from '../helpers/paths.mjs';
 import { tempDir } from '../helpers/temp.mjs';
@@ -17,6 +19,7 @@ import {
   workDetailHref,
 } from '../../apps/web/lib/work-detail-safety.mjs';
 import * as decisionSections from '../../apps/web/lib/decision-sections.mjs';
+import * as apiErrorKeys from '../../apps/web/lib/api-error-keys.mjs';
 
 const webRequire = createRequire(join(repoRoot, 'apps/web/package.json'));
 const React = webRequire('react');
@@ -111,60 +114,50 @@ const icons = {
   RestoreIcon: () => null,
 };
 
-test('MemoryCore filters taskless descendant runs by Work', async () => {
-  const core = createMemoryCore({ version: 'test' });
-  const createWork = async (title) => (await core.createWork(
+async function seedWorksWithRuns(t) {
+  const { root, db, core } = await createTestCore(t, { version: 'test' }, { prefix: 'owl-api-web-controls-' });
+  const createWork = async (title) => (await core.createWork(command(
     { title, summary: '', size: 'small', project_id: null },
-    { request_id: title, idempotency_key: title, expected_version: 0 },
-  )).data.work_id;
+    `web-controls:${title}`,
+  ))).data.work_id;
   const workA = await createWork('Work A');
   const workB = await createWork('Work B');
-  core.works.get(workA).tasks.push('task-a');
-  core.works.get(workB).tasks.push('task-b');
-  const run = (id, task_id, parent_agent_id = null) => ({
-    id, task_id, parent_agent_id, role: 'worker', provider: 'test', model: 'test', status: 'completed',
-    pid: null, started_at: null, ended_at: null, phase: null, subtask_count: null, label: null, origin: null,
+  const taskIds = { [workA]: createUlid(), [workB]: createUlid() };
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((tx) => {
+    for (const [workId, taskId] of Object.entries(taskIds)) {
+      tx.run(
+        `INSERT INTO tasks (id, work_id, title, type, status, priority, context, acceptance, created_at, updated_at)
+         VALUES (?, ?, 'Task', 'code', 'ready', 'normal', '', '', ?, ?)`,
+        taskId, workId, now, now,
+      );
+    }
   });
-  for (const agent of [
-    run('root-a', 'task-a'),
-    run('manager-a', null, 'root-a'),
-    run('child-a', null, 'manager-a'),
-    run('root-b', 'task-b'),
-    run('manager-b', null, 'root-b'),
-  ]) core.agents.set(agent.id, agent);
+  // Runs are listed in id order, so the ids sort in the order the tests expect.
+  const insertRuns = (workId, runs) => db.createWriteLane().transact((tx) => {
+    for (const [id, taskId, parent, role] of runs) {
+      tx.run(
+        `INSERT INTO agent_runs (id, work_id, task_id, parent_agent_id, role, provider, model, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 'test', 'test', 'completed', ?, ?)`,
+        id, workId, taskId, parent, role, now, now,
+      );
+    }
+  });
+  await insertRuns(workA, [['a1-root', taskIds[workA], null, 'worker'], ['a2-manager', null, 'a1-root', 'manager'], ['a3-child', null, 'a2-manager', 'executor']]);
+  await insertRuns(workB, [['b1-root', taskIds[workB], null, 'worker'], ['b2-manager', null, 'b1-root', 'manager']]);
+  return { root, db, core, workA, workB };
+}
 
+test('Core filters taskless descendant runs by Work', async (t) => {
+  const { core, workA, workB } = await seedWorksWithRuns(t);
   const query = { status: null, limit: 100, cursor: null };
-  assert.deepEqual((await core.listAgents({ ...query, work_id: workA })).data.map((agent) => agent.id), ['root-a', 'manager-a', 'child-a']);
-  assert.deepEqual((await core.listAgents({ ...query, work_id: workB })).data.map((agent) => agent.id), ['root-b', 'manager-b']);
+  assert.deepEqual(core.listAgentRuns({ ...query, work_id: workA }).data.map((agent) => agent.id), ['a1-root', 'a2-manager', 'a3-child']);
+  assert.deepEqual(core.listAgentRuns({ ...query, work_id: workB }).data.map((agent) => agent.id), ['b1-root', 'b2-manager']);
 });
 
 test('GET /agents?work_id= includes taskless descendants of the Work', async (t) => {
-  const core = createMemoryCore({ version: 'test' });
-  const createWork = async (title) => (await core.createWork(
-    { title, summary: '', size: 'small', project_id: null },
-    { request_id: title, idempotency_key: title, expected_version: 0 },
-  )).data.work_id;
-  const workA = await createWork('Work A');
-  const workB = await createWork('Work B');
-  core.works.get(workA).tasks.push('task-a');
-  core.works.get(workB).tasks.push('task-b');
-
-  const run = (id, task_id, parent_agent_id = null, role = 'worker') => ({
-    id, task_id, parent_agent_id, role, provider: 'test', model: 'test', status: 'completed',
-    pid: null, started_at: null, ended_at: null, phase: null, subtask_count: null, label: null, origin: null,
-  });
-  for (const agent of [
-    run('root-a', 'task-a'),
-    run('manager-a', null, 'root-a', 'manager'),
-    run('child-a', null, 'manager-a', 'executor'),
-    run('root-b', 'task-b'),
-    run('manager-b', null, 'root-b', 'manager'),
-    run('orphan-manager', null, null, 'manager'),
-    run('orphan-child', null, 'orphan-manager', 'executor'),
-  ]) core.agents.set(agent.id, agent);
-
-  const root = await tempDir(t, 'owl-api-web-controls-');
-  const server = await startTestHttpServer(t, { core, webOut: root, owlRoot: root }, { token: 'api-web-controls-test-token' });
+  const { root, db, core, workA, workB } = await seedWorksWithRuns(t);
+  const server = await startTestHttpServer(t, { core: new ExternalCoreAdapter(core, db, root, root), db, webOut: root, owlRoot: root, dataDir: root }, { token: 'api-web-controls-test-token' });
   if (!server) return t.skip('localhost listen is unavailable');
 
   const list = async (workId) => {
@@ -172,8 +165,8 @@ test('GET /agents?work_id= includes taskless descendants of the Work', async (t)
     assert.equal(response.status, 200);
     return (await response.json()).data.map((agent) => agent.id);
   };
-  assert.deepEqual(await list(workA), ['root-a', 'manager-a', 'child-a']);
-  assert.deepEqual(await list(workB), ['root-b', 'manager-b']);
+  assert.deepEqual(await list(workA), ['a1-root', 'a2-manager', 'a3-child']);
+  assert.deepEqual(await list(workB), ['b1-root', 'b2-manager']);
 });
 
 test('static extensionless page routes work when the web output path has a dotted parent', async (t) => {
@@ -181,8 +174,8 @@ test('static extensionless page routes work when the web output path has a dotte
   const webOut = join(root, 'out');
   await mkdir(webOut);
   await writeFile(join(webOut, 'backlog.html'), '<main>Backlog page</main>');
-  const core = createMemoryCore({ version: 'test' });
-  const server = await startTestHttpServer(t, { core, webOut, owlRoot: root });
+  const { db, core } = await createTestCore(t, { version: 'test' }, { prefix: 'owl-api-web-controls-core-' });
+  const server = await startTestHttpServer(t, { core: new ExternalCoreAdapter(core, db, root, root), db, webOut, owlRoot: root, dataDir: root });
   if (!server) return t.skip('localhost listen is unavailable');
 
   const response = await fetch(`${server.baseUrl}/owl/backlog`);
@@ -232,6 +225,7 @@ const { DecisionView } = compile(join(repoRoot, 'apps/web/components/DecisionVie
   '@/lib/view-loader': viewLoader,
   '@/components/StateBadge': badges,
   '@/lib/decision-sections.mjs': decisionSections,
+  '@/lib/api-error-keys.mjs': apiErrorKeys,
   '@/lib/i18n': i18n,
 });
 

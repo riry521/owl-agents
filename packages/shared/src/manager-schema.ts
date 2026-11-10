@@ -134,6 +134,12 @@ const MANAGER_TASK_SCHEMA: RoleSchema = objectSchema({
   }),
 });
 
+const WORK_FULL_TEST_RUN_SCHEMA = {
+  type: "boolean",
+  example: false,
+  description: "true when the Work's final Core test run must run the whole test suite whatever the diff; false otherwise. Never ask for the whole suite in a Task's acceptance criteria",
+} as const;
+
 /** Manager output for mode "plan": at least one Task. */
 export const MANAGER_PLAN_OUTPUT_SCHEMA: RoleSchema = objectSchema({
   tasks: {
@@ -142,6 +148,7 @@ export const MANAGER_PLAN_OUTPUT_SCHEMA: RoleSchema = objectSchema({
     items: MANAGER_TASK_SCHEMA,
     description: "the Tasks of the plan (at least one)",
   },
+  work_full_test_run: WORK_FULL_TEST_RUN_SCHEMA,
   skills_used: SKILLS_USED_SCHEMA,
 });
 
@@ -152,6 +159,7 @@ export const MANAGER_REPLAN_OUTPUT_SCHEMA: RoleSchema = objectSchema({
     items: MANAGER_TASK_SCHEMA,
     description: "Tasks to retry or add; [] when nothing is missing and no failed Task remains",
   },
+  work_full_test_run: WORK_FULL_TEST_RUN_SCHEMA,
   updated_title: {
     type: ["string", "null"],
     minLength: 1,

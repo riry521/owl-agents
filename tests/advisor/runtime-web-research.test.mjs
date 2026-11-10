@@ -23,7 +23,6 @@ test("Advisor runtime forwards research with conversation context and ignores re
       get: () => undefined,
     },
     sessionManager: { recordActivity: async () => undefined },
-    memorySaver: {},
     providerClient: {},
     owlRoot: "/owl",
     getAdvisorSettings: () => ({ providerId: "anthropic", harnessId: "claude", model: "test", systemPrompt: "test" }),
@@ -77,7 +76,6 @@ test("Advisor runtime reports a web research failure with conversation context a
   const runtime = new AdvisorSessionRuntime({
     db: { createWriteLane: () => ({ write: async () => undefined }), get: () => undefined },
     sessionManager: { recordActivity: async () => undefined },
-    memorySaver: {},
     providerClient: {},
     owlRoot: "/owl",
     getAdvisorSettings: () => ({ providerId: "anthropic", harnessId: "claude", model: "test", systemPrompt: "test" }),

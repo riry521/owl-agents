@@ -38,7 +38,7 @@ export function answerTriageTarget(reader: Reader, decisionId: string, optionKey
   const options = JSON.parse(row.options_json) as { key: string; label: string; description: string }[];
   const retry = options.find((option) => option.key === "retry");
   if (optionKey === "retry" ? !retry : row.allow_free_text !== 1) return null;
-  // A Work-scope Decision holds its Work in judgement_waiting until the answer returns it to running (state-reducer row 7).
+  // A Work-scope Decision holds its Work in judgement_waiting until the answer returns it to running (reduceWork, decision.resolved).
   const workState = reader.get<{ state: string }>("SELECT state FROM works WHERE id = ?", row.work_id)?.state;
   if (workState !== "running" && workState !== "judgement_waiting") return null;
   const taskId = (JSON.parse(row.blocked_task_ids_json) as string[])[0];

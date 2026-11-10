@@ -314,9 +314,9 @@ test("the AI is shown the head of the Project overview, cut to max_detail_chars"
   const none = await core.receiveAutoWorkSignal(signal({ dedupe: { kind: "id", value: "o:1" } }));
   assert.equal(none.verdict, "created");
   assert.equal(calls[0].project.overview, null);
-  core.knowledgeNotes.getProjectOverview = async () => ({ summary: "あ".repeat(150), claims: [{ text: "事実" }] });
+  core.pageRouter.readOverview = async (projectId) => (projectId === "proj1" ? [`【目的】${"あ".repeat(150)}`] : []);
   await core.receiveAutoWorkSignal(signal({ dedupe: { kind: "id", value: "o:2" } }));
-  assert.equal(calls[1].project.overview, "あ".repeat(100));
+  assert.equal(calls[1].project.overview, `【目的】${"あ".repeat(96)}`);
 });
 
 test("the created alert names the Work and how it was made, in the same row as the Work", async (t) => {

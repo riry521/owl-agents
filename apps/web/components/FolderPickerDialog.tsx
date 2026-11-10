@@ -5,7 +5,7 @@ import { createPortal } from 'react-dom';
 import { listDirectories, ApiRequestError } from '@/lib/api-client';
 import type { DirectoryListing } from '@/lib/types';
 import { useLocale } from '@/lib/i18n';
-import { humanizeError } from '@/lib/settings-errors';
+import { humanizeSettingsError } from '@/lib/api-error-keys.mjs';
 import { FolderIcon } from '@/components/icons';
 
 const SHORTCUT_LABEL_KEYS: Record<string, string> = {
@@ -52,7 +52,7 @@ export function FolderPickerDialog({ open, initialPath, onSelect, onClose }: Fol
       setError(
         err instanceof ApiRequestError && (err.status === 403 || err.status === 404 || err.status === 422)
           ? err.rawMessage
-          : humanizeError(err, t),
+          : humanizeSettingsError(err, t),
       );
       setPermissionHint(err instanceof ApiRequestError && err.status === 403);
       setListing(null);

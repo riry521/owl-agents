@@ -15,6 +15,7 @@ import { type BoardSection, boardSectionOf, boardSectionLabels, formatRelative, 
 import { ArchivedBadge, WorkStateBadge } from '@/components/StateBadge';
 import { useLocale, type TFunction, type Locale } from '@/lib/i18n';
 import { workDetailHref } from '@/lib/work-detail-safety.mjs';
+import { humanizeBoardError } from '@/lib/api-error-keys.mjs';
 import { groupByProject } from '../lib/archive-list.mjs';
 import { workSummarySkeleton } from '../lib/work-summary.mjs';
 import { removeWorks, revealWork, useWorkRemovals, type RemovalKind } from '@/lib/work-removal';
@@ -59,7 +60,7 @@ export function BoardView({ onSelectCard, selectedCardId, refreshToken = 0 }: Bo
   const { hiddenIds } = useWorkRemovals();
   const { data: viewData, error, refresh } = useView<BoardData>('board', () => getBoard({ archived: 'exclude' }));
   const data = viewData ?? null;
-  const loadError = error ? humanizeError(error, t) : null;
+  const loadError = error ? humanizeBoardError(error, t) : null;
   const projects: Project[] = data?.projects ?? fallbackProjects;
   const hasProjects = data?.projects !== undefined;
   const lastRefreshToken = useRef(refreshToken);
@@ -116,7 +117,7 @@ export function BoardView({ onSelectCard, selectedCardId, refreshToken = 0 }: Bo
       setFormError(
         created
           ? t('board.createPartialError')
-          : humanizeError(error, t),
+          : humanizeBoardError(error, t),
       );
     } finally {
       setFormBusy(false);
@@ -646,26 +647,4 @@ export function WorkCard({
       </div>
     </div>
   );
-}
-
-export function humanizeError(error: unknown, t: TFunction): string {
-  const code = error instanceof Error ? error.message : '';
-  switch (code) {
-    case 'validation_error':
-      return t('board.errorValidation');
-    case 'project_not_found':
-      return t('board.errorProjectNotFound');
-    case 'version_conflict':
-      return t('board.errorVersionConflict');
-    case 'idempotency_conflict':
-      return t('board.errorIdempotencyConflict');
-    case 'network_error':
-    case 'runtime_config_unavailable':
-      return t('board.errorNetwork');
-    case 'invalid_runtime_config':
-    case 'invalid_response':
-      return t('board.errorInvalidResponse');
-    default:
-      return t('board.errorDefault');
-  }
 }

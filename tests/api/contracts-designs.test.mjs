@@ -4,7 +4,7 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import test from "node:test";
 
-import { ExternalCoreAdapter, createCore as createMemoryCore } from "../../apps/server/dist/core.js";
+import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { GuardTokenRegistry } from "../../apps/server/dist/guard-tokens.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { createTestCore } from "../helpers/core.mjs";
@@ -183,19 +183,26 @@ for (const [label, wrap] of [["the Core itself", false], ["an ExternalCoreAdapte
 }
 
 test("design mock APIs answer 503 when the Core lacks the methods", async (t) => {
-  const { root } = await createTestCore(t, {}, { prefix: "owl-api-mocks-503-" });
+  const { root, db, core: durableCore } = await createTestCore(t, {}, { prefix: "owl-api-mocks-503-" });
+  const dataDir = join(root, "data");
+  await mkdir(dataDir, { recursive: true });
+  const limited = Object.create(durableCore, { saveDesignMock: { value: undefined }, listWorkDesignMocks: { value: undefined } });
+  const core = new ExternalCoreAdapter(limited, db, root, dataDir);
+  t.after(() => core.shutdown({ force: true, timeoutMs: 0 }).catch(() => undefined));
   const guardTokens = GuardTokenRegistry.open(join(root, "guard-tokens"));
   t.after(() => guardTokens.clear());
-  const api = await startTestHttpServer(t, { core: createMemoryCore({ version: "1.0.0" }), owlRoot: root, webOut: root, guardTokens }, { token: "owner-token" });
+  const api = await startTestHttpServer(t, { core, db, webOut: root, owlRoot: root, dataDir, guardTokens }, { token: "owner-token" });
   if (!api) return t.skip("localhost listen is unavailable");
   const lease = guardTokens.issue({ agent_run_id: createUlid(), role: "designer" });
   const designerToken = (await readFile(lease.file, "utf8")).trim();
   const list = await api.request("GET", `/api/v1/works/${createUlid()}/design-mocks`);
   assert.equal(list.status, 503);
+  assert.equal((await list.json()).error.code, "dependency_unavailable");
   const save = await fetch(`${api.baseUrl}/api/v1/agent/design-mocks`, {
     method: "POST",
     headers: { authorization: `Bearer ${designerToken}`, "content-type": "application/json" },
     body: JSON.stringify({ request_id: randomUUID(), idempotency_key: "k", expected_version: 0, payload: { name: "top.html", html: "<p>x</p>" } }),
   });
   assert.equal(save.status, 503);
+  assert.equal((await save.json()).error.code, "dependency_unavailable");
 });

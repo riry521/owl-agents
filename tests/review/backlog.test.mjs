@@ -246,9 +246,9 @@ test("a reviewed design Task completed by a minor-only pass stores its finding",
       return {
         outcome: "success", report_valid: true,
         report: {
-        kind: "report", schema_version: "1.0.0", invocation_id: request.invocation_id,
+        kind: "report", schema_version: "1.1.0", invocation_id: request.invocation_id,
         result: "success", work_done: "Designed the approach.", changes: [],
-        verification: { passed: true, method: "Checked." }, remaining_issues: [],
+        verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked.", integration_check: null }, remaining_issues: [],
         next_action: "none", needs_replanning: false, question_for_manager: null,
         },
       };
@@ -304,9 +304,9 @@ test("a retry after mixed fix_required findings receives only major findings whi
         outcome: "success",
         report_valid: true,
         report: {
-          kind: "report", schema_version: "1.0.0", invocation_id: request.invocation_id,
+          kind: "report", schema_version: "1.1.0", invocation_id: request.invocation_id,
           result: "success", work_done: "Implemented and verified the required path.", changes: [],
-          verification: { passed: true, method: "Checked the change." }, remaining_issues: [],
+          verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked the change.", integration_check: null }, remaining_issues: [],
           next_action: "none", needs_replanning: false, question_for_manager: null,
         },
       };

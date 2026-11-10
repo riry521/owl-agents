@@ -103,13 +103,13 @@ signals before changing them.
 | Stale-running recovery (`stale_running_ms`) | 600_000 ms (10 minutes) | If `processed_at - updated_at` for normal jobs approaches 10 minutes, increase it. If recovery after a crash takes too long, decrease it; recorded `processed` work and proposal sources prevent duplicate output. |
 | Retry limit (`max_attempts`) | 3 | If many `failed` jobs later succeed through `retryJob`, indicating transient errors, increase it. If most fail 3 times with the same error, keep the value and fix the cause. |
 | Jobs per processing batch (`batch_size`) | 5 | If at least `batch_size` jobs remain `pending` after the periodic timer runs, increase it. |
-| Rule proposal source threshold (`RULE_PROPOSAL_MIN_SOURCES`) | 1 | If proposals with one source have a high rejection rate and create approval noise, raise the constant to 2. If useful proposals remain in `pending` waiting for sources, return it to 1. If code changes become burdensome, a settings API would be needed; none exists today. |
+| Rule proposal source threshold (`RULE_PROPOSAL_MIN_SOURCES`) | 2 | If useful proposals remain in `pending` waiting for a second source, lower the constant to 1. If proposals with two sources still have a high rejection rate, raise it. If code changes become burdensome, a settings API would be needed; none exists today. |
 | Knowledge injection limits (`settings.knowledge`) | `max_notes` 3 / `max_tokens` 1500 / `per_note_tokens` 600 / `max_characters` 4000 | If the difference in `TokenUsage.input_tokens` with and without injection greatly exceeds the estimate, review the token-estimate multiplier. If knowledge-related `remaining_issues`/`findings` are absent while costs increase, reduce the limits. If `render` consistently returns fewer `notes` than `select` because of truncation, increase them. |
 | Injection hard caps (§6.1 limits) | 10 / 4000 / 1500 / 12000 | Reconsider if requested settings repeatedly reach these caps. |
 | Relevance thresholds (`min_score`; topic match) | 3; 3 or more with a score difference of 2 | If unrelated injections or incorrect note merges become common in manual review of injected notes or note merges, raise the thresholds. If notes for the same topic fragment into many new notes, lower them. |
 
-`RULE_PROPOSAL_MIN_SOURCES = 1` is a code constant: a validated proposal with one
-source can immediately enter `awaiting_approval`. Approval remains an operator action;
+`RULE_PROPOSAL_MIN_SOURCES = 2` is a code constant: a validated proposal with two
+sources can enter `awaiting_approval`. Approval remains an operator action;
 the threshold does not install rules automatically.
 
 ## Worker self-verification, completion gate and review limits
@@ -159,31 +159,29 @@ verification: {
 
 A 1.0.0 report (`verification: { passed: boolean, method }`,
 `LEGACY_REPORT_SCHEMA_VERSION`) is read-only: reports already stored stay readable, but a new
-agent run that returns 1.0.0 is rejected (`packages/agent-runtime/src/protocol.ts`). The gate
-reads a legacy `passed` as `passed`/`failed` and skips the per-criterion checks.
+agent run that returns 1.0.0 is rejected (`packages/agent-runtime/src/protocol.ts`). A stored 1.0.0
+report never goes through the gate.
 
 ### Completion gate
 
-The gate fails when any of these holds. The failure is recorded as a deterministic failure
-(`retry_allowed: true`) with `gate_reasons`, and the Task does not reach `verifying`.
+agent-runtime checks the report itself before the gate runs. `validateReportEnvelope` rejects a malformed
+report, `correctReportSemantics` lowers a contradictory `success` (not passed, `needs_replanning`, a question, a
+Hybrid delegation without a passed `integration_check`) to `partial`, and a `goal_unmet` without a reason is
+rejected. The gate looks only at what Core knows. It fails when either holds. The failure is recorded as a
+deterministic failure (`retry_allowed: true`) with `gate_reasons`, and the Task does not reach `verifying`.
 
 | Condition | `error_key` |
 |---|---|
-| `result` is not `success`, `needs_replanning` is set, or `question_for_manager` is non-empty | `worker_completion_gate_failed` |
-| `verification.status`, an acceptance item or a check is `failed` | `worker_verification_failed` |
-| any of those is `blocked` | `worker_verification_blocked` |
-| status missing or unknown, or `verification.acceptance` is empty (1.1.0) | `worker_verification_incomplete` |
-| Hybrid Task, or subagents were observed, and `integration_check` is missing, not `passed`, or (for observed subagents) `required` is not `true` | `hybrid_integration_verification_missing` |
+| Subagents were observed, the Worker declared `own_subagents_used`, or (outside Hybrid) it delegated children, and `integration_check` is missing or not `passed` | `hybrid_integration_verification_missing` |
+| A child run is not finished, or a dispatched child is not listed in `delegation.delegated` | `worker_children_incomplete` |
 
-When several apply, the recorded key is the first in this order: `hybrid_integration_verification_missing`,
-`worker_verification_blocked`, `worker_verification_failed`, `worker_verification_incomplete`,
-`worker_completion_gate_failed`. If the Worker sets `needs_replanning` or asks a question, the
-Task goes through `task.replan_requested` and the same `error_key` and `gate_reasons` are attached.
+When both apply, the recorded key is `hybrid_integration_verification_missing`. Events recorded before this change can
+still carry the older keys (`worker_completion_gate_failed`, `worker_verification_failed` and others).
 
 ### Worker AND Core verification
 
-Both must pass. The Worker's own `verification` is a claim, not proof: the gate only checks
-that it is complete and honest (nothing failed, blocked or missing). Core and the Reviewer then
+Both must pass. The Worker's own `verification` is a claim, not proof: agent-runtime
+checks that it is complete and honest (a contradictory success is lowered to partial). Core and the Reviewer then
 verify independently (Core verification always runs; the Reviewer runs when the routing requires it); the Reviewer prompt (`packages/agent-runtime/src/reviewer.ts`) treats the
 evidence as a claim to check, and marks a `passed` that was not actually verified, or that rests
 only on a child agent's report, as a major finding. Neither side's pass alone completes a Task.
@@ -205,7 +203,7 @@ otherwise); an invalid stored value falls back to the default. Every valid verdi
 is counted and the count survives a replan. When a non-pass verdict makes the count equal to the
 limit, the Task fails and goes to the Manager. When it exceeds the limit, the Task moves to
 `judgement_waiting` and a Core decision is opened for the Owner (the Work waits too only when no other Task can proceed; see "Progress guard and prerequisite waits"). The Task is never passed
-automatically (`packages/core/src/state-reducer.ts`, rows 18b/18c).
+automatically (`packages/core/src/state-reducer.ts`, the total review attempt limit).
 
 ### Fixer escalation
 
@@ -231,20 +229,20 @@ A replan that replaces a failed Task (`replaces`) records a lineage: `tasks.line
 (`packages/core/src/task-lineage.ts`, migration 039). The per-Task limits above do not carry over
 to a replacement Task, so a lineage has its own limits. Settings key `remake_limits`
 (`packages/shared/src/remake-limit-settings.ts`; read by `remakeLimits` in
-`packages/core/src/remake-limits.ts`; `GET`/`PUT /api/v1/settings/remake-limits`; PUT takes all eight fields):
+`packages/core/src/remake-limits.ts`; `GET`/`PUT /api/v1/settings/remake-limits`; PUT takes all five fields):
 
 | Field | Default | Meaning |
 |---|---|---|
-| `lineage_review_attempts` | 9 | valid Reviewer verdicts (pass or not) totalled over a lineage |
-| `lineage_worker_runs` | 10 | Worker/Designer launches that ran to an end (completed or failed) over a lineage |
-| `non_functional_remakes` | 2 | consecutive remakes whose changes touch only `verification_paths` |
-| `base_sync_lineage_review_attempts` | 9 | like `lineage_review_attempts`, counted separately over the generations that only synced the base branch |
-| `base_sync_lineage_worker_runs` | 10 | like `lineage_worker_runs`, counted separately over base-sync-only generations |
+| `lineage_review_attempts` | 9 | valid Reviewer verdicts (pass or not) totalled over a lineage, including generations that only synced the base branch (they have no limit of their own) |
+| `lineage_worker_runs` | 10 | Worker/Designer launches that ran to an end (completed or failed) over a lineage, including base-sync-only generations |
 | `lead_review_rejections` | 1 | Reviewer rejections of Lead Designer output over a lineage before Core stops remaking the design (integer 1–100) |
 | `verification_paths` | tests, fixtures, snapshots, `scripts/verify*` globs | paths that count as verification, not functional code |
-| `checked_task_types` | `code`, `config` | Task types whose remakes are checked for non-functional changes |
+| `checked_task_types` | `code`, `config` | Task types whose remakes are classified as functional or verification-only in the Owner brief's history |
 
-A missing or invalid stored value falls back to the default per field; the stored `review_limits`
+A missing or invalid stored value falls back to the default per field. A stored row from an older
+version may still carry `non_functional_remakes`, `base_sync_lineage_review_attempts` or
+`base_sync_lineage_worker_runs`; reads skip them with a warning, and PUT rejects a body that
+carries them. The stored `review_limits`
 (`plan_review_rounds`, `total_review_attempts`) are independent and unchanged.
 
 When a limit is reached:
@@ -253,25 +251,51 @@ When a limit is reached:
   The failed Task becomes `judgement_waiting`, and an open Core Decision names the
   limit, the numbers and the lineage history. The Work becomes `judgement_waiting` only when no
   other Task can proceed; otherwise it keeps running. A replan the Owner asked for is not gated.
-- At a Reviewer verdict (reducer row 18d): when the verdicts of the whole lineage reach
+- At a Reviewer verdict (reducer lineage review-attempt limit): when the verdicts of the whole lineage reach
   `lineage_review_attempts` on a failing verdict, the Task moves to `judgement_waiting` with the
-  same Decision instead of failing into a replan. Base-sync-only generations are checked against
-  the `base_sync_lineage_*` limits instead.
+  same Decision instead of failing into a replan. Base-sync-only generations count in the same
+  total.
 - Lead Designer rejections: when a `design` Task escalated to the Lead Designer is rejected
   `lead_review_rejections` times over the lineage, Core stops remaking the design and records a
   design stop; the Manager receives it with the Owner's answer on the next replan.
 
-Non-functional detection compares content hashes that Core measures at each Task verification
-(`task_change_measurements`). A remake is compared with the previous generation of the same Task, or
-with the Tasks it replaces; a remake that drops a file its predecessor had counts as changing it.
-A remake whose changes cannot be measured is neutral: it neither adds to nor resets the streak.
-Project-less Works are measured only at the first verification of each Task.
+Core still measures content hashes at each Task verification (`task_change_measurements`) to
+label each generation in the Decision history as functional or verification-only. The label stops
+nothing by itself: a lineage is stopped only by the limits above.
+
+### Attempt limits
+
+All settings that cap a number of tries, in one place. "Source" is the line that holds the default
+in `packages/shared/src/`. Each row's details are in the section named in the last column; this
+table does not replace them.
+
+| Setting key.field | Default | Source | What it counts | Details |
+|---|---|---|---|---|
+| `review_limits.plan_review_rounds` | 2 | `review-limit-settings.ts:12` | rejected reviews of one plan (resets on replan) | [Review limits](#review-limits) |
+| `review_limits.total_review_attempts` | 6 | `review-limit-settings.ts:12` | valid Reviewer verdicts of one Task across replans | [Review limits](#review-limits) |
+| `fixer_escalation.after_review_rejections` | 2 | `fixer-escalation-settings.ts:14` | verification failures plus Reviewer rejections of a Task before the Fixer takes over | [Fixer escalation](#fixer-escalation) |
+| `remake_limits.lineage_review_attempts` | 9 | `remake-limit-settings.ts:21` | valid Reviewer verdicts over a remake lineage, including generations that only take in the base (no separate limit) | [Remake limits](#remake-limits) |
+| `remake_limits.lineage_worker_runs` | 10 | `remake-limit-settings.ts:22` | finished Worker/Designer launches over a lineage, including generations that only take in the base (no separate limit) | [Remake limits](#remake-limits) |
+| `remake_limits.lead_review_rejections` | 1 | `remake-limit-settings.ts:23` | Reviewer rejections of Lead Designer output over a lineage | [Remake limits](#remake-limits) |
+| `auto_recovery.limit` | 2 | `auto-recovery-settings.ts:12` | automatic recoveries per reason before a Decision is opened (0 = off); also the Manager replans after a failed Work integration verification | [Progress guard](#progress-guard-and-prerequisite-waits) |
+| `progress_guard.no_progress_limit` | 3 | `progress-guard-settings.ts:31` | consecutive "no progress" results of one Task | [Progress guard](#progress-guard-and-prerequisite-waits) |
+| `progress_guard.process_wait_max_count` | 3 | `progress-guard-settings.ts:35` | process waits a Worker may start per Task line | [Progress guard](#progress-guard-and-prerequisite-waits) |
+| `progress_guard.external_blocker_limit` | 2 | `progress-guard-settings.ts:37` | Worker-reported external blockers sent to the Manager per lineage | [Progress guard](#progress-guard-and-prerequisite-waits) |
+| `progress_guard.partial_limit` | 3 | `progress-guard-settings.ts:38` | plain partial Worker reports per lineage | [Progress guard](#progress-guard-and-prerequisite-waits) |
+| `progress_guard.decision_explanation_rewrites_max` | 2 | `progress-guard-settings.ts:40` | rewrites asked for a Decision explanation that failed a check | [Decision text checks](#checking-the-texts-of-decision-explanations-decision_text_checks) |
+| `progress_guard.plan_rejection_attempts_max` | 3 | `progress-guard-settings.ts:41` | Manager calls per round for a plan Core rejects | [Progress guard](#progress-guard-and-prerequisite-waits) |
+
+**Fixer and plan review limit.** `fixer_escalation.after_review_rejections` (2) and
+`review_limits.plan_review_rounds` (2) have the same value. A plan whose Task fails after
+`plan_review_rounds` rejected reviews reaches the Fixer only for its last allowed attempt, so the Fixer
+gets one run per plan. This is the Owner's intent. The limit cleanup left both values, the Fixer's
+one-run-per-plan limit and the Owner escalation when the Fixer cannot fix it unchanged.
 
 ### Progress guard and prerequisite waits
 
 Settings key `progress_guard` (`packages/shared/src/progress-guard-settings.ts`; read by
-`progressGuard` in `packages/core/src/progress-guard.ts`). It is read and written through
-`Core.getProgressGuardSettings()` / `Core.setProgressGuardSettings()` (all six fields at once;
+`progressGuard` in `packages/core/src/progress-guard.ts`). It is written through
+`Core.setProgressGuardSettings()` (all six fields at once;
 an out-of-range value is rejected). There is no HTTP route or Settings screen for the settings themselves.
 A plan that Core rejects for a missing field or a format error (`auto_recovery.criteria_relaxations`, `rule_applicability`, the reason for rewriting a criterion, an Owner criterion not carried over word for word, a plan quality warning) goes back to the Manager with the reason in `previous_output_feedback`, up to `plan_rejection_attempts_max` Manager calls per round (1 to 10, default 3), before the auto-recovery and then the Decision.
 A missing or invalid stored value falls back to the default per field.
@@ -313,12 +337,12 @@ Manager and the Worker are not started for it while it waits. All conditions mus
 **Process wait.** A Worker that must run a long process (a dry-run, a long build) starts it detached,
 writes a log and a done file inside the worktree, and reports `partial` with `pending_process`
 (`description`, `command`, `log_path`, `done_path`, `pid`, `expected_minutes`). Core moves the Task
-`running → waiting` (row 32c, `task.process_wait_started`) without calling the Manager, so
+`running → waiting` (`task.process_wait_started`) without calling the Manager, so
 `no_progress_count`, the failure counters and `lineage_worker_runs` are not consumed; the run is
 excluded from the lineage count. The `process` condition is released when the done file exists or the
 pid is gone, then the Worker is relaunched with `context.process_wait` and its previous report. The
 deadline (`process_wait_max_hours`) or `process_wait_max_count` bounds the restarts: past either one
-the Owner is asked via a Decision (row 37; `wait_count` when the count is used up). Neither
+the Owner is asked via a Decision (`wait_count` when the count is used up). Neither
 increases a failure counter or `no_progress_count`, and the Worker is not relaunched.
 
 **Unprovable acceptance criteria.** A criterion that nothing inside the Task can prove (for example a
@@ -388,7 +412,7 @@ Project's verification plan on the whole Work branch (`runWorkIntegrationVerific
 no Project. A Work with a Project never skips it: if the Git gateway cannot verify the branch the
 result is recorded as `error`. A pass lets the Final Manager go ahead. A `failed` or `error`
 result goes to the Manager as a replan (the failing command and output are passed as
-`work_verification`) up to `max_manager_repairs` times since the last Owner decision, then to the
+`work_verification`) up to `auto_recovery.limit` times since the last Owner decision, then to the
 Owner. Each run is recorded as `work.integration_verification_completed` with `routed_to`.
 
 Settings key `work_verification` (`packages/shared/src/work-verification-settings.ts`; read by
@@ -398,7 +422,6 @@ row. A missing or invalid key falls back to its default, per key, with a warning
 | Field | Default | Invalid when |
 |---|---|---|
 | `enabled` | `true` | not a boolean |
-| `max_manager_repairs` | 2 | not an integer from 0 to 10 |
 
 ### Plan quality check
 
@@ -423,7 +446,6 @@ silently uses its default; an invalid key falls back to its default with a warni
 | Field | Default | Invalid when |
 |---|---|---|
 | `enabled` | `true` | not a boolean |
-| `max_repair_requests` | 1 | not an integer ≥ 0 (no longer read; repairs count toward `plan_rejection_attempts_max`) |
 | `max_acceptance_items` | 8 | not an integer ≥ 1 |
 | `max_acceptance_chars` | 1500 | not an integer ≥ 1 |
 | `max_components` | 3 | not an integer ≥ 1 |
@@ -442,7 +464,7 @@ silently uses its default; an invalid key falls back to its default with a warni
 Two more warning codes: `criterion_verification_missing` (one criterion names no way to check it) and
 `external_state_comparison` (one criterion compares state that changes outside the Task, such as
 production or another Work, before and after; text matching `external_state_exempt_patterns` is
-ignored). A code in `blocking_codes` is still rejected after the repair requests are used up, so the
+ignored; a `goal` criterion is not checked, since a goal may depend on outside state). A code in `blocking_codes` is still rejected after the repair requests are used up, so the
 unprovable criterion goes back to the Manager instead of being accepted with a warning. A list that
 starts with bullets counts one bullet as one criterion, however many `(1)`/`(2)` numbers it contains.
 

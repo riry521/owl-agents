@@ -233,7 +233,6 @@ export function withWorkspacePreparation(runner: AgentRunner, preparer: AgentWor
     runDesigner: async (request) => { await prepare(request); return runner.runDesigner(request); },
     runWorker: async (request) => { await prepare(request); return runner.runWorker(request); },
     runReviewer: async (request) => { await prepare(request); return runner.runReviewer(request); },
-    runAdvisor: (request) => runner.runAdvisor(request),
     ...(runner.runCurator ? { runCurator: (request: Parameters<NonNullable<AgentRunner["runCurator"]>>[0]) => runner.runCurator!(request) } : {}),
     ...(runner.cancelAgent ? { cancelAgent: (invocationId: string, force?: boolean) => runner.cancelAgent!(invocationId, force) } : {}),
     ...(runner.setProcessObserver ? { setProcessObserver: (observer: Parameters<NonNullable<AgentRunner["setProcessObserver"]>>[0]) => runner.setProcessObserver!(observer) } : {}),

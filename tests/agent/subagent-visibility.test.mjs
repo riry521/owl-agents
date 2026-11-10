@@ -224,8 +224,8 @@ test("the Hybrid Worker dispatches its own child and owns nested agent processes
         outcome: "success",
         report_valid: true,
         report: {
-          kind: "report", schema_version: "1.0.0", invocation_id: request.invocation_id, result: "success",
-          work_done: "The notes were written and checked.", changes: [], verification: { passed: true, method: "Checked the complete task.", integration_check: { status: "passed", evidence: "built" } },
+          kind: "report", schema_version: "1.1.0", invocation_id: request.invocation_id, result: "success",
+          work_done: "The notes were written and checked.", changes: [], verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked the complete task.", integration_check: { status: "passed", evidence: "built" } },
           remaining_issues: [], next_action: "none", needs_replanning: false, question_for_manager: null,
           delegation: {
             decomposition: "Writing notes is independent; whole-task checking stays with the Worker.",

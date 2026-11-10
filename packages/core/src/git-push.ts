@@ -1,3 +1,4 @@
+import { GIT_CREDENTIAL_RULES, redactWithRules } from "@owl/shared";
 import type { GitPushFailure } from "./types";
 
 export const PUSH_HOOK_BLOCK_MARKER = "owl-pre-push: blocked";
@@ -59,8 +60,4 @@ export function classifyPushFailure(input: {
   return { failure: "unknown", hook_side: null };
 }
 
-export function redactCredentials(text: string): string {
-  return text
-    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/@\s]+@/giu, "$1***@")
-    .replace(/\b(x-access-token|oauth2|gitlab-ci-token):[^@\s/]+@/giu, "$1:***@");
-}
+export const redactCredentials = (text: string): string => redactWithRules(text, GIT_CREDENTIAL_RULES);

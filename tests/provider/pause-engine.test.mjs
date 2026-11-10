@@ -13,6 +13,7 @@ import { createTestDatabase } from "../helpers/db.mjs";
 import { criteriaFor, necessityFor, withNecessity } from "../helpers/necessity.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 import { waitFor } from "../helpers/wait.mjs";
+import { queueManagerTrigger, readManagerTrigger } from "../../packages/core/dist/replan-queue-store.js";
 
 // Core's verification and fake harnesses spawn node/git through PATH; keep them reachable when the runner starts with an empty environment.
 process.env.PATH ||= `${dirname(process.execPath)}:/usr/bin:/bin`;
@@ -178,7 +179,7 @@ test("a Reviewer without a role model is withheld while the default Provider is 
       runWorker: async (request) => {
         await writeValidFile(request);
         workerAttempts += 1;
-        return { outcome: "success", report_valid: true, report: { result: "success", verification: { passed: true } }, skill_feedback: null };
+        return { outcome: "success", report_valid: true, report: { result: "success", verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [] } }, skill_feedback: null };
       },
       runReviewer: async () => {
         reviewerAttempts += 1;
@@ -424,7 +425,7 @@ test("a rate-limited Reviewer resumes without consuming Reviewer failures", asyn
     agentRunner: {
       runWorker: async (request) => (await writeValidFile(request), {
         outcome: "success", report_valid: true,
-        report: { result: "success", verification: { passed: true } },
+        report: { result: "success", verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [] } },
         skill_feedback: null,
       }),
       runReviewer: async () => {
@@ -517,7 +518,6 @@ test("an Advisor rate limit replies with the reset time, pauses the provider and
   runtime = new AdvisorSessionRuntime({
     db,
     sessionManager: new AdvisorSessionManager(db),
-    memorySaver: {},
     providerClient: { createSession: async () => providerSession },
     owlRoot: root,
     git: { resolveAdvisorSessionDirectory: async () => ({ kind: "direct", cwd: root }) },
@@ -566,11 +566,7 @@ test("a Manager replan rate limit is requeued and retried after persisted pause 
     tx.run("UPDATE works SET state = 'running' WHERE id = ?", work.id);
     const [task] = createTaskPlanInTransaction(tx, work.id, [{ id: "FAILED", title: "Failed", type: "doc", acceptance: "Retry", depends_on: [] }]);
     tx.run("UPDATE tasks SET status = 'failed' WHERE id = ?", task.id);
-    tx.run(
-      `INSERT INTO idempotency_keys (key, request_hash, response_json, status_code, created_at, expires_at)
-       VALUES (?, ?, ?, 202, ?, ?)`,
-      `manager-trigger:${task.id}`, "0".repeat(64), JSON.stringify({ status: "queued" }), NOW, "2031-01-02T03:04:05.000Z",
-    );
+    queueManagerTrigger(tx, task.id, { question: null, question_only: false }, NOW);
     return work.id;
   });
   let managerCalls = 0;
@@ -604,7 +600,7 @@ test("a Manager replan rate limit is requeued and retried after persisted pause 
   assert.equal(db.get("SELECT status FROM agent_runs WHERE role = 'manager' ORDER BY created_at DESC LIMIT 1").status, "exited");
   assert.equal(db.get("SELECT COUNT(*) AS count FROM events WHERE type = 'manager.failed'").count, 0);
   assert.equal(db.get("SELECT COUNT(*) AS count FROM decisions WHERE status = 'open'").count, 0);
-  assert.equal(JSON.parse(db.get("SELECT response_json FROM idempotency_keys WHERE key = ?", `manager-trigger:${taskId}`).response_json).status, "queued");
+  assert.equal(readManagerTrigger(db, taskId).status, "queued");
 
   await tickMockedClock(t, core, 90_000);
   await flushUntil(() => db.get("SELECT status FROM tasks WHERE manager_task_id = 'REPLACEMENT'")?.status === "waiting", "requeued replan");

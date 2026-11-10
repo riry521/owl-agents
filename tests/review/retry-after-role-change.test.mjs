@@ -53,7 +53,7 @@ async function harness(t, { pausedProviders = ["openai"] } = {}) {
     agentRunner: {
       runWorker: async (request) => (await writeValidFile(request), {
         outcome: "success", report_valid: true,
-        report: { result: "success", verification: { passed: true } },
+        report: { result: "success", verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [] } },
         skill_feedback: null,
       }),
       runReviewer: async () => {
@@ -107,7 +107,7 @@ test("Core.updateModelSettings launches the waiting Review when the Reviewer rol
   const agentRunner = {
     runWorker: async (request) => (await writeValidFile(request), {
       outcome: "success", report_valid: true,
-      report: { result: "success", verification: { passed: true } },
+      report: { result: "success", verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [] } },
       skill_feedback: null,
     }),
     runReviewer: async () => {

@@ -56,8 +56,8 @@ test("the Worker prompt carries the Finalization steps, the retry limit and the 
   assert.match(prompt, /Finalization/);
   assert.match(prompt, /Take each criterion in task\.acceptance_criteria as one criterion, identified by its id/);
   assert.match(prompt, /final workspace itself/);
-  assert.match(prompt, /re-verify the whole Task/);
-  assert.match(prompt, /essential check cannot be run[^.]*blocked/);
+  assert.equal(prompt.match(/re-verify the whole Task/g)?.length, 1);
+  assert.match(prompt, /essential verification \(a test, build, or check the criterion depends on\) could not be run and cannot be replaced by other evidence; say in its evidence what is missing/);
   assert.match(prompt, /verify it yourself; a child's report is evidence, not proof/);
   assert.match(prompt, /secrets, credentials, environment dumps, and large raw logs/);
   assert.match(prompt, /two substantively different fixes, stop trying/);
@@ -66,10 +66,11 @@ test("the Worker prompt carries the Finalization steps, the retry limit and the 
 
 test("the Worker prompt tells required from goal criteria and reports a goal shortfall as goal_unmet, not partial", () => {
   const prompt = buildWorkerPrompt(request);
-  assert.match(prompt, /goal criterion \(requirement goal\) that is not met does not prevent success: report it as goal_unmet with shortfall_reason/);
+  assert.match(prompt, /goal criterion \(requirement goal\) that is not met does not prevent success: report it as goal_unmet with shortfall_reason saying why and what you did instead; a goal_unmet without a reason is rejected/);
   assert.match(prompt, /Never report "partial" only because a goal criterion is not met/);
   assert.match(prompt, /verification\.status covers the required criteria and the checks only/);
-  assert.match(prompt, /set status goal_unmet and write in shortfall_reason why[^.]*a goal_unmet without a reason is rejected/);
+  assert.equal(prompt.match(/a goal_unmet without a reason is rejected/g)?.length, 1);
+  assert.match(buildDesignerRolePrompt(request), /a goal_unmet without a reason is rejected/);
   assert.match(prompt, /Never use failed, blocked or unverifiable for a goal/);
   assert.match(prompt, /For a goal criterion, report goal_unmet with the reason instead/);
 });

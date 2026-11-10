@@ -8,9 +8,19 @@ import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { createTestCore } from "../helpers/core.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
 import { repoRoot } from "../helpers/paths.mjs";
+import { listApiRoutes } from "../../apps/server/dist/http-routes.js";
+import { ADVISOR_WORKSPACE_API_PATH, ADVISOR_WORKSPACE_FINISH_API_PATH } from "../../packages/shared/dist/advisor-api-policy.js";
 
 const openapi = readFileSync(join(repoRoot, "contracts/openapi/owl-api-v1.yaml"), "utf8");
-const http = readFileSync(join(repoRoot, "apps/server/src/http.ts"), "utf8");
+const apiRoutes = listApiRoutes();
+
+/** Assert the server route table has a row for each "METHOD /api/v1/path" given. */
+function assertRoutes(...rows) {
+  for (const row of rows) {
+    const [method, path] = row.split(" ");
+    assert.ok(apiRoutes.some((route) => route.method === method && route.path === path), `missing route ${row}`);
+  }
+}
 
 /** Return the indented YAML block that starts at `header` (exclusive of following siblings). */
 function yamlBlock(text, header) {
@@ -62,7 +72,7 @@ test("OpenAPI documents moving a Project-less Work into a Project", () => {
   assert.match(route, /work_project_already_set/u);
   assert.match(route, /worktree_cleanup_failed/u);
   assert.match(yamlBlock(openapi, "    MoveWorkToProjectPayload:"), /additionalProperties: false/u);
-  assert.match(http, /requireWorkProjectMoveApi\(context\.core\)\.moveWorkToProject/u);
+  assertRoutes("POST /api/v1/works/{work_id}/project");
 });
 
 test("OpenAPI archive and delete work routes match the server actions", () => {
@@ -77,9 +87,10 @@ test("OpenAPI archive and delete work routes match the server actions", () => {
   const unarchive = yamlBlock(openapi, "  /api/v1/works/{work_id}/unarchive:");
   assert.match(archive, /ArchiveWorkResponse/u);
   assert.match(unarchive, /UnarchiveWorkResponse/u);
-  assert.match(http, /workActionMatch && method === "POST"/u);
-  assert.ok(http.includes("(start|pause|resume|cancel|reopen|archive|unarchive)"));
-  assert.match(http, /workDeleteMatch && method === "DELETE"/u);
+  assertRoutes(
+    ...["start", "pause", "resume", "cancel", "reopen", "archive", "unarchive"].map((action) => `POST /api/v1/works/{work_id}/${action}`),
+    "DELETE /api/v1/works/{work_id}",
+  );
 
   for (const header of ["    WorkSummary:", "    WorkDetail:"]) {
     const schema = yamlBlock(openapi, header);
@@ -99,7 +110,7 @@ test("OpenAPI IntegrationSettingsResponse matches what GET /settings/integration
   assert.doesNotMatch(data, /enabled|phase/u);
   const response = yamlBlock(openapi, "    IntegrationSettingsResponse:");
   assert.match(response, /\n        - request_id\n/u);
-  // Shape served by apps/server (http.ts: { request_id, data: { integrations } }).
+  // Shape served by apps/server ({ request_id, data: { integrations } }).
   const status = yamlBlock(openapi, "    IntegrationStatus:");
   for (const key of ["provider", "configured", "conversation_channel_id", "notification_channel_id", "last_tested_at", "last_test_ok"]) {
     assert.match(status, new RegExp(`\\n        ${key}:\\n`, "u"), key);
@@ -116,7 +127,7 @@ test("OpenAPI documents GET /works/{work_id}/branch-status and the server serves
   const response = yamlBlock(openapi, "    WorkBranchStatusResponse:");
   assert.match(response, /- present\n\s+- absent\n\s+- unknown/u);
   assert.match(response, /additionalProperties: false/u);
-  assert.match(http, /\/works\/\(\[\^\/\]\+\)\/branch-status/u);
+  assertRoutes("GET /api/v1/works/{work_id}/branch-status");
   const detail = yamlBlock(openapi, "    WorkDetail:");
   assert.doesNotMatch(detail, /has_unmerged_changes/u);
 });
@@ -130,9 +141,7 @@ test("OpenAPI and server routes expose design document list and detail endpoints
   assert.match(detail, /operationId: getWorkDesign/u);
   assert.match(detail, /WorkDesignResponse/u);
   assert.match(detail, /design_document_not_found/u);
-  assert.match(http, /works\/\(\[\^\/\]\+\)\/designs/u);
-  assert.match(http, /getWorkDesigns\(workId\)/u);
-  assert.match(http, /getWorkDesign\(workId, taskId\)/u);
+  assertRoutes("GET /api/v1/works/{work_id}/designs", "GET /api/v1/works/{work_id}/designs/{task_id}");
 });
 
 test("OpenAPI and server routes expose design mock endpoints", () => {
@@ -146,16 +155,14 @@ test("OpenAPI and server routes expose design mock endpoints", () => {
   assert.match(detail, /design_mock_not_found/u);
   assert.match(save, /operationId: saveAgentDesignMock/u);
   assert.match(remove, /operationId: deleteAgentDesignMock/u);
-  assert.match(http, /works\/\(\[\^\/\]\+\)\/design-mocks\$/u);
-  assert.match(http, /agent\/design-mocks`/u);
-  assert.match(http, /agent\/design-mocks\/delete`/u);
+  assertRoutes("GET /api/v1/works/{work_id}/design-mocks", "POST /api/v1/agent/design-mocks", "POST /api/v1/agent/design-mocks/delete");
 });
 
 test("OpenAPI documents provider pause listing", () => {
   const list = yamlBlock(openapi, "  /api/v1/providers/pauses:");
   assert.match(list, /operationId: listProviderPauses/u);
   assert.match(list, /ProviderPauseListResponse/u);
-  assert.match(http, /providers\/pauses/u);
+  assertRoutes("GET /api/v1/providers/pauses");
   const view = yamlBlock(openapi, "    ProviderPauseView:");
   for (const field of ["provider", "label", "state", "paused_at", "resume_at", "resume_source", "reported_resets_at", "backoff_step", "last_error", "last_role"]) {
     assert.match(view, new RegExp(`\\n        - ${field}\\n`, "u"), field);
@@ -193,12 +200,11 @@ test("OpenAPI project edit and deletion routes match the server handlers", () =>
   for (const field of ["project_id", "work_count", "running_work_count", "active_agent_count", "backlog_item_count", "running_works", "blockers", "deletable"]) {
     assert.match(impactSchema, new RegExp(`\\n        - ${field}\\n`, "u"), field);
   }
-  assert.match(http, /projectImpactMatch && method === "GET"/u);
-  assert.match(http, /projectMatch && method === "PATCH"/u);
-  assert.match(http, /projectMatch && method === "DELETE"/u);
-  assert.match(http, /getProjectDeletionImpact\(projectId\)/u);
-  assert.match(http, /updateProject\(projectId,/u);
-  assert.match(http, /deleteProject\(projectId,/u);
+  assertRoutes(
+    "GET /api/v1/projects/{project_id}/deletion-impact",
+    "PATCH /api/v1/projects/{project_id}",
+    "DELETE /api/v1/projects/{project_id}",
+  );
 });
 
 test("OpenAPI documents the owner provider pause resume route and nullable pause response", () => {
@@ -216,8 +222,7 @@ test("OpenAPI documents the owner provider pause resume route and nullable pause
 });
 
 test("OpenAPI documents GET/PUT /settings/knowledge-storage as the server serves them", () => {
-  assert.match(http, /pathname === `\$\{API_PREFIX\}\/settings\/knowledge-storage` && method === "GET"/u);
-  assert.match(http, /pathname === `\$\{API_PREFIX\}\/settings\/knowledge-storage` && method === "PUT"/u);
+  assertRoutes("GET /api/v1/settings/knowledge-storage", "PUT /api/v1/settings/knowledge-storage");
   const route = yamlBlock(openapi, "  /api/v1/settings/knowledge-storage:");
   const getOp = yamlBlock(route, "    get:");
   const putOp = yamlBlock(route, "    put:");
@@ -321,11 +326,11 @@ test("OpenAPI documents POST /advisor/workspace and AdvisorWorkspacePreparation,
   assert.match(route, /^    post:/mu);
   assert.match(route, /AdvisorWorkspacePreparation/u);
   assert.match(yamlBlock(openapi, "    AdvisorWorkspacePreparation:"), /- worktree_path/u);
-  assert.match(http, /pathname === ADVISOR_WORKSPACE_API_PATH/u);
+  assertRoutes(`POST ${ADVISOR_WORKSPACE_API_PATH}`);
   const finish = yamlBlock(openapi, "  /api/v1/advisor/workspace/finish:");
   assert.match(finish, /^    post:/mu);
   assert.match(finish, /merge_conflict|uncommitted_changes/u);
-  assert.match(http, /pathname === ADVISOR_WORKSPACE_FINISH_API_PATH/u);
+  assertRoutes(`POST ${ADVISOR_WORKSPACE_FINISH_API_PATH}`);
 });
 
 test("PUT /settings/auto-recovery saves a valid limit (200) and rejects bad bodies (400) without saving; GET and /settings/view carry auto_recovery", async (t) => {
@@ -361,5 +366,5 @@ test("OpenAPI documents GET /works/{work_id}/markdown with the path query, its r
   for (const field of ["path", "name", "source", "markdown", "size_bytes"]) assert.match(document, new RegExp(`- ${field}\\n`, "u"), field);
   for (const source of ["project", "work_branch", "materials"]) assert.match(document, new RegExp(`- ${source}\\n`, "u"), source);
   assert.match(yamlBlock(openapi, "    WorkMarkdownResponse:"), /#\/components\/schemas\/WorkMarkdown'/u);
-  assert.match(http, /\/works\/\(\[\^\/\]\+\)\/markdown\$/u);
+  assertRoutes("GET /api/v1/works/{work_id}/markdown");
 });

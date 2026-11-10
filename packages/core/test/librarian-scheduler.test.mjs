@@ -148,7 +148,7 @@ test("a librarian report with an error, or with remaining items and no organized
     { extra: { remaining: 3, rejected: [{ index: 0, code: "x" }] }, status: "failed", error: /3.*1/ },
     { extra: { remaining: 3, pages: [{ path: "a.md", action: "updated" }] }, status: "succeeded" },
     { extra: { remaining: 0 }, status: "succeeded" },
-    { extra: { remaining: 3, skipped: "retag_running" }, status: "succeeded" },
+    { extra: { remaining: 3, skipped: "librarian_running" }, status: "succeeded" },
   ];
   for (const c of cases) {
     core.pageLibrarian.run = async (input) => reportOf(input, c.extra);

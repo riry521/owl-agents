@@ -66,6 +66,8 @@ for (const mode of ["plan", "replan"]) {
     const prompt = await managerPrompt(mode);
     assert.match(prompt, /what must work correctly \(behavior and result\)/);
     assert.match(prompt, /unless the Owner explicitly specified them/);
+    assert.match(prompt, /set work_full_test_run to true instead/);
+    assert.match(prompt, /Core removes it from the Task and defers it to the end of the Work/);
   });
 }
 
@@ -103,10 +105,12 @@ for (const mode of ["plan", "replan"]) {
   test(`Manager ${mode} prompt distinguishes required from goal criteria`, async () => {
     const prompt = await managerPrompt(mode);
     assert.match(prompt, /Keep required criteria few/);
+    assert.match(prompt, /check each criterion yourself: can the Worker decide pass or fail/);
+    assert.match(prompt, /make it a goal or change its check to a stub, a fixture or a unit test/);
     assert.match(prompt, /Never make a criterion that depends on anything outside the Task .* required/);
     assert.match(prompt, /Make count criteria .* and procedure criteria .* goals/);
     assert.match(prompt, /quoted from the Work summary's 目標 \(Goals\) section is goal/);
-    assert.match(prompt, /Do not change the requirement of an existing criterion in an automatic replan/);
+    assert.match(prompt, /Do not change the requirement of an existing criterion in an automatic replan, except turning a criterion with origin manager that acceptance_defects names from required into goal/);
     assert.match(prompt, /A goal still needs serves and if_omitted/);
   });
 }

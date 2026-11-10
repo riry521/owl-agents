@@ -11,6 +11,8 @@ import {
   buildAgentPermissionArgs,
   cliTokenUsage,
   reapProcessGroup,
+  appendCapped,
+  signalProcessGroup,
   CodexProgressTracker,
   ClaudeStreamReader,
   DEFAULT_AGENT_WALL_TIMEOUT_MS,
@@ -315,24 +317,6 @@ function executorProcessSkills(task: ExecutorTask, provider: string): string[] |
   });
   const source = task.process_skills_source ?? "setting";
   return renderProcessSkills("executor", { skills_dir: skillsDir, source, available_files: availableFiles }, provider === "codex" || provider === "opencode" ? provider : "claude");
-}
-
-function appendCapped(current: string, chunk: Buffer): string {
-  const currentBytes = Buffer.from(current, "utf8");
-  if (currentBytes.byteLength >= OUTPUT_CAP_BYTES) return current;
-  return Buffer.concat([currentBytes, chunk.subarray(0, OUTPUT_CAP_BYTES - currentBytes.byteLength)]).toString("utf8");
-}
-
-function signalProcessGroup(child: ReturnType<typeof spawn>, signal: NodeJS.Signals): void {
-  if (child.pid !== undefined && child.pid > 0) {
-    try {
-      process.kill(-child.pid, signal);
-      return;
-    } catch {
-      // Fall through to the child handle when the group has already exited.
-    }
-  }
-  try { child.kill(signal); } catch { /* the process already exited */ }
 }
 
 function safeExecutorFailure(reason: string, config: ExecutorConfig, details = ""): string {
@@ -655,7 +639,7 @@ export async function runExecutorProcess(
         }, KILL_GRACE_MS);
         killTimer.unref();
       }
-      const next = appendCapped(current, chunk);
+      const next = appendCapped(current, chunk, OUTPUT_CAP_BYTES);
       if (which === "stdout") stdout = next;
       else stderr = next;
     };

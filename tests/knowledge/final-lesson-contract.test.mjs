@@ -50,7 +50,7 @@ test("a structured lesson saved to disk reads back field by field", async (t) =>
 });
 
 test("the structured read path never uses the Markdown label readers", async () => {
-  for (const file of ["learning-pipeline.ts", "rule-proposals.ts", "rule-store.ts", "memory-saver.ts"]) {
+  for (const file of ["learning-pipeline.ts", "rule-proposals.ts", "rule-store.ts", "memory/explicit-memory.ts"]) {
     const source = await readFile(new URL(`../../packages/core/src/${file}`, import.meta.url), "utf8");
     assert.doesNotMatch(source, /parseLessonBlocks|splitLessonBlocks/u, file);
   }

@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import ts from 'typescript';
 
 import { repoRoot } from '../helpers/paths.mjs';
+const apiErrorKeys = await import('../../apps/web/lib/api-error-keys.mjs');
 
 const webRequire = createRequire(join(repoRoot, 'apps/web/package.json'));
 const React = webRequire('react');
@@ -52,6 +53,7 @@ const baseOverrides = {
   react: reactStub,
   'react-markdown': { __esModule: true, default: ({ children }) => React.createElement('div', null, children) },
   'remark-gfm': { __esModule: true, default: () => {} },
+  '@/lib/api-error-keys.mjs': apiErrorKeys,
   '@/lib/i18n': { useLocale: () => ({ locale: 'en', t: translations(en) }) },
   '@/lib/advisor-windows.mjs': windowsMod,
   '@/lib/advisor-file-delivery.mjs': webRequire(join(repoRoot, 'apps/web/lib/advisor-file-delivery.mjs')),
@@ -622,7 +624,7 @@ const { SettingsView } = loadTsx('apps/web/components/SettingsView.tsx', {
   '@/lib/api-client': { ...baseOverrides['@/lib/api-client'], inviteOwnerToSlackChannels: async () => [], ApiRequestError: class extends Error {} },
   '@/components/OwnerInviteButton': { OwnerInviteButton },
   '@/lib/remake-limits.mjs': {},
-  '@/lib/settings-errors': {},
+  '@/lib/api-error-keys.mjs': {},
   '@/lib/model-presets': {},
   '@/components/ModelPresetsBar': {},
   '@/components/FolderPickerDialog': {},

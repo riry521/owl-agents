@@ -728,6 +728,7 @@ test("stub background smoke starts, answers health, and stops without Tailscale 
   }
   const root = await tempDir(t, "owl-smoke-");
   await cp(join(repoRoot, "contracts"), join(root, "contracts"), { recursive: true });
+  await cp(join(repoRoot, "packages", "db", "migrations"), join(root, "packages", "db", "migrations"), { recursive: true });
   await mkdir(join(root, "apps", "web"), { recursive: true });
   await cp(join(repoRoot, "apps", "web", "out"), join(root, "apps", "web", "out"), { recursive: true });
   await mkdir(join(root, "packages", "db"), { recursive: true });
@@ -763,13 +764,13 @@ test("owl stop also stops a server launched directly outside the owl start comma
   }
   const root = await tempDir(t, "owl-direct-stop-");
   await cp(join(repoRoot, "contracts"), join(root, "contracts"), { recursive: true });
+  await cp(join(repoRoot, "packages", "db", "migrations"), join(root, "packages", "db", "migrations"), { recursive: true });
   await mkdir(join(root, "apps", "web"), { recursive: true });
   await cp(join(repoRoot, "apps", "web", "out"), join(root, "apps", "web", "out"), { recursive: true });
   const dataDir = join(root, "runtime");
   const env = envWith({
     OWL_ROOT: root,
     OWL_DATA_DIR: dataDir,
-    OWL_CORE_MODE: "standalone",
     OWL_PROVIDER: "stub",
     OWL_BIND: "127.0.0.1",
     OWL_PORT: String(port),
@@ -822,19 +823,19 @@ async function startStubbornProcess(t) {
   return child;
 }
 
-async function standaloneRoot(t, prefix) {
+async function serverRoot(t, prefix) {
   const root = await tempDir(t, prefix);
   await cp(join(repoRoot, "contracts"), join(root, "contracts"), { recursive: true });
+  await cp(join(repoRoot, "packages", "db", "migrations"), join(root, "packages", "db", "migrations"), { recursive: true });
   await mkdir(join(root, "apps", "web"), { recursive: true });
   await cp(join(repoRoot, "apps", "web", "out"), join(root, "apps", "web", "out"), { recursive: true });
   return { root, dataDir: join(root, "runtime") };
 }
 
-function standaloneEnv(root, dataDir, port) {
+function serverEnv(root, dataDir, port) {
   return envWith({
     OWL_ROOT: root,
     OWL_DATA_DIR: dataDir,
-    OWL_CORE_MODE: "standalone",
     OWL_PROVIDER: "stub",
     OWL_BIND: "127.0.0.1",
     OWL_PORT: String(port),
@@ -853,10 +854,10 @@ async function writeServerState(dataDir, pid, port, identity) {
   await writeFile(join(dataDir, "owl-server.json"), JSON.stringify({ pid, bind: "127.0.0.1", port, started_at: new Date().toISOString(), ...identity }));
 }
 
-function spawnStandaloneServer(t, root, dataDir, port) {
+function spawnTestServer(t, root, dataDir, port) {
   const child = spawn(process.execPath, [join(repoRoot, "apps", "server", "dist", "server.js"), "--bind", "127.0.0.1", "--port", String(port)], {
     cwd: repoRoot,
-    env: standaloneEnv(root, dataDir, port),
+    env: serverEnv(root, dataDir, port),
     stdio: ["ignore", "ignore", "ignore"],
   });
   t.after(() => {
@@ -868,8 +869,8 @@ function spawnStandaloneServer(t, root, dataDir, port) {
 test("owl status reports a live PID with a closed port, and stop --force kills it with SIGKILL", async (t) => {
   const port = await freePort();
   if (port === null) return t.skip("localhost listen is not permitted in this environment");
-  const { root, dataDir } = await standaloneRoot(t, "owl-unresponsive-");
-  const env = standaloneEnv(root, dataDir, port);
+  const { root, dataDir } = await serverRoot(t, "owl-unresponsive-");
+  const env = serverEnv(root, dataDir, port);
   const child = await startStubbornProcess(t);
   await writeServerState(dataDir, child.pid, port, readProcessIdentity(child.pid));
 
@@ -892,8 +893,8 @@ test("owl status reports a live PID with a closed port, and stop --force kills i
 test("owl restart escalates to SIGKILL for an unresponsive server and starts a new one", async (t) => {
   const port = await freePort();
   if (port === null) return t.skip("localhost listen is not permitted in this environment");
-  const { root, dataDir } = await standaloneRoot(t, "owl-restart-");
-  const env = standaloneEnv(root, dataDir, port);
+  const { root, dataDir } = await serverRoot(t, "owl-restart-");
+  const env = serverEnv(root, dataDir, port);
   const child = await startStubbornProcess(t);
   await writeServerState(dataDir, child.pid, port, readProcessIdentity(child.pid));
 
@@ -914,11 +915,11 @@ test("a second server on the same data directory is refused while the first keep
   const first = await freePort();
   const second = await freePort();
   if (first === null || second === null) return t.skip("localhost listen is not permitted in this environment");
-  const { root, dataDir } = await standaloneRoot(t, "owl-lock-");
-  const one = spawnStandaloneServer(t, root, dataDir, first);
+  const { root, dataDir } = await serverRoot(t, "owl-lock-");
+  const one = spawnTestServer(t, root, dataDir, first);
   await waitForPath(join(dataDir, "owl-server.pid"));
 
-  const two = spawnStandaloneServer(t, root, dataDir, second);
+  const two = spawnTestServer(t, root, dataDir, second);
   const [exitCode] = await once(two, "exit");
   assert.notEqual(exitCode, 0);
   await waitForPath(join(dataDir, "owl-server.json"));
@@ -930,8 +931,8 @@ test("a server starts again after the previous one was killed with SIGKILL and l
   const first = await freePort();
   const second = await freePort();
   if (first === null || second === null) return t.skip("localhost listen is not permitted in this environment");
-  const { root, dataDir } = await standaloneRoot(t, "owl-sigkill-");
-  const one = spawnStandaloneServer(t, root, dataDir, first);
+  const { root, dataDir } = await serverRoot(t, "owl-sigkill-");
+  const one = spawnTestServer(t, root, dataDir, first);
   await waitForPath(join(dataDir, "owl-server.json"));
   const killed = once(one, "exit");
   one.kill("SIGKILL");
@@ -940,7 +941,7 @@ test("a server starts again after the previous one was killed with SIGKILL and l
   assert.equal(existsSync(join(dataDir, "owl-server.json")), true);
   assert.equal(existsSync(join(dataDir, "owl-server.lock")), true);
 
-  const two = spawnStandaloneServer(t, root, dataDir, second);
+  const two = spawnTestServer(t, root, dataDir, second);
   await waitFor(() => {
     try { return JSON.parse(readFileSync(join(dataDir, "owl-server.json"), "utf8")).pid === two.pid; } catch { return false; }
   }, { timeoutMs: 10_000, intervalMs: 50, message: "second server state" });
@@ -950,8 +951,8 @@ test("a server starts again after the previous one was killed with SIGKILL and l
 test("stop --force and restart refuse to signal a PID whose recorded identity does not match", async (t) => {
   const port = await freePort();
   if (port === null) return t.skip("localhost listen is not permitted in this environment");
-  const { root, dataDir } = await standaloneRoot(t, "owl-foreign-pid-");
-  const env = standaloneEnv(root, dataDir, port);
+  const { root, dataDir } = await serverRoot(t, "owl-foreign-pid-");
+  const env = serverEnv(root, dataDir, port);
   const child = await startStubbornProcess(t);
   const identity = readProcessIdentity(child.pid);
   await writeServerState(dataDir, child.pid, port, { ...identity, process_cmdline_sha256: "0".repeat(64) });
@@ -966,7 +967,7 @@ test("stop --force and restart refuse to signal a PID whose recorded identity do
 });
 
 test("the server lock survives garbage collection of the caller's reference", async (t) => {
-  const { dataDir } = await standaloneRoot(t, "owl-lock-gc-");
+  const { dataDir } = await serverRoot(t, "owl-lock-gc-");
   await mkdir(dataDir, { recursive: true });
   const script = `
     import { acquireServerLock } from ${JSON.stringify(new URL("../../packages/db/dist/index.js", import.meta.url).href)};
@@ -1064,13 +1065,13 @@ test("SIGINT during a stuck SIGTERM shutdown force-terminates and exits without 
 test("the real server logs every line with a time and each shutdown stage on SIGTERM", async (t) => {
   const port = await freePort();
   if (port === null) return t.skip("localhost listen is not permitted in this environment");
-  const { root, dataDir } = await standaloneRoot(t, "owl-shutdown-log-");
+  const { root, dataDir } = await serverRoot(t, "owl-shutdown-log-");
   const logPath = join(root, "server-output.log");
   await writeFile(logPath, "");
   const fd = openSync(logPath, "a");
   const child = spawn(process.execPath, [join(repoRoot, "apps", "server", "dist", "server.js"), "--bind", "127.0.0.1", "--port", String(port)], {
     cwd: repoRoot,
-    env: { ...standaloneEnv(root, dataDir, port), OWL_SHUTDOWN_TIMEOUT_MS: "20000" },
+    env: { ...serverEnv(root, dataDir, port), OWL_SHUTDOWN_TIMEOUT_MS: "20000" },
     stdio: ["ignore", fd, fd],
   });
   t.after(() => {

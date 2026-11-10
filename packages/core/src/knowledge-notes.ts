@@ -1,15 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { copyFile, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-import { generateUlid, isValidUlid } from "@owl/shared";
+import { isValidUlid } from "@owl/shared";
 
+import { writeAtomic } from "./atomic-write.js";
 import { projectOverviewFilename } from "./project-overview.js";
 
 import type { KnowledgeBase } from "./knowledge-base.js";
 import { fingerprint } from "./learning-fingerprint.js";
-import { mergeTagSets, sanitizeKeywords } from "./knowledge-tags.js";
-import { resolveKnowledgeFilename, slugifyKnowledgeName } from "./knowledge-naming.js";
+import { slugifyKnowledgeName } from "./knowledge-naming.js";
 
 export interface NoteClaim {
   readonly fingerprint: string;
@@ -54,31 +54,6 @@ export class NoteParseError extends Error {
   }
 }
 
-const DEFAULT_MIN_TOPIC_SCORE = 3;
-const DEFAULT_MIN_TOPIC_SCORE_GAP = 2;
-
-/** Atomically replace a file using a sibling temporary file and rename. */
-export async function writeAtomic(absolutePath: string, content: string): Promise<void> {
-  await mkdir(dirname(absolutePath), { recursive: true });
-  const temporaryPath = `${absolutePath}.${randomUUID()}.tmp`;
-  try {
-    await writeFile(temporaryPath, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
-    await rename(temporaryPath, absolutePath);
-  } catch (error) {
-    try {
-      await unlink(temporaryPath);
-    } catch (cleanupError) {
-      if ((cleanupError as NodeJS.ErrnoException).code !== "ENOENT") throw cleanupError;
-    }
-    throw error;
-  }
-}
-
-interface StoredNote {
-  readonly note: NoteDocument;
-  readonly path: string;
-}
-
 export class KnowledgeNotes {
   private readonly now: () => string;
   private readonly knownTitles = new Map<string, string>();
@@ -96,16 +71,6 @@ export class KnowledgeNotes {
     this.now = options.now ?? (() => new Date().toISOString());
   }
 
-  /** Files under notes/ do not match the page templates, so they are not knowledge: none is listed. */
-  public async list(): Promise<NoteDocument[]> {
-    return [];
-  }
-
-  /** Notes with their actual file names under notes/ (which may carry a de-duplication suffix). */
-  public async listWithFiles(): Promise<Array<{ note: NoteDocument; file: string }>> {
-    return (await this.readStoredNotes()).map(({ note, path }) => ({ note, file: path }));
-  }
-
   /** The fixed-name overview note of one project; null if missing or unparsable. */
   public async getProjectOverview(projectId: string): Promise<NoteDocument | null> {
     try {
@@ -113,83 +78,6 @@ export class KnowledgeNotes {
     } catch {
       return null;
     }
-  }
-
-  public async get(id: string): Promise<NoteDocument | null> {
-    const entry = (await this.readStoredNotes()).find(({ note }) => note.id === id);
-    return entry?.note ?? null;
-  }
-
-
-
-
-
-  /** Move a merged source note out of knowledge/ and point other notes' links at the target. */
-  public async retireMergedNote(
-    sourceId: string,
-    targetId: string,
-    archiveDir: string,
-  ): Promise<{ archived_path: string; relinked: string[] }> {
-    const stored = await this.readStoredNotes();
-    const source = stored.find(({ note }) => note.id === sourceId);
-    if (!source || !stored.some(({ note }) => note.id === targetId)) throw new Error("note_not_found");
-
-    const relinked: string[] = [];
-    for (const { note, path } of stored) {
-      if (note.id === sourceId || !note.links.includes(sourceId)) continue;
-      const links = uniqueSorted(note.links.filter((id) => id !== sourceId).concat(note.id === targetId ? [] : [targetId]));
-      await this.writeNote(path, { ...note, links, updated: this.now() });
-      relinked.push(path);
-    }
-
-    const archiveNotes = join(archiveDir, "notes");
-    await mkdir(archiveNotes, { recursive: true });
-    const dot = source.path.lastIndexOf(".");
-    const stem = dot > 0 ? source.path.slice(0, dot) : source.path;
-    const ext = dot > 0 ? source.path.slice(dot) : "";
-    let archived = join(archiveNotes, source.path);
-    for (let n = 1; await readFile(archived).then(() => true, () => false); n += 1) {
-      archived = join(archiveNotes, `${stem}-${n}${ext}`);
-    }
-    const from = join(this.notesDir, source.path);
-    try {
-      await rename(from, archived);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
-      await copyFile(from, archived);
-      await unlink(from);
-    }
-    return { archived_path: archived, relinked };
-  }
-
-  public async normalizeTags(noteId: string, from: string, to: string): Promise<boolean> {
-    const stored = (await this.readStoredNotes()).find(({ note }) => note.id === noteId);
-    if (!stored) throw new Error("note_not_found");
-    const tags = uniqueSorted(stored.note.tags.map((tag) => tag === from ? to : tag));
-    if (tags.join("\u0000") === [...stored.note.tags].sort((a, b) => a.localeCompare(b)).join("\u0000")) return false;
-    await this.writeNote(stored.path, { ...stored.note, tags, updated: this.now() });
-    return true;
-  }
-
-  /** Replace only the tags of a note; body and `updated` stay untouched. `keywords` marks the tags as keyword-built. */
-  public async setTags(noteId: string, tags: readonly string[], keywords = false): Promise<void> {
-    const stored = (await this.readStoredNotes()).find(({ note }) => note.id === noteId);
-    if (!stored) throw new Error("note_not_found");
-    await this.writeNote(stored.path, { ...stored.note, tags: uniqueSorted(tags), ...(keywords ? { tags_source: "keywords" as const } : {}) });
-  }
-
-  public async recordPromotion(noteId: string, entry: NotePromotion): Promise<void> {
-    const stored = (await this.readStoredNotes()).find(({ note }) => note.id === noteId);
-    if (!stored) throw new Error("note_not_found");
-    if (!(entry.status === "applied" || entry.status === "rejected") || !entry.date || !entry.proposal_id) {
-      throw new Error("invalid_note_promotion");
-    }
-    const note = {
-      ...stored.note,
-      updated: this.now(),
-      promotions: [...stored.note.promotions, { ...entry }],
-    };
-    await this.writeNote(stored.path, note);
   }
 
   /** Read notes/<filename> (null if missing or unparsable), build the next note, and write it in place. */
@@ -298,31 +186,6 @@ export class KnowledgeNotes {
     return `${frontmatter.join("\n")}\n`;
   }
 
-
-
-  private async readStoredNotes(): Promise<StoredNote[]> {
-    let entries;
-    try {
-      entries = await readdir(this.notesDir, { withFileTypes: true });
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-      throw error;
-    }
-    const stored: StoredNote[] = [];
-    for (const entry of entries.filter((item) => item.isFile() && item.name.endsWith(".md")).sort((a, b) => a.name.localeCompare(b.name))) {
-      const content = await readFile(join(this.notesDir, entry.name), "utf8");
-      let note: NoteDocument;
-      try {
-        note = this.parse(content);
-      } catch (error) {
-        console.warn(`[owl-core] Skipping unparsable knowledge note ${entry.name}: ${error instanceof Error ? error.message : String(error)}`);
-        continue;
-      }
-      this.knownTitles.set(note.id, note.title);
-      stored.push({ note, path: entry.name });
-    }
-    return stored;
-  }
 
 
   private async writeNote(filename: string, note: NoteDocument): Promise<void> {
@@ -543,16 +406,4 @@ function sameNote(left: NoteDocument, right: NoteDocument): boolean {
   // tags_source is optional and may sit at a different key position, so compare it separately.
   return left.tags_source === right.tags_source
     && JSON.stringify({ ...left, tags_source: undefined }) === JSON.stringify({ ...right, tags_source: undefined });
-}
-
-function words(value: string): Set<string> {
-  return new Set((value.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter((word) => word.length > 1));
-}
-
-function uniqueSorted(values: readonly string[]): string[] {
-  return [...new Set(values)].sort((left, right) => left.localeCompare(right));
-}
-
-function validThreshold(value: number | undefined, fallback: number): number {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : fallback;
 }

@@ -3,11 +3,14 @@ import {
   AUTO_RECOVERY_SETTINGS_KEY,
   DEFAULT_AUTO_RECOVERY_SETTINGS,
   readAutoRecoverySettings,
+  validateAutoRecoverySettings,
+  type AutoRecoverySettings,
 } from "../../shared/dist/auto-recovery-settings.js";
 import { cancelWorkOption, option, type DecisionBrief } from "./decision-brief";
 import { finalAutoContinueLimit } from "./final-continue-limit";
 import { FALLBACK_BACKOFF_MINUTES } from "./provider-pause-controller";
 import type { OwnerLanguage, SettingsReader } from "./owner-language";
+import { storedSettingJson, type SettingSaveSpec } from "./settings-store";
 import { appendEventInTransaction } from "./state-reducer";
 import { lineageRootOf, type LineageReader } from "./task-lineage";
 import type { CoreWriteLaneTransaction, JsonObject } from "./types";
@@ -29,14 +32,20 @@ export interface AutoRecoveryStored {
   readonly stored: boolean;
 }
 
+export const AUTO_RECOVERY_SAVE: SettingSaveSpec<AutoRecoverySettings> = {
+  key: AUTO_RECOVERY_SETTINGS_KEY,
+  validate: validateAutoRecoverySettings,
+  event: { type: "settings.auto_recovery_updated", idempotencyPrefix: "settings-auto-recovery" },
+};
+
 const warned = new Set<string>();
 
 /** The stored auto_recovery setting; a missing value is the default, an invalid one falls back to it with a warning. */
 export function autoRecoverySettings(reader: SettingsReader): AutoRecoveryStored {
   try {
-    const row = reader.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", AUTO_RECOVERY_SETTINGS_KEY);
-    if (!row) return { limit: DEFAULT_AUTO_RECOVERY_SETTINGS.limit, warnings: [], stored: false };
-    const { settings, warnings } = readAutoRecoverySettings(JSON.parse(row.value_json) as unknown);
+    const json = storedSettingJson(reader, AUTO_RECOVERY_SETTINGS_KEY);
+    if (json === undefined) return { limit: DEFAULT_AUTO_RECOVERY_SETTINGS.limit, warnings: [], stored: false };
+    const { settings, warnings } = readAutoRecoverySettings(JSON.parse(json) as unknown);
     for (const message of warnings) {
       if (!warned.has(message)) {
         warned.add(message);

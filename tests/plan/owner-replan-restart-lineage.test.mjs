@@ -14,7 +14,7 @@ import { waitFor } from "../helpers/wait.mjs";
 
 const envelope = (payload, suffix, expectedVersion = 0) => command(payload, `test:${suffix}:${createUlid()}`, expectedVersion);
 const task = (id, depends_on = []) => ({ id, title: id, type: "code", acceptance: "Done; verified by the test.", depends_on, required_sections: [], required_tests: [], replaces: [], review: false });
-const LIMIT = { ...DEFAULT_REMAKE_LIMIT_SETTINGS, lineage_worker_runs: 1, lineage_review_attempts: 1000, non_functional_remakes: 100 };
+const LIMIT = { ...DEFAULT_REMAKE_LIMIT_SETTINGS, lineage_worker_runs: 1, lineage_review_attempts: 1000 };
 
 test("an Owner-instructed replan replaces the limit-stopped Task and its failed dependent, restarting the lineage", async (t) => {
   let replanReport = null;

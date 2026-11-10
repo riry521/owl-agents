@@ -49,19 +49,15 @@ test("resolveWorkspacesRoot falls back to a per-process temporary directory unde
   assert.equal(resolveWorkspacesRoot({ ...env, OWL_WORKSPACES_DIR: "/custom/dir" }, home), resolve("/custom/dir"));
 });
 
-test("WorkspaceLayout.roots() dedupes when root and legacyRoot are the same", () => {
-  const legacyOnly = WorkspaceLayout.legacyOnly("/tmp/owl-root-example");
-  assert.equal(legacyOnly.roots().length, 1);
-  assert.equal(legacyOnly.roots()[0], legacyOnly.root);
-  assert.equal(legacyOnly.root, legacyOnly.legacyRoot);
-
-  const split = new WorkspaceLayout("/tmp/new-root", "/tmp/legacy-root");
-  assert.deepEqual(split.roots(), [resolve("/tmp/new-root"), resolve("/tmp/legacy-root")]);
+test("WorkspaceLayout.underOwlRoot resolves the default root under the Owl root", () => {
+  const layout = WorkspaceLayout.underOwlRoot("/tmp/owl-root-example");
+  assert.equal(layout.root, resolve("/tmp/owl-root-example", ".owl-workspaces"));
+  assert.equal(new WorkspaceLayout("/tmp/new-root").root, resolve("/tmp/new-root"));
 });
 
 test("empty ids and ids of only dots resolve to a directory below their parent, never to the parent or above it", async (t) => {
   const parent = await tempDir(t, "owl-layout-dots-");
-  const layout = new WorkspaceLayout(join(parent, "root"), join(parent, "legacy"));
+  const layout = new WorkspaceLayout(join(parent, "root"));
   const below = (base, path) => path.startsWith(`${base}/`) && path.length > base.length + 1;
   for (const id of ["", ".", ".."]) {
     assert.ok(below(layout.root, layout.workDir(id)), `workDir(${id})`);
@@ -70,59 +66,35 @@ test("empty ids and ids of only dots resolve to a directory below their parent, 
   }
 });
 
-test("workDir prefers an existing legacy directory, otherwise falls back to the current root", async (t) => {
-  const parent = await tempDir(t, "owl-layout-workdir-");
-  const root = join(parent, "root");
-  const legacyRoot = join(parent, "legacy");
-  const layout = new WorkspaceLayout(root, legacyRoot);
-
-  // Neither exists yet: falls back to the current root.
+test("workDir, taskPath and integrationPath resolve under the root", () => {
+  const root = resolve("/tmp/owl-layout-workdir");
+  const layout = new WorkspaceLayout(root);
   assert.equal(layout.workDir("W1"), join(root, "W1"));
-
-  // Once a legacy directory for this Work exists, it takes priority.
-  await mkdir(join(legacyRoot, "W1"), { recursive: true });
-  assert.equal(layout.workDir("W1"), join(legacyRoot, "W1"));
-
-  // A different Work with no legacy directory still resolves under the current root.
-  assert.equal(layout.workDir("W2"), join(root, "W2"));
-
   assert.equal(layout.taskPath("W2", "T1"), join(root, "W2", "T1"));
   assert.equal(layout.integrationPath("W2"), join(root, "W2", "__work__"));
 });
 
-test("advisorSharedDir and advisorHomeDir always resolve under the current root, even when a legacy advisor directory exists", async (t) => {
-  const parent = await tempDir(t, "owl-layout-advisordir-");
-  const root = join(parent, "root");
-  const legacyRoot = join(parent, "legacy");
-  const layout = new WorkspaceLayout(root, legacyRoot);
-  await mkdir(join(legacyRoot, "advisor", "shared", "repo-1"), { recursive: true });
-
+test("advisorSharedDir and advisorHomeDir resolve under the root", () => {
+  const root = resolve("/tmp/owl-layout-advisordir");
+  const layout = new WorkspaceLayout(root);
   assert.equal(layout.advisorSharedDir("repo-1"), join(root, "advisor", "shared", "repo-1"));
   assert.equal(layout.advisorHomeDir(), join(root, "advisor", "home"));
 });
 
-test("contains and rootOf identify which root (if any) holds a given path", () => {
+test("contains identifies whether a path is inside the root", () => {
   const root = resolve("/tmp/owl-layout-contains-root");
-  const legacyRoot = resolve("/tmp/owl-layout-contains-legacy");
-  const layout = new WorkspaceLayout(root, legacyRoot);
-
+  const layout = new WorkspaceLayout(root);
   assert.equal(layout.contains(join(root, "W1", "T1")), true);
-  assert.equal(layout.contains(join(legacyRoot, "W2")), true);
   assert.equal(layout.contains(root), true);
   assert.equal(layout.contains("/tmp/elsewhere"), false);
-
-  assert.equal(layout.rootOf(join(root, "W1")), root);
-  assert.equal(layout.rootOf(join(legacyRoot, "W2")), legacyRoot);
-  assert.equal(layout.rootOf("/tmp/elsewhere"), null);
 });
 
-test("Task worktrees are created under the current root when no legacy directory exists for the Work", async (t) => {
+test("Task worktrees are created under the configured root", async (t) => {
   const parent = await tempDir(t, "owl-layout-newroot-");
   const project = await projectRepo(parent);
   const owlRoot = join(parent, "owl");
   const workspacesRoot = join(parent, "workspaces");
-  const legacyRoot = join(owlRoot, ".owl-workspaces");
-  const layout = new WorkspaceLayout(workspacesRoot, legacyRoot);
+  const layout = new WorkspaceLayout(workspacesRoot);
   const gateway = new GitWorktreeGateway(fakeDatabase(parent, project), owlRoot, undefined, undefined, layout);
 
   const prepared = await gateway.prepareWorktree({ work_id: "W", task_id: "T1" });
@@ -130,47 +102,16 @@ test("Task worktrees are created under the current root when no legacy directory
   assert.equal(prepared.worktree_path, join(workspacesRoot, "W", "T1"));
 });
 
-test("Task worktrees reuse a Work's existing legacy directory even when a current root is configured", async (t) => {
-  const parent = await tempDir(t, "owl-layout-legacyprefer-");
-  const project = await projectRepo(parent);
-  const owlRoot = join(parent, "owl");
-  const workspacesRoot = join(parent, "workspaces");
-  const legacyRoot = join(owlRoot, ".owl-workspaces");
-  const layout = new WorkspaceLayout(workspacesRoot, legacyRoot);
-  const gateway = new GitWorktreeGateway(fakeDatabase(parent, project), owlRoot, undefined, undefined, layout);
-
-  // Simulate a Work whose worktrees were already registered under the legacy root.
-  const legacyGateway = new GitWorktreeGateway(fakeDatabase(parent, project), owlRoot, undefined, undefined, WorkspaceLayout.legacyOnly(owlRoot));
-  const legacyPrepared = await legacyGateway.prepareWorktree({ work_id: "W", task_id: "T1" });
-  assert.equal(legacyPrepared.ok, true, legacyPrepared.message);
-  assert.equal(legacyPrepared.worktree_path, join(legacyRoot, "W", "T1"));
-
-  // A second Task on the same Work, via the layout that also knows about the current root,
-  // should still land in the legacy directory since it already exists.
-  const prepared = await gateway.prepareWorktree({ work_id: "W", task_id: "T2" });
-  assert.equal(prepared.ok, true, prepared.message);
-  assert.equal(prepared.worktree_path, join(legacyRoot, "W", "T2"));
-});
-
-test("listWorkspaces returns entries from both the current root and the legacy root", async (t) => {
+test("listWorkspaces returns entries under the root", async (t) => {
   const parent = await tempDir(t, "owl-layout-listworkspaces-");
   const project = await projectRepo(parent);
   const owlRoot = join(parent, "owl");
   const workspacesRoot = join(parent, "workspaces");
-  const legacyRoot = join(owlRoot, ".owl-workspaces");
-  const layout = new WorkspaceLayout(workspacesRoot, legacyRoot);
-  const gateway = new GitWorktreeGateway(fakeDatabase(parent, project), owlRoot, undefined, undefined, layout);
+  const gateway = new GitWorktreeGateway(fakeDatabase(parent, project), owlRoot, undefined, undefined, new WorkspaceLayout(workspacesRoot));
 
-  // One Work lands under the legacy root (pre-existing legacy directory)...
-  const legacyGateway = new GitWorktreeGateway(fakeDatabase(parent, project), owlRoot, undefined, undefined, WorkspaceLayout.legacyOnly(owlRoot));
-  const legacyPrepared = await legacyGateway.prepareWorktree({ work_id: "WLegacy", task_id: "T1" });
-  assert.equal(legacyPrepared.ok, true, legacyPrepared.message);
-
-  // ...and another lands under the current root, since it has no legacy directory.
-  const newPrepared = await gateway.prepareWorktree({ work_id: "WNew", task_id: "T1" });
-  assert.equal(newPrepared.ok, true, newPrepared.message);
+  const prepared = await gateway.prepareWorktree({ work_id: "WNew", task_id: "T1" });
+  assert.equal(prepared.ok, true, prepared.message);
 
   const entries = await gateway.listWorkspaces();
-  const paths = entries.map((entry) => entry.path).sort();
-  assert.deepEqual(paths, [join(legacyRoot, "WLegacy", "T1"), join(workspacesRoot, "WNew", "T1")].sort());
+  assert.deepEqual(entries.map((entry) => entry.path), [join(workspacesRoot, "WNew", "T1")]);
 });

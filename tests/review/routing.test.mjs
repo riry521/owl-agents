@@ -162,10 +162,10 @@ async function runSkippedReviewTask(t, files, configure, opts = {}) {
       return {
         outcome: "success", report_valid: true,
         report: {
-          kind: "report", invocation_id: request.invocation_id, result: "success", schema_version: "1.0.0",
+          kind: "report", invocation_id: request.invocation_id, result: "success", schema_version: "1.1.0",
           work_done: "Done.", changes: [...Object.keys(step.files).map((file) => ({ file, action: "added" })), ...step.remove.map((file) => ({ file, action: "deleted" }))],
           remaining_issues: [], next_action: "none", needs_replanning: false, question_for_manager: null,
-          verification: { passed: true, method: "Checked.", ...(request.context.hybrid_mode ? { integration_check: { status: "passed", evidence: "Nothing to integrate." } } : {}) },
+          verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked.", integration_check: request.context.hybrid_mode ? { status: "passed", evidence: "Nothing to integrate." } : null },
         },
       };
     },

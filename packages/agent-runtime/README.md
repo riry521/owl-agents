@@ -17,10 +17,7 @@ the configured provider fails.
 
 The default CLI bridge uses the locked-style `claude-cli/v1` argv shape and
 requires an absolute `executablePath`, `model`, and explicit environment from
-the caller, including non-empty `PATH` and `HOME`. A caller that has built
-`packages/providers` can instead inject a `ProviderClient`. Until the provider
-package has a consumable package boundary, this package still contains its
-local CLI adapter implementation; it must not be described as provider reuse.
+the caller, including non-empty `PATH` and `HOME`. A caller can instead inject a `ProviderClient`.
 Claude stdout is parsed as the whole, single JSON object it is required to
 be. Canonical JSONL consumers ignore only the explicitly
 permitted `kind:"log"` rows (and activity rows), then require exactly one

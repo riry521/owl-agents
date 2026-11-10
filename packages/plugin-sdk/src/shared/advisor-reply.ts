@@ -1,3 +1,4 @@
+import { asRecord } from "./connector-common";
 import { connectorText } from "./connector-text";
 import type { OwlLanguage } from "./language";
 
@@ -19,10 +20,4 @@ export function formatAdvisorReply(reply: string, value: unknown, language: OwlL
     return type.length > 0 && description.length > 0 ? [`• ${type}: ${description}`] : [];
   });
   return actions.length === 0 ? reply : `${reply}\n\n${connectorText(language).nextActions}\n${actions.join("\n")}`;
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
 }

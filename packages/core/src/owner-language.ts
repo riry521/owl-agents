@@ -5,6 +5,7 @@ import {
   type OwnerLanguage,
 } from "@owl/shared";
 
+import { storedSettingJson } from "./settings-store";
 import type { CoreSqlValue } from "./types";
 
 export { DEFAULT_OWNER_LANGUAGE, OWNER_LANGUAGE_SETTINGS_KEY, isOwnerLanguage, type OwnerLanguage };
@@ -16,10 +17,10 @@ export interface SettingsReader {
 
 /** The stored Owner language, or null when it was never set. */
 export function storedOwnerLanguage(reader: SettingsReader): OwnerLanguage | null {
-  const row = reader.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", OWNER_LANGUAGE_SETTINGS_KEY);
-  if (!row) return null;
+  const json = storedSettingJson(reader, OWNER_LANGUAGE_SETTINGS_KEY);
+  if (json === undefined) return null;
   try {
-    const value: unknown = JSON.parse(row.value_json);
+    const value: unknown = JSON.parse(json);
     return isOwnerLanguage(value) ? value : null;
   } catch {
     return null;

@@ -33,12 +33,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function workerReport(invocationId) {
   return {
     kind: "report",
-    schema_version: "1.0.0",
+    schema_version: "1.1.0",
     invocation_id: invocationId,
     result: "success",
     work_done: "Done.",
     changes: [],
-    verification: { passed: true, method: "Checked." },
+    verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked.", integration_check: null },
     remaining_issues: [],
     next_action: "none",
     needs_replanning: false,
@@ -528,7 +528,7 @@ async function reviewerRace(t, { reviewer, matches, prepare = null }) {
   runner.reviewerCalls = [];
   runner.runWorker = async (request) => {
     await writeFile(join(request.context.worktree, `${request.task_id}.mjs`), "export const x = 1;\n");
-    return { outcome: "success", report_valid: true, report: { result: "success", verification: { passed: true } }, skill_feedback: null };
+    return { outcome: "success", report_valid: true, report: { result: "success", verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [] } }, skill_feedback: null };
   };
   runner.runReviewer = async (request) => { runner.reviewerCalls.push(request.invocation_id); return reviewer(request); };
   const { core } = await createTestCore(t, {

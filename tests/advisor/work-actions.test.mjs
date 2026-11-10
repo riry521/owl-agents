@@ -11,26 +11,25 @@ import { createUlid } from "../../packages/db/dist/index.js";
 import * as advisorResponse from "../../packages/shared/dist/advisor-response.js";
 import { command } from "../helpers/core.mjs";
 import { git } from "../helpers/git.mjs";
+import { scriptedProvider } from "../helpers/advisor-provider.mjs";
 import { createTestDatabase } from "../helpers/db.mjs";
 import { tempDir } from "../helpers/temp.mjs";
+import { waitFor } from "../helpers/wait.mjs";
+import { readOwnerReplan } from "../../packages/core/dist/replan-queue-store.js";
 
 async function setup(t, coreOptions = {}) {
   const root = await tempDir(t, "owl-advisor-work-actions-");
   const db = createTestDatabase(root);
   const advisorReplies = [];
-  const advisorRequests = [];
+  const { providerClient, sent: advisorTurns } = scriptedProvider(advisorReplies);
   const cancelledRuns = [];
   const agentRunner = {
     cancelAgent: async (runId) => { cancelledRuns.push(runId); },
     runManagerPlan: async () => ({ outcome: "failed", message: "unused" }),
     runWorker: async () => ({ outcome: "failed" }),
     runReviewer: async () => ({ outcome: "failed" }),
-    runAdvisor: async (request) => {
-      advisorRequests.push(request);
-      return { reply: advisorReplies.shift() ?? "Unexpected empty test Advisor response." };
-    },
   };
-  const core = createCore({ db, agentRunner, version: "advisor-work-actions-test", owlRoot: root, dataDir: root, ...coreOptions });
+  const core = createCore({ db, agentRunner, providerClient, version: "advisor-work-actions-test", owlRoot: root, dataDir: root, ...coreOptions });
   t.after(async () => {
     await core.stop({ force: true }).catch(() => {});
     db.close();
@@ -57,7 +56,7 @@ async function setup(t, coreOptions = {}) {
       );
     });
 
-    const requestCount = advisorRequests.length;
+    const turnCount = advisorTurns.length;
     advisorReplies.push([
       text,
       "```owl-actions",
@@ -67,17 +66,18 @@ async function setup(t, coreOptions = {}) {
     if (followupActions) advisorReplies.push(["Retrying.", "```owl-actions", JSON.stringify(followupActions), "```"].join("\n"));
     await core.advisorRespond(conversationId, userMessageId, { channel: "slack" });
 
-    // A failed action runs the one follow-up Advisor turn, so the stub is called once, or twice after a failure.
-    assert.ok([requestCount + 1, requestCount + 2].includes(advisorRequests.length), "the user message should run through the stub Advisor");
-    assert.ok(advisorRequests[requestCount].messages.some((message) => message.source === "user" && message.body === text));
-    const message = db.get(
+    // A failed action runs the one follow-up Advisor turn, so the session gets one turn, or two after a failure.
+    await waitFor(() => advisorTurns.length > turnCount && !db.get("SELECT 1 FROM advisor_turns WHERE status IN ('queued', 'running')"), { message: "the Advisor turns settle" });
+    assert.ok([turnCount + 1, turnCount + 2].includes(advisorTurns.length), "the user message should run through the Advisor session");
+    assert.ok(advisorTurns[turnCount].text.includes(text));
+    const message = await waitFor(() => db.get(
       `SELECT id, body FROM messages
         WHERE conversation_id = ? AND source_message_id LIKE 'advisor:%'
           AND rowid > (SELECT rowid FROM messages WHERE id = ?)
         ORDER BY rowid ASC LIMIT 1`,
       conversationId,
       userMessageId,
-    );
+    ), { message: "the Advisor reply is saved" });
     return { messageId: message.id, body: message.body };
   }
 
@@ -103,8 +103,7 @@ function action(type, payload = {}) {
 }
 
 function ownerReplan(db, workId) {
-  const row = db.get("SELECT response_json FROM idempotency_keys WHERE key = ?", `owner-replan:${workId}`);
-  return row ? JSON.parse(row.response_json) : null;
+  return readOwnerReplan(db, workId) ?? null;
 }
 
 test("send_work_instruction reaches the target Work through an Advisor turn", async (t) => {

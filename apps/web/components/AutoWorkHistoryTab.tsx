@@ -9,7 +9,7 @@ import {
   eventsViewKey, hasActionError, isMutedEvent, knownValue, mergeEvents, sourceLabelKey, verdictLabelKey, verdictTone,
 } from '@/lib/auto-work.mjs';
 import { useLocale, type TFunction } from '@/lib/i18n';
-import { humanizeError } from '@/lib/settings-errors';
+import { humanizeSettingsError } from '@/lib/api-error-keys.mjs';
 import type { AutoWorkEventDetail, AutoWorkEventView, AutoWorkProjectSettings } from '@/lib/types';
 import { useView } from '@/lib/view-loader';
 
@@ -211,7 +211,7 @@ export function AutoWorkHistoryTab({ projects }: { projects: AutoWorkProjectSett
       setMore((current) => ({ key, items: mergeEvents(current?.key === key ? current.items : [], page.items), nextOffset: page.next_offset }));
     } catch (err) {
       console.error('[Owl] Auto Work history page failed', err);
-      if (filterKeyRef.current === key) setMoreError(humanizeError(err, t));
+      if (filterKeyRef.current === key) setMoreError(humanizeSettingsError(err, t));
     } finally {
       if (filterKeyRef.current === key) setLoadingMore(false);
     }

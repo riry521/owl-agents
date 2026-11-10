@@ -36,13 +36,16 @@ const REPORTED_ACTION = "created";
 
 export const successReport =(invocationId, changes = []) => ({
   kind: "report",
-  schema_version: "1.0.0",
+  schema_version: "1.1.0",
   invocation_id: invocationId,
   result: "success",
   work_done: "Completed the test Task.",
   changes,
   delegation: { decomposition: "The test Task is not divided.", delegated: [], retained: [{ part: "the whole Task", reason: "A fake Worker does everything itself." }] },
-  verification: { passed: true, method: "The fake Worker returned a valid success report." },
+  verification: {
+    status: "passed", method: "The fake Worker returned a valid success report.", checks: [], integration_check: null,
+    acceptance: [{ criterion_id: "AC1", criterion: "Return a successful Worker report.", status: "passed", evidence: "The fake Worker returned it." }],
+  },
   remaining_issues: [],
   next_action: "none",
   needs_replanning: false,

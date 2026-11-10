@@ -2,12 +2,12 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { createDefaultEmbedder, DEFAULT_EMBEDDER_CONFIG, embeddingUnavailableWarning, type Embedder, type EmbedderHealth, type RetrievalProfile } from "./embedder.js";
 import { MemoryIndex, type MemoryIndexOptions, type MemoryIndexStatus, type MemoryScanResult } from "./memory-index.js";
-import type { MemoryMode } from "@owl/shared";
 import { advisorKey, MemoryReadLedger } from "./memory-read-ledger.js";
 import { estimatePageTokens, PAGE_LIMITS, SEARCHABLE_PAGE_KINDS, parsePage, setFrontmatter, type PageSection, type StoredKind } from "./page-format.js";
 import { buildFilter, MemorySearch, type MemorySearchInput } from "./memory-search.js";
 import { nextConversationName } from "./conversation-log-writer.js";
-import { KIND_OF_SECTION, writeAtomic, type PageRouter, type RouteResult } from "./page-router.js";
+import { OWNED_DIR_WRITE, writeAtomic } from "../atomic-write.js";
+import { KIND_OF_SECTION, type PageRouter, type RouteResult } from "./page-router.js";
 import type { KnowledgeSearchResult } from "../knowledge-base.js";
 import { MEMORY_TYPES, type MemoryLogger, type MemoryNoteRow, type MemoryNoteStatus, type MemoryNoteType, type MemoryRequestContext, type MemoryStoragePort } from "./memory-types.js";
 
@@ -287,7 +287,7 @@ export class MemoryService {
         const file = join(this.storage.activeDir(), path);
         const text = readFileSync(file, "utf8");
         // One line is edited, not a parse-and-render: that would drop what the parser does not keep (block lists, comments, CRLF).
-        if (parsePage(text).frontmatter.status === "dormant") await writeAtomic(file, setFrontmatter(text, "status", "active"));
+        if (parsePage(text).frontmatter.status === "dormant") await writeAtomic(file, setFrontmatter(text, "status", "active"), OWNED_DIR_WRITE);
       });
       await this.index.refreshChanged();
     } catch (error) {
@@ -357,7 +357,6 @@ export class MemoryService {
     };
   }
 
-  public mode(): MemoryMode { return "pages"; }
   /** Only files of the 4 templates are knowledge. */
   private templateOnly(): { page_types?: readonly StoredKind[]; template_valid_only?: boolean } { return { page_types: SEARCHABLE_PAGE_KINDS, template_valid_only: true }; }
 

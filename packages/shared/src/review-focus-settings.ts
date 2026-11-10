@@ -1,3 +1,5 @@
+import { isRecord } from "./settings-validation.js";
+
 export const REVIEW_FOCUS_SETTINGS_KEY = "review_focus";
 
 export interface ReviewFocusSettings {
@@ -23,7 +25,7 @@ const MINIMUMS: Record<keyof ReviewFocusSettings, number> = { same_spot_threshol
 
 /** For reads: per-key fallback to the default (a key never saved falls back silently), calling warn for an invalid one. */
 export function readReviewFocusSettings(value: unknown, warn?: (message: string) => void): ReviewFocusSettings {
-  const stored = typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+  const stored = isRecord(value) ? value : {};
   const entries = (Object.keys(DEFAULT_REVIEW_FOCUS_SETTINGS) as (keyof ReviewFocusSettings)[]).map((key) => {
     const candidate = stored[key];
     if (candidate === undefined) return [key, DEFAULT_REVIEW_FOCUS_SETTINGS[key]];

@@ -5,6 +5,7 @@ import { createAgentRunner } from "../../packages/agent-runtime/dist/index.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { createTestCore } from "../helpers/core.mjs";
 import { waitFor } from "../helpers/wait.mjs";
+import { readOwnerReplan } from "../../packages/core/dist/replan-queue-store.js";
 
 // A Manager replan started by an Owner request may rewrite the Work title/summary;
 // the change and its history row commit with the plan.
@@ -84,8 +85,7 @@ async function resume(core, db, workId) {
 
 const revisions = (db, workId) => db.all("SELECT * FROM work_summary_revisions WHERE work_id = ?", workId);
 const workRow = (db, workId) => db.get("SELECT title, summary, state_version FROM works WHERE id = ?", workId);
-const markerKey = (workId) => `owner-replan:${workId}`;
-const markerGone = (db, workId) => !db.get("SELECT 1 FROM idempotency_keys WHERE key = ?", markerKey(workId));
+const markerGone = (db, workId) => readOwnerReplan(db, workId) === undefined;
 
 async function runInstruction(t, answer, body = "Add acceptance criteria") {
   const ctx = await setup(t, answer);

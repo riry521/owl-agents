@@ -5,7 +5,6 @@ import { test } from "node:test";
 
 import { createUlid } from "../../packages/db/dist/index.js";
 import { validateReplan } from "../../packages/core/dist/replan-plan.js";
-import { evaluateWorkerCompletion } from "../../packages/core/dist/task-completion-gate.js";
 import { DEFAULT_PROGRESS_GUARD_SETTINGS } from "../../packages/shared/dist/progress-guard-settings.js";
 import { DEFAULT_REMAKE_LIMIT_SETTINGS } from "../../packages/shared/dist/remake-limit-settings.js";
 import { ACCEPTANCE_DEFECT_EVENT, workerAcceptanceDefects } from "../../packages/shared/dist/acceptance-defect.js";
@@ -13,7 +12,7 @@ import { DESIGNER_REPORT_SCHEMA, WORKER_REPORT_SCHEMA, buildWorkerPrompt, normal
 import { buildManagerPrompt } from "../../packages/agent-runtime/dist/manager.js";
 import { lineageUsage } from "../../packages/core/dist/task-lineage.js";
 import { DEFAULT_ATTEMPT_POLICY_CONFIG } from "../../packages/core/dist/attempt-policy.js";
-import { validateReportEnvelope, validateReportSemantics } from "../../packages/agent-runtime/dist/protocol.js";
+import { validateReportEnvelope } from "../../packages/agent-runtime/dist/protocol.js";
 import { createTestCore, command } from "../helpers/core.mjs";
 import { disablePlanQuality } from "../helpers/plan-quality.mjs";
 import { waitFor } from "../helpers/wait.mjs";
@@ -134,10 +133,9 @@ test("report schema and prompt describe unverifiable", () => {
   assert.deepEqual(workerAcceptanceDefects(passedReport("i")), []);
   // The report contract accepts the new status and reason, and still rejects a success claim that carries one.
   assert.equal(validateReportEnvelope(unverifiableReport("i")).verification.acceptance[0].status, "unverifiable");
-  assert.throws(() => validateReportSemantics(validateReportEnvelope({ ...unverifiableReport("i"), result: "success", verification: { ...unverifiableReport("i").verification, status: "passed" } })), /Owl report contract/);
-  const gate = evaluateWorkerCompletion({ ...unverifiableReport("i"), result: "success" }, { hybrid: false, delegated_work_detected: false });
-  assert.equal(gate.passed, false);
-  assert.equal(gate.error_key, "worker_acceptance_unverifiable");
+  const lowered = normalizeWorkerResponseWithFeedback(asProvider(claimedSuccess({ verification: { status: "blocked", acceptance: [{ criterion_id: "AC1", status: "unverifiable", evidence: "n/a", unverifiable_reason: REASON }] } })), "i");
+  assert.equal(lowered.report.result, "partial");
+  assert.deepEqual(lowered.corrections.map((c) => c.rule), ["success_with_unpassed_verification", "success_with_unpassed_item"]);
 });
 
 test("an unverifiable required criterion still reaches the defect path, an unverifiable goal does not", () => {
@@ -513,7 +511,6 @@ test("corrections never raise a result and leave broken or ambiguous reports rej
   assert.equal(normalizeWorkerResponseWithFeedback(asProvider(claimedSuccess()), "i").corrections.length, 0);
   assert.throws(() => normalizeWorkerResponseWithFeedback(asProvider({ ...claimedSuccess(), result: "done" }), "i"), /Owl report contract|worker_output/);
   assert.throws(() => normalizeWorkerResponseWithFeedback(asProvider({ ...claimedSuccess(), verification: null }), "i"), /Owl report contract|worker_output/);
-  assert.throws(() => validateReportSemantics(validateReportEnvelope(claimedSuccess()), { verdict: "retry", retry_subtasks: [] }), /Owl report contract/);
 });
 
 test("the Worker and Designer paths share the one correction list", () => {

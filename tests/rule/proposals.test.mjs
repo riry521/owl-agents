@@ -7,7 +7,7 @@ import { tempDir } from "../helpers/temp.mjs";
 
 const proposalModule = await import("../../packages/core/dist/rule-proposals.js").catch(() => ({}));
 
-async function setup(t, { min_sources = 1, promptRules = [], ruleWriter, notes, now, judge } = {}) {
+async function setup(t, { min_sources = 1, promptRules = [], ruleWriter, now, judge } = {}) {
   const { db } = await openTestDatabase(t, { prefix: "owl-rule-proposals-" });
   const writeLane = db.createWriteLane();
   assert.equal(typeof proposalModule.RuleProposals, "function", "rule-proposals must export RuleProposals");
@@ -19,7 +19,6 @@ async function setup(t, { min_sources = 1, promptRules = [], ruleWriter, notes, 
     ruleStore,
     min_sources,
     ruleWriter: ruleWriter ?? { apply: async ({ level, role }) => ({ path: level === "system" ? "rules/system/owl-approved.yaml" : `rules/role/${role}.yaml`, generation: 1 }) },
-    notes: notes ?? { recordPromotion: async () => undefined },
     now,
     judge,
   });
@@ -203,13 +202,11 @@ test("list filters and deserializes proposals including derived sources", async 
   assert.equal((await f.proposals.list("pending")).length, 0);
 });
 
-test("approval applies an awaiting proposal, records promotion, and preserves source idempotency", async (t) => {
+test("approval applies an awaiting proposal and preserves source idempotency", async (t) => {
   const writes = [];
-  const promotions = [];
   const f = await setup(t, {
     now: () => "2026-09-27T00:00:00.000Z",
     ruleWriter: { apply: async (write) => { writes.push(write); return { path: "rules/system/owl-approved.yaml", generation: 2 }; } },
-    notes: { recordPromotion: async (noteId, entry) => promotions.push({ noteId, entry }) },
   });
   const proposal = await f.proposals.create(input("note-source", {
     origin: "note",
@@ -230,15 +227,6 @@ test("approval applies an awaiting proposal, records promotion, and preserves so
     text: "Validate the release state before deployment.",
   }]);
   assert.equal(f.db.get("SELECT status FROM rule_proposals WHERE id=?", proposal.proposal_id).status, "applied");
-  assert.deepEqual(promotions, [{
-    noteId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-    entry: {
-      date: "2026-09-27",
-      proposal_id: proposal.proposal_id,
-      status: "applied",
-      path: "rules/system/owl-approved.yaml",
-    },
-  }]);
   const repeated = await f.proposals.create(input("note-source", {
     origin: "note",
     source: { kind: "note", ref: "01ARZ3NDEKTSV4RRFFQ69G5FAV:abcdef0123456789" },
@@ -295,10 +283,8 @@ test("approval whose rule was already written by an interrupted attempt complete
 });
 
 test("only awaiting proposals can be approved or rejected, and rejection suppresses the rule key", async (t) => {
-  const promotions = [];
   const f = await setup(t, {
     min_sources: 2,
-    notes: { recordPromotion: async (noteId, entry) => promotions.push({ noteId, entry }) },
   });
   const pending = await f.proposals.create(input("work-a", {
     origin: "lesson", source: { kind: "work", ref: "work-a" }, input_fingerprint: "lesson-a",
@@ -306,9 +292,7 @@ test("only awaiting proposals can be approved or rejected, and rejection suppres
   await assert.rejects(f.proposals.approve(pending.proposal_id), (error) => error.code === "invalid_state_transition");
   await assert.rejects(f.proposals.reject(pending.proposal_id), (error) => error.code === "invalid_state_transition");
 
-  const f2 = await setup(t, {
-    notes: { recordPromotion: async (noteId, entry) => promotions.push({ noteId, entry }) },
-  });
+  const f2 = await setup(t);
   const awaiting = await f2.proposals.create(input("01ARZ3NDEKTSV4RRFFQ69G5FAV:claim", {
     origin: "note",
     source: { kind: "note", ref: "01ARZ3NDEKTSV4RRFFQ69G5FAV:claim" },
@@ -317,7 +301,6 @@ test("only awaiting proposals can be approved or rejected, and rejection suppres
   const rejected = await f2.proposals.reject(awaiting.proposal_id);
   assert.equal(rejected.status, "rejected");
   assert.equal(f2.db.get("SELECT status FROM rule_proposals WHERE id=?", awaiting.proposal_id).status, "rejected");
-  assert.equal(promotions.at(-1).entry.status, "rejected");
 
   const suppressed = await f2.proposals.create(input("another-source", {
     origin: "lesson", source: { kind: "work", ref: "another-source" },

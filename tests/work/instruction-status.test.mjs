@@ -7,6 +7,7 @@ import { createUlid } from "../../packages/db/dist/index.js";
 import { createTestCore } from "../helpers/core.mjs";
 import { createTestDatabase } from "../helpers/db.mjs";
 import { waitFor } from "../helpers/wait.mjs";
+import { readOwnerReplan, setOwnerReplanStatus, writeOwnerReplan } from "../../packages/core/dist/replan-queue-store.js";
 
 // An Owner instruction is "queued" until the Manager takes it, "processing"
 // while the Manager replans, then "answered" by a Manager reply message whose
@@ -72,10 +73,7 @@ async function seedCompletedTask(db, workId) {
   });
 }
 
-const marker = (db, workId) => {
-  const row = db.get("SELECT response_json FROM idempotency_keys WHERE key = ?", `owner-replan:${workId}`);
-  return row ? JSON.parse(row.response_json) : null;
-};
+const marker = (db, workId) => readOwnerReplan(db, workId) ?? null;
 
 const instructionOf = (core, workId, messageId) => core.getWorkConversation(workId, { limit: 100 }).messages.find((m) => m.id === messageId);
 
@@ -141,7 +139,7 @@ test("a failed replan opens a Decision and answers with decision_opened; a reque
   assert.equal(marker(db, ref.workId).status, "attempted", "the marker stays for recovery");
 
   await db.createWriteLane().transact((tx) => {
-    tx.run("UPDATE idempotency_keys SET response_json = json_set(response_json, '$.status', 'queued') WHERE key = ?", `owner-replan:${ref.workId}`);
+    setOwnerReplanStatus(tx, ref.workId, "queued", new Date().toISOString());
     return null;
   });
   assert.equal(instructionOf(core, ref.workId, id).instruction.status, "queued");
@@ -170,10 +168,8 @@ test("old markers and messages without ids or metadata carry no instruction stat
   const { db, core, ref } = await setup(t, () => ({ tasks: [] }));
   const id = await postWhilePaused(core, db, ref);
   await db.createWriteLane().transact((tx) => {
-    tx.run(
-      "UPDATE idempotency_keys SET response_json = json_remove(response_json, '$.message_ids') WHERE key = ?",
-      `owner-replan:${ref.workId}`,
-    );
+    const { message_ids: _ids, ...old } = readOwnerReplan(tx, ref.workId);
+    writeOwnerReplan(tx, ref.workId, { ...old, message_ids: [] }, "replace", new Date().toISOString());
     return null;
   });
   const conversation = core.getWorkConversation(ref.workId, {});
@@ -259,11 +255,7 @@ test("after a restart an already answered A is not reprocessed; only B is", asyn
   const version = db.get("SELECT state_version AS v FROM works WHERE id = ?", ref.workId).v;
   const second = (await core.postWorkInstruction(ref.workId, envelope({ body: "And tests" }, "second", version))).data.message_id;
   await db.createWriteLane().transact((tx) => {
-    tx.run(
-      "UPDATE idempotency_keys SET response_json = json_set(response_json, '$.status', 'queued', '$.processing_answer', 'Add docs', '$.processing_kind', 'instruction', '$.processing_message_ids', json_array(?)) WHERE key = ?",
-      first,
-      `owner-replan:${ref.workId}`,
-    );
+    writeOwnerReplan(tx, ref.workId, { ...readOwnerReplan(tx, ref.workId), processing_answer: "Add docs", processing_kind: "instruction", processing_message_ids: [first] }, "replace", new Date().toISOString());
     return null;
   });
   await core.stop({ force: true });

@@ -472,3 +472,19 @@ test("send-file destination PUT saves with a server-decided name, validates, cle
   assert.equal(clearedData.default_destination, null);
   assert.deepEqual(await api.core.getAdvisorFileDestinationSettings(), { preferredProvider: null, defaultDestination: null });
 });
+
+test("DELETE with a broken percent-encoded window key returns 500 server_error", async (t) => {
+  const api = await startApi(t);
+  if (!api) return;
+  const response = await api.request("DELETE", "/advisor/windows/%E0%A4%A/channels/slack", command({}, "broken-key-delete"));
+  assert.equal(response.status, 500);
+  assert.equal((await errorOf(response)).code, "server_error");
+});
+
+test("GET /channels/{provider} has no route and returns 404 for a valid key", async (t) => {
+  const api = await startApi(t);
+  if (!api) return;
+  const created = await api.project("no-get-provider");
+  const response = await api.request("GET", channelsPath(created.project_id, "slack"));
+  assert.equal(response.status, 404);
+});

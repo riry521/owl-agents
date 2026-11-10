@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { guardConfig, guardRequest } from "./guard-client.js";
 import { createInterface } from "node:readline";
 import { redactProviderOutput } from "../../../packages/shared/dist/advisor-response.js";
 import { validateOwnApiPath } from "../../../packages/shared/dist/advisor-api-policy.js";
@@ -49,12 +49,11 @@ function loopbackBase(base: string): URL | null {
 }
 
 async function request(args: Json): Promise<{ status: number; body: unknown }> {
-  const base = process.env.OWL_GUARD_API_BASE;
-  const tokenFile = process.env.OWL_GUARD_TOKEN_FILE;
-  if (process.env.OWL_ROLE !== "advisor" || !base || !tokenFile) {
+  const guard = guardConfig({ roleVar: "OWL_ROLE", role: "advisor" });
+  if (!guard) {
     throw new ToolError("owl_api_unavailable", "Advisor の OWL_ROLE / OWL_GUARD_API_BASE / OWL_GUARD_TOKEN_FILE が設定されていません。");
   }
-  const baseUrl = loopbackBase(base);
+  const baseUrl = loopbackBase(guard.base);
   if (!baseUrl) throw new ToolError("owl_api_unavailable", "OWL_GUARD_API_BASE がループバックではありません。");
 
   const method = args.method;
@@ -78,13 +77,13 @@ async function request(args: Json): Promise<{ status: number; body: unknown }> {
 
   for (let attempt = 0; ; attempt += 1) {
     try {
-      const token = readFileSync(tokenFile, "utf8").trim();
-      const response = await fetch(target, {
+      const { response, token } = await guardRequest(guard, target, {
         method,
-        headers: { authorization: `Bearer ${token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
+        headers: body === undefined ? {} : { "content-type": "application/json" },
         body,
         redirect: "error",
-        signal: AbortSignal.timeout(Number(process.env.OWL_GUARD_API_TIMEOUT_MS) || OWL_API_MCP_TIMEOUT_MS),
+        authorizeEmptyToken: true,
+        timeoutMs: Number(process.env.OWL_GUARD_API_TIMEOUT_MS) || OWL_API_MCP_TIMEOUT_MS,
       });
       // Strip the token from the raw text so neither the JSON nor the string path can echo it back.
       const text = token ? (await response.text()).split(token).join("[redacted]") : await response.text();

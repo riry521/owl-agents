@@ -132,19 +132,26 @@ export async function runCoreTests(deps: CoreTestRunDeps, req: CoreTestRunReques
   const previous = latestTestRun(deps.db, req.scope === "task" && req.task_id !== null ? { scope: "task", task_id: req.task_id } : { scope: "work", work_id: req.work_id });
   const whole = req.settings.mode === "whole";
   const targets = whole ? null : await listTestTargets(req.root, req.settings);
-  const selected: TestSelection = whole
+  const select = (changedFiles: readonly string[]): Promise<TestSelection> => selectTests({
+    scope: req.scope,
+    root: req.root,
+    testFiles: targets?.files ?? [],
+    targets: targets ?? undefined,
+    changedFiles,
+    previous,
+    requiredTests: req.required_tests,
+    forceFull: req.force_full,
+    settings: req.settings,
+  });
+  let selected: TestSelection = whole
     ? { mode: "full", files: [WHOLE_RUN_FILE], previous_failed: [], changed_tests: [], related: [], required: [], full_reason: "whole_command", changed_files_count: req.changed_files.length }
-    : await selectTests({
-      scope: req.scope,
-      root: req.root,
-      testFiles: targets?.files ?? [],
-      targets: targets ?? undefined,
-      changedFiles: req.changed_files,
-      previous,
-      requiredTests: req.required_tests,
-      forceFull: req.force_full,
-      settings: req.settings,
-    });
+    : await select(req.changed_files);
+  // A re-check selects by what changed since the last check, which may be files no test relates to (a type-only file).
+  // Why not carry the earlier pass over instead: a passed run says nothing about tests this change set selects now, and a
+  // Task whose whole change set has no related test must still end up unchecked (code_unchecked), so select again by the whole set.
+  if (!whole && req.scope === "task" && selected.files.length === 0) {
+    selected = await select(req.work_changed_files);
+  }
   // Only the Work-level run skips quarantined files, and never one the Work touched (it may have fixed it).
   // A file holding a known failure always runs: the known failure only hides itself, and skipping the file would hide new failures in it too.
   const unitOf = (path: string): string | null => targets?.targetOf(path) ?? null;

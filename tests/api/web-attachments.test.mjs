@@ -3,7 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { createCore as createMemoryCore, ExternalCoreAdapter } from "../../apps/server/dist/core.js";
+import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { MAX_MESSAGE_ATTACHMENTS, MAX_UPLOAD_BYTES } from "../../packages/core/dist/upload-limits.js";
 import { command, createTestCore } from "../helpers/core.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
@@ -179,10 +179,12 @@ test("work attachments: upload and message go through the Work conversation, and
   assert.equal(empty.status, 400);
 });
 
-test("a Core without Web attachment support (MemoryCore) answers 503 dependency_unavailable", async (t) => {
-  const core = createMemoryCore({ version: "1.0.0", agentRunner: { start: async () => {} } });
-  const root = await tempDir(t, "owl-api-web-attachments-memory-");
-  const api = await startTestHttpServer(t, { core, webOut: root, owlRoot: root }, { token: "owner-token" });
+test("a Core without Web attachment support answers 503 dependency_unavailable", async (t) => {
+  const { root, db, core } = await createTestCore(t, { version: "api-web-attachments-503" }, { prefix: "owl-api-web-attachments-503-" });
+  const limited = Object.create(core, { uploadWebAttachment: { value: undefined } });
+  const adapter = new ExternalCoreAdapter(limited, db, root, join(root, "data"));
+  t.after(() => adapter.shutdown({ force: true, timeoutMs: 0 }).catch(() => undefined));
+  const api = await startTestHttpServer(t, { core: adapter, db, webOut: root, owlRoot: root }, { token: "owner-token" });
   if (!api) return t.skip("localhost listen is unavailable");
   const response = await upload(api, "conversations", "01ARZ3NDEKTSV4RRFFQ69G5FAV");
   assert.equal(response.status, 503);

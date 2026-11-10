@@ -23,8 +23,8 @@ const rejection = (file = "a.ts") => {
   return { outcome: "failed", report_valid: true, report: { kind: "review", ...review }, review };
 };
 const workerReport = (invocationId) => ({
-  kind: "report", schema_version: "1.0.0", invocation_id: invocationId, result: "success", work_done: "Done.", changes: [],
-  verification: { passed: true, method: "Checked." }, remaining_issues: [], next_action: "none", needs_replanning: false, question_for_manager: null,
+  kind: "report", schema_version: "1.1.0", invocation_id: invocationId, result: "success", work_done: "Done.", changes: [],
+  verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked.", integration_check: null }, remaining_issues: [], next_action: "none", needs_replanning: false, question_for_manager: null,
 });
 const runs = (db, workId) => db.all("SELECT worker_tier AS tier, model FROM agent_runs WHERE work_id = ? AND role = 'worker' ORDER BY id", workId);
 

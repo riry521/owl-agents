@@ -21,8 +21,8 @@ process.env.HOME ||= os.homedir();
 // review: Core sends the criterion to the Manager on the same Task and the
 // verdict counts toward neither review_limits nor lineage_review_attempts.
 
-const BAD_CRITERION = "The live server data directory is unchanged before and after the run.";
-const REASON = "The live server is outside the Task, so no command the Task runs can compare it.";
+const BAD_CRITERION = "A sample passed through the production intake (_v2_errors) of the locally running media-studio gives 0 errors.";
+const REASON = "The locally running media-studio is outside the Task, so no command the Task runs can reach it.";
 const GOOD_ACCEPTANCE = "A copy of the data directory made inside the Task is unchanged; verified by node --test tests/copy.test.mjs.";
 const TESTS = { ran: false, command: "none", passed: 0, failed: 0 };
 
@@ -64,7 +64,7 @@ const planTask = (text, origin, relax = false, requirement = undefined) => ({
  * The first review reports BAD_CRITERION as unprovable; the Manager rewrites it; the next review passes.
  * With alwaysDefect every review reports it, so the recovery limit is what ends the loop.
  */
-function runner({ origin = MANAGER, alwaysDefect = false, requirement = undefined } = {}) {
+function runner({ origin = MANAGER, alwaysDefect = false, requirement = undefined, toGoal = false } = {}) {
   const state = { workerCalls: 0, reviewCalls: 0, replanRequests: [] };
   return {
     state,
@@ -73,7 +73,7 @@ function runner({ origin = MANAGER, alwaysDefect = false, requirement = undefine
       if (mode === "plan") return { outcome: "success", report_valid: true, report: { event: "work.planned", tasks: [planTask(BAD_CRITERION, origin, false, requirement)] } };
       if (mode === "replan") {
         state.replanRequests.push(request);
-        return { outcome: "success", report_valid: true, report: { event: "task.replanned", tasks: [planTask(GOOD_ACCEPTANCE, origin, true)] } };
+        return { outcome: "success", report_valid: true, report: { event: "task.replanned", tasks: [toGoal ? planTask(BAD_CRITERION, origin, true, "goal") : planTask(GOOD_ACCEPTANCE, origin, true)] } };
       }
       return { outcome: "failed", message: `unexpected manager ${mode}` };
     },
@@ -159,7 +159,18 @@ test("an acceptance_defect review goes to the Manager on the same Task and is no
   assert.equal(stored[0].text, GOOD_ACCEPTANCE, "the Task's criteria were rewritten");
 });
 
-const openDecisions = (db, workId) => db.all("SELECT reason, tried, options_json FROM decisions WHERE work_id = ? AND status = 'open' AND blocked_task_ids_json != '[]'", workId);
+test("the Manager may answer an acceptance_defect by moving the named manager criterion from required to goal", async (t) => {
+  const { fake, db, workId } = await run(t, undefined, { toGoal: true });
+  const [task] = tasksOf(db, workId);
+  assert.equal(tasksOf(db, workId).length, 1, "no replacement Task was created");
+  assert.equal(fake.state.replanRequests[0].context.failed_tasks[0].failure.kind, "acceptance_defect");
+  const stored = JSON.parse(db.get("SELECT acceptance_criteria_json AS json FROM tasks WHERE id = ?", task.id).json);
+  assert.deepEqual([stored[0].text, stored[0].requirement, stored[0].origin.kind], [BAD_CRITERION, "goal", "manager"]);
+  const relaxed = db.all("SELECT payload_json FROM events WHERE work_id = ? AND type = 'criteria.relaxed'", workId).map((row) => JSON.parse(row.payload_json));
+  assert.deepEqual(relaxed.map((entry) => [entry.criterion_id, entry.original.requirement, entry.relaxed.requirement]), [["AC1", "required", "goal"]]);
+});
+
+const openDecisions =(db, workId) => db.all("SELECT reason, tried, options_json FROM decisions WHERE work_id = ? AND status = 'open' AND blocked_task_ids_json != '[]'", workId);
 const hasDecision = (_rows, db, workId) => openDecisions(db, workId).length > 0;
 
 for (const [label, origin] of [["an Owner criterion", OWNER], ["a criterion with no origin", null]]) {
@@ -239,6 +250,8 @@ test("the Reviewer prompt says when to use acceptance_defect and how it differs 
   assert.match(prompt, /verdict "acceptance_defect"/);
   assert.match(prompt, /that is fix_required/);
   assert.match(prompt, /does not count as a review attempt/);
+  assert.match(prompt, /Judge each criterion on its own/);
+  assert.match(prompt, /a service running locally, production settings or data/);
 });
 
 test("the Reviewer prompt separates goals from required criteria and asks for goal_shortfalls with a reason", () => {

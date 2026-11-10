@@ -171,12 +171,6 @@ importers:
         specifier: ^5.0.0
         version: 5.9.2
 
-  packages/providers:
-    dependencies:
-      '@owl/shared':
-        specifier: file:../shared
-        version: link:../shared
-
   packages/shared: {}
 
 packages:

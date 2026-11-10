@@ -18,16 +18,16 @@ export interface WorktreeReconcilerDeps {
   readonly db: CoreDatabase;
   readonly writeLane: WriteLane;
   readonly git: GitGateway;
-  /** Root directory holding the legacy `.owl-workspaces`; required to save a Project-less Work's outputs. */
+  /** Owl root holding the default `.owl-workspaces`; required to save a Project-less Work's outputs. */
   readonly owlRoot: string;
   /** Root directory holding `outputs/`; required to save a Project-less Work's outputs. */
   readonly dataDir: string;
-  /** Resolves Work/Task/integration workspace paths. Defaults to the legacy `<owlRoot>/.owl-workspaces` layout. */
+  /** Resolves Work/Task/integration workspace paths. Defaults to the `<owlRoot>/.owl-workspaces` layout. */
   readonly layout?: WorkspaceLayout;
 }
 
 function layoutOf(deps: WorktreeReconcilerDeps): WorkspaceLayout {
-  return deps.layout ?? WorkspaceLayout.legacyOnly(deps.owlRoot);
+  return deps.layout ?? WorkspaceLayout.underOwlRoot(deps.owlRoot);
 }
 
 export interface WorktreeReconcileScope {
@@ -415,7 +415,7 @@ async function discardMergedWorkspaces(
   if (failures.length !== previousFailureCount) return;
   const refusal = !isCompletedMergedProjectWork(deps.db, workId)
     ? `Work ${workId} is no longer completed with a recorded merge.`
-    : layout.rootOf(workRoot) === null || [".", "..", "advisor", "nightly", "test-baseline"].includes(basename(workRoot))
+    : !layout.contains(workRoot) || [".", "..", "advisor", "nightly", "test-baseline"].includes(basename(workRoot))
       ? `${workRoot} is not a Work directory under a workspaces root.`
       : null;
   if (refusal !== null) {

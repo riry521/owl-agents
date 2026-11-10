@@ -78,9 +78,9 @@ test("the agent runner selects the Codex endpoint variables for a codex-harness 
       },
     },
   });
-  const advisorInput = (provider) => ({ conversation_id: "c1", messages: [{ role: "user", content: "hi" }], system_prompt: "s", provider });
-  await runner.runAdvisor(advisorInput("orca")).catch(() => undefined);
-  await runner.runAdvisor(advisorInput("openai")).catch(() => undefined);
+  const curatorInput = (provider) => ({ proposals: [], skill_index: [], candidates: [], usages: [], with_judgement: true, provider });
+  await runner.runCurator(curatorInput("orca")).catch(() => undefined);
+  await runner.runCurator(curatorInput("openai")).catch(() => undefined);
   assert.equal(calls[0].adapter, "codex");
   assert.equal(calls[0].env[CODEX_PROVIDER_BASE_URL_ENV], "https://api.orca.test/v1");
   assert.equal(calls[0].env[CODEX_PROVIDER_API_KEY_ENV], "orca-secret-key");

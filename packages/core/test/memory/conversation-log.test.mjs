@@ -149,7 +149,7 @@ function runtimeWith(canInstruct) {
   const root = mkdtempSync(join(tmpdir(), "owl-conversation-log-rt-"));
   const db = { get: () => undefined, all: () => [], run() {}, createWriteLane: () => ({ transact: async () => undefined }) };
   const runtime = new AdvisorSessionRuntime({
-    db, sessionManager: new AdvisorSessionManager({ ...db }), memorySaver: {}, owlRoot: root,
+    db, sessionManager: new AdvisorSessionManager({ ...db }), owlRoot: root,
     providerClient: { createSession: async (request) => { requests.push(request); throw new Error("stop after capture"); } },
     git: { resolveAdvisorSessionDirectory: async () => ({ kind: "direct", cwd: root }) },
     getAdvisorSettings: () => ({ providerId: "p", harnessId: "claude", model: "m", systemPrompt: "Advisor" }),

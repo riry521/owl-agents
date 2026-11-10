@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
-import { isValidUlid } from "@owl/shared";
+import { findSecretPatterns, isValidUlid } from "@owl/shared";
+export { findSecretPatterns, maskSecrets } from "@owl/shared";
 
 /** Parser, renderer and validator for the four page templates (design §2, §6). Flat frontmatter only. */
 
@@ -361,24 +362,6 @@ export const themeTitleKey = (title: string): string => title.normalize("NFKC").
 /** themeTitleKey that also reads 「・」 as 「-」: slugifyKnowledgeName turns 「・」 into 「-」, so both spellings name one file. */
 export const pagePathKey = (path: string): string => themeTitleKey(path).replace(/・/gu, "-");
 
-const SECRET_PATTERNS: readonly (readonly [string, RegExp])[] = [
-  ["sk-", /(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{20,}/u],
-  ["xox[bp]-", /xox[bp]-[A-Za-z0-9-]{10,}/u],
-  ["ghp_", /ghp_[A-Za-z0-9]{20,}/u],
-  ["AKIA", /AKIA[0-9A-Z]{16}/u],
-];
-/** Names of the secret shapes found in `text` (never the secret itself). */
-export function findSecretPatterns(text: string): readonly string[] {
-  return SECRET_PATTERNS.filter(([, pattern]) => pattern.test(text)).map(([name]) => name);
-}
-/** Copies a JSON value with every secret shape in its strings (object keys too) replaced by `[secret:<name>]`, using the patterns findSecretPatterns names. */
-export function maskSecrets(value: unknown): unknown {
-  const maskText = (text: string): string => SECRET_PATTERNS.reduce((t, [name, pattern]) => t.replace(new RegExp(pattern.source, `${pattern.flags}g`), `[secret:${name}]`), text);
-  if (typeof value === "string") return maskText(value);
-  if (Array.isArray(value)) return value.map(maskSecrets);
-  if (typeof value === "object" && value !== null) return Object.fromEntries(Object.entries(value).map(([k, v]) => [maskText(k), maskSecrets(v)]));
-  return value;
-}
 
 /** `name.md` → `name-2.md`, `name-3.md`, … until `exists` is false. */
 export function uniqueFilename(filename: string, exists: (candidate: string) => boolean): string {

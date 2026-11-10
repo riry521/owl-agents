@@ -8,6 +8,7 @@ import ts from 'typescript';
 import { groupArchivedByDay, groupByProject, sortArchivedWorks } from '../../apps/web/lib/archive-list.mjs';
 
 import { repoRoot } from '../helpers/paths.mjs';
+const apiErrorKeys = await import('../../apps/web/lib/api-error-keys.mjs');
 const webRequire = createRequire(join(repoRoot, 'apps/web/package.json'));
 const React = webRequire('react');
 
@@ -124,6 +125,7 @@ const boardModule = compile(join(repoRoot, 'apps/web/components/BoardView.tsx'),
   '@/lib/view-loader': viewLoader,
   '@/lib/format': { ...format, boardSectionOf: () => 'done', boardSectionLabels: () => ({}), formatRelative: () => '' },
   '@/components/StateBadge': stateBadge,
+  '@/lib/api-error-keys.mjs': apiErrorKeys,
   '@/lib/i18n': i18n,
   '@/lib/work-detail-safety.mjs': { workDetailHref: (id) => `/work?id=${id}` },
   '../lib/work-summary.mjs': { workSummarySkeleton: () => null },
@@ -135,6 +137,7 @@ const archiveModule = compile(join(repoRoot, 'apps/web/components/ArchiveView.ts
   '@/lib/api-client': apiClient,
   '@/lib/view-loader': viewLoader,
   '@/lib/format': format,
+  '@/lib/api-error-keys.mjs': apiErrorKeys,
   '@/lib/i18n': i18n,
   '@/lib/work-detail-safety.mjs': { workDetailHref: (id) => `/work?id=${id}` },
   '@/lib/archive-list.mjs': { groupArchivedByDay },

@@ -9,10 +9,9 @@ import {
   readCodexCompactionSummaries,
   waitForCompactionSummary,
 } from "../../agent-runtime/dist/compaction-summary.js";
-import { KnowledgeBase } from "../dist/knowledge-base.js";
-import { MemorySaver } from "../dist/memory-saver.js";
+import { ConversationLogWriter } from "../dist/memory/conversation-log-writer.js";
+import { PageRouter } from "../dist/memory/page-router.js";
 
-const EMPTY_SHA1 = "da39a3ee";
 const CLAUDE_SUMMARY =
   "This session is being continued from a previous conversation that ran out of context.\n\nSummary:\n1. Primary Request and Intent:\n   Fix the compaction capture.";
 const CODEX_SUMMARY = "Another language model started to solve this problem and produced a summary of its thinking process.\n\n- Fixed the capture.";
@@ -47,24 +46,20 @@ async function writeCodexRollout(codexHome, threadId, message) {
 }
 
 async function saveCompaction(t, summary) {
-  const root = await tempDir(t, "owl-compaction-capture-");
-  const knowledge = new KnowledgeBase(root);
-  const result = await new MemorySaver(knowledge).saveCompactionSummary("session-1", {
-    conversationId: "conversation-1",
-    cause: "auto",
-    preTokens: null,
-    summary,
-    provider: "test-provider",
-    model: "test-model",
-    index: 1,
-    transcriptPath: null,
+  const vault = await tempDir(t, "owl-compaction-capture-");
+  const withWrite = async (fn) => fn();
+  const writer = new ConversationLogWriter({
+    knowledgeDir: () => vault, withWrite, router: new PageRouter({ knowledgeDir: () => vault, withWrite }), project: () => null,
   });
-  return { knowledge, result };
+  const saved = await writer.write({
+    sessionId: "session-1", conversationId: "conversation-1", cause: "auto", summary, transcriptPath: null,
+    provider: "test-provider", model: "test-model", index: 1,
+  });
+  return { vault, result: { path: saved.path, captured: saved.path !== null } };
 }
 
-async function savedSummary(knowledge, path) {
-  const text = await readFile(join(knowledge.knowledgeDir, path), "utf8");
-  return text.split(/^# .*\n\n/mu)[1].replace(/\n$/u, "");
+async function savedText(vault, path) {
+  return readFile(join(vault, path), "utf8");
 }
 
 test("Claude transcript summary is captured and saved verbatim", async (t) => {
@@ -76,10 +71,9 @@ test("Claude transcript summary is captured and saved verbatim", async (t) => {
   assert.equal(summary, CLAUDE_SUMMARY);
   assert.match(path, /sess-1\.jsonl$/u);
 
-  const { knowledge, result } = await saveCompaction(t, summary);
+  const { vault, result } = await saveCompaction(t, summary);
   assert.equal(result.captured, true);
-  assert.ok(!result.path.includes(EMPTY_SHA1), result.path);
-  assert.equal(await savedSummary(knowledge, result.path), CLAUDE_SUMMARY);
+  assert.ok((await savedText(vault, result.path)).includes(CLAUDE_SUMMARY));
 });
 
 test("Codex rollout summary is captured and saved verbatim", async (t) => {
@@ -88,10 +82,9 @@ test("Codex rollout summary is captured and saved verbatim", async (t) => {
   const { summary } = await waitForCompactionSummary(() => readCodexCompactionSummaries(codexHome, "thread-1"), 1, 1);
   assert.equal(summary, CODEX_SUMMARY);
 
-  const { knowledge, result } = await saveCompaction(t, summary);
+  const { vault, result } = await saveCompaction(t, summary);
   assert.equal(result.captured, true);
-  assert.ok(!result.path.includes(EMPTY_SHA1), result.path);
-  assert.equal(await savedSummary(knowledge, result.path), CODEX_SUMMARY);
+  assert.ok((await savedText(vault, result.path)).includes(CODEX_SUMMARY));
 });
 
 test("an empty Codex summary stays uncaptured and no file is written", async (t) => {
@@ -101,10 +94,9 @@ test("an empty Codex summary stays uncaptured and no file is written", async (t)
   assert.equal(summary, null);
 
   for (const empty of [summary, "", "  \n"]) {
-    const { knowledge, result } = await saveCompaction(t, empty);
+    const { vault, result } = await saveCompaction(t, empty);
     assert.deepEqual(result, { path: null, captured: false });
-    const files = await readdir(join(knowledge.knowledgeDir, "advisor", "sessions")).catch(() => []);
-    assert.deepEqual(files, []);
+    assert.deepEqual(await readdir(vault), []);
   }
 });
 

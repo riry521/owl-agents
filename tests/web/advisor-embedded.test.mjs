@@ -39,6 +39,7 @@ const overrides = {
   'remark-gfm': { __esModule: true, default: () => {} },
   '@/lib/i18n': { useLocale: () => ({ locale: 'en', t }) },
   '@/lib/advisor-windows.mjs': windowsMod,
+  '@/lib/api-error-keys.mjs': webRequire(join(repoRoot, 'apps/web/lib/api-error-keys.mjs')),
   '@/lib/advisor-file-delivery.mjs': webRequire(join(repoRoot, 'apps/web/lib/advisor-file-delivery.mjs')),
   '@/lib/advisor-awaiting.mjs': { replyArrived: () => false },
 '@/lib/advisor-indicator.mjs': webRequire(join(repoRoot, 'apps/web/lib/advisor-indicator.mjs')),

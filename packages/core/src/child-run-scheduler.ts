@@ -1,4 +1,5 @@
 import { createUlid } from "../../db/dist/index.js";
+import { LIVE_AGENT_RUN_STATUSES, recordAgentRunProcess, setAgentRunStatus, touchAgentRunOutput } from "./agent-run-state.js";
 import {
   CHILD_RUN_EFFORTS,
   CHILD_RUN_LIMITS,
@@ -297,7 +298,7 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
           runId, r.work_id, r.task_id, r.parent_agent_run_id, r.provider, r.model, r.effort, r.title, r.id, previous, now, now, now, now,
         );
         tx.run("UPDATE child_runs SET current_agent_run_id = ?, updated_at = ? WHERE id = ?", runId, now, r.id);
-        tx.run("UPDATE agent_runs SET last_output_at = ?, updated_at = ? WHERE id = ?", now, now, r.parent_agent_run_id);
+        touchAgentRunOutput(tx, r.parent_agent_run_id, now);
         return runId;
       },
       event: {
@@ -323,12 +324,7 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
         const identity = readProcessIdentity(pid);
         void writeLane.transact((tx) => {
           const now = timestamp();
-          tx.run(
-            `UPDATE agent_runs SET pid = ?, process_start_time = ?, process_cmdline_sha256 = ?,
-                    status = CASE WHEN status IN ('launch_pending','spawned') THEN 'running' ELSE status END, updated_at = ?
-              WHERE id = ? AND status IN ('launch_pending','spawned','running','cancel_requested')`,
-            pid, identity.process_start_time, identity.process_cmdline_sha256, now, runId,
-          );
+          recordAgentRunProcess(tx, runId, { pid, identity, now });
           return runId;
         }).catch((error) => console.error(`[owl-core] Failed to persist child pid for ${runId}`, error));
       },
@@ -339,7 +335,7 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
         options.onParentActivity(r.parent_agent_run_id);
         void writeLane.transact((tx) => {
           const now = timestamp();
-          tx.run("UPDATE agent_runs SET last_output_at = ?, updated_at = ? WHERE id = ? AND status IN ('launch_pending','spawned','running','cancel_requested')", now, now, runId);
+          touchAgentRunOutput(tx, runId, now, { statuses: LIVE_AGENT_RUN_STATUSES });
           return runId;
         }).catch((error) => console.error(`[owl-core] Failed to persist child output activity ${runId}`, error));
       },
@@ -416,12 +412,9 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
         const current = tx.get<{ status: string }>("SELECT status FROM agent_runs WHERE id = ?", runId);
         const cancelled = current?.status === "cancel_requested" || current?.status === "cancelled";
         const status = cancelled ? "cancelled" : result.success ? "completed" : "failed";
-        tx.run(
-          `UPDATE agent_runs SET status = ?, outcome = ?, pid = NULL, ended_at = COALESCE(ended_at, ?), updated_at = ?,
-                  usage_json = COALESCE(?, usage_json)
-            WHERE id = ? AND status IN ('launch_pending','spawned','running','cancel_requested')`,
-          status, status === "completed" ? "success" : null, now, now, usageJson(usage), runId,
-        );
+        setAgentRunStatus(tx, runId, status, {
+          now, from: LIVE_AGENT_RUN_STATUSES, endedAt: "coalesce", clearProcess: true, outcome: status === "completed" ? "success" : null, usageJson: usageJson(usage),
+        });
         if (result.provider_error) insertProviderError(tx, runId, "executor", result.provider_error);
         return { cancelled };
       },

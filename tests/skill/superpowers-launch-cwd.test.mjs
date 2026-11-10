@@ -5,7 +5,6 @@ import { test } from "node:test";
 
 import { buildArgv } from "../../packages/agent-runtime/dist/provider.js";
 import { buildStartArgv } from "../../packages/agent-runtime/dist/advisor-session-driver.js";
-import { buildWorkArgv } from "../../packages/providers/dist/argv.js";
 import { argv as executorArgv } from "../../packages/core/dist/executor.js";
 import { tempDir } from "../helpers/temp.mjs";
 
@@ -32,7 +31,6 @@ async function withInstalled(t, entries, run) {
 const launches = {
   provider: (env) => buildArgv({ adapter: "claude-cli/v1", role: "worker", model: "m", cwd: CWD, env }),
   advisor: (env) => buildStartArgv({ cwd: CWD, env, model: "m", system_prompt: "s" }, "/bin/claude", "id"),
-  providers: (env) => buildWorkArgv({ adapter: "claude-cli/v1", executablePath: "/bin/claude" }, "m", "p", { env, cwd: CWD }),
   executor: (env) => executorArgv({ provider: "claude", model: "m" }, { owlRoot: process.cwd(), env, executables: {} }, CWD),
 };
 

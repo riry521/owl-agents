@@ -1,10 +1,16 @@
+import { SubagentObserver, type HookSubagentInput } from "./subagent-observer.js";
+export type { HookSubagentInput };
+import { LIVE_AGENT_RUN_STATUSES, STARTING_AGENT_RUN_STATUSES, setAgentRunStatus } from "./agent-run-state.js";
+import { StaleAgentChecker, OWNER_STOP_ABORT } from "./stale-agent-check.js";
+import { ArtifactCapture, type WorktreeEntry } from "./artifact-capture.js";
+import { TestRunAssembler, type TestRunPlace, type TestRunResolutionWithExecutables } from "./test-run-assembly.js";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { execFile, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readdir, readFile, readlink, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm } from "node:fs/promises";
 import { createUlid, utcNow } from "../../db/dist/index.js";
-import { OUTPUT_FORMAT_INVALID_ERROR_KEY, readDesignBlocked, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, readStoredAcceptanceCriteria, type StoredAcceptanceCriterion, readStoredTaskPlanContext, requestsSpecTest, AGENT_STALE_THRESHOLD_MS,DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, designDocumentPath, designMockDirectory, isScreenDesignTask, OWL_INSTANCE_ID_ENV, reapProcessGroup, resolveInstanceId, tokenUsageOf, usageJson, type DelegationMismatchKind, type ResearchSubagentSettings, type TaskReplanTrigger, type TokenUsage } from "@owl/shared";
+import { OUTPUT_FORMAT_INVALID_ERROR_KEY, readDesignBlocked, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, readStoredAcceptanceCriteria, type StoredAcceptanceCriterion, readStoredTaskPlanContext, requestsSpecTest, DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, MODEL_SETTING_EFFORTS, designDocumentPath, designMockDirectory, isScreenDesignTask, OWL_INSTANCE_ID_ENV, createOutputCapture, runProcess, signalProcessGroup, resolveInstanceId, tokenUsageOf, usageJson, type DelegationMismatchKind, type ResearchSubagentSettings, type TaskReplanTrigger } from "@owl/shared";
 import { matchesAnyGlob } from "../../shared/dist/glob.js";
 import { taskVerificationMarker } from "./workspace-process-sweeper.js";
 import { TRANSIENT_RETRY_DELAYS_MS, TRANSIENT_RETRY_LIMIT } from "./attempt-policy";
@@ -13,88 +19,58 @@ import type { ChildRunScheduler } from "./child-run-scheduler.js";
 import { HumanReadableError, validationError } from "./errors";
 import { pendingReportResubmit, reportResubmitLimit } from "./report-resubmit";
 import { PROCESS_WAIT_EVENT, validatePendingProcess, validatePrerequisiteSpec, type PrerequisiteSpec } from "../../shared/dist/prerequisite.js";
-import {
-  ACCEPTANCE_DEFECT_EVENT,
-  ACCEPTANCE_DEFECT_VERDICT,
-  normalizeAcceptanceDefects,
-  workerAcceptanceDefects,
-  type AcceptanceDefect,
-  type AcceptanceDefectSource,
-} from "../../shared/dist/acceptance-defect.js";
+import { ACCEPTANCE_DEFECT_EVENT, ACCEPTANCE_DEFECT_VERDICT, normalizeAcceptanceDefects, workerAcceptanceDefects, type AcceptanceDefect, type AcceptanceDefectSource } from "../../shared/dist/acceptance-defect.js";
 import type { RuleStore } from "./rule-store";
-import {
-  appendEventInTransaction,
-  applyReplanInTransaction,
-  assertTaskDependencyGraph,
-  cascadeDependencyFailureInTransaction,
-  createTaskPlanInTransaction,
-  isTerminalTaskState,
-  openRemakeLimitDecisionInTransaction,
-  openTestEnvironmentDecisionInTransaction,
-  reduceTaskInTransaction,
-  reduceWorkInTransaction,
-  stopTaskForNoProgressInTransaction,
-  type ReplanApplyGuard,
-  type ReplanApplyResult,
-} from "./state-reducer";
+import { appendEventInTransaction, applyReplanInTransaction, assertTaskDependencyGraph, cascadeDependencyFailureInTransaction, createTaskPlanInTransaction, isTerminalTaskState, openRemakeLimitDecisionInTransaction, openTestEnvironmentDecisionInTransaction, reduceTaskInTransaction, reduceWorkInTransaction, stopTaskForNoProgressInTransaction, type ReplanApplyGuard, type ReplanApplyResult } from "./state-reducer";
 import { lineageReviewHistory, lineageRootOf, recordTaskChangeMeasurementInTransaction } from "./task-lineage";
-import { autoRecoveryCountsOfWork, autoRecoverySummary, criteriaRelaxationsOfWork, recordAutoRecoveryInTransaction, startAutoRecoveryInTransaction, transientRecoveryResumeAt } from "./auto-recovery";
+import { autoRecoveryCountsOfWork, criteriaRelaxationsOfWork, recordAutoRecoveryInTransaction, startAutoRecoveryInTransaction, transientRecoveryResumeAt } from "./auto-recovery";
 import { progressGuard } from "./progress-guard";
+import { storedSettingJson } from "./settings-store";
 import { HYBRID_MODE_SETTINGS_KEY } from "./types";
 import type { CriterionCheck } from "./types";
 import { runCriterionChecks, splitPlainCommand, type CriterionCheckResult } from "./criterion-checks";
 import { GitWorktreeGateway } from "./git-gateway.js";
+import { WorkspaceLayout } from "./workspace-layout.js";
 import { cloneCheck, usedCloneCheck, type RecordedCloneUse } from "./clone-check.js";
 import { prepareWorkGitTemplate, removeWorkGitTemplate } from "./work-git-template.js";
-import { processIdentityMatches, readProcessIdentity } from "./process-identity.js";
+
 import { formatRuntimeFailure } from "./error-display.js";
 import { rethrowUnlessRateLimited, type ProviderPauseController } from "./provider-pause-controller";
 import { enqueueLearningJobInTransaction } from "./learning-pipeline.js";
 import type { IndexInjector } from "./memory/index-injector.js";
 import { ContextBuilder } from "./context-builder.js";
-import { pendingExternalBlocker, taskDependencyIds } from "./task-context.js";
+import { pendingExternalBlocker } from "./task-context.js";
 import { EXTERNAL_BLOCKER_EVENT, reportedExternalBlocker, type ExternalBlocker } from "../../shared/dist/external-blocker.js";
 import { registerReviewBacklogInTransaction, settleWorkBacklogOnCompletionInTransaction } from "./review-backlog.js";
-import { assertAgentRunNotStopped, isAgentRunStopped, isStoppedAgentStatus } from "./agent-run-stop.js";
+import { assertAgentRunNotStopped, isAgentRunStopped } from "./agent-run-stop.js";
 import { clearPausedReviewerWait, readPausedReviewerWait, recordPausedReviewerWait } from "./provider-pause-reviewer-wait.js";
-import { agentCliNames, installedAgentCliMatches, listProcesses, passThroughNames, planSubagentReconciliation } from "./subagent-watcher.js";
+import { listProcesses } from "./subagent-watcher.js";
 import { evaluateWorkerCompletion, goalOnlyShortfallReport, observedSubagentsNeedingIntegration, type ObservedSubagent, type WorkerChild } from "./task-completion-gate.js";
 import { isNonBlankReason, type GoalShortfall } from "../../shared/dist/acceptance-criteria.js";
 import { goalCriterionIds, goalShortfallsFromReport, goalShortfallsOfWork, recordTaskGoalShortfalls, replaceTaskGoalShortfalls } from "./goal-shortfalls.js";
 import { NO_CORE_ACTIVITY, type CoreActivityReporter } from "./core-activity.js";
-import { childEnv, coreTestErrorOutcome, coreTestRunBrief, notApplicableTestRun, runCoreTests, workTestRunner, type CoreTestRunDeps, type CoreTestRunOutcome } from "./core-test-run.js";
-import { DEFAULT_TEST_RUN_SETTINGS, runArgvOf, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
+import { coreTestRunBrief, type CoreTestRunOutcome } from "./core-test-run.js";
+import { type TestRunSettings } from "../../shared/dist/test-run-settings.js";
 import { DEFAULT_TEST_DETECTION_RULES, type TestDetectionRules } from "./test-detection-rules.js";
-import { markerReader, reportCheckCommands, resolveTestRun, testDetectionMarkerDigest, testDetectionRulesVersion, type TestRunResolution } from "./test-detection.js";
-import { explicitTestRunDigest, isLegacyWholeSetup, readStoredTestSetup, selectTestSetupInCheckout, testExecutables, testSetupDigests, type KnownFailure, type StoredTestSetup, type TestSetupSelection } from "./test-setup.js";
+
+
 import { testSetupSettings } from "./test-setup-settings.js";
-import type { TestSetupSettings } from "../../shared/dist/test-setup-settings.js";
+
 import type { TestSetupService } from "./test-setup-service.js";
-import { execInstallQuery, gatedTestRunner } from "./test-setup-install-guard.js";
-import { latestTestRun, testRunSettingsFromJson, type TestCommandRunner } from "./test-runs.js";
+
+import { testRunSettingsFromJson, type TestCommandRunner } from "./test-runs.js";
 import { QUARANTINE_FIX_TASK_PREFIX } from "./test-quarantine.js";
 import { evaluateTaskTypePolicy, verificationPolicySettings, type TaskVerificationSpec, type TypePolicyResult } from "./task-verification-policy.js";
 import { reviewRouting } from "./assurance-settings.js";
-import { insertRequestUsageRows } from "./token-usage-report.js";
-import type { HookRequestUsage } from "../../shared/dist/token-relay.js";
+
+
 import { decideReviewRouting, effectiveReviewRequired, taskArtifactPaths, type ReviewRoutingDecision } from "./review-routing.js";
-import type {
-  AgentRunResult,
-  AgentRunner,
-  ChangedFile,
-  CoreDatabase,
-  CoreWriteLaneTransaction,
-  GitGateway,
-  JsonObject,
-  TaskPlanItem,
-  TaskRow,
-  WorkLearningInput,
-  WorkflowSnapshot,
-} from "./types";
+import type { AgentRunResult, AgentRunner, ChangedFile, CoreDatabase, CoreWriteLaneTransaction, GitGateway, JsonObject, TaskPlanItem, TaskRow, WorkLearningInput, WorkflowSnapshot } from "./types";
 import { ownerLanguage } from "./owner-language";
-import { approvedInstallArgvs, policyTestEnvironment, tagOutsideInstalls,type TestEnvironmentBlock, type TestEnvironmentFailure } from "./test-environment";
+import { policyTestEnvironment, tagOutsideInstalls, type TestEnvironmentBlock } from "./test-environment";
 import { prerequisiteExpiredBrief, testEnvironmentBrief } from "./decision-brief";
 import type { ReplanPlan } from "./replan-plan";
+import { deleteOwnerReplan } from "./replan-queue-store.js";
 import type { SkillBox } from "./skill-box";
 import { defaultOwlRoot } from "./workspace-layout.js";
 
@@ -103,14 +79,6 @@ const ACTIVE_AGENT_STATUSES = ["launch_pending", "spawned", "running", "cancel_r
 const SUBAGENT_SCAN_INTERVAL_MS = 5_000;
 /** Thrown inside a write whose auto_recovery slots are used up; the caller escalates the failure. */
 const AUTO_RECOVERY_EXHAUSTED = new Error("No auto_recovery slot is left.");
-/** Thrown inside a write that must leave no row because the Owner stopped the work it records. */
-const OWNER_STOP_ABORT = new Error("The Owner stopped this work before its result was recorded.");
-
-/** Whether `candidate` resolves to `base` itself or a path underneath it. */
-function inside(base: string, candidate: string): boolean {
-  const rel = relative(base, candidate);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
 
 /** `{ usage }` for a reducer or event payload, or nothing when no usage was reported. */
 function usagePayload(usage: unknown): JsonObject {
@@ -130,12 +98,7 @@ function isActiveAgentStatus(status: string | undefined): boolean {
   return status !== undefined && (ACTIVE_AGENT_STATUSES as readonly string[]).includes(status);
 }
 
-const MAX_CAPTURED_ARTIFACT_BYTES = 512 * 1024 * 1024;
-const MAX_CAPTURED_ARTIFACT_FILE_BYTES = 10 * 1024 * 1024;
 /** Limits of the Project-less change measurement; exceeding the entry count makes the measurement incomplete, not empty. */
-const WORKTREE_SNAPSHOT_MAX_ENTRIES = 100_000;
-const WORKTREE_SNAPSHOT_MAX_KEPT_BYTES = 64 * 1024 * 1024;
-
 type TaskChangeMeasurement = {
   files: ChangedFile[] | null;
   approximate: boolean;
@@ -152,13 +115,6 @@ async function hashWorktreeFile(root: string, path: string): Promise<string> {
     const code = (error as NodeJS.ErrnoException).code;
     return code === "ENOENT" ? "deleted" : `special:${code ?? "unknown"}`;
   }
-}
-
-interface WorktreeEntry {
-  hash: string;
-  lines: number;
-  binary: boolean;
-  text?: string;
 }
 
 const isGoalOrBeyondScope = (scope: unknown): boolean => scope === "beyond_acceptance" || scope === "goal";
@@ -188,46 +144,6 @@ export function normalizeReviewFindings(findings: readonly unknown[]): unknown[]
       : finding);
 }
 
-function mimeForPath(path: string): string {
-  const extension = path.toLowerCase().split(".").pop();
-  const types: Record<string, string> = {
-    ts: "text/typescript", tsx: "text/tsx", js: "text/javascript", jsx: "text/jsx",
-    json: "application/json", md: "text/markdown", txt: "text/plain", css: "text/css",
-    html: "text/html", yaml: "text/yaml", yml: "text/yaml", png: "image/png", jpg: "image/jpeg",
-  };
-  return types[extension ?? ""] ?? "application/octet-stream";
-}
-
-/** A SubagentStart / SubagentStop notification, or the stopped subagent's request usage. */
-export type HookSubagentInput =
-  | { readonly event: "start" | "stop"; readonly agentId: string; readonly agentType: string | null }
-  | { readonly event: "usage"; readonly agentId: string; readonly agentType: string | null; readonly requests: readonly HookRequestUsage[] };
-
-type TestRunResolutionWithExecutables = TestRunResolution & {
-  readonly executables: Record<string, string>;
-  /** Commands outside the Project that the Owner has approved in the saved setup. */
-  readonly approved_installs: readonly (readonly string[])[];
-  /** The record a passing run makes the record of this place; null when none is to be adopted. */
-  readonly adopt_record: StoredTestSetup | null;
-  /** Failures the used record knows were already failing. */
-  readonly known_failures: readonly KnownFailure[];
-};
-
-/** Where a test run happens: the Task worktree or the Work checkout. */
-interface TestRunPlace {
-  readonly scope: "work" | "task";
-  readonly work_id: string;
-  readonly task_id: string | null;
-}
-
-interface ProjectTestRunRow {
-  readonly id: string;
-  readonly canonical_path: string;
-  readonly test_run_json: string | null;
-  readonly test_run_detected_json: string | null;
-  readonly report_check_commands_json: string | null;
-  readonly setup_records: readonly StoredTestSetup[];
-}
 
 export interface ManagerReplanNeededInput {
   readonly work_id: string;
@@ -313,12 +229,18 @@ export function taskModelRole(task: {
   return task.fixer_escalated_rejections != null ? "fixer" : "worker";
 }
 
-export function resolveRoleModel(db: Pick<CoreDatabase, "get">, role: string): { model: string; provider: string; effort?: string } | undefined {
-  const row = db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", WF_MODEL_SETTINGS_KEY);
-  if (!row) return DEFAULT_ROLE_MODELS[role as keyof typeof DEFAULT_ROLE_MODELS];
+/**
+ * The one place a role's model is resolved from settings.model_settings.
+ * `anyRoleDefault` is for Core callers: a role missing from stored settings gets its default, and the Librarian borrows the Advisor's entry first.
+ * Workflow callers leave it off: only roles added after settings were first stored (designer, lead_designer, fixer) get a default, any other missing role is a settings error.
+ */
+export function resolveRoleModel(db: Pick<CoreDatabase, "get">, role: string, options: { anyRoleDefault?: boolean } = {}): { model: string; provider: string; effort?: string } | undefined {
+  const defaultFor = (name: string) => (Object.hasOwn(DEFAULT_ROLE_MODELS, name) ? DEFAULT_ROLE_MODELS[name as keyof typeof DEFAULT_ROLE_MODELS] : undefined);
+  const json = storedSettingJson(db, WF_MODEL_SETTINGS_KEY);
+  if (json === undefined) return defaultFor(role);
   let parsed: { roles?: unknown };
   try {
-    parsed = JSON.parse(row.value_json) as { roles?: unknown };
+    parsed = JSON.parse(json) as { roles?: unknown };
   } catch (error) {
     throw validationError("Stored model settings are not valid JSON.", {
       key: WF_MODEL_SETTINGS_KEY,
@@ -328,17 +250,18 @@ export function resolveRoleModel(db: Pick<CoreDatabase, "get">, role: string): {
   if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.roles)) {
     throw validationError("Stored model settings must contain a roles array.", { key: WF_MODEL_SETTINGS_KEY });
   }
-  const found = parsed.roles.find((candidate): candidate is { role?: unknown; model?: unknown; provider?: unknown; effort?: unknown } => (
+  const roles: unknown[] = parsed.roles;
+  const findRole = (name: string) => roles.find((candidate): candidate is { role?: unknown; model?: unknown; provider?: unknown; effort?: unknown } => (
     typeof candidate === "object" && candidate !== null && !Array.isArray(candidate)
-  ) && (candidate as { role?: unknown }).role === role);
-  // Settings stored before the Designer existed have no designer entry.
-  if (!found && role === "designer") return DEFAULT_ROLE_MODELS.designer;
-  if (!found && role === "lead_designer") return DEFAULT_ROLE_MODELS.lead_designer;
-  if (!found && role === "fixer") return DEFAULT_ROLE_MODELS.fixer;
+  ) && (candidate as { role?: unknown }).role === name);
+  const found = findRole(role)
+    ?? (options.anyRoleDefault && role === "librarian" ? findRole("advisor") : undefined)
+    // Settings stored before the Designer existed have no designer entry.
+    ?? (options.anyRoleDefault || role === "designer" || role === "lead_designer" || role === "fixer" ? defaultFor(role) : undefined);
   if (!found || typeof found.model !== "string" || found.model.trim().length === 0 || typeof found.provider !== "string" || found.provider.trim().length === 0) {
     throw validationError(`Stored model settings are missing a valid ${role} provider/model.`, { key: WF_MODEL_SETTINGS_KEY, role });
   }
-  if (found.effort !== undefined && (typeof found.effort !== "string" || !["low", "medium", "high", "xhigh", "max"].includes(found.effort))) {
+  if (found.effort !== undefined && (typeof found.effort !== "string" || !MODEL_SETTING_EFFORTS.includes(found.effort))) {
     throw validationError(`Stored model settings contain an invalid ${role} effort.`, { key: WF_MODEL_SETTINGS_KEY, role });
   }
   return { model: found.model, provider: found.provider.trim().toLowerCase(), effort: found.effort as string | undefined };
@@ -416,25 +339,12 @@ export class WorkflowEngine {
   private readonly gitTemplateOps = new Set<Promise<unknown>>();
   private staleCheckInterval: ReturnType<typeof setInterval> | null = null;
   private subagentScanInterval: ReturnType<typeof setInterval> | null = null;
-  private subagentScanInFlight = false;
   private readonly gatingAgentRuns = new Set<string>();
-  private readonly idleAlertedAgentRuns = new Map<string, string>();
-  /**
-   * Worker/Reviewer runs whose process looked dead on the last scan, keyed by
-   * agent_run_id. A process that just exited normally is still reflected in
-   * `pid`/identity columns for a brief window before its own exit handler
-   * clears them, so the first dead-pid observation is recorded rather than
-   * acted on; only a run whose pid is still the same one two scans later is
-   * a real orphan.
-   */
-  private readonly deadPidSeen = new Map<string, { pid: number; at: number }>();
   private readonly staleCheckIntervalMs: number;
-  /**
-   * A running agent with no output for this long raises `agent.idle`. The
-   * alert never stops the process; the provider's no-output limit, which is
-   * never shorter than this threshold, does.
-   */
-  private static readonly STALE_THRESHOLD_MS = AGENT_STALE_THRESHOLD_MS;
+  private readonly subagents: SubagentObserver;
+  private readonly staleAgents: StaleAgentChecker;
+  private readonly artifacts: ArtifactCapture;
+  private readonly testRuns: TestRunAssembler;
 
   public constructor(options: WorkflowEngineOptions) {
     this.db = options.db;
@@ -451,7 +361,7 @@ export class WorkflowEngine {
     this.owlRoot = options.owlRoot ?? defaultOwlRoot();
     this.dataDir = options.dataDir ?? join(this.owlRoot, "data");
     this.designSkill = options.designSkill ?? null;
-    this.workspaceRoot = options.workspaceRoot ?? join(this.owlRoot, ".owl-workspaces");
+    this.workspaceRoot = options.workspaceRoot ?? WorkspaceLayout.underOwlRoot(this.owlRoot).root;
     this.testCommandRunner = options.testCommandRunner;
     this.coreActivity = options.coreActivity ?? NO_CORE_ACTIVITY;
     this.testDetectionRules = options.testDetectionRules ?? DEFAULT_TEST_DETECTION_RULES;
@@ -471,6 +381,23 @@ export class WorkflowEngine {
     }
     this.globalMaxParallel = options.globalMaxParallel ?? null;
     this.staleCheckIntervalMs = options.staleCheckIntervalMs ?? 60_000;
+    this.subagents = new SubagentObserver(this.db, this.writeLane, this.gatingAgentRuns);
+    this.staleAgents = new StaleAgentChecker(this.db, this.writeLane, (...args) => this.writeFailureEvent(...args));
+    this.artifacts = new ArtifactCapture({ db: this.db, writeLane: this.writeLane, git: this.git, dataDir: this.dataDir, projectIdOf: (workId) => this.projectIdOf(workId) });
+    this.testRuns = new TestRunAssembler({
+      db: this.db,
+      writeLane: this.writeLane,
+      git: this.git,
+      workspaceRoot: this.workspaceRoot,
+      dataDir: this.dataDir,
+      testCommandRunner: this.testCommandRunner,
+      coreActivity: this.coreActivity,
+      testDetectionRules: this.testDetectionRules,
+      testSetup: this.testSetup,
+      baselineLocks: this.baselineLocks,
+      taskIsVerifying: (taskId) => this.taskIsVerifying(taskId),
+      runVerificationCommand: (...args) => this.runVerificationCommand(...args),
+    });
   }
 
   private projectIdOf(workId: string): { project_id?: string } {
@@ -502,7 +429,7 @@ export class WorkflowEngine {
     let signalled = 0;
     for (const [child, taskId] of this.verificationChildren) {
       if (!taskIds.has(taskId)) continue;
-      signalChildProcessGroup(child, signal);
+      signalProcessGroup(child, signal);
       signalled += 1;
     }
     this.testSetup?.cancelInvestigations(taskIds, signal === "SIGKILL");
@@ -518,13 +445,13 @@ export class WorkflowEngine {
     this.running = false;
     this.stopping = true;
     this.stopStaleDetection();
-    for (const child of this.verificationChildren.keys()) signalChildProcessGroup(child, "SIGKILL");
+    for (const child of this.verificationChildren.keys()) signalProcessGroup(child, "SIGKILL");
     terminateActiveExecutorsImmediately();
   }
 
   public startStaleDetection(): void {
     if (this.staleCheckInterval) return;
-    this.staleCheckInterval = setInterval(() => this.checkStaleAgents(), this.staleCheckIntervalMs);
+    this.staleCheckInterval = setInterval(() => this.staleAgents.check(), this.staleCheckIntervalMs);
     this.subagentScanInterval = setInterval(() => void this.scanSubagents(), SUBAGENT_SCAN_INTERVAL_MS);
     this.subagentScanInterval.unref?.();
   }
@@ -540,359 +467,48 @@ export class WorkflowEngine {
     }
   }
 
-  /**
-   * Record agent CLIs that running agents started by themselves (see
-   * subagent-watcher.ts) as observed executor AgentRuns, and close them when
-   * their process is gone. Works the same for every provider and harness.
-   */
-  public async scanSubagents(processes = listProcesses()): Promise<void> {
-    if (this.subagentScanInFlight || processes === null) return;
-    this.subagentScanInFlight = true;
-    try {
-      await this.closeOrphanedHookSubagents();
-      // Hook-reported children have no process; the stop hook closes them.
-      const runs = this.db.all<{ id: string; work_id: string; task_id: string | null; pid: number | null; origin: string | null }>(
-        "SELECT id, work_id, task_id, pid, origin FROM agent_runs WHERE hook_agent_id IS NULL AND status IN ('launch_pending','spawned','running','cancel_requested')",
-      );
-      if (runs.length === 0) return;
-      const plan = planSubagentReconciliation(processes, runs, agentCliNames(), installedAgentCliMatches, passThroughNames());
-      const runById = new Map(runs.map((run) => [run.id, run]));
-      for (const runId of plan.exited) {
-        const run = runById.get(runId);
-        if (!run) continue;
-        await this.writeLane.write({
-          mutateState: (transaction: CoreWriteLaneTransaction) => {
-            const now = utcNow();
-            transaction.run(
-              `UPDATE agent_runs
-                  SET status = CASE WHEN status = 'cancel_requested' THEN 'cancelled' ELSE 'exited' END,
-                      pid = NULL, ended_at = COALESCE(ended_at, ?), updated_at = ?
-                WHERE id = ? AND status IN ('launch_pending','spawned','running','cancel_requested')`,
-              now,
-              now,
-              runId,
-            );
-            return { agent_run_id: runId };
-          },
-          event: {
-            idempotencyKey: `subagent-exited:${runId}`,
-            type: "subagent.exited",
-            workId: run.work_id,
-            taskId: run.task_id,
-            agentRunId: runId,
-            payload: { agent_run_id: runId },
-          },
-          outbox: [{ provider: "websocket" }],
-        });
-      }
-      for (const found of plan.detected) {
-        const parent = runById.get(found.parent_run_id);
-        if (!parent) continue;
-        const runId = createUlid();
-        const identity = readProcessIdentity(found.pid);
-        await this.writeLane.write({
-          mutateState: (transaction: CoreWriteLaneTransaction) => {
-            const now = utcNow();
-            transaction.run(
-              `INSERT INTO agent_runs
-                 (id, work_id, task_id, parent_agent_id, role, origin, provider, model, status, label, pid,
-                  process_start_time, process_cmdline_sha256, started_at, created_at, updated_at, tool_program)
-                 VALUES (?, ?, ?, ?, 'executor', 'observed', ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?)`,
-              runId,
-              parent.work_id,
-              parent.task_id,
-              parent.id,
-              found.provider,
-              found.model ?? "unknown",
-              found.label,
-              found.pid,
-              identity.process_start_time,
-              identity.process_cmdline_sha256,
-              identity.process_start_time ?? now,
-              now,
-              now,
-              found.tool_program,
-            );
-            return { agent_run_id: runId };
-          },
-          event: {
-            idempotencyKey: `subagent-detected:${runId}`,
-            type: "subagent.detected",
-            workId: parent.work_id,
-            taskId: parent.task_id,
-            agentRunId: runId,
-            payload: {
-              agent_run_id: runId,
-              parent_agent_run_id: parent.id,
-              provider: found.provider,
-              label: found.label,
-            },
-          },
-          outbox: [{ provider: "websocket" }],
-        });
-      }
-    } catch (error) {
-      console.error("[owl-core] Subagent scan failed", error);
-    } finally {
-      this.subagentScanInFlight = false;
-    }
+
+
+
+
+
+
+
+  /** Observes agent CLIs that running agents started themselves (see SubagentObserver). */
+  public scanSubagents(processes = listProcesses()): Promise<void> {
+    return this.subagents.scanSubagents(processes);
   }
 
-  /**
-   * A Worker's own subagent as its harness reported it (SubagentStart / Stop
-   * hook). Only the id and type are kept, never the hook's prompt or other
-   * input. A repeated start or stop changes nothing. A usage upload stores
-   * the subagent's request token counts; a repeated one adds no rows.
-   */
   public recordHookSubagent(
     parentRunId: string,
     input: HookSubagentInput,
   ): Promise<{ readonly agent_run_id: string | null; readonly changed: boolean }> {
-    // One notification at a time, so the lookup and the write cannot interleave.
-    const run = this.hookSubagentChain.then(() => this.recordHookSubagentNow(parentRunId, input));
-    this.hookSubagentChain = run.then(() => undefined, () => undefined);
-    return run;
+    return this.subagents.recordHookSubagent(parentRunId, input);
   }
 
-  private hookSubagentChain: Promise<void> = Promise.resolve();
-
-  private async recordHookSubagentNow(
-    parentRunId: string,
-    input: HookSubagentInput,
-  ): Promise<{ readonly agent_run_id: string | null; readonly changed: boolean }> {
-    const parent = this.db.get<{ id: string; work_id: string; task_id: string | null; provider: string; model: string }>(
-      "SELECT id, work_id, task_id, provider, model FROM agent_runs WHERE id = ? AND role = 'worker'",
-      parentRunId,
-    );
-    if (!parent) return { agent_run_id: null, changed: false };
-    const existing = this.db.get<{ id: string; status: string }>(
-      "SELECT id, status FROM agent_runs WHERE parent_agent_id = ? AND hook_agent_id = ?",
-      parent.id,
-      input.agentId,
-    );
-    if (input.event === "usage") {
-      // Without a recorded start, the rows belong to the Worker's own run.
-      const runId = existing?.id ?? parent.id;
-      const inserted = await this.writeLane.transact((tx) => insertRequestUsageRows(tx, input.requests.map((request) => ({
-        ...request, agent_run_id: runId, work_id: parent.work_id, child_run_id: null, provider: parent.provider, subagent: true,
-      }))));
-      return { agent_run_id: runId, changed: inserted > 0 };
-    }
-    if (input.event === "start") {
-      if (existing) return { agent_run_id: existing.id, changed: false };
-      const runId = createUlid();
-      const label = input.agentType ?? "subagent";
-      await this.writeLane.write({
-        mutateState: (transaction: CoreWriteLaneTransaction) => {
-          const now = utcNow();
-          transaction.run(
-            `INSERT INTO agent_runs
-               (id, work_id, task_id, parent_agent_id, role, origin, provider, model, status, label, hook_agent_id,
-                started_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, 'executor', 'observed', ?, ?, 'running', ?, ?, ?, ?, ?)`,
-            runId, parent.work_id, parent.task_id, parent.id, parent.provider, parent.model, label, input.agentId, now, now, now,
-          );
-          return { agent_run_id: runId };
-        },
-        event: {
-          idempotencyKey: `subagent-detected:${runId}`,
-          type: "subagent.detected",
-          workId: parent.work_id,
-          taskId: parent.task_id,
-          agentRunId: runId,
-          payload: { agent_run_id: runId, parent_agent_run_id: parent.id, provider: parent.provider, label },
-        },
-        outbox: [{ provider: "websocket" }],
-      });
-      return { agent_run_id: runId, changed: true };
-    }
-    if (!existing || existing.status !== "running") return { agent_run_id: existing?.id ?? null, changed: false };
-    await this.closeHookSubagent(existing.id, parent.work_id, parent.task_id);
-    return { agent_run_id: existing.id, changed: true };
+  public runWorkCoreTests(workId: string): ReturnType<TestRunAssembler["runWorkCoreTests"]> {
+    return this.testRuns.runWorkCoreTests(workId);
   }
 
-  private async closeHookSubagent(runId: string, workId: string, taskId: string | null): Promise<void> {
-    await this.writeLane.write({
-      mutateState: (transaction: CoreWriteLaneTransaction) => {
-        const now = utcNow();
-        transaction.run(
-          "UPDATE agent_runs SET status = 'exited', ended_at = COALESCE(ended_at, ?), updated_at = ? WHERE id = ? AND status = 'running'",
-          now, now, runId,
-        );
-        return { agent_run_id: runId };
-      },
-      event: {
-        idempotencyKey: `subagent-exited:${runId}`,
-        type: "subagent.exited",
-        workId,
-        taskId,
-        agentRunId: runId,
-        payload: { agent_run_id: runId },
-      },
-      outbox: [{ provider: "websocket" }],
-    });
+  public resolveTaskTestRun(workId: string, taskId: string, worktree: string | null): ReturnType<TestRunAssembler["resolveTaskTestRun"]> {
+    return this.testRuns.resolveTaskTestRun(workId, taskId, worktree);
   }
 
-  /**
-   * Hook-reported children with no live ancestor never get a stop hook. An
-   * ancestor that is active, or whose completion gate is still running, keeps
-   * them open: a finished intermediate parent (e.g. an executor) is not enough.
-   */
-  private async closeOrphanedHookSubagents(): Promise<void> {
-    const running = this.db.all<{ id: string; work_id: string; task_id: string | null; parent_agent_id: string | null }>(
-      "SELECT id, work_id, task_id, parent_agent_id FROM agent_runs WHERE hook_agent_id IS NOT NULL AND status = 'running'",
-    );
-    const active = new Set(["launch_pending", "spawned", "running", "cancel_requested"]);
-    for (const child of running) {
-      let alive = false;
-      const seen = new Set<string>();
-      for (let id = child.parent_agent_id; id && !seen.has(id) && !alive; ) {
-        seen.add(id);
-        const row = this.db.get<{ parent_agent_id: string | null; status: string }>("SELECT parent_agent_id, status FROM agent_runs WHERE id = ?", id);
-        if (!row) break;
-        alive = active.has(row.status) || this.gatingAgentRuns.has(id);
-        id = row.parent_agent_id;
-      }
-      if (!alive) await this.closeHookSubagent(child.id, child.work_id, child.task_id);
-    }
+  // Why these stay: tests/core/test-setup-*.test.mjs call them on the engine, and those tests must pass unchanged.
+  private projectTestRunRow(...args: Parameters<TestRunAssembler["projectTestRunRow"]>): ReturnType<TestRunAssembler["projectTestRunRow"]> {
+    return this.testRuns.projectTestRunRow(...args);
   }
 
-  private checkStaleAgents(): void {
-    // Observed subagents are reconciled by scanSubagents(), and Owl cannot
-    // see their output, so neither crash nor idle detection applies to them.
-    const agents = this.db.all<{ id: string; work_id: string; task_id: string | null; role: string; status: string; pid: number | null; process_start_time: string | null; process_cmdline_sha256: string | null; last_output_at: string | null; updated_at: string }>(
-      "SELECT id, work_id, task_id, role, status, pid, process_start_time, process_cmdline_sha256, last_output_at, updated_at FROM agent_runs WHERE status IN ('launch_pending','spawned','running','cancel_requested') AND (origin IS NULL OR origin <> 'observed')",
-    );
-    const activeIds = new Set(agents.map((agent) => agent.id));
-    for (const id of this.idleAlertedAgentRuns.keys()) {
-      if (!activeIds.has(id)) this.idleAlertedAgentRuns.delete(id);
-    }
-    for (const id of this.deadPidSeen.keys()) {
-      if (!activeIds.has(id)) this.deadPidSeen.delete(id);
-    }
-    for (const run of agents) {
-      let processFailure: string | null = null;
-      if (run.pid != null && run.pid > 0) {
-        try {
-          process.kill(run.pid, 0);
-          const expected = {
-            process_start_time: run.process_start_time,
-            process_cmdline_sha256: run.process_cmdline_sha256,
-          };
-          const observed = readProcessIdentity(run.pid);
-          const identityAvailable = expected.process_start_time !== null
-            && expected.process_cmdline_sha256 !== null
-            && observed.process_start_time !== null
-            && observed.process_cmdline_sha256 !== null;
-          if (identityAvailable && !processIdentityMatches(expected, observed)) {
-            processFailure = "process_identity_mismatch";
-          }
-        } catch {
-          processFailure = "process_died_without_report";
-        }
-      }
-      // A child Executor's exit is recorded by its own close handler;
-      // reconciling it here would race that handler.
-      if (processFailure !== null && run.role === "executor") continue;
-      // A Worker/Reviewer CLI that exits normally still has its old pid on
-      // this row for a brief window before its own exit handler clears it,
-      // which a scan landing in that window would otherwise misread as a
-      // crash. Only a pid still dead on a second, later scan is a real orphan.
-      if (processFailure !== null && (run.role === "worker" || run.role === "designer" || run.role === "reviewer")) {
-        const seen = this.deadPidSeen.get(run.id);
-        if (!seen || seen.pid !== run.pid) {
-          this.deadPidSeen.set(run.id, { pid: run.pid ?? -1, at: Date.now() });
-          continue;
-        }
-        this.deadPidSeen.delete(run.id);
-      } else if (processFailure === null) {
-        this.deadPidSeen.delete(run.id);
-      }
-      if (processFailure !== null) {
-        if (run.status === "cancel_requested") {
-          void this.writeLane.write({
-            mutateState: (transaction) => {
-              const now = utcNow();
-              transaction.run(
-                "UPDATE agent_runs SET status = 'cancelled', ended_at = COALESCE(ended_at, ?), updated_at = ? WHERE id = ? AND status = 'cancel_requested'",
-                now, now, run.id,
-              );
-              return { agent_run_id: run.id, cancelled: true };
-            },
-            event: {
-              idempotencyKey: `stale-cancel:${run.id}`,
-              type: "agent.exited",
-              workId: run.work_id,
-              taskId: run.task_id,
-              agentRunId: run.id,
-              payload: { agent_run_id: run.id, outcome: "cancelled", result_ignored: true },
-            },
-            outbox: [{ provider: "websocket" }],
-          }).catch((error) => console.error(`[stale-detect] Failed to reconcile cancelled agent ${run.id}`, error));
-          continue;
-        }
-        const payload: JsonObject = {
-          role: run.role,
-          report_present: false,
-          error_key: processFailure,
-          pid: run.pid,
-        };
-        if (run.task_id && (run.role === "worker" || run.role === "designer" || run.role === "reviewer")) {
-            void this.writeFailureEvent(run.work_id, run.task_id, run.id, payload, "agent.crashed")
-              .catch((error) => console.error(`[stale-detect] Failed to reconcile crashed agent ${run.id}`, error));
-        } else {
-          void this.writeLane.write({
-            mutateState: (transaction) => {
-              const now = utcNow();
-              const changed = transaction.run(
-                "UPDATE agent_runs SET status = 'failed', ended_at = ?, updated_at = ? WHERE id = ? AND status IN ('launch_pending','spawned','running')",
-                now, now, run.id,
-              ).changes;
-              // The Owner stopped this run after the scan read it; no crash is recorded for it.
-              if (changed === 0) throw OWNER_STOP_ABORT;
-              return { agent_run_id: run.id };
-            },
-            event: {
-              idempotencyKey: `stale-crash:${run.id}`,
-              type: "agent.crashed",
-              workId: run.work_id,
-              taskId: run.task_id,
-              agentRunId: run.id,
-              payload,
-            },
-            outbox: [{ provider: "websocket" }],
-          }).catch((error) => {
-            if (error !== OWNER_STOP_ABORT) console.error(`[stale-detect] Failed to record stale agent ${run.id}`, error);
-          });
-        }
-        console.log(`[stale-detect] Agent ${run.id} (pid ${run.pid ?? "unknown"} ${processFailure}) → reconciled`);
-        continue;
-      }
-      const outputAt = Date.parse(run.last_output_at ?? run.updated_at);
-      if (!Number.isFinite(outputAt) || Date.now() - outputAt <= WorkflowEngine.STALE_THRESHOLD_MS) continue;
-      const outputMarker = run.last_output_at ?? run.updated_at;
-      if (this.idleAlertedAgentRuns.get(run.id) === outputMarker) continue;
-      this.idleAlertedAgentRuns.set(run.id, outputMarker);
-      const thresholdSeconds = Math.floor(WorkflowEngine.STALE_THRESHOLD_MS / 1000);
-      this.writeLane.write({
-        mutateState: () => ({ agent_run_id: run.id, idle: true }),
-        event: {
-          idempotencyKey: `agent-idle:${run.id}:${outputMarker}`,
-          type: "agent.idle",
-          workId: run.work_id,
-          taskId: run.task_id,
-          agentRunId: run.id,
-          payload: {
-            agent_run_id: run.id,
-            threshold_seconds: thresholdSeconds,
-            last_output_at: outputMarker,
-            action: "notify_only",
-          },
-        },
-        outbox: [{ provider: "websocket" }],
-      }).catch((error) => console.error(`[stale-detect] Failed to record idle alert for ${run.id}`, error));
-      console.log(`[stale-detect] Agent ${run.id} has produced no output for more than ${thresholdSeconds}s → alert only`);
-    }
+  private resolveProjectTestRun(...args: Parameters<TestRunAssembler["resolveProjectTestRun"]>): ReturnType<TestRunAssembler["resolveProjectTestRun"]> {
+    return this.testRuns.resolveProjectTestRun(...args);
+  }
+
+  private adoptPassedSetup(...args: Parameters<TestRunAssembler["adoptPassedSetup"]>): ReturnType<TestRunAssembler["adoptPassedSetup"]> {
+    return this.testRuns.adoptPassedSetup(...args);
+  }
+
+  private gateTestRunner(...args: Parameters<TestRunAssembler["gateTestRunner"]>): ReturnType<TestRunAssembler["gateTestRunner"]> {
+    return this.testRuns.gateTestRunner(...args);
   }
 
   public isRunning(): boolean {
@@ -930,9 +546,9 @@ export class WorkflowEngine {
 
   /**
    * Apply a validated Manager replan in ONE WriteLane transaction (see
-   * applyReplanInTransaction): new Tasks, retried Tasks (Task rows 20/20b)
-   * with their revised instructions and dependencies, replaced Tasks (row 30)
-   * with their dependents re-pointed, cascade restores (row 31) and a single
+   * applyReplanInTransaction): new Tasks, retried Tasks (task.replanned)
+   * with their revised instructions and dependencies, replaced Tasks (task.superseded)
+   * with their dependents re-pointed, cascade restores (task.dependency_restored) and a single
    * plan_revision bump. The Work state, the plan revision and every root
    * Task's status are re-checked inside the transaction; an abort
    * (REPLAN_WORK_NOT_RUNNING / REPLAN_PLAN_STALE) or any other error writes
@@ -943,7 +559,7 @@ export class WorkflowEngine {
     plan: ReplanPlan,
     guard: ReplanApplyGuard,
     reason: string,
-    consumedOwnerReplanKey?: string,
+    consumedOwnerReplan?: boolean,
     options: {
       readonly afterApply?: (transaction: CoreWriteLaneTransaction, applied: ReplanApplyResult) => void;
       readonly prerequisites?: ReadonlyMap<string, PrerequisiteSpec>;
@@ -968,13 +584,7 @@ export class WorkflowEngine {
         // The Owner's replan request that produced this plan is now applied;
         // clear it in the same transaction so a crash right after this write
         // never leaves it in limbo between attempted and queued.
-        if (consumedOwnerReplanKey !== undefined) {
-          transaction.run(
-            `DELETE FROM idempotency_keys
-              WHERE key = ? AND json_extract(response_json, '$.status') = 'attempted'`,
-            consumedOwnerReplanKey,
-          );
-        }
+        if (consumedOwnerReplan === true) deleteOwnerReplan(transaction, workId, "attempted");
         options.afterApply?.(transaction, state);
         return state;
       },
@@ -1203,7 +813,7 @@ export class WorkflowEngine {
       }
       if (prepared.created && prepared.worktree_path) this.onWorktreeCreated?.(prepared.worktree_path);
       if (prepared.worktree_path) {
-        await this.materializeDependencyArtifacts(workId, taskId, prepared.worktree_path);
+        await this.artifacts.materializeDependencyArtifacts(workId, taskId, prepared.worktree_path);
       }
       const agentRunId = createUlid();
       let writeResult;
@@ -1312,7 +922,7 @@ export class WorkflowEngine {
   }
 
   /**
-   * Fail a Task whose worktree conflicts with the Work branch (Task row 35)
+   * Fail a Task whose worktree conflicts with the Work branch before launch
    * and return the trigger to hand the Manager, or null when the Task left
    * ready/review_fix_waiting meanwhile.
    */
@@ -1483,12 +1093,7 @@ export class WorkflowEngine {
     await this.writeLane.write({
       mutateState: (transaction) => {
         const now = utcNow();
-        transaction.run(
-          "UPDATE agent_runs SET status = 'cancelled', ended_at = COALESCE(ended_at, ?), updated_at = ? WHERE id = ? AND status IN ('cancel_requested','running','spawned','launch_pending')",
-          now,
-          now,
-          agentRunId,
-        );
+        setAgentRunStatus(transaction, agentRunId, "cancelled", { now, from: LIVE_AGENT_RUN_STATUSES, endedAt: "coalesce" });
         return { agent_run_id: agentRunId, result_ignored: true };
       },
       event: {
@@ -1604,7 +1209,7 @@ export class WorkflowEngine {
         ...(designStop ? { design_stop: { ...designStop, review_history: lineageReviewHistory(this.db, taskId) as unknown as JsonObject[] } } : {}),
         ...(processSkillsPack ? { process_skills_dir: processSkillsPack.skills_dir, process_skills_source: processSkillsPack.source } : {}),
         ...(research ? { research_subagent: research as unknown as JsonObject } : {}),
-        ...(isDesigner ? {} : { report_check_commands: await this.workerReportCheckCommands(workId, taskId, taskRow?.worktree_path ?? null) }),
+        ...(isDesigner ? {} : { report_check_commands: await this.testRuns.workerReportCheckCommands(workId, taskId, taskRow?.worktree_path ?? null) }),
         ...workerContext,
       },
       ...(workerRoleModel ? {
@@ -1787,15 +1392,12 @@ export class WorkflowEngine {
   }
 
   private isHybridModeEnabled(): boolean {
-    const row = this.db.get<{ value_json: string }>(
-      "SELECT value_json FROM settings WHERE key = ?",
-      HYBRID_MODE_SETTINGS_KEY,
-    );
-    if (!row) {
+    const json = storedSettingJson(this.db, HYBRID_MODE_SETTINGS_KEY);
+    if (json === undefined) {
       return false;
     }
     try {
-      const parsed = JSON.parse(row.value_json) as unknown;
+      const parsed = JSON.parse(json) as unknown;
       if (typeof parsed !== "boolean") {
         throw new Error("hybrid_mode must be a boolean");
       }
@@ -1808,7 +1410,7 @@ export class WorkflowEngine {
     }
   }
 
-  /** Completion gate: a success claim the report itself contradicts never reaches verification or the Reviewer. */
+  /** Completion gate: a success claim with unfinished children, or with delegated work and no passed integration_check, never reaches verification or the Reviewer. Contradictions inside the report are lowered by agent-runtime. */
   private async evaluateCompletionGate(taskId: string, agentRunId: string, result: AgentRunResult, hybridAtLaunch: boolean, taskType?: string) {
     // While the gate runs, the Worker keeps its hook-detected descendants open even if it has already ended.
     this.gatingAgentRuns.add(agentRunId);
@@ -1840,7 +1442,6 @@ export class WorkflowEngine {
       hybrid: type !== "design" && hybridAtLaunch,
       delegated_work_detected: observedSubagentsNeedingIntegration(result.report, observed).length > 0,
       children,
-      goal_criterion_ids: goalCriterionIds(this.storedCriteriaOf(taskId)),
     });
   }
 
@@ -1916,7 +1517,7 @@ export class WorkflowEngine {
   }
 
   /**
-   * A partial report with pending_process is a wait, not a failure: hold the Task in waiting (row 32c) until the
+   * A partial report with pending_process is a wait, not a failure: hold the Task in waiting (task.process_wait_started) until the
    * process ends; once process_wait_max_count is used up (since the last restart of the Task's line) the same write
    * opens an Owner Decision. False (invalid shape, or waiting turned off with 0) leaves the report to be handled as an ordinary partial.
    */
@@ -2096,7 +1697,7 @@ export class WorkflowEngine {
       if (artifactTask?.type === "design") {
         if (!await this.acceptDesignDocument(workId, taskId, agentRunId, artifactTask.worktree_path, designBaseline ?? null, result.report.design_unchanged === true, usage)) return;
       } else {
-        await this.captureArtifacts(workId, taskId, agentRunId, artifactTask?.worktree_path ?? null);
+        await this.artifacts.captureArtifacts(workId, taskId, agentRunId, artifactTask?.worktree_path ?? null);
       }
       if (this.stopping) return;
       const pendingProcess = (result.report as JsonObject).pending_process;
@@ -2688,233 +2289,8 @@ export class WorkflowEngine {
     }
   }
 
-  /**
-   * A Work without a Project has no shared git history to carry a
-   * dependency's output into a dependent Task's isolated worktree, so a
-   * dependent Task otherwise starts from an empty folder. Copy the latest
-   * code/generated artifacts of this Task's completed direct dependencies
-   * into its worktree, at the same relative path they were captured at.
-   */
-  private async materializeDependencyArtifacts(workId: string, taskId: string, worktreePath: string): Promise<void> {
-    const work = this.db.get<{ project_id: string | null }>("SELECT project_id FROM works WHERE id = ?", workId);
-    if (work?.project_id) return;
-    const dependsOn = taskDependencyIds(this.db, taskId);
-    if (dependsOn.length === 0) return;
-    const taskPlaceholders = dependsOn.map(() => "?").join(",");
-    const completed = this.db.all<{ id: string }>(
-      `SELECT id FROM tasks WHERE id IN (${taskPlaceholders}) AND status = 'completed'`,
-      ...dependsOn,
-    );
-    if (completed.length === 0) return;
-    const artifactPlaceholders = completed.map(() => "?").join(",");
-    const artifacts = this.db.all<{ path: string; storage_path: string; sha256: string; task_id: string }>(
-      `SELECT a.path, a.storage_path, a.sha256, a.task_id
-         FROM artifacts a
-        WHERE a.task_id IN (${artifactPlaceholders}) AND a.kind IN ('code', 'generated')
-          AND a.version_no = (
-            SELECT MAX(version_no) FROM artifacts WHERE work_id = a.work_id AND task_id = a.task_id AND path = a.path
-          )
-        ORDER BY a.created_at ASC, a.id ASC`,
-      ...completed.map((dependency) => dependency.id),
-    );
-    if (artifacts.length === 0) return;
-    const root = resolve(worktreePath);
-    for (const artifact of artifacts) {
-      const destination = resolve(root, artifact.path);
-      if (destination === root || !inside(root, destination)) continue;
-      const contents = await readFile(artifact.storage_path).catch((error: NodeJS.ErrnoException) => {
-        console.warn(`[owl-core] Task ${taskId}: dependency artifact ${artifact.path} from Task ${artifact.task_id} could not be read, so it is not copied into the worktree:`, error);
-        return null;
-      });
-      if (!contents) continue;
-      const existing = await lstat(destination).catch(() => null); // Why not log: an unreadable destination fails at the write below.
-      if (existing?.isFile()) {
-        const existingContents = await readFile(destination);
-        if (createHash("sha256").update(existingContents).digest("hex") === artifact.sha256) continue;
-        console.warn(`[owl-core] Task ${taskId}: the dependency artifact ${artifact.path} from Task ${artifact.task_id} overwrote a different copy already in the worktree.`);
-      }
-      await mkdir(dirname(destination), { recursive: true });
-      await writeFile(destination, contents);
-    }
-  }
 
-  private async captureArtifacts(workId: string, taskId: string, agentRunId: string, worktreePath: string | null): Promise<void> {
-    if (!worktreePath) return;
-    const root = resolve(worktreePath);
-    const files: Array<{ path: string; sha256: string; bytes: number; mime: string; contents: Buffer; storage_path: string }> = [];
-    let capturedBytes = 0;
-    const capture = async (absolute: string): Promise<void> => {
-      const info = await lstat(absolute).catch((error: NodeJS.ErrnoException) => {
-        if (error.code !== "ENOENT") console.warn(`[owl-core] Task ${taskId}: artifact ${absolute} could not be inspected and is not recorded:`, error);
-        return null;
-      });
-      if (!info?.isFile()) return;
-      if (info.size > MAX_CAPTURED_ARTIFACT_FILE_BYTES || capturedBytes + info.size > MAX_CAPTURED_ARTIFACT_BYTES) {
-        console.warn(`[owl-core] Task ${taskId}: artifact ${absolute} (${info.size} bytes) exceeds the capture size limit and is not recorded.`);
-        return;
-      }
-      const contents = await readFile(absolute).catch((error: NodeJS.ErrnoException) => {
-        if (error.code !== "ENOENT") console.warn(`[owl-core] Task ${taskId}: artifact ${absolute} could not be read and is not recorded:`, error);
-        return null;
-      });
-      if (!contents) return;
-      const relPath = relative(root, absolute).split("\\").join("/");
-      const sha256 = createHash("sha256").update(contents).digest("hex");
-      const storagePath = join(this.dataDir, "artifacts", workId, taskId, sha256);
-      files.push({
-        path: relPath,
-        sha256,
-        bytes: contents.byteLength,
-        mime: mimeForPath(relPath),
-        contents,
-        storage_path: storagePath,
-      });
-      capturedBytes += contents.byteLength;
-    };
-    const visit = async (directory: string): Promise<void> => {
-      if (files.length >= 2000) return;
-      const entries = await readdir(directory, { withFileTypes: true });
-      for (const entry of entries) {
-        if (files.length >= 2000 || entry.name === ".git" || entry.name === "node_modules") continue;
-        const absolute = resolve(directory, entry.name);
-        const info = await lstat(absolute);
-        if (info.isSymbolicLink()) continue;
-        if (info.isDirectory()) await visit(absolute);
-        else await capture(absolute);
-      }
-    };
-    // In a Git Task worktree the artifacts are the files this Task changed,
-    // not the whole checkout it started from. A non-Git isolated workspace
-    // holds only what the Task produced, so it is captured as a whole.
-    const changed = await this.git.changedPaths?.({ work_id: workId, task_id: taskId, worktree_path: root }) ?? null;
-    if (changed === null) {
-      await visit(root);
-    } else {
-      for (const path of changed) {
-        if (files.length >= 2000) break;
-        const absolute = resolve(root, path);
-        if (absolute.startsWith(`${root}/`)) await capture(absolute);
-      }
-    }
-    if (files.length === 0) return;
 
-    // A Task worktree is removed after a successful review/merge. Archive
-    // content-addressed bytes before recording the metadata so the artifact
-    // row never points at a path that is about to disappear. The hash makes a
-    // repeated capture safe; a mismatching pre-existing target is refused.
-    const createdArchives: string[] = [];
-    for (const file of files) {
-      await mkdir(dirname(file.storage_path), { recursive: true, mode: 0o700 });
-      const temporary = `${file.storage_path}.${createUlid()}.tmp`;
-      try {
-        await writeFile(temporary, file.contents, { flag: "wx", mode: 0o600 });
-        await rename(temporary, file.storage_path);
-        createdArchives.push(file.storage_path);
-      } catch (error) {
-        await unlink(temporary).catch(() => undefined);
-        const existing = await lstat(file.storage_path).catch(() => null);
-        if (!existing?.isFile()) throw error;
-        const existingContents = await readFile(file.storage_path);
-        if (createHash("sha256").update(existingContents).digest("hex") !== file.sha256) {
-          throw validationError("A durable artifact path already contains different content.", { storage_path: file.storage_path });
-        }
-      }
-    }
-    const now = utcNow();
-    try {
-      await this.writeLane.write({
-        mutateState: (transaction) => {
-          let inserted = 0;
-          for (const file of files) {
-            // Scoped by work_id and path/sha256 only (not task_id): a file a
-            // dependency's artifacts already cover, and that
-            // materializeDependencyArtifacts copied into this Task's
-            // worktree unchanged, is not this Task's own artifact.
-            const exists = transaction.get<{ id: string }>(
-              "SELECT id FROM artifacts WHERE work_id = ? AND path = ? AND sha256 = ? LIMIT 1",
-              workId,
-              file.path,
-              file.sha256,
-            );
-            if (exists) continue;
-            const version = transaction.get<{ version_no: number }>(
-              "SELECT COALESCE(MAX(version_no), 0) AS version_no FROM artifacts WHERE work_id = ? AND task_id = ? AND path = ?",
-              workId,
-              taskId,
-              file.path,
-            );
-            transaction.run(
-              `INSERT INTO artifacts
-                 (id, work_id, task_id, path, kind, deliverable, sha256, bytes, mime, commit_ref, source_event_id, version_no, created_at, storage_path)
-               VALUES (?, ?, ?, ?, 'generated', 1, ?, ?, ?, NULL, NULL, ?, ?, ?)`,
-              createUlid(),
-              workId,
-              taskId,
-              file.path,
-              file.sha256,
-              file.bytes,
-              file.mime,
-              Number(version?.version_no ?? 0) + 1,
-              now,
-              file.storage_path,
-            );
-            inserted += 1;
-          }
-          return { work_id: workId, task_id: taskId, artifact_count: inserted };
-        },
-        event: {
-          // One capture per Worker run: a fix round that leaves the files as
-          // they were captures the same contents again.
-          idempotencyKey: `artifacts-captured:${taskId}:${agentRunId}`,
-          type: "artifact.created",
-          workId,
-          taskId,
-          payload: { work_id: workId, task_id: taskId, artifact_count: files.length, paths: files.map((file) => file.path) },
-        },
-        outbox: [{ provider: "websocket" }],
-      });
-    } catch (error) {
-      await Promise.all(createdArchives.map((path) => unlink(path).catch(() => undefined)));
-      throw error;
-    }
-  }
-
-  /**
-   * Snapshot of every entry under a Project-less Task worktree (symlinks and node_modules included, only the top-level .git
-   * skipped), independent of artifact capture limits. Contents are kept for small text files so edits can be counted by line.
-   */
-  private async snapshotWorktree(root: string): Promise<Map<string, WorktreeEntry>> {
-    const entries = new Map<string, WorktreeEntry>();
-    let keptBytes = 0;
-    const visit = async (directory: string): Promise<void> => {
-      for (const entry of await readdir(directory, { withFileTypes: true })) {
-        if (directory === root && entry.name === ".git") continue;
-        const absolute = resolve(directory, entry.name);
-        const info = await lstat(absolute);
-        const path = relative(root, absolute).split("\\").join("/");
-        if (info.isDirectory()) {
-          await visit(absolute);
-          continue;
-        }
-        if (entries.size >= WORKTREE_SNAPSHOT_MAX_ENTRIES) throw new Error(`more than ${WORKTREE_SNAPSHOT_MAX_ENTRIES} entries`);
-        if (info.isSymbolicLink()) {
-          entries.set(path, { hash: `link:${await readlink(absolute)}`, lines: 0, binary: true });
-        } else if (info.isFile()) {
-          const contents = await readFile(absolute);
-          const binary = contents.includes(0);
-          const text = binary ? "" : contents.toString("utf8");
-          const lines = text.length === 0 ? 0 : text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
-          const keep = !binary && keptBytes + contents.byteLength <= WORKTREE_SNAPSHOT_MAX_KEPT_BYTES;
-          if (keep) keptBytes += contents.byteLength;
-          entries.set(path, { hash: createHash("sha256").update(contents).digest("hex"), lines, binary, ...(keep ? { text } : {}) });
-        } else {
-          entries.set(path, { hash: `special:${info.mode}`, lines: 0, binary: true });
-        }
-      }
-    };
-    await visit(root);
-    return entries;
-  }
 
   /**
    * Everything the Task changed, measured independently of artifact capture limits: Git's per-file counts for a Project,
@@ -2936,7 +2312,7 @@ export class WorkflowEngine {
     if (!baseline) return { files: null, approximate: true, unmeasured_reason: "the worktree state before the Worker started was not recorded" };
     let current: Map<string, WorktreeEntry>;
     try {
-      current = await this.snapshotWorktree(resolve(task.worktree_path));
+      current = await this.artifacts.snapshotWorktree(resolve(task.worktree_path));
     } catch (error) {
       return { files: null, approximate: true, unmeasured_reason: `changes could not be measured: ${error instanceof Error ? error.message : String(error)}` };
     }
@@ -2963,7 +2339,7 @@ export class WorkflowEngine {
     const newGeneration = generation > (this.baselineGeneration.get(task.id) ?? generation);
     if (!newGeneration && (runs > 1 || this.worktreeBaselines.has(task.id))) return;
     try {
-      this.worktreeBaselines.set(task.id, await this.snapshotWorktree(resolve(task.worktree_path)));
+      this.worktreeBaselines.set(task.id, await this.artifacts.snapshotWorktree(resolve(task.worktree_path)));
       this.baselineGeneration.set(task.id, generation);
     } catch (error) {
       console.warn(`[owl-core] Could not record the worktree baseline for Task ${task.id}; review will be required.`, error);
@@ -3113,12 +2489,12 @@ export class WorkflowEngine {
       return { passed: false, worker_verification_passed: workerPassed, source: "check_commands", core_checks: "executed", commands: checks, check_commands: checks, error_key: "check_failed", error: `Check command failed: ${String(failed?.command_id)}` };
     }
     // The test setup is resolved for each run (a re-investigation changes it); Core's test run and the type policy's test commands use the last one's executables.
-    const project = hasProject && root !== null ? this.projectTestRunRow(workId, task.id) : undefined;
+    const project = hasProject && root !== null ? this.testRuns.projectTestRunRow(workId, task.id) : undefined;
     const last: { resolved: TestRunResolutionWithExecutables | null } = { resolved: null };
     type CoreTests = { outcome: CoreTestRunOutcome; settings: TestRunSettings } | null;
     const evaluate = (coreTests: CoreTests, resolved: TestRunResolutionWithExecutables | null): Promise<TypePolicyResult> => {
       const explicit = resolved?.enabled && resolved.source === "explicit"
-        ? JSON.parse(this.projectTestRunRow(workId, task.id)?.test_run_json ?? "{}") as Record<string, unknown> : {};
+        ? JSON.parse(this.testRuns.projectTestRunRow(workId, task.id)?.test_run_json ?? "{}") as Record<string, unknown> : {};
       return evaluateTaskTypePolicy({
         type: task.type,
         root,
@@ -3164,15 +2540,15 @@ export class WorkflowEngine {
     let policy: TypePolicyResult;
     if (project !== undefined && root !== null) {
       const place: TestRunPlace = { scope: "task", work_id: workId, task_id: task.id };
-      const signals = this.environmentSignals();
-      const recovered = await this.withTestSetupRecovery({
+      const signals = this.testRuns.environmentSignals();
+      const recovered = await this.testRuns.withTestSetupRecovery({
         project,
         place,
         checkout: root,
         run: async () => {
-          const row = this.projectTestRunRow(workId, task.id) ?? project;
-          last.resolved = await this.resolveTaskVerificationTestRun(row, root, place);
-          const core = task.type !== "design" ? await this.runTaskCoreTests(workId, task, root, files, spec, agentRunId, last.resolved) : null;
+          const row = this.testRuns.projectTestRunRow(workId, task.id) ?? project;
+          last.resolved = await this.testRuns.resolveTaskVerificationTestRun(row, root, place);
+          const core = task.type !== "design" ? await this.testRuns.runTaskCoreTests(workId, task, root, files, spec, agentRunId, last.resolved) : null;
           return { core, policy: await evaluate(core, last.resolved) };
         },
         // The Task's default tests (policy:test) run outside Core's test run, so their failures are classified too.
@@ -3214,11 +2590,11 @@ export class WorkflowEngine {
   private async removeUnrequestedTests(workId: string, task: TaskRow, root: string): Promise<{ error: string | null; removed: string[] }> {
     const none = { error: null, removed: [] };
     if (requestsSpecTest(readStoredAcceptanceCriteria(task.acceptance_criteria_json, task.acceptance ?? ""))) return none;
-    const project = this.projectTestRunRow(workId, task.id);
+    const project = this.testRuns.projectTestRunRow(workId, task.id);
     if (!project) return none;
     // test_patterns apply even when the Owner turned the Core test run off.
     const explicit = project.test_run_json === null ? null : testRunSettingsFromJson(project.test_run_json);
-    const resolved = explicit === null ? await this.resolveProjectTestRun(project, root, { investigate: false }) : null;
+    const resolved = explicit === null ? await this.testRuns.resolveProjectTestRun(project, root, { investigate: false }) : null;
     const patterns = explicit?.test_patterns ?? (resolved?.enabled ? resolved.settings.test_patterns : []);
     if (patterns.length === 0) return none;
     const added = await this.git.addedPaths?.({ work_id: workId, task_id: task.id, worktree_path: root }) ?? null;
@@ -3256,297 +2632,11 @@ export class WorkflowEngine {
     return results;
   }
 
-  /**
-   * Core's own run of the tests related to what the Task changed (and the ones that failed last time).
-   * null when the Project has no test_run settings; a non-Git checkout runs without a commit record.
-   */
-  private async runTaskCoreTests(workId: string, task: TaskRow, root: string, files: readonly string[], spec: TaskVerificationSpec, agentRunId: string | null, preResolved: TestRunResolutionWithExecutables | null = null): Promise<{ outcome: CoreTestRunOutcome; settings: TestRunSettings } | null> {
-    const project = this.projectTestRunRow(workId, task.id);
-    if (!project) return null;
-    const git =(args: string[]): Promise<string> => execFileAsync("git", args, { cwd: root }).then((result) => result.stdout.trim());
-    let commit: string;
-    let dirty: boolean;
-    let isGit = true;
-    try {
-      commit = await git(["rev-parse", "--verify", "HEAD^{commit}"]);
-      dirty = (await git(["status", "--porcelain"])).length > 0;
-    } catch (error) {
-      const stderr = String((error as { stderr?: unknown }).stderr ?? "");
-      if (/not a git repository/iu.test(stderr)) {
-        // Why not skip the run: the Project's test settings still decide the verification; only the commit record is empty.
-        console.warn(`[owl-core] Task ${task.id} is not in a Git checkout; running the Core tests without a commit.`);
-        commit = "";
-        dirty = false;
-        isGit = false;
-      } else {
-        // A git failure (timeout, lock, I/O) is not proof of "no checkout": fail the verification instead of skipping the tests.
-        console.error(`[owl-core] Task ${task.id}: git failed before the Core test run; verification fails.`, error);
-        const message = `Core tests could not be started because git failed: ${error instanceof Error ? error.message : String(error)}`;
-        return { outcome: { ...notApplicableTestRun(message), status: "error", error: message, reason: undefined }, settings: DEFAULT_TEST_RUN_SETTINGS };
-      }
-    }
-    const resolved = preResolved ?? await this.resolveTaskVerificationTestRun(project, root, { scope: "task", work_id: workId, task_id: task.id });
-    if (!resolved.enabled) return { outcome: notApplicableTestRun(resolved.reason), settings: DEFAULT_TEST_RUN_SETTINGS };
-    const settings = resolved.settings;
-    let baseCommit: string | null = null;
-    try {
-      // A non-Git checkout has no merge-base to compare against; git would throw here.
-      if (isGit) baseCommit = await this.git.projectBaseCommit?.({ work_id: workId, task_id: task.id, worktree_path: root }) ?? null;
-    } catch (error) {
-      return { outcome: coreTestErrorOutcome(error), settings };
-    }
-    const baseRun: TestCommandRunner = this.testCommandRunner ?? (async (argv, cwd, timeoutMs, limit) => {
-      const started = Date.now();
-      const result = await this.runVerificationCommand(task.id, argv, cwd, [...settings.env_allowlist, "HOME"], timeoutMs, limit, limit, [0], true);
-      const error = typeof result.error === "string" ? result.error : undefined;
-      return {
-        exit_code: error !== undefined || typeof result.exit_code !== "number" ? null : result.exit_code,
-        timed_out: result.timed_out === true,
-        stdout: typeof result.stdout === "string" ? result.stdout : "",
-        stderr: typeof result.stderr === "string" ? result.stderr : "",
-        duration_ms: Date.now() - started,
-        ...(error !== undefined ? { error } : {}),
-      };
-    });
-    const run = this.gateTestRunner(baseRun, resolved, [...settings.env_allowlist, "HOME"], () => [root]);
-    // Selection follows what changed since the previous check (committed or not); the Work-level change set stays cumulative.
-    const digest: Record<string, string> = {};
-    for (const file of files) {
-      digest[file] = await readFile(join(root, file)).then((data) => createHash("sha256").update(data).digest("hex"), () => "");
-    }
-    const previousRun = latestTestRun(this.db, { scope: "task", task_id: task.id });
-    const previousRow = previousRun ? this.db.get<{ selection_json: string }>("SELECT selection_json FROM test_runs WHERE id = ?", previousRun.id) : undefined;
-    const before = previousRow ? (JSON.parse(previousRow.selection_json) as { change_digest?: Record<string, string> }).change_digest : undefined;
-    const sinceChecked = before === undefined ? files : [...new Set([...Object.keys(digest), ...Object.keys(before)])].filter((file) => digest[file] !== before[file]);
-    const outcome = await runCoreTests(this.coreTestRunDeps(workId, settings, (runner) => this.gateTestRunner(runner, resolved, settings.env_allowlist, (cwd) => [cwd])), {
-      scope: "task",
-      project_id: project.id,
-      work_id: workId,
-      task_id: task.id,
-      agent_run_id: agentRunId,
-      root,
-      commit,
-      base_commit: baseCommit,
-      repo: project.canonical_path,
-      changed_files: sinceChecked,
-      change_digest: digest,
-      // The Task's worktree forks from the Work branch, so its own change set is what decides "not changed by the Work" here.
-      work_changed_files: files,
-      required_tests: spec.required_tests ?? [],
-      force_full: null,
-      dirty,
-      settings,
-      known_failures: resolved.known_failures,
-      run,
-      environment_signals: this.environmentSignals(),
-    });
-    await this.adoptPassedSetup(resolved, outcome, settings, project.id, root, { scope: "task", work_id: workId, task_id: task.id });
-    return { outcome, settings };
-  }
 
-  /**
-   * Core's test run on the integrated Work branch. The first run selects the tests related to what the Work changed
-   * against its base (the whole suite when the diff is unavailable or a full_run_pattern matches); later ones are the tests
-   * that failed last time plus those related to what changed since. Pre-existing failures are triaged and
-   * backlogged inside runCoreTests. null when the Project has no test_run settings or the checkout is unavailable.
-   */
-  public async runWorkCoreTests(workId: string): Promise<{ outcome: CoreTestRunOutcome; settings: TestRunSettings; environment_blocked: TestEnvironmentBlock | null } | null> {
-    const project = this.projectTestRunRow(workId, null);
-    const gateway = this.git;
-    if (!project || !gateway.withWorkCheckout || !gateway.diffPaths) return null;
-    const previous = latestTestRun(this.db, { scope: "work", work_id: workId });
-    let settings: TestRunSettings = DEFAULT_TEST_RUN_SETTINGS;
-    let blocked: TestEnvironmentBlock | null = null;
-    // A checkout that cannot be prepared or restored is an error outcome, never a skipped run that lets the Work proceed.
-    const outcome = await gateway.withWorkCheckout({ work_id: workId }, async (checkout) => {
-      // The re-investigation and the run again finish here, before the checkout is cleaned up.
-      const place: TestRunPlace = { scope: "work", work_id: workId, task_id: null };
-      const recovered = await this.withTestSetupRecovery({
-        project,
-        place,
-        checkout: checkout.path,
-        run: () => this.runWorkCoreTestsIn(workId, this.projectTestRunRow(workId, null) ?? project, checkout, previous, (value) => { settings = value; }),
-        environmentOf: (result) => result.environment,
-      });
-      blocked = recovered.blocked;
-      return recovered.result;
-    }).catch(coreTestErrorOutcome);
-    return outcome === null ? null : { outcome, settings, environment_blocked: blocked };
-  }
 
-  private async runWorkCoreTestsIn(
-    workId: string,
-    project: ProjectTestRunRow,
-    checkout: Parameters<NonNullable<GitWorktreeGateway["withWorkCheckout"]>>[1] extends (checkout: infer C) => unknown ? C : never,
-    previous: ReturnType<typeof latestTestRun>,
-    useSettings: (settings: TestRunSettings) => void,
-  ): Promise<CoreTestRunOutcome> {
-    const gateway = this.git;
-    {
-      const resolved = await this.resolveProjectTestRun(project, checkout.path, { investigate: true, place: { scope: "work", work_id: workId, task_id: null } });
-      if (!resolved.enabled) return notApplicableTestRun(resolved.reason);
-      const settings = resolved.settings;
-      useSettings(settings);
-      // The baseline run happens in another checkout, so its roots are the place it runs in.
-      const baseDeps = this.coreTestRunDeps(workId, settings, (runner) => this.gateTestRunner(runner, resolved, settings.env_allowlist, (cwd) => [cwd]));
-      const baseRun: TestCommandRunner = this.gateTestRunner(
-        this.testCommandRunner ?? workTestRunner({ workId, envAllowlist: settings.env_allowlist, extraEnv: testSetupSettings(this.db).run_env, instanceId: resolveInstanceId(this.dataDir) }),
-        resolved,
-        settings.env_allowlist,
-        () => [checkout.path],
-      );
-      const activity = this.coreActivity(workId, "core_tests");
-      // The baseline run (failure triage) is also Core's test command; report it so the activity does not look stalled.
-      const deps: CoreTestRunDeps = {
-        ...baseDeps,
-        baselineRunner: (argv, cwd, timeoutMs, limit) => {
-          activity.command(argv);
-          return baseDeps.baselineRunner(argv, cwd, timeoutMs, limit, () => activity.output());
-        },
-      };
-      let workChanged: readonly string[] | null;
-      let sincePrevious: readonly string[] | null;
-      try {
-        workChanged = await gateway.diffPaths!({ work_id: workId, from: checkout.base_commit, to: checkout.commit });
-        sincePrevious = previous === null ? workChanged : await gateway.diffPaths!({ work_id: workId, from: previous.commit_sha, to: checkout.commit });
-      } catch (error) {
-        await activity.end("error");
-        throw error;
-      }
-      const run: TestCommandRunner = (argv, cwd, timeoutMs, limit) => {
-        activity.command(argv);
-        return baseRun(argv, cwd, timeoutMs, limit, () => activity.output());
-      };
-      const place: TestRunPlace = { scope: "work", work_id: workId, task_id: null };
-      return runCoreTests(deps, {
-        scope: "work",
-        project_id: project.id,
-        work_id: workId,
-        task_id: null,
-        agent_run_id: null,
-        root: checkout.path,
-        commit: checkout.commit,
-        base_commit: checkout.base_commit,
-        repo: checkout.repo,
-        changed_files: sincePrevious ?? [],
-        work_changed_files: workChanged ?? [],
-        required_tests: [],
-        force_full: previous === null ? "first_work_run" : sincePrevious === null ? "diff_unavailable" : null,
-        settings,
-        known_failures: resolved.known_failures,
-        run,
-        environment_signals: this.environmentSignals(),
-      }).then(
-        async (result) => {
-          await this.adoptPassedSetup(resolved, result, settings, project.id, checkout.path, place);
-          await activity.end(result.status === "passed" || result.status === "failed" || result.status === "error" ? result.status : "done");
-          return result;
-        },
-        async (error: unknown) => { await activity.end("error"); throw error; },
-      );
-    }
-  }
 
-  /**
-   * The Project row with the setup records of this place, in the order they are tried: for a Task its own record, the Work's,
-   * the Work's other Tasks', then the Project's; for the Work (taskId null) its own, its Tasks', then the Project's.
-   */
-  private projectTestRunRow(workId: string, taskId: string | null): ProjectTestRunRow | undefined {
-    const project = this.db.get<Omit<ProjectTestRunRow, "setup_records"> & { test_setup_json: string | null }>(
-      "SELECT p.id, p.canonical_path, p.test_run_json, p.test_run_detected_json, p.report_check_commands_json, p.test_setup_json FROM projects p JOIN works w ON w.project_id = p.id WHERE w.id = ?",
-      workId,
-    );
-    if (!project) return undefined;
-    const warn = (message: string): void => console.warn(`[owl-core] ${message}`);
-    const own = taskId === null ? undefined : this.db.get<{ test_setup_json: string | null }>("SELECT test_setup_json FROM tasks WHERE id = ?", taskId);
-    const work = this.db.get<{ test_setup_json: string | null }>("SELECT test_setup_json FROM works WHERE id = ?", workId);
-    const others = this.db.all<{ test_setup_json: string | null }>(
-      "SELECT test_setup_json FROM tasks WHERE work_id = ? AND id IS NOT ? AND test_setup_json IS NOT NULL ORDER BY updated_at DESC, id",
-      workId,
-      taskId,
-    );
-    const json = taskId === null
-      ? [work?.test_setup_json, ...others.map((row) => row.test_setup_json), project.test_setup_json]
-      : [own?.test_setup_json, work?.test_setup_json, ...others.map((row) => row.test_setup_json), project.test_setup_json];
-    const setup_records = json.flatMap((text) => {
-      const record = readStoredTestSetup(text ?? null, warn);
-      return record === null ? [] : [record];
-    });
-    const { test_setup_json: _ignored, ...row } = project;
-    return { ...row, setup_records };
-  }
 
-  /** The signals that mark a test failure as the environment's; absent without an investigation service, so nothing is classified then. */
-  private environmentSignals(): TestSetupSettings["environment"] | undefined {
-    return this.testSetup?.available() === true ? testSetupSettings(this.db).environment : undefined;
-  }
 
-  /**
-   * Runs the tests; a failure that came from the environment is investigated again and the tests run again, up to
-   * `max_reinvestigations` times in this one verification (the count is not stored). `blocked` is set when the
-   * environment is still broken, or an install outside the Project waits for the Owner.
-   */
-  private async withTestSetupRecovery<T>(input: {
-    readonly project: ProjectTestRunRow;
-    readonly place: TestRunPlace;
-    readonly checkout: string;
-    readonly run: () => Promise<T>;
-    readonly environmentOf: (result: T) => TestEnvironmentFailure | null;
-  }): Promise<{ result: T; blocked: TestEnvironmentBlock | null }> {
-    const { project, place } = input;
-    const tried: string[] = [];
-    const missing: string[] = [];
-    const installs = new Map<string, { argv: readonly string[]; reason: string }>();
-    const maxRounds = testSetupSettings(this.db).max_reinvestigations;
-    let rounds = 0;
-    let result = await input.run();
-    for (;;) {
-      const failure = input.environmentOf(result);
-      const service = this.testSetup;
-      if (failure === null || service === undefined || !service.available()) return { result, blocked: null };
-      const current = this.projectTestRunRow(place.work_id, place.task_id) ?? project;
-      const explicit = current.test_run_json !== null;
-      const block = (): TestEnvironmentBlock => ({ ...failure, explicit, tried: [...tried], missing: [...missing], outside_installs: [...installs.values()] });
-      if (failure.signal === "needs_approval") {
-        for (const record of current.setup_records) {
-          for (const entry of record.outside_installs) {
-            if (typeof entry.approved_at !== "string" || entry.approved_at === "") installs.set(entry.argv.join("\0"), { argv: entry.argv, reason: entry.reason });
-          }
-        }
-        // The refused command itself is what the Owner approves, even when no investigation recorded it.
-        if (!installs.has(failure.argv.join("\0"))) installs.set(failure.argv.join("\0"), { argv: failure.argv, reason: failure.evidence });
-        return { result, blocked: block() };
-      }
-      if (rounds >= maxRounds) return { result, blocked: block() };
-      // Why not investigate anyway: an Owner stop ends the command in failure, which reads as an environment failure,
-      // and the investigation (an Agent outside agent_runs) would keep this pipeline, and so the stop, pending.
-      if (place.task_id !== null && !this.taskIsVerifying(place.task_id)) return { result, blocked: null };
-      rounds += 1;
-      const outcome = await service.investigate({
-        project_id: project.id,
-        scope: place.scope,
-        place_id: place.scope === "task" ? place.task_id ?? "" : place.work_id,
-        work_id: place.work_id,
-        ...(place.task_id === null ? {} : { task_id: place.task_id }),
-        checkout: input.checkout,
-        trigger: "environment_failure",
-        mode: explicit ? "repair_explicit" : "find",
-        failure: { argv: failure.argv, exit_code: null, signal: failure.signal, evidence: failure.evidence },
-      }).catch((error: unknown) => ({ saved: false as const, reason: error instanceof Error ? error.message : String(error) }));
-      if (!outcome.saved) {
-        tried.push(`investigation did not run: ${outcome.reason}`);
-      } else {
-        tried.push(...outcome.tried);
-        missing.push(...outcome.missing);
-        for (const install of outcome.outside_installs) installs.set(install.argv.join("\0"), install);
-        if (outcome.code_problem) return { result, blocked: null };
-        if (outcome.status === "needs_approval") return { result, blocked: block() };
-      }
-      // Why not run again: the stop cancelled the investigation, and a new run would outlive the stop.
-      if (place.task_id !== null && !this.taskIsVerifying(place.task_id)) return { result, blocked: null };
-      result = await input.run();
-    }
-  }
 
   /** The Owner Decision for a Task whose test environment could not be fixed; the Task waits in judgement_waiting without a remake. */
   private async blockOnTestEnvironment(input: { readonly workId: string; readonly taskId: string; readonly agentRunId: string; readonly block: TestEnvironmentBlock }): Promise<void> {
@@ -3602,171 +2692,20 @@ export class WorkflowEngine {
       }
       if (!report || typeof report !== "object" || Array.isArray(report)) continue;
       this.reviewerRetriesInFlight.add(taskId);
-      void this.runVerification(row.work_id, taskId, row.agent_run_id, report as JsonObject)
+      void this.runVerification(row.work_id, taskId, row.agent_run_id, withStatusFromStoredReport(report as JsonObject))
         .catch((error: unknown) => console.error(`[owl-core] Could not verify Task ${taskId} again`, error))
         .finally(() => this.reviewerRetriesInFlight.delete(taskId));
     }
   }
 
-  /** The test run of a Task's verification: a whole Project defers to the Work, so it is resolved without investigating. */
-  private async resolveTaskVerificationTestRun(project: ProjectTestRunRow, root: string, place: TestRunPlace): Promise<TestRunResolutionWithExecutables> {
-    // Why not investigate first: the investigation runs setup, prepare and the whole suite, which a whole Project leaves to the Work.
-    const known = await this.resolveProjectTestRun(project, root, { investigate: false });
-    return known.enabled && known.settings.mode === "whole" ? known : this.resolveProjectTestRun(project, root, { investigate: true, place });
-  }
 
-  /** The test run Core uses for a Task's worktree, read-only (nothing is investigated or stored); null without a Project. */
-  public async resolveTaskTestRun(workId: string, taskId: string, worktree: string | null): Promise<TestRunResolution | null> {
-    const project = this.projectTestRunRow(workId, taskId);
-    return project ? this.resolveProjectTestRun(project, worktree ?? project.canonical_path, { investigate: false }) : null;
-  }
 
-  /** Commands the Worker runs before reporting, resolved in the Task worktree; [] without a Project. */
-  private async workerReportCheckCommands(workId: string, taskId: string, worktree: string | null, options: { readonly resolvedOnly?: boolean } = {}): Promise<string[]> {
-    const project = this.projectTestRunRow(workId, taskId);
-    if (!project) return [];
-    const root = worktree ?? project.canonical_path;
-    const settings = testSetupSettings(this.db);
-    const setup = await this.selectProjectTestSetup(project, root);
-    return reportCheckCommands({
-      configured: project.report_check_commands_json === null || options.resolvedOnly === true ? [] : JSON.parse(project.report_check_commands_json) as string[],
-      explicit_json: project.test_run_json,
-      detected_json: project.test_run_detected_json,
-      root,
-      rules: this.testDetectionRules,
-      setup,
-      default_executables: settings.default_executables,
-    });
-  }
 
-  /** The record this checkout uses (null = none), by the digests of the checkout. */
-  private async selectProjectTestSetup(project: ProjectTestRunRow, root: string): Promise<TestSetupSelection | null> {
-    if (project.setup_records.length === 0) return null;
-    const rules = this.testDetectionRules;
-    return selectTestSetupInCheckout({
-      root,
-      records: project.setup_records,
-      rules_version: testDetectionRulesVersion(rules),
-      settings: testSetupSettings(this.db),
-      marker_digest: testDetectionMarkerDigest(markerReader(root, rules.max_file_bytes), rules),
-      explicitDigest: project.test_run_json === null ? null : explicitTestRunDigest(project.test_run_json),
-      max_file_bytes: rules.max_file_bytes,
-    });
-  }
 
-  /**
-   * Owner's test_run > saved setup record > saved detection > detection now (stored for the next check).
-   * `investigate` is the hook for finding a setup when none matches; no investigation exists yet, so it changes nothing.
-   */
-  private async resolveProjectTestRun(project: ProjectTestRunRow, root: string, options: { readonly investigate: boolean; readonly place?: TestRunPlace } = { investigate: true }): Promise<TestRunResolutionWithExecutables> {
-    const settings = testSetupSettings(this.db);
-    if (options.investigate && options.place !== undefined && project.test_run_json === null) {
-      project = await this.ensureTestSetup(project, root, options.place);
-    }
-    const setup = await this.selectProjectTestSetup(project, root);
-    const resolved = resolveTestRun({
-      explicit_json: project.test_run_json,
-      detected_json: project.test_run_detected_json,
-      root,
-      rules: this.testDetectionRules,
-      now: new Date().toISOString(),
-      warn: (message) => console.warn(`[owl-core] ${message}`),
-      setup,
-      default_executables: settings.default_executables,
-    });
-    if (options.investigate && resolved.save !== null) {
-      await this.writeLane.transact((tx) => {
-        tx.run("UPDATE projects SET test_run_detected_json = ? WHERE id = ? AND test_run_json IS NULL", JSON.stringify(resolved.save), project.id);
-      });
-    }
-    const approved_installs = options.place === undefined
-      ? (setup?.setup.outside_installs ?? []).filter((entry) => typeof entry.approved_at === "string" && entry.approved_at !== "").map((entry) => entry.argv)
-      : approvedInstallArgvs(this.db, options.place.work_id);
-    return { ...resolved, executables: testExecutables(setup?.setup ?? null, root, settings.default_executables), approved_installs, adopt_record: resolved.adopt_on_pass ? setup?.setup ?? null : null, known_failures: resolved.setup_match !== null || (resolved.source === "explicit" && setup?.match === "explicit") ? setup?.setup.known_failures ?? [] : [] };
-  }
 
-  /**
-   * Origin 2 of the test setup: the Project record is re-investigated (not waited for) when the canonical checkout's
-   * inputs changed; a checkout whose inputs differ from the canonical ones and that has no matching record waits for an
-   * investigation at its own place. Returns the row with the records read again.
-   */
-  private async ensureTestSetup(project: ProjectTestRunRow, root: string, place: TestRunPlace): Promise<ProjectTestRunRow> {
-    const service = this.testSetup;
-    if (service === undefined || !service.available()) return project;
-    const settings = testSetupSettings(this.db);
-    const rules = this.testDetectionRules;
-    const projectRecord = readStoredTestSetup(this.db.get<{ test_setup_json: string | null }>("SELECT test_setup_json FROM projects WHERE id = ?", project.id)?.test_setup_json ?? null);
-    const sources = projectRecord?.sources ?? [];
-    const digestsOf = (dir: string) => testSetupDigests({
-      root: dir,
-      rules_version: testDetectionRulesVersion(rules),
-      settings,
-      sources,
-      marker_digest: testDetectionMarkerDigest(markerReader(dir, rules.max_file_bytes), rules),
-      max_file_bytes: rules.max_file_bytes,
-    });
-    const sameKey = (a: { layout: string; sources: string; settings: string }, b: { layout: string; sources: string; settings: string }): boolean =>
-      a.layout === b.layout && a.sources === b.sources && a.settings === b.settings;
-    const canonical = await digestsOf(project.canonical_path);
-    if (canonical === null) return project;
-    if (projectRecord === null || !sameKey(projectRecord.digests, canonical) || isLegacyWholeSetup(projectRecord)) service.schedule(project.id, { trigger: "inputs_changed" });
-    if (root === project.canonical_path) return project;
-    const here = await digestsOf(root);
-    if (here === null || sameKey(here, canonical)) return project;
-    const selected = await this.selectProjectTestSetup(project, root);
-    if (selected !== null && selected.match !== "stale") return project;
-    await service.investigate({
-      project_id: project.id,
-      scope: place.scope,
-      place_id: place.scope === "task" ? place.task_id ?? "" : place.work_id,
-      work_id: place.work_id,
-      ...(place.task_id === null ? {} : { task_id: place.task_id }),
-      checkout: root,
-      trigger: "inputs_changed",
-    });
-    return this.projectTestRunRow(place.work_id, place.task_id) ?? project;
-  }
 
-  /** A passing run of a setup that was never confirmed for this checkout (tests changed, or it had failed before) is written as this place's record. */
-  private async adoptPassedSetup(resolved: TestRunResolutionWithExecutables, outcome: CoreTestRunOutcome, settings: TestRunSettings, projectId: string, root: string, place: TestRunPlace): Promise<void> {
-    if (this.testSetup === undefined || resolved.adopt_record === null || outcome.status !== "passed") return;
-    await this.testSetup.adopt({
-      project_id: projectId,
-      scope: place.scope,
-      place_id: place.scope === "task" ? place.task_id ?? "" : place.work_id,
-      work_id: place.work_id,
-      ...(place.task_id === null ? {} : { task_id: place.task_id }),
-      checkout: root,
-      record: resolved.adopt_record,
-      argv: runArgvOf(settings),
-    }).catch((error: unknown) => console.warn(`[owl-core] Could not save the confirmed test setup: ${error instanceof Error ? error.message : String(error)}`));
-  }
 
-  /**
-   * Stops an install outside the Project that the Owner has not approved before it starts a process.
-   * The environment the judgement assumes is the one the child process gets.
-   */
-  private gateTestRunner(run: TestCommandRunner, resolved: TestRunResolutionWithExecutables, envAllowlist: readonly string[], roots: (cwd: string) => readonly string[]): TestCommandRunner {
-    const setupSettings = testSetupSettings(this.db);
-    return gatedTestRunner(run, {
-      gate: resolved.gate,
-      roots,
-      env: childEnv(envAllowlist, setupSettings.run_env),
-      approved: resolved.approved_installs,
-      settings: setupSettings.install,
-      query: execInstallQuery(setupSettings.probe_timeout_seconds * 1000),
-    });
-  }
 
-  private coreTestRunDeps(workId: string, settings: TestRunSettings, wrap: (runner: TestCommandRunner) => TestCommandRunner = (runner) => runner): CoreTestRunDeps {
-    return {
-      db: this.db,
-      writeLane: this.writeLane,
-      workspaceRoot: this.workspaceRoot,
-      baselineRunner: wrap(this.testCommandRunner ?? workTestRunner({ workId, envAllowlist: settings.env_allowlist, extraEnv: testSetupSettings(this.db).run_env, instanceId: resolveInstanceId(this.dataDir) })),
-      baselineLocks: this.baselineLocks,
-    };
-  }
 
   /** Files this Task changed, relative to its worktree: Git's view with a Project, the captured artifacts without one. */
   private async taskChangedFiles(workId: string, task: TaskRow, root: string, hasProject: boolean): Promise<string[]> {
@@ -3791,7 +2730,7 @@ export class WorkflowEngine {
     const { limits } = verificationPolicySettings(this.db);
     // Allowed: the Project's check_commands plus what the Worker was told to run before reporting (report_check_commands or the resolved test_run).
     // report_check_commands replaces the resolved test_run for the Worker, but the Manager may still check with either.
-    const reportCommands = [...await this.workerReportCheckCommands(workId, taskId, cwd), ...await this.workerReportCheckCommands(workId, taskId, cwd, { resolvedOnly: true })].flatMap((line) => {
+    const reportCommands = [...await this.testRuns.workerReportCheckCommands(workId, taskId, cwd), ...await this.testRuns.workerReportCheckCommands(workId, taskId, cwd, { resolvedOnly: true })].flatMap((line) => {
       const argv = splitPlainCommand(line);
       return argv === null ? [] : [argv];
     });
@@ -3827,27 +2766,21 @@ export class WorkflowEngine {
     Object.assign(env, testSetupSettings(this.db).run_env);
     env[OWL_INSTANCE_ID_ENV] = resolveInstanceId(this.dataDir);
     env.OWL_AGENT_RUN_ID = taskVerificationMarker(taskId);
-    return new Promise<JsonObject>((resolveResult) => {
-      let stdout = "";
-      let stderr = "";
-      let timedOut = false;
-      const child = spawn(argv[0], argv.slice(1), { cwd, env, shell: false, detached: true, stdio: ["ignore", "pipe", "pipe"] });
-      this.verificationChildren.set(child, taskId);
-      const append = (current: string, chunk: Buffer, cap: number): string => {
-        const currentBytes = Buffer.from(current);
-        if (currentBytes.byteLength >= cap) return current;
-        return Buffer.concat([currentBytes, chunk.subarray(0, cap - currentBytes.byteLength)]).toString();
-      };
-      child.stdout.on("data", (chunk: Buffer) => { stdout = append(stdout, chunk, stdoutLimit); });
-      child.stderr.on("data", (chunk: Buffer) => { stderr = append(stderr, chunk, stderrLimit); });
-      const killGroup = (signal: "SIGTERM" | "SIGKILL"): void => {
-        if (child.pid === undefined) return;
-        try { process.kill(-child.pid, signal); } catch { try { child.kill(signal); } catch { /* process already exited */ } }
-      };
-      const timer = setTimeout(() => { timedOut = true; killGroup("SIGTERM"); setTimeout(() => killGroup("SIGKILL"), 5000).unref(); }, Math.max(1, timeoutMs));
-      child.once("error", (error) => { clearTimeout(timer); this.verificationChildren.delete(child); resolveResult({ passed: false, exit_code: -1, stdout, stderr, error: error.message }); });
-      child.once("close", (code, signal) => { clearTimeout(timer); this.verificationChildren.delete(child); void reapProcessGroup(child.pid); resolveResult({ passed: !timedOut && signal === null && expectedExitCodes.includes(code ?? -1), exit_code: code ?? -1, signal, stdout, stderr, timed_out: timedOut }); });
+    const stdout = createOutputCapture(stdoutLimit, "tail");
+    const stderr = createOutputCapture(stderrLimit, "tail");
+    const run = await runProcess(argv[0]!, argv.slice(1), {
+      cwd,
+      env,
+      timeoutMs: Math.max(1, timeoutMs),
+      killGraceMs: 5000,
+      reapOnClose: true,
+      onSpawn: (child) => { this.verificationChildren.set(child, taskId); },
+      onSettled: (child) => { this.verificationChildren.delete(child); },
+      onData: (stream, chunk) => (stream === "stdout" ? stdout : stderr).push(chunk),
     });
+    if (run.spawnThrew) throw new Error(run.error);
+    if (run.error !== undefined) return { passed: false, exit_code: -1, stdout: stdout.text(), stderr: stderr.text(), error: run.error };
+    return { passed: !run.timedOut && run.signal === null && expectedExitCodes.includes(run.code ?? -1), exit_code: run.code ?? -1, signal: run.signal, stdout: stdout.text(), stderr: stderr.text(), timed_out: run.timedOut };
   }
 
   private async runReviewer(
@@ -3874,12 +2807,7 @@ export class WorkflowEngine {
     await this.writeLane.write({
       mutateState: (transaction) => {
         const now = utcNow();
-        transaction.run(
-          "UPDATE agent_runs SET status = 'cancelled', ended_at = COALESCE(ended_at, ?), updated_at = ? WHERE id = ? AND status IN ('launch_pending','spawned','running','cancel_requested')",
-          now,
-          now,
-          reviewerAgentRunId,
-        );
+        setAgentRunStatus(transaction, reviewerAgentRunId, "cancelled", { now, from: LIVE_AGENT_RUN_STATUSES, endedAt: "coalesce" });
         return { agent_run_id: reviewerAgentRunId, result_ignored: true };
       },
       event: {
@@ -3928,7 +2856,7 @@ export class WorkflowEngine {
         if (task?.status === "verifying") {
           // The Reviewer itself failed (provider or contract error): no
           // finding was produced, so this must not consume a review round.
-          // Use the Reviewer crash path (Task row 29), which is bounded by
+          // Use the Reviewer crash path (Reviewer failure), which is bounded by
           // tasks.reviewer_failure_count (REVIEWER_FAILURE_LIMIT) instead.
           const formatInvalid = (error as { details?: { error_key?: unknown } } | null)?.details?.error_key === OUTPUT_FORMAT_INVALID_ERROR_KEY;
           const reduction = reduceTaskInTransaction(transaction, taskId, {
@@ -3938,12 +2866,7 @@ export class WorkflowEngine {
           managerTrigger = reduction.manager_trigger;
         }
         if (reviewer && ["launch_pending", "spawned", "running", "cancel_requested"].includes(reviewer.status)) {
-          transaction.run(
-            "UPDATE agent_runs SET status = 'failed', ended_at = ?, updated_at = ? WHERE id = ? AND status IN ('launch_pending','spawned','running')",
-            utcNow(),
-            utcNow(),
-            reviewer.id,
-          );
+          setAgentRunStatus(transaction, reviewer.id, "failed", { now: utcNow(), from: STARTING_AGENT_RUN_STATUSES });
         }
         return { task_id: taskId, reviewer_agent_run_id: reviewer?.id ?? null, error: message };
       },
@@ -4121,7 +3044,7 @@ export class WorkflowEngine {
         mutateState: (transaction) => {
           assertAgentRunNotStopped(transaction, reviewerAgentRunId);
           const now = utcNow();
-          transaction.run("UPDATE agent_runs SET status = 'exited', ended_at = ?, updated_at = ? WHERE id = ? AND status = 'running'", now, now, reviewerAgentRunId);
+          setAgentRunStatus(transaction, reviewerAgentRunId, "exited", { now, from: ["running"] });
           recordPausedReviewerWait(transaction, taskId, reviewerProvider, now);
           return { agent_run_id: reviewerAgentRunId, provider_paused: true };
         },
@@ -4197,7 +3120,7 @@ export class WorkflowEngine {
         mutateState: (transaction) => {
           assertAgentRunNotStopped(transaction, reviewerAgentRunId);
           const now = utcNow();
-          transaction.run("UPDATE agent_runs SET status = 'exited', ended_at = ?, updated_at = ?, usage_json = COALESCE(?, usage_json) WHERE id = ? AND status = 'running'", now, now, usageJson(result.usage), reviewerAgentRunId);
+          setAgentRunStatus(transaction, reviewerAgentRunId, "exited", { now, from: ["running"], usageJson: usageJson(result.usage) });
           recordPausedReviewerWait(transaction, taskId, provider, now);
           return payload;
         },
@@ -4273,7 +3196,7 @@ export class WorkflowEngine {
     }
     // A Reviewer replan_required verdict is escalated to the Manager
     // instead of being downgraded to fix_required: see the manager_trigger
-    // check on reviewWriteResult below, and TASK_TRANSITION_TABLE row 28.
+    // check on reviewWriteResult below, and the replan_required review verdict.
     const rawFindings = reviewObject.findings;
     const tests = reviewObject.tests;
     if (!Array.isArray(rawFindings) || !tests || typeof tests !== "object" || Array.isArray(tests)) {
@@ -4348,7 +3271,7 @@ export class WorkflowEngine {
       mutateState: (transaction: CoreWriteLaneTransaction) => {
         const reduction = reduceTaskInTransaction(transaction, taskId, { event, payload: reviewPayload });
         // reviews.round is a per-Task sequence, not tasks.review_round: a
-        // Manager replan resets review_round to 0 (Task row 20), and reusing
+        // Manager replan resets review_round to 0 (task.replanned), and reusing
         // it here would collide with UNIQUE (task_id, round) of the earlier
         // plan's review rows. Readers take the latest review by round DESC.
         transaction.run(
@@ -4363,17 +3286,13 @@ export class WorkflowEngine {
           JSON.stringify({ report, review: storedReview }),
           utcNow(),
         );
-        const agentUpdate = transaction.run(
-          `UPDATE agent_runs
-              SET status = 'completed', outcome = ?, ended_at = ?, updated_at = ?, usage_json = COALESCE(?, usage_json)
-            WHERE id = ? AND status = 'running'`,
-          verdict === "pass" ? "success" : verdict === "replan_required" ? "replan" : "redo",
-          utcNow(),
-          utcNow(),
-          usageJson(result.usage),
-          reviewerAgentRunId,
-        );
-        if (agentUpdate.changes !== 1) {
+        const agentUpdateChanges = setAgentRunStatus(transaction, reviewerAgentRunId, "completed", {
+          now: utcNow(),
+          from: ["running"],
+          outcome: verdict === "pass" ? "success" : verdict === "replan_required" ? "replan" : "redo",
+          usageJson: usageJson(result.usage),
+        });
+        if (agentUpdateChanges !== 1) {
           throw new HumanReadableError({
             code: "reviewer_run_not_found",
             message: "The Reviewer run disappeared before its result was recorded.",
@@ -4515,14 +3434,25 @@ export class WorkflowEngine {
 
 /**
  * Whether an agent report's own verification passed: `verification.status` is
- * "passed" (schema 1.1.0), or the legacy 1.0.0 `verification.passed` is true.
- * failed and blocked both count as not passed.
+ * "passed". failed and blocked both count as not passed.
  */
 function reportedVerificationPassed(report: JsonObject): boolean {
   const verification = report.verification;
   if (verification === null || typeof verification !== "object" || Array.isArray(verification)) return false;
-  const { status, passed } = verification as JsonObject;
-  return status === undefined ? passed === true : status === "passed";
+  return (verification as JsonObject).status === "passed";
+}
+
+/**
+ * A report read back from the DB may be schema 1.0.0 (`verification.passed`, no `status`).
+ * The conversion lives here, at the stored-report boundary, so that the pass decision
+ * above stays `status`-only for new reports.
+ */
+function withStatusFromStoredReport(report: JsonObject): JsonObject {
+  const verification = report.verification;
+  if (verification === null || typeof verification !== "object" || Array.isArray(verification)) return report;
+  const stored = verification as JsonObject;
+  if (stored.status !== undefined || typeof stored.passed !== "boolean") return report;
+  return { ...report, verification: { ...stored, status: stored.passed ? "passed" : "failed" } };
 }
 
 /** Identity of a design document on disk, to tell whether an attempt rewrote it. */
@@ -4594,15 +3524,6 @@ function resolveMaxParallel(explicit: number | undefined): number | null {
     return configured;
   }
   throw validationError("OWL_CORE_MAX_PARALLEL must be a positive integer when set.", { value: envValue });
-}
-
-function signalChildProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (child.pid === undefined || child.pid <= 0) return;
-  try {
-    process.kill(-child.pid, signal);
-  } catch {
-    try { child.kill(signal); } catch { /* child has already exited */ }
-  }
 }
 
 /** The recorded stop of a design Task for the stop-report run's context; null when none or unreadable. */

@@ -13,11 +13,9 @@ const finishedHeader = "Recently finished Works (completed or cancelled; newest 
 async function fixture(t, label, { providerClient } = {}) {
   const root = await tempDir(t, `owl-advisor-work-context-${label}-`);
   const db = createTestDatabase(root);
-  const requests = [];
   const core = createCore({
     db,
     agentRunner: {
-      runAdvisor: async (request) => { requests.push(request); return { reply: "" }; },
       runManagerPlan: async () => ({ outcome: "failed" }),
       runWorker: async () => ({ outcome: "failed" }),
       runReviewer: async () => ({ outcome: "failed" }),
@@ -32,7 +30,7 @@ async function fixture(t, label, { providerClient } = {}) {
     await core.stop({ force: true }).catch(() => {});
     db.close();
   });
-  return { root, db, core, conversation, requests };
+  return { root, db, core, conversation };
 }
 
 async function addProject(db, name = "Context Project") {
@@ -151,31 +149,6 @@ test("Work catalog applies the active and recently finished limits", async (t) =
   assert.equal(active[0].title, "Active 50");
   assert.equal(finished[0].title, "Finished 10");
   assert.match(block, /More active Works exist than are listed \(showing the 50 most recently updated\)/u);
-});
-
-test("web and Slack Advisor turns receive a fresh Work catalog in system_prompt", async (t) => {
-  const { db, core, conversation, requests } = await fixture(t, "turns");
-  const projectId = await addProject(db, "Turn Project");
-  const workId = await addWork(db, { state: "paused", title: "Current Work", projectId });
-
-  const webMessageId = await addUserMessage(db, conversation.conversation_id, "web");
-  await core.advisorRespond(conversation.conversation_id, webMessageId, { channel: "web" });
-  const webPrompt = requests[0].system_prompt;
-  assert.match(webPrompt, /<owl-project-search>/u);
-  assert.match(webPrompt, /<owl-work-search>/u);
-  assert.match(webPrompt, new RegExp(workId, "u"));
-  assert.match(webPrompt, /Turn Project/u);
-
-  const latestWorkId = await addWork(db, { state: "running", title: "Added before Slack turn", projectId });
-  const slackMessageId = await addUserMessage(db, conversation.conversation_id, "slack");
-  await core.advisorRespond(conversation.conversation_id, slackMessageId, { channel: "slack" });
-  const slackPrompt = requests[1].system_prompt;
-  assert.match(slackPrompt, /<owl-project-search>/u);
-  assert.match(slackPrompt, /<owl-work-search>/u);
-  assert.match(slackPrompt, new RegExp(workId, "u"));
-  assert.match(slackPrompt, new RegExp(latestWorkId, "u"));
-  assert.match(slackPrompt, /Turn Project/u);
-  assert.equal(requests.length, 2);
 });
 
 test("persistent web and Slack turns receive the latest Work catalog", async (t) => {

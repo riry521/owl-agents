@@ -12,6 +12,7 @@ import { withNecessity } from "../helpers/necessity.mjs";
 import { migrationsDir } from "../helpers/paths.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 import { waitFor } from "../helpers/wait.mjs";
+import { readManagerTrigger } from "../../packages/core/dist/replan-queue-store.js";
 
 // Reviewer failures are counted in tasks.reviewer_failure_count, which
 // Worker starts and successes never reset, and a Manager replan gives the
@@ -55,12 +56,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 function workerReport(invocationId) {
   return {
     kind: "report",
-    schema_version: "1.0.0",
+    schema_version: "1.1.0",
     invocation_id: invocationId,
     result: "success",
     work_done: "Done.",
     changes: [],
-    verification: { passed: true, method: "Checked." },
+    verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked.", integration_check: null },
     remaining_issues: [],
     next_action: "none",
     needs_replanning: false,
@@ -148,7 +149,7 @@ test("a Reviewer that always fails stops the Task after three Reviewer failures 
   assert.equal(task.last_error_key, null);
   // A Reviewer failure produced no finding, so it consumed no review round.
   assert.equal(task.review_round, 0);
-  assert.ok(db.get("SELECT key FROM idempotency_keys WHERE key = ?", `manager-trigger:${task.id}`), "a manager-trigger row exists");
+  assert.ok(readManagerTrigger(db, task.id), "a manager-trigger row exists");
   assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE task_id = ? AND type = 'review.failed'", task.id).n, 3);
 });
 
@@ -289,7 +290,7 @@ const workerSuccess = { event: "agent.exited", payload: { outcome: "success", re
 
 test("Worker success no longer erases Reviewer failures", () => {
   let row = taskRow();
-  // Row 29, then rows 19/2 (task.started) and 4 (agent.exited success): twice.
+  // Reviewer failure, then task.started and agent.exited (success): twice.
   for (const expected of [1, 2]) {
     const crashed = reduceTask(row, reviewerCrash);
     assert.equal(crashed.next.status, "review_fix_waiting");
@@ -519,7 +520,7 @@ test("the first review_budget_exceeded opens no Decision and queues a budget_exh
   await fail();
   assert.equal(db.get("SELECT status FROM tasks WHERE id = 'T1'").status, "failed");
   assert.equal(decisions(), 0, "the first budget stop opens no Decision");
-  assert.equal(JSON.parse(db.get("SELECT response_json FROM idempotency_keys WHERE key = 'manager-trigger:T1'").response_json).budget_recovery, true);
+  assert.equal(readManagerTrigger(db, "T1").budget_recovery, true);
   assert.deepEqual(recoveries().map((r) => [r.kind, r.action]), [["budget_exhausted", "replan_different_approach"]]);
 
   // A replan gives the budget back and keeps the recovery count; here the Task simply hits the budget again.

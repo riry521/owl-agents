@@ -8,7 +8,7 @@ export interface OutputsStoreDeps {
   readonly db: CoreDatabase;
   readonly owlRoot: string;
   readonly dataDir: string;
-  /** Resolves Work workspace paths. Defaults to the legacy `<owlRoot>/.owl-workspaces` layout. */
+  /** Resolves Work workspace paths. Defaults to the `<owlRoot>/.owl-workspaces` layout. */
   readonly layout?: WorkspaceLayout;
 }
 
@@ -177,10 +177,10 @@ function claimOrKeepAlongside(
  */
 export async function saveProjectlessWorkOutputs(deps: OutputsStoreDeps, workId: string): Promise<boolean> {
   if (safeSegment(workId) !== workId || workId === "." || workId === "..") return false;
-  const layout = deps.layout ?? WorkspaceLayout.legacyOnly(deps.owlRoot);
+  const layout = deps.layout ?? WorkspaceLayout.underOwlRoot(deps.owlRoot);
   const workspaceDir = layout.workDir(workId);
   try {
-    const workspaceRoot = layout.rootOf(workspaceDir) ?? layout.root;
+    const workspaceRoot = layout.root;
     let rootInfo;
     try { rootInfo = await lstat(workspaceRoot); }
     catch (error) {

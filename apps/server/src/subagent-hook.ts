@@ -1,10 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import { createInterface } from "node:readline";
 
-import { GUARD_TOKEN_FILE_ENV } from "../../../packages/shared/dist/guard-token.js";
+import { guardConfig, guardHasToken, guardRequest, trimOneSlash } from "./guard-client.js";
 import { RequestUsageTracker, SUBAGENT_USAGE_BATCH_MAX, type RequestTokenUsage } from "../../../packages/shared/dist/token-relay.js";
 
 const MAX_FIELD_LENGTH = 200;
@@ -53,16 +52,8 @@ async function main(): Promise<void> {
   const event = Object.hasOwn(EVENTS, name) ? EVENTS[name] : undefined;
   if (!event || typeof input.agent_id !== "string" || !input.agent_id) return;
 
-  const apiBase = process.env.OWL_GUARD_API_BASE;
-  const tokenFile = process.env[GUARD_TOKEN_FILE_ENV];
-  if (!apiBase || !tokenFile || !isAbsolute(tokenFile)) return;
-  let guardToken: string;
-  try {
-    guardToken = (await readFile(tokenFile, "utf8")).trim();
-  } catch {
-    return;
-  }
-  if (!guardToken) return;
+  const guard = guardConfig({ roleVar: "OWL_AGENT_ROLE", absoluteTokenFile: true });
+  if (!guard || !await guardHasToken(guard)) return;
 
   const agentType = typeof input.agent_type === "string" && input.agent_type
     ? input.agent_type.slice(0, MAX_FIELD_LENGTH)
@@ -70,11 +61,11 @@ async function main(): Promise<void> {
   const agentId = input.agent_id.slice(0, MAX_FIELD_LENGTH);
   const post = async (payload: Record<string, unknown>): Promise<void> => {
     try {
-      await fetch(`${apiBase.replace(/\/$/u, "")}/api/v1/subagents/hook-event`, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${guardToken}` },
+      await guardRequest(guard, "/api/v1/subagents/hook-event", {
+        headers: { "content-type": "application/json" },
         body: JSON.stringify({ request_id: randomUUID(), idempotency_key: randomUUID(), expected_version: 0, payload }),
-        signal: AbortSignal.timeout(3000),
+        timeoutMs: 3000,
+        normalizeBase: trimOneSlash,
       });
     } catch {
       // Notification only; failures must not affect the agent.

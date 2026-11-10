@@ -7,6 +7,7 @@ import type { SkillProposal, SkillProposalCommandResult } from '@/lib/types';
 import { diffFileMaps, formatByteSize } from '@/lib/skill-diff';
 import { useLocale, type TFunction } from '@/lib/i18n';
 import { SkillFileDiff } from './SkillFileDiff';
+import { apiErrorField, humanizeApiErrorFields } from '@/lib/api-error-keys.mjs';
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
@@ -18,11 +19,15 @@ function recordString(record: Record<string, unknown> | null, key: string): stri
   return null;
 }
 
-function errorField(error: unknown, key: 'code' | 'kind'): string {
-  const record = asRecord(error);
-  const value = record?.[key];
-  return typeof value === 'string' ? value : '';
-}
+const CARD_ERROR_KEYS = {
+  network: 'skills.approvals.errorNetwork',
+  networkFrom: 'kind',
+  fallback: 'skills.approvals.errorDefault',
+  codes: {
+    invalid_state_transition: 'skills.approvals.errorInvalidStateTransition',
+    dependency_unavailable: 'skills.approvals.errorDependencyUnavailable',
+  },
+} as const;
 
 export function SkillApprovalsView() {
   const { t } = useLocale();
@@ -50,15 +55,6 @@ export function SkillApprovalsView() {
     void load();
   }, [load, retryCount]);
 
-  function classifyError(error: unknown): string {
-    const code = errorField(error, 'code');
-    const kind = errorField(error, 'kind');
-    if (code === 'invalid_state_transition') return t('skills.approvals.errorInvalidStateTransition');
-    if (code === 'dependency_unavailable') return t('skills.approvals.errorDependencyUnavailable');
-    if (kind === 'network_error') return t('skills.approvals.errorNetwork');
-    return t('skills.approvals.errorDefault');
-  }
-
   function outcomeText(result: SkillProposalCommandResult): string {
     if (result.status === 'applied') return t('skills.approvals.resultApplied');
     if (result.status === 'rejected') return t('skills.approvals.resultRejected');
@@ -78,9 +74,9 @@ export function SkillApprovalsView() {
       }
       retry();
     } catch (e) {
-      setCardErrors((prev) => ({ ...prev, [proposal.id]: classifyError(e) }));
+      setCardErrors((prev) => ({ ...prev, [proposal.id]: humanizeApiErrorFields(e, t, CARD_ERROR_KEYS) }));
       // The proposal may already have been handled elsewhere; show the latest list.
-      if (errorField(e, 'code') === 'invalid_state_transition') retry();
+      if (apiErrorField(e, 'code') === 'invalid_state_transition') retry();
       console.error(`[Owl] Skill proposal ${action} error`, e);
     } finally {
       setBusyIds((prev) => {

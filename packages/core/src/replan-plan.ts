@@ -18,7 +18,7 @@ export interface ReplanSnapshotTask {
   readonly id: string;
   readonly manager_task_id: string | null;
   readonly status: string;
-  /** True when the Task failed only because a dependency failed (Task row 27). */
+  /** True when the Task failed only because a dependency failed (dependency cascade). */
   readonly failed_by_dependency: boolean;
   /** Absent in a hand-written snapshot: read as not a screen design Task. */
   readonly type?: string;
@@ -275,8 +275,8 @@ function fillDefectRelaxations(
     for (const before of (currentCriteria.get(id) ?? []).filter(isManagerCriterion)) {
       if (existing.some((entry) => entry.criterion_id === before.id)) continue;
       const after = (revision.acceptance_criteria ?? []).find((criterion) => criterion.id === before.id);
-      if (after === undefined || (after.text === before.text && after.check === before.check)) continue;
-      const defect = named.find((entry) => (entry.criterion_id !== "" ? entry.criterion_id === before.id : entry.criterion.trim() === before.text.trim()));
+      if (after === undefined || (after.text === before.text && after.check === before.check && criterionRequirement(after) === criterionRequirement(before))) continue;
+      const defect = named.find((entry) => defectNames(entry, before));
       if (defect === undefined) continue;
       const reason = defect.reason.trim();
       const keeps = after.check.trim() !== "" ? after.check.trim() : after.text.trim();
@@ -285,6 +285,16 @@ function fillDefectRelaxations(
     }
     if (added.length > 0) (plan.revisions as Map<string, TaskRevision>).set(id, { ...revision, criteria_relaxations: [...existing, ...added] });
   }
+}
+
+function defectNames(defect: AcceptanceDefect, criterion: StoredAcceptanceCriterion): boolean {
+  return defect.criterion_id !== "" ? defect.criterion_id === criterion.id : defect.criterion.trim() === criterion.text.trim();
+}
+
+/** Ids of the Task's Manager-made criteria that its acceptance defects name: an automatic replan may move these (and only these) from required to goal. */
+function goalAllowedIds(id: string, options: ReplanOptions): Set<string> {
+  const named = options.acceptanceDefects?.get(id) ?? [];
+  return new Set((options.currentCriteria?.get(id) ?? []).filter((criterion) => isManagerCriterion(criterion) && named.some((defect) => defectNames(defect, criterion))).map((criterion) => criterion.id));
 }
 
 /** What an automatic replan may do to criteria: loosen Manager-made ones (recorded), never touch the Owner's (or origin-less) ones. */
@@ -310,10 +320,12 @@ function criteriaOwnershipErrors(
           errors.push(`Task ${labelOf(id)}: criterion ${before.id} comes from the Owner (or has no origin); an automatic replan must keep its id, text, check and requirement (${criterionRequirement(before)}) as they are. ${original(before)}`);
         }
       }
-      // Manager-made criteria may be loosened, but never moved between required and goal.
+      // Manager-made criteria may be loosened, but never moved between required and goal, except required to goal for one an acceptance defect names.
+      const goalAllowed = goalAllowedIds(id, options);
       for (const before of (current.get(id) ?? []).filter(isManagerCriterion)) {
         const after = (revision.acceptance_criteria ?? []).find((criterion) => criterion.id === before.id);
-        if (after !== undefined && criterionRequirement(after) !== criterionRequirement(before)) {
+        const toGoal = goalAllowed.has(before.id) && criterionRequirement(before) === "required" && after !== undefined && criterionRequirement(after) === "goal";
+        if (after !== undefined && criterionRequirement(after) !== criterionRequirement(before) && !toGoal) {
           errors.push(`Task ${labelOf(id)}: criterion ${before.id}: an automatic replan must keep requirement ${criterionRequirement(before)}.`);
         }
       }
@@ -336,7 +348,7 @@ function criteriaOwnershipErrors(
   for (const [id, revision] of plan.revisions) {
     const relaxations = revision.criteria_relaxations ?? [];
     if (!required.has(id) && relaxations.length === 0) continue;
-    for (const line of evaluateCriteriaRelaxation(current.get(id) ?? [], revision.acceptance_criteria ?? [], relaxations, settings)) {
+    for (const line of evaluateCriteriaRelaxation(current.get(id) ?? [], revision.acceptance_criteria ?? [], relaxations, settings, goalAllowedIds(id, options))) {
       errors.push(`Task ${labelOf(id)}: ${line}`);
     }
   }

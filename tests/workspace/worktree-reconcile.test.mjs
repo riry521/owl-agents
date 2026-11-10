@@ -480,8 +480,8 @@ test("a full-tree reconcile still cleans other Projects when one Project's direc
 
 function workerReport(invocationId, changes) {
   return {
-    kind: "report", schema_version: "1.0.0", invocation_id: invocationId, result: "success",
-    work_done: "Done.", changes, verification: { passed: true, method: "Checked the result." }, remaining_issues: [], next_action: "none",
+    kind: "report", schema_version: "1.1.0", invocation_id: invocationId, result: "success",
+    work_done: "Done.", changes, verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked the result.", integration_check: null }, remaining_issues: [], next_action: "none",
     needs_replanning: false, question_for_manager: null,
   };
 }

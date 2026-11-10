@@ -43,7 +43,6 @@ export interface LearningRoute {
 
 export interface LearningJobResult {
   readonly skill_proposal_ids: readonly string[];
-  readonly note_ids: readonly string[];
   readonly rule_proposal_ids: readonly string[];
   readonly discarded: number;
   readonly routes: readonly LearningRoute[];
@@ -107,7 +106,6 @@ interface LearningJobRow extends LearningJobRecord {}
 interface StoredLearningResult {
   processed: string[];
   skill_proposal_ids: string[];
-  note_ids: string[];
   rule_proposal_ids: string[];
   discarded: number;
   routes: LearningRoute[];
@@ -529,7 +527,7 @@ function parsePayload(json: string): LearningJobPayload {
 }
 
 function parseResult(json: string | null): StoredLearningResult {
-  const empty = (): StoredLearningResult => ({ processed: [], skill_proposal_ids: [], note_ids: [], rule_proposal_ids: [], discarded: 0, routes: [], failed: {} });
+  const empty = (): StoredLearningResult => ({ processed: [], skill_proposal_ids: [], rule_proposal_ids: [], discarded: 0, routes: [], failed: {} });
   if (!json) return empty();
   let value: unknown;
   try { value = JSON.parse(json); } catch (error) {
@@ -540,7 +538,6 @@ function parseResult(json: string | null): StoredLearningResult {
   return {
     processed: stringArray(value.processed),
     skill_proposal_ids: stringArray(value.skill_proposal_ids ?? value.skills),
-    note_ids: stringArray(value.note_ids ?? value.notes),
     rule_proposal_ids: stringArray(value.rule_proposal_ids ?? value.rule_proposals),
     discarded: Number.isSafeInteger(value.discarded) && Number(value.discarded) > 0 ? Number(value.discarded) : 0,
     routes: Array.isArray(value.routes) ? value.routes.filter((route): route is LearningRoute => isRecord(route) && typeof route.fingerprint === "string") : [],
@@ -557,7 +554,6 @@ function serializeResult(result: StoredLearningResult): string {
 function publicResult(result: StoredLearningResult): LearningJobResult {
   return {
     skill_proposal_ids: [...result.skill_proposal_ids],
-    note_ids: [...result.note_ids],
     rule_proposal_ids: [...result.rule_proposal_ids],
     discarded: result.discarded,
     routes: [...result.routes],
@@ -565,7 +561,7 @@ function publicResult(result: StoredLearningResult): LearningJobResult {
 }
 
 function emptyPublicResult(): LearningJobResult {
-  return { skill_proposal_ids: [], note_ids: [], rule_proposal_ids: [], discarded: 0, routes: [] };
+  return { skill_proposal_ids: [], rule_proposal_ids: [], discarded: 0, routes: [] };
 }
 
 function addUnique(target: string[], values: readonly string[]): void {

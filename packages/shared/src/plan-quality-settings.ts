@@ -1,3 +1,5 @@
+import { isRecord, SettingsValidationError } from "./settings-validation.js";
+
 export const PLAN_QUALITY_SETTINGS_KEY = "plan_quality";
 
 export const PLAN_QUALITY_CODES = [
@@ -9,11 +11,6 @@ export type PlanQualityCode = typeof PLAN_QUALITY_CODES[number];
 
 export interface PlanQualitySettings {
   readonly enabled: boolean;
-  /**
-   * No longer read: repair requests share progress_guard.plan_rejection_attempts_max with the other rejections.
-   * Kept so stored settings and PUT bodies that carry it stay valid.
-   */
-  readonly max_repair_requests: number;
   readonly max_acceptance_items: number;
   readonly max_acceptance_chars: number;
   readonly max_components: number;
@@ -42,7 +39,6 @@ export interface PlanQualitySettings {
 
 export const DEFAULT_PLAN_QUALITY_SETTINGS: PlanQualitySettings = {
   enabled: true,
-  max_repair_requests: 1,
   max_acceptance_items: 8,
   max_acceptance_chars: 1500,
   max_components: 3,
@@ -65,14 +61,10 @@ export const DEFAULT_PLAN_QUALITY_SETTINGS: PlanQualitySettings = {
   record_only_codes: ["acceptance_chars_over"],
 };
 
-export class PlanQualitySettingsValidationError extends Error {
-  public constructor(message: string, public readonly field: string) {
-    super(message);
-    this.name = "PlanQualitySettingsValidationError";
-  }
+export class PlanQualitySettingsValidationError extends SettingsValidationError {
+  public override name = "PlanQualitySettingsValidationError";
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const isCount = (value: unknown, min: number): value is number => typeof value === "number" && Number.isInteger(value) && value >= min;
 const isStrings = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === "string" && item.length > 0);
 const isRegexSources = (value: unknown, flags = "g"): value is string[] => {
@@ -90,7 +82,6 @@ const isCodes = (value: unknown): boolean => Array.isArray(value) && new Set(val
 
 const FIELD_CHECKS: Record<keyof PlanQualitySettings, (value: unknown) => boolean> = {
   enabled: (value) => typeof value === "boolean",
-  max_repair_requests: (value) => isCount(value, 0),
   max_acceptance_items: (value) => isCount(value, 1),
   max_acceptance_chars: (value) => isCount(value, 1),
   max_components: (value) => isCount(value, 1),

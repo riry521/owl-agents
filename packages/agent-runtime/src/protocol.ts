@@ -384,29 +384,12 @@ export function correctReportSemantics(
 }
 
 /**
- * Meaning checks a shape-valid report can still fail: a success claim that the
- * verification contradicts. blocked and failed are both rejected, for
- * different reasons; neither is ever treated as passed.
+ * The one meaning check left after correctReportSemantics: a goal_unmet needs a stated reason.
+ * Contradictions in a success claim are lowered to partial by the correction rules, so they never reach here.
  */
-export function validateReportSemantics(report: ReportEnvelope, hybrid?: HybridRouting): void {
-  const { verification } = report;
-  if (verification.acceptance.some((item) => item.status === GOAL_UNMET_STATUS && !isNonBlankReason(item.shortfall_reason))) {
+export function validateReportSemantics(report: ReportEnvelope): void {
+  if (report.verification.acceptance.some((item) => item.status === GOAL_UNMET_STATUS && !isNonBlankReason(item.shortfall_reason))) {
     throw reportInvalid("report_semantics:goal_unmet_without_reason");
-  }
-  if (report.result === "success") {
-    if (verification.status !== "passed") throw reportInvalid(`report_semantics:success_with_verification_${verification.status}`);
-    const unmet = verification.acceptance.find((item) => item.status !== "passed" && !isGoalShortfall(item))
-      ?? verification.checks.find((item) => item.status !== "passed");
-    if (unmet) throw reportInvalid(`report_semantics:success_with_${unmet.status}_item`);
-    if (report.needs_replanning) throw reportInvalid("report_semantics:success_with_needs_replanning");
-    if (report.question_for_manager !== null) throw reportInvalid("report_semantics:success_with_question_for_manager");
-  }
-  // Without delegated children there is no integrated result to check.
-  if (hybrid?.verdict === "ok" && report.delegation.delegated.length > 0 && verification.integration_check?.status !== "passed") {
-    throw reportInvalid("report_semantics:hybrid_ok_without_passed_integration");
-  }
-  if (hybrid?.verdict === "retry" && hybrid.retry_subtasks.length === 0) {
-    throw reportInvalid("report_semantics:hybrid_retry_without_subtasks");
   }
 }
 
@@ -700,10 +683,7 @@ export function extractProviderUsage(response: { readonly adapter: string; reado
 
 /** stdout is one complete JSON object, never a line-scanned stream. */
 /**
- * Option B wrapper unwrapping. The canonical location is
- * packages/providers/normalize.ts#normalizeClaude; because packages/providers
- * packaging (package.json and importer setup) is not complete, this remains
- * here for now.
+ * Option B wrapper unwrapping.
  */
 export function normalizeClaudeStdout(
   rawStdout: string,

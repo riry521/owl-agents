@@ -1,5 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { copyFile, lstat, mkdir, readdir, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
+import { OWNED_DIR_WRITE, writeAtomic } from "../atomic-write.js";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DEFAULT_MEMORY_ARCHIVE_SUFFIX, PAGES_LAYOUT, type MemoryArchive } from "@owl/shared";
 
@@ -42,12 +43,6 @@ export function archiveDirFor(root: string, archive: MemoryArchive): string {
 const sha256 = async (path: string) => createHash("sha256").update(await readFile(path)).digest("hex");
 const exists = (path: string) => lstat(path).then(() => true, () => false);
 const isCode = (error: unknown, code: string) => (error as { code?: unknown } | null)?.code === code;
-
-async function writeAtomic(path: string, text: string): Promise<void> {
-  const tmp = `${path}.${randomBytes(4).toString("hex")}.tmp`;
-  await writeFile(tmp, text);
-  await rename(tmp, path);
-}
 
 function isEnoent(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === "ENOENT";
@@ -135,7 +130,7 @@ export async function archiveLegacyKnowledge(options: ArchiveOptions): Promise<A
       runDir = join(archiveDir, (options.now?.() ?? new Date()).toISOString().replace(/[:.]/gu, "-"));
       manifest = { version: 1, status: "in_progress", archived_at: (options.now?.() ?? new Date()).toISOString(), source: root, marker: marker.raw, dirs, files };
       await mkdir(join(runDir, FILES_DIR), { recursive: true });
-      await writeAtomic(join(runDir, MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}\n`);
+      await writeAtomic(join(runDir, MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}\n`, { ...OWNED_DIR_WRITE, exclusive: false });
     }
   }
 
@@ -162,8 +157,8 @@ export async function archiveLegacyKnowledge(options: ArchiveOptions): Promise<A
     }
   }
 
-  await writeAtomic(join(root, MARKER_FILE), `${JSON.stringify({ ...marker.json, layout: PAGES_LAYOUT })}\n`);
-  if (manifest && runDir) await writeAtomic(join(runDir, MANIFEST_FILE), `${JSON.stringify({ ...manifest, status: "complete" }, null, 2)}\n`);
+  await writeAtomic(join(root, MARKER_FILE), `${JSON.stringify({ ...marker.json, layout: PAGES_LAYOUT })}\n`, { ...OWNED_DIR_WRITE, exclusive: false });
+  if (manifest && runDir) await writeAtomic(join(runDir, MANIFEST_FILE), `${JSON.stringify({ ...manifest, status: "complete" }, null, 2)}\n`, { ...OWNED_DIR_WRITE, exclusive: false });
   return { archived, run_dir: runDir };
 }
 
@@ -210,6 +205,6 @@ export async function restoreArchivedKnowledge(options: { root: string; archive:
   if (manifest.marker === null) await unlink(join(root, MARKER_FILE)).catch((error: unknown) => {
     if (!isEnoent(error)) throw error;
   });
-  else await writeAtomic(join(root, MARKER_FILE), manifest.marker);
+  else await writeAtomic(join(root, MARKER_FILE), manifest.marker, { ...OWNED_DIR_WRITE, exclusive: false });
   return { restored: manifest.files.length, run_dir: runDir };
 }

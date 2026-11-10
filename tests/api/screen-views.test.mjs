@@ -1,47 +1,18 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { DEFAULT_SCREEN_VIEW_LIMITS } from "../../apps/server/dist/http.js";
-import { ExternalCoreAdapter, createCore as createMemoryCore } from "../../apps/server/dist/core.js";
+import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { createTestCore } from "../helpers/core.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
-import { repoRoot } from "../helpers/paths.mjs";
+import { loadOpenApi, schemaErrors } from "../helpers/openapi.mjs";
 
 const token = "screen-views-token";
-const schemaDir = join(repoRoot, "contracts/jsonschema/owl-v1");
-const schemas = new Map();
-const loadSchema = (file) => {
-  if (!schemas.has(file)) schemas.set(file, JSON.parse(readFileSync(join(schemaDir, file), "utf8")));
-  return schemas.get(file);
-};
-
-/** Minimal validator for the keywords the view schemas use: $ref, type, required, properties, items. */
-function schemaErrors(value, schema, path = "$") {
-  if (schema.$ref) {
-    const [file, fragment] = schema.$ref.split("#");
-    let target = loadSchema(file);
-    for (const part of (fragment ?? "").split("/").filter(Boolean)) target = target?.[part];
-    return target ? schemaErrors(value, target, path) : [`${path}: cannot resolve ${schema.$ref}`];
-  }
-  const types = Array.isArray(schema.type) ? schema.type : schema.type ? [schema.type] : [];
-  const kindOf = (v) => (v === null ? "null" : Array.isArray(v) ? "array" : Number.isInteger(v) ? "integer" : typeof v);
-  if (types.length > 0 && !types.some((type) => type === kindOf(value) || (type === "number" && typeof value === "number"))) {
-    return [`${path}: expected ${types.join("|")}`];
-  }
-  const errors = [];
-  if (kindOf(value) === "object") {
-    for (const key of schema.required ?? []) if (!Object.hasOwn(value, key)) errors.push(`${path}.${key}: missing`);
-    for (const [key, child] of Object.entries(schema.properties ?? {})) {
-      if (Object.hasOwn(value, key)) errors.push(...schemaErrors(value[key], child, `${path}.${key}`));
-    }
-  }
-  if (kindOf(value) === "array" && schema.items) value.forEach((item, i) => errors.push(...schemaErrors(item, schema.items, `${path}[${i}]`)));
-  return errors;
-}
+const openapi = loadOpenApi();
+const viewErrors = (value, name) => schemaErrors(openapi, value, `#/components/schemas/${name}`);
 
 function seed(db) {
   const now = new Date().toISOString();
@@ -133,7 +104,7 @@ test("GET /works/{id}/view returns only that Work's decisions, the newest report
   assert.deepEqual(body.data.reports.map((r) => r.id), [ids.reportNew]);
   assert.equal(body.data.reports[0].task_id, ids.taskA);
   assert.deepEqual(body.data.tasks.map((task) => task.id), [ids.taskA]);
-  assert.deepEqual(schemaErrors(body.data, loadSchema("work-view.json")), []);
+  assert.deepEqual(viewErrors(body.data, "WorkView"), []);
 
   assert.equal((await api.get(`/works/${createUlid()}/view`)).status, 404);
 });
@@ -145,14 +116,14 @@ test("GET /works/{id}/view always returns goal_shortfalls as an array that fits 
 
   const empty = await api.get(`/works/${ids.workA}/view`);
   assert.deepEqual(empty.body.data.goal_shortfalls, []);
-  assert.deepEqual(schemaErrors(empty.body.data, loadSchema("work-view.json")), []);
+  assert.deepEqual(viewErrors(empty.body.data, "WorkView"), []);
 
   const record = { task_id: ids.taskA, criterion_id: "AC2", text: "Add a diagram", reason: "No time", source: "final_check", recorded_at: "2026-01-01T00:00:00.000Z", resolution: null };
   db.createWriteLane().transact((tx) => tx.run("UPDATE works SET goal_shortfalls_json = ? WHERE id = ?", JSON.stringify([record]), ids.workA));
   const filled = await api.get(`/works/${ids.workA}/view`);
   assert.equal(filled.body.data.goal_shortfalls.length, 1);
   assert.equal(filled.body.data.goal_shortfalls[0].text, "Add a diagram");
-  assert.deepEqual(schemaErrors(filled.body.data, loadSchema("work-view.json")), []);
+  assert.deepEqual(viewErrors(filled.body.data, "WorkView"), []);
 });
 
 test("GET /works/{id}/view takes the conversation size from the query", async (t) => {
@@ -271,32 +242,12 @@ test("GET /decisions/{id}/view returns the decision, its Work and blocked Tasks 
   assert.equal(body.data.decision.id, ids.decisionAOpen);
   assert.equal(body.data.work.id, ids.workA);
   assert.deepEqual(body.data.blocked_tasks.map((task) => task.id).sort(), [ids.taskA, ids.taskASuperseded].sort());
-  assert.deepEqual(schemaErrors(body.data, loadSchema("decision-view.json")), []);
+  assert.deepEqual(viewErrors(body.data, "DecisionView"), []);
 
   assert.equal((await api.get(`/decisions/${createUlid()}/view`)).status, 404);
 
   const open = await api.get("/decisions?status=open");
   assert.deepEqual(open.body.data.map((d) => d.id).sort(), [ids.decisionAOpen, ids.decisionBOpen].sort());
-});
-
-test("every view route answers 503 dependency_unavailable on a Core without view methods", async (t) => {
-  const previous = process.env.OWL_API_TOKEN;
-  delete process.env.OWL_API_TOKEN;
-  t.after(() => {
-    if (previous !== undefined) process.env.OWL_API_TOKEN = previous;
-  });
-  const root = await tempDir(t, "owl-screen-views-memory-");
-  const api = await startTestHttpServer(t, { core: createMemoryCore({ version: "1.0.0" }), owlRoot: root, webOut: root });
-  if (!api) return t.skip("localhost listen is unavailable");
-  const routes = [
-    `/works/${createUlid()}/view`, `/decisions/${createUlid()}/view`, "/board/view", "/backlog/linkable-works?project_id=x",
-    "/backlog/view", "/tokens/view", "/settings/view",
-  ];
-  for (const route of routes) {
-    const response = await fetch(`${api.baseUrl}/api/v1${route}`);
-    assert.equal(response.status, 503, route);
-    assert.equal((await response.json()).error.code, "dependency_unavailable");
-  }
 });
 
 const insertWork = (tx, { id = createUlid(), projectId = null, state = "running", updatedAt, archivedAt = null }) => {
@@ -325,7 +276,7 @@ test("GET /board/view pages Works with next_cursor, keeps open decisions on the 
   assert.equal(typeof first.body.data.next_cursor, "string");
   assert.deepEqual(first.body.data.open_decisions.map((d) => d.id).sort(), [ids.decisionAOpen, ids.decisionBOpen].sort());
   assert.ok(Array.isArray(first.body.data.projects));
-  assert.deepEqual(schemaErrors(first.body.data, loadSchema("board-view.json")), []);
+  assert.deepEqual(viewErrors(first.body.data, "BoardView"), []);
 
   const second = await api.get(`/board/view?limit=1&cursor=${first.body.data.next_cursor}`);
   assert.equal(second.status, 200);
@@ -422,7 +373,7 @@ test("GET /backlog/linkable-works excludes cancelled, puts unfinished first and 
   assert.equal(all.status, 200);
   assert.deepEqual(all.body.data.works.map((w) => w.id), expected);
   assert.equal(all.body.data.next_cursor, null);
-  assert.deepEqual(schemaErrors(all.body.data, loadSchema("linkable-works.json")), []);
+  assert.deepEqual(viewErrors(all.body.data, "LinkableWorks"), []);
 
   const seen = [];
   let cursor = null;
@@ -451,7 +402,7 @@ test("backlog, tokens and settings views return what the existing GET routes ret
   assert.deepEqual(backlog.body.data.items, list.body.data);
   assert.equal(backlog.body.data.next_offset, list.body.next_offset);
   assert.deepEqual(backlog.body.data.projects, await data("/projects"));
-  assert.deepEqual(schemaErrors(backlog.body.data, loadSchema("backlog-view.json")), []);
+  assert.deepEqual(viewErrors(backlog.body.data, "BacklogView"), []);
 
   const tokens = await api.get("/tokens/view?period=30d&top=5");
   assert.equal(tokens.status, 200);
@@ -461,7 +412,7 @@ test("backlog, tokens and settings views return what the existing GET routes ret
   assert.deepEqual(tokens.body.data.projects, backlog.body.data.projects);
   const withoutGeneratedAt = ({ generated_at, ...rest }) => rest; // plan usage stamps the time it was read
   assert.deepEqual(withoutGeneratedAt(tokens.body.data.plan_usage), withoutGeneratedAt(await data("/plan-usage")));
-  assert.deepEqual(schemaErrors(tokens.body.data, loadSchema("tokens-view.json")), []);
+  assert.deepEqual(viewErrors(tokens.body.data, "TokensView"), []);
 
   const settings = await api.get("/settings/view");
   assert.equal(settings.status, 200);
@@ -482,7 +433,26 @@ test("backlog, tokens and settings views return what the existing GET routes ret
   };
   for (const [key, route] of Object.entries(routes)) assert.deepEqual(settings.body.data[key], await data(route), key);
   assert.deepEqual(settings.body.data.system_status, (await api.get("/system/status")).body);
-  assert.deepEqual(schemaErrors(settings.body.data, loadSchema("settings-view.json")), []);
+  assert.deepEqual(viewErrors(settings.body.data, "SettingsView"), []);
   assert.ok(!JSON.stringify(settings.body).includes(secret));
   assert.notEqual(settings.body.data.typesafe.typesafe_api_key, "");
+});
+
+test("every view route answers 503 dependency_unavailable on a Core without view methods", async (t) => {
+  const { root, db, core } = await createTestCore(t, {}, { prefix: "owl-screen-views-503-" });
+  const missing = ["getWorkView", "getDecisionView", "getBoardView", "listLinkableWorks", "getBacklogListView", "getTokensView", "getRemakeLimitSettings"];
+  const limited = Object.create(core, Object.fromEntries(missing.map((name) => [name, { value: undefined }])));
+  const adapter = new ExternalCoreAdapter(limited, db, root, join(root, "data"));
+  t.after(() => adapter.shutdown({ force: true, timeoutMs: 0 }).catch(() => undefined));
+  const api = await startTestHttpServer(t, { core: adapter, db, webOut: root, owlRoot: root }, { token });
+  if (!api) return t.skip("localhost listen is unavailable");
+  const routes = [
+    `/works/${createUlid()}/view`, `/decisions/${createUlid()}/view`, "/board/view", `/backlog/linkable-works?project_id=${createUlid()}`,
+    "/backlog/view", "/tokens/view", "/settings/view",
+  ];
+  for (const route of routes) {
+    const response = await fetch(`${api.baseUrl}/api/v1${route}`, { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(response.status, 503, route);
+    assert.equal((await response.json()).error.code, "dependency_unavailable");
+  }
 });

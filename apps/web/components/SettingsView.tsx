@@ -6,7 +6,7 @@ import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ChildR
 import { roleDisplayName } from '@/lib/format';
 import { useLocale, type Locale } from '@/lib/i18n';
 import { REMAKE_TASK_TYPES, remakeLimitsToDraft, draftToRemakeLimits } from '@/lib/remake-limits.mjs';
-import { humanizeError } from '@/lib/settings-errors';
+import { humanizeSettingsError } from '@/lib/api-error-keys.mjs';
 import { presetMatchesSettings } from '@/lib/model-presets';
 import { AutoWorkEntryPanel } from '@/components/AutoWorkEntryPanel';
 import { ModelPresetsBar } from '@/components/ModelPresetsBar';
@@ -165,7 +165,7 @@ export function SettingsView() {
   useEffect(() => {
     if (settingsView.error && !settingsView.data) {
       console.error('[Owl] Settings load failed', settingsView.error);
-      setLoadError(humanizeError(settingsView.error, t));
+      setLoadError(humanizeSettingsError(settingsView.error, t));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settingsView.error]);
@@ -206,7 +206,7 @@ export function SettingsView() {
   useEffect(() => {
     if (settingsView.error && !settingsView.data) {
       setHybridModeState(false);
-      setChildSettingsError(humanizeError(settingsView.error, t));
+      setChildSettingsError(humanizeSettingsError(settingsView.error, t));
       setChildSettingsLoading(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -243,7 +243,7 @@ export function SettingsView() {
       setSaveNotice(t('settings.saveSuccess'));
     } catch (error) {
       console.error('[Owl] Settings save failed', error);
-      setSaveError(humanizeError(error, t));
+      setSaveError(humanizeSettingsError(error, t));
     } finally {
       setSaving(false);
     }
@@ -315,7 +315,7 @@ export function SettingsView() {
       setChildSettingsNotice(t('settings.childRunSaveSuccess'));
     } catch (error) {
       console.error('[Owl] Child-run settings save failed', error);
-      setChildSettingsError(humanizeError(error, t));
+      setChildSettingsError(humanizeSettingsError(error, t));
     } finally {
       setChildSettingsSaving(false);
     }
@@ -783,7 +783,7 @@ export function AdvisorFoldersSection() {
       setNotice(t('settings.advisorFoldersSaved'));
     } catch (err) {
       // The server already localizes validation messages (422); surface those verbatim.
-      setError(err instanceof ApiRequestError && err.code === 'validation_error' ? err.rawMessage : humanizeError(err, t));
+      setError(err instanceof ApiRequestError && err.code === 'validation_error' ? err.rawMessage : humanizeSettingsError(err, t));
     } finally {
       setSaving(false);
     }
@@ -976,7 +976,7 @@ export function AdvisorSendFileDestinationSection() {
       setNotice(t('settings.sendFileDestinationSavedNotice'));
     } catch (err) {
       // The server already localizes validation messages (422); surface those verbatim.
-      setError(err instanceof ApiRequestError && err.code === 'validation_error' ? err.rawMessage : humanizeError(err, t));
+      setError(err instanceof ApiRequestError && err.code === 'validation_error' ? err.rawMessage : humanizeSettingsError(err, t));
     } finally {
       setSaving(false);
     }
@@ -1157,7 +1157,7 @@ export function FixerEscalationSection() {
       setNotice(t('settings.fixerEscalationSaved'));
     } catch (err) {
       // Validation messages come from the API; surface them verbatim.
-      setError(err instanceof ApiRequestError && err.code === 'validation_error' ? err.rawMessage : humanizeError(err, t));
+      setError(err instanceof ApiRequestError && err.code === 'validation_error' ? err.rawMessage : humanizeSettingsError(err, t));
     } finally {
       setSaving(false);
     }
@@ -1235,7 +1235,7 @@ export function AutoRecoverySection() {
       setDraft(String(saved.limit));
       setNotice(t('settings.autoRecoverySaved'));
     } catch (err) {
-      setError(humanizeError(err, t));
+      setError(humanizeSettingsError(err, t));
     } finally {
       setSaving(false);
     }
@@ -1273,7 +1273,7 @@ export function AutoRecoverySection() {
   );
 }
 
-const REMAKE_NUMBER_FIELDS =['lineage_review_attempts', 'lineage_worker_runs', 'non_functional_remakes', 'base_sync_lineage_review_attempts', 'base_sync_lineage_worker_runs', 'lead_review_rejections'] as const;
+const REMAKE_NUMBER_FIELDS =['lineage_review_attempts', 'lineage_worker_runs', 'lead_review_rejections'] as const;
 
 export function RemakeLimitsSection() {
   const { t } = useLocale();
@@ -1316,7 +1316,7 @@ export function RemakeLimitsSection() {
       setNotice(t('settings.remakeLimitsSaved'));
     } catch (err) {
       // Validation messages come from the API; surface them verbatim.
-      setError(err instanceof ApiRequestError && err.code === 'validation_error' ? err.rawMessage : humanizeError(err, t));
+      setError(err instanceof ApiRequestError && err.code === 'validation_error' ? err.rawMessage : humanizeSettingsError(err, t));
     } finally {
       setSaving(false);
     }
@@ -1457,7 +1457,7 @@ export function KnowledgeStorageSection() {
       const reasonKey = typeof reason === 'string' ? `settings.knowledgeStorageTargetInvalid_${reason}` : null;
       const localized = reasonKey !== null && KNOWLEDGE_TARGET_INVALID_REASONS.includes(reason as string) ? t(reasonKey) : null;
       // Other 4xx messages come from server-side validation; show them verbatim.
-      setError(localized ?? (err instanceof ApiRequestError && err.status !== null && err.status < 500 ? err.rawMessage : humanizeError(err, t)));
+      setError(localized ?? (err instanceof ApiRequestError && err.status !== null && err.status < 500 ? err.rawMessage : humanizeSettingsError(err, t)));
     } finally {
       setMoving(false);
     }
@@ -1552,7 +1552,7 @@ export function KnowledgeAutomationSection() {
   useEffect(() => {
     if (settingsView.error && !settingsView.data) {
       console.error('[Owl] Knowledge automation settings load failed', settingsView.error);
-      setError(humanizeError(settingsView.error, t));
+      setError(humanizeSettingsError(settingsView.error, t));
       setLoading(false);
     }
   }, [settingsView.error, settingsView.data, t]);
@@ -1587,7 +1587,7 @@ export function KnowledgeAutomationSection() {
       setNotice(t('settings.knowledgeAutomationSaved'));
     } catch (err) {
       console.error('[Owl] Knowledge automation settings save failed', err);
-      setError(humanizeError(err, t));
+      setError(humanizeSettingsError(err, t));
     } finally {
       setSaving(false);
     }
@@ -2112,6 +2112,8 @@ oauth_config:
   scopes:
     bot:
       - channels:history
+      - channels:join
+      - channels:manage
       - channels:read
       - chat:write
       - files:read
@@ -2141,7 +2143,6 @@ function IntegrationsSection() {
   const [notice, setNotice] = useState<string | null>(null);
   const [botToken, setBotToken] = useState('');
   const [appToken, setAppToken] = useState('');
-  const [signingSecret, setSigningSecret] = useState('');
   const [conversationChannelId, setConversationChannelId] = useState('');
   const [notificationChannelId, setNotificationChannelId] = useState('');
   const [ownerUserId, setOwnerUserId] = useState('');
@@ -2195,7 +2196,6 @@ function IntegrationsSection() {
       const config: {
         bot_token?: string;
         app_token?: string;
-        signing_secret?: string;
         conversation_channel_id: string;
         notification_channel_id: string;
         owner_user_id?: string;
@@ -2206,7 +2206,6 @@ function IntegrationsSection() {
       if (botToken.trim()) config.bot_token = botToken.trim();
       if (provider === 'slack') {
         if (appToken.trim()) config.app_token = appToken.trim();
-        if (signingSecret.trim()) config.signing_secret = signingSecret.trim();
         config.owner_user_id = ownerUserId.trim();
       }
       await saveIntegration(provider, config);
@@ -2214,7 +2213,6 @@ function IntegrationsSection() {
       setEditing(null);
       setBotToken('');
       setAppToken('');
-      setSigningSecret('');
       setConversationChannelId('');
       setNotificationChannelId('');
       setOwnerUserId('');
@@ -2244,7 +2242,6 @@ function IntegrationsSection() {
     setEditing(provider);
     setBotToken('');
     setAppToken('');
-    setSigningSecret('');
     const status = getStatus(provider);
     setConversationChannelId(status.conversation_channel_id ?? '');
     setNotificationChannelId(status.notification_channel_id ?? '');
@@ -2393,16 +2390,6 @@ function IntegrationsSection() {
                     value={appToken}
                     onChange={(ev) => setAppToken(ev.target.value)}
                     placeholder={status.configured ? t('settings.tokenSaved') : t('settings.slackAppTokenHint')}
-                    autoComplete="off"
-                  />
-                </label>
-                <label className="form-field" style={{ marginTop: '8px' }}>
-                  <span>{t('settings.signingSecret')}</span>
-                  <input
-                    className="input"
-                    type="password"
-                    value={signingSecret}
-                    onChange={(ev) => setSigningSecret(ev.target.value)}
                     autoComplete="off"
                   />
                 </label>

@@ -2,6 +2,7 @@ import type { Client as DiscordClient, MessageCreateOptions } from "discord.js";
 import {
   buildNotificationCard,
   isNotificationCardEvent,
+  parseChannelIds,
   retryTransient,
   type ConnectorDecisionMessageRef,
   type OwlLanguage,
@@ -138,9 +139,4 @@ export async function updateNotification(
 
 export function shouldNotify(eventType: string, payload?: Record<string, unknown>): boolean {
   return isNotificationCardEvent(eventType, payload);
-}
-
-function parseChannelIds(value: string | readonly string[] | undefined): string[] {
-  const values: readonly string[] = Array.isArray(value) ? value : value ? [value] : [];
-  return [...new Set(values.flatMap((item) => item.split(/[\s,]+/u).map((part) => part.trim()).filter((part) => part.length > 0)))];
 }

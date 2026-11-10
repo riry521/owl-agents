@@ -1,9 +1,9 @@
-const MOVABLE_STATES = new Set(['memo', 'ready', 'paused', 'judgement_waiting']);
+import { apiErrorKeyForCode } from './api-error-keys.mjs';
 
-/** What the Project row of Work detail offers: 'move' (selector), 'pause-hint' (running) or 'none'. */
+/** What the Project row of Work detail offers: 'move' (selector, only when the server says the Work can move), 'pause-hint' (running) or 'none'. */
 export function workProjectMoveMode(work) {
   if (work.project_id) return 'none';
-  if (MOVABLE_STATES.has(work.state)) return 'move';
+  if (work.can_move_to_project) return 'move';
   return work.state === 'running' ? 'pause-hint' : 'none';
 }
 
@@ -19,7 +19,12 @@ export function projectMoveErrorKey(code, details = {}, kind = '') {
     case 'work_has_active_agents': return 'work.moveErrorActiveAgents';
     case 'invalid_state_transition':
       return details?.reason === 'task_fix_pending' ? 'work.moveErrorFixPending' : 'work.moveErrorState';
-    case 'version_conflict': return 'work.errorVersionConflict';
-    default: return kind === 'network_error' ? 'work.errorNetwork' : 'work.errorOperation';
+    default:
+      return apiErrorKeyForCode(code, kind, {
+        versionConflict: 'work.errorVersionConflict',
+        network: 'work.errorNetwork',
+        networkFrom: 'kind',
+        fallback: 'work.errorOperation',
+      });
   }
 }

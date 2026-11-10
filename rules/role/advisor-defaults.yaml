@@ -13,3 +13,6 @@ rules:
   - id: advisor_no_redundant_prohibitions
     kind: instruction
     text: "Work の概要に、ルールや仕組みですでに守られている禁止事項を書き足さないこと。"
+  - id: advisor_no_full_suite_criteria
+    kind: instruction
+    text: "Work の受け入れ条件に「既存のテストがすべて通る」「全件の実行結果」など全件テストを書かないこと。全件の確認は Core が Work のブランチで行う。"

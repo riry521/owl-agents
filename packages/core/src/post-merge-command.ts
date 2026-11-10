@@ -1,20 +1,10 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { CommandResult, CommandRunner } from "./workspace-tooling.js";
-import { redactCredentials } from "./git-push.js";
-
-const SECRET_NAME = "[\\w-]*(?:key|token|secret|password|passwd|credential)[\\w-]*";
-const SECRET_VALUE = "(\"[^\"]*\"|'[^']*'|[^\\s\"']+)";
-const SECRET_FLAG = new RegExp(`^--?${SECRET_NAME}$`, "iu");
+import { POST_MERGE_REDACT_RULES, redactWithRules, SECRET_FLAG } from "@owl/shared";
 
 /** Masks URL credentials, Authorization/Bearer/Basic values, NAME=value / NAME: value and `--flag value` secrets. */
-export function redactSecrets(text: string): string {
-  return redactCredentials(text)
-    .replace(/\b(authorization\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?[^\s"']+/giu, "$1[REDACTED]")
-    .replace(/\b(bearer|basic)\s+[\w.~+/=-]{6,}/giu, "$1 [REDACTED]")
-    .replace(new RegExp(`(${SECRET_NAME}\\s*[=:]\\s*)${SECRET_VALUE}`, "giu"), "$1[REDACTED]")
-    .replace(new RegExp(`(\\s--?${SECRET_NAME}\\s+)${SECRET_VALUE}`, "giu"), "$1[REDACTED]");
-}
+export const redactSecrets = (text: string): string => redactWithRules(text, POST_MERGE_REDACT_RULES);
 
 /** Like redactSecrets, but also masks the element after a secret-named flag such as `--token`. */
 export function redactArgv(argv: readonly string[]): string[] {

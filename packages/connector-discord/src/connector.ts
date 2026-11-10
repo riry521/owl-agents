@@ -25,11 +25,18 @@ import {
   readOutboundFile,
   reportAdvisorDelivery,
 parseDeliveryTarget,
-type OutboundFile,
+  type OutboundFile,
   resolveDecisionButtonTarget,
   submitDecisionAnswer,
   uploadAttachment,
   FileConnectorStateStore,
+  asRecord,
+  deliverNotification,
+  fetchAdvisorReply,
+  fetchPendingDecisions,
+  formatBytes,
+  parseChannelIds,
+  reportNotificationFailure,
   type OutboundFileResult,
   type PendingDecision,
 } from "@owl/plugin-sdk/shared";
@@ -40,8 +47,6 @@ import { sendNotification, shouldNotify, updateNotification } from "./notificati
 import { downloadAttachment } from "./files.js";
 
 const DEFAULT_CHAR_LIMIT = 2000;
-const PENDING_DECISION_PAGE_LIMIT = 50;
-const MAX_PENDING_DECISION_PAGES = 10_000;
 // Replies carry Advisor output and user-supplied names; like notifications,
 // they must never ping @everyone, roles or users.
 const NO_MENTIONS = { parse: [] } as const;
@@ -248,7 +253,7 @@ export class DiscordConnector {
       acknowledged = true;
 
       const t = connectorText(await this.core.language());
-      const selected = resolveDecisionButtonTarget(await this.fetchPendingDecisions(true), target);
+      const selected = resolveDecisionButtonTarget(await this.fetchPendingDecisions(), target);
       if (!selected) {
         await interaction.editReply({ content: t.decisionGone });
         return;
@@ -313,39 +318,14 @@ export class DiscordConnector {
       return;
     }
     if (!shouldNotify(event.type, event.payload)) return;
-    const decisionId = event.type === "decision.opened" || event.type === "decision.resolved" || event.type === "decision.cancelled"
-      ? (typeof event.payload.decision_id === "string" ? event.payload.decision_id : null)
-      : null;
-
-    if (event.type === "decision.resolved" || event.type === "decision.cancelled") {
-      const posted = decisionId ? this.core.decisionMessage(decisionId) : null;
-      if (posted) {
-        try {
-          await updateNotification(this.client, posted, event, await this.core.language());
-        } catch (error) {
-          await this.reportNotificationFailure(event, error);
-        }
-        if (decisionId) await this.core.forgetDecisionMessage(decisionId);
-        return;
-      }
-    }
-
-    try {
-      await sendNotification(this.client, event, this.notificationChannelIds, {
-        language: await this.core.language(),
-        onPosted: async ({ channelId, messageId }) => {
-          if (decisionId) {
-            await this.core.rememberDecisionMessage(decisionId, {
-              channel_id: channelId,
-              message_ref: messageId,
-              posted_at: new Date().toISOString(),
-            });
-          }
-        },
-      });
-    } catch (error) {
-      await this.reportNotificationFailure(event, error);
-    }
+    await deliverNotification(this.core, event, {
+      update: (posted, language) => updateNotification(this.client, posted, event, language),
+      send: (language, remember) => sendNotification(this.client, event, this.notificationChannelIds, {
+        language,
+        onPosted: ({ channelId, messageId }) => remember(channelId, messageId),
+      }),
+      fail: (error) => this.reportNotificationFailure(event, error),
+    });
   }
 
   /** Decision whose notification this message replies to, if known. */
@@ -369,24 +349,14 @@ export class DiscordConnector {
     return null;
   }
 
-  /** Surface a notification that failed after retries, with the event sequence. */
-  private async reportNotificationFailure(event: OwlEvent, error: unknown): Promise<void> {
-    const decisionId = typeof event.payload.decision_id === "string" ? event.payload.decision_id : null;
-    const language = await this.core.language();
-    const t = connectorText(language);
-    const subject = t.notificationSubject(event.sequence, event.type, decisionId ? decisionShortId(decisionId) : null);
-    const safe = formatIntegrationError("Discord", error, language);
-    console.error(`[discord] Notification delivery failed (event #${event.sequence} ${event.type}, event_id ${event.event_id}): ${formatIntegrationError("Discord", error, "en")}`);
-    for (const channelId of this.conversationChannelIds) {
-      try {
+  private reportNotificationFailure(event: OwlEvent, error: unknown): Promise<void> {
+    return reportNotificationFailure(this.core, event, error, { tag: "discord", label: "Discord" }, this.conversationChannelIds,
+      async (channelId, text) => {
         const channel = await this.client.channels.fetch(channelId);
         if (channel && channel.isTextBased() && "send" in channel) {
-          await channel.send({ content: t.notificationFailed(subject, safe), allowedMentions: NO_MENTIONS });
+          await channel.send({ content: text, allowedMentions: NO_MENTIONS });
         }
-      } catch (postError) {
-        console.error(`[discord] Could not post notification failure to ${channelId}:`, postError);
-      }
-    }
+      });
   }
 
   private async handleAdvisorResponse(event: OwlEvent): Promise<void> {
@@ -404,7 +374,7 @@ export class DiscordConnector {
     }
 
     try {
-      const reply = await this.fetchAdvisorReply(event);
+      const reply = await fetchAdvisorReply(this.core, event);
       const channel = await this.client.channels.fetch(channelId);
       if (!channel || !channel.isTextBased() || !("send" in channel)) {
         throw new Error(`The Discord channel ${channelId} for the Advisor reply is not available.`);
@@ -487,32 +457,6 @@ export class DiscordConnector {
     return { lines, results };
   }
 
-  private async fetchAdvisorReply(event: OwlEvent): Promise<string> {
-    for (const candidate of [event.payload.reply, event.payload.text]) {
-      if (typeof candidate === "string" && candidate.trim().length > 0) return candidate;
-    }
-
-    const conversationId = event.payload.conversation_id;
-    const messageId = event.payload.message_id;
-    if (typeof conversationId !== "string" || typeof messageId !== "string") {
-      throw new Error("The Advisor reply event has no conversation id or message id.");
-    }
-
-    const response = await this.core.request<unknown>(`/conversations/${encodeURIComponent(conversationId)}/messages?limit=200`);
-    const messages = Array.isArray(response)
-      ? response
-      : asRecord(response)?.data && Array.isArray(asRecord(response)?.data)
-        ? asRecord(response)?.data as unknown[]
-        : null;
-    if (!messages) throw new Error("Core returned a malformed Advisor message list.");
-    const message = messages.find((candidate) => asRecord(candidate)?.id === messageId);
-    const body = asRecord(message)?.body;
-    if (typeof body !== "string" || body.trim().length === 0) {
-      throw new Error("Could not read the Advisor reply body from Core.");
-    }
-    return body;
-  }
-
   private async sendToCore(message: Message, text: string, attachmentIds: readonly string[], statusReply?: string): Promise<void> {
     const envelope = commandEnvelope({
       provider: "discord",
@@ -560,29 +504,9 @@ export class DiscordConnector {
     await channel.send({ content, allowedMentions: NO_MENTIONS });
   }
 
-  private async fetchPendingDecisions(_throwOnError = true): Promise<PendingDecision[]> {
-    const decisions: PendingDecision[] = [];
-    const seenCursors = new Set<string>();
-    let cursor: string | null = null;
-
-    for (let pageCount = 0; pageCount < MAX_PENDING_DECISION_PAGES; pageCount += 1) {
-      const query = new URLSearchParams({ status: "open", limit: String(PENDING_DECISION_PAGE_LIMIT) });
-      if (cursor !== null) query.set("cursor", cursor);
-      const page = await this.core.requestPage<PendingDecision[]>(`/decisions?${query.toString()}`);
-      if (!Array.isArray(page.data)) {
-        throw new Error("Core pending decisions response returned invalid data");
-      }
-      decisions.push(...page.data);
-      if (!page.has_more) return decisions;
-
-      if (!page.cursor || seenCursors.has(page.cursor)) {
-        throw new Error("Core pending decisions response returned a non-advancing cursor");
-      }
-      seenCursors.add(page.cursor);
-      cursor = page.cursor;
-    }
-
-    throw new Error("Core pending decisions pagination exceeded the safety limit");
+  /** Instance seam over the shared reader so tests can stub the open Decisions. */
+  private fetchPendingDecisions(): Promise<PendingDecision[]> {
+    return fetchPendingDecisions(this.core);
   }
 
   private async reportMessageError(message: Message, error: unknown): Promise<void> {
@@ -633,10 +557,6 @@ export function resolveDiscordAdvisorChannel(
   return channelId && allowedChannels.includes(channelId) ? channelId : null;
 }
 
-function parseChannelIds(value: string): string[] {
-  return [...new Set(value.split(/[\s,]+/u).map((item) => item.trim()).filter((item) => item.length > 0))];
-}
-
 function splitAtParagraphs(text: string, limit: number): string[] {
   const chunks: string[] = [];
   let remaining = text;
@@ -670,16 +590,4 @@ function discordSendHint(error: unknown, t: ReturnType<typeof connectorText>): s
   if (code === 50013) return t.fileSendHint.discordPermission;
   if (code === 40005) return t.fileSendHint.discordTooLarge;
   return "";
-}
-
-function asRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes}B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
 }

@@ -5,17 +5,17 @@ import {
   type LearningMetricsSettings,
 } from "../../shared/dist/learning-metrics-settings.js";
 import type { SettingsReader } from "./owner-language";
+import { readSetting, type SettingReadSpec } from "./settings-store";
+
+export const LEARNING_METRICS_SETTING: SettingReadSpec<LearningMetricsSettings> = {
+  key: LEARNING_METRICS_SETTINGS_KEY,
+  defaults: DEFAULT_LEARNING_METRICS_SETTINGS,
+  read: readLearningMetricsSettings,
+  warnPrefix: "learning_metrics: ",
+  readFailure: "Could not read learning_metrics; using defaults",
+};
 
 /** The stored learning metrics settings; missing or invalid values fall back to the defaults. A failed read never blocks Work completion. */
 export function learningMetrics(reader: SettingsReader): LearningMetricsSettings {
-  try {
-    const row = reader.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", LEARNING_METRICS_SETTINGS_KEY);
-    if (!row) return DEFAULT_LEARNING_METRICS_SETTINGS;
-    return readLearningMetricsSettings(JSON.parse(row.value_json) as unknown, (message) => {
-      console.warn(`[owl-core] learning_metrics: ${message}`);
-    });
-  } catch (error) {
-    console.warn("[owl-core] Could not read learning_metrics; using defaults", error);
-    return DEFAULT_LEARNING_METRICS_SETTINGS;
-  }
+  return readSetting(reader, LEARNING_METRICS_SETTING);
 }

@@ -4,12 +4,10 @@ import { delimiter, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { resolveDataDir, serverPackageRoot } from "./contracts.js";
-import { providerMode } from "./config.js";
 import { AppSettingsStore } from "./app-settings-store.js";
 import { ApiError } from "./errors.js";
 import { buildAgentEnv } from "./agent-env.js";
 import { providerConfigurationError, providerSelection, resolveExecutableForSelection, type ProviderSelection } from "./provider-selection.js";
-import type { AgentRunner } from "./types.js";
 import type { GuardTokenIssuer } from "../../../packages/shared/dist/guard-token.js";
 import type { PromptObserver, ProviderErrorObserver } from "../../../packages/shared/dist/index.js";
 import { AUTO_WORK_JUDGMENT_UNAVAILABLE, DECISION_ANSWER_TRIAGE_UNAVAILABLE, OPENCODE_EXECUTABLE_ENV, type OpencodeChildOutcome, type OpencodeChildRun } from "../../../packages/shared/dist/index.js";
@@ -59,70 +57,6 @@ async function loadAgentRuntimeModule(): Promise<AgentRuntimeModule> {
     );
   }
   return loaded;
-}
-
-/**
- * Standalone/dev-mode agent runner used only when OWL_CORE_MODE === "standalone"
- * (paired with MemoryCore, which has no real task-driving workflow of its own).
- * The production execution path is createExternalAgentRunner(), which the real
- * packages/core Core class calls directly via runManagerPlan/runWorker/runReviewer
- * (a structurally different interface with no start/stopAll/PID concept).
- *
- * packages/agent-runtime's ProviderClient.execute() spawns and fully owns its
- * child process inside the returned promise; it exposes no PID or AbortSignal
- * hook a caller could use to track or kill an in-flight invocation from outside.
- * Real PID-based cancellation for actually-spawned CLI processes is implemented
- * at the packages/core layer instead (Core.cancelAgent(), which reads the
- * agent_runs.pid column written by the real Core and sends SIGTERM/SIGKILL).
- * This class therefore only validates that the runtime dependency is loadable
- * and tracks which Work ids are considered active, rather than pretending to
- * manage real child processes it has no way to observe.
- */
-class RealAgentRunner implements AgentRunner {
-  readonly mode = "real" as const;
-  private readonly activeWorkIds = new Set<string>();
-
-  activeCount(): number {
-    return this.activeWorkIds.size;
-  }
-
-  async start(workId: string, _mode: "normal" | "small"): Promise<void> {
-    await loadAgentRuntimeModule();
-    this.activeWorkIds.add(workId);
-  }
-
-  async stopAll(_force: boolean): Promise<void> {
-    this.activeWorkIds.clear();
-  }
-}
-
-class StubAgentRunner implements AgentRunner {
-  readonly mode = "stub" as const;
-  private active = 0;
-
-  activeCount(): number {
-    return this.active;
-  }
-
-  async start(_workId: string, _mode: "normal" | "small"): Promise<void> {
-    this.active += 1;
-  }
-
-  async stopAll(_force: boolean): Promise<void> {
-    this.active = 0;
-  }
-}
-
-export function createAgentRunner(): AgentRunner {
-  return new RealAgentRunner();
-}
-
-export function createStubAgentRunner(): AgentRunner {
-  return new StubAgentRunner();
-}
-
-export function createConfiguredAgentRunner(): AgentRunner {
-  return providerMode() === "stub" ? createStubAgentRunner() : createAgentRunner();
 }
 
 function agentRunnerInitializationError(error: unknown): ApiError {
@@ -260,7 +194,6 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
       runDesigner(request: unknown): Promise<unknown>;
       runWorker(request: unknown): Promise<unknown>;
       runReviewer(request: unknown): Promise<unknown>;
-      runAdvisor(request: unknown): Promise<unknown>;
       runCurator?(request: unknown): Promise<unknown>;
       runKeywordExtraction?(request: unknown): Promise<unknown>;
       runLibrarianOperations?(request: unknown): Promise<unknown>;
@@ -424,7 +357,6 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
       runDesigner: async (request: unknown) => (await getDelegate()).runDesigner(request),
       runWorker: async (request: unknown) => (await getDelegate()).runWorker(request),
       runReviewer: async (request: unknown) => (await getDelegate()).runReviewer(request),
-      runAdvisor: async (request: unknown) => (await getDelegate()).runAdvisor(request),
       runCurator: async (request: unknown) => {
         const delegateValue = await getDelegate();
         if (typeof delegateValue.runCurator !== "function") return { ok: false, error: "curator_unavailable" };

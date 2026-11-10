@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { signalProcessGroup } from "@owl/shared";
 import { isAbsolute, resolve } from "node:path";
 
 /** Outcome of rehearsing one MCP server's startup handshake. */
@@ -63,11 +64,7 @@ export async function probeStdioServer(server: StdioServerTarget, timeoutMs: num
 
     const killGroup = (signal: NodeJS.Signals): void => {
       if (child?.pid === undefined) return;
-      try {
-        process.kill(-child.pid, signal);
-      } catch {
-        try { child.kill(signal); } catch { /* already exited */ }
-      }
+      signalProcessGroup(child, signal);
     };
 
     const finish = (result: ProbeResult): void => {

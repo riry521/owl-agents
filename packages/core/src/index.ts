@@ -16,8 +16,6 @@ export { NoopGitGateway } from "./types";
 export { basePushArgs, classifyPushFailure, parsePushPorcelain, PUSH_HOOK_BLOCK_MARKER, PUSH_HOOK_WARNING_MARKER, redactCredentials, safeRemoteName } from "./git-push";
 export type { PushRefLine } from "./git-push";
 export {
-  TASK_TRANSITION_TABLE,
-  WORK_TRANSITION_TABLE,
   createTaskPlanInTransaction,
   createWorkInTransaction,
   detachProjectWorksInTransaction,
@@ -72,8 +70,6 @@ export {
   redactResearchText,
 } from "./research-filter.js";
 export type { ResearchTargetVerdict } from "./research-filter.js";
-export { retagKnowledge } from "./knowledge-retag";
-export type { KeywordExtractionItem, KeywordExtractionResult, RetagReport } from "./knowledge-retag";
 export { MAX_NOTE_TAGS, isValidTag, mergeTagSets, sanitizeKeywords, tagProblem } from "./knowledge-tags";
 export { parseLessonBlocks } from "./final-verdict";
 export type { FinalLesson, FinalManagerVerdict, LessonBlock, NormalizedLesson } from "./final-verdict";
@@ -86,10 +82,9 @@ export { RuleWriter, RuleWriteError } from "./rule-writer";
 export type { RuleWriteErrorCode, RuleWriteInput, RuleWriteResult, RuleWriterOptions } from "./rule-writer";
 export { GitProjectSourceReader, ProjectOverviewService, isOverviewSourcePath, isSecretPath, projectOverviewFilename } from "./project-overview-note";
 export type { ProjectOverviewInput, ProjectOverviewTrigger, ProjectSourceReader } from "./project-overview-note";
-export { KnowledgeNotes, NoteParseError, writeAtomic } from "./knowledge-notes";
+export { KnowledgeNotes, NoteParseError } from "./knowledge-notes";
+export { writeAtomic } from "./atomic-write";
 export type { KnowledgeNotesOptions, NoteClaim, NoteDocument, NotePromotion } from "./knowledge-notes";
-export { DEFAULT_KNOWLEDGE_LIMITS, estimateTokens, normalizeKnowledgeLimits, renderProjectOverview } from "./knowledge-retrieval";
-export type { KnowledgeLimits } from "./knowledge-retrieval";
 export { detectSkillReads, SkillBox } from "./skill-box";
 export { detectProcessSkillsPack } from "./process-skills-pack";
 export type { DetectProcessSkillsPackInput, DetectedProcessSkillsPack, ProcessSkillsFileSystem } from "./process-skills-pack";
@@ -100,7 +95,6 @@ export type { ParseSkillMdResult, ParsedSkillMd, SkillFilePathResult, SkillMetad
 export { RuleFileError, RuleLoadError, RuleStore, RULE_ROLES, parseRuleYaml, parseWorkRules, renderRuleFile } from "./rule-store";
 export { AdvisorSessionManager } from "./advisor-session";
 export { AdvisorSessionNotFoundError, AdvisorSessionRuntime } from "./advisor-runtime";
-export { MemorySaver, slugify } from "./memory-saver";
 export { CURATION_KINDS, CURATION_RUN_STATUSES, CurationRunStore } from "./curation-runs";
 export type {
   CurationActor,
@@ -130,7 +124,7 @@ export type {
 } from "./workspace-tooling";
 export { parseClaudeMcpList, parseCodexMcpList, probeHttpServer, probeStdioServer } from "./mcp-probe";
 export type { CodexMcpServer, HttpServerTarget, McpServerStatus, ProbeResult, ProbeStatus, StdioServerTarget } from "./mcp-probe";
-export { defaultOwlRoot, isNodeTestRun, LEGACY_WORKSPACES_DIRNAME, resolveWorkspacesRoot, safeSegment, WorkspaceLayout } from "./workspace-layout";
+export { defaultOwlRoot, isNodeTestRun, DEFAULT_WORKSPACES_DIRNAME, resolveWorkspacesRoot, safeSegment, WorkspaceLayout } from "./workspace-layout";
 export {
   BACKLOG_STATUSES,
   backlogDedupeKey,
@@ -249,7 +243,6 @@ export type { OutboxHandler } from "./event-dispatcher";
 export type { DecisionRow, OpenDecisionInput as StateReducerOpenDecisionInput, ResolveDecisionInput, ResolveDecisionResult } from "./state-reducer";
 export type { AdvisorSession, AdvisorSessionStatus, AdvisorSessionEndReason } from "./advisor-session";
 export type { AdvisorRuntimeConfig, AdvisorSettingsSnapshot } from "./advisor-runtime";
-export type { SessionSummary } from "./memory-saver";
 export type { WorktreeReconcilerDeps, WorktreeReconcileScope, WorktreeReconcileResult } from "./worktree-reconciler";
 export type { WorkSummaryHistory, WorkSummaryRevision } from "./work-summary-history";
 export { PROVIDER_FAILED_ERROR_PREFIX, TRANSIENT_RETRY_DELAYS_MS, TRANSIENT_RETRY_LIMIT, attemptAction } from "./attempt-policy";

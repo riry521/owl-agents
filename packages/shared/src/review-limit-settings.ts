@@ -1,3 +1,5 @@
+import { isRecord, SettingsValidationError } from "./settings-validation.js";
+
 export const REVIEW_LIMIT_SETTINGS_KEY = "review_limits";
 
 export interface ReviewLimitSettings {
@@ -9,15 +11,8 @@ export interface ReviewLimitSettings {
 
 export const DEFAULT_REVIEW_LIMIT_SETTINGS: ReviewLimitSettings = { plan_review_rounds: 2, total_review_attempts: 6 };
 
-export class ReviewLimitSettingsValidationError extends Error {
-  public constructor(message: string, public readonly field: "plan_review_rounds" | "total_review_attempts" | "payload") {
-    super(message);
-    this.name = "ReviewLimitSettingsValidationError";
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+export class ReviewLimitSettingsValidationError extends SettingsValidationError<"plan_review_rounds" | "total_review_attempts" | "payload"> {
+  public override name = "ReviewLimitSettingsValidationError";
 }
 
 const isPositiveInteger = (value: unknown): value is number => typeof value === "number" && Number.isInteger(value) && value >= 1;

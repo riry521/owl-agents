@@ -2,9 +2,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { bodySha256, emptyThemePage, estimatePageTokens, findSecretPatterns, lineHash, PAGE_LIMITS, parseHistory, parsePage, renderHistory, renderPage, themeTitleKey, uniqueFilename, validatePage } from "../../dist/memory/page-format.js";
-import { estimateTokens } from "../../dist/knowledge-retrieval.js";
-import { matchFolderKind } from "../../dist/memory/folder-kinds.js";
-import { DEFAULT_MEMORY_FOLDER_KINDS } from "@owl/shared";
 
 const KINDS = ["theme", "project-index", "work-log", "clipping", "conversation-log"];
 const fixture = (kind) => readFileSync(new URL(`./fixtures/pages/${kind}.md`, import.meta.url), "utf8");
@@ -27,8 +24,11 @@ for (const kind of KINDS) {
   });
 }
 
-test("estimatePageTokens equals the old estimateTokens", () => {
-  for (const text of ["", "abcd", "日本語のテキスト abc", "ＡＢＣ"]) assert.equal(estimatePageTokens(text), estimateTokens(text));
+test("estimatePageTokens counts normalized ASCII quarters and one token per non-ASCII code point", () => {
+  assert.equal(estimatePageTokens(""), 0);
+  assert.equal(estimatePageTokens("abcd"), 1);
+  assert.equal(estimatePageTokens("AあBCい"), 3);
+  assert.equal(estimatePageTokens("ＡＢＣＤ"), 1);
   assert.equal(estimatePageTokens("abcdefgh"), 2);
   assert.equal(estimatePageTokens("あい"), 2);
 });
@@ -133,19 +133,13 @@ test("filename uniqueness: owl gets -2, -3", () => {
   assert.equal(uniqueFilename("b.md", (n) => taken.has(n)), "b.md");
 });
 
-test("helpers: bodySha256 ignores frontmatter, emptyThemePage is valid, themeTitleKey, folder rules", () => {
+test("helpers: bodySha256 ignores frontmatter, emptyThemePage is valid, themeTitleKey", () => {
   const text = fixture("theme");
   assert.equal(bodySha256(text), bodySha256(text.replace("updated: 2026-10-03", "updated: 2026-10-04")));
   assert.notEqual(bodySha256(text), bodySha256(`${text}x`));
   const empty = emptyThemePage({ id: "01HZZZZZZZZZZZZZZZZZZZZZZB", title: "新規", summary: "s", scope: "common", project_id: null, today: "2026-10-03" });
   assert.equal(validatePage(parsePage(renderPage(empty)), { writer: "owl" }).ok, true);
   assert.equal(themeTitleKey("テスト の　ＡＢＣ"), "テストのABC");
-  assert.equal(matchFolderKind(DEFAULT_MEMORY_FOLDER_KINDS, "research/2026/a.md")?.type, "clipping");
-  assert.equal(matchFolderKind(DEFAULT_MEMORY_FOLDER_KINDS, "advisor/x.md"), null);
-  assert.equal(matchFolderKind(DEFAULT_MEMORY_FOLDER_KINDS, "works/2026-10/W1-x.md")?.type, "work-log");
-  assert.equal(matchFolderKind(DEFAULT_MEMORY_FOLDER_KINDS, "notes/a.md"), null);
-  assert.equal(matchFolderKind({ version: 1, rules: [{ glob: "ext/*/in.md", type: "clipping" }] }, "ext/a/in.md")?.type, "clipping");
-  assert.equal(matchFolderKind({ version: 1, rules: [{ glob: "ext/*/in.md", type: "clipping" }] }, "ext/a/b/in.md"), null);
 });
 
 test("long lines, many W numbers, too many lines and tokens only warn; the page stays valid", () => {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { requestStopOfAgentRuns, setAgentRunStatus, type AgentRunStatus } from "./agent-run-state.js";
 import { createUlid, utcNow } from "../../db/dist/index.js";
 import { OUTPUT_FORMAT_INVALID_ERROR_KEY, isReportFormatInvalidErrorKey, readDesignBlocked, usageJson } from "@owl/shared";
 import type { ReviewLimitSettings } from "../../shared/dist/review-limit-settings.js";
@@ -18,9 +19,10 @@ import {
 import * as AttemptPolicy from "./attempt-policy";
 import { attemptAction, type AttemptDecision, type AttemptReason } from "./attempt-policy";
 import { autoRecoveryLimit, autoRecoveryUsed, criteriaDecisionBrief, immediateDecisionReason, recordAutoRecoveryInTransaction, samePartialReport, withAutoRecoveryTried, type ImmediateDecisionReason } from "./auto-recovery";
-import { isManagerCriterion, readStoredAcceptanceCriteria, type StoredAcceptanceCriterion } from "../../shared/dist/acceptance-criteria.js";
+import { criterionRequirement, isManagerCriterion, readStoredAcceptanceCriteria, type StoredAcceptanceCriterion } from "../../shared/dist/acceptance-criteria.js";
 import { ownerLanguage, type OwnerLanguage } from "./owner-language";
 import { replaceWorkPrerequisitesInTransaction, resolveWorkPrerequisiteDecisionInTransaction } from "./work-prerequisites";
+import { flagManagerTrigger, queueManagerTrigger } from "./replan-queue-store.js";
 import { fixPendingTaskIds } from "./fix-pending-tasks.js";
 import { reviewLimits } from "./review-limits";
 import { previousFixSpots, reviewFocusSettings, reviewSpots, type ReviewSpot } from "./review-focus";
@@ -29,6 +31,9 @@ import { remakeLimits } from "./remake-limits";
 import { fixerEscalation } from "./fixer-escalation";
 import type { FixerEscalationSettings } from "../../shared/dist/fixer-escalation-settings.js";
 import { progressGuard } from "./progress-guard";
+import { ensureOwner } from "./settings-store";
+
+export { ensureOwner };
 import { assertAgentRunNotStopped } from "./agent-run-stop";
 import { assignReplacementLineageInTransaction, lineageExternalBlockerReports, lineagePartialReports, previousPartialReport, lineageGenerationCount, lineageReviewAttemptsExcluding, lineageRootOf, lineageUsage, parseLineageReset, restartLineageBudgetInTransaction } from "./task-lineage";
 import type { RemakeLimitSettings } from "../../shared/dist/remake-limit-settings.js";
@@ -53,93 +58,6 @@ import type {
 } from "./types";
 
 /**
- * The Work and Task transition tables are represented as data as well as
- * executable branches below. Keeping the rows next to the reducer makes the
- * implementation/report mapping auditable and prevents a handler from
- * inventing a second transition table.
- */
-export const WORK_TRANSITION_TABLE = [
-  { row: 1, current: "memo", guard: "title/summary/owner/project valid", event: "work.ready", next: "ready" },
-  { row: 2, current: "memo", guard: "owner explicitly starts", event: "work.started", next: "running" },
-  { row: 3, current: "ready", guard: "start idempotency not processed", event: "work.started", next: "running" },
-  { row: 4, current: "running", guard: "unfinished task or agent; every Agent run of the Work but the Advisor's is stopped, and running/verifying Tasks are paused to be redone", event: "work.paused", next: "paused" },
-  { row: 5, current: "paused", guard: "owner resume (reconciled); stopped Agent runs are ignored and stopped Tasks are redone", event: "work.resumed", next: "running" },
-  { row: 6, current: "running", guard: "open decision blocks work", event: "decision.opened", next: "judgement_waiting" },
-  { row: 7, current: "judgement_waiting", guard: "winner answer committed by CAS", event: "decision.resolved", next: "running" },
-  { row: 8, current: "running", guard: "all tasks complete and manager verdict complete", event: "work.completed", next: "completed" },
-  { row: 9, current: "running", guard: "owner cancel or manager failure owner choice", event: "work.cancelled", next: "cancelled" },
-  { row: 10, current: "paused", guard: "owner cancel", event: "work.cancelled", next: "cancelled" },
-  { row: 11, current: "completed", guard: "valid small reopen", event: "work.reopened", next: "running" },
-  { row: 12, current: "cancelled", guard: "reopen is prohibited", event: "work.reopen_rejected", next: "cancelled" },
-  { row: 13, current: "any non-terminal", guard: "core cannot safely reconcile", event: "system.alert", next: "judgement_waiting" },
-  { row: 14, current: "judgement_waiting", guard: "owner cancel", event: "work.cancelled", next: "cancelled" },
-  { row: 15, current: "memo", guard: "owner cancel", event: "work.cancelled", next: "cancelled" },
-  { row: 16, current: "ready", guard: "owner cancel", event: "work.cancelled", next: "cancelled" },
-  { row: 17, current: "ready", guard: "a prerequisite Work was cancelled or deleted", event: "decision.opened", next: "judgement_waiting" },
-  { row: 18, current: "judgement_waiting", guard: "prerequisite Decision answered and prerequisites remain", event: "work.prerequisite_wait_resumed", next: "ready" },
-] as const;
-
-export const TASK_TRANSITION_TABLE = [
-  { row: 1, current: "waiting", guard: "all dependencies completed", event: "task.ready", next: "ready" },
-  { row: 2, current: "ready", guard: "capacity and launch lease", event: "task.started", next: "running" },
-  { row: 3, current: "ready", guard: "work paused/cancelled", event: "work.paused/work.cancelled", next: "paused/cancelled" },
-  { row: 4, current: "running", guard: "valid success report", event: "agent.exited", next: "verifying" },
-  { row: 5, current: "running", guard: "transient and (retry_no <= 3 or auto recovery granted)", event: "task.failure.classified", next: "ready" },
-  { row: 6, current: "running", guard: "deterministic below same/total thresholds", event: "task.failure.classified", next: "ready" },
-  { row: 7, current: "running", guard: "deterministic at same/total threshold", event: "task.failed", next: "failed" },
-  { row: 8, current: "running", guard: "deterministic retry_allowed=false", event: "task.failed -> decision.opened", next: "judgement_waiting" },
-  { row: 9, current: "running", guard: "crash below deterministic threshold", event: "agent.crashed", next: "ready" },
-  { row: 10, current: "running", guard: "crash at deterministic threshold", event: "agent.crashed -> task.failed", next: "failed" },
-  { row: 11, current: "verifying", guard: "verification pass, no review", event: "verification.completed", next: "completed" },
-  { row: 12, current: "verifying", guard: "verification pass, review required", event: "verification.completed", next: "verifying" },
-  { row: 13, current: "verifying", guard: "verification fail and review_round < review_limits.plan_review_rounds", event: "verification.completed", next: "review_fix_waiting" },
-  { row: 14, current: "verifying", guard: "verification fail and review_round >= review_limits.plan_review_rounds", event: "verification.completed -> task.failed", next: "failed" },
-  { row: 15, current: "verifying", guard: "review pass and merge exit 0", event: "review.passed -> git.merge.result", next: "completed" },
-  { row: 16, current: "verifying", guard: "review pass and merge exit != 0", event: "review.passed -> git.merge.aborted -> task.conflict", next: "failed" },
-  { row: 17, current: "verifying", guard: "review fix_required and review_round < review_limits.plan_review_rounds", event: "review.failed", next: "review_fix_waiting" },
-  { row: 18, current: "verifying", guard: "review fix_required and review_round >= review_limits.plan_review_rounds", event: "review.failed", next: "failed" },
-  { row: 19, current: "review_fix_waiting", guard: "replacement lease", event: "task.started", next: "running" },
-  { row: "18b", current: "verifying", guard: "review not passed and total_review_attempts reached review_limits.total_review_attempts", event: "review.failed", next: "failed" },
-  { row: "18e", current: "verifying", guard: "design Task escalated from the standard Designer to Lead (not one that began at Lead under design_mode=lead or assigned_designer=lead_designer) and lineage-wide lead rejections reached remake_limits.lead_review_rejections (only Owner answers to a Decision restart the count; Manager replans, replacements and Owner-initiated replans carry it over)", event: "review.failed", next: "review_fix_waiting (stop-report run, then judgement_waiting)" },
-  { row: "32d", current: "running", guard: "design Task: the Designer reported design_blocked, or the stop-report run (design_stop_json set) ended; no remake", event: "task.design_blocked -> decision.opened", next: "judgement_waiting" },
-  { row: "32e", current: "running", guard: "stop-report run (design_stop_json set) crashed, failed or was rate limited", event: "task.failure.classified | agent.crashed | task.rate_limited", next: "judgement_waiting" },
-  { row: "32f", current: "ready | review_fix_waiting", guard: "design Task with design_stop_json set and its Designer provider paused", event: "task.design_blocked", next: "judgement_waiting" },
-  { row: "18d", current: "verifying", guard: "review not passed and lineage-wide Reviewer verdicts reached remake_limits.lineage_review_attempts (base-sync-only generations are checked against remake_limits.base_sync_lineage_review_attempts instead)", event: "review.failed -> decision.opened", next: "judgement_waiting" },
-  { row: "18c", current: "verifying", guard: "review not passed and total_review_attempts exceeded review_limits.total_review_attempts", event: "review.failed -> decision.opened", next: "judgement_waiting" },
-  { row: 20, current: "failed", guard: "manager replan accepted and every dependency completed; failure counters, reviewer failures and review_round reset", event: "task.replanned", next: "ready" },
-  { row: "20b", current: "failed", guard: "manager replan accepted but a dependency is not completed; same resets as row 20", event: "task.replanned", next: "waiting" },
-  { row: "20c", current: "failed", guard: "manager replan accepted with payload.prerequisite (wait_for); same resets as row 20, no_progress_count kept; prerequisite_json and prerequisite_since recorded", event: "task.replanned", next: "waiting" },
-  { row: 21, current: "failed", guard: "manager or core cannot continue and owner decision open", event: "decision.opened", next: "judgement_waiting" },
-  { row: 22, current: "judgement_waiting", guard: "decision winner targets task and every dependency completed", event: "decision.resolved", next: "ready" },
-  { row: "22b", current: "judgement_waiting", guard: "decision winner targets task but a dependency is not completed", event: "decision.resolved", next: "waiting" },
-  { row: 23, current: "waiting/ready/review_fix_waiting/failed", guard: "owner pause", event: "work.paused", next: "paused" },
-  { row: 24, current: "running/verifying", guard: "owner pause; every Agent run of the Work is marked cancel_requested in the same transaction and stopped by Core after the commit; paused_from records ready so resume redoes the Task", event: "work.paused", next: "paused" },
-  { row: 25, current: "paused", guard: "work resumed", event: "work.resumed", next: "paused_from" },
-  { row: 26, current: "any non-terminal", guard: "owner cancel", event: "work.cancelled", next: "cancelled" },
-  { row: 27, current: "waiting", guard: "a dependency permanently failed; failed_by_dependency_task_id records it", event: "task.dependency_failed", next: "failed" },
-  { row: 28, current: "verifying", guard: "review replan_required (explicit, any review_round)", event: "review.failed", next: "failed" },
-  { row: 29, current: "verifying", guard: "Reviewer agent failed; reviewer_failure_count below REVIEWER_FAILURE_LIMIT (else failed + manager trigger)", event: "agent.crashed", next: "review_fix_waiting/failed" },
-  { row: "24b", current: "running/verifying", guard: "owner instruction; the Task's Agent runs are marked cancel_requested in the same transaction and stopped by Core after the commit; failure counters, lineage and worktree kept", event: "task.interrupted", next: "ready" },
-  { row: 30, current: "failed/judgement_waiting", guard: "manager replan registered replacement Tasks", event: "task.superseded", next: "cancelled" },
-  { row: 31, current: "failed", guard: "failed_by_dependency_task_id set and no dependency is failed or cancelled any more; marker cleared", event: "task.dependency_restored", next: "waiting" },
-  { row: 32, current: "running", guard: "Worker asked the Manager a question or requested replanning", event: "task.replan_requested", next: "failed" },
-  { row: "32b", current: "running", guard: "Worker reported acceptance criteria it cannot prove inside the Task (source=worker); failure counters kept", event: "task.acceptance_defect_reported", next: "failed" },
-  { row: "28b", current: "verifying", guard: "Reviewer reported acceptance criteria that cannot be proven inside the Task (source=reviewer); review_round, total_review_attempts and reviewer_failure_count kept", event: "task.acceptance_defect_reported", next: "failed" },
-  { row: 33, current: "completed/failed/cancelled", guard: "no agent run is active on the worktree", event: "task.worktree.discarded", next: "same status" },
-  { row: 34, current: "running", guard: "provider returned rate_limited", event: "task.rate_limited", next: "ready" },
-  { row: 35, current: "ready/review_fix_waiting", guard: "Task worktree conflicts with the Work branch before launch; merge aborted", event: "task.conflict", next: "failed" },
-  { row: 36, current: "ready/review_fix_waiting", guard: "Core stops a launch because no_progress_count reached progress_guard.no_progress_limit", event: "decision.opened", next: "judgement_waiting" },
-  { row: "32c", current: "running", guard: "Worker reported pending_process within progress_guard.process_wait_max_count; prerequisite_json (source=worker, kind=process) and prerequisite_since recorded; failure counters and no_progress_count kept", event: "task.process_wait_started", next: "waiting" },
-  { row: "32d", current: "running", guard: "Worker reported external_blocker; within progress_guard.external_blocker_limit over the lineage the Manager is triggered (failure counters and no_progress_count kept), past it the Owner decides", event: "task.external_blocker_reported", next: "failed/judgement_waiting" },
-  { row: 37, current: "waiting", guard: "prerequisite set and Core found it expired, unreachable or in sync conflict; mark kept for the Decision brief", event: "decision.opened", next: "judgement_waiting" },
-  { row: 38, current: "waiting", guard: "prerequisite set and every condition holds; mark cleared, no_progress_count kept", event: "task.prerequisite_satisfied", next: "waiting" },
-  { row: 39, current: "waiting/paused(paused_from=waiting)", guard: "prerequisite set and the Owner resumed it; mark cleared, no_progress_count=0", event: "task.prerequisite_resumed", next: "same state" },
-  { row: 40, current: "verifying", guard: "Core's test run failed for the test environment and the re-investigation did not fix it; the Task is not remade", event: "decision.opened", next: "judgement_waiting" },
-  { row: 41, current: "judgement_waiting", guard: "decision winner chose to run the verification again", event: "decision.resolved", next: "verifying" },
-  { row: 42, current: "ready", guard: "owner instruction replan revised the Task in place; failure counters, lineage, retry_no and worktree kept", event: "task.revised", next: "ready/waiting" },
-] as const;
-
-/**
  * The one definition of "this Task has finished for good". A superseded
  * (cancelled) Task left the plan without failing the Work, so it counts as
  * terminal. Core's final-check trigger and WorkflowEngine's Work completion
@@ -153,7 +71,7 @@ export function isTerminalTaskState(status: string): boolean {
 }
 
 /**
- * Task row 29: how many times the Reviewer itself may fail (provider or
+ * Reviewer failure: how many times the Reviewer itself may fail (provider or
  * contract error, not a finding) before the Task fails for Manager replanning.
  * Counted in tasks.reviewer_failure_count, which Worker starts and successes
  * never reset.
@@ -247,7 +165,7 @@ function workResult(
 }
 
 /**
- * Task rows 15-16: a finished Task and the serialized Core Git merge of
+ * Integration: a finished Task and the serialized Core Git merge of
  * it into the Work branch (after review.passed, or at verification.completed
  * for a Task without review). A conflict fails the Task for Manager replanning.
  */
@@ -332,7 +250,7 @@ function resetFailureCounters(row: TaskRow): TaskRow {
 }
 
 /**
- * Clears the Reviewer failure budget (Task row 29). Deliberately not part of
+ * Clears the Reviewer failure budget. Deliberately not part of
  * resetFailureCounters: that one runs on every Worker success, and folding the
  * Reviewer budget into it let a failing Reviewer loop forever.
  */
@@ -352,7 +270,7 @@ function resetSameErrorCounter(row: TaskRow): TaskRow {
 /**
  * Builds the evaluate() thresholds from reduceTask's options. Values are not
  * defaulted with `??`: tests/remake/limits.test.mjs passes a partial lineage and
- * relies on the undefined limit never triggering the base-sync stop.
+ * relies on the undefined limit never triggering the lineage stop.
  */
 function attemptPolicyConfig(options: TaskReducerOptions): AttemptPolicy.AttemptPolicyConfig {
   return {
@@ -361,9 +279,9 @@ function attemptPolicyConfig(options: TaskReducerOptions): AttemptPolicy.Attempt
     reviewFocus: options.reviewFocus ?? AttemptPolicy.DEFAULT_ATTEMPT_POLICY_CONFIG.reviewFocus,
     fixerAfterRejections: options.fixerEscalation?.after_review_rejections ?? AttemptPolicy.DEFAULT_ATTEMPT_POLICY_CONFIG.fixerAfterRejections,
     lineageLimits: options.lineage
-      ? { reviewAttempts: options.lineage.limit, baseSyncReviewAttempts: options.lineage.baseSyncLimit, leadReviewRejections: options.lineage.leadRejectionLimit }
+      ? { reviewAttempts: options.lineage.limit, leadReviewRejections: options.lineage.leadRejectionLimit }
       : null,
-    // Not defaulted by a missing lineage: only the external_blocker branch reads it, so the base-sync problem above cannot occur.
+    // Not defaulted by a missing lineage: only the external_blocker branch reads it, so a missing lineage cannot trigger it.
     externalBlockerLimit: options.externalBlocker?.limit ?? AttemptPolicy.DEFAULT_ATTEMPT_POLICY_CONFIG.externalBlockerLimit,
     partialLimit: options.partial?.limit ?? AttemptPolicy.DEFAULT_ATTEMPT_POLICY_CONFIG.partialLimit,
     autoRecovery: options.autoRecovery ?? AttemptPolicy.DEFAULT_ATTEMPT_POLICY_CONFIG.autoRecovery,
@@ -375,7 +293,6 @@ function lineageObservation(options: TaskReducerOptions): AttemptPolicy.AttemptL
   return options.lineage
     ? {
       otherReviewAttempts: options.lineage.otherReviewAttempts,
-      otherBaseSyncReviewAttempts: options.lineage.otherBaseSyncReviewAttempts,
       generations: options.lineage.generations,
       otherLeadRejections: options.lineage.otherLeadRejections,
     }
@@ -412,7 +329,7 @@ export function reduceWork(row: WorkRow, command: WorkReducerCommand): Reduction
   const now = typeof payload.now === "string" ? payload.now : utcNow();
   const event = command.event;
 
-  // Work row 1: memo -> ready.
+  // Work ready: memo -> ready.
   if (row.state === "memo" && event === "work.ready") {
     if (!requiredBoolean(payload, "valid")) {
       reject(row, event, "The Work is not valid enough to leave memo state.");
@@ -420,7 +337,7 @@ export function reduceWork(row: WorkRow, command: WorkReducerCommand): Reduction
     return workResult(row, withWorkVersion(row, "ready", now));
   }
 
-  // Work row 2: explicit owner start from memo.
+  // Owner start: explicit owner start from memo.
   if (row.state === "memo" && event === "work.started") {
     if (!requiredBoolean(payload, "explicit_start")) {
       reject(row, event, "Starting a memo Work requires an explicit owner action.");
@@ -428,7 +345,7 @@ export function reduceWork(row: WorkRow, command: WorkReducerCommand): Reduction
     return workResult(row, withWorkVersion(row, "running", now));
   }
 
-  // Work row 3: ready start with idempotency already checked by Core.
+  // Start from ready: ready start with idempotency already checked by Core.
   if (row.state === "ready" && event === "work.started") {
     if (requiredBoolean(payload, "idempotency_processed")) {
       reject(row, event, "The start idempotency key has already been processed.");
@@ -436,7 +353,7 @@ export function reduceWork(row: WorkRow, command: WorkReducerCommand): Reduction
     return workResult(row, withWorkVersion(row, "running", now));
   }
 
-  // Work row 17: a prerequisite that can no longer complete stops the wait.
+  // Prerequisite lost: a prerequisite that can no longer complete stops the wait.
   if (row.state === "ready" && event === "decision.opened") {
     if (!requiredBoolean(payload, "prerequisite_unreachable")) {
       reject(row, event, "A ready Work waits for the Owner only when a prerequisite can no longer complete.");
@@ -444,7 +361,7 @@ export function reduceWork(row: WorkRow, command: WorkReducerCommand): Reduction
     return workResult(row, withWorkVersion(row, "judgement_waiting", now));
   }
 
-  // Work row 18: the Owner dropped the missing prerequisites but others are not completed yet.
+  // Prerequisite wait resumed: the Owner dropped the missing prerequisites but others are not completed yet.
   if (row.state === "judgement_waiting" && event === "work.prerequisite_wait_resumed") {
     if (!requiredBoolean(payload, "prerequisites_pending")) {
       reject(row, event, "The Work returns to waiting only while prerequisites remain.");
@@ -452,7 +369,7 @@ export function reduceWork(row: WorkRow, command: WorkReducerCommand): Reduction
     return workResult(row, withWorkVersion(row, "ready", now));
   }
 
-  // Work row 4: pause only while work is active.
+  // Work pause: pause only while work is active.
   if (row.state === "running" && event === "work.paused") {
     if (!requiredBoolean(payload, "has_active_task_or_agent")) {
       reject(row, event, "A running Work can be paused only while a Task or Agent is active.");
@@ -460,7 +377,7 @@ export function reduceWork(row: WorkRow, command: WorkReducerCommand): Reduction
     return workResult(row, withWorkVersion(row, "paused", now));
   }
 
-  // Work row 5: normal resume, with the unsafe-reconcile branch below.
+  // Work resume: normal resume, with the unsafe-reconcile branch below.
   if (row.state === "paused" && event === "work.resumed") {
     const reconciled = requiredBoolean(payload, "reconciled");
     if (!reconciled) {
@@ -469,7 +386,7 @@ export function reduceWork(row: WorkRow, command: WorkReducerCommand): Reduction
     return workResult(row, withWorkVersion(row, "running", now));
   }
 
-  // Work row 6: a blocking Decision moves the Work to judgement_waiting.
+  // Blocking Decision: it moves the Work to judgement_waiting.
   if (row.state === "running" && event === "decision.opened") {
     if (!requiredBoolean(payload, "blocks_work")) {
       reject(row, event, "The Decision does not identify this Work as blocked.");
@@ -477,7 +394,7 @@ export function reduceWork(row: WorkRow, command: WorkReducerCommand): Reduction
     return workResult(row, withWorkVersion(row, "judgement_waiting", now));
   }
 
-  // Work row 7: only the CAS winner may resume a judgement-waiting Work.
+  // Decision answered: only the CAS winner may resume a judgement-waiting Work.
   if (row.state === "judgement_waiting" && event === "decision.resolved") {
     if (!requiredBoolean(payload, "winner_commit")) {
       reject(row, event, "Only the Decision winner can resume a Work.");
@@ -485,7 +402,7 @@ export function reduceWork(row: WorkRow, command: WorkReducerCommand): Reduction
     return workResult(row, withWorkVersion(row, "running", now));
   }
 
-  // Work row 8: completion requires both Task and Manager verdict.
+  // Work completion: completion requires both Task and Manager verdict.
   if (row.state === "running" && event === "work.completed") {
     if (!requiredBoolean(payload, "all_tasks_completed") || payload.manager_final_verdict !== "complete") {
       reject(row, event, "The Work is not complete because Task completion or the Manager verdict is missing.");
@@ -493,7 +410,7 @@ export function reduceWork(row: WorkRow, command: WorkReducerCommand): Reduction
     return workResult(row, withWorkVersion(row, "completed", now));
   }
 
-  // Work rows 9-10 and 14-16: owner cancellation from memo, ready,
+  // Owner cancel: owner cancellation from memo, ready,
   // running, paused, or judgement_waiting (otherwise a blocked Work could only
   // be escaped by answering its Decision, and a never-started Work could
   // never be withdrawn).
@@ -512,7 +429,7 @@ export function reduceWork(row: WorkRow, command: WorkReducerCommand): Reduction
     return workResult(row, withWorkVersion(row, "cancelled", now));
   }
 
-  // Work row 11: only a valid reopen can leave completed.
+  // Reopen: only a valid one can leave completed.
   if (row.state === "completed" && event === "work.reopened") {
     if (!requiredBoolean(payload, "valid_reopen")) {
       reject(row, event, "Only a valid reopen can reopen a completed Work.");
@@ -521,12 +438,12 @@ export function reduceWork(row: WorkRow, command: WorkReducerCommand): Reduction
     return workResult(row, { ...withWorkVersion(row, "running", now), completed_at: null });
   }
 
-  // Work row 12: cancelled Work can never be reopened in place.
+  // Reopen rejected: cancelled Work can never be reopened in place.
   if (row.state === "cancelled" && event === "work.reopen_rejected") {
     reject(row, event, "A cancelled Work cannot be reopened; create a new Work instead.");
   }
 
-  // Work row 13: unreconcilable non-terminal state is judgement_waiting.
+  // Unsafe reconcile: unreconcilable non-terminal state is judgement_waiting.
   if (event === "system.alert" && row.state !== "completed" && row.state !== "cancelled") {
     if (!requiredBoolean(payload, "safe_reconcile_failed")) {
       reject(row, event, "system.alert is reserved for an unsafe reconcile result.");
@@ -549,17 +466,15 @@ export interface TaskReducerOptions {
     readonly acceptanceRoute?: AttemptPolicy.AcceptanceDefectRoute;
     /** Partial reports earlier in the lineage and the progress_guard limit; used only for a deterministic failure event carrying a partial report. */
     readonly partial?: { readonly earlierReports: number; readonly limit: number; readonly same?: boolean };
-    /** total_review_attempts at the Owner's last answer (lineage_reset_json); rows 18b/18c count from there. */
+    /** total_review_attempts at the Owner's last answer (lineage_reset_json); the total review attempt limit counts from there. */
     readonly reviewAttemptsBase?: number;
     readonly refundedBase?: number;
-    /** Lineage budget inputs; without them row 18d is skipped. */
+    /** Lineage budget inputs; without them the lineage review-attempt limit is skipped. */
     readonly lineage?: {
       readonly otherReviewAttempts: number;
-      readonly otherBaseSyncReviewAttempts: number;
       readonly limit: number;
-      readonly baseSyncLimit: number;
       readonly generations: number;
-      /** Lead-stage rejections over the other Tasks of the chain; without it (or the limit) row 18e is skipped. */
+      /** Lead-stage rejections over the other Tasks of the chain; without it (or the limit) the lead-rejection limit is skipped. */
       readonly otherLeadRejections?: number;
       readonly leadRejectionLimit?: number;
     };
@@ -579,7 +494,7 @@ export function reduceTask(
   const now = typeof payload.now === "string" ? payload.now : utcNow();
   const event = command.event;
 
-  // Task row 1.
+  // Dependencies completed: waiting -> ready.
   if (row.status === "waiting" && event === "task.ready") {
     if (row.prerequisite_json != null) {
       reject(row, event, "The Task waits on a prerequisite; only its satisfaction or an Owner resume releases it.");
@@ -590,7 +505,7 @@ export function reduceTask(
     return taskResult(row, withTaskVersion(row, "ready", now));
   }
 
-  // Task row 27 (cascade): a waiting Task fails once a dependency of
+  // Dependency cascade: a waiting Task fails once a dependency of
   // it is permanently failed. WorkflowEngine.cascadeFailure() walks
   // task_dependencies and dispatches this event transitively so a `waiting`
   // Task never stalls forever behind a permanently failed dependency (see
@@ -608,7 +523,7 @@ export function reduceTask(
     return decided(taskResult(row, next, ["dependency_failure_cascaded"]), "dependency_failed");
   }
 
-  // Task row 31: a Task failed only because a dependency failed returns to
+  // Dependency restored: a Task failed only because a dependency failed returns to
   // waiting once that dependency is replanned or superseded.
   if (row.status === "failed" && event === "task.dependency_restored") {
     requiredString(payload, "restored_dependency_task_id");
@@ -619,7 +534,7 @@ export function reduceTask(
     }), "dependency_restored");
   }
 
-  // Task row 30: the Manager replaced this Task with new Tasks, so it leaves
+  // Superseded: the Manager replaced this Task with new Tasks, so it leaves
   // the plan without counting as a Work failure.
   // An Owner-initiated replan may also retire an open Task (stop_open): the
   // Manager chose to cancel or replace it while it waits, runs or is blocked.
@@ -638,7 +553,7 @@ export function reduceTask(
     return taskResult(row, { ...withTaskVersion(resetReviewerFailureCounter(resetFailureCounters(row)), "completed", now), paused_from: null }, ["dependencies_unlock"]);
   }
 
-  // Task rows 2 and 19.
+  // Task start: ready or review_fix_waiting -> running.
   if ((row.status === "ready" || row.status === "review_fix_waiting") && event === "task.started") {
     if (!requiredBoolean(payload, "capacity_acquired") || !requiredBoolean(payload, "launch_lease_acquired")) {
       reject(row, event, "The Task cannot start without both capacity and a launch lease.");
@@ -657,8 +572,8 @@ export function reduceTask(
     return taskResult(row, next, ["agent_run_required"]);
   }
 
-  // Task row 35: the Task worktree could not catch up with the Work branch
-  // before its next attempt. Like a conflict at integration (row 16), only
+  // Pre-launch conflict: the Task worktree could not catch up with the Work branch
+  // before its next attempt. Like a conflict at integration, only
   // this Task fails, for Manager replanning; its worktree stays as it was.
   if ((row.status === "ready" || row.status === "review_fix_waiting") && event === "task.conflict") {
     const taskBranch = requiredString(payload, "task_branch");
@@ -666,7 +581,7 @@ export function reduceTask(
     return applyAttemptEvaluation(row, event, now, AttemptPolicy.evaluate({ kind: "work_sync_conflict", task: row, taskBranch, workBranch }, policy));
   }
 
-  // Task row 3: ready Task follows Work pause/cancel.
+  // Work pause/cancel: ready Task follows Work pause/cancel.
   if (row.status === "ready" && (event === "work.paused" || event === "work.cancelled")) {
     if (event === "work.paused" && !requiredBoolean(payload, "work_paused")) {
       reject(row, event, "A ready Task may be paused only after Work pause is committed.");
@@ -679,7 +594,7 @@ export function reduceTask(
     return taskResult(row, next, [event === "work.paused" ? "spawn_suppressed" : "cancel_requested"]);
   }
 
-  // Task row 4: a valid success report enters verification.
+  // Success report: a valid success report enters verification.
   if (row.status === "running" && event === "agent.exited") {
     if (payload.outcome !== "success" || !requiredBoolean(payload, "report_valid")) {
       reject(row, event, "Only a valid successful report may enter verification.");
@@ -687,13 +602,13 @@ export function reduceTask(
     return taskResult(row, withTaskVersion(resetFailureCounters(row), "verifying", now), ["report_saved"]);
   }
 
-  // Task row 32c: a Worker's long process holds the Task in waiting; nothing failed, so no counter moves.
+  // Process wait: a Worker's long process holds the Task in waiting; nothing failed, so no counter moves.
   if (row.status === "running" && event === PROCESS_WAIT_EVENT) {
     validatePrerequisiteSpec(payload.prerequisite);
     return decided(taskResult(row, withTaskVersion(row, "waiting", now), ["report_saved"]), "process_wait");
   }
 
-  // Task rows 32d/32e/32f: a design Task stops without a remake. The Designer reported design_blocked, or the
+  // Design stop: a design Task stops without a remake. The Designer reported design_blocked, or the
   // stop-report run (design_stop_json set) ended in any way: the Owner decides, never Manager or ready.
   if (
     row.type === "design" &&
@@ -709,7 +624,7 @@ export function reduceTask(
     }, policy));
   }
 
-  // Task row 5: transient retry is independent of deterministic failure counters.
+  // Transient failure: the retry is independent of deterministic failure counters.
   if (row.status === "running" && event === "task.failure.classified" && payload.failure_class === "transient") {
     const retryNo = requiredNumber(payload, "retry_no");
     const nextAttemptAt = payload.next_attempt_at === null || typeof payload.next_attempt_at === "string"
@@ -725,7 +640,7 @@ export function reduceTask(
     return decided(taskResult(row, withTaskVersion({ ...row, next_attempt_at: null }, "ready", now), ["provider_pause_scheduled"]), "rate_limited");
   }
 
-  // Task rows 6-8: deterministic failure classification and Manager/Decision split.
+  // Deterministic failure: classification and Manager/Decision split.
   if (row.status === "running" && event === "task.failure.classified" && payload.failure_class === "deterministic") {
     const errorKey = requiredString(payload, "error_key");
     const retryAllowed = requiredBoolean(payload, "retry_allowed");
@@ -749,7 +664,7 @@ export function reduceTask(
     }, policy));
   }
 
-  // Task row 32: the Worker finished but asked the Manager a question or
+  // Replan requested: the Worker finished but asked the Manager a question or
   // requested replanning. The Task leaves running first so the Manager
   // replan (task.replanned: failed -> ready) can apply its revision.
   if (row.status === "running" && event === "task.replan_requested") {
@@ -761,7 +676,7 @@ export function reduceTask(
     ), typeof payload.question === "string" ? "worker_question" : "worker_replan_requested");
   }
 
-  // Task rows 32b / 28b: the Worker or Reviewer found criteria that cannot be
+  // Acceptance defect: the Worker or Reviewer found criteria that cannot be
   // proven inside the Task. Failure and review counters stay as they are; the
   // Manager must rewrite the criteria on the same Task.
   if (event === ACCEPTANCE_DEFECT_EVENT) {
@@ -769,12 +684,12 @@ export function reduceTask(
     return applyAttemptEvaluation(row, event, now, AttemptPolicy.evaluate({ kind: "acceptance_defect", task: row, source, route: options.acceptanceRoute }, policy));
   }
 
-  // Task row 32d: the Worker reported a problem outside the Task. Failure counters stay; the lineage count and limit decide Manager or Owner.
+  // External blocker: the Worker reported a problem outside the Task. Failure counters stay; the lineage count and limit decide Manager or Owner.
   if (event === EXTERNAL_BLOCKER_EVENT) {
     return applyAttemptEvaluation(row, event, now, AttemptPolicy.evaluate({ kind: "external_blocker", task: row, earlierReports: options.externalBlocker?.earlierReports ?? 0 }, policy));
   }
 
-  // Task rows 9-10: a crash without a report follows deterministic counters.
+  // Crash without a report follows deterministic counters.
   if (row.status === "running" && event === "agent.crashed") {
     if (requiredBoolean(payload, "report_present")) {
       reject(row, event, "agent.crashed must not carry a successful report.");
@@ -789,7 +704,7 @@ export function reduceTask(
     return decided(taskResult(row, withTaskVersion(row, "judgement_waiting", now), ["core_decision_required"]), "reviewer_output_invalid");
   }
 
-  // Task row 29: a Reviewer owns a running AgentRun while the Task remains
+  // Reviewer failure: a Reviewer owns a running AgentRun while the Task remains
   // in verifying. If the Reviewer itself fails (provider or contract error,
   // or its process disappears during shutdown/restart), put the Task back
   // through the normal Worker/review path instead of leaving it permanently
@@ -803,7 +718,7 @@ export function reduceTask(
     return applyAttemptEvaluation(row, event, now, AttemptPolicy.evaluate({ kind: "reviewer_crash", task: row }, policy));
   }
 
-  // Task rows 11-14: verification pass/fail and independent review counter.
+  // Verification result: verification pass/fail and independent review counter.
   if (row.status === "verifying" && event === "verification.completed") {
     const outcome = payload.outcome;
     if (outcome === "pass") {
@@ -820,12 +735,12 @@ export function reduceTask(
     return applyAttemptEvaluation(row, event, now, AttemptPolicy.evaluate({ kind: "verification_failed", task: row }, policy));
   }
 
-  // Task rows 15-16: reviewer pass plus serialized Core Git result.
+  // Review passed: reviewer pass plus serialized Core Git result.
   if (row.status === "verifying" && event === "review.passed") {
     return integrationResult(row, payload, now, [], "review_passed", true);
   }
 
-  // Task rows 17-18, plus row 28.
+  // Review failed: fix_required or replan_required.
   if (row.status === "verifying" && event === "review.failed") {
     if (payload.verdict !== "fix_required" && payload.verdict !== "replan_required") {
       reject(row, event, "review.failed must contain the fix_required or replan_required verdict.");
@@ -842,7 +757,7 @@ export function reduceTask(
     }, policy));
   }
 
-  // Task rows 20/20b: replan uses a base-plan CAS. A retried Task
+  // Manager replan: replan uses a base-plan CAS. A retried Task
   // whose dependency is not completed yet (the Manager retried a Task and its
   // dependency together) waits for it instead of starting early.
   if (row.status === "failed" && event === "task.replanned") {
@@ -851,7 +766,7 @@ export function reduceTask(
     if (basePlanVersion !== currentPlanVersion) {
       throw versionConflict(basePlanVersion, currentPlanVersion);
     }
-    // Row 20c: a wait_for retry holds the Task in waiting whatever its dependencies.
+    // wait_for: a wait_for retry holds the Task in waiting whatever its dependencies.
     const target: TaskState = payload.prerequisite === undefined && requiredBoolean(payload, "dependencies_completed") ? "ready" : "waiting";
     // The replanned Task gets its fix/review budget back. reviews.round is
     // a per-Task sequence (see WorkflowEngine.recordReview), so resetting
@@ -870,7 +785,7 @@ export function reduceTask(
     ), target === "ready" ? "replanned" : payload.prerequisite !== undefined ? "process_wait" : "dependency_incomplete");
   }
 
-  // Task row 21: Manager-originated inability opens a Core Decision.
+  // Manager or Core Decision: Manager-originated inability opens a Core Decision.
   if (row.status === "failed" && event === "decision.opened") {
     if (payload.issuer !== "manager" && payload.issuer !== "core") {
       reject(row, event, "A failed Task Decision must originate from the Manager or Core.");
@@ -878,7 +793,7 @@ export function reduceTask(
     return decided(taskResult(row, withTaskVersion(row, "judgement_waiting", now), ["decision_opened"]), payload.issuer === "manager" ? "manager_cannot_continue" : "core_cannot_continue");
   }
 
-  // Task row 40: the test environment is broken, not the code; the Owner decides before anything is remade.
+  // Broken test environment: the test environment is broken, not the code; the Owner decides before anything is remade.
   if (row.status === "verifying" && event === "decision.opened") {
     if (payload.issuer !== "core") {
       reject(row, event, "A verifying Task can only be blocked by a Core Decision.");
@@ -886,7 +801,7 @@ export function reduceTask(
     return decided(taskResult(row, withTaskVersion(row, "judgement_waiting", now), ["decision_opened"]), "test_environment_blocked");
   }
 
-  // Task row 36: Core stops a launchable Task that reached the no-progress limit.
+  // No-progress limit: Core stops a launchable Task that reached the no-progress limit.
   if ((row.status === "ready" || row.status === "review_fix_waiting") && event === "decision.opened") {
     if (payload.issuer !== "core") {
       reject(row, event, "A launchable Task can only be blocked by a Core Decision.");
@@ -894,7 +809,7 @@ export function reduceTask(
     return decided(taskResult(row, withTaskVersion(row, "judgement_waiting", now), ["decision_opened"]), "no_progress_limit");
   }
 
-  // Task row 37: Core stops a prerequisite wait that can no longer end by itself.
+  // Prerequisite wait stopped: Core stops a prerequisite wait that can no longer end by itself.
   if (row.status === "waiting" && row.prerequisite_json != null && event === "decision.opened") {
     if (payload.issuer !== "core") {
       reject(row, event, "A prerequisite wait can only be blocked by a Core Decision.");
@@ -902,7 +817,7 @@ export function reduceTask(
     return decided(taskResult(row, withTaskVersion(row, "judgement_waiting", now), ["decision_opened"]), "prerequisite_unreachable");
   }
 
-  // Task rows 38/39: the mark is cleared by reduceTaskInTransaction; the status stays.
+  // Prerequisite satisfied or resumed: the mark is cleared by reduceTaskInTransaction; the status stays.
   if (
     (event === "task.prerequisite_satisfied" && row.status === "waiting") ||
     (event === "task.prerequisite_resumed" && (row.status === "waiting" || (row.status === "paused" && row.paused_from === "waiting")))
@@ -921,7 +836,7 @@ export function reduceTask(
     return decided(taskResult(row, withTaskVersion(row, "judgement_waiting", now), ["decision_opened"]), "blocked_by_decision");
   }
 
-  // Task rows 22/22b: only the CAS winner resumes the blocked Task. A
+  // Decision answered: only the CAS winner resumes the blocked Task. A
   // Task whose dependency is not completed returns to waiting instead of
   // rejecting the whole answer: an answer to a Decision that also blocks
   // a cascaded Task must not fail and leave the Decision open.
@@ -938,7 +853,7 @@ export function reduceTask(
     if (payload.rerun_review === true) {
       return decided(taskResult(row, { ...withTaskVersion(row, "verifying", now), design_stop_json: null }, []), "owner_rerun_review");
     }
-    // Task row 41: back to verifying, where Core runs the verification again on the unchanged report.
+    // Rerun verification: back to verifying, where Core runs the verification again on the unchanged report.
     if (payload.rerun_verification === true) {
       return decided(taskResult(row, { ...withTaskVersion(row, "verifying", now), design_stop_json: null }, []), "owner_rerun_verification");
     }
@@ -950,7 +865,7 @@ export function reduceTask(
     ), target === "ready" ? "owner_answer" : "dependency_incomplete");
   }
 
-  // Task row 23: paused_from is the only legal restore target.
+  // Owner pause of a waiting Task: paused_from is the only legal restore target.
   if (
     (row.status === "waiting" || row.status === "ready" || row.status === "review_fix_waiting" || row.status === "failed") &&
     event === "work.paused"
@@ -962,8 +877,8 @@ export function reduceTask(
     return taskResult(row, next, ["spawn_suppressed"]);
   }
 
-  // Task row 24: an Owner pause stops the Task's Agents. paused_from records
-  // ready, so row 25 redoes the Task from its Worker on resume.
+  // Owner pause of an active Task: an Owner pause stops the Task's Agents. paused_from records
+  // ready, so resume redoes the Task from its Worker on resume.
   if ((row.status === "running" || row.status === "verifying") && event === "work.paused") {
     if (!requiredBoolean(payload, "work_paused")) {
       reject(row, event, "A Task pause requires the committed Work pause.");
@@ -972,7 +887,7 @@ export function reduceTask(
     return taskResult(row, next, ["spawn_suppressed", "cancel_requested"]);
   }
 
-  // Task row 24b: an Owner instruction stops the Task so the Manager replans
+  // Owner interrupt: an Owner instruction stops the Task so the Manager replans
   // before it runs again.
   if ((row.status === "running" || row.status === "verifying") && event === "task.interrupted") {
     if (!requiredBoolean(payload, "owner_instruction")) {
@@ -981,14 +896,14 @@ export function reduceTask(
     return taskResult(row, withTaskVersion(row, "ready", now), ["spawn_suppressed", "cancel_requested"]);
   }
 
-  // Task row 42: the Manager rewrote a stopped ready Task in place. Only the
+  // In-place revision: the Manager rewrote a stopped ready Task in place. Only the
   // state follows the dependencies; counters, lineage and worktree stay.
   if (row.status === "ready" && event === "task.revised") {
     const target: TaskState = requiredBoolean(payload, "dependencies_completed") ? "ready" : "waiting";
     return taskResult(row, withTaskVersion(row, target, now), []);
   }
 
-  // Task row 25: paused restores paused_from, with dependency re-evaluation.
+  // Resume: paused restores paused_from, with dependency re-evaluation.
   if (row.status === "paused" && event === "work.resumed") {
     const pausedFrom = row.paused_from;
     if (pausedFrom === null || pausedFrom === undefined) {
@@ -1007,7 +922,7 @@ export function reduceTask(
     return taskResult(row, { ...withTaskVersion(row, restored, now), paused_from: null });
   }
 
-  // Task row 26: cancellation is terminal and never deletes a worktree.
+  // Cancel: cancellation is terminal and never deletes a worktree.
   if (row.status !== "completed" && row.status !== "cancelled" && event === "work.cancelled") {
     if (!requiredBoolean(payload, "owner_cancel")) {
       reject(row, event, "Task cancellation requires the committed owner cancel action.");
@@ -1015,7 +930,7 @@ export function reduceTask(
     return taskResult(row, { ...withTaskVersion(row, "cancelled", now), paused_from: null, failed_by_dependency_task_id: null }, ["cancel_requested"]);
   }
 
-  // Task row 33: worktree cleanup after the Task is terminal, or after its
+  // Worktree cleanup after the Task is terminal, or after its
   // Work completed with a recorded merge. The caller (the worktree
   // reconciler) confirms no agent run still touches the worktree, and sets
   // merged_work_completed only after reading the Work's completion and merge
@@ -1117,36 +1032,10 @@ function persistTaskRow(transaction: CoreWriteLaneTransaction, row: TaskRow): vo
   }
 }
 
-export function ensureOwner(transaction: CoreWriteLaneTransaction, ownerId: string, now: string): void {
-  transaction.run(
-    `INSERT OR IGNORE INTO owners (id, display_name, created_at, updated_at)
-     VALUES (?, ?, ?, ?)`,
-    ownerId,
-    ownerId,
-    now,
-    now,
-  );
-}
-
-/** Durable per-Task marker that a completed design Task was already handed to the Manager (design_completed). */
-export function designCompletedKey(taskId: string): string {
-  return `design-completed:${taskId}`;
-}
-
 /** Durable per-Task marker that a failed Task still needs a Manager replan. */
 function budgetRecoveryReason(reason: string, attempts: number, limit: number, language: OwnerLanguage): string {
   const what = reason === "lineage_budget_exhausted" ? { ja: "作り直しの", en: "remake" } : { ja: "Reviewer の", en: "review" };
   return language === "ja" ? `${what.ja}回数が上限に達しました（${attempts}/${limit}）` : `The ${what.en} budget ran out (${attempts}/${limit}).`;
-}
-
-/** The queued Manager trigger of this Task is a budget_exhausted replan: Core already recorded the recovery, so the remake gate lets it through. */
-export function markBudgetRecovery(transaction: CoreWriteLaneTransaction, taskId: string): void {
-  transaction.run("UPDATE idempotency_keys SET response_json = json_set(response_json, '$.budget_recovery', json('true')) WHERE key = ? AND json_valid(response_json)", managerTriggerKey(taskId));
-}
-
-/** Mark the Task's queued Manager trigger with a flag (partial_recovery) that the replan reads to tell the Manager why it was called. */
-export function markTriggerFlag(transaction: CoreWriteLaneTransaction, taskId: string, flag: "partial_recovery"): void {
-  transaction.run(`UPDATE idempotency_keys SET response_json = json_set(response_json, '$.${flag}', json('true')) WHERE key = ? AND json_valid(response_json)`, managerTriggerKey(taskId));
 }
 
 /** One sentence naming the criteria the repeated partial report left open; it is the result of the recovery before. */
@@ -1162,15 +1051,11 @@ function partialRepeatedSummary(report: unknown, language: OwnerLanguage): strin
   return language === "ja" ? `同じ途中報告が続きました（残った条件: ${ids}）` : `The same partial report came again (open criteria: ${ids})`;
 }
 
-export function managerTriggerKey(taskId: string): string {
-  return `manager-trigger:${taskId}`;
-}
-
 /**
  * Move a Task's worktree_state out of `active` once its worktree is known to
  * be gone (removed, merged, or deliberately kept for recovery). This is
  * bookkeeping, not a Task status transition, so it never touches status or
- * the transition table; a Task whose worktree_state already moved on is left
+ * the reducer's transitions; a Task whose worktree_state already moved on is left
  * alone. Returns whether the row actually changed.
  */
 export function repairWorktreeStateInTransaction(
@@ -1205,7 +1090,6 @@ function ensureManagerTrigger(
   payload: JsonObject,
   now: string,
 ): void {
-  const triggerKey = managerTriggerKey(task.id);
   // Every new failure re-queues the trigger (a replanned Task that fails
   // again needs another replan). Core marks it attempted when it invokes the
   // Manager, and its tick replays any trigger that is still queued. The
@@ -1213,22 +1097,15 @@ function ensureManagerTrigger(
   // replan (the Worker's own request, a tick replay, a restart) passes it on.
   const question =
     typeof payload.question === "string" && payload.question.trim().length > 0 ? payload.question : null;
-  transaction.run(
-    `INSERT OR REPLACE INTO idempotency_keys
-       (key, request_hash, response_json, status_code, created_at, expires_at)
-     VALUES (?, ?, ?, 202, ?, ?)`,
-    triggerKey,
-    "0".repeat(64),
-    JSON.stringify({
-      task_id: task.id,
-      event,
-      status: "queued",
+  queueManagerTrigger(
+    transaction,
+    task.id,
+    {
       question,
       // A Worker question that does not ask for a replan is not a remake.
       question_only: event === "task.replan_requested" && payload.needs_replanning !== true && question !== null,
-    }),
+    },
     now,
-    new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
   );
 }
 
@@ -1255,7 +1132,7 @@ export function ensureCoreDecision(
   if (existing) {
     // A second Task halted for the same reason joins the open Decision,
     // so answering it resumes every Task it stands for. The caller has already
-    // moved the Task to judgement_waiting (row 8), and the Decision keeps its
+    // moved the Task to judgement_waiting (deterministic failure), and the Decision keeps its
     // scope. state_version is not bumped: the question did not change, and an
     // answer being composed against it must still win the CAS.
     const stored = JSON.parse(existing.blocked_task_ids_json) as unknown;
@@ -1294,8 +1171,8 @@ export function ensureCoreDecision(
 /**
  * Stop remaking: open a Core Decision (scope work) for the Tasks a remake limit
  * blocked and move the Work to judgement_waiting. Failed Tasks go to
- * judgement_waiting here (row 21); a Task the reducer already moved is skipped.
- * No new Task is created. Answering resumes the Tasks and the Work (rows 22, 7).
+ * judgement_waiting here; a Task the reducer already moved is skipped.
+ * No new Task is created. Answering resumes the Tasks and the Work (decision.resolved).
  */
 export function openRemakeLimitDecisionInTransaction(
   transaction: CoreWriteLaneTransaction,
@@ -1327,7 +1204,7 @@ export function openRemakeLimitDecisionInTransaction(
 
 /**
  * Stop at a broken test environment: the Decision is opened for the Owner and the Work waits.
- * A Task (verifying) goes to judgement_waiting without counting a remake (row 40); a Work-level
+ * A Task (verifying) goes to judgement_waiting without counting a remake (broken test environment); a Work-level
  * failure has no Task to block (blockedTaskIds is empty).
  */
 export function openTestEnvironmentDecisionInTransaction(
@@ -1438,32 +1315,13 @@ export function reduceWorkInTransaction(
     // cancel_requested until a restart. Core still signals it by id after the
     // commit, in case the runner is spawning it right now. Executor runs are
     // closed by their own finish handler.
-    transaction.run(
-      `UPDATE agent_runs
-          SET status = CASE WHEN status = 'launch_pending' AND pid IS NULL AND role <> 'executor' THEN 'cancelled' ELSE 'cancel_requested' END,
-              ended_at = CASE WHEN status = 'launch_pending' AND pid IS NULL AND role <> 'executor' THEN COALESCE(ended_at, ?) ELSE ended_at END,
-              updated_at = ?
-        WHERE work_id = ? AND status IN ('launch_pending', 'spawned', 'running')`,
-      result.next.updated_at,
-      result.next.updated_at,
-      row.id,
-    );
+    requestStopOfAgentRuns(transaction, { column: "work_id", id: row.id }, result.next.updated_at);
   }
   if (command.event === "work.paused" && result.changed) {
     // An Owner pause stops every Agent run of the Work but the Advisor's.
     // Hook-reported children and observed executors end with their Worker's
     // process group and are closed by their own watchers.
-    transaction.run(
-      `UPDATE agent_runs
-          SET status = CASE WHEN status = 'launch_pending' AND pid IS NULL AND role <> 'executor' THEN 'cancelled' ELSE 'cancel_requested' END,
-              ended_at = CASE WHEN status = 'launch_pending' AND pid IS NULL AND role <> 'executor' THEN COALESCE(ended_at, ?) ELSE ended_at END,
-              updated_at = ?
-        WHERE work_id = ? AND status IN ('launch_pending', 'spawned', 'running')
-          AND role <> 'advisor' AND hook_agent_id IS NULL AND (origin IS NULL OR origin <> 'observed')`,
-      result.next.updated_at,
-      result.next.updated_at,
-      row.id,
-    );
+    requestStopOfAgentRuns(transaction, { column: "work_id", id: row.id }, result.next.updated_at, { excludeRoles: ["advisor"], skipHookAndObserved: true });
     const childRunsTable = transaction.get<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'child_runs'");
     if (childRunsTable) {
       transaction.run(
@@ -1597,7 +1455,7 @@ function ownerAnsweredRemainder(json: string | null | undefined):PrerequisiteSpe
   return rest.length > 0 && rest.length < spec.conditions.length ? { ...spec, conditions: rest } : null;
 }
 
-/** Row 20c side effect: store the prerequisite, keep no_progress_count, announce the wait. */
+/** wait_for side effect: store the prerequisite, keep no_progress_count, announce the wait. */
 function recordPrerequisiteWait(transaction: CoreWriteLaneTransaction, row: TaskRow, spec: PrerequisiteSpec, now: string): void {
   transaction.run("UPDATE tasks SET prerequisite_json = ?, prerequisite_since = ? WHERE id = ?", JSON.stringify(spec), now, row.id);
   const count = transaction.get<{ no_progress_count: number }>("SELECT no_progress_count FROM tasks WHERE id = ?", row.id)?.no_progress_count ?? 0;
@@ -1701,10 +1559,8 @@ export function reduceTaskInTransaction(
     const other = lineageReviewAttemptsExcluding(transaction, row.id);
     const limits = remakeLimits(transaction);
     lineage = {
-      otherReviewAttempts: other.main,
-      otherBaseSyncReviewAttempts: other.base_sync,
+      otherReviewAttempts: other.main + other.base_sync,
       limit: limits.lineage_review_attempts,
-      baseSyncLimit: limits.base_sync_lineage_review_attempts,
       generations: lineageGenerationCount(transaction, row.id),
       otherLeadRejections: other.lead,
       leadRejectionLimit: limits.lead_review_rejections,
@@ -1804,16 +1660,7 @@ export function reduceTaskInTransaction(
     // The Task left the plan while an Agent may still work on it: close runs
     // that never started and mark the others cancel_requested; Core signals
     // them by id after the commit.
-    transaction.run(
-      `UPDATE agent_runs
-          SET status = CASE WHEN status = 'launch_pending' AND pid IS NULL AND role <> 'executor' THEN 'cancelled' ELSE 'cancel_requested' END,
-              ended_at = CASE WHEN status = 'launch_pending' AND pid IS NULL AND role <> 'executor' THEN COALESCE(ended_at, ?) ELSE ended_at END,
-              updated_at = ?
-        WHERE task_id = ? AND status IN ('launch_pending', 'spawned', 'running')`,
-      result.next.updated_at,
-      result.next.updated_at,
-      row.id,
-    );
+    requestStopOfAgentRuns(transaction, { column: "task_id", id: row.id }, result.next.updated_at);
   }
   if (result.changed && (command.event === "task.interrupted" || command.event === "task.revised")) {
     // The Manager reads these from the events table (context.stopped_task_ids), so they are recorded.
@@ -1830,18 +1677,7 @@ export function reduceTaskInTransaction(
     // An Owner instruction stops the Task's Agents; the Manager keeps running.
     // Hook-reported children and observed executors end with their Worker's
     // process group and are closed by their own watchers.
-    transaction.run(
-      `UPDATE agent_runs
-          SET status = CASE WHEN status = 'launch_pending' AND pid IS NULL AND role <> 'executor' THEN 'cancelled' ELSE 'cancel_requested' END,
-              ended_at = CASE WHEN status = 'launch_pending' AND pid IS NULL AND role <> 'executor' THEN COALESCE(ended_at, ?) ELSE ended_at END,
-              updated_at = ?
-        WHERE task_id = ? AND status IN ('launch_pending', 'spawned', 'running')
-          AND role IN ('worker', 'designer', 'reviewer', 'executor')
-          AND hook_agent_id IS NULL AND (origin IS NULL OR origin <> 'observed')`,
-      result.next.updated_at,
-      result.next.updated_at,
-      row.id,
-    );
+    requestStopOfAgentRuns(transaction, { column: "task_id", id: row.id }, result.next.updated_at, { roles: ["worker", "designer", "reviewer", "executor"], skipHookAndObserved: true });
     const childRunsTable = transaction.get<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'child_runs'");
     if (childRunsTable) {
       transaction.run(
@@ -1897,7 +1733,7 @@ export function reduceTaskInTransaction(
     // partial, not achieved). Only a run that could not produce a result ends
     // `failed`.
     const runOutcome = runOutcomeFromPayload(payload.run_outcome);
-    let status: string;
+    let status: AgentRunStatus;
     let outcome: string | null = null;
     if (command.event === "agent.exited") {
       status = "completed";
@@ -1926,17 +1762,10 @@ export function reduceTaskInTransaction(
     const reportValue = payload.report;
     const hasReport = !!reportValue && typeof reportValue === "object" && !Array.isArray(reportValue);
     const reportId = hasReport ? insertReport(transaction, agentRunId, reportValue, result.next.updated_at) : null;
-    const update = transaction.run(
-      `UPDATE agent_runs SET status = ?, outcome = ?, report_id = ?, ended_at = ?, updated_at = ?, usage_json = COALESCE(?, usage_json) WHERE id = ?`,
-      status,
-      outcome,
-      reportId,
-      result.next.updated_at,
-      result.next.updated_at,
-      usageJson(payload.usage),
-      agentRunId,
-    );
-    if (update.changes !== 1) {
+    const changes = setAgentRunStatus(transaction, agentRunId, status, {
+      now: result.next.updated_at, outcome, reportId, usageJson: usageJson(payload.usage),
+    });
+    if (changes !== 1) {
       throw new HumanReadableError({
         code: "agent_run_not_found",
         message: `Agent run ${agentRunId} was not found while recording its result.`,
@@ -2011,7 +1840,7 @@ export function reduceTaskInTransaction(
         kind: "budget_exhausted", target: lineageTarget, workId: row.work_id, action: "replan_different_approach", sourceEventId: recoverySource,
         previousFailure: { summary: reason, error_key: result.decision.reason, detail: reason }, now: result.next.updated_at,
       });
-      markBudgetRecovery(transaction, row.id);
+      flagManagerTrigger(transaction, row.id, "budget_recovery", utcNow());
     }
     if (result.decision?.reason === "partial_repeated") {
       const summary = partialRepeatedSummary(payload.report, ownerLanguage(transaction));
@@ -2019,7 +1848,7 @@ export function reduceTaskInTransaction(
         kind: "partial_repeated", target: lineageTarget, workId: row.work_id, action: "repair_partial", sourceEventId: recoverySource,
         previousFailure: { summary, error_key: "partial_repeated", detail: summary }, now: result.next.updated_at,
       });
-      markTriggerFlag(transaction, row.id, "partial_recovery");
+      flagManagerTrigger(transaction, row.id, "partial_recovery", utcNow());
     }
     // A fresh failure that needs a Manager replan is one more result that
     // did not move the Task forward. A criteria defect is the exception: the
@@ -2088,7 +1917,7 @@ export function reduceTaskInTransaction(
 }
 
 /**
- * Work row 6 for a Task-scope Decision: once no Task in the Work can move
+ * Blocking Decision for a Task-scope Decision: once no Task in the Work can move
  * (every one is done, waiting on the Decision or on a dependency), the Work
  * itself waits for judgement. A waiting Task with a prerequisite and a Task
  * failed on its own (Manager replan pending) still count as able to move.
@@ -2172,8 +2001,8 @@ export function appendEventInTransaction(
 }
 
 /**
- * Cascade a permanent Task failure to every Task that depends on it (Task
- * row 27). Only `waiting` Tasks are affected: a ready/running/verifying
+ * Cascade a permanent Task failure to every Task that depends on it
+ * (task.dependency_failed). Only `waiting` Tasks are affected: a ready/running/verifying
  * Task keeps going until Core observes its own outcome. Each cascaded Task
  * gets its own `task.dependency_failed` event so the Work event log records
  * which failure propagated where, and reduceTaskInTransaction re-enters this
@@ -2219,7 +2048,7 @@ export function cascadeDependencyFailureInTransaction(
   return cascaded;
 }
 
-/** The `dependencies_completed` guard of Task rows 1, 20, 22 and 25: every dependency of the Task is completed. */
+/** The `dependencies_completed` guard of task.ready, task.replanned, decision.resolved and work.resumed: every dependency of the Task is completed. */
 export function taskDependenciesCompletedInTransaction(transaction: CoreWriteLaneTransaction, taskId: string): boolean {
   const dependencies = transaction.all<{ status: string }>(
     `SELECT dependency.status AS status
@@ -2232,7 +2061,7 @@ export function taskDependenciesCompletedInTransaction(transaction: CoreWriteLan
 }
 
 /**
- * Task row 31: return cascade-failed Tasks to waiting once none of their
+ * Dependency restored: return cascade-failed Tasks to waiting once none of their
  * dependencies is failed or cancelled any more. The candidates are found by
  * the durable failed_by_dependency_task_id marker, never by the Task's latest
  * event (a pause or resume event after the cascade used to hide it).
@@ -2797,7 +2626,7 @@ function replanAbort(code: string, message: string, details: Record<string, unkn
 }
 
 /**
- * Apply a validated Manager replan (Task rows 20/20b, 30, 31) in ONE
+ * Apply a validated Manager replan (retry, supersede, dependency restore) in ONE
  * transaction: register the new Tasks, replace the dependencies of retried
  * Tasks, retire replaced Tasks and re-point their dependents at their own
  * replacements, retry the retried Tasks with their revisions, restore
@@ -2892,7 +2721,7 @@ export function applyReplanInTransaction(
     }
   }
 
-  // Row 30: retire each replaced Task; its dependents wait for its own replacements.
+  // Supersede: retire each replaced Task; its dependents wait for its own replacements.
   const replacements: Record<string, string[]> = {};
   const cancelledDecisionIds: string[] = [];
   const stoppedTaskIds: string[] = [];
@@ -2943,7 +2772,7 @@ export function applyReplanInTransaction(
     stoppedTaskIds.push(action.task_id);
   }
 
-  // Rows 20/20b: retry, with the Manager's revised instructions.
+  // Retry: retry, with the Manager's revised instructions.
   for (const taskId of plan.reopenIds) {
     const before = transaction.get<{ type: string; assigned_designer: AssignedDesigner | null; design_escalated: number }>(
       "SELECT type, assigned_designer, design_escalated FROM tasks WHERE id = ?", taskId) as { type: string; assigned_designer: AssignedDesigner | null; design_escalated: number };
@@ -2974,7 +2803,7 @@ export function applyReplanInTransaction(
     transaction.run("UPDATE tasks SET base_sync_only = ?, base_sync_generations = base_sync_generations + ? WHERE id = ?", baseSyncMark, baseSyncMark, taskId);
   }
 
-  // Row 42: a stopped ready Task is rewritten in place; the replan does not count as a retry.
+  // In-place revision: a stopped ready Task is rewritten in place; the replan does not count as a retry.
   for (const taskId of reviseIds) {
     reduceTaskInTransaction(transaction, taskId, {
       event: "task.revised",
@@ -3037,13 +2866,13 @@ function recordCriteriaRelaxations(
   const before = readStoredAcceptanceCriteria(original.acceptance_criteria_json, original.acceptance);
   const lineageRoot = lineageRootOf(transaction, taskId);
   const target = { kind: "task", id: lineageRoot } as const;
-  const detail = (criterion: { readonly text: string; readonly check: string; readonly check_weight: string | null; readonly kind?: string }): JsonObject =>
-    ({ text: criterion.text, check: criterion.check, check_weight: criterion.check_weight, kind: criterion.kind ?? "work_check" });
+  const detail = (criterion: StoredAcceptanceCriterion): JsonObject =>
+    ({ text: criterion.text, check: criterion.check, check_weight: criterion.check_weight, kind: criterion.kind ?? "work_check", requirement: criterionRequirement(criterion) });
   const relaxed: JsonObject[] = [];
   for (const record of relaxations) {
     const was = before.find((criterion) => criterion.id === record.criterion_id);
     const now_ = revision.acceptance_criteria.find((criterion) => criterion.id === record.criterion_id);
-    if (!was || !now_ || (was.text === now_.text && was.check === now_.check)) continue;
+    if (!was || !now_ || (was.text === now_.text && was.check === now_.check && criterionRequirement(was) === criterionRequirement(now_))) continue;
     appendEventInTransaction(transaction, {
       type: "criteria.relaxed",
       idempotencyKey: `criteria-relaxed:${taskId}:${record.criterion_id}:${workId}:${guard.base_plan_revision}`,

@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 
-import { GUARD_TOKEN_FILE_ENV } from "../../../packages/shared/dist/guard-token.js";
+import { guardConfig, guardHasToken, guardRequest, trimOneSlash } from "./guard-client.js";
 import { hasAuthPasswordForm } from "../../../packages/shared/dist/index.js";
 
 interface ResearchHookInput {
@@ -35,17 +34,8 @@ async function main(): Promise<void> {
     || (input.tool_name !== "WebFetch" && input.tool_name !== "WebSearch")
     || !isRecord(input.tool_input)) return;
 
-  const apiBase = process.env.OWL_GUARD_API_BASE;
-  const tokenFile = process.env[GUARD_TOKEN_FILE_ENV];
-  if (!process.env.OWL_AGENT_ROLE || !apiBase || !tokenFile || !isAbsolute(tokenFile)) return;
-
-  let guardToken: string;
-  try {
-    guardToken = (await readFile(tokenFile, "utf8")).trim();
-  } catch {
-    return;
-  }
-  if (!guardToken) return;
+  const guard = guardConfig({ roleVar: "OWL_AGENT_ROLE", requireRole: true, absoluteTokenFile: true });
+  if (!guard || !await guardHasToken(guard)) return;
 
   const responseText = typeof input.tool_response === "string"
     ? input.tool_response
@@ -73,12 +63,7 @@ async function main(): Promise<void> {
   if (Buffer.byteLength(body, "utf8") > 1_000_000) return;
 
   try {
-    await fetch(`${apiBase.replace(/\/$/u, "")}/api/v1/research/capture`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${guardToken}` },
-      body,
-      signal: AbortSignal.timeout(3000),
-    });
+    await guardRequest(guard, "/api/v1/research/capture", { headers: { "content-type": "application/json" }, body, timeoutMs: 3000, normalizeBase: trimOneSlash });
   } catch {
     // PostToolUse is observational; capture failures must not affect the agent.
   }

@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, mkdirSync, writeFileSync, type Dirent } from "node:fs";
 import { tmpdir } from "node:os";
@@ -35,7 +35,7 @@ import { NO_CORE_ACTIVITY, type CoreActivityHandle, type CoreActivityKind, type 
 import { GitLanes } from "./git-lane.js";
 import { basePushArgs, classifyPushFailure, parsePushPorcelain, PUSH_HOOK_WARNING_MARKER, redactCredentials, safeRemoteName } from "./git-push.js";
 import { OWL_GIT_EXCLUDES_CONTENT } from "./owl-git-excludes.js";
-import { OWL_INSTANCE_ID_ENV, reapProcessGroup, resolveInstanceId } from "@owl/shared";
+import { OWL_INSTANCE_ID_ENV, createOutputCapture, resolveInstanceId, runProcess } from "@owl/shared";
 import { workVerificationMarker } from "./workspace-process-sweeper.js";
 import { ADVISOR_HOME_DIRNAME, ADVISOR_SHARED_DIRNAME, safeSegment, WorkspaceLayout } from "./workspace-layout.js";
 import { commitExcludePathspecs } from "./workspace-tooling.js";
@@ -280,7 +280,7 @@ export class GitWorktreeGateway implements GitGateway {
     private readonly owlRoot: string,
     private readonly lanes: GitLanes = processGitLanes,
     private readonly dataDir: string = join(owlRoot, "data"),
-    private readonly layout: WorkspaceLayout = WorkspaceLayout.legacyOnly(owlRoot),
+    private readonly layout: WorkspaceLayout = WorkspaceLayout.underOwlRoot(owlRoot),
   ) {
     this.excludesFile = writeOwlExcludesFile(dataDir);
   }
@@ -879,7 +879,7 @@ export class GitWorktreeGateway implements GitGateway {
     const removedWorkspaces: string[] = [];
     const removedBranches: string[] = [];
 
-    for (const root of this.layout.roots()) {
+    for (const root of [this.layout.root]) {
       const advisorRoot = resolve(root, "advisor");
       const entries = await readdir(advisorRoot, { withFileTypes: true }).catch(() => []);
       for (const entry of entries) {
@@ -2138,52 +2138,21 @@ export class GitWorktreeGateway implements GitGateway {
     }
     env[OWL_INSTANCE_ID_ENV] = resolveInstanceId(this.dataDir);
     env.OWL_AGENT_RUN_ID = workVerificationMarker(workId);
-    return new Promise((resolveResult) => {
-      let stdout = "";
-      let stderr = "";
-      let timedOut = false;
-      let settled = false;
-      let child;
-      try {
-        child = spawn(command.argv[0]!, command.argv.slice(1), { cwd, env, shell: false, detached: true, stdio: ["ignore", "pipe", "pipe"] });
-      } catch (error) {
-        resolveResult({ passed: false, exit_code: -1, stdout, stderr, timed_out: false, error: error instanceof Error ? error.message : String(error) });
-        return;
-      }
-      const append = (current: string, chunk: Buffer, cap: number): string => {
-        if (cap <= 0) return "";
-        const combined = Buffer.concat([Buffer.from(current), chunk]);
-        if (combined.byteLength <= cap) return combined.toString("utf8");
-        let start = combined.byteLength - cap;
-        while (start < combined.byteLength && (combined[start]! & 0xc0) === 0x80) start += 1;
-        return combined.subarray(start).toString("utf8");
-      };
-      child.stdout?.on("data", (chunk: Buffer) => { activity.output(); stdout = append(stdout, chunk, command.stdout_limit); });
-      child.stderr?.on("data", (chunk: Buffer) => { activity.output(); stderr = append(stderr, chunk, command.stderr_limit); });
-      const killGroup = (signal: "SIGTERM" | "SIGKILL"): void => {
-        if (child.pid === undefined) return;
-        try { process.kill(-child.pid, signal); } catch { try { child.kill(signal); } catch { /* process already exited */ } }
-      };
-      const timer = setTimeout(() => {
-        timedOut = true;
-        killGroup("SIGTERM");
-        setTimeout(() => killGroup("SIGKILL"), 5_000).unref();
-      }, Math.max(1, command.timeout_seconds * 1_000));
-      child.once("error", (error) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolveResult({ passed: false, exit_code: -1, stdout, stderr, timed_out: timedOut, error: error.message });
-      });
-      child.once("close", (code, signal) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        void reapProcessGroup(child.pid);
-        const exitCode = code ?? -1;
-        resolveResult({ passed: !timedOut && signal === null && command.expected_exit_codes.includes(exitCode), exit_code: exitCode, stdout, stderr, timed_out: timedOut });
-      });
+    const stdout = createOutputCapture(command.stdout_limit, "tail");
+    const stderr = createOutputCapture(command.stderr_limit, "tail");
+    const run = await runProcess(command.argv[0]!, command.argv.slice(1), {
+      cwd,
+      env,
+      timeoutMs: Math.max(1, command.timeout_seconds * 1_000),
+      killGraceMs: 5_000,
+      reapOnClose: true,
+      onData: (stream, chunk) => { activity.output(); (stream === "stdout" ? stdout : stderr).push(chunk); },
     });
+    if (run.error !== undefined) {
+      return { passed: false, exit_code: -1, stdout: stdout.text(), stderr: stderr.text(), timed_out: run.timedOut, error: run.error };
+    }
+    const exitCode = run.code ?? -1;
+    return { passed: !run.timedOut && run.signal === null && command.expected_exit_codes.includes(exitCode), exit_code: exitCode, stdout: stdout.text(), stderr: stderr.text(), timed_out: run.timedOut };
   }
 
   /**
@@ -2485,7 +2454,7 @@ export class GitWorktreeGateway implements GitGateway {
    */
   public async listWorkspaces(): Promise<readonly WorkspaceEntry[]> {
     const entries: WorkspaceEntry[] = [];
-    for (const root of this.layout.roots()) {
+    for (const root of [this.layout.root]) {
       const workDirs = await readdir(root, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
         if (error.code === "ENOENT") return [];
         throw error;
@@ -2533,30 +2502,11 @@ export class GitWorktreeGateway implements GitGateway {
 
   private async deleteWorkWorkspacesNow(workId: string, canonical: string): Promise<WorktreeCleanupResult> {
     const workRoot = this.layout.workDir(workId);
-    const legacy = this.layout.rootOf(workRoot) === this.layout.legacyRoot;
-    let realWorkspacesRoot: string;
-    if (legacy) {
-      // The legacy root is nested inside owlRoot, so a symlinked owlRoot must
-      // still resolve the workspaces directory to somewhere inside it.
-      const owlRoot = await realpath(this.owlRoot);
-      const resolvedLegacyRoot = await realpath(this.layout.legacyRoot).catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return null;
-        throw error;
-      });
-      if (resolvedLegacyRoot === null) return { ok: true, message: "The Work workspace was already absent." };
-      if (!inside(owlRoot, resolvedLegacyRoot)) {
-        return { ok: false, message: "The .owl-workspaces directory resolves outside owl_root.", details: { path: this.layout.legacyRoot, stage: "workspace_check" } };
-      }
-      realWorkspacesRoot = resolvedLegacyRoot;
-    } else {
-      // The current root lives outside any repository; only its own realpath needs to resolve.
-      const resolvedRoot = await realpath(this.layout.root).catch((error: NodeJS.ErrnoException) => {
-        if (error.code === "ENOENT") return null;
-        throw error;
-      });
-      if (resolvedRoot === null) return { ok: true, message: "The Work workspace was already absent." };
-      realWorkspacesRoot = resolvedRoot;
-    }
+    const realWorkspacesRoot = await realpath(this.layout.root).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (realWorkspacesRoot === null) return { ok: true, message: "The Work workspace was already absent." };
     const rootInfo = await lstat(workRoot).catch((error: NodeJS.ErrnoException) => {
       if (error.code === "ENOENT") return null;
       throw error;

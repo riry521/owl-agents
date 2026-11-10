@@ -1,3 +1,5 @@
+import { keyedReader, SettingsValidationError } from "./settings-validation.js";
+
 export const LEARNING_METRICS_SETTINGS_KEY = "learning_metrics";
 
 export interface LearningMetricsSettings {
@@ -24,18 +26,11 @@ export const LEARNING_METRICS_RANGES = {
   rationale_max_ids: { min: 1, max: 1000 },
 } as const;
 
-export class LearningMetricsSettingsValidationError extends Error {
-  public constructor(message: string, public readonly field: string) {
-    super(message);
-    this.name = "LearningMetricsSettingsValidationError";
-  }
+export class LearningMetricsSettingsValidationError extends SettingsValidationError {
+  public override name = "LearningMetricsSettingsValidationError";
 }
 
 const KEYS = Object.keys(DEFAULT_LEARNING_METRICS_SETTINGS) as (keyof LearningMetricsSettings)[];
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function checkValue(key: keyof LearningMetricsSettings, value: unknown): number | boolean {
   if (key === "enabled") {
@@ -50,30 +45,11 @@ function checkValue(key: keyof LearningMetricsSettings, value: unknown): number 
   return value;
 }
 
-/** For PUT: exactly the known keys, every value valid. Throws LearningMetricsSettingsValidationError. */
-export function validateLearningMetricsSettings(value: unknown): LearningMetricsSettings {
-  if (!isRecord(value)) throw new LearningMetricsSettingsValidationError("Settings must be an object.", "payload");
-  const own = Reflect.ownKeys(value);
-  if (own.length !== KEYS.length || !KEYS.every((key) => own.includes(key))) {
-    throw new LearningMetricsSettingsValidationError(`Settings must contain exactly ${KEYS.join(", ")}.`, "payload");
-  }
-  return Object.fromEntries(KEYS.map((key) => [key, checkValue(key, value[key])])) as unknown as LearningMetricsSettings;
-}
-
 /** For reads: per-key fallback to the default, calling warn for each fallback. */
-export function readLearningMetricsSettings(value: unknown, warn?: (message: string) => void): LearningMetricsSettings {
-  if (!isRecord(value)) {
-    warn?.("Stored learning metrics settings are not an object; using defaults.");
-    return DEFAULT_LEARNING_METRICS_SETTINGS;
-  }
-  const entries = KEYS.map((key) => {
-    try {
-      if (!Object.hasOwn(value, key)) return [key, DEFAULT_LEARNING_METRICS_SETTINGS[key]];
-      return [key, checkValue(key, value[key])];
-    } catch {
-      warn?.(`Invalid learning metrics setting ${key}; using default.`);
-      return [key, DEFAULT_LEARNING_METRICS_SETTINGS[key]];
-    }
-  });
-  return Object.fromEntries(entries) as unknown as LearningMetricsSettings;
-}
+export const readLearningMetricsSettings = keyedReader<LearningMetricsSettings>({
+  keys: KEYS,
+  defaults: DEFAULT_LEARNING_METRICS_SETTINGS,
+  check: checkValue,
+  notObject: "Stored learning metrics settings are not an object; using defaults.",
+  invalid: (key) => `Invalid learning metrics setting ${key}; using default.`,
+});

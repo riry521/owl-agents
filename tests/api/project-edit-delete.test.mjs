@@ -4,7 +4,7 @@ import { copyFile, mkdir, readFile, readdir, realpath, stat, writeFile } from "n
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { ExternalCoreAdapter, MemoryCore } from "../../apps/server/dist/core.js";
+import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { GuardTokenRegistry } from "../../apps/server/dist/guard-tokens.js";
 import { createUlid, openDatabase } from "../../packages/db/dist/index.js";
 import { createTestCore, command as coreCommand } from "../helpers/core.mjs";
@@ -15,7 +15,7 @@ import { tempDir } from "../helpers/temp.mjs";
 
 const command = (payload, suffix = randomUUID(), expectedVersion = 0) => coreCommand(payload, `api-project-edit-delete:${suffix}`, expectedVersion);
 
-async function setup(t, { memory = false, legacyAdapter = false, coreOptions = {} } = {}) {
+async function setup(t, { legacyAdapter = false, coreOptions = {} } = {}) {
   const { root, db, core: durableCore } = await createTestCore(t, {
     version: "api-project-edit-delete-test",
     dispatcher: { tick_interval_ms: 25 },
@@ -32,7 +32,7 @@ async function setup(t, { memory = false, legacyAdapter = false, coreOptions = {
       },
     });
   }
-  const httpCore = memory ? new MemoryCore({ version: "api-project-edit-delete-memory" }) : new ExternalCoreAdapter(targetCore, db, root, dataDir);
+  const httpCore = new ExternalCoreAdapter(targetCore, db, root, dataDir);
   const token = randomBytes(32).toString("hex");
   const guardTokens = GuardTokenRegistry.open(join(root, "guard-tokens"));
   t.after(() => guardTokens.clear());
@@ -77,17 +77,6 @@ async function createProject(api, suffix, { name = `Project ${suffix}`, path, br
     allowed_roots: [canonicalPath],
     verification_plan: [],
   }, `create-project:${suffix}`))).data;
-}
-
-async function createMemoryProject(api, suffix, path) {
-  const canonicalPath = await realpath(path);
-  return (await api.httpCore.createProject({
-    name: `Project ${suffix}`,
-    canonical_path: canonicalPath,
-    base_branch: "main",
-    allowed_roots: [canonicalPath],
-    verification_plan: [],
-  }, { request_id: randomUUID(), idempotency_key: `memory-project:${suffix}`, expected_version: 0 })).data;
 }
 
 async function createWork(api, title, projectId, state = "memo") {
@@ -571,52 +560,6 @@ test("the schema RESTRICT foreign key still rejects deleting a Project with atta
   assert.equal(api.db.get("SELECT project_id FROM works WHERE id = ?", workId).project_id, project.id);
 });
 
-test("MemoryCore supports PATCH, impact, DELETE, path conflicts, and not-found responses", async (t) => {
-  const api = await setup(t, { memory: true });
-  if (!api) return;
-  const firstRepo = await makeRepo(t, api.root, "memory-project-one");
-  const secondRepo = await makeRepo(t, api.root, "memory-project-two");
-  if (!firstRepo || !secondRepo) return;
-  const first = await createMemoryProject(api, "memory-one", firstRepo);
-  const second = await createMemoryProject(api, "memory-two", secondRepo);
-  const beforeConflict = await listProjects(api);
-
-  const conflict = await assertApiError(await sendCommand(api, "PATCH", `/projects/${second.id}`, { canonical_path: firstRepo }, "memory-conflict"), 400, "validation_error");
-  assert.equal(conflict.error.details.project_id, first.id);
-  assert.deepEqual(await listProjects(api), beforeConflict);
-  const renamed = await sendCommand(api, "PATCH", `/projects/${first.id}`, { name: "Memory renamed" }, "memory-rename");
-  assert.equal(renamed.status, 200);
-  const impact = await api.request(`/projects/${first.id}/deletion-impact`);
-  assert.equal(impact.status, 200);
-  assert.equal((await impact.json()).data.work_count, 0);
-  assert.equal((await sendCommand(api, "DELETE", `/projects/${first.id}`, { confirmed_work_count: 0 }, "memory-delete")).status, 200);
-  assert.equal((await listProjects(api)).some((item) => item.id === second.id), true);
-  await assertApiError(await sendCommand(api, "PATCH", `/projects/${first.id}`, { name: "Gone" }, "memory-patch-missing"), 404, "project_not_found");
-  await assertApiError(await api.request(`/projects/${first.id}/deletion-impact`), 404, "project_not_found");
-  await assertApiError(await sendCommand(api, "DELETE", `/projects/${first.id}`, { confirmed_work_count: 0 }, "memory-delete-missing"), 404, "project_not_found");
-  await assertApiError(await api.request(`/projects/${createUlid()}/deletion-impact`), 404, "project_not_found");
-});
-
-test("MemoryCore keeps post_merge_command given at POST /projects and defaults to null", async (t) => {
-  const api = await setup(t, { memory: true });
-  if (!api) return;
-  const repoA = await makeRepo(t, api.root, "memory-post-merge-a");
-  const repoB = await makeRepo(t, api.root, "memory-post-merge-b");
-  if (!repoA || !repoB) return;
-  const body = async (repo, name, fields) => {
-    const canonicalPath = await realpath(repo);
-    return { name, canonical_path: canonicalPath, base_branch: "main", allowed_roots: [canonicalPath], verification_plan: [], ...fields };
-  };
-  const withCmd = await sendCommand(api, "POST", "/projects", await body(repoA, "PM a", { post_merge_command: ["node", "-v"] }), "pm-create-a");
-  assert.equal(withCmd.status, 201);
-  assert.deepEqual((await withCmd.json()).data.post_merge_command, ["node", "-v"]);
-  const without = await sendCommand(api, "POST", "/projects", await body(repoB, "PM b", {}), "pm-create-b");
-  assert.equal(without.status, 201);
-  const projects = await listProjects(api);
-  assert.deepEqual(projects.find((item) => item.name === "PM a").post_merge_command, ["node", "-v"]);
-  assert.equal(projects.find((item) => item.name === "PM b").post_merge_command, null);
-});
-
 test("an ExternalCoreAdapter without the new methods returns core_not_ready for all three routes", async (t) => {
   const api = await setup(t, { legacyAdapter: true });
   if (!api) return;
@@ -705,28 +648,6 @@ test("auto_push defaults off, PATCH persists booleans, and non-booleans are reje
   for (const value of ["true", 1, null]) {
     await assertApiError(await sendCommand(api, "PATCH", `/projects/${existing.id}`, { auto_push: value }, `auto-push-invalid:${String(value)}`), 400, "validation_error");
   }
-
-  const memoryApi = await setup(t, { memory: true });
-  if (!memoryApi) return;
-  const memoryPath = join(memoryApi.root, "memory-auto-push");
-  await mkdir(memoryPath);
-  const memoryCreate = await sendCommand(memoryApi, "POST", "/projects", {
-    name: "Memory auto push",
-    canonical_path: memoryPath,
-    base_branch: "main",
-    allowed_roots: [memoryPath],
-    verification_plan: [],
-  }, "memory-auto-push-create");
-  assert.equal(memoryCreate.status, 201);
-  const memoryProject = (await memoryCreate.json()).data;
-  assert.equal(memoryProject.auto_push, false);
-  const memoryUpdate = await sendCommand(memoryApi, "PATCH", `/projects/${memoryProject.id}`, { auto_push: true }, "memory-auto-push-update");
-  assert.equal(memoryUpdate.status, 200);
-  assert.equal((await memoryUpdate.json()).data.auto_push, true);
-  assert.equal((await listProjects(memoryApi)).find((project) => project.id === memoryProject.id).auto_push, true);
-  const memoryDisable = await sendCommand(memoryApi, "PATCH", `/projects/${memoryProject.id}`, { auto_push: false }, "memory-auto-push-disable");
-  assert.equal((await memoryDisable.json()).data.auto_push, false);
-  assert.equal((await listProjects(memoryApi)).find((project) => project.id === memoryProject.id).auto_push, false);
 });
 
 test("an existing Project defaults to auto_push=false when the migration is applied", async (t) => {

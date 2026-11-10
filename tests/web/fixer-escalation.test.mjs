@@ -55,7 +55,7 @@ function render(name, preset, api, capture) {
     '@/lib/i18n': { useLocale: () => ({ t: (key) => key }) },
     '@/lib/api-client': { ApiRequestError: class ApiRequestError extends Error {}, ...api },
     '@/lib/format': { roleDisplayName }, '@/lib/model-presets': { presetMatchesSettings: () => true },
-    '@/lib/settings-errors': { humanizeError: () => 'ERROR' },
+    '@/lib/api-error-keys.mjs': { humanizeSettingsError: () => 'ERROR' },
     '@/components/OwnerInviteButton': { OwnerInviteButton: () => null }, '@/components/ModelPresetsBar': { ModelPresetsBar: () => null }, '@/components/FolderPickerDialog': { FolderPickerDialog: () => null },
     '@/components/AutoWorkEntryPanel': { AutoWorkEntryPanel: () => null },
   }, {

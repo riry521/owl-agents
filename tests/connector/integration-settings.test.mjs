@@ -11,7 +11,6 @@ import { test } from "node:test";
 import { IntegrationStore } from "../../apps/server/dist/integration-store.js";
 import { ConnectorManager } from "../../apps/server/dist/connector-manager.js";
 import { validateIntegrationPayload } from "../../apps/server/dist/http.js";
-import { createCore as createServerCore } from "../../apps/server/dist/core.js";
 import { DecisionService } from "../../packages/core/dist/index.js";
 import { resolveAdvisorWorkingDirectory } from "../../packages/core/dist/advisor-working-directory.js";
 import { runExecutor as runCoreExecutor } from "../../packages/core/dist/executor.js";
@@ -36,9 +35,7 @@ import {
   resolveDiscordAdvisorChannel,
   sendNotification as sendDiscordNotification,
 } from "../../packages/connector-discord/dist/index.js";
-import { SlackConnector as StandaloneSlackConnector } from "../../apps/connectors/dist/slack-connector.js";
-import { DiscordConnector as StandaloneDiscordConnector } from "../../apps/connectors/dist/discord-connector.js";
-import { createConnectorLifecycle, resolveConnectorAccountId } from "../../apps/connectors/dist/cli.js";
+import { buildDiscordConfig, buildSlackConfig, createConnectorLifecycle, resolveConnectorAccountId } from "../../apps/connectors/dist/cli.js";
 import { command, createTestCore } from "../helpers/core.mjs";
 import { openTestDatabase } from "../helpers/db.mjs";
 import { git } from "../helpers/git.mjs";
@@ -1052,12 +1049,12 @@ test("Manager, Worker, and Reviewer surface provider failures without raw harnes
   const runner = createAgentRunner({ provider: failureProvider });
   const report = {
     kind: "report",
-    schema_version: "1.0.0",
+    schema_version: "1.1.0",
     invocation_id: "worker-report",
     result: "success",
     work_done: "done",
     changes: [],
-    verification: { passed: true, method: "Checked the result." },
+    verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked the result.", integration_check: null },
     delegation: { decomposition: "Kept together.", delegated: [], retained: [{ part: "Whole Task", reason: "No independent part was identified." }] },
     remaining_issues: [],
     next_action: "none",
@@ -1102,12 +1099,12 @@ test("Core role handoffs map work, task, report, rules, and workspace once", asy
   const requests = [];
   const workerReport = {
     kind: "report",
-    schema_version: "1.0.0",
+    schema_version: "1.1.0",
     invocation_id: "worker-handoff",
     result: "success",
     work_done: "worker-report-marker",
     changes: [],
-    verification: { passed: true, method: "Checked the result." },
+    verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked the result.", integration_check: null },
     delegation: { decomposition: "Kept together.", delegated: [], retained: [{ part: "Whole Task", reason: "No independent part was identified." }] },
     remaining_issues: [],
     next_action: "none",
@@ -1348,8 +1345,8 @@ test("Discord decision buttons defer before Core I/O and edit the deferred reply
     accountId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
   });
   const calls = [];
-  connector.fetchPendingDecisions = async (throwOnError) => {
-    calls.push(["pending", throwOnError]);
+  connector.fetchPendingDecisions = async () => {
+    calls.push(["pending"]);
     return [{ id: decisionId, options: [{ key: "approve_now", label: "承認" }] }];
   };
   connector.core.request = async (path) => {
@@ -1571,33 +1568,6 @@ test("core Decision resolution rejects an option outside stored options", async 
   assert.equal(resolved.data.status, "resolved");
 });
 
-test("MemoryCore rejects free-text answers when the saved Decision disallows them", async () => {
-  const core = createServerCore({ version: "test", db: null, agentRunner: {} });
-  const decision = {
-    id: "01ARZ3NDEKTSV4RRFFQ6_MEMORY",
-    work_id: "01ARZ3NDEKTSV4RRFFQ6_WORK",
-    scope: "work",
-    status: "open",
-    reason: "Need an owner choice",
-    options: [{ key: "approve_now", label: "承認" }],
-    recommended: null,
-    allow_free_text: false,
-    blocked_task_ids: [],
-    state_version: 0,
-  };
-  core.decisions.set(decision.id, decision);
-  await assert.rejects(
-    () => core.answerDecision(decision.id, {
-      answer: "arbitrary free text",
-      option_key: null,
-      source_message_id: null,
-    }, commandEnvelope({}, "memory-free-text")),
-    (error) => error?.status === 400 && error?.code === "validation_error" && /自由記述/u.test(error.message),
-  );
-  assert.equal(decision.status, "open");
-  assert.equal(decision.state_version, 0);
-});
-
 test("standalone connector CLI requires provider-owned account IDs for --all", () => {
   const keys = [
     "OWL_CONNECTOR_ACCOUNT_ID",
@@ -1707,7 +1677,7 @@ test("Slack and Discord pending Decision pagination reaches the 51st button targ
     { data: decisions.slice(0, 50), cursor: "50", has_more: true },
     { data: decisions.slice(50), cursor: null, has_more: false },
   ], discordPaths);
-  const discordPending = await discord.fetchPendingDecisions(true);
+  const discordPending = await discord.fetchPendingDecisions();
   assert.equal(discordPending.length, 51);
   assert.deepEqual(discordPaths, expectedPaths);
 
@@ -1724,59 +1694,66 @@ test("Slack and Discord pending Decision pagination reaches the 51st button targ
   }
 });
 
-test("standalone connector adapters reuse full notification and interaction implementations", async () => {
-  const config = {
-    owlApiBase: "http://127.0.0.1:3787/api/v1",
-    slackBotToken: "xoxb-standalone-test",
-    slackAppToken: "xapp-standalone-test",
-    conversationChannelId: "C-STANDALONE-CONVERSATION",
-    notificationChannelId: "C-STANDALONE-NOTIFICATION",
-    accountId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-  };
-  const standaloneSlack = new StandaloneSlackConnector(config);
-  assert.ok(standaloneSlack.delegate instanceof FullSlackConnector);
-  assert.equal(standaloneSlack.delegate.config.notificationChannelId, "C-STANDALONE-NOTIFICATION");
-
-  const notificationPosts = [];
-  standaloneSlack.delegate.web = { chat: { postMessage: async (message) => notificationPosts.push(message) } };
-  await standaloneSlack.delegate.handleCoreEvent({
-    kind: "event",
-    event_id: createUlid(),
-    sequence: 1,
-    cursor: "1",
-    type: "work.completed",
-    schema_version: "1.0.0",
-    payload: { title: "Standalone work" },
+test("standalone CLI builds the full connectors' own config from env", async () => {
+  const saved = { ...process.env };
+  Object.assign(process.env, {
+    SLACK_BOT_TOKEN: "xoxb-standalone-test",
+    SLACK_APP_TOKEN: "xapp-standalone-test",
+    SLACK_CONVERSATION_CHANNEL_ID: "C-STANDALONE-CONVERSATION",
+    SLACK_NOTIFICATION_CHANNEL_ID: "C-STANDALONE-NOTIFICATION",
+    OWL_SLACK_CONNECTOR_ACCOUNT_ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    DISCORD_BOT_TOKEN: "discord-standalone-test",
+    DISCORD_CHANNEL_ID: "D-STANDALONE-CHANNEL",
+    OWL_DISCORD_CONNECTOR_ACCOUNT_ID: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
   });
-  assert.equal(notificationPosts[0]?.channel, "C-STANDALONE-NOTIFICATION");
+  delete process.env.OWL_API_BASE;
+  delete process.env.SLACK_CHANNEL_ID;
+  try {
+    const slackConfig = buildSlackConfig();
+    assert.equal(slackConfig.coreApiBase, "http://127.0.0.1:3787/api/v1");
+    const standaloneSlack = new FullSlackConnector(slackConfig);
+    assert.equal(standaloneSlack.config.notificationChannelId, "C-STANDALONE-NOTIFICATION");
 
-  const decisionId = "01ARZ3NDEKTSV4RRFFQ6_STANDALONE";
-  const requests = [];
-  standaloneSlack.delegate.fetchPendingDecisions = async () => [{
-    id: decisionId,
-    options: [{ key: "needs_more_info_v2", label: "追加情報" }],
-  }];
-  standaloneSlack.delegate.core.request = async (path, init) => {
-    requests.push({ path, init });
-    return {};
-  };
-  await standaloneSlack.delegate.handleInteraction({
-    actions: [{ action_id: createDecisionButtonId(decisionId, 0), value: "ignored-by-handler" }],
-    channel: { id: "C-STANDALONE-NOTIFICATION" },
-    message: { ts: "1712345678.000100" },
-  });
-  assert.equal(requests[0]?.path, `/decisions/${decisionId}/answer`);
-  assert.equal(requests[0].init.body.payload.option_key, "needs_more_info_v2");
+    const notificationPosts = [];
+    standaloneSlack.web = { chat: { postMessage: async (message) => notificationPosts.push(message) } };
+    await standaloneSlack.handleCoreEvent({
+      kind: "event",
+      event_id: createUlid(),
+      sequence: 1,
+      cursor: "1",
+      type: "work.completed",
+      schema_version: "1.0.0",
+      payload: { title: "Standalone work" },
+    });
+    assert.equal(notificationPosts[0]?.channel, "C-STANDALONE-NOTIFICATION");
 
-  const standaloneDiscord = new StandaloneDiscordConnector({
-    owlApiBase: config.owlApiBase,
-    discordBotToken: "discord-standalone-test",
-    conversationChannelId: "D-STANDALONE-CONVERSATION",
-    notificationChannelId: "D-STANDALONE-NOTIFICATION",
-    accountId: config.accountId,
-  });
-  assert.ok(standaloneDiscord.delegate instanceof FullDiscordConnector);
-  assert.equal(standaloneDiscord.delegate.config.notificationChannelId, "D-STANDALONE-NOTIFICATION");
+    const decisionId = "01ARZ3NDEKTSV4RRFFQ6_STANDALONE";
+    const requests = [];
+    standaloneSlack.core.requestPage = async () => ({
+      data: [{ id: decisionId, options: [{ key: "needs_more_info_v2", label: "追加情報" }] }],
+      has_more: false,
+      cursor: null,
+    });
+    standaloneSlack.core.request = async (path, init) => {
+      requests.push({ path, init });
+      return {};
+    };
+    await standaloneSlack.handleInteraction({
+      actions: [{ action_id: createDecisionButtonId(decisionId, 0), value: "ignored-by-handler" }],
+      channel: { id: "C-STANDALONE-NOTIFICATION" },
+      message: { ts: "1712345678.000100" },
+    });
+    assert.equal(requests[0]?.path, `/decisions/${decisionId}/answer`);
+    assert.equal(requests[0].init.body.payload.option_key, "needs_more_info_v2");
+
+    const discordConfig = buildDiscordConfig();
+    const standaloneDiscord = new FullDiscordConnector(discordConfig);
+    assert.equal(standaloneDiscord.config.notificationChannelId, "D-STANDALONE-CHANNEL");
+    assert.equal(standaloneDiscord.config.conversationChannelId, "D-STANDALONE-CHANNEL");
+  } finally {
+    for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
+    Object.assign(process.env, saved);
+  }
 });
 
 test("clearing an Advisor conversation removes messages referenced by turns and receipts", async (t) => {
@@ -1850,12 +1827,12 @@ test("Core strips Hybrid-only control fields before passing a Worker report to t
   let reviewerRequest = null;
   const workerReport = {
     kind: "report",
-    schema_version: "1.0.0",
+    schema_version: "1.1.0",
     invocation_id: "hybrid-worker-run",
     result: "success",
     work_done: "Completed the subtask.",
     changes: [],
-    verification: { passed: true, method: "Checked the result." },
+    verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked the result.", integration_check: null },
     delegation: { decomposition: "Kept together.", delegated: [], retained: [{ part: "Whole Task", reason: "No independent part was identified." }] },
     remaining_issues: [],
     next_action: "none",
@@ -1928,12 +1905,12 @@ test("Core preserves valid Reviewer findings and sends them to the next Worker a
         report_valid: true,
         report: {
           kind: "report",
-          schema_version: "1.0.0",
+          schema_version: "1.1.0",
           invocation_id: request.invocation_id,
           result: "success",
           work_done: `Worker attempt ${workerRequests.length} completed.`,
           changes: [],
-          verification: { passed: true, method: "Checked the result." },
+          verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked the result.", integration_check: null },
           delegation: { decomposition: "Kept together.", delegated: [], retained: [{ part: "Whole Task", reason: "No independent part was identified." }] },
           remaining_issues: [],
           next_action: "none",
@@ -2022,12 +1999,12 @@ test("Manager review choices survive planning and control Reviewer dispatch", as
         report_valid: true,
         report: {
           kind: "report",
-          schema_version: "1.0.0",
+          schema_version: "1.1.0",
           invocation_id: request.invocation_id,
           result: "success",
           work_done: `${request.context.task.title} completed.`,
           changes: [],
-          verification: { passed: true, method: "Checked the result." },
+          verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked the result.", integration_check: null },
           delegation: { decomposition: "Kept together.", delegated: [], retained: [{ part: "Whole Task", reason: "No independent part was identified." }] },
           remaining_issues: [],
           next_action: "none",
@@ -2180,4 +2157,28 @@ test("ConnectorManager.channelAdmin returns the running connector channel API an
   assert.equal(manager.channelAdmin("discord"), null);
   await manager.stopConnector("slack");
   assert.equal(manager.channelAdmin("slack"), null);
+});
+
+test("a leftover SLACK_SIGNING_SECRET is ignored when loading the Slack integration", async (t) => {
+  const envKeys = ["SLACK_BOT_TOKEN", "SLACK_APP_TOKEN", "SLACK_SIGNING_SECRET", "OWL_SECRET_PASSPHRASE"];
+  const previous = restoreEnvironment(envKeys);
+  for (const key of envKeys) delete process.env[key];
+  try {
+    const root = await tempDir(t, "owl-signing-leftover-");
+    process.env.SLACK_BOT_TOKEN = "xoxb-leftover-test";
+    process.env.SLACK_SIGNING_SECRET = "leftover-signing";
+    const config = new IntegrationStore(root, join(root, "data")).getConfig("slack");
+    assert.equal(config?.bot_token, "xoxb-leftover-test");
+    assert.equal("signing_secret" in config, false);
+  } finally {
+    resetEnvironment(previous);
+  }
+});
+
+test("the Settings screen's embedded Slack manifest has the same bot scopes as docs/slack-manifest.yaml", async () => {
+  const scopesOf = (text) => text.match(/bot:\n((?:\s+- [\w:]+\n)+)/)[1].match(/\w+:\w+/g).sort();
+  const doc = await readFile(join(repoRoot, "docs/slack-manifest.yaml"), "utf8");
+  const screen = await readFile(join(repoRoot, "apps/web/components/SettingsView.tsx"), "utf8");
+  assert.deepEqual(scopesOf(screen), scopesOf(doc));
+  assert.ok(scopesOf(doc).includes("channels:manage") && scopesOf(doc).includes("channels:join"));
 });

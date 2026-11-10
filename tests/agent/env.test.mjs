@@ -112,9 +112,9 @@ test("a custom provider key reaches only that provider's process, under the harn
       },
     },
   });
-  const advisorInput = (provider) => ({ conversation_id: "c1", messages: [{ role: "user", content: "hi" }], system_prompt: "s", provider });
-  await runner.runAdvisor(advisorInput("orca")).catch(() => undefined);
-  await runner.runAdvisor(advisorInput("anthropic")).catch(() => undefined);
+  const curatorInput = (provider) => ({ proposals: [], skill_index: [], candidates: [], usages: [], with_judgement: true, provider });
+  await runner.runCurator(curatorInput("orca")).catch(() => undefined);
+  await runner.runCurator(curatorInput("anthropic")).catch(() => undefined);
   assert.equal(calls.length, 2);
   assert.equal(calls[0].env.ANTHROPIC_API_KEY, "orca-key");
   assert.equal(calls[0].env.ANTHROPIC_BASE_URL, "https://orca.test");
@@ -137,7 +137,7 @@ test("an opencode custom provider passes its endpoint and key name through openc
       },
     },
   });
-  await runner.runAdvisor({ conversation_id: "c1", messages: [{ role: "user", content: "hi" }], system_prompt: "s", provider: "orca" }).catch(() => undefined);
+  await runner.runCurator({ proposals: [], skill_index: [], candidates: [], usages: [], with_judgement: true, provider: "orca" }).catch(() => undefined);
   assert.equal(calls.length, 1);
   const { env } = calls[0];
   assert.equal(env.OWL_OPENCODE_BASE_URL, "https://orca.test");

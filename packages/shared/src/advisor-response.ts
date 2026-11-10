@@ -1,5 +1,6 @@
 import { advisorAlternativeActions, matchAdvisorBlockedApi, validateOwnApiPath, type AdvisorBlockedApi } from "./advisor-api-policy.js";
-import { validateRoleOutput, type RoleSchema } from "./role-schema.js";
+import { ADVISOR_REDACT_RULES, redactWithRules } from "./secret-patterns.js";
+import { validateRoleOutput,type RoleSchema } from "./role-schema.js";
 
 export interface AdvisorSuggestedAction {
   readonly type: string;
@@ -50,11 +51,7 @@ export interface AdvisorMalformedDetail {
 export type AdvisorMalformedHandler = (reason: string, detail?: AdvisorMalformedDetail) => void;
 
 /** Mask credentials the same way Core masks user-visible error text. */
-export function redactProviderOutput(text: string): string {
-  return text
-    .replace(/(bearer\s+|authorization\s*[:=]\s*|api[-_ ]?key\s*[:=]\s*|access[_ -]?token\s*[:=]\s*|secret\s*[:=]\s*)[^\s,;"]+/giu, "$1[redacted]")
-    .replace(/\b(?:sk|xoxb|xoxp|xapp|ghp|gho|github_pat)[-_][A-Za-z0-9_-]+\b/gu, "[redacted]");
-}
+export const redactProviderOutput = (text: string): string => redactWithRules(text, ADVISOR_REDACT_RULES);
 
 /** One-line log text for a reason plus its detail. */
 export function formatAdvisorMalformed(reason: string, detail?: AdvisorMalformedDetail): string {
@@ -64,14 +61,10 @@ export function formatAdvisorMalformed(reason: string, detail?: AdvisorMalformed
 
 const EXCERPT_CHARS = 40;
 
-const SECRET_PATTERNS = [
-  /(?:bearer\s+|authorization\s*[:=]\s*|api[-_ ]?key\s*[:=]\s*|access[_ -]?token\s*[:=]\s*|secret\s*[:=]\s*)[^\s,;"]+/giu,
-  /\b(?:sk|xoxb|xoxp|xapp|ghp|gho|github_pat)[-_][A-Za-z0-9_-]+\b/gu,
-];
 
 /** Escaped excerpt of text[from, to). Secrets are located on the full text first, so a token cut by the window is still masked. */
 function excerpt(text: string, from: number, to: number): string {
-  const ranges = SECRET_PATTERNS.flatMap((pattern) =>
+  const ranges = ADVISOR_REDACT_RULES.flatMap(([pattern]) =>
     [...text.matchAll(pattern)].map((m) => [m.index!, m.index! + m[0].length] as const));
   let out = "";
   for (let i = from; i < Math.min(to, text.length); i += 1) {

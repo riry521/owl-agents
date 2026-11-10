@@ -6,6 +6,7 @@ import { DEFAULT_REMAKE_LIMIT_SETTINGS } from "../../packages/shared/dist/remake
 import { createTestCore, command } from "../helpers/core.mjs";
 import { disablePlanQuality } from "../helpers/plan-quality.mjs";
 import { waitFor } from "../helpers/wait.mjs";
+import { readOwnerReplan } from "../../packages/core/dist/replan-queue-store.js";
 
 // An Owner instruction reaches the Manager at the next tick even while Tasks
 // are still running or blocked, and a retry answer to a remake-limit Decision
@@ -14,11 +15,11 @@ import { waitFor } from "../helpers/wait.mjs";
 const envelope = (payload, suffix, expectedVersion = 0) => command(payload, `test:${suffix}:${createUlid()}`, expectedVersion);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const workerReport = (invocationId) => ({
-  kind: "report", schema_version: "1.0.0", invocation_id: invocationId, result: "success", work_done: "Done.", changes: [],
-  verification: { passed: true, method: "Checked." }, remaining_issues: [], next_action: "none", needs_replanning: false, question_for_manager: null,
+  kind: "report", schema_version: "1.1.0", invocation_id: invocationId, result: "success", work_done: "Done.", changes: [],
+  verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked.", integration_check: null }, remaining_issues: [], next_action: "none", needs_replanning: false, question_for_manager: null,
 });
 const planTask = { id: "T1", title: "A", type: "code", acceptance: "Done; verified by the test.", depends_on: [], required_sections: [], required_tests: [], replaces: [], review: false };
-const marker = (db, workId) => JSON.parse(db.get("SELECT response_json FROM idempotency_keys WHERE key = ?", `owner-replan:${workId}`)?.response_json ?? "null");
+const marker = (db, workId) => readOwnerReplan(db, workId) ?? null;
 const workVersion = (db, workId) => db.get("SELECT state_version FROM works WHERE id = ?", workId).state_version;
 
 async function openCore(t, agentRunner, settings) {
@@ -65,7 +66,7 @@ function runner({ workerHangs, onReplan, replanGate, replanReport }) {
   };
 }
 
-const LIMIT = { lineage_worker_runs: 1, lineage_review_attempts: 1000, non_functional_remakes: 100 };
+const LIMIT = { lineage_worker_runs: 1, lineage_review_attempts: 1000 };
 
 test("an instruction on a Work with a running Task reaches the Manager at the next tick", async (t) => {
   let release;

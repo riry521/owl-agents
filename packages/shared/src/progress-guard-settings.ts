@@ -1,3 +1,5 @@
+import { exactKeysValidator, keyedReader, SettingsValidationError } from "./settings-validation.js";
+
 export const PROGRESS_GUARD_SETTINGS_KEY = "progress_guard";
 
 export interface ProgressGuardSettings {
@@ -51,18 +53,11 @@ export const PROGRESS_GUARD_RANGES = {
   plan_rejection_attempts_max: { min: 1, max: 10 },
 } as const;
 
-export class ProgressGuardSettingsValidationError extends Error {
-  public constructor(message: string, public readonly field: string) {
-    super(message);
-    this.name = "ProgressGuardSettingsValidationError";
-  }
+export class ProgressGuardSettingsValidationError extends SettingsValidationError {
+  public override name = "ProgressGuardSettingsValidationError";
 }
 
 const KEYS = Object.keys(DEFAULT_PROGRESS_GUARD_SETTINGS) as (keyof ProgressGuardSettings)[];
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function checkValue(key: keyof ProgressGuardSettings, value: unknown): number | boolean {
   if (key === "prerequisite_sync_base") {
@@ -77,30 +72,18 @@ function checkValue(key: keyof ProgressGuardSettings, value: unknown): number | 
 }
 
 /** For PUT: exactly the known keys, every value valid. Throws ProgressGuardSettingsValidationError. */
-export function validateProgressGuardSettings(value: unknown): ProgressGuardSettings {
-  if (!isRecord(value)) throw new ProgressGuardSettingsValidationError("Settings must be an object.", "payload");
-  const own = Reflect.ownKeys(value);
-  if (own.length !== KEYS.length || !KEYS.every((key) => own.includes(key))) {
-    throw new ProgressGuardSettingsValidationError(`Settings must contain exactly ${KEYS.join(", ")}.`, "payload");
-  }
-  return Object.fromEntries(KEYS.map((key) => [key, checkValue(key, value[key])])) as unknown as ProgressGuardSettings;
-}
+export const validateProgressGuardSettings = exactKeysValidator<ProgressGuardSettings>({
+  keys: KEYS,
+  check: checkValue,
+  error: ProgressGuardSettingsValidationError,
+});
 
 /** For reads: per-key fallback to the default, calling warn for each fallback. */
-export function readProgressGuardSettings(value: unknown, warn?: (message: string) => void): ProgressGuardSettings {
-  if (!isRecord(value)) {
-    warn?.("Stored progress guard settings are not an object; using defaults.");
-    return DEFAULT_PROGRESS_GUARD_SETTINGS;
-  }
-  const entries = KEYS.map((key) => {
-    try {
-      // Keys added after a value was saved (e.g. only no_progress_limit) read as the default, silently.
-      if (!Object.hasOwn(value, key)) return [key, DEFAULT_PROGRESS_GUARD_SETTINGS[key]];
-      return [key, checkValue(key, value[key])];
-    } catch {
-      warn?.(`Invalid progress guard setting ${key}; using default.`);
-      return [key, DEFAULT_PROGRESS_GUARD_SETTINGS[key]];
-    }
-  });
-  return Object.fromEntries(entries) as unknown as ProgressGuardSettings;
-}
+// Keys added after a value was saved (e.g. only no_progress_limit) read as the default, silently.
+export const readProgressGuardSettings = keyedReader<ProgressGuardSettings>({
+  keys: KEYS,
+  defaults: DEFAULT_PROGRESS_GUARD_SETTINGS,
+  check: checkValue,
+  notObject: "Stored progress guard settings are not an object; using defaults.",
+  invalid: (key) => `Invalid progress guard setting ${key}; using default.`,
+});

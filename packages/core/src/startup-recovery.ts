@@ -1,9 +1,12 @@
 import { createUlid, utcNow } from "../../db/dist/index.js";
+import { LIVE_AGENT_RUN_STATUSES, STARTING_AGENT_RUN_STATUSES, closeLiveAgentRun, setAgentRunStatus } from "./agent-run-state.js";
+import { isPidAlive, signalProcessGroup } from "@owl/shared";
 import { reduceTaskInTransaction, repairWorktreeStateInTransaction } from "./state-reducer.js";
 import { reviewRouting } from "./assurance-settings.js";
 import { effectiveReviewRequired } from "./review-routing.js";
 import { processIdentityMatches, readProcessIdentity } from "./process-identity.js";
 import { createProviderPauseStore } from "./provider-pause-store.js";
+import { requeueAttemptedOwnerReplans, requeueStuckManagerTriggers } from "./replan-queue-store.js";
 import { readPausedReviewerWait } from "./provider-pause-reviewer-wait.js";
 import type { CoreDatabase, GitGateway, GitOperationRequest, JsonObject, TaskRow } from "./types.js";
 
@@ -121,13 +124,7 @@ export async function recoverOrphanedState(db: CoreDatabase, git?: GitGateway): 
       db.get<{ status: string }>("SELECT status FROM tasks WHERE id = ?", agent.task_id)?.status === "verifying"
     ) {
       const status = agent.status === "cancel_requested" ? "cancelled" : "exited";
-      await lane.transact((tx) => tx.run(
-        `UPDATE agent_runs
-            SET status = ?, pid = NULL, process_start_time = NULL, process_cmdline_sha256 = NULL,
-                ended_at = ?, updated_at = ?
-          WHERE id = ? AND status IN ('running','spawned','launch_pending','cancel_requested')`,
-        status, now, now, agent.id,
-      ));
+      await lane.transact((tx) => setAgentRunStatus(tx, agent.id, status, { now, from: LIVE_AGENT_RUN_STATUSES, clearProcess: true }));
       continue;
     }
     await lane.write({
@@ -135,13 +132,7 @@ export async function recoverOrphanedState(db: CoreDatabase, git?: GitGateway): 
         // Child runs and observed subagents belong to their Worker,
         // whose own row drives Task recovery below; just close them.
         if (agent.role === "executor") {
-          tx.run(
-            `UPDATE agent_runs
-                SET status = CASE WHEN status = 'cancel_requested' THEN 'cancelled' WHEN origin = 'observed' THEN 'exited' ELSE 'failed' END,
-                    pid = NULL, ended_at = ?, updated_at = ?
-              WHERE id = ? AND status IN ('cancel_requested','running','spawned','launch_pending')`,
-            now, now, agent.id,
-          );
+          closeLiveAgentRun(tx, agent.id, { now, otherwise: "failed", observedAs: "exited", endedAt: "set" });
           return { requeued: false };
         }
         const task = agent.task_id ? tx.get<{ status: string }>("SELECT status FROM tasks WHERE id = ?", agent.task_id) : undefined;
@@ -159,11 +150,11 @@ export async function recoverOrphanedState(db: CoreDatabase, git?: GitGateway): 
               error_key: "startup_cancelled_agent",
             },
           });
-          tx.run("UPDATE agent_runs SET status = 'cancelled', ended_at = ?, updated_at = ? WHERE id = ? AND status = 'cancel_requested'", now, now, agent.id);
+          setAgentRunStatus(tx, agent.id, "cancelled", { now, from: ["cancel_requested"] });
           return { requeued: task.status === "running" || task.status === "verifying" };
         }
         if (agent.status === "cancel_requested" || task?.status === "cancelled") {
-          tx.run("UPDATE agent_runs SET status = 'cancelled', ended_at = ?, updated_at = ? WHERE id = ? AND status IN ('cancel_requested','running','spawned','launch_pending')", now, now, agent.id);
+          setAgentRunStatus(tx, agent.id, "cancelled", { now, from: LIVE_AGENT_RUN_STATUSES });
           return { requeued: false };
         }
         if (agent.task_id && task?.status === "running") {
@@ -185,7 +176,7 @@ export async function recoverOrphanedState(db: CoreDatabase, git?: GitGateway): 
           });
           return { requeued: reduced.next.status === "review_fix_waiting" };
         }
-        tx.run("UPDATE agent_runs SET status = 'failed', ended_at = ?, updated_at = ? WHERE id = ? AND status IN ('running','spawned','launch_pending')", now, now, agent.id);
+        setAgentRunStatus(tx, agent.id, "failed", { now, from: STARTING_AGENT_RUN_STATUSES });
         return { requeued: false };
       },
       event: {
@@ -298,27 +289,8 @@ export async function recoverOrphanedState(db: CoreDatabase, git?: GitGateway): 
   // `attempted` with no in-flight replan to ever finish it. Move any such
   // marker back to `queued` here so the first tick after restart replays it.
   const requeuedReplanMarkers = await lane.transact((tx) => {
-    const triggers = tx.run(
-      `UPDATE idempotency_keys
-          SET response_json = json_set(response_json, '$.status', 'queued')
-        WHERE key LIKE 'manager-trigger:%'
-          AND json_extract(response_json, '$.status') = 'attempted'
-          AND EXISTS (
-            SELECT 1 FROM tasks
-              JOIN works ON works.id = tasks.work_id
-             WHERE tasks.id = substr(idempotency_keys.key, length('manager-trigger:') + 1)
-               AND tasks.status = 'failed'
-               AND tasks.failed_by_dependency_task_id IS NULL
-               AND works.state = 'running'
-          )`,
-    );
-    const ownerReplans = tx.run(
-      `UPDATE idempotency_keys
-          SET response_json = json_set(response_json, '$.status', 'queued')
-        WHERE key LIKE 'owner-replan:%'
-          AND json_extract(response_json, '$.status') = 'attempted'`,
-    );
-    return triggers.changes + ownerReplans.changes;
+    const now = utcNow();
+    return requeueStuckManagerTriggers(tx, now) + requeueAttemptedOwnerReplans(tx, now);
   });
 
   return {
@@ -380,18 +352,7 @@ async function removeWorktreeAtStartup(git: GitGateway, request: GitOperationReq
   }
 }
 
-function isProcessAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; } catch { return false; }
-}
-
-function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
-  try {
-    process.kill(-pid, signal);
-    return;
-  } catch {
-    try { process.kill(pid, signal); } catch { /* process may be exiting */ }
-  }
-}
+const isProcessAlive = (pid: number): boolean => isPidAlive(pid, { epermAlive: false });
 
 async function terminateProcessGroup(pid: number): Promise<void> {
   signalProcessGroup(pid, "SIGTERM");

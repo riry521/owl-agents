@@ -9,16 +9,19 @@ import {
 import { useView } from '@/lib/view-loader';
 import type { RuleProposal, RuleProposalCommandResult, RuleProposalStatus } from '@/lib/types';
 import { useLocale, type TFunction } from '@/lib/i18n';
+import { apiErrorField, humanizeApiErrorFields } from '@/lib/api-error-keys.mjs';
 
 type ProposalListStatus = Extract<RuleProposalStatus, 'awaiting_approval' | 'pending' | 'expired'>;
 
-function errorField(error: unknown, key: 'code' | 'kind'): string {
-  if (error !== null && typeof error === 'object' && !Array.isArray(error)) {
-    const value = (error as Record<string, unknown>)[key];
-    return typeof value === 'string' ? value : '';
-  }
-  return '';
-}
+const CARD_ERROR_KEYS = {
+  network: 'rules.approvals.errorNetwork',
+  networkFrom: 'kind',
+  fallback: 'rules.approvals.errorDefault',
+  codes: {
+    invalid_state_transition: 'rules.approvals.errorInvalidStateTransition',
+    dependency_unavailable: 'rules.approvals.errorDependencyUnavailable',
+  },
+} as const;
 
 export function RuleApprovalsView() {
   const { t } = useLocale();
@@ -41,15 +44,6 @@ export function RuleApprovalsView() {
     if (queryStatus === 'pending' || queryStatus === 'expired') setStatus(queryStatus);
   }, []);
 
-  function classifyError(error: unknown): string {
-    const code = errorField(error, 'code');
-    const kind = errorField(error, 'kind');
-    if (code === 'invalid_state_transition') return t('rules.approvals.errorInvalidStateTransition');
-    if (code === 'dependency_unavailable') return t('rules.approvals.errorDependencyUnavailable');
-    if (kind === 'network_error') return t('rules.approvals.errorNetwork');
-    return t('rules.approvals.errorDefault');
-  }
-
   function outcomeText(result: RuleProposalCommandResult): string {
     return result.status === 'applied'
       ? t('rules.approvals.resultApplied')
@@ -66,8 +60,8 @@ export function RuleApprovalsView() {
       setOutcomeBanner(outcomeText(result));
       retry();
     } catch (error) {
-      setCardErrors((previous) => ({ ...previous, [proposal.id]: classifyError(error) }));
-      if (errorField(error, 'code') === 'invalid_state_transition') retry();
+      setCardErrors((previous) => ({ ...previous, [proposal.id]: humanizeApiErrorFields(error, t, CARD_ERROR_KEYS) }));
+      if (apiErrorField(error, 'code') === 'invalid_state_transition') retry();
       console.error(`[Owl] Rule proposal ${action} error`, error);
     } finally {
       setBusyIds((previous) => {

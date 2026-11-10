@@ -245,6 +245,7 @@ Details are in [docs/operations.md](docs/operations.md).
 - **Final report.** The top of a completed Work's detail page shows the Manager's final report: a summary, the test results and the remaining issues.
 - **Markdown viewer.** A Markdown file named in a Work's deliverables or final report opens in a viewer with a table of contents. It reads only `.md` files in the Work's Project and the materials folder (up to 2 MiB, never files that may hold secrets). Before the Work is integrated, it shows the Work branch and says the content may still change.
 - **Required and goal criteria.** Each acceptance criterion is either required or a goal. A Work can complete when every required criterion is met, even if a goal is not. The Work detail page lists the goals that were not met, with the reason.
+- **Owner criteria.** Only the summary's `受け入れ条件:` and `目標:` lines and quotes from your instructions and Decision answers become your acceptance criteria. If a criterion depends on state outside the Task, the Reviewer sends it back to the Manager to fix. When the Manager drops one of your criteria, the removal and its reason are recorded. A goal is not checked for outside-state dependence.
 
 ### Keeping it running
 
@@ -254,7 +255,7 @@ Details are in [docs/operations.md](docs/operations.md).
 - **Fixer.** When verification fails or the Reviewer rejects a non-design Task twice in total (`after_review_rejections`, default 2), the Fixer role takes the next fix and keeps the Task until it completes. Set its model under the `fixer` role in Settings. See [docs/operations.md](docs/operations.md#fixer-escalation).
 - **Test setup per Project.** The default test mode is `per_file`, and a setup step is skipped while the files it depends on are unchanged and what it made still exists. When you register or change a Project, or when a test fails because of the environment, an agent investigates how to run that Project's tests, Core confirms the command works, and the result is saved with the Project. In the Projects view, edit a Project and use the re-investigation button to run it again by hand.
 - **Test unit.** In `per_file` mode a Project can run each test command on a `file`, `folder` or `package` (`test_run` `unit`, with `unit_argv` and `unit_markers`) from the prepared `cwd`. The investigation tries them in that order and saves the finest unit that works.
-- **Whole-suite tests.** For a Project whose tests run in `whole` mode, Core does not run the whole suite during each Task's verification. The Task records the test check as deferred, and the whole suite runs once in the Work's verification.
+- **Whole-suite tests.** For a Project whose tests run in `whole` mode, Core does not run the whole suite during each Task's verification. The Task records the test check as deferred, and Core runs the whole suite once at the end of the Work. Workers do not run it.
 - **Cloned repositories.** Workers must keep cloned external repositories outside the Project. Owl picks a clone folder outside every Project (git `ghq.root`, else the home folder that already holds the most clones, else a `clones` folder under the data directory) and tells the Worker. A Task that places a clone inside the Project, or edits a clone, fails verification.
 - **Turn off tests.** Set the Project's test run to "Don't run tests" (`test_run` mode `off`) and Core does not run the test runner during Task verification either.
 - **Commit language.** Set `commit_language` (`ja` or `en`) on a Project. For `en`, the commit that completes a Work is written in English.
@@ -492,7 +493,7 @@ When you turn on a Project's Advisor window ([Advisor windows](#advisor-windows)
 
 ### Slack
 
-1. Open [api.slack.com/apps](https://api.slack.com/apps), choose **Create New App → From a manifest**, and paste [`docs/slack-manifest.yaml`](docs/slack-manifest.yaml). The Settings screen also has a button that copies a manifest, but the one embedded there lacks `channels:manage` and `channels:join`. To use automatic channel creation, use `docs/slack-manifest.yaml` instead, or add those two scopes (see below) after copying from the screen.
+1. Open [api.slack.com/apps](https://api.slack.com/apps), choose **Create New App → From a manifest**, and paste [`docs/slack-manifest.yaml`](docs/slack-manifest.yaml). The Settings screen also has a button that copies the same manifest; `docs/slack-manifest.yaml` is the source of truth, and the copy embedded in the screen is kept in step with it by a test.
 2. Install the app to your workspace and copy the **Bot Token** (`xoxb-...`).
 3. Under **Basic Information → App-Level Tokens**, create a token with the `connections:write` scope and copy it (`xapp-...`).
 4. Invite the bot to the channels you want to use (`/invite @owl-agent`), and copy each channel ID from the bottom of the channel details.
@@ -708,8 +709,7 @@ node apps/supervisor/dist/supervisor.js
 | `packages/shared` | `@owl/shared` | Shared types & contracts |
 | `packages/db` | `@owl/db` | SQLite database layer |
 | `packages/core` | `@owl/core` | Workflow engine & state management |
-| `packages/agent-runtime` | `@owl/agent-runtime` | AI role prompt builders & response parsers |
-| `packages/providers` | `@owl/providers` | Provider adapters (stub, claude-cli, codex-cli) |
+| `packages/agent-runtime` | `@owl/agent-runtime` | AI role runner: prompt builders, response parsers, and CLI provider execution (Claude, Codex, OpenCode) |
 | `packages/connector-slack` | `@owl/connector-slack` | Slack connector |
 | `packages/connector-discord` | `@owl/connector-discord` | Discord connector |
 | `packages/plugin-sdk` | `@owl/plugin-sdk` | SDK for external plugins |

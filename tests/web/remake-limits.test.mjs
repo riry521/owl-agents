@@ -16,9 +16,6 @@ const realJsxRuntime = webRequire('react/jsx-runtime');
 const settings = {
   lineage_review_attempts: 9,
   lineage_worker_runs: 10,
-  non_functional_remakes: 2,
-  base_sync_lineage_review_attempts: 9,
-  base_sync_lineage_worker_runs: 10,
   lead_review_rejections: 4,
   verification_paths: ['**/tests/**', '**/*.test.*'],
   checked_task_types: ['code', 'config'],
@@ -117,7 +114,7 @@ function renderSection(state, api) {
     '@/lib/remake-limits.mjs': remakeLimits,
     '@/lib/i18n': { useLocale: () => ({ t: (key) => key }) },
     '@/lib/api-client': { ApiRequestError: class ApiRequestError extends Error {}, ...api },
-    '@/lib/format': {}, '@/lib/model-presets': {}, '@/lib/settings-errors': { humanizeError: () => 'ERROR' },
+    '@/lib/format': {}, '@/lib/model-presets': {}, '@/lib/api-error-keys.mjs': { humanizeSettingsError: () => 'ERROR' },
     '@/components/OwnerInviteButton': { OwnerInviteButton: () => null }, '@/components/ModelPresetsBar': {}, '@/components/FolderPickerDialog': {},
     '@/components/AutoWorkEntryPanel': { AutoWorkEntryPanel: () => null },
   }, {
@@ -142,7 +139,7 @@ test('the section shows the loaded values and Save sends the edited ones', async
   const { html, saveButton, values } = renderSection([true, settings, draft, false, false, null, null], api);
   assert.match(html, /name="lineage_review_attempts"[^>]*value="9"/);
   assert.match(html, /name="lineage_worker_runs"[^>]*value="15"/);
-  assert.match(html, /name="non_functional_remakes"[^>]*value="2"/);
+  assert.doesNotMatch(html, /non_functional_remakes|base_sync_lineage/);
   assert.match(html, /name="lead_review_rejections"[^>]*value="4"/);
   assert.match(html, /settings\.remakeLimits_lead_review_rejections/);
   assert.match(html, /\*\*\/tests\/\*\*\n\*\*\/\*\.test\.\*/);
@@ -199,7 +196,7 @@ test('child-run settings are two-level, have no concurrency-limit inputs and Sav
     '@/lib/remake-limits.mjs': remakeLimits,
     '@/lib/i18n': { useLocale: () => ({ t: (key) => key }) },
     '@/lib/api-client': { ApiRequestError: class extends Error {}, setChildRunSettings: async (config) => { sent = config; return config; } },
-    '@/lib/format': {}, '@/lib/model-presets': {}, '@/lib/settings-errors': { humanizeError: () => 'ERROR' },
+    '@/lib/format': {}, '@/lib/model-presets': {}, '@/lib/api-error-keys.mjs': { humanizeSettingsError: () => 'ERROR' },
     '@/components/OwnerInviteButton': { OwnerInviteButton: () => null }, '@/components/ModelPresetsBar': { ModelPresetsBar: () => null }, '@/components/FolderPickerDialog': { FolderPickerDialog: () => null },
     '@/components/AutoWorkEntryPanel': { AutoWorkEntryPanel: () => null },
   }, {

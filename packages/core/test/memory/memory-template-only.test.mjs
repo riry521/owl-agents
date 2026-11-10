@@ -3,8 +3,6 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { KnowledgeBase } from "../../dist/knowledge-base.js";
-import { KnowledgeNotes } from "../../dist/knowledge-notes.js";
 import { MemoryService } from "../../dist/memory/memory-service.js";
 
 const fixture = (kind) => readFileSync(new URL(`./fixtures/pages/${kind}.md`, import.meta.url), "utf8");
@@ -19,7 +17,7 @@ const NON_TEMPLATE = {
   "ext/typed-log.md": `---\ntitle: ログ\ntype: log\n---\n${KEYWORD}\n`,
 };
 
-test("files that match no template are not knowledge (search, recall, page search, KnowledgeNotes.list)", async () => {
+test("files that match no template are not knowledge (search, recall, page search)", async () => {
   const root = mkdtempSync(join(tmpdir(), "owl-template-only-"));
   const vault = join(root, "vault");
   const dataDir = join(root, "data");
@@ -46,8 +44,5 @@ test("files that match no template are not knowledge (search, recall, page searc
     assert.equal((await service.page({ page: "research/2026-10-01-日付.md" }, owner)).found, true);
     const listedPages = service.index.listPages({ types: ["clipping", "theme", "project-index", "work-log"], status: ["active", "archived", "draft", "superseded"] }).map((r) => r.path);
     assert.ok(!listedPages.includes("research/bad.md"));
-
-    // The note read-side is gone: the old note is not listed either.
-    assert.deepEqual(await new KnowledgeNotes(new KnowledgeBase(root, { rootDir: () => vault })).list(), []);
   } finally { await service.stop(); rmSync(root, { recursive: true, force: true }); }
 });

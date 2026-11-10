@@ -1,4 +1,4 @@
-import type { OwnerLanguage } from "@owl/shared";
+import { ERROR_DISPLAY_REDACT_RULES, redactWithRules, type OwnerLanguage } from "@owl/shared";
 
 type Label = (label: string) => string;
 
@@ -53,11 +53,7 @@ const RUNTIME_FAILURE_TEXT: Record<OwnerLanguage, RuntimeFailureText> = {
 };
 
 /** Replaces credential-looking values (bearer, authorization, api key, sk-/xoxb- tokens) with [redacted]. */
-export function redactSecrets(text: string): string {
-  return text
-    .replace(/(bearer\s+|authorization\s*[:=]\s*(?:bearer\s+)?|api[-_ ]?key\s*[:=]\s*|access[_ -]?token\s*[:=]\s*|secret\s*[:=]\s*)[^\s,;]+/giu, "$1[redacted]")
-    .replace(/\b(?:sk|xoxb|xapp|ghp|github_pat)-[A-Za-z0-9_-]+\b/gu, "[redacted]");
-}
+export const redactSecrets = (text: string): string => redactWithRules(text, ERROR_DISPLAY_REDACT_RULES);
 
 /**
  * Build safe, actionable text for an error that crosses the Core boundary.

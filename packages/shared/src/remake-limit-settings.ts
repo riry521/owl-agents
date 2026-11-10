@@ -1,3 +1,4 @@
+import { exactKeysValidator, keyedReader, SettingsValidationError } from "./settings-validation.js";
 import { globToRegExp } from "./glob.js";
 
 export const REMAKE_LIMIT_SETTINGS_KEY = "remake_limits";
@@ -8,12 +9,6 @@ export interface RemakeLimitSettings {
   readonly lineage_review_attempts: number;
   /** Worker/Designer launches that ran to an end across a lineage. Integer 1..1000. */
   readonly lineage_worker_runs: number;
-  /** Consecutive remakes that changed only verification paths. Integer 1..100. */
-  readonly non_functional_remakes: number;
-  /** Valid Reviewer verdicts across a lineage's base-sync-only generations (counted apart from lineage_review_attempts). Integer 1..1000. */
-  readonly base_sync_lineage_review_attempts: number;
-  /** Worker/Designer launches that ran to an end in a lineage's base-sync-only generations. Integer 1..1000. */
-  readonly base_sync_lineage_worker_runs: number;
   /** Reviewer rejections of Lead Designer output across a lineage before Core stops remaking the design. Integer 1..100. */
   readonly lead_review_rejections: number;
   /** Globs (repo-relative, `/` separated) that count as tests/verification scripts. */
@@ -25,9 +20,6 @@ export interface RemakeLimitSettings {
 export const DEFAULT_REMAKE_LIMIT_SETTINGS: RemakeLimitSettings = {
   lineage_review_attempts: 9,
   lineage_worker_runs: 10,
-  non_functional_remakes: 2,
-  base_sync_lineage_review_attempts: 9,
-  base_sync_lineage_worker_runs: 10,
   lead_review_rejections: 1,
   verification_paths: [
     "**/tests/**", "**/test/**", "**/__tests__/**",
@@ -38,22 +30,15 @@ export const DEFAULT_REMAKE_LIMIT_SETTINGS: RemakeLimitSettings = {
   checked_task_types: ["code", "config"],
 };
 
-export class RemakeLimitSettingsValidationError extends Error {
-  public constructor(message: string, public readonly field: string) {
-    super(message);
-    this.name = "RemakeLimitSettingsValidationError";
-  }
+export class RemakeLimitSettingsValidationError extends SettingsValidationError {
+  public override name = "RemakeLimitSettingsValidationError";
 }
 
-const KEYS = ["lineage_review_attempts", "lineage_worker_runs", "non_functional_remakes", "base_sync_lineage_review_attempts", "base_sync_lineage_worker_runs", "lead_review_rejections", "verification_paths", "checked_task_types"] as const;
+const KEYS = ["lineage_review_attempts", "lineage_worker_runs", "lead_review_rejections", "verification_paths", "checked_task_types"] as const;
 export const REMAKE_LIMIT_SETTINGS_KEYS: readonly string[] = KEYS;
 const MAX_GLOBS = 200;
 const MAX_GLOB_LENGTH = 500;
-const INTEGER_RANGES = { lineage_review_attempts: 1000, lineage_worker_runs: 1000, non_functional_remakes: 100, base_sync_lineage_review_attempts: 1000, base_sync_lineage_worker_runs: 1000, lead_review_rejections: 100 } as const;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+const INTEGER_RANGES = { lineage_review_attempts: 1000, lineage_worker_runs: 1000, lead_review_rejections: 100 } as const;
 
 function fail(field: string, message: string): never {
   throw new RemakeLimitSettingsValidationError(message, field);
@@ -93,30 +78,18 @@ function checkKey(key: (typeof KEYS)[number], value: unknown): number | string[]
 }
 
 /** For PUT: exactly the keys, every value valid. Throws RemakeLimitSettingsValidationError. */
-export function validateRemakeLimitSettings(value: unknown): RemakeLimitSettings {
-  if (!isRecord(value)) fail("payload", "Settings must be an object.");
-  const own = Reflect.ownKeys(value);
-  if (own.length !== KEYS.length || !KEYS.every((key) => own.includes(key))) fail("payload", `Settings must contain exactly ${KEYS.join(", ")}.`);
-  return Object.fromEntries(KEYS.map((key) => [key, checkKey(key, value[key])])) as unknown as RemakeLimitSettings;
-}
+export const validateRemakeLimitSettings = exactKeysValidator<RemakeLimitSettings>({
+  keys: KEYS,
+  check: checkKey,
+  error: RemakeLimitSettingsValidationError,
+});
 
 /** For reads: per-key fallback to the default, calling warn for each fallback. */
-export function readRemakeLimitSettings(value: unknown, warn?: (message: string) => void): RemakeLimitSettings {
-  if (!isRecord(value)) {
-    warn?.("Stored remake limits are not an object; using defaults.");
-    return DEFAULT_REMAKE_LIMIT_SETTINGS;
-  }
-  for (const key of Reflect.ownKeys(value)) {
-    if (!(KEYS as readonly unknown[]).includes(key)) warn?.(`Unknown remake limit ${String(key)}; ignoring.`);
-  }
-  const entries = KEYS.map((key) => {
-    try {
-      if (!Object.hasOwn(value, key)) return [key, DEFAULT_REMAKE_LIMIT_SETTINGS[key]];
-      return [key, checkKey(key, value[key])];
-    } catch {
-      warn?.(`Invalid remake limit ${key}; using default.`);
-      return [key, DEFAULT_REMAKE_LIMIT_SETTINGS[key]];
-    }
-  });
-  return Object.fromEntries(entries) as unknown as RemakeLimitSettings;
-}
+export const readRemakeLimitSettings = keyedReader<RemakeLimitSettings>({
+  keys: KEYS,
+  defaults: DEFAULT_REMAKE_LIMIT_SETTINGS,
+  check: checkKey,
+  notObject: "Stored remake limits are not an object; using defaults.",
+  unknown: (key) => `Unknown remake limit ${key}; ignoring.`,
+  invalid: (key) => `Invalid remake limit ${key}; using default.`,
+});

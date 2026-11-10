@@ -3,7 +3,8 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { evaluateWorkerCompletion, observedSubagentsNeedingIntegration } from "../../packages/core/dist/task-completion-gate.js";
+import { evaluateWorkerCompletion, goalOnlyShortfallReport, observedSubagentsNeedingIntegration } from "../../packages/core/dist/task-completion-gate.js";
+import { normalizeWorkerResponseWithFeedback } from "../../packages/agent-runtime/dist/worker.js";
 import { WorkflowEngine } from "../../packages/core/dist/workflow-engine.js";
 import { openTestDatabase } from "../helpers/db.mjs";
 const normal = { hybrid: false, delegated_work_detected: false };
@@ -25,45 +26,24 @@ function report(overrides = {}, verification = {}) {
 const integrationPassed = { status: "passed", evidence: "Integrated." };
 const integrationRequired = { ...integrationPassed, required: true };
 
-test("Completion Gate (Normal): only a fully passed success report passes", () => {
+test("Completion Gate (Normal): a passed success report passes", () => {
   assert.deepEqual(evaluateWorkerCompletion(report(), normal), { passed: true, reasons: [], error_key: null });
-  const cases = [
-    [report({ result: "partial" }), "worker_completion_gate_failed"],
-    [report({ result: "failed" }), "worker_completion_gate_failed"],
-    [report({ needs_replanning: true }), "worker_completion_gate_failed"],
-    [report({ question_for_manager: "Which one?" }), "worker_completion_gate_failed"],
-    [report({}, { status: "failed" }), "worker_verification_failed"],
-    [report({}, { status: "blocked" }), "worker_verification_blocked"],
-    [report({}, { acceptance: [{ criterion_id: "AC1", criterion: "c", status: "failed", evidence: "e" }] }), "worker_verification_failed"],
-    [report({}, { checks: [{ name: "build", status: "blocked", evidence: "e" }] }), "worker_verification_blocked"],
-    [report({}, { acceptance: [] }), "worker_verification_incomplete"],
-  ];
-  for (const [input, key] of cases) {
-    const verdict = evaluateWorkerCompletion(input, normal);
-    assert.equal(verdict.passed, false);
-    assert.equal(verdict.error_key, key);
-    assert.ok(verdict.reasons.length > 0);
-  }
 });
 
-test("Completion Gate: a legacy 1.0.0 report is judged on verification.passed", () => {
-  const legacy = (passed) => ({ ...report(), schema_version: "1.0.0", verification: { passed, method: "m" } });
-  assert.equal(evaluateWorkerCompletion(legacy(true), normal).passed, true);
-  assert.equal(evaluateWorkerCompletion(legacy(false), normal).error_key, "worker_verification_failed");
-});
-
-test("Completion Gate (Hybrid): a passed integration_check is required, not the Executor success count", () => {
+test("Completion Gate (Hybrid): a passed integration_check is required outside Hybrid runs; Hybrid runs leave delegated work to agent-runtime", () => {
   const hybrid = { hybrid: true, delegated_work_detected: false };
   assert.equal(evaluateWorkerCompletion(report({}, { integration_check: integrationPassed }), hybrid).passed, true);
   // No delegated child and no observed subagent: integration_check is not required even in Hybrid.
   assert.equal(evaluateWorkerCompletion(report(), hybrid).passed, true);
   const delegatedReport = (verification = {}) => report({ delegation: { decomposition: "x", delegated: [{ child_id: "c1", instruction: "i", provider: "p", model: "m" }], retained: [] } }, verification);
-  assert.equal(evaluateWorkerCompletion(delegatedReport(), hybrid).error_key, "hybrid_integration_verification_missing");
-  assert.equal(evaluateWorkerCompletion(delegatedReport({ integration_check: integrationPassed }), hybrid).passed, true);
-  assert.equal(evaluateWorkerCompletion(delegatedReport({ integration_check: { status: "failed", evidence: "x" } }), hybrid).error_key, "hybrid_integration_verification_missing");
-  assert.equal(evaluateWorkerCompletion(delegatedReport({ integration_check: { status: "blocked", evidence: "x" } }), hybrid).passed, false);
-  const manyExecutors = report({ delegation: { decomposition: "x", delegated: [1, 2, 3].map((n) => ({ child_id: `c${n}`, instruction: "i", provider: "p", model: "m" })), retained: [] } });
-  assert.equal(evaluateWorkerCompletion(manyExecutors, hybrid).passed, false);
+  // In a Hybrid run correctReportSemantics lowers a delegated success without a passed integration_check, so the gate does not look.
+  assert.equal(evaluateWorkerCompletion(delegatedReport(), hybrid).passed, true);
+  assert.equal(evaluateWorkerCompletion(delegatedReport(), normal).error_key, "hybrid_integration_verification_missing");
+  assert.equal(evaluateWorkerCompletion(delegatedReport({ integration_check: integrationPassed }), normal).passed, true);
+  assert.equal(evaluateWorkerCompletion(delegatedReport({ integration_check: { status: "failed", evidence: "x" } }), normal).error_key, "hybrid_integration_verification_missing");
+  assert.equal(evaluateWorkerCompletion(delegatedReport({ integration_check: { status: "blocked", evidence: "x" } }), normal).passed, false);
+  const declared = report({ delegation: { decomposition: "x", delegated: [], retained: [], own_subagents_used: true } });
+  assert.equal(evaluateWorkerCompletion(declared, hybrid).error_key, "hybrid_integration_verification_missing");
 });
 
 test("Completion Gate (Subagent): observed subagents need integration; no observation never fails a Task", () => {
@@ -118,10 +98,11 @@ async function openWorkflow(t, { hybrid = false, launchHybrid = hybrid, childRun
   return { db, workflow, seedRun, count, events, succeed, settle, reviewerRuns: () => reviewerRuns };
 }
 
-test("Workflow: a success claim with a failed verification starts no Reviewer and never reaches verifying", async (t) => {
+test("Workflow: a success claim the gate rejects starts no Reviewer and never reaches verifying", async (t) => {
   const w = await openWorkflow(t);
   await w.seedRun("run-1");
-  await w.succeed("run-1", report({}, { status: "failed" }));
+  await w.seedRun("sub-1", "run-1", "observed");
+  await w.succeed("run-1", report());
   await w.settle();
   assert.equal(w.reviewerRuns(), 0);
   assert.equal(w.count("SELECT COUNT(*) AS n FROM agent_runs WHERE role = 'reviewer'"), 0);
@@ -129,20 +110,10 @@ test("Workflow: a success claim with a failed verification starts no Reviewer an
   assert.equal(w.events("agent.exited"), 0);
   assert.notEqual(w.db.get("SELECT status FROM tasks WHERE id = 'task-1'").status, "verifying");
   const failure = JSON.parse(w.db.get("SELECT payload_json FROM events WHERE task_id = 'task-1' AND type = 'task.failure.classified'").payload_json);
-  assert.equal(failure.error_key, "worker_verification_failed");
+  assert.equal(failure.error_key, "hybrid_integration_verification_missing");
   assert.equal(failure.retry_allowed, true);
-  assert.match(failure.gate_reasons.join("; "), /verification\.status is failed/u);
+  assert.match(failure.gate_reasons.join("; "), /integration_check is not present/u);
   assert.equal(failure.reason, undefined);
-});
-
-test("Workflow: blocked and incomplete verification use their own error keys", async (t) => {
-  for (const [verification, key] of [[{ status: "blocked" }, "worker_verification_blocked"], [{ acceptance: [] }, "worker_verification_incomplete"]]) {
-    const w = await openWorkflow(t);
-    await w.seedRun("run-1");
-    await w.succeed("run-1", report({}, verification));
-    assert.equal(JSON.parse(w.db.get("SELECT payload_json FROM events WHERE type = 'task.failure.classified'").payload_json).error_key, key);
-    assert.equal(w.reviewerRuns(), 0);
-  }
 });
 
 test("Workflow: a structured verification that passes without a Project starts the Reviewer", async (t) => {
@@ -158,8 +129,9 @@ test("Workflow: a structured verification that passes without a Project starts t
 test("Workflow: reprocessing the same agentRunId does not duplicate gate or verification events", async (t) => {
   const failing = await openWorkflow(t);
   await failing.seedRun("run-1");
-  await failing.succeed("run-1", report({}, { status: "failed" }));
-  await failing.succeed("run-1", report({}, { status: "failed" }));
+  await failing.seedRun("sub-1", "run-1", "observed");
+  await failing.succeed("run-1", report());
+  await failing.succeed("run-1", report());
   assert.equal(failing.events("task.failure.classified"), 1);
   assert.equal(failing.count("SELECT failure_count AS n FROM tasks WHERE id = 'task-1'"), 1);
 
@@ -176,7 +148,7 @@ test("Workflow (Hybrid): a missing integration_check is rejected; the Executor s
   const w = await openWorkflow(t, { hybrid: true });
   await w.seedRun("run-1");
   await w.seedRun("exec-1", "run-1", "spawned");
-  await w.succeed("run-1", report({ delegation: { decomposition: "x", delegated: [{ child_id: "c1", instruction: "i", provider: "p", model: "m" }], retained: [] } }));
+  await w.succeed("run-1", report({ delegation: { decomposition: "x", delegated: [], retained: [], own_subagents_used: true } }));
   assert.equal(JSON.parse(w.db.get("SELECT payload_json FROM events WHERE type = 'task.failure.classified'").payload_json).error_key, "hybrid_integration_verification_missing");
   assert.equal(w.reviewerRuns(), 0);
 
@@ -250,33 +222,20 @@ test("Workflow (Children): every unfinished, unknown or unreported child, at any
   }
 });
 
-test("Workflow: a failing success report that also asks for replanning records the gate error_key and reasons", async (t) => {
-  for (const extra of [{ needs_replanning: true }, { question_for_manager: "Which one?" }]) {
-    const w = await openWorkflow(t);
-    await w.seedRun("run-1");
-    await w.succeed("run-1", report(extra, { status: "failed" }));
-    await w.settle();
-    const row = w.db.get("SELECT payload_json FROM events WHERE task_id = 'task-1' AND type = 'task.replan_requested'");
-    const payload = JSON.parse(row.payload_json);
-    assert.equal(payload.error_key, "worker_verification_failed");
-    assert.ok(payload.gate_reasons.length > 0);
-    assert.equal(w.reviewerRuns(), 0);
-    assert.equal(w.events("verification.started"), 0);
-  }
-});
-
 test("Workflow (Hybrid): the gate uses the mode the Worker was launched with, not the current setting", async (t) => {
-  const settingOff = await openWorkflow(t, { hybrid: false, launchHybrid: true });
-  await settingOff.seedRun("run-1");
-  await settingOff.succeed("run-1", report({ delegation: { decomposition: "x", delegated: [{ child_id: "c1", instruction: "i", provider: "p", model: "m" }], retained: [] } }));
-  assert.equal(JSON.parse(settingOff.db.get("SELECT payload_json FROM events WHERE type = 'task.failure.classified'").payload_json).error_key, "hybrid_integration_verification_missing");
-  assert.equal(settingOff.reviewerRuns(), 0);
+  const delegatedBody = report({ delegation: { decomposition: "x", delegated: [{ child_id: "c1", instruction: "i", provider: "p", model: "m" }], retained: [] } });
+  // Launched outside Hybrid (setting on now): the gate sees the delegated work and rejects the missing integration_check.
+  const launchedNormal = await openWorkflow(t, { hybrid: true, launchHybrid: false });
+  await launchedNormal.seedRun("run-1");
+  await launchedNormal.succeed("run-1", delegatedBody);
+  assert.equal(JSON.parse(launchedNormal.db.get("SELECT payload_json FROM events WHERE type = 'task.failure.classified'").payload_json).error_key, "hybrid_integration_verification_missing");
+  assert.equal(launchedNormal.reviewerRuns(), 0);
 
-  const settingOn = await openWorkflow(t, { hybrid: true, launchHybrid: false });
-  await settingOn.seedRun("run-1");
-  await settingOn.succeed("run-1", report());
-  assert.equal(settingOn.events("task.failure.classified"), 0);
-  assert.equal(settingOn.reviewerRuns(), 1);
+  // Launched in Hybrid (setting off now): agent-runtime owns this check, so the gate does not stop it.
+  const launchedHybrid = await openWorkflow(t, { hybrid: false, launchHybrid: true });
+  await launchedHybrid.seedRun("run-1");
+  await launchedHybrid.succeed("run-1", delegatedBody);
+  assert.equal(launchedHybrid.events("task.failure.classified"), 0);
 });
 
 // Goal criteria: the Task's stored criteria decide what is a goal, never the report's own requirement.
@@ -285,22 +244,6 @@ const GOAL_CRITERIA = [criterion("AC1"), criterion("AC2", "goal")];
 const goalUnmet = (id, shortfall_reason) => ({ criterion_id: id, criterion: "c", status: "goal_unmet", evidence: "e", ...(shortfall_reason === undefined ? {} : { shortfall_reason }) });
 const passedAc = (id) => ({ criterion_id: id, criterion: "c", status: "passed", evidence: "e" });
 const withGoalUnmet = (...items) => report({}, { acceptance: items });
-const goalOptions = { ...normal, goal_criterion_ids: ["AC2"] };
-
-test("Completion Gate: goal_unmet passes for a goal with a reason, and stops for a required id or a blank reason", () => {
-  assert.equal(evaluateWorkerCompletion(withGoalUnmet(passedAc("AC1"), goalUnmet("AC2", "only 6 branches")), goalOptions).passed, true);
-  const required = evaluateWorkerCompletion(withGoalUnmet(goalUnmet("AC1", "why"), passedAc("AC2")), goalOptions);
-  assert.deepEqual([required.passed, required.error_key], [false, "worker_verification_failed"]);
-  for (const reason of [undefined, null, "", "  \n"]) {
-    const blank = evaluateWorkerCompletion(withGoalUnmet(passedAc("AC1"), goalUnmet("AC2", reason)), goalOptions);
-    assert.deepEqual([blank.passed, blank.error_key], [false, "worker_verification_failed"]);
-  }
-});
-
-test("Completion Gate: a criterion without a requirement is required, so goal_unmet on it stops", () => {
-  const verdict = evaluateWorkerCompletion(withGoalUnmet(passedAc("AC1"), goalUnmet("AC2", "why")), normal);
-  assert.deepEqual([verdict.passed, verdict.error_key], [false, "worker_verification_failed"]);
-});
 
 test("Workflow: a goal_unmet goal passes the gate, starts the Reviewer and stores the shortfall on the Task", async (t) => {
   const w = await openWorkflow(t, { criteria: GOAL_CRITERIA });
@@ -311,17 +254,6 @@ test("Workflow: a goal_unmet goal passes the gate, starts the Reviewer and store
   assert.deepEqual(JSON.parse(w.db.get("SELECT goal_shortfalls_json AS j FROM tasks WHERE id = 'task-1'").j), [
     { criterion_id: "AC2", text: "criterion AC2", reason: "only 6 branches", source: "worker" },
   ]);
-});
-
-test("Workflow: goal_unmet without a reason, or on a required id, is worker_verification_failed and stores nothing", async (t) => {
-  for (const body of [withGoalUnmet(passedAc("AC1"), goalUnmet("AC2", "  ")), withGoalUnmet(passedAc("AC1"), goalUnmet("AC2")), withGoalUnmet(goalUnmet("AC1", "why"), passedAc("AC2"))]) {
-    const w = await openWorkflow(t, { criteria: GOAL_CRITERIA });
-    await w.seedRun("run-1");
-    await w.succeed("run-1", body);
-    assert.equal(w.reviewerRuns(), 0);
-    assert.equal(JSON.parse(w.db.get("SELECT payload_json FROM events WHERE type = 'task.failure.classified'").payload_json).error_key, "worker_verification_failed");
-    assert.equal(w.db.get("SELECT goal_shortfalls_json AS j FROM tasks WHERE id = 'task-1'").j, null);
-  }
 });
 
 const gateRow = (id, over = {}) => ({ id, parent_agent_id: null, provider: "claude", hook_agent_id: null, tool_program: null, ...over });
@@ -395,4 +327,82 @@ test("Workflow (Subagent): a report classification lets a shell-only CLI pass; a
     assert.equal(w.reviewerRuns(), 0);
     assert.equal(JSON.parse(w.db.get("SELECT payload_json FROM events WHERE type = 'task.failure.classified'").payload_json).error_key, "hybrid_integration_verification_missing");
   }
+});
+
+// Preservation table: the same payloads run through the production order (agent-runtime normalizes, Core lifts a
+// goal-only shortfall, the gate runs on success only). Its expectations must hold before and after the gate's
+// duplicated checks were removed.
+const PIPELINE_CRITERIA = [criterion("AC1"), criterion("AC2", "goal")];
+const PIPELINE_GOAL_IDS = ["AC2"];
+const asProvider = (payload) => ({ adapter: "claude", stdout: JSON.stringify(payload), stderr: "", exit_code: 0, signal: null, format: "plain-text" });
+const child = (id) => ({ child_id: id, instruction: "i", provider: "p", model: "m" });
+const base = (over = {}, verification = {}) => ({
+  kind: "report", schema_version: "1.1.0", invocation_id: "i", result: "success", work_done: "Done.",
+  delegation: { decomposition: "x", delegated: [], retained: [] }, changes: [], remaining_issues: [], next_action: "none",
+  needs_replanning: false, question_for_manager: null, external_blocker: null, pending_process: null,
+  verification: {
+    status: "passed", method: "Checked.", checks: [{ name: "build", status: "passed", evidence: "ok" }],
+    acceptance: [{ criterion_id: "AC1", status: "passed", evidence: "e" }, { criterion_id: "AC2", status: "passed", evidence: "e" }],
+    integration_check: null, ...verification,
+  },
+  ...over,
+});
+const acceptanceWith = (ac1, ac2) => [{ criterion_id: "AC1", status: "passed", evidence: "e", ...ac1 }, { criterion_id: "AC2", status: "passed", evidence: "e", ...ac2 }];
+const withDelegated = (verification = {}, over = {}) => base({ delegation: { decomposition: "x", delegated: [child("c1")], retained: [], ...over } }, verification);
+const done = (id) => ({ id, kind: "dispatched", status: "completed" });
+
+function pipeline(payload, { hybrid = false, children = [], detected = false } = {}) {
+  let normalized;
+  try {
+    normalized = normalizeWorkerResponseWithFeedback(asProvider(payload), "i", hybrid, { acceptance_criteria: PIPELINE_CRITERIA });
+  } catch (error) {
+    return { rejected: `${error.reason ?? ""} ${error.message}` };
+  }
+  let body = normalized.report;
+  if (goalOnlyShortfallReport(body, { goal_criterion_ids: PIPELINE_GOAL_IDS })) {
+    body = { ...body, result: "success", verification: { ...body.verification, status: "passed" } };
+  }
+  const gate = body.result === "success"
+    ? evaluateWorkerCompletion(body, { hybrid, delegated_work_detected: detected, children, goal_criterion_ids: PIPELINE_GOAL_IDS }).error_key
+    : "not_run";
+  return { result: body.result, corrections: normalized.corrections.map((c) => c.rule), gate };
+}
+
+const UNPASSED_V = "success_with_unpassed_verification";
+const UNPASSED_I = "success_with_unpassed_item";
+const MISSING = "hybrid_integration_verification_missing";
+const INCOMPLETE = "worker_children_incomplete";
+const ok = { result: "success", corrections: [], gate: null };
+const partial = (...corrections) => ({ result: "partial", corrections, gate: "not_run" });
+const gated = (gate) => ({ result: "success", corrections: [], gate });
+const ownSubagents = () => base({ delegation: { decomposition: "x", delegated: [], retained: [], own_subagents_used: true } });
+
+test("Pipeline preservation P1-P22: results, corrections and gate keys do not depend on which layer checks them", () => {
+  const withReason = { shortfall_reason: "only 6 branches" };
+  const rows = {
+    P1: [pipeline(base()), ok],
+    P2: [pipeline(base({}, { status: "failed" })), partial(UNPASSED_V)],
+    P3: [pipeline(base({}, { status: "blocked", acceptance: acceptanceWith({ status: "blocked" }, {}) })), partial(UNPASSED_V, UNPASSED_I)],
+    P4: [pipeline(base({}, { status: "failed", checks: [{ name: "build", status: "failed", evidence: "x" }] })), partial(UNPASSED_V, UNPASSED_I)],
+    P5: [pipeline(base({}, { status: "blocked", acceptance: acceptanceWith({ status: "unverifiable", unverifiable_reason: "outside the Task" }, {}) })), partial(UNPASSED_V, UNPASSED_I)],
+    P6: [pipeline(base({ needs_replanning: true })), partial("success_with_needs_replanning")],
+    P7: [pipeline(base({ question_for_manager: "Which?" })), partial("success_with_question_for_manager")],
+    P8: [pipeline(base({}, { acceptance: acceptanceWith({}, { status: "goal_unmet", ...withReason }) })), ok],
+    P10: [pipeline(base({}, { acceptance: acceptanceWith({ status: "goal_unmet", ...withReason }, {}) })), partial(UNPASSED_I)],
+    P11: [pipeline(base({}, { acceptance: acceptanceWith({}, { status: "failed", evidence: "only 6" }) })), ok],
+    P12: [pipeline(base({ result: "partial" }, { acceptance: acceptanceWith({}, { status: "goal_unmet", ...withReason }) })), ok],
+    P13: [pipeline(withDelegated(), { hybrid: true, children: [done("c1")] }), partial("hybrid_ok_without_passed_integration")],
+    P14: [pipeline(withDelegated({ integration_check: integrationPassed }), { hybrid: true, children: [done("c1")] }), ok],
+    P15: [pipeline(withDelegated({ integration_check: integrationPassed }), { hybrid: true, children: [{ ...done("c1"), status: "running" }] }), gated(INCOMPLETE)],
+    P16: [pipeline(withDelegated({ integration_check: integrationPassed }), { hybrid: true, children: [done("c1"), done("c2")] }), gated(INCOMPLETE)],
+    P17: [pipeline(ownSubagents()), gated(MISSING)],
+    P18: [pipeline(base(), { detected: true }), gated(MISSING)],
+    P19: [pipeline(withDelegated(), { children: [done("c1")] }), gated(MISSING)],
+    P20: [pipeline(ownSubagents(), { children: [{ id: "o1", kind: "observed", status: "running" }] }), gated(MISSING)],
+    P21: [pipeline(ownSubagents(), { hybrid: true }), gated(MISSING)],
+  };
+  for (const [name, [actual, expected]] of Object.entries(rows)) assert.deepEqual(actual, expected, name);
+  const rejected = (payload) => pipeline(payload).rejected;
+  assert.match(rejected(base({}, { acceptance: acceptanceWith({}, { status: "goal_unmet" }) })), /goal_unmet_without_reason/u, "P9");
+  assert.match(rejected(base({}, { acceptance: [{ criterion_id: "AC1", status: "passed", evidence: "e" }] })), /worker_acceptance_criterion_ids/u, "P22");
 });

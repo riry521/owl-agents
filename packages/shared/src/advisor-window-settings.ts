@@ -1,3 +1,5 @@
+import { isRecord, SettingsValidationError } from "./settings-validation.js";
+
 export const ADVISOR_WINDOW_SETTINGS_KEY = "advisor_windows";
 
 export interface AdvisorWindowSettings {
@@ -22,11 +24,8 @@ export const DEFAULT_ADVISOR_WINDOW_SETTINGS: AdvisorWindowSettings = {
   handoff_summary_max_chars: 4000,
 };
 
-export class AdvisorWindowSettingsValidationError extends Error {
-  public constructor(message: string, public readonly field: AdvisorWindowSettingsField) {
-    super(message);
-    this.name = "AdvisorWindowSettingsValidationError";
-  }
+export class AdvisorWindowSettingsValidationError extends SettingsValidationError<AdvisorWindowSettingsField> {
+  public override name = "AdvisorWindowSettingsValidationError";
 }
 
 const SETTING_KEYS = Object.keys(DEFAULT_ADVISOR_WINDOW_SETTINGS) as readonly (keyof AdvisorWindowSettings)[];
@@ -77,7 +76,7 @@ export function defaultChannelName(
 
 /** For PUT: exactly the six settings, each in range. */
 export function validateAdvisorWindowSettings(value: unknown): AdvisorWindowSettings {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+  if (!isRecord(value)) {
     throw new AdvisorWindowSettingsValidationError("Settings must be an object.", "payload");
   }
   const record = value as Record<string, unknown>;

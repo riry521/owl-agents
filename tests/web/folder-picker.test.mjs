@@ -187,7 +187,7 @@ function renderFolderPicker(state, props, apiClientOverrides) {
         },
         ...apiClientOverrides,
       },
-      '@/lib/settings-errors': { humanizeError: () => 'ERROR' },
+      '@/lib/api-error-keys.mjs': { humanizeSettingsError: () => 'ERROR' },
       '@/components/icons': { FolderIcon: () => null },
     },
   });

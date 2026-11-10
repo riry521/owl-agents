@@ -7,7 +7,7 @@ import { test } from "node:test";
 
 import { advisorFolderDefaults, isGitIgnoredDirectory, normalizeAdvisorFolder } from "../../apps/server/dist/advisor-folders.js";
 import { AppSettingsStore } from "../../apps/server/dist/app-settings-store.js";
-import { MemoryCore } from "../../apps/server/dist/core.js";
+import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { errorBody } from "../../apps/server/dist/errors.js";
 import { listHostDirectories } from "../../apps/server/dist/fs-directories.js";
 import { createUlid } from "../../packages/db/dist/index.js";
@@ -28,7 +28,8 @@ test("folder values expand home, reject relative paths, and reset to defaults", 
   assert.throws(() => normalizeAdvisorFolder("x".repeat(1025)), /absolute/);
   assert.throws(() => normalizeAdvisorFolder("/tmp/\0bad"), /absolute/);
   assert.equal(normalizeAdvisorFolder(""), "");
-  const core = new MemoryCore({ version: "test", owlRoot: root, dataDir: root });
+  const { db, core: realCore } = await createTestCore(t, { owlRoot: root });
+  const core = new ExternalCoreAdapter(realCore, db, root, root);
   const defaults = advisorFolderDefaults(root);
   assert.deepEqual((await core.getAdvisorFolders()).custom, { shared_dir: false, screenshot_dir: false });
   await core.setAdvisorFolders(join(root, "outside"), join(root, "screenshots"));
@@ -102,8 +103,9 @@ test("Advisor folder API returns defaults, saves values, and rejects tracked pat
   const root = await tempDir(t, "owl-folders-api-");
   git(root, "init", "-q");
   await writeFile(join(root, ".gitignore"), "shared/\ncustom/\n");
-  const core = new MemoryCore({ version: "test", owlRoot: root, dataDir: root });
-  const api = await startTestHttpServer(t, { core, webOut: root, owlRoot: root });
+  const { db, core: realCore } = await createTestCore(t, { owlRoot: root });
+  const core = new ExternalCoreAdapter(realCore, db, root, root);
+  const api = await startTestHttpServer(t, { core, db, webOut: root, owlRoot: root });
   if (!api) return t.skip("localhost listen is not permitted");
   const base = `${api.baseUrl}/api/v1/settings/advisor-folders`;
   const get = async () => (await (await fetch(base)).json()).data;
@@ -124,8 +126,9 @@ test("directory picker lists sorted folders, hidden folders, and path errors", a
   await writeFile(join(root, "file.txt"), "file");
   await symlink(join(root, "folder2"), join(root, "linked-folder"));
   await symlink(join(root, "file.txt"), join(root, "linked-file"));
-  const core = new MemoryCore({ version: "test", owlRoot: root, dataDir: root });
-  const api = await startTestHttpServer(t, { core, webOut: root, owlRoot: root, dataDir: root });
+  const { db, core: realCore } = await createTestCore(t);
+  const core = new ExternalCoreAdapter(realCore, db, root, root);
+  const api = await startTestHttpServer(t, { core, db, webOut: root, owlRoot: root, dataDir: root });
   if (!api) return t.skip("localhost listen is not permitted");
   const base = `${api.baseUrl}/api/v1/fs/directories`;
   const get = async (path, showHidden) => {

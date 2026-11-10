@@ -1,3 +1,4 @@
+import { isRecord, SettingsValidationError } from "./settings-validation.js";
 import { globToRegExp } from "./glob.js";
 
 export const REVIEW_ROUTING_SETTINGS_KEY = "review_routing";
@@ -35,11 +36,8 @@ export const DEFAULT_REVIEW_ROUTING_SETTINGS: ReviewRoutingSettings = {
   force_on_rejection_history: true,
 };
 
-export class ReviewRoutingSettingsValidationError extends Error {
-  public constructor(message: string, public readonly field: string) {
-    super(message);
-    this.name = "ReviewRoutingSettingsValidationError";
-  }
+export class ReviewRoutingSettingsValidationError extends SettingsValidationError {
+  public override name = "ReviewRoutingSettingsValidationError";
 }
 
 const MAX_GLOBS_PER_GROUP = 200;
@@ -47,10 +45,6 @@ const MAX_GROUPS = 50;
 const MAX_TEXT = 500;
 const LIMITS = { max_changed_lines: 100000, max_changed_files: 10000 } as const;
 const TOP_KEYS = ["type_defaults", "max_changed_lines", "max_changed_files", "sensitive_paths", "force_on_hybrid_delegation", "force_on_gate_failure_history", "force_on_rejection_history"];
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function sameKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const own = Reflect.ownKeys(value);

@@ -684,8 +684,7 @@ node apps/supervisor/dist/supervisor.js
 | `packages/shared` | `@owl/shared` | 共有の型とcontract |
 | `packages/db` | `@owl/db` | SQLiteデータベース層 |
 | `packages/core` | `@owl/core` | ワークフローエンジンと状態管理 |
-| `packages/agent-runtime` | `@owl/agent-runtime` | AIロールのprompt builderとresponse parser |
-| `packages/providers` | `@owl/providers` | Provider adapter（stub、claude-cli、codex-cli） |
+| `packages/agent-runtime` | `@owl/agent-runtime` | AIロールの実行（prompt builder、response parser、CLI provider（Claude・Codex・OpenCode）の呼び出し） |
 | `packages/connector-slack` | `@owl/connector-slack` | Slackコネクタ |
 | `packages/connector-discord` | `@owl/connector-discord` | Discordコネクタ |
 | `packages/plugin-sdk` | `@owl/plugin-sdk` | 外部プラグイン用SDK |

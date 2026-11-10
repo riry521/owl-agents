@@ -111,12 +111,12 @@ test("completed Work learning flows through HTTP proposals and applies rules onl
 
   const workerReport = (invocationId) => ({
     kind: "report",
-    schema_version: "1.0.0",
+    schema_version: "1.1.0",
     invocation_id: invocationId,
     result: "success",
     work_done: "Completed the test Work.",
     changes: [],
-    verification: { passed: true, method: "The fake Worker returned a valid success report." },
+    verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "The fake Worker returned a valid success report.", integration_check: null },
     remaining_issues: [],
     next_action: "none",
     needs_replanning: false,

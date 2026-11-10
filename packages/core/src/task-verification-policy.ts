@@ -11,6 +11,7 @@ import {
   type VerificationPolicySettings,
 } from "../../shared/dist/verification-policy-settings.js";
 import type { SettingsReader } from "./owner-language";
+import { readSetting, type SettingReadSpec } from "./settings-store";
 import { WHOLE_DEFERRED_REASON, WHOLE_RUN_FILE } from "./test-runs.js";
 
 /** What the Manager asked Core to check for one Task (tasks.verification_spec_json). */
@@ -124,18 +125,16 @@ async function readText(path: string, maxBytes: number): Promise<string | null> 
   return readFile(path, "utf8").catch(() => null);
 }
 
+export const VERIFICATION_POLICY_SETTING: SettingReadSpec<VerificationPolicySettings> = {
+  key: VERIFICATION_POLICY_SETTINGS_KEY,
+  defaults: DEFAULT_VERIFICATION_POLICY_SETTINGS,
+  read: readVerificationPolicySettings,
+  readFailure: "Could not read the verification policy; using defaults.",
+};
+
 /** The stored policy settings; missing or invalid values fall back to the defaults. A failed read never blocks verification. */
 export function verificationPolicySettings(reader: SettingsReader): VerificationPolicySettings {
-  try {
-    const row = reader.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", VERIFICATION_POLICY_SETTINGS_KEY);
-    if (!row) return DEFAULT_VERIFICATION_POLICY_SETTINGS;
-    return readVerificationPolicySettings(JSON.parse(row.value_json) as unknown, (message) => {
-      console.warn(`[owl-core] ${message}`);
-    });
-  } catch (error) {
-    console.warn("[owl-core] Could not read the verification policy; using defaults.", error);
-    return DEFAULT_VERIFICATION_POLICY_SETTINGS;
-  }
+  return readSetting(reader, VERIFICATION_POLICY_SETTING);
 }
 
 /**

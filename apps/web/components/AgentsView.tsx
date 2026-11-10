@@ -9,13 +9,14 @@ import { AgentRunTree, AgentStatusBadge, HybridPhaseBadge } from '@/components/S
 import { buildRunTree, type RunTree } from '@/lib/agent-run-tree.mjs';
 import { useLocale } from '@/lib/i18n';
 import { useView } from '@/lib/view-loader';
+import { humanizeApiError } from '@/lib/api-error-keys.mjs';
 
 export function AgentsView() {
   const { locale, t } = useLocale();
   const { data: loaded, error } = useView<AgentsData>('agents', getAgents);
   const data = loaded ?? null;
   const [now, setNow] = useState(0);
-  const loadError = error && !data ? humanizeLoadError(error, t) : null;
+  const loadError = error && !data ? humanizeApiError(error, t, LOAD_ERROR_KEYS) : null;
 
   useEffect(() => {
     if (error) console.error('[Owl] Agents load failed', error);
@@ -89,19 +90,11 @@ export function AgentsView() {
   );
 }
 
-function humanizeLoadError(error: unknown, t: (key: string) => string): string {
-  const code = error instanceof Error ? error.message : '';
-  switch (code) {
-    case 'network_error':
-    case 'runtime_config_unavailable':
-      return t('agents.errorNetwork');
-    case 'invalid_runtime_config':
-    case 'invalid_response':
-      return t('agents.errorInvalidResponse');
-    default:
-      return t('agents.errorDefault');
-  }
-}
+const LOAD_ERROR_KEYS = {
+  network: 'agents.errorNetwork',
+  invalidResponse: 'agents.errorInvalidResponse',
+  fallback: 'agents.errorDefault',
+};
 
 function isIdle(a: AgentActivity, threshold: number, now: number): boolean {
   const s = silentSeconds(a.last_output_at, a.run.started_at, now);

@@ -10,8 +10,8 @@ import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { loadOwlEnv } from "../../../packages/shared/dist/env.js";
-import { SlackConnector, type SlackConnectorConfig } from "./slack-connector.js";
-import { DiscordConnector, type DiscordConnectorConfig } from "./discord-connector.js";
+import { SlackConnector, type SlackConfig } from "@owl/connector-slack";
+import { DiscordConnector, type DiscordConfig } from "@owl/connector-discord";
 
 export const CONNECTOR_ACCOUNT_ENV = {
   slack: "OWL_SLACK_CONNECTOR_ACCOUNT_ID",
@@ -105,13 +105,13 @@ function channelPair(prefix: "SLACK" | "DISCORD"): { conversationChannelId: stri
   return { conversationChannelId, notificationChannelId };
 }
 
-export function buildSlackConfig(allProviders = false): SlackConnectorConfig {
+export function buildSlackConfig(allProviders = false): SlackConfig {
   const accountId = resolveConnectorAccountId("slack", allProviders);
   return {
     accountId,
-    owlApiBase: owlApiBase(),
-    slackBotToken: requireEnv("SLACK_BOT_TOKEN"),
-    slackAppToken: requireEnv("SLACK_APP_TOKEN"),
+    coreApiBase: owlApiBase(),
+    botToken: requireEnv("SLACK_BOT_TOKEN"),
+    appToken: requireEnv("SLACK_APP_TOKEN"),
     ...channelPair("SLACK"),
     apiToken: process.env.OWL_API_TOKEN,
     coreWsUrl: process.env.OWL_WS_URL,
@@ -119,12 +119,12 @@ export function buildSlackConfig(allProviders = false): SlackConnectorConfig {
   };
 }
 
-export function buildDiscordConfig(allProviders = false): DiscordConnectorConfig {
+export function buildDiscordConfig(allProviders = false): DiscordConfig {
   const accountId = resolveConnectorAccountId("discord", allProviders);
   return {
     accountId,
-    owlApiBase: owlApiBase(),
-    discordBotToken: requireEnv("DISCORD_BOT_TOKEN"),
+    coreApiBase: owlApiBase(),
+    botToken: requireEnv("DISCORD_BOT_TOKEN"),
     ...channelPair("DISCORD"),
     apiToken: process.env.OWL_API_TOKEN,
     coreWsUrl: process.env.OWL_WS_URL,

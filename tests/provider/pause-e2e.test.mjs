@@ -118,7 +118,7 @@ function makeWorkflow(temp, clock, workId, agentRunner, onReplan = async () => {
 
 async function success(request) {
   await writeFile(join(request.context.worktree, "out.md"), "# Result\n\nDone.\n");
-  return { outcome: "success", report_valid: true, report: { result: "success", changes: [{ file: "out.md", action: "created" }], verification: { passed: true } }, skill_feedback: null };
+  return { outcome: "success", report_valid: true, report: { result: "success", changes: [{ file: "out.md", action: "created" }], verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [] } }, skill_feedback: null };
 }
 
 test("a reported rate limit preserves Task counters and completes automatically at the resume time", async (t) => {

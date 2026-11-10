@@ -145,7 +145,7 @@ test('KnowledgeAutomationSection shows the next run of all three scheduled kinds
     '@/lib/view-loader': { useView: () => ({ data: undefined, error: null, loading: false, refresh: async () => {} }) },
     '@/lib/api-client': new Proxy({}, { get: (_, name) => (name === 'ApiRequestError' ? class extends Error {} : async () => ({})) }),
     '@/lib/format': {},
-    '@/lib/settings-errors': {},
+    '@/lib/api-error-keys.mjs': {},
     '@/lib/remake-limits.mjs': {},
     '@/lib/model-presets': {},
     '@/components/OwnerInviteButton': { OwnerInviteButton: () => null }, '@/components/ModelPresetsBar': {},

@@ -3,9 +3,9 @@ import { test } from "node:test";
 
 import { TEST_SETUP_RETRY_OPTION_KEY } from "../../packages/shared/dist/index.js";
 
-import { WORK_TRANSITION_TABLE } from "../../packages/core/dist/state-reducer.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { command as baseCommand, createTestCore } from "../helpers/core.mjs";
+import { readOwnerReplan, writeOwnerReplan } from "../../packages/core/dist/replan-queue-store.js";
 
 const command = (payload, suffix, expectedVersion = 0, idempotencyKey = `work-update:${suffix}`) => baseCommand(payload, idempotencyKey, expectedVersion);
 
@@ -24,8 +24,7 @@ async function createWorkInState(core, db, state, suffix) {
 }
 
 function ownerReplan(db, workId) {
-  const row = db.get("SELECT response_json FROM idempotency_keys WHERE key = ?", `owner-replan:${workId}`);
-  return row ? JSON.parse(row.response_json) : null;
+  return readOwnerReplan(db, workId) ?? null;
 }
 
 test("updating a running Work changes its fields without changing state_version and queues a work_update replan", async (t) => {
@@ -47,13 +46,14 @@ test("updating a running Work changes its fields without changing state_version 
     title: "Renamed Work", summary: "New summary", state_version: 1,
   });
   assert.equal(db.get("SELECT COUNT(*) AS n FROM events WHERE type = 'work.updated' AND work_id = ?", workId).n, 1);
-  assert.equal(WORK_TRANSITION_TABLE.some((row) => row.event === "work.updated"), false);
+  assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "running");
   assert.deepEqual(ownerReplan(db, workId), {
-    work_id: workId,
     status: "queued",
     kind: "work_update",
     answer: 'The Owner renamed the Work from "Work running" to "Renamed Work".\nThe Owner rewrote the Work summary. New summary:\nNew summary',
     requests: [{ kind: "work_update", changed_fields: ["title", "summary"], previous_title: "Work running", previous_summary: "Old summary" }],
+    message_ids: [],
+    processing_message_ids: [],
   });
 });
 
@@ -94,13 +94,7 @@ test("a pending instruction replan is merged with the Work update", async (t) =>
   const { db, core } = await setup(t);
   const workId = await createWorkInState(core, db, "running", "merge-instruction");
   await db.createWriteLane().transact((transaction) => {
-    transaction.run(
-      `INSERT INTO idempotency_keys (key, request_hash, response_json, status_code, created_at, expires_at)
-       VALUES (?, ?, ?, 202, ?, ?)`,
-      `owner-replan:${workId}`, "0".repeat(64),
-      JSON.stringify({ work_id: workId, status: "queued", kind: "instruction", answer: "Existing instruction" }),
-      new Date().toISOString(), "2999-01-01T00:00:00.000Z",
-    );
+    writeOwnerReplan(transaction, workId, { kind: "instruction", answer: "Existing instruction", message_ids: [], processing_message_ids: [] }, "replace", new Date().toISOString());
   });
 
   await core.updateWork(workId, command({ title: "Merged title" }, "merge-instruction", 1));
@@ -114,13 +108,7 @@ test("a pending decision replan is upgraded to work_update without losing its an
   const { db, core } = await setup(t);
   const workId = await createWorkInState(core, db, "running", "merge-decision");
   await db.createWriteLane().transact((transaction) => {
-    transaction.run(
-      `INSERT INTO idempotency_keys (key, request_hash, response_json, status_code, created_at, expires_at)
-       VALUES (?, ?, ?, 202, ?, ?)`,
-      `owner-replan:${workId}`, "0".repeat(64),
-      JSON.stringify({ work_id: workId, status: "queued", kind: "decision", answer: "Existing decision answer" }),
-      new Date().toISOString(), "2999-01-01T00:00:00.000Z",
-    );
+    writeOwnerReplan(transaction, workId, { kind: "decision", answer: "Existing decision answer", message_ids: [], processing_message_ids: [] }, "replace", new Date().toISOString());
   });
 
   await core.updateWork(workId, command({ summary: "Revised summary" }, "merge-decision", 1));

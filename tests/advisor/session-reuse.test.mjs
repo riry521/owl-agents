@@ -37,7 +37,6 @@ function createRuntime({ session, providerClient = {}, sessionManager = {}, advi
       getActiveSession: () => session,
       ...sessionManager,
     },
-    memorySaver: {},
     providerClient,
     owlRoot: "/owl",
     getAdvisorSettings: () => advisorSettings,
@@ -210,7 +209,6 @@ async function createLiveRuntime(t, providerSessions, { git } = {}) {
   const runtime = new AdvisorSessionRuntime({
     db,
     sessionManager: new AdvisorSessionManager(db),
-    memorySaver: {},
     providerClient: {
       execute: async () => { throw new Error("not used"); },
       createSession: async (request) => {
@@ -689,7 +687,6 @@ test("startup recovery ends leftover sessions as core_restart and a fresh reside
   const runtime = new AdvisorSessionRuntime({
     db: live.db,
     sessionManager: new AdvisorSessionManager(live.db),
-    memorySaver: {},
     providerClient: { execute: async () => { throw new Error("not used"); }, createSession: async () => fresh },
     owlRoot: live.runtime.config.owlRoot,
     getAdvisorSettings: () => settings,

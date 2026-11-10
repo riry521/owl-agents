@@ -9,16 +9,13 @@ import { git } from "../helpers/git.mjs";
 import { disablePlanQuality } from "../helpers/plan-quality.mjs";
 import { waitFor } from "../helpers/wait.mjs";
 
-/** workerPassed: a boolean is a stored legacy 1.0.0 report; a status string is a 1.1.0 report. */
+/** workerPassed: the verification status of a 1.1.0 report ("passed" or "failed"). */
 function workerReport(workerPassed, invocationId) {
   const common = {
     kind: "report", invocation_id: invocationId, result: "success",
     work_done: "Done.", changes: [{ file: "code.mjs", action: "added" }], remaining_issues: [], next_action: "none",
     needs_replanning: false, question_for_manager: null,
   };
-  if (typeof workerPassed === "boolean") {
-    return { ...common, schema_version: "1.0.0", verification: { passed: workerPassed, method: "Checked." } };
-  }
   return {
     ...common, schema_version: "1.1.0",
     verification: {
@@ -96,21 +93,21 @@ async function firstVerification(t, { workerPassed, projectExitCode }) {
 }
 
 test("a failing Worker verification fails the Task even when the Project checks pass", async (t) => {
-  assert.deepEqual(await firstVerification(t, { workerPassed: false, projectExitCode: 0 }), { outcome: "fail", reviewerRuns: 0 });
+  assert.deepEqual(await firstVerification(t, { workerPassed: "failed", projectExitCode: 0 }), { outcome: "fail", reviewerRuns: 0 });
 });
 
 test("a failing Project check fails the Task even when the Worker verification passed", async (t) => {
-  assert.deepEqual(await firstVerification(t, { workerPassed: true, projectExitCode: 1 }), { outcome: "fail", reviewerRuns: 0 });
+  assert.deepEqual(await firstVerification(t, { workerPassed: "passed", projectExitCode: 1 }), { outcome: "fail", reviewerRuns: 0 });
 });
 
 test("the Reviewer starts when the Worker verification and the Project checks both pass", async (t) => {
-  const result = await firstVerification(t, { workerPassed: true, projectExitCode: 0 });
+  const result = await firstVerification(t, { workerPassed: "passed", projectExitCode: 0 });
   assert.equal(result.outcome, "pass");
   assert.ok(result.reviewerRuns >= 1);
 });
 
 test("without a Project check the Worker verification decides", async (t) => {
-  const result = await firstVerification(t, { workerPassed: true, projectExitCode: null });
+  const result = await firstVerification(t, { workerPassed: "passed", projectExitCode: null });
   assert.equal(result.outcome, "pass");
   assert.ok(result.reviewerRuns >= 1);
 });

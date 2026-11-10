@@ -7,6 +7,7 @@ import { createUlid } from "../../packages/db/dist/index.js";
 import { command as commandEnvelope, createTestCore } from "../helpers/core.mjs";
 import { withNecessity } from "../helpers/necessity.mjs";
 import { waitFor } from "../helpers/wait.mjs";
+import { readManagerTrigger, readOwnerReplan } from "../../packages/core/dist/replan-queue-store.js";
 
 // The test names below were numbered audit items (1 to 8); the numbers are dropped from the names.
 
@@ -32,12 +33,12 @@ function insertTask(transaction, workId, { id, status, managerTaskId, title, fai
 function workerReport(invocationId, extra = {}) {
   return {
     kind: "report",
-    schema_version: "1.0.0",
+    schema_version: "1.1.0",
     invocation_id: invocationId,
     result: "success",
     work_done: "Done.",
     changes: [],
-    verification: { passed: true, method: "Checked the result." },
+    verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked the result.", integration_check: null },
     remaining_issues: [],
     next_action: "none",
     needs_replanning: false,
@@ -115,7 +116,7 @@ test("cancelAgent at the crash threshold cascades to dependents and the tick rep
   assert.ok(db.get("SELECT 1 FROM events WHERE type = 'task.dependency_failed' AND task_id = ?", t2));
   assert.ok(db.get("SELECT 1 FROM events WHERE type = 'task.dependency_failed' AND task_id = ?", t3));
   assert.equal(
-    JSON.parse(db.get("SELECT response_json FROM idempotency_keys WHERE key = ?", `manager-trigger:${t1}`).response_json).status,
+    readManagerTrigger(db, t1).status,
     "queued",
   );
 
@@ -124,7 +125,7 @@ test("cancelAgent at the crash threshold cascades to dependents and the tick rep
   assert.ok(replanned, "the tick should replay the queued Manager replan");
   assert.deepEqual(replanRequests[0].context.failed_task_ids, [t1], "only the root failure is replanned, not cascade-failed Tasks");
   assert.equal(
-    JSON.parse(db.get("SELECT response_json FROM idempotency_keys WHERE key = ?", `manager-trigger:${t1}`).response_json).status,
+    readManagerTrigger(db, t1).status,
     "attempted",
   );
   assert.ok(await waitFor(() => db.get("SELECT 1 FROM tasks WHERE id = ? AND status = 'waiting'", t2)), "the cascaded dependent is restored");
@@ -180,14 +181,14 @@ test("an Owner answer queued for a replan survives a Core restart", async (t) =>
   });
   // The first Core never ticks the Work (it is not started).
   await first.answerDecision(decisionId, commandEnvelope({ answer: "restart-marker: try a smaller task", option_key: null, source_message_id: null }, "restart-answer"));
-  assert.ok(db.get("SELECT 1 FROM idempotency_keys WHERE key = ?", `owner-replan:${workId}`), "the Owner answer is persisted");
+  assert.ok(readOwnerReplan(db, workId), "the Owner answer is persisted");
 
   const { core: second } = await newCore(t, agentRunner, {}, { db, owlRoot: root });
   await second.start();
   const replacement = await waitFor(() => db.get("SELECT id FROM tasks WHERE work_id = ? AND manager_task_id = 'T9'", workId));
   assert.ok(replacement, "the restarted Core should replan with the persisted answer");
   assert.equal(prompts[0].context.owner_requests[0].text, "restart-marker: try a smaller task");
-  assert.equal(db.get("SELECT COUNT(*) AS n FROM idempotency_keys WHERE key = ?", `owner-replan:${workId}`).n, 0);
+  assert.equal(readOwnerReplan(db, workId), undefined);
   await second.stop({ force: true }); // teardown closes the db (owned by the first Core) before the second Core's hook would stop it
 });
 
@@ -409,7 +410,7 @@ test("Hybrid Worker reports go to the Reviewer instead of Core's retired retry-s
         report_valid: true,
         report: workerReport(request.invocation_id, {
           changes: [{ file: "a.mjs", action: "added" }],
-          verification: { passed: true, method: "Checked the result.", integration_check: { status: "passed", evidence: "Integrated." } },
+          verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked the result.", integration_check: { status: "passed", evidence: "Integrated." } },
           verdict: "retry",
           retry_subtasks: [{ subtask_id: "s2", instruction: "Fix the parser edge case" }],
           delegation: {

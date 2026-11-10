@@ -8,8 +8,8 @@ import { curationNoticeWrite, ruleAddedNotice } from "./curation-summary.js";
 import { ownerLanguage } from "./owner-language.js";
 import type { RulePairJudge } from "./rule-judge.js";
 import { coApply } from "./rule-curation.js";
-import type { KnowledgeNotes, NotePromotion } from "./knowledge-notes.js";
 import type { RuleWriter } from "./rule-writer.js";
+import { storedSettingJson } from "./settings-store.js";
 import type { CoreDatabase, CoreWriteLaneTransaction } from "./types.js";
 
 export const RULE_PROPOSAL_MIN_SOURCES = 2;
@@ -87,7 +87,6 @@ export interface RuleProposalsOptions {
   readonly writeLane: ReturnType<CoreDatabase["createWriteLane"]>;
   readonly ruleStore: Pick<RuleStore, "rules">;
   readonly ruleWriter: Pick<RuleWriter, "apply">;
-  readonly notes: Pick<KnowledgeNotes, "recordPromotion">;
   readonly now?: () => string;
   readonly logger?: Pick<Console, "warn" | "error">;
   readonly min_sources?: number;
@@ -153,7 +152,6 @@ export class RuleProposals {
   private readonly writeLane: ReturnType<CoreDatabase["createWriteLane"]>;
   private readonly ruleStore: Pick<RuleStore, "rules">;
   private readonly ruleWriter: Pick<RuleWriter, "apply">;
-  private readonly notes: Pick<KnowledgeNotes, "recordPromotion">;
   private readonly now: () => string;
   private readonly minSources: number;
   private readonly makeJudge?: () => RulePairJudge | undefined;
@@ -165,7 +163,6 @@ export class RuleProposals {
     this.writeLane = options.writeLane;
     this.ruleStore = options.ruleStore;
     this.ruleWriter = options.ruleWriter;
-    this.notes = options.notes;
     this.now = options.now ?? utcNow;
     this.minSources = positiveInteger(options.min_sources, RULE_PROPOSAL_MIN_SOURCES);
     this.logger = options.logger ?? console;
@@ -225,9 +222,8 @@ export class RuleProposals {
   }
 
   private expireDays(): number {
-    const row = this.db.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", RULE_PROPOSAL_SETTINGS_KEY);
     // Why not throw: an unparseable setting falls back to the default so the nightly run keeps working.
-    const value = parseJson(row?.value_json ?? null);
+    const value = parseJson(storedSettingJson(this.db, RULE_PROPOSAL_SETTINGS_KEY) ?? null);
     return positiveInteger(isRecord(value) ? value.expire_days as number | undefined : undefined, RULE_PROPOSAL_EXPIRE_DAYS);
   }
 
@@ -361,7 +357,6 @@ export class RuleProposals {
       appliedAt,
       proposalId,
     ));
-    await this.recordPromotion(proposal, { date: appliedAt.slice(0, 10), proposal_id: proposalId, status: "applied", path: written.path });
     // The rule is already written; a failed notice must not turn the approval into an error.
     await this.writeLane.write(curationNoticeWrite(ruleAddedNotice(ownerLanguage(this.db)))).catch((error: unknown) => console.warn("[owl-core] Could not record curation_notice", error));
     return { proposal_id: proposalId, status: "applied", applied_rule_id: appliedRuleId, applied_path: written.path };
@@ -379,21 +374,7 @@ export class RuleProposals {
       rejectedAt,
       proposalId,
     ));
-    await this.recordPromotion(proposal, { date: rejectedAt.slice(0, 10), proposal_id: proposalId, status: "rejected", path: null });
     return { proposal_id: proposalId, status: "rejected", applied_rule_id: null, applied_path: null };
-  }
-
-  private async recordPromotion(proposal: ProposalRow, entry: NotePromotion): Promise<void> {
-    if (!proposal.note_id) return;
-    try {
-      await this.notes.recordPromotion(proposal.note_id, entry);
-    } catch (error) {
-      this.logger.warn("Could not record rule proposal promotion on its knowledge note.", {
-        proposal_id: proposal.id,
-        note_id: proposal.note_id,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
   }
 
   /** Why before the transaction: the write lane callback is synchronous and a model call must not hold it. */

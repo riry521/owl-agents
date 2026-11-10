@@ -7,6 +7,7 @@ import ts from 'typescript';
 
 import { workDetailHref } from '../../apps/web/lib/work-detail-safety.mjs';
 import { repoRoot } from '../helpers/paths.mjs';
+const apiErrorKeys = await import('../../apps/web/lib/api-error-keys.mjs');
 
 const webRequire = createRequire(join(repoRoot, 'apps/web/package.json'));
 const React = webRequire('react');
@@ -57,6 +58,7 @@ const { WorkPrerequisitesSection } = compile('apps/web/components/WorkPrerequisi
   'next/link': link,
   '@/lib/api-client': apiClientStub,
   '@/components/StateBadge': stateBadge,
+  '@/lib/api-error-keys.mjs': apiErrorKeys,
   '@/lib/i18n': i18n,
   '@/lib/work-detail-safety.mjs': { workDetailHref },
 });
@@ -111,6 +113,7 @@ test('the board WorkCard lists the Works it is waiting on', () => {
     '@/lib/format': { workDisplayNumber: (n) => n ?? null, formatRelative: () => 'now', boardSectionOf: () => 'waiting', boardSectionLabels: () => ({}) },
     '@/components/StateBadge': { ...stateBadge, ArchivedBadge: () => null },
     '@/components/WorkArchiveActions': {},
+    '@/lib/api-error-keys.mjs': apiErrorKeys,
     '@/lib/i18n': i18n,
     '@/lib/work-detail-safety.mjs': { workDetailHref },
     '@/lib/work-removal': {},

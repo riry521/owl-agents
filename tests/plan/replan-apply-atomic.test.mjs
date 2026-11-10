@@ -6,6 +6,7 @@ import { createUlid } from "../../packages/db/dist/index.js";
 import { createTestCore, command } from "../helpers/core.mjs";
 import { withNecessity, necessityFor, criteriaFor } from "../helpers/necessity.mjs";
 import { waitFor } from "../helpers/wait.mjs";
+import { queueManagerTrigger, readManagerTrigger, readOwnerReplan, setManagerTriggerStatus } from "../../packages/core/dist/replan-queue-store.js";
 
 // A validated Manager replan is applied in ONE WriteLane
 // transaction that re-checks the Work state, the plan revision and every
@@ -116,16 +117,12 @@ function insertTask(tx, workId, { id, status, managerTaskId, failedBy = null }) 
 
 function insertTrigger(tx, taskId, status = "queued") {
   const now = new Date().toISOString();
-  tx.run(
-    `INSERT OR REPLACE INTO idempotency_keys (key, request_hash, response_json, status_code, created_at, expires_at)
-     VALUES (?, ?, ?, 202, ?, ?)`,
-    `manager-trigger:${taskId}`, "0".repeat(64), JSON.stringify({ task_id: taskId, event: "task.failed", status }), now,
-    new Date(Date.now() + 86_400_000).toISOString(),
-  );
+  queueManagerTrigger(tx, taskId, { question: null, question_only: false }, now);
+  if (status !== "queued") setManagerTriggerStatus(tx, taskId, status, now);
 }
 
 const markerStatus = (db, taskId) =>
-  db.get("SELECT json_extract(response_json, '$.status') AS s FROM idempotency_keys WHERE key = ?", `manager-trigger:${taskId}`)?.s ?? null;
+  readManagerTrigger(db, taskId)?.status ?? null;
 
 /**
  * T1 completed, T5 completed, T2 failed (the only root failure, depends on
@@ -370,9 +367,9 @@ test("an Owner replan interrupted by a pause is persisted again and handed to th
   await entered.promise;
   await core.pauseWork(workId, commandEnvelope({ reason: "break" }, "pause", workVersion(db, workId)));
   release.resolve();
-  const ownerKey = () => db.get("SELECT response_json FROM idempotency_keys WHERE key = ?", `owner-replan:${workId}`);
+  const ownerKey = () => readOwnerReplan(db, workId);
   await waitFor(() => ownerKey());
-  assert.equal(JSON.parse(ownerKey().response_json).answer, "owner-answer-marker: replace T2", "the Owner's answer is kept");
+  assert.equal(ownerKey().answer, "owner-answer-marker: replace T2", "the Owner's answer is kept");
   assert.equal(markerStatus(db, t2), "attempted", "the trigger keeps its previous status");
   assert.equal(managerTaskRow(db, workId, "N9"), undefined);
 

@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { isPidAlive } from "../../../packages/shared/dist/index.js";
 
 /**
  * `kill(pid, 0)` also succeeds for a zombie on macOS/Linux until its parent
@@ -16,11 +17,7 @@ export function readProcessCommand(pid: number): string | null {
 
 export function isProcessAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-  } catch {
-    return false;
-  }
+  if (!isPidAlive(pid, { epermAlive: false })) return false;
 
   const probe = spawnSync("ps", ["-p", String(pid), "-o", "stat="], {
     encoding: "utf8",

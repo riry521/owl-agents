@@ -27,12 +27,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const workerReport = (invocationId, question) => ({
   kind: "report",
-  schema_version: "1.0.0",
+  schema_version: "1.1.0",
   invocation_id: invocationId,
   result: question ? "partial" : "success",
   work_done: "Done.",
   changes: [],
-  verification: { passed: true, method: "Checked." },
+  verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked.", integration_check: null },
   remaining_issues: [],
   next_action: "none",
   needs_replanning: false,

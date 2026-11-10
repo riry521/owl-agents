@@ -1,3 +1,4 @@
+import type { TaskStateValue, WorkStateValue } from "@owl/shared";
 import type { OwlDatabase, WriteLane, WriteLaneTransaction } from "../../db/dist/index.js";
 import type { AcceptanceCriterion, CriteriaRelaxation, AgentFailureClass, AgentProcessEvent, CuratorCandidate, CuratorProposal, CuratorRequest, CuratorRunResult, OwnerLanguage, ProcessSkillsInstallCommand, PromptObserver, ProviderErrorObserver, ProviderErrorRecord, ProcessSkillsSettings, RateLimitInfo, SkillFeedback, TaskNecessity, TaskPlanContext, TestPolicy, TokenUsage, UiChange } from "@owl/shared";
 import type { AttemptDecision } from "./attempt-policy";
@@ -24,15 +25,7 @@ export interface WorkLearningInput {
 
 export type AgentKind = "decision" | "task" | "executor";
 
-export type WorkState =
-  | "memo"
-  | "ready"
-  | "running"
-  | "paused"
-  | "judgement_waiting"
-  | "completed"
-  | "cancelled"
-  | (string & {});
+export type WorkState = WorkStateValue | (string & {});
 
 export const WorkState = {
   Memo: "memo",
@@ -44,17 +37,7 @@ export const WorkState = {
   Cancelled: "cancelled",
 } as const satisfies Record<string, WorkState>;
 
-export type TaskState =
-  | "waiting"
-  | "ready"
-  | "running"
-  | "paused"
-  | "verifying"
-  | "review_fix_waiting"
-  | "failed"
-  | "judgement_waiting"
-  | "completed"
-  | "cancelled";
+export type TaskState = TaskStateValue;
 
 export const TaskState = {
   Waiting: "waiting",
@@ -124,35 +107,13 @@ export interface ReviewerRunRequest extends AgentRunRequest {
   readonly review_round: number;
 }
 
-export interface AdvisorRunRequest {
-  readonly conversation_id: string;
-  readonly messages: readonly { source: string; body: string }[];
-  readonly invocation_id: string;
-  readonly model?: string;
-  readonly provider?: string;
-  readonly effort?: string;
-  readonly system_prompt?: string;
-}
-
-export interface AdvisorRunResult {
-  readonly reply: string;
-  readonly suggested_actions?: readonly {
-    type: string;
-    description: string;
-    payload?: JsonObject;
-  }[];
-}
-
 /**
  * Turn contract for the persistent Advisor session runtime
  * (persistent Advisor session contract). Replaces
- * AdvisorRunRequest's "reload every message" shape: a turn carries only the
+ * the old "reload every message" shape: a turn carries only the
  * one new user message (plus attachments) that needs a reply, because
  * conversation history now lives in the provider CLI's own session/transcript
  * instead of being re-sent on every call.
- *
- * AdvisorRunRequest / AdvisorRunResult / AgentRunner.runAdvisor are kept
- * as-is; this type is additive and does not yet replace them.
  */
 export interface AdvisorTurnRequest {
   readonly turn_id: string;
@@ -195,7 +156,6 @@ export interface AgentRunner {
   runDesigner(request: WorkerRunRequest): Promise<AgentRunResult>;
   runWorker(request: WorkerRunRequest): Promise<AgentRunResult>;
   runReviewer(request: ReviewerRunRequest): Promise<AgentRunResult>;
-  runAdvisor(request: AdvisorRunRequest): Promise<AdvisorRunResult>;
   runCurator?(request: CuratorRequest): Promise<CuratorRunResult>;
   cancelAgent?(invocationId: string, force?: boolean): Promise<void>;
   setProcessObserver?(observer: (invocationId: string, event: AgentProcessEvent) => void | Promise<void>): void;
@@ -759,7 +719,7 @@ export interface CoreOptions {
   readonly dispatcher?: CoreDispatcherOptions;
   /** Total time stop() may take when the caller passes no timeoutMs. Defaults to 10000. */
   readonly stopTimeoutMs?: number;
-  /** Owl's own repository root, used to resolve `dataDir` and the legacy `<owlRoot>/.owl-workspaces` worktrees directory. Defaults to process.cwd() (a temporary directory under the Node test runner). */
+  /** Owl's own repository root, used to resolve `dataDir` and the default `<owlRoot>/.owl-workspaces` worktrees directory. Defaults to process.cwd() (a temporary directory under the Node test runner). */
   readonly owlRoot?: string;
   /** Durable runtime data directory. Defaults to `<owlRoot>/data`. */
   readonly dataDir?: string;
@@ -767,7 +727,7 @@ export interface CoreOptions {
   readonly homeDir?: string;
   /** Persists the Owner-chosen knowledge directory ("" = `<owlRoot>/knowledge`). Without it the location is fixed. */
   readonly knowledgeStorage?: KnowledgeStoragePersistence;
-  /** Root directory for Work and Advisor worktrees. Defaults to `<owlRoot>/.owl-workspaces` for backward compatibility. */
+  /** Root directory for Work and Advisor worktrees. Defaults to `<owlRoot>/.owl-workspaces` when unset. */
   readonly workspacesRoot?: string;
   /** Replaces the process-starting runner of Core test runs (tests). */
   readonly testCommandRunner?: import("./test-runs.js").TestCommandRunner;
@@ -818,11 +778,8 @@ export interface CoreOptions {
   /**
    * Provider client for persistent Advisor sessions (agent-runtime's ProviderClient).
    * Kept as `unknown` here so this types module never imports agent-runtime; core.ts
-   * casts it before constructing AdvisorSessionRuntime. Absent (or lacking
-   * createSession) is not allowed for production persistent Advisor sessions.
-   * Compatibility/stub callers may omit it and use the explicit one-shot
-   * runner path, but the production server rejects this configuration rather
-   * than silently switching modes.
+   * casts it before constructing AdvisorSessionRuntime. Without a client that
+   * has createSession, Advisor replies fail with an error; there is no other path.
    */
   readonly providerClient?: unknown;
   readonly getTypesafeApiKey?: () => string;
@@ -1016,6 +973,8 @@ export interface WorkDetail extends WorkSummary {
   readonly advisor_backlog: WorkAdvisorBacklog | null;
   /** In the order the Owner listed them. */
   readonly prerequisites: readonly WorkPrerequisiteView[];
+  /** Whether the Owner can move this Project-less Work into a Project now (state, active Agents and pending fixes). */
+  readonly can_move_to_project: boolean;
   /** The summary written when the Work completed; null while it is not completed or when none was written. */
   readonly final_report: { readonly summary: string; readonly test_results: string; readonly issues: string; readonly created_at: string } | null;
 }
@@ -1327,10 +1286,10 @@ export interface TaskRow extends JsonObject {
   last_failure_class: FailureClass | null;
   paused_from: TaskState | null;
   /**
-   * Task row 27: the dependency whose failure failed this Task. Set while the
+   * Dependency cascade: the dependency whose failure failed this Task. Set while the
    * Task is failed (or paused from failed) because of that cascade; null for
    * a root failure. Cleared whenever the Task leaves that failure. Core never hands such a Task to the
-   * Manager or to a Decision: it returns to waiting on its own (row 31).
+   * Manager or to a Decision: it returns to waiting on its own (task.dependency_restored).
    */
   failed_by_dependency_task_id: string | null;
   /** Set while the Task waits on a prerequisite (a PrerequisiteSpec as JSON); null for an ordinary wait. */
@@ -1374,9 +1333,9 @@ export interface ReductionResult<S extends JsonObject> {
   readonly review_budget?: { readonly attempts: number; readonly limit: number };
   /** Set when fix_required reviews kept pointing at the same spot; the findings that did. */
   readonly review_same_spot?: readonly { readonly file: string; readonly line: number | null; readonly problem: string }[];
-  /** Set when the lineage-wide Reviewer verdict count reached remake_limits.lineage_review_attempts or base_sync_lineage_review_attempts. */
+  /** Set when the lineage-wide Reviewer verdict count reached remake_limits.lineage_review_attempts. */
   readonly lineage_budget?: {
-    readonly reason: "lineage_review_attempts" | "base_sync_lineage_review_attempts";
+    readonly reason: "lineage_review_attempts";
     readonly attempts: number;
     readonly limit: number;
     readonly generations: number;

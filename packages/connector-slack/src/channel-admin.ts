@@ -1,5 +1,6 @@
 import type { WebClient } from "@slack/web-api";
 import { ChannelAdminError, type ChannelAdmin, type ChannelAdminErrorCode, type ChannelInfo } from "@owl/plugin-sdk";
+import { asRecord } from "@owl/plugin-sdk/shared";
 
 type SlackChannelApi = Pick<WebClient, "conversations">;
 
@@ -14,14 +15,10 @@ const ERROR_CODES: ReadonlyMap<string, ChannelAdminErrorCode> = new Map([
   ["restricted_action", "not_authorized"],
 ]);
 
-function record(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null ? value as Record<string, unknown> : null;
-}
-
 /** Maps a WebClient failure to a ChannelAdminError; Slack's data.error string decides the code. */
 export function toChannelAdminError(error: unknown): ChannelAdminError {
-  const wrapper = record(error);
-  const data = wrapper && Object.hasOwn(wrapper, "data") ? record(wrapper.data) : null;
+  const wrapper = asRecord(error);
+  const data = wrapper && Object.hasOwn(wrapper, "data") ? asRecord(wrapper.data) : null;
   const slackError = data && typeof data.error === "string" ? data.error : "";
   if (slackError === "missing_scope") {
     const needed = typeof data?.needed === "string" ? data.needed.split(",").map((scope) => scope.trim()).filter(Boolean) : [];
@@ -35,7 +32,7 @@ export function toChannelAdminError(error: unknown): ChannelAdminError {
 }
 
 function toInfo(channel: unknown, fallbackMember: boolean): ChannelInfo {
-  const value = record(channel);
+  const value = asRecord(channel);
   if (!value || typeof value.id !== "string" || typeof value.name !== "string") {
     throw new ChannelAdminError("provider_error", "Slack returned a channel without id or name.");
   }

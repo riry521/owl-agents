@@ -18,12 +18,12 @@ function commandEnvelope(payload, suffix, expectedVersion = 0) {
 function workerReport(invocationId) {
   return {
     kind: "report",
-    schema_version: "1.0.0",
+    schema_version: "1.1.0",
     invocation_id: invocationId,
     result: "success",
     work_done: "Done.",
     changes: [],
-    verification: { passed: true, method: "Checked the result." },
+    verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked the result.", integration_check: null },
     remaining_issues: [],
     next_action: "none",
     needs_replanning: false,

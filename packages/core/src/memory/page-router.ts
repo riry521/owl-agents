@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createUlid } from "../../../db/dist/index.js";
+import { OWNED_DIR_WRITE, writeAtomic } from "../atomic-write.js";
 import { fingerprint } from "../learning-fingerprint.js";
 import { slugifyKnowledgeName } from "../knowledge-naming.js";
 import {
@@ -458,12 +459,5 @@ async function createFile(path: string, content: string): Promise<void> {
 /** The page write: it must fit the four templates, else PageRejectedError and no file is touched. */
 export async function writePage(path: string, content: string): Promise<void> {
   assertValidPage(content);
-  await writeAtomic(path, content);
-}
-
-/** Temp file + rename, so a reader never sees half a page. */
-export async function writeAtomic(path: string, content: string): Promise<void> {
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  await writeFile(tmp, content, { encoding: "utf8", flag: "wx" });
-  await rename(tmp, path);
+  await writeAtomic(path, content, OWNED_DIR_WRITE);
 }

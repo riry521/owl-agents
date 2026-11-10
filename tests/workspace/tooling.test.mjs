@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import {
   WorkspaceTooling,
+  appendCapped,
   commitExcludePathspecs,
   copyWorktreeIncludes,
   listIgnoredEntries,
@@ -533,4 +534,11 @@ test("WorkspaceTooling.refreshBeforeRun: serializes calls for the same worktree 
   assert.equal(calls.length, 2);
   const differentWorktrees = [...calls].sort((a, b) => a.start - b.start);
   assert.ok(differentWorktrees[1].start < differentWorktrees[0].end, "calls on different worktrees overlap");
+});
+
+test("appendCapped: over the cap it keeps the tail and never splits a UTF-8 code point", () => {
+  assert.equal(appendCapped("abc", Buffer.from("defg"), 4), "defg");
+  assert.equal(appendCapped("head", "あい", 6), "あい");
+  assert.equal(appendCapped("", Buffer.from("あいう"), 7), "いう");
+  assert.equal(appendCapped("x", "y", 0), "");
 });

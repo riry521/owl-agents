@@ -13,6 +13,7 @@ import {
 } from '../../apps/web/lib/work-detail-safety.mjs';
 
 import { repoRoot } from '../helpers/paths.mjs';
+const apiErrorKeys = await import('../../apps/web/lib/api-error-keys.mjs');
 const apiClientPath = join(repoRoot, 'apps/web/lib/api-client.ts');
 const webRequire = createRequire(join(repoRoot, 'apps/web/package.json'));
 const React = webRequire('react');
@@ -229,6 +230,7 @@ const componentIcons = {
 };
 const archiveActionsModule = compileWebComponent(join(repoRoot, 'apps/web/components/WorkArchiveActions.tsx'), {
   '@/lib/api-client': componentApiClient,
+  '@/lib/api-error-keys.mjs': apiErrorKeys,
   '@/lib/i18n': componentI18n,
   '@/lib/work-removal': componentWorkRemoval,
   '@/components/icons': componentIcons,
@@ -272,6 +274,7 @@ const linkModule = {
 };
 const stateBadgeModule = compileWebComponent(join(repoRoot, 'apps/web/components/StateBadge.tsx'), {
   '@/lib/format': componentFormat,
+  '@/lib/api-error-keys.mjs': apiErrorKeys,
   '@/lib/i18n': componentI18n,
 });
 const boardComponentModule = compileWebComponent(join(repoRoot, 'apps/web/components/BoardView.tsx'), {
@@ -281,24 +284,28 @@ const boardComponentModule = compileWebComponent(join(repoRoot, 'apps/web/compon
   '@/lib/format': componentFormat,
   '@/components/StateBadge': stateBadgeModule,
   '@/components/WorkArchiveActions': archiveActionsModule,
+  '@/lib/api-error-keys.mjs': apiErrorKeys,
   '@/lib/i18n': componentI18n,
   '@/lib/work-detail-safety.mjs': { workDetailHref },
   '@/lib/work-removal': componentWorkRemoval,
   '@/components/icons': componentIcons,
 });
 const workSummaryBlockModule = compileWebComponent(join(repoRoot, 'apps/web/components/WorkSummaryBlock.tsx'), {
+  '@/lib/api-error-keys.mjs': apiErrorKeys,
   '@/lib/i18n': componentI18n,
 });
 const designMocksSectionModule = compileWebComponent(join(repoRoot, 'apps/web/components/DesignMocksSection.tsx'), {
   '@/lib/api-client': componentApiClient,
   '@/lib/format': componentFormat,
   '@/lib/skill-diff': actualSkillDiffModule,
+  '@/lib/api-error-keys.mjs': apiErrorKeys,
   '@/lib/i18n': componentI18n,
 });
 const designDocumentsSectionModule = compileWebComponent(join(repoRoot, 'apps/web/components/DesignDocumentsSection.tsx'), {
   '@/lib/api-client': componentApiClient,
   '@/lib/format': componentFormat,
   '@/lib/skill-diff': actualSkillDiffModule,
+  '@/lib/api-error-keys.mjs': apiErrorKeys,
   '@/lib/i18n': componentI18n,
 });
 const advisorStub = { AdvisorView: () => React.createElement('div', { 'data-testid': 'advisor' }) };
@@ -310,6 +317,7 @@ const previewComponentModule = compileWebComponent(join(repoRoot, 'apps/web/comp
   '@/lib/format': { ...componentFormat, agentStatusLabels: () => ({}), agentOutcomeLabels: () => ({}) },
   '@/components/StateBadge': stateBadgeModule,
   '@/components/WorkArchiveActions': archiveActionsModule,
+  '@/lib/api-error-keys.mjs': apiErrorKeys,
   '@/lib/i18n': componentI18n,
   '@/lib/work-detail-safety.mjs': { humanizeWorkDetailError, normalizeWorkDetailData, workDetailHref },
   '@/components/WorkSummaryBlock': workSummaryBlockModule,
@@ -345,6 +353,7 @@ const detailComponentModule = compileWebComponent(join(repoRoot, 'apps/web/compo
   '@/components/WorkArchiveActions': archiveActionsModule,
   '@/components/WorkProjectMove': workProjectMoveStub,
   '@/components/WorkPrerequisitesSection': { WorkPrerequisitesSection: () => null },
+  '@/lib/api-error-keys.mjs': apiErrorKeys,
   '@/lib/i18n': componentI18n,
   '@/lib/work-detail-safety.mjs': { asReportEnvelope, humanizeWorkDetailError, normalizeWorkDetailData },
   '@/components/WorkSummaryBlock': workSummaryBlockModule,
@@ -360,6 +369,7 @@ const detailComponentModule = compileWebComponent(join(repoRoot, 'apps/web/compo
 });
 const workErrorModule = compileWebComponent(join(repoRoot, 'apps/web/app/work/error.tsx'), {
   'next/link': linkModule,
+  '@/lib/api-error-keys.mjs': apiErrorKeys,
   '@/lib/i18n': componentI18n,
 });
 
@@ -1864,6 +1874,7 @@ const moveApi = {
 };
 const projectMoveModule = compileWebComponent(join(repoRoot, 'apps/web/components/WorkProjectMove.tsx'), {
   '@/lib/api-client': moveApi,
+  '@/lib/api-error-keys.mjs': apiErrorKeys,
   '@/lib/i18n': { useLocale: () => ({ locale: 'en', t: moveT }) },
   '../lib/work-project-move.mjs': moveHelpers,
 });
@@ -1871,7 +1882,7 @@ const moveProjects = [
   { id: '01J00000000000000000000001', name: 'alpha', canonical_path: '/repo/alpha' },
   { id: '01J00000000000000000000002', name: 'beta', canonical_path: '/repo/beta' },
 ];
-const moveWork = { id: '01J000000000000000000000W1', state: 'paused', state_version: 4, project_id: null, display_number: 3 };
+const moveWork = { id: '01J000000000000000000000W1', state: 'paused', state_version: 4, project_id: null, can_move_to_project: true, display_number: 3 };
 
 function findElements(node, predicate, found = []) {
   if (Array.isArray(node)) node.forEach((child) => findElements(child, predicate, found));
@@ -1918,17 +1929,14 @@ test('Project move offers a select of "name (canonical_path)" and a button for a
 });
 
 test('Project move controls follow the Work state and Project membership', () => {
-  for (const state of ['memo', 'ready', 'paused', 'judgement_waiting']) {
-    assert.equal(moveHelpers.canMoveWorkToProject({ state, project_id: null }), true, state);
-  }
-  for (const state of ['running', 'completed', 'cancelled']) {
-    assert.equal(moveHelpers.canMoveWorkToProject({ state, project_id: null }), false, state);
-  }
-  assert.equal(moveHelpers.canMoveWorkToProject({ state: 'paused', project_id: 'p1' }), false);
+  assert.equal(moveHelpers.canMoveWorkToProject({ state: 'paused', project_id: null, can_move_to_project: true }), true);
+  assert.equal(moveHelpers.canMoveWorkToProject({ state: 'paused', project_id: null, can_move_to_project: false }), false);
+  assert.equal(moveHelpers.canMoveWorkToProject({ state: 'paused', project_id: null }), false);
+  assert.equal(moveHelpers.canMoveWorkToProject({ state: 'paused', project_id: 'p1', can_move_to_project: true }), false);
   const render = (work) => renderMove(createHookHarness(), work).html;
-  assert.match(render({ ...moveWork, state: 'running' }), /Pause the Work to move it into a Project\./u);
-  for (const state of ['completed', 'cancelled']) {
-    const html = render({ ...moveWork, state });
+  assert.match(render({ ...moveWork, state: 'running', can_move_to_project: false }), /Pause the Work to move it into a Project\./u);
+  for (const state of ['completed', 'cancelled', 'paused']) {
+    const html = render({ ...moveWork, state, can_move_to_project: false });
     assert.ok(!html.includes('<select') && !html.includes('<button') && !html.includes('Pause the Work'), state);
     assert.match(html, /—/u);
   }

@@ -8,6 +8,7 @@ import { createAgentRunner, toolNamesInLine } from "../../packages/agent-runtime
 import { command as commandEnvelope, createTestCore } from "../helpers/core.mjs";
 import { withNecessity } from "../helpers/necessity.mjs";
 import { waitFor } from "../helpers/wait.mjs";
+import { readOwnerReplan } from "../../packages/core/dist/replan-queue-store.js";
 
 // One terminal-Task predicate (a superseded Task counts as terminal)
 // and a hardened final-check path (task_id on reports, bounded retry, a
@@ -106,12 +107,12 @@ async function seedFinishedWork(core, db, tasks) {
 function workerReport(invocationId) {
   return {
     kind: "report",
-    schema_version: "1.0.0",
+    schema_version: "1.1.0",
     invocation_id: invocationId,
     result: "success",
     work_done: "Done.",
     changes: [],
-    verification: { passed: true, method: "Checked." },
+    verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked.", integration_check: null },
     remaining_issues: [],
     next_action: "none",
     needs_replanning: false,
@@ -570,10 +571,7 @@ test("reopening a completed Work does not depend on its size", async (t) => {
   await core.reopenWork(workId, commandEnvelope({ reason: "please add one more thing" }, "reopen", version));
 
   assert.equal(db.get("SELECT state FROM works WHERE id = ?", workId).state, "running");
-  const marker = db.get(
-    "SELECT json_extract(response_json, '$.status') AS status FROM idempotency_keys WHERE key = ?",
-    `owner-replan:${workId}`,
-  );
+  const marker = readOwnerReplan(db, workId);
   assert.equal(marker?.status, "queued", "an Owner replan is queued for the next tick");
 });
 

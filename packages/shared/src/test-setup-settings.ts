@@ -1,3 +1,4 @@
+import { isRecord } from "./settings-validation.js";
 import type { TestRunSettings } from "./test-run-settings.js";
 
 export const TEST_SETUP_SETTINGS_KEY = "test_setup";
@@ -246,7 +247,6 @@ export const DEFAULT_TEST_SETUP_SETTINGS: TestSetupSettings = {
   summary_chars: 500,
 };
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const int = (min: number, max: number) => (value: unknown): boolean => typeof value === "number" && Number.isInteger(value) && value >= min && value <= max;
 const strings = (value: unknown): boolean => Array.isArray(value) && value.every((item) => typeof item === "string" && item.length > 0);
 const argvs = (value: unknown): boolean => Array.isArray(value) && value.every(strings) && value.every((argv) => (argv as unknown[]).length > 0);

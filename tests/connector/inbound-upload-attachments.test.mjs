@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { command, createTestCore } from "../helpers/core.mjs";
 import { waitFor } from "../helpers/wait.mjs";
+import { readOwnerReplan } from "../../packages/core/dist/replan-queue-store.js";
 
 const ownerId = "owner:default";
 
@@ -430,7 +431,7 @@ test("web attachments: an attachments-only Work instruction stays queued with a 
   const version = () => db.get("SELECT state_version FROM works WHERE id = ?", workId).state_version;
   const first = await core.postWorkInstruction(workId, commandEnvelope({ body: "", attachment_ids: [up.attachment_id] }, "queue-1", version()));
   const second = await core.postWorkInstruction(workId, commandEnvelope({ body: "explain", attachment_ids: [] }, "queue-2", version()));
-  const marker = JSON.parse(db.get("SELECT response_json FROM idempotency_keys WHERE key = ?", `owner-replan:${workId}`).response_json);
+  const marker = readOwnerReplan(db, workId);
   assert.deepEqual([...marker.message_ids].sort(), [first.data.message_id, second.data.message_id].sort());
   void conversationId;
 });

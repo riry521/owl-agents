@@ -1,3 +1,4 @@
+import { apiErrorKeyForCode } from './api-error-keys.mjs';
 import { isAgentOutcome } from './agent-run-display.mjs';
 import { normalizeAutoRecovery } from './auto-recovery.mjs';
 
@@ -479,21 +480,17 @@ export function humanizeWorkDetailError(error, t) {
   const code = isRecord(error) && typeof error.code === 'string'
     ? error.code
     : error instanceof Error ? error.message : '';
-  switch (code) {
-    case 'network_error':
-    case 'request_timeout':
-    case 'runtime_config_unavailable':
-    case 'core_not_ready':
-    case 'dependency_unavailable':
-      return t('work.errorNetwork');
-    case 'invalid_runtime_config':
-    case 'invalid_response':
-    case 'invalid_query':
-    case 'contract_invalid':
-      return t('work.errorInvalidResponse');
-    case 'version_conflict':
-      return t('work.errorVersionConflict');
-    default:
-      return t('work.errorDefault');
-  }
+  return t(apiErrorKeyForCode(code, '', {
+    network: 'work.errorNetwork',
+    invalidResponse: 'work.errorInvalidResponse',
+    versionConflict: 'work.errorVersionConflict',
+    fallback: 'work.errorDefault',
+    codes: {
+      request_timeout: 'work.errorNetwork',
+      core_not_ready: 'work.errorNetwork',
+      dependency_unavailable: 'work.errorNetwork',
+      invalid_query: 'work.errorInvalidResponse',
+      contract_invalid: 'work.errorInvalidResponse',
+    },
+  }));
 }

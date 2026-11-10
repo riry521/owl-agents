@@ -1,3 +1,5 @@
+import { isRecord, SettingsValidationError } from "./settings-validation.js";
+
 export const KNOWLEDGE_AUTOMATION_SETTINGS_KEY = "knowledge_automation";
 export const DEFAULT_LIBRARIAN_TIMES: readonly string[] = ["03:00", "15:00"];
 export const MAX_LIBRARIAN_TIMES = 24;
@@ -42,15 +44,8 @@ function isCount(value: unknown, max = Number.MAX_SAFE_INTEGER): value is number
   return typeof value === "number" && Number.isInteger(value) && value >= 0 && value <= max;
 }
 
-export class KnowledgeAutomationValidationError extends Error {
-  public constructor(message: string, public readonly field: "librarian_times" | "research_autosave" | "research_source_links" | "research_source_links_max" | "research_tags_min" | "research_tags_max" | "research_existing_tags_max" | "payload") {
-    super(message);
-    this.name = "KnowledgeAutomationValidationError";
-  }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+export class KnowledgeAutomationValidationError extends SettingsValidationError<"librarian_times" | "research_autosave" | "research_source_links" | "research_source_links_max" | "research_tags_min" | "research_tags_max" | "research_existing_tags_max" | "payload"> {
+  public override name = "KnowledgeAutomationValidationError";
 }
 
 function normalizeLibrarianTimes(value: unknown): readonly string[] {

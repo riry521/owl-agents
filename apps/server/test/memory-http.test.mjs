@@ -38,7 +38,7 @@ async function setup(t, { withMemory = true, withMemorySaver = true, startCore =
   const core = new Core({ db, agentRunner, version: "test", owlRoot: root });
   if (startCore) await core.start();
   else core.memory = withMemory ? fakeMemory : { stop: async () => {} };
-  if (!withMemorySaver) core.memorySaver = undefined;
+  if (!withMemorySaver) core.rememberExplicit = undefined;
   const adapter = new ExternalCoreAdapter(core, db, root, join(root, "data"));
   const guardTokens = withGuard ? (await import("../dist/guard-tokens.js")).GuardTokenRegistry.open(join(root, "guard-tokens")) : undefined;
   const prior = process.env.OWL_API_TOKEN;
@@ -87,7 +87,7 @@ test("memory routes run through the adapter-wrapped Core", async (t) => {
   assert.equal((await api.call("reindex", { mode: "full" })).status, 200);
 });
 
-test("memory-saving routes reach Core.memorySaver through ExternalCoreAdapter", async (t) => {
+test("memory-saving routes reach Core.rememberExplicit through ExternalCoreAdapter", async (t) => {
   const api = await setup(t);
   if (!api) return;
 
@@ -96,19 +96,6 @@ test("memory-saving routes reach Core.memorySaver through ExternalCoreAdapter", 
   const explicitBody = await explicit.json();
   assert.equal(typeof explicitBody.path, "string");
   await access(join(api.root, "knowledge", explicitBody.path));
-
-  const manual = await api.call("save-manual", {
-    title: "Adapter manual snapshot",
-    facts: ["saved through the adapter"],
-    decisions: [],
-    open_threads: [],
-    related_work_ids: [],
-    tags: ["adapter"],
-  });
-  assert.equal(manual.status, 200);
-  const manualBody = await manual.json();
-  assert.equal(typeof manualBody.path, "string");
-  await access(join(api.root, "knowledge", manualBody.path));
 });
 
 test("saved explicit memory is searchable through ExternalCoreAdapter within five seconds", async (t) => {
@@ -138,13 +125,12 @@ test("saved explicit memory is searchable through ExternalCoreAdapter within fiv
   assert.equal(found, true, `not indexed within 5 seconds: ${path}`);
 });
 
-test("memory-saving routes return 503 when Core.memorySaver is unavailable", async (t) => {
+test("memory-saving routes return 503 when Core.rememberExplicit is unavailable", async (t) => {
   const api = await setup(t, { withMemorySaver: false });
   if (!api) return;
 
   for (const [op, body] of [
     ["save-explicit", { text: "memory saver unavailable" }],
-    ["save-manual", { title: "snapshot", facts: [], decisions: [], open_threads: [], related_work_ids: [], tags: [] }],
   ]) {
     const response = await api.call(op, body);
     assert.equal(response.status, 503, op);

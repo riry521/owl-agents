@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { command, createTestCore } from "../helpers/core.mjs";
 import { waitFor } from "../helpers/wait.mjs";
+import { queueManagerTrigger, setManagerTriggerStatus, setOwnerReplanStatus, writeOwnerReplan } from "../../packages/core/dist/replan-queue-store.js";
 
 function commandEnvelope(payload, suffix, expectedVersion = 0) {
   return command(payload, `test:${suffix}`, expectedVersion);
@@ -23,19 +24,6 @@ function insertTask(transaction, workId, { id, status, managerTaskId, title, fai
         created_at, updated_at, retry_no, manager_task_id, failed_by_dependency_task_id)
      VALUES (?, ?, ?, 'code', ?, 'normal', '', 'Done.', 0, 0, 0, 0, 0, ?, ?, 0, ?, ?)`,
     id, workId, title, status, now, now, managerTaskId, failedByDependencyTaskId,
-  );
-}
-
-function insertIdempotencyKey(transaction, key, responseBody) {
-  const now = new Date().toISOString();
-  transaction.run(
-    `INSERT INTO idempotency_keys (key, request_hash, response_json, status_code, created_at, expires_at)
-     VALUES (?, ?, ?, 202, ?, ?)`,
-    key,
-    "0".repeat(64),
-    JSON.stringify(responseBody),
-    now,
-    new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString(),
   );
 }
 
@@ -84,12 +72,9 @@ test("a Manager-trigger marker left attempted by a crash is replayed on the firs
     // A crash between Core marking the trigger attempted and the replan
     // finishing leaves it stuck here, with no in-flight replan left to
     // ever move it forward.
-    insertIdempotencyKey(transaction, `manager-trigger:${taskId}`, {
-      task_id: taskId,
-      event: "task.failure.classified",
-      status: "attempted",
-      question: null,
-    });
+    const now = new Date().toISOString();
+    queueManagerTrigger(transaction, taskId, { question: null, question_only: false }, now);
+    setManagerTriggerStatus(transaction, taskId, "attempted", now);
   });
 
   await core.start();
@@ -123,12 +108,9 @@ test("an Owner-replan marker left attempted by a crash hands the reopen's answer
     // A crash between consumeOwnerReplan moving the marker to attempted
     // and the replan finishing leaves it stuck, with no in-flight replan
     // left to ever act on the Owner's reopen request.
-    insertIdempotencyKey(transaction, `owner-replan:${workId}`, {
-      work_id: workId,
-      status: "attempted",
-      kind: "reopen",
-      answer: "Please also add a changelog entry.",
-    });
+    const now = new Date().toISOString();
+    writeOwnerReplan(transaction, workId, { kind: "reopen", answer: "Please also add a changelog entry.", message_ids: [], processing_message_ids: [] }, "replace", now);
+    setOwnerReplanStatus(transaction, workId, "attempted", now);
   });
 
   await core.start();
@@ -137,17 +119,6 @@ test("an Owner-replan marker left attempted by a crash hands the reopen's answer
   // An older marker (answer only) is one request, text whole.
   assert.deepEqual(replanned.context.owner_requests, [{ kind: "reopen", text: "Please also add a changelog entry.", message_ids: [] }]);
   assert.deepEqual(replanned.context.worker_questions, []);
-});
-
-test("a malformed Owner-replan request is removed instead of being left attempted for the next restart", async (t) => {
-  const { db, core } = await createCore(t, {});
-  const workId = await createRunningWork(core, db, "malformed");
-  await db.createWriteLane().transact((transaction) => {
-    insertIdempotencyKey(transaction, `owner-replan:${workId}`, { work_id: workId, status: "queued", kind: "reopen" });
-  });
-
-  assert.equal(await core.consumeOwnerReplan(workId), null);
-  assert.equal(db.get("SELECT 1 AS found FROM idempotency_keys WHERE key = ?", `owner-replan:${workId}`), undefined);
 });
 
 test("a merge wake schedules the waiting Work without remembering a key that can never match again", async (t) => {

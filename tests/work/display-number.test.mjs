@@ -4,7 +4,7 @@ import { copyFile, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { ExternalCoreAdapter, MemoryCore } from "../../apps/server/dist/core.js";
+import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { createUlid, openDatabase } from "../../packages/db/dist/index.js";
 import { command, createTestCore } from "../helpers/core.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
@@ -209,13 +209,7 @@ test("works without a project take the highest remaining number + 1 after a midd
   assert.deepEqual([number(works[0]), number(works[2])], [1, 3]);
 });
 
-test("display numbers reach the API, and Cores without them report null", async (t) => {
-  const memoryCore = new MemoryCore({ version: "work-display-number-memory" });
-  const memoryWork = await memoryCore.createWork({ title: "Unnumbered", summary: "", size: "small", project_id: null }, {});
-  const memoryId = memoryWork.data.work_id;
-  assert.equal((await memoryCore.listWorks({ state: null, archived: "exclude", limit: 10, cursor: null })).data[0].display_number, null);
-  assert.equal((await memoryCore.getWork(memoryId)).display_number, null);
-
+test("display numbers reach the API, and legacy Cores without them report null", async (t) => {
   const { root, dataDir, db, core: durableCore, createProject, createWork } = await openCore(t, "owl-work-display-api-");
   const core = new ExternalCoreAdapter(durableCore, db, root, dataDir);
   const token = randomBytes(32).toString("hex");

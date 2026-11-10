@@ -1,9 +1,9 @@
-import { existsSync, mkdtempSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
-/** Directory name used for Task/Work/Advisor worktrees nested inside an Owl clone. */
-export const LEGACY_WORKSPACES_DIRNAME = ".owl-workspaces";
+/** Directory name of the workspaces root under an Owl root, used when no root is configured. */
+export const DEFAULT_WORKSPACES_DIRNAME = ".owl-workspaces";
 
 export const ADVISOR_SHARED_DIRNAME = "shared";
 export const ADVISOR_HOME_DIRNAME = "home";
@@ -62,38 +62,20 @@ export function resolveWorkspacesRoot(env: NodeJS.ProcessEnv, home: string): str
   return join(home, ".owl", "workspaces");
 }
 
-/**
- * Resolves Task/Work/Advisor workspace paths across two possible roots: the
- * current root (outside of any repository) and a legacy root nested inside
- * an Owl clone (`<owlRoot>/.owl-workspaces`), kept for worktrees that were
- * already created there before the current root existed.
- */
+/** Resolves Task/Work/Advisor workspace paths under one workspaces root. */
 export class WorkspaceLayout {
   readonly root: string;
-  readonly legacyRoot: string;
 
-  constructor(root: string, legacyRoot: string) {
+  constructor(root: string) {
     this.root = resolve(root);
-    this.legacyRoot = resolve(legacyRoot);
   }
 
-  /** A layout with no separate current root; everything resolves under `<owlRoot>/.owl-workspaces`. */
-  static legacyOnly(owlRoot: string): WorkspaceLayout {
-    const legacyRoot = resolve(owlRoot, LEGACY_WORKSPACES_DIRNAME);
-    return new WorkspaceLayout(legacyRoot, legacyRoot);
+  /** The layout under `<owlRoot>/.owl-workspaces`, for callers that configure no workspaces root. */
+  static underOwlRoot(owlRoot: string): WorkspaceLayout {
+    return new WorkspaceLayout(resolve(owlRoot, DEFAULT_WORKSPACES_DIRNAME));
   }
 
-  /** The distinct roots this layout may resolve paths under. */
-  roots(): readonly string[] {
-    return this.root === this.legacyRoot ? [this.root] : [this.root, this.legacyRoot];
-  }
-
-  /** The Work directory for `workId`, preferring an already-existing legacy directory. */
   workDir(workId: string): string {
-    const legacy = join(this.legacyRoot, safeSegment(workId));
-    if (existsSync(legacy)) {
-      return legacy;
-    }
     return join(this.root, safeSegment(workId));
   }
 
@@ -115,13 +97,8 @@ export class WorkspaceLayout {
     return join(this.root, "advisor", ADVISOR_HOME_DIRNAME);
   }
 
-  /** True when `path` is inside (or equal to) any root this layout resolves under. */
+  /** True when `path` is inside (or equal to) the root. */
   contains(path: string): boolean {
-    return this.roots().some((root) => inside(root, path));
-  }
-
-  /** The root that contains `path`, or null when it is under neither root. */
-  rootOf(path: string): string | null {
-    return this.roots().find((root) => inside(root, path)) ?? null;
+    return inside(this.root, path);
   }
 }

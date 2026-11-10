@@ -1,5 +1,7 @@
 // Pure helpers for the shared WorkConversation component.
 
+import { apiErrorKeyForCode } from './api-error-keys.mjs';
+
 /**
  * Whether an instruction can be sent for a Work in `workState`.
  * @param {string} workState
@@ -38,25 +40,28 @@ export function shouldSendOnKey(event, { isTouchDevice, composing }) {
  * @returns {{messageKey: string, refetch: boolean}}
  */
 export function humanizeInstructionError(err) {
-  if (err?.kind === 'network_error') return { messageKey: 'work.errorNetwork', refetch: false };
+  // kind が network_error なら code と status に関係なくネットワークの文言にし、再取得しない。
+  // code を渡さないのは、409 の codes の表が kind より先に当たるのを避けるため。
+  const networkKey = apiErrorKeyForCode('', err?.kind ?? '', { network: 'work.errorNetwork', networkFrom: 'kind', fallback: '' });
+  if (networkKey) return { messageKey: networkKey, refetch: false };
+  const code = err?.code ?? '';
   if (err?.status === 409) {
-    switch (err.code) {
-      case 'version_conflict':
-        return { messageKey: 'workChat.errorVersionConflict', refetch: true };
-      case 'work_reopen_required':
-        return { messageKey: 'workChat.errorReopenRequired', refetch: true };
-      case 'work_cancelled':
-        return { messageKey: 'work.instructionCancelledNote', refetch: true };
-      case 'invalid_state_transition':
-        return { messageKey: 'work.instructionNotStartedNote', refetch: true };
-      default:
-        return { messageKey: 'work.instructionError', refetch: true };
-    }
+    return {
+      messageKey: apiErrorKeyForCode(code, '', {
+        versionConflict: 'workChat.errorVersionConflict',
+        fallback: 'work.instructionError',
+        codes: {
+          work_reopen_required: 'workChat.errorReopenRequired',
+          work_cancelled: 'work.instructionCancelledNote',
+          invalid_state_transition: 'work.instructionNotStartedNote',
+        },
+      }),
+      refetch: true,
+    };
   }
-  if (err?.status === 400 && err.code === 'validation_error') {
-    return { messageKey: 'workChat.errorValidation', refetch: false };
-  }
-  return { messageKey: 'work.instructionError', refetch: false };
+  // validation_error の文言は 400 のときだけ出す。
+  const validation = err?.status === 400 ? 'workChat.errorValidation' : undefined;
+  return { messageKey: apiErrorKeyForCode(code, '', { validation, fallback: 'work.instructionError' }), refetch: false };
 }
 
 /**

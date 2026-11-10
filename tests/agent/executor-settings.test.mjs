@@ -28,7 +28,7 @@ async function openCore(t) {
   return { db, root, makeCore };
 }
 
-test("child settings derive from legacy executor_config without saving the migration", async (t) => {
+test("child settings ignore a stored legacy executor_config row", async (t) => {
   const { db, makeCore } = await openCore(t);
   const now = new Date().toISOString();
   await db.createWriteLane().transact((tx) => {
@@ -40,14 +40,7 @@ test("child settings derive from legacy executor_config without saving the migra
   });
   const core = await makeCore();
 
-  const settings = core.getChildRunSettings();
-  assert.equal(settings.executor_harness, "codex");
-  assert.deepEqual(settings.executor_by_harness, {
-    ...DEFAULT_CHILD_RUN_SETTINGS.executor_by_harness,
-    codex: { model: "gpt-5.6-luna", effort: "xhigh" },
-  });
-  //  assert.deepEqual(settings.allowed_efforts, ["low", "medium", "high", "xhigh"]);
-  assert.equal(settings.timeout_minutes, 11);
+  assert.deepEqual(core.getChildRunSettings(), DEFAULT_CHILD_RUN_SETTINGS);
   assert.equal(db.get("SELECT COUNT(*) AS count FROM settings WHERE key = 'child_run_settings'").count, 0);
 });
 

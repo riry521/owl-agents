@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { accessSync, constants, statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -14,6 +13,7 @@ import {
   opencodeConfigContent,
   opencodeServeEnv,
   parseOpencodeVersion,
+  runCliVersion,
 } from "../../../packages/shared/dist/index.js";
 import { startOpencodeServer, type OpencodeServer } from "../../../packages/agent-runtime/dist/index.js";
 
@@ -68,12 +68,10 @@ function readVersionOutput(executable: string): Promise<string | null> {
     return Promise.resolve(null);
   }
   if (versionCache.has(key)) return Promise.resolve(versionCache.get(key)!);
-  return new Promise((resolve) => {
-    execFile(executable, ["--version"], { timeout: VERSION_TIMEOUT_MS }, (error, stdout) => {
-      const output = error ? null : stdout;
-      versionCache.set(key, output);
-      resolve(output);
-    });
+  return runCliVersion(executable, ["--version"], VERSION_TIMEOUT_MS).then(({ exitCode, stdout }) => {
+    const output = exitCode === 0 ? stdout : null;
+    versionCache.set(key, output);
+    return output;
   });
 }
 

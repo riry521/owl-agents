@@ -85,7 +85,6 @@ AutoRecoverySettings,
   RuleProposal,
   RuleProposalStatus,
   RuleProposalCommandResult,
-  RuleProposalCreateResult,
   RuleProposalRole,
   SkillSettings,
   SkillState,
@@ -1034,7 +1033,6 @@ export async function saveIntegration(
   config: {
     bot_token?: string;
     app_token?: string;
-    signing_secret?: string;
     conversation_channel_id: string;
     notification_channel_id: string;
     owner_user_id?: string;
@@ -2004,18 +2002,6 @@ export async function rejectRuleProposal(proposalId: string): Promise<RulePropos
     0,
     'POST',
   );
-  return response.data;
-}
-
-/** POST /api/v1/rule-proposals from a knowledge note claim. */
-export async function createRuleProposalFromNote(input: {
-  note_id: string;
-  claim_fingerprint: string;
-  level: 'system' | 'role';
-  role?: RuleProposalRole;
-  text?: string;
-}): Promise<RuleProposalCreateResult> {
-  const response = await command<RuleProposalCreateResult>('/rule-proposals', input, 0, 'POST');
   return response.data;
 }
 

@@ -16,6 +16,7 @@ import { openTestDatabase } from "../helpers/db.mjs";
 import { createTestCore, command } from "../helpers/core.mjs";
 import { withNecessity, necessityFor, criteriaFor } from "../helpers/necessity.mjs";
 import { waitFor } from "../helpers/wait.mjs";
+import { queueManagerTrigger } from "../../packages/core/dist/replan-queue-store.js";
 
 // A Manager replan names the failed Tasks each new Task replaces, may be
 // empty, and is validated against the Work before any write. A rejected
@@ -700,12 +701,12 @@ test("a retry's revised type and review are applied and take effect on the Task'
         report_valid: true,
         report: {
           kind: "report",
-          schema_version: "1.0.0",
+          schema_version: "1.1.0",
           invocation_id: request.invocation_id,
           result: "success",
           work_done: "T2 done.",
           changes: [],
-          verification: { passed: true, method: "Ran the tests." },
+          verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Ran the tests.", integration_check: null },
           remaining_issues: [],
           next_action: "none",
           needs_replanning: false,
@@ -766,7 +767,7 @@ test("a retry's base_sync_only mark is stored per generation and never carried o
     runWorker: async (request) => ({
       outcome: "success",
       report_valid: true,
-      report: { kind: "report", schema_version: "1.0.0", invocation_id: request.invocation_id, result: "success", work_done: "done", changes: [], verification: { passed: true, method: "Checked." }, remaining_issues: [], next_action: "none", needs_replanning: false, question_for_manager: null },
+      report: { kind: "report", schema_version: "1.1.0", invocation_id: request.invocation_id, result: "success", work_done: "done", changes: [], verification: { status: "passed", acceptance: [{ criterion_id: "AC1", criterion: "c", status: "passed", evidence: "ok" }], checks: [], method: "Checked.", integration_check: null }, remaining_issues: [], next_action: "none", needs_replanning: false, question_for_manager: null },
     }),
     runReviewer: async () => ({ outcome: "success", report_valid: true, report: {}, review: { verdict: "pass", summary: "ok", findings: [], tests: { ran: false, command: "none", passed: 0, failed: 0 } } }),
     runAdvisor: async () => ({ reply: "" }),
@@ -1044,17 +1045,21 @@ const recoveryRecords = (db, workId) =>
 /** A Core whose Manager is `manage(request, callNo)`; the Work driver is not running. */
 async function openStubManagerCore(t, manage) {
   const calls = [];
+  const workers = [];
   const agentRunner = {
     runManagerPlan: async (request) => {
       calls.push(request);
       return manage(request, calls.length);
     },
-    runWorker: async () => ({ outcome: "failed", failure_class: "transient", error_key: "x", retry_allowed: true, message: "x" }),
+    runWorker: async (request) => {
+      workers.push(request);
+      return { outcome: "failed", failure_class: "transient", error_key: "x", retry_allowed: true, message: "x" };
+    },
     runReviewer: async () => ({ outcome: "failed" }),
     runAdvisor: async () => ({ reply: "" }),
   };
   const opened = await createTestCore(t, { agentRunner, max_parallel: 4, dispatcher: { tick_interval_ms: 60_000, manager_retry_delay_ms: 1 } }, { prefix: "owl-replan-recovery-" });
-  return { ...opened, calls };
+  return { ...opened, calls, workers };
 }
 
 test("a replan the quality check finally rejects opens no Decision the first time and hands its feedback to the next Manager call", async (t) => {
@@ -1090,11 +1095,7 @@ test("a replan hit by a 503 waits for resume_at without calling the Manager, and
   const { db, core, calls } = await openStubManagerCore(t, () => ({ outcome: "failed", failure_class: "transient", error_key: "provider_failed:harness_error:503", retry_allowed: true, message: "503 Service Unavailable" }));
   const { workId, t2 } = await seedRepro2(core, db);
   await startWithoutDriving(core, db, workId);
-  const queueTrigger = () => db.createWriteLane().transact((tx) => tx.run(
-    `INSERT INTO idempotency_keys (key, request_hash, response_json, status_code, created_at, expires_at)
-     VALUES (?, ?, ?, 202, ?, ?) ON CONFLICT(key) DO UPDATE SET response_json = excluded.response_json`,
-    `manager-trigger:${t2}`, "0".repeat(64), JSON.stringify({ status: "queued" }), new Date().toISOString(), "2031-01-02T03:04:05.000Z",
-  ));
+  const queueTrigger = () => db.createWriteLane().transact((tx) => queueManagerTrigger(tx, t2, { question: null, question_only: false }, new Date().toISOString()));
   await queueTrigger();
 
   await core.tick(workId);
@@ -1352,7 +1353,7 @@ const storedCriteriaOf = (db, workId, managerTaskId) =>
   JSON.parse(db.get("SELECT acceptance_criteria_json AS json FROM tasks WHERE work_id = ? AND manager_task_id = ?", workId, managerTaskId).json);
 
 test("a replacement Task that drops the Owner's criteria goes back with each criterion's original id, text and check, and is applied once they are carried over", async (t) => {
-  const quoted = { kind: "owner", source: "summary", quote: "x" };
+  const quoted = { kind: "owner", source: "instruction", quote: "x" };
   const ownerCriteria = ["AC1", "AC2", "AC3"].map((id) => stored(id, quoted, { text: `${id}: the Owner's "exact" wording`, check: `node --test tests/${id.toLowerCase()}.test.mjs` }));
   const { db, workId, feedback } = await replanFixedOnSecondCall(t, replacementN1(criteriaFor("Done; verified by the test.")), replacementN1(ownerCriteria), {
     seed: (db, t2) => db.createWriteLane().transact((tx) => tx.run("UPDATE tasks SET acceptance_criteria_json = ? WHERE id = ?", JSON.stringify(ownerCriteria), t2)),
@@ -1414,7 +1415,7 @@ test("a plan still over a non-blocking limit is not applied before the last call
 });
 
 test("a replan that revises a Task clears its goal_shortfalls_json and keeps a stored criterion without requirement as required", async (t) => {
-  const quoted = { kind: "owner", source: "summary", quote: "x" };
+  const quoted = { kind: "owner", source: "instruction", quote: "x" };
   const stale = [{ criterion_id: "AC1", text: "old goal", reason: "old reason", source: "worker" }];
   const noRequirement = ["AC1", "AC2", "AC3"].map((id) => stored(id, quoted));
   const { db, workId } = await replanFixedOnSecondCall(t, replacementN1(criteriaFor("Done; verified by the test.")), { ...task("T2", { title: "failed one" }), acceptance_criteria: noRequirement }, {
@@ -1447,4 +1448,72 @@ test("an automatic replan cannot change a Manager criterion's requirement when a
   const replace = (criterion) => validateReplan([{ id: "N1", title: "A", type: "code", acceptance: "x", depends_on: [], replaces: ["T1"], acceptance_criteria: [criterion] }], snapshot, ["T1"], { currentCriteria: new Map([["T1", [manager]]]), automatic: true });
   assert.ok(!isPlanRejection(replace(manager)), "the same requirement is fine");
   assert.ok(isPlanRejection(replace({ ...manager, requirement: "goal" })), "required to goal");
+});
+
+// A whole-suite criterion is Core's job at the end of the Work: a replan's Tasks reach the DB and the Worker without it.
+
+const fullTestMark = (db, workId) => db.get("SELECT full_test_run_at_end AS mark FROM works WHERE id = ?", workId).mark;
+
+test("a replan's whole-suite criteria, the Owner's too, are dropped before the Task is stored and run, and the Work is marked", async (t) => {
+  const criteria = [
+    stored("AC1", OWNER, { text: "既存のテストがすべて通る" }),
+    stored("AC2", MANAGER, { text: "the whole test suite passes" }),
+    stored("AC3", MANAGER, { text: "tests/a.test.mjs 内のすべてのテストが通る", check: "node --test tests/a.test.mjs" }),
+  ];
+  const { db, core, calls, workers } = await openStubManagerCore(t, () => stubAnswer([replacementN1(criteria)]));
+  const { workId, t2 } = await seedRepro2(core, db);
+  await startWithoutDriving(core, db, workId);
+  assert.equal(fullTestMark(db, workId), 0);
+
+  await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
+  const kept = [["AC1", "tests/a.test.mjs 内のすべてのテストが通る"]];
+  assert.deepEqual(storedCriteriaOf(db, workId, "N1").map((criterion) => [criterion.id, criterion.text]), kept);
+  assert.equal(fullTestMark(db, workId), 1);
+  const marked = JSON.parse(db.get("SELECT payload_json AS p FROM events WHERE type = 'work.full_test_run_marked' AND work_id = ?", workId).p);
+  assert.deepEqual(marked.removed_owner_criteria, [{ task: "N1", text: "既存のテストがすべて通る" }], "the removed Owner criterion stays in the event");
+  await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" }).catch(() => {});
+  assert.deepEqual(calls.at(-1).context.removed_owner_criteria, marked.removed_owner_criteria, "the Manager's next input lists it");
+  inBackground(core.tick(workId));
+  await waitFor(() => workers.length > 0, { message: "the Worker of N1" });
+  assert.deepEqual(workers[0].context.task.acceptance_criteria.map((criterion) => [criterion.id, criterion.text]), kept);
+});
+
+for (const [shape, planned] of [["retries the Task in place", (criteria) => ({ ...task("T2", { title: "failed one" }), acceptance_criteria: criteria })], ["replaces the Task", replacementN1]]) {
+  test(`an automatic replan that ${shape}, copying a stored Owner whole-suite criterion, is accepted with the Owner criterion after it renumbered`, async (t) => {
+    const quoted = { kind: "owner", source: "instruction", quote: "x" };
+    const before = [stored("AC1", quoted, { text: "既存のテストがすべて通る" }), stored("AC2", quoted), stored("AC3", MANAGER)];
+    const { db, core, calls, workers } = await openStubManagerCore(t, () => stubAnswer([planned(before)]));
+    const { workId, t2 } = await seedRepro2(core, db);
+    await db.createWriteLane().transact((tx) => tx.run("UPDATE tasks SET acceptance_criteria_json = ? WHERE id = ?", JSON.stringify(before), t2));
+    await startWithoutDriving(core, db, workId);
+
+    await core.triggerManagerReplan(workId, [t2], { kind: "queued_failed_tasks" });
+    assert.equal(calls.length, 1, "accepted on the first answer");
+    const kept = [["AC1", "AC2 holds", "owner"], ["AC2", "AC3 holds", "manager"]];
+    const shown = (criteria) => criteria.map((criterion) => [criterion.id, criterion.text, criterion.origin.kind]);
+    assert.deepEqual(shown(storedCriteriaOf(db, workId, planned([]).id)), kept);
+    assert.equal(fullTestMark(db, workId), 1);
+    inBackground(core.tick(workId));
+    await waitFor(() => workers.length > 0, { message: "the Worker of the replanned Task" });
+    assert.deepEqual(shown(workers[0].context.task.acceptance_criteria), kept);
+  });
+}
+
+test("an empty replan with work_full_test_run true still marks the Work", async (t) => {
+  const { db, core, calls } = await openStubManagerCore(t, () => ({ outcome: "success", report_valid: true, report: { event: "task.replanned", tasks: [], work_full_test_run: true } }));
+  const created = await core.createWork(commandEnvelope({ title: "W", summary: "x", size: "normal", project_id: null }, "create"));
+  const workId = created.data.work_id;
+  await db.createWriteLane().transact((tx) => {
+    const t1 = createUlid();
+    insertTask(tx, workId, { id: t1, status: "completed", managerTaskId: "T1", title: "done one" });
+    insertReport(tx, workId, t1);
+    return null;
+  });
+  await startWithoutDriving(core, db, workId);
+  const before = writeState(db, workId);
+
+  await core.triggerManagerReplan(workId, [], { kind: "queued_failed_tasks" });
+  assert.equal(calls.length, 1);
+  assert.equal(writeState(db, workId).tasks, before.tasks, "the empty replan wrote no Task");
+  assert.equal(fullTestMark(db, workId), 1);
 });

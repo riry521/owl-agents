@@ -1,28 +1,21 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { writeFile } from "node:fs/promises";
 import { createConfiguredCore, ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { createUlid } from "../../packages/db/dist/index.js";
+import { WorkState } from "../../packages/shared/dist/index.js";
 import { normalizeWorkDetailData } from "../../apps/web/lib/work-detail-safety.mjs";
 import { createTestDatabase } from "../helpers/db.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
-import { repoRoot } from "../helpers/paths.mjs";
+import { loadOpenApi, schemaErrors } from "../helpers/openapi.mjs";
 import { createStubTestRunner, openTestRunCore, plannedTask, workerReport } from "../helpers/test-run-core.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 import { waitFor } from "../helpers/wait.mjs";
 const sizes = ["small", "normal", "large"];
-const workTypesSource = readFileSync(join(repoRoot, "apps/server/src/types.ts"), "utf8");
-const workStateDeclaration = workTypesSource.match(/export type WorkState =([\s\S]*?);/);
-assert.ok(workStateDeclaration, "apps/server/src/types.ts should declare WorkState");
-const workStates = [...workStateDeclaration[1].matchAll(/"([^"]+)"/g)].map((match) => match[1]);
-assert.ok(workStates.length > 0, "WorkState should declare at least one known state");
-const contractSchemas = {
-  "common.json": JSON.parse(readFileSync(join(repoRoot, "contracts/jsonschema/owl-v1/common.json"), "utf8")),
-  "work-detail.json": JSON.parse(readFileSync(join(repoRoot, "contracts/jsonschema/owl-v1/work-detail.json"), "utf8")),
-};
+const workStates = Object.values(WorkState);
+const openapi = loadOpenApi();
 const taskStates = [
   "waiting",
   "ready",
@@ -61,89 +54,9 @@ function assertError(response, body, status, code) {
   assert.equal(typeof body.error?.details, "object");
 }
 
-function schemaErrors(value, schema, path = "$", seenRefs = new Set()) {
-  const errors = [];
-  if (schema.$ref) {
-    const [file, fragment] = schema.$ref.split("#");
-    const reference = `${file}#${fragment ?? ""}`;
-    if (seenRefs.has(reference)) return errors;
-    const referencedDocument = contractSchemas[file];
-    if (!referencedDocument) return [`${path}: cannot resolve ${schema.$ref}`];
-    let referencedSchema = referencedDocument;
-    if (fragment) {
-      for (const part of fragment.replace(/^\//, "").split("/")) {
-        const key = part.replaceAll("~1", "/").replaceAll("~0", "~");
-        referencedSchema = referencedSchema?.[key];
-      }
-    }
-    if (!referencedSchema) return [`${path}: cannot resolve ${schema.$ref}`];
-    const nextRefs = new Set(seenRefs).add(reference);
-    return schemaErrors(value, referencedSchema, path, nextRefs);
-  }
-
-  if (Array.isArray(schema.type)) {
-    const typeMatches = {
-      object: value !== null && typeof value === "object" && !Array.isArray(value),
-      array: Array.isArray(value),
-      string: typeof value === "string",
-      number: typeof value === "number" && Number.isFinite(value),
-      integer: Number.isInteger(value),
-      boolean: typeof value === "boolean",
-      null: value === null,
-    };
-    const matchingType = schema.type.find((type) => typeMatches[type]);
-    if (!matchingType) return [`${path}: expected ${schema.type.join(" or ")}`];
-    return schemaErrors(value, { ...schema, type: matchingType }, path, seenRefs);
-  }
-
-  if (schema.anyOf) {
-    if (!schema.anyOf.some((candidate) => schemaErrors(value, candidate, path, seenRefs).length === 0)) {
-      errors.push(`${path}: does not match any allowed schema`);
-    }
-    return errors;
-  }
-
-  if (schema.type === "object") {
-    if (value === null || typeof value !== "object" || Array.isArray(value)) return [`${path}: expected object`];
-    for (const key of schema.required ?? []) {
-      if (!Object.hasOwn(value, key)) errors.push(`${path}.${key}: required property is missing`);
-    }
-    for (const [key, childSchema] of Object.entries(schema.properties ?? {})) {
-      if (Object.hasOwn(value, key)) errors.push(...schemaErrors(value[key], childSchema, `${path}.${key}`, seenRefs));
-    }
-    if (schema.additionalProperties === false) {
-      for (const key of Object.keys(value)) {
-        if (!Object.hasOwn(schema.properties ?? {}, key)) errors.push(`${path}.${key}: additional property is not allowed`);
-      }
-    }
-  } else if (schema.type === "string") {
-    if (typeof value !== "string") return [`${path}: expected string`];
-    if (schema.pattern && !new RegExp(schema.pattern).test(value)) errors.push(`${path}: does not match ${schema.pattern}`);
-    if (schema.format === "date-time" && (!/^\d{4}-\d{2}-\d{2}T/.test(value) || !Number.isFinite(Date.parse(value)))) {
-      errors.push(`${path}: expected date-time`);
-    }
-  } else if (schema.type === "array") {
-    if (!Array.isArray(value)) return [`${path}: expected array`];
-    value.forEach((item, index) => errors.push(...schemaErrors(item, schema.items ?? {}, `${path}[${index}]`, seenRefs)));
-  } else if (schema.type === "integer") {
-    if (!Number.isInteger(value)) return [`${path}: expected integer`];
-  } else if (schema.type === "number") {
-    if (typeof value !== "number" || !Number.isFinite(value)) return [`${path}: expected number`];
-  } else if (schema.type === "null") {
-    if (value !== null) return [`${path}: expected null`];
-  } else if (schema.type && typeof value !== schema.type) {
-    return [`${path}: expected ${schema.type}`];
-  }
-
-  if (schema.enum && !schema.enum.includes(value)) errors.push(`${path}: value is not in the allowed enum`);
-  if (typeof value === "number" && schema.minimum !== undefined && value < schema.minimum) errors.push(`${path}: below minimum ${schema.minimum}`);
-  if (typeof value === "number" && schema.maximum !== undefined && value > schema.maximum) errors.push(`${path}: above maximum ${schema.maximum}`);
-  return errors;
-}
-
 function assertMatchesWorkDetailSchema(work, label) {
-  const errors = schemaErrors(work, contractSchemas["work-detail.json"]);
-  assert.deepEqual(errors, [], `${label} does not match work-detail.json / common.json:\n${errors.join("\n")}`);
+  const errors = schemaErrors(openapi, work, "#/components/schemas/WorkDetail");
+  assert.deepEqual(errors, [], `${label} does not match the WorkDetail OpenAPI schema:\n${errors.join("\n")}`);
 }
 
 // Tasks superseded by a replan (cancelled in a Work that goes on) are not counted.
@@ -525,21 +438,6 @@ test("core-activity lists the running step with its command and output time, and
   await writeFile(gate, "go\n");
   await waitFor(() => workState(db, workId) === "completed", { timeoutMs: 60_000, message: "the Work to complete" });
   assert.deepEqual(await activity(workId), { work_id: workId, activities: [] });
-});
-
-test("core-activity answers with an empty list from the in-memory Core too", async (t) => {
-  const root = await tempDir(t, "owl-core-activity-memory-");
-  const oldMode = process.env.OWL_CORE_MODE;
-  process.env.OWL_CORE_MODE = "standalone";
-  t.after(() => { if (oldMode === undefined) delete process.env.OWL_CORE_MODE; else process.env.OWL_CORE_MODE = oldMode; });
-  const db = createTestDatabase(root);
-  const core = await createConfiguredCore({ db, agentRunner: {}, version: "core-activity", owlRoot: root, dataDir: root });
-  const api = await startTestHttpServer(t, { core, db, webOut: root, owlRoot: root }, { token: "core-activity-token" });
-  if (!api) return t.skip("localhost listen is unavailable");
-  const workId = createUlid();
-  const response = await fetch(api.baseUrl + "/api/v1/works/" + workId + "/core-activity", { headers: { authorization: "Bearer core-activity-token" } });
-  assert.equal(response.status, 200);
-  assert.deepEqual((await response.json()).data, { work_id: workId, activities: [] });
 });
 
 const workState = (db, workId) => db.get("SELECT state FROM works WHERE id = ?", workId).state;

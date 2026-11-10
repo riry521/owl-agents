@@ -5,9 +5,11 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { validateContractArtifacts } from "../../apps/server/dist/contracts.js";
+import { loadOpenApi } from "../helpers/openapi.mjs";
 import { repoRoot } from "../helpers/paths.mjs";
 
 const readJson = (path) => JSON.parse(readFileSync(join(repoRoot, path), "utf8"));
+const schemas = loadOpenApi().components.schemas;
 const openapi = readFileSync(join(repoRoot, "contracts/openapi/owl-api-v1.yaml"), "utf8");
 
 /** Return the indented YAML block that starts at `header` (exclusive of following siblings). */
@@ -33,19 +35,13 @@ test("contract manifest stores no digests and loading computes them from each ar
     const text = readFileSync(join(repoRoot, artifact.path), "utf8");
     assert.equal(artifact.sha256, createHash("sha256").update(text, "utf8").digest("hex"), artifact.path);
   }
-  assert.ok(manifest.artifacts.some((artifact) => artifact.path === "contracts/jsonschema/owl-v1/decision.json"));
-  assert.ok(manifest.artifacts.some((artifact) => artifact.path === "contracts/jsonschema/owl-v1/websocket-server-frame.json"));
-  for (const path of [
-    "contracts/jsonschema/owl-v1/work-design.json",
-    "contracts/jsonschema/owl-v1/work-design-list.json",
-    "contracts/jsonschema/owl-v1/work-design-summary.json",
-  ]) assert.ok(manifest.artifacts.some((artifact) => artifact.path === path));
+  assert.deepEqual(manifest.artifacts.map((artifact) => [artifact.path, artifact.role]), [["contracts/openapi/owl-api-v1.yaml", "rest_ws"]]);
 });
 
 test("design document schemas keep their response fields strict", () => {
-  const list = readJson("contracts/jsonschema/owl-v1/work-design-list.json");
-  const summary = readJson("contracts/jsonschema/owl-v1/work-design-summary.json");
-  const detail = readJson("contracts/jsonschema/owl-v1/work-design.json");
+  const list = schemas.WorkDesignListResponse.allOf[1].properties.data;
+  const summary = schemas.WorkDesignSummary;
+  const detail = schemas.WorkDesign;
   assert.deepEqual(list.required, ["designs"]);
   assert.equal(list.additionalProperties, false);
   assert.deepEqual(summary.required, ["task_id", "title", "updated_at", "size_bytes"]);
@@ -55,9 +51,9 @@ test("design document schemas keep their response fields strict", () => {
 });
 
 test("Decision contracts allow the allow_free_text field the server returns", () => {
-  const schema = readJson("contracts/jsonschema/owl-v1/decision.json");
+  const schema = schemas.Decision;
   assert.equal(schema.additionalProperties, false);
-  assert.deepEqual(schema.properties.allow_free_text, { type: "boolean" });
+  assert.equal(schema.properties.allow_free_text.type, "boolean");
   assert.ok(schema.required.includes("allow_free_text"));
   const decision = yamlBlock(openapi, "    Decision:");
   assert.match(decision, /\n        - allow_free_text\n/u);
@@ -76,12 +72,12 @@ test("Decision contracts allow the allow_free_text field the server returns", ()
 });
 
 test("WebSocket event frames document work/task/agent ids and created_at", () => {
-  const schema = readJson("contracts/jsonschema/owl-v1/websocket-server-frame.json");
+  const schema = schemas.WebSocketServerFrame;
   const eventFrame = schema.oneOf.find((variant) => variant.properties?.kind?.const === "event");
   assert.ok(eventFrame);
   assert.equal(eventFrame.additionalProperties, false);
   for (const key of ["work_id", "task_id", "agent_run_id"]) {
-    assert.deepEqual(eventFrame.properties[key], { anyOf: [{ $ref: "common.json#/$defs/ULID" }, { type: "null" }] }, key);
+    assert.deepEqual(eventFrame.properties[key], { anyOf: [{ $ref: "#/components/schemas/ULID" }, { type: "null" }] }, key);
   }
   assert.ok(eventFrame.properties.created_at);
   // A canonical frame as produced by packages/core validates against the documented key set.
@@ -106,13 +102,10 @@ test("OpenAPI documents SystemStatusResponse.data_dir and the per-provider integ
 });
 
 test("Work contracts expose positive nullable display numbers", () => {
-  for (const path of [
-    "contracts/jsonschema/owl-v1/work-summary.json",
-    "contracts/jsonschema/owl-v1/work-detail.json",
-  ]) {
-    const schema = readJson(path);
-    assert.ok(schema.required.includes("display_number"), path);
-    assert.deepEqual(schema.properties.display_number, { type: ["integer", "null"], minimum: 1 }, path);
+  for (const name of ["WorkSummary", "WorkDetail"]) {
+    const schema = schemas[name];
+    assert.ok(schema.required.includes("display_number"), name);
+    assert.deepEqual(schema.properties.display_number, { anyOf: [{ type: "integer", minimum: 1 }, { type: "null" }] }, name);
   }
 
   for (const header of ["    WorkSummary:", "    WorkDetail:"]) {
@@ -123,7 +116,7 @@ test("Work contracts expose positive nullable display numbers", () => {
 });
 
 test("WorkView contract lists goal shortfalls as an optional array", () => {
-  const schema = readJson("contracts/jsonschema/owl-v1/work-view.json");
+  const schema = schemas.WorkView;
   assert.equal(schema.properties.goal_shortfalls.type, "array");
   assert.equal(schema.required.includes("goal_shortfalls"), false);
   assert.deepEqual(schema.properties.goal_shortfalls.items.properties.source.enum, ["worker", "reviewer", "final_check"]);

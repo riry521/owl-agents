@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import ts from 'typescript';
 
 import { repoRoot } from '../helpers/paths.mjs';
+const apiErrorKeys = await import('../../apps/web/lib/api-error-keys.mjs');
 const webRequire = createRequire(join(repoRoot, 'apps/web/package.json'));
 const React = webRequire('react');
 const { renderToStaticMarkup } = webRequire('react-dom/server');
@@ -103,6 +104,7 @@ function renderRuleApprovals(locale, status = 'awaiting_approval', proposalValue
   const componentI18n = { useLocale: () => ({ locale, t: (key, values) => translate(locale, key, values) }) };
   const module = compileWebComponent(join(repoRoot, 'apps/web/components/RuleApprovalsView.tsx'), {
     '@/lib/api-client': componentApiClient,
+    '@/lib/api-error-keys.mjs': apiErrorKeys,
     '@/lib/i18n': componentI18n,
     '@/lib/view-loader': componentViewLoader,
   });

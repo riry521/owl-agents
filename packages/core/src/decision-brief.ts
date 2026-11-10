@@ -693,10 +693,7 @@ export function reviewBudgetReason(budget: { readonly attempts: number; readonly
 
 export type RemakeLimitReason =
   | "lineage_review_attempts"
-  | "lineage_worker_runs"
-  | "non_functional_remakes"
-  | "base_sync_lineage_review_attempts"
-  | "base_sync_lineage_worker_runs";
+  | "lineage_worker_runs";
 
 export interface RemakeLimitBriefInput {
   readonly taskTitle: string;
@@ -709,8 +706,6 @@ export interface RemakeLimitBriefInput {
     readonly base_sync_generations: number;
     readonly base_sync_review_attempts: number;
     readonly base_sync_worker_runs: number;
-    readonly non_functional_streak: number;
-    readonly last_streak_paths: readonly string[];
     readonly history: readonly {
       readonly title: string;
       readonly generation: number;
@@ -725,9 +720,6 @@ export interface RemakeLimitBriefInput {
   readonly settings: {
     readonly lineage_review_attempts: number;
     readonly lineage_worker_runs: number;
-    readonly non_functional_remakes: number;
-    readonly base_sync_lineage_review_attempts: number;
-    readonly base_sync_lineage_worker_runs: number;
   };
 }
 
@@ -736,16 +728,10 @@ const REMAKE_TEXT = {
     stopped: (title: string) => `「${title}」の作り直しが上限に達したため、Core が新しい Task を作らずに止めました。`,
     lineage_review_attempts: (x: number, limit: number, g: number) => `Reviewer の判定が系統通算 ${x}/${limit} 回に達しました（${g} 世代）。`,
     lineage_worker_runs: (x: number, limit: number, g: number) => `Worker の起動が系統通算 ${x}/${limit} 回に達しました（${g} 世代）。`,
-    non_functional_remakes: (x: number, limit: number, paths: string) => `機能コードを変えない作り直しが ${x}/${limit} 回続きました。変えたのは検証パスだけです: ${paths}`,
-    base_sync_lineage_review_attempts: (x: number, limit: number, g: number) => `ベースブランチの取り込みだけを行う作り直しで、Reviewer の判定が系統通算 ${x}/${limit} 回に達しました（取り込み専用 ${g} 世代）。`,
-    base_sync_lineage_worker_runs: (x: number, limit: number, g: number) => `ベースブランチの取り込みだけを行う作り直しで、Worker の起動が系統通算 ${x}/${limit} 回に達しました（取り込み専用 ${g} 世代）。`,
-    baseSyncTotals: (u: RemakeLimitBriefInput["usage"], s: RemakeLimitBriefInput["settings"]) =>
-      `取り込み専用の通算（別枠）: Reviewer 判定 ${u.base_sync_review_attempts}/${s.base_sync_lineage_review_attempts}、Worker 起動 ${u.base_sync_worker_runs}/${s.base_sync_lineage_worker_runs}（${u.base_sync_generations} 世代）`,
     historyBaseSync: (n: number, reviews: number, runs: number) => ` / うち取り込み専用 ${n} 世代: Reviewer 判定 ${reviews} 回 / Worker 起動 ${runs} 回`,
-    mainPrefix: (g: number) => `本題の通算（${g} 世代）: `,
     totalsPrefix: "通算: ",
     totals: (u: RemakeLimitBriefInput["usage"], s: RemakeLimitBriefInput["settings"]) =>
-      `Reviewer 判定 ${u.review_attempts}/${s.lineage_review_attempts}、Worker 起動 ${u.worker_runs}/${s.lineage_worker_runs}、機能コードを変えない作り直し 連続 ${u.non_functional_streak}/${s.non_functional_remakes}`,
+      `Reviewer 判定 ${u.review_attempts}/${s.lineage_review_attempts}、Worker 起動 ${u.worker_runs}/${s.lineage_worker_runs}`,
     question: (title: string) => `「${title}」をどうしますか。`,
     currentState: "作り直しを止めて Owner の判断を待っています。上限は設定 remake_limits で変えられます。",
     noHistory: "系統の履歴はありません。",
@@ -757,16 +743,10 @@ const REMAKE_TEXT = {
     stopped: (title: string) => `Core stopped the remakes of "${title}" without creating a new Task because a limit was reached.`,
     lineage_review_attempts: (x: number, limit: number, g: number) => `Reviewer verdicts across the lineage reached ${x}/${limit} (${g} generations).`,
     lineage_worker_runs: (x: number, limit: number, g: number) => `Worker launches across the lineage reached ${x}/${limit} (${g} generations).`,
-    non_functional_remakes: (x: number, limit: number, paths: string) => `${x}/${limit} consecutive remakes changed no functional code. Only verification paths changed: ${paths}`,
-    base_sync_lineage_review_attempts: (x: number, limit: number, g: number) => `Reviewer verdicts on remakes that only merge the base branch reached ${x}/${limit} across the lineage (${g} base-sync-only generations).`,
-    base_sync_lineage_worker_runs: (x: number, limit: number, g: number) => `Worker launches on remakes that only merge the base branch reached ${x}/${limit} across the lineage (${g} base-sync-only generations).`,
-    baseSyncTotals: (u: RemakeLimitBriefInput["usage"], s: RemakeLimitBriefInput["settings"]) =>
-      `Base-sync-only totals (separate limit): Reviewer verdicts ${u.base_sync_review_attempts}/${s.base_sync_lineage_review_attempts}, Worker launches ${u.base_sync_worker_runs}/${s.base_sync_lineage_worker_runs} (${u.base_sync_generations} generations)`,
     historyBaseSync: (n: number, reviews: number, runs: number) => ` / of which ${n} base-sync-only generations: ${reviews} Reviewer verdicts / ${runs} Worker launches`,
-    mainPrefix: (g: number) => `Main work totals (${g} generations): `,
     totalsPrefix: "Totals: ",
     totals: (u: RemakeLimitBriefInput["usage"], s: RemakeLimitBriefInput["settings"]) =>
-      `Reviewer verdicts ${u.review_attempts}/${s.lineage_review_attempts}, Worker launches ${u.worker_runs}/${s.lineage_worker_runs}, consecutive non-functional remakes ${u.non_functional_streak}/${s.non_functional_remakes}`,
+      `Reviewer verdicts ${u.review_attempts}/${s.lineage_review_attempts}, Worker launches ${u.worker_runs}/${s.lineage_worker_runs}`,
     question: (title: string) => `What should happen to "${title}"?`,
     currentState: "Remaking is stopped and waiting for the Owner. The limits can be changed in the remake_limits setting.",
     noHistory: "No lineage history.",
@@ -780,17 +760,10 @@ const REMAKE_TEXT = {
 export function remakeLimitBrief(input: RemakeLimitBriefInput, language: OwnerLanguage): DecisionBrief {
   const t = REMAKE_TEXT[language];
   const { usage, settings } = input;
-  const baseSyncShown = usage.base_sync_generations > 0 || input.reason.startsWith("base_sync_");
   const detail =
     input.reason === "lineage_review_attempts"
-      ? t.lineage_review_attempts(usage.review_attempts, settings.lineage_review_attempts, usage.main_generations)
-      : input.reason === "lineage_worker_runs"
-        ? t.lineage_worker_runs(usage.worker_runs, settings.lineage_worker_runs, usage.main_generations)
-        : input.reason === "base_sync_lineage_review_attempts"
-          ? t.base_sync_lineage_review_attempts(usage.base_sync_review_attempts, settings.base_sync_lineage_review_attempts, usage.base_sync_generations)
-          : input.reason === "base_sync_lineage_worker_runs"
-            ? t.base_sync_lineage_worker_runs(usage.base_sync_worker_runs, settings.base_sync_lineage_worker_runs, usage.base_sync_generations)
-            : t.non_functional_remakes(usage.non_functional_streak, settings.non_functional_remakes, usage.last_streak_paths.join(", "));
+      ? t.lineage_review_attempts(usage.review_attempts, settings.lineage_review_attempts, usage.generations)
+      : t.lineage_worker_runs(usage.worker_runs, settings.lineage_worker_runs, usage.generations);
   const kindText = (kind: RemakeLimitBriefInput["usage"]["history"][number]["kind"]): string =>
     kind === "functional" ? t.kinds.functional : kind === "non_functional" ? t.kinds.non_functional : t.kinds.other;
   const tried =
@@ -798,7 +771,7 @@ export function remakeLimitBrief(input: RemakeLimitBriefInput, language: OwnerLa
       ? t.noHistory
       : usage.history.map((line) => t.historyLine(line.generation, line.title, line.review_attempts, line.worker_runs, kindText(line.kind)) + (line.base_sync_generations > 0 ? t.historyBaseSync(line.base_sync_generations, line.base_sync_review_attempts, line.base_sync_worker_runs) : "")).join("\n");
   return {
-    reason: [t.stopped(input.taskTitle), detail, (baseSyncShown ? t.mainPrefix(usage.main_generations) : t.totalsPrefix) + t.totals(usage, settings), ...(baseSyncShown ? [t.baseSyncTotals(usage, settings)] : [])].join("\n"),
+    reason: [t.stopped(input.taskTitle), detail, t.totalsPrefix + t.totals(usage, settings)].join("\n"),
     question: t.question(input.taskTitle),
     current_state: t.currentState,
     tried,

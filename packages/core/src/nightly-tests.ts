@@ -1,9 +1,9 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
-import { reapProcessGroup } from "@owl/shared";
+import { createOutputCapture, runProcess } from "@owl/shared";
 import type { TestCommandResult } from "./test-runs";
 
 const execFileAsync = promisify(execFile);
@@ -179,71 +179,38 @@ export function createNightlyTestExecutor(deps: { readonly workspaceRoot: string
   };
 }
 
-function runNightlyCommand(project: NightlyProject, path: string, baseCommit: string, timeoutMs: number, signal: AbortSignal): Promise<NightlyExecution> {
-  {
-    const [command, ...args] = project.argv;
-    return new Promise<NightlyExecution>((resolve) => {
-      let tail = "";
-      let stdout = "";
-      let timedOut = false;
-      let aborted = false;
-      let settled = false;
-      const child = spawn(command ?? "", args, {
-        cwd: path,
-        env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
-        shell: false,
-        detached: true,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
-      const collect = (chunk: Buffer, isStdout: boolean) => {
-        const text = chunk.toString("utf8");
-        if (isStdout) stdout += text;
-        tail = (tail + text).slice(-OUTPUT_TAIL_CHARS);
-      };
-      child.stdout.on("data", (chunk: Buffer) => collect(chunk, true));
-      child.stderr.on("data", (chunk: Buffer) => collect(chunk, false));
-      const killGroup = (signalName: NodeJS.Signals) => {
-        try {
-          if (child.pid !== undefined) process.kill(-child.pid, signalName);
-        } catch {
-          // already gone
-        }
-      };
-      let killTimer: ReturnType<typeof setTimeout> | null = null;
-      const stopChild = () => {
-        killGroup("SIGTERM");
-        killTimer = setTimeout(() => killGroup("SIGKILL"), KILL_GRACE_MS);
-      };
-      const timer = setTimeout(() => { timedOut = true; stopChild(); }, timeoutMs);
-      const onAbort = () => { aborted = true; stopChild(); };
-      if (signal.aborted) onAbort();
-      else signal.addEventListener("abort", onAbort, { once: true });
-      const finish = (result: NightlyExecution) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (killTimer !== null) clearTimeout(killTimer);
-        signal.removeEventListener("abort", onAbort);
-        resolve(result);
-      };
-      child.on("error", (error) => finish(nightlyError(`Could not start the test command: ${error.message}`, { base_commit: baseCommit, output_tail: tail })));
-      child.on("close", (code) => {
-        if (timedOut || aborted) {
-          finish(nightlyError(timedOut ? `Timed out after ${timeoutMs} ms` : "aborted", { base_commit: baseCommit, timed_out: timedOut, output_tail: tail }));
-          return;
-        }
-        finish({
-          status: "completed",
-          base_commit: baseCommit,
-          exit_code: code,
-          timed_out: false,
-          error: null,
-          failures: parseTapFailures(stdout, path),
-          output_tail: tail,
-        });
-      });
-    });
+async function runNightlyCommand(project: NightlyProject, path: string, baseCommit: string, timeoutMs: number, signal: AbortSignal): Promise<NightlyExecution> {
+  const [command, ...args] = project.argv;
+  let tail = "";
+  let stdout = "";
+  const run = await runProcess(command ?? "", args, {
+    cwd: path,
+    env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "" },
+    timeoutMs,
+    killGraceMs: KILL_GRACE_MS,
+    cancelKillOnClose: true,
+    groupOnly: true,
+    signal,
+    onData: (stream, chunk) => {
+      const text = chunk.toString("utf8");
+      if (stream === "stdout") stdout += text;
+      tail = (tail + text).slice(-OUTPUT_TAIL_CHARS);
+    },
+  });
+  if (run.spawnThrew) throw new Error(run.error);
+  if (run.error !== undefined) return nightlyError(`Could not start the test command: ${run.error}`, { base_commit: baseCommit, output_tail: tail });
+  if (run.timedOut || run.aborted) {
+    return nightlyError(run.timedOut ? `Timed out after ${timeoutMs} ms` : "aborted", { base_commit: baseCommit, timed_out: run.timedOut, output_tail: tail });
   }
+  return {
+    status: "completed",
+    base_commit: baseCommit,
+    exit_code: run.code,
+    timed_out: false,
+    error: null,
+    failures: parseTapFailures(stdout, path),
+    output_tail: tail,
+  };
 }
 
 /**
@@ -272,51 +239,32 @@ export async function withDetachedWorktree<T>(input: { readonly repo: string; re
  * kept apart, each cut to outputLimitBytes (and flagged *_truncated). With `input`, it is written to stdin and stdin is closed. A timeout or abort stops the group
  * (SIGTERM, then SIGKILL after the grace period); a timeout sets timed_out.
  */
-export function spawnTestCommand(argv: readonly string[], cwd: string, env: Record<string, string>, timeoutMs: number, outputLimitBytes: number, signal?: AbortSignal, onOutput?: () => void, input?: string): Promise<TestCommandResult> {
-  return new Promise<TestCommandResult>((resolve) => {
-    const startedAt = Date.now();
-    const [command, ...args] = argv;
-    const out = { stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
-    const truncated = { stdout: false, stderr: false };
-    let timedOut = false;
-    let settled = false;
-    const child = spawn(command ?? "", args, { cwd, env, shell: false, detached: true, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
-    const collect = (key: "stdout" | "stderr") => (chunk: Buffer) => {
-      onOutput?.();
-      if (out[key].length + chunk.length > outputLimitBytes) truncated[key] = true;
-      if (out[key].length < outputLimitBytes) out[key] = Buffer.concat([out[key], chunk]).subarray(0, outputLimitBytes);
-    };
-    if (input !== undefined) {
-      // A process that exits without reading its stdin ends the pipe with EPIPE; the exit code already says what happened.
-      child.stdin?.on("error", () => undefined);
-      child.stdin?.end(input, "utf8");
-    }
-    child.stdout?.on("data", collect("stdout"));
-    child.stderr?.on("data", collect("stderr"));
-    const stop = () => { void reapProcessGroup(child.pid, { graceMs: KILL_GRACE_MS }); };
-    const timer = setTimeout(() => { timedOut = true; stop(); }, timeoutMs);
-    if (signal?.aborted) stop();
-    else signal?.addEventListener("abort", stop, { once: true });
-    const finish = (code: number | null, error?: string) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", stop);
-      stop();
-      resolve({
-        exit_code: code,
-        timed_out: timedOut,
-        stdout: out.stdout.toString("utf8"),
-        stderr: out.stderr.toString("utf8"),
-        duration_ms: Date.now() - startedAt,
-        stdout_truncated: truncated.stdout,
-        stderr_truncated: truncated.stderr,
-        ...(error === undefined ? {} : { error }),
-      });
-    };
-    child.on("error", (spawnError) => finish(null, spawnError.message));
-    child.on("close", (code) => finish(code));
+export async function spawnTestCommand(argv: readonly string[], cwd: string, env: Record<string, string>, timeoutMs: number, outputLimitBytes: number, signal?: AbortSignal, onOutput?: () => void, input?: string): Promise<TestCommandResult> {
+  const startedAt = Date.now();
+  const [command, ...args] = argv;
+  const out = { stdout: createOutputCapture(outputLimitBytes, "head"), stderr: createOutputCapture(outputLimitBytes, "head") };
+  const run = await runProcess(command ?? "", args, {
+    cwd,
+    env,
+    timeoutMs,
+    killGraceMs: KILL_GRACE_MS,
+    reapOnClose: true,
+    stopMode: "reap",
+    ...(input !== undefined ? { input } : {}),
+    ...(signal !== undefined ? { signal } : {}),
+    onData: (stream, chunk) => { onOutput?.(); out[stream].push(chunk); },
   });
+  if (run.spawnThrew) throw new Error(run.error);
+  return {
+    exit_code: run.code,
+    timed_out: run.timedOut,
+    stdout: out.stdout.text(),
+    stderr: out.stderr.text(),
+    duration_ms: Date.now() - startedAt,
+    stdout_truncated: out.stdout.truncated(),
+    stderr_truncated: out.stderr.truncated(),
+    ...(run.error === undefined ? {} : { error: run.error }),
+  };
 }
 
 export interface NightlyRunSummary {

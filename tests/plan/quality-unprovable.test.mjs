@@ -45,6 +45,11 @@ test("external_state_comparison: a copied log or a sandbox log does not exempt a
   assert.deepEqual(codes([item([crit(1, "本番 data/ のコピーを作り、本番 data/ が前後で変わらないことを確認する")])]), ["external_state_comparison"]);
 });
 
+test("external_state_comparison: a goal criterion is not flagged, a required one is", () => {
+  assert.deepEqual(codes([item([ok, { ...external, requirement: "goal" }])]), []);
+  assert.deepEqual(codes([item([ok, { ...external, requirement: "required" }])]), ["external_state_comparison"]);
+});
+
 test("settings drive the verdict and are validated", () => {
   const plan = [item([ok, external])];
   assert.deepEqual(codes(plan, { ...S, external_state_patterns: [] }), []);

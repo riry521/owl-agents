@@ -231,7 +231,7 @@ test("Advisor runtime passes the Owner's statement as recall_query every turn", 
   };
   const runtime = new AdvisorSessionRuntime({
     db, sessionManager: new AdvisorSessionManager(db), memoryInjector,
-    memorySaver: { saveCompactionSummary: async () => ({ path: null, captured: false }) },
+    conversationLog: { writer: { write: async () => ({ path: null }) } },
     providerClient: { createSession }, owlRoot: root,
     git: { resolveAdvisorSessionDirectory: async () => ({ kind: "direct", cwd: root }) },
     getAdvisorSettings: () => ({ providerId: "anthropic", harnessId: "claude", model: "claude-test", systemPrompt: "Advisor" }),

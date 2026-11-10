@@ -518,7 +518,7 @@ test("Core's briefs do not promise where the Owner's words go", () => {
       briefs.push(prerequisiteExpiredBrief({ taskTitle: "T", kind, detail: "d", reason: "r", conditions: ["c"], taskId: "T1" }, language));
     }
     const usage = { generations: 2, main_generations: 2, review_attempts: 3, worker_runs: 3, base_sync_generations: 0, base_sync_review_attempts: 0, base_sync_worker_runs: 0, non_functional_streak: 2, last_streak_paths: ["a.md"], history: [] };
-    const settings = { lineage_review_attempts: 3, lineage_worker_runs: 3, non_functional_remakes: 2, base_sync_lineage_review_attempts: 3, base_sync_lineage_worker_runs: 3 };
+    const settings = { lineage_review_attempts: 3, lineage_worker_runs: 3 };
     for (const reason of ["lineage_review_attempts", "lineage_worker_runs", "non_functional_remakes", "base_sync_lineage_review_attempts", "base_sync_lineage_worker_runs"]) {
       briefs.push(remakeLimitBrief({ taskTitle: "T", reason, usage, settings }, language));
     }

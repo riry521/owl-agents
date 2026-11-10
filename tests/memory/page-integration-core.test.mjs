@@ -39,16 +39,6 @@ test("a manual page integration is recorded as a librarian run and found by its 
   assert.equal(stored.report.skipped, undefined);
 });
 
-test("a run is recorded as skipped while a retag is running", async (t) => {
-  const { core } = await setup(t, "pages");
-  core.retagRunning = true;
-  const run = await core.integrateMemoryPages(manual);
-  core.retagRunning = false;
-  const stored = core.getCurationRun(run.id);
-  assert.equal(stored.report.skipped, "retag_running");
-  assert.match(stored.summary, /skipped: retag_running/u);
-});
-
 test("a manual run is recorded as skipped while another librarian run is active; nightly queues behind it", async (t) => {
   const { core } = await setup(t, "pages");
   let release;

@@ -15,7 +15,7 @@ export function designerStateAtCreation(
 }
 
 /**
- * A retried Task after its revision is applied. null keeps the state row 20 left
+ * A retried Task after its revision is applied. null keeps the state the Manager replan (task.replanned) left
  * (same design type and no new designation).
  */
 export function designerStateAfterRetry(

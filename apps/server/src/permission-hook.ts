@@ -1,9 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 
 import { GUARD_COMMAND_KEYS, GUARD_NAMED_TOOLS, GUARD_PATH_KEYS, guardChecksToolCall, isReadOnlyAgentRole, readOnlyToolAllowed } from "../../../packages/shared/dist/guard-inputs.js";
 import { GUARD_TOKEN_FILE_ENV } from "../../../packages/shared/dist/guard-token.js";
+import { guardConfig, guardHasToken, guardRequest, trimOneSlash } from "./guard-client.js";
 import { isResearchSubagentType, researchToolDecision } from "../../../packages/shared/dist/research-subagent.js";
 
 interface HookInput {
@@ -316,20 +316,12 @@ async function main(): Promise<void> {
   // match, so it runs without asking the guard (MCP and web tools mostly).
   if (!guardChecksToolCall(input.tool_name, input.tool_input)) return;
 
-  const role = process.env.OWL_AGENT_ROLE;
-  const apiBase = process.env.OWL_GUARD_API_BASE;
-  const tokenFile = process.env[GUARD_TOKEN_FILE_ENV];
-  if (!role || !apiBase || !tokenFile || !isAbsolute(tokenFile)) {
+  const guard = guardConfig({ roleVar: "OWL_AGENT_ROLE", requireRole: true, absoluteTokenFile: true });
+  if (!guard) {
     deny("Tool execution was denied because the Owl guard configuration is unavailable.");
     return;
   }
-  let guardToken: string;
-  try {
-    guardToken = (await readFile(tokenFile, "utf8")).trim();
-  } catch {
-    guardToken = "";
-  }
-  if (guardToken.length === 0) {
+  if (!await guardHasToken(guard)) {
     deny("Tool execution was denied because the Owl guard token could not be read.");
     return;
   }
@@ -341,26 +333,22 @@ async function main(): Promise<void> {
     return;
   }
 
-  const endpoint = `${apiBase.replace(/\/$/u, "")}/api/v1/guard/check`;
   try {
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${guardToken}`,
-      },
+    const { response } = await guardRequest(guard, "/api/v1/guard/check", {
+      normalizeBase: trimOneSlash,
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({
         request_id: randomUUID(),
         idempotency_key: randomUUID(),
         expected_version: 0,
         payload: {
-          role,
+          role: guard.role,
           tool_name: input.tool_name,
           tool_input: input.tool_input,
           cwd,
         },
       }),
-      signal: AbortSignal.timeout(3000),
+      timeoutMs: 3000,
     });
     if (!response.ok) {
       deny(`Tool execution was denied because Owl guard returned HTTP ${response.status}.`);

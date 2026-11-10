@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { open, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { isSeq, parseDocument, type Document } from "yaml";
+import { isPidAlive } from "@owl/shared";
 
 const CONFIG_FILE_NAME = "serena_config.yml";
 const PROJECT_FILE = join(".serena", "project.yml");
@@ -47,15 +48,6 @@ const processLanes = new Map<string, Promise<unknown>>();
 
 const exists = (path: string) => stat(path).then(() => true, () => false);
 
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
 const readOwner = (lockPath: string) => readFile(lockPath, "utf8").then((text) => text, () => null);
 
 /** Runs `operation` while holding `lockPath`; the file holds `<pid>:<token>` of its owner. */
@@ -96,7 +88,7 @@ async function reclaimDeadLock(lockPath: string): Promise<boolean> {
   if (seen === null) return true;
   const pid = Number(seen.split(":")[0]);
   const dead = Number.isInteger(pid) && pid > 0
-    ? !pidAlive(pid)
+    ? !isPidAlive(pid, { epermAlive: true })
     : await stat(lockPath).then((info) => Date.now() - info.mtimeMs > LOCK_STALE_MS, () => false);
   if (!dead) return false;
   const guard = `${lockPath}.reclaim`;

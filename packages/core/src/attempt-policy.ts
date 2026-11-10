@@ -26,7 +26,7 @@ export type AttemptReason =
   | "crash" | "crash_threshold" | "reviewer_crash" | "reviewer_crash_threshold" | "reviewer_output_invalid"
   | "verification_failed" | "verification_exhausted"
   | "review_fix_required" | "review_same_spot_repeated" | "review_replan_required" | "review_budget_reached" | "review_budget_exceeded"
-  | "lineage_budget_exhausted" | "base_sync_lineage_budget_exhausted"
+  | "lineage_budget_exhausted"
   | "design_escalated_to_lead" | "lead_rejections_exhausted" | "design_blocked"
   | "worker_replan_requested" | "worker_question" | "acceptance_defect" | "acceptance_defect_decision"
   | "external_blocker" | "external_blocker_limit" | "partial_limit" | "partial_repeated"
@@ -61,11 +61,9 @@ export function attemptAction(next: TaskState, managerTrigger: boolean, reason: 
   }
 }
 
-/** rows 6-10: 同じ error_key の失敗がこの回数に達したら再試行しない。 */
-export const DETERMINISTIC_SAME_ERROR_LIMIT = 2;
-/** rows 6-10: 失敗の合計がこの回数に達したら再試行しない。 */
+/** 決定的な失敗とクラッシュ: 失敗の合計がこの回数に達したら再試行しない。 */
 export const DETERMINISTIC_FAILURE_LIMIT = 3;
-/** row 29: Reviewer 自身の失敗がこの回数に達したら Manager へ。 */
+/** Reviewer の失敗: Reviewer 自身の失敗がこの回数に達したら Manager へ。 */
 export const REVIEWER_FAILURE_LIMIT = 3;
 
 /** evaluate が読む Task の値。TaskRow をそのまま渡せる。 */
@@ -77,30 +75,27 @@ export type AttemptTaskSnapshot = Readonly<Pick<TaskRow,
   | "review_rejections" | "fixer_escalated_rejections" | "design_stop_json"
 >>;
 
-/** row 18d / 18e: 同じ系譜の他の Task の回数。 */
+/** 系譜上限: 同じ系譜の他の Task の回数。 */
 export interface AttemptLineageObservation {
   readonly otherReviewAttempts: number;
-  readonly otherBaseSyncReviewAttempts: number;
   readonly generations: number;
   readonly otherLeadRejections?: number;
 }
 
-/** row 18d / 18e のしきい値（remake_limits）。 */
+/** 系譜上限のしきい値（remake_limits）。 */
 export interface AttemptLineageLimits {
   readonly reviewAttempts: number;
-  readonly baseSyncReviewAttempts: number;
-  /** undefined なら row 18e を飛ばす。 */
+  /** undefined なら lead 却下上限の判定を飛ばす。 */
   readonly leadReviewRejections?: number;
 }
 
 export interface AttemptPolicyConfig {
   readonly transientRetryLimit: number;
-  readonly deterministicSameErrorLimit: number;
   readonly deterministicFailureLimit: number;
   readonly reviewerFailureLimit: number;
   readonly reviewLimits: ReviewLimitSettings;
   readonly reviewFocus: ReviewFocusSettings;
-  /** null なら row 18d と 18e を飛ばす。 */
+  /** null なら系譜上限の判定を両方飛ばす。 */
   readonly lineageLimits: AttemptLineageLimits | null;
   readonly noProgressLimit: number;
   readonly externalBlockerLimit: number;
@@ -113,7 +108,6 @@ export interface AttemptPolicyConfig {
 
 export const DEFAULT_ATTEMPT_POLICY_CONFIG: AttemptPolicyConfig = {
   transientRetryLimit: TRANSIENT_RETRY_LIMIT,
-  deterministicSameErrorLimit: DETERMINISTIC_SAME_ERROR_LIMIT,
   deterministicFailureLimit: DETERMINISTIC_FAILURE_LIMIT,
   reviewerFailureLimit: REVIEWER_FAILURE_LIMIT,
   reviewLimits: DEFAULT_REVIEW_LIMIT_SETTINGS,
@@ -133,7 +127,7 @@ export interface DesignStop {
   readonly limit: number | null;
 }
 
-/** rows 15/16 と row 11（merge あり）: Core Git の統合結果。 */
+/** review.passed のあと、または review なしの検証合格（merge あり）での Core Git の統合結果。 */
 export type IntegrationMerge =
   | { readonly outcome: "merged"; readonly worktreeRetained: boolean }
   | { readonly outcome: "commit_failure" | "conflict"; readonly taskBranch: string; readonly workBranch: string };
@@ -190,7 +184,7 @@ export type AttemptTaskObservation =
       readonly merge: IntegrationMerge;
       readonly successReason: "review_passed" | "verified_without_review";
       readonly successSideEffects: readonly string[];
-      /** review.passed（rows 15/16）だけ true。 */
+      /** review.passed のときだけ true。 */
       readonly countReview: boolean;
     }
   | { readonly kind: "work_sync_conflict"; readonly task: AttemptTaskSnapshot; readonly taskBranch: string; readonly workBranch: string }
@@ -333,20 +327,12 @@ function evaluateReviewFailed(o: Extract<AttemptTaskObservation, { kind: "review
 
   // Why not fill undefined limits with ??: a partial lineage (tests/remake/limits.test.mjs) compares against undefined and never stops, and that must stay.
   if (o.lineage && c.lineageLimits) {
-    const mainAttempts = o.lineage.otherReviewAttempts + totalAttempts - baseSyncAttempts;
+    const mainAttempts = o.lineage.otherReviewAttempts + totalAttempts;
     if (mainAttempts >= c.lineageLimits.reviewAttempts) {
       // Why failed + trigger instead of the Decision: the first budget stop is handed to the Manager once (auto recovery kind budget_exhausted).
       return decide(task, c.autoRecovery.budget ? "failed" : "judgement_waiting", "lineage_budget_exhausted", c.autoRecovery.budget ? trigger : owner, c.autoRecovery.budget, { ...counted, paused_from: null }, {
         lineageBudget: { reason: "lineage_review_attempts", attempts: mainAttempts, limit: c.lineageLimits.reviewAttempts, generations: o.lineage.generations },
       });
-    }
-    if (baseSync) {
-      const lineageBaseSync = o.lineage.otherBaseSyncReviewAttempts + baseSyncAttempts;
-      if (lineageBaseSync >= c.lineageLimits.baseSyncReviewAttempts) {
-        return decide(task, "judgement_waiting", "base_sync_lineage_budget_exhausted", owner, false, { ...counted, paused_from: null }, {
-          lineageBudget: { reason: "base_sync_lineage_review_attempts", attempts: lineageBaseSync, limit: c.lineageLimits.baseSyncReviewAttempts, generations: o.lineage.generations },
-        });
-      }
     }
   }
   const leadLimit = c.lineageLimits?.leadReviewRejections;
@@ -457,7 +443,7 @@ export function evaluate(observation: AttemptObservation, c: AttemptPolicyConfig
       // A partial that asks someone for something keeps this flow but never counts as a failure.
       const counters = p ? { same: o.task.same_error_count, total: o.task.failure_count } : deterministicCounters(o.task, o.errorKey);
       const base: AttemptRowPatch = { ...(p ? {} : failureBase(o.task, o.errorKey, counters)), next_attempt_at: null };
-      const withinLimits = counters.same < c.deterministicSameErrorLimit && counters.total < c.deterministicFailureLimit;
+      const withinLimits = counters.total < c.deterministicFailureLimit;
       if (!o.retryAllowed && c.autoRecovery.outputFormat && isReportFormatInvalidErrorKey(o.errorKey)) {
         return decide(o.task, "ready", "output_format_recovery", ["deterministic_retry_scheduled"], false, base);
       }
@@ -473,7 +459,7 @@ export function evaluate(observation: AttemptObservation, c: AttemptPolicyConfig
       const o = observation;
       const counters = deterministicCounters(o.task, o.errorKey);
       const base: AttemptRowPatch = { ...failureBase(o.task, o.errorKey, counters), next_attempt_at: null };
-      if (counters.same >= c.deterministicSameErrorLimit || counters.total >= c.deterministicFailureLimit) {
+      if (counters.total >= c.deterministicFailureLimit) {
         return decide(o.task, "failed", "crash_threshold", ["manager_trigger_required"], true, base);
       }
       return decide(o.task, "ready", "crash", ["deterministic_retry_scheduled"], false, base);

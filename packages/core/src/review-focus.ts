@@ -5,7 +5,15 @@ import {
   type ReviewFocusSettings,
 } from "../../shared/dist/review-focus-settings.js";
 import type { SettingsReader } from "./owner-language";
+import { readSetting, type SettingReadSpec } from "./settings-store";
 import type { LineageReader } from "./task-lineage";
+
+export const REVIEW_FOCUS_SETTING: SettingReadSpec<ReviewFocusSettings> = {
+  key: REVIEW_FOCUS_SETTINGS_KEY,
+  defaults: DEFAULT_REVIEW_FOCUS_SETTINGS,
+  read: readReviewFocusSettings,
+  readFailure: "Could not read review focus settings; using defaults.",
+};
 
 /** One finding reduced to where it points. line is null when the Reviewer gave none. */
 export interface ReviewSpot {
@@ -16,16 +24,7 @@ export interface ReviewSpot {
 
 /** The stored review focus settings; missing or invalid values fall back to the defaults. A failed read never blocks a transition. */
 export function reviewFocusSettings(reader: SettingsReader): ReviewFocusSettings {
-  try {
-    const row = reader.get<{ value_json: string }>("SELECT value_json FROM settings WHERE key = ?", REVIEW_FOCUS_SETTINGS_KEY);
-    if (!row) return DEFAULT_REVIEW_FOCUS_SETTINGS;
-    return readReviewFocusSettings(JSON.parse(row.value_json) as unknown, (message) => {
-      console.warn(`[owl-core] ${message}`);
-    });
-  } catch (error) {
-    console.warn("[owl-core] Could not read review focus settings; using defaults.", error);
-    return DEFAULT_REVIEW_FOCUS_SETTINGS;
-  }
+  return readSetting(reader, REVIEW_FOCUS_SETTING);
 }
 
 /** The major findings that name a file (minor ones and findings without a file point nowhere). */

@@ -5,7 +5,7 @@ import { ApiRequestError, createModelPreset, deleteModelPreset, getModelPresets,
 import type { ModelPreset, RoleModelSetting } from '@/lib/types';
 import { presetMatchesSettings, presetToRoleInputs } from '@/lib/model-presets';
 import { roleDisplayName } from '@/lib/format';
-import { humanizeError } from '@/lib/settings-errors';
+import { apiErrorKeyForCode, humanizeSettingsError, SETTINGS_ERROR_KEYS } from '@/lib/api-error-keys.mjs';
 import { useLocale, type Locale, type TFunction } from '@/lib/i18n';
 
 /** How long a two-tap (overwrite/delete) confirm stays armed before reverting. */
@@ -16,34 +16,37 @@ function isStalePresetError(error: unknown): boolean {
   return error instanceof ApiRequestError && (error.code === 'version_conflict' || error.code === 'model_preset_not_found');
 }
 
-/** A rejected role setting, named after the role when the server says which one. */
-function humanizeRoleError(error: ApiRequestError, t: TFunction, locale: Locale): string {
+/**
+ * Turns a preset/apply failure into text through the shared settings keys. A rejected role setting
+ * (settings.errorValidation) is named after the role when the server says which one.
+ */
+function humanizeWithRole(error: ApiRequestError, t: TFunction, locale: Locale, keys: Parameters<typeof apiErrorKeyForCode>[2]): string {
+  const key = apiErrorKeyForCode(error.message, '', keys);
   const role = error.details.role;
-  return typeof role === 'string'
-    ? `${humanizeError(error, t)}${t('settings.presets.errorApplyRoleSuffix', { role: roleDisplayName(role, locale) })}`
-    : humanizeError(error, t);
+  return key === SETTINGS_ERROR_KEYS.validation && typeof role === 'string'
+    ? `${t(key)}${t('settings.presets.errorApplyRoleSuffix', { role: roleDisplayName(role, locale) })}`
+    : t(key);
 }
 
 /** Errors from the model-preset commands themselves (create/rename/overwrite/delete). */
 function humanizePresetError(error: unknown, t: TFunction, locale: Locale): string {
-  if (error instanceof ApiRequestError) {
-    if (isStalePresetError(error)) return t('settings.presets.errorStale');
-    if (error.code === 'validation_error') {
-      if (error.details.field === 'presets') return t('settings.presets.errorLimit');
-      if (error.details.field === 'roles') return humanizeRoleError(error, t, locale);
-      return t('settings.presets.errorValidation');
-    }
-  }
-  return humanizeError(error, t);
+  if (!(error instanceof ApiRequestError)) return humanizeSettingsError(error, t);
+  const field = error.details.field;
+  return humanizeWithRole(error, t, locale, {
+    ...SETTINGS_ERROR_KEYS,
+    // The preset list changed underneath us (isStalePresetError).
+    versionConflict: 'settings.presets.errorStale',
+    validation: field === 'presets' ? 'settings.presets.errorLimit'
+      : field === 'roles' ? SETTINGS_ERROR_KEYS.validation
+      : 'settings.presets.errorValidation',
+    codes: { model_preset_not_found: 'settings.presets.errorStale' },
+  });
 }
 
 /** Errors from applying a preset, which is a plain PUT /settings/models under the hood. */
 function humanizeApplyError(error: unknown, t: TFunction, locale: Locale): string {
-  if (error instanceof ApiRequestError) {
-    if (error.code === 'version_conflict') return t('settings.presets.errorVersionConflict');
-    if (error.code === 'validation_error') return humanizeRoleError(error, t, locale);
-  }
-  return humanizeError(error, t);
+  if (!(error instanceof ApiRequestError)) return humanizeSettingsError(error, t);
+  return humanizeWithRole(error, t, locale, { ...SETTINGS_ERROR_KEYS, versionConflict: 'settings.presets.errorVersionConflict' });
 }
 
 export function ModelPresetsBar({

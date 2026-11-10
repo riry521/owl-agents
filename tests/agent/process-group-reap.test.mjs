@@ -11,7 +11,7 @@ import { createCliProvider } from "../../packages/agent-runtime/dist/provider.js
 import { runExecutor } from "../../packages/core/dist/executor.js";
 import { tempDir } from "../helpers/temp.mjs";
 import { waitFor } from "../helpers/wait.mjs";
-import { isProcessGroupAlive, reapProcessGroup } from "../../packages/shared/dist/index.js";
+import { createOutputCapture, isPidAlive, isProcessGroupAlive, reapProcessGroup, runCliVersion, runProcess, signalProcessGroup } from "../../packages/shared/dist/index.js";
 
 // Fake harnesses start with `#!/usr/bin/env node`, so PATH must reach node even when the runner has none.
 const baseEnv = { PATH: process.env.PATH || dirname(process.execPath), HOME: process.env.HOME || tmpdir() };
@@ -108,4 +108,94 @@ test("an Executor run reaps group members left behind by the agent", async (t) =
     const pid = await member();
     assert.equal(await waitFor(() => !alive(pid), { timeoutMs: 8000 }), true);
   });
+});
+
+test("createOutputCapture keeps the head or the tail under the limit and never splits a UTF-8 code point", () => {
+  const head = createOutputCapture(4, "head");
+  head.push(Buffer.from("abc"));
+  head.push(Buffer.from("defg"));
+  assert.equal(head.text(), "abcd");
+  assert.equal(head.truncated(), true);
+  const tail = createOutputCapture(7, "tail");
+  tail.push(Buffer.from("あいう"));
+  assert.equal(tail.text(), "いう");
+});
+
+test("runProcess stops the whole group after the timeout and SIGKILLs a member that ignores SIGTERM", async (t) => {
+  let memberPid = 0;
+  const script = "const {spawn}=require('node:child_process');const c=spawn('sh',['-c','trap \"\" TERM; exec sleep 60'],{stdio:'ignore'});console.log(c.pid);setInterval(()=>{},1000)";
+  const result = await runProcess(process.execPath, ["-e", script], {
+    cwd: process.cwd(),
+    env: baseEnv,
+    timeoutMs: 600,
+    killGraceMs: 300,
+    onData: (stream, chunk) => { if (stream === "stdout") memberPid = Number(chunk.toString().trim()) || memberPid; },
+  });
+  t.after(() => safeKill(memberPid));
+  assert.equal(result.timedOut, true);
+  assert.ok(memberPid > 0);
+  assert.equal(await waitFor(() => !alive(memberPid), { timeoutMs: 5000 }), true);
+});
+
+test("isPidAlive counts EPERM as alive only when asked to", (t) => {
+  assert.equal(isPidAlive(process.pid, { epermAlive: false }), true);
+  t.mock.method(process, "kill", () => { throw Object.assign(new Error("denied"), { code: "EPERM" }); });
+  assert.equal(isPidAlive(1, { epermAlive: true }), true);
+  assert.equal(isPidAlive(1, { epermAlive: false }), false);
+});
+
+test("signalProcessGroup skips the leader fallback only when the group is gone and the caller asked to", (t) => {
+  const calls = [];
+  const child = { pid: 4242, kill: (signal) => { calls.push(signal); return true; } };
+  t.mock.method(process, "kill", () => { throw Object.assign(new Error("gone"), { code: "ESRCH" }); });
+  signalProcessGroup(child, "SIGTERM", { skipFallbackWhenGone: true });
+  assert.deepEqual(calls, []);
+  signalProcessGroup(child, "SIGTERM");
+  assert.deepEqual(calls, ["SIGTERM"]);
+});
+
+test("signalProcessGroup groupOnly never signals the child alone when the group send fails", () => {
+  const calls = [];
+  const child = { pid: 2_000_000_000, kill: (signal) => { calls.push(signal); return true; } };
+  signalProcessGroup(child, "SIGTERM", { groupOnly: true });
+  signalProcessGroup({ kill: (signal) => { calls.push(signal); return true; } }, "SIGTERM", { groupOnly: true });
+  assert.deepEqual(calls, []);
+  signalProcessGroup(child, "SIGTERM");
+  assert.deepEqual(calls, ["SIGTERM"]);
+});
+
+test("runProcess cancelKillOnClose drops the pending SIGKILL when the child closes; by default it still fires", async (t) => {
+  const original = process.kill.bind(process);
+  const sent = [];
+  t.mock.method(process, "kill", (pid, signal) => { if (signal === "SIGKILL") sent.push(pid); return original(pid, signal); });
+  const run = (cancelKillOnClose) => runProcess(process.execPath, ["-e", "setInterval(()=>{},1000)"], {
+    cwd: process.cwd(), env: baseEnv, timeoutMs: 100, killGraceMs: 400, cancelKillOnClose, onData: () => undefined,
+  });
+  assert.equal((await run(true)).timedOut, true);
+  await new Promise((r) => setTimeout(r, 700));
+  assert.deepEqual(sent, []);
+  assert.equal((await run(false)).timedOut, true);
+  await waitFor(() => sent.length > 0, { timeoutMs: 2000 });
+  assert.ok(sent.length > 0);
+});
+
+test("runProcess stopMode reap stops a member that ignores SIGTERM", async (t) => {
+  let memberPid = 0;
+  const script = "const {spawn}=require('node:child_process');const c=spawn('sh',['-c','trap \"\" TERM; exec sleep 60'],{stdio:'ignore'});console.log(c.pid);setInterval(()=>{},1000)";
+  const result = await runProcess(process.execPath, ["-e", script], {
+    cwd: process.cwd(), env: baseEnv, timeoutMs: 600, killGraceMs: 300, stopMode: "reap",
+    onData: (stream, chunk) => { if (stream === "stdout") memberPid = Number(chunk.toString().trim()) || memberPid; },
+  });
+  t.after(() => safeKill(memberPid));
+  assert.equal(result.timedOut, true);
+  assert.equal(await waitFor(() => !alive(memberPid), { timeoutMs: 5000 }), true);
+});
+
+test("runCliVersion with ignoreStdio spawns with stdio ignored: closed stdin, no stdout, no output limit", async () => {
+  const big = "process.stdout.write('x'.repeat(2*1024*1024));process.stdin.on('end',()=>process.exit(3));process.stdin.resume()";
+  const result = await runCliVersion(process.execPath, ["-e", big], 10_000, { ignoreStdio: true });
+  assert.deepEqual({ stdout: result.stdout, exitCode: result.exitCode, spawnError: result.spawnError }, { stdout: "", exitCode: 3, spawnError: null });
+  const missing = await runCliVersion("/nonexistent-owl-cli", ["--version"], 1000, { ignoreStdio: true });
+  assert.equal(missing.exitCode, null);
+  assert.ok(missing.spawnError);
 });
