@@ -1,16 +1,15 @@
 import { cliText } from "./cli-language.js";
 import { isIP } from "node:net";
 
-import { loadOwlEnv } from "../../../packages/shared/dist/env.js";
-import { DESIGN_SKILL_NAME_PATTERN } from "../../../packages/shared/dist/design-documents.js";
-import { AgentTimeoutSettingError, agentIdleTimeoutMs, agentWallTimeoutMs } from "../../../packages/shared/dist/index.js";
+import { loadOwlEnv } from "@owl/shared/env";
+import { DESIGN_SKILL_NAME_PATTERN } from "@owl/shared/design-documents";
+import { AgentTimeoutSettingError, agentIdleTimeoutMs, agentWallTimeoutMs } from "@owl/shared";
 
 // Every server entry point imports this module before reading process.env.
 // Existing process values are intentionally kept authoritative by loadOwlEnv.
 loadOwlEnv();
 
 export const DEFAULT_BIND = "127.0.0.1" as const;
-export const DEFAULT_PORT = 3787 as const;
 
 export function configuredBind(): string {
   return process.env.OWL_BIND?.trim() || DEFAULT_BIND;

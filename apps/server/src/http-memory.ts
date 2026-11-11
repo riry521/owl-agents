@@ -1,6 +1,8 @@
 import { ApiError } from "./errors.js";
-import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
-import type { MemoryNoteType, MemoryRequestContext } from "../../../packages/core/dist/memory/memory-types.js";
+import { MemoryMessages } from "./messages/memory.js";
+import type { MessageRef } from "./messages/define.js";
+import type { GuardTokenAgent } from "@owl/shared/guard-token";
+import type { MemoryNoteType, MemoryRequestContext } from "@owl/core/dist/memory/memory-types.js";
 import { requireMemoryFeature } from "./core-feature.js";
 
 export const MEMORY_OPERATIONS: ReadonlySet<string> = new Set(["search", "expand", "recall", "health", "reindex", "index", "page", "pages/search", "mode", "append"]);
@@ -9,12 +11,12 @@ export const MEMORY_GET_OPERATIONS: ReadonlySet<string> = new Set(["health", "mo
 
 const TYPES = new Set(["preference", "decision", "lesson", "procedure", "reference", "overview", "north-star", "reflection", "log", "raw"]);
 const SCOPES = new Set(["global", "project", "all"]);
-const bad = (message: string): ApiError => new ApiError(400, "validation_error", message);
+const bad = (message: MessageRef): ApiError => new ApiError(400, "validation_error", message);
 
 function field<T>(body: Record<string, unknown>, key: string, ok: (v: unknown) => v is T): T | undefined {
   const value = body[key];
   if (value === undefined) return undefined;
-  if (!ok(value)) throw bad(`${key}が不正です。`);
+  if (!ok(value)) throw bad(MemoryMessages.invalidField({ field: key }));
   return value;
 }
 const isString = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 2000;
@@ -54,47 +56,47 @@ export async function runMemoryOperation(core: unknown, op: string, rawBody: unk
     return { ...health, injection: health.injection ?? INJECTION_DEFAULT };
   }
   if (op === "mode") return { mode: api.mode?.() ?? "pages" };
-  if (typeof rawBody !== "object" || rawBody === null || Array.isArray(rawBody)) throw bad("本文はJSON objectで指定してください。");
+  if (typeof rawBody !== "object" || rawBody === null || Array.isArray(rawBody)) throw bad(MemoryMessages.bodyNotObject());
   const body = rawBody as Record<string, unknown>;
   if (op === "reindex") return api.reindex({ mode: field(body, "mode", isMode) ?? "diff" });
   if (op === "append") {
     // Only the Advisor writes knowledge directly; every other caller, the owner included, is refused.
-    if (ctx.caller !== "advisor") throw new ApiError(403, "forbidden", "ナレッジへの追記は Advisor だけができます。");
+    if (ctx.caller !== "advisor") throw new ApiError(403, "forbidden", MemoryMessages.appendAdvisorOnly());
     const section = field(body, "section", isString);
     const text = field(body, "text", isString);
-    if (!section || text === undefined) throw bad("sectionとtextを指定してください。");
-    if (!api.append) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support the append tool.");
+    if (!section || text === undefined) throw bad(MemoryMessages.sectionAndTextRequired());
+    if (!api.append) throw new ApiError(503, "dependency_unavailable", MemoryMessages.appendToolUnsupported());
     const out = await api.append({ project_id: field(body, "project_id", isString), section, text, theme: field(body, "theme", isString), procedure: field(body, "procedure", isString) }, ctx);
-    if ("error" in out) throw out.error === "append_unavailable" ? new ApiError(503, "dependency_unavailable", "追記先を使えません。") : bad(`追記できません: ${out.error}`);
+    if ("error" in out) throw out.error === "append_unavailable" ? new ApiError(503, "dependency_unavailable", MemoryMessages.appendUnavailable()) : bad(MemoryMessages.appendFailed({ reason: out.error }));
     return out;
   }
   if (op === "index" || op === "page" || op === "pages/search") {
-    const unsupported = (): never => { throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support the page tools."); };
+    const unsupported = (): never => { throw new ApiError(503, "dependency_unavailable", MemoryMessages.pageToolsUnsupported()); };
     if (op === "index") {
       if (!api.readIndex) return unsupported();
       return api.readIndex({ project_id: field(body, "project_id", isString) }, ctx);
     }
     if (op === "page") {
       const page = field(body, "page", isString);
-      if (!page) throw bad("pageを指定してください。");
+      if (!page) throw bad(MemoryMessages.pageRequired());
       if (!api.page) return unsupported();
       return api.page({ page, sections: field(body, "sections", isStrings) }, ctx);
     }
     const pageQuery = field(body, "query", isString);
-    if (!pageQuery) throw bad("queryを指定してください。");
+    if (!pageQuery) throw bad(MemoryMessages.queryRequired());
     if (!api.searchPages) return unsupported();
     return api.searchPages({ query: pageQuery, include_work_log: field(body, "include_work_log", isBool) }, ctx);
   }
   if (op === "expand") {
     const note = field(body, "note", isString);
-    if (!note) throw bad("noteを指定してください。");
+    if (!note) throw bad(MemoryMessages.noteRequired());
     return api.expand({ note, include_body: field(body, "include_body", isBool), max_bytes: field(body, "max_bytes", isInt(200_000)) }, ctx);
   }
   if (op === "recall") {
     return api.recall({ topic: field(body, "topic", isString), types: field(body, "types", isTypes), limit: field(body, "limit", isInt(50)), explain: field(body, "explain", isBool) }, ctx);
   }
   const query = field(body, "query", isString);
-  if (!query) throw bad("queryを指定してください。");
+  if (!query) throw bad(MemoryMessages.queryRequired());
   return api.search({
     query, limit: Math.min(field(body, "limit", isInt(1000)) ?? 8, 30), types: field(body, "types", isTypes),
     scope: field(body, "scope", isScope), include_superseded: field(body, "include_superseded", isBool),

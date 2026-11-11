@@ -1,5 +1,5 @@
-import { isGoalCriterion, isNonBlankReason, readStoredAcceptanceCriteria, type GoalShortfall, type StoredAcceptanceCriterion, type WorkGoalRecord } from "../../shared/dist/acceptance-criteria.js";
-import { workSummaryListItems } from "../../shared/dist/work-summary.js";
+import { isGoalCriterion, isNonBlankReason, readStoredAcceptanceCriteria, type GoalShortfall, type StoredAcceptanceCriterion, type WorkGoalRecord } from "@owl/shared/acceptance-criteria";
+import { workSummaryListItems } from "@owl/shared/work-summary";
 import { validationError } from "./errors";
 import type { FinalManagerVerdict } from "./final-verdict";
 import type { LineageReader } from "./task-lineage";
@@ -135,7 +135,7 @@ export function settleFinalVerdict(verdict: FinalManagerVerdict, index: readonly
       required.push(item);
       continue;
     }
-    if (!isNonBlankReason(item.reason)) throw validationError("The final Manager verdict missing reason is blank for a goal.", { criterion_ref: target.ref, final_check_retry: true });
+    if (!isNonBlankReason(item.reason)) throw validationError("The final Manager verdict missing reason is blank for a goal.", { criterion_ref: target.ref, final_check_retry: true }, { code: "goal_shortfall.reason_blank", values: { field: "reason" } });
     goalItems.push({ task_id: target.task_id, criterion_id: target.criterion_id, text: target.text, reason: item.reason.trim(), source: "final_check" });
   }
   let verdictValue = verdict.verdict;

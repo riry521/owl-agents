@@ -161,10 +161,10 @@ test("a later Task that adds a.test.mjs runs the no_tests record's setup without
   await writeFile(join(worktree, "a.test.mjs"), "import test from 'node:test';\ntest('a', () => {});\n");
 
   const place = { scope: "task", work_id: workId, task_id: taskId };
-  const resolved = await ctx.core.workflow.resolveProjectTestRun(ctx.core.workflow.projectTestRunRow(workId, taskId), worktree, { investigate: true, place });
+  const resolved = await ctx.core.workflow.testRuns.resolveProjectTestRun(ctx.core.workflow.testRuns.projectTestRunRow(workId, taskId), worktree, { investigate: true, place });
   assert.equal(ctx.agent.calls.length, calls);
   assert.equal(resolved.setup_match, "tests_changed");
-  await ctx.core.workflow.adoptPassedSetup(resolved, { status: "passed" }, { mode: "whole", whole_argv: ["node", "--test"], file_argv: [] }, project.projectId, worktree, place);
+  await ctx.core.workflow.testRuns.adoptPassedSetup(resolved, { status: "passed" }, { mode: "whole", whole_argv: ["node", "--test"], file_argv: [] }, project.projectId, worktree, place);
   const saved = ctx.record("tasks", taskId);
   assert.equal(saved.status, "ready", JSON.stringify(saved.missing));
   assert.equal(saved.confirmed.by, "core");

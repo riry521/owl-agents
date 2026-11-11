@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, rm, rmdir } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import type { WriteLane } from "../../db/dist/index.js";
+import type { WriteLane } from "@owl/db";
 import { isEmptyDirectoryTree } from "./git-gateway.js";
 import { isTerminalTaskState, reduceTaskInTransaction } from "./state-reducer.js";
 import { saveProjectlessWorkOutputs } from "./outputs-store.js";
@@ -117,13 +117,6 @@ async function gitResult(path: string, operation: () => Promise<GitOperationResu
 type BlockKind = "discard" | "merged";
 type BlockableResult = GitOperationResult & { readonly blocked?: boolean };
 
-/**
- * Run a discard, except while a recorded `worktree.reconcile_blocked` event
- * for this path names ignored paths that all still hold content: git would
- * refuse again for the same reason. Ignored files are never deleted here; once
- * one is gone the discard runs again. A new refusal is recorded so the skip
- * survives a restart. `blocked` tells the caller not to log it again.
- */
 /** The recorded refusal message for `path` while all its ignored paths still hold content, else null. */
 export async function recordedWorktreeBlock(db: Pick<CoreDatabase, "all">, workId: string, path: string, kind?: BlockKind): Promise<string | null> {
   // work_id first so the (work_id, type, sequence) index narrows the scan.
@@ -144,6 +137,13 @@ export async function recordedWorktreeBlock(db: Pick<CoreDatabase, "all">, workI
   return null;
 }
 
+/**
+ * Run a discard, except while a recorded `worktree.reconcile_blocked` event
+ * for this path names ignored paths that all still hold content: git would
+ * refuse again for the same reason. Ignored files are never deleted here; once
+ * one is gone the discard runs again. A new refusal is recorded so the skip
+ * survives a restart. `blocked` tells the caller not to log it again.
+ */
 async function guardedDiscard(
   deps: WorktreeReconcilerDeps,
   workId: string,

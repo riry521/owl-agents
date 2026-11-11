@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import type { Dirent } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { compareClaudeEntries } from "./semver.js";
 import { buildOwlApiMcpArgs } from "./owl-api-mcp-args.js";

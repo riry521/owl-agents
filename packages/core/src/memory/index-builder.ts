@@ -8,6 +8,7 @@ import {
   bodySha256, estimatePageTokens, INDEX_SECTIONS, PAGE_LIMITS, parsePage, renderPage, validatePage,
   type FrontmatterValue,
 } from "./page-format.js";
+import { sha256 } from "@owl/shared/small-helpers";
 
 /** Builds the Project/common index pages and Home.md (design §2.2, §4.4, §7.2). */
 
@@ -40,7 +41,7 @@ const CONFIG_TITLE = "プロジェクトの構成";
 const LIMITS = { overview_tokens: 150, must_read: 10, themes: 20, common_themes: 6 } as const;
 const MAX_BODY_BYTES = 256 * 1024;
 
-const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
+// shared の clip は UTF-16 の長さで切り省略記号を足す。ここは code point 単位で省略記号なしに切るので別に持つ。
 const clip = (text: string, max: number): string => { const chars = Array.from(text); return chars.length <= max ? text : chars.slice(0, max).join(""); };
 const oneLine = (text: string): string => text.replace(/\s+/gu, " ").trim();
 const plainLinks = (text: string): string => text.replace(/\[\[([^\]|\n]+)(?:\|([^\]\n]*))?\]\]/gu, (_m, name: string, label?: string) => label ?? name);

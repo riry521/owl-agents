@@ -3,8 +3,8 @@ import {
   type PlanUsageHarnessView,
   type PlanUsageSettings,
   type PlanUsageView,
-} from "../../../shared/dist/plan-usage-settings.js";
-import type { PlanUsageFetchResult, PlanUsageHarness, PlanUsageOrigin, PlanUsageSnapshot, PlanUsageSource, PlanUsageStatus, PlanUsageWindow } from "../../../shared/dist/plan-usage.js";
+} from "@owl/shared/plan-usage-settings";
+import type { PlanUsageFetchResult, PlanUsageHarness, PlanUsageOrigin, PlanUsageSnapshot, PlanUsageSource, PlanUsageWindow } from "@owl/shared/plan-usage";
 import { sanitizePlanUsageDetail, sanitizePlanUsageSnapshot, sanitizePlanUsageStatus, PlanUsageStore, type PlanUsageRow } from "./store.js";
 
 export interface PlanUsageServiceOptions {

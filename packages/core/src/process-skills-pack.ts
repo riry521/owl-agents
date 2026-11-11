@@ -1,6 +1,7 @@
 import * as nodeFs from "node:fs";
 import { basename, join } from "node:path";
 import { compareClaudeEntries, compareSemver, parseSemver, type ClaudePluginEntry, type ProcessSkillsSettings } from "@owl/shared";
+import { isRecord } from "@owl/shared/small-helpers";
 
 export interface DetectedProcessSkillsPack {
   readonly skills_dir: string;
@@ -83,10 +84,6 @@ function readJsonFile(fs: ProcessSkillsFileSystem, path: string): unknown | null
   } catch {
     return null;
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function compareCandidates(left: Candidate, right: Candidate): number {

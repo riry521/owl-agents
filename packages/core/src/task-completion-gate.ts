@@ -7,7 +7,7 @@
  * Pure: no I/O, no events. A passing gate does not replace verification.
  */
 
-import { isNonBlankReason } from "../../shared/dist/acceptance-criteria.js";
+import { isNonBlankReason } from "@owl/shared/acceptance-criteria";
 
 const GOAL_UNMET = "goal_unmet";
 

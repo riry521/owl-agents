@@ -1,3 +1,4 @@
+// @ts-check
 /** @typedef {import('./types').BacklogItem} BacklogItem */
 /** @typedef {import('./types').WorkSummary} WorkSummary */
 

@@ -178,6 +178,7 @@ export function deletionDialogModel(impact: ProjectDeletionImpact): DeletionDial
   return { variant: 'withWorks', workCount: impact.work_count, backlogCount: impact.backlog_item_count };
 }
 
+// web は @owl/shared に依存しない（ブラウザ向けの bundle に node:crypto を含む shared を入れない）ので、shared の isRecord を読めない。
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

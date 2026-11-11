@@ -56,7 +56,6 @@ import type {
   IssueBacklogWorkInput,
   IssueBacklogWorkResult,
   LinkBacklogItemsResult,
-  ExecutorConfig,
   ChildRunSettings,
   ProviderInfo,
   ProviderPauseView,
@@ -218,6 +217,7 @@ function apiRequestErrorKind(code: string, status: number | null): ApiRequestErr
   return 'request_error';
 }
 
+// web は @owl/shared に依存しない（ブラウザ向けの bundle に node:crypto を含む shared を入れない）ので、shared の isRecord を読めない。
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -557,7 +557,7 @@ export async function getWorkDesignMocks(id: ULID): Promise<{ mocks: WorkDesignM
 export interface WorkMarkdownDocument {
   path: string;
   name: string;
-  source: 'project' | 'work_branch' | 'materials';
+  source: 'project' | 'work_branch' | 'materials' | 'owner_folder';
   markdown: string;
   size_bytes: number;
 }
@@ -567,6 +567,35 @@ export async function getWorkMarkdown(id: ULID, path: string): Promise<WorkMarkd
   const query = new URLSearchParams({ path });
   const response = await requestJson<{ data: WorkMarkdownDocument }>(`/works/${encodeURIComponent(id)}/markdown?${query}`);
   return response.data;
+}
+
+/** URL of one Owner-folder file: the key and each path segment are encoded, the `/` between them is kept. */
+export function ownerFileUrl(apiBase: string, key: string, path: string): string {
+  return resolveApiUrl(apiBase, `/owner-files/${encodeURIComponent(key)}/${path.split('/').map(encodeURIComponent).join('/')}`);
+}
+
+/** GET /api/v1/owner-files/{key}/{path}: the body is the raw .md text, so it is read as text, not JSON; failures are JSON envelopes. */
+export async function getOwnerMarkdown(key: string, path: string): Promise<WorkMarkdownDocument> {
+  const config = await runtimeConfig();
+  const url = ownerFileUrl(config.api_base, key, path);
+  let response: Response;
+  try {
+    response = await fetch(url, { cache: 'no-store' });
+  } catch (error) {
+    console.error('[Owl] owner-files request failed', { url, error });
+    throw new ApiRequestError('network_error', 'サーバーへ接続できません。', null);
+  }
+  if (!response.ok) {
+    const body = await parseJson(response, `GET ${url}`).catch(() => null);
+    throw apiErrorFromBody(body, response.status, url);
+  }
+  let markdown: string;
+  try {
+    markdown = await response.text();
+  } catch {
+    throw new ApiRequestError('network_error', 'サーバーとの通信が中断されました。', response.status);
+  }
+  return { path, name: path.split('/').pop() ?? path, source: 'owner_folder', markdown, size_bytes: new TextEncoder().encode(markdown).length };
 }
 
 /** GET /api/v1/owner-files/roots: the folders the owner-files route serves, with their absolute paths. */
@@ -1481,19 +1510,6 @@ export async function setChildRunSettings(settings: ChildRunSettings): Promise<C
   const response = await command<ChildRunSettings>('/settings/child-runs', settings, 0, 'PUT');
   return response.data;
 }
-
-// ---- Legacy Executor Config API -------------------------------------------
-
-export async function getExecutorConfig(): Promise<ExecutorConfig> {
-  const response = await requestJson<ApiEnvelope<ExecutorConfig>>('/settings/executor');
-  return response.data;
-}
-
-export async function setExecutorConfig(config: ExecutorConfig): Promise<ExecutorConfig> {
-  const response = await command<ExecutorConfig>('/settings/executor', config, 0, 'PUT');
-  return response.data;
-}
-
 
 // ---- Typesafe API Key -------------------------------------------------------
 

@@ -1,3 +1,4 @@
+// @ts-check
 // WebSocket の知らせ（イベントフレーム）→ 取り直すキーの対応表。純 JS。
 // パターンは完全一致か、* を含む glob。{work_id} などは知らせの値で埋める。
 
@@ -5,6 +6,7 @@ const WORK_KEYS = ["work:{work_id}", "work-*:{work_id}"];
 const ADVISOR_KEYS = ["advisor-session:*", "advisor-messages:*"];
 
 /** type の前方一致（先頭から順に最初の一致）。fn は frame の値から追加のパターンを返す。 */
+/** @type {{ prefixes: string[], keys: string[], needs?: string, otherwise?: string[] }[]} */
 export const VIEW_EVENT_RULES = [
   { prefixes: ["work."], keys: ["board", "archive", ...WORK_KEYS, "linkable-works:*"], needs: "work_id" },
   {
@@ -29,11 +31,16 @@ export const VIEW_EVENT_RULES = [
 
 const EVENTS_KEY = "events";
 
+/** @param {string} pattern */
 function globToRegExp(pattern) {
   const escaped = pattern.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"));
   return new RegExp(`^${escaped.join(".*")}$`);
 }
 
+/**
+ * @param {string} pattern
+ * @param {Record<string, any>} values
+ */
 function fill(pattern, values) {
   let missing = false;
   const text = pattern.replace(/\{(\w+)\}/g, (_, name) => {
@@ -51,9 +58,15 @@ function fill(pattern, values) {
  * 知らせに関係するキーのうち、表示中（mountedKeys）のものだけを返す。
  * 値が無い {id} は「そのキーの全部」とみなす。ただし work:{work_id} は work_id が無ければ外す。
  */
+/**
+ * @param {any} frame
+ * @param {string[]} mountedKeys
+ * @returns {string[]}
+ */
 export function viewKeysForEvent(frame, mountedKeys) {
   const payload = frame && typeof frame.payload === "object" && frame.payload !== null ? frame.payload : {};
   const type = typeof frame?.type === "string" ? frame.type : "";
+  /** @type {Record<string, any>} */
   const values = {
     work_id: frame?.work_id ?? payload.work_id ?? null,
     conversation_id: payload.conversation_id ?? null,
@@ -65,7 +78,7 @@ export function viewKeysForEvent(frame, mountedKeys) {
   const rule = rules.find((candidate) => candidate.needs === undefined || candidate.otherwise !== undefined || values[candidate.needs]);
   if (rule) {
     const useOtherwise = rule.needs && !values[rule.needs] && rule.otherwise;
-    for (const pattern of useOtherwise ? [...rule.otherwise, ...(values.work_id ? ["work:{work_id}"] : [])] : rule.keys) {
+    for (const pattern of useOtherwise ? [...(rule.otherwise ?? []), ...(values.work_id ? ["work:{work_id}"] : [])] : rule.keys) {
       const { text, missing } = fill(pattern, values);
       if (missing && pattern.startsWith("work:")) continue;
       patterns.push(text);

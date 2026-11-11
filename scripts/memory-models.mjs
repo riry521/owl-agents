@@ -56,7 +56,7 @@ async function optionalEmbedderConfig(dataDir) {
   } catch { return {}; }
 }
 
-async function modelRoots(dir, dataDir = process.env.OWL_DATA_DIR || undefined) {
+async function modelRoots(dir, dataDir = defaultDataDir()) {
   if (dir) return [resolve(dir)];
   const config = await optionalEmbedderConfig(dataDir);
   const roots = [

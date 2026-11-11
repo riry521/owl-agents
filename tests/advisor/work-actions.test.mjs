@@ -36,7 +36,7 @@ async function setup(t, coreOptions = {}) {
   });
   const { conversation_id: conversationId } = await core.getActiveConversation();
   // `followupActions` is the reply to the automatic follow-up turn that a failed action starts.
-  async function respond(actions, text = "Please perform this Work operation.", followupActions = null) {
+  async function respond(actions, text = "Please perform this Work operation.", followupActions = null, channel = "slack") {
     const accountId = db.get("SELECT id FROM connector_accounts WHERE owner_id = 'owner:default' AND provider = 'web'").id;
     const userMessageId = createUlid();
     const now = new Date().toISOString();
@@ -64,7 +64,7 @@ async function setup(t, coreOptions = {}) {
       "```",
     ].join("\n"));
     if (followupActions) advisorReplies.push(["Retrying.", "```owl-actions", JSON.stringify(followupActions), "```"].join("\n"));
-    await core.advisorRespond(conversationId, userMessageId, { channel: "slack" });
+    await core.advisorRespond(conversationId, userMessageId, { channel });
 
     // A failed action runs the one follow-up Advisor turn, so the session gets one turn, or two after a failure.
     await waitFor(() => advisorTurns.length > turnCount && !db.get("SELECT 1 FROM advisor_turns WHERE status IN ('queued', 'running')"), { message: "the Advisor turns settle" });
@@ -471,7 +471,7 @@ test("call_api is never sent twice for a reprocessed turn or a duplicated action
   let calls = 0;
   const ctx = await setup(t, { callOwnApi: async () => { calls += 1; return { kind: "response", status: 200, body: {} }; } });
   const turnId = createUlid();
-  const reply = (actions) => ctx.core.persistAdvisorReply(ctx.conversationId, "", turnId, { channel: "web" }, actions);
+  const reply = (actions) => ctx.core.advisorActions.persistAdvisorReply(ctx.conversationId, "", turnId, { channel: "web" }, actions);
 
   await reply([action("call_api", API_PAYLOAD), action("call_api", API_PAYLOAD)]);
   assert.equal(calls, 1);
@@ -490,11 +490,11 @@ test("a call_api left started-only is recorded unknown and not sent again", asyn
     if (input.event?.type === "advisor.api_call_finished") throw new Error("crash");
     return write(input);
   };
-  await ctx.core.persistAdvisorReply(ctx.conversationId, "", turnId, { channel: "web" }, [action("call_api", API_PAYLOAD)]);
+  await ctx.core.advisorActions.persistAdvisorReply(ctx.conversationId, "", turnId, { channel: "web" }, [action("call_api", API_PAYLOAD)]);
   assert.equal(calls, 1);
   ctx.core.writeLane.write = write;
 
-  await ctx.core.persistAdvisorReply(ctx.conversationId, "", turnId, { channel: "web" }, [action("call_api", API_PAYLOAD)]);
+  await ctx.core.advisorActions.persistAdvisorReply(ctx.conversationId, "", turnId, { channel: "web" }, [action("call_api", API_PAYLOAD)]);
 
   assert.equal(calls, 1);
   const finished = callApiEvents(ctx.db, "advisor.api_call_finished").map((row) => JSON.parse(row.payload_json));
@@ -645,12 +645,12 @@ test("a retried turn saves the prerequisites that were never stored and reports 
     // The first attempt stops after createWork, before the prerequisites are stored.
     const realReplace = core.replaceWorkPrerequisites;
     core.replaceWorkPrerequisites = async () => { throw new Error("stopped"); };
-    await core.persistAdvisorReply(conversationId, "first", turnId, origin, actions);
+    await core.advisorActions.persistAdvisorReply(conversationId, "first", turnId, origin, actions);
     core.replaceWorkPrerequisites = realReplace;
     const work = db.get("SELECT id FROM works WHERE title = ?", `Waiting ${language}`);
     assert.equal(db.get("SELECT COUNT(*) AS count FROM work_prerequisites WHERE work_id = ?", work.id).count, 0);
 
-    await core.persistAdvisorReply(conversationId, "second", turnId, origin, actions);
+    await core.advisorActions.persistAdvisorReply(conversationId, "second", turnId, origin, actions);
     assert.equal(db.get("SELECT COUNT(*) AS count FROM work_prerequisites WHERE work_id = ?", work.id).count, 1);
     assert.equal(db.get("SELECT state FROM works WHERE id = ?", work.id).state, "ready", "waiting for the prerequisite, not running");
     const body = db.get("SELECT body FROM messages WHERE source_message_id LIKE ? ORDER BY rowid DESC LIMIT 1", `advisor:%:${turnId}%`).body;
@@ -669,7 +669,7 @@ async function sendFileSetup(t, settings, extraOptions = {}) {
   const send = async (channel, ...paths) => {
     const turnId = createUlid();
     const origin = { channel, channel_id: "C1", ref: "1.1" };
-    await ctx.core.persistAdvisorReply(ctx.conversationId, "reply", turnId, origin,
+    await ctx.core.advisorActions.persistAdvisorReply(ctx.conversationId, "reply", turnId, origin,
       paths.map((path) => action("send_file", typeof path === "string" ? { path } : path)));
     const row = ctx.db.get("SELECT payload_json FROM events WHERE type = 'advisor.responded' ORDER BY rowid DESC LIMIT 1");
     return JSON.parse(row.payload_json);
@@ -794,6 +794,20 @@ test("send_file from a Web conversation goes to the window's one usable binding,
   assert.equal(refusedPayload.action_failures[0].code, "no_destination");
   assert.equal(refusedPayload.action_failures[0].details.reason, "preferred_provider_unset");
   assert.equal(refusedPayload.action_failures[0].retryable, false);
+});
+
+test("a follow-up Web reply with send_file resolves the destination once for both the reconcile and the dispatch", async (t) => {
+  const ctx = await sendFileSetup(t, (dir) => ({ dirs: [dir] }), destinationOptions({ defaultDestination: { provider: "slack", channel_id: "CCONV", display_name: "owl" } }));
+  const missing = action("send_file", { path: join(ctx.allowed, "missing.txt") });
+  let resolves = 0;
+  const resolve = ctx.core.resolveWebFileDestination.bind(ctx.core);
+  ctx.core.resolveWebFileDestination = (...args) => { resolves += 1; return resolve(...args); };
+  // The source reply fails (the file is missing) and starts the follow-up turn, which retries the same action.
+  await ctx.respond([missing], "send it", [missing], "web");
+  const turns = ctx.db.get("SELECT COUNT(*) AS n FROM advisor_turns").n;
+  assert.equal(turns, 2, "a source turn and one follow-up turn");
+  // One resolve for the source reply, one for the follow-up: reconcile and dispatch share a memo.
+  assert.equal(resolves, 2);
 });
 
 test("a Web send_file with a preferred provider and two bindings goes to that provider's row", async (t) => {

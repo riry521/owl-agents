@@ -279,7 +279,7 @@ test("a spontaneous reply still gets a follow-up when a later turn is queued, an
   assert.equal(env.turns().length, 3);
 
   const spontaneousId = createUlid();
-  const messageId = await env.core.persistAdvisorReply(env.conversationId, "", spontaneousId, { channel: "web" }, [pauseMissing()]);
+  const messageId = await env.core.advisorActions.persistAdvisorReply(env.conversationId, "", spontaneousId, { channel: "web" }, [pauseMissing()]);
   const followup = env.db.get("SELECT * FROM advisor_turns WHERE followup_of_turn_id = ?", spontaneousId);
   assert.ok(followup, "a follow-up was queued for the spontaneous reply");
   assert.equal(followup.user_message_id, messageId);

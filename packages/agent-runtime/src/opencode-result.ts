@@ -2,6 +2,7 @@ import { normalizeOpencodeToolCall, tokenUsageOf } from "@owl/shared";
 import type { HarnessFailureDetail } from "./protocol";
 import type { RateLimitResetInput } from "./rate-limit";
 import type { TokenUsage } from "./types";
+import { isRecord } from "@owl/shared/small-helpers";
 
 /** The error opencode reported for the turn, as kept in the `opencode.result` stdout line. `retry_after` is lifted out of the response so headers never reach stdout. */
 export interface OpencodeResultError {
@@ -17,10 +18,6 @@ export interface OpencodeResult {
   readonly session_id: string;
   readonly messages: readonly Record<string, unknown>[];
   readonly error: OpencodeResultError | null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function parseLine(line: string): Record<string, unknown> | null {

@@ -1,31 +1,24 @@
-import { mkdtemp, readFile, rm, unlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { SocketModeClient } from "@slack/socket-mode";
 import { WebClient } from "@slack/web-api";
 import { CoreClient, commandEnvelope, formatIntegrationError } from "@owl/plugin-sdk";
 import {
-  classifyIntent,
+  routeInboundMessage,
+  answerDecisionButton,
   connectorText,
-  decisionShortId,
-  appendFileResults,
-  formatAdvisorReply,
-  parseOutboundFiles,
-  readOutboundFile,
-  reportAdvisorDelivery,
-parseDeliveryTarget,
   type OutboundFile,
-  formatStatusResponse,
   parseDecisionButtonId,
-  resolveDecisionButtonTarget,
-  submitDecisionAnswer,
-  uploadAttachment,
   FileConnectorStateStore,
   asRecord,
+  buildAdvisorReplyText,
+  deliverFilesToChannel,
   deliverNotification,
-  fetchAdvisorReply,
+  dispatchCoreEvent,
+  refreshBoundChannels,
+  routeAdvisorOrigin,
+  sendOutboundFiles,
+  type OwlLanguage,
+  type UploadFailure,
   fetchPendingDecisions,
-  formatBytes,
   parseChannelIds,
   reportNotificationFailure,
   type OutboundFileResult,
@@ -133,128 +126,42 @@ export class SlackConnector {
   }
 
   private async handleMessage(message: SlackMessage): Promise<void> {
-    const pendingDecisions = await this.fetchPendingDecisions();
-    const language = await this.core.language();
-    const t = connectorText(language);
-    const intent = classifyIntent(
-      { ...message, replyToDecisionId: this.decisionForThread(message) },
-      pendingDecisions,
-      this.config.statusKeywords,
-      language,
-    );
-
-    switch (intent.kind) {
-      case "status_query": {
-        const status = await formatStatusResponse(this.core, language);
-        await postSlackMessage(this.web, {
-          channel: message.channel,
-          text: status,
-        });
-        // A misjudged request must still reach the Advisor's conversation; a failed record never blocks the answer already posted.
-        await this.sendSlackInboundMessage(message, message.text, [], status).catch((error) => {
-          console.error("[slack] Failed to record the status exchange in Core:", error);
-        });
-        break;
-      }
-
-      case "decision_answer": {
-        const decision = pendingDecisions.find((candidate) => candidate.id === intent.decisionId);
-        const outcome = await submitDecisionAnswer(this.core, {
-          decisionId: intent.decisionId,
-          answer: intent.answer,
-          optionKey: intent.optionKey,
-          displayLabel: intent.optionLabel ?? intent.answer,
-          source: "slack",
-          sourceMessageId: message.ts,
-          idempotencyKey: `slack:decision:${intent.decisionId}:msg:${message.ts}`,
-          expectedVersion: decision?.state_version ?? 0,
-        });
-        await postSlackMessage(this.web, {
-          channel: message.channel,
-          ...(message.thread_ts ? { thread_ts: message.thread_ts } : {}),
-          text: outcome.kind === "accepted" ? t.answerAccepted(decisionShortId(intent.decisionId)) : t.alreadyAnswered(outcome.label),
-        });
-        break;
-      }
-
-      case "decision_clarification": {
-        await postSlackMessage(this.web, {
-          channel: message.channel,
-          ...(message.thread_ts ? { thread_ts: message.thread_ts } : {}),
-          text: intent.text,
-        });
-        break;
-      }
-
-      case "file_upload": {
-        // Group by channel, matching the "conversation" case below, so an
-        // attachment uploaded ahead of its message (registration needs no
-        // conversation_id yet) still lands in the same conversation.
-        const conversationHint = { work_id: null, dm_ref: message.channel, thread_ref: null };
-        const tempDir = await mkdtemp(join(tmpdir(), "owl-slack-upload-"));
-        const attachmentIds: string[] = [];
-        try {
-          for (const file of intent.files) {
-            // One failing file must not stop the other files or the message
-            // text, so each is caught, logged and reported to the channel.
-            try {
-              if (this.config.maxFileSize !== undefined && file.size > this.config.maxFileSize) {
-                throw new Error(`${file.size} bytes exceeds maxFileSize ${this.config.maxFileSize}`);
-              }
-              const result = await downloadFile(this.config.botToken, file, tempDir, this.config.maxFileSize);
-              try {
-                const bytes = await readFile(result.path);
-                const uploaded = await uploadAttachment(this.core, {
-                  provider: "slack",
-                  account_id: this.config.accountId,
-                  external_attachment_id: file.id,
-                  conversation_hint: conversationHint,
-                  work_id: null,
-                  file: { name: file.name, mime: result.mime, bytes },
-                });
-                attachmentIds.push(uploaded.upload_id);
-                const notice = t.fileReceived(file.name, formatBytes(result.size), result.knownFormat);
-                await postSlackMessage(this.web, {
-                  channel: message.channel,
-                  text: uploaded.status === "quarantined" ? `${notice}\n${t.executableNotRun}` : notice,
-                });
-              } finally {
-                await unlink(result.path).catch(() => undefined);
-              }
-            } catch (error) {
-              const reason = error instanceof Error ? error.message : String(error);
-              console.warn(`[slack] Could not import ${file.name}: ${reason}`);
-              const checkScope = !file.url_private_download || /: (401|403)$/u.test(reason);
-              await postSlackMessage(this.web, {
-                channel: message.channel,
-                text: t.fileFailed(file.name, reason, checkScope),
-              }).catch(() => undefined);
-            }
-          }
-        } finally {
-          await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+    const threaded = message.thread_ts ? { thread_ts: message.thread_ts } : {};
+    const post = async (text: string, extra: { thread_ts?: string } = {}): Promise<void> => {
+      await postSlackMessage(this.web, { channel: message.channel, ...extra, text });
+    };
+    await routeInboundMessage(this.core, {
+      source: "slack",
+      fetchPendingDecisions: () => this.fetchPendingDecisions(),
+      accountId: this.config.accountId,
+      statusKeywords: this.config.statusKeywords,
+      message: { ...message, replyToDecisionId: this.decisionForThread(message) },
+      messageId: message.ts,
+      reply: (text) => post(text, threaded),
+      notice: (text) => post(text),
+      // Group by channel so an attachment uploaded ahead of its message still lands in the same conversation.
+      conversationHint: { work_id: null, dm_ref: message.channel, thread_ref: null },
+      tempDirPrefix: "owl-slack-upload-",
+      download: async (file, dir) => {
+        if (this.config.maxFileSize !== undefined && file.size > this.config.maxFileSize) {
+          throw new Error(`${file.size} bytes exceeds maxFileSize ${this.config.maxFileSize}`);
         }
-        if (attachmentIds.length === 0 && !intent.text) break;
-        const threadTs = message.thread_ts;
-        if (threadTs) this.threadChannels.set(threadTs, message.channel);
-        await this.sendSlackInboundMessage(message, intent.text ?? "", attachmentIds);
-        break;
-      }
-
-      case "conversation": {
-        // Group every conversation channel-wide (dm_ref = channel,
-        // thread_ref = null), the same rule Discord already follows: Advisor
-        // context lives in the owner-scoped session, not in the conversation
-        // row, so splitting by thread only fragments the conversation list
-        // without adding context. thread_id still carries the actual reply
-        // destination (undefined for a top-level post) so a reply can be
-        // posted back into the thread it came from.
-        const threadTs = message.thread_ts;
-        if (threadTs) this.threadChannels.set(threadTs, message.channel);
-        await this.sendSlackInboundMessage(message, intent.text, []);
-        break;
-      }
-    }
+        return downloadFile(this.config.botToken, file, dir, this.config.maxFileSize);
+      },
+      // One failing file must not stop the other files or the message text, so each is reported to the channel.
+      onFileError: async (file, error, language) => {
+        const reason = error instanceof Error ? error.message : String(error);
+        console.warn(`[slack] Could not import ${file.name}: ${reason}`);
+        const checkScope = !file.url_private_download || /: (401|403)$/u.test(reason);
+        const t = connectorText(language);
+        await post(t.fileFailed(file.name, reason, checkScope)).catch(() => undefined);
+      },
+      // Advisor context lives in the owner-scoped session, so every conversation is grouped channel-wide; thread_id keeps the reply destination.
+      sendInbound: async (text, attachmentIds, statusReply) => {
+        if (statusReply === undefined && message.thread_ts) this.threadChannels.set(message.thread_ts, message.channel);
+        await this.sendSlackInboundMessage(message, text, attachmentIds, statusReply);
+      },
+    });
   }
 
   /**
@@ -308,28 +215,10 @@ export class SlackConnector {
       const action = payload.actions[0];
       const target = parseDecisionButtonId(action.action_id);
       if (!target) return;
-      const t = connectorText(await this.core.language());
-      const selected = resolveDecisionButtonTarget(await this.fetchPendingDecisions(), target);
-      if (!selected) {
-        throw new Error(t.decisionGone);
-      }
-      const messageRef = payload.message?.ts ?? "none";
-      const outcome = await submitDecisionAnswer(this.core, {
-        decisionId: selected.decisionId,
-        answer: selected.label,
-        optionKey: selected.optionKey,
-        displayLabel: selected.label,
-        source: "slack",
-        sourceMessageId: payload.message?.ts ?? null,
-        idempotencyKey: `slack:decision:${selected.decisionId}:${selected.optionKey}:${messageRef}`,
-        expectedVersion: selected.stateVersion,
-      });
-
+      const answered = await answerDecisionButton(this.core, { source: "slack", target, fetchPendingDecisions: () => this.fetchPendingDecisions(), messageId: payload.message?.ts ?? null });
+      if (answered.gone) throw new Error(answered.text);
       if (payload.channel) {
-        await postSlackMessage(this.web, {
-          channel: payload.channel.id,
-          text: outcome.kind === "accepted" ? t.answeredWith(selected.label) : t.alreadyAnswered(outcome.label),
-        });
+        await postSlackMessage(this.web, { channel: payload.channel.id, text: answered.text });
       }
     } catch (error) {
       await this.reportMessageError(payload.channel?.id, error);
@@ -345,33 +234,23 @@ export class SlackConnector {
     return this.conversationChannelIds.includes(channelId) || this.boundChannelIds.has(channelId);
   }
 
-  /** Keeps the previous list when Core cannot be read; the next binding event reads it again. */
   private async refreshBindings(): Promise<void> {
-    try {
-      const data = await this.core.request<{ bindings: Array<{ channel_id: string }> }>("/advisor/channel-bindings?provider=slack");
-      this.boundChannelIds = new Set(data.bindings.map((binding) => binding.channel_id));
-    } catch (error) {
-      console.error("[slack] Could not read the Advisor channel bindings:", error);
-    }
+    this.boundChannelIds = await refreshBoundChannels(this.core, "slack", this.boundChannelIds);
   }
 
-  private async handleCoreEvent(event: OwlEvent): Promise<void> {
-    if (event.type === "advisor.channel_binding_changed") {
-      await this.refreshBindings();
-      return;
-    }
-    if (event.type === "advisor.responded") {
-      await this.handleAdvisorResponse(event);
-      return;
-    }
-    if (!shouldNotify(event.type, event.payload)) return;
-    await deliverNotification(this.core, event, {
-      update: (posted, language) => updateNotification(this.web, posted, event, language),
-      send: (language, remember) => sendNotification(this.web, event, this.notificationChannelIds.map((channelId) => ({ channelId })), {
-        language,
-        onPosted: ({ channelId, ts }) => remember(channelId, ts),
+  private handleCoreEvent(event: OwlEvent): Promise<void> {
+    return dispatchCoreEvent(event, {
+      refreshBindings: () => this.refreshBindings(),
+      advisorResponse: (advisorEvent) => this.handleAdvisorResponse(advisorEvent),
+      shouldNotify,
+      notify: (notifyEvent) => deliverNotification(this.core, notifyEvent, {
+        update: (posted, language) => updateNotification(this.web, posted, notifyEvent, language),
+        send: (language, remember) => sendNotification(this.web, notifyEvent, this.notificationChannelIds.map((channelId) => ({ channelId })), {
+          language,
+          onPosted: ({ channelId, ts }) => remember(channelId, ts),
+        }),
+        fail: (error) => this.reportNotificationFailure(notifyEvent, error),
       }),
-      fail: (error) => this.reportNotificationFailure(event, error),
     });
   }
 
@@ -390,94 +269,60 @@ export class SlackConnector {
   }
 
   private async handleAdvisorResponse(event: OwlEvent): Promise<void> {
+    if (!await routeAdvisorOrigin(event, "slack", (channelId) => this.deliverToChannel(event, channelId))) return;
     const origin = asRecord(event.payload.origin);
-    if (origin?.channel !== "slack") {
-      const target = parseDeliveryTarget(event);
-      if (origin?.channel === "web" && target?.provider === "slack") await this.deliverToChannel(event, target.channel_id);
-      return;
-    }
-
-    const threadTs = typeof origin.ref === "string" ? origin.ref : undefined;
+    const threadTs = typeof origin?.ref === "string" ? origin.ref : undefined;
     const channel = resolveSlackAdvisorChannel(event, [...this.conversationChannelIds, ...this.boundChannelIds], this.threadChannels, threadTs);
     if (!channel) {
       throw new Error("Could not determine the Slack channel for the Advisor reply.");
     }
     try {
-      const reply = await fetchAdvisorReply(this.core, event);
-      // Core is the sole parsing point for Advisor replies: it has already
-      // parsed and dispatched any action fence before emitting this event, so
-      // `reply` is the text Core decided to show, as-is.
-      const language = await this.core.language();
-      const { lines, results } = await this.uploadOutboundFiles(channel, threadTs, parseOutboundFiles(event.payload.outbound_files));
-      const notice = await reportAdvisorDelivery(this.core, event, results);
-      if (notice) lines.push(notice);
+      const text = await buildAdvisorReplyText(this.core, event, (files, language) => this.uploadOutboundFiles(channel, threadTs, files, language));
       await postSlackMessage(this.web, {
         channel,
         // Reply in the same thread the operator messaged from, if any; a
         // channel-scoped conversation does not imply a thread.
         ...(threadTs ? { thread_ts: threadTs } : {}),
-        text: formatAdvisorReply(appendFileResults(reply, event.payload.action_results, lines), event.payload.suggested_actions, language),
+        text,
       });
     } catch (error) {
       await this.reportMessageError(channel, error);
     }
   }
 
-  /** Web-origin files go to the channel Core chose; the reply text stays in the Web chat. */
-  private async deliverToChannel(event: OwlEvent, channelId: string): Promise<void> {
-    const files = parseOutboundFiles(event.payload.outbound_files);
-    if (!this.isConversationChannel(channelId)) await this.refreshBindings();
-    if (!this.isConversationChannel(channelId)) {
-      const message = `Slack のチャンネル ${channelId} は Connector の配送先に入っていません。`;
-      await reportAdvisorDelivery(this.core, event, files.map((file) => ({
-        index: file.index ?? -1, outcome: "failed", code: "upload_rejected", platform_error: null, message,
-      })));
-      return;
-    }
-    try {
-      const { results } = await this.uploadOutboundFiles(channelId, undefined, files);
-      await reportAdvisorDelivery(this.core, event, results);
-    } catch (error) {
-      await this.reportMessageError(channelId, error);
-    }
+  private deliverToChannel(event: OwlEvent, channelId: string): Promise<void> {
+    return deliverFilesToChannel(this.core, event, {
+      resolveChannel: async () => {
+        if (!this.isConversationChannel(channelId)) await this.refreshBindings();
+        return this.isConversationChannel(channelId) ? channelId : null;
+      },
+      notAllowedMessage: `Slack のチャンネル ${channelId} は Connector の配送先に入っていません。`,
+      upload: (channel, files, language) => this.uploadOutboundFiles(channel, undefined, files, language),
+      onError: (error) => this.reportMessageError(channelId, error),
+    });
   }
 
-  private async uploadOutboundFiles(
+  private uploadOutboundFiles(
     channel: string,
     threadTs: string | undefined,
     files: readonly OutboundFile[],
+    language: OwlLanguage,
   ): Promise<{ lines: string[]; results: OutboundFileResult[] }> {
-    const language = await this.core.language();
-    const t = connectorText(language);
-    const lines: string[] = [];
-    const results: OutboundFileResult[] = [];
-    for (const file of files) {
-      const index = file.index ?? -1;
-      const read = await readOutboundFile(file);
-      if (!read.ok) {
-        const message = t.fileSendFailed(file.name, read.reason === "changed" ? t.fileSendChanged : t.fileSendUnreadable, "");
-        lines.push(message);
-        results.push({ index, outcome: "failed", code: read.reason, platform_error: null, message });
-        continue;
-      }
-      try {
+    return sendOutboundFiles(files, language, {
+      label: "Slack",
+      send: async (file, bytes) => {
         const upload = {
           channel_id: channel,
-          file: read.bytes,
+          file: bytes,
           filename: file.name,
           ...(file.comment ? { initial_comment: markdownToMrkdwn(file.comment) } : {}),
         };
         // The SDK types thread_ts as required once present, so the two shapes are separate calls.
         await (threadTs ? this.web.filesUploadV2({ ...upload, thread_ts: threadTs }) : this.web.filesUploadV2(upload));
-        lines.push(t.fileSent(file.name, formatBytes(file.size)));
-        results.push({ index, outcome: "sent" });
-      } catch (error) {
-        const message = t.fileSendFailed(file.name, formatIntegrationError("Slack", error, language), slackSendHint(error, t));
-        lines.push(message);
-        results.push({ index, message, ...classifySlackUploadError(error) });
-      }
-    }
-    return { lines, results };
+      },
+      classifyError: classifySlackUploadError,
+      hint: slackSendHint,
+    });
   }
 
   /** Instance seam over the shared reader so tests can stub the open Decisions. */
@@ -548,8 +393,6 @@ function advisorThreadRef(event: OwlEvent): string | undefined {
   const origin = asRecord(event.payload.origin);
   return typeof origin?.ref === "string" ? origin.ref : undefined;
 }
-
-type UploadFailure = Required<Pick<OutboundFileResult, "outcome" | "code" | "platform_error">>;
 
 /** Failed only when Slack plainly refused the upload (nothing was posted); a dropped connection or an unrecognised error may have gone through. */
 export function classifySlackUploadError(error: unknown): UploadFailure {

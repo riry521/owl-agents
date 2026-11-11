@@ -1,9 +1,11 @@
+// @ts-check
 /**
  * Display lines for the stored reason / current_state / tried texts of a
  * Decision: repeats and bare ids are removed, the stored texts stay as they are.
  *
- * packages/plugin-sdk/src/shared/decision-sections.ts holds the same rules,
- * because the web app does not import plugin-sdk; keep the two in step.
+ * Copy of packages/plugin-sdk/src/shared/decision-sections.ts. It stays a copy because
+ * apps/web is a static Next export that does not depend on plugin-sdk (TypeScript source);
+ * tests/connector/notification-card.test.mjs checks that both return the same result.
  */
 
 /** Longest heading ("待っていた内容:") that is ignored when comparing lines. */
@@ -27,6 +29,7 @@ function compareKey(line) {
  */
 export function decisionContextLines(input) {
   const seen = new Set();
+  /** @param {unknown} value */
   const pick = (value) =>
     String(value ?? '').split(LINE_SEPARATOR).flatMap((raw) => {
       const line = raw.replace(BRACKETED_ID, '').trim();
@@ -46,8 +49,10 @@ export function decisionContextLines(input) {
 export function decisionDisplay({ explanation, questionText, decision }) {
   const ready = explanation?.status === 'ready' && explanation.summary !== null;
   const nextSteps = ready ? explanation?.next_steps || null : null;
+  /** @param {string[]} texts */
   const countLines = (...texts) => decisionContextLines({ reason: texts.join('\n'), current_state: '', tried: '' }).reason.length;
   // Only the lines of text not already in before, so a text that partly repeats an earlier one shows just its new lines.
+  /** @param {string[]} before @param {string} text */
   const newLines = (before, text) =>
     decisionContextLines({ reason: [...before, text].join('\n'), current_state: '', tried: '' }).reason.slice(countLines(...before));
   const summary = ready ? [explanation?.summary ?? ''] : [];

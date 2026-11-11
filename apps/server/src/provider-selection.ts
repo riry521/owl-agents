@@ -1,13 +1,16 @@
-import { cliText } from "./cli-language.js";
+import { cliLanguage } from "./cli-language.js";
 import { access } from "node:fs/promises";
 import { constants } from "node:fs";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 
-import { OPENCODE_EXECUTABLE_ENV, builtinProviderHarness, DEFAULT_HARNESS_MODELS, type ModelHarness } from "../../../packages/shared/dist/index.js";
+import { OPENCODE_EXECUTABLE_ENV, builtinProviderHarness, DEFAULT_HARNESS_MODELS, type ModelHarness } from "@owl/shared";
 
 import { AppSettingsStore } from "./app-settings-store.js";
 import { providerMode } from "./config.js";
 import { resolveDataDir } from "./contracts.js";
+import { renderMessage } from "./errors.js";
+import type { MessageRef } from "./messages/define.js";
+import { ProviderSelectionMessages as M } from "./messages/provider-selection.js";
 
 export type ProviderHarness = ModelHarness;
 
@@ -156,25 +159,24 @@ export async function resolveExecutableForSelection(selection: ProviderSelection
   return undefined;
 }
 
-export function providerConfigurationError(selection: ProviderSelection, executable?: string): string | null {
-  if (selection.mode === "invalid") {
-    return cliText('OWL_PROVIDERはstubまたはrealのいずれかを指定してください。', 'Set OWL_PROVIDER to stub or real.');
-  }
+/** Why the selected Provider cannot start, as a message-table row; null when it can. */
+export function providerConfigurationIssue(selection: ProviderSelection, executable?: string): MessageRef | null {
+  if (selection.mode === "invalid") return M.modeInvalid();
   if (selection.mode === "stub") return null;
   if (!selection.harness || !selection.adapter || !selection.executableEnv || !selection.binaryName) {
-    return process.env.OWL_PROVIDER_ADAPTER?.trim()
-      ? cliText('OWL_PROVIDER_ADAPTERはclaude-cli/v1またはcodex-cli/v1で指定してください。', 'Set OWL_PROVIDER_ADAPTER to claude-cli/v1 or codex-cli/v1.')
-      : cliText('real providerのadapter設定を解決できません。OWL_PROVIDER_ADAPTER=claude-cli/v1またはcodex-cli/v1を指定してください。', 'Could not resolve the real Provider adapter. Set OWL_PROVIDER_ADAPTER to claude-cli/v1 or codex-cli/v1.');
+    return process.env.OWL_PROVIDER_ADAPTER?.trim() ? M.adapterInvalid() : M.adapterUnresolved();
   }
-  if (selection.harness === "opencode" && !selection.model) {
-    return cliText('opencodeにはデフォルトのモデルがありません。OWL_PROVIDER_MODELへprovider/modelの形式で指定してください。', 'opencode has no default model. Set OWL_PROVIDER_MODEL to a provider/model id.');
-  }
+  if (selection.harness === "opencode" && !selection.model) return M.opencodeModelMissing();
   const configured = providerExecutableFromEnvironment(selection);
-  if (configured && !isAbsolute(configured)) {
-    return cliText(`${selection.executableEnv}は絶対パスで指定してください。`, `Set ${selection.executableEnv} to an absolute path.`);
-  }
+  if (configured && !isAbsolute(configured)) return M.executableNotAbsolute({ env: selection.executableEnv });
   if (!executable) {
-    return cliText(`${selection.harness} provider (${selection.adapter}) が必要です。${selection.executableEnv}へ絶対パスを指定するか、${selection.binaryName}をPATHへ追加してください。Owlはprovider CLIを自動インストールしません。`, `The ${selection.harness} Provider (${selection.adapter}) is required. Set ${selection.executableEnv} to an absolute path or add ${selection.binaryName} to PATH. Owl does not install Provider CLIs.`);
+    return M.executableMissing({ harness: selection.harness, adapter: selection.adapter, env: selection.executableEnv, binary: selection.binaryName });
   }
   return null;
+}
+
+/** The same issue as text in the CLI language, for the CLI and setup. */
+export function providerConfigurationError(selection: ProviderSelection, executable?: string): string | null {
+  const issue = providerConfigurationIssue(selection, executable);
+  return issue === null ? null : renderMessage(issue, cliLanguage());
 }

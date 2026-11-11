@@ -31,6 +31,8 @@ export function startKillWatchdog(afterMs: number): void {
   worker.unref();
 }
 
+const describeError = (error: unknown): string => (error instanceof Error ? error.stack ?? error.message : String(error));
+
 export interface ShutdownDeadlineOptions {
   /** The shutdown work. coreTimeoutMs is the deadline minus a margin so the graceful path ends first. */
   run(coreTimeoutMs: number, force: boolean): Promise<void>;
@@ -55,8 +57,8 @@ export function createShutdownDeadline(options: ShutdownDeadlineOptions): { hand
     exiting = true;
     const stages = [...activeStages];
     log(`[owl-server] shutdown aborted (${reason})${stages.length ? `; unfinished stages: ${stages.join(", ")}` : ""}`);
-    try { options.forceTerminate(); } catch (error) { log(`[owl-server] forceTerminateProcesses failed: ${String(error)}`); }
-    try { options.cleanup(); } catch (error) { log(`[owl-server] runtime cleanup failed: ${String(error)}`); }
+    try { options.forceTerminate(); } catch (error) { log(`[owl-server] forceTerminateProcesses failed: ${describeError(error)}`); }
+    try { options.cleanup(); } catch (error) { log(`[owl-server] runtime cleanup failed: ${describeError(error)}`); }
     options.exit(1);
   };
 
@@ -75,12 +77,13 @@ export function createShutdownDeadline(options: ShutdownDeadlineOptions): { hand
         try {
           await options.run(Math.max(0, deadlineMs - marginMs), force);
           if (exiting) return;
-          exiting = true;
+          // Why cleanup runs before `exiting` is set: if it throws, forceExit must still be allowed to exit(1).
           options.cleanup();
+          exiting = true;
           log("[owl-server] shutdown complete");
           options.exit(0);
         } catch (error) {
-          forceExit(`shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+          forceExit(`shutdown failed: ${describeError(error)}`);
         }
       })();
     },

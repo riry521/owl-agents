@@ -300,7 +300,8 @@ test("skill proposal approval reports conflicts and an unavailable Curator", asy
   assert.equal(conflict.status, 409);
   const conflictBody = await conflict.json();
   assert.equal(conflictBody.error.code, "invalid_state_transition");
-  assert.match(conflictBody.error.message, /skill_changed_since_proposal/u);
+  // The message is the Owner-language text of the code; the proposal is named in details.
+  assert.equal(conflictBody.error.details.proposal_id, "proposal-outdated");
   assert.equal(api.db.get("SELECT status FROM skill_proposals WHERE id = 'proposal-outdated'").status, "awaiting_approval");
   assert.equal(api.durableCore.skillBox.getSkill("release-procedure").current_revision, 2);
 
@@ -512,4 +513,70 @@ test("OpenAPI documents all skill and skill settings operations", () => {
   for (const field of ["recent_uses", "file_sizes", "has_scripts", "source_work_title", "judgement", "reusability", "rolled_back"]) {
     assert.ok(openapi.includes(field), `OpenAPI includes field ${field}`);
   }
+});
+
+test("core.ts skill filter errors carry a reason code and field, and render in one language only", async (t) => {
+  const { core } = await createTestCore(t);
+  let error = null;
+  try { core.listSkills({ state: "bogus" }); } catch (caught) { error = caught; }
+  assert.equal(error.code, "validation_error");
+  const { code, values } = error.details.reason;
+  assert.deepEqual({ code, values }, { code: "core.skill_state_invalid", values: { field: "state" } });
+  const { coreReasonMessage } = await import("../../apps/server/dist/messages/core-reasons/index.js");
+  const ja = coreReasonMessage("ja", code, values);
+  const en = coreReasonMessage("en", code, values);
+  assert.match(ja, /state/u);
+  assert.doesNotMatch(ja, /must be/u);
+  assert.match(en, /state/u);
+  assert.doesNotMatch(en, /[぀-ヿ一-鿿]/u);
+});
+
+test("core.ts skill file path errors use a reason code per cause, not one shared Japanese sentence", async (t) => {
+  const { core } = await createTestCore(t);
+  const { coreReasonMessage } = await import("../../apps/server/dist/messages/core-reasons/index.js");
+  const reasons = new Map();
+  for (const path of ["../x", "/abs", "other/file.md"]) {
+    let error = null;
+    try { await core.readSkillFile("some-skill", path); } catch (caught) { error = caught; }
+    assert.equal(error.code, "validation_error");
+    const { code, values } = error.details.reason;
+    assert.deepEqual(values, { field: "path" });
+    reasons.set(code, coreReasonMessage("ja", code, values));
+  }
+  assert.deepEqual([...reasons.keys()].sort(), ["core.skill_path_absolute", "core.skill_path_location", "core.skill_path_traversal"]);
+  assert.equal(new Set(reasons.values()).size, 3);
+  for (const text of reasons.values()) assert.doesNotMatch(text, /must|cannot/u);
+});
+
+test("core.ts skill input errors carry the identifier, not core's English text, and SKILL.md problems get a sentence per cause", async (t) => {
+  const { core, db } = await createTestCore(t);
+  const { coreReasonMessage } = await import("../../apps/server/dist/messages/core-reasons/index.js");
+  const { parseSkillMd } = await import("../../packages/core/dist/skill-files.js");
+  const created = await core.skillBox.applyRevision(revisionInput("broken-restore", "# v1"));
+  const revisionId = createUlid();
+  await db.createWriteLane().transact((tx) => tx.run(
+    `INSERT INTO skill_revisions (id, skill_name, revision, actor, action, snapshot_json, content_hash, reason, created_at)
+     VALUES (?, 'broken-restore', ?, 'user', 'update', 'not json', 'hash', 'Broken snapshot.', ?)`,
+    revisionId, created.revision + 1, new Date().toISOString(),
+  ));
+  let error = null;
+  try { await core.restoreSkill("broken-restore", revisionId); } catch (caught) { error = caught; }
+  assert.equal(error.code, "validation_error");
+  assert.deepEqual(error.details.reason, { code: "core.skill_input_invalid", values: { field: "skill", error_code: "skill_revision_invalid" } });
+  const ja = coreReasonMessage("ja", "core.skill_input_invalid", error.details.reason.values);
+  assert.match(ja, /スキルの版/u);
+  assert.doesNotMatch(ja, /[A-Za-z]{2,} (?:is|must|cannot)/u);
+  assert.doesNotMatch(coreReasonMessage("en", "core.skill_input_invalid", error.details.reason.values), /[぀-ヿ一-鿿]/u);
+
+  const sentences = new Set();
+  for (const document of ["no frontmatter", "---\nname: a-skill\nname: b-skill\n---\n", "---\nname: x\ndescription: d\nscope: global\n---\n"]) {
+    const parsed = parseSkillMd(document);
+    const values = { field: "SKILL.md", problem: parsed.problem, key: parsed.key ?? null };
+    const text = coreReasonMessage("ja", "core.skill_md_invalid", values);
+    assert.doesNotMatch(text, /missing|malformed|invalid|duplicate/u);
+    assert.doesNotMatch(coreReasonMessage("en", "core.skill_md_invalid", values), /[぀-ヿ一-鿿]/u);
+    sentences.add(text);
+  }
+  assert.equal(sentences.size, 3);
+  assert.match(coreReasonMessage("ja", "core.skill_md_invalid", { field: "SKILL.md", problem: "duplicate_key", key: "name" }), /name が 2 回以上/u);
 });

@@ -68,7 +68,7 @@ export function AttachmentTray({
             {notices.map((notice) => <span key={notice}>{notice}</span>)}
           </div>
           {onDismissNotices ? (
-            <button type="button" className="attach-notice__close" onClick={onDismissNotices} aria-label="×"><XIcon /></button>
+            <button type="button" className="attach-notice__close" onClick={onDismissNotices} aria-label={t('attachments.dismissNotices')}><XIcon /></button>
           ) : null}
         </div>
       ) : null}

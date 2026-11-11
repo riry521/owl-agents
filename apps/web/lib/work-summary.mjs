@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * Work summary template: read a summary written as
  *
@@ -10,6 +11,8 @@
  *
  * WORK_SUMMARY_SECTIONS is a copy of packages/shared/src/work-summary.ts
  * (the definition the Advisor prompt is built from); tests keep them equal.
+ * It is copied, not imported, because the web app loads this file as plain JS by relative path
+ * (also under node --test without a TS build), and importing a .ts file would need a compile step there.
  * Plain JS imported by relative path, like agent-run-tree.mjs.
  *
  * @typedef {'request' | 'background' | 'approach' | 'acceptance' | 'goals' | 'notes'} WorkSummaryKey
@@ -49,6 +52,7 @@ export const WORK_SUMMARY_SECTIONS = [
 const LIST_MARKER = /^(?:[-*•・]|\d+[.)])\s+/u;
 
 /** @param {string} value */
+// web は @owl/shared に依存しない（ブラウザ向けの bundle に node:crypto を含む shared を入れない）ので、shared の escapeRegExp を読めない。
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
 }

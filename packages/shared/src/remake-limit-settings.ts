@@ -1,4 +1,4 @@
-import { exactKeysValidator, keyedReader, SettingsValidationError } from "./settings-validation.js";
+import { exactKeysValidator, keyedReader, SettingsValidationError, type SettingsCondition } from "./settings-validation.js";
 import { globToRegExp } from "./glob.js";
 
 export const REMAKE_LIMIT_SETTINGS_KEY = "remake_limits";
@@ -40,24 +40,24 @@ const MAX_GLOBS = 200;
 const MAX_GLOB_LENGTH = 500;
 const INTEGER_RANGES = { lineage_review_attempts: 1000, lineage_worker_runs: 1000, lead_review_rejections: 100 } as const;
 
-function fail(field: string, message: string): never {
-  throw new RemakeLimitSettingsValidationError(message, field);
+function fail(field: string, message: string, condition: SettingsCondition): never {
+  throw new RemakeLimitSettingsValidationError(message, field, condition);
 }
 
 function checkInteger(key: keyof typeof INTEGER_RANGES, value: unknown): number {
   const max = INTEGER_RANGES[key];
-  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > max) fail(key, `${key} must be an integer from 1 to ${max}.`);
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1 || value > max) fail(key, `${key} must be an integer from 1 to ${max}.`, { kind: "integer_range", min: 1, max });
   return value;
 }
 
 function checkVerificationPaths(value: unknown): string[] {
-  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_GLOBS) fail("verification_paths", `verification_paths must be an array of 1 to ${MAX_GLOBS} globs.`);
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_GLOBS) fail("verification_paths", `verification_paths must be an array of 1 to ${MAX_GLOBS} globs.`, { kind: "array_length", min: 1, max: MAX_GLOBS });
   return value.map((glob) => {
-    if (typeof glob !== "string" || glob.length === 0 || glob.length > MAX_GLOB_LENGTH) fail("verification_paths", `verification_paths must contain non-empty globs of at most ${MAX_GLOB_LENGTH} characters.`);
+    if (typeof glob !== "string" || glob.length === 0 || glob.length > MAX_GLOB_LENGTH) fail("verification_paths", `verification_paths must contain non-empty globs of at most ${MAX_GLOB_LENGTH} characters.`, { kind: "glob_list", max_length: MAX_GLOB_LENGTH });
     try {
       globToRegExp(glob);
     } catch {
-      fail("verification_paths", `verification_paths contains an invalid glob: ${glob}`);
+      fail("verification_paths", `verification_paths contains an invalid glob: ${glob}`, { kind: "glob_list", max_length: MAX_GLOB_LENGTH });
     }
     return glob;
   });
@@ -66,7 +66,7 @@ function checkVerificationPaths(value: unknown): string[] {
 function checkTaskTypes(value: unknown): string[] {
   const known: readonly unknown[] = TASK_TYPES_FOR_REMAKE;
   if (!Array.isArray(value) || value.some((type) => !known.includes(type)) || new Set(value).size !== value.length) {
-    fail("checked_task_types", `checked_task_types must be a list of distinct task types from ${TASK_TYPES_FOR_REMAKE.join(", ")}.`);
+    fail("checked_task_types", `checked_task_types must be a list of distinct task types from ${TASK_TYPES_FOR_REMAKE.join(", ")}.`, { kind: "distinct_one_of_list", values: TASK_TYPES_FOR_REMAKE });
   }
   return [...value] as string[];
 }

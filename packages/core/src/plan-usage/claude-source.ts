@@ -1,5 +1,5 @@
-import { parseClaudeUsageResponse } from "../../../shared/dist/plan-usage-claude.js";
-import type { PlanUsageFetchResult, PlanUsageSource } from "../../../shared/dist/plan-usage.js";
+import { parseClaudeUsageResponse } from "@owl/shared/plan-usage-claude";
+import type { PlanUsageFetchResult, PlanUsageSource } from "@owl/shared/plan-usage";
 import {
   defaultClaudeCredentialReaderDeps,
   readClaudeCredential,

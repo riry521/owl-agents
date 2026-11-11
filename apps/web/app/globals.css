@@ -2856,7 +2856,7 @@ input, textarea, select {
   bottom: 0;
   left: 0;
   right: 0;
-  height: 83px;
+  height: var(--tabbar-h);
   background: rgba(255, 255, 255, 0.95);
   backdrop-filter: blur(12px);
   border-top: 1px solid var(--line);
@@ -2930,7 +2930,7 @@ input, textarea, select {
 
 .nav-more-sheet {
   position: absolute;
-  bottom: 83px;
+  bottom: var(--tabbar-h);
   left: 0;
   right: 0;
   background: var(--card);
@@ -2998,13 +2998,13 @@ input, textarea, select {
   }
 
   .advisor {
-    height: calc(100vh - var(--nav-h) - 83px);
+    height: calc(100vh - var(--nav-h) - var(--tabbar-h));
     padding-bottom: 90px;
   }
 
   .advisor__input-area {
     position: fixed;
-    bottom: 83px;
+    bottom: var(--tabbar-h);
     left: 0;
     right: 0;
     padding: 8px 16px;
@@ -4869,7 +4869,7 @@ body:has(.advisor-page-wrap) .provider-pause-banner__error { flex-basis: auto; w
   .md-notice__actions .btn { width: 100%; min-height: 44px; }
 }
 @media (max-width: 768px) {
-  .md-toc-button { bottom: calc(83px + 12px); }
+  .md-toc-button { bottom: calc(var(--tabbar-h) + 12px); }
 }
 
 /* Work detail: links to the md viewer */

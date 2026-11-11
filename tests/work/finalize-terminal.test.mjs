@@ -15,9 +15,9 @@ import { readOwnerReplan } from "../../packages/core/dist/replan-queue-store.js"
 // final_manager_failed Decision that reruns the check instead of replanning).
 
 /** The runner needs the db and root that createTestCore creates, so the Core gets an empty runner object that is filled in right after. */
-async function openCore(t, agentRunnerFor) {
+async function openCore(t, agentRunnerFor, dispatcher = {}) {
   const agentRunner = {};
-  const { root, db, core } = await createTestCore(t, { agentRunner, dispatcher: { tick_interval_ms: 25, manager_retry_delay_ms: 1 } }, { prefix: "owl-finalize-" });
+  const { root, db, core } = await createTestCore(t, { agentRunner, dispatcher: { tick_interval_ms: 25, manager_retry_delay_ms: 1, ...dispatcher } }, { prefix: "owl-finalize-" });
   Object.assign(agentRunner, withNecessity(agentRunnerFor({ db, root })));
   return { db, core, root };
 }
@@ -74,7 +74,7 @@ function insertTask(tx, workId, { id, status, managerTaskId, title }) {
   );
 }
 
-function insertReport(tx, workId, taskId) {
+function insertReport(tx, workId, taskId, payload = { kind: "report", result: "success", work_done: `did ${taskId}` }) {
   const now = new Date().toISOString();
   const run = createUlid();
   tx.run(
@@ -85,7 +85,7 @@ function insertReport(tx, workId, taskId) {
   tx.run(
     `INSERT INTO reports (id, agent_run_id, schema_version, result, payload_json, raw_response_sha256, raw_response_bytes, created_at)
      VALUES (?, ?, '1', 'success', ?, ?, 0, ?)`,
-    createUlid(), run, JSON.stringify({ kind: "report", result: "success", work_done: `did ${taskId}` }), "0".repeat(64), now,
+    createUlid(), run, JSON.stringify(payload), "0".repeat(64), now,
   );
 }
 
@@ -965,4 +965,70 @@ test("a goal recorded by an incomplete final check reaches the next final check 
   assert.equal(payload.goal_shortfalls.length, 1);
   assert.equal(payload.goal_shortfalls[0].task_id, taskId);
   assert.equal(payload.goal_shortfalls[0].reason, "No time for a diagram");
+});
+
+/** A Work of many Tasks with large reports; returns the reports the final check received. */
+async function finalReportsSeen(t, dispatcher, taskCount, bodyChars) {
+  let seen = null;
+  const { db, core } = await openCore(t, () => ({
+    runManagerPlan: async (request) => {
+      if (request.mode !== "finalize") return { outcome: "failed", message: "unexpected" };
+      seen = request.reports;
+      return { outcome: "success", report_valid: true, report: { tasks: request.tasks ?? [], event: null, verdict: completeVerdict.verdict } };
+    },
+    runWorker: async () => ({ outcome: "failed" }),
+    runReviewer: async () => ({ outcome: "failed" }),
+    runAdvisor: async () => ({ reply: "" }),
+  }), dispatcher);
+  const ids = Array.from({ length: taskCount }, () => createUlid());
+  const payloads = new Map();
+  const workId = await seedFinishedWork(core, db, ids.map((id, i) => ({ id, status: "completed", managerTaskId: `T${i + 1}`, title: `t${i}` })));
+  await db.createWriteLane().transact((tx) => {
+    for (const id of ids) {
+      const base = workerReport(id);
+      const payload = { ...base, work_done: "w".repeat(bodyChars), verification: { ...base.verification, acceptance: [{ criterion_id: "AC1", status: "passed", evidence: "e".repeat(bodyChars) }] } };
+      payloads.set(id, payload);
+      insertReport(tx, workId, id, payload);
+    }
+    return null;
+  });
+  await core.start();
+  await core.tick(workId);
+  await waitFor(() => seen, { timeoutMs: 8_000 });
+  return { seen, ids, payloads };
+}
+
+test("the final check gets a bounded digest per Task and the full report as a file", async (t) => {
+  const limit = 40_000;
+  const taskCount = 40;
+  const bodyChars = 15_000;
+  const { seen, ids, payloads } = await finalReportsSeen(t, { final_reports_max_chars: limit }, taskCount, bodyChars);
+  assert.ok(ids.length * bodyChars * 2 >= 500_000, "the reports total at least 500k characters");
+  assert.ok(JSON.stringify(seen).length <= limit);
+  for (const id of ids) {
+    const digest = seen.find((report) => report.task_id === id);
+    assert.equal(digest.status, "completed");
+    assert.equal(digest.acceptance[0].criterion_id, "AC1");
+    assert.equal(digest.acceptance[0].status, "passed");
+    assert.equal(typeof digest.work_done, "string");
+    const full = JSON.parse(await readFile(digest.report_path, "utf8"));
+    assert.deepEqual(full, payloads.get(id));
+  }
+});
+
+test("the digests shrink further when a tiny limit is configured", async (t) => {
+  const limit = 3_000;
+  const roomy = await finalReportsSeen(t, { final_reports_max_chars: 1_000_000 }, 5, 3_000);
+  const small = await finalReportsSeen(t, { final_reports_max_chars: limit }, 5, 3_000);
+  assert.ok(JSON.stringify(roomy.seen).length > limit);
+  assert.ok(JSON.stringify(small.seen).length <= limit);
+  assert.equal(small.seen.length, 5);
+});
+
+test("the oversize log compares the report digests only, so other parts of the input do not trigger it", async (t) => {
+  const logged = [];
+  t.mock.method(console, "error", (...args) => { logged.push(args.join(" ")); });
+  const { seen } = await finalReportsSeen(t, { final_reports_max_chars: 4_000 }, 3, 3_000);
+  assert.ok(JSON.stringify(seen).length <= 4_000);
+  assert.ok(!logged.some((line) => /final check/u.test(line)), logged.join("\n"));
 });

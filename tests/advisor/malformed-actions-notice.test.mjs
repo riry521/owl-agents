@@ -39,14 +39,14 @@ test("malformed owl-actions notifies the Owner, creates no Work, and logs positi
   // Runtime path: parse once and pass the flag; Core's fallback then sees stripped text.
   const parsed = parseAdvisorTurnReply("slack", malformedReply, "ja");
   assert.equal(parsed.malformed, true);
-  const id = await core.persistAdvisorReply(conversationId, parsed.reply, createUlid(), { channel: "slack" }, parsed.suggested_actions, parsed.malformed);
+  const id = await core.advisorActions.persistAdvisorReply(conversationId, parsed.reply, createUlid(), { channel: "slack" }, parsed.suggested_actions, parsed.malformed);
   const body = db.get("SELECT body FROM messages WHERE id = ?", id).body;
   assert.ok(body.startsWith(VISIBLE));
   assert.equal(body.match(NOTICE).length, 1);
   assert.equal(db.get("SELECT COUNT(*) AS count FROM works WHERE title = ?", "Malformed Work").count, 0);
 
   // Fallback path parses the raw reply again and the flag is also set: still one notice.
-  const id2 = await core.persistAdvisorReply(conversationId, malformedReply, createUlid(), { channel: "slack" }, [], true);
+  const id2 = await core.advisorActions.persistAdvisorReply(conversationId, malformedReply, createUlid(), { channel: "slack" }, [], true);
   assert.equal(db.get("SELECT body FROM messages WHERE id = ?", id2).body.match(NOTICE).length, 1);
 
   const log = logs.join("\n");
@@ -61,9 +61,9 @@ test("valid create_work and replies without owl-actions get no notice", async (t
   const logs = captureWarnings(t);
   const parsed = parseAdvisorTurnReply("slack", validReply, "ja");
   assert.equal(parsed.malformed, undefined);
-  const id = await core.persistAdvisorReply(conversationId, parsed.reply, createUlid(), { channel: "slack" }, parsed.suggested_actions);
+  const id = await core.advisorActions.persistAdvisorReply(conversationId, parsed.reply, createUlid(), { channel: "slack" }, parsed.suggested_actions);
   assert.doesNotMatch(db.get("SELECT body FROM messages WHERE id = ?", id).body, NOTICE);
-  const plain = await core.persistAdvisorReply(conversationId, "ただの返信", createUlid(), { channel: "slack" }, []);
+  const plain = await core.advisorActions.persistAdvisorReply(conversationId, "ただの返信", createUlid(), { channel: "slack" }, []);
   assert.equal(db.get("SELECT body FROM messages WHERE id = ?", plain).body, "ただの返信");
   assert.equal(logs.filter((line) => /malformed/u.test(line)).length, 0);
 });
@@ -75,7 +75,7 @@ test("a valid fence runs and a malformed fence in the same Slack reply adds a no
   const parsed = parseAdvisorTurnReply("slack", mixed, "ja");
   assert.equal(parsed.malformed, true);
   assert.equal(parsed.suggested_actions.length, 1);
-  const id = await core.persistAdvisorReply(conversationId, parsed.reply, createUlid(), { channel: "slack" }, parsed.suggested_actions, parsed.malformed);
+  const id = await core.advisorActions.persistAdvisorReply(conversationId, parsed.reply, createUlid(), { channel: "slack" }, parsed.suggested_actions, parsed.malformed);
   const body = db.get("SELECT body FROM messages WHERE id = ?", id).body;
   assert.equal(body.match(NOTICE).length, 1);
   assert.doesNotMatch(body, /何も変更していません|Nothing was changed/u);
@@ -87,7 +87,7 @@ test("a broken owl-actions block is recorded as an owl-actions failure at index 
   const { core, db, conversationId } = await setup(t);
   captureWarnings(t);
   const parsed = parseAdvisorTurnReply("slack", malformedReply, "ja");
-  await core.persistAdvisorReply(conversationId, parsed.reply, createUlid(), { channel: "slack" }, parsed.suggested_actions, parsed.malformed);
+  await core.advisorActions.persistAdvisorReply(conversationId, parsed.reply, createUlid(), { channel: "slack" }, parsed.suggested_actions, parsed.malformed);
   const payload = JSON.parse(db.get("SELECT payload_json FROM events WHERE type = 'advisor.responded' ORDER BY rowid DESC LIMIT 1").payload_json);
   assert.deepEqual(payload.action_failures.map((f) => [f.index, f.type, f.status, f.code, f.retryable, f.target, f.details]), [
     [-1, "owl-actions", "failed", "invalid_payload", true, null, {}],

@@ -4,9 +4,10 @@ import * as nodeFs from "node:fs/promises";
 import { rename as renameFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { createUlid } from "../../db/dist/index.js";
+import { createUlid } from "@owl/db";
 
 import { HumanReadableError } from "./errors.js";
+import { isPathInside } from "./path-inside.js";
 
 export type KnowledgeStorageState = "available" | "unavailable" | "moving";
 export type KnowledgeUnavailableReason =
@@ -91,6 +92,7 @@ function storageError(code: string, message: string, details: Record<string, unk
   return new HumanReadableError({ code, message, remediation: "Check the knowledge storage settings and try again.", details });
 }
 
+// shared の errorCode は文字列以外の code も String で文字列にする。ここは文字列の code だけを受けるので別に持つ。
 function errorCode(error: unknown): string | undefined {
   return typeof error === "object" && error !== null && typeof (error as { code?: unknown }).code === "string"
     ? (error as { code: string }).code
@@ -106,7 +108,7 @@ export function normalizeKnowledgeDirInput(value: string, defaultDir?: string): 
     code: "validation_error",
     message: "The knowledge storage path must be an absolute path.",
     remediation: "Enter an absolute path.",
-    details: { field: "path", reason: "absolute" },
+    details: { field: "path", reason: { code: "knowledge_storage.path_not_absolute", values: { field: "path" } } },
   });
   if (typeof value !== "string") throw invalid();
   let text = value.trim();
@@ -118,15 +120,10 @@ export function normalizeKnowledgeDirInput(value: string, defaultDir?: string): 
   return defaultDir !== undefined && resolved === resolve(defaultDir) ? "" : resolved;
 }
 
-function isInside(parent: string, child: string): boolean {
-  const rel = relative(parent, child);
-  return rel === "" || (!rel.startsWith(`..${sep}`) && rel !== ".." && !isAbsolute(rel));
-}
-
 function isSafeRelativePath(root: string, path: string): boolean {
   const resolvedRoot = resolve(root);
   const resolvedPath = resolve(resolvedRoot, path);
-  return path !== "" && !isAbsolute(path) && resolvedPath !== resolvedRoot && isInside(resolvedRoot, resolvedPath);
+  return path !== "" && !isAbsolute(path) && resolvedPath !== resolvedRoot && isPathInside(resolvedRoot, resolvedPath, true);
 }
 
 // Entries excluded from target emptiness checks and file-set verification.
@@ -655,10 +652,10 @@ export class KnowledgeLocation {
       throw this.invalidTarget("parent_missing");
     });
     if (targetReal === sourceReal) throw this.invalidTarget("same_as_current");
-    if (isInside(sourceReal, targetReal) || isInside(targetReal, sourceReal)) throw this.invalidTarget("nested");
+    if (isPathInside(sourceReal, targetReal, true) || isPathInside(targetReal, sourceReal, true)) throw this.invalidTarget("nested");
     const reserved = await this.protectedPaths();
     const dataReal = reserved[3];
-    if (reserved.includes(targetReal) || isInside(dataReal, targetReal) || isInside(targetReal, reserved[2]) || isInside(targetReal, dataReal)) {
+    if (reserved.includes(targetReal) || isPathInside(dataReal, targetReal, true) || isPathInside(targetReal, reserved[2], true) || isPathInside(targetReal, dataReal, true)) {
       throw this.invalidTarget("reserved");
     }
     let createdTarget = false;

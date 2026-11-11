@@ -4,11 +4,12 @@ import { lstatSync, readFileSync, readdirSync, realpathSync, rmdirSync, statSync
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
-import { TEST_RUN_UNITS } from "../../shared/dist/test-run-settings.js";
-import { REGEX_FLAGS, type TestSetupSettings } from "../../shared/dist/test-setup-settings.js";
+import { TEST_RUN_UNITS } from "@owl/shared/test-run-settings";
+import { REGEX_FLAGS, type TestSetupSettings } from "@owl/shared/test-setup-settings";
 import { matchesGlobWithDots } from "./glob.js";
 import { DEFAULT_TEST_DETECTION_RULES } from "./test-detection-rules.js";
 import type { JsonObject, TestSetupView } from "./types.js";
+import { isRecord, sha256 } from "@owl/shared/small-helpers";
 
 const execFileAsync = promisify(execFile);
 const GIT_BUFFER_BYTES = 64 * 1024 * 1024;
@@ -62,7 +63,6 @@ export interface StoredTestSetup {
 export const isLegacyWholeSetup = (record: StoredTestSetup): boolean =>
   record.explicit_digest === null && record.test_run?.mode === "whole" && record.whole_reason === "";
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const isStrings = (value: unknown): value is string[] => Array.isArray(value) && value.every((item) => typeof item === "string");
 
 /** null (with a warning) when the JSON is absent-shaped or broken; a record is never partly trusted. */
@@ -107,8 +107,6 @@ export function readStoredTestSetup(json: string | null, warn?: (message: string
     return null;
   }
 }
-
-const sha256 = (text: string | Buffer): string => createHash("sha256").update(text).digest("hex");
 
 /** The digest a repair record stores for the Owner's test_run_json; resolution and display both compare against it. */
 export const explicitTestRunDigest = (testRunJson: string): string => sha256(testRunJson);

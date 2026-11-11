@@ -280,3 +280,30 @@ printf "TAP version 13\\nok 1 - pass\\n1..1\\n"
   assert.equal(failure.file, "backend/tests/fail.t");
   assert.equal(testFailureKey(failure), `backend/tests/fail.t\0boom`);
 });
+
+test("core.ts test_run and test_policy errors carry each key with its cause, and render in one language with the reason", async (t) => {
+  const { core, projectId } = await setup(t);
+  const { coreReasonMessage } = await import("../../apps/server/dist/messages/core-reasons/index.js");
+  const reasonOf = async (payload, key) => {
+    let error = null;
+    try { await core.updateProject(projectId, command(payload, key)); } catch (caught) { error = caught; }
+    assert.equal(error.code, "validation_error");
+    return error.details.reason;
+  };
+  const run = await reasonOf({ test_run: { mode: "whole", bogus: 1 } }, "run-bad");
+  assert.equal(run.code, "core.test_run_settings_invalid");
+  assert.deepEqual(run.values, { field: "test_run", problems: [{ key: "test_run.bogus", kind: "unknown_key" }, { key: "test_run.whole_argv", kind: "whole_argv_required" }] });
+  const runJa = coreReasonMessage("ja", run.code, run.values);
+  assert.match(runJa, /test_run\.bogus は未知のキー/u);
+  assert.match(runJa, /mode が whole のときは test_run\.whole_argv が必要/u);
+  assert.doesNotMatch(runJa, /is required|is not a known/u);
+  assert.doesNotMatch(coreReasonMessage("en", run.code, run.values), /[぀-ヿ一-鿿]/u);
+
+  const policy = await reasonOf({ test_policy: { check_commands: [[]], extra: 1 } }, "policy-bad");
+  assert.equal(policy.code, "core.test_policy_settings_invalid");
+  assert.deepEqual(policy.values, { field: "test_policy", problems: [{ key: "extra", kind: "unknown_key" }, { key: "check_commands", kind: "invalid" }] });
+  const policyJa = coreReasonMessage("ja", policy.code, policy.values);
+  assert.match(policyJa, /test_policy\.extra は未知のキー/u);
+  assert.match(policyJa, /test_policy\.check_commands は、argv/u);
+  assert.doesNotMatch(coreReasonMessage("en", policy.code, policy.values), /[぀-ヿ一-鿿]/u);
+});

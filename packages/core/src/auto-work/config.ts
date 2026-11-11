@@ -7,6 +7,7 @@ import {
   type AutoWorkSource, type EffectiveAutoWorkConfig, type EffectiveAutoWorkRule,
 } from "@owl/shared";
 import { parseLibrarianTime } from "../librarian-scheduler.js";
+import { isRecord } from "@owl/shared/small-helpers";
 
 export type AutoWorkConfigLayer = "defaults" | "local" | "project";
 export type AutoWorkConfigAlertKind = "auto_work_config_invalid" | "auto_work_config_restored";
@@ -34,8 +35,6 @@ const ORIGIN_PRIORITY: Readonly<Record<AutoWorkRuleOrigin, number>> = { project:
 function fail(path: string, message: string): never {
   throw new AutoWorkConfigError(`${path}: ${message}`);
 }
-
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 
 const int = (min: number, max?: number): Validator => (value, path) => {
   if (!Number.isInteger(value) || (value as number) < min || (max !== undefined && (value as number) > max)) {

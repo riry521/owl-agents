@@ -1,6 +1,7 @@
-import { createUlid } from "../../db/dist/index.js";
+import { createUlid } from "@owl/db";
 import type { CurationKind } from "./curation-runs";
 import type { OwnerLanguage } from "@owl/shared";
+import { isRecord } from "@owl/shared/small-helpers";
 
 /** Report arrays whose first entries are worth naming in the summary, per kind. */
 const MAIN_ITEM_ARRAYS: Record<CurationKind, readonly string[]> = {
@@ -20,10 +21,6 @@ const RULE_READ_ONLY_SENTENCE: Record<OwnerLanguage, string> = {
 };
 
 const NO_CHANGES: Record<OwnerLanguage, string> = { ja: "変更なし", en: "no changes" };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 /** A short human label for one report entry, or null when the entry has no usable field. */
 function itemLabel(entry: unknown): string | null {

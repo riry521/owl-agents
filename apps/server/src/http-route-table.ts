@@ -1,3 +1,5 @@
+import { escapeRegExp } from "@owl/shared/small-helpers";
+
 export const API_PREFIX = "/api/v1";
 export const WEBSOCKET_PATH = `${API_PREFIX}/ws`;
 export type ApiMethod = "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -21,8 +23,6 @@ export interface CompiledRoute<T extends RouteDefinition> {
 }
 
 const TOKEN = /\{([A-Za-z_][A-Za-z0-9_]*)([*+]?)\}/g;
-
-const escapeRegExp = (text: string): string => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // Why not: 手書きの正規表現を各行に持たせる案は、OpenAPI のパスと二重管理になるので採らない。
 // テンプレートから機械的に作れば、OpenAPI と同じ書き方のまま照合できる。

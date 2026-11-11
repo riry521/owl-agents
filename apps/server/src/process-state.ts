@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { isPidAlive } from "../../../packages/shared/dist/index.js";
+import { isPidAlive } from "@owl/shared";
 
 /**
  * `kill(pid, 0)` also succeeds for a zombie on macOS/Linux until its parent

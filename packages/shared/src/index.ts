@@ -1,6 +1,4 @@
 import { randomBytes } from "node:crypto";
-import { isAbsolute, relative, resolve, sep } from "node:path";
-import type { AdvisorSuggestedAction } from "./advisor-response.js";
 import type { ModelHarness } from "./harness-models.js";
 import type { OwnerLanguage } from "./owner-language.js";
 import type { WebResearchCapture } from "./web-research.js";
@@ -152,7 +150,10 @@ export type { ModelSettingRole } from "./default-role-models.js";
 export {
   builtinProviderHarness,
   harnessOfAdapter,
+  CLAUDE_FABLE_5_2_MODEL,
   CLAUDE_HAIKU_5_5_MODEL,
+  CLAUDE_OPUS_5_5_MODEL,
+  CLAUDE_SONNET_5_5_MODEL,
   CODEX_BUILTIN_MODELS,
   CODEX_GPT_6_LUNA_MODEL,
   DEFAULT_HARNESS_MODELS,
@@ -207,6 +208,8 @@ export interface AgentRunRequest {
   readonly invocation_id: string;
   readonly work_id: string;
   readonly task_id: string | null;
+  /** The Work's Project; omitted when the Work has none. Becomes OWL_PROJECT_ID of the agent's owl-memory server. */
+  readonly project_id?: string;
   readonly attempt: number;
   readonly context: JsonObject;
   readonly model?: string;
@@ -420,21 +423,6 @@ export type AgentKind = "decision" | "task" | "executor";
 /** Provider launch implementations, not credentials. */
 export type ProviderAdapter = "claude-cli" | "codex-cli" | "api-key";
 
-/** The model catalog reference an agent run is stored against. */
-export interface ModelRef {
-  provider: ProviderAdapter;
-  catalog_id: string;
-  model_name: string;
-  effort: string;
-  catalog_version: string;
-}
-
-/** A persisted run's relationship to an actor or child executor. */
-export type RunType =
-  | "role_run"
-  | "child_executor_run"
-  | "verification_run";
-
 /** The canonical Work state values. */
 export enum WorkState {
   Memo = "memo",
@@ -548,57 +536,6 @@ export function isValidUlid(value: unknown): value is ULID {
   return typeof value === "string" && ULID_PATTERN.test(value);
 }
 
-/** Convert an external string into a branded ULID or fail with an actionable error. */
-export function assertValidUlid(value: string): asserts value is ULID {
-  if (!isValidUlid(value)) {
-    throw new HumanReadableError({
-      code: "invalid_ulid",
-      message: "The identifier is not a valid uppercase ULID.",
-      remediation: "Provide a 26-character Crockford-base32 ULID."
-    });
-  }
-}
-
-/**
- * Resolve a path relative to the configured owl_root.
- * Absolute path segments and lexical traversal outside the root are rejected.
- */
-export function resolveOwlPath(owlRoot: string, ...relativeSegments: string[]): string {
-  if (!owlRoot || !isAbsolute(owlRoot)) {
-    throw new HumanReadableError({
-      code: "invalid_owl_root",
-      message: "The configured owl_root must be an absolute path.",
-      remediation: "Set owl_root in the installation configuration before resolving paths."
-    });
-  }
-
-  if (relativeSegments.some((segment) => isAbsolute(segment))) {
-    throw new HumanReadableError({
-      code: "absolute_path_not_allowed",
-      message: "An owl_root-relative path cannot contain an absolute segment.",
-      remediation: "Pass only relative path segments below the configured owl_root."
-    });
-  }
-
-  const root = resolve(owlRoot);
-  const candidate = resolve(root, ...relativeSegments);
-  const relativeCandidate = relative(root, candidate);
-  const escapesRoot =
-    relativeCandidate === ".." ||
-    relativeCandidate.startsWith(`..${sep}`) ||
-    isAbsolute(relativeCandidate);
-
-  if (escapesRoot) {
-    throw new HumanReadableError({
-      code: "path_outside_owl_root",
-      message: "The requested path is outside the configured owl_root.",
-      remediation: "Choose a relative path that remains inside owl_root."
-    });
-  }
-
-  return candidate;
-}
-
 /** Canonical event registry, including the legacy migration entry. */
 export const CANONICAL_EVENT_REGISTRY = [
   "work.ready",
@@ -655,22 +592,12 @@ export const CANONICAL_EVENT_REGISTRY = [
   "legacy.imported"
 ] as const;
 
-/** Compatibility name for callers that refer to the registry as a type list. */
-export const CANONICAL_EVENT_TYPES = CANONICAL_EVENT_REGISTRY;
-
 export type CanonicalEventType = (typeof CANONICAL_EVENT_REGISTRY)[number];
-export type CanonicalEvent = CanonicalEventType;
 
 /** External display alias only; it is intentionally not a canonical event type. */
 export const CANONICAL_EVENT_ALIASES = {
   "decision.required": "decision.opened"
 } as const satisfies Readonly<Record<string, CanonicalEventType>>;
-
-export type CanonicalEventAlias = keyof typeof CANONICAL_EVENT_ALIASES;
-
-export function isCanonicalEventType(value: string): value is CanonicalEventType {
-  return (CANONICAL_EVENT_REGISTRY as readonly string[]).includes(value);
-}
 
 export { ClaudeStreamReader } from "./agent-stream.js";
 export * from "./token-relay.js";

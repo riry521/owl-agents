@@ -1,4 +1,5 @@
 import type { OwnerLanguage } from "./owner-language";
+import { isRecord } from "@owl/shared/small-helpers";
 
 /**
  * The Final Manager's verdict, in the template its output schema fixes
@@ -71,10 +72,6 @@ export interface FinalManagerVerdict {
   readonly lessons: readonly FinalLesson[];
   /** Recorded goals the Manager says are now met; Core accepts them only under the rules of goal-shortfalls.ts. */
   readonly goals_met: readonly { readonly criterion_ref: string; readonly evidence: string }[];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function hasStrings(value: Record<string, unknown>, keys: readonly string[]): boolean {

@@ -1,6 +1,3 @@
-import { mkdtemp, readFile, rm, unlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
   Client,
   DiscordAPIError,
@@ -14,27 +11,23 @@ import {
 } from "discord.js";
 import { CoreClient, commandEnvelope, formatIntegrationError } from "@owl/plugin-sdk";
 import {
-  classifyIntent,
+  routeInboundMessage,
+  answerDecisionButton,
   connectorText,
-  decisionShortId,
-  appendFileResults,
-  formatAdvisorReply,
-  formatStatusResponse,
   parseDecisionButtonId,
-  parseOutboundFiles,
-  readOutboundFile,
-  reportAdvisorDelivery,
-parseDeliveryTarget,
   type OutboundFile,
-  resolveDecisionButtonTarget,
-  submitDecisionAnswer,
-  uploadAttachment,
   FileConnectorStateStore,
   asRecord,
+  buildAdvisorReplyText,
+  deliverFilesToChannel,
   deliverNotification,
-  fetchAdvisorReply,
+  dispatchCoreEvent,
+  refreshBoundChannels,
+  routeAdvisorOrigin,
+  sendOutboundFiles,
+  type OwlLanguage,
+  type UploadFailure,
   fetchPendingDecisions,
-  formatBytes,
   parseChannelIds,
   reportNotificationFailure,
   type OutboundFileResult,
@@ -150,92 +143,27 @@ export class DiscordConnector {
         url: a.url,
       })),
     };
-
-    const pendingDecisions = await this.fetchPendingDecisions();
-    const language = await this.core.language();
-    const t = connectorText(language);
-    const intent = classifyIntent(discordMsg, pendingDecisions, this.config.statusKeywords, language);
-
-    switch (intent.kind) {
-      case "status_query": {
-        const status = await formatStatusResponse(this.core, language);
-        await this.sendLong(message, status);
-        // A misjudged request must still reach the Advisor's conversation; a failed record never blocks the answer already posted.
-        await this.sendToCore(message, message.content, [], status).catch((error) => {
-          console.error("[discord] Failed to record the status exchange in Core:", error);
-        });
-        break;
-      }
-
-      case "decision_answer": {
-        const pending = pendingDecisions.find((candidate) => candidate.id === intent.decisionId);
-        const outcome = await submitDecisionAnswer(this.core, {
-          decisionId: intent.decisionId,
-          answer: intent.answer,
-          optionKey: intent.optionKey,
-          displayLabel: intent.optionLabel ?? intent.answer,
-          source: "discord",
-          sourceMessageId: message.id,
-          idempotencyKey: `discord:decision:${intent.decisionId}:msg:${message.id}`,
-          expectedVersion: pending?.state_version ?? 0,
-        });
-        await this.sendNativeMessage(
-          message,
-          outcome.kind === "accepted" ? t.answerAccepted(decisionShortId(intent.decisionId)) : t.alreadyAnswered(outcome.label),
-        );
-        break;
-      }
-
-      case "decision_clarification": {
-        await this.sendLong(message, intent.text);
-        break;
-      }
-
-      case "file_upload": {
-        // Same grouping sendToCore uses for this message's conversation_hint
-        // (dm_ref = thread_ref = channelId), so an attachment uploaded ahead
-        // of the message still lands in the conversation the message
-        // resolves to.
-        const conversationHint = { work_id: null, dm_ref: message.channelId, thread_ref: message.channelId };
-        const tempDir = await mkdtemp(join(tmpdir(), "owl-discord-upload-"));
-        const attachmentIds: string[] = [];
-        try {
-          for (const attachment of intent.files) {
-            if (this.config.maxFileSize !== undefined && attachment.size > this.config.maxFileSize) {
-              console.warn(`[discord] Skipping ${attachment.name}: ${attachment.size} bytes exceeds maxFileSize ${this.config.maxFileSize}`);
-              continue;
-            }
-            const result = await downloadAttachment(attachment, tempDir, this.config.maxFileSize);
-            try {
-              const bytes = await readFile(result.path);
-              const uploaded = await uploadAttachment(this.core, {
-                provider: "discord",
-                account_id: this.config.accountId,
-                external_attachment_id: attachment.id,
-                conversation_hint: conversationHint,
-                work_id: null,
-                file: { name: attachment.name, mime: result.mime, bytes },
-              });
-              attachmentIds.push(uploaded.upload_id);
-              const notice = t.fileReceived(attachment.name, formatBytes(result.size), result.knownFormat);
-              await this.sendNativeMessage(message, uploaded.status === "quarantined" ? `${notice}\n${t.executableNotRun}` : notice);
-            } finally {
-              await unlink(result.path).catch(() => undefined);
-            }
-          }
-        } finally {
-          await rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
+    await routeInboundMessage(this.core, {
+      source: "discord",
+      fetchPendingDecisions: () => this.fetchPendingDecisions(),
+      accountId: this.config.accountId,
+      statusKeywords: this.config.statusKeywords,
+      message: discordMsg,
+      messageId: message.id,
+      reply: (text) => this.sendLong(message, text),
+      notice: (text) => this.sendLong(message, text),
+      // Same grouping sendToCore uses for this message's conversation_hint, so an attachment uploaded ahead of the message lands in the same conversation.
+      conversationHint: { work_id: null, dm_ref: message.channelId, thread_ref: message.channelId },
+      tempDirPrefix: "owl-discord-upload-",
+      download: async (attachment, dir) => {
+        if (this.config.maxFileSize !== undefined && attachment.size > this.config.maxFileSize) {
+          console.warn(`[discord] Skipping ${attachment.name}: ${attachment.size} bytes exceeds maxFileSize ${this.config.maxFileSize}`);
+          return null;
         }
-        if (attachmentIds.length === 0 && !intent.text) break;
-        await this.sendToCore(message, intent.text ?? "", attachmentIds);
-        break;
-      }
-
-      case "conversation": {
-        await this.sendToCore(message, intent.text, []);
-        break;
-      }
-    }
+        return downloadAttachment(attachment, dir, this.config.maxFileSize);
+      },
+      sendInbound: (text, attachmentIds, statusReply) => this.sendToCore(message, text, attachmentIds, statusReply),
+    });
   }
 
   private async handleButtonInteraction(interaction: Interaction): Promise<void> {
@@ -252,27 +180,8 @@ export class DiscordConnector {
       await interaction.deferReply({ ephemeral: true });
       acknowledged = true;
 
-      const t = connectorText(await this.core.language());
-      const selected = resolveDecisionButtonTarget(await this.fetchPendingDecisions(), target);
-      if (!selected) {
-        await interaction.editReply({ content: t.decisionGone });
-        return;
-      }
-      const messageRef = interaction.message?.id ?? "none";
-      const outcome = await submitDecisionAnswer(this.core, {
-        decisionId: selected.decisionId,
-        answer: selected.label,
-        optionKey: selected.optionKey,
-        displayLabel: selected.label,
-        source: "discord",
-        sourceMessageId: interaction.message?.id ?? null,
-        idempotencyKey: `discord:decision:${selected.decisionId}:${selected.optionKey}:${messageRef}`,
-        expectedVersion: selected.stateVersion,
-      });
-
-      await interaction.editReply({
-        content: outcome.kind === "accepted" ? t.answeredWith(selected.label) : t.alreadyAnswered(outcome.label),
-      });
+      const answered = await answerDecisionButton(this.core, { source: "discord", target, fetchPendingDecisions: () => this.fetchPendingDecisions(), messageId: interaction.message?.id ?? null });
+      await interaction.editReply({ content: answered.text });
     } catch (error) {
       // Keep the interaction answered even when pending-list/Core I/O fails.
       // Do not call reply after deferReply; the flags also cover a Discord
@@ -298,33 +207,23 @@ export class DiscordConnector {
     return this.conversationChannelIds.includes(channelId) || this.boundChannelIds.has(channelId);
   }
 
-  /** Keeps the previous list when Core cannot be read; the next binding event reads it again. */
   private async refreshBindings(): Promise<void> {
-    try {
-      const data = await this.core.request<{ bindings: Array<{ channel_id: string }> }>("/advisor/channel-bindings?provider=discord");
-      this.boundChannelIds = new Set(data.bindings.map((binding) => binding.channel_id));
-    } catch (error) {
-      console.error("[discord] Could not read the Advisor channel bindings:", error);
-    }
+    this.boundChannelIds = await refreshBoundChannels(this.core, "discord", this.boundChannelIds);
   }
 
-  private async handleCoreEvent(event: OwlEvent): Promise<void> {
-    if (event.type === "advisor.channel_binding_changed") {
-      await this.refreshBindings();
-      return;
-    }
-    if (event.type === "advisor.responded") {
-      await this.handleAdvisorResponse(event);
-      return;
-    }
-    if (!shouldNotify(event.type, event.payload)) return;
-    await deliverNotification(this.core, event, {
-      update: (posted, language) => updateNotification(this.client, posted, event, language),
-      send: (language, remember) => sendNotification(this.client, event, this.notificationChannelIds, {
-        language,
-        onPosted: ({ channelId, messageId }) => remember(channelId, messageId),
+  private handleCoreEvent(event: OwlEvent): Promise<void> {
+    return dispatchCoreEvent(event, {
+      refreshBindings: () => this.refreshBindings(),
+      advisorResponse: (advisorEvent) => this.handleAdvisorResponse(advisorEvent),
+      shouldNotify,
+      notify: (notifyEvent) => deliverNotification(this.core, notifyEvent, {
+        update: (posted, language) => updateNotification(this.client, posted, notifyEvent, language),
+        send: (language, remember) => sendNotification(this.client, notifyEvent, this.notificationChannelIds, {
+          language,
+          onPosted: ({ channelId, messageId }) => remember(channelId, messageId),
+        }),
+        fail: (error) => this.reportNotificationFailure(notifyEvent, error),
       }),
-      fail: (error) => this.reportNotificationFailure(event, error),
     });
   }
 
@@ -360,13 +259,7 @@ export class DiscordConnector {
   }
 
   private async handleAdvisorResponse(event: OwlEvent): Promise<void> {
-    const origin = asRecord(event.payload.origin);
-    if (origin?.channel !== "discord") {
-      const target = parseDeliveryTarget(event);
-      if (origin?.channel === "web" && target?.provider === "discord") await this.deliverToChannel(event, target.channel_id);
-      return;
-    }
-
+    if (!await routeAdvisorOrigin(event, "discord", (channelId) => this.deliverToChannel(event, channelId))) return;
     const channelId = resolveDiscordAdvisorChannel(event, [...this.conversationChannelIds, ...this.boundChannelIds]);
     if (!channelId) {
       console.error("[discord] Advisor response has no configured destination channel:", event.payload.origin);
@@ -374,19 +267,11 @@ export class DiscordConnector {
     }
 
     try {
-      const reply = await fetchAdvisorReply(this.core, event);
       const channel = await this.client.channels.fetch(channelId);
       if (!channel || !channel.isTextBased() || !("send" in channel)) {
         throw new Error(`The Discord channel ${channelId} for the Advisor reply is not available.`);
       }
-      // Core is the sole parsing point: `reply` is already the text Core
-      // decided to show. Append any structured suggested_actions it left
-      // unhandled, the same way the Slack connector does.
-      const language = await this.core.language();
-      const { lines, results } = await this.uploadOutboundFiles(channel, parseOutboundFiles(event.payload.outbound_files));
-      const notice = await reportAdvisorDelivery(this.core, event, results);
-      if (notice) lines.push(notice);
-      const text = formatAdvisorReply(appendFileResults(reply, event.payload.action_results, lines), event.payload.suggested_actions, language);
+      const text = await buildAdvisorReplyText(this.core, event, (files, language) => this.uploadOutboundFiles(channel, files, language));
       for (const chunk of splitAtParagraphs(text, this.charLimit)) {
         await channel.send({ content: chunk, allowedMentions: NO_MENTIONS });
       }
@@ -395,66 +280,42 @@ export class DiscordConnector {
     }
   }
 
-  /** Web-origin files go to the channel Core chose; the reply text stays in the Web chat. */
-  private async deliverToChannel(event: OwlEvent, channelId: string): Promise<void> {
-    const files = parseOutboundFiles(event.payload.outbound_files);
+  private deliverToChannel(event: OwlEvent, channelId: string): Promise<void> {
     const fetchAllowed = async () => {
       if (!this.isConversationChannel(channelId)) return null;
       const channel = await this.client.channels.fetch(channelId).catch(() => null);
       return channel && channel.isTextBased() && "send" in channel ? channel : null;
     };
-    let channel = await fetchAllowed();
-    if (!channel) {
-      await this.refreshBindings();
-      channel = await fetchAllowed();
-    }
-    if (!channel) {
-      const message = `Discord のチャンネル ${channelId} は Connector の配送先に入っていないか、取得できません。`;
-      await reportAdvisorDelivery(this.core, event, files.map((file) => ({
-        index: file.index ?? -1, outcome: "failed", code: "upload_rejected", platform_error: null, message,
-      })));
-      return;
-    }
-    try {
-      const { results } = await this.uploadOutboundFiles(channel, files);
-      await reportAdvisorDelivery(this.core, event, results);
-    } catch (error) {
-      await this.reportChannelError(channelId, error);
-    }
+    return deliverFilesToChannel(this.core, event, {
+      resolveChannel: async () => {
+        const channel = await fetchAllowed();
+        if (channel) return channel;
+        await this.refreshBindings();
+        return fetchAllowed();
+      },
+      notAllowedMessage: `Discord のチャンネル ${channelId} は Connector の配送先に入っていないか、取得できません。`,
+      upload: (channel, files, language) => this.uploadOutboundFiles(channel, files, language),
+      onError: (error) => this.reportChannelError(channelId, error),
+    });
   }
 
-  private async uploadOutboundFiles(
+  private uploadOutboundFiles(
     channel: { send(options: MessageCreateOptions): Promise<unknown> },
     files: readonly OutboundFile[],
+    language: OwlLanguage,
   ): Promise<{ lines: string[]; results: OutboundFileResult[] }> {
-    const language = await this.core.language();
-    const t = connectorText(language);
-    const lines: string[] = [];
-    const results: OutboundFileResult[] = [];
-    for (const file of files) {
-      const index = file.index ?? -1;
-      const read = await readOutboundFile(file);
-      if (!read.ok) {
-        const message = t.fileSendFailed(file.name, read.reason === "changed" ? t.fileSendChanged : t.fileSendUnreadable, "");
-        lines.push(message);
-        results.push({ index, outcome: "failed", code: read.reason, platform_error: null, message });
-        continue;
-      }
-      try {
+    return sendOutboundFiles(files, language, {
+      label: "Discord",
+      send: async (file, bytes) => {
         await channel.send({
           ...(file.comment ? { content: file.comment } : {}),
-          files: [{ attachment: read.bytes, name: file.name }],
+          files: [{ attachment: bytes, name: file.name }],
           allowedMentions: NO_MENTIONS,
         });
-        lines.push(t.fileSent(file.name, formatBytes(file.size)));
-        results.push({ index, outcome: "sent" });
-      } catch (error) {
-        const message = t.fileSendFailed(file.name, formatIntegrationError("Discord", error, language), discordSendHint(error, t));
-        lines.push(message);
-        results.push({ index, message, ...classifyDiscordUploadError(error) });
-      }
-    }
-    return { lines, results };
+      },
+      classifyError: classifyDiscordUploadError,
+      hint: discordSendHint,
+    });
   }
 
   private async sendToCore(message: Message, text: string, attachmentIds: readonly string[], statusReply?: string): Promise<void> {
@@ -570,8 +431,6 @@ function splitAtParagraphs(text: string, limit: number): string[] {
   if (remaining) chunks.push(remaining);
   return chunks;
 }
-
-type UploadFailure = Required<Pick<OutboundFileResult, "outcome" | "code" | "platform_error">>;
 
 /** Failed only when Discord plainly refused the send (4xx); a 5xx, a timeout or an unrecognised error may have gone through. */
 export function classifyDiscordUploadError(error: unknown): UploadFailure {

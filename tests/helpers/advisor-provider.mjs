@@ -33,27 +33,3 @@ export function scriptedProvider(script) {
   };
   return { providerClient, sent, requests };
 }
-const apiToken = "advisor-slack-create-work-test-token";
-
-function commandEnvelope(payload) {
-  return command(payload, `advisor-slack-create-work:${createUlid()}`);
-}
-
-function advisorReply(title, label, includeVisibleText = true, designMode = undefined) {
-  return [
-    ...(includeVisibleText ? [`${label}-originated **reply** with a [guide](https://example.com/${label.toLowerCase()}).`] : []),
-    "```owl-actions",
-    JSON.stringify([{
-      type: "create_work",
-      description: `Create ${label} origin Work`,
-      payload: {
-        title,
-        summary: `Create and verify the ${label} origin regression Work.`,
-        size: "small",
-        project_id: null,
-        ...(designMode ? { design_mode: designMode } : {}),
-      },
-    }]),
-    "```",
-  ].join("\n");
-}

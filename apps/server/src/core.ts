@@ -4,9 +4,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import type { Core } from "../../../packages/core/dist/core.js";
+import type { Core } from "@owl/core/dist/core.js";
 import { resolveDataDir, serverPackageRoot } from "./contracts.js";
-import { ApiError, humanUnexpectedMessage } from "./errors.js";
+import { ApiError, coreText } from "./errors.js";
+import { CommonMessages } from "./messages/common.js";
+import { CoreMessages } from "./messages/core.js";
 import { isUlid } from "./ids.js";
 import type {
   AgentRun,
@@ -69,32 +71,28 @@ import type {
   AdvisorSessionsPort,
 } from "./types.js";
 import { configuredDesignSkill } from "./config.js";
-import type { SessionActivity } from "../../../packages/shared/dist/index.js";
-import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
-import type { WebResearchCapture } from "../../../packages/shared/dist/web-research.js";
-import type { ChildDispatchRequest, ChildDispatchResponse, ChildRunListFilter, ChildRunRecord, ChildRunSettings, ChildWaitRequest, ChildWaitResponse } from "../../../packages/shared/dist/child-runs.js";
+import type { SessionActivity } from "@owl/shared";
+import type { GuardTokenAgent } from "@owl/shared/guard-token";
+import type { WebResearchCapture } from "@owl/shared/web-research";
+import type { ChildDispatchRequest, ChildDispatchResponse, ChildRunListFilter, ChildRunRecord, ChildRunSettings, ChildWaitRequest, ChildWaitResponse } from "@owl/shared/child-runs";
 
 import { IntegrationStore, parseChannelIds } from "./integration-store.js";
 import { AppSettingsStore, type CustomProviderConfig } from "./app-settings-store.js";
 import { AdvisorFolderError, advisorFolderDefaults, ensureAdvisorSharedDir, isGitIgnoredDirectory, normalizeAdvisorFolder } from "./advisor-folders.js";
-import type { WebAttachmentFile, WebAttachmentResult, WebAttachmentTarget } from "../../../packages/core/dist/core.js";
-import { defaultOwlRoot as defaultCoreOwlRoot, resolveWorkspacesRoot } from "../../../packages/core/dist/workspace-layout.js";
+import type { WebAttachmentFile, WebAttachmentResult, WebAttachmentTarget } from "@owl/core/dist/core.js";
+import { defaultOwlRoot as defaultCoreOwlRoot, resolveWorkspacesRoot } from "@owl/core/dist/workspace-layout.js";
 import { buildAgentEnv } from "./agent-env.js";
 import { customProviderApiKeyEnvNames } from "./agent-runner.js";
 import { providerSelection } from "./provider-selection.js";
-import type { KnowledgeAutomationSettings, KnowledgeAutomationSnapshot } from "../../../packages/shared/dist/knowledge-automation.js";
+import type { KnowledgeAutomationSettings, KnowledgeAutomationSnapshot } from "@owl/shared/knowledge-automation";
 import {
-  DEFAULT_OWNER_LANGUAGE,
   ownerLanguageFromLocale,
   type OwnerLanguage,
-} from "../../../packages/shared/dist/owner-language.js";
-import { builtinProviderHarness, type ModelHarness, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, OPENCODE_API_KEY_ENV_ENV, OPENCODE_BASE_URL_ENV, PROCESS_SKILLS_INSTALL_COMMANDS } from "../../../packages/shared/dist/index.js";
+} from "@owl/shared/owner-language";
+import { builtinProviderHarness, type ModelHarness, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, OPENCODE_API_KEY_ENV_ENV, OPENCODE_BASE_URL_ENV, PROCESS_SKILLS_INSTALL_COMMANDS } from "@owl/shared";
 import { codexKnownModels, mergeOfficialModels, opencodeKnownModels } from "./model-catalog.js";
 import { detectProviders, type BuiltinHarnessInfo, type BuiltinProviderInfo } from "./provider-detection.js";
-
-function coreText(language: OwnerLanguage, ja: string, en: string): string {
-  return language === "ja" ? ja : en;
-}
+import { isRecord } from "@owl/shared/small-helpers";
 
 function cloneModelPreset(preset: ModelPreset): ModelPreset {
   return { ...preset, roles: preset.roles.map((role) => ({ ...role })) };
@@ -165,7 +163,7 @@ export function knowledgeStorageOptions(appSettings: AppSettingsStore): { read()
 }
 
 interface ExternalCoreModule {
-  createCore?: (options: CreateCoreOptions) => unknown;
+  createCore?: (options: CreateCoreOptions) => Core;
 }
 
 interface ExternalCommandResponse {
@@ -174,32 +172,37 @@ interface ExternalCommandResponse {
   version: number;
 }
 
-function isRecord(value: unknown): value is JsonObject {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+type CoreWorkDetailResponse = ReturnType<Core["getWork"]>;
+type CoreWorkDetail = CoreWorkDetailResponse["data"];
+// Fields an older Core leaves out of getWork (tests/work/display-number.test.mjs keeps such a Core).
+// They stay optional here so the fallbacks below are type-checked against Core's WorkDetail.
+type LegacyOptionalWorkField =
+  | "display_number" | "progress" | "conversation_id" | "prerequisite_wait" | "waiting_on"
+  | "prerequisites" | "can_move_to_project" | "final_report";
+// Not Omit<>: CoreWorkDetail extends JsonObject, and Omit over its string index signature drops every named field.
+type ExternalWorkDetailData =
+  { readonly [K in keyof CoreWorkDetail as K extends LegacyOptionalWorkField ? never : K]: CoreWorkDetail[K] } &
+  { readonly [K in LegacyOptionalWorkField]?: CoreWorkDetail[K] };
 
-function validWorkProgress(value: unknown): WorkProgress | null {
-  if (!isRecord(value)) return null;
+// Core's type fixes the shape; only the value ranges are checked, and a broken progress falls back to counting the Tasks.
+function validWorkProgress(value: WorkProgress | undefined): WorkProgress | null {
+  if (!value) return null;
   const { total_tasks, completed_tasks, percent } = value;
   if (
-    !Number.isSafeInteger(total_tasks) || Number(total_tasks) < 0 ||
-    !Number.isSafeInteger(completed_tasks) || Number(completed_tasks) < 0 || Number(completed_tasks) > Number(total_tasks) ||
-    !Number.isSafeInteger(percent) || Number(percent) < 0 || Number(percent) > 100
+    !Number.isSafeInteger(total_tasks) || total_tasks < 0 ||
+    !Number.isSafeInteger(completed_tasks) || completed_tasks < 0 || completed_tasks > total_tasks ||
+    !Number.isSafeInteger(percent) || percent < 0 || percent > 100
   ) return null;
-  const expectedPercent = Number(total_tasks) === 0 ? 0 : Math.round((Number(completed_tasks) / Number(total_tasks)) * 100);
-  if (Number(percent) !== expectedPercent) return null;
-  return {
-    total_tasks: Number(total_tasks),
-    completed_tasks: Number(completed_tasks),
-    percent: Number(percent),
-  };
+  const expectedPercent = total_tasks === 0 ? 0 : Math.round((completed_tasks / total_tasks) * 100);
+  if (percent !== expectedPercent) return null;
+  return { total_tasks, completed_tasks, percent };
 }
 
 function workDetailCoreError(workId: string, field: string, reason: string): ApiError {
   return new ApiError(
     500,
     "server_error",
-    "Work詳細を取得できませんでした。保存されたWork情報を確認してください。",
+    CoreMessages.workDetailUnavailable(),
     { operation: "getWork", work_id: workId, field, reason },
   );
 }
@@ -213,15 +216,7 @@ function externalWorkProgress(core: Core, workId: string): WorkProgress {
   try {
     while (true) {
       const page = core.listTasks(workId, { limit: 200, cursor });
-      if (
-        !isRecord(page) || !Array.isArray(page.data) || typeof page.has_more !== "boolean" ||
-        (page.cursor !== null && typeof page.cursor !== "string")
-      ) throw workDetailCoreError(workId, "progress", "Core returned a malformed task page.");
-
       for (const task of page.data) {
-        if (!isRecord(task) || typeof task.status !== "string") {
-          throw workDetailCoreError(workId, "progress", "Core returned a Task without a status.");
-        }
         total_tasks += 1;
         if (!Number.isSafeInteger(total_tasks)) {
           throw workDetailCoreError(workId, "progress", "The Work has too many Tasks to count safely.");
@@ -240,11 +235,8 @@ function externalWorkProgress(core: Core, workId: string): WorkProgress {
         };
       }
 
-      const nextCursor = page.cursor;
-      if (
-        typeof nextCursor !== "string" || nextCursor.length === 0 || seenCursors.has(nextCursor) ||
-        page.data.length === 0
-      ) {
+      const nextCursor: string | null = page.cursor;
+      if (nextCursor === null || nextCursor.length === 0 || seenCursors.has(nextCursor) || page.data.length === 0) {
         throw workDetailCoreError(workId, "progress", "Core returned a non-advancing task cursor.");
       }
       seenCursors.add(nextCursor);
@@ -256,25 +248,19 @@ function externalWorkProgress(core: Core, workId: string): WorkProgress {
   }
 }
 
-function externalWorkDetail(response: unknown, workId: string, computedProgress: WorkProgress): WorkDetail {
-  const envelope = isRecord(response) ? response : null;
-  const data = envelope && isRecord(envelope.data) ? envelope.data : null;
-  if (!data) {
-    throw workDetailCoreError(workId, "data", "Core returned no Work detail object.");
-  }
-  if (typeof data.id === "string" && data.id.length > 0 && data.id !== workId) {
+function externalWorkDetail(response: CoreWorkDetailResponse, workId: string, computedProgress: WorkProgress): WorkDetail {
+  const data: ExternalWorkDetailData = response.data;
+  if (data.id !== workId) {
     throw new ApiError(
       500,
       "server_error",
-      "Work詳細を取得できませんでした。Coreが要求したWorkとは異なるIDを返しました。",
+      CoreMessages.workDetailIdMismatch(),
       { operation: "getWork", work_id: workId, returned_work_id: data.id },
     );
   }
 
-  const versionOrNull = (value: unknown): number | null =>
-    Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : null;
-  const timestampOrNull = (value: unknown): string | null => {
-    if (typeof value !== "string") return null;
+  const versionOrNull = (value: number): number | null => Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const timestampOrNull = (value: string): string | null => {
     const match = /^(\d{4})-(\d{2})-(\d{2})T([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.exec(value);
     if (!match) return null;
     const [, rawYear, rawMonth, rawDay] = match;
@@ -284,65 +270,39 @@ function externalWorkDetail(response: unknown, workId: string, computedProgress:
     if (month < 1 || month > 12 || day < 1 || day > new Date(Date.UTC(year, month, 0)).getUTCDate()) return null;
     return Number.isFinite(Date.parse(value)) ? value : null;
   };
-  const requireString = (value: unknown, field: string): string => {
-    if (typeof value !== "string" || value.length === 0) {
-      throw workDetailCoreError(workId, field, "Core returned a missing or invalid required string.");
-    }
-    return value;
-  };
-  const stateVersion = versionOrNull(data.state_version) ?? versionOrNull(envelope?.version);
-  const id = requireString(data.id, "id");
-  const title = requireString(data.title, "title");
-  const state = requireString(data.state, "state");
-  const ownerId = requireString(data.owner_id, "owner_id");
-  const summary = typeof data.summary === "string" ? data.summary : null;
+  const stateVersion = versionOrNull(data.state_version) ?? versionOrNull(response.version);
   const updatedAt = timestampOrNull(data.updated_at);
   const archivedAt = data.archived_at === null ? null : timestampOrNull(data.archived_at);
-  const displayNumber = displayNumberOrNull(data.display_number);
   const planRevision = versionOrNull(data.plan_revision);
-  const size = data.size === "small" || data.size === "normal" || data.size === "large" ? data.size : null;
-  const projectId = data.project_id === null || isUlid(data.project_id) ? data.project_id : undefined;
 
-  if (!isUlid(id) || id !== workId) {
-    throw workDetailCoreError(workId, "id", "Core returned a missing or invalid Work ID.");
-  }
+  if (!isUlid(data.id)) throw workDetailCoreError(workId, "id", "Core returned a missing or invalid Work ID.");
   if (stateVersion === null) throw workDetailCoreError(workId, "state_version", "Core returned no valid version.");
   if (updatedAt === null) throw workDetailCoreError(workId, "updated_at", "Core returned a missing or invalid timestamp.");
   if (archivedAt === null && data.archived_at !== null) throw workDetailCoreError(workId, "archived_at", "Core returned a missing or invalid archive timestamp.");
-  if (projectId === undefined) throw workDetailCoreError(workId, "project_id", "Core returned an invalid project ID.");
-  if (summary === null) throw workDetailCoreError(workId, "summary", "Core returned no summary.");
-  if (size === null) throw workDetailCoreError(workId, "size", "Core returned an unsupported Work size.");
+  if (data.project_id !== null && !isUlid(data.project_id)) throw workDetailCoreError(workId, "project_id", "Core returned an invalid project ID.");
   if (planRevision === null) throw workDetailCoreError(workId, "plan_revision", "Core returned no valid plan revision.");
 
   return {
-    id,
-    title,
-    state,
+    id: data.id,
+    title: data.title,
+    state: data.state,
     state_version: stateVersion,
     updated_at: updatedAt,
     archived_at: archivedAt,
-    display_number: displayNumber,
-    owner_id: ownerId,
-    project_id: projectId,
-    summary,
-    size,
+    display_number: displayNumberOrNull(data.display_number),
+    owner_id: data.owner_id,
+    project_id: data.project_id,
+    summary: data.summary,
+    size: data.size,
     plan_revision: planRevision,
     progress: computedProgress,
-    conversation_id: data.conversation_id === null || isUlid(data.conversation_id) ? data.conversation_id : null,
+    conversation_id: data.conversation_id != null && isUlid(data.conversation_id) ? data.conversation_id : null,
     prerequisite_wait: data.prerequisite_wait === true,
-    waiting_on: Array.isArray(data.waiting_on) ? data.waiting_on : [],
-    prerequisites: Array.isArray(data.prerequisites) ? data.prerequisites : [],
+    waiting_on: [...(data.waiting_on ?? [])],
+    prerequisites: [...(data.prerequisites ?? [])],
     can_move_to_project: data.can_move_to_project === true,
-    final_report: finalReportOrNull(data.final_report),
+    final_report: data.final_report ?? null,
   };
-}
-
-function finalReportOrNull(value: unknown): WorkDetail["final_report"] {
-  if (value === null || typeof value !== "object") return null;
-  const { summary, test_results, issues, created_at } = value as Record<string, unknown>;
-  return typeof summary === "string" && typeof test_results === "string" && typeof issues === "string" && typeof created_at === "string"
-    ? { summary, test_results, issues, created_at }
-    : null;
 }
 
 function displayNumberOrNull(value: unknown): number | null {
@@ -404,16 +364,17 @@ export function externalError(error: unknown, operation: string): ApiError {
           : publicCode.endsWith("_not_found") ? 404
           : publicCode === "server_error" ? 500
             : 409;
-    const message = typeof error.message === "string" ? error.message : humanUnexpectedMessage();
     const remediation = typeof error.remediation === "string" ? " " + error.remediation : "";
     const details = isRecord(error.details) ? error.details : { operation };
-    return new ApiError(status, publicCode, message + remediation, details, { cause: error });
+    // The text is relayed as Core gave it (not a fixed string); only a missing message falls back to the table.
+    const message = typeof error.message === "string" ? error.message + remediation : CommonMessages.unexpected();
+    return new ApiError(status, publicCode, message, details, { cause: error });
   }
-  return new ApiError(500, "server_error", humanUnexpectedMessage(), { operation }, { cause: error });
+  return new ApiError(500, "server_error", CommonMessages.unexpected(), { operation }, { cause: error });
 }
 
 function skillApiUnavailable(operation: string): ApiError {
-  return new ApiError(503, "core_not_ready", `The loaded Core does not support ${operation.toLowerCase()}.`);
+  return new ApiError(503, "core_not_ready", CoreMessages.unsupported({ feature: operation.toLowerCase() }));
 }
 
 export class ExternalCoreAdapter implements CorePort {
@@ -485,8 +446,8 @@ export class ExternalCoreAdapter implements CorePort {
   async getWork(workId: string): Promise<WorkDetail> {
     try {
       const response = this.core.getWork(workId);
-      const data = isRecord(response) && isRecord(response.data) ? response.data : null;
-      const computedProgress = validWorkProgress(data?.progress) ?? externalWorkProgress(this.core, workId);
+      const data: ExternalWorkDetailData = response.data;
+      const computedProgress = validWorkProgress(data.progress) ?? externalWorkProgress(this.core, workId);
       return externalWorkDetail(response, workId, computedProgress);
     } catch (error) {
       throw externalError(error, "getWork");
@@ -521,7 +482,7 @@ export class ExternalCoreAdapter implements CorePort {
   async getWorkConversation(workId: string, opts: { limit: number }): Promise<WorkConversation> {
     try {
       await this.core.getWork(workId);
-      if (!this.core.getWorkConversation) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support work conversations.");
+      if (!this.core.getWorkConversation) throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "work conversations" }));
       return (await this.core.getWorkConversation(workId, opts)) as unknown as WorkConversation;
     } catch (error) {
       throw externalError(error, "getWorkConversation");
@@ -530,7 +491,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   getWorkView(workId: string, query: { conversation_limit?: number }): JsonObject {
     try {
-      if (!this.core.getWorkView) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support the Work detail API.");
+      if (!this.core.getWorkView) throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "the Work detail API" }));
       return this.core.getWorkView(workId, query);
     } catch (error) {
       throw externalError(error, "getWorkView");
@@ -539,7 +500,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   getDecisionView(decisionId: string): JsonObject {
     try {
-      if (!this.core.getDecisionView) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support the Decision detail API.");
+      if (!this.core.getDecisionView) throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "the Decision detail API" }));
       return this.core.getDecisionView(decisionId);
     } catch (error) {
       throw externalError(error, "getDecisionView");
@@ -548,7 +509,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   getBoardView(query: { archived: "exclude" | "only"; limit: number; cursor?: string | null }): JsonObject {
     try {
-      if (!this.core.getBoardView) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support the Board API.");
+      if (!this.core.getBoardView) throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "the Board API" }));
       return this.core.getBoardView(query);
     } catch (error) {
       throw externalError(error, "getBoardView");
@@ -557,7 +518,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   listLinkableWorks(projectId: string | null, query: { limit: number; cursor?: string | null }): JsonObject {
     try {
-      if (!this.core.listLinkableWorks) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support the linkable Works API.");
+      if (!this.core.listLinkableWorks) throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "the linkable Works API" }));
       return this.core.listLinkableWorks(projectId, query);
     } catch (error) {
       throw externalError(error, "listLinkableWorks");
@@ -566,7 +527,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   getBacklogListView(filter: { status?: string; project_id?: string; work_id?: string; issued_work_id?: string; limit?: number; offset?: number }): JsonObject {
     try {
-      if (!this.core.getBacklogListView) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support the Backlog screen API.");
+      if (!this.core.getBacklogListView) throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "the Backlog screen API" }));
       return this.core.getBacklogListView(filter as never);
     } catch (error) {
       throw externalError(error, "getBacklogListView");
@@ -575,7 +536,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async getTokensView(input: { period: "today" | "7d" | "30d"; top: number }): Promise<JsonObject> {
     try {
-      if (!this.core.getTokensView) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support the Tokens screen API.");
+      if (!this.core.getTokensView) throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "the Tokens screen API" }));
       return await this.core.getTokensView(input);
     } catch (error) {
       throw externalError(error, "getTokensView");
@@ -585,7 +546,7 @@ export class ExternalCoreAdapter implements CorePort {
   async getWorkAssurance(workId: string): Promise<WorkAssurance> {
     try {
       await this.core.getWork(workId);
-      if (!this.core.getWorkAssurance) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support work assurance.");
+      if (!this.core.getWorkAssurance) throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "work assurance" }));
       return (await this.core.getWorkAssurance(workId)) as WorkAssurance;
     } catch (error) {
       throw externalError(error, "getWorkAssurance");
@@ -614,7 +575,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async replaceWorkPrerequisites(workId: string, input: { prerequisite_work_ids: string[] }, command: CommandMeta): Promise<CommandResult<JsonObject>> {
     try {
-      if (!this.core.replaceWorkPrerequisites) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support Work prerequisites.");
+      if (!this.core.replaceWorkPrerequisites) throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "Work prerequisites" }));
       const response = await this.core.replaceWorkPrerequisites(workId, { ...command, payload: input });
       const { version: _version, ...data } = response.data as JsonObject;
       return { data, version: response.version };
@@ -625,7 +586,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async releaseWorkPrerequisiteWait(workId: string, command: CommandMeta): Promise<CommandResult<JsonObject>> {
     try {
-      if (!this.core.releaseWorkPrerequisiteWait) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support Work prerequisites.");
+      if (!this.core.releaseWorkPrerequisiteWait) throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "Work prerequisites" }));
       const response = await this.core.releaseWorkPrerequisiteWait(workId, { ...command, payload: {} });
       const { version: _version, ...data } = response.data as JsonObject;
       return { data, version: response.version };
@@ -636,7 +597,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async moveWorkToProject(workId: string, input: { project_id: string }, command: CommandMeta): Promise<CommandResult<JsonObject>> {
     try {
-      if (!this.core.moveWorkToProject) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support moving a Work into a Project.");
+      if (!this.core.moveWorkToProject) throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "moving a Work into a Project" }));
       const response = await this.core.moveWorkToProject(workId, { ...command, payload: input });
       const { version: _version, ...data } = response.data as JsonObject;
       return { data, version: response.version };
@@ -860,7 +821,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async updateProject(projectId: string, input: UpdateProjectInput, command: CommandMeta): Promise<{ data: Project; version: number }> {
     try {
-      if (!this.core.updateProject) throw new ApiError(503, "core_not_ready", "The loaded Core does not support updateProject.");
+      if (!this.core.updateProject) throw new ApiError(503, "core_not_ready", CoreMessages.unsupported({ feature: "updateProject" }));
       const response = await this.core.updateProject(projectId, { ...command, payload: input as never });
       const { version: _version, ...data } = response.data as JsonObject;
       return { data: data as unknown as Project, version: response.version };
@@ -871,7 +832,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async getProjectDeletionImpact(projectId: string): Promise<ProjectDeletionImpact> {
     try {
-      if (!this.core.getProjectDeletionImpact) throw new ApiError(503, "core_not_ready", "The loaded Core does not support getProjectDeletionImpact.");
+      if (!this.core.getProjectDeletionImpact) throw new ApiError(503, "core_not_ready", CoreMessages.unsupported({ feature: "getProjectDeletionImpact" }));
       return (await this.core.getProjectDeletionImpact(projectId)) as unknown as ProjectDeletionImpact;
     } catch (error) {
       throw externalError(error, "getProjectDeletionImpact");
@@ -880,7 +841,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async deleteProject(projectId: string, input: DeleteProjectInput, command: CommandMeta): Promise<{ data: DeleteProjectResult; version: number }> {
     try {
-      if (!this.core.deleteProject) throw new ApiError(503, "core_not_ready", "The loaded Core does not support deleteProject.");
+      if (!this.core.deleteProject) throw new ApiError(503, "core_not_ready", CoreMessages.unsupported({ feature: "deleteProject" }));
       const response = await this.core.deleteProject(projectId, { ...command, payload: input as never });
       const { version: _version, ...data } = response.data as JsonObject;
       return { data: data as unknown as DeleteProjectResult, version: response.version };
@@ -983,7 +944,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async ensureConnectorAccount(ownerId: string, provider: "slack" | "discord", accountId: string): Promise<string> {
     try {
-      if (typeof this.core.ensureConnectorAccount !== "function") throw new ApiError(503, "dependency_unavailable", "Core does not support connector account registration.");
+      if (typeof this.core.ensureConnectorAccount !== "function") throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "connector account registration" }));
       return await this.core.ensureConnectorAccount(ownerId, provider, accountId);
     } catch (error) {
       throw externalError(error, "ensureConnectorAccount");
@@ -1024,7 +985,7 @@ export class ExternalCoreAdapter implements CorePort {
     command: { request_id: string; idempotency_key: string },
   ): Promise<WebAttachmentResult> {
     try {
-      if (typeof this.core.uploadWebAttachment !== "function") throw new ApiError(503, "dependency_unavailable", "Core does not support Web attachments.");
+      if (typeof this.core.uploadWebAttachment !== "function") throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "Web attachments" }));
       return await this.core.uploadWebAttachment(ownerId, target, file, command);
     } catch (error) {
       throw externalError(error, "uploadWebAttachment");
@@ -1043,7 +1004,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async restartAdvisorSession(ownerId: string, windowKey?: string): Promise<void> {
     if (typeof this.core.restartAdvisorSession !== "function") {
-      throw new ApiError(503, "dependency_unavailable", "Persistent Advisor session restart is not available in the loaded Core.");
+      throw new ApiError(503, "dependency_unavailable", CoreMessages.advisorRestartUnavailable());
     }
     try {
       await this.core.restartAdvisorSession(ownerId, windowKey);
@@ -1062,7 +1023,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async interruptAdvisorTurn(ownerId: string, windowKey?: string): Promise<{ status: "interrupting" | "not_running" | "unsupported"; turn_id: string | null }> {
     if (typeof this.core.interruptAdvisorTurn !== "function") {
-      throw new ApiError(503, "dependency_unavailable", "Advisor turn interruption is not available in the loaded Core.");
+      throw new ApiError(503, "dependency_unavailable", CoreMessages.advisorInterruptUnavailable());
     }
     try {
       return await this.core.interruptAdvisorTurn(ownerId, windowKey);
@@ -1378,7 +1339,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async setLanguage(language: OwnerLanguage): Promise<OwnerLanguage> {
     if (typeof this.core.setLanguage !== "function") {
-      throw new ApiError(503, "core_not_ready", "このCoreは言語設定に対応していません。Coreを更新してください。");
+      throw new ApiError(503, "core_not_ready", CoreMessages.setLanguageUnsupported());
     }
     try {
       return await this.core.setLanguage(language);
@@ -1515,7 +1476,7 @@ export class ExternalCoreAdapter implements CorePort {
   }
 
   async dispatchChildRun(parentAgentRunId: string, request: ChildDispatchRequest, requestKey: string): Promise<ChildDispatchResponse> {
-    if (typeof this.core.dispatchChildRun !== "function") throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support child runs.");
+    if (typeof this.core.dispatchChildRun !== "function") throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "child runs" }));
     try {
       return await this.core.dispatchChildRun(parentAgentRunId, request, requestKey);
     } catch (error) {
@@ -1524,7 +1485,7 @@ export class ExternalCoreAdapter implements CorePort {
   }
 
   async waitChildRuns(parentAgentRunId: string, request: ChildWaitRequest, signal: AbortSignal): Promise<ChildWaitResponse> {
-    if (typeof this.core.waitChildRuns !== "function") throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support child runs.");
+    if (typeof this.core.waitChildRuns !== "function") throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "child runs" }));
     try {
       return await this.core.waitChildRuns(parentAgentRunId, request, signal);
     } catch (error) {
@@ -1533,7 +1494,7 @@ export class ExternalCoreAdapter implements CorePort {
   }
 
   listChildRuns(filter: ChildRunListFilter): readonly ChildRunRecord[] {
-    if (typeof this.core.listChildRuns !== "function") throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support child runs.");
+    if (typeof this.core.listChildRuns !== "function") throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "child runs" }));
     try {
       return [...this.core.listChildRuns(filter)];
     } catch (error) {
@@ -1542,7 +1503,7 @@ export class ExternalCoreAdapter implements CorePort {
   }
 
   getChildRunSettings(): ChildRunSettings {
-    if (typeof this.core.getChildRunSettings !== "function") throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support child-run settings.");
+    if (typeof this.core.getChildRunSettings !== "function") throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "child-run settings" }));
     try {
       return this.core.getChildRunSettings();
     } catch (error) {
@@ -1551,7 +1512,7 @@ export class ExternalCoreAdapter implements CorePort {
   }
 
   async setChildRunSettings(settings: ChildRunSettings): Promise<ChildRunSettings> {
-    if (typeof this.core.setChildRunSettings !== "function") throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support child-run settings.");
+    if (typeof this.core.setChildRunSettings !== "function") throw new ApiError(503, "dependency_unavailable", CoreMessages.unsupported({ feature: "child-run settings" }));
     try {
       return await this.core.setChildRunSettings(settings);
     } catch (error) {
@@ -1569,7 +1530,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async resumeProviderPause(provider: string): Promise<ProviderPauseView | null> {
     try {
-      if (!this.core.resumeProviderPause) throw new ApiError(404, "provider_pause_not_found", "プロバイダーの一時停止が見つかりません。 / The provider pause was not found.");
+      if (!this.core.resumeProviderPause) throw new ApiError(404, "provider_pause_not_found", CoreMessages.providerPauseNotFound());
       return await this.core.resumeProviderPause(provider);
     } catch (error) {
       throw externalError(error, "resumeProviderPause");
@@ -1596,30 +1557,30 @@ export class ExternalCoreAdapter implements CorePort {
 
   async saveProvider(id: string, input: SaveProviderInput): Promise<ProviderConfigRecord> {
     if (BUILTIN_PROVIDER_PRESETS.some((provider) => provider.id === id)) {
-      throw new ApiError(409, "validation_error", "組み込みProviderは編集できません。別のIDでカスタムProviderとして登録してください。");
+      throw new ApiError(409, "validation_error", CoreMessages.builtinProviderNotEditable());
     }
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/u.test(id)) {
-      throw new ApiError(400, "validation_error", "Provider IDは英数字、ハイフン、アンダースコアを使う64文字以内の値にしてください。");
+      throw new ApiError(400, "validation_error", CoreMessages.providerIdInvalid());
     }
     if (input.displayName.trim().length === 0 || input.displayName.length > 128) {
-      throw new ApiError(400, "validation_error", "displayNameは1〜128文字で指定してください。");
+      throw new ApiError(400, "validation_error", CoreMessages.displayNameInvalid());
     }
     if (input.harnessId !== "claude" && input.harnessId !== "codex" && input.harnessId !== "opencode") {
-      throw new ApiError(400, "validation_error", "harnessIdはclaude、codex、opencodeのいずれかを指定してください。");
+      throw new ApiError(400, "validation_error", CoreMessages.harnessIdInvalid());
     }
     // A custom provider always names its endpoint; without it the harness
     // would send the provider's key to the harness's own default service.
     if (input.backendUrl === undefined || input.backendUrl.trim().length === 0) {
-      throw new ApiError(400, "validation_error", "backendUrlを指定してください。カスタムProviderには接続先のhttpまたはhttpsのURLが必要です。", { field: "backendUrl" });
+      throw new ApiError(400, "validation_error", CoreMessages.backendUrlRequired(), { field: "backendUrl" });
     }
     try {
       const parsed = new URL(input.backendUrl);
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") throw new Error("protocol");
     } catch {
-      throw new ApiError(400, "validation_error", "backendUrlはhttpまたはhttpsのURLを指定してください。", { field: "backendUrl" });
+      throw new ApiError(400, "validation_error", CoreMessages.backendUrlInvalid(), { field: "backendUrl" });
     }
     if (input.apiKeySource !== undefined && !/^env:[A-Za-z_][A-Za-z0-9_]*$/u.test(input.apiKeySource)) {
-      throw new ApiError(400, "validation_error", "apiKeySourceはenv:VARIABLE_NAME形式で指定してください。");
+      throw new ApiError(400, "validation_error", CoreMessages.apiKeySourceInvalid());
     }
     const saved = this.appSettings.saveCustomProvider(id, { ...input });
     return {
@@ -1634,7 +1595,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   async deleteProvider(id: string): Promise<{ deleted: boolean }> {
     if (BUILTIN_PROVIDER_PRESETS.some((provider) => provider.id === id)) {
-      throw new ApiError(409, "validation_error", "組み込みProviderは削除できません。");
+      throw new ApiError(409, "validation_error", CoreMessages.builtinProviderNotDeletable());
     }
     return { deleted: this.appSettings.deleteCustomProvider(id) };
   }
@@ -1642,7 +1603,7 @@ export class ExternalCoreAdapter implements CorePort {
   async testProvider(id: string): Promise<{ ok: boolean; detail: string }> {
     const provider = await this.getProvider(id);
     if (!provider) {
-      throw new ApiError(404, "not_found", "指定されたProviderが見つかりません。IDを確認して再試行してください。");
+      throw new ApiError(404, "not_found", CoreMessages.providerNotFound());
     }
     if (!provider.isBuiltin && !provider.backendUrl) {
       return { ok: false, detail: coreText(await this.getLanguage(), "backendUrlが未設定です。Provider設定で接続先のURLを指定してください。", "backendUrl is missing. Set the destination URL in Provider settings.") };
@@ -1677,7 +1638,7 @@ export class ExternalCoreAdapter implements CorePort {
     const status = this.integrationStore.save_integration(provider, config);
     const stored = this.integrationStore.getConfig(provider);
     const ownerId = process.env.OWL_OWNER_ID?.trim() || "owner:default";
-    if (!stored?.account_id) throw new ApiError(500, "server_error", "Connector account registration did not produce a canonical account id.");
+    if (!stored?.account_id) throw new ApiError(500, "server_error", CoreMessages.connectorAccountIdMissing());
     await this.ensureConnectorAccount(ownerId, provider, stored.account_id);
     this.emitControl({ type: "integration.saved", provider });
     return { data: status, version: 0 };
@@ -1757,7 +1718,7 @@ export class ExternalCoreAdapter implements CorePort {
 
   private readEventsBefore(before: number | null, limit: number): CoreEvent[] {
     if (!Number.isSafeInteger(limit) || limit < 0) {
-      throw new ApiError(400, "invalid_query", "イベント一覧のlimitが不正です。0以上の整数を指定してください。");
+      throw new ApiError(400, "invalid_query", CoreMessages.eventLimitInvalid());
     }
     if (limit === 0) return [];
     if (!this.core.listEventsAfter) {
@@ -1839,10 +1800,14 @@ export class ExternalCoreAdapter implements CorePort {
 
   async shutdown(options: { force: boolean; timeoutMs: number }): Promise<void> {
     try {
-      await this.core.stop({ force: options.force, timeoutMs: options.timeoutMs });
-      this.unsubscribeExternal();
-      const candidate = this.db as { close?: () => void } | null;
-      if (candidate && typeof candidate.close === "function") candidate.close();
+      // Why not close only after a clean stop: a failed step must not leave the DB open.
+      try {
+        await this.core.stop({ force: options.force, timeoutMs: options.timeoutMs });
+      } finally {
+        this.unsubscribeExternal();
+        const candidate = this.db as { close?: () => void } | null;
+        if (candidate && typeof candidate.close === "function") candidate.close();
+      }
     } catch (error) {
       throw externalError(error, "shutdown");
     }
@@ -1862,7 +1827,7 @@ function isActivityEvent(event: CoreEvent): boolean {
 
 function newestFirst<T>(ascending: T[], limit: number): T[] {
   if (!Number.isSafeInteger(limit) || limit < 0) {
-    throw new ApiError(400, "invalid_query", "イベント一覧のlimitが不正です。0以上の整数を指定してください。");
+    throw new ApiError(400, "invalid_query", CoreMessages.eventLimitInvalid());
   }
   return limit === 0 ? [] : ascending.slice(-limit).reverse();
 }
@@ -1870,7 +1835,7 @@ function newestFirst<T>(ascending: T[], limit: number): T[] {
 function latestEvents<T>(events: T[], limit?: number): T[] {
   if (limit === undefined) return events;
   if (!Number.isSafeInteger(limit) || limit < 0) {
-    throw new ApiError(400, "invalid_query", "イベント一覧のlimitが不正です。0以上の整数を指定してください。");
+    throw new ApiError(400, "invalid_query", CoreMessages.eventLimitInvalid());
   }
   return limit === 0 ? [] : events.slice(0, limit);
 }
@@ -1917,7 +1882,7 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
     throw new ApiError(
       503,
       "dependency_unavailable",
-      "Core実行基盤がまだ利用できません。必要なdistをビルドしてから再実行してください。",
+      CoreMessages.coreDistMissing(),
       { dependency: "packages/core/dist/index.js" },
       { cause: error },
     );
@@ -1929,7 +1894,7 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
     throw new ApiError(
       503,
       "dependency_unavailable",
-      "Core実行基盤を読み込めませんでした。ビルド成果物と実行環境を確認してください。",
+      CoreMessages.coreLoadFailed(),
       { dependency: "packages/core/dist/index.js" },
       { cause: error },
     );
@@ -1938,7 +1903,7 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
     throw new ApiError(
       503,
       "dependency_unavailable",
-      "Coreの公開APIが契約と一致しません。createCore({db, agentRunner, git, version})を確認してください。",
+      CoreMessages.coreApiMismatch(),
       { dependency: "packages/core/dist/index.js", export: "createCore" },
     );
   }
@@ -2009,7 +1974,7 @@ export async function createConfiguredCore(options: CreateCoreOptions): Promise<
   };
   let external: Core;
   try {
-    external = loaded.createCore(enrichedOptions) as Core;
+    external = loaded.createCore(enrichedOptions);
     if (!external || typeof external.start !== "function" || typeof external.stop !== "function" || typeof external.subscribe !== "function") {
       throw new Error("Core createCore returned an incompatible object");
     }

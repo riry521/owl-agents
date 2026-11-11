@@ -1,3 +1,5 @@
+import { isRecord } from "./small-helpers.js";
+
 /** A Task held in `waiting` until conditions outside its Work hold (stored in tasks.prerequisite_json). */
 export type PrerequisiteCondition =
   | { kind: "task"; task_id: string; description: string }
@@ -40,10 +42,6 @@ export class PrerequisiteValidationError extends Error {
     super(message);
     this.name = "PrerequisiteValidationError";
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function text(value: unknown, field: string, allowEmpty = false): string {

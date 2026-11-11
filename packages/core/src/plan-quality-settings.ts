@@ -4,7 +4,7 @@ import {
   readPlanQualitySettings,
   validatePlanQualitySettings,
   type PlanQualitySettings,
-} from "../../shared/dist/plan-quality-settings.js";
+} from "@owl/shared/plan-quality-settings";
 import type { SettingsReader } from "./owner-language";
 import { readSetting, type SettingSpec } from "./settings-store";
 

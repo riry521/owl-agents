@@ -139,13 +139,20 @@ const VALIDATORS: Readonly<Record<keyof TestRunSettings, (value: unknown) => boo
   unit_markers: unitMarkers,
 };
 
-/** The message for a unit that cannot run with the other settings, or null. */
-function unitProblem(mode: unknown, unitValue: unknown, argv: unknown, markers: unknown): string | null {
+/** What a write rejected, as a kind the server turns into the Owner's language; `message` is the English text validateTestRunSettings returns. */
+export interface TestRunSettingsProblem {
+  readonly key: string;
+  readonly kind: "not_object" | "unknown_key" | "invalid" | "whole_argv_required" | "unit_needs_per_file" | "unit_argv_required" | "unit_markers_required";
+  readonly message: string;
+}
+
+/** The problem for a unit that cannot run with the other settings, or null. */
+function unitProblem(mode: unknown, unitValue: unknown, argv: unknown, markers: unknown): TestRunSettingsProblem | null {
   const empty = (list: unknown): boolean => !Array.isArray(list) || list.length === 0;
   if (unitValue === "file") return null;
-  if (mode !== "per_file") return 'test_run.unit must be "file" unless mode is per_file';
-  if (empty(argv)) return "test_run.unit_argv is required when unit is folder or package";
-  if (unitValue === "package" && empty(markers)) return "test_run.unit_markers is required when unit is package";
+  if (mode !== "per_file") return { key: "test_run.unit", kind: "unit_needs_per_file", message: 'test_run.unit must be "file" unless mode is per_file' };
+  if (empty(argv)) return { key: "test_run.unit_argv", kind: "unit_argv_required", message: "test_run.unit_argv is required when unit is folder or package" };
+  if (unitValue === "package" && empty(markers)) return { key: "test_run.unit_markers", kind: "unit_markers_required", message: "test_run.unit_markers is required when unit is package" };
   return null;
 }
 
@@ -172,25 +179,32 @@ export function readTestRunSettings(value: unknown, warn?: (message: string) => 
   const settings = result as unknown as TestRunSettings;
   const problem = unitProblem(settings.mode, settings.unit, settings.unit_argv, settings.unit_markers);
   if (problem !== null) {
-    warn?.(`Invalid test_run.unit (${problem}); using "file".`);
+    warn?.(`Invalid test_run.unit (${problem.message}); using "file".`);
     return { ...settings, unit: "file" };
   }
   return settings;
 }
 
-/** For writes: one message per invalid key ([] = valid). */
-export function validateTestRunSettings(value: unknown): string[] {
-  if (!isRecord(value)) return ["test_run must be an object"];
-  const errors: string[] = [];
+/** For writes: one problem per invalid key ([] = valid). */
+export function testRunSettingsProblems(value: unknown): TestRunSettingsProblem[] {
+  if (!isRecord(value)) return [{ key: "test_run", kind: "not_object", message: "test_run must be an object" }];
+  const problems: TestRunSettingsProblem[] = [];
   for (const [key, item] of Object.entries(value)) {
     const valid = Object.hasOwn(VALIDATORS, key) ? VALIDATORS[key as keyof TestRunSettings] : undefined;
-    if (valid === undefined) errors.push(`test_run.${key} is not a known key`);
-    else if (!valid(item)) errors.push(`test_run.${key} is invalid`);
+    if (valid === undefined) problems.push({ key: `test_run.${key}`, kind: "unknown_key", message: `test_run.${key} is not a known key` });
+    else if (!valid(item)) problems.push({ key: `test_run.${key}`, kind: "invalid", message: `test_run.${key} is invalid` });
   }
-  if (value.mode === "whole" && !(Array.isArray(value.whole_argv) && value.whole_argv.length > 0)) errors.push("test_run.whole_argv is required when mode is whole");
+  if (value.mode === "whole" && !(Array.isArray(value.whole_argv) && value.whole_argv.length > 0)) {
+    problems.push({ key: "test_run.whole_argv", kind: "whole_argv_required", message: "test_run.whole_argv is required when mode is whole" });
+  }
   if (unit(value.unit)) {
     const problem = unitProblem(value.mode ?? DEFAULT_TEST_RUN_SETTINGS.mode, value.unit, value.unit_argv, value.unit_markers);
-    if (problem !== null) errors.push(problem);
+    if (problem !== null) problems.push(problem);
   }
-  return errors;
+  return problems;
+}
+
+/** For writes: one message per invalid key ([] = valid). */
+export function validateTestRunSettings(value: unknown): string[] {
+  return testRunSettingsProblems(value).map((problem) => problem.message);
 }

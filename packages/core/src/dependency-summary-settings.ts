@@ -4,7 +4,7 @@ import {
   readDependencySummarySettings,
   validateDependencySummarySettings,
   type DependencySummarySettings,
-} from "../../shared/dist/dependency-summary-settings.js";
+} from "@owl/shared/dependency-summary-settings";
 import type { SettingsReader } from "./owner-language";
 import { readSetting, type SettingSpec } from "./settings-store";
 

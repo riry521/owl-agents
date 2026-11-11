@@ -83,7 +83,7 @@ export class WorkDriver {
 
   public register(workId: string): void {
     if (workId.length === 0) {
-      throw validationError("A Work driver registration requires a Work identifier.", { field: "work_id" });
+      throw validationError("A Work driver registration requires a Work identifier.", { field: "work_id" }, { code: "work_driver.work_id_required", values: { field: "work_id" } });
     }
     this.workIds.add(workId);
   }
@@ -210,9 +210,10 @@ export class WorkDriver {
 
 }
 
+// shared の positiveInteger は既定値を返す。ここは正の整数でなければ validationError を投げるので別に持つ。
 function positiveInteger(value: number, field: string): number {
   if (!Number.isSafeInteger(value) || value < 1) {
-    throw validationError(`${field} must be a positive integer.`, { [field]: value });
+    throw validationError(`${field} must be a positive integer.`, { [field]: value }, { code: "work_driver.positive_integer_required", values: { field } });
   }
   return value;
 }

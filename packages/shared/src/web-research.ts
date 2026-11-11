@@ -1,3 +1,5 @@
+import { isRecord } from "./small-helpers.js";
+
 export type WebResearchTool = "WebFetch" | "WebSearch";
 
 export interface WebResearchLink {
@@ -25,8 +27,6 @@ export interface WebResearchCapture {
 export const WEB_RESEARCH_TOOLS: readonly WebResearchTool[] = ["WebFetch", "WebSearch"];
 export const WEB_RESEARCH_MAX_CONTENT_CHARS = 65_536;
 export const WEB_RESEARCH_MAX_LINKS = 20;
-export const MAX_CONTENT_CHARS = WEB_RESEARCH_MAX_CONTENT_CHARS;
-export const MAX_LINKS = WEB_RESEARCH_MAX_LINKS;
 
 const TRUNCATION_SUFFIX = "\n…[truncated]";
 
@@ -115,10 +115,6 @@ export function extractWebResearchCapture(
     else console.error("[web-research] Could not build web research capture", error);
     return null;
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function trimmedString(value: unknown): string | null {

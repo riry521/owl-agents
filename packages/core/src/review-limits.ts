@@ -4,7 +4,7 @@ import {
   readReviewLimitSettings,
   validateReviewLimitSettings,
   type ReviewLimitSettings,
-} from "../../shared/dist/review-limit-settings.js";
+} from "@owl/shared/review-limit-settings";
 import type { SettingsReader } from "./owner-language";
 import { readSetting, type SettingSpec } from "./settings-store";
 

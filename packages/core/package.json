@@ -1,6 +1,6 @@
 {
   "name": "@owl/core",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "private": true,
   "description": "Owl Core state reducer, workflow engine, event dispatcher, retry policy, and Decision CAS.",
   "type": "commonjs",
@@ -15,11 +15,11 @@
     "build": "tsc -p tsconfig.json"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.17.0 <23"
   },
   "dependencies": {
-    "@owl/db": "file:../db",
-    "@owl/shared": "file:../shared",
+    "@owl/db": "workspace:*",
+    "@owl/shared": "workspace:*",
     "@typesafe-ai/sdk": "^0.6.0",
     "better-sqlite3": "12.6.2",
     "minimatch": "^9.0.9",
@@ -32,7 +32,7 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "9.6.0",
-    "@types/node": "^20.0.0",
-    "typescript": "^5.8.2"
+    "@types/node": "22.15.3",
+    "typescript": "5.9.2"
   }
 }

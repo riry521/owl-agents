@@ -4,6 +4,7 @@ import { createRequire, Module } from "node:module";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import ts from "typescript";
+import { WHOLE_DEFERRED_REASON } from "../../packages/core/dist/test-runs.js";
 import { repoRoot } from "../helpers/paths.mjs";
 
 const webRequire = createRequire(join(repoRoot, "apps/web/package.json"));
@@ -302,4 +303,9 @@ test("Activity Log explains a whole-deferred test run only for that reason", () 
   assert.match(renderToStaticMarkup(React.createElement(ActivityLog)), /activity\.testRunDeferredToWork/);
   hookValues = [[event("v-2")], ""];
   assert.doesNotMatch(renderToStaticMarkup(React.createElement(ActivityLog)), /activity\.testRunDeferredToWork/);
+});
+
+test("ActivityLog keeps the same WHOLE_DEFERRED_REASON value as Core", () => {
+  const source = readFileSync(join(repoRoot, "apps/web/components/ActivityLog.tsx"), "utf8");
+  assert.equal(/const WHOLE_DEFERRED_REASON = '([^']+)'/.exec(source)?.[1], WHOLE_DEFERRED_REASON);
 });

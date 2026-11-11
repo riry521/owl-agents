@@ -165,3 +165,32 @@ test("Core stop({ timeoutMs: 0 }) does not wait for a hung step", async (t) => {
   await Promise.race([core.stop({ timeoutMs: 0 }), timeoutAfter(1_000, "stop() waited with timeoutMs 0")]);
   assert.ok(Date.now() - began < 1_000);
 });
+
+test("Core stop runs the remaining steps after a step fails, then reports the failure", async (t) => {
+  const { core } = await createTestCore(t, { version: "shutdown-test" }, { prefix: "owl-stop-failure-" });
+  await core.start();
+  let drained = false;
+  const originalDrain = core.writeLane.drain.bind(core.writeLane);
+  core.dispatcher.stop = async () => { throw new Error("dispatcher boom"); };
+  core.writeLane.drain = async () => { drained = true; return originalDrain(); };
+  await assert.rejects(() => core.stop(), (error) => error instanceof AggregateError && error.errors[0].message === "dispatcher boom");
+  assert.equal(drained, true);
+});
+
+test("Core stop runs the later steps when a synchronous stop throws", async (t) => {
+  const { core } = await createTestCore(t, { version: "shutdown-test" }, { prefix: "owl-stop-sync-failure-" });
+  await core.start();
+  let drained = false;
+  const originalDrain = core.writeLane.drain.bind(core.writeLane);
+  const { stop: usageStop } = core.planUsageService;
+  const { stopWatching } = core.ruleStore;
+  core.planUsageService.stop = () => { throw new Error("usage boom"); };
+  core.ruleStore.stopWatching = () => { throw new Error("watch boom"); };
+  core.writeLane.drain = async () => { drained = true; return originalDrain(); };
+  await assert.rejects(() => core.stop(), (error) => error instanceof AggregateError && error.errors.map((e) => e.message).join() === "usage boom,watch boom");
+  assert.equal(drained, true);
+  core.planUsageService.stop = usageStop;
+  core.ruleStore.stopWatching = stopWatching;
+  usageStop.call(core.planUsageService);
+  stopWatching.call(core.ruleStore);
+});

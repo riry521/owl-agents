@@ -1,10 +1,9 @@
 import { createHash } from "node:crypto";
-import { createUlid } from "../../db/dist/index.js";
+import { createUlid } from "@owl/db";
 import { HumanReadableError, invalidStateTransition, notFound, validationError } from "./errors";
 import { type NightlyBacklogEntry } from "./nightly-tests";
 import { createWorkInTransaction } from "./state-reducer";
 import type {
-  CommandRequest,
   CoreDatabase,
   CoreWriteLaneTransaction,
   JsonObject,
@@ -244,10 +243,10 @@ export function listBacklogItems(db: BacklogReader, filter: BacklogListFilter = 
   const limit = filter.limit ?? BACKLOG_LIST_LIMIT;
   const offset = filter.offset ?? 0;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > BACKLOG_LIST_LIMIT) {
-    throw validationError(`Backlog list limit must be an integer between 1 and ${BACKLOG_LIST_LIMIT}.`, { limit });
+    throw validationError(`Backlog list limit must be an integer between 1 and ${BACKLOG_LIST_LIMIT}.`, { limit }, { code: "backlog.list_limit_invalid", values: { field: "limit", max: BACKLOG_LIST_LIMIT } });
   }
   if (!Number.isSafeInteger(offset) || offset < 0) {
-    throw validationError("Backlog list offset must be a non-negative integer.", { offset });
+    throw validationError("Backlog list offset must be a non-negative integer.", { offset }, { code: "backlog.list_offset_invalid", values: { field: "offset" } });
   }
   const status = filter.status ?? null;
   const projectId = filter.project_id ?? null;
@@ -324,7 +323,7 @@ export function issueBacklogWorkInTransaction(
   ownerId = "owner:default",
 ): IssueBacklogWorkData {
   if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
-    throw validationError("Backlog Work details are invalid.", { field: "item_ids" });
+    throw validationError("Backlog Work details are invalid.", { field: "item_ids" }, { code: "backlog.work_details_invalid", values: { field: "item_ids" } });
   }
   const ids = validateItemIds(payload.item_ids);
   const rows = readBacklogStates(tx, ids);
@@ -334,13 +333,13 @@ export function issueBacklogWorkInTransaction(
     throw validationError("Backlog items must belong to the same Project to issue a Work.", {
       field: "item_ids",
       project_ids: projectIds,
-    });
+    }, { code: "backlog.items_project_mismatch", values: { field: "item_ids" } });
   }
   if (typeof payload.title !== "string" || payload.title.trim().length < 1 || payload.title.length > 500) {
-    throw validationError("Work title must contain between 1 and 500 characters.", { field: "title" });
+    throw validationError("Work title must contain between 1 and 500 characters.", { field: "title" }, { code: "backlog.title_length", values: { field: "title", max: 500 } });
   }
   if (typeof payload.summary !== "string" || payload.summary.length > 20000) {
-    throw validationError("Work summary cannot exceed 20,000 characters.", { field: "summary" });
+    throw validationError("Work summary cannot exceed 20,000 characters.", { field: "summary" }, { code: "backlog.summary_too_long", values: { field: "summary", max: 20000 } });
   }
   const work = createWorkInTransaction(tx, {
     title: payload.title,
@@ -385,7 +384,7 @@ export function applyAdvisorBacklogInTransaction(
   if (linkIds.length === 0 && dismissIds.length === 0) return;
   const overlap = linkIds.filter((id) => dismissIds.includes(id));
   if (overlap.length > 0) {
-    throw validationError("A backlog item cannot be both linked and dismissed.", { field: "dismiss_backlog_item_ids", item_ids: overlap });
+    throw validationError("A backlog item cannot be both linked and dismissed.", { field: "dismiss_backlog_item_ids", item_ids: overlap }, { code: "backlog.link_dismiss_overlap", values: { field: "dismiss_backlog_item_ids" } });
   }
   const linked = linkIds.length === 0 ? [] : linkBacklogItemsToWorkInTransaction(tx, work.id, linkIds, now).items;
   let dismissed: BacklogItem[] = [];
@@ -399,7 +398,7 @@ export function applyAdvisorBacklogInTransaction(
         field: "dismiss_backlog_item_ids",
         work_project_id: work.project_id,
         item_ids: mismatched.map((row) => row.id),
-      });
+      }, { code: "backlog.items_project_differs_from_work", values: { field: "dismiss_backlog_item_ids" } });
     }
     dismissed = dismissBacklogItemsInTransaction(tx, ids, now);
   }
@@ -446,7 +445,7 @@ export function linkBacklogItemsToWorkInTransaction(
       field: "item_ids",
       work_project_id: work.project_id,
       item_ids: mismatched.map((row) => row.id),
-    });
+    }, { code: "backlog.items_project_differs_from_work", values: { field: "item_ids" } });
   }
   const status = work.state === "completed" ? "done" : "in_progress";
   const update = tx.run(
@@ -519,7 +518,7 @@ export function detachWorkBacklogOnDeleteInTransaction(tx: CoreWriteLaneTransact
 
 function validateItemIds(value: unknown): string[] {
   if (!Array.isArray(value) || value.length < 1 || value.length > BACKLOG_ITEM_IDS_MAX || value.some((id) => typeof id !== "string") || new Set(value).size !== value.length) {
-    throw validationError("Backlog item IDs must be a non-empty list of unique strings (up to 100).", { field: "item_ids" });
+    throw validationError("Backlog item IDs must be a non-empty list of unique strings (up to 100).", { field: "item_ids" }, { code: "backlog.item_ids_invalid", values: { field: "item_ids", max: 100 } });
   }
   return [...value] as string[];
 }

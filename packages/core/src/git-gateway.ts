@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants, mkdirSync, writeFileSync, type Dirent } from "node:fs";
+import { constants, mkdirSync, writeFileSync } from "node:fs";
 import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -38,6 +38,7 @@ import { OWL_INSTANCE_ID_ENV, createOutputCapture, processTempDir, resolveInstan
 import { workVerificationMarker } from "./workspace-process-sweeper.js";
 import { ADVISOR_HOME_DIRNAME, ADVISOR_SHARED_DIRNAME, safeSegment, WorkspaceLayout } from "./workspace-layout.js";
 import { commitExcludePathspecs } from "./workspace-tooling.js";
+import { isPathInside } from "./path-inside.js";
 import { gitlinkPathsSince } from "./clone-check.js";
 import { inspectRepositoryRoot, type RepositoryRootInspection } from "./repository-inspection.js";
 
@@ -112,11 +113,6 @@ interface VerificationCommandResult {
   readonly stderr: string;
   readonly timed_out: boolean;
   readonly error?: string;
-}
-
-function inside(base: string, candidate: string): boolean {
-  const rel = relative(resolve(base), resolve(candidate));
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
 }
 
 function branchName(prefix: string, workId: string, taskId: string | null): string {
@@ -196,11 +192,6 @@ async function ignoredContent(root: string, paths: readonly string[]): Promise<s
   return kept;
 }
 
-function ignoredWorktree(path: string, ignoredPaths: readonly string[]): { path: string; ignored_count: number; ignored_paths: string[] } {
-  const paths = [...new Set(ignoredPaths)].sort();
-  return { path, ignored_count: paths.length, ignored_paths: paths.slice(0, 10) };
-}
-
 async function lstatIfPresent(path: string) {
   return lstat(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return null;
@@ -229,6 +220,7 @@ function sharedAdvisorBranchFor(key: string): string {
   return `${SHARED_ADVISOR_BRANCH_PREFIX}${key}`;
 }
 
+// shared の firstLine は最初の行をさらに trim する。ここは行末の空白を残すので別に持つ。
 function firstLine(text: string): string {
   return text.trim().split(/\r?\n/u)[0] ?? "";
 }
@@ -1395,7 +1387,7 @@ export class GitWorktreeGateway implements GitGateway {
       for (const command of plan) {
         const cwd = resolve(integrationPath, command.cwd);
         const started = Date.now();
-        const outcome: VerificationCommandResult = inside(integrationPath, cwd)
+        const outcome: VerificationCommandResult = isPathInside(integrationPath, cwd, true)
           ? await this.runProjectVerificationCommand(request.work_id, command, cwd, activity)
           : { passed: false, exit_code: -1, stdout: "", stderr: "", timed_out: false, error: "cwd_outside_worktree" };
         commands.push({
@@ -1967,7 +1959,7 @@ export class GitWorktreeGateway implements GitGateway {
     const integrationPath = context.worktree_path;
     for (const command of plan) {
       const cwd = resolve(integrationPath, command.cwd);
-      if (!inside(integrationPath, cwd)) {
+      if (!isPathInside(integrationPath, cwd, true)) {
         return {
           kind: "verification_failed",
           ok: false,
@@ -2515,7 +2507,7 @@ export class GitWorktreeGateway implements GitGateway {
       return { ok: false, message: "The Work workspace is not a plain directory.", details: { path: workRoot, stage: "workspace_scan" } };
     }
     const realWorkRoot = await realpath(workRoot);
-    if (!inside(realWorkspacesRoot, realWorkRoot) || realWorkRoot === realWorkspacesRoot) {
+    if (!isPathInside(realWorkspacesRoot, realWorkRoot, true) || realWorkRoot === realWorkspacesRoot) {
       return { ok: false, message: "The Work workspace resolves outside its expected directory.", details: { path: workRoot, stage: "workspace_scan" } };
     }
 
@@ -2614,11 +2606,11 @@ export class GitWorktreeGateway implements GitGateway {
     const fingerprint = createHash("sha256").update(JSON.stringify(files.map(({ path, sha256, bytes }) => [path, sha256, bytes]))).digest("hex").slice(0, 16);
     const backupRoot = resolve(this.dataDir, "outputs", safeSegment(workId), folder, `${safeSegment(candidate.name)}-${fingerprint}`);
     const outputsRoot = resolve(this.dataDir, "outputs", safeSegment(workId));
-    if (!inside(outputsRoot, backupRoot) || backupRoot === outputsRoot) throw new Error("The verified workspace backup path is outside the Work outputs directory.");
+    if (!isPathInside(outputsRoot, backupRoot, true) || backupRoot === outputsRoot) throw new Error("The verified workspace backup path is outside the Work outputs directory.");
     for (const file of files) {
       const source = resolve(candidate.path, file.path);
       const destination = resolve(backupRoot, file.path);
-      if (!inside(candidate.path, source) || !inside(backupRoot, destination)) throw new Error(`A workspace file path escaped its root: ${file.path}`);
+      if (!isPathInside(candidate.path, source, true) || !isPathInside(backupRoot, destination, true)) throw new Error(`A workspace file path escaped its root: ${file.path}`);
       await mkdir(resolve(destination, ".."), { recursive: true });
       try {
         await copyFile(source, destination, constants.COPYFILE_EXCL);
@@ -2773,46 +2765,6 @@ export class GitWorktreeGateway implements GitGateway {
     return { ok: true, message: "Task worktree changes were discarded.", changed_paths: changedPaths };
   }
 
-  /**
-   * Save a worktree's uncommitted changes before its Work is deleted. They
-   * normally go into a commit on its Owl branch; when that commit is refused
-   * (a Project hook, for instance), a verified copy under the Work outputs
-   * keeps them so the delete can go ahead without bypassing the Project's rules.
-   */
-  private async preserveForDeletion(workId: string, candidate: WorkDeletionCandidate): Promise<GitOperationResult> {
-    const committed = candidate.integration
-      ? await this.commitIntegrationChanges(candidate.path, workId)
-      : await this.commitTaskChanges(candidate.path, workId, candidate.task_id ?? "worktree");
-    if (committed.ok || committed.failure_kind !== "commit_failure") return committed;
-    const staged = await this.git(candidate.path, ["diff", "--cached", "--name-only", "--no-renames", "--diff-filter=d", "-z"]);
-    if (!staged.ok) return staged;
-    const paths = staged.message === "git operation completed" ? [] : staged.message.split("\0").filter((path) => path.length > 0);
-    try {
-      const files: WorkspaceFile[] = [];
-      for (const path of paths) {
-        const absolute = resolve(candidate.path, path);
-        if (!inside(candidate.path, absolute)) throw new Error(`A workspace file path escaped its root: ${path}`);
-        if (!(await lstat(absolute)).isFile()) throw new Error(`Only regular files can be backed up: ${path}`);
-        const contents = await readFile(absolute);
-        files.push({ path, sha256: createHash("sha256").update(contents).digest("hex"), bytes: contents.byteLength });
-      }
-      await this.backupUnregisteredWorkspace(workId, candidate, { paths, files, ignored_paths: [] }, "_uncommitted-changes");
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      return { ...committed, message: `${committed.message} The changes could not be backed up instead: ${reason}` };
-    }
-    // The copy is verified, so the worktree can drop the changes the commit refused.
-    const reset = await this.git(candidate.path, ["reset", "--quiet", "--hard", "HEAD"]);
-    if (!reset.ok) return reset;
-    return {
-      ok: true,
-      exit_code: 0,
-      recorded: false,
-      worktree_path: candidate.path,
-      message: "The changes could not be committed, so a verified copy was saved to the Work outputs.",
-    };
-  }
-
   private async commitTaskChanges(taskPath: string, workId: string, taskId: string, verb: "complete" | "checkpoint" = "complete"): Promise<GitOperationResult> {
     return this.commitWorktreeChanges(taskPath, workId, `owl: ${verb} task ${taskId}`);
   }
@@ -2954,7 +2906,7 @@ export class GitWorktreeGateway implements GitGateway {
     try { roots = JSON.parse(allowedRootsJson) as unknown; } catch { throw new Error("Project allowed_roots is invalid JSON."); }
     if (!Array.isArray(roots) || roots.some((root) => typeof root !== "string")) throw new Error("Project allowed_roots is invalid.");
     const resolvedRoots = await Promise.all((roots as string[]).map((root) => realpath(root)));
-    if (!resolvedRoots.some((root) => inside(root, canonical))) throw new Error("Project canonical_path is outside allowed_roots.");
+    if (!resolvedRoots.some((root) => isPathInside(root, canonical, true))) throw new Error("Project canonical_path is outside allowed_roots.");
     return canonical;
   }
 

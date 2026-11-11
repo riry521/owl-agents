@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import type { GuardTokenAgent, GuardTokenLease } from "../../../packages/shared/dist/guard-token.js";
+import type { GuardTokenAgent, GuardTokenLease } from "@owl/shared/guard-token";
 
 /**
  * Guard tokens for agent processes. Each process gets its own token, bound to

@@ -22,16 +22,7 @@ export interface AcceptanceDefect {
   readonly suggestion: string;
 }
 
-/** イベント payload の形（Worker も Reviewer も同じ） */
-export interface AcceptanceDefectPayload {
-  readonly task_id: string;
-  readonly source: AcceptanceDefectSource;
-  readonly agent_run_id: string;
-  readonly defects: AcceptanceDefect[];
-  /** Manager への依頼文（formatAcceptanceDefectReason）。no_progress の Decision の recent にも出る */
-  readonly reason: string;
-}
-
+// shared の clip(text, max) は文字列を省略記号で切る。ここは unknown を受け、trim して省略記号なしで切るので別に持つ。
 function clip(value: unknown): string {
   return typeof value === "string" ? value.trim().slice(0, ACCEPTANCE_DEFECT_LIMITS.text) : "";
 }

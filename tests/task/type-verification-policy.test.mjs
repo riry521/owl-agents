@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
+import { coreReasonMessage } from "../../apps/server/dist/messages/core-reasons/index.js";
 
 import { matchesGlobWithDots } from "../../packages/core/dist/glob.js";
 import { evaluateTaskTypePolicy, verificationPolicySettings } from "../../packages/core/dist/task-verification-policy.js";
@@ -183,7 +184,22 @@ test("Core verification policy updates preserve raw settings and commit through 
     outbox: db.all("SELECT * FROM outbox_deliveries ORDER BY rowid"),
   });
   const prior = snapshot();
-  await assert.rejects(core.updateVerificationPolicySettings({ limits: { timeout_seconds: 0 }, code: { run_test_runners: false } }), (error) => error.code === "validation_error");
+  await assert.rejects(core.updateVerificationPolicySettings({ limits: { timeout_seconds: 0 }, code: { run_test_runners: false } }), (error) => {
+    assert.equal(error.code, "validation_error");
+    assert.equal(error.details.field, "payload.limits.timeout_seconds");
+    assert.equal(error.details.reason.code, "settings.integer_range");
+    assert.equal(error.details.reason.values.field, "payload.limits.timeout_seconds");
+    assert.equal(error.details.reason.values.min, 1);
+    const { values } = error.details.reason;
+    const ja = coreReasonMessage("ja", "settings.integer_range", values);
+    const en = coreReasonMessage("en", "settings.integer_range", values);
+    assert.ok(ja.includes("payload.limits.timeout_seconds") && en.includes("payload.limits.timeout_seconds"));
+    assert.match(ja, /[ぁ-ん]/);
+    assert.doesNotMatch(ja, /\b(must|integer|safe|positive)\b/i);
+    assert.ok(!ja.includes(error.message));
+    assert.doesNotMatch(en, /[ぁ-んァ-ン一-龥]/);
+    return true;
+  });
   assert.deepEqual(snapshot(), prior);
   await db.createWriteLane().transact((transaction) => transaction.run("CREATE TRIGGER fail_verification_policy_update BEFORE UPDATE ON settings WHEN OLD.key = 'verification_policy' BEGIN SELECT RAISE(ABORT, 'injected settings failure'); END"));
   await assert.rejects(core.updateVerificationPolicySettings({ limits: { timeout_seconds: 20 } }));

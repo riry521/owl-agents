@@ -118,6 +118,59 @@ test("validatedSetting turns a SettingsValidationError into a validation_error w
   assert.throws(() => validatedSetting(() => { throw original; }, null), (error) => error === original);
 });
 
+const { coreReasonMessage } = await import("../../apps/server/dist/messages/core-reasons/index.js");
+const shared = (name) => import(`../../packages/shared/dist/${name}.js`);
+const dependencySummary = await shared("dependency-summary-settings");
+const planUsage = await shared("plan-usage-settings");
+const reviewLimit = await shared("review-limit-settings");
+const knowledge = await shared("knowledge-automation");
+const remake = await shared("remake-limit-settings");
+const routing = await shared("review-routing-settings");
+const planQuality = await shared("plan-quality-settings");
+
+const REASON_CASES = [
+  [dependencySummary.DEPENDENCY_SUMMARY_SETTINGS_KEY, dependencySummary.validateDependencySummarySettings, { max_chars: 0 }, "settings.integer_range", { field: "max_chars", min: 1 }],
+  [planUsage.PLAN_USAGE_SETTINGS_KEY, planUsage.validatePlanUsageSettings, { claude_usage_api_enabled: true, poll_interval_minutes: 3 }, "settings.one_of", { field: "poll_interval_minutes", allowed: "2, 5, 10, 15, 30, 60" }],
+  [planUsage.PLAN_USAGE_SETTINGS_KEY, planUsage.validatePlanUsageSettings, { claude_usage_api_enabled: true }, "settings.exact_keys", { field: "payload", keys: "claude_usage_api_enabled, poll_interval_minutes" }],
+  [planUsage.PLAN_USAGE_SETTINGS_KEY, planUsage.validatePlanUsageSettings, { claude_usage_api_enabled: "yes", poll_interval_minutes: 5 }, "settings.boolean", { field: "claude_usage_api_enabled" }],
+  [planUsage.PLAN_USAGE_SETTINGS_KEY, planUsage.validatePlanUsageSettings, "x", "settings.not_object", { field: "payload" }],
+  // The lower bound depends on another field: plan_review_rounds 5 needs total_review_attempts >= 6.
+  [reviewLimit.REVIEW_LIMIT_SETTINGS_KEY, reviewLimit.validateReviewLimitSettings, { plan_review_rounds: 5, total_review_attempts: 3 }, "settings.integer_min", { field: "total_review_attempts", min: 6 }],
+  [knowledge.KNOWLEDGE_AUTOMATION_SETTINGS_KEY, knowledge.validateKnowledgeAutomationSettings, { librarian_times: [] }, "settings.keys", { field: "payload", required: "librarian_times, research_autosave" }],
+  [knowledge.KNOWLEDGE_AUTOMATION_SETTINGS_KEY, knowledge.validateKnowledgeAutomationSettings, { librarian_times: ["25:00"], research_autosave: true }, "settings.hh_mm_list", { field: "librarian_times" }],
+  [knowledge.KNOWLEDGE_AUTOMATION_SETTINGS_KEY, knowledge.validateKnowledgeAutomationSettings, { librarian_times: [], research_autosave: true, research_source_links_max: 3, research_source_links: 4 }, "settings.integer_range", { field: "research_source_links", min: 0, max: 3 }],
+  [remake.REMAKE_LIMIT_SETTINGS_KEY, remake.validateRemakeLimitSettings, { ...remake.DEFAULT_REMAKE_LIMIT_SETTINGS, verification_paths: [""] }, "settings.glob_list", { field: "verification_paths", max_length: 500 }],
+  [remake.REMAKE_LIMIT_SETTINGS_KEY, remake.validateRemakeLimitSettings, { ...remake.DEFAULT_REMAKE_LIMIT_SETTINGS, checked_task_types: ["code", "code"] }, "settings.distinct_one_of_list", { field: "checked_task_types", allowed: "research, design, code, config, doc, test" }],
+  [routing.REVIEW_ROUTING_SETTINGS_KEY, routing.validateReviewRoutingSettings, { ...routing.DEFAULT_REVIEW_ROUTING_SETTINGS, sensitive_paths: { "": ["a/**"] } }, "settings.named_groups", { field: "sensitive_paths", max_groups: 50, max_name_length: 100 }],
+  [planQuality.PLAN_QUALITY_SETTINGS_KEY, planQuality.validatePlanQualitySettings, { ...planQuality.DEFAULT_PLAN_QUALITY_SETTINGS, component_patterns: ["("] }, "settings.regex_list", { field: "component_patterns" }],
+];
+
+for (const [key, validator, input, code, expected] of REASON_CASES) {
+  test(`saving ${key} that breaks a condition rejects with reason ${code} carrying the field and condition values, and the ja/en sentences carry them in one language`, async (t) => {
+    const { db, writeLane } = await setup(t);
+    let caught;
+    await assert.rejects(saveSetting(writeLane, spec({ key, validate: validator }), input), (error) => {
+      caught = error;
+      return true;
+    });
+    assert.equal(countOf(db, "settings"), 0);
+    assert.ok(caught instanceof HumanReadableError && caught.code === "validation_error");
+    assert.equal(caught.details.field, expected.field);
+    assert.equal(caught.details.reason.code, code);
+    const { values } = caught.details.reason;
+    for (const [name, value] of Object.entries(expected)) assert.equal(values[name], value);
+    const ja = coreReasonMessage("ja", code, values);
+    const en = coreReasonMessage("en", code, values);
+    for (const value of Object.values(values)) {
+      assert.ok(ja.includes(String(value)) && en.includes(String(value)), `${code} sentences include ${value}`);
+    }
+    assert.match(ja, /[ぁ-ん]/);
+    assert.ok(!ja.includes(caught.message), "the English message is not embedded in the ja sentence");
+    assert.doesNotMatch(ja, /\b(must|exactly|integer|object|array|contain|valid)\b/i);
+    assert.doesNotMatch(en, /[ぁ-んァ-ン一-龥]/);
+  });
+}
+
 test("saveSetting writes no row and no event when validation fails", async (t) => {
   const { db, writeLane } = await setup(t);
   await assert.rejects(saveSetting(writeLane, spec(), {}), (error) => error instanceof HumanReadableError && error.details.field === "size");

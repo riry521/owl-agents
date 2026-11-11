@@ -482,7 +482,7 @@ test("a failed replan opens a Decision and lifts the launch hold", async (t) => 
   const { db, core, workId } = await openRunning(t, r);
   await instruct(core, db, workId, "Will fail", "fail");
   await waitFor(() => db.get("SELECT 1 AS n FROM decisions WHERE work_id = ? AND status = 'open'", workId), { message: "an open Decision" });
-  assert.equal(core.ownerInstructionPending(workId), false, "the launch hold is lifted");
+  assert.equal(core.manager.ownerInstructionPending(workId), false, "the launch hold is lifted");
 });
 
 test("an instruction to a paused Work queues the replan and does not replan until resume", async (t) => {

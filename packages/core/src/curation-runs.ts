@@ -1,4 +1,4 @@
-import { createUlid, utcNow } from "../../db/dist/index.js";
+import { createUlid, utcNow } from "@owl/db";
 import type { CoreDatabase } from "./types";
 
 export type CurationKind = "librarian" | "skill_curation" | "rule_curation";

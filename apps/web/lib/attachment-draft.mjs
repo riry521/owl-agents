@@ -1,8 +1,10 @@
+// @ts-check
 /** Pure helpers for the pre-send attachment list shared by the Advisor and Work composers. */
 
 const UNITS = ['B', 'KB', 'MB', 'GB'];
 
 /** "72.4 MB", "50 MB": one decimal, dropped when it is zero. */
+/** @param {any} bytes */
 export function formatBytes(bytes) {
   let value = Math.max(0, Number(bytes) || 0);
   let unit = 0;
@@ -25,6 +27,7 @@ export function formatBytes(bytes) {
  */
 export function checkFiles(files, limits, currentCount) {
   const accepted = [];
+  /** @type {{ file: File, reason: 'too_large' | 'too_many' }[]} */
   const rejected = [];
   for (const file of files) {
     if (file.size > limits.max_bytes) rejected.push({ file, reason: 'too_large' });
@@ -34,7 +37,12 @@ export function checkFiles(files, limits, currentCount) {
   return { accepted, rejected };
 }
 
-/** The user-facing sentence for a refused file. */
+/**
+ * The user-facing sentence for a refused file.
+ * @param {{ file: File, reason: string }} rejection
+ * @param {{ max_bytes: number, max_files: number }} limits
+ * @param {(key: string, params?: Record<string, string>) => string} t
+ */
 export function rejectionMessage(rejection, limits, t) {
   const name = rejection.file.name;
   if (rejection.reason === 'too_large') {
@@ -46,6 +54,8 @@ export function rejectionMessage(rejection, limits, t) {
 /**
  * Map an upload failure to an i18n key plus params, so the tray can translate it.
  * A 413 carries details.max_bytes; a filename rejection is validation_error on field "filename".
+ * @param {any} error
+ * @param {{ name: string, size: number }} file
  */
 export function uploadFailureReason(error, file) {
   if (error?.code === 'upload_too_large') {
@@ -64,11 +74,13 @@ export const emptyDraft = Object.freeze({ items: [] });
  * Item states: uploading | ready | quarantined | failed.
  * Actions: add {items:[{id,file}]}, uploaded {id,attachment}, failed {id,reason}, retry {id}, remove {id}, clear.
  * Results for ids no longer in the list (removed meanwhile) are dropped.
+ * @param {any} state
+ * @param {any} action
  */
 export function draftReducer(state, action) {
   switch (action.type) {
     case 'add':
-      return { items: [...state.items, ...action.items.map(({ id, file }) => ({ id, file, status: 'uploading' }))] };
+      return { items: [...state.items, ...action.items.map((/** @type {{ id: any, file: any }} */ { id, file }) => ({ id, file, status: 'uploading' }))] };
     case 'uploaded':
       return mapItem(state, action.id, (item) => ({
         ...item,
@@ -80,7 +92,7 @@ export function draftReducer(state, action) {
     case 'retry':
       return mapItem(state, action.id, (item) => (item.status === 'failed' ? { id: item.id, file: item.file, status: 'uploading' } : item));
     case 'remove':
-      return { items: state.items.filter((item) => item.id !== action.id) };
+      return { items: state.items.filter((/** @type {any} */ item) => item.id !== action.id) };
     case 'clear':
       return emptyDraft;
     default:
@@ -88,31 +100,48 @@ export function draftReducer(state, action) {
   }
 }
 
+/**
+ * @param {any} state
+ * @param {any} id
+ * @param {(item: any) => any} update
+ */
 function mapItem(state, id, update) {
-  if (!state.items.some((item) => item.id === id)) return state;
-  return { items: state.items.map((item) => (item.id === id ? update(item) : item)) };
+  if (!state.items.some((/** @type {any} */ item) => item.id === id)) return state;
+  return { items: state.items.map((/** @type {any} */ item) => (item.id === id ? update(item) : item)) };
 }
 
-/** Whether the send button may be pressed. */
-export function canSend({ body, items, sending }) {
+/**
+ * Whether the send button may be pressed.
+ * @param {{ hasBody: any, items: any[], sending: any }} args
+ */
+export function canSend({ hasBody, items, sending }) {
   if (sending) return false;
   if (items.some((item) => item.status === 'uploading' || item.status === 'failed')) return false;
-  return String(body ?? '').trim().length > 0 || items.length > 0;
+  return hasBody || items.length > 0;
 }
 
-/** Hint key shown while sending is blocked by an item, or null. */
+/**
+ * Hint key shown while sending is blocked by an item, or null.
+ * @param {any[]} items
+ */
 export function blockedHintKey(items) {
   if (items.some((item) => item.status === 'failed')) return 'attachments.blockedByFailed';
   if (items.some((item) => item.status === 'uploading')) return 'attachments.waitUploading';
   return null;
 }
 
-/** ids to send as attachment_ids (ready and quarantined items). */
+/**
+ * ids to send as attachment_ids (ready and quarantined items).
+ * @param {any[]} items
+ */
 export function attachmentIdsOf(items) {
   return items.filter((item) => item.attachmentId && (item.status === 'ready' || item.status === 'quarantined')).map((item) => item.attachmentId);
 }
 
-/** Only File entries of a drop or paste; text items are ignored. */
+/**
+ * Only File entries of a drop or paste; text items are ignored.
+ * @param {any} transfer
+ */
 export function filesFromTransfer(transfer) {
   if (!transfer) return [];
   if (transfer.items && transfer.items.length > 0) {
@@ -124,12 +153,18 @@ export function filesFromTransfer(transfer) {
   return Array.from(transfer.files ?? []);
 }
 
-/** True when a drag carries files (not dragged text). */
+/**
+ * True when a drag carries files (not dragged text).
+ * @param {any} transfer
+ */
 export function isFileDrag(transfer) {
   return Array.from(transfer?.types ?? []).includes('Files');
 }
 
-/** Extension shown inside the file icon, e.g. "PDF". */
+/**
+ * Extension shown inside the file icon, e.g. "PDF".
+ * @param {string} name
+ */
 export function fileExtension(name) {
   const match = /\.([A-Za-z0-9]{1,5})$/.exec(name);
   return match ? match[1].toUpperCase() : 'FILE';

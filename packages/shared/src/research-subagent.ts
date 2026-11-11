@@ -7,6 +7,7 @@ import { holdTempConfigFile } from "./temp-config-files.js";
 import { EXTERNAL_DATA_POLICY, type ResearcherPromptRef } from "./agent-rules.js";
 import { tomlString } from "./permission-args.js";
 import type { ResearchSubagentSettings } from "./child-runs.js";
+import { isRecord } from "./small-helpers.js";
 
 export type ResearchSubagentAdapter = "claude" | "codex";
 
@@ -128,10 +129,6 @@ export function isResearchSubagentType(agentType: unknown): boolean {
 export function researchToolDecision(agentType: unknown, toolName: string): "allow" | "deny" {
   const tools = typeof agentType === "string" ? RESEARCH_TOOLS_BY_TYPE.get(agentType) : undefined;
   return tools?.has(toolName.toLowerCase()) ? "allow" : "deny";
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isCount(value: unknown): value is number {

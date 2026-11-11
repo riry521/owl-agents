@@ -55,7 +55,7 @@ async function setup(t) {
   };
   // Each role runs through its real path (Core, WorkflowEngine, SkillCurator); resolves to the catalog in the runner's input.
   const run = {
-    manager: async () => { await core.invokeManagerPlan({ work_id: workId }, "plan").catch(() => {}); return catalogIn(seen.manager); },
+    manager: async () => { await core.manager.invokeManagerPlan({ work_id: workId }, "plan").catch(() => {}); return catalogIn(seen.manager); },
     designer: async () => { await core.workflow.runWorkerInternal(workId, designId, await startRun(designId, "designer", "running"), 1).catch(() => {}); return catalogIn(seen.designer); },
     worker: async () => { await core.workflow.runWorkerInternal(workId, taskId, await startRun(taskId, "worker", "running"), 1).catch(() => {}); return catalogIn(seen.worker); },
     reviewer: async () => {

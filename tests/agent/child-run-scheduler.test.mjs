@@ -6,7 +6,7 @@ import { test } from "node:test";
 
 import { createChildRunScheduler, summarizeChildReport } from "../../packages/core/dist/child-run-scheduler.js";
 import { runExecutorProcess } from "../../packages/core/dist/executor.js";
-import { DEFAULT_CHILD_RUN_SETTINGS, GUARD_TOKEN_FILE_ENV, MINIMAL_CODE_RULES } from "../../packages/shared/dist/index.js";
+import { CHILD_RUN_LIMITS, DEFAULT_CHILD_RUN_SETTINGS, GUARD_TOKEN_FILE_ENV, MINIMAL_CODE_RULES } from "../../packages/shared/dist/index.js";
 import { createUlid } from "../../packages/db/dist/index.js";
 import { createTestCore } from "../helpers/core.mjs";
 import { createTestDatabase } from "../helpers/db.mjs";
@@ -625,4 +625,20 @@ test("a child whose start the Owner's pause beats records no Executor run and st
   assert.equal(db.get(EXECUTOR_RUNS_SQL).n, 0);
   assert.equal(db.get("SELECT status FROM child_runs WHERE parent_agent_run_id = ?", ids.parent).status, "cancelled");
   assert.deepEqual(await readdir(records), []);
+});
+
+test("a wrong child_ids count carries a reason code that renders in one language only", async (t) => {
+  const { scheduler, ids } = await setup(t);
+  const error = await scheduler.wait(ids.parent, { child_ids: [], timeout_seconds: 1 }, new AbortController().signal).then(() => null, (caught) => caught);
+  assert.equal(error.code, "validation_error");
+  const { code, values } = error.details.reason;
+  assert.deepEqual({ code, values }, { code: "child_run.child_ids_invalid", values: { field: "child_ids", max: CHILD_RUN_LIMITS.wait_max_ids } });
+  const { coreReasonMessage } = await import("../../apps/server/dist/messages/core-reasons/index.js");
+  const ja = coreReasonMessage("ja", code, values);
+  const en = coreReasonMessage("en", code, values);
+  assert.match(ja, /child_ids/u);
+  assert.doesNotMatch(ja, /must contain|between/u);
+  assert.match(en, /child_ids must contain between 1 and \d+ child IDs/u);
+  assert.doesNotMatch(en, /[぀-ヿ一-鿿]/u);
+  assert.equal(coreReasonMessage("ja", "toString", {}), undefined);
 });

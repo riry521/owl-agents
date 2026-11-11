@@ -1,4 +1,4 @@
-import { coreDecisionTexts, findInternalTerms, findManagerWorkRequests, type CoreDecisionTexts, type DecisionExplanationRequest } from "../../shared/dist/decision-explanation.js";
+import { coreDecisionTexts, findInternalTerms, findManagerWorkRequests, type CoreDecisionTexts, type DecisionExplanationRequest } from "@owl/shared/decision-explanation";
 
 export interface PlainExplanation extends CoreDecisionTexts {
   readonly summary: string;

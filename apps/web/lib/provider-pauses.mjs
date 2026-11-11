@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * @typedef {object} ProviderPause
  * @property {string} provider
@@ -36,7 +37,9 @@ export function providerPauseLines(pauses, t, now, timeZone) {
     }
 
     const resumeAt = new Date(pause.resume_at);
+    /** @type {Intl.DateTimeFormatOptions} */
     const timeOptions = { hour: 'numeric', minute: '2-digit', ...(timeZone ? { timeZone } : {}) };
+    /** @type {Intl.DateTimeFormatOptions} */
     const dateOptions = { year: 'numeric', month: 'numeric', day: 'numeric', ...(timeZone ? { timeZone } : {}) };
     const resumeTime = new Intl.DateTimeFormat(locale, timeOptions).format(resumeAt);
     const currentDate = new Intl.DateTimeFormat(locale, dateOptions).format(current);

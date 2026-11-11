@@ -56,3 +56,12 @@ test("prepare-test-checkout copies a missing better-sqlite3 binding from the sou
   assert.deepEqual(copied, [path.join(checkout, rel)]);
   assert.equal(readFileSync(path.join(checkout, rel), "utf8"), "binding");
 });
+
+test("root test と test:nightly は packages/*/test と apps/server/test のテストも対象にする", () => {
+  const { scripts } = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
+  for (const name of ["test", "test:nightly"]) {
+    for (const glob of ["tests/**/*.test.mjs", "packages/*/test/**/*.test.mjs", "apps/server/test/**/*.test.mjs"]) {
+      assert.ok(scripts[name].includes(glob), `${name} は ${glob} を対象にしていない`);
+    }
+  }
+});

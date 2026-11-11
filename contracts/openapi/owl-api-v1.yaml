@@ -5844,83 +5844,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-  /api/v1/settings/executor:
-    get:
-      operationId: getExecutorSettings
-      summary: Get legacy executor settings
-      security:
-        - ownerBearer: []
-      responses:
-        '200':
-          description: Child-run settings plus the default provider, model, effort and timeout_ms.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ExecutorSettingsResponse'
-        '401':
-          description: Unauthorized.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: dependency_unavailable
-          x-error-codes:
-            - dependency_unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-    put:
-      operationId: updateExecutorSettings
-      summary: Update legacy executor settings
-      security:
-        - ownerBearer: []
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/UpdateExecutorSettingsCommand'
-      responses:
-        '200':
-          description: Executor settings updated.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ExecutorSettingsCommandResponse'
-        '400':
-          description: Settings validation failure.
-          x-error-codes:
-            - validation_error
-            - write_paths_invalid
-            - timeout_out_of_range
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '401':
-          description: Unauthorized.
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '409':
-          description: idempotency_conflict or parent_not_active.
-          x-error-codes:
-            - idempotency_conflict
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '503':
-          description: dependency_unavailable
-          x-error-codes:
-            - dependency_unavailable
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
   /api/v1/settings/model-presets:
     get:
       operationId: listModelPresets
@@ -15849,55 +15772,6 @@ components:
           properties:
             data:
               $ref: '#/components/schemas/ChildRunSettingsData'
-    ExecutorSettingsData:
-      allOf:
-        - $ref: '#/components/schemas/ChildRunSettingsData'
-        - type: object
-          required: [provider, model, effort, timeout_ms]
-          properties:
-            provider: { type: string, description: The executor_harness. }
-            model: { type: [string, 'null'] }
-            effort:
-              oneOf:
-                - { type: string, enum: [low, medium, high, xhigh, max] }
-                - { type: 'null' }
-            timeout_ms: { type: integer, description: timeout_minutes * 60000. }
-    UpdateExecutorSettingsPayload:
-      type: object
-      description: Either the full child-run settings (when executor_harness or defaults_by_parent_harness is present) or the legacy form provider, model, timeout_ms and optional effort.
-      properties:
-        provider: { type: string, minLength: 1, description: 'claude, codex or opencode; legacy aliases are mapped.' }
-        model: { type: string, minLength: 1 }
-        effort:
-          oneOf:
-            - { type: string, enum: [low, medium, high, xhigh, max] }
-            - { type: 'null' }
-        timeout_ms: { type: integer, minimum: 0, description: 0 keeps the current timeout. }
-        executor_harness: { type: string, enum: [claude, codex, opencode] }
-      additionalProperties: true
-    ExecutorSettingsResponse:
-      type: object
-      required: [request_id, data]
-      properties:
-        request_id:
-          $ref: '#/components/schemas/RequestId'
-        data:
-          $ref: '#/components/schemas/ExecutorSettingsData'
-      additionalProperties: false
-    UpdateExecutorSettingsCommand:
-      allOf:
-        - $ref: '#/components/schemas/CommandRequest'
-        - type: object
-          properties:
-            payload:
-              $ref: '#/components/schemas/UpdateExecutorSettingsPayload'
-    ExecutorSettingsCommandResponse:
-      allOf:
-        - $ref: '#/components/schemas/Response'
-        - type: object
-          properties:
-            data:
-              $ref: '#/components/schemas/ExecutorSettingsData'
     ModelPreset:
       type: object
       required: [id, name, roles, created_at, updated_at]
@@ -17580,7 +17454,7 @@ components:
         last_compaction_at: { type: [string, 'null'] }
         queued_turns: { type: integer }
         running_turns: { type: integer }
-        activity: { description: Current Advisor activity, opaque. }
+        activity: { description: "Current Advisor activity, opaque." }
         provider_paused_until: { type: [string, 'null'] }
         created_at: { type: [string, 'null'] }
         resumed_count: { type: integer }

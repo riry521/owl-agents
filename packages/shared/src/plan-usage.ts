@@ -76,5 +76,3 @@ export interface PlanUsageSource {
   fetch(signal: AbortSignal): Promise<PlanUsageFetchResult>;
 }
 
-/** Receives snapshots observed live in agent output. Must not throw. */
-export type PlanUsageSink = (observation: PlanUsageSnapshot) => void;

@@ -420,13 +420,6 @@ function truncate(value: string, maxLength: number): string {
   return chars.length <= maxLength ? value : `${chars.slice(0, Math.max(0, maxLength - 1)).join("")}…`;
 }
 
-function truncateWithSuffix(value: string, maxLength: number, suffix: string): string {
-  const chars = Array.from(value);
-  if (chars.length <= maxLength) return value;
-  const suffixChars = Array.from(suffix);
-  return `${chars.slice(0, Math.max(0, maxLength - suffixChars.length)).join("")}${suffix}`;
-}
-
 function safeMetadataText(value: string | null | undefined): string {
   return value ? redactResearchText(value.replace(/[\r\n]+/gu, " ")).text : "";
 }

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'next/navigation';
-import { ApiRequestError, getWorkMarkdown, type WorkMarkdownDocument } from '@/lib/api-client';
+import { ApiRequestError, getOwnerMarkdown, getWorkMarkdown, type WorkMarkdownDocument } from '@/lib/api-client';
 import { useLocale } from '@/lib/i18n';
 import { tocEntries } from '@/lib/markdown-toc.mjs';
 import { viewerBackTarget, viewerStateForError } from '@/lib/markdown-viewer-state.mjs';
@@ -24,15 +24,16 @@ export function MarkdownViewerView() {
   const { t } = useLocale();
   const params = useSearchParams();
   const id = params.get('id')?.trim() || null;
+  const root = params.get('root')?.trim() || null;
   const path = params.get('path')?.trim() || null;
   const [attempt, setAttempt] = useState(0);
-  const [load, setLoad] = useState<Load>(id && path ? { status: 'loading' } : INVALID_URL);
+  const [load, setLoad] = useState<Load>((id || root) && path ?{ status: 'loading' } : INVALID_URL);
   const [entries, setEntries] = useState<TocItem[]>([]);
   const sheetRef = useRef<HTMLElement>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
-    if (!id || !path) {
+    if (!(id || root) || !path) {
       setLoad(INVALID_URL);
       return;
     }
@@ -40,7 +41,7 @@ export function MarkdownViewerView() {
     let timeout: ReturnType<typeof setTimeout> | undefined;
     setLoad({ status: 'loading' });
     Promise.race([
-      getWorkMarkdown(id, path),
+      id ? getWorkMarkdown(id, path) : getOwnerMarkdown(root as string, path),
       new Promise<never>((_, reject) => {
         timeout = setTimeout(() => reject(new Error('request_timeout')), LOAD_TIMEOUT_MS);
       }),
@@ -55,7 +56,7 @@ export function MarkdownViewerView() {
       cancelled = true;
       clearTimeout(timeout);
     };
-  }, [id, path, attempt]);
+  }, [id, root, path, attempt]);
 
   useLayoutEffect(() => {
     if (load.status !== 'ready') {

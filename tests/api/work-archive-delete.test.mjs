@@ -328,8 +328,9 @@ test("DELETE with a failed workspace cleanup answers worktree_cleanup_failed wit
 
   const response = await deleteWork(api.request, workId, `delete-cleanup:${workId}`);
   const body = await assertApiError(response, 503, "worktree_cleanup_failed");
-  assert.match(body.error.message, /Device or resource busy/);
-  assert.ok(body.error.message.includes("/work/dir/task"));
+  // The message is the Owner-language text of the code; the path and stage stay in details.
+  assert.equal(body.error.details.path, "/work/dir/task");
+  assert.equal(body.error.details.stage, "work_directory_remove");
   assert.ok(api.db.get("SELECT id FROM works WHERE id = ?", workId));
 });
 

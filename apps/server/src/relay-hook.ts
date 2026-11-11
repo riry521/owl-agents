@@ -1,22 +1,14 @@
 import { readFile } from "node:fs/promises";
+import { readStdin } from "./stdio-jsonrpc.js";
 
-import { RELAY_STATE_FILE_ENV } from "../../../packages/shared/dist/token-relay.js";
+import { RELAY_STATE_FILE_ENV } from "@owl/shared/token-relay";
+import { isRecord } from "@owl/shared/small-helpers";
 
 /**
  * Hook for relay-watched Claude children. It only reads the state file Owl
  * writes from the stream's token counts; it never counts tokens itself, so
  * the handoff decision and the request records use the same numbers.
  */
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  return Buffer.concat(chunks).toString("utf8");
-}
 
 async function main(): Promise<number> {
   let input: unknown;

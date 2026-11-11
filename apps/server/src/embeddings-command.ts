@@ -2,9 +2,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
-  ChildEmbedder, MEMORY_INDEX_FILE, downloadModel, embedIndexFile, enableIfUnset, isValidModelName, loadEmbedderConfig,
-} from "../../../packages/core/dist/index.js";
-import type { Embedder, EmbedderConfig } from "../../../packages/core/dist/index.js";
+  ChildEmbedder, MEMORY_INDEX_FILE, downloadModel, embedIndexFile, embeddingsEnabledSetting, enableIfUnset, isValidModelName, loadEmbedderConfig,
+} from "@owl/core";
+import type { Embedder, EmbedderConfig } from "@owl/core";
 import { cliText } from "./cli-language.js";
 
 export interface EmbeddingsCommandInput {
@@ -12,6 +12,8 @@ export interface EmbeddingsCommandInput {
   env: NodeJS.ProcessEnv;
   out: (line: string) => void;
   err: (line: string) => void;
+  /** Raw text (no newline added) for the one-line progress; used only when isTTY. */
+  write?: (text: string) => void;
   /** Progress is overwritten on one line only on a terminal. */
   isTTY?: boolean;
   fetch?: typeof fetch;
@@ -22,16 +24,16 @@ export interface EmbeddingsCommandInput {
 
 /** True only when the environment or memory-embedder.json says false; an unset value is not a refusal. */
 function explicitlyOff(dataDir: string, env: NodeJS.ProcessEnv): boolean {
-  const fromEnv = env.OWL_MEMORY_EMBEDDINGS_ENABLED;
-  if (fromEnv !== undefined && ["true", "1", "false", "0"].includes(fromEnv)) return ["false", "0"].includes(fromEnv);
-  try {
-    return (JSON.parse(readFileSync(join(dataDir, "memory-embedder.json"), "utf8")) as { enabled?: unknown }).enabled === false;
-  } catch { return false; }
+  let fileEnabled: unknown;
+  try { fileEnabled = (JSON.parse(readFileSync(join(dataDir, "memory-embedder.json"), "utf8")) as { enabled?: unknown }).enabled; } catch { /* no usable file: unset */ }
+  return embeddingsEnabledSetting(env, fileEnabled) === false;
 }
 
 /** Downloads the model, enables embeddings when unset, and embeds the pending notes of an existing index. Returns the exit code. */
 export async function runEmbeddingsCommand(input: EmbeddingsCommandInput): Promise<number> {
   const { dataDir, env, out, err } = input;
+  // out adds a newline per call, so the CLI passes write for in-place progress; without it progress still goes to out.
+  const progress = input.write ?? out;
   const config = loadEmbedderConfig(dataDir, env);
   if (explicitlyOff(dataDir, env)) {
     out(cliText("埋め込みは設定で無効になっているので、何もしません。", "Embeddings are disabled in the settings, so nothing was done."));
@@ -67,10 +69,10 @@ export async function runEmbeddingsCommand(input: EmbeddingsCommandInput): Promi
         indexPath, embedder, profile: config.profile, pageTypes: config.pageTypes,
         meta: { rrf_w_fts: String(config.weights.fts), rrf_w_vec: String(config.weights.vec) },
         onProgress: (done, total) => {
-          if (input.isTTY) process.stdout.write(`\r${cliText("埋め込み", "Embedding")} ${done} / ${total}`);
+          if (input.isTTY) progress(`\r${cliText("埋め込み", "Embedding")} ${done} / ${total}`);
         },
       });
-      if (input.isTTY) process.stdout.write("\n");
+      if (input.isTTY) progress("\n");
       if (result.status === "schema_mismatch") {
         err(cliText("索引の版が違います。サーバーを起動して索引を作り直してから、もう一度実行してください。", "The index version differs. Start the server to rebuild the index, then run this again."));
         return 1;

@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { isReportFormatInvalidErrorKey } from "@owl/shared";
-import { ACCEPTANCE_DEFECT_EVENT } from "../../shared/dist/acceptance-defect.js";
-import { EXTERNAL_BLOCKER_EVENT } from "../../shared/dist/external-blocker.js";
-import type { DesignBlockedReport } from "../../shared/dist/design-blocked.js";
-import { DEFAULT_PROGRESS_GUARD_SETTINGS } from "../../shared/dist/progress-guard-settings.js";
-import { DEFAULT_REVIEW_LIMIT_SETTINGS, type ReviewLimitSettings } from "../../shared/dist/review-limit-settings.js";
-import { DEFAULT_FIXER_ESCALATION_SETTINGS } from "../../shared/dist/fixer-escalation-settings.js";
-import { DEFAULT_REVIEW_FOCUS_SETTINGS, type ReviewFocusSettings } from "../../shared/dist/review-focus-settings.js";
+import { ACCEPTANCE_DEFECT_EVENT } from "@owl/shared/acceptance-defect";
+import { EXTERNAL_BLOCKER_EVENT } from "@owl/shared/external-blocker";
+import type { DesignBlockedReport } from "@owl/shared/design-blocked";
+import { DEFAULT_PROGRESS_GUARD_SETTINGS } from "@owl/shared/progress-guard-settings";
+import { DEFAULT_REVIEW_LIMIT_SETTINGS, type ReviewLimitSettings } from "@owl/shared/review-limit-settings";
+import { DEFAULT_FIXER_ESCALATION_SETTINGS } from "@owl/shared/fixer-escalation-settings";
+import { DEFAULT_REVIEW_FOCUS_SETTINGS, type ReviewFocusSettings } from "@owl/shared/review-focus-settings";
 import { repeatedSpots, type ReviewSpot } from "./review-focus";
 import type { ReductionResult, TaskRow, TaskState } from "./types";
 

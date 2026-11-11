@@ -14,8 +14,8 @@ import {
   opencodeServeEnv,
   parseOpencodeVersion,
   runCliVersion,
-} from "../../../packages/shared/dist/index.js";
-import { startOpencodeServer, type OpencodeServer } from "../../../packages/agent-runtime/dist/index.js";
+} from "@owl/shared";
+import { startOpencodeServer, type OpencodeServer } from "@owl/agent-runtime";
 
 import { isOwlSecretEnvName } from "./agent-env.js";
 import { AppSettingsStore } from "./app-settings-store.js";

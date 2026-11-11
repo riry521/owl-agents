@@ -5,8 +5,8 @@ import { availableParallelism } from "node:os";
 import { dirname, posix, resolve } from "node:path";
 import { matchesGlobWithDots } from "./glob.js";
 import { promisify } from "node:util";
-import { createUlid } from "../../db/dist/index.js";
-import { readTestRunSettings, targetPlaceholderOf, runArgvOf, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
+import { createUlid } from "@owl/db";
+import { readTestRunSettings, targetPlaceholderOf, runArgvOf, type TestRunSettings } from "@owl/shared/test-run-settings";
 import { parseBunFailures, parseTapFailures, type TestFailure } from "./nightly-tests";
 import type { CoreDatabase, CoreWriteLaneTransaction } from "./types";
 

@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { chmod, lstat, mkdir, readFile, readlink, readdir, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { agentUserInstructionEnv, buildAgentPermissionArgs, owlMcpServers, opencodeMcpConfig } from "../../packages/shared/dist/index.js";
 import { argv as executorArgv } from "../../packages/core/dist/executor.js";
+import { RuleStore } from "../../packages/core/dist/rule-store.js";
+import { GuardTokenRegistry } from "../../apps/server/dist/guard-tokens.js";
+import { startTestHttpServer } from "../helpers/http.mjs";
 import { tempDir } from "../helpers/temp.mjs";
 
 async function withPermissionHook(t, run) {
@@ -470,4 +474,52 @@ test("a relay-watched child fails to start when relay-hook.js is not built", asy
   await withPermissionHook(t, async (root) => {
     assert.throws(() => buildAgentPermissionArgs("worker", "claude", { owlRoot: root, env: { HOME: root }, tokenRelay: true }), /Owl relay hook is missing at .*relay-hook\.js; build Owl/);
   });
+});
+
+function runPermissionHook(env, toolName, toolInput, cwd) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.resolve("apps/server/dist/permission-hook.js")], { env, stdio: ["pipe", "pipe", "ignore"] });
+    const stdout = [];
+    child.stdout.on("data", (chunk) => stdout.push(chunk));
+    child.once("error", reject);
+    child.once("close", (code) => resolve({ code, stdout: Buffer.concat(stdout).toString("utf8") }));
+    child.stdin.end(JSON.stringify({ hook_event_name: "PreToolUse", tool_name: toolName, tool_input: toolInput, cwd }));
+  });
+}
+
+test("PreToolUse denies a guarded command when the role or the guard API configuration is missing", async (t) => {
+  const cases = [
+    { name: "OWL_AGENT_ROLE", env: { OWL_GUARD_API_BASE: "http://127.0.0.1:1" } },
+    { name: "OWL_GUARD_API_BASE", env: { OWL_AGENT_ROLE: "worker" } },
+  ];
+  for (const missing of cases) {
+    await t.test(`${missing.name} is absent`, async () => {
+      const env = { PATH: process.env.PATH ?? "", ...missing.env, OWL_GUARD_TOKEN_FILE: path.resolve("missing-guard-token-for-test") };
+      const result = await runPermissionHook(env, "Bash", { command: "git push -f" }, process.cwd());
+      assert.equal(result.code, 0);
+      const output = JSON.parse(result.stdout);
+      assert.equal(output.hookSpecificOutput.permissionDecision, "deny");
+      assert.match(output.hookSpecificOutput.permissionDecisionReason, /configuration is unavailable/u);
+    });
+  }
+});
+
+test("PreToolUse lets the Advisor read knowledge notes but still blocks .env and secrets.json", async (t) => {
+  const root = await tempDir(t, "owl-hook-knowledge-");
+  const guardTokens = GuardTokenRegistry.open(path.join(root, "guard-tokens"));
+  const lease = guardTokens.issue({ agent_run_id: "run-advisor", role: "advisor" });
+  const ruleStore = new RuleStore(process.cwd());
+  await ruleStore.load();
+  const api = await startTestHttpServer(t, { core: { ready: true }, webOut: root, owlRoot: root, ruleStore, guardTokens });
+  if (!api) return t.skip("localhost listen is unavailable");
+  const env = { ...process.env, OWL_AGENT_ROLE: "advisor", OWL_GUARD_API_BASE: api.baseUrl, OWL_GUARD_TOKEN_FILE: lease.file };
+  const notes = path.join(root, "Memory", "notes");
+  const run = async (toolName, toolInput) => (await runPermissionHook(env, toolName, toolInput, root)).stdout;
+
+  assert.equal(await run("Read", { file_path: path.join(notes, "project-overview-01M3X50CF12CW3P838TC4MRG11.md") }), "");
+  assert.equal(await run("Grep", { pattern: "stack", path: notes }), "");
+  for (const name of [".env", "secrets.json"]) {
+    const out = await run("Read", { file_path: path.join(root, "Memory", name) });
+    assert.equal(JSON.parse(out).hookSpecificOutput.permissionDecision, "deny", name);
+  }
 });

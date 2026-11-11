@@ -23,6 +23,7 @@ export interface CheckItem {
   run(context: CheckItemContext): AutoWorkSignal[];
 }
 
+// shared の sha256 は 1 つのデータの hash。ここは parts を NUL でつないでから hash するので別に持つ。
 const sha256 = (parts: readonly string[]): string => createHash("sha256").update(parts.join("\0")).digest("hex");
 
 function signal(context: CheckItemContext, kind: string, title: string, detail: string, dedupeValue: string, backlogItemIds: readonly string[]): AutoWorkSignal {

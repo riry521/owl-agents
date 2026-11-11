@@ -7,6 +7,7 @@ export type DefaultModelHarness = "claude" | "codex";
 export const CLAUDE_SONNET_5_5_MODEL = "claude-sonnet-5-5";
 export const CLAUDE_HAIKU_5_5_MODEL = "claude-haiku-5-5";
 export const CLAUDE_OPUS_5_5_MODEL = "claude-opus-5-5";
+export const CLAUDE_FABLE_5_2_MODEL = "claude-fable-5-2";
 
 /** Model each harness uses when no role or Executor setting names one. */
 export const DEFAULT_HARNESS_MODELS: Readonly<Record<DefaultModelHarness, string>> = {

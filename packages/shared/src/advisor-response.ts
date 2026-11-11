@@ -1,6 +1,7 @@
 import { advisorAlternativeActions, matchAdvisorBlockedApi, validateOwnApiPath, type AdvisorBlockedApi } from "./advisor-api-policy.js";
 import { ADVISOR_REDACT_RULES, redactWithRules } from "./secret-patterns.js";
 import { validateRoleOutput,type RoleSchema } from "./role-schema.js";
+import { isRecord } from "./small-helpers.js";
 
 export interface AdvisorSuggestedAction {
   readonly type: string;
@@ -451,10 +452,6 @@ function liftMisplacedPayloadKeys(item: Record<string, unknown>): Record<string,
   const lifted = keys.filter((key) => Object.hasOwn(item, key) && !(payload && Object.hasOwn(payload, key)));
   if (lifted.length === 0) return payload;
   return { ...payload, ...Object.fromEntries(lifted.map((key) => [key, item[key]])) };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export type AdvisorCurationKind = "librarian" | "skill_curation" | "rule_curation";

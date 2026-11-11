@@ -1,4 +1,4 @@
-import { createUlid } from "../../db/dist/index.js";
+import { createUlid } from "@owl/db";
 import { LIVE_AGENT_RUN_STATUSES, recordAgentRunProcess, setAgentRunStatus, touchAgentRunOutput } from "./agent-run-state.js";
 import {
   CHILD_RUN_EFFORTS,
@@ -548,7 +548,6 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
 
   async function pumpOnce(): Promise<void> {
     if (stopped) return;
-    const settings = readSettings();
     const running = db.all<ChildRow>("SELECT * FROM child_runs WHERE status = 'running'");
     const scopeOf = (r: ChildRow): readonly string[] => normalizeWritePaths({ write_paths: JSON.parse(r.write_paths_json) as string[] });
     const ahead: ChildRow[] = [];
@@ -625,7 +624,7 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
 
     async dispatch(parentId, request, requestKey) {
       const parent = checkParent(parentId);
-      if (typeof requestKey !== "string" || requestKey.trim().length === 0) throw validationError("A non-empty request key is required.");
+      if (typeof requestKey !== "string" || requestKey.trim().length === 0) throw validationError("A non-empty request key is required.", {}, { code: "child_run.request_key_required", values: { field: "request_key" } });
       const existing = db.get<ChildRow>("SELECT * FROM child_runs WHERE parent_agent_run_id = ? AND request_key = ?", parentId, requestKey);
       if (existing) return response(existing);
       const limits = CHILD_RUN_LIMITS;
@@ -634,7 +633,10 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
         typeof request.instruction !== "string" || request.instruction.trim().length === 0 || request.instruction.length > limits.instruction_max_chars ||
         !Array.isArray(request.write_paths) || request.write_paths.length === 0 || request.write_paths.length > limits.write_paths_max ||
         request.write_paths.some((path) => typeof path !== "string")
-      ) throw validationError("title, instruction and write_paths are required and must be within their size limits.");
+      ) throw validationError("title, instruction and write_paths are required and must be within their size limits.", {}, {
+        code: "child_run.dispatch_fields_invalid",
+        values: { fields: "title, instruction, write_paths", title_max_chars: limits.title_max_chars, instruction_max_chars: limits.instruction_max_chars, write_paths_max: limits.write_paths_max },
+      });
       const settings = readSettings();
       const provider = settings.executor_harness;
       const { model, effort } = settings.executor_by_harness[provider] as { model: string; effort: ChildRunRecord["effort"] };
@@ -678,13 +680,13 @@ export function createChildRunScheduler(options: ChildRunSchedulerOptions | Omit
       if (
         !Array.isArray(request.child_ids) || request.child_ids.length === 0 || request.child_ids.length > CHILD_RUN_LIMITS.wait_max_ids ||
         request.child_ids.some((id) => typeof id !== "string" || id.trim().length === 0)
-      ) throw validationError(`child_ids must contain between 1 and ${CHILD_RUN_LIMITS.wait_max_ids} child IDs.`);
+      ) throw validationError(`child_ids must contain between 1 and ${CHILD_RUN_LIMITS.wait_max_ids} child IDs.`, {}, { code: "child_run.child_ids_invalid", values: { field: "child_ids", max: CHILD_RUN_LIMITS.wait_max_ids } });
       if (request.return_when !== undefined && request.return_when !== "all" && request.return_when !== "any") {
-        throw validationError("return_when must be 'all' or 'any'.");
+        throw validationError("return_when must be 'all' or 'any'.", {}, { code: "child_run.return_when_invalid", values: { field: "return_when" } });
       }
       const requestedTimeout = request.timeout_seconds ?? CHILD_RUN_LIMITS.wait_max_seconds;
       if (!Number.isSafeInteger(requestedTimeout) || requestedTimeout < 0) {
-        throw validationError("timeout_seconds must be a non-negative integer.");
+        throw validationError("timeout_seconds must be a non-negative integer.", {}, { code: "child_run.timeout_seconds_invalid", values: { field: "timeout_seconds" } });
       }
       const ids = [...new Set(request.child_ids)];
       const read = (): ChildRow[] => ids.map((id) => {

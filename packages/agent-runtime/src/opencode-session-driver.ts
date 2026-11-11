@@ -83,7 +83,7 @@ export class OpencodeSessionDriver implements ProviderSession {
     private readonly projectId: string,
     private readonly runDir: string,
     private readonly request: ProviderSessionRequest,
-    private readonly owlRoot: string,
+    owlRoot: string,
     private readonly deps: OpencodeSessionDeps,
   ) {
     this.turnEvents = {

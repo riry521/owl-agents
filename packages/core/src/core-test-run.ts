@@ -1,7 +1,7 @@
 import { OWL_INSTANCE_ID_ENV } from "@owl/shared";
-import { createUlid } from "../../db/dist/index.js";
-import type { TestRunSettings } from "../../shared/dist/test-run-settings.js";
-import type { TestSetupSettings } from "../../shared/dist/test-setup-settings.js";
+import { createUlid } from "@owl/db";
+import type { TestRunSettings } from "@owl/shared/test-run-settings";
+import type { TestSetupSettings } from "@owl/shared/test-setup-settings";
 import { spawnTestCommand, testFailureKey, type TestFailure } from "./nightly-tests";
 import { ownerLanguage } from "./owner-language";
 import { executionEnvironmentFailure, type TestEnvironmentFailure } from "./test-environment";

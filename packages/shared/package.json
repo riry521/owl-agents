@@ -1,6 +1,6 @@
 {
   "name": "@owl/shared",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./*": {
+      "types": "./dist/*.d.ts",
+      "default": "./dist/*.js"
     }
   },
   "scripts": {

@@ -1,20 +1,20 @@
-import type { TaskStateValue, WorkStateValue } from "@owl/shared";
-import type { OwlDatabase, WriteLane, WriteLaneTransaction } from "../../db/dist/index.js";
+import type { AgentKind, AgentOutcome, AgentRunner as SharedAgentRunner, AgentRunRequest, AgentRunResult, FailureClass, JsonObject, ManagerPlanRequest, ModelEffort, ReviewerRunRequest, TaskStateValue, WorkerRunRequest, WorkStateValue } from "@owl/shared";
+import type { WriteLane, WriteLaneTransaction } from "@owl/db";
 import type { AcceptanceCriterion, CriteriaRelaxation, AgentFailureClass, AgentProcessEvent, CuratorCandidate, CuratorProposal, CuratorRequest, CuratorRunResult, OwnerLanguage, ProcessSkillsInstallCommand, PromptObserver, ProviderErrorObserver, ProviderErrorRecord, ProcessSkillsSettings, RateLimitInfo, SkillFeedback, TaskNecessity, TaskPlanContext, TestPolicy, TokenUsage, UiChange } from "@owl/shared";
 import type { AttemptDecision } from "./attempt-policy";
 import type { ExecutorRuntime } from "./executor.js";
 import type { KnowledgeStoragePersistence } from "./knowledge-location.js";
 import type { DetectedProcessSkillsPack, ProcessSkillsFileSystem } from "./process-skills-pack.js";
 import type { NormalizedLesson } from "./final-verdict.js";
-import type { DesignBlockedReport } from "../../shared/dist/design-blocked.js";
-import type { FinalReportCheckInput } from "../../shared/dist/final-report.js";
-import type { DecisionCauseKind, DecisionTextCheckInput } from "../../shared/dist/decision-explanation.js";
-import type { WorkPrerequisiteView } from "../../shared/dist/work-prerequisite.js";
-import type { PlanWaitFor } from "../../shared/dist/prerequisite.js";
-import type { PlanUsageSource } from "../../shared/dist/plan-usage.js";
-import type { ModelHarness } from "../../shared/dist/harness-models.js";
+import type { DesignBlockedReport } from "@owl/shared/design-blocked";
+import type { FinalReportCheckInput } from "@owl/shared/final-report";
+import type { DecisionCauseKind, DecisionTextCheckInput } from "@owl/shared/decision-explanation";
+import type { WorkPrerequisiteView } from "@owl/shared/work-prerequisite";
+import type { PlanWaitFor } from "@owl/shared/prerequisite";
+import type { PlanUsageSource } from "@owl/shared/plan-usage";
+import type { ModelHarness } from "@owl/shared/harness-models";
 
-export type JsonObject = Record<string, unknown>;
+export type { AgentKind, AgentOutcome, AgentRunRequest, AgentRunResult, FailureClass, JsonObject, ManagerPlanRequest, ModelEffort, ReviewerRunRequest, WorkerRunRequest };
 
 /** Final Manager lessons and their source metadata passed to the durable learning queue. */
 export interface WorkLearningInput {
@@ -23,8 +23,7 @@ export interface WorkLearningInput {
   readonly lessons: readonly NormalizedLesson[];
 }
 
-export type AgentKind = "decision" | "task" | "executor";
-
+/** Core keeps its own const-object WorkState/TaskState (no enum, and WorkState also accepts unknown strings from stored rows); the shared enums are for wire types. */
 export type WorkState = WorkStateValue | (string & {});
 
 export const WorkState = {
@@ -58,8 +57,6 @@ export const TaskState = {
  * same `settings` row; value_json is the plain JSON boolean "true"/"false".
  */
 export const HYBRID_MODE_SETTINGS_KEY = "hybrid_mode";
-/** Legacy Executor setting key, retained for migration to child-run settings. */
-export const EXECUTOR_CONFIG_SETTINGS_KEY = "executor_config";
 /** Settings table key for child-run dispatch defaults and allowlists. */
 export const CHILD_RUN_SETTINGS_KEY = "child_run_settings";
 
@@ -74,38 +71,7 @@ export interface CoreDatabase {
   close?: () => void;
 }
 
-export type OwlDb = OwlDatabase;
 export type CoreWriteLaneTransaction = WriteLaneTransaction;
-
-export interface AgentRunRequest {
-  readonly invocation_id: string;
-  readonly work_id: string;
-  readonly task_id: string | null;
-  /** The Work's Project; omitted when the Work has none. Becomes OWL_PROJECT_ID of the agent's owl-memory server. */
-  readonly project_id?: string;
-  readonly attempt: number;
-  readonly context: JsonObject;
-  readonly model?: string;
-  readonly provider?: string;
-  readonly effort?: string;
-  /** The Owner language for the human-readable values of the output. */
-  readonly language?: OwnerLanguage;
-}
-
-export interface ManagerPlanRequest extends AgentRunRequest {
-  readonly task_id: null;
-  readonly context: JsonObject;
-}
-
-export interface WorkerRunRequest extends AgentRunRequest {
-  readonly task_id: string;
-  readonly git_template_dir?: string;
-}
-
-export interface ReviewerRunRequest extends AgentRunRequest {
-  readonly task_id: string;
-  readonly review_round: number;
-}
 
 /**
  * Turn contract for the persistent Advisor session runtime
@@ -126,43 +92,10 @@ export interface AdvisorTurnRequest {
   };
 }
 
-export type AgentOutcome = "success" | "failed" | "partial";
-export type FailureClass = "transient" | "deterministic";
-
-export interface AgentRunResult {
-  readonly outcome: AgentOutcome;
-  readonly failure_class?: AgentFailureClass;
-  readonly rate_limit?: RateLimitInfo | null;
-  readonly error_key?: string;
-  readonly retry_allowed?: boolean;
-  readonly exit_code?: number | null;
-  readonly signal?: string | null;
-  readonly report_valid?: boolean;
-  readonly adapter_version?: string;
-  readonly report?: JsonObject | null;
-  readonly message?: string;
-  readonly skill_feedback: SkillFeedback | null;
-  /** Report contradictions the runtime repaired by lowering the result (rule name and results). */
-  readonly report_corrections?: readonly { readonly rule: string; readonly from_result: string; readonly to_result: string }[];
-  /** Tokens the provider reported for this run; absent or null when it reported none. */
-  readonly usage?: TokenUsage | null;
-  /** Claude session to resume when only the report must be produced again. */
-  readonly provider_session_id?: string;
-}
-
-/** Public runtime contract owned by @owl/core and implemented by agent-runtime. */
-export interface AgentRunner {
-  runManagerPlan(request: ManagerPlanRequest): Promise<AgentRunResult>;
+/** The shared runner contract plus what only Core drives: the Designer role and the output-resubmit limit (@owl/shared omits them because agent-runtime-independent callers never use them). */
+export interface AgentRunner extends SharedAgentRunner {
   runDesigner(request: WorkerRunRequest): Promise<AgentRunResult>;
-  runWorker(request: WorkerRunRequest): Promise<AgentRunResult>;
-  runReviewer(request: ReviewerRunRequest): Promise<AgentRunResult>;
-  runCurator?(request: CuratorRequest): Promise<CuratorRunResult>;
-  cancelAgent?(invocationId: string, force?: boolean): Promise<void>;
-  setProcessObserver?(observer: (invocationId: string, event: AgentProcessEvent) => void | Promise<void>): void;
-  setOutputObserver?(observer: (invocationId: string) => void): void;
   setOutputResubmitLimit?(read: () => number): void;
-  setPromptObserver?(observer: PromptObserver | undefined): void;
-  setProviderErrorObserver?(observer: ProviderErrorObserver | undefined): void;
 }
 
 export interface WorkCheckout {
@@ -845,6 +778,8 @@ export interface CoreDispatcherOptions {
   readonly global_max_parallel?: number;
   /** Delay before retrying a transient/retryable initial Manager plan failure. Defaults to 5000. */
   readonly manager_retry_delay_ms?: number;
+  /** Upper bound (JSON characters) of the per-Task report digests alone given to the final check; the rest of the input (tasks, criteria) is not counted. Defaults to FINAL_REPORTS_MAX_CHARS. */
+  readonly final_reports_max_chars?: number;
   /** How often the dead/idle agent scan runs. Defaults to 60000. */
   readonly stale_check_interval_ms?: number;
 }
@@ -992,11 +927,6 @@ export interface StartWorkPayload extends JsonObject {
 
 export interface PauseWorkPayload extends JsonObject {
   readonly reason: string;
-}
-
-export interface CancelWorkPayload extends JsonObject {
-  readonly reason: string;
-  readonly force?: boolean;
 }
 
 export interface CancelAgentPayload extends JsonObject {
@@ -1560,8 +1490,8 @@ export interface DeleteProjectResult extends JsonObject {
 
 export interface ProjectListQuery extends ListQuery {}
 
+/** Wider than the shared ActorRole on purpose: Core also runs lead_designer and fixer, which Rule Store files and guard checks (shared) do not name. */
 export type ActorRole = "advisor" | "manager" | "designer" | "lead_designer" | "worker" | "fixer" | "reviewer" | "librarian" | "curator";
-export type ModelEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface RoleModelSetting extends JsonObject {
   readonly role: ActorRole;

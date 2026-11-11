@@ -49,7 +49,7 @@ test("a retried Advisor turn recovers an already-created Work instead of failing
     return realStartWork(...args);
   };
 
-  const firstMessageId = await core.persistAdvisorReply(
+  const firstMessageId = await core.advisorActions.persistAdvisorReply(
     conversationId,
     "",
     turnId,
@@ -70,7 +70,7 @@ test("a retried Advisor turn recovers an already-created Work instead of failing
 
   // A turn retry re-runs the same turn (same turnId, same action index) but
   // the AI produced a different title this time.
-  const secondMessageId = await core.persistAdvisorReply(
+  const secondMessageId = await core.advisorActions.persistAdvisorReply(
     conversationId,
     "",
     turnId,

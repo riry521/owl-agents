@@ -1,11 +1,11 @@
-import { AUTO_RECOVERY_KINDS, type AutoRecoveryAction, type AutoRecoveryKind, type ImmediateDecisionReason } from "../../shared/dist/auto-recovery-names.js";
+import { AUTO_RECOVERY_KINDS, type AutoRecoveryAction, type AutoRecoveryKind, type ImmediateDecisionReason } from "@owl/shared/auto-recovery-names";
 import {
   AUTO_RECOVERY_SETTINGS_KEY,
   DEFAULT_AUTO_RECOVERY_SETTINGS,
   readAutoRecoverySettings,
   validateAutoRecoverySettings,
   type AutoRecoverySettings,
-} from "../../shared/dist/auto-recovery-settings.js";
+} from "@owl/shared/auto-recovery-settings";
 import { cancelWorkOption, option, type DecisionBrief } from "./decision-brief";
 import { finalAutoContinueLimit } from "./final-continue-limit";
 import { FALLBACK_BACKOFF_MINUTES } from "./provider-pause-controller";
@@ -328,6 +328,7 @@ function oneLine(value: string): string {
   return line.length > LINE_MAX ? `${line.slice(0, LINE_MAX - 1)}…` : line;
 }
 
+// shared の firstLine は最初の行を返す。ここは空でない最初の行を返すので別に持つ。
 function firstLine(value: string): string {
   return value.split(/\r?\n/u).find((line) => line.trim().length > 0) ?? value;
 }

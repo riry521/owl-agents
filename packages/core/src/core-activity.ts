@@ -1,4 +1,4 @@
-import { createUlid } from "../../db/dist/index.js";
+import { createUlid } from "@owl/db";
 
 export type CoreActivityKind = "integration_verification" | "core_tests" | "merge_verification" | "git_lane_wait" | "base_merge";
 export type CoreActivityOutcome = "passed" | "failed" | "error" | "done";

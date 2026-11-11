@@ -95,7 +95,7 @@ async function coreWithPages(t) {
   const roles = async (projectId) => {
     const { workId, designId, taskId } = await plan(projectId);
     for (const k of Object.keys(seen)) delete seen[k];
-    await core.invokeManagerPlan({ work_id: workId }, "plan").catch(() => {});
+    await core.manager.invokeManagerPlan({ work_id: workId }, "plan").catch(() => {});
     await core.workflow.runWorkerInternal(workId, designId, await startRun(workId, designId, "designer", "running"), 1).catch(() => {});
     await core.workflow.runWorkerInternal(workId, taskId, await startRun(workId, taskId, "worker", "running"), 1).catch(() => {});
     const workerRun = await startRun(workId, taskId, "worker", "verifying");

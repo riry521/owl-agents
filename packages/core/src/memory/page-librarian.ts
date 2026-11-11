@@ -1,7 +1,7 @@
 import { mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { dirname, join, posix, sep } from "node:path";
 import { KNOWLEDGE_EXTERNAL_COMMAND_RULE } from "@owl/shared";
-import { createUlid } from "../../../db/dist/index.js";
+import { createUlid } from "@owl/db";
 import type { IndexScope } from "./index-builder.js";
 import type { PageQuery, PageRow } from "./memory-types.js";
 import { bodySha256, estimatePageTokens, findSecretPatterns, lineHash, maskSecrets, PAGE_LIMITS, pageSize, type PageSize, parsePage, setFrontmatter, UPDATES_SECTION, validatePage } from "./page-format.js";
@@ -165,7 +165,6 @@ const EXTRA_SPECS: OpDefinitions = {
   take_conversation: { required: { conversation: "string", h: "string", items: "items" } },
   set_usage: { required: { clipping: "string", h: "string", text: "string" } },
 };
-const EXTRA_OPS = new Set(Object.keys(EXTRA_SPECS));
 const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isLine = (v: unknown): v is string => typeof v === "string" && v.trim() !== "" && !/[\r\n]/u.test(v) && findSecretPatterns(v).length === 0;
 

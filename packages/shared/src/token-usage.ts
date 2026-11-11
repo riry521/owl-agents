@@ -1,4 +1,5 @@
 import type { TokenUsage } from "./index.js";
+import { isRecord } from "./small-helpers.js";
 
 /**
  * Token usage of one-shot agent CLI runs. Core and agent-runtime both read
@@ -8,10 +9,6 @@ import type { TokenUsage } from "./index.js";
  */
 
 const TOKEN_USAGE_KEYS = ["input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens"] as const;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 function tokenCount(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;

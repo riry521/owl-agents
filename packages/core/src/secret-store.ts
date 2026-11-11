@@ -5,7 +5,6 @@ import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:
 const ALGORITHM = "aes-256-gcm";
 const KEY_LENGTH = 32;
 const IV_LENGTH = 12;
-const TAG_LENGTH = 16;
 const SALT_LENGTH = 16;
 
 export interface SecretEntry {

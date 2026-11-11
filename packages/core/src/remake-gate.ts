@@ -1,5 +1,5 @@
-import { matchesAnyGlob } from "../../shared/dist/glob.js";
-import type { RemakeLimitSettings } from "../../shared/dist/remake-limit-settings.js";
+import { matchesAnyGlob } from "@owl/shared/glob";
+import type { RemakeLimitSettings } from "@owl/shared/remake-limit-settings";
 
 /** One measured file: repo-relative path and the content hash (or "deleted" / "special:<code>" / "conflict"). */
 export interface MeasuredFile {

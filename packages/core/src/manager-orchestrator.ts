@@ -1,487 +1,138 @@
 import { clearOwnerReplanProcessing, deleteOwnerReplan, flagManagerTrigger, listQueuedReplanTasks, readManagerTrigger, readOwnerReplan, setManagerTriggerStatus, setOwnerReplanStatus, writeOwnerReplan, type ReplanMarkerStatus } from "./replan-queue-store.js";
 import { LIVE_AGENT_RUN_STATUSES, setAgentRunStatus } from "./agent-run-state.js";
-import { createHash } from "node:crypto";
-import { AdvisorActions } from "./advisor-actions.js";
-import { serenaConfigPath, unregisterSerenaProject } from "./serena-registry.js";
-import { createHash as createFileHash } from "node:crypto";
-import { constants, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, statSync } from "node:fs";
-import { copyFile, lstat, mkdir, readdir, readFile, rename, rm, rmdir, stat, unlink, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { createUlid, utcNow } from "../../db/dist/index.js";
-import { insertProviderError, listProviderErrors } from "./provider-error-store.js";
-import type { StoredProviderError } from "./types.js";
-import { DecisionService, type OpenDecisionPayload } from "./decision";
-import { DesignMockStore, type DesignMockSummary } from "./design-mocks";
-import { OwnerFilesReader, type OwnerFileOpened, type OwnerFileRoot } from "./owner-files.js";
-import { DEFAULT_WORK_MARKDOWN_LIMITS, WorkMarkdownReader, type WorkMarkdownDocument } from "./work-markdown.js";
-import { DECISION_CANCEL_OPTION_KEY, managerReplanFailureBrief, prerequisiteExpiredBrief, RESOLVE_CONFLICT_OPTION_KEY, type ReplanFailureCause } from "./decision-brief";
+import { existsSync } from "node:fs";
+import { relative, resolve } from "node:path";
+import { createUlid, utcNow } from "@owl/db";
+import { managerReplanFailureBrief, prerequisiteExpiredBrief, type ReplanFailureCause } from "./decision-brief";
 import { evaluatePrerequisite, type PrerequisiteFacts } from "./prerequisite-monitor";
-import {
-  evaluateWorkPrerequisitesInTransaction,
-  hasOpenWorkPrerequisiteDecision,
-  replaceWorkPrerequisitesInTransaction,
-  settleWorkPrerequisiteWaitInTransaction,
-  snapshotDeletedPrerequisiteInTransaction,
-  waitingWorkIds,
-  workPrerequisiteViews,
-} from "./work-prerequisites";
-import type { WorkPrerequisiteView } from "../../shared/dist/work-prerequisite.js";
-import type { AcceptanceDefect } from "../../shared/dist/acceptance-defect.js";
-import type { DecisionAnswerRoute, DecisionCriterionRewrite } from "../../shared/dist/decision-explanation.js";
-import { isFinalLesson, isFinalMissingItem, normalizeLesson, parseLessonBlocks, type FinalManagerVerdict } from "./final-verdict";
-import { outputResubmitLimit } from "./report-resubmit";
-import { DEFAULT_OWNER_LANGUAGE, OWNER_LANGUAGE_SETTINGS_KEY, ownerLanguage, storedOwnerLanguage, type OwnerLanguage, type SettingsReader } from "./owner-language";
-import { EventDispatcher } from "./event-dispatcher";
-import { HumanReadableError, dependencyUnavailable, idempotencyConflict, invalidStateTransition, notFound, projectDeletionImpactChanged, projectHasRunningWorks, projectNotFound, providerPauseNotFound, projectPathConflict, validationError, versionConflict, workCancelled, workProjectAlreadySet, workReopenRequired } from "./errors";
+import type { AcceptanceDefect } from "@owl/shared/acceptance-defect";
+import { isFinalLesson, isFinalMissingItem, type FinalManagerVerdict } from "./final-verdict";
+import { ownerLanguage } from "./owner-language";
+import { HumanReadableError, invalidStateTransition, notFound, validationError } from "./errors";
 import {
   appendEventInTransaction,
-  createWorkInTransaction,
-  detachProjectWorksInTransaction,
-  ensureOwner,
-  isDecisionCancelAnswer,
-  isTerminalTaskState,
   REPLAN_PLAN_STALE,
   REPLAN_WORK_NOT_RUNNING,
   openRemakeLimitDecisionInTransaction,
   stopTaskForNoProgressInTransaction,
   reduceTaskInTransaction,
   reduceWorkInTransaction,
-  resolveDecisionInTransaction,
-  restoreCascadedDependentsInTransaction,
-  setWorkArchivedInTransaction,
-  updateWorkFieldsInTransaction,
-  taskDependenciesCompletedInTransaction,
 } from "./state-reducer";
 import {
   applyManagerWorkSummaryUpdateInTransaction,
-  listWorkSummaryRevisions,
   managerWorkSummaryUpdate,
-  recordOwnerWorkSummaryRevisionInTransaction,
   type ManagerWorkSummaryUpdate,
-  type WorkSummaryHistory,
 } from "./work-summary-history";
-import { getWorkAssurance, type WorkAssurance } from "./work-assurance";
-import { WorkDriver } from "./work-driver";
-import { saveProjectlessWorkOutputs } from "./outputs-store.js";
 import { isDesignHanded, markDesignsHanded } from "./design-handoff-store";
-import { attachWorkToProjectInTransaction } from "./state-reducer";
 import {
-  activeAutoRecoveries, criteriaRelaxationsOfWork, autoRecoveryForManager, autoRecoveryLimit, autoRecoverySummary, autoRecoveryUsed, immediateDecisionReason,
+  criteriaRelaxationsOfWork, autoRecoveryForManager, autoRecoveryLimit, autoRecoveryUsed, 
   recordAutoRecoveryInTransaction, startAutoRecoveryInTransaction, transientRecoveryPendingUntil,
   transientRecoveryResumeAt, withAutoRecoveryTried,
 } from "./auto-recovery";
-import { fixPendingTaskIds } from "./fix-pending-tasks.js";
-import { finalCriteriaIndex, goalShortfallsOfWork, readTaskGoalShortfalls, recordFinalGoalShortfalls, settleFinalVerdict, type FinalCriterionRef, type SettledFinalVerdict } from "./goal-shortfalls";
-import { detectNewRepositories, type NewRepositoryCandidate } from "./new-repository-detection.js";
-import { clearPausedReviewerWait } from "./provider-pause-reviewer-wait.js";
+import { finalCriteriaIndex, goalShortfallsOfWork, recordFinalGoalShortfalls, settleFinalVerdict, type FinalCriterionRef, type SettledFinalVerdict } from "./goal-shortfalls";
 import { assertAgentRunNotStopped, isAgentRunStopped } from "./agent-run-stop.js";
-import { WorkflowEngine, resolveRoleModel, mergeConflictPaths, type HookSubagentInput } from "./workflow-engine";
-import { isPlanRejection, validatePlan, validateReplan, type PlannedApproach, type PlanRejection, type ReplanAction, type ReplanPlan, type ReplanSnapshot } from "./replan-plan";
-import type { PlanWaitFor, PrerequisiteCondition, PrerequisiteSpec } from "../../shared/dist/prerequisite.js";
-import { isPidAlive, isProcessGroupAlive, signalProcessGroup } from "../../shared/dist/process-group.js";
-import { KnowledgeBase } from "./knowledge-base";
-import { archiveLegacyKnowledge } from "./memory/knowledge-archive.js";
-import { ChildEmbedder, loadEmbedderConfig } from "./memory/embedder.js";
-import { MemoryService, type MemoryReindexOutput } from "./memory/memory-service.js";
-import { advisorKey, DEFAULT_MEMORY_READ_LIMITS, MemoryReadLedger, type MemoryReadLimits, type RoleReadLimit } from "./memory/memory-read-ledger.js";
-import type { KnowledgeSearchResult } from "./knowledge-base";
-import { KnowledgeLocation, type KnowledgeMoveMode, type KnowledgeMoveResult, type KnowledgeStorageStatus } from "./knowledge-location";
-import { KnowledgeNotes } from "./knowledge-notes.js";
-import { createClaudeUsageSource } from "./plan-usage/claude-source.js";
-import { createCodexSessionLogSource } from "./plan-usage/codex-source.js";
-import { GitProjectSourceReader, INVESTIGATION_MARKER, ProjectOverviewService, collectFacts, thinMetrics, thinReasons, type ProjectInvestigationInput, type ProjectInvestigationResult, type ProjectOverviewInput, type ProjectSourceReader } from "./project-overview-note.js";
-import { IndexInjector } from "./memory/index-injector.js";
-import { ResearchRecall } from "./memory/research-recall.js";
-import { PageRouter, writePage } from "./memory/page-router.js";
-import { assertValidPage, MATERIALS_DIR } from "./memory/page-format.js";
-import { PageLibrarian, type PagePendingStats, type PageRunMode, type ProposeOperationsFn } from "./memory/page-librarian.js";
-import { IndexBuilder } from "./memory/index-builder.js";
-import { bodySha256 } from "./memory/page-format.js";
-import { ConversationLogWriter } from "./memory/conversation-log-writer.js";
-import { WorkLogWriter } from "./memory/work-log-writer.js";
-import { searchQuery } from "./memory/memory-injector.js";
-import { ruleKeyFingerprint } from "./learning-fingerprint.js";
-import { LearningJobs, LearningPipeline, type LearningJobStatus } from "./learning-pipeline.js";
-import { RuleLoadError, RuleStore, parseWorkRules, type RuleReloadResult, type RuleRole } from "./rule-store";
-import type { RuleCurationResult } from "./rule-curation.js";
-import { RulePairJudge, type RuleJudgmentRunner } from "./rule-judge.js";
-import { RuleProposals,type RuleProposalStatus, type RuleProposalTidyResult } from "./rule-proposals.js";
-import { RuleWriter } from "./rule-writer.js";
-import { DEFAULT_SKILL_FEEDBACK_WEIGHTS, detectSkillReads, SkillBox, type SkillSettings, type SkillState } from "./skill-box";
-import { isValidSkillScope, validateSkillFilePath, validateSkillName } from "./skill-files";
-import { SKILL_CURATOR_DEBOUNCE_MS, SkillCurator, type SkillCurationResult } from "./skill-curator";
-import { AdvisorSessionManager } from "./advisor-session.js";
-import {
-  advisorActionFingerprint, advisorActionNeedsApproval, advisorActionTarget, buildAdvisorActionFailure, loadFollowupRetries,
-  loadSourceFailures, nextTurnOf, planFollowupActions, stableJson, type AdvisorActionFailure, type AdvisorFailureDetails, type FollowupCandidate,
-} from "./advisor-followup.js";
-import { advisorWorkId, parseAdvisorWorkOperationPayload } from "./advisor-work-payload.js";
-import { AdvisorSessionNotFoundError, AdvisorSessionRuntime, type AdvisorSettingsSnapshot } from "./advisor-runtime.js";
-import { routeExplicitMemory } from "./memory/explicit-memory.js";
-import { slugifyKnowledgeNameOrNull } from "./knowledge-naming.js";
-import { autoWorkDbToggle, type AutoWorkSettingsValue, type AutoWorkSignal, type SessionActivity } from "@owl/shared";
-import { AutoWorkConfigLoader } from "./auto-work/config.js";
-import { AutoWorkService } from "./auto-work/service.js";
-import { AutoWorkStore } from "./auto-work/store.js";
-import { ScheduledCheckTrigger } from "./auto-work/triggers/scheduled-check.js";
-import {
-  AUTO_WORK_LIST_LIMIT, AUTO_WORK_RULES_DIR, buildAutoWorkSettingsData, toAutoWorkEventDetailView, toAutoWorkEventView,
-  type AutoWorkEventFilter,
-} from "./auto-work/views.js";
-import { FailureWatchTrigger, readFailureNotice, spawnAutoWorkCommand } from "./auto-work/triggers/failure-notice.js";
-import { createGhRunner, GithubTrigger } from "./auto-work/triggers/github.js";
-import { LibrarianScheduler, localDayKey, parseLibrarianTime } from "./librarian-scheduler.js";
-import {
-  DEFAULT_NIGHTLY_TEST_TIME,
-  NIGHTLY_TEST_SETTINGS_KEY,
-  NIGHTLY_TEST_TIMEOUT_MS,
-  classifyNightlyRun,
-  createNightlyTestExecutor,
-  newNightlyFailures,
-  nightlyBacklogEntries,
-  nightlyError,
-  type NightlyExecution,
-  type NightlyRunSummary,
-  type NightlyTestExecutor,
-  type TestFailure,
-} from "./nightly-tests.js";
-import {
-  CurationRunStore,
-  type CurationActor,
-  type CurationKind,
-  type CurationListQuery,
-  type CurationRunSummaryView,
-  type CurationRunView,
-  type CurationTrigger,
-} from "./curation-runs.js";
-import { buildCurationNotice, curationNoticeWrite, curationReportFailure, summarizeCurationReport, type CurationNotice, type CurationNoticeEntry } from "./curation-summary.js";
-import { reviewLimits } from "./review-limits.js";
-import { dependencySummarySettings } from "./dependency-summary-settings.js";
-import { advisorWindowSettings } from "./advisor-window-settings.js";
-import {
-  ensureGeneralWindowInTransaction,
-  ensureWebAccount,
-  ensureProjectWindowInTransaction,
-  findAdvisorWindow,
-  latestReply,
-  listAdvisorWindows,
-  replyPosition,
-  type AdvisorWindowRef,
-} from "./advisor-windows.js";
-import {
-  type AdvisorWindowSettings,
-} from "../../shared/dist/advisor-window-settings.js";
-import { GENERAL_WINDOW_KEY, type AdvisorWindowChannel, type AdvisorWindowSummary } from "../../shared/dist/advisor-windows.js";
-import {
-  type DependencySummarySettings,
-} from "../../shared/dist/dependency-summary-settings.js";
-import {
-  VerificationPolicySettingsValidationError,
-  VERIFICATION_POLICY_SETTINGS_KEY,
-  validateVerificationPolicyPatch,
-  readVerificationPolicySettings,
-  type VerificationPolicyPatch,
-  type VerificationPolicySettings,
-} from "../../shared/dist/verification-policy-settings.js";
+import { resolveRoleModel, mergeConflictPaths } from "./workflow-engine";
+import { isPlanRejection, validatePlan, validateReplan, type PlannedApproach, type ReplanAction, type ReplanPlan, type ReplanSnapshot } from "./replan-plan";
+import type { PlanWaitFor, PrerequisiteCondition, PrerequisiteSpec } from "@owl/shared/prerequisite";
+import { isPidAlive, isProcessGroupAlive } from "@owl/shared/process-group";
 import { remakeLimits } from "./remake-limits.js";
-import { fixerEscalation } from "./fixer-escalation.js";
-import { autoRecoverySettings, openCriteriaStatuses } from "./auto-recovery.js";
+import { openCriteriaStatuses } from "./auto-recovery.js";
 import { appendRuleSection, RULE_SECTION_HEADING, toJsonResults, type CriterionCheckResult } from "./criterion-checks";
-import {
-  type FixerEscalationSettings,
-} from "../../shared/dist/fixer-escalation-settings.js";
-import {
-  type AutoRecoverySettings,
-} from "../../shared/dist/auto-recovery-settings.js";
 import { progressGuard } from "./progress-guard.js";
-import { DecisionAnswerTriage, answerTriageTarget } from "./decision-answer-triage";
-import { DecisionExplainer, toDecisionExplanation } from "./decision-explainer";
-import { FinalReporter, readFinalReport } from "./final-report";
-import { metricsRuleCandidates, proposeFromMetrics } from "./learning-metrics.js";
-import { learningMetrics } from "./learning-metrics-settings.js";
-import {
-  type ProgressGuardSettings,
-} from "../../shared/dist/progress-guard-settings.js";
 import { evaluateRemakeGate } from "./remake-gate.js";
 import { lineagePartialReportPayloads, lineageRootOf, lineageUsage, restartLineageBudgetInTransaction } from "./task-lineage.js";
 import { remakeLimitBrief, type RemakeLimitReason } from "./decision-brief.js";
-import {
-  type RemakeLimitSettings,
-} from "../../shared/dist/remake-limit-settings.js";
-import { reviewRouting, workVerification } from "./assurance-settings.js";
 import { evaluateCriteriaRelaxation, evaluatePlanQuality, formatPlanQualityReason, planQualityOutcome, repairableWarnings, type PlanQualityOutcome, type PlanQualityWarning, type PreviousOutputFeedback } from "./plan-quality.js";
 import { planQualitySettings } from "./plan-quality-settings.js";
-import { projectInvestigationOutputSettings } from "./project-investigation-settings.js";
 import {
   type PlanQualitySettings,
-} from "../../shared/dist/plan-quality-settings.js";
-import {
-  type ReviewRoutingSettings,
-} from "../../shared/dist/review-routing-settings.js";
-import { reviewMetrics, type ReviewMetrics } from "./review-metrics.js";
-import {
-  type ReviewLimitSettings,
-} from "../../shared/dist/review-limit-settings.js";
-import { PlanUsageService } from "./plan-usage/service.js";
-import { PlanUsageStore } from "./plan-usage/store.js";
-import {
-  DEFAULT_PLAN_USAGE_SETTINGS,
-  PLAN_USAGE_SETTINGS_KEY,
-  readPlanUsageSettings,
-  validatePlanUsageSettings,
-  type PlanUsageSettings,
-  type PlanUsageView,
-} from "../../shared/dist/plan-usage-settings.js";
-import type { PlanUsageSnapshot, PlanUsageSource } from "../../shared/dist/plan-usage.js";
-import {
-  DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS,
-  KNOWLEDGE_AUTOMATION_SETTINGS_KEY,
-  OPENCODE_HARNESS_GAPS,
-  readKnowledgeAutomationSettings as parseKnowledgeAutomationSettings,
-  validateKnowledgeAutomationSettings,
-  type KnowledgeAutomationSettings,
-  type KnowledgeAutomationSnapshot,
-} from "@owl/shared";
-import { CHILD_RUN_SETTINGS_KEY, HYBRID_MODE_SETTINGS_KEY } from "./types";
-import {
-  DEFAULT_OWNER_ID,
-  readSetting,
-  saveSetting,
-  storedSettingJson,
-  storedSettingRow,
-  upsertSetting,
-  type SettingSaveSpec,
-  type SettingSpec,
-} from "./settings-store";
-import { ADVISOR_WINDOW_SETTING } from "./advisor-window-settings.js";
-import { REVIEW_LIMIT_SETTING } from "./review-limits.js";
-import { DEPENDENCY_SUMMARY_SETTING } from "./dependency-summary-settings.js";
-import { PROGRESS_GUARD_SETTING } from "./progress-guard.js";
-import { REMAKE_LIMIT_SETTING } from "./remake-limits.js";
-import { FIXER_ESCALATION_SETTING } from "./fixer-escalation.js";
-import { AUTO_RECOVERY_SAVE } from "./auto-recovery.js";
-import { PLAN_QUALITY_SETTING } from "./plan-quality-settings.js";
-import { REVIEW_ROUTING_SETTING } from "./assurance-settings.js";
-import type { AdvisorWorkspacePreparation, CriterionCheck, RuleApplicability } from "./types";
-import { CoreActivityRegistry } from "./core-activity.js";
-import { GitWorktreeGateway } from "./git-gateway.js";
-import { clearWorkGitTemplates } from "./work-git-template.js";
-import { defaultOwlRoot, safeSegment, WorkspaceLayout } from "./workspace-layout.js";
-import { parseVerificationMarker, WorkspaceProcessSweeper, type SweepRunInfo, type WorkspaceActivity } from "./workspace-process-sweeper.js";
-import { WorkspaceTooling, runCommand } from "./workspace-tooling.js";
-import { DEFAULT_POST_MERGE_DEPENDENCY_FILES, DEFAULT_POST_MERGE_INSTALL_RULES, POST_MERGE_COMMAND_TIMEOUT_MS, PostMergeCommandQueue, postMergeResultEvent, redactArgv, type PostMergeInstallRule, type PostMergeRunOutcome, type ResolvedPostMergeCommand } from "./post-merge-command.js";
-import { AgentWorkspacePreparer, withWorkspacePreparation, worktreeHarnesses } from "./agent-workspace-preparer.js";
-import { redactCredentials } from "./git-push.js";
-import { recoverOrphanedState } from "./startup-recovery.js";
-import { COMPLETED_PROJECT_WORKS_SQL } from "./completed-project-works-query.js";
-import { cleanupWorkForDeletion, reconcileWorktrees, recordedWorktreeBlock, type WorktreeReconcileFailure } from "./worktree-reconciler.js";
-import { processIdentityMatches, readProcessIdentity } from "./process-identity.js";
+} from "@owl/shared/plan-quality-settings";
+import type { CriterionCheck, RuleApplicability } from "./types";
 import { formatRuntimeFailure } from "./error-display.js";
-import { ADVISOR_TEXT, workRef } from "./advisor-text.js";
-import { MAX_MESSAGE_ATTACHMENTS, MAX_UPLOAD_BYTES } from "./upload-limits.js";
-import { assertMessageAttachmentsInTransaction, messageAttachmentViews, resolveMessageAttachments, type MessageAttachmentView } from "./message-attachments.js";
+import { resolveMessageAttachments } from "./message-attachments.js";
 import { INSTRUCTION_REPLY_TEXT, type ReplanSummary } from "./instruction-reply-text.js";
 import { ownerGuidance } from "./owner-guidance.js";
 import { failedTaskBrief, pendingAcceptanceDefect, pendingExternalBlocker } from "./task-context.js";
-import { resolveAdvisorFileDestination, type FileDestinationChannel, type FileDestinationRefusal, type FileDestinationResult, type FileDestinationSource } from "./advisor-file-destination.js";
-import { DEFAULT_ADVISOR_SEND_FILE_MAX_BYTES, formatSendFileSize, prepareAdvisorSendFile, sendFileNotice, type AdvisorOutboundFile, type AdvisorSendFileSettings } from "./advisor-send-file.js";
-import { planContextFields } from "./context-builder.js";
-import { detectProcessSkillsPack, type DetectedProcessSkillsPack } from "./process-skills-pack.js";
-import { ResearchRecorder, type ResearchAttributionRole } from "./research-recorder.js";
-import { buildTokenUsageReport, countRequestsOverThreshold, type RequestThresholdCount } from "./token-usage-report.js";
-import type { TokenUsagePeriod, TokenUsageReport } from "../../shared/dist/token-usage-report.js";
-import { RESEARCH_CAPTURE_ROLES } from "../../shared/dist/permission-args.js";
+import { reportSummary, writeDependencyReport } from "./context-builder.js";
+import { clip } from "@owl/shared/small-helpers";
+import { DEFAULT_DEPENDENCY_SUMMARY_SETTINGS } from "@owl/shared/dependency-summary-settings";
 import {
-  ADVISOR_CALL_API_ACTION_TYPE,
-  ADVISOR_SEND_FILE_ACTION_TYPE,
-  ADVISOR_WINDOW_ACTION_TYPES,
-  validateWindowHandoffPayload,
-  ADVISOR_WORK_OPERATION_ACTION_TYPES,
-  parseAdvisorCallApiPayload,
-parseAdvisorCallApiRequestShape,
-  redactProviderOutput,
-  isAdvisorWorkOperationType,
-  type AdvisorWorkOperationType,
-} from "../../shared/dist/advisor-response.js";
-import {
-  BACKLOG_STATUSES,
-  applyAdvisorBacklogInTransaction,
-  detachWorkBacklogOnDeleteInTransaction,
-  deleteBacklogItemsInTransaction,
-  dismissBacklogItemsInTransaction,
-  issueBacklogWorkInTransaction,
-  linkBacklogItemsToWorkInTransaction,
-  listBacklogItems,
   listInProgressBacklogItemsOfWork,
-  registerNightlyTestBacklogInTransaction,
-  releaseWorkBacklogInTransaction,
-  type BacklogListFilter,
-  type BacklogListResult,
-  type DeleteBacklogItemsData,
-  type DismissBacklogItemsData,
-  type DismissBacklogItemsPayload,
-  type IssueBacklogWorkData,
-  type IssueBacklogWorkPayload,
-  type LinkBacklogItemsData,
-  type LinkBacklogItemsPayload,
 } from "./review-backlog.js";
 import {
-  ADVISOR_CURATION_ACTION_TYPES,
-  ADVISOR_CURATION_INSTRUCTION,
-validatePrerequisiteWorkIds,
-  advisorCurationKind,
-  builtinProviderHarness,
-  type ModelHarness,
-  CHILD_RUN_EFFORTS,
-  CHILD_RUN_PROVIDERS,
-  splitOpencodeModel,
-  CODEX_BUILTIN_MODELS,
-  DEFAULT_CHILD_RUN_SETTINGS,
-  CHILD_RUN_LIMITS,
-  tokenRelaySettingsProblem,
   DEFAULT_HARNESS_MODELS,
-  DEFAULT_ROLE_MODELS,
-  MODEL_SETTING_ROLES,
-  MODEL_SETTING_EFFORTS,
-  MODEL_PRESET_NAME_MAX_LENGTH,
-  PROJECT_LOCKING_WORK_STATES,
   designDocumentPath,
-  taskReportPath,
-  isRuleRole,
-  PROCESS_SKILLS_INSTALL_COMMANDS,
-  PROCESS_SKILLS_PROMPT_FILES,
-  PROCESS_SKILLS_SETTINGS_KEY,
   usageJson,
-  workSummaryInstruction,
-  workSummaryLabel,
-  WORK_SUMMARY_SECTIONS,
-  type ProcessSkillsSettings,
-  type GuardTokenAgent,
-  type WebResearchCapture,
-  type ChildDispatchRequest,
-  type ChildDispatchResponse,
-  type ChildRunEffort,
-  type ChildRunHarnessChoice,
-  type ChildRunListFilter,
-  type ChildRunProvider,
-  type ChildRunRecord,
-  type ChildRunSettings,
-  type ChildWaitRequest,
-  type ChildWaitResponse,
 } from "@owl/shared";
-import { createProviderPauseStore, type ProviderPauseRow, type ProviderPauseStore } from "./provider-pause-store";
-import { createProviderPauseController, rethrowUnlessRateLimited, type ProviderPauseController, type ProviderPauseEvent } from "./provider-pause-controller";
-import { coreTestRunBrief, workTestRunner } from "./core-test-run";
-import { TEST_SETUP_MANUAL_TRIGGER, TestSetupService } from "./test-setup-service.js";
+import { rethrowUnlessRateLimited } from "./provider-pause-controller";
 import { QUARANTINE_FIX_TASK_PREFIX } from "./test-quarantine";
 import { UI_CHANGE_LEVELS, type BaseMergeConflict, type ManagerTrigger, type WorkerQuestion } from "@owl/shared";
-import { stripFullTestCriteria, isFullTestCriterion, acceptanceCriteriaProblems, isManagerCriterion, parseTaskNecessity, readStoredAcceptanceCriteria, readStoredTaskPlanContext, renderAcceptanceCriteria, renderTaskNecessity, type AcceptanceCriterion, type CriteriaRelaxation, type StoredAcceptanceCriterion, type TaskPlanContext, resolveInstanceId, type AdvisorSuggestedAction, type ProcessSkillsInstallCommand, type ProviderClient } from "@owl/shared";
-import { MEMORY_LIBRARIAN_BATCH_SETTINGS_KEY, MEMORY_RECALL_LIMIT_SETTINGS_KEY, MEMORY_RECALL_MIN_SIMILARITY_SETTINGS_KEY, readMemoryLibrarianBatch, readMemoryRecallLimit, readMemoryRecallMinSimilarity, type MemoryLibrarianBatch } from "@owl/shared";
-import { EXTERNAL_DATA_POLICY, externalJsonBlock, MEMORY_ARCHIVE_SETTINGS_KEY, readMemoryArchive, REVIEW_RERUN_OPTION_KEY, TEST_SETUP_APPROVE_OPTION_KEY, TEST_SETUP_RETRY_OPTION_KEY } from "@owl/shared";
-import { approveOutsideInstalls } from "./test-environment";
-import { runArgvOf, validateTestRunSettings } from "../../shared/dist/test-run-settings.js";
-import { readTestPolicy, validateTestPolicy } from "../../shared/dist/test-policy.js";
-import { verificationPolicySettings } from "./task-verification-policy.js";
-import { resolveTestRun } from "./test-detection.js";
-import { explicitTestRunDigest, readStoredTestSetup, testSetupView } from "./test-setup.js";
-import { testSetupSettings } from "./test-setup-settings.js";
-import { resolveCloneRoot } from "./clone-root";
-import { cloneBaseline, cloneUses } from "./clone-check.js";
-import { classifyInstallCommand, execInstallQuery, outsideWriteTargets, resolveInstallTarget, TestSetupRunRegistry, type InstallQuery, type TestSetupRunEntry } from "./test-setup-install-guard.js";
-import { GUARD_PATH_KEYS, GUARD_SHELL_COMMAND_KEYS, GUARD_SHELL_TOOL_NAMES, READ_ONLY_TOOL_NAMES } from "../../shared/dist/guard-inputs.js";
-import { canonicalizePath } from "./command-analysis.js";
-import { matchesGlobWithDots } from "./glob.js";
-import { designsScreens, type UiChange } from "../../shared/dist/design-documents.js";
-import { screenCreationTargets, screenDesignRequiredMessage, type FsView, type ScreenPathCheck } from "./screen-path-guard.js";
-import { matchDeniedCommand, reviewerDeniedCommands, REVIEWER_TEST_COMMAND_DENIED_MESSAGE, type ReviewerTestCommandCheck } from "./reviewer-test-guard.js";
-import { createChildRunScheduler, type ChildRunScheduler } from "./child-run-scheduler.js";
-import { TRANSIENT_RETRY_LIMIT } from "./attempt-policy.js";
-import { defaultExecutorRuntime } from "./executor.js";
+import { stripFullTestCriteria, isFullTestCriterion, acceptanceCriteriaProblems, isManagerCriterion, parseTaskNecessity, readStoredAcceptanceCriteria, readStoredTaskPlanContext, renderAcceptanceCriteria, renderTaskNecessity, type AcceptanceCriterion, type CriteriaRelaxation, type StoredAcceptanceCriterion, type TaskPlanContext } from "@owl/shared";
+import { type UiChange } from "@owl/shared/design-documents";
 import type {
-  AgentListQuery,
-  AgentRun,
-  AgentsViewActivity,
-  AgentsViewData,
-  BacklogViewData,
-  BoardViewData,
-  DecisionViewData,
-  LinkableWorksData,
-  TokensViewData,
-  WorkViewData,
   AgentRunResult,
-  CancelAgentPayload,
-  CanonicalEventFrame,
-  CommandRequest,
   CommandResponse,
-  ConversationHint,
-  CoreDatabase,
-  CoreOptions,
-  CoreStatus,
   CoreWriteLaneTransaction,
-  CreateProjectPayload,
-  DeleteProjectPayload,
-  DeleteProjectResult,
-  CreateModelPresetPayload,
-  CreateWorkData,
-  CreateWorkPayload,
-  Decision,
-  DecisionListQuery,
-  EventHandler,
   JsonObject,
-  ListResponse,
-  Message,
-  MessageListQuery,
-  ModelPreset,
-  PauseWorkPayload,
-  PostMessagePayload,
-  InboundMessagePayload,
-  InboundUploadCompletePayload,
-  InboundUploadCompleteResult,
-  InboundUploadContentResult,
-  InboundUploadBytes,
-  InboundUploadRegisterPayload,
-  InboundUploadTicket,
-  Project,
-  TestRunStatus,
-  ProjectDeletionImpact,
-  ProjectListQuery,
-  ProjectRunningWork,
-  UpdateProjectPayload,
-  RoleModelSetting,
-  RoleModelSettingInput,
-  ProcessSkillsSettingsSnapshot,
   StartWorkPayload,
-  TaskDetail,
-  TaskListQuery,
   TaskPlanItem,
   TaskRow,
-  TaskState,
-  UpdateWorkData,
-  UpdateWorkPayload,
-  WorkState,
-  ResumeWorkOrRetryData,
-  ResumeWorkOrRetryPayload,
-  TaskPrerequisiteView,
-  TaskSummary,
-  UpdateModelSettingsPayload,
-  UpdateModelPresetPayload,
-  VerificationCommand,
-  WorkAdvisorBacklog,
-  WorkDetail,
-  WorkProgress,
-  WorkListQuery,
   WorkRow,
-  WorkSummary,
-  WorkflowSnapshot,
-  GitGateway,
-  WorktreeCleanupResult,
-  GitPushFailure,
-  GitPushResult,
-  GitWorkMergeResult,
   WorkBranchVerification,
 } from "./types";
-import { Core, INITIAL_PLAN_MAX_ATTEMPTS, delay, INITIAL_PLAN_RETRY_DELAY_MS, WorkDbRow, StoppableRun, isRecordedProcessGone, AGENT_STOP_WAIT_MS, OWNER_STOP_CONFIRM_FACTOR, isRecord, WorkNotRunningAbort, parseStringArray, managerTaskView, storedVerificationSpec, mergeConflictFiles, insertInstructionReply, firstLine, humanizeUnexpected, parseStoredJsonObject, FinalManagerOutcome, FINAL_MANAGER_MAX_ATTEMPTS, finalManagerErrorResult, extractManagerRequestIds, MANAGER_PAUSED_AT_START, addManagerRules, sideEffectFailureFields, SIDE_EFFECT_FAILURE_PREFIX, isRateLimitedAgentRunResult, extractManagerWorkRules } from "./core.js";
+import type { CoreDatabase, CoreOptions, CommandRequest, GitGateway } from "./types";
+import type { WorkflowEngine } from "./workflow-engine";
+import type { EventDispatcher } from "./event-dispatcher";
+import type { WorkDriver } from "./work-driver";
+import type { ProviderPauseController } from "./provider-pause-controller";
+import type { WorkspaceLayout } from "./workspace-layout.js";
+import type { SkillBox } from "./skill-box";
+import type { DecisionService } from "./decision";
+import type { RuleRole } from "./rule-store";
+import { CommandMutation, FINAL_REPORTS_MAX_CHARS, INITIAL_PLAN_MAX_ATTEMPTS, delay, INITIAL_PLAN_RETRY_DELAY_MS, WorkDbRow, StoppableRun, isRecordedProcessGone, AGENT_STOP_WAIT_MS, OWNER_STOP_CONFIRM_FACTOR, isRecord, WorkNotRunningAbort, parseStringArray, managerTaskView, storedVerificationSpec, mergeConflictFiles, insertInstructionReply, firstLine, humanizeUnexpected, parseStoredJsonObject, FinalManagerOutcome, FINAL_MANAGER_MAX_ATTEMPTS, finalManagerErrorResult, extractManagerRequestIds, MANAGER_PAUSED_AT_START, addManagerRules, sideEffectFailureFields, SIDE_EFFECT_FAILURE_PREFIX, isRateLimitedAgentRunResult, extractManagerWorkRules } from "./core-shared.js";
+
+/**
+ * The Core members the Manager's command center uses. Core implements this, so the class does not depend on core.ts
+ * and Core can keep every other member private.
+ */
+export interface ManagerHost {
+  readonly db: CoreDatabase;
+  readonly writeLane: ReturnType<CoreDatabase["createWriteLane"]>;
+  readonly started: boolean;
+  readonly workflow: WorkflowEngine;
+  readonly options: CoreOptions;
+  readonly dispatcher: EventDispatcher;
+  readonly workDriver: WorkDriver;
+  readonly ownerStopWaits: Map<string, { since: number; resent: boolean }>;
+  readonly providerPauseController: ProviderPauseController;
+  readonly git: GitGateway;
+  readonly workspaceLayout: WorkspaceLayout;
+  readonly skillBox: SkillBox;
+  readonly decisions: DecisionService;
+  readonly owlRoot: string;
+  readonly dataDir: string;
+  announceCoreDecisions(workId?: string): Promise<void>;
+  announceDecisionCancellations(decisionIds?: readonly string[]): Promise<void>;
+  processSkillsRequestContext(): JsonObject;
+  composeRulesForRole(role: RuleRole, workId: string): string | null;
+  composeKnowledgeForWork(workId: string): Promise<string | null>;
+  tryAutoResolveMergeConflict(
+    workId: string,
+    merge: { readonly conflicting_files: readonly string[]; readonly base_branch: string | null; readonly message: string },
+  ): Promise<{ readonly handled: true } | { readonly handled: false; readonly attempts: number }>;
+  trackWorktreeReconcile(workId: string, reason: string): void;
+  stopAgentRuns(runIds: readonly string[], options: { force: boolean; waitMs: number }): Promise<StoppableRun[]>;
+  signalAgentRun(run: StoppableRun, force: boolean, failureMessage: (runId: string) => string): Promise<void>;
+  runCommand<P extends JsonObject, D extends JsonObject>(
+    request: CommandRequest<P>,
+    event: { id?: string; type: string; workId?: string; taskId?: string; agentRunId?: string; resourceKey?: string; payload: JsonObject },
+    mutation: (transaction: CoreWriteLaneTransaction) => CommandMutation<D>,
+  ): Promise<CommandResponse<D>>;
+  answerDecision(
+    decisionId: string,
+    request: CommandRequest<{ answer: string; option_key: string | null; source_message_id: string | null } & JsonObject>,
+  ): Promise<CommandResponse<{ decision_id: string; status: "resolved"; winner: boolean; resumed_task_ids: readonly string[] }>>;
+}
 
 /**
  * The Manager's command center (initial plan, replan, final check, Owner instructions and stops, prerequisite waits),
@@ -489,7 +140,7 @@ import { Core, INITIAL_PLAN_MAX_ATTEMPTS, delay, INITIAL_PLAN_RETRY_DELAY_MS, Wo
  * are not `private` for that reason.
  */
 export class ManagerOrchestrator {
-  constructor(private readonly host: Core) {}
+  constructor(private readonly host: ManagerHost) {}
 
   /**
    * Works with a Manager replan in progress. Owner answers that should drive
@@ -657,7 +308,7 @@ export class ManagerOrchestrator {
       },
       validate: async (parsed) => {
         if (managerEvent !== "work.planned" && managerEvent !== "task.replanned") {
-          throw validationError("The Manager plan must return work.planned or task.replanned.", { work_id: workId, event: managerEvent });
+          throw validationError("The Manager plan must return work.planned or task.replanned.", { work_id: workId, event: managerEvent }, { code: "manager.plan_event_invalid", values: { field: "event", work_id: workId, event: String(managerEvent) } });
         }
         const plan = validatePlan(parsed.items);
         return isPlanRejection(plan) ? { errors: plan.errors } : { value: null };
@@ -1584,8 +1235,8 @@ export class ManagerOrchestrator {
    * previous answer's problems in `previous_output_feedback`; `trigger` stays the original one.
    */
   /** Adds the files the Owner sent with an instruction (found through its messages); an item without files gets no attachments key. */
-  withAttachments(request: OwnerRequestInput): OwnerRequestInput | Record<string, unknown> {
-    if (request.kind === "work_update" || request.message_ids.length === 0) return request;
+  withAttachments(request: OwnerRequestInput): JsonObject {
+    if (request.kind === "work_update" || request.message_ids.length === 0) return request as JsonObject;
     const ids = request.message_ids.flatMap((messageId) => {
       const row = this.host.db.get<{ attachment_ids_json: string }>("SELECT attachment_ids_json FROM messages WHERE id = ?", messageId);
       return row ? parseStringArray(row.attachment_ids_json, "attachment_ids", messageId, "Message") : [];
@@ -1597,7 +1248,7 @@ export class ManagerOrchestrator {
       status: attachment.status,
       path: attachment.path,
     }));
-    return attachments.length > 0 ? { ...request, attachments } : request;
+    return (attachments.length > 0 ? { ...request, attachments } : request) as JsonObject;
   }
 
   buildReplanRequest(
@@ -1647,7 +1298,7 @@ export class ManagerOrchestrator {
         design_documents: this.completedDesignDocuments(workId),
         trigger: trigger as unknown as JsonObject,
         worker_questions: workerQuestions as unknown as JsonObject[],
-        owner_requests: ownerRequests.map((request) => this.withAttachments(request)) as unknown as JsonObject[],
+        owner_requests: ownerRequests.map((request) => this.withAttachments(request)),
         removed_owner_criteria: this.removedOwnerCriteriaOfWork(workId),
         ...(ownerReplanKind === "instruction" ? { stopped_task_ids: this.stoppedTaskIds(workId) } : {}),
         base_merge_conflict: baseConflict as unknown as JsonObject | null,
@@ -2327,28 +1978,7 @@ export class ManagerOrchestrator {
     const tasks = this.host.db.all<TaskRow>("SELECT * FROM tasks WHERE work_id = ? ORDER BY created_at ASC, id ASC", workId);
     const managerTasks = tasks.map((task) => managerTaskView(task, this.taskDependencyIds(task.id)));
     const criteriaIndex = finalCriteriaIndex(this.workSummaryText(workId), tasks.map((task) => ({ id: task.id, status: task.status, acceptance: task.acceptance, acceptance_criteria_json: task.acceptance_criteria_json ?? null })));
-    const reports: JsonObject[] = [];
-    for (const task of tasks) {
-      if (task.status !== "completed") continue;
-      const row = this.host.db.get<{ payload_json: string }>(
-        `SELECT reports.payload_json
-           FROM reports JOIN agent_runs ON agent_runs.id = reports.agent_run_id
-          WHERE agent_runs.task_id = ?
-          ORDER BY reports.created_at DESC LIMIT 1`,
-        task.id,
-      );
-      if (!row) {
-        // The Manager judges from the reports it has; a lost report row must
-        // not turn every tick into a failure.
-        console.error(`[owl-core] completed Task ${task.id} of Work ${workId} has no stored Worker report; the final check runs without it`);
-        continue;
-      }
-      const report = parseStoredJsonObject(row.payload_json, "report", task.id);
-      // Legacy Core routing fields are not part of the Worker report that a
-      // later Manager should summarize.
-      const { verdict: _verdict, retry_subtasks: _retrySubtasks, ...workerReport } = report;
-      reports.push({ task_id: task.id, ...workerReport });
-    }
+    const reports = this.finalReportDigests(workId, tasks);
     // Outputs stay out of the final check; the Manager needs only what passed.
     const workVerificationContext: JsonObject = {
       status: workBranchVerification.status,
@@ -2377,6 +2007,11 @@ export class ManagerOrchestrator {
         commit_language: this.host.db.get<{ commit_language: "ja" | "en" | null }>("SELECT projects.commit_language FROM works JOIN projects ON projects.id = works.project_id WHERE works.id = ?", workId)?.commit_language ?? null,
         context: { mode: "finalize", trigger: { kind: "final_check" }, work_id: workId, tasks: managerTasks, reports, work_verification: workVerificationContext, criteria_relaxations: criteriaRelaxationsOfWork(this.host.db, workId), removed_owner_criteria: this.removedOwnerCriteriaOfWork(workId), criteria_index: criteriaIndex as unknown as JsonObject[], goal_shortfalls: goalShortfallsOfWork(this.host.db, workId) as unknown as JsonObject[], design_documents: this.completedDesignDocuments(workId), backlog_items: listInProgressBacklogItemsOfWork(this.host.db, workId).map(({ id, file, line, problem, suggestion }) => ({ id, file, line, problem, suggestion })), ...this.host.processSkillsRequestContext() },
       };
+      // The limit covers the report digests only, so only they are compared; tasks, criteria_index and the rest would trip it on every large Work.
+      const reportChars = JSON.stringify(reports).length;
+      if (attempt === 1 && reportChars > this.finalInputMaxChars()) {
+        console.error(`[owl-core] final check report digests of Work ${workId} are ${reportChars} characters, over the ${this.finalInputMaxChars()} limit; the Manager call may fail with "prompt too long"`);
+      }
       lastInvocationId = roleRequest.invocation_id;
       const outcome = await this.attemptFinalManager(workId, roleRequest, criteriaIndex);
       if (outcome === null) return null;
@@ -2396,6 +2031,64 @@ export class ManagerOrchestrator {
       remediation: "Retry the final check, or cancel the Work.",
       details: { work_id: workId, error_key: failure?.error_key ?? null },
     });
+  }
+
+  /**
+   * One digest per completed Task (status, acceptance results, summary, path
+   * of the full report file) so the final check input stays bounded however
+   * many Tasks a Work has. Text fields are clipped to a length that is halved
+   * until the whole list fits final_reports_max_chars.
+   */
+  finalInputMaxChars(): number {
+    return this.host.options.dispatcher?.final_reports_max_chars ?? FINAL_REPORTS_MAX_CHARS;
+  }
+
+  finalReportDigests(workId: string, tasks: readonly TaskRow[]): JsonObject[] {
+    const stored: { task: TaskRow; report: JsonObject; path: string | null }[] = [];
+    for (const task of tasks) {
+      if (task.status !== "completed") continue;
+      const row = this.host.db.get<{ payload_json: string }>(
+        `SELECT reports.payload_json
+           FROM reports JOIN agent_runs ON agent_runs.id = reports.agent_run_id
+          WHERE agent_runs.task_id = ?
+          ORDER BY reports.created_at DESC LIMIT 1`,
+        task.id,
+      );
+      if (!row) {
+        // The Manager judges from the reports it has; a lost report row must
+        // not turn every tick into a failure.
+        console.error(`[owl-core] completed Task ${task.id} of Work ${workId} has no stored Worker report; the final check runs without it`);
+        continue;
+      }
+      const report = parseStoredJsonObject(row.payload_json, "report", task.id);
+      stored.push({ task, report, path: writeDependencyReport(this.host.dataDir, workId, task.id, report) });
+    }
+    const limit = this.finalInputMaxChars();
+    const digests = (clipTo: number): JsonObject[] => stored.map(({ task, report, path }) => {
+      const summary = reportSummary(report);
+      const verification = isRecord(report.verification) ? report.verification : {};
+      const acceptance = Array.isArray(verification.acceptance) ? verification.acceptance.filter(isRecord) : [];
+      return {
+        task_id: task.id,
+        status: task.status,
+        report_path: path,
+        verification_status: typeof verification.status === "string" ? verification.status : null,
+        acceptance: acceptance.map((item) => ({ criterion_id: item.criterion_id ?? null, status: item.status ?? null, evidence: clip(typeof item.evidence === "string" ? item.evidence : "", clipTo) })),
+        work_done: clip(summary.work_done as string, clipTo),
+        changed_files: (summary.changes as JsonObject[]).map((change) => change.file).filter((file) => typeof file === "string"),
+        remaining_issues: (summary.remaining_issues as unknown[]).map((item) => clip(String(isRecord(item) ? item.issue : item), clipTo)),
+      };
+    });
+    for (let clipTo = DEFAULT_DEPENDENCY_SUMMARY_SETTINGS.max_chars; clipTo >= 1; clipTo = Math.floor(clipTo / 2)) {
+      const candidate = digests(clipTo);
+      if (JSON.stringify(candidate).length <= limit) return candidate;
+    }
+    // Even one-character texts do not fit: keep only the identity, the
+    // acceptance status and where the full report is.
+    return digests(1).map(({ task_id, status, report_path, verification_status, acceptance }) => ({
+      task_id, status, report_path, verification_status,
+      acceptance: (acceptance as JsonObject[]).map(({ criterion_id, status: criterionStatus }) => ({ criterion_id, status: criterionStatus })),
+    }));
   }
 
   /** One Final Manager call: a verdict, a failure result, or null when Core stopped. */
@@ -2950,7 +2643,7 @@ export function requeueOwnerReplanInTransaction(transaction: CoreWriteLaneTransa
 
 export function requireAgentRunResult(value: unknown, operation: string): AgentRunResult {
   if (!isRecord(value) || (value.outcome !== "success" && value.outcome !== "failed" && value.outcome !== "partial")) {
-    throw validationError(`The ${operation} result does not match the AgentRunner contract.`, { operation });
+    throw validationError(`The ${operation} result does not match the AgentRunner contract.`, { operation }, { code: "manager.result_contract_mismatch", values: { field: "outcome", operation } });
   }
   return value as unknown as AgentRunResult;
 }
@@ -2973,7 +2666,7 @@ export function normalizeManagerResult(value: unknown, mode: "finalize"): AgentR
       skill_feedback: (value.skill_feedback as AgentRunResult["skill_feedback"] | undefined) ?? null,
     };
   }
-  throw validationError("The final Manager result does not match its declared runtime contract.", { mode });
+  throw validationError("The final Manager result does not match its declared runtime contract.", { mode }, { code: "manager.final_result_contract_mismatch", values: { field: "mode", mode: String(mode) } });
 }
 
 export function requireManagerReport(result: AgentRunResult, operation: string): JsonObject {
@@ -2985,18 +2678,19 @@ export function requireManagerReport(result: AgentRunResult, operation: string):
       {
       outcome: result.outcome,
       error_key: result.error_key ?? null,
-      },
+      provider_message: result.message ?? null,
+      }, { code: "manager.operation_failed", values: { field: "outcome", operation, outcome: String(result.outcome) } }
     );
   }
   if (result.report_valid !== true || !result.report || typeof result.report !== "object" || Array.isArray(result.report)) {
-    throw validationError(`The ${operation} must include a valid report object.`, { operation });
+    throw validationError(`The ${operation} must include a valid report object.`, { operation }, { code: "manager.report_invalid", values: { field: "report", operation } });
   }
   return result.report;
 }
 
 export function requireManagerVerdict(value: unknown, workId: string): FinalManagerVerdict {
   if (!isRecord(value) || (value.verdict !== "complete" && value.verdict !== "incomplete")) {
-    throw validationError("The final Manager verdict is invalid.", { work_id: workId });
+    throw validationError("The final Manager verdict is invalid.", { work_id: workId }, { code: "manager.final_verdict_invalid", values: { field: "verdict", work_id: workId } });
   }
   if (
     typeof value.summary !== "string" ||
@@ -3005,7 +2699,7 @@ export function requireManagerVerdict(value: unknown, workId: string): FinalMana
     !Array.isArray(value.lessons) ||
     !value.lessons.every(isFinalLesson)
   ) {
-    throw validationError("The final Manager verdict fields are invalid.", { work_id: workId });
+    throw validationError("The final Manager verdict fields are invalid.", { work_id: workId }, { code: "manager.final_verdict_fields_invalid", values: { field: "verdict", work_id: workId } });
   }
   return {
     verdict: value.verdict,
@@ -3025,7 +2719,7 @@ export function requireManagerVerdict(value: unknown, workId: string): FinalMana
 /** Parse the Manager's open-Task actions (cancel / complete); absent means none. */
 export function managerTaskActions(value: unknown): readonly ReplanAction[] {
   if (value === undefined || value === null) return [];
-  if (!Array.isArray(value)) throw validationError("The Manager task_actions must be an array.", {});
+  if (!Array.isArray(value)) throw validationError("The Manager task_actions must be an array.", {}, { code: "manager.task_actions_not_array", values: { field: "task_actions" } });
   return value.map((entry, index) => {
     if (
       !isRecord(entry) ||
@@ -3033,7 +2727,7 @@ export function managerTaskActions(value: unknown): readonly ReplanAction[] {
       (entry.action !== "cancel" && entry.action !== "complete") ||
       typeof entry.reason !== "string"
     ) {
-      throw validationError(`The Manager task_actions[${index}] needs task_id, action (cancel or complete) and reason.`, {});
+      throw validationError(`The Manager task_actions[${index}] needs task_id, action (cancel or complete) and reason.`, {}, { code: "manager.task_action_invalid", values: { field: `task_actions[${index}]` } });
     }
     return { task_id: entry.task_id, action: entry.action, reason: entry.reason };
   });
@@ -3045,65 +2739,65 @@ export function managerTasksToPlanItems(
   { allowEmpty }: { readonly allowEmpty: boolean },
 ): readonly TaskPlanItem[] {
   if (!Array.isArray(value)) {
-    throw validationError("The Manager plan tasks must be an array.", { work_id: workId });
+    throw validationError("The Manager plan tasks must be an array.", { work_id: workId }, { code: "manager.plan_tasks_not_array", values: { field: "tasks", work_id: workId } });
   }
   if (value.length === 0 && !allowEmpty) {
-    throw validationError("The Manager plan must contain at least one Task.", { work_id: workId });
+    throw validationError("The Manager plan must contain at least one Task.", { work_id: workId }, { code: "manager.plan_tasks_empty", values: { field: "tasks", work_id: workId } });
   }
   const allowedTypes = new Set(["research", "design", "code", "config", "doc", "test"]);
   const allowedPriorities = new Set(["low", "normal", "high", "critical"]);
   return value.map((candidate, index) => {
     if (!isRecord(candidate)) {
-      throw validationError("The Manager plan contains a non-object Task.", { work_id: workId, index });
+      throw validationError("The Manager plan contains a non-object Task.", { work_id: workId, index }, { code: "manager.plan_task_not_object", values: { field: "tasks", work_id: workId, index } });
     }
     const id = nonEmptyString(candidate.id, "id", index);
     const candidateWorkId = candidate.work_id;
     if (candidateWorkId !== undefined && candidateWorkId !== "" && candidateWorkId !== workId) {
-      throw validationError("The Manager plan contains a Task for another Work.", { work_id: workId, task_id: id });
+      throw validationError("The Manager plan contains a Task for another Work.", { work_id: workId, task_id: id }, { code: "manager.plan_task_other_work", values: { field: "work_id", work_id: workId, task_id: id } });
     }
     const type = nonEmptyString(candidate.type, "type", index);
     if (!allowedTypes.has(type)) {
-      throw validationError("The Manager plan contains an unsupported Task type.", { work_id: workId, task_id: id, type });
+      throw validationError("The Manager plan contains an unsupported Task type.", { work_id: workId, task_id: id, type }, { code: "manager.plan_task_type_unsupported", values: { field: "type", work_id: workId, task_id: id, type: String(type) } });
     }
     const dependencies = candidate.depends_on;
     if (!Array.isArray(dependencies) || dependencies.some((dependency) => typeof dependency !== "string" || dependency.length === 0)) {
-      throw validationError("The Manager plan Task dependencies are invalid.", { work_id: workId, task_id: id });
+      throw validationError("The Manager plan Task dependencies are invalid.", { work_id: workId, task_id: id }, { code: "manager.plan_task_field_invalid", values: { field: "depends_on", work_id: workId, task_id: id } });
     }
     const context = candidate.context;
     if (context !== undefined && typeof context !== "string") {
-      throw validationError("The Manager plan Task context must be a string.", { work_id: workId, task_id: id });
+      throw validationError("The Manager plan Task context must be a string.", { work_id: workId, task_id: id }, { code: "manager.plan_task_field_not_string", values: { field: "context", work_id: workId, task_id: id } });
     }
     const notes = candidate.notes;
     if (notes !== undefined && typeof notes !== "string") {
-      throw validationError("The Manager plan Task notes must be a string.", { work_id: workId, task_id: id });
+      throw validationError("The Manager plan Task notes must be a string.", { work_id: workId, task_id: id }, { code: "manager.plan_task_field_not_string", values: { field: "notes", work_id: workId, task_id: id } });
     }
     const review = candidate.review;
     if (review !== undefined && typeof review !== "boolean") {
-      throw validationError("The Manager plan Task review field must be a boolean.", { work_id: workId, task_id: id });
+      throw validationError("The Manager plan Task review field must be a boolean.", { work_id: workId, task_id: id }, { code: "manager.plan_task_field_not_boolean", values: { field: "review", work_id: workId, task_id: id } });
     }
     const specLists = (["required_sections", "required_tests"] as const).map((field) => {
       const list = candidate[field];
       if (list === undefined) return undefined;
       if (!Array.isArray(list) || list.length > 20 || list.some((entry) => typeof entry !== "string" || entry.length < 1 || entry.length > 200)) {
-        throw validationError(`The Manager plan Task ${field} must be at most 20 strings of 1 to 200 characters.`, { work_id: workId, task_id: id });
+        throw validationError(`The Manager plan Task ${field} must be at most 20 strings of 1 to 200 characters.`, { work_id: workId, task_id: id }, { code: "manager.plan_task_string_list_invalid", values: { field, work_id: workId, task_id: id } });
       }
       return list as string[];
     });
     const parentTaskId = candidate.parent_task_id;
     if (parentTaskId !== undefined && parentTaskId !== null && typeof parentTaskId !== "string") {
-      throw validationError("The Manager plan parent Task id is invalid.", { work_id: workId, task_id: id });
+      throw validationError("The Manager plan parent Task id is invalid.", { work_id: workId, task_id: id }, { code: "manager.plan_task_field_invalid", values: { field: "parent_task_id", work_id: workId, task_id: id } });
     }
     const priority = candidate.priority;
     if (priority !== undefined && (typeof priority !== "string" || !allowedPriorities.has(priority))) {
-      throw validationError("The Manager plan Task priority is invalid.", { work_id: workId, task_id: id });
+      throw validationError("The Manager plan Task priority is invalid.", { work_id: workId, task_id: id }, { code: "manager.plan_task_field_invalid", values: { field: "priority", work_id: workId, task_id: id } });
     }
     const managerTaskId = candidate.manager_task_id;
     if (managerTaskId !== undefined && (typeof managerTaskId !== "string" || managerTaskId.trim().length === 0)) {
-      throw validationError("The Manager plan manager_task_id is invalid.", { work_id: workId, task_id: id });
+      throw validationError("The Manager plan manager_task_id is invalid.", { work_id: workId, task_id: id }, { code: "manager.plan_task_field_invalid", values: { field: "manager_task_id", work_id: workId, task_id: id } });
     }
     const replaces = candidate.replaces;
     if (!Array.isArray(replaces) || replaces.some((replaced) => typeof replaced !== "string" || replaced.trim().length === 0)) {
-      throw validationError("The Manager plan Task replaces must be an array of Task ids.", { work_id: workId, task_id: id });
+      throw validationError("The Manager plan Task replaces must be an array of Task ids.", { work_id: workId, task_id: id }, { code: "manager.plan_task_replaces_invalid", values: { field: "replaces", work_id: workId, task_id: id } });
     }
     const assignedDesigner = parseAssignedDesigner(candidate.assigned_designer, type, index);
     const uiChange = parseUiChange(candidate.ui_change, index);
@@ -3158,7 +2852,7 @@ export function parseCriteriaRelaxations(value: unknown, taskId: string, workId:
   if (list === undefined || list === null) return [];
   const text = (entry: unknown): entry is string => typeof entry === "string";
   if (!Array.isArray(list) || list.some((entry) => !isRecord(entry) || !text(entry.criterion_id))) {
-    throw validationError("The Manager plan Task auto_recovery.criteria_relaxations must be a list of criterion_id, reason and keeps.", { work_id: workId, task_id: taskId });
+    throw validationError("The Manager plan Task auto_recovery.criteria_relaxations must be a list of criterion_id, reason and keeps.", { work_id: workId, task_id: taskId }, { code: "manager.auto_recovery_list_invalid", values: { field: "auto_recovery.criteria_relaxations", work_id: workId, task_id: taskId, shape: "criterion_id, reason, keeps" } });
   }
   return list.map((entry) => ({ criterion_id: String(entry.criterion_id), reason: text(entry.reason) ? entry.reason : "", keeps: text(entry.keeps) ? entry.keeps : "" }));
 }
@@ -3171,10 +2865,10 @@ export function parsePartialRecovery(value: unknown, taskId: string, workId: str
   const rules = value.rule_applicability ?? [];
   const text = (entry: unknown): entry is string => typeof entry === "string" && entry.trim().length > 0;
   if (!Array.isArray(checks) || checks.some((entry) => !isRecord(entry) || !text(entry.criterion_id) || !Array.isArray(entry.argv) || entry.argv.length === 0 || entry.argv.some((arg) => typeof arg !== "string"))) {
-    throw validationError("The Manager plan Task auto_recovery.criterion_checks must be a list of criterion_id and argv (strings).", { work_id: workId, task_id: taskId });
+    throw validationError("The Manager plan Task auto_recovery.criterion_checks must be a list of criterion_id and argv (strings).", { work_id: workId, task_id: taskId }, { code: "manager.auto_recovery_list_invalid", values: { field: "auto_recovery.criterion_checks", work_id: workId, task_id: taskId, shape: "criterion_id, argv" } });
   }
   if (!Array.isArray(rules) || rules.some((entry) => !isRecord(entry) || !text(entry.criterion_id) || !text(entry.rule) || typeof entry.applies !== "boolean" || !text(entry.reason))) {
-    throw validationError("The Manager plan Task auto_recovery.rule_applicability must be a list of criterion_id, rule, applies and reason.", { work_id: workId, task_id: taskId });
+    throw validationError("The Manager plan Task auto_recovery.rule_applicability must be a list of criterion_id, rule, applies and reason.", { work_id: workId, task_id: taskId }, { code: "manager.auto_recovery_list_invalid", values: { field: "auto_recovery.rule_applicability", work_id: workId, task_id: taskId, shape: "criterion_id, rule, applies, reason" } });
   }
   return {
     criterion_checks: checks.map((entry) => ({ criterion_id: String(entry.criterion_id), argv: (entry.argv as unknown[]).map(String) })),
@@ -3184,7 +2878,7 @@ export function parsePartialRecovery(value: unknown, taskId: string, workId: str
 
 export function parseAssignedDesigner(value: unknown, type: string, index: number): "designer" | "lead_designer" | null {
   if (value !== undefined && value !== null && value !== "designer" && value !== "lead_designer") {
-    throw validationError("The Manager plan Task assigned_designer must be designer, lead_designer or null.", { field: "assigned_designer", index });
+    throw validationError("The Manager plan Task assigned_designer must be designer, lead_designer or null.", { field: "assigned_designer", index }, { code: "manager.plan_task_enum_invalid", values: { field: "assigned_designer", index, allowed: "designer, lead_designer, null" } });
   }
   return type === "design" && typeof value === "string" ? value : null;
 }
@@ -3192,19 +2886,19 @@ export function parseAssignedDesigner(value: unknown, type: string, index: numbe
 export function parseUiChange(value: unknown, index: number): UiChange {
   if (value === undefined) return "none";
   if (typeof value !== "string" || !(UI_CHANGE_LEVELS as readonly string[]).includes(value)) {
-    throw validationError("The Manager plan Task ui_change must be none, minor or major.", { field: "ui_change", index });
+    throw validationError("The Manager plan Task ui_change must be none, minor or major.", { field: "ui_change", index }, { code: "manager.plan_task_enum_invalid", values: { field: "ui_change", index, allowed: "none, minor, major" } });
   }
   return value as UiChange;
 }
 
 export function baseSyncOnly(value: unknown, index: number): boolean {
-  if (typeof value !== "boolean") throw validationError("The Manager plan Task base_sync_only must be a boolean or null.", { field: "base_sync_only", index });
+  if (typeof value !== "boolean") throw validationError("The Manager plan Task base_sync_only must be a boolean or null.", { field: "base_sync_only", index }, { code: "manager.plan_task_enum_invalid", values: { field: "base_sync_only", index, allowed: "true, false, null" } });
   return value;
 }
 
 export function nonEmptyString(value: unknown, field: string, index: number): string {
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw validationError(`The Manager plan Task ${field} must be a non-empty string.`, { field, index });
+    throw validationError(`The Manager plan Task ${field} must be a non-empty string.`, { field, index }, { code: "manager.plan_task_string_required", values: { field, index } });
   }
   return value;
 }

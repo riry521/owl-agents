@@ -12,6 +12,3 @@ export function projectIdOfOverviewFile(fileOrNotesPath: string): string | null 
   return PROJECT_OVERVIEW_FILE_PATTERN.exec(fileOrNotesPath.replace(/^notes\//u, ""))?.[1] ?? null;
 }
 
-export function isProjectOverviewFile(fileOrNotesPath: string): boolean {
-  return projectIdOfOverviewFile(fileOrNotesPath) !== null;
-}

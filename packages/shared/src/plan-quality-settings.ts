@@ -1,4 +1,4 @@
-import { isRecord, SettingsValidationError } from "./settings-validation.js";
+import { isRecord, SettingsValidationError, type SettingsCondition } from "./settings-validation.js";
 
 export const PLAN_QUALITY_SETTINGS_KEY = "plan_quality";
 
@@ -98,16 +98,34 @@ const FIELD_CHECKS: Record<keyof PlanQualitySettings, (value: unknown) => boolea
   record_only_codes: isCodes,
 };
 
+const FIELD_CONDITIONS: Record<keyof PlanQualitySettings, SettingsCondition> = {
+  enabled: { kind: "boolean" },
+  max_acceptance_items: { kind: "integer_min", min: 1 },
+  max_acceptance_chars: { kind: "integer_min", min: 1 },
+  max_components: { kind: "integer_min", min: 1 },
+  component_patterns: { kind: "regex_list" },
+  broad_scope_keywords: { kind: "non_empty_string_list" },
+  verification_required_types: { kind: "non_empty_string_list" },
+  verification_keywords: { kind: "non_empty_string_list" },
+  criterion_verification_patterns: { kind: "regex_list" },
+  external_state_patterns: { kind: "regex_list" },
+  state_comparison_patterns: { kind: "regex_list" },
+  external_state_exempt_patterns: { kind: "regex_list" },
+  heavy_check_patterns: { kind: "regex_list" },
+  blocking_codes: { kind: "distinct_one_of_list", values: PLAN_QUALITY_CODES },
+  record_only_codes: { kind: "distinct_one_of_list", values: PLAN_QUALITY_CODES },
+};
+
 /** For PUT: exact keys, each value valid. */
 export function validatePlanQualitySettings(value: unknown): PlanQualitySettings {
-  if (!isRecord(value)) throw new PlanQualitySettingsValidationError("Settings must be an object.", "payload");
+  if (!isRecord(value)) throw new PlanQualitySettingsValidationError("Settings must be an object.", "payload", { kind: "not_object" });
   const keys = Reflect.ownKeys(value);
   const expected = Object.keys(FIELD_CHECKS);
   if (keys.length !== expected.length || !expected.every((key) => keys.includes(key))) {
-    throw new PlanQualitySettingsValidationError(`Settings must contain exactly ${expected.join(", ")}.`, "payload");
+    throw new PlanQualitySettingsValidationError(`Settings must contain exactly ${expected.join(", ")}.`, "payload", { kind: "exact_keys", keys: expected });
   }
   for (const [field, check] of Object.entries(FIELD_CHECKS)) {
-    if (!check(value[field])) throw new PlanQualitySettingsValidationError(`${field} is invalid.`, field);
+    if (!check(value[field])) throw new PlanQualitySettingsValidationError(`${field} is invalid.`, field, FIELD_CONDITIONS[field as keyof PlanQualitySettings]);
   }
   return { ...(value as unknown as PlanQualitySettings) };
 }

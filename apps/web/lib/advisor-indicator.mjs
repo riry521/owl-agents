@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * Whether the session still has something to show: a turn, a queued turn, or
  * an activity the driver reports. Drives the indicator and both polls.
@@ -16,7 +17,7 @@ export function advisorSessionBusy(session) {
  * The indicator text: one main label by priority, plus the background count
  * when background work is running.
  *
- * @param {{ t: (key: string, params?: Record<string, string>) => string, session: object | null | undefined, sending: boolean, stopping: boolean, pausedLabel: string | null }} args
+ * @param {{ t: (key: string, params?: Record<string, string>) => string, session: { running_turns?: number, queued_turns?: number, activity?: { state?: string | null, tool_name?: string | null, background_count?: number } | null } | null | undefined, sending: boolean, stopping: boolean, pausedLabel: string | null }} args
  */
 export function advisorIndicatorLabel({ t, session, sending, stopping, pausedLabel }) {
   const running = session?.running_turns ?? 0;

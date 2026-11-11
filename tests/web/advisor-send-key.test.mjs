@@ -66,11 +66,11 @@ globalThis.cancelAnimationFrame ??= () => {};
 
 // Spy for use-attachment-draft: every input path must hand the same File[] to add().
 const addCalls = [];
-const draftSpy = { items: [], notices: [], hint: null, attachmentIds: [], clears: 0 };
+const draftSpy = { items: [], notices: [], hint: null, attachmentIds: [], clears: 0, clearArgs: [] };
 const attachmentPure = await import('../../apps/web/lib/attachment-draft.mjs');
 const attachmentOverrides = {
   '@/lib/use-attachment-draft': {
-    useAttachmentDraft: () => ({ ...draftSpy, add: (files) => addCalls.push(files), remove() {}, retry() {}, dismissNotices() {}, clear: () => { draftSpy.clears += 1; } }),
+    useAttachmentDraft: () => ({ ...draftSpy, add: (files) => addCalls.push(files), remove() {}, retry() {}, dismissNotices() {}, clear: (ids) => { draftSpy.clears += 1; draftSpy.clearArgs.push(ids); } }),
     useFileDrop: (onFiles, disabled) => ({ dragging: false, dropProps: { onDrop: (files) => { if (!disabled) onFiles(files); } } }),
   },
   '@/lib/attachment-draft.mjs': attachmentPure,
@@ -84,6 +84,7 @@ const attachmentOverrides = {
   },
 };
 let advisorMessages = [];
+let generalConversation = 'conv-1';
 let postMessageArgs = [];
 let postMessageCalls = 0;
 let sessionData;
@@ -155,7 +156,7 @@ const advisorViewModule = compileWebComponent(advisorViewPath, {
 '@/lib/advisor-indicator.mjs': indicatorModule,
   '@/lib/advisor-windows.mjs': await import('../../apps/web/lib/advisor-windows.mjs'),
   '@/lib/advisor-file-delivery.mjs': await import('../../apps/web/lib/advisor-file-delivery.mjs'),
-  '@/lib/view-loader': { useView: (key, _fetcher, options) => (viewOptions[key?.split(':')[0]] = options, { data: key?.startsWith('advisor-messages:') ? advisorMessages : key === 'advisor-window:general' ? 'conv-1' : sessionData, error: null, loading: false, refresh: async () => { callLog.push('refresh:' + (key?.split(':')[0])); } }) },
+  '@/lib/view-loader': { useView: (key, _fetcher, options) => (viewOptions[key?.split(':')[0]] = options, { data: key?.startsWith('advisor-messages:') ? advisorMessages : key === 'advisor-window:general' ? generalConversation : sessionData, error: null, loading: false, refresh: async () => { callLog.push('refresh:' + (key?.split(':')[0])); } }) },
   '@/components/icons': { SendIcon: () => null, StopIcon: () => null, TrashIcon: () => null },
   '@/components/AdvisorChannelPanel': { AdvisorChannelPanel: () => null },
 });
@@ -165,7 +166,7 @@ const advisorViewModule = compileWebComponent(advisorViewPath, {
 // knowledgeSaveNotice, knowledgeSaveError, menuOpen, isTouchDevice,
 // awaitingReply, channelsOpen; then AdvisorComposer: hasText.
 // AdvisorView holds four refs (the last is the save-notice timer); the composer's textarea and composing refs follow.
-const COMPOSING_REF = 5;
+const COMPOSING_REF = 6;
 const VISIBLE_STEP = 30;
 
 function createHookHarness(isTouchDevice, awaitingReply = null, hasText = false) {
@@ -173,9 +174,9 @@ function createHookHarness(isTouchDevice, awaitingReply = null, hasText = false)
   if (hasText) state[14] = true; // composer's hasText
   let hookIndex = 0;
   let refIndex = 0;
-  // refs[4] is the composer's textarea; the text is read from it at send time.
+  // refs[5] is the composer's textarea; the text is read from it at send time.
   const refs = [];
-  refs[4] = { current: { value: 'hello', focus() {} } };
+  refs[5] = { current: { value: 'hello', focus() {} } };
   // setCalls counts every state setter call; changes counts those that would re-render.
   const counts = { setCalls: 0, changes: 0 };
   const effects = [];
@@ -364,7 +365,7 @@ test('rendered: the spinner stays through idle or stale session reads after a se
   const state = [];
   const effects = [];
   const refs = [];
-  refs[4] = { current: { value: 'hello', focus() {} } };
+  refs[5] = { current: { value: 'hello', focus() {} } };
   let dirty = false;
   let hookIndex = 0;
   let effectIndex = 0;
@@ -482,14 +483,14 @@ test('without field-sizing, the scheduled resize writes no height while composin
   withBrowserGlobals(false, () => {
     const { textarea, harness } = renderAdvisor(false);
     const writes = [];
-    harness.refs[4].current = { scrollHeight: 80, style: { set height(v) { writes.push(v); } } };
+    harness.refs[5].current = { scrollHeight: 80, style: { set height(v) { writes.push(v); } } };
     let frame;
     globalThis.requestAnimationFrame = (fn) => { frame = fn; return 1; };
-    harness.refs[5].current = true;
+    harness.refs[6].current = true;
     textarea.onChange({ target: { value: 'x' } });
     frame();
     assert.deepEqual(writes, []);
-    harness.refs[5].current = false;
+    harness.refs[6].current = false;
     textarea.onChange({ target: { value: 'xy' } });
     frame();
     assert.deepEqual(writes, ['', '80px']);
@@ -504,7 +505,7 @@ test('send clears the box before postMessage answers, restores it on failure, an
   try {
     const { textarea, harness } = renderAdvisor(false);
     assert.equal(textarea.disabled, undefined, 'textarea is never disabled');
-    const ta = harness.refs[4].current;
+    const ta = harness.refs[5].current;
     textarea.onKeyDown(keyEvent({ shiftKey: true }).event);
     assert.equal(ta.value, '', 'cleared before the API answers');
     ta.value = 'again';
@@ -522,6 +523,22 @@ test('send clears the box before postMessage answers, restores it on failure, an
     await new Promise((r) => setImmediate(r));
     assert.equal(ta.value, 'newer', 'text typed after the send is not overwritten');
   } finally {
+    componentApiClient.postMessage = original;
+  }
+});
+
+test('a successful send clears only the attachment ids present when it started', async () => {
+  const original = componentApiClient.postMessage;
+  componentApiClient.postMessage = async () => ({});
+  draftSpy.items = [{ id: 'a1' }];
+  draftSpy.clearArgs.length = 0;
+  try {
+    const { textarea } = renderAdvisor(false);
+    textarea.onKeyDown(keyEvent({ shiftKey: true }).event);
+    await new Promise((r) => setImmediate(r));
+    assert.deepEqual(draftSpy.clearArgs, [['a1']]);
+  } finally {
+    draftSpy.items = [];
     componentApiClient.postMessage = original;
   }
 });
@@ -719,7 +736,7 @@ test('attachment only and body plus attachment each post once with the attachmen
     resetDraftSpy({ items: [{ id: 'i1', status: 'ready', attachmentId: 'a1' }], attachmentIds: ['a1'] });
     const { button, harness, textarea } = renderAdvisor(false, null, false);
     assert.equal(button.disabled, false, 'an attachment alone enables the send button');
-    harness.refs[4].current.value = text;
+    harness.refs[5].current.value = text;
     textarea.onKeyDown(keyEvent({ shiftKey: true }).event);
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(postMessageArgs, [['conv-1', expectedBody, ['a1']]]);
@@ -733,6 +750,33 @@ test('a body-only send passes an empty attachment list', async () => {
   textarea.onKeyDown(keyEvent({ shiftKey: true }).event);
   await new Promise((r) => setImmediate(r));
   assert.deepEqual(postMessageArgs, [['conv-1', 'hello', []]]);
+});
+
+test('paste adds no attachment while the conversation id is unknown', () => {
+  resetDraftSpy();
+  generalConversation = null;
+  try {
+    // Without a conversation id the view shows only the loading note, so no input exists to paste into.
+    const { textarea, attachButton, html } = renderAdvisor(false);
+    assert.equal(textarea, null);
+    assert.equal(attachButton, null);
+    assert.match(html, /advisor-loading/);
+    assert.equal(addCalls.length, 0);
+  } finally {
+    generalConversation = 'conv-1';
+  }
+});
+
+test('an owner-files link opens in a new tab even before the roots are loaded', () => {
+  resetDraftSpy();
+  advisorMessages = [{ id: 'm1', source: 'advisor', body: '[f](/api/v1/owner-files/materials/a.txt) [x](https://example.com)', created_at: '1' }];
+  try {
+    const { html } = renderAdvisor(false);
+    assert.match(html, /<a href="\/api\/v1\/owner-files\/materials\/a\.txt" target="_blank" rel="noopener noreferrer">f<\/a>/);
+    assert.match(html, /<a href="https:\/\/example\.com">x<\/a>/);
+  } finally {
+    advisorMessages = [];
+  }
 });
 
 test('a limit rejection is shown with role="alert"', () => {
@@ -754,6 +798,28 @@ test('Turn shows body and file names, a quarantined badge, and no body box when 
     assert.equal(html.split('class="turn__body').length - 1, 1, 'only the non-empty body gets a box');
   } finally {
     advisorMessages = [];
+  }
+});
+
+test('unmounting while ingestConversation is pending leaves no notice timer behind', async () => {
+  const original = componentApiClient.ingestConversation;
+  const savedMessages = advisorMessages;
+  advisorMessages = [{ id: 'm1', source: 'web', created_at: '1' }];
+  let resolveIngest;
+  componentApiClient.ingestConversation = () => new Promise((resolve) => { resolveIngest = resolve; });
+  mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const { harness, save } = renderAdvisor(false, null, false, { menuOpen: true });
+    const pending = save.onClick();
+    harness.effects.filter((e) => String(e).includes('clearTimeout')).map((e) => e())[0]();
+    resolveIngest({ path: 'knowledge/advisor.md' });
+    await pending;
+    mock.timers.tick(10000);
+    assert.equal(harness.state[7], null, 'no success notice after unmount');
+  } finally {
+    componentApiClient.ingestConversation = original;
+    advisorMessages = savedMessages;
+    mock.timers.reset();
   }
 });
 

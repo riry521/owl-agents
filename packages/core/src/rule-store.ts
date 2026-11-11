@@ -20,6 +20,7 @@ import {
 } from "./command-analysis";
 import { HumanReadableError } from "./errors";
 import { isSecretPath } from "./project-overview-note";
+import { isRecord } from "@owl/shared/small-helpers";
 
 const DESIGNER_WRITE_DENIED = "Designer can write only its assigned external design document; a screen design Task saves its HTML mocks with the save_design_mock tool.";
 
@@ -766,10 +767,6 @@ export class RuleStore {
       }
     }
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function firstString(record: Record<string, unknown>, names: readonly string[]): string | null {

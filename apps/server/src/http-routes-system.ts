@@ -1,18 +1,16 @@
 import { configuredApiToken } from "./config.js";
 import { requireAdapterFeature, requireCoreFeature } from "./core-feature.js";
 import { ApiError } from "./errors.js";
+import { SystemRouteMessages as M } from "./messages/routes-system.js";
 import { listHostDirectories } from "./fs-directories.js";
 import {
   UI_SESSION_COOKIE,
-  UI_SESSION_MAX_AGE_SECONDS,
   commandEnvelope,
-  createUiSessionValue,
   decodeRouteValue,
   exactKeys,
   isLoopback,
   parseBoolean,
   parseLimit,
-  parseTokenUsageTop,
   readRequestBody,
   requireOwner,
   runCommand,
@@ -20,11 +18,33 @@ import {
   workMarkdownCall,
   type ApiRoute,
   type RouteRequest,
+  UI_SESSION_SECRET,
+  requestId,
 } from "./http-common.js";
 import { API_PREFIX } from "./http-route-table.js";
 import { renderOwnerFolder, sendOwnerFile, sendOwnerFolder } from "./owner-files-http.js";
 import type { JsonObject } from "./types.js";
-import { parseTokenUsagePeriod } from "../../../packages/shared/dist/token-usage-report.js";
+import { parseTokenUsagePeriod } from "@owl/shared/token-usage-report";
+import { createHmac, randomBytes } from "node:crypto";
+
+const UI_SESSION_MAX_AGE_SECONDS = 24 * 60 * 60;
+
+function createUiSessionValue(): string {
+  const expiresAt = Math.floor(Date.now() / 1000) + UI_SESSION_MAX_AGE_SECONDS;
+  const payload = `${expiresAt}.${randomBytes(16).toString("hex")}`;
+  const signature = createHmac("sha256", UI_SESSION_SECRET).update(payload).digest("base64url");
+  return `${payload}.${signature}`;
+}
+
+function parseTokenUsageTop(value: string | null): number {
+  if (value === null) return 10;
+  const parsed = Number(value);
+  if (!/^\d+$/u.test(value) || parsed < 1 || parsed > 50) {
+    throw new ApiError(400, "validation_error", M.topInvalid(), { field: "top" });
+  }
+  return parsed;
+}
+
 
 /** Routes that sit before OWNER_FILE_ROUTES in the original routeApi (rows 2, 3, 4, 6, 7). */
 export const SYSTEM_ENTRY_ROUTES: readonly ApiRoute[] = [
@@ -34,10 +54,10 @@ export const SYSTEM_ENTRY_ROUTES: readonly ApiRoute[] = [
     async handle(route: RouteRequest): Promise<void> {
       const { context, request, response } = route;
       if (!isLoopback(request)) {
-        throw new ApiError(403, "forbidden", "healthはloopback接続だけに公開されています。localhostから接続してください。");
+        throw new ApiError(403, "forbidden", M.healthLoopbackOnly());
       }
       if (!context.core.ready || context.shuttingDown) {
-        throw new ApiError(503, "core_not_ready", "Coreが起動準備中または停止処理中です。しばらく待って再試行してください。");
+        throw new ApiError(503, "core_not_ready", M.coreNotReady());
       }
       sendJson(response, 200, { status: "ok", schema_version: context.contract.contract_version, core_time: new Date().toISOString() });
     },
@@ -48,12 +68,11 @@ export const SYSTEM_ENTRY_ROUTES: readonly ApiRoute[] = [
     async handle(route: RouteRequest): Promise<void> {
       const { context, request, response } = route;
       if (!isLoopback(request)) {
-        throw new ApiError(403, "forbidden", "runtime configは同一端末から取得してください。localhostから接続してください。");
+        throw new ApiError(403, "forbidden", M.runtimeConfigLocalOnly());
       }
       if (!context.core.ready || context.shuttingDown) {
-        throw new ApiError(503, "core_not_ready", "Coreが起動準備中または停止処理中です。しばらく待って再試行してください。");
+        throw new ApiError(503, "core_not_ready", M.coreNotReady());
       }
-      const wsHost = process.env.OWL_PUBLIC_HOST ?? (context.bind === "0.0.0.0" ? "127.0.0.1" : context.bind);
       sendJson(
         response,
         200,
@@ -88,9 +107,9 @@ export const SYSTEM_ENTRY_ROUTES: readonly ApiRoute[] = [
       const requestIdValue = route.requestId;
       requireOwner(request);
       const period = parseTokenUsagePeriod(url.searchParams.get("period") ?? "7d");
-      if (!period) throw new ApiError(400, "validation_error", "periodはtoday、7d、30dのいずれかを指定してください。", { field: "period" });
+      if (!period) throw new ApiError(400, "validation_error", M.periodInvalid(), { field: "period" });
       const data = requireCoreFeature(context.core, ["getTokenUsageReport"],
-        { code: "dependency_unavailable", message: "The loaded Core does not support token usage reports." }).getTokenUsageReport({
+        { code: "dependency_unavailable", message: M.tokenUsageUnsupported() }).getTokenUsageReport({
         period,
         top: parseTokenUsageTop(url.searchParams.get("top")),
       });
@@ -106,12 +125,12 @@ export const SYSTEM_ENTRY_ROUTES: readonly ApiRoute[] = [
       requireOwner(request);
       const threshold = url.searchParams.get("threshold_tokens");
       if (threshold !== null && !/^[1-9][0-9]*$/u.test(threshold)) {
-        throw new ApiError(400, "validation_error", "threshold_tokens must be a positive integer.", { field: "threshold_tokens" });
+        throw new ApiError(400, "validation_error", M.thresholdTokensInvalid(), { field: "threshold_tokens" });
       }
       const models = url.searchParams.getAll("model").filter((model) => model.length > 0);
       const workId = url.searchParams.get("work_id");
       const data = requireCoreFeature(context.core, ["countLargeModelRequests"],
-        { code: "dependency_unavailable", message: "The loaded Core does not support request token counts." }).countLargeModelRequests({
+        { code: "dependency_unavailable", message: M.requestCountsUnsupported() }).countLargeModelRequests({
         ...(threshold !== null ? { threshold_tokens: Number(threshold) } : {}),
         ...(models.length > 0 ? { models } : {}),
         ...(workId ? { work_id: workId } : {}),
@@ -127,7 +146,7 @@ async function handleOwnerFiles(route: RouteRequest, rest: string): Promise<void
   const requestIdValue = route.requestId;
   requireOwner(request);
   const files = requireCoreFeature(context.core, ["listOwnerFileRoots", "openOwnerFile"],
-    { code: "dependency_unavailable", message: "The loaded Core does not support opening Owner files." });
+    { code: "dependency_unavailable", message: M.ownerFilesUnsupported() });
   if (rest === "roots") {
     const roots = await files.listOwnerFileRoots();
     sendJson(response, 200, { request_id: requestIdValue, data: { roots } });
@@ -170,9 +189,9 @@ export const SYSTEM_ROUTES: readonly ApiRoute[] = [
       const requestIdValue = route.requestId;
       requireOwner(request);
       const period = parseTokenUsagePeriod(url.searchParams.get("period") ?? "7d");
-      if (!period) throw new ApiError(400, "validation_error", "periodはtoday、7d、30dのいずれかを指定してください。", { field: "period" });
+      if (!period) throw new ApiError(400, "validation_error", M.periodInvalid(), { field: "period" });
       const data = await requireAdapterFeature(context.core, ["getTokensView"],
-        { code: "dependency_unavailable", message: "The loaded Core does not support the Tokens screen API." }).getTokensView({
+        { code: "dependency_unavailable", message: M.tokensViewUnsupported() }).getTokensView({
         period,
         top: parseTokenUsageTop(url.searchParams.get("top")),
       });
@@ -214,7 +233,7 @@ export const SYSTEM_ROUTES: readonly ApiRoute[] = [
       const requestIdValue = route.requestId;
       requireOwner(request);
       const data = await requireCoreFeature(context.core, ["getReviewMetrics"],
-        { code: "dependency_unavailable", message: "The loaded Core does not support review metrics." }).getReviewMetrics();
+        { code: "dependency_unavailable", message: M.reviewMetricsUnsupported() }).getReviewMetrics();
       sendJson(response, 200, { request_id: requestIdValue, data, version: 0 });
     },
   },
@@ -227,7 +246,7 @@ export const SYSTEM_ROUTES: readonly ApiRoute[] = [
       requireOwner(request);
       const showHidden = url.searchParams.get("show_hidden") ?? "0";
       if (showHidden !== "0" && showHidden !== "1") {
-        throw new ApiError(422, "validation_error", "show_hiddenは0または1で指定してください。");
+        throw new ApiError(422, "validation_error", M.showHiddenInvalid());
       }
       sendJson(response, 200, { request_id: requestIdValue,
         data: await listHostDirectories(url.searchParams.get("path") ?? undefined, showHidden === "1", context.dataDir), version: 0 });
@@ -242,30 +261,30 @@ export const SYSTEM_ROUTES: readonly ApiRoute[] = [
       requireOwner(request);
       const afterValue = url.searchParams.get("after");
       if (afterValue !== null && !/^\d+$/.test(afterValue)) {
-        throw new ApiError(400, "invalid_query", "afterが不正です。0以上の整数カーソルを指定してください。");
+        throw new ApiError(400, "invalid_query", M.afterInvalid());
       }
       const afterCursor = afterValue === null ? 0 : Number(afterValue);
       if (!Number.isSafeInteger(afterCursor)) {
-        throw new ApiError(400, "invalid_query", "afterが大きすぎます。現在のイベントカーソルを使ってください。");
+        throw new ApiError(400, "invalid_query", M.afterTooLarge());
       }
       const limit = parseLimit(url.searchParams.get("limit"), 50);
       const order = url.searchParams.get("order") ?? "asc";
       if (order !== "asc" && order !== "desc") {
-        throw new ApiError(400, "invalid_query", "orderが不正です。ascまたはdescを指定してください。");
+        throw new ApiError(400, "invalid_query", M.orderInvalid());
       }
       const beforeValue = url.searchParams.get("before");
       if (order === "desc") {
         // Newest-first page (Activity Log). `before` is an exclusive sequence
         // cursor: pass the previous page's cursor to read older events.
         if (afterValue !== null) {
-          throw new ApiError(400, "invalid_query", "order=descではafterを使えません。古いイベントはbeforeで取得してください。");
+          throw new ApiError(400, "invalid_query", M.afterWithDesc());
         }
         if (beforeValue !== null && !/^\d+$/.test(beforeValue)) {
-          throw new ApiError(400, "invalid_query", "beforeが不正です。0以上の整数カーソルを指定してください。");
+          throw new ApiError(400, "invalid_query", M.beforeInvalid());
         }
         const before = beforeValue === null ? null : Number(beforeValue);
         if (before !== null && !Number.isSafeInteger(before)) {
-          throw new ApiError(400, "invalid_query", "beforeが大きすぎます。直前のページのcursorを使ってください。");
+          throw new ApiError(400, "invalid_query", M.beforeTooLarge());
         }
         const events = context.core.eventsBefore
           ? context.core.eventsBefore(before, limit)
@@ -276,7 +295,7 @@ export const SYSTEM_ROUTES: readonly ApiRoute[] = [
         return;
       }
       if (beforeValue !== null) {
-        throw new ApiError(400, "invalid_query", "beforeはorder=descと一緒に指定してください。");
+        throw new ApiError(400, "invalid_query", M.beforeNeedsDesc());
       }
       const events = context.core.eventsAfter(afterCursor, limit);
       const nextCursor = events.length > 0 ? events[events.length - 1].cursor : String(afterCursor);
@@ -287,4 +306,4 @@ export const SYSTEM_ROUTES: readonly ApiRoute[] = [
 
 // The original requirePlanUsageApi checked all four plan-usage methods for both routes.
 const PLAN_USAGE_KEYS = ["getPlanUsage", "refreshPlanUsage", "getPlanUsageSettings", "setPlanUsageSettings"] as const;
-const PLAN_USAGE_UNAVAILABLE = { code: "dependency_unavailable", message: "The loaded Core does not support plan usage." } as const;
+const PLAN_USAGE_UNAVAILABLE = { code: "dependency_unavailable", message: M.planUsageUnsupported() } as const;

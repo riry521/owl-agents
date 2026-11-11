@@ -346,11 +346,11 @@ test("completions of different Tasks of one Work each wake the waiter without wa
     return null;
   });
   await complete(secondId);
-  ctx.core.wakePrerequisiteWaiters(other.workId, false);
+  ctx.core.manager.wakePrerequisiteWaiters(other.workId, false);
   await sleep(300);
   assert.equal(ctx.runner.state.workerCalls, 1, "one of two conditions holds");
   await complete(other.taskId);
-  ctx.core.wakePrerequisiteWaiters(other.workId, false);
+  ctx.core.manager.wakePrerequisiteWaiters(other.workId, false);
   assert.ok(await until(() => ctx.runner.state.workerCalls >= 2), "the second completion woke the waiter (interval is 1h)");
   assert.equal(eventCount(ctx.db, workId, "task.prerequisite_satisfied"), 1);
   assert.ok(await until(() => task(ctx.db, workId).status === "completed"), "the waiter's Task finishes before cleanup");

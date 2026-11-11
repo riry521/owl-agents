@@ -1,10 +1,11 @@
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readdir, readFile, readlink, rename, rm, unlink, writeFile } from "node:fs/promises";
-import { createUlid, utcNow } from "../../db/dist/index.js";
+import { createUlid, utcNow } from "@owl/db";
 import { validationError } from "./errors";
 import { taskDependencyIds } from "./task-context.js";
 import type { CoreDatabase, GitGateway } from "./types";
+import { isPathInside } from "./path-inside.js";
 
 const MAX_CAPTURED_ARTIFACT_BYTES = 512 * 1024 * 1024;
 const MAX_CAPTURED_ARTIFACT_FILE_BYTES = 10 * 1024 * 1024;
@@ -20,11 +21,6 @@ export interface WorktreeEntry {
 }
 
 /** Whether `candidate` resolves to `base` itself or a path underneath it. */
-function inside(base: string, candidate: string): boolean {
-  const rel = relative(base, candidate);
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
-
 function mimeForPath(path: string): string {
   const extension = path.toLowerCase().split(".").pop();
   const types: Record<string, string> = {
@@ -80,7 +76,7 @@ export class ArtifactCapture {
     const root = resolve(worktreePath);
     for (const artifact of artifacts) {
       const destination = resolve(root, artifact.path);
-      if (destination === root || !inside(root, destination)) continue;
+      if (destination === root || !isPathInside(root, destination, true)) continue;
       const contents = await readFile(artifact.storage_path).catch((error: NodeJS.ErrnoException) => {
         console.warn(`[owl-core] Task ${taskId}: dependency artifact ${artifact.path} from Task ${artifact.task_id} could not be read, so it is not copied into the worktree:`, error);
         return null;
@@ -200,7 +196,7 @@ export class ArtifactCapture {
         if (!existing?.isFile()) throw error;
         const existingContents = await readFile(file.storage_path);
         if (createHash("sha256").update(existingContents).digest("hex") !== file.sha256) {
-          throw validationError("A durable artifact path already contains different content.", { storage_path: file.storage_path });
+          throw validationError("A durable artifact path already contains different content.", { storage_path: file.storage_path }, { code: "artifact.content_differs", values: { field: "storage_path" } });
         }
       }
     }

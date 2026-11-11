@@ -1,3 +1,6 @@
+// @ts-check
+/** @typedef {{ id: string, created_at: string, depends_on?: readonly string[] }} StagedTask */
+
 /**
  * Execution stage of each Task, computed from dependencies on every render.
  * Stage = 1 for no dependencies, else (latest stage among dependencies) + 1.
@@ -5,7 +8,6 @@
  * a stage with one Task is just "4". Tasks whose stage cannot be computed
  * (cycle, dependency outside the list) go last with an empty label.
  *
- * @typedef {{ id: string, created_at: string, depends_on?: readonly string[] }} StagedTask
  * @template {StagedTask} T
  * @param {T[]} tasks
  * @returns {Array<{ task: T, stage: number | null, label: string }>} In display order.

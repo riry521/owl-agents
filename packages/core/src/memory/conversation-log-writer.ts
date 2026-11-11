@@ -1,6 +1,6 @@
 import { mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { createUlid } from "../../../db/dist/index.js";
+import { createUlid } from "@owl/db";
 import { redactResearchText } from "../research-filter.js";
 import { conversationLogSections, parseConversationSummary, routeResultLine } from "./conversation-log.js";
 import { renderPage, type ParsedPage } from "./page-format.js";

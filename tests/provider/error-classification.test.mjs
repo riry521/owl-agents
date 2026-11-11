@@ -201,3 +201,18 @@ test("opencode errors map to the classes of design 2.5", async () => {
   assert.equal(classify({ type: "provider.auth", message: "x" }).failure_class, "deterministic");
   assert.equal(classify({ type: "provider.rate-limit", message: "slow down" }).failure_class, "rate_limited");
 });
+
+test("Claude's 'Prompt is too long' result is an input-size failure, not a configuration or transient one", () => {
+  const stdout = JSON.stringify({ type: "result", subtype: "success", is_error: true, result: "Prompt is too long" });
+  const failure = classifyProviderFailure("claude-cli/v1", exited({ ...harnessFailureDetail("claude-cli/v1", stdout), stdout: "", stderr: "" }));
+  assert.equal(failure.failure_class, "deterministic");
+  assert.equal(failure.retry_allowed, false);
+  assert.equal(failure.error_key, "provider_failed:context_length_exceeded");
+  assert.match(failure.message, /コンテキスト上限/u);
+  assert.doesNotMatch(failure.message, /実行設定が不正/u);
+});
+
+test("E2BIG stays argument_list_too_long, apart from the context overflow key", () => {
+  const failure = classifyProviderFailure("claude-cli/v1", exited({ stderr: "spawn E2BIG: argument list too long", stdout: "" }));
+  assert.equal(failure.error_key, "provider_failed:argument_list_too_long");
+});

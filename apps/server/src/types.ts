@@ -1,11 +1,20 @@
-import type { TaskStateValue, WorkStateValue } from "../../../packages/shared/dist/index.js";
-import type { OwnerLanguage } from "../../../packages/shared/dist/owner-language.js";
-import type { ModelHarness } from "../../../packages/shared/dist/harness-models.js";
-import type { GuardTokenIssuer } from "../../../packages/shared/dist/guard-token.js";
-import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
-import type { OpencodeChildOutcome, OpencodeChildRun, ProviderErrorRecord, SessionActivity } from "../../../packages/shared/dist/index.js";
-import type { KnowledgeAutomationSettings, KnowledgeAutomationSnapshot } from "../../../packages/shared/dist/knowledge-automation.js";
-import type { WebResearchCapture } from "../../../packages/shared/dist/web-research.js";
+import type { JsonObject, ModelEffort, ProcessSkillsInstallCommand, TaskStateValue, WorkStateValue } from "@owl/shared";
+import type { ActorRole } from "@owl/core";
+
+export type { ActorRole, JsonObject, ModelEffort, ProcessSkillsInstallCommand };
+
+// Other names shared with @owl/core (WorkSummary, WorkDetail, TaskDetail, Project, Message, Decision, ...) stay defined here on purpose:
+// they are the HTTP response shapes (mutable fields, no JsonObject base) and the server must not change them when Core's internal types change.
+// AgentRunner here is the server's process supervisor, a different thing from Core's AgentRunner.
+import type { BacklogStatus, IntegrationProvider, IntegrationTestResult, WorkProgress, TaskPrerequisite, ProviderPauseView, RuntimeConfig, IntegrationStatus, WorkState, FileDestinationProvider, ProjectBlocker, ProjectRunningWork, DetachedWork, ProjectDeletionImpact, DeleteProjectResult, WorkPrerequisite, InstructionReplyMetadata, AdvisorFileDeliveryMetadata, MessageMetadata, MessageAttachment, Message, InstructionStatus, WorkConversationMessage, WorkConversation, RoleModelSettingInput, Report, WorkAssurance, VerificationCommand, UpdateProjectInput } from "@owl/shared/api-views";
+export type { BacklogStatus, IntegrationProvider, IntegrationTestResult, WorkProgress, TaskPrerequisite, ProviderPauseView, RuntimeConfig, IntegrationStatus, WorkState, FileDestinationProvider, ProjectBlocker, ProjectRunningWork, DetachedWork, ProjectDeletionImpact, DeleteProjectResult, WorkPrerequisite, InstructionReplyMetadata, AdvisorFileDeliveryMetadata, MessageMetadata, MessageAttachment, Message, InstructionStatus, WorkConversationMessage, WorkConversation, RoleModelSettingInput, Report, WorkAssurance, VerificationCommand, UpdateProjectInput };
+import type { OwnerLanguage } from "@owl/shared/owner-language";
+import type { ModelHarness } from "@owl/shared/harness-models";
+import type { GuardTokenIssuer } from "@owl/shared/guard-token";
+import type { GuardTokenAgent } from "@owl/shared/guard-token";
+import type { OpencodeChildOutcome, OpencodeChildRun, ProviderErrorRecord, SessionActivity } from "@owl/shared";
+import type { KnowledgeAutomationSettings, KnowledgeAutomationSnapshot } from "@owl/shared/knowledge-automation";
+import type { WebResearchCapture } from "@owl/shared/web-research";
 import type {
   ChildDispatchRequest,
   ChildDispatchResponse,
@@ -14,11 +23,7 @@ import type {
   ChildRunSettings,
   ChildWaitRequest,
   ChildWaitResponse,
-} from "../../../packages/shared/dist/child-runs.js";
-export type JsonObject = Record<string, unknown>;
-
-export type BacklogStatus = "open" | "in_progress" | "done" | "dismissed";
-
+} from "@owl/shared/child-runs";
 export interface LinkBacklogItemsResult {
   work_id: string;
   status: "in_progress" | "done";
@@ -36,8 +41,6 @@ export interface IssueBacklogWorkResult {
   items: Array<JsonObject & { id: string; status: BacklogStatus }>;
 }
 
-export type WorkState = WorkStateValue | (string & {});
-
 export type TaskState = TaskStateValue;
 
 export interface WorkSummary {
@@ -51,24 +54,6 @@ export interface WorkSummary {
   project_id: string | null;
   prerequisite_wait: boolean;
   waiting_on: WorkPrerequisite[];
-}
-
-/** A prerequisite Work as shown to the Owner; state is null once the Work was deleted. */
-export interface WorkPrerequisite {
-  work_id: string;
-  project_id: string | null;
-  project_name: string | null;
-  display_number: number | null;
-  title: string;
-  state: WorkState | null;
-  deleted: boolean;
-  satisfied: boolean;
-}
-
-export interface WorkProgress {
-  total_tasks: number;
-  completed_tasks: number;
-  percent: number;
 }
 
 export interface WorkDetail extends WorkSummary {
@@ -135,14 +120,6 @@ export interface TaskSummary {
   fixer_escalation?: { rejections: number } | null;
 }
 
-export interface TaskPrerequisite {
-  reason: string;
-  source: "manager" | "worker";
-  conditions: { kind: string; target: string | null; description: string }[];
-  deadline_at: string;
-  since: string | null;
-}
-
 export interface TaskDetail extends TaskSummary {
   parent_task_id: string | null;
   acceptance: string;
@@ -150,15 +127,6 @@ export interface TaskDetail extends TaskSummary {
   total_review_attempts: number;
   failure_count: number;
   worker_generation: number;
-}
-
-export interface Report {
-  id: string;
-  agent_run_id: string;
-  schema_version: string;
-  result: "success" | "failed" | "partial";
-  payload: JsonObject;
-  created_at: string;
 }
 
 export interface Decision {
@@ -192,18 +160,6 @@ export interface AgentRun {
   subtask_count: number | null;
   label: string | null;
   origin: "spawned" | "observed" | null;
-}
-
-export interface VerificationCommand {
-  command_id: string;
-  argv: string[];
-  cwd: string;
-  env_allowlist: string[];
-  timeout_seconds: number;
-  stdout_limit: number;
-  stderr_limit: number;
-  expected_exit_codes: number[];
-  executor: "core" | "reviewer";
 }
 
 export interface TestRunStatus {
@@ -245,61 +201,9 @@ export interface CreateProjectInput {
   test_policy?: Record<string, unknown> | null;
 }
 
-export interface UpdateProjectInput {
-  name?: string;
-  canonical_path?: string;
-  base_branch?: string;
-  auto_push?: boolean;
-  advisor_window_enabled?: boolean;
-  commit_language?: "ja" | "en" | null;
-  worktree_setup_command?: string[];
-  worktree_refresh_command?: string[];
-  post_merge_command?: string[] | null;
-  post_merge_install_command?: string[] | null;
-  required_test_command?: string[] | null;
-  test_run?: Record<string, unknown> | null;
-  test_policy?: Record<string, unknown> | null;
-  report_check_commands?: string[] | null;
-  screen_paths?: { include: string[]; exclude?: string[] } | null;
-  verification_plan?: VerificationCommand[];
-}
-
 export interface DeleteProjectInput {
   confirmed_work_count: number;
 }
-
-export type ProjectBlocker = "running_works" | "active_agents";
-
-export interface ProjectDeletionImpact {
-  project_id: string;
-  work_count: number;
-  running_work_count: number;
-  active_agent_count: number;
-  backlog_item_count: number;
-  running_works: Array<{
-    id: string;
-    display_number: number | null;
-    title: string;
-    state: "running" | "paused" | "judgement_waiting";
-  }>;
-  blockers: ProjectBlocker[];
-  deletable: boolean;
-}
-
-export interface DeleteProjectResult {
-  project_id: string;
-  deleted: true;
-  detached_work_count: number;
-  detached_backlog_item_count: number;
-  detached_works: Array<{
-    work_id: string;
-    previous_display_number: number | null;
-    display_number: number | null;
-  }>;
-}
-
-export type ActorRole = "advisor" | "manager" | "designer" | "lead_designer" | "worker" | "fixer" | "reviewer" | "librarian" | "curator";
-export type ModelEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface RoleModelSetting {
   role: ActorRole;
@@ -309,92 +213,12 @@ export interface RoleModelSetting {
   catalog_version: string;
 }
 
-export interface RoleModelSettingInput {
-  role: ActorRole;
-  provider: string;
-  model: string;
-  effort: ModelEffort;
-}
-
 export interface ModelPreset {
   id: string;
   name: string;
   roles: RoleModelSetting[];
   created_at: string;
   updated_at: string;
-}
-
-export interface InstructionReplyMetadata {
-  kind: "instruction_reply";
-  in_reply_to: string[];
-  outcome: "tasks_changed" | "no_change" | "decision_opened";
-  plan_revision: number | null;
-}
-
-export type MessageMetadata = InstructionReplyMetadata | AdvisorFileDeliveryMetadata;
-
-export interface AdvisorFileDeliveryMetadata {
-  kind: "advisor_file_delivery";
-  destination: {
-    provider: "slack" | "discord";
-    channel_id: string;
-    display_name: string;
-    source: "window_binding" | "default_destination";
-  } | null;
-  refusal: "preferred_provider_unset" | "default_destination_unset" | "default_provider_not_configured" | "default_channel_unavailable" | null;
-  files: {
-    index: number;
-    name: string;
-    size: number | null;
-    status: "pending" | "sent" | "failed" | "unknown" | "rejected";
-    code?: string;
-    message?: string;
-  }[];
-  notice?: string;
-}
-
-export interface Message {
-  id: string;
-  conversation_id: string;
-  source: "slack" | "discord" | "web" | "advisor" | "manager" | string;
-  body: string;
-  attachment_ids: string[];
-  /** Present only when the message has attachments. Never carries a file path. */
-  attachments?: { id: string; filename: string; mime: string; bytes: number; status: "stored" | "quarantined" }[];
-  created_at: string;
-  metadata?: MessageMetadata | null;
-}
-
-export interface InstructionStatus {
-  status: "queued" | "processing" | "answered";
-  outcome: InstructionReplyMetadata["outcome"] | null;
-  reply_message_id: string | null;
-}
-
-export interface WorkConversationMessage extends Message {
-  received_at: string;
-  instruction: InstructionStatus | null;
-  in_reply_to: string[];
-}
-
-export interface WorkConversation {
-  work_id: string;
-  conversation_id: string | null;
-  truncated: boolean;
-  messages: WorkConversationMessage[];
-}
-
-export interface WorkAssurance {
-  work_id: string;
-  reviews: {
-    task_id: string;
-    required: boolean;
-    base: string;
-    skip_reason: string | null;
-    forced_reasons: { code: string; detail: string }[];
-  }[];
-  integration_verification: JsonObject | null;
-  plan_quality_warnings: JsonObject[];
 }
 
 export interface WorkInstructionInput {
@@ -572,8 +396,6 @@ export interface CommandResult<T extends JsonObject> {
   request_id?: string;
 }
 
-export type IntegrationProvider = "slack" | "discord";
-
 export interface IntegrationConfig {
   bot_token: string;
   app_token?: string;
@@ -592,23 +414,6 @@ export interface IntegrationConfig {
 /** Partial update accepted by the settings API and IntegrationStore. */
 export type IntegrationConfigPatch = Partial<IntegrationConfig>;
 
-export interface IntegrationStatus extends JsonObject {
-  provider: IntegrationProvider;
-  configured: boolean;
-  conversation_channel_id: string | null;
-  notification_channel_id: string | null;
-  owner_user_id: string | null;
-  last_tested_at: string | null;
-  last_test_ok: boolean | null;
-}
-
-export interface IntegrationTestResult {
-  provider: IntegrationProvider;
-  ok: boolean;
-  detail: string;
-  tested_at: string;
-}
-
 export interface ProcessSkillsDetectedPack {
   skills_dir: string;
   version: string | null;
@@ -618,11 +423,6 @@ export interface ProcessSkillsDetectedPack {
 export interface ProcessSkillsSettingsInput {
   enabled: boolean;
   path: string | null;
-}
-
-export interface ProcessSkillsInstallCommand {
-  harness: "claude" | "codex";
-  command: string;
 }
 
 export interface ProcessSkillsSettingsSnapshot extends ProcessSkillsSettingsInput {
@@ -657,19 +457,6 @@ export interface SaveProviderInput {
   harnessId: string;
   backendUrl?: string;
   apiKeySource?: string;
-}
-
-export interface ProviderPauseView {
-  readonly provider: string;
-  readonly label: string;
-  readonly state: "paused" | "probing";
-  readonly paused_at: string;
-  readonly resume_at: string;
-  readonly resume_source: "reported" | "backoff";
-  readonly reported_resets_at: string | null;
-  readonly backoff_step: number;
-  readonly last_error: string | null;
-  readonly last_role: string | null;
 }
 
 export interface AdvisorFoldersSnapshot {
@@ -878,7 +665,7 @@ export interface CorePort {
   activeAgentCount(): number;
   shutdown(options: { force: boolean; timeoutMs: number }): Promise<void>;
   /** Synchronous, non-throwing kill of Owl-owned Agent and Advisor processes; safe to call repeatedly. */
-  forceTerminateProcesses?(): void;
+  forceTerminateProcesses(): void;
 }
 
 export interface AgentRunner {
@@ -927,11 +714,4 @@ export interface CreateCoreOptions {
     readonly describeProviderError?: (provider: string, stdout: string, stderr: string, exitCode: number | null, signal: string | null) => ProviderErrorRecord;
     readonly runOpencode?: (run: OpencodeChildRun) => Promise<OpencodeChildOutcome>;
   }>;
-}
-
-export interface RuntimeConfig {
-  base_path: "/owl/";
-  api_base: "/api/v1";
-  ws_url: string;
-  schema_version: "1.0.0";
 }

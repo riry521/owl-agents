@@ -1,0 +1,28 @@
+import { defineMessages } from "./define.js";
+
+export const WorksRouteMessages = defineMessages("routes-works", {
+  archivedInvalid: { ja: "archivedが不正です。exclude、include、onlyのいずれかを指定してください。", en: "Set archived to exclude, include, or only." },
+  reopenPayloadMismatch: { ja: "ReopenWork payloadの項目が契約と一致しません。余分な項目を除いてください。", en: "The ReopenWork payload fields do not match the contract. Remove the extra fields." },
+  reasonInvalid: { ja: "reasonが不正です。1〜1000文字で指定してください。", en: "Set reason to 1 to 1000 characters." },
+  sourceInvalid: { ja: "sourceはweb, slack, discordのいずれかで指定してください。", en: "Set source to web, slack, or discord." },
+  limitInvalid500: { ja: "limitが不正です。1〜500の整数を指定してください。", en: "Set limit to an integer from 1 to 500." },
+  limitNotPositive: { ja: "limitが不正です。正の整数を指定してください。", en: "Set limit to a positive integer." },
+  designMockNotFound: { ja: "指定されたdesign mockが見つかりません。", en: "The requested design mock was not found." },
+  designDocumentNotFound: { ja: "指定されたTaskのdesign documentが見つかりません。", en: "The design document of the requested Task was not found." },
+  projectIdNotUlid: { ja: "project_idはULIDで指定してください。", en: "project_id must be a ULID." },
+  statusInvalid: { ja: "statusが不正です。open、resolved、cancelledのいずれかを指定してください。", en: "Set status to open, resolved, or cancelled." },
+  archivedExcludeOrOnly: { ja: "archivedはexcludeかonlyを指定してください。", en: "Set archived to exclude or only." },
+  designMocksUnsupported: { ja: "読み込み済みの Core はdesign mockに対応していません。", en: "The loaded Core does not support design mocks." },
+  backlogUnsupported: { ja: "読み込み済みの Core はReview Backlog APIに対応していません。", en: "The loaded Core does not support the Review Backlog API." },
+  prerequisitesUnsupported: { ja: "読み込み済みの Core はWork の前提条件に対応していません。", en: "The loaded Core does not support Work prerequisites." },
+  workDetailUnsupported: { ja: "読み込み済みの Core はWork 詳細 APIに対応していません。", en: "The loaded Core does not support the Work detail API." },
+  workMarkdownUnsupported: { ja: "読み込み済みの Core はWork Markdown の読み取りに対応していません。", en: "The loaded Core does not support reading Work Markdown." },
+  conversationUnsupported: { ja: "読み込み済みの Core はWork の会話に対応していません。", en: "The loaded Core does not support work conversations." },
+  assuranceUnsupported: { ja: "読み込み済みの Core はWork の保証情報に対応していません。", en: "The loaded Core does not support work assurance." },
+  coreActivityUnsupported: { ja: "読み込み済みの Core はWork の Core 活動に対応していません。", en: "The loaded Core does not support work core activity." },
+  summaryHistoryUnsupported: { ja: "読み込み済みの Core はWork の要約履歴に対応していません。", en: "The loaded Core does not support work summary history." },
+  moveProjectUnsupported: { ja: "読み込み済みの Core はWork の Project 移動に対応していません。", en: "The loaded Core does not support moving a Work into a Project." },
+  resumePrerequisiteUnsupported: { ja: "読み込み済みの Core は前提待ちの再開に対応していません。", en: "The loaded Core does not support resuming a prerequisite wait." },
+  decisionDetailUnsupported: { ja: "読み込み済みの Core はDecision 詳細 APIに対応していません。", en: "The loaded Core does not support the Decision detail API." },
+  boardUnsupported: { ja: "読み込み済みの Core はBoard APIに対応していません。", en: "The loaded Core does not support the Board API." },
+});

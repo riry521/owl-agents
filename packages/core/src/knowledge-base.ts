@@ -1,6 +1,6 @@
 import { readdir, readFile, writeFile, mkdir, stat, lstat, realpath, unlink, rename, link } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { join, relative, resolve, isAbsolute, extname, basename, dirname } from "node:path";
+import { join, relative, resolve, isAbsolute, extname, basename } from "node:path";
 import { isValidUlid } from "@owl/shared";
 
 import {

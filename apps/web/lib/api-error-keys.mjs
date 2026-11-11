@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * API エラーを画面の i18n キーに直す共通処理。
  * network_error・runtime_config_unavailable・invalid_runtime_config・invalid_response・

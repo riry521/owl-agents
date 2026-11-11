@@ -77,18 +77,18 @@ export function defaultChannelName(
 /** For PUT: exactly the six settings, each in range. */
 export function validateAdvisorWindowSettings(value: unknown): AdvisorWindowSettings {
   if (!isRecord(value)) {
-    throw new AdvisorWindowSettingsValidationError("Settings must be an object.", "payload");
+    throw new AdvisorWindowSettingsValidationError("Settings must be an object.", "payload", { kind: "not_object" });
   }
   const record = value as Record<string, unknown>;
   const keys = Reflect.ownKeys(record);
   const extra = keys.find((key) => typeof key !== "string" || !SETTING_KEYS.includes(key as keyof AdvisorWindowSettings));
   if (extra !== undefined || keys.length !== SETTING_KEYS.length) {
-    throw new AdvisorWindowSettingsValidationError(`Settings must contain exactly ${SETTING_KEYS.join(", ")}.`, "payload");
+    throw new AdvisorWindowSettingsValidationError(`Settings must contain exactly ${SETTING_KEYS.join(", ")}.`, "payload", { kind: "exact_keys", keys: SETTING_KEYS });
   }
   for (const [field, [min, max]] of Object.entries(INTEGER_RANGES)) {
     const number = record[field];
     if (typeof number !== "number" || !Number.isInteger(number) || number < min || number > max) {
-      throw new AdvisorWindowSettingsValidationError(`${field} must be an integer from ${min} to ${max}.`, field as keyof AdvisorWindowSettings);
+      throw new AdvisorWindowSettingsValidationError(`${field} must be an integer from ${min} to ${max}.`, field as keyof AdvisorWindowSettings, { kind: "integer_range", min, max });
     }
   }
   const prefix = record.channel_name_prefix;
@@ -96,10 +96,15 @@ export function validateAdvisorWindowSettings(value: unknown): AdvisorWindowSett
     throw new AdvisorWindowSettingsValidationError(
       `channel_name_prefix must be at most ${PREFIX_MAX_LENGTH} lowercase letters, digits, "_" and single "-" separators, and may end in one "-".`,
       "channel_name_prefix",
+      { kind: "channel_name_prefix", max_length: PREFIX_MAX_LENGTH },
     );
   }
   if ((record.channel_name_max_length as number) <= codePointLength(prefix)) {
-    throw new AdvisorWindowSettingsValidationError("channel_name_max_length must be longer than channel_name_prefix.", "channel_name_max_length");
+    throw new AdvisorWindowSettingsValidationError("channel_name_max_length must be longer than channel_name_prefix.", "channel_name_max_length", {
+      kind: "integer_range",
+      min: codePointLength(prefix) + 1,
+      max: INTEGER_RANGES.channel_name_max_length[1],
+    });
   }
   return Object.fromEntries(SETTING_KEYS.map((key) => [key, record[key]])) as unknown as AdvisorWindowSettings;
 }

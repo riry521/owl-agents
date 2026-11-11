@@ -1,8 +1,7 @@
-import { join } from "node:path";
-import { createUlid, utcNow } from "../../db/dist/index.js";
+import { createUlid, utcNow } from "@owl/db";
 import { ownerLanguage, type OwnerLanguage } from "./owner-language";
 import { EventDispatcher } from "./event-dispatcher";
-import { HumanReadableError, validationError, workProjectAlreadySet } from "./errors";
+import { HumanReadableError, validationError } from "./errors";
 import { advisorActionFingerprint, advisorActionNeedsApproval, advisorActionTarget, buildAdvisorActionFailure, loadFollowupRetries, loadSourceFailures, nextTurnOf, planFollowupActions, type AdvisorActionFailure, type AdvisorFailureDetails, type FollowupCandidate } from "./advisor-followup.js";
 import { advisorWorkId, parseAdvisorWorkOperationPayload } from "./advisor-work-payload.js";
 import { AdvisorSessionRuntime } from "./advisor-runtime.js";
@@ -10,19 +9,21 @@ import { type CurationKind } from "./curation-runs.js";
 import { type CurationNoticeEntry } from "./curation-summary.js";
 import { advisorWindowSettings } from "./advisor-window-settings.js";
 import { ensureWebAccount } from "./advisor-windows.js";
-import { GENERAL_WINDOW_KEY } from "../../shared/dist/advisor-windows.js";
+import { GENERAL_WINDOW_KEY } from "@owl/shared/advisor-windows";
 import { formatRuntimeFailure } from "./error-display.js";
 import { ADVISOR_TEXT, workRef } from "./advisor-text.js";
 import { prepareAdvisorSendFile, sendFileNotice, type AdvisorOutboundFile, type AdvisorSendFileSettings } from "./advisor-send-file.js";
-import { ADVISOR_CALL_API_ACTION_TYPE, ADVISOR_SEND_FILE_ACTION_TYPE, ADVISOR_WINDOW_ACTION_TYPES, validateWindowHandoffPayload, ADVISOR_WORK_OPERATION_ACTION_TYPES, parseAdvisorCallApiPayload, redactProviderOutput, isAdvisorWorkOperationType, type AdvisorWorkOperationType } from "../../shared/dist/advisor-response.js";
+import { ADVISOR_CALL_API_ACTION_TYPE, ADVISOR_SEND_FILE_ACTION_TYPE, ADVISOR_WINDOW_ACTION_TYPES, validateWindowHandoffPayload, ADVISOR_WORK_OPERATION_ACTION_TYPES, parseAdvisorCallApiPayload, redactProviderOutput, isAdvisorWorkOperationType, type AdvisorWorkOperationType } from "@owl/shared/advisor-response";
 import { ADVISOR_CURATION_ACTION_TYPES, validatePrerequisiteWorkIds, advisorCurationKind } from "@owl/shared";
-import { type AdvisorSuggestedAction, type ProviderClient } from "@owl/shared";
+import { type AdvisorSuggestedAction } from "@owl/shared";
 import { externalJsonBlock } from "@owl/shared";
-import type { CoreDatabase, CoreOptions, CoreWriteLaneTransaction, Project, WorkState } from "./types";
+import type { CommandRequest, CommandResponse, CoreDatabase, CoreOptions, CoreWriteLaneTransaction, CreateWorkData, CreateWorkPayload, JsonObject, PauseWorkPayload, ResumeWorkOrRetryData, ResumeWorkOrRetryPayload, StartWorkPayload, UpdateWorkData, UpdateWorkPayload, WorkState, WorktreeCleanupResult } from "./types";
+import type { WorkPrerequisiteView } from "@owl/shared/work-prerequisite";
+import type { AdvisorWindowRef } from "./advisor-windows.js";
+import type { CurationActor, CurationRunView, CurationTrigger } from "./curation-runs.js";
 
 /** The Core members the Advisor actions use; Core builds this from its private state. */
-import type { Core } from "./core.js";
-import { advisorWorkKeyForType, advisorWorkTypeForKey, callApiHash, isRecord, parseMessageMetadata, type AdvisorActionOutcome, type AdvisorFileDeliveryMetadata, type AdvisorFileDeliveryPlan, type WebFileDestination } from "./core.js";
+import { advisorWorkKeyForType, advisorWorkTypeForKey, callApiHash, isRecord, parseMessageMetadata, type AdvisorActionOutcome, type AdvisorFileDeliveryMetadata, type AdvisorFileDeliveryPlan, type WebFileDestination } from "./core-shared.js";
 export interface AdvisorActionsHost {
   readonly db: CoreDatabase;
   readonly writeLane: ReturnType<CoreDatabase["createWriteLane"]>;
@@ -30,28 +31,28 @@ export interface AdvisorActionsHost {
   readonly dispatcher: EventDispatcher;
   readonly options: CoreOptions;
   readonly started: boolean;
-  readonly cancelWork: Core["cancelWork"];
+  readonly cancelWork: (workId: string, request: CommandRequest<{ reason: string; force?: boolean } & JsonObject>) => Promise<CommandResponse<{ work_id: string; state: "cancelled"; cancel_requested: boolean; worktree_cleanup: WorktreeCleanupResult }>>;
   readonly claimWindowHandoffs: (windowId: string, messageId: string) => Promise<void>;
   readonly conversationWindowId: (conversationId: string) => string | null;
-  readonly createWork: Core["createWork"];
-  readonly deleteWork: Core["deleteWork"];
-  readonly ensureAdvisorWindow: Core["ensureAdvisorWindow"];
-  readonly moveWorkToProject: Core["moveWorkToProject"];
-  readonly pauseWork: Core["pauseWork"];
-  readonly postWorkInstruction: Core["postWorkInstruction"];
+  readonly createWork: (request: CommandRequest<CreateWorkPayload>) => Promise<CommandResponse<CreateWorkData>>;
+  readonly deleteWork: (workId: string, request: CommandRequest<JsonObject>) => Promise<CommandResponse<{ work_id: string; deleted: true }>>;
+  readonly ensureAdvisorWindow: (ownerId: string, key: string) => Promise<AdvisorWindowRef | null>;
+  readonly moveWorkToProject: (workId: string, request: CommandRequest<{ project_id: string }>, source?: "owner" | "advisor") => Promise<CommandResponse<{ work_id: string; project_id: string; display_number: number; previous_display_number: number; state: WorkState }>>;
+  readonly pauseWork: (workId: string, request: CommandRequest<PauseWorkPayload>) => Promise<CommandResponse<{ work_id: string; state: "paused"; signal: "pause_requested" }>>;
+  readonly postWorkInstruction: (workId: string, request: CommandRequest<{ body: string; attachment_ids?: string[]; reopen?: boolean }>) => Promise<CommandResponse<{ work_id: string; conversation_id: string; message_id: string; status: "queued" }>>;
   readonly recoverAdvisorCallApis: (turnId: string, actions?: readonly AdvisorSuggestedAction[]) => Promise<{ notices: string[]; failures: AdvisorActionFailure[] }>;
   readonly releaseStatusExchanges: (messageId: string) => Promise<void>;
   readonly releaseWindowHandoffs: (messageId: string) => Promise<void>;
-  readonly replaceWorkPrerequisites: Core["replaceWorkPrerequisites"];
+  readonly replaceWorkPrerequisites: (workId: string, request: CommandRequest<{ prerequisite_work_ids: string[] } & JsonObject>) => Promise<CommandResponse<{ work_id: string; state: WorkState; prerequisites: WorkPrerequisiteView[] }>>;
   readonly resolveAdvisorSendFileSettings: () => AdvisorSendFileSettings;
   readonly resolveAttachmentPaths: (messageId: string) => { paths: readonly string[]; notes: readonly string[] };
-  readonly resumeWorkOrRetryDecision: Core["resumeWorkOrRetryDecision"];
+  readonly resumeWorkOrRetryDecision: (workId: string, request: CommandRequest<ResumeWorkOrRetryPayload>) => Promise<CommandResponse<ResumeWorkOrRetryData>>;
   readonly sendCurationNoticeFor: (entries: readonly CurationNoticeEntry[]) => void;
   readonly sendFileChannelFor: (conversationId: string, origin: { channel: string }, memo: { resolved?: WebFileDestination }) => string;
-  readonly startCurationInBackground: Core["startCurationInBackground"];
-  readonly startWork: Core["startWork"];
+  readonly startCurationInBackground: (input: { kind: CurationKind; trigger: CurationTrigger; actor: CurationActor; actor_ref?: string | null; request_key?: string | null }, collect?: (finished: Promise<CurationNoticeEntry>) => void) => Promise<{ run: CurationRunView; started: boolean }>;
+  readonly startWork: (workId: string, request: CommandRequest<StartWorkPayload>) => Promise<CommandResponse<{ work_id: string; state: "running" | "ready" | "judgement_waiting"; started: boolean; waiting_for_prerequisites: boolean }>>;
   readonly statusExchangesBlock: (messageId: string) => string | null;
-  readonly updateWork: Core["updateWork"];
+  readonly updateWork: (workId: string, request: CommandRequest<UpdateWorkPayload>) => Promise<CommandResponse<UpdateWorkData>>;
   readonly windowHandoffBlock: (messageId: string) => string | null;
   readonly windowHandoffDoneNotice: (windowId: string, targetName: string, t: (typeof ADVISOR_TEXT)["ja"]) => string;
   readonly windowName: (windowId: string, general: string) => string;
@@ -165,6 +166,8 @@ export class AdvisorActions {
     if (!conversation) return null;
 
     const visibleReply = reply;
+    // One memo per reply: the follow-up reconcile and the dispatch resolve the Web destination once between them.
+    const destinationMemo: { resolved?: WebFileDestination } = {};
     const interrupted = options.interrupted === true;
     const allSuggestedActions = interrupted ? [] : [...suggestedActions];
     const recovery = interrupted
@@ -181,10 +184,10 @@ export class AdvisorActions {
     )?.followup_of_turn_id ?? null;
     const reconciled = followupOf === null || interrupted
       ? { heldIndexes: new Set<number>(), notices: [] as string[], failures: [] as AdvisorActionFailure[] }
-      : await this.reconcileFollowupActions(conversationId, turnId, followupOf, allSuggestedActions, origin);
+      : await this.reconcileFollowupActions(conversationId, turnId, followupOf, allSuggestedActions, origin, destinationMemo);
     const actionResult = interrupted
       ? { notices: [] as string[], failures: [] as AdvisorActionFailure[], handledIndexes: new Set<number>(), outboundFiles: [] as (AdvisorOutboundFile & { index: number })[], fileDelivery: null as AdvisorFileDeliveryPlan | null }
-      : await this.dispatchAdvisorWorkActions(conversationId, turnId, allSuggestedActions, origin, recovery.recoveredIndexes, reconciled.heldIndexes);
+      : await this.dispatchAdvisorWorkActions(conversationId, turnId, allSuggestedActions, origin, destinationMemo, recovery.recoveredIndexes, reconciled.heldIndexes);
     const trimmedReply = visibleReply.trimEnd();
     const allNotices = [
       ...recovery.notices,
@@ -304,10 +307,10 @@ export class AdvisorActions {
     sourceTurnId: string,
     actions: readonly AdvisorSuggestedAction[],
     origin: { channel: string; channel_id?: string; ref?: string },
+    destinationMemo: { resolved?: WebFileDestination },
   ): Promise<{ heldIndexes: Set<number>; notices: string[]; failures: AdvisorActionFailure[] }> {
     const t = ADVISOR_TEXT[ownerLanguage(this.host.db)];
     const candidates: { index: number; action: AdvisorSuggestedAction; candidate: FollowupCandidate }[] = [];
-    const destinationMemo: { resolved?: WebFileDestination } = {};
     for (const [index, action] of actions.entries()) {
       const executedByCore = ADVISOR_CURATION_ACTION_TYPES.has(action.type) || ADVISOR_WINDOW_ACTION_TYPES.has(action.type)
         || action.type === ADVISOR_CALL_API_ACTION_TYPE || action.type === ADVISOR_SEND_FILE_ACTION_TYPE
@@ -574,6 +577,7 @@ export class AdvisorActions {
     turnId: string,
     actions: readonly AdvisorSuggestedAction[],
     origin: { channel: string; channel_id?: string; ref?: string },
+    destinationMemo: { resolved?: WebFileDestination } = {},
     recoveredIndexes: ReadonlySet<number> = new Set(),
     heldIndexes: ReadonlySet<number> = new Set(),
   ): Promise<{ notices: string[]; failures: AdvisorActionFailure[]; handledIndexes: Set<number>; outboundFiles: (AdvisorOutboundFile & { index: number })[]; fileDelivery: AdvisorFileDeliveryPlan | null }> {
@@ -581,7 +585,6 @@ export class AdvisorActions {
     const failures: AdvisorActionFailure[] = [];
     const outboundFiles: (AdvisorOutboundFile & { index: number })[] = [];
     const fileResults: AdvisorFileDeliveryMetadata["files"][number][] = [];
-    const destinationMemo: { resolved?: WebFileDestination } = {};
     const add = (outcome: AdvisorActionOutcome): void => {
       notices.push(outcome.notice);
       if (outcome.failure) failures.push(outcome.failure);
@@ -1035,27 +1038,26 @@ export class AdvisorActions {
     const conversation = this.host.db.get<{ owner_id: string }>("SELECT owner_id FROM conversations WHERE id = ?", conversationId);
     if (!conversation || conversation.owner_id !== ownerId) throw notFoundError(`conversation ${conversationId} was not found.`);
 
-    const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
     const idField = (value: unknown, name: string): string => {
-      if (typeof value !== "string" || value.length < 1 || value.length > 128) throw validationError(`${name} must be a string of 1 to 128 characters.`, { field: name });
+      if (typeof value !== "string" || value.length < 1 || value.length > 128) throw validationError(`${name} must be a string of 1 to 128 characters.`, { field: name }, { code: "advisor.delivery_id_invalid", values: { field: name } });
       return value;
     };
-    if (!isRecord(payload) || !Array.isArray(payload.results) || payload.results.length === 0) throw validationError("The delivery report needs turn_id, message_id and at least one result.");
+    if (!isRecord(payload) || !Array.isArray(payload.results) || payload.results.length === 0) throw validationError("The delivery report needs turn_id, message_id and at least one result.", {}, { code: "advisor.delivery_report_incomplete", values: { field: "results" } });
     const turnId = idField(payload.turn_id, "turn_id");
     const messageId = idField(payload.message_id, "message_id");
     const codesByOutcome: Readonly<Record<string, readonly string[]>> = { failed: ["changed", "unreadable", "upload_rejected", "upload_rate_limited"], unknown: ["upload_unknown"], sent: [] };
     const results = payload.results.map((entry: unknown) => {
-      if (!isRecord(entry) || typeof entry.index !== "number" || !Number.isSafeInteger(entry.index) || entry.index < 0) throw validationError("Each result needs a non-negative integer index.");
+      if (!isRecord(entry) || typeof entry.index !== "number" || !Number.isSafeInteger(entry.index) || entry.index < 0) throw validationError("Each result needs a non-negative integer index.", {}, { code: "advisor.delivery_index_invalid", values: { field: "index" } });
       const outcome = entry.outcome;
-      if (typeof outcome !== "string" || !Object.hasOwn(codesByOutcome, outcome)) throw validationError("outcome must be sent, failed or unknown.", { index: entry.index });
+      if (typeof outcome !== "string" || !Object.hasOwn(codesByOutcome, outcome)) throw validationError("outcome must be sent, failed or unknown.", { index: entry.index }, { code: "advisor.delivery_outcome_invalid", values: { field: "outcome", index: entry.index as number } });
       const code = entry.code;
-      if (outcome === "sent" ? code !== undefined : typeof code !== "string" || !codesByOutcome[outcome]!.includes(code)) throw validationError("code does not match outcome.", { index: entry.index });
+      if (outcome === "sent" ? code !== undefined : typeof code !== "string" || !codesByOutcome[outcome]!.includes(code)) throw validationError("code does not match outcome.", { index: entry.index }, { code: "advisor.delivery_code_mismatch", values: { field: "code", index: entry.index as number } });
       const platformError = entry.platform_error ?? null;
-      if (platformError !== null && (typeof platformError !== "string" || platformError.length > 100)) throw validationError("platform_error must be null or a string of at most 100 characters.", { index: entry.index });
-      if (entry.message !== undefined && (typeof entry.message !== "string" || entry.message.length > 300)) throw validationError("message must be a string of at most 300 characters.", { index: entry.index });
+      if (platformError !== null && (typeof platformError !== "string" || platformError.length > 100)) throw validationError("platform_error must be null or a string of at most 100 characters.", { index: entry.index }, { code: "advisor.delivery_platform_error_invalid", values: { field: "platform_error", index: entry.index as number, max: 100 } });
+      if (entry.message !== undefined && (typeof entry.message !== "string" || entry.message.length > 300)) throw validationError("message must be a string of at most 300 characters.", { index: entry.index }, { code: "advisor.delivery_message_invalid", values: { field: "message", index: entry.index as number, max: 300 } });
       return { index: entry.index, outcome, code: code as string | undefined, platformError, message: entry.message as string | undefined };
     });
-    if (new Set(results.map((r) => r.index)).size !== results.length) throw validationError("result indexes must not repeat.");
+    if (new Set(results.map((r) => r.index)).size !== results.length) throw validationError("result indexes must not repeat.", {}, { code: "advisor.delivery_index_repeated", values: { field: "index" } });
 
     const row = this.host.db.get<{ payload_json: string }>(
       `SELECT payload_json FROM events
@@ -1071,7 +1073,7 @@ export class AdvisorActions {
     for (const file of Array.isArray(responded.outbound_files) ? responded.outbound_files : []) {
       if (isRecord(file) && typeof file.index === "number" && typeof file.path === "string") files.set(file.index, { path: file.path, name: String(file.name ?? "") });
     }
-    for (const result of results) if (!files.has(result.index)) throw validationError(`index ${result.index} is not one of the reply's outbound_files.`, { index: result.index });
+    for (const result of results) if (!files.has(result.index)) throw validationError(`index ${result.index} is not one of the reply's outbound_files.`, { index: result.index }, { code: "advisor.delivery_index_unknown", values: { field: "index", index: result.index } });
 
     const idempotencyKey = `advisor-delivery:${turnId}:${messageId}`;
     const saved = this.host.db.get<{ payload_json: string }>("SELECT payload_json FROM events WHERE idempotency_key = ?", idempotencyKey);

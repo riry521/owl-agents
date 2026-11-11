@@ -1,6 +1,4 @@
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+import { isRecord } from "./small-helpers.js";
 
 export type RoleSchemaType = "object" | "array" | "string" | "integer" | "number" | "boolean" | "null";
 

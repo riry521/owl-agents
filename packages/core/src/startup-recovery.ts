@@ -1,4 +1,4 @@
-import { createUlid, utcNow } from "../../db/dist/index.js";
+import { createUlid, utcNow } from "@owl/db";
 import { LIVE_AGENT_RUN_STATUSES, STARTING_AGENT_RUN_STATUSES, closeLiveAgentRun, setAgentRunStatus } from "./agent-run-state.js";
 import { isPidAlive, signalProcessGroup } from "@owl/shared";
 import { reduceTaskInTransaction, repairWorktreeStateInTransaction } from "./state-reducer.js";

@@ -1,5 +1,5 @@
 import { OUTPUT_FORMAT_INVALID_ERROR_KEY, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_OPTION_KEY, REVIEW_RERUN_OPTION_KEY, TEST_SETUP_APPROVE_OPTION_KEY, TEST_SETUP_RETRY_OPTION_KEY, type DecisionExplanationKind, type DesignBlockCauseKind, type DesignBlockedReport } from "@owl/shared";
-import { DEFAULT_TEST_RUN_SETTINGS } from "../../shared/dist/test-run-settings.js";
+import { DEFAULT_TEST_RUN_SETTINGS } from "@owl/shared/test-run-settings";
 import { validationError } from "./errors";
 import { formatMissingList } from "./final-verdict";
 import type { OwnerLanguage } from "./owner-language";
@@ -65,7 +65,7 @@ export function assertDecisionBrief(brief: {
 }): void {
   for (const field of ["reason", "question", "current_state", "tried"] as const) {
     if (typeof brief[field] !== "string" || brief[field].trim().length === 0) {
-      throw validationError(`A Decision requires ${field}.`, { field });
+      throw validationError(`A Decision requires ${field}.`, { field }, { code: "decision.field_required", values: { field } });
     }
   }
   const keys = new Set<string>();
@@ -73,19 +73,19 @@ export function assertDecisionBrief(brief: {
     for (const field of ["key", "label", "description"] as const) {
       const value = option[field];
       if (typeof value !== "string" || value.trim().length === 0) {
-        throw validationError(`Every Decision option requires ${field}.`, { field: `options.${field}` });
+        throw validationError(`Every Decision option requires ${field}.`, { field: `options.${field}` }, { code: "decision.option_field_required", values: { field: `options.${field}` } });
       }
     }
     if (keys.has(option.key as string)) {
-      throw validationError("Decision option keys must be unique.", { field: "options.key" });
+      throw validationError("Decision option keys must be unique.", { field: "options.key" }, { code: "decision.option_keys_not_unique", values: { field: "options.key" } });
     }
     keys.add(option.key as string);
   }
   if (brief.options.length === 0 && !brief.allow_free_text) {
-    throw validationError("A Decision needs options or a free-text answer.", { field: "options" });
+    throw validationError("A Decision needs options or a free-text answer.", { field: "options" }, { code: "decision.options_or_free_text_required", values: { field: "options" } });
   }
   if (brief.recommended !== null && !keys.has(brief.recommended)) {
-    throw validationError("The recommended option must be one of the options.", { field: "recommended" });
+    throw validationError("The recommended option must be one of the options.", { field: "recommended" }, { code: "decision.recommended_unknown", values: { field: "recommended" } });
   }
 }
 
@@ -880,6 +880,7 @@ const NO_PROGRESS_TEXT = {
 /** The Decision opened when a Task reaches the consecutive no-progress limit. */
 export function noProgressLimitBrief(input: NoProgressBriefInput, language: OwnerLanguage): DecisionBrief {
   const t = NO_PROGRESS_TEXT[language];
+  // shared の clip は省略記号を含めて max 文字に収める。ここは 300 文字で切ってから省略記号を足すので別に持つ。
   const clip = (value: string): string => (value.length > 300 ? `${value.slice(0, 300)}…` : value);
   return {
     reason: t.reason(input),

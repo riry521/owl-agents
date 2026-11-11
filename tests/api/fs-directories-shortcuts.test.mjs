@@ -7,6 +7,7 @@ import { test } from 'node:test';
 import { tempDir } from '../helpers/temp.mjs';
 
 const { listHostDirectories } = await import('../../apps/server/dist/fs-directories.js');
+const { errorBody } = await import('../../apps/server/dist/errors.js');
 
 // "/dev" is on a different device than the temp dir, so fake volumes are not taken for the startup disk.
 const otherDeviceRoot = '/dev';
@@ -72,7 +73,7 @@ test('stat and readdir EACCES/EPERM return 403 with macOS permission steps', asy
         };
         await assert.rejects(listHostDirectories(f.home, false, join(f.base, 'data'), f.roots, fsOps), (error) => {
           assert.equal(error.status, 403);
-          const hint = error.details.permission_hint;
+          const hint = errorBody('r', error, 'ja').error.details.permission_hint;
           const text = hint.settings_paths.join(' ');
           assert.match(text, /フルディスクアクセス/);
           assert.match(text, /ファイルとフォルダ/);

@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 
-import type { TestSetupSettings } from "../../shared/dist/test-setup-settings.js";
+import type { TestSetupSettings } from "@owl/shared/test-setup-settings";
 import {
   advanceWorkingDirectory,
   analyzeShellCommand,

@@ -40,12 +40,12 @@ function getNestedValue(obj: unknown, path: string): string | undefined {
   return typeof current === 'string' ? current : undefined;
 }
 
-function interpolate(template: string, params?: Record<string, string>): string {
+function interpolate(template: string, params?: Record<string, string | number>): string {
   if (!params) return template;
-  return template.replace(/\{\{(\w+)\}\}/g, (_, key: string) => params[key] ?? `{{${key}}}`);
+  return template.replace(/\{\{(\w+)\}\}/g, (_, key: string) => String(params[key] ?? `{{${key}}}`));
 }
 
-export type TFunction = (key: string, params?: Record<string, string>) => string;
+export type TFunction = (key: string, params?: Record<string, string | number>) => string;
 
 interface LocaleContextValue {
   locale: Locale;
@@ -81,7 +81,7 @@ export function LocaleProvider({ children }: { children: ReactNode }) {
     try { document.documentElement.lang = locale; } catch { /* noop */ }
   }, [locale]);
 
-  const t: TFunction = useCallback((key: string, params?: Record<string, string>) => {
+  const t: TFunction = useCallback((key: string, params?: Record<string, string | number>) => {
     const value = getNestedValue(dictionaries[locale], key);
     if (value !== undefined) return interpolate(value, params);
     // Fallback to Japanese

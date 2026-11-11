@@ -691,7 +691,7 @@ While a turn runs, `GET /api/v1/advisor/session` reports the session's `activity
 
 **Owner files.** `GET /api/v1/owner-files/{root}/{path}` serves a file, or lists a folder, under the materials folder or the Advisor shared folder. The Web chat turns such paths in Advisor replies into links. Paths outside these folders, `..` segments, symlinks that lead out, and secret-looking files are refused.
 
-**Markdown viewer.** The Work detail page opens Markdown files in a viewer (`/work/markdown`). It reads only `.md` files in the Work's Project (the integrated version, or the Work branch before integration) and in the materials folder, up to 2 MiB, and refuses secret-looking paths.
+**Markdown viewer.** The Work detail page, and `.md` links in Advisor conversations, open Markdown files in a viewer (`/work/markdown`). It reads only `.md` files in the Work's Project (the integrated version, or the Work branch before integration) and in the materials folder, up to 2 MiB, and refuses secret-looking paths.
 
 `GET /api/v1/advisor/windows` returns `has_unread` for each window. The server stores the read state, and `PUT /api/v1/advisor/windows/{key}/read` marks a window read (the Web UI calls it when you open the window). An Advisor turn that is running can be interrupted from the Advisor page (stop button, `POST /api/v1/advisor/session/interrupt`). The stop works for both Claude and Codex Advisor sessions.
 

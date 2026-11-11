@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { guardConfig, guardRequest } from "./guard-client.js";
-import { createInterface } from "node:readline";
-import { redactProviderOutput } from "../../../packages/shared/dist/advisor-response.js";
-import { validateOwnApiPath } from "../../../packages/shared/dist/advisor-api-policy.js";
+import { serveMcp } from "./stdio-jsonrpc.js";
+import { redactProviderOutput } from "@owl/shared/advisor-response";
+import { validateOwnApiPath } from "@owl/shared/advisor-api-policy";
 
 const OWL_API_MCP_TIMEOUT_MS = 60_000;
 const OWL_API_MCP_MAX_RESPONSE_CHARS = 100_000;
@@ -31,6 +31,7 @@ class ToolError extends Error {
   constructor(readonly code: string, message: string) { super(message); }
 }
 
+// shared の errorCode は error.code を文字列で返し、無ければ undefined。ここは cause.code を先に見て、無ければ空文字を返すので別に持つ。
 function errorCode(error: unknown): string {
   const e = error as { code?: string; cause?: { code?: string } };
   return e?.cause?.code ?? e?.code ?? "";
@@ -119,28 +120,4 @@ async function callTool(name: string, args: Json): Promise<Json> {
   }
 }
 
-function send(message: Json): void {
-  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
-}
-
-async function handle(line: string): Promise<void> {
-  let message: { id?: unknown; method?: string; params?: Json };
-  try { message = JSON.parse(line); } catch { return; }
-  if (typeof message !== "object" || message === null) return;
-  const { id, method, params } = message;
-  if (id === undefined) return;
-  if (method === "initialize") {
-    send({ id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "owl-api", version: "1.0.0" } } });
-  } else if (method === "ping") {
-    send({ id, result: {} });
-  } else if (method === "tools/list") {
-    send({ id, result: { tools: TOOLS } });
-  } else if (method === "tools/call") {
-    const args = params?.arguments && typeof params.arguments === "object" ? (params.arguments as Json) : {};
-    send({ id, result: await callTool(String(params?.name ?? ""), args) });
-  } else {
-    send({ id, error: { code: -32601, message: `Method not found: ${method}` } });
-  }
-}
-
-createInterface({ input: process.stdin }).on("line", (line) => { void handle(line); });
+serveMcp({ name: "owl-api", version: "1.0.0", tools: () => TOOLS, callTool: (_id, name, args) => callTool(name, args) });

@@ -1,4 +1,4 @@
-import { isOwnerLanguage, ownerLanguageFromLocale, type OwnerLanguage } from "../../../packages/shared/dist/owner-language.js";
+import { isOwnerLanguage, ownerLanguageFromLocale, type OwnerLanguage } from "@owl/shared/owner-language";
 
 export function cliLanguage(env: NodeJS.ProcessEnv = process.env): OwnerLanguage {
   if (isOwnerLanguage(env.OWL_LANG)) return env.OWL_LANG;

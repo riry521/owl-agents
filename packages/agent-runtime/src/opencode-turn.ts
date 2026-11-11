@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { OPENCODE_RETRY_WAIT_LIMIT_MS, normalizeOpencodeToolCall, opencodePermissionRules, type AgentPermissionRole } from "@owl/shared";
 import { OpencodeHttpError, type OpencodeClient, type OpencodeEvent } from "./opencode-client";
 import type { OpencodePermissionResponder } from "./opencode-permission";
+import { isRecord } from "@owl/shared/small-helpers";
 
 /** How long an interrupt may wait for serve's answer before the run goes on to stop serve. */
 const INTERRUPT_TIMEOUT_MS = 5_000;
@@ -48,10 +49,6 @@ export interface OpencodeTurnResult {
   readonly userMessageId: string | null;
   /** stdout JSON lines; text deltas and reasoning are left out. */
   readonly records: readonly string[];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** The retry-after value anywhere in the error's response (headers or body), without keeping the rest of it. */

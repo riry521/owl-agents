@@ -83,11 +83,13 @@ export function buildLibrarianOperationsPrompt(request: LibrarianOperationsReque
 export const parseLibrarianOperationsResponse = (response: Pick<ProviderResponse, "adapter" | "stdout" | "format">) =>
   parseWith(LIBRARIAN_OPERATIONS_OUTPUT_SCHEMA, "librarian_operations_stdout_not_single_json_object", "librarian_operations", response);
 
-export const CLIPPING_TAGS_OUTPUT_SCHEMA: RoleSchema = objectSchema({
+// Only `tags` is required: summary and keywords were added later, and a reply with `tags` alone must still be saved.
+const CLIPPING_TAGS_FIELDS = objectSchema({
   tags: { type: "array", items: { type: "string", minLength: 1 }, description: "tags describing the content of the article" },
   summary: { type: "string", minLength: 1, description: "one short sentence saying what this material is" },
   keywords: { type: "array", items: { type: "string", minLength: 1 }, description: "Japanese keywords, including Japanese paraphrases of the English terms" },
 });
+export const CLIPPING_TAGS_OUTPUT_SCHEMA: RoleSchema = { ...CLIPPING_TAGS_FIELDS, required: ["tags"] };
 
 export function buildClippingTagsPrompt(request: ClippingTagsRequest): string {
   return renderRolePrompt({

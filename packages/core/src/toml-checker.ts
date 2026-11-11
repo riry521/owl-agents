@@ -1,12 +1,8 @@
 import { constants } from "node:fs";
 import { open, lstat, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep, win32 } from "node:path";
+import { isAbsolute, relative, resolve, win32 } from "node:path";
 import { parse } from "smol-toml";
-
-function inside(root: string, candidate: string): boolean {
-  const path = relative(root, candidate);
-  return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path));
-}
+import { isPathInside } from "./path-inside.js";
 
 async function main(args: string[]): Promise<number> {
   const [file, limitText, ...extra] = args;
@@ -17,14 +13,14 @@ async function main(args: string[]): Promise<number> {
 
   const root = await realpath(process.cwd());
   const target = resolve(root, file);
-  if (!inside(root, target)) return 2;
+  if (!isPathInside(root, target, true)) return 2;
 
   let handle;
   try {
     const info = await lstat(target);
     if (!info.isFile() || info.isSymbolicLink()) return 2;
     const resolvedTarget = await realpath(target);
-    if (!inside(root, resolvedTarget)) return 2;
+    if (!isPathInside(root, resolvedTarget, true)) return 2;
     handle = await open(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     const opened = await handle.stat();
     if (!opened.isFile()) return 2;

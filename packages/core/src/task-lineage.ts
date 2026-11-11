@@ -1,10 +1,10 @@
-import type { RemakeLimitSettings } from "../../shared/dist/remake-limit-settings.js";
-import { EXTERNAL_BLOCKER_EVENT } from "../../shared/dist/external-blocker.js";
-import { workerAcceptanceDefects } from "../../shared/dist/acceptance-defect.js";
+import type { RemakeLimitSettings } from "@owl/shared/remake-limit-settings";
+import { EXTERNAL_BLOCKER_EVENT } from "@owl/shared/external-blocker";
+import { workerAcceptanceDefects } from "@owl/shared/acceptance-defect";
 import { HumanReadableError } from "./errors";
 import { classifyRemakeUnit, type MeasuredFile, type RemakeUnit, type RemakeUnitClass } from "./remake-gate";
 import type { ChangedFile, CoreSqlValue, CoreWriteLaneTransaction } from "./types";
-import { createUlid, utcNow } from "../../db/dist/index.js";
+import { createUlid, utcNow } from "@owl/db";
 
 export interface LineageReader {
   get<T extends object>(sql: string, ...parameters: CoreSqlValue[]): T | undefined;

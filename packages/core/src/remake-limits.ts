@@ -4,7 +4,7 @@ import {
   readRemakeLimitSettings,
   validateRemakeLimitSettings,
   type RemakeLimitSettings,
-} from "../../shared/dist/remake-limit-settings.js";
+} from "@owl/shared/remake-limit-settings";
 import type { SettingsReader } from "./owner-language";
 import { readSetting, type SettingSpec } from "./settings-store";
 

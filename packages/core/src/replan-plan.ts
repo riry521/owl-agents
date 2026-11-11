@@ -1,8 +1,8 @@
-import { PrerequisiteValidationError, validateWaitFor, type PlanWaitFor } from "../../shared/dist/prerequisite.js";
-import { DEFAULT_PLAN_QUALITY_SETTINGS, type PlanQualitySettings } from "../../shared/dist/plan-quality-settings.js";
-import { criterionRequirement, isManagerCriterion, type CriteriaRelaxation, type StoredAcceptanceCriterion } from "../../shared/dist/acceptance-criteria.js";
-import type { AcceptanceDefect } from "../../shared/dist/acceptance-defect.js";
-import { designsScreens, type UiChange } from "../../shared/dist/design-documents.js";
+import { PrerequisiteValidationError, validateWaitFor, type PlanWaitFor } from "@owl/shared/prerequisite";
+import { DEFAULT_PLAN_QUALITY_SETTINGS, type PlanQualitySettings } from "@owl/shared/plan-quality-settings";
+import { criterionRequirement, isManagerCriterion, type CriteriaRelaxation, type StoredAcceptanceCriterion } from "@owl/shared/acceptance-criteria";
+import type { AcceptanceDefect } from "@owl/shared/acceptance-defect";
+import { designsScreens, type UiChange } from "@owl/shared/design-documents";
 import { evaluateCriteriaRelaxation } from "./plan-quality";
 import type { CriterionCheck, RuleApplicability, TaskPlanItem } from "./types";
 

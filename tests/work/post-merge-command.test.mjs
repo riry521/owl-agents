@@ -173,7 +173,7 @@ test("createProject stores a valid post_merge_command and rejects invalid ones",
 test("Core defaults to pnpm build for its own unset project", async (t) => {
   const { db, core, root } = await openMergeCore(t, undefined);
   const owl = await seedFinishedWork(core, db, root, null);
-  assert.deepEqual(core.resolvePostMergeCommand(owl.projectId).argv, ["pnpm", "build"]);
+  assert.deepEqual(core.postMerge.resolve(owl.projectId).argv, ["pnpm", "build"]);
 });
 
 async function runMergeWith(t, changed, { install, build, projectInstall }) {

@@ -1,5 +1,5 @@
 import type { ProviderErrorRecord } from "@owl/shared";
-import { createUlid, utcNow } from "../../db/dist/index.js";
+import { createUlid, utcNow } from "@owl/db";
 import type { CoreDatabase, CoreWriteLaneTransaction, StoredProviderError } from "./types.js";
 
 interface Row { readonly invocation_id: string; readonly role: string; readonly record_json: string; readonly created_at: string }

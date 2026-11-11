@@ -4,13 +4,13 @@ import {
   readReviewRoutingSettings,
   validateReviewRoutingSettings,
   type ReviewRoutingSettings,
-} from "../../shared/dist/review-routing-settings.js";
+} from "@owl/shared/review-routing-settings";
 import {
   DEFAULT_WORK_VERIFICATION_SETTINGS,
   WORK_VERIFICATION_SETTINGS_KEY,
   readWorkVerificationSettings,
   type WorkVerificationSettings,
-} from "../../shared/dist/work-verification-settings.js";
+} from "@owl/shared/work-verification-settings";
 import type { SettingsReader } from "./owner-language";
 import { readSetting, type SettingReadSpec, type SettingSpec } from "./settings-store";
 

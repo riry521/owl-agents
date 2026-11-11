@@ -1,3 +1,4 @@
+// @ts-check
 // キー付きキャッシュ（stale-while-revalidate）と、invalidate の束ね直しを持つ純 JS の読み込み係。
 // DOM も React も使わず、時計とタイマーは引数で差し替えられる。
 
@@ -11,6 +12,10 @@ export const DEFAULT_REFRESH_MS = 5_000;
  * fetcher は (etag) => Promise<{ kind: "fresh", value: { data, version, etag } } | { kind: "not_modified" }>。
  * listener には { data, etag, fetchedAt, error } を渡す。
  */
+/**
+ * @param {any} a
+ * @param {any} b
+ */
 const sameJson = (a, b) => {
   try {
     return a !== undefined && a !== null && JSON.stringify(a) === JSON.stringify(b);
@@ -19,6 +24,10 @@ const sameJson = (a, b) => {
   }
 };
 
+/**
+ * @typedef {{ data: any, etag: string | null, fetchedAt: number | null, error: any }} ViewSnapshot
+ * @typedef {{ data: any, etag: string | null, fetchedAt: number | null, error: any, stale: boolean, listeners: Set<(view: ViewSnapshot) => void>, fetcher: ((etag: string | null) => Promise<any>) | null, inflight: Promise<any> | null, refetchAfter: boolean, pollMs: number | null, pollTimer: any, evictTimer: any }} ViewEntry
+ */
 export function createViewStore({
   now = Date.now,
   setTimer = setTimeout,
@@ -29,10 +38,13 @@ export function createViewStore({
   staleMs: defaultStaleMs = DEFAULT_STALE_MS,
   refreshMs: defaultRefreshMs = DEFAULT_REFRESH_MS,
 } = {}) {
+  /** @type {Map<string, ViewEntry>} */
   const entries = new Map();
   const dirty = new Map(); // key -> 最初に invalidate された時刻
+  /** @type {any} */
   let coalesceTimer = null;
 
+  /** @param {string} key */
   function entryOf(key) {
     let entry = entries.get(key);
     if (!entry) {
@@ -55,13 +67,20 @@ export function createViewStore({
     return entry;
   }
 
+  /** @param {ViewEntry} entry */
   const snapshot = (entry) => ({ data: entry.data, etag: entry.etag, fetchedAt: entry.fetchedAt, error: entry.error });
+  /** @param {ViewEntry} entry */
   const hasState = (entry) => entry.fetchedAt !== null || entry.error !== null;
+  /** @param {ViewEntry} entry */
   const notify = (entry) => {
     const view = snapshot(entry);
     for (const listener of [...entry.listeners]) listener(view);
   };
 
+  /**
+   * @param {string} key
+   * @returns {Promise<any>}
+   */
   function fetchKey(key) {
     const entry = entries.get(key);
     if (!entry || !entry.fetcher) return Promise.resolve();
@@ -71,7 +90,7 @@ export function createViewStore({
     }
     entry.stale = false;
     entry.inflight = Promise.resolve()
-      .then(() => entry.fetcher(entry.etag))
+      .then(() => /** @type {NonNullable<ViewEntry['fetcher']>} */ (entry.fetcher)(entry.etag))
       .then(
         (result) => {
           entry.fetchedAt = now();
@@ -116,6 +135,7 @@ export function createViewStore({
     return Promise.all(fetches).then(() => undefined);
   }
 
+  /** @param {Iterable<string>} keys */
   function invalidate(keys) {
     const at = now();
     for (const key of keys) if (!dirty.has(key)) dirty.set(key, at);
@@ -133,6 +153,7 @@ export function createViewStore({
     }, Math.min(coalesceMs, remaining));
   }
 
+  /** @param {string} key */
   function schedulePoll(key) {
     const entry = entries.get(key);
     if (!entry || entry.pollTimer !== null || entry.pollMs === null || entry.listeners.size === 0) return;
@@ -144,11 +165,16 @@ export function createViewStore({
     }, entry.pollMs);
   }
 
+  /** @param {ViewEntry} entry */
   function stopPoll(entry) {
     if (entry.pollTimer !== null) clearTimer(entry.pollTimer);
     entry.pollTimer = null;
   }
 
+  /**
+   * @param {string} key
+   * @param {(view: ViewSnapshot) => void} listener
+   */
   function subscribe(key, listener) {
     const entry = entryOf(key);
     entry.listeners.add(listener);
@@ -167,6 +193,11 @@ export function createViewStore({
     };
   }
 
+  /**
+   * @param {string} key
+   * @param {(etag: string | null) => Promise<any>} fetcher
+   * @param {{ staleMs?: number }} [options]
+   */
   function load(key, fetcher, { staleMs = defaultStaleMs } = {}) {
     const entry = entryOf(key);
     entry.fetcher = fetcher;
@@ -175,6 +206,7 @@ export function createViewStore({
   }
 
   return {
+    /** @param {string} key */
     read(key) {
       const entry = entries.get(key);
       return entry && hasState(entry) ? snapshot(entry) : undefined;
@@ -183,6 +215,10 @@ export function createViewStore({
     load,
     invalidate,
     refresh: fetchKey,
+    /**
+     * @param {string} key
+     * @param {number} [ms]
+     */
     setPolling(key, ms = defaultRefreshMs) {
       const entry = entryOf(key);
       stopPoll(entry);

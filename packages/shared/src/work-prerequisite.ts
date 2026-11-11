@@ -18,11 +18,17 @@ export type WorkPrerequisiteView = {
 };
 
 /** Throws an Error whose message is safe to show; callers wrap it in their own validation error. */
+export class PrerequisiteIdsError extends Error {
+  public constructor(message: string, public readonly kind: "not_array" | "duplicate" | "too_many") {
+    super(message);
+  }
+}
+
 export function validatePrerequisiteWorkIds(value: unknown, field = "prerequisite_work_ids"): string[] {
   if (!Array.isArray(value) || value.some((id) => typeof id !== "string" || !ULID_PATTERN.test(id))) {
-    throw new Error(`${field} must be an array of Work IDs.`);
+    throw new PrerequisiteIdsError(`${field} must be an array of Work IDs.`, "not_array");
   }
-  if (new Set(value).size !== value.length) throw new Error(`${field} must list each Work once.`);
-  if (value.length > WORK_PREREQUISITE_LIMIT) throw new Error(`${field} can list at most ${WORK_PREREQUISITE_LIMIT} Works.`);
+  if (new Set(value).size !== value.length) throw new PrerequisiteIdsError(`${field} must list each Work once.`, "duplicate");
+  if (value.length > WORK_PREREQUISITE_LIMIT) throw new PrerequisiteIdsError(`${field} can list at most ${WORK_PREREQUISITE_LIMIT} Works.`, "too_many");
   return value as string[];
 }

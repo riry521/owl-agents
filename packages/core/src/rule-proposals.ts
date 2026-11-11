@@ -1,4 +1,4 @@
-import { createUlid, utcNow } from "../../db/dist/index.js";
+import { createUlid, utcNow } from "@owl/db";
 import { isRuleRole } from "@owl/shared";
 import { HumanReadableError, invalidStateTransition, notFound } from "./errors.js";
 import { fingerprint, ruleKeyFingerprint } from "./learning-fingerprint.js";
@@ -11,6 +11,7 @@ import { coApply } from "./rule-curation.js";
 import type { RuleWriter } from "./rule-writer.js";
 import { storedSettingJson } from "./settings-store.js";
 import type { CoreDatabase, CoreWriteLaneTransaction } from "./types.js";
+import { isRecord, positiveInteger } from "@owl/shared/small-helpers";
 
 export const RULE_PROPOSAL_MIN_SOURCES = 2;
 export const RULE_PROPOSAL_SETTINGS_KEY = "rule_proposals";
@@ -799,14 +800,6 @@ function parseJson(json: string | null): unknown {
   try { return JSON.parse(json) as unknown; } catch { return null; }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function isProposalStatus(value: string): value is RuleProposalStatus {
   return ["pending", "awaiting_approval", "applied", "rejected", "expired", "merged"].includes(value);
-}
-
-function positiveInteger(value: number | undefined, fallback: number): number {
-  return Number.isSafeInteger(value) && (value ?? 0) > 0 ? value as number : fallback;
 }

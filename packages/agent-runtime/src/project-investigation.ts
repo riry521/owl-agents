@@ -10,7 +10,7 @@ import {
   DEFAULT_PROJECT_INVESTIGATION_OUTPUT_SETTINGS,
   PROJECT_INVESTIGATION_PATTERN_FLAGS,
   type ProjectInvestigationOutputSettings,
-} from "../../shared/dist/project-investigation-settings.js";
+} from "@owl/shared/project-investigation-settings";
 import type { ProviderResponse } from "./types";
 
 export interface ProjectInvestigationEvidenceItem {

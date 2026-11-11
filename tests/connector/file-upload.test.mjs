@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { readdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { SlackConnector, downloadFile } from "../../packages/connector-slack/dist/index.js";
@@ -528,4 +530,41 @@ test("Slack status_query posts the fixed answer, then records the message and th
   assert.equal(recordCalls.length, 1);
   assert.equal(recordCalls[0].body.text, "/status");
   assert.equal(recordCalls[0].body.status_reply, posts[0].text);
+});
+
+test("Slack and Discord ask Core for the language once per Advisor reply that carries a file", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "owl-language-count-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const path = join(dir, "report.txt");
+  await writeFile(path, "body");
+  const outbound_files = [{ path, name: "report.txt", size: 4, sha256: createHash("sha256").update("body").digest("hex") }];
+  const event = (channel) => ({
+    kind: "event", event_id: `event-${channel}`, sequence: 1, cursor: "1", type: "advisor.responded", schema_version: "1.0.0",
+    payload: { conversation_id: `${channel}:C1`, reply: "done", outbound_files, origin: { channel, channel_id: "C1" } },
+  });
+  // CoreClient caches language(), so count the calls themselves, not the HTTP requests behind them.
+  const stubCore = (connector, counter) => {
+    connector.core.language = async () => { counter.languageCalls += 1; return "ja"; };
+    connector.core.request = async () => ({});
+  };
+
+  const slack = new SlackConnector({
+    botToken: "xoxb-x", appToken: "xapp-x", conversationChannelId: "C1", notificationChannelId: "C2",
+    coreApiBase: "http://127.0.0.1:1/api/v1", accountId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  });
+  const slackCount = { languageCalls: 0 };
+  stubCore(slack, slackCount);
+  slack.web = { chat: { postMessage: async () => ({}) }, filesUploadV2: async () => ({}) };
+  await slack.handleCoreEvent(event("slack"));
+  assert.equal(slackCount.languageCalls, 1);
+
+  const discord = new DiscordConnector({
+    botToken: "discord-x", conversationChannelId: "C1", notificationChannelId: "C2",
+    coreApiBase: "http://127.0.0.1:1/api/v1", accountId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+  });
+  const discordCount = { languageCalls: 0 };
+  stubCore(discord, discordCount);
+  discord.client.channels.fetch = async () => ({ isTextBased: () => true, send: async () => ({}) });
+  await discord.handleCoreEvent(event("discord"));
+  assert.equal(discordCount.languageCalls, 1);
 });

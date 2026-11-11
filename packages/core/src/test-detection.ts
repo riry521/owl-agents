@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 
-import { DEFAULT_TEST_RUN_SETTINGS, readTestRunSettings, runArgvOf, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
-import { DEFAULT_TEST_SETUP_SETTINGS } from "../../shared/dist/test-setup-settings.js";
+import { DEFAULT_TEST_RUN_SETTINGS, readTestRunSettings, runArgvOf, type TestRunSettings } from "@owl/shared/test-run-settings";
+import { DEFAULT_TEST_SETUP_SETTINGS } from "@owl/shared/test-setup-settings";
 import { testExecutables, withExecutables, type TestSetupMatch, type TestSetupSelection } from "./test-setup.js";
 import { testRunSettingsFromJson } from "./test-runs.js";
 
@@ -13,6 +13,7 @@ import {
   type TestDetectionPrepare,
   type TestDetectionRules,
 } from "./test-detection-rules.js";
+import { sha256 } from "@owl/shared/small-helpers";
 
 /** Returns a root-relative file's text, or null when it is absent, unreadable, outside the root or too large. */
 export type MarkerReader = (path: string) => string | null;
@@ -97,8 +98,6 @@ function referencedFiles(rules: TestDetectionRules): string[] {
   }
   return [...files].sort();
 }
-
-const sha256 = (text: string): string => createHash("sha256").update(text).digest("hex");
 
 export function testDetectionRulesVersion(rules: TestDetectionRules): string {
   return sha256(JSON.stringify(rules));

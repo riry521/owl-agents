@@ -1,6 +1,6 @@
 {
   "name": "@owl/root",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "private": true,
   "packageManager": "pnpm@10.15.0",
   "engines": {
@@ -12,13 +12,13 @@
     "build": "pnpm --filter @owl/shared build && pnpm --filter @owl/db build && pnpm --filter @owl/plugin-sdk build && pnpm --filter @owl/connector-slack build && pnpm --filter @owl/connector-discord build && pnpm --filter @owl/core build && pnpm --filter @owl/agent-runtime build && pnpm --filter @owl/server build && pnpm --filter @owl-agent/connectors build && pnpm --filter @owl-agent/supervisor build && pnpm --filter web build && :",
     "start": "node apps/server/dist/server.js",
     "typecheck": "pnpm --filter @owl/shared typecheck && pnpm --filter @owl/db typecheck && pnpm --filter @owl/plugin-sdk typecheck && pnpm --filter @owl/connector-slack typecheck && pnpm --filter @owl/connector-discord typecheck && pnpm --filter @owl/core typecheck && pnpm --filter @owl/agent-runtime typecheck && pnpm --filter @owl/server typecheck && pnpm --filter @owl-agent/connectors typecheck && pnpm --filter @owl-agent/supervisor typecheck && pnpm --filter web typecheck",
-    "test": "node --test --test-timeout=120000 \"tests/**/*.test.mjs\"",
+    "test": "node --test --test-timeout=120000 \"tests/**/*.test.mjs\" \"packages/*/test/**/*.test.mjs\" \"apps/server/test/**/*.test.mjs\"",
     "test:prepare": "node scripts/prepare-test-checkout.mjs",
     "test:required": "node scripts/run-required-tests.mjs tests/required-tests.json",
     "test:gate": "pnpm test:prepare && pnpm test:required",
     "test:layout": "node scripts/check-test-layout.mjs tests/layout.json",
     "test:hardcode": "node scripts/check-test-hardcode.mjs tests/hardcode-checks.json",
-    "test:nightly": "pnpm test:prepare && node --test --test-timeout=120000 --test-reporter=tap \"tests/**/*.test.mjs\"",
+    "test:nightly": "pnpm test:prepare && node --test --test-timeout=120000 --test-reporter=tap \"tests/**/*.test.mjs\" \"packages/*/test/**/*.test.mjs\" \"apps/server/test/**/*.test.mjs\"",
     "audit": "pnpm audit --prod --audit-level high",
     "typecheck:shared": "pnpm -w exec tsc --noEmit -p packages/shared"
   },

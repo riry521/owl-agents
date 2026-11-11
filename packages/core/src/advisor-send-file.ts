@@ -3,9 +3,11 @@ import { constants } from "node:fs";
 import { open, readlink, realpath, stat, type FileHandle } from "node:fs/promises";
 import { basename, isAbsolute, relative, sep } from "node:path";
 
-import { parseAdvisorSendFilePayload } from "../../shared/dist/index.js";
+import { parseAdvisorSendFilePayload } from "@owl/shared";
 import type { AdvisorText } from "./advisor-text.js";
 import { isSecretPath } from "./project-overview-note.js";
+import { isPathInside } from "./path-inside.js";
+import { errorCode } from "@owl/shared/small-helpers";
 
 /** The one place the per-channel upload limits default; settings override them. */
 export const DEFAULT_ADVISOR_SEND_FILE_MAX_BYTES = { slack: 100 * 1024 * 1024, discord: 20 * 1024 * 1024 } as const;
@@ -39,10 +41,6 @@ export type AdvisorSendFileResult =
   | { ok: false; kind: "unsupported_channel"; name: string }
   | { ok: false; kind: "rejected"; name: string; rejection: AdvisorSendFileRejection; size?: number; limit?: number; channel?: string };
 
-function errorCode(error: unknown): string | undefined {
-  return typeof error === "object" && error !== null && "code" in error ? String((error as { code: unknown }).code) : undefined;
-}
-
 /** Opens `real` so that the descriptor is the file at that exact symlink-free path. */
 export async function openPinnedFile(real: string):
   Promise<{ ok: true; handle: FileHandle } | { ok: false; rejection: "changed" | "not_found" | "unreadable" }> {
@@ -71,11 +69,6 @@ export async function openPinnedFile(real: string):
   return { ok: true, handle };
 }
 
-export function isInside(root: string, target: string): boolean {
-  const rel = relative(root, target);
-  return rel !== "" && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
-}
-
 async function realDirectories(dirs: readonly string[]): Promise<string[]> {
   const roots: string[] = [];
   for (const dir of dirs) {
@@ -101,11 +94,11 @@ async function check(request: { path: string; comment?: string }, channel: strin
     const code = errorCode(error);
     return reject(code === "ENOENT" || code === "ENOTDIR" ? "not_found" : "unreadable");
   }
-  if (!roots.some((root) => isInside(root, real))) {
+  if (!roots.some((root) => isPathInside(root, real, false))) {
     if (roots.some((root) => root === real)) return reject("not_a_file");
     // Textually inside a folder but resolving outside means a link led out.
     const configured = [...settings.dirs, ...roots];
-    return reject(configured.some((root) => isInside(root, request.path)) ? "symlink_escape" : "outside");
+    return reject(configured.some((root) => isPathInside(root, request.path, false)) ? "symlink_escape" : "outside");
   }
   if (isSecretPath(real.split(sep).join("/"))) return reject("secret");
   const pinned = await openPinnedFile(real);

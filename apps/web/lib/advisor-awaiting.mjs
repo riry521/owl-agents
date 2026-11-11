@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * Whether the reply to the message just sent has arrived: an advisor message
  * after it. Only this clears the awaiting state; a session reading idle does

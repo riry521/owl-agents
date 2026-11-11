@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { request as httpRequest } from "node:http";
-import { mkdir, realpath, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
 
@@ -150,6 +150,21 @@ for (const wrap of [false, true]) {
 
     const rootPage = await s.get("/shared/");
     assert.match(rootPage.body.toString(), /hello\.txt/u);
+  });
+
+  test(`answers 4xx, not 500, for a folder the process cannot read (${label})`, async (t) => {
+    const s = await setup(t, { wrap });
+    if (!s) return t.skip("localhost listen is unavailable");
+    const locked = join(s.materials, "demo", "locked");
+    await mkdir(locked, { recursive: true });
+    await chmod(locked, 0o000);
+    t.after(() => chmod(locked, 0o755).catch(() => undefined));
+    if (process.getuid?.() === 0) return t.skip("root can read any folder");
+    const res = await s.get("/materials/demo/locked/");
+    assert.ok(res.status >= 400 && res.status < 500, `status ${res.status}`);
+    const message = JSON.parse(res.body.toString()).error.message;
+    assert.match(message, /権限|permissions/u);
+    assert.doesNotMatch(message, /外にあります|outside/u);
   });
 }
 

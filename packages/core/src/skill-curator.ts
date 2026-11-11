@@ -1,4 +1,4 @@
-import { createUlid } from "../../db/dist/index.js";
+import { createUlid } from "@owl/db";
 import type {
   CuratorCandidate,
   CuratorJudgement,
@@ -11,6 +11,7 @@ import type { AgentRunner, CoreDatabase, CoreWriteLaneTransaction } from "./type
 import { SKILLS_SETTINGS_KEY, type SkillBox, type SkillRecord } from "./skill-box.js";
 import { storedSettingJson } from "./settings-store.js";
 import { hashSkillFiles, parseSkillMd, renderSkillMd, validateSkillFilePath, validateSkillName } from "./skill-files.js";
+import { isRecord } from "@owl/shared/small-helpers";
 
 export interface SkillCurationResult {
   target: { skills: number; open_proposals: number };
@@ -1142,10 +1143,6 @@ function runKindPriority(kind: CuratorRunKind): number {
 
 function words(value: string): Set<string> {
   return new Set((value.toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).filter((word) => word.length > 1));
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function decisionReason(json: string | null): string | null {

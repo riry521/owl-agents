@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { resolve, sep } from "node:path";
+import { resolve } from "node:path";
 import { OWL_INSTANCE_ID_ENV, OWL_MARKER_PATTERN, PROCESS_GROUP_REAP_GRACE_MS } from "@owl/shared";
 import type { WorkspaceEntry } from "./types.js";
 import { safeSegment } from "./workspace-layout.js";
+import { isPathInside } from "./path-inside.js";
 
 /** One row of the process table with the Owl markers found in its environment. */
 export interface ProcessRow {
@@ -155,10 +156,6 @@ export async function snapshotProcessTable(platform: NodeJS.Platform = process.p
   return rows;
 }
 
-function isInside(directory: string, candidate: string): boolean {
-  return candidate === directory || candidate.startsWith(directory.endsWith(sep) ? directory : directory + sep);
-}
-
 /** The executable of a ps line. `ps -E` prints the environment after the arguments, so nothing past the first word is ever logged. */
 function commandOf(args: string): string {
   const first = args.trim().split(/\s+/u)[0] ?? "";
@@ -219,7 +216,7 @@ export class WorkspaceProcessSweeper {
       const scopePath = scope.path === undefined ? null : resolve(scope.path);
       selected = (await this.deps.listWorkspaces()).filter((entry) =>
         (scope.workId === undefined || entry.work_id === scope.workId)
-        && (scopePath === null || isInside(scopePath, resolve(entry.path))),
+        && (scopePath === null || isPathInside(scopePath, resolve(entry.path), true)),
       );
       if (selected.length === 0) return [];
     }

@@ -13,7 +13,7 @@ interface WorkFinalReportPanelProps {
 }
 
 /** The Manager's closing report of a completed Work, split into three sections. Hidden unless completed with a report. */
-export function WorkFinalReportPanel({ state, finalReport, workId, locale, t }:WorkFinalReportPanelProps) {
+export function WorkFinalReportPanel({ state, finalReport, workId, locale, t }: WorkFinalReportPanelProps) {
   if (state !== 'completed' || !finalReport) return null;
   const sections = [
     { key: 'summary', title: t('work.finalReportSummary'), text: finalReport.summary },

@@ -2,7 +2,6 @@ import { exactKeysValidator, isRecord, SettingsValidationError } from "./setting
 
 export const FIXER_ESCALATION_SETTINGS_KEY = "fixer_escalation";
 const KEYS = ["after_review_rejections"] as const;
-export const FIXER_ESCALATION_SETTINGS_KEYS: readonly string[] = KEYS;
 export const FIXER_ESCALATION_MIN = 1;
 export const FIXER_ESCALATION_MAX = 100;
 
@@ -19,7 +18,7 @@ export class FixerEscalationSettingsValidationError extends SettingsValidationEr
 
 function checkRejections(value: unknown): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < FIXER_ESCALATION_MIN || value > FIXER_ESCALATION_MAX) {
-    throw new FixerEscalationSettingsValidationError(`after_review_rejections must be an integer from ${FIXER_ESCALATION_MIN} to ${FIXER_ESCALATION_MAX}.`, "after_review_rejections");
+    throw new FixerEscalationSettingsValidationError(`after_review_rejections must be an integer from ${FIXER_ESCALATION_MIN} to ${FIXER_ESCALATION_MAX}.`, "after_review_rejections", { kind: "integer_range", min: FIXER_ESCALATION_MIN, max: FIXER_ESCALATION_MAX });
   }
   return value;
 }

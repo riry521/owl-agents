@@ -3,7 +3,7 @@ import {
   PROJECT_INVESTIGATION_OUTPUT_SETTINGS_KEY,
   readProjectInvestigationOutputSettings,
   type ProjectInvestigationOutputSettings,
-} from "../../shared/dist/project-investigation-settings.js";
+} from "@owl/shared/project-investigation-settings";
 import type { SettingsReader } from "./owner-language";
 import { readSetting, type SettingReadSpec } from "./settings-store";
 

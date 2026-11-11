@@ -1,6 +1,10 @@
+// @ts-check
 // Core の処理の表示用の整形。純 JS。
 
-/** 開始からの経過を { unit, count } にする（60秒未満は秒、1時間未満は分、それ以上は時間）。 */
+/**
+ * 開始からの経過を { unit, count } にする（60秒未満は秒、1時間未満は分、それ以上は時間）。
+ * @param {unknown} iso @param {number} now
+ */
 export function elapsedParts(iso, now) {
   const start = typeof iso === "string" ? Date.parse(iso) : NaN;
   if (!Number.isFinite(start)) return null;
@@ -10,7 +14,7 @@ export function elapsedParts(iso, now) {
   return minutes < 60 ? { unit: "minutes", count: minutes } : { unit: "hours", count: Math.floor(minutes / 60) };
 }
 
-/** argv を空白でつなぐ。無ければ null。 */
+/** argv を空白でつなぐ。無ければ null。 @param {unknown} command */
 export function commandText(command) {
   return Array.isArray(command) && command.length > 0 ? command.join(" ") : null;
 }

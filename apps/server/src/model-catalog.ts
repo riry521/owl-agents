@@ -8,7 +8,7 @@ import {
   CODEX_BUILTIN_MODELS,
   parseCodexModelsCache,
   type CodexCatalogModel,
-} from "../../../packages/shared/dist/index.js";
+} from "@owl/shared";
 
 import { opencodeCliStatus, withPrivateOpencodeServe } from "./opencode-status.js";
 

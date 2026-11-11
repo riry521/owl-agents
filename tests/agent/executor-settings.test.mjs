@@ -178,7 +178,7 @@ test("invalid token relay and researcher settings are rejected with the offendin
   assert.deepEqual(core.getChildRunSettings(), DEFAULT_CHILD_RUN_SETTINGS);
 });
 
-test("legacy executor PUT updates the Executor harness and dispatch uses the saved values", async (t) => {
+test("child-runs PUT updates the Executor harness and dispatch uses the saved values", async (t) => {
   const { root, db, core } = await createTestCore(t, {}, { prefix: "owl-executor-settings-api-" });
   const token = randomUUID();
   const scheduler = createChildRunScheduler({
@@ -194,32 +194,20 @@ test("legacy executor PUT updates the Executor harness and dispatch uses the sav
   if (!api) return t.skip("localhost listen is unavailable");
   const request = (path, { method = "GET", body } = {}) => api.request(method, `/api/v1${path}`, body);
 
-  const oldDefaults = { provider: "openai", model: "gpt-5.6-luna", effort: "low" };
-  const update = await request("/settings/executor", {
+  const saved = {
+    ...DEFAULT_CHILD_RUN_SETTINGS,
+    executor_harness: "codex",
+    executor_by_harness: { ...DEFAULT_CHILD_RUN_SETTINGS.executor_by_harness, codex: { model: "gpt-5.6-luna", effort: "low" } },
+    timeout_minutes: 35,
+  };
+  const update = await request("/settings/child-runs", {
     method: "PUT",
-    body: { request_id: randomUUID(), idempotency_key: randomUUID(), expected_version: 0, payload: { ...oldDefaults, timeout_ms: 35 * 60_000 } },
+    body: { request_id: randomUUID(), idempotency_key: randomUUID(), expected_version: 0, payload: saved },
   });
   assert.equal(update.status, 200);
-  const updated = (await update.json()).data;
-  assert.equal(updated.executor_harness, "codex");
-  assert.deepEqual(updated.executor_by_harness.codex, { model: "gpt-5.6-luna", effort: "low" });
-  assert.equal(updated.provider, "codex");
-  assert.equal(updated.model, "gpt-5.6-luna");
-  assert.equal(updated.effort, "low");
-  assert.equal(updated.timeout_ms, 35 * 60_000);
-  const invalidUpdate = await request("/settings/executor", {
-    method: "PUT",
-    body: { request_id: randomUUID(), idempotency_key: randomUUID(), expected_version: 0, payload: { ...oldDefaults, effort: "invalid", timeout_ms: 35 * 60_000 } },
-  });
-  assert.equal(invalidUpdate.status, 400);
-  assert.equal((await invalidUpdate.json()).error.code, "validation_error");
-
   const childSettings = (await (await request("/settings/child-runs")).json()).data;
   assert.equal(childSettings.executor_harness, "codex");
-  assert.deepEqual(childSettings.executor_by_harness, updated.executor_by_harness);
-  const legacyGet = (await (await request("/settings/executor")).json()).data;
-  assert.equal(legacyGet.executor_harness, "codex");
-  assert.deepEqual(legacyGet.executor_by_harness, updated.executor_by_harness);
+  assert.deepEqual(childSettings.executor_by_harness.codex, { model: "gpt-5.6-luna", effort: "low" });
 
   const now = new Date().toISOString();
   const ids = { work: createUlid(), task: createUlid(), claude: createUlid(), codex: createUlid() };
@@ -309,10 +297,6 @@ test("server routes answer 400 for malformed path escapes and inherited-property
   assert.equal((await api.request("GET", "/api/v1/settings/providers/constructor")).status, 404);
   // A non-string body must not be saved as an empty entry body.
   assert.equal((await api.request("PUT", "/api/v1/knowledge/global/a.md", { body: null })).status, 400);
-  const before = (await (await api.request("GET", "/api/v1/settings/executor")).json()).data;
-  const update = await api.request("PUT", "/api/v1/settings/executor", envelope({ provider: "constructor", model: "m", timeout_ms: 60_000 }));
-  assert.equal(update.status, 400);
-  assert.deepEqual((await (await api.request("GET", "/api/v1/settings/executor")).json()).data, before);
 
   assert.equal((await api.request("PUT", "/api/v1/knowledge/global/a.md", { tags: "x" })).status, 400);
 
@@ -320,7 +304,7 @@ test("server routes answer 400 for malformed path escapes and inherited-property
   const inheritedCode = () => { throw Object.assign(new Error("boom"), { code: "constructor" }); };
   core.setChildRunSettings = inheritedCode;
   core.resumePrerequisiteWait = inheritedCode;
-  const childRuns = await api.request("PUT", "/api/v1/settings/executor", envelope({ provider: "claude", model: "m", timeout_ms: 60_000 }));
+  const childRuns = await api.request("PUT", "/api/v1/settings/child-runs", envelope({}));
   assert.equal(childRuns.status, 500);
   assert.notEqual((await childRuns.json()).error?.code, "constructor");
   const resumed = await api.request("POST", `/api/v1/tasks/${"0".repeat(26)}/prerequisite/resume`, envelope({}));

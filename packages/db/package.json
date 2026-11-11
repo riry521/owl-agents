@@ -1,6 +1,6 @@
 {
   "name": "@owl/db",
-  "version": "0.16.1",
+  "version": "0.17.0",
   "private": true,
   "description": "SQLite schema, migrations, and single-writer persistence lane for Owl core.",
   "type": "commonjs",
@@ -18,14 +18,14 @@
     "build": "tsc"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.17.0 <23"
   },
   "dependencies": {
     "better-sqlite3": "12.6.2"
   },
   "devDependencies": {
     "@types/better-sqlite3": "9.6.0",
-    "@types/node": "^20.0.0",
-    "typescript": "^5.8.2"
+    "@types/node": "22.15.3",
+    "typescript": "5.9.2"
   }
 }

@@ -10,7 +10,7 @@
 import { createHash } from "node:crypto";
 import type { ProviderErrorRecord } from "@owl/shared";
 import { insertProviderError } from "./provider-error-store";
-import { createUlid, utcNow } from "../../db/dist/index.js";
+import { createUlid, utcNow } from "@owl/db";
 import { applyAdvisorInterfaceInstructions, externalJsonBlock, formatAdvisorMalformed, parseAdvisorResponse, parseSlackAdvisorResponse } from "@owl/shared";
 import type { AdvisorSessionDirectory, AdvisorTurnRequest, AdvisorWorkspacePreparation, CoreDatabase, CoreWriteLaneTransaction, GitGateway } from "./types";
 import type { AdvisorSession, AdvisorSessionManager } from "./advisor-session";
@@ -29,12 +29,12 @@ import { searchQuery } from "./memory/memory-injector.js";
 import { ownerLanguage, type OwnerLanguage } from "./owner-language";
 import { advisorWindowSettings } from "./advisor-window-settings";
 import { findAdvisorWindow } from "./advisor-windows";
-import { GENERAL_WINDOW_KEY } from "../../shared/dist/advisor-windows.js";
+import { GENERAL_WINDOW_KEY } from "@owl/shared/advisor-windows";
 import { CONVERSATION_COMPACT_INSTRUCTIONS } from "./memory/conversation-log.js";
 import type { ConversationLogWriter } from "./memory/conversation-log-writer.js";
 // Imported from the agent-runtime "types" submodule (not the package barrel
 // "../../agent-runtime/dist/index.js") because that barrel re-exports
-// core-contract.d.ts, which imports back from "../../core/dist/types.js" -
+// core-contract.d.ts, which imports back core's dist/types.js -
 // pulling core's own dist output in as a compilation input and tripping
 // TS5055 ("Cannot write file ... because it would overwrite input file").
 import type {

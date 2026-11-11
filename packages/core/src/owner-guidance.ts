@@ -1,12 +1,9 @@
 import { compareText } from "./context-canonical";
 import type { JsonObject } from "./types";
+import { isRecord } from "@owl/shared/small-helpers";
 
 interface GuidanceReader {
   all<T extends object>(sql: string, ...parameters: string[]): T[];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 

@@ -4,8 +4,8 @@ import { pathToFileURL } from "node:url";
 import { resolveDataDir } from "./contracts.js";
 import type { IntegrationStore } from "./integration-store.js";
 import type { IntegrationConfig, IntegrationProvider } from "./types.js";
-import type { ChannelAdmin } from "../../../packages/plugin-sdk/dist/shared/channel-admin.js";
-import type { OwnerLanguage } from "../../../packages/shared/dist/owner-language.js";
+import type { ChannelAdmin } from "@owl/plugin-sdk/shared";
+import type { OwnerLanguage } from "@owl/shared/owner-language";
 import { cliLanguage } from "./cli-language.js";
 
 export interface Connector {

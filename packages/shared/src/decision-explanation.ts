@@ -4,6 +4,7 @@ import { AUTO_RECOVERY_ACTIONS, AUTO_RECOVERY_KINDS, IMMEDIATE_DECISION_REASONS 
 import { MANAGER_FINALIZE_OUTPUT_SCHEMA, MANAGER_FINALIZE_PAGES_OUTPUT_SCHEMA, MANAGER_PLAN_OUTPUT_SCHEMA, MANAGER_REPLAN_OUTPUT_SCHEMA } from "./manager-schema.js";
 import { MANAGER_TRIGGER_KINDS, OWNER_REPLAN_KINDS, OWNER_REQUEST_SITUATIONS, PLAN_FEEDBACK_KINDS, TASK_INTEGRATION_FAILURE_KINDS, TASK_REPLAN_TRIGGER_KINDS } from "./manager-trigger.js";
 import { validateRoleOutput, type RoleSchema } from "./role-schema.js";
+import { escapeRegExp } from "./small-helpers.js";
 
 /** work: the criteria are fine, the work is lacking / criteria: the criteria cannot be met inside the Task / external: the cause is outside the Task. */
 export const DECISION_CAUSE_KINDS = ["work", "criteria", "external"] as const;
@@ -198,10 +199,6 @@ for (const name of [
   ...AUTO_RECOVERY_ACTIONS,
   ...IMMEDIATE_DECISION_REASONS,
 ]) if (SNAKE_CASE_ONLY.test(name)) owlInternalNames.add(name);
-
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-}
 
 /** The matched words of text that an Owner should not see. A snake_case name inside backticks is the Owner's own and passes unless it is one of Owl's. */
 export function findInternalTerms(text: string, forbiddenTerms: readonly string[]): string[] {

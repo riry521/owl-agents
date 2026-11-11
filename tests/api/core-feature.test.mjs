@@ -7,13 +7,13 @@ import {
   requireCoreFeature,
   requireMemoryFeature,
 } from "../../apps/server/dist/core-feature.js";
-import { ApiError } from "../../apps/server/dist/errors.js";
+import { ApiError, errorBody } from "../../apps/server/dist/errors.js";
 
 const error = { code: "dependency_unavailable", message: "no feature" };
 const fn = () => 1;
 
 function assert503(call, code, message) {
-  assert.throws(call, (e) => e instanceof ApiError && e.status === 503 && e.code === code && e.message === message);
+  assert.throws(call, (e) => e instanceof ApiError && e.status === 503 && e.code === code && (e.messageRef ? errorBody("r", e, "en").error.message : e.message) === message);
 }
 
 test("requireAdapterFeature は core だけを見て、core.core にあっても 503 にする", () => {

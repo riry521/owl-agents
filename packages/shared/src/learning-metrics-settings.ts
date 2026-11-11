@@ -34,13 +34,13 @@ const KEYS = Object.keys(DEFAULT_LEARNING_METRICS_SETTINGS) as (keyof LearningMe
 
 function checkValue(key: keyof LearningMetricsSettings, value: unknown): number | boolean {
   if (key === "enabled") {
-    if (typeof value !== "boolean") throw new LearningMetricsSettingsValidationError(`${key} must be true or false.`, key);
+    if (typeof value !== "boolean") throw new LearningMetricsSettingsValidationError(`${key} must be true or false.`, key, { kind: "boolean" });
     return value;
   }
   const { min, max } = LEARNING_METRICS_RANGES[key];
   const integerOnly = key === "min_tasks" || key === "rationale_max_ids";
   if (typeof value !== "number" || !Number.isFinite(value) || (integerOnly && !Number.isInteger(value)) || value < min || value > max) {
-    throw new LearningMetricsSettingsValidationError(`${key} must be ${integerOnly ? "an integer" : "a number"} from ${min} to ${max}.`, key);
+    throw new LearningMetricsSettingsValidationError(`${key} must be ${integerOnly ? "an integer" : "a number"} from ${min} to ${max}.`, key, { kind: integerOnly ? "integer_range" : "number_range", min, max });
   }
   return value;
 }

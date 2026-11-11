@@ -1,5 +1,4 @@
 import { cliText } from "./cli-language.js";
-import { createHash } from "node:crypto";
 import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -7,9 +6,9 @@ import { fileURLToPath } from "node:url";
 
 import "./config.js";
 import { ContractValidationError } from "./errors.js";
+import { sha256 } from "@owl/shared/small-helpers";
 
 export const CONTRACT_VERSION = "1.0.0" as const;
-export const WS_PROTOCOL_VERSION = "owl-ws-1" as const;
 
 export interface ContractArtifact {
   path: string;
@@ -112,10 +111,6 @@ function parseJson(text: string, path: string): Record<string, unknown> {
     throw new ContractValidationError(cliText(`契約JSONのルートがobjectではありません: ${path}`, `The contract JSON root is not an object: ${path}`));
   }
   return value;
-}
-
-function sha256(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
 function assertWithinRoot(root: string, candidate: string): void {

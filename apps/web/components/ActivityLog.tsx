@@ -126,7 +126,11 @@ const PHASE_LABEL_KEYS: Record<string, string> = {
   verdict: 'hybrid.phaseVerdict',
 };
 
-/** Same value as WHOLE_DEFERRED_REASON in packages/core/src/test-runs.ts (Web cannot import Core). */
+/**
+ * Copy of WHOLE_DEFERRED_REASON in packages/core/src/test-runs.ts. It stays a copy because
+ * apps/web is a static Next export that does not depend on Core; tests/web/activity-log.test.mjs
+ * checks that the two are equal.
+ */
 const WHOLE_DEFERRED_REASON = 'whole_deferred_to_work';
 
 /** Short payload detail for legacy phase and current child-run events. */

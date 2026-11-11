@@ -1,17 +1,14 @@
 import { managerPlanInvalid } from "./errors";
 import { isRecord } from "./protocol";
 import {
-  objectSchema,
   prepareLegacySkillOutput,
   renderRolePrompt,
   skillFeedbackFromOutput,
-  SKILL_PROPOSALS_SCHEMA,
-  SKILLS_USED_SCHEMA,
   validateRoleOutput,
   type RoleSchema,
 } from "./role-contract";
-import { ACCEPTANCE_CRITERION_ID_PREFIX, CRITERION_ORIGIN_QUOTE_MAX, DEFAULT_OWNER_LANGUAGE, finalizeOutputSchema, MANAGER_FINALIZE_OUTPUT_SCHEMA, MANAGER_FINALIZE_PAGES_OUTPUT_SCHEMA, MANAGER_PLAN_OUTPUT_SCHEMA, MANAGER_REPLAN_OUTPUT_SCHEMA, renderAcceptanceCriteria, validateAcceptanceCriteria, type AcceptanceCriterion, type OwnerLanguage, type TaskNecessity, type UiChange } from "@owl/shared";
-import type { PlanWaitFor } from "../../shared/dist/prerequisite.js";
+import { CRITERION_ORIGIN_QUOTE_MAX, DEFAULT_OWNER_LANGUAGE, finalizeOutputSchema, MANAGER_FINALIZE_OUTPUT_SCHEMA, MANAGER_FINALIZE_PAGES_OUTPUT_SCHEMA, MANAGER_PLAN_OUTPUT_SCHEMA, MANAGER_REPLAN_OUTPUT_SCHEMA, renderAcceptanceCriteria, validateAcceptanceCriteria, type AcceptanceCriterion, type OwnerLanguage, type TaskNecessity, type UiChange } from "@owl/shared";
+import type { PlanWaitFor } from "@owl/shared/prerequisite";
 import {
   type ManagerPlanRequest,
   type ManagerPlanResult,
@@ -234,7 +231,8 @@ function buildFinalizeManagerPrompt(request: ManagerPlanRequest, language: Owner
   return renderRolePrompt({
     role: "You are the Owl Manager performing the final review of a Work.",
     instructions: [
-      "Every Task for this Work has already finished running. The input below gives the Work, its Tasks, and each Task's final report.",
+      "Every Task for this Work has already finished running. The input below gives the Work, its Tasks, and a digest of each completed Task's final report.",
+      "reports[] holds one digest per completed Task: task_id (links it to a Task in tasks), status, verification_status, acceptance (criterion_id, status, evidence), work_done, changed_files, remaining_issues and report_path. Judge from the digests; open the file at report_path (the full Worker report as JSON) only for a Task whose digest is not enough to decide.",
       "reports[].task_id links each report to a Task in tasks. Tasks with status cancelled were replaced by a replan or cancelled by the Owner and have no report; do not count their absence as missing work.",
       "Read the reports and judge whether the Work's goal was achieved by the completed Tasks.",
       "context.design_documents lists the design documents written by completed design Tasks as task_id, title and path ([] if none); a design Task's deliverable is that document, not repository changes.",
@@ -277,14 +275,6 @@ export function buildManagerPrompt(
     language,
     inputs: [{ name: "Manager input", value: managerPromptInput({ ...request, mode }) }],
   });
-}
-
-/** Validate the Manager's JSON object strictly against the schema for its mode. */
-export function parseManagerPlan(
-  payload: Record<string, unknown>,
-  request: ManagerPlanRequest,
-): ManagerPlanResult {
-  return parseManagerPlanWithFeedback(payload, request).result;
 }
 
 /** The schema accepts whitespace-only text; a Task necessity with a blank field is a format error. */

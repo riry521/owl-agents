@@ -1,3 +1,5 @@
+import { isRecord } from "./small-helpers.js";
+
 /** Per-Project test handling set by the Owner; stored in projects.test_policy_json (apart from test_run so setting it never disables test detection). */
 export interface TestPolicy {
   /** Commands (space-separated word prefixes) a Reviewer may not run, in addition to those derived from the test_run settings. */
@@ -13,7 +15,6 @@ export const DEFAULT_TEST_POLICY: TestPolicy = {
 };
 
 const KEYS = Object.keys(DEFAULT_TEST_POLICY);
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const boundedString = (value: unknown, max: number): boolean => typeof value === "string" && value.length >= 1 && value.length <= max;
 
 /** API input check: the problems found as key names; [] when the value is a valid policy object. */

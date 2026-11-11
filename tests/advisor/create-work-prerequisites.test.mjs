@@ -18,7 +18,7 @@ async function setup(t) {
   const { conversation_id } = await core.getActiveConversation();
   const send = async (title, extra) => {
     const a = { type: "create_work", description: title, payload: { title, summary: `Do ${title}.`, size: "small", project_id: null, ...extra } };
-    const id = await core.persistAdvisorReply(conversation_id, "", createUlid(), { channel: "web" }, [a]);
+    const id = await core.advisorActions.persistAdvisorReply(conversation_id, "", createUlid(), { channel: "web" }, [a]);
     return db.get("SELECT body FROM messages WHERE id = ?", id).body;
   };
   return { db, send };

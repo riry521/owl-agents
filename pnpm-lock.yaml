@@ -31,7 +31,20 @@ importers:
         specifier: workspace:*
         version: link:../../packages/connector-slack
 
-  apps/server: {}
+  apps/server:
+    dependencies:
+      '@owl/agent-runtime':
+        specifier: workspace:*
+        version: link:../../packages/agent-runtime
+      '@owl/core':
+        specifier: workspace:*
+        version: link:../../packages/core
+      '@owl/plugin-sdk':
+        specifier: workspace:*
+        version: link:../../packages/plugin-sdk
+      '@owl/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
 
   apps/supervisor: {}
 
@@ -63,17 +76,17 @@ importers:
         specifier: 19.1.2
         version: 19.1.2(@types/react@19.1.2)
       typescript:
-        specifier: 5.8.3
-        version: 5.8.3
+        specifier: 5.9.2
+        version: 5.9.2
 
   packages/agent-runtime:
     dependencies:
       '@owl/shared':
-        specifier: file:../shared
+        specifier: workspace:*
         version: link:../shared
     devDependencies:
       typescript:
-        specifier: ^5.8.2
+        specifier: 5.9.2
         version: 5.9.2
 
   packages/connector-discord:
@@ -86,7 +99,7 @@ importers:
         version: 14.27.0
     devDependencies:
       typescript:
-        specifier: ^5.6.0
+        specifier: 5.9.2
         version: 5.9.2
 
   packages/connector-slack:
@@ -94,9 +107,6 @@ importers:
       '@owl/plugin-sdk':
         specifier: workspace:*
         version: link:../plugin-sdk
-      '@owl/shared':
-        specifier: workspace:*
-        version: link:../shared
       '@slack/socket-mode':
         specifier: ^2.0.0
         version: 2.0.7
@@ -105,16 +115,16 @@ importers:
         version: 7.19.0
     devDependencies:
       typescript:
-        specifier: ^5.6.0
+        specifier: 5.9.2
         version: 5.9.2
 
   packages/core:
     dependencies:
       '@owl/db':
-        specifier: file:../db
+        specifier: workspace:*
         version: link:../db
       '@owl/shared':
-        specifier: file:../shared
+        specifier: workspace:*
         version: link:../shared
       '@typesafe-ai/sdk':
         specifier: ^0.6.0
@@ -136,15 +146,15 @@ importers:
         specifier: 9.6.0
         version: 9.6.0
       '@types/node':
-        specifier: ^20.0.0
-        version: 20.19.43
+        specifier: 22.15.3
+        version: 22.15.3
       typescript:
-        specifier: ^5.8.2
+        specifier: 5.9.2
         version: 5.9.2
     optionalDependencies:
       '@huggingface/transformers':
         specifier: 4.3.0
-        version: 4.3.0(@types/node@20.19.43)
+        version: 4.3.0(@types/node@22.15.3)
       sqlite-vec:
         specifier: 0.1.9
         version: 0.1.9
@@ -159,16 +169,16 @@ importers:
         specifier: 9.6.0
         version: 9.6.0
       '@types/node':
-        specifier: ^20.0.0
-        version: 20.19.43
+        specifier: 22.15.3
+        version: 22.15.3
       typescript:
-        specifier: ^5.8.2
+        specifier: 5.9.2
         version: 5.9.2
 
   packages/plugin-sdk:
     devDependencies:
       typescript:
-        specifier: ^5.0.0
+        specifier: 5.9.2
         version: 5.9.2
 
   packages/shared: {}
@@ -1268,11 +1278,6 @@ packages:
     resolution: {integrity: sha512-Ne+eE4r0/iWnpAxD852z3A+N0Bt5RN//NjJwRd2VFHEmrywxf5vsZlh4R6lixl6B+wz/8d+maTSAkN1FIkI3LQ==}
     engines: {node: '>=10'}
 
-  typescript@5.8.3:
-    resolution: {integrity: sha512-p1diW6TqL9L07nNxvRMM7hMMw4c5XOo/1ibL4aAIGmSAt9slTE1Xgw5KWuof2uTOvCg9BY7ZRi+GaF+7sfgPeQ==}
-    engines: {node: '>=14.17'}
-    hasBin: true
-
   typescript@5.9.2:
     resolution: {integrity: sha512-CWBzXQrc/qOkhidw1OzBTQuYRbfyxDXJMVJ1XNwUHGROVmuaeiEm3OslpZ1RV96d7SKKjZKrSJu3+t/xlw3R9A==}
     engines: {node: '>=14.17'}
@@ -1397,13 +1402,13 @@ snapshots:
   '@huggingface/tokenizers@0.2.0':
     optional: true
 
-  '@huggingface/transformers@4.3.0(@types/node@20.19.43)':
+  '@huggingface/transformers@4.3.0(@types/node@22.15.3)':
     dependencies:
       '@huggingface/jinja': 0.5.10
       '@huggingface/tokenizers': 0.2.0
       onnxruntime-node: 1.30.0
       onnxruntime-web: 1.31.0-dev.20260914-8d85527a0
-      sharp: 0.35.5(@types/node@20.19.43)
+      sharp: 0.35.5(@types/node@22.15.3)
     transitivePeerDependencies:
       - '@types/node'
     optional: true
@@ -1581,7 +1586,7 @@ snapshots:
 
   '@slack/logger@4.0.1':
     dependencies:
-      '@types/node': 20.19.43
+      '@types/node': 22.15.3
 
   '@slack/socket-mode@2.0.7':
     dependencies:
@@ -1623,7 +1628,7 @@ snapshots:
 
   '@types/better-sqlite3@9.6.0':
     dependencies:
-      '@types/node': 20.19.43
+      '@types/node': 22.15.3
 
   '@types/debug@4.1.13':
     dependencies:
@@ -1669,7 +1674,7 @@ snapshots:
 
   '@types/ws@8.18.1':
     dependencies:
-      '@types/node': 20.19.43
+      '@types/node': 22.15.3
 
   '@typesafe-ai/sdk@0.6.0': {}
 
@@ -2506,7 +2511,7 @@ snapshots:
       '@protobufjs/path': 1.1.2
       '@protobufjs/pool': 1.1.0
       '@protobufjs/utf8': 1.1.2
-      '@types/node': 20.19.43
+      '@types/node': 22.15.3
       long: 5.3.2
     optional: true
 
@@ -2600,40 +2605,6 @@ snapshots:
   serialize-error@8.1.0:
     dependencies:
       type-fest: 0.20.2
-    optional: true
-
-  sharp@0.35.5(@types/node@20.19.43):
-    dependencies:
-      '@img/colour': 1.1.0
-      detect-libc: 2.1.2
-      semver: 7.8.5
-    optionalDependencies:
-      '@img/sharp-darwin-arm64': 0.35.5
-      '@img/sharp-darwin-x64': 0.35.5
-      '@img/sharp-freebsd-wasm32': 0.35.5
-      '@img/sharp-libvips-darwin-arm64': 1.3.4
-      '@img/sharp-libvips-darwin-x64': 1.3.4
-      '@img/sharp-libvips-linux-arm': 1.3.4
-      '@img/sharp-libvips-linux-arm64': 1.3.4
-      '@img/sharp-libvips-linux-ppc64': 1.3.4
-      '@img/sharp-libvips-linux-riscv64': 1.3.4
-      '@img/sharp-libvips-linux-s390x': 1.3.4
-      '@img/sharp-libvips-linux-x64': 1.3.4
-      '@img/sharp-libvips-linuxmusl-arm64': 1.3.4
-      '@img/sharp-libvips-linuxmusl-x64': 1.3.4
-      '@img/sharp-linux-arm': 0.35.5
-      '@img/sharp-linux-arm64': 0.35.5
-      '@img/sharp-linux-ppc64': 0.35.5
-      '@img/sharp-linux-riscv64': 0.35.5
-      '@img/sharp-linux-s390x': 0.35.5
-      '@img/sharp-linux-x64': 0.35.5
-      '@img/sharp-linuxmusl-arm64': 0.35.5
-      '@img/sharp-linuxmusl-x64': 0.35.5
-      '@img/sharp-webcontainers-wasm32': 0.35.5
-      '@img/sharp-win32-arm64': 0.35.5
-      '@img/sharp-win32-ia32': 0.35.5
-      '@img/sharp-win32-x64': 0.35.5
-      '@types/node': 20.19.43
     optional: true
 
   sharp@0.35.5(@types/node@22.15.3):
@@ -2761,8 +2732,6 @@ snapshots:
 
   type-fest@0.20.2:
     optional: true
-
-  typescript@5.8.3: {}
 
   typescript@5.9.2: {}
 

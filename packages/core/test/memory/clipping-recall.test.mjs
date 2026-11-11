@@ -197,7 +197,7 @@ test("Manager, Designer and Advisor pass recall_query; Worker does not", async (
     });
     return id;
   };
-  await core.invokeManagerPlan({ work_id: workId }, "plan").catch(() => {});
+  await core.manager.invokeManagerPlan({ work_id: workId }, "plan").catch(() => {});
   await core.workflow.runWorkerInternal(workId, designId, await startRun(designId, "designer"), 1).catch(() => {});
   await core.workflow.runWorkerInternal(workId, taskId, await startRun(taskId, "worker"), 1).catch(() => {});
   const by = (role) => calls.find((c) => c.role === role);

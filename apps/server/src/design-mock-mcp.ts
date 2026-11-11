@@ -1,5 +1,5 @@
 import { guardConfig, guardRequest } from "./guard-client.js";
-import { createInterface } from "node:readline";
+import { serveMcp } from "./stdio-jsonrpc.js";
 
 const FETCH_TIMEOUT_MS = 30_000;
 const nonce = `${process.pid}-${Date.now().toString(36)}`;
@@ -41,6 +41,7 @@ class ToolError extends Error {
   constructor(readonly code: string, message: string) { super(message); }
 }
 
+// shared の errorCode は error.code を文字列で返し、無ければ undefined。ここは cause.code を先に見て、無ければ空文字を返すので別に持つ。
 function errorCode(error: unknown): string {
   const e = error as { code?: string; cause?: { code?: string } };
   return e?.cause?.code ?? e?.code ?? "";
@@ -90,29 +91,4 @@ async function callTool(id: unknown, name: string, args: Json): Promise<Json> {
   }
 }
 
-function send(message: Json): void {
-  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
-}
-
-async function handle(line: string): Promise<void> {
-  let request: { id?: unknown; method?: string; params?: Json };
-  try { request = JSON.parse(line); } catch { return; }
-  // A line such as `null` parses but cannot be destructured; an unhandled rejection would end the server.
-  if (typeof request !== "object" || request === null) return;
-  const { id, method, params } = request;
-  if (id === undefined) return; // notifications
-  if (method === "initialize") {
-    send({ id, result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "owl-design", version: "1.0.0" } } });
-  } else if (method === "ping") {
-    send({ id, result: {} });
-  } else if (method === "tools/list") {
-    send({ id, result: { tools: TOOLS } });
-  } else if (method === "tools/call") {
-    const args = params?.arguments && typeof params.arguments === "object" ? (params.arguments as Json) : {};
-    send({ id, result: await callTool(id, String(params?.name ?? ""), args) });
-  } else {
-    send({ id, error: { code: -32601, message: `Method not found: ${method}` } });
-  }
-}
-
-createInterface({ input: process.stdin }).on("line", (line) => { void handle(line); });
+serveMcp({ name: "owl-design", version: "1.0.0", tools: () => TOOLS, callTool: callTool });

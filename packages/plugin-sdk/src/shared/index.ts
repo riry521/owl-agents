@@ -14,7 +14,7 @@ export {
 export { formatStatusResponse } from "./status";
 export { asOwlLanguage, type OwlLanguage } from "./language";
 export { connectorText, type ConnectorText } from "./connector-text";
-export { parseOutboundFiles, parseDeliveryTarget,readOutboundFile, appendFileResults, reportAdvisorDelivery, type OutboundFile, type OutboundFileResult } from "./outbound-files";
+export { parseOutboundFiles, parseDeliveryTarget, readOutboundFile, appendFileResults, reportAdvisorDelivery, type OutboundFile, type OutboundFileResult } from "./outbound-files";
 export { formatAdvisorReply } from "./advisor-reply";
 export { decisionContextLines, type DecisionContextInput, type DecisionContextLines } from "./decision-sections";
 export {
@@ -125,3 +125,16 @@ export {
   downloadToDir,
   type NotificationDelivery,
 } from "./connector-common";
+export {
+  refreshBoundChannels,
+  dispatchCoreEvent,
+  routeAdvisorOrigin,
+  sendOutboundFiles,
+  deliverFilesToChannel,
+  buildAdvisorReplyText,
+  routeInboundMessage,
+  answerDecisionButton,
+  type InboundFile,
+  type InboundMessageFlow,
+  type UploadFailure,
+} from "./connector-flow";

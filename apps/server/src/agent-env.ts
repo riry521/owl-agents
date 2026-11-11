@@ -1,8 +1,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { parseDotEnv } from "../../../packages/shared/dist/env.js";
-import { OPENCODE_EXECUTABLE_ENV } from "../../../packages/shared/dist/index.js";
+import { parseDotEnv } from "@owl/shared/env";
+import { OPENCODE_EXECUTABLE_ENV } from "@owl/shared";
 
 /**
  * Credentials that belong to Owl itself (connectors, the local API, the guard

@@ -1,5 +1,5 @@
-import { matchesAnyGlob } from "../../shared/dist/glob.js";
-import type { ReviewRoutingSettings } from "../../shared/dist/review-routing-settings.js";
+import { matchesAnyGlob } from "@owl/shared/glob";
+import type { ReviewRoutingSettings } from "@owl/shared/review-routing-settings";
 import type { ChangedFile, TaskRow } from "./types.js";
 
 export type ReviewForcedCode =

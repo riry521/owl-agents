@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { copyFile, lstat, mkdir, readdir, readFile, rename, rmdir, unlink, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readdir, readFile, rename, rmdir, unlink } from "node:fs/promises";
 import { OWNED_DIR_WRITE, writeAtomic } from "../atomic-write.js";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { DEFAULT_MEMORY_ARCHIVE_SUFFIX, PAGES_LAYOUT, type MemoryArchive } from "@owl/shared";
@@ -40,6 +40,7 @@ export function archiveDirFor(root: string, archive: MemoryArchive): string {
   return archive.dir === "" ? `${resolve(root)}${DEFAULT_MEMORY_ARCHIVE_SUFFIX}` : resolve(archive.dir);
 }
 
+// shared の sha256 は文字列か Buffer を受ける。ここはファイルを読んで非同期に hash するので別に持つ。
 const sha256 = async (path: string) => createHash("sha256").update(await readFile(path)).digest("hex");
 const exists = (path: string) => lstat(path).then(() => true, () => false);
 const isCode = (error: unknown, code: string) => (error as { code?: unknown } | null)?.code === code;

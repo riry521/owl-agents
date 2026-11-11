@@ -1,4 +1,4 @@
-import type { AdvisorWorkOperationType } from "../../shared/dist/advisor-response.js";
+import type { AdvisorWorkOperationType } from "@owl/shared/advisor-response";
 
 export interface AdvisorWorkOperationPayload {
   readonly workId: string;

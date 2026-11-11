@@ -1,4 +1,4 @@
-import { utcNow } from "../../db/dist/index.js";
+import { utcNow } from "@owl/db";
 import { STARTING_AGENT_RUN_STATUSES, setAgentRunStatus } from "./agent-run-state.js";
 import { AGENT_STALE_THRESHOLD_MS } from "@owl/shared";
 import { processIdentityMatches, readProcessIdentity } from "./process-identity.js";

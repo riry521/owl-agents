@@ -1,4 +1,5 @@
 import { DEFAULT_OWNER_LANGUAGE, type OwnerLanguage } from "./owner-language.js";
+import { escapeRegExp } from "./small-helpers.js";
 
 /**
  * The one template for a Work summary. The Advisor is told to write every
@@ -66,7 +67,6 @@ export function workSummaryInstruction(language: OwnerLanguage = DEFAULT_OWNER_L
 }
 
 const LIST_MARKER = /^(?:[-*•・]|\d+[.)])\s+/u;
-const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 const LABEL_LINE = new RegExp(
   `^\\s*(${WORK_SUMMARY_SECTIONS.flatMap((section) => [section.label, section.label_en]).map(escapeRegExp).join("|")})\\s*[:：][ \\t]*(.*)$`,
   "iu",

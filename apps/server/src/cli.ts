@@ -16,18 +16,18 @@ import { join } from "node:path";
 
 import "./config.js";
 import { cliText } from "./cli-language.js";
-import { CliError, ContractValidationError, newReferenceId } from "./errors.js";
+import { CliError, newReferenceId } from "./errors.js";
 import { resolveDataDir, resolveOwlRoot, serverPackageRoot } from "./contracts.js";
-import { resolveWorkspacesRoot } from "../../../packages/core/dist/workspace-layout.js";
+import { resolveWorkspacesRoot } from "@owl/core/dist/workspace-layout.js";
 import { stopManagedAuxiliaryProcesses } from "./lifecycle-stop.js";
 import { isProcessAlive, readProcessCommand } from "./process-state.js";
-import { processIdentityMatches, readProcessIdentity } from "../../../packages/core/dist/process-identity.js";
+import { processIdentityMatches, readProcessIdentity } from "@owl/core/dist/process-identity.js";
 import { startServer, type RunningServer, type ServerOptions } from "./server.js";
 import { configuredBind, configuredPort, deprecatedConfigurationWarnings, serverExposureError, shutdownTimeoutMs, tailscaleServeEnabled } from "./config.js";
 import { connectorConfigStatus, prepareConnectorConfig } from "./secret-config.js";
 import { resolveAgentExecutables } from "./agent-runner.js";
-import { OPENCODE_HARNESS_GAPS, runCliVersion, splitOpencodeModel } from "../../../packages/shared/dist/index.js";
-import type { OpencodeServer } from "../../../packages/agent-runtime/dist/index.js";
+import { OPENCODE_HARNESS_GAPS, runCliVersion, splitOpencodeModel } from "@owl/shared";
+import type { OpencodeServer } from "@owl/agent-runtime";
 import { parseOpencodeModels } from "./model-catalog.js";
 import { opencodeCliStatus, opencodeRoles, opencodeUnsupportedMessage, withPrivateOpencodeServe } from "./opencode-status.js";
 import { providerConfigurationError, providerSelection, resolveExecutableForSelection } from "./provider-selection.js";
@@ -713,6 +713,7 @@ async function runStop(args: { force: boolean; timeoutSeconds: number; restart?:
 }
 
 async function runRestart(args: ParsedStart): Promise<Record<string, unknown>> {
+  // force: true のままにする。restart は応答しない旧 core も入れ替える操作で、SIGTERM を待たず SIGINT から始めて復旧を早めるため。
   await runStop({ force: true, restart: true, timeoutSeconds: defaultStopTimeoutSeconds() }, true);
   const result = await runStart({ ...args, foreground: false });
   return { command: "restart", pid: result.pid, status: "ok" };
@@ -1490,7 +1491,7 @@ export async function runCli(argv: readonly string[] = process.argv.slice(2)): P
     const { runEmbeddingsCommand } = await import("./embeddings-command.js");
     process.exitCode = await runEmbeddingsCommand({
       dataDir: resolveDataDir(resolveOwlRoot()), env: process.env, isTTY: process.stdout.isTTY,
-      out: (line) => process.stdout.write(`${line}\n`), err: (line) => process.stderr.write(`${line}\n`),
+      out: (line) => process.stdout.write(`${line}\n`), err: (line) => process.stderr.write(`${line}\n`), write: (text) => process.stdout.write(text),
       serverRunning: async () => { const state = await readState(); return state !== null && isAlive(state.pid); },
     });
     return;

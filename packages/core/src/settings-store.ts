@@ -1,5 +1,5 @@
-import { createUlid, utcNow, type WriteLane } from "../../db/dist/index.js";
-import { SettingsValidationError } from "../../shared/dist/settings-validation.js";
+import { createUlid, utcNow, type WriteLane } from "@owl/db";
+import { SettingsValidationError } from "@owl/shared/settings-validation";
 import { validationError } from "./errors";
 import type { SettingsReader } from "./owner-language";
 import type { CoreWriteLaneTransaction, JsonObject } from "./types";
@@ -70,13 +70,43 @@ export function readSetting<T>(reader: SettingsReader, spec: SettingReadSpec<T>)
   }
 }
 
+export function settingsReason(error: SettingsValidationError) {
+  const { field, condition } = error;
+  switch (condition?.kind) {
+    case undefined: return { code: "settings.invalid", values: { field } } as const;
+    case "not_object": return { code: "settings.not_object", values: { field } } as const;
+    case "boolean": return { code: "settings.boolean", values: { field } } as const;
+    case "exact_keys": return { code: "settings.exact_keys", values: { field, keys: condition.keys.join(", ") } } as const;
+    case "integer_min": return { code: "settings.integer_min", values: { field, min: condition.min } } as const;
+    case "integer_range": return { code: "settings.integer_range", values: { field, min: condition.min, max: condition.max } } as const;
+    case "number_range": return { code: "settings.number_range", values: { field, min: condition.min, max: condition.max } } as const;
+    case "one_of": return { code: "settings.one_of", values: { field, allowed: condition.values.join(", ") } } as const;
+    case "keys": return { code: "settings.keys", values: { field, required: condition.required.join(", "), optional: condition.optional.join(", ") } } as const;
+    case "known_keys": return { code: "settings.known_keys", values: { field, keys: condition.keys.join(", ") } } as const;
+    case "array": return { code: "settings.array", values: { field } } as const;
+    case "array_length": return { code: "settings.array_length", values: { field, min: condition.min, max: condition.max } } as const;
+    case "string": return { code: "settings.string", values: { field } } as const;
+    case "non_empty_string": return { code: "settings.non_empty_string", values: { field } } as const;
+    case "string_list": return { code: "settings.string_list", values: { field } } as const;
+    case "non_empty_string_list": return { code: "settings.non_empty_string_list", values: { field } } as const;
+    case "regex_list": return { code: "settings.regex_list", values: { field } } as const;
+    case "regex_with_group": return { code: "settings.regex_with_group", values: { field } } as const;
+    case "hh_mm_list": return { code: "settings.hh_mm_list", values: { field } } as const;
+    case "glob_list": return { code: "settings.glob_list", values: { field, max_length: condition.max_length } } as const;
+    case "distinct_one_of_list": return { code: "settings.distinct_one_of_list", values: { field, allowed: condition.values.join(", ") } } as const;
+    case "argv": return { code: "settings.argv", values: { field } } as const;
+    case "named_groups": return { code: "settings.named_groups", values: { field, max_groups: condition.max_groups, max_name_length: condition.max_name_length } } as const;
+    case "channel_name_prefix": return { code: "settings.channel_name_prefix", values: { field, max_length: condition.max_length } } as const;
+  }
+}
+
 /** Runs validate; a SettingsValidationError becomes a validation_error with its field, anything else is rethrown. */
 export function validatedSetting<T, I>(validate: (input: I) => T, input: I): T {
   try {
     return validate(input);
   } catch (error) {
     if (error instanceof SettingsValidationError) {
-      throw validationError(error.message, { field: error.field });
+      throw validationError(error.message, { field: error.field }, settingsReason(error));
     }
     throw error;
   }

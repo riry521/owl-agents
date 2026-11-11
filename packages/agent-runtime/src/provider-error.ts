@@ -78,6 +78,7 @@ interface ProviderErrorContext {
   readonly rateLimitTransient?: boolean;
 }
 
+// shared の isRecord は配列を除く。ここは配列も object として受けるので別に持つ。
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
@@ -158,6 +159,10 @@ function isArgumentSizeFailure(text: string): boolean {
   return /\be2big\b|argument list too long|argument list.*too (?:large|long)/iu.test(text);
 }
 
+function isContextOverflowFailure(text: string): boolean {
+  return /prompt is too long/iu.test(text);
+}
+
 type LabelText = (label: string) => string;
 type StatusLabelText = (label: string, statusText: string) => string;
 
@@ -173,6 +178,7 @@ function formatResetTime(iso: string, language: OwnerLanguage): string {
 interface ProviderErrorText {
   status: (status: number) => string;
   argumentSize: LabelText;
+  contextOverflow: LabelText;
   auth: StatusLabelText;
   permission: StatusLabelText;
   rateLimit: (label: string, statusText: string, resetsAt: string | null) => string;
@@ -204,7 +210,8 @@ interface ProviderErrorText {
 const PROVIDER_ERROR_TEXT: Record<OwnerLanguage, ProviderErrorText> = {
   ja: {
     status: (status) => `（HTTP ${status}）`,
-    argumentSize: (label) => `${label}への入力がOSのコマンドサイズ上限を超え、Harnessを起動できませんでした。プロンプトとExecutor出力のサイズを確認してください。`,
+    argumentSize: (label) => `${label}への入力が大きすぎます（OSのコマンドサイズ上限を超えました）。プロンプトとExecutor出力のサイズを確認してください。`,
+    contextOverflow: (label) => `${label}への入力がモデルのコンテキスト上限を超えました。プロンプトとExecutor出力のサイズを確認してください。`,
     auth: (label, statusText) => `${label}の認証に失敗しました${statusText}。CLI/APIキーの認証情報を更新してから、Owlを再起動してください。`,
     permission: (label, statusText) => `${label}の権限が拒否されました${statusText}。利用アカウントの権限、モデルへのアクセス権、ワークスペース権限を確認してください。`,
     rateLimit: (label, statusText, resetsAt) => resetsAt === null
@@ -235,7 +242,8 @@ const PROVIDER_ERROR_TEXT: Record<OwnerLanguage, ProviderErrorText> = {
   },
   en: {
     status: (status) => ` (HTTP ${status})`,
-    argumentSize: (label) => `The input to ${label} exceeded the OS command size limit, so the Harness could not start. Check the size of the prompt and the Executor output.`,
+    argumentSize: (label) => `The input to ${label} is too large (it exceeded the OS command size limit). Check the size of the prompt and the Executor output.`,
+    contextOverflow: (label) => `The input to ${label} exceeded the model's context limit. Check the size of the prompt and the Executor output.`,
     auth: (label, statusText) => `${label} authentication failed${statusText}. Refresh the CLI or API key credentials, then restart Owl.`,
     permission: (label, statusText) => `${label} denied permission${statusText}. Check the account permissions, model access, and workspace permissions.`,
     rateLimit: (label, statusText, resetsAt) => resetsAt === null
@@ -292,6 +300,7 @@ export function formatProviderError(
 
   if (context.kind === "timeout") return context.timeoutKind === "idle" ? t.idle(label) : t.timeout(label);
   if (context.kind === "cancelled" || context.kind === "output_too_large") return t.processControl(label);
+  if (isContextOverflowFailure(text)) return t.contextOverflow(label);
   if (isArgumentSizeFailure(text)) return t.argumentSize(label);
   if (isConversationNotFound(text)) return t.conversationNotFound(label);
   if (context.rateLimitInfo !== undefined) {
@@ -470,6 +479,7 @@ function classifiedText(cause: ProviderFailureCause): string {
 }
 
 function fallbackVerdict(cause: ProviderFailureCause, text: string, resetReported: boolean): FailureVerdict {
+  if (isContextOverflowFailure(text)) return deterministic("context_length_exceeded");
   if (isArgumentSizeFailure(text)) return deterministic("argument_list_too_long");
   if (isInsufficientQuotaFailure(text)) return deterministic(exitDescriptor(cause));
   const status = statusFrom(text, { status: cause.harness_status ?? null });

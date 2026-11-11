@@ -1,4 +1,4 @@
-import { createUlid } from "../../db/dist/index.js";
+import { createUlid } from "@owl/db";
 import type { AgentRunResult } from "./types";
 import type { ProviderPauseRow, ProviderPauseStore, ProviderRateLimit } from "./provider-pause-store";
 

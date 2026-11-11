@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 
 import { ApiError } from "./errors.js";
+import { FsDirectoriesMessages } from "./messages/fs-directories.js";
 
 export interface DirectoryListing {
   path: string;
@@ -29,19 +30,17 @@ export interface ShortcutRoots {
 
 type DirectoryFs = { stat: typeof stat; readdir: typeof readdir };
 
+// The texts stay message-table refs here; errorBody words them in the Owner language.
 const MACOS_PERMISSION_HINT = {
   reason: "macos_privacy",
-  settings_paths: [
-    "システム設定 > プライバシーとセキュリティ > フルディスクアクセス",
-    "システム設定 > プライバシーとセキュリティ > ファイルとフォルダ（リムーバブルボリューム／ネットワークボリューム／ファイルプロバイダ）",
-  ],
-  steps: "Owl を動かしているアプリ（ターミナルや Node）をオンにして、Owl を再起動してください。",
+  settings_paths: [FsDirectoriesMessages.permissionHintFullDisk(), FsDirectoriesMessages.permissionHintFilesAndFolders()],
+  steps: FsDirectoriesMessages.permissionHintSteps(),
 };
 
 function directoryError(error: unknown): ApiError {
   const code = (error as NodeJS.ErrnoException).code;
-  if (code === "ENOENT" || code === "ENOTDIR") return new ApiError(404, "not_found", "フォルダが見つかりません。");
-  if (code === "EACCES" || code === "EPERM") return new ApiError(403, "forbidden", "このフォルダを開く権限がありません。", { permission_hint: MACOS_PERMISSION_HINT });
+  if (code === "ENOENT" || code === "ENOTDIR") return new ApiError(404, "not_found", FsDirectoriesMessages.notFound());
+  if (code === "EACCES" || code === "EPERM") return new ApiError(403, "forbidden", FsDirectoriesMessages.permissionDenied(), { permission_hint: MACOS_PERMISSION_HINT });
   throw error;
 }
 
@@ -77,12 +76,12 @@ export async function listHostDirectories(path: string | undefined, showHidden: 
   const home = roots.homeDir ?? homedir();
   const input = path === undefined ? home : path === "~" ? home : path.startsWith(`~${sep}`) ? join(home, path.slice(2)) : path;
   if (!isAbsolute(input) || input.includes("\0") || input.length > 1024) {
-    throw new ApiError(422, "validation_error", "フォルダは絶対パスで指定してください。");
+    throw new ApiError(422, "validation_error", FsDirectoriesMessages.notAbsolute());
   }
   const directory = resolve(input);
   let info;
   try { info = await fsOps.stat(directory); } catch (error) { throw directoryError(error); }
-  if (!info.isDirectory()) throw new ApiError(422, "validation_error", "フォルダではありません。");
+  if (!info.isDirectory()) throw new ApiError(422, "validation_error", FsDirectoriesMessages.notDirectory());
 
   let dirents;
   try { dirents = await fsOps.readdir(directory, { withFileTypes: true }); } catch (error) { throw directoryError(error); }

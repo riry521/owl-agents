@@ -1,6 +1,8 @@
-import type { Core, MemoryService } from "../../../packages/core/dist/index.js";
+import type { Core, MemoryService } from "@owl/core";
 import type { ExternalCoreAdapter } from "./core.js";
 import { ApiError } from "./errors.js";
+import { CoreFeatureMessages } from "./messages/core-feature.js";
+import type { MessageRef } from "./messages/define.js";
 import type { CorePort } from "./types.js";
 
 export type OwlCore = Core;
@@ -19,18 +21,13 @@ export type AdapterFeatureKey = Exclude<MethodKey<ExternalCoreAdapter>, CorePort
 export type CoreFeatureKey = Exclude<MethodKey<OwlCore>, keyof ExternalCoreAdapter>;
 
 type Assert<T extends true> = T;
-/**
- * http.ts の `declare module` が CorePort に足している実 Core 専用の3メソッド（グループ B）。
- * adapter には無いので requireCoreFeature で呼ぶ。http.ts の宣言を消す T-B でこの除外も消す。
- */
-type AugmentedCoreOnlyKey = "listRuleProposals" | "approveRuleProposal" | "rejectRuleProposal";
 /** 型だけの確認。CorePort の省略可能なメンバーは、すべて requireAdapterFeature に渡せる。 */
 export type OptionalPortMethodsAreAdapterFeatures =
-  Assert<[Exclude<Exclude<keyof CorePort, CorePortDirectKey | AugmentedCoreOnlyKey>, AdapterFeatureKey>] extends [never] ? true : false>;
+  Assert<[Exclude<Exclude<keyof CorePort, CorePortDirectKey>, AdapterFeatureKey>] extends [never] ? true : false>;
 
 export interface CoreFeatureError {
   readonly code: "dependency_unavailable" | "core_not_ready";
-  readonly message: string;
+  readonly message: string | MessageRef;
 }
 
 // 関数を取り出さず object 自身を返す。取り出すと呼ぶときの this が変わるため。
@@ -82,6 +79,6 @@ const MEMORY_REQUIRED: readonly MemoryRequiredKey[] = ["search", "expand", "reca
 
 export function requireMemoryFeature(core: unknown): MemoryFeature {
   const found = firstWithMethods([memoryOf(core), memoryOf(inner(core))], MEMORY_REQUIRED);
-  if (!found) throw new ApiError(503, "dependency_unavailable", "The loaded Core does not support the memory API.");
+  if (!found) throw new ApiError(503, "dependency_unavailable", CoreFeatureMessages.memoryApiUnsupported());
   return found as MemoryFeature;
 }

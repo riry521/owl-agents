@@ -10,7 +10,11 @@
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
     "skipLibCheck": true,
-    "noEmitOnError": true
+    "noEmitOnError": true,
+    "paths": {
+      "@owl/shared": ["../shared/dist/index.d.ts"],
+      "@owl/shared/*": ["../shared/dist/*"]
+    }
   },
   "include": ["src/**/*.ts"]
 }

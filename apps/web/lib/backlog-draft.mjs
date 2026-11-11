@@ -1,3 +1,4 @@
+// @ts-check
 import { WORK_SUMMARY_SECTIONS } from './work-summary.mjs';
 
 /** @typedef {import('./types').BacklogItem} BacklogItem */
@@ -6,9 +7,9 @@ const TITLE_LIMIT = 500;
 const SUMMARY_LIMIT = 20_000;
 const PROBLEM_TITLE_LIMIT = 80;
 
-/** @param {string} key */
+/** @param {string} key @param {string} locale */
 function summaryLabel(key, locale) {
-  const section = WORK_SUMMARY_SECTIONS.find((item) => item.key === key);
+  const section = /** @type {{ label: string, label_en: string }} */ (WORK_SUMMARY_SECTIONS.find((item) => item.key === key));
   return locale === 'ja' ? section.label : section.label_en;
 }
 
@@ -55,6 +56,7 @@ export function backlogWorkDraft(items, locale, t) {
     return lines.join('\n');
   });
 
+  /** @param {string[]} backgroundEntries @param {boolean} addEllipsis */
   const renderSummary = (backgroundEntries, addEllipsis) => {
     const background = [...backgroundEntries, ...(addEllipsis ? ['…'] : [])].join('\n');
     return [

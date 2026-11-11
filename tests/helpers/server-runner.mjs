@@ -17,6 +17,8 @@ export async function serverRunnerModuleWithout(t, methods, delegate) {
   for (const name of ["shared", "core", "db"]) {
     await symlink(fileURLToPath(new URL(`../../packages/${name}`, import.meta.url)), path.join(tree, "packages", name));
   }
+  // The copied dist resolves @owl/* by package name, so it needs the server's node_modules next to it.
+  await symlink(fileURLToPath(new URL("../../apps/server/node_modules", import.meta.url)), path.join(tree, "apps/server/node_modules"));
   globalThis.__owlScriptedRuntimeRunner = delegate;
   const realRuntime = JSON.stringify(new URL("../../packages/agent-runtime/dist/index.js", import.meta.url).href);
   await writeFile(

@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { requestStopOfAgentRuns, setAgentRunStatus, type AgentRunStatus } from "./agent-run-state.js";
-import { createUlid, utcNow } from "../../db/dist/index.js";
+import { createUlid, utcNow } from "@owl/db";
 import { OUTPUT_FORMAT_INVALID_ERROR_KEY, isReportFormatInvalidErrorKey, readDesignBlocked, usageJson } from "@owl/shared";
-import type { ReviewLimitSettings } from "../../shared/dist/review-limit-settings.js";
+import type { ReviewLimitSettings } from "@owl/shared/review-limit-settings";
 import { HumanReadableError, invalidStateTransition, notFound, validationError, versionConflict, workProjectAlreadySet } from "./errors";
 import {
   DECISION_CANCEL_OPTION_KEY,
@@ -19,29 +19,28 @@ import {
 import * as AttemptPolicy from "./attempt-policy";
 import { attemptAction, type AttemptDecision, type AttemptReason } from "./attempt-policy";
 import { autoRecoveryLimit, autoRecoveryUsed, criteriaDecisionBrief, immediateDecisionReason, recordAutoRecoveryInTransaction, samePartialReport, withAutoRecoveryTried, type ImmediateDecisionReason } from "./auto-recovery";
-import { criterionRequirement, isManagerCriterion, readStoredAcceptanceCriteria, type StoredAcceptanceCriterion } from "../../shared/dist/acceptance-criteria.js";
+import { criterionRequirement, isManagerCriterion, readStoredAcceptanceCriteria, type StoredAcceptanceCriterion } from "@owl/shared/acceptance-criteria";
 import { ownerLanguage, type OwnerLanguage } from "./owner-language";
 import { replaceWorkPrerequisitesInTransaction, resolveWorkPrerequisiteDecisionInTransaction } from "./work-prerequisites";
 import { flagManagerTrigger, queueManagerTrigger } from "./replan-queue-store.js";
 import { fixPendingTaskIds } from "./fix-pending-tasks.js";
 import { reviewLimits } from "./review-limits";
 import { previousFixSpots, reviewFocusSettings, reviewSpots, type ReviewSpot } from "./review-focus";
-import type { ReviewFocusSettings } from "../../shared/dist/review-focus-settings.js";
+import type { ReviewFocusSettings } from "@owl/shared/review-focus-settings";
 import { remakeLimits } from "./remake-limits";
 import { fixerEscalation } from "./fixer-escalation";
-import type { FixerEscalationSettings } from "../../shared/dist/fixer-escalation-settings.js";
+import type { FixerEscalationSettings } from "@owl/shared/fixer-escalation-settings";
 import { progressGuard } from "./progress-guard";
 import { ensureOwner } from "./settings-store";
 
 export { ensureOwner };
 import { assertAgentRunNotStopped } from "./agent-run-stop";
 import { assignReplacementLineageInTransaction, lineageExternalBlockerReports, lineagePartialReports, previousPartialReport, lineageGenerationCount, lineageReviewAttemptsExcluding, lineageRootOf, lineageUsage, parseLineageReset, restartLineageBudgetInTransaction } from "./task-lineage";
-import type { RemakeLimitSettings } from "../../shared/dist/remake-limit-settings.js";
 import { findDependencyCycle, type ReplanPlan, type TaskRevision } from "./replan-plan";
-import { PROCESS_WAIT_EVENT, validatePrerequisiteSpec, type PrerequisiteSpec } from "../../shared/dist/prerequisite.js";
+import { PROCESS_WAIT_EVENT, validatePrerequisiteSpec, type PrerequisiteSpec } from "@owl/shared/prerequisite";
 import { designerStateAfterRetry, designerStateAtCreation, type AssignedDesigner } from "./designer-assignment.js";
-import { ACCEPTANCE_DEFECT_EVENT, normalizeAcceptanceDefects, workerAcceptanceDefects } from "../../shared/dist/acceptance-defect.js";
-import { EXTERNAL_BLOCKER_EVENT } from "../../shared/dist/external-blocker.js";
+import { ACCEPTANCE_DEFECT_EVENT, normalizeAcceptanceDefects, workerAcceptanceDefects } from "@owl/shared/acceptance-defect";
+import { EXTERNAL_BLOCKER_EVENT } from "@owl/shared/external-blocker";
 import type {
   CoreWriteLaneTransaction,
   CreateWorkPayload,
@@ -100,7 +99,7 @@ function objectPayload(command: { payload?: JsonObject }): JsonObject {
 function requiredBoolean(payload: JsonObject, key: string): boolean {
   const value = payload[key];
   if (typeof value !== "boolean") {
-    throw validationError(`Reducer guard ${key} must be an explicit boolean.`, { field: key });
+    throw validationError(`Reducer guard ${key} must be an explicit boolean.`, { field: key }, { code: "state.reducer_guard_not_boolean", values: { field: key } });
   }
   return value;
 }
@@ -108,7 +107,7 @@ function requiredBoolean(payload: JsonObject, key: string): boolean {
 function requiredString(payload: JsonObject, key: string): string {
   const value = payload[key];
   if (typeof value !== "string" || value.length === 0) {
-    throw validationError(`Reducer field ${key} must be a non-empty string.`, { field: key });
+    throw validationError(`Reducer field ${key} must be a non-empty string.`, { field: key }, { code: "state.reducer_field_not_string", values: { field: key } });
   }
   return value;
 }
@@ -116,18 +115,7 @@ function requiredString(payload: JsonObject, key: string): string {
 function requiredNumber(payload: JsonObject, key: string): number {
   const value = payload[key];
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
-    throw validationError(`Reducer field ${key} must be a non-negative integer.`, { field: key });
-  }
-  return value;
-}
-
-function optionalBoolean(payload: JsonObject, key: string, defaultValue: boolean): boolean {
-  const value = payload[key];
-  if (value === undefined) {
-    return defaultValue;
-  }
-  if (typeof value !== "boolean") {
-    throw validationError(`Reducer guard ${key} must be a boolean when supplied.`, { field: key });
+    throw validationError(`Reducer field ${key} must be a non-negative integer.`, { field: key }, { code: "state.reducer_field_not_count", values: { field: key } });
   }
   return value;
 }
@@ -730,7 +718,7 @@ export function reduceTask(
       return decided(taskResult(row, withTaskVersion(resetReviewerFailureCounter(resetFailureCounters(row)), "completed", now), ["dependencies_unlock"]), "verified_without_review");
     }
     if (outcome !== "fail") {
-      throw validationError("Verification outcome must be pass or fail.", { field: "outcome" });
+      throw validationError("Verification outcome must be pass or fail.", { field: "outcome" }, { code: "state.verification_outcome_invalid", values: { field: "outcome" } });
     }
     return applyAttemptEvaluation(row, event, now, AttemptPolicy.evaluate({ kind: "verification_failed", task: row }, policy));
   }
@@ -2121,14 +2109,14 @@ function insertReport(
   now: string,
 ): string {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw validationError("A valid report must be a JSON object.", { agent_run_id: agentRunId });
+    throw validationError("A valid report must be a JSON object.", { agent_run_id: agentRunId }, { code: "state.report_not_object", values: { field: "report", agent_run_id: agentRunId } });
   }
   const record = value as JsonObject;
   const reportResult = record.result;
   if (typeof reportResult !== "string" || !REPORT_RESULT_VALUES.has(reportResult)) {
     throw validationError("A valid report must have result success, failed, or partial.", {
       agent_run_id: agentRunId,
-    });
+    }, { code: "state.report_result_invalid", values: { field: "result", agent_run_id: agentRunId } });
   }
   const payloadJson = JSON.stringify(value);
   const reportId = createUlid();
@@ -2253,16 +2241,16 @@ export function createWorkInTransaction(
   ownerId = "owner:default",
 ): WorkRow {
   if (payload.title.trim().length < 1 || payload.title.length > 500) {
-    throw validationError("Work title must contain between 1 and 500 characters.", { field: "title" });
+    throw validationError("Work title must contain between 1 and 500 characters.", { field: "title" }, { code: "state.work_title_length", values: { field: "title" } });
   }
   if (payload.summary.length > 20000) {
-    throw validationError("Work summary cannot exceed 20,000 characters.", { field: "summary" });
+    throw validationError("Work summary cannot exceed 20,000 characters.", { field: "summary" }, { code: "state.work_summary_too_long", values: { field: "summary" } });
   }
   if (!["small", "normal", "large"].includes(payload.size)) {
-    throw validationError("Work size must be small, normal, or large.", { field: "size" });
+    throw validationError("Work size must be small, normal, or large.", { field: "size" }, { code: "state.work_size_invalid", values: { field: "size" } });
   }
   if (payload.design_mode !== undefined && payload.design_mode !== "auto" && payload.design_mode !== "lead") {
-    throw validationError("Work design_mode must be auto or lead.", { field: "design_mode" });
+    throw validationError("Work design_mode must be auto or lead.", { field: "design_mode" }, { code: "state.work_design_mode_invalid", values: { field: "design_mode" } });
   }
   const now = utcNow();
   ensureOwner(transaction, ownerId, now);
@@ -2338,7 +2326,7 @@ function detectCycle(
         throw validationError("A Task dependency must refer to a Task in the same plan.", {
           task_id: localId,
           depends_on_task_id: dependency,
-        });
+        }, { code: "state.plan_dependency_outside_plan", values: { field: "depends_on_task_id", task_id: localId, depends_on_task_id: dependency } });
       }
     }
     edges.set(localId, dependencies);
@@ -2347,7 +2335,7 @@ function detectCycle(
   const visited = new Set<string>();
   const visit = (id: string): void => {
     if (visiting.has(id)) {
-      throw validationError("The Task plan contains a dependency cycle.", { task_id: id });
+      throw validationError("The Task plan contains a dependency cycle.", { task_id: id }, { code: "state.plan_dependency_cycle", values: { field: "depends_on", task_id: id } });
     }
     if (visited.has(id)) {
       return;
@@ -2412,16 +2400,16 @@ export function createTaskPlanInTransaction(
     for (const alias of aliases) {
       const previous = localAliases.get(alias);
       if (previous !== undefined && previous !== canonicalId) {
-        throw validationError("Every Manager Task identifier must be unique and non-empty.", { field: "tasks", task_id: alias });
+        throw validationError("Every Manager Task identifier must be unique and non-empty.", { field: "tasks", task_id: alias }, { code: "state.task_identifier_invalid", values: { field: "tasks", task_id: alias } });
       }
       localAliases.set(alias, canonicalId);
     }
   }
   if (new Set(localIds).size !== localIds.length || localIds.some((id) => id.length === 0)) {
-    throw validationError("Every Manager Task identifier must be unique and non-empty.", { field: "tasks" });
+    throw validationError("Every Manager Task identifier must be unique and non-empty.", { field: "tasks" }, { code: "state.task_identifier_invalid", values: { field: "tasks", task_id: "" } });
   }
   if ([...localAliases.keys()].some((alias) => existingRefs.has(alias))) {
-    throw validationError("A new Task identifier conflicts with an existing Task in this Work.", { field: "tasks" });
+    throw validationError("A new Task identifier conflicts with an existing Task in this Work.", { field: "tasks" }, { code: "state.task_identifier_conflict", values: { field: "tasks" } });
   }
   const normalizedItems = items.map((item) => ({
     ...item,
@@ -2440,7 +2428,7 @@ export function createTaskPlanInTransaction(
   for (let index = 0; index < items.length; index += 1) {
     const item = normalizedItems[index];
     if (item.title.trim().length < 1 || item.title.length > 500) {
-      throw validationError("Task title must contain between 1 and 500 characters.", { field: "title" });
+      throw validationError("Task title must contain between 1 and 500 characters.", { field: "title" }, { code: "state.task_title_length", values: { field: "title" } });
     }
     const localId = localIds[index];
     const id = idMap.get(localId)!;
@@ -2540,14 +2528,14 @@ export function createTaskPlanInTransaction(
     const parentLocalId = item.parent_task_id ?? null;
     const parentId = parentLocalId === null ? null : idMap.get(parentLocalId) ?? existingRefs.get(parentLocalId);
     if (parentLocalId !== null && parentId === undefined) {
-      throw validationError("A Task parent must refer to a Task in this Work.", { parent_task_id: parentLocalId });
+      throw validationError("A Task parent must refer to a Task in this Work.", { parent_task_id: parentLocalId }, { code: "state.task_parent_outside_work", values: { field: "parent_task_id", parent_task_id: parentLocalId } });
     }
     transaction.run("UPDATE tasks SET parent_task_id = ? WHERE id = ?", parentId ?? null, row.id);
     row.parent_task_id = parentId ?? null;
     for (const dependency of item.depends_on ?? []) {
       const mappedDep = idMap.get(dependency) ?? existingRefs.get(dependency);
       if (!mappedDep) {
-        throw validationError("A Task dependency must refer to a Task in this Work.", { depends_on_task_id: dependency });
+        throw validationError("A Task dependency must refer to a Task in this Work.", { depends_on_task_id: dependency }, { code: "state.task_dependency_outside_work", values: { field: "depends_on_task_id", depends_on_task_id: dependency } });
       }
       transaction.run(
         "INSERT INTO task_dependencies (task_id, depends_on_task_id) VALUES (?, ?)",
@@ -2595,7 +2583,7 @@ export interface ReplanApplyResult {
  * cycle. Works on the WriteLane transaction (before commit) and on the
  * database (WorkflowEngine.validateDependencies).
  */
-export function assertTaskDependencyGraph(reader: Pick<CoreWriteLaneTransaction, "all">, workId: string, cycleMessage = "The Work contains a dependency cycle."): void {
+export function assertTaskDependencyGraph(reader: Pick<CoreWriteLaneTransaction, "all">, workId: string, replan = false): void {
   const tasks = reader.all<{ id: string }>("SELECT id FROM tasks WHERE work_id = ?", workId);
   const dependencies = reader.all<{ task_id: string; depends_on_task_id: string }>(
     `SELECT task_id, depends_on_task_id
@@ -2608,12 +2596,12 @@ export function assertTaskDependencyGraph(reader: Pick<CoreWriteLaneTransaction,
   for (const dependency of dependencies) {
     const list = edges.get(dependency.task_id);
     if (!list || !edges.has(dependency.depends_on_task_id)) {
-      throw validationError("A dependency references a Task outside the Work.", dependency);
+      throw validationError("A dependency references a Task outside the Work.", dependency, { code: "state.dependency_outside_work", values: { field: "depends_on_task_id", task_id: dependency.task_id, depends_on_task_id: dependency.depends_on_task_id } });
     }
     list.push(dependency.depends_on_task_id);
   }
   const cycle = findDependencyCycle(edges);
-  if (cycle) throw validationError(cycleMessage, { task_id: cycle[0], cycle });
+  if (cycle) throw validationError(replan ? "The replan creates a dependency cycle." : "The Work contains a dependency cycle.", { task_id: cycle[0], cycle }, { code: "state.dependency_cycle", values: { field: "depends_on", task_id: cycle[0], replan: String(replan) } });
 }
 
 function replanAbort(code: string, message: string, details: Record<string, unknown>): HumanReadableError {
@@ -2689,7 +2677,7 @@ export function applyReplanInTransaction(
   const registeredByLocalId = new Map(registered.map((task) => [task.manager_task_id ?? task.id, task.id]));
   const registeredId = (localId: string): string => {
     const taskId = registeredByLocalId.get(localId);
-    if (taskId === undefined) throw validationError("A Task of the replan was not registered.", { work_id: workId, task_id: localId });
+    if (taskId === undefined) throw validationError("A Task of the replan was not registered.", { work_id: workId, task_id: localId }, { code: "state.replan_task_not_registered", values: { field: "tasks", work_id: workId, task_id: localId } });
     return taskId;
   };
 
@@ -2715,7 +2703,7 @@ export function applyReplanInTransaction(
       const dependencyId = "task_id" in dependency ? dependency.task_id : registeredId(dependency.new_task);
       const owner = transaction.get<{ work_id: string }>("SELECT work_id FROM tasks WHERE id = ?", dependencyId);
       if (owner?.work_id !== workId || dependencyId === taskId) {
-        throw validationError("A retried Task's dependency must be another Task of this Work.", { task_id: taskId, depends_on_task_id: dependencyId });
+        throw validationError("A retried Task's dependency must be another Task of this Work.", { task_id: taskId, depends_on_task_id: dependencyId }, { code: "state.retried_dependency_outside_work", values: { field: "depends_on_task_id", task_id: taskId, depends_on_task_id: dependencyId } });
       }
       transaction.run("INSERT OR IGNORE INTO task_dependencies (task_id, depends_on_task_id) VALUES (?, ?)", taskId, dependencyId);
     }
@@ -2814,7 +2802,7 @@ export function applyReplanInTransaction(
 
   restoreCascadedDependentsInTransaction(transaction, workId);
   transaction.run("UPDATE works SET plan_revision = plan_revision + 1, updated_at = ? WHERE id = ?", now, workId);
-  assertTaskDependencyGraph(transaction, workId, "The replan creates a dependency cycle.");
+  assertTaskDependencyGraph(transaction, workId, true);
   if (work.state === "judgement_waiting") cancelledDecisionIds.push(...resumeWorkAfterOwnerReplanInTransaction(transaction, workId, now));
   return { registered, reopened: [...plan.reopenIds], replacements, cancelled_decision_ids: cancelledDecisionIds, stopped_task_ids: stoppedTaskIds, revised: [...reviseIds] };
 }
@@ -3026,7 +3014,7 @@ export function openDecisionInTransaction(
   );
   if (input.scope === "work" && input.blocks_work === false) {
     if (input.blocked_task_ids.length > 0) {
-      throw validationError("A non-blocking Decision cannot block Tasks.", { field: "blocked_task_ids" });
+      throw validationError("A non-blocking Decision cannot block Tasks.", { field: "blocked_task_ids" }, { code: "state.nonblocking_decision_blocks_tasks", values: { field: "blocked_task_ids" } });
     }
   } else if (input.scope === "work") {
     reduceWorkInTransaction(transaction, input.work_id, {
@@ -3091,7 +3079,7 @@ export function resolveDecisionInTransaction(
 ): ResolveDecisionResult {
   const maxAnswerLength = input.by_instruction === true ? 100000 : 10000;
   if (input.answer.length < 1 || input.answer.length > maxAnswerLength) {
-    throw validationError(`Decision answer must contain between 1 and ${maxAnswerLength.toLocaleString("en-US")} characters.`, { field: "answer" });
+    throw validationError(`Decision answer must contain between 1 and ${maxAnswerLength.toLocaleString("en-US")} characters.`, { field: "answer" }, { code: "state.decision_answer_length", values: { field: "answer", max: maxAnswerLength.toLocaleString("en-US") } });
   }
   const decision = transaction.get<DecisionRow>("SELECT * FROM decisions WHERE id = ?", input.decision_id);
   if (!decision) {
@@ -3117,17 +3105,17 @@ export function resolveDecisionInTransaction(
     throw validationError("This Decision does not allow a free-text answer; select one of the stored options.", {
       decision_id: decision.id,
       allow_free_text: false,
-    });
+    }, { code: "state.decision_free_text_not_allowed", values: { field: "answer", decision_id: decision.id } });
   }
   if (input.option_key !== null) {
     let storedOptions: unknown;
     try {
       storedOptions = JSON.parse(decision.options_json) as unknown;
     } catch (error) {
-      throw validationError("The stored Decision options value is invalid.", { decision_id: decision.id, cause: error instanceof Error ? error.message : "parse_error" });
+      throw validationError("The stored Decision options value is invalid.", { decision_id: decision.id, cause: error instanceof Error ? error.message : "parse_error" }, { code: "state.decision_options_invalid", values: { field: "options", decision_id: decision.id } });
     }
     if (!Array.isArray(storedOptions)) {
-      throw validationError("The stored Decision options value is invalid.", { decision_id: decision.id });
+      throw validationError("The stored Decision options value is invalid.", { decision_id: decision.id }, { code: "state.decision_options_invalid", values: { field: "options", decision_id: decision.id } });
     }
     const selected = storedOptions.find((option) =>
       typeof option === "object" && option !== null && !Array.isArray(option)
@@ -3137,13 +3125,13 @@ export function resolveDecisionInTransaction(
       throw validationError("The selected Decision option is not one of the stored options.", {
         decision_id: decision.id,
         option_key: input.option_key,
-      });
+      }, { code: "state.decision_option_unknown", values: { field: "option_key", decision_id: decision.id, option_key: String(input.option_key) } });
     }
     if (input.option_note !== true && typeof selected.label === "string" && input.answer !== selected.label) {
       throw validationError("The answer text must match the label of the selected option.", {
         decision_id: decision.id,
         option_key: input.option_key,
-      });
+      }, { code: "state.decision_answer_label_mismatch", values: { field: "answer", decision_id: decision.id, option_key: String(input.option_key) } });
     }
   }
   const now = utcNow();
@@ -3179,7 +3167,7 @@ export function resolveDecisionInTransaction(
 
   const blockedTaskIds = JSON.parse(decision.blocked_task_ids_json) as unknown;
   if (!Array.isArray(blockedTaskIds) || blockedTaskIds.some((id) => typeof id !== "string")) {
-    throw validationError("The stored Decision blocked_task_ids value is invalid.", { decision_id: decision.id });
+    throw validationError("The stored Decision blocked_task_ids value is invalid.", { decision_id: decision.id }, { code: "state.decision_blocked_task_ids_invalid", values: { field: "blocked_task_ids", decision_id: decision.id } });
   }
   const resumedTaskIds: string[] = [];
   // A "cancel" answer ends the Work (Core.answerDecision cancels it right
@@ -3251,11 +3239,4 @@ export function resolveDecisionInTransaction(
     decision: { ...decision, status: "resolved", state_version: decision.state_version + 1, resolved_at: now },
     resumed_task_ids: resumedTaskIds,
   };
-}
-
-export function resolveTaskState(row: TaskRow, dependenciesCompleted: boolean): TaskState {
-  if (row.status !== "waiting") {
-    return row.status;
-  }
-  return dependenciesCompleted ? "ready" : "waiting";
 }

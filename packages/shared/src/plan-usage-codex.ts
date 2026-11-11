@@ -1,10 +1,7 @@
 import type { PlanUsageSnapshot, PlanUsageWindow } from "./plan-usage.js";
+import { isRecord } from "./small-helpers.js";
 
 type RecordValue = Record<string, unknown>;
-
-function isRecord(value: unknown): value is RecordValue {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 function pick(record: RecordValue, snake: string, camel: string): unknown {
   return record[snake] !== undefined ? record[snake] : record[camel];

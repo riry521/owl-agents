@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * @typedef {object} RemakeLimits
  * @property {number} lineage_review_attempts
@@ -27,6 +28,7 @@ export function remakeLimitsToDraft(settings) {
 
 /** @param {ReturnType<typeof remakeLimitsToDraft>} draft */
 export function draftToRemakeLimits(draft) {
+  /** @param {string} text */
   const number = (text) => (text.trim() === '' ? Number.NaN : Number(text));
   return {
     lineage_review_attempts: number(draft.lineage_review_attempts),

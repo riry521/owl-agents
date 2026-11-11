@@ -8,14 +8,14 @@ import {
   providerFailureCause,
   turnFailureProviderError,
   unwrapOpencodeResult,
-} from "../../../packages/agent-runtime/dist/index.js";
+} from "@owl/agent-runtime";
 import {
   OPENCODE_EXECUTABLE_ENV,
   type ChildRunFailureKind,
   type OpencodeChildOutcome,
   type OpencodeChildRun,
-} from "../../../packages/shared/dist/index.js";
-import { opencodeErrorText } from "../../../packages/core/dist/executor.js";
+} from "@owl/shared";
+import { opencodeErrorText } from "@owl/core/dist/executor.js";
 
 const REASON_MAX_CHARS = 600;
 

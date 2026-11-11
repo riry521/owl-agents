@@ -41,3 +41,11 @@ test("outside text in Librarian prompts sits inside an external-data block with 
   assert.match(kw, /<owl-items data=.{1,2}external/);
   assert.equal(kw.includes("<owl-x>"), false);
 });
+
+test("a clipping tags reply with only tags is accepted; a reply without tags is not", async () => {
+  const { parseClippingTagsResponse } = await import("../dist/page-integration.js");
+  const reply = (body) => parseClippingTagsResponse({ adapter: "claude", format: "json", stdout: JSON.stringify(body) });
+  assert.deepEqual(reply({ tags: ["a-b"] }).output, { tags: ["a-b"] });
+  assert.equal(reply({ tags: ["a-b"], summary: "s", keywords: ["k"] }).output.summary, "s");
+  assert.match(reply({ summary: "s" }).error, /tags/);
+});

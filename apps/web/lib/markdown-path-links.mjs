@@ -1,3 +1,4 @@
+// @ts-check
 /** @typedef {{ text: string, path: string | null }} PathSegment */
 
 // Judged by the characters alone: the Web does not know where the Project and materials are.
@@ -8,13 +9,16 @@ const LINK_PATTERN = new RegExp(
   + `|(?<![^${DELIMITERS}])(?<path>[^${DELIMITERS}]+?\\.md)(?![A-Za-z0-9_\\-/\\\\]|\\.[A-Za-z0-9])`,
   'giu',
 );
+/** @param {string} path */
 const linkable = (path) => !path.startsWith('~') && !path.includes('\\') && !path.split('/').includes('..');
 
 /**
  * Splits prose into plain text and linkable Markdown paths, keeping every character in order.
+ * @param {string} text
  * @returns {PathSegment[]}
  */
 export function splitMarkdownPaths(text) {
+  /** @type {PathSegment[]} */
   const segments = [];
   let at = 0;
   for (const match of text.matchAll(LINK_PATTERN)) {
@@ -28,13 +32,13 @@ export function splitMarkdownPaths(text) {
   return segments;
 }
 
-/** The linkable path when the whole string is one path, else null. */
+/** The linkable path when the whole string is one path, else null. @param {string} file */
 export function markdownLinkPath(file) {
   const segments = splitMarkdownPaths(file);
   return segments.length === 1 ? segments[0].path : null;
 }
 
-/** The viewer's href without the basePath. */
+/** The viewer's href without the basePath. @param {string} workId @param {string} path */
 export function markdownViewerHref(workId, path) {
   return `/work/markdown?${new URLSearchParams({ id: workId, path })}`;
 }

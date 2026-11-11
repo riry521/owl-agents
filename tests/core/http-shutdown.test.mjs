@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { createConnection } from "node:net";
 import { test } from "node:test";
 
+import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { createOwlHttpServer } from "../../apps/server/dist/http.js";
 import { tempDir } from "../helpers/temp.mjs";
 
@@ -44,4 +45,16 @@ test("HTTP shutdown closes an unfinished client request promptly", async (t) => 
     client.destroy();
     if (http.server.listening) await http.close();
   }
+});
+
+test("adapter shutdown still unsubscribes and closes the DB when Core stop() fails", async (t) => {
+  const root = await tempDir(t, "owl-adapter-shutdown-");
+  let unsubscribed = 0;
+  let closed = 0;
+  const failure = new Error("stop step failed");
+  const core = { subscribe: () => () => { unsubscribed += 1; }, stop: async () => { throw failure; } };
+  const adapter = new ExternalCoreAdapter(core, { close: () => { closed += 1; } }, root, root);
+  await assert.rejects(adapter.shutdown({ force: false, timeoutMs: 100 }));
+  assert.equal(unsubscribed, 1);
+  assert.equal(closed, 1);
 });

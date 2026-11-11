@@ -1,7 +1,7 @@
-import { utcNow } from "../../db/dist/index.js";
-import { validatePrerequisiteWorkIds, type WorkPrerequisiteView } from "../../shared/dist/work-prerequisite.js";
+import { utcNow } from "@owl/db";
+import { PrerequisiteIdsError, validatePrerequisiteWorkIds, WORK_PREREQUISITE_LIMIT, type WorkPrerequisiteView } from "@owl/shared/work-prerequisite";
 import { DROP_MISSING_PREREQUISITES_OPTION_KEY, workPrerequisiteUnreachableBrief, type WorkPrerequisiteBriefItem } from "./decision-brief";
-import { HumanReadableError, validationError } from "./errors";
+import { HumanReadableError, validationError, type CoreReason } from "./errors";
 import type { OwnerLanguage } from "./owner-language";
 import { workConditionVerdict, type ConditionVerdict } from "./prerequisite-monitor";
 import { appendEventInTransaction, ensureCoreDecision, reduceWorkInTransaction } from "./state-reducer";
@@ -114,6 +114,14 @@ export function findPrerequisiteCycle(reader: WorkPrerequisiteReader, workId: st
   return null;
 }
 
+export function prerequisiteIdsReason(error: unknown): CoreReason {
+  const field = "prerequisite_work_ids";
+  const kind = error instanceof PrerequisiteIdsError ? error.kind : "not_array";
+  if (kind === "duplicate") return { code: "work_prerequisite.ids_duplicate", values: { field } };
+  if (kind === "too_many") return { code: "work_prerequisite.ids_too_many", values: { field, max: WORK_PREREQUISITE_LIMIT } };
+  return { code: "work_prerequisite.ids_not_array", values: { field } };
+}
+
 /** Replace the prerequisites of a Work, refusing missing Works, itself and cycles. */
 export function replaceWorkPrerequisitesInTransaction(
   transaction: CoreWriteLaneTransaction,
@@ -125,16 +133,16 @@ export function replaceWorkPrerequisitesInTransaction(
   try {
     ids = validatePrerequisiteWorkIds(value);
   } catch (error) {
-    throw validationError((error as Error).message, { field: "prerequisite_work_ids" });
+    throw validationError((error as Error).message, { field: "prerequisite_work_ids" }, prerequisiteIdsReason(error));
   }
-  if (ids.includes(workId)) throw validationError("A Work cannot be its own prerequisite.", { field: "prerequisite_work_ids" });
+  if (ids.includes(workId)) throw validationError("A Work cannot be its own prerequisite.", { field: "prerequisite_work_ids" }, { code: "work_prerequisite.self_reference", values: { field: "prerequisite_work_ids" } });
   for (const id of ids) {
     if (!transaction.get("SELECT id FROM works WHERE id = ?", id)) {
       throw new HumanReadableError({
         code: "prerequisite_work_not_found",
         message: `Prerequisite Work ${id} was not found.`,
         remediation: "Check the Work ID on the Work screen or by search, then send the request again.",
-        details: { work_id: id },
+        details: { work_id: id, reason: { code: "work_prerequisite.not_found", values: { id } } },
       });
     }
   }
@@ -152,7 +160,7 @@ export function replaceWorkPrerequisitesInTransaction(
       code: "prerequisite_cycle",
       message: `These prerequisites would make Works wait on each other: ${cycle.map((id) => views.get(id)).join(" → ")}.`,
       remediation: "Remove one of the prerequisites on the path.",
-      details: { cycle },
+      details: { cycle, reason: { code: "work_prerequisite.cycle", values: { path: cycle.map((id) => views.get(id)).join(" → ") } } },
     });
   }
   transaction.run("DELETE FROM work_prerequisites WHERE work_id = ?", workId);

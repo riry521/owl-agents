@@ -1,6 +1,7 @@
+// @ts-check
 /** @typedef {{ id: string, text: string, level: number }} TocEntry */
 
-/** A heading's text as a URL-safe id, unique among `used` (the id is added to it). */
+/** A heading's text as a URL-safe id, unique among `used` (the id is added to it). @param {string} text @param {Set<string>} used */
 export function slugifyHeading(text, used) {
   const base = text.trim().toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}_-]/gu, '') || 'section';
   let id = base;
@@ -9,11 +10,13 @@ export function slugifyHeading(text, used) {
   return id;
 }
 
+/** @param {any} node @returns {string} */
 const nodeText = (node) => (typeof node.value === 'string' ? node.value : (node.children ?? []).map(nodeText).join(''));
 
 /** Remark plugin: adds id and tabIndex to the headings directly under the root. */
 export function remarkHeadingIds() {
-  return (tree) => {
+  return (/** @type {any} */ tree) => {
+    /** @type {Set<string>} */
     const used = new Set();
     for (const node of tree.children) {
       if (node.type !== 'heading') continue;

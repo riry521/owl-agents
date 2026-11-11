@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { signalProcessGroup } from "@owl/shared";
-import { isAbsolute, resolve } from "node:path";
+import { resolve } from "node:path";
 
 /** Outcome of rehearsing one MCP server's startup handshake. */
 export type ProbeStatus = "ok" | "failed" | "timeout" | "unverified";

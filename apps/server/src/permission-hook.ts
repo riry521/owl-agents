@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { readStdin } from "./stdio-jsonrpc.js";
 import { dirname, isAbsolute, resolve, sep } from "node:path";
 
-import { GUARD_COMMAND_KEYS, GUARD_NAMED_TOOLS, GUARD_PATH_KEYS, guardChecksToolCall, isReadOnlyAgentRole, readOnlyToolAllowed } from "../../../packages/shared/dist/guard-inputs.js";
-import { GUARD_TOKEN_FILE_ENV } from "../../../packages/shared/dist/guard-token.js";
+import { GUARD_COMMAND_KEYS, GUARD_NAMED_TOOLS, GUARD_PATH_KEYS, guardChecksToolCall, isReadOnlyAgentRole, readOnlyToolAllowed } from "@owl/shared/guard-inputs";
+import { GUARD_TOKEN_FILE_ENV } from "@owl/shared/guard-token";
 import { guardConfig, guardHasToken, guardRequest, trimOneSlash } from "./guard-client.js";
-import { isResearchSubagentType, researchToolDecision } from "../../../packages/shared/dist/research-subagent.js";
+import { isResearchSubagentType, researchToolDecision } from "@owl/shared/research-subagent";
+import { isRecord } from "@owl/shared/small-helpers";
 
 interface HookInput {
   readonly hook_event_name?: unknown;
@@ -20,10 +22,6 @@ interface GuardResponse {
     readonly allowed?: unknown;
     readonly message?: unknown;
   };
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//iu;
@@ -217,7 +215,7 @@ async function checkOutbound(toolName: string, toolInput: Record<string, unknown
     if (urls.length === 0) return null;
     const owlRoot = process.env.OWL_ROOT;
     if (!owlRoot || !isAbsolute(owlRoot)) throw new Error("OWL_ROOT is unavailable");
-    const { OutboundGuard } = await import("../../../packages/core/dist/outbound-guard.js");
+    const { OutboundGuard } = await import("@owl/core/dist/outbound-guard.js");
     const guard = new OutboundGuard(owlRoot);
     guard.load();
     for (const url of urls) {
@@ -264,14 +262,6 @@ function deny(reason: string): void {
       permissionDecisionReason: reason,
     },
   })}\n`);
-}
-
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  }
-  return Buffer.concat(chunks).toString("utf8");
 }
 
 async function main(): Promise<void> {

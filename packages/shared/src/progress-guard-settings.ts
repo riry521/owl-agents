@@ -61,12 +61,12 @@ const KEYS = Object.keys(DEFAULT_PROGRESS_GUARD_SETTINGS) as (keyof ProgressGuar
 
 function checkValue(key: keyof ProgressGuardSettings, value: unknown): number | boolean {
   if (key === "prerequisite_sync_base") {
-    if (typeof value !== "boolean") throw new ProgressGuardSettingsValidationError(`${key} must be true or false.`, key);
+    if (typeof value !== "boolean") throw new ProgressGuardSettingsValidationError(`${key} must be true or false.`, key, { kind: "boolean" });
     return value;
   }
   const { min, max } = PROGRESS_GUARD_RANGES[key];
   if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
-    throw new ProgressGuardSettingsValidationError(`${key} must be an integer from ${min} to ${max}.`, key);
+    throw new ProgressGuardSettingsValidationError(`${key} must be an integer from ${min} to ${max}.`, key, { kind: "integer_range", min, max });
   }
   return value;
 }

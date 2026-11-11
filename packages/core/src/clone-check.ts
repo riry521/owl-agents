@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { lstat, readdir, readFile, readlink } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
-import { GUARD_PATH_KEYS, GUARD_SHELL_COMMAND_KEYS, GUARD_SHELL_TOOL_NAMES } from "../../shared/dist/guard-inputs.js";
+import { GUARD_PATH_KEYS, GUARD_SHELL_COMMAND_KEYS, GUARD_SHELL_TOOL_NAMES } from "@owl/shared/guard-inputs";
 import type { PolicyCheck } from "./task-verification-policy.js";
 
 const run = promisify(execFile);

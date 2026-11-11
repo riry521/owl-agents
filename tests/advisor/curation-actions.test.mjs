@@ -104,7 +104,7 @@ test("the chat reply runs each curation action once, records one run, and append
   for (const [type, kind] of Object.entries(KINDS)) {
     const before = core.listCurationRuns({ limit: 50 }).items.length;
     const turnId = createUlid();
-    const messageId = await core.persistAdvisorReply(
+    const messageId = await core.advisorActions.persistAdvisorReply(
       conversationId,
       "承知しました。",
       turnId,
@@ -141,7 +141,7 @@ test("the chat reply runs each curation kind at most once per turn, whatever the
   const { core } = await setup(t);
   const { conversation_id: conversationId } = await core.getActiveConversation();
   const before = core.listCurationRuns({ limit: 50 }).items.length;
-  const messageId = await core.persistAdvisorReply(
+  const messageId = await core.advisorActions.persistAdvisorReply(
     conversationId,
     "",
     createUlid(),
@@ -164,7 +164,7 @@ test("the chat reply ignores a prototype-inherited action type instead of crashi
   const before = core.listCurationRuns({ limit: 50 }).items.length;
 
   for (const type of HOSTILE_TYPES) {
-    const messageId = await core.persistAdvisorReply(
+    const messageId = await core.advisorActions.persistAdvisorReply(
       conversationId,
       "そのままでお願いします。",
       createUlid(),
@@ -194,7 +194,7 @@ test("the chat reply summarises the Librarian report from the current Librarian 
     warnings: ["w1"],
   });
   const { conversation_id: conversationId } = await core.getActiveConversation();
-  const messageId = await core.persistAdvisorReply(
+  const messageId = await core.advisorActions.persistAdvisorReply(
     conversationId,
     "",
     createUlid(),
@@ -224,7 +224,7 @@ test("the recorded rule curation run says it did not rewrite rules", async (t) =
     warnings: [],
   });
   const { conversation_id: conversationId } = await core.getActiveConversation();
-  const messageId = await core.persistAdvisorReply(
+  const messageId = await core.advisorActions.persistAdvisorReply(
     conversationId,
     "",
     createUlid(),
@@ -396,7 +396,7 @@ test("the chat reply and POST /advisor/actions return while the curation is stil
   const { conversation_id: conversationId } = await core.getActiveConversation();
 
   const turnId = createUlid();
-  const messageId = await core.persistAdvisorReply(conversationId, "", turnId, { channel: "web" }, [{ type: "run_skill_curation", description: "tidy", payload: {} }]);
+  const messageId = await core.advisorActions.persistAdvisorReply(conversationId, "", turnId, { channel: "web" }, [{ type: "run_skill_curation", description: "tidy", payload: {} }]);
   const chatRun = core.listCurationRuns({ limit: 10 }).items.find((item) => item.actor_ref === turnId);
   assert.equal(chatRun.status, "running");
   assert.ok(core.db.get("SELECT body FROM messages WHERE id = ?", messageId).body.includes(chatRun.id));
@@ -433,7 +433,7 @@ const NOTHING_RUNS = [
 
 async function replyWithAllCurations(core) {
   const { conversation_id: conversationId } = await core.getActiveConversation();
-  await core.persistAdvisorReply(conversationId, "", createUlid(), { channel: "web" }, NOTHING_RUNS);
+  await core.advisorActions.persistAdvisorReply(conversationId, "", createUlid(), { channel: "web" }, NOTHING_RUNS);
   await settleNotices(core);
 }
 
@@ -533,12 +533,12 @@ test("a curation that cannot start is a retryable failure; starting and a repeat
   const responded = () => JSON.parse(db.get("SELECT payload_json FROM events WHERE type = 'advisor.responded' ORDER BY rowid DESC LIMIT 1").payload_json);
   const actions = [{ type: "run_librarian", description: "a", payload: {} }, { type: "run_librarian", description: "b", payload: {} }];
 
-  await core.persistAdvisorReply(conversationId, "ok", createUlid(), { channel: "web" }, actions);
+  await core.advisorActions.persistAdvisorReply(conversationId, "ok", createUlid(), { channel: "web" }, actions);
   await settle(core);
   assert.equal(Object.hasOwn(responded(), "action_failures"), false);
 
   core.startCurationInBackground = async () => { throw new Error("cannot start"); };
-  await core.persistAdvisorReply(conversationId, "ok", createUlid(), { channel: "web" }, [...actions, { type: "run_rule_curation", description: "c", payload: {} }]);
+  await core.advisorActions.persistAdvisorReply(conversationId, "ok", createUlid(), { channel: "web" }, [...actions, { type: "run_rule_curation", description: "c", payload: {} }]);
   const failures = responded().action_failures;
   assert.deepEqual(failures.map((f) => [f.index, f.type, f.code, f.status, f.retryable, f.details]), [
     [0, "run_librarian", "start_failed", "failed", true, { kind: "librarian" }],

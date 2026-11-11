@@ -10,6 +10,7 @@ import { repoRoot } from "../helpers/paths.mjs";
 // browser-test dependency, so playwright-core and esbuild are borrowed from
 // OWL_BROWSER_TEST_DIR (default: another local project); skipped if unavailable.
 const webDir = join(repoRoot, "apps/web");
+const nextConfig = createRequire(import.meta.url)(join(webDir, "next.config.js"));
 const advisorSrc = process.env.OWL_ADVISOR_SRC ?? join(webDir, "components/AdvisorView.tsx");
 const toolsDir = process.env.OWL_BROWSER_TEST_DIR ?? join(homedir(), "stock-research/engine");
 
@@ -60,7 +61,8 @@ before(async () => {
     format: "iife",
     jsx: "automatic",
     tsconfig: join(webDir, "tsconfig.json"),
-    define: { "process.env.NODE_ENV": '"development"' },
+    // Next inlines env from next.config.js at build time; mimic that here.
+define: { "process.env.NODE_ENV": '"development"', "process.env.NEXT_PUBLIC_BASE_PATH": JSON.stringify(nextConfig.env.NEXT_PUBLIC_BASE_PATH) },
     nodePaths: [join(webDir, "node_modules")],
     plugins: [{
       name: "stub-api",

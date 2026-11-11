@@ -1,4 +1,4 @@
-import { isRecord, SettingsValidationError } from "./settings-validation.js";
+import { isRecord, SettingsValidationError, type SettingsCondition } from "./settings-validation.js";
 import { globToRegExp } from "./glob.js";
 
 export const REVIEW_ROUTING_SETTINGS_KEY = "review_routing";
@@ -42,6 +42,7 @@ export class ReviewRoutingSettingsValidationError extends SettingsValidationErro
 
 const MAX_GLOBS_PER_GROUP = 200;
 const MAX_GROUPS = 50;
+const MAX_GROUP_NAME = 100;
 const MAX_TEXT = 500;
 const LIMITS = { max_changed_lines: 100000, max_changed_files: 10000 } as const;
 const TOP_KEYS = ["type_defaults", "max_changed_lines", "max_changed_files", "sensitive_paths", "force_on_hybrid_delegation", "force_on_gate_failure_history", "force_on_rejection_history"];
@@ -51,18 +52,18 @@ function sameKeys(value: Record<string, unknown>, keys: readonly string[]): bool
   return own.length === keys.length && keys.every((key) => own.includes(key));
 }
 
-function fail(field: string, message: string): never {
-  throw new ReviewRoutingSettingsValidationError(message, field);
+function fail(field: string, message: string, condition: SettingsCondition): never {
+  throw new ReviewRoutingSettingsValidationError(message, field, condition);
 }
 
 function validGlobs(field: string, value: unknown): string[] {
-  if (!Array.isArray(value) || value.length > MAX_GLOBS_PER_GROUP) fail(field, `${field} must be an array of at most ${MAX_GLOBS_PER_GROUP} globs.`);
+  if (!Array.isArray(value) || value.length > MAX_GLOBS_PER_GROUP) fail(field, `${field} must be an array of at most ${MAX_GLOBS_PER_GROUP} globs.`, { kind: "array_length", min: 0, max: MAX_GLOBS_PER_GROUP });
   return value.map((glob) => {
-    if (typeof glob !== "string" || glob.length === 0 || glob.length > MAX_TEXT) fail(field, `${field} must contain non-empty globs of at most ${MAX_TEXT} characters.`);
+    if (typeof glob !== "string" || glob.length === 0 || glob.length > MAX_TEXT) fail(field, `${field} must contain non-empty globs of at most ${MAX_TEXT} characters.`, { kind: "glob_list", max_length: MAX_TEXT });
     try {
       globToRegExp(glob);
     } catch {
-      fail(field, `${field} contains an invalid glob: ${glob}`);
+      fail(field, `${field} contains an invalid glob: ${glob}`, { kind: "glob_list", max_length: MAX_TEXT });
     }
     return glob;
   });
@@ -70,26 +71,27 @@ function validGlobs(field: string, value: unknown): string[] {
 
 /** For PUT: exact keys, integers in range, enums, globs that compile. */
 export function validateReviewRoutingSettings(value: unknown): ReviewRoutingSettings {
-  if (!isRecord(value)) fail("payload", "Settings must be an object.");
-  if (!sameKeys(value, TOP_KEYS)) fail("payload", `Settings must contain exactly ${TOP_KEYS.join(", ")}.`);
+  if (!isRecord(value)) fail("payload", "Settings must be an object.", { kind: "not_object" });
+  if (!sameKeys(value, TOP_KEYS)) fail("payload", `Settings must contain exactly ${TOP_KEYS.join(", ")}.`, { kind: "exact_keys", keys: TOP_KEYS });
   const defaults = value.type_defaults;
-  if (!isRecord(defaults) || !sameKeys(defaults, REVIEW_ROUTING_TASK_TYPES)) fail("type_defaults", `type_defaults must contain exactly ${REVIEW_ROUTING_TASK_TYPES.join(", ")}.`);
+  if (!isRecord(defaults) || !sameKeys(defaults, REVIEW_ROUTING_TASK_TYPES)) fail("type_defaults", `type_defaults must contain exactly ${REVIEW_ROUTING_TASK_TYPES.join(", ")}.`, { kind: "exact_keys", keys: REVIEW_ROUTING_TASK_TYPES });
   const typeDefaults = Object.fromEntries(REVIEW_ROUTING_TASK_TYPES.map((type) => {
     const entry = defaults[type];
-    if (entry !== "required" && entry !== "not_required") fail(`type_defaults.${type}`, `type_defaults.${type} must be "required" or "not_required".`);
+    if (entry !== "required" && entry !== "not_required") fail(`type_defaults.${type}`, `type_defaults.${type} must be "required" or "not_required".`, { kind: "one_of", values: ["required", "not_required"] });
     return [type, entry];
   })) as Record<ReviewRoutingTaskType, ReviewDefault>;
   for (const key of ["max_changed_lines", "max_changed_files"] as const) {
     const number = value[key];
-    if (typeof number !== "number" || !Number.isInteger(number) || number < 0 || number > LIMITS[key]) fail(key, `${key} must be an integer from 0 to ${LIMITS[key]}.`);
+    if (typeof number !== "number" || !Number.isInteger(number) || number < 0 || number > LIMITS[key]) fail(key, `${key} must be an integer from 0 to ${LIMITS[key]}.`, { kind: "integer_range", min: 0, max: LIMITS[key] });
   }
   for (const key of ["force_on_hybrid_delegation", "force_on_gate_failure_history", "force_on_rejection_history"] as const) {
-    if (typeof value[key] !== "boolean") fail(key, `${key} must be a boolean.`);
+    if (typeof value[key] !== "boolean") fail(key, `${key} must be a boolean.`, { kind: "boolean" });
   }
   const paths = value.sensitive_paths;
-  if (!isRecord(paths) || Reflect.ownKeys(paths).length > MAX_GROUPS) fail("sensitive_paths", `sensitive_paths must be an object of at most ${MAX_GROUPS} groups.`);
+  const groupsCondition = { kind: "named_groups", max_groups: MAX_GROUPS, max_name_length: MAX_GROUP_NAME } as const;
+  if (!isRecord(paths) || Reflect.ownKeys(paths).length > MAX_GROUPS) fail("sensitive_paths", `sensitive_paths must be an object of at most ${MAX_GROUPS} groups.`, groupsCondition);
   const sensitive = Object.fromEntries(Object.entries(paths).map(([group, globs]) => {
-    if (group.length === 0 || group.length > 100) fail("sensitive_paths", "sensitive_paths group names must be 1 to 100 characters.");
+    if (group.length === 0 || group.length > MAX_GROUP_NAME) fail("sensitive_paths", "sensitive_paths group names must be 1 to 100 characters.", groupsCondition);
     return [group, validGlobs(`sensitive_paths.${group}`, globs)];
   }));
   return {

@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { TestRunSettings } from "../../shared/dist/test-run-settings.js";
+import type { TestRunSettings } from "@owl/shared/test-run-settings";
 import { testFailureKey, withDetachedWorktree, type TestFailure } from "./nightly-tests";
 import {
   baselineTestRun,

@@ -1,5 +1,5 @@
 import { TEST_SETUP_APPROVE_OPTION_KEY } from "@owl/shared";
-import { REGEX_FLAGS, type TestSetupSettings } from "../../shared/dist/test-setup-settings.js";
+import { REGEX_FLAGS, type TestSetupSettings } from "@owl/shared/test-setup-settings";
 import { testFailureKey } from "./nightly-tests";
 import type { TestExecution, TestFileResult } from "./test-runs";
 import type { TypePolicyResult } from "./task-verification-policy.js";

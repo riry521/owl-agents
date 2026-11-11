@@ -16,8 +16,8 @@ import {
   type DecisionExplanationRunResult,
   type DecisionFixOption,
   type StoredDecisionExplanation,
-} from "../../shared/dist/decision-explanation.js";
-import { readStoredAcceptanceCriteria } from "../../shared/dist/acceptance-criteria.js";
+} from "@owl/shared/decision-explanation";
+import { readStoredAcceptanceCriteria } from "@owl/shared/acceptance-criteria";
 import { assertDecisionBrief } from "./decision-brief";
 import { plainDecisionExplanation, type PlainExplanation } from "./decision-plain-explanation";
 import { lineagePartialReportPayloads, type LineageReader } from "./task-lineage";

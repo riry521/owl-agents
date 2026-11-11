@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import { GUARD_TOKEN_FILE_ENV } from "../../../packages/shared/dist/guard-token.js";
+import { GUARD_TOKEN_FILE_ENV } from "@owl/shared/guard-token";
 
 /** The run's Guard API settings, resolved from the environment. */
 export interface GuardConfig {

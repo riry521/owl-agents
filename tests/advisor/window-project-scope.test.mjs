@@ -101,7 +101,7 @@ test("create_work in a Project window goes into that Project; another project_id
   const alpha = await addProject("Alpha");
   const beta = await addProject("Beta");
   const window = await core.ensureAdvisorWindow(ownerId, alpha);
-  const reply = (actions) => core.persistAdvisorReply(window.conversation_id, "", createUlid(), { channel: "web" }, actions)
+  const reply = (actions) => core.advisorActions.persistAdvisorReply(window.conversation_id, "", createUlid(), { channel: "web" }, actions)
     .then((messageId) => db.get("SELECT body FROM messages WHERE id = ?", messageId).body);
 
   await reply([createWorkAction("unset")]);

@@ -117,7 +117,8 @@ export class GitProjectSourceReader implements ProjectSourceReader {
   private async git(repo: string, args: string[], env: Record<string, string> = {}, encoding: "utf8" | "buffer" = "utf8"): Promise<string | Buffer | null> {
     try {
       const { stdout } = await execFileAsync("git", ["-C", repo, ...args], {
-        encoding,
+        // Why cast: "buffer" is valid at run time, but @types/node 22 has no overload for the "utf8" | "buffer" union.
+        encoding: encoding as BufferEncoding,
         env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0", ...env },
         timeout: 10_000,
         // Why not 1 MiB: `ls-tree -r` of a repository with ~17k paths exceeds it and the whole listing became null.

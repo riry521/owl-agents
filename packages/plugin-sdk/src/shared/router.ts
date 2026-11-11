@@ -309,6 +309,7 @@ const STATUS_QUESTION_TAILS = [
 ];
 const STATUS_DEFECT_WORDS = /崩れ|表示されな|ずれ|エラー|落ちる|動かない|\b(?:error|broken|crash)/;
 
+// plugin-sdk は @owl/shared に依存しない公開パッケージなので、shared の escapeRegExp を読めない。同じ中身をここに持つ。
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

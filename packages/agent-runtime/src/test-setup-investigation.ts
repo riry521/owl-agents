@@ -7,8 +7,8 @@ import {
   validateRoleOutput,
   type RoleSchema,
 } from "./role-contract";
-import { TEST_RUN_UNITS, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
-import type { TestSetupBootstrap } from "../../shared/dist/test-setup-settings.js";
+import { TEST_RUN_UNITS, type TestRunSettings } from "@owl/shared/test-run-settings";
+import type { TestSetupBootstrap } from "@owl/shared/test-setup-settings";
 import type { ProviderResponse } from "./types";
 
 export const TEST_SETUP_VERDICTS = ["ready", "tests_failing", "no_tests", "no_language", "needs_owner", "code_problem"] as const;

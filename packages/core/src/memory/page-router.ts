@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createUlid } from "../../../db/dist/index.js";
+import { createUlid } from "@owl/db";
 import { OWNED_DIR_WRITE, writeAtomic } from "../atomic-write.js";
 import { fingerprint } from "../learning-fingerprint.js";
 import { slugifyKnowledgeName } from "../knowledge-naming.js";

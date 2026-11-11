@@ -86,6 +86,7 @@ interface ClaudeStreamLine {
   readonly task_id?: unknown;
 }
 
+// shared の isRecord は配列を除く。ここは配列も object として受けるので別に持つ。
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }

@@ -1,4 +1,4 @@
-import type { PrerequisiteCondition, PrerequisiteSpec } from "../../shared/dist/prerequisite.js";
+import type { PrerequisiteCondition, PrerequisiteSpec } from "@owl/shared/prerequisite";
 
 export type ConditionVerdict = "satisfied" | "pending" | "unreachable";
 

@@ -116,10 +116,10 @@ async function gracefulKill(pid: number, name: string, options: StopOptions): Pr
 }
 
 /**
- * Stop only optional Owl helper processes launched from this project.
- * The server itself is stopped by cli.ts after validating owl-server.json and
- * the HTTP status PID, so a same-named process from another checkout cannot
- * be signalled accidentally.
+ * Stop only the supervisor and connectors processes launched from this
+ * project's dist files (found by their command line under `root`).
+ * The server itself is not touched here: runStop in cli.ts stops it from the
+ * state it reads, after checking that the PID is an Owl server.
  */
 export async function stopManagedAuxiliaryProcesses(root: string, options: StopOptions): Promise<ManagedProcessStopEntry[]> {
   const results: ManagedProcessStopEntry[] = [];

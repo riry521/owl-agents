@@ -1,6 +1,6 @@
 'use client';
 
-import { type ComponentProps, type FormEvent,type KeyboardEvent, type Ref, useCallback, useEffect, useLayoutEffect, memo, useMemo, useRef, useState } from 'react';
+import { type ComponentProps, type FormEvent, type KeyboardEvent, type Ref, useCallback, useEffect, useLayoutEffect, memo, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import { ownerFileAnchorProps, remarkOwnerFileLinks } from '@/lib/owner-file-links.mjs';
@@ -71,7 +71,8 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
   const [channelsOpen, setChannelsOpen] = useState(false);
   const channelsButtonRef = useRef<HTMLButtonElement | null>(null);
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(() => () => { if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current); }, []);
+  const unmountedRef = useRef(false);
+  useEffect(() => () => { unmountedRef.current = true; if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current); }, []);
 
   // No fallback id on failure: a conversation made up here would belong to no window.
   const conversationView = useView<string>(knownConversationId ? null : `advisor-window:${windowKey}`, () => getAdvisorWindowConversation(windowKey));
@@ -194,6 +195,7 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
     setKnowledgeSaveError(null);
     try {
       const result = await ingestConversation(conversationId);
+      if (unmountedRef.current) return;
       setKnowledgeSaveNotice(t('advisor.saveSuccess', { path: result.path }));
       noticeTimerRef.current = setTimeout(() => setKnowledgeSaveNotice(null), KNOWLEDGE_SAVE_NOTICE_MS);
     } catch (error) {
@@ -433,6 +435,7 @@ function AdvisorComposer({ conversationId, sending, sendError, replying, stoppin
     if (!ta || sendingRef.current || blockedHintKey(draft.items)) return;
     const text = ta.value;
     const attachmentIds = draft.attachmentIds;
+    const sentItemIds = draft.items.map((item) => item.id);
     const clear = text.trim() !== '';
     sendingRef.current = true;
     if (clear) {
@@ -447,7 +450,7 @@ function AdvisorComposer({ conversationId, sending, sendError, replying, stoppin
       sendingRef.current = false;
       ta.focus();
     }
-    if (posted) draft.clear();
+    if (posted) draft.clear(sentItemIds);
     // Restore only into an empty box: text typed since the send is newer than the failed draft and must not be overwritten.
     if (!posted && clear && ta.value === '') {
       ta.value = text;
@@ -492,7 +495,7 @@ function AdvisorComposer({ conversationId, sending, sendError, replying, stoppin
           }}
           onKeyDown={onKeyDown}
           onPaste={(ev) => {
-            if (ev.clipboardData.files.length === 0) return;
+            if (!conversationId || ev.clipboardData.files.length === 0) return;
             ev.preventDefault();
             draft.add(Array.from(ev.clipboardData.files));
           }}
@@ -515,7 +518,7 @@ function AdvisorComposer({ conversationId, sending, sendError, replying, stoppin
           <button
             type="submit"
             className="advisor__send"
-            disabled={!canSend({ body: hasText ? 'x' : '', items: draft.items, sending })}
+            disabled={!canSend({ hasBody: hasText, items: draft.items, sending })}
             aria-label={t('advisor.sendLabel')}
           >
             <SendIcon />
@@ -615,13 +618,14 @@ const MarkdownBody = memo(function MarkdownBody({ body }: { body: string }) {
     return () => { active = false; };
   }, []);
   const apiBase = folders?.apiBase ?? '';
+  const viewerBase = process.env.NEXT_PUBLIC_BASE_PATH;
   const plugins = useMemo<NonNullable<ComponentProps<typeof ReactMarkdown>['remarkPlugins']>>(
-    () => (folders && folders.roots.length > 0 ? [remarkGfm, [remarkOwnerFileLinks, { roots: folders.roots, apiBase }]] : [remarkGfm]),
-    [folders, apiBase],
+    () => (folders && folders.roots.length > 0 ? [remarkGfm, [remarkOwnerFileLinks, { roots: folders.roots, apiBase, viewerBase }]] : [remarkGfm]),
+    [folders, apiBase, viewerBase],
   );
   const components = useMemo<Components>(() => ({
-    a: ({ href, children }: ComponentProps<'a'>) => <a href={href} {...ownerFileAnchorProps(href, apiBase)}>{children}</a>,
-  }), [apiBase]);
+    a: ({ href, children }: ComponentProps<'a'>) => <a href={href} {...ownerFileAnchorProps(href, apiBase, viewerBase)}>{children}</a>,
+  }), [apiBase, viewerBase]);
   return <ReactMarkdown remarkPlugins={plugins} components={components} skipHtml>{body}</ReactMarkdown>;
 });
 

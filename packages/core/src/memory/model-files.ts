@@ -1,6 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { embeddingsEnabledSetting } from "./embedder.js";
+
 /** The files transformers.js reads for dtype q8 (embedder-child's dtype). A constant, not a setting: it follows the dtype. */
 export const MODEL_FILES: readonly string[] = ["config.json", "tokenizer.json", "tokenizer_config.json", "special_tokens_map.json", "onnx/model_quantized.onnx"];
 
@@ -58,7 +60,6 @@ export async function downloadModel(input: {
 
 /** Writes `enabled: true` to memory-embedder.json only when neither the environment nor the file decides it. A malformed file is never overwritten. */
 export async function enableIfUnset(dataDir: string, env: NodeJS.ProcessEnv = process.env): Promise<"written" | "already_enabled" | "disabled"> {
-  const fromEnv = ["true", "1"].includes(env.OWL_MEMORY_EMBEDDINGS_ENABLED ?? "") ? true : ["false", "0"].includes(env.OWL_MEMORY_EMBEDDINGS_ENABLED ?? "") ? false : undefined;
   const path = join(dataDir, "memory-embedder.json");
   let file: Record<string, unknown> = {};
   if (existsSync(path)) {
@@ -66,7 +67,7 @@ export async function enableIfUnset(dataDir: string, env: NodeJS.ProcessEnv = pr
       throw new Error(`${path} is not valid JSON; fix it by hand: ${(error as Error).message}`);
     }
   }
-  const decided = fromEnv ?? (typeof file.enabled === "boolean" ? file.enabled : undefined);
+  const decided = embeddingsEnabledSetting(env, file.enabled);
   if (decided !== undefined) return decided ? "already_enabled" : "disabled";
   mkdirSync(dataDir, { recursive: true });
   writeFileSync(path, `${JSON.stringify({ ...file, enabled: true }, null, 2)}\n`);

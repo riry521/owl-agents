@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { lstat, mkdir, readdir, readFile, rename, rm, rmdir, unlink, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve } from "node:path";
-import { createUlid, utcNow } from "../../db/dist/index.js";
+import { createUlid, utcNow } from "@owl/db";
 import { fingerprint } from "./learning-fingerprint";
 import { storedSettingJson, upsertSetting } from "./settings-store.js";
 import { GUARD_CONTENT_KEYS, GUARD_PATH_KEYS } from "@owl/shared";
@@ -10,6 +10,7 @@ import type { CoreDatabase, CoreWriteLaneTransaction } from "./types.js";
 import { compareText } from "./context-canonical.js";
 import { WRITE_TOOL_NAME } from "./rule-store.js";
 import { hashSkillFiles, isValidSkillScope, parseSkillMd, renderSkillMd, validateSkillFilePath, validateSkillName, type SkillMetadata } from "./skill-files.js";
+import { positiveInteger } from "@owl/shared/small-helpers";
 
 export type SkillState = "active" | "stale" | "archived";
 export type SkillActor = "curator" | "user";
@@ -1248,7 +1249,8 @@ function validateFiles(name: string, inputFiles: Record<string, string>, meta: O
     files[path] = content;
   }
   const parsed = parseSkillMd(files["SKILL.md"] ?? "");
-  if ("error" in parsed) throw new Error(`invalid_skill_md: ${parsed.error}`);
+  // The problem rides on the Error so core.ts can build a reason code without parsing the English message.
+  if ("error" in parsed) throw Object.assign(new Error(`invalid_skill_md: ${parsed.error}`), { skill_md: { problem: parsed.problem, key: parsed.key ?? null } });
   if (parsed.name !== name || parsed.description !== meta.description || parsed.scope !== meta.scope || JSON.stringify(parsed.tags) !== JSON.stringify(meta.tags)) {
     throw new Error("SKILL.md metadata does not match the supplied skill metadata.");
   }
@@ -1270,10 +1272,6 @@ function safeParseTags(value: string): string[] {
   } catch {
     return [];
   }
-}
-
-function positiveInteger(value: unknown, fallback: number): number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
 function parseJsonOrNull(value: string | null): unknown {

@@ -1,11 +1,11 @@
-import { createUlid } from "../../db/dist/index.js";
+import { createUlid } from "@owl/db";
 import {
   GENERAL_WINDOW_KEY,
   type AdvisorWindowChannel,
   type AdvisorWindowScope,
   type AdvisorWindowSessionStatus,
   type AdvisorWindowSummary,
-} from "../../shared/dist/advisor-windows.js";
+} from "@owl/shared/advisor-windows";
 import { ensureOwner } from "./state-reducer";
 import type { CoreDatabase, CoreWriteLaneTransaction } from "./types";
 

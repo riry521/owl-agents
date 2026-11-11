@@ -4,7 +4,7 @@ import {
   readAdvisorWindowSettings,
   validateAdvisorWindowSettings,
   type AdvisorWindowSettings,
-} from "../../shared/dist/advisor-window-settings.js";
+} from "@owl/shared/advisor-window-settings";
 import type { SettingsReader } from "./owner-language";
 import { readSetting, type SettingSpec } from "./settings-store";
 

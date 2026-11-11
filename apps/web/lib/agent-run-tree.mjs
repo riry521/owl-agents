@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * Parent → child structure over one list of AgentRuns.
  *

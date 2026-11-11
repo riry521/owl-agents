@@ -27,7 +27,7 @@ async function setup(t) {
   const core = createCore({ db, agentRunner, version: "draft-test", owlRoot: root, dataDir: root });
   const { conversation_id } = await core.getActiveConversation();
   const send = async (a) => {
-    const id = await core.persistAdvisorReply(conversation_id, "", createUlid(), { channel: "web" }, [a]);
+    const id = await core.advisorActions.persistAdvisorReply(conversation_id, "", createUlid(), { channel: "web" }, [a]);
     return db.get("SELECT body FROM messages WHERE id = ?", id).body;
   };
   return { db, send };

@@ -12,21 +12,70 @@
  * fetches later without touching components.
  */
 
+import type { BacklogStatus, IntegrationProvider, IntegrationTestResult, WorkProgress, TaskPrerequisite, ProviderPauseView, RuntimeConfig, IntegrationStatus, WorkState, FileDestinationProvider, ProjectBlocker, ProjectRunningWork, DetachedWork, ProjectDeletionImpact, DeleteProjectResult, WorkPrerequisite, InstructionReplyMetadata, AdvisorFileDeliveryMetadata, MessageMetadata, MessageAttachment, Message, InstructionStatus, WorkConversationMessage, WorkConversation, RoleModelSettingInput, Report, WorkAssurance, VerificationCommand, UpdateProjectInput } from "../../../packages/shared/dist/api-views.js";
+export type { BacklogStatus, IntegrationProvider, IntegrationTestResult, WorkProgress, TaskPrerequisite, ProviderPauseView, RuntimeConfig, IntegrationStatus, WorkState, FileDestinationProvider, ProjectBlocker, ProjectRunningWork, DetachedWork, ProjectDeletionImpact, DeleteProjectResult, WorkPrerequisite, InstructionReplyMetadata, AdvisorFileDeliveryMetadata, MessageMetadata, MessageAttachment, Message, InstructionStatus, WorkConversationMessage, WorkConversation, RoleModelSettingInput, Report, WorkAssurance, VerificationCommand, UpdateProjectInput };
 import type { TaskStateValue, WorkStateValue } from "../../../packages/shared/dist/index.js";
+import type { AdvisorWindowChannel } from "../../../packages/shared/dist/advisor-windows.js";
+import type { AutoRecoverySettings } from "../../../packages/shared/dist/auto-recovery-settings.js";
+import type { AutoWorkEnabledFrom, AutoWorkRuleOrigin, AutoWorkSource, AutoWorkVerdict } from "../../../packages/shared/dist/auto-work.js";
+import type { ChildRunEffort, ChildRunHarnessChoice, ChildRunListFilter, ChildRunProvider, ChildRunRecord, ChildRunSettings, ChildRunStatus, ChildRunSummary } from "../../../packages/shared/dist/child-runs.js";
+import type { DecisionCriterionRewrite } from "../../../packages/shared/dist/decision-explanation.js";
+import type { FixerEscalationSettings } from "../../../packages/shared/dist/fixer-escalation-settings.js";
+import type { PlanUsageHarness, PlanUsageOrigin, PlanUsageSnapshot, PlanUsageStatus, PlanUsageWindow, PlanUsageWindowKind } from "../../../packages/shared/dist/plan-usage.js";
+import type { PlanUsageHarnessView, PlanUsageSettings, PlanUsageView } from "../../../packages/shared/dist/plan-usage-settings.js";
+import type { ProcessSkillsInstallCommand } from "../../../packages/shared/dist/process-skills.js";
+import type { TokenUsageHarness, TokenUsageMetrics, TokenUsagePeriod, TokenUsageReport, TokenUsageRole, TokenUsageTaskTotals, TokenUsageWorkTotals } from "../../../packages/shared/dist/token-usage-report.js";
+export type { AdvisorWindowChannel, AutoRecoverySettings, AutoWorkEnabledFrom, AutoWorkRuleOrigin, AutoWorkSource, AutoWorkVerdict, ChildRunEffort, ChildRunHarnessChoice, ChildRunListFilter, ChildRunProvider, ChildRunRecord, ChildRunSettings, ChildRunStatus, ChildRunSummary, DecisionCriterionRewrite, FixerEscalationSettings, PlanUsageHarness, PlanUsageHarnessView, PlanUsageOrigin, PlanUsageSettings, PlanUsageSnapshot, PlanUsageStatus, PlanUsageView, PlanUsageWindow, PlanUsageWindowKind, ProcessSkillsInstallCommand, TokenUsageHarness, TokenUsageMetrics, TokenUsagePeriod, TokenUsageReport, TokenUsageRole, TokenUsageTaskTotals, TokenUsageWorkTotals };
+
+/** The web copy carries the resolved-rule fields (origin, overridden_fields) that the shared rule type does not have. */
+export interface AutoWorkRule {
+  id: string;
+  source: AutoWorkSource;
+  kinds: string[];
+  min_occurrences: number;
+  window_minutes: number;
+  action: 'draft' | 'start';
+  size: 'small' | 'normal' | 'large' | null;
+  disabled: boolean;
+  origin: AutoWorkRuleOrigin;
+  overridden_fields: string[];
+}
+
+/** Mutable on purpose: the settings screen passes it to remake-limits.mjs, whose JSDoc type RemakeLimits is not readonly. */
+export interface RemakeLimitSettings {
+  lineage_review_attempts: number;
+  lineage_worker_runs: number;
+  lead_review_rejections: number;
+  verification_paths: string[];
+  checked_task_types: string[];
+}
+
+/** Mutable on purpose: token-usage-table.ts sums into it when grouping by project. */
+export interface TokenUsageTotals {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  total_tokens: number;
+  runs: number;
+}
+
+// Types with the same name and a mutually assignable shape on both sides come from @owl/shared/api-views.
+// The names that @owl/server's types.ts also defines but with a different shape stay defined here;
+// each one has a comment above it naming the fields or members that differ.
+// The web bundle must not import the server package (it pulls in Node-only code).
 
 // ---- common scalars ---------------------------------------------------------
 
-/** string(pattern ^[0-9A-HJKMNP-TV-Z]{26}$) */
+/** string(pattern ^[0-9A-HJKMNP-TV-Z]{26}$). The shared ULID is a validator for the server; the web only needs the wire type. */
 export type ULID = string;
 /** string(format date-time) */
 export type RFC3339 = string;
 
 // ---- states ------------------------------------------------------------------
 
-/** Known Work states plus future values returned by newer servers. */
-export type WorkState = WorkStateValue | (string & {});
-
-/** Known Task states plus future values returned by newer servers. */
+/** Known Task states plus future values returned by newer servers. Not the shared TaskState enum, for the same reason as WorkState. */
+// Differs from the server's TaskState in: the web accepts future values (TaskStateValue | (string & {})); the server uses the exact TaskStateValue.
 export type TaskState = TaskStateValue | (string & {});
 
 /** agent_runs.status CHECK. */
@@ -46,18 +95,7 @@ export type AgentRunOutcome = 'success' | 'redo' | 'replan' | 'question' | 'part
 
 // ---- DTOs ---------------------------------------------------------------------
 
-/** One prerequisite Work as the API reports it (design 6.6). */
-export interface WorkPrerequisite {
-  work_id: ULID;
-  project_id: ULID | null;
-  project_name: string | null;
-  display_number: number | null;
-  title: string;
-  state: WorkState | null;
-  deleted: boolean;
-  satisfied: boolean;
-}
-
+// Differs from the server's WorkSummary in: display_number, project_id, prerequisite_wait and waiting_on, which are optional here and required on the server (the web builds partial WorkSummary values for list rows).
 export interface WorkSummary {
   id: ULID;
   display_number?: number | null;
@@ -92,6 +130,7 @@ export interface WorkFinalReport {
   created_at: RFC3339;
 }
 
+// Differs from the server's WorkDetail in: design_mode and advisor_backlog (web only); final_report (WorkFinalReport here, an inline object on the server); title, state, updated_at, owner_id, summary, size, plan_revision and progress are nullable here and non-null on the server; conversation_id, prerequisites, can_move_to_project, display_number, prerequisite_wait and waiting_on are optional here and required on the server. The web omits them for a Work that has not loaded yet.
 export interface WorkDetail extends Omit<WorkSummary, 'title' | 'state' | 'updated_at'> {
   title: string | null;
   state: WorkState | null;
@@ -108,12 +147,6 @@ export interface WorkDetail extends Omit<WorkSummary, 'title' | 'state' | 'updat
   prerequisites?: WorkPrerequisite[];
   can_move_to_project?: boolean;
   final_report?: WorkFinalReport | null;
-}
-
-export interface WorkProgress {
-  total_tasks: number;
-  completed_tasks: number;
-  percent: number;
 }
 
 export interface WorkListOptions {
@@ -143,6 +176,9 @@ export interface DeleteWorkResult {
   deleted: true;
 }
 
+// Differs from the server's TaskSummary in: created_at and depends_on (web only) and status (TaskState here, a fixed union without 'ready' on the server; the web accepts unknown future values).
+// Why: task-stages.mjs orders the stage view by depends_on and work-detail-safety.mjs normalizes created_at/depends_on
+// from the Work detail payload; status stays TaskState so a state the server adds later still renders.
 export interface TaskSummary {
   id: ULID;
   work_id: ULID;
@@ -161,14 +197,9 @@ export interface TaskSummary {
   fixer_escalation?: { rejections: number } | null;
 }
 
-export interface TaskPrerequisite {
-  reason: string;
-  source: "manager" | "worker";
-  conditions: { kind: string; target: string | null; description: string }[];
-  deadline_at: RFC3339;
-  since: RFC3339 | null;
-}
-
+// Differs from the server's TaskDetail in: created_at and depends_on (web only) and status (TaskState here, a fixed union without 'ready' on the server; the web accepts unknown future values).
+// Why: task-stages.mjs orders the stage view by depends_on and work-detail-safety.mjs normalizes created_at/depends_on
+// from the Work detail payload; status stays TaskState so a state the server adds later still renders.
 export interface TaskDetail extends TaskSummary {
   parent_task_id: ULID | null;
   acceptance: string;
@@ -177,19 +208,6 @@ export interface TaskDetail extends TaskSummary {
   failure_count: number;
   worker_generation: number;
 }
-
-export interface Report {
-  id: ULID;
-  agent_run_id: ULID;
-  schema_version: string;
-  result: 'success' | 'failed' | 'partial';
-  /** `payload:object` on the wire. In practice a ReportEnvelope. */
-  payload: Record<string, unknown>;
-  created_at: RFC3339;
-}
-
-/** Review backlog item lifecycle state. */
-export type BacklogStatus = 'open' | 'in_progress' | 'done' | 'dismissed';
 
 /** GET /api/v1/backlog row and command result item. */
 export interface BacklogItem {
@@ -225,6 +243,10 @@ export interface IssueBacklogWorkInput {
 }
 
 /** POST /api/v1/works/{id}/backlog/link data. */
+// Differs from the server's LinkBacklogItemsResult in: items (BacklogItem[] here, JsonObject & { id; status }[] on the server).
+// Why: core fills items with readBacklogItemsByIds, the same row view as GET /api/v1/backlog, so the web types
+// each item as the BacklogItem it shows in BacklogView. The server only passes core's result through and checks
+// id/status, so its looser JsonObject element is enough there; narrowing it would not change what the server reads.
 export interface LinkBacklogItemsResult {
   work_id: ULID;
   status: 'in_progress' | 'done';
@@ -232,6 +254,7 @@ export interface LinkBacklogItemsResult {
 }
 
 /** POST /api/v1/backlog/issue-work data. */
+// Differs from the server's IssueBacklogWorkResult in: status and items (server only); the web does not read them.
 export interface IssueBacklogWorkResult {
   work_id: ULID;
   display_number: number | null;
@@ -256,12 +279,6 @@ export interface DecisionOption {
   criteria_rewrites?: DecisionCriterionRewrite[];
 }
 
-export interface DecisionCriterionRewrite {
-  criterion_id: string;
-  before: string;
-  after: string;
-  check: string;
-}
 
 export interface DecisionExplanation {
   kind: string;
@@ -273,6 +290,11 @@ export interface DecisionExplanation {
   option_notes?: { key: string; note: string }[];
 }
 
+// Differs from the server's Decision in: question, current_state, tried and explanation (web only) and options (DecisionOption[] here, JsonObject[] on the server).
+// Why: DecisionView, BoardView, WorkPreviewPanel and WorkDetailView render the Decision template (question,
+// current_state, tried) and the plain explanation, and draw one button per option from its key/label/description.
+// The server code only stores and forwards these values without reading them, so its type lists just the fields it
+// checks and keeps options as raw JSON objects.
 export interface Decision {
   id: ULID;
   work_id: ULID;
@@ -292,6 +314,7 @@ export interface Decision {
 }
 
 /** GET/PUT /api/v1/settings/models role-model row. */
+// Differs from the server's RoleModelSetting in: role and effort (string here, ActorRole and ModelEffort on the server). The web keeps plain strings so a role or effort added on the server still renders.
 export interface RoleModelSetting {
   role: string;
   provider: string;
@@ -300,14 +323,7 @@ export interface RoleModelSetting {
   catalog_version: string;
 }
 
-/** PUT /api/v1/settings/models payload row. */
-export interface RoleModelSettingInput {
-  role: 'advisor' | 'manager' | 'designer' | 'lead_designer' | 'worker' | 'fixer' | 'reviewer' | 'librarian' | 'curator';
-  provider: string;
-  model: string;
-  effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
-}
-
+// Differs from the server's ModelPreset in: roles, because it holds the web RoleModelSetting (role and effort are string here, ActorRole and ModelEffort on the server).
 export interface ModelPreset {
   id: string;
   name: string;
@@ -326,56 +342,7 @@ export interface UpdateModelPresetInput {
   roles?: RoleModelSettingInput[];
 }
 
-export type IntegrationProvider = 'slack' | 'discord';
 
-export interface IntegrationStatus {
-  provider: IntegrationProvider;
-  configured: boolean;
-  conversation_channel_id: string | null;
-  notification_channel_id: string | null;
-  owner_user_id: string | null;
-  last_tested_at: string | null;
-  last_test_ok: boolean | null;
-}
-
-export interface IntegrationTestResult {
-  provider: IntegrationProvider;
-  ok: boolean;
-  detail: string;
-  tested_at: string;
-}
-
-export interface ExecutorConfig {
-  provider: string;
-  model: string;
-  effort?: string;
-  timeout_ms: number;
-}
-
-export interface ChildRunHarnessChoice {
-  model: string | null;
-  effort: ChildRunEffort | null;
-}
-
-export interface ChildRunSettings {
-  executor_harness: ChildRunProvider;
-  executor_by_harness: Record<ChildRunProvider, ChildRunHarnessChoice>;
-  timeout_minutes: number;
-  max_timeout_minutes: number;
-  max_attempts: number;
-  token_relay: {
-    models: { provider: 'claude'; model: string }[];
-    handoff_tokens: number;
-    kill_tokens: number;
-    max_relays: number;
-    report_threshold_tokens: number;
-  };
-  research_subagent: {
-    claude: { model: string; max_turns: number };
-    codex: { model: string; max_turns: number };
-    answer_max_chars: number;
-  };
-}
 
 export interface ProviderInfo {
   id: string;
@@ -390,19 +357,6 @@ export interface ProviderInfo {
   apiKeyLast4?: string;
 }
 
-export interface ProviderPauseView {
-  provider: string;
-  label: string;
-  state: 'paused' | 'probing';
-  paused_at: string;
-  resume_at: string;
-  resume_source: 'reported' | 'backoff';
-  reported_resets_at: string | null;
-  backoff_step: number;
-  last_error: string | null;
-  last_role: string | null;
-}
-
 export interface SaveProviderPayload {
   id?: string;
   displayName: string;
@@ -412,6 +366,7 @@ export interface SaveProviderPayload {
 }
 
 /** Whether Core's test check runs for a Project (source: explicit = Owner's test_run, setup = a setup an agent found and Core confirmed, detected = automatic). */
+// Differs from the server's TestRunStatus in: source, which also has 'setup' here (a setup an agent found and Core confirmed); the server union is 'explicit' | 'detected'.
 export interface TestRunStatus {
   enabled: boolean;
   reason: string | null;
@@ -456,6 +411,13 @@ export interface WindowChannelResult {
 }
 
 /** GET/POST /api/v1/projects. */
+// Differs from the server's Project in: window_channels, effective_post_merge_command and test_setup (web only); required_test_command (server only); verification_plan (unknown[] here, VerificationCommand[] on the server); test_run (TestRunInput here, Record<string, unknown> on the server); auto_push, worktree_setup_command, worktree_refresh_command, post_merge_command, post_merge_install_command are optional here and required on the server.
+// Why: ProjectsView shows window_channels (added by the PATCH route when the Advisor window is turned on),
+// effective_post_merge_command (badge) and test_setup (both built into core's project view), so the web needs them;
+// the web never shows required_test_command. test_run is TestRunInput because project-management.ts turns it into the test-run form.
+// The command fields and auto_push are optional because project-management.ts reads them with `?? []` / `=== true`
+// and its tests build Projects with only id/name/canonical_path. verification_plan is unknown[] because the web never
+// reads its elements.
 export interface Project {
   id: string;
   name: string;
@@ -478,58 +440,8 @@ export interface Project {
   verification_plan: unknown[];
 }
 
-/** PATCH /api/v1/projects/:id payload. */
-export interface UpdateProjectInput {
-  name?: string;
-  canonical_path?: string;
-  auto_push?: boolean;
-  advisor_window_enabled?: boolean;
-  commit_language?: 'ja' | 'en' | null;
-  worktree_setup_command?: string[];
-  worktree_refresh_command?: string[];
-  post_merge_command?: string[] | null;
-  post_merge_install_command?: string[] | null;
-  /** null = automatic, { mode: 'whole', whole_argv } = this command, { mode: 'off' } = no tests. */
-  test_run?: TestRunInput | null;
-}
-
-export type ProjectBlocker = 'running_works' | 'active_agents';
-
-export interface ProjectRunningWork {
-  id: string;
-  display_number: number | null;
-  title: string;
-  state: 'running' | 'paused' | 'judgement_waiting';
-}
-
-/** GET /api/v1/projects/:id/deletion-impact response data. */
-export interface ProjectDeletionImpact {
-  project_id: string;
-  work_count: number;
-  running_work_count: number;
-  active_agent_count: number;
-  backlog_item_count: number;
-  running_works: ProjectRunningWork[];
-  blockers: ProjectBlocker[];
-  deletable: boolean;
-}
-
-export interface DetachedWork {
-  work_id: string;
-  previous_display_number: number | null;
-  display_number: number | null;
-}
-
-/** DELETE /api/v1/projects/:id response data. */
-export interface DeleteProjectResult {
-  project_id: string;
-  deleted: true;
-  detached_work_count: number;
-  detached_backlog_item_count: number;
-  detached_works: DetachedWork[];
-}
-
 /** POST /api/v1/projects payload. */
+// Differs from the server's CreateProjectInput in: verification_plan (unknown[] here, VerificationCommand[] on the server) and post_merge_command, post_merge_install_command, required_test_command, test_run, test_policy (only the server accepts them; the create form does not use them).
 export interface CreateProjectInput {
   name: string;
   canonical_path: string;
@@ -579,14 +491,6 @@ export interface ProjectSetupInput {
   path: string;
 }
 
-export interface MessageAttachment {
-  id: ULID;
-  filename: string;
-  mime: string;
-  bytes: number;
-  status: 'stored' | 'quarantined';
-}
-
 export interface UploadedAttachment {
   attachment_id: ULID;
   filename: string;
@@ -599,62 +503,6 @@ export interface UploadedAttachment {
 export interface UploadLimits {
   max_bytes: number;
   max_files: number;
-}
-
-export interface Message {
-  id: ULID;
-  conversation_id: ULID;
-  source: 'slack' | 'discord' | 'web' | 'advisor' | 'manager' | (string & {});
-  body: string;
-  attachment_ids: ULID[];
-  attachments?: MessageAttachment[];
-  created_at: RFC3339;
-  metadata?: {
-    kind: 'instruction_reply';
-    in_reply_to: ULID[];
-    outcome: 'tasks_changed' | 'no_change' | 'decision_opened';
-    plan_revision: number | null;
-  } | AdvisorFileDeliveryMetadata | null;
-}
-
-/** Message.metadata of a Web Advisor reply that asked Core to send files. */
-export interface AdvisorFileDeliveryMetadata {
-  kind: 'advisor_file_delivery';
-  destination: {
-    provider: FileDestinationProvider;
-    channel_id: string;
-    display_name: string;
-    source: 'window_binding' | 'default_destination';
-  } | null;
-  refusal: 'preferred_provider_unset' | 'default_destination_unset' | 'default_provider_not_configured' | 'default_channel_unavailable' | null;
-  files: {
-    index: number;
-    name: string;
-    size: number | null;
-    status: 'pending' | 'sent' | 'failed' | 'unknown' | 'rejected';
-    code?: string;
-    message?: string;
-  }[];
-  notice?: string;
-}
-
-export interface InstructionStatus {
-  status: 'queued' | 'processing' | 'answered';
-  outcome: 'tasks_changed' | 'no_change' | 'decision_opened' | null;
-  reply_message_id: ULID | null;
-}
-
-export interface WorkConversationMessage extends Message {
-  received_at: string;
-  instruction: InstructionStatus | null;
-  in_reply_to: ULID[];
-}
-
-export interface WorkConversation {
-  work_id: ULID;
-  conversation_id: ULID | null;
-  truncated: boolean;
-  messages: WorkConversationMessage[];
 }
 
 /** GET /works/{id}/assurance: recorded review routing, integration verification and plan warnings. */
@@ -671,20 +519,8 @@ export interface WorkCoreActivity {
   activities: CoreActivity[];
 }
 
-export interface WorkAssurance {
-  work_id: ULID;
-  reviews: { task_id: ULID; required: boolean; base: string; skip_reason: string | null; forced_reasons: { code: string; detail: string }[] }[];
-  integration_verification: Record<string, unknown> | null;
-  plan_quality_warnings: Record<string, unknown>[];
-}
-
 export type AdvisorSessionStatus = 'starting' | 'running' | 'ending' | 'suspended' | 'none';
 
-export interface AdvisorWindowChannel {
-  provider: 'slack' | 'discord';
-  channel_id: string;
-  display_name: string;
-}
 
 /** One entry of GET /advisor/windows. */
 export interface AdvisorWindow {
@@ -750,27 +586,8 @@ export interface KnowledgeStorageStatus {
   move: { target: string; stage: string; files_total: number | null; files_done: number } | null;
 }
 
-/** GET/PUT /api/v1/settings/fixer-escalation. */
-export interface FixerEscalationSettings {
-  after_review_rejections: number;
-}
 
-/** GET/PUT /api/v1/settings/auto-recovery. */
-export interface AutoRecoverySettings {
-  limit: number;
-  warnings?: string[];
-}
 
-/** GET/PUT /api/v1/settings/remake-limits. */
-export interface RemakeLimitSettings {
-  lineage_review_attempts: number;
-  lineage_worker_runs: number;
-  lead_review_rejections: number;
-  verification_paths: string[];
-  checked_task_types: string[];
-}
-
-export type FileDestinationProvider = 'slack' | 'discord';
 
 /** GET/PUT /api/v1/settings/advisor-send-file-destination. */
 export interface AdvisorSendFileDestination {
@@ -803,57 +620,11 @@ export type HybridPhase = 'plan' | 'executing' | 'verdict';
  */
 export type AgentRunOrigin = 'spawned' | 'observed';
 
-export type ChildRunProvider = 'claude' | 'codex' | 'opencode';
-export type ChildRunEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
-export type ChildRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | (string & {});
 
-export interface ChildRunSummary {
-  result: 'succeeded' | 'partial' | 'failed';
-  summary: string;
-  changed_files: string[];
-  checks: Array<{ command: string; passed: boolean }>;
-  remaining_issues: string[];
-  failure: { kind: string; reason: string } | null;
-  attempts: number;
-  duration_seconds: number;
-  report_format: 'structured' | 'fallback';
-}
 
-/** Durable child execution record returned by GET /api/v1/child-runs. */
-export interface ChildRunRecord {
-  id: ULID;
-  work_id: ULID;
-  task_id: ULID;
-  parent_agent_run_id: ULID;
-  seq: number;
-  title: string;
-  instruction: string;
-  write_paths: string[];
-  provider: ChildRunProvider;
-  model: string;
-  effort: ChildRunEffort | null;
-  timeout_ms: number;
-  max_attempts: number;
-  attempt: number;
-  status: ChildRunStatus;
-  blocked_reason: string | null;
-  current_agent_run_id: ULID | null;
-  summary: ChildRunSummary | null;
-  report_text: string | null;
-  failure_kind: string | null;
-  failure_reason: string | null;
-  created_at: RFC3339;
-  started_at: RFC3339 | null;
-  finished_at: RFC3339 | null;
-  updated_at: RFC3339;
-}
 
-export interface ChildRunListFilter {
-  work_id?: ULID;
-  task_id?: ULID;
-  parent_agent_run_id?: ULID;
-}
 
+// Differs from the server's AgentRun in: effort and child_run_id (web only); status is AgentRunStatus | string on the web and string on the server; outcome is optional with AgentRunOutcome on the web and string | null on the server. The web keeps the wider/optional form so a new run status or a missing outcome still renders.
 export interface AgentRun {
   id: ULID;
   /** The Work the run belongs to; null for runs outside any Work. */
@@ -911,14 +682,6 @@ export interface ReportEnvelope {
   next_action: string;
   needs_replanning: boolean;
   question_for_manager: string | null;
-}
-
-/** GET /api/v1/runtime-config.json. */
-export interface RuntimeConfig {
-  base_path: '/owl/';
-  api_base: '/api/v1';
-  ws_url: string;
-  schema_version: '1.0.0';
 }
 
 /** POST /api/v1/decisions/{decision_id}/answer payload / response data. */
@@ -1268,10 +1031,6 @@ export interface DetectedProcessSkillsPack {
   source: 'setting' | 'claude' | 'codex';
 }
 
-export interface ProcessSkillsInstallCommand {
-  harness: 'claude' | 'codex';
-  command: string;
-}
 
 export interface ProcessSkillsSettingsData {
   enabled: boolean;
@@ -1296,30 +1055,12 @@ export interface KnowledgeAutomationSettingsData extends KnowledgeAutomationSett
 
 // ---- Automatic Work creation ----------------------------------------------
 
-export type AutoWorkSource = 'failure_notice' | 'scheduled_check' | 'github';
-export type AutoWorkVerdict =
-  | 'judging' | 'created' | 'duplicate' | 'below_threshold' | 'daily_cap' | 'unauthorized'
-  | 'no_rule' | 'disabled' | 'not_worth' | 'judge_failed';
-export type AutoWorkEnabledFrom = 'db' | 'project_file' | 'local_file' | 'defaults';
-export type AutoWorkRuleOrigin = 'defaults' | 'local' | 'project';
 
 export interface AutoWorkEnabled {
   effective: boolean;
   from: AutoWorkEnabledFrom;
 }
 
-export interface AutoWorkRule {
-  id: string;
-  source: AutoWorkSource;
-  kinds: string[];
-  min_occurrences: number;
-  window_minutes: number;
-  action: 'draft' | 'start';
-  size: 'small' | 'normal' | 'large' | null;
-  disabled: boolean;
-  origin: AutoWorkRuleOrigin;
-  overridden_fields: string[];
-}
 
 export interface AutoWorkListState {
   since: string | null;
@@ -1421,114 +1162,17 @@ export interface AutoWorkRunResult {
 
 // ---- Usage reporting ------------------------------------------------------
 
-export type TokenUsagePeriod = 'today' | '7d' | '30d';
-export type TokenUsageHarness = 'claude' | 'codex' | 'other';
-export type TokenUsageRole = 'advisor' | 'manager' | 'designer' | 'worker' | 'reviewer' | 'executor';
 
-export interface TokenUsageTotals {
-  input_tokens: number;
-  output_tokens: number;
-  cache_read_tokens: number;
-  cache_write_tokens: number;
-  total_tokens: number;
-  runs: number;
-}
 
-export interface TokenUsageMetrics {
-  uncached_input_tokens: number;
-  tokens_after_first_review: number;
-  first_review_pass_rate: number | null;
-  completed_tasks: number;
-  uncached_input_tokens_per_completed_task: number | null;
-  runs_per_completed_task: number | null;
-}
 
-export interface TokenUsageTaskTotals {
-  task_id: string;
-  work_id: string;
-  title: string;
-  status: string;
-  first_review_verdict: string | null;
-  first_review_pass_rate: 0 | 1 | null;
-  uncached_input_tokens: number;
-  tokens_after_first_review: number;
-  totals: TokenUsageTotals;
-}
 
-export interface TokenUsageWorkTotals {
-  work_id: string;
-  title: string | null;
-  display_number: number | null;
-  project_id: string | null;
-  state: string | null;
-  totals: TokenUsageTotals;
-  metrics: TokenUsageMetrics;
-}
 
-export interface TokenUsageReport {
-  period: TokenUsagePeriod;
-  since: string;
-  until: string;
-  time_zone: string;
-  totals: TokenUsageTotals;
-  runs_without_usage: number;
-  daily: { date: string; totals: TokenUsageTotals }[];
-  by_work: TokenUsageWorkTotals[];
-  by_task: TokenUsageTaskTotals[];
-  by_harness: { harness: TokenUsageHarness; totals: TokenUsageTotals }[];
-  by_role: { role: TokenUsageRole; totals: TokenUsageTotals; metrics: TokenUsageMetrics }[];
-  by_model: { provider: string; model: string; harness: TokenUsageHarness; totals: TokenUsageTotals }[];
-  top_works: TokenUsageWorkTotals[];
-}
 
-export interface PlanUsageSettings {
-  claude_usage_api_enabled: boolean;
-  poll_interval_minutes: number;
-}
 
-export type PlanUsageHarness = 'claude' | 'codex';
-export type PlanUsageWindowKind = 'five_hour' | 'weekly' | 'weekly_opus' | 'weekly_sonnet' | 'weekly_oauth_apps' | 'other';
-export type PlanUsageOrigin = 'claude_usage_api' | 'claude_rate_limit_event' | 'codex_live' | 'codex_session_log';
-export type PlanUsageStatus =
-  | 'ok' | 'disabled' | 'not_configured' | 'not_logged_in' | 'expired' | 'unauthorized'
-  | 'rate_limited' | 'unavailable' | 'unrecognized' | 'error' | 'not_installed' | 'no_data';
 
-export interface PlanUsageWindow {
-  id: string;
-  kind: PlanUsageWindowKind;
-  used_percent: number | null;
-  resets_at: string | null;
-  window_minutes: number | null;
-  state: 'normal' | 'warning' | 'limited' | null;
-  label: string | null;
-}
 
-export interface PlanUsageSnapshot {
-  harness: PlanUsageHarness;
-  origin: PlanUsageOrigin;
-  windows: PlanUsageWindow[];
-  plan_type: string | null;
-  observed_at: string;
-}
 
-export interface PlanUsageHarnessView {
-  harness: PlanUsageHarness;
-  status: PlanUsageStatus;
-  detail: string | null;
-  display: PlanUsageSnapshot | null;
-  display_origin: PlanUsageOrigin | null;
-  fallback: boolean;
-  stale: boolean;
-  checked_at: string | null;
-  next_check_at: string | null;
-}
 
-export interface PlanUsageView {
-  generated_at: string;
-  settings: PlanUsageSettings;
-  claude: PlanUsageHarnessView;
-  codex: PlanUsageHarnessView;
-}
 
 // ---- Skill Box UI aggregate views ------------------------------------------
 

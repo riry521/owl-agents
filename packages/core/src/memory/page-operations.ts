@@ -507,6 +507,7 @@ function beforeOf(doc: Doc, heading: string, item: Item, removing: readonly Item
   const prev = items.filter((i) => i.start < item.start && !removing.some((r) => r.start === i.start)).pop();
   return prev ? prev.h : "（欄の先頭）";
 }
+// shared の firstLine は trim してから最初の行を取る。ここは trim せず最初の行を取るので別に持つ。
 const firstLine = (text: string): string => text.split("\n")[0];
 const hasLink = (doc: Doc, title: string): boolean => (section(doc, RELATED)?.items ?? []).some((i) => i.text.includes(`[[${title}]]`) || i.text.includes(`[[${title}|`));
 const addLink = (doc: Doc, title: string, relation: string): void => addToSection(doc, RELATED, [`- [[${title}]] — ${relation}`]);

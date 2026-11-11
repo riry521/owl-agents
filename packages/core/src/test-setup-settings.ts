@@ -3,7 +3,7 @@ import {
   TEST_SETUP_SETTINGS_KEY,
   readTestSetupSettings,
   type TestSetupSettings,
-} from "../../shared/dist/test-setup-settings.js";
+} from "@owl/shared/test-setup-settings";
 import type { SettingsReader } from "./owner-language";
 import { readSetting, type SettingReadSpec } from "./settings-store";
 

@@ -404,7 +404,6 @@ interface ListRule {
   readonly item: (v: string) => boolean;
   readonly expected: string;
 }
-const text = (max: number) => (v: string): string | null => (v.length <= max ? null : `${max} 文字以内`);
 const oneOf = (...values: string[]) => (v: string): string | null => (values.includes(v) ? null : values.join(" / "));
 const ulid = (v: string): string | null => (isValidUlid(v) ? null : "ULID");
 /** The pattern matches and the calendar date exists (2026-02-30 and 2026-99-99 do not). */

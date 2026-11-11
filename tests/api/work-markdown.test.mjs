@@ -144,6 +144,15 @@ test("a cancelled Work reads its own Work branch, and a missing file is not_foun
   assert.equal(code(await s.get(s.works.cancelled, "docs/none.md")), "markdown_not_found");
 });
 
+test("a path that is the base folder itself is refused as outside, not as not_markdown", async (t) => {
+  const s = await setup(t);
+  if (!s) return t.skip("localhost listen is unavailable");
+  for (const path of [".", "./", "materials/", "materials"]) {
+    const res = await s.get(s.works.running, path);
+    assert.deepEqual([path, res.status, res.body.error.details], [path, 403, { reason: path === "materials" ? "not_markdown" : "outside" }]);
+  }
+});
+
 test("refuses paths outside the Project and materials with the same answer whether or not the file exists", async (t) => {
   const s = await setup(t);
   if (!s) return t.skip("localhost listen is unavailable");

@@ -9,6 +9,7 @@ import { parseMemoryNote, normalizeVaultPath, memoryIdForPath } from "./memory-n
 import { CHUNKS_DDL, embedPending, hasVectors, knn, loadVec, removeVectors } from "./memory-vectors.js";
 import type { Embedder, RetrievalProfile } from "./embedder.js";
 import { type MemoryLogger, type MemoryNoteRow, type MemoryStoragePort, type PageQuery, type PageRow, type PageType, rawPathPrefixes } from "./memory-types.js";
+import { sha256 } from "@owl/shared/small-helpers";
 
 export const MEMORY_INDEX_FILE = "memory-index.sqlite";
 export const MEMORY_INDEX_SCHEMA_VERSION = 2;
@@ -97,7 +98,6 @@ CREATE INDEX links_dst ON links(dst_rowid);
 `;
 
 const fold = (text: string): string => text.normalize("NFKC");
-const sha256 = (data: string | Buffer): string => createHash("sha256").update(data).digest("hex");
 const stamp = (date: Date): string => date.toISOString().replace(/[-:]/gu, "").replace(/\.\d+Z$/u, "Z");
 const isCorrupt = (error: unknown): boolean => /SQLITE_CORRUPT|SQLITE_NOTADB|malformed|not a database/iu.test(`${(error as { code?: string })?.code ?? ""} ${(error as Error)?.message ?? ""}`);
 

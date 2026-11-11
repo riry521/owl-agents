@@ -1,6 +1,6 @@
 import { mkdir, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { createUlid } from "../../../db/dist/index.js";
+import { createUlid } from "@owl/db";
 import { lessonFingerprint } from "../learning-fingerprint.js";
 import { slugifyKnowledgeName } from "../knowledge-naming.js";
 import type { NormalizedLesson } from "../final-verdict.js";
@@ -102,6 +102,7 @@ function reflected(route: LearningRoute | undefined): string {
   return `反映なし: ${route.reason ?? route.status}`;
 }
 
+// shared の clip は空白をそのまま残す。ここは空白を 1 つにして MAX_LINE_CHARS で切るので別に持つ。
 function clip(text: string): string {
   const line = text.replace(/\s+/gu, " ").trim();
   return line.length > MAX_LINE_CHARS ? `${line.slice(0, MAX_LINE_CHARS - 1)}…` : line;

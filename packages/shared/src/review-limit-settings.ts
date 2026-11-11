@@ -19,16 +19,19 @@ const isPositiveInteger = (value: unknown): value is number => typeof value === 
 
 /** For PUT: exact keys, integers, plan_review_rounds >= 1, total_review_attempts > plan_review_rounds. */
 export function validateReviewLimitSettings(value: unknown): ReviewLimitSettings {
-  if (!isRecord(value)) throw new ReviewLimitSettingsValidationError("Settings must be an object.", "payload");
+  if (!isRecord(value)) throw new ReviewLimitSettingsValidationError("Settings must be an object.", "payload", { kind: "not_object" });
   const keys = Reflect.ownKeys(value);
   if (keys.length !== 2 || !keys.includes("plan_review_rounds") || !keys.includes("total_review_attempts")) {
-    throw new ReviewLimitSettingsValidationError("Settings must contain exactly plan_review_rounds and total_review_attempts.", "payload");
+    throw new ReviewLimitSettingsValidationError("Settings must contain exactly plan_review_rounds and total_review_attempts.", "payload", { kind: "exact_keys", keys: ["plan_review_rounds", "total_review_attempts"] });
   }
   if (!isPositiveInteger(value.plan_review_rounds)) {
-    throw new ReviewLimitSettingsValidationError("plan_review_rounds must be an integer >= 1.", "plan_review_rounds");
+    throw new ReviewLimitSettingsValidationError("plan_review_rounds must be an integer >= 1.", "plan_review_rounds", { kind: "integer_min", min: 1 });
   }
   if (!isPositiveInteger(value.total_review_attempts) || value.total_review_attempts < value.plan_review_rounds + 1) {
-    throw new ReviewLimitSettingsValidationError("total_review_attempts must be an integer >= plan_review_rounds + 1.", "total_review_attempts");
+    throw new ReviewLimitSettingsValidationError("total_review_attempts must be an integer >= plan_review_rounds + 1.", "total_review_attempts", {
+      kind: "integer_min",
+      min: value.plan_review_rounds + 1,
+    });
   }
   return { plan_review_rounds: value.plan_review_rounds, total_review_attempts: value.total_review_attempts };
 }

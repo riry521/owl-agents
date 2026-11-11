@@ -677,7 +677,7 @@ test("a Manager start that the pause beats leaves no run and does not plan", asy
   await waitFor(() => runner.workerCalls.length >= 1);
   const state = pauseBefore(core, db, workId, eventTypeIs("manager.started"));
 
-  const raw = await core.invokeManagerPlan({ work_id: workId, mode: "replan" }, "test.manager");
+  const raw = await core.manager.invokeManagerPlan({ work_id: workId, mode: "replan" }, "test.manager");
 
   assert.equal(state.fired, true);
   assert.equal(raw, null);

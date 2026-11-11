@@ -16,6 +16,8 @@ import {
   type TokenUsage,
   type WorkerDelegation,
 } from "./types";
+import { isRecord } from "@owl/shared/small-helpers";
+export { isRecord };
 
 const REPORT_ENVELOPE_FIELDS = new Set([
   "kind",
@@ -35,10 +37,6 @@ const REPORT_ENVELOPE_FIELDS = new Set([
   "design_unchanged",
   "external_blocker",
 ]);
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 function parseObject(text: string, reason: string): Record<string, unknown> {
   const trimmed = text.trim();

@@ -1,10 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, chmodSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
-import { parseDotEnv } from "../../../packages/shared/dist/index.js";
+import { CLAUDE_FABLE_5_2_MODEL, CLAUDE_HAIKU_5_5_MODEL, CLAUDE_OPUS_5_5_MODEL, CLAUDE_SONNET_5_5_MODEL, parseDotEnv } from "@owl/shared";
 
 import { AdvisorFolderError, normalizeAdvisorFolder } from "./advisor-folders.js";
 import { legacyDataDir, prepareDataDir, resolveDataDir } from "./contracts.js";
+import { isRecord } from "@owl/shared/small-helpers";
 
 export interface CustomProviderConfig {
   displayName: string;
@@ -73,10 +74,10 @@ const ENV_REFERENCE = /^env:([A-Za-z_][A-Za-z0-9_]*)$/u;
 
 const DEFAULT_PROVIDER_MODELS: Record<string, string[]> = {
   anthropic: [
-    "claude-fable-5-2",
-    "claude-opus-5-5",
-    "claude-sonnet-5-5",
-    "claude-haiku-5-5",
+    CLAUDE_FABLE_5_2_MODEL,
+    CLAUDE_OPUS_5_5_MODEL,
+    CLAUDE_SONNET_5_5_MODEL,
+    CLAUDE_HAIKU_5_5_MODEL,
   ],
   openai: [
     "gpt-6-astra",
@@ -98,10 +99,6 @@ const DEFAULTS: StoredAppSettings = {
   advisor_screenshot_dir: "",
   knowledge_dir: "",
 };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function legacyApiKeyEnvName(providerId: string): string {
   const normalized = providerId

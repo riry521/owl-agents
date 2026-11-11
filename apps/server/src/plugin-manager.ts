@@ -6,6 +6,7 @@ import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
 
 import { getPluginsFilePath } from "./config.js";
+import { isRecord } from "@owl/shared/small-helpers";
 
 export interface PluginSpec {
   name: string;
@@ -25,10 +26,6 @@ export class PluginConfigError extends Error {
 
 const topLevelFields = new Set(["plugins", "decision_text_checks", "final_report_text_checks"]);
 const pluginFields = new Set(["name", "command", "args", "cwd", "enabled", "env"]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 function checkKeys(value: Record<string, unknown>, allowed: Set<string>, field: string): void {
   for (const key of Object.keys(value)) {

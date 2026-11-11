@@ -1,4 +1,8 @@
+// @ts-check
+/** @param {unknown} value @returns {value is Record<string, any>} */
+// web は @owl/shared に依存しない（ブラウザ向けの bundle に node:crypto を含む shared を入れない）ので、shared の isRecord を読めない。
 const isRecord = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
+/** @param {unknown} value */
 const text = (value) => (typeof value === 'string' ? value : '');
 
 /**

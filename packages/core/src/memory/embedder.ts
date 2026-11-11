@@ -98,6 +98,14 @@ function missingModelWarning(model: string, dirs: readonly string[]): string {
   return `モデル ${model} が見つかりません（検索先: ${dirs.join(", ")}）。検索中の自動取得は行いません。owl embeddings を実行してください。`;
 }
 
+/** The single rule for embeddings on/off: OWL_MEMORY_EMBEDDINGS_ENABLED (true/1/false/0) wins over `enabled` in memory-embedder.json; undefined means unset. */
+export function embeddingsEnabledSetting(env: NodeJS.ProcessEnv, fileEnabled?: unknown): boolean | undefined {
+  const value = env.OWL_MEMORY_EMBEDDINGS_ENABLED ?? "";
+  if (["true", "1"].includes(value)) return true;
+  if (["false", "0"].includes(value)) return false;
+  return typeof fileEnabled === "boolean" ? fileEnabled : undefined;
+}
+
 /** `<dataDir>/models` (design §4.3), then `~/.owl/models`, which is outside data/. `memory-embedder.json` and OWL_MEMORY_* override. */
 export function loadEmbedderConfig(dataDir: string, env: NodeJS.ProcessEnv = process.env): EmbedderConfig {
   let file: Partial<EmbedderConfig> = {};
@@ -106,11 +114,10 @@ export function loadEmbedderConfig(dataDir: string, env: NodeJS.ProcessEnv = pro
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") console.warn("[owl-core] Could not read memory-embedder.json; using the default embedder settings.", error);
   }
   const num = (v: string | undefined): number | undefined => (v && Number.isFinite(Number(v)) ? Number(v) : undefined);
-  const envEnabled = ["true", "1"].includes(env.OWL_MEMORY_EMBEDDINGS_ENABLED ?? "") ? true : ["false", "0"].includes(env.OWL_MEMORY_EMBEDDINGS_ENABLED ?? "") ? false : undefined;
   const config = { ...DEFAULT_EMBEDDER_CONFIG, ...file, profile: { ...DEFAULT_EMBEDDER_CONFIG.profile, ...file.profile } };
   return {
     ...config,
-    enabled: envEnabled ?? (typeof file.enabled === "boolean" ? file.enabled : false),
+    enabled: embeddingsEnabledSetting(env, file.enabled) ?? false,
     model: env.OWL_MEMORY_EMBED_MODEL ?? config.model,
     pageTypes: Array.isArray(file.pageTypes) && file.pageTypes.every((t) => typeof t === "string") ? file.pageTypes : DEFAULT_EMBEDDER_CONFIG.pageTypes,
     modelHost: env.OWL_MEMORY_MODEL_HOST ?? (typeof file.modelHost === "string" ? file.modelHost : DEFAULT_EMBEDDER_CONFIG.modelHost),

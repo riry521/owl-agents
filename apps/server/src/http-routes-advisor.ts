@@ -1,35 +1,266 @@
 import { createHash } from "node:crypto";
-
-import { MAX_MESSAGE_ATTACHMENTS, MAX_UPLOAD_BYTES } from "../../../packages/core/dist/upload-limits.js";
-import type { WebAttachmentTarget } from "../../../packages/core/dist/core.js";
-import { GENERAL_WINDOW_KEY } from "../../../packages/shared/dist/advisor-windows.js";
-import { defaultChannelName } from "../../../packages/shared/dist/advisor-window-settings.js";
-import { ADVISOR_CURATION_ACTION_TYPES, ADVISOR_WORKSPACE_API_PATH, ADVISOR_WORKSPACE_FINISH_API_PATH, advisorCurationKind } from "../../../packages/shared/dist/index.js";
-
+import { MAX_MESSAGE_ATTACHMENTS, MAX_UPLOAD_BYTES } from "@owl/core/dist/upload-limits.js";
+import { GENERAL_WINDOW_KEY, type AdvisorWindowChannel } from "@owl/shared/advisor-windows";
+import { defaultChannelName } from "@owl/shared/advisor-window-settings";
+import {
+  ADVISOR_CURATION_ACTION_TYPES,
+  ADVISOR_WORKSPACE_API_PATH,
+  ADVISOR_WORKSPACE_FINISH_API_PATH,
+  advisorCurationKind,
+} from "@owl/shared";
 import { requireAdapterFeature, requireCoreFeature } from "./core-feature.js";
 import { ApiError } from "./errors.js";
+import type { MessageRef } from "./messages/define.js";
+import { RoutesAdvisorMessages } from "./messages/routes-advisor.js";
 import { createUlid, isUlid } from "./ids.js";
 import {
-  ADVISOR_ACTION_TYPES, CHANNEL_PROVIDERS, advisorDeliveryCall, advisorSessionDatabase, advisorWindowFeature, channelBindingBody, channelCall,
-  channelNameFromPayload, channelProvider, commandEnvelope, decisionWorkId, exactKeys, headerValue, integrationOf, inviteOwnerToChannel,
-  isJsonContentType, isObject, nullableQuery, parseLimit, pathId, projectNameOf, readRawBody, readRequestBody, requestUrl, requireChannelAdmin,
-  requireGuard, requireOwner, resolveAdvisorSessionWindow, runCommand, sendApiError, sendJson, slackOwnerUserId, stringField,
-  validateAnswerPayload, validateCreateWorkPayload, validateInboundMessage, validatePostMessagePayload, validateStartPayload,
-  validateUpdateWorkPayload, validateUploadComplete, validateUploadRegister, validateWorkInstructionPayload, withWorkLock,
-  type ApiRoute, type RouteRequest,
+  CHANNEL_PROVIDERS,
+  advisorWindowFeature,
+  channelCall,
+  channelNameFromPayload,
+  commandEnvelope,
+  decisionWorkId,
+  exactKeys,
+  headerValue,
+  integrationOf,
+  inviteOwnerToChannel,
+  isJsonContentType,
+  isObject,
+  nullableQuery,
+  parseLimit,
+  pathId,
+  projectNameOf,
+  readRawBody,
+  readRequestBody,
+  requestUrl,
+  requireChannelAdmin,
+  requireGuard,
+  requireOwner,
+  runCommand,
+  sendApiError,
+  sendJson,
+  slackOwnerUserId,
+  stringField,
+  validateCreateWorkPayload,
+  validateStartPayload,
+  validateWorkInstructionPayload,
+  withWorkLock,
+  type ApiRoute,
+  type RouteRequest,
+  handleAttachmentUpload,
+  type AdvisorSessionReadDatabase,
+  requestId,
+  nullableUlid,
+  validateMessageContent,
+  type ChannelProvider,
 } from "./http-common.js";
-import type { JsonObject } from "./types.js";
+import type { JsonObject, InboundMessageInput, PostMessageInput } from "./types.js";
+
+function advisorSessionDatabase(value: unknown): AdvisorSessionReadDatabase | null {
+  if (!isObject(value) || typeof value.get !== "function") return null;
+  return value as unknown as AdvisorSessionReadDatabase;
+}
+
+/**
+ * The Advisor window a session request addresses: the window of `conversationId`
+ * when given, else the window named by `windowKey` (GENERAL_WINDOW_KEY or a Project id).
+ * Null when neither is given, or the conversation belongs to no window, so the
+ * caller falls back to the general window; "missing" when the named window does not exist yet.
+ */
+function resolveAdvisorSessionWindow(
+  database: AdvisorSessionReadDatabase | null,
+  ownerId: string,
+  conversationId: string | null,
+  windowKey: string | null,
+): { readonly window_id: string } | "missing" | null {
+  if (!database) return null;
+  if (conversationId) {
+    const row = database.get<{ advisor_window_id: string | null }>("SELECT advisor_window_id FROM conversations WHERE id = ?", conversationId);
+    if (row?.advisor_window_id) return { window_id: row.advisor_window_id };
+  }
+  if (!windowKey) return null;
+  const window = windowKey === GENERAL_WINDOW_KEY
+    ? database.get<{ id: string }>("SELECT id FROM advisor_windows WHERE owner_id = ? AND scope = 'general'", ownerId)
+    : database.get<{ id: string }>("SELECT id FROM advisor_windows WHERE owner_id = ? AND scope = 'project' AND project_id = ?", ownerId, windowKey);
+  return window ? { window_id: window.id } : "missing";
+}
+
+function validateUpdateWorkPayload(payload: JsonObject): { title?: string; summary?: string } {
+  const hasTitle = Object.hasOwn(payload, "title");
+  const hasSummary = Object.hasOwn(payload, "summary");
+  if (!hasTitle && !hasSummary) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.titleOrSummary());
+  const title = hasTitle ? stringField(payload.title, "title", 1, 500) : undefined;
+  if (title !== undefined && title.trim().length === 0) {
+    throw new ApiError(400, "validation_error", RoutesAdvisorMessages.titleBlank());
+  }
+  const summary = hasSummary ? stringField(payload.summary, "summary", 0, 20000) : undefined;
+  return {
+    ...(title === undefined ? {} : { title: title.trim() }),
+    ...(summary === undefined ? {} : { summary: summary.trim() }),
+  };
+}
+
+function validatePostMessagePayload(payload: JsonObject): PostMessageInput {
+  exactKeys(payload, ["body", "attachment_ids"], "PostMessage payload");
+  return validateMessageContent(payload.body, payload.attachment_ids);
+}
+
+function validateInboundMessage(value: unknown): InboundMessageInput {
+  if (!isObject(value)) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.inboundNotObject());
+  exactKeys(value, ["provider", "account_id", "external_message_id", "user_id", "channel_id", "thread_id", "received_at", "text", "conversation_hint", "attachment_ids"], "InboundMessage", ["status_reply"]);
+  if (value.provider !== "slack" && value.provider !== "discord") {
+    throw new ApiError(400, "validation_error", RoutesAdvisorMessages.providerChoice());
+  }
+  const account_id = stringField(value.account_id, "account_id", 1, 200);
+  const external_message_id = stringField(value.external_message_id, "external_message_id", 1, 200);
+  stringField(value.user_id, "user_id", 1, 200);
+  stringField(value.channel_id, "channel_id", 1, 200);
+  const thread_id = value.thread_id === null ? null : stringField(value.thread_id, "thread_id", 1, 200);
+  const received_at = stringField(value.received_at, "received_at", 1, 80);
+  if (!Number.isFinite(Date.parse(received_at)) || !/T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/u.test(received_at)) {
+    throw new ApiError(400, "validation_error", RoutesAdvisorMessages.receivedAtInvalid());
+  }
+  const text = stringField(value.text, "text", 0, 100000);
+  if (!isObject(value.conversation_hint)) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.conversationHintInvalid());
+  exactKeys(value.conversation_hint, ["work_id", "dm_ref", "thread_ref"], "conversation_hint");
+  const work_id = nullableUlid(value.conversation_hint.work_id, "conversation_hint.work_id");
+  const dm_ref = stringField(value.conversation_hint.dm_ref, "conversation_hint.dm_ref", 1, 200);
+  const thread_ref = value.conversation_hint.thread_ref === null ? null : stringField(value.conversation_hint.thread_ref, "conversation_hint.thread_ref", 1, 200);
+  if (!Array.isArray(value.attachment_ids) || value.attachment_ids.length > MAX_MESSAGE_ATTACHMENTS || !value.attachment_ids.every((id) => isUlid(id))) {
+    throw new ApiError(400, "validation_error", RoutesAdvisorMessages.attachmentIdsInvalid({ max: MAX_MESSAGE_ATTACHMENTS }));
+  }
+  return {
+    provider: value.provider,
+    account_id,
+    external_message_id,
+    user_id: value.user_id as string,
+    channel_id: value.channel_id as string,
+    thread_id,
+    received_at,
+    text,
+    conversation_hint: { work_id, dm_ref, thread_ref },
+    attachment_ids: value.attachment_ids as string[],
+    ...(value.status_reply === undefined ? {} : { status_reply: stringField(value.status_reply, "status_reply", 1, 100000) }),
+  };
+}
+
+function validateUploadRegister(value: unknown): import("./types.js").InboundUploadRegisterInput {
+  if (!isObject(value)) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.uploadNotObject());
+  exactKeys(value, ["provider", "account_id", "external_attachment_id", "filename", "declared_mime", "declared_bytes", "sha256", "work_id", "conversation_id", "conversation_hint"], "UploadRegister");
+  if (value.provider !== "slack" && value.provider !== "discord" && value.provider !== "web") throw new ApiError(400, "validation_error", RoutesAdvisorMessages.providerInvalid());
+  const filename = stringField(value.filename, "filename", 1, 255);
+  if (/[\\/\0\x00-\x1f\x7f]/u.test(filename) || filename === "." || filename === "..") throw new ApiError(400, "validation_error", RoutesAdvisorMessages.filenameInvalid());
+  if (!Number.isSafeInteger(value.declared_bytes) || Number(value.declared_bytes) < 0 || Number(value.declared_bytes) > MAX_UPLOAD_BYTES) throw new ApiError(413, "upload_too_large", RoutesAdvisorMessages.declaredBytesTooLarge());
+  const sha256 = value.sha256 === null ? null : stringField(value.sha256, "sha256", 64, 64);
+  if (sha256 !== null && !/^[0-9a-f]{64}$/u.test(sha256)) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.sha256Format());
+  const conversation_id = value.conversation_id === null ? null : pathId(stringField(value.conversation_id, "conversation_id", 1, 128), "conversation_id");
+  let conversation_hint: { work_id: string | null; dm_ref: string; thread_ref: string | null } | null = null;
+  if (value.conversation_hint !== null) {
+    if (!isObject(value.conversation_hint)) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.conversationHintInvalid());
+    exactKeys(value.conversation_hint, ["work_id", "dm_ref", "thread_ref"], "conversation_hint");
+    const work_id = nullableUlid(value.conversation_hint.work_id, "conversation_hint.work_id");
+    const dm_ref = stringField(value.conversation_hint.dm_ref, "conversation_hint.dm_ref", 1, 200);
+    const thread_ref = value.conversation_hint.thread_ref === null ? null : stringField(value.conversation_hint.thread_ref, "conversation_hint.thread_ref", 1, 200);
+    conversation_hint = { work_id, dm_ref, thread_ref };
+  }
+  if ((conversation_id === null) === (conversation_hint === null)) {
+    throw new ApiError(400, "validation_error", RoutesAdvisorMessages.conversationIdOrHint());
+  }
+  return {
+    provider: value.provider,
+    account_id: stringField(value.account_id, "account_id", 1, 200),
+    external_attachment_id: stringField(value.external_attachment_id, "external_attachment_id", 1, 200),
+    filename,
+    declared_mime: value.declared_mime === null ? null : stringField(value.declared_mime, "declared_mime", 1, 255),
+    declared_bytes: Number(value.declared_bytes),
+    sha256,
+    work_id: nullableUlid(value.work_id, "work_id"),
+    conversation_id,
+    conversation_hint,
+  };
+}
+
+function validateUploadComplete(value: JsonObject): { bytes: number; sha256: string; mime: string } {
+  exactKeys(value, ["bytes", "sha256", "mime"], "CompleteUpload payload");
+  if (!Number.isSafeInteger(value.bytes) || Number(value.bytes) < 0) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.bytesInvalid());
+  const sha256 = stringField(value.sha256, "sha256", 64, 64);
+  if (!/^[0-9a-f]{64}$/u.test(sha256)) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.sha256Invalid());
+  return { bytes: Number(value.bytes), sha256, mime: stringField(value.mime, "mime", 1, 255) };
+}
+
+const ADVISOR_DELIVERY_ERROR_STATUS: Readonly<Record<string, number>> = { validation_error: 400, not_found: 404 };
+
+/** Core refuses a bad report with a domain code; give it its HTTP status. */
+async function advisorDeliveryCall<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    const code = isObject(error) && typeof error.code === "string" ? error.code : "";
+    const status = Object.hasOwn(ADVISOR_DELIVERY_ERROR_STATUS, code) ? ADVISOR_DELIVERY_ERROR_STATUS[code] : undefined;
+    if (status === undefined || error instanceof ApiError) throw error;
+    throw new ApiError(status, code as ApiError["code"], error instanceof Error ? error.message : code, {}, { cause: error });
+  }
+}
+
+function channelProvider(value: string | undefined): ChannelProvider {
+  const provider = CHANNEL_PROVIDERS.find((candidate) => candidate === value);
+  if (!provider) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.providerChoice(), { field: "provider" });
+  return provider;
+}
+
+function channelBindingBody(binding: AdvisorWindowChannel): JsonObject {
+  return { provider: binding.provider, channel_id: binding.channel_id, display_name: binding.display_name };
+}
+
+/**
+ * Every action type the /advisor/actions endpoint accepts. The curation types
+ * come from the shared list, and both the allowlist below and the dispatch
+ * branch use `Set.has`, which — unlike indexing a plain object — can never
+ * match an inherited Object.prototype member such as "constructor".
+ */
+const ADVISOR_ACTION_TYPES: ReadonlySet<string> = new Set([
+  "create_work",
+  "start_work",
+  "pause_work",
+  "reopen_work",
+  "cancel_work",
+  "delete_work",
+  "send_work_instruction",
+  "update_work",
+  "resume_work",
+  "answer_decision",
+  "send_file",
+  ...ADVISOR_CURATION_ACTION_TYPES,
+]);
+
+
+// Keyed by Core's AdvisorWorkspaceErrorCode; a Map so a code from Core cannot hit prototype keys.
+const ADVISOR_WORKSPACE_ERROR_MESSAGES = new Map<string, () => MessageRef>([
+  ["project_unavailable", RoutesAdvisorMessages.workspaceProjectUnavailable],
+  ["base_not_found", RoutesAdvisorMessages.workspaceBaseNotFound],
+  ["workspace_conflict", RoutesAdvisorMessages.workspaceConflict],
+  ["sync_failed", RoutesAdvisorMessages.workspaceSyncFailed],
+  ["uncommitted_changes", RoutesAdvisorMessages.workspaceUncommittedChanges],
+  ["merge_conflict", RoutesAdvisorMessages.workspaceMergeConflict],
+  ["checkout_conflict", RoutesAdvisorMessages.workspaceCheckoutConflict],
+]);
+
+/** The Owner-language sentence for a failed Advisor workspace step; Core's own text stays in details.message. */
+export function advisorWorkspaceErrorMessage(errorCode: string | null): MessageRef {
+  const message = errorCode === null ? undefined : ADVISOR_WORKSPACE_ERROR_MESSAGES.get(errorCode);
+  return message === undefined ? RoutesAdvisorMessages.workspaceUnavailable() : message();
+}
 
 async function advisorWorkspace(route: RouteRequest): Promise<void> {
   const { context, request, response, pathname } = route; const requestIdValue = route.requestId;
   // セッションは guard token の agent_run_id で決まるので、Advisor 本人以外は呼べない
   const agent = requireGuard(request, context.guardTokens);
-  if (agent?.role !== "advisor") throw new ApiError(403, "forbidden", "Only a running Advisor session can prepare or finish its workspace.");
+  if (agent?.role !== "advisor") throw new ApiError(403, "forbidden", RoutesAdvisorMessages.advisorOnly());
   const body = await readRequestBody(request);
-  if (!isObject(body)) throw new ApiError(400, "validation_error", "リクエスト本文はJSON objectで指定してください。");
+  if (!isObject(body)) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.bodyNotObject());
   exactKeys(body, [], "AdvisorWorkspace payload", ["project_id"]);
   const projectId = body.project_id === undefined || body.project_id === null ? null : stringField(body.project_id, "project_id", 1, 64);
-  const api = requireCoreFeature(context.core, ["prepareAdvisorWorkspaceForSession", "finishAdvisorWorkspaceForSession"], { code: "dependency_unavailable", message: "The loaded Core does not support Advisor workspaces." });
+  const api = requireCoreFeature(context.core, ["prepareAdvisorWorkspaceForSession", "finishAdvisorWorkspaceForSession"], { code: "dependency_unavailable", message: RoutesAdvisorMessages.workspacesUnsupported() });
   let data: unknown;
   try {
     const session = { session_id: agent.agent_run_id, project_id: projectId };
@@ -37,13 +268,13 @@ async function advisorWorkspace(route: RouteRequest): Promise<void> {
       ? await api.finishAdvisorWorkspaceForSession(session)
       : await api.prepareAdvisorWorkspaceForSession(session);
   } catch (error) {
-    if (error instanceof Error && error.name === "AdvisorSessionNotFoundError") throw new ApiError(404, "advisor_session_not_found", error.message);
+    if (error instanceof Error && error.name === "AdvisorSessionNotFoundError") throw new ApiError(404, "advisor_session_not_found", RoutesAdvisorMessages.sessionNotFound(), {}, { cause: error });
     throw error;
   }
   const result = data as { ok: boolean; error_code: string | null; message: string };
   if (!result.ok) {
     if (result.error_code === "project_not_found" || result.error_code === "conversation_not_found") throw new ApiError(404, result.error_code, result.message);
-    throw new ApiError(409, "advisor_workspace_unavailable", result.message, { error_code: result.error_code, message: result.message });
+    throw new ApiError(409, "advisor_workspace_unavailable", advisorWorkspaceErrorMessage(result.error_code), { error_code: result.error_code, message: result.message });
   }
   sendJson(response, 200, { request_id: requestIdValue, data, version: 0 });
   return;
@@ -54,10 +285,10 @@ async function advisorActions(route: RouteRequest): Promise<void> {
   requireOwner(request);
   const command = commandEnvelope(await readRequestBody(request));
   exactKeys(command.payload, ["invocation_id", "actions"], "AdvisorActions payload");
-  if (!isUlid(command.payload.invocation_id)) throw new ApiError(400, "validation_error", "invocation_idはULIDで指定してください。");
-  if (!Array.isArray(command.payload.actions)) throw new ApiError(400, "validation_error", "actionsは配列で指定してください。");
+  if (!isUlid(command.payload.invocation_id)) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.invocationIdNotUlid());
+  if (!Array.isArray(command.payload.actions)) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.actionsNotArray());
   const actions = command.payload.actions.map((value, index) => {
-    if (!isObject(value)) throw new ApiError(400, "validation_error", `actions[${index}]はJSON objectで指定してください。`);
+    if (!isObject(value)) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.actionNotObject({ index }));
     // A curation action takes no input beyond an optional reason, so its
     // payload may be omitted or null; every other action still needs one.
     // `has` (not an object lookup) keeps inherited keys such as "constructor"
@@ -74,28 +305,28 @@ async function advisorActions(route: RouteRequest): Promise<void> {
       curation === null ? [] : ["payload"],
     );
     const action_id = stringField(value.action_id, `actions[${index}].action_id`, 1, 200);
-    if (!Number.isSafeInteger(value.sequence)) throw new ApiError(400, "validation_error", `actions[${index}].sequenceが不正です。`);
+    if (!Number.isSafeInteger(value.sequence)) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.sequenceInvalid({ index }));
     if (typeof value.type !== "string" || !ADVISOR_ACTION_TYPES.has(value.type)) {
-      throw new ApiError(422, "action_rejected", `actions[${index}].typeは許可されたAdvisor actionではありません。`);
+      throw new ApiError(422, "action_rejected", RoutesAdvisorMessages.actionTypeNotAllowedAt({ index }));
     }
     if (curation === null) {
-      if (!isObject(value.payload)) throw new ApiError(400, "validation_error", `actions[${index}].payloadが不正です。`);
+      if (!isObject(value.payload)) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.actionPayloadInvalid({ index }));
     } else {
       // Only an optional reason is accepted; anything else is a contract
       // mismatch rather than something to pass through to the curation.
       if (value.payload !== undefined && value.payload !== null && !isObject(value.payload)) {
-        throw new ApiError(400, "validation_error", `actions[${index}].payloadが不正です。`);
+        throw new ApiError(400, "validation_error", RoutesAdvisorMessages.actionPayloadInvalid({ index }));
       }
       exactKeys(isObject(value.payload) ? value.payload : {}, [], `actions[${index}].payload`, ["reason"]);
     }
     if (!Number.isInteger(value.expected_version) || Number(value.expected_version) < 0) {
-      throw new ApiError(400, "validation_error", `actions[${index}].expected_versionが不正です。0以上の整数を指定してください。`);
+      throw new ApiError(400, "validation_error", RoutesAdvisorMessages.expectedVersionInvalid({ index }));
     }
     return { action_id, sequence: Number(value.sequence), type: value.type, payload: isObject(value.payload) ? value.payload : {}, expected_version: Number(value.expected_version) };
   }).sort((left, right) => left.sequence - right.sequence);
   const seenActionIds = new Set<string>();
   if (actions.some((action) => seenActionIds.has(action.action_id) || (seenActionIds.add(action.action_id), false))) {
-    throw new ApiError(409, "action_id_conflict", "同じAdvisor action batchに重複したaction_idがあります。");
+    throw new ApiError(409, "action_id_conflict", RoutesAdvisorMessages.duplicateActionId());
   }
   const results: Array<{ action_id: string; status: "executed" | "rejected" | "not_run"; result: JsonObject | null; error_code: string | null }> = [];
   for (const action of actions) {
@@ -156,8 +387,8 @@ async function advisorActions(route: RouteRequest): Promise<void> {
         data = (await (decisionWork === undefined ? operation() : withWorkLock(context, decisionWork, operation))).data as unknown as JsonObject;
       } else if (ADVISOR_CURATION_ACTION_TYPES.has(action.type)) {
         const kind = advisorCurationKind(action.type);
-        if (kind === null) throw new ApiError(422, "action_rejected", `${action.type}は許可されたAdvisor actionではありません。`);
-        const { run, started } = await requireAdapterFeature(context.core, ["runCuration", "startCurationInBackground", "listCurationRuns", "getCurationRun"], { code: "core_not_ready", message: "The loaded Core does not support the curation run API." }).startCurationInBackground({
+        if (kind === null) throw new ApiError(422, "action_rejected", RoutesAdvisorMessages.actionTypeNotAllowed({ type: action.type }));
+        const { run, started } = await requireAdapterFeature(context.core, ["runCuration", "startCurationInBackground", "listCurationRuns", "getCurationRun"], { code: "core_not_ready", message: RoutesAdvisorMessages.curationUnsupported() }).startCurationInBackground({
           kind,
           trigger: "advisor_action",
           actor: "advisor",
@@ -166,7 +397,7 @@ async function advisorActions(route: RouteRequest): Promise<void> {
         }) as { run: { id: string; status: string; summary: string }; started: boolean };
         data = { run_id: run.id, status: run.status, started, summary: run.summary };
       } else {
-        throw new ApiError(422, "action_rejected", "send_fileは配送先Connectorが設定されている場合だけ実行できます。");
+        throw new ApiError(422, "action_rejected", RoutesAdvisorMessages.sendFileNeedsDestination());
       }
       results.push({ action_id: action.action_id, status: "executed", result: data, error_code: null });
     } catch (error) {
@@ -197,7 +428,7 @@ async function advisorDelivery(route: RouteRequest): Promise<void> {
   const ownerId = requireOwner(request);
   const conversationId = pathId(route.params.conversation_id as string, "conversation_id");
   const command = commandEnvelope(await readRequestBody(request));
-  const api = requireCoreFeature(context.core, ["reportAdvisorDelivery"], { code: "dependency_unavailable", message: "The loaded Core does not accept Advisor delivery reports." });
+  const api = requireCoreFeature(context.core, ["reportAdvisorDelivery"], { code: "dependency_unavailable", message: RoutesAdvisorMessages.deliveryUnsupported() });
   const data = await advisorDeliveryCall(() => api.reportAdvisorDelivery(ownerId, conversationId, command.payload));
   sendJson(response, 200, { request_id: command.request_id, data, version: 0 });
   return;
@@ -209,10 +440,10 @@ async function inboundMessage(route: RouteRequest): Promise<void> {
   const requestHeader = headerValue(request, "x-request-id");
   const idempotencyHeader = headerValue(request, "idempotency-key");
   if (!requestHeader || !idempotencyHeader) {
-    throw new ApiError(400, "validation_error", "X-Request-IdとIdempotency-Key headerは必須です。");
+    throw new ApiError(400, "validation_error", RoutesAdvisorMessages.headersRequired());
   }
   const raw = await readRequestBody(request);
-  if (!isObject(raw)) throw new ApiError(400, "validation_error", "Inbound messageはJSON objectで指定してください。");
+  if (!isObject(raw)) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.inboundNotObject());
   const payload = validateInboundMessage(raw);
   const command = { request_id: stringField(requestHeader, "X-Request-Id", 1, 128), idempotency_key: stringField(idempotencyHeader, "Idempotency-Key", 1, 128), expected_version: 0 };
   const result = await context.core.ingestInbound(ownerId, payload, command);
@@ -255,20 +486,20 @@ async function uploadContent(route: RouteRequest): Promise<void> {
   const contentLengthHeader = headerValue(request, "content-length");
   const digestHeader = headerValue(request, "digest");
   if (!contentTypeHeader || !contentLengthHeader || !digestHeader || !/^sha-256=/iu.test(digestHeader)) {
-    throw new ApiError(400, "validation_error", "Content-Type、Content-Length、Digest: sha-256=<base64> headerは必須です。");
+    throw new ApiError(400, "validation_error", RoutesAdvisorMessages.uploadHeadersRequired());
   }
-  if (!/^\d+$/u.test(contentLengthHeader)) throw new ApiError(400, "validation_error", "Content-Lengthが不正です。");
+  if (!/^\d+$/u.test(contentLengthHeader)) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.contentLengthInvalid());
   const content = await readRawBody(request, MAX_UPLOAD_BYTES);
-  if (Number(contentLengthHeader) !== content.byteLength) throw new ApiError(400, "validation_error", "Content-Lengthと実際のupload bytesが一致しません。");
+  if (Number(contentLengthHeader) !== content.byteLength) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.contentLengthMismatch());
   const digestBase64 = digestHeader.slice(digestHeader.indexOf("=") + 1).trim();
   let suppliedDigest: Buffer;
   try {
     suppliedDigest = Buffer.from(digestBase64, "base64");
   } catch (error) {
-    throw new ApiError(400, "validation_error", "Digest headerが不正です。", {}, { cause: error });
+    throw new ApiError(400, "validation_error", RoutesAdvisorMessages.digestInvalid(), {}, { cause: error });
   }
   const actualDigest = createHash("sha256").update(content).digest();
-  if (suppliedDigest.length !== actualDigest.length || !suppliedDigest.equals(actualDigest)) throw new ApiError(409, "upload_checksum_mismatch", "Digestとupload bytesが一致しません。");
+  if (suppliedDigest.length !== actualDigest.length || !suppliedDigest.equals(actualDigest)) throw new ApiError(409, "upload_checksum_mismatch", RoutesAdvisorMessages.digestMismatch());
   const result = await context.core.putInboundUpload(ownerId, uploadId, { content, sha256: actualDigest.toString("hex"), mime: contentTypeHeader });
   sendJson(response, 200, { data: result });
   return;
@@ -353,10 +584,10 @@ async function setAdvisorWindowOrder(route: RouteRequest): Promise<void> {
   const command = commandEnvelope(await readRequestBody(request));
   const keys = isObject(command.payload) ? command.payload.keys : undefined;
   if (!Array.isArray(keys) || !keys.every((key) => typeof key === "string")) {
-    throw new ApiError(400, "validation_error", "keys must be an array of strings.", { field: "keys" });
+    throw new ApiError(400, "validation_error", RoutesAdvisorMessages.keysNotArray(), { field: "keys" });
   }
-  if (new Set(keys).size !== keys.length) throw new ApiError(400, "validation_error", "keys must not contain duplicates.", { field: "keys" });
-  if (keys.includes(GENERAL_WINDOW_KEY)) throw new ApiError(400, "validation_error", "The general window is always first and cannot be reordered.", { field: "keys" });
+  if (new Set(keys).size !== keys.length) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.keysDuplicate(), { field: "keys" });
+  if (keys.includes(GENERAL_WINDOW_KEY)) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.generalFirst(), { field: "keys" });
   const api = advisorWindowFeature(context.core);
   const result = await runCommand(context, pathname, command, 200, async () => ({
     data: await api.setAdvisorWindowOrder(keys) as unknown as JsonObject,
@@ -373,17 +604,17 @@ async function markAdvisorWindowRead(route: RouteRequest): Promise<void> {
   const command = commandEnvelope(await readRequestBody(request));
   const readThrough = isObject(command.payload) ? command.payload.read_through_message_id : undefined;
   if (readThrough !== undefined && (typeof readThrough !== "string" || readThrough === "")) {
-    throw new ApiError(400, "validation_error", "read_through_message_id must be a message id.", { field: "read_through_message_id" });
+    throw new ApiError(400, "validation_error", RoutesAdvisorMessages.readThroughInvalid(), { field: "read_through_message_id" });
   }
   const api = advisorWindowFeature(context.core);
   const result = await runCommand(context, pathname, command, 200, async () => {
     const data = await api.markAdvisorWindowRead(key, readThrough).catch((error: unknown) => {
       if (isObject(error) && error.code === "validation_error") {
-        throw new ApiError(400, "validation_error", error instanceof Error ? error.message : "Invalid request.", { field: "read_through_message_id" }, { cause: error });
+        throw new ApiError(400, "validation_error", error instanceof Error ? error.message : RoutesAdvisorMessages.invalidRequest(), { ...(isObject(error.details) ? error.details : {}), field: "read_through_message_id" }, { cause: error });
       }
       throw error;
     });
-    if (!data) throw new ApiError(404, "advisor_window_not_found", "指定されたAdvisorの窓が見つかりません。窓の一覧を読み直してください。", { key });
+    if (!data) throw new ApiError(404, "advisor_window_not_found", RoutesAdvisorMessages.windowNotFound(), { key });
     return { data: data as unknown as JsonObject, version: 0 };
   });
   sendJson(response, 200, result);
@@ -395,7 +626,7 @@ async function listChannelBindings(route: RouteRequest): Promise<void> {
   requireOwner(request);
   const provider = url.searchParams.get("provider");
   if (provider !== "slack" && provider !== "discord") {
-    throw new ApiError(400, "validation_error", "provider must be slack or discord.", { field: "provider" });
+    throw new ApiError(400, "validation_error", RoutesAdvisorMessages.providerChoice(), { field: "provider" });
   }
   const bindings = await advisorWindowFeature(context.core).listAdvisorChannelBindings(provider);
   sendJson(response, 200, { request_id: requestIdValue, data: { bindings }, version: 0 });
@@ -410,7 +641,7 @@ async function getAdvisorWindowConversation(route: RouteRequest): Promise<void> 
   // Same visibility as the list: a switched-off, unbound Project's window is not found even by URL.
   const listed = (await api.listAdvisorWindows()).some((entry) => entry.key === key);
   const window = listed ? await api.ensureAdvisorWindow(ownerId, key) : null;
-  if (!window) throw new ApiError(404, "advisor_window_not_found", "指定されたAdvisorの窓が見つかりません。窓の一覧を読み直してください。", { key });
+  if (!window) throw new ApiError(404, "advisor_window_not_found", RoutesAdvisorMessages.windowNotFound(), { key });
   sendJson(response, 200, { request_id: requestIdValue, conversation_id: window.conversation_id, window_id: window.window_id });
   return;
 }
@@ -559,7 +790,7 @@ async function listAdvisorChannels(route: RouteRequest): Promise<void> {
   const { context, request, response } = route;
   const requestIdValue = route.requestId;
   const key = route.params.key ?? "";
-  const windowNotFound = () => new ApiError(404, "advisor_window_not_found", "指定されたAdvisorの窓が見つかりません。窓の一覧を読み直してください。", { key });
+  const windowNotFound = () => new ApiError(404, "advisor_window_not_found", RoutesAdvisorMessages.windowNotFound(), { key });
   const ownerId = requireOwner(request);
   const api = advisorWindowFeature(context.core);
   const window = await api.ensureAdvisorWindow(ownerId, key);
@@ -594,22 +825,22 @@ async function writeAdvisorChannel(route: RouteRequest, inviteOwner: boolean): P
   const { context, request, response, pathname, method } = route;
   const key = route.params.key ?? "";
   const providerPart = route.params.provider;
-  const windowNotFound = () => new ApiError(404, "advisor_window_not_found", "指定されたAdvisorの窓が見つかりません。窓の一覧を読み直してください。", { key });
+  const windowNotFound = () => new ApiError(404, "advisor_window_not_found", RoutesAdvisorMessages.windowNotFound(), { key });
   const ownerId = requireOwner(request);
   const provider = channelProvider(providerPart);
   const command = commandEnvelope(await readRequestBody(request));
   if (key === GENERAL_WINDOW_KEY) {
-    throw new ApiError(422, "validation_error", "ジェネラリストのチャンネルは連携設定で決めます。", { field: "key" });
+    throw new ApiError(422, "validation_error", RoutesAdvisorMessages.generalistChannel(), { field: "key" });
   }
   const api = advisorWindowFeature(context.core);
   const window = await api.ensureAdvisorWindow(ownerId, key);
   if (!window) throw windowNotFound();
 
   if (inviteOwner) {
-    if (provider !== "slack") throw new ApiError(422, "invite_not_supported", "Discordはチャンネルへの招待に対応していません。", { provider });
+    if (provider !== "slack") throw new ApiError(422, "invite_not_supported", RoutesAdvisorMessages.discordNoInvite(), { provider });
     const result = await runCommand(context, pathname, command, 200, async () => {
       const existing = await api.getAdvisorChannelBinding(window.window_id, provider);
-      if (!existing) throw new ApiError(404, "channel_binding_not_found", "この窓にはチャンネルが連携していません。", { provider });
+      if (!existing) throw new ApiError(404, "channel_binding_not_found", RoutesAdvisorMessages.bindingNotFound(), { provider });
       const ownerUserId = await slackOwnerUserId(context);
       const admin = await requireChannelAdmin(context, provider);
       const invite = await inviteOwnerToChannel(admin, existing.channel_id, ownerUserId);
@@ -624,7 +855,7 @@ async function writeAdvisorChannel(route: RouteRequest, inviteOwner: boolean): P
   if (method === "POST") {
     const result = await runCommand(context, pathname, command, 201, async () => {
       if (await api.getAdvisorChannelBinding(window.window_id, provider)) {
-        throw new ApiError(409, "window_channel_exists", "この窓には既にチャンネルが連携しています。名前を変えるか、既存の連携を確認してください。", { provider });
+        throw new ApiError(409, "window_channel_exists", RoutesAdvisorMessages.channelExists(), { provider });
       }
       const name = channelNameFromPayload(command.payload.name ?? defaultChannelName(projectNameOf(context, key), key, settings), settings);
       const admin = await requireChannelAdmin(context, provider);
@@ -632,7 +863,7 @@ async function writeAdvisorChannel(route: RouteRequest, inviteOwner: boolean): P
       try {
         return { data: channelBindingBody(await api.bindAdvisorChannel(window.window_id, provider, info.channel_id, info.name)), version: 0 };
       } catch (error) {
-        throw new ApiError(500, "server_error", "チャンネルは作れましたが、連携を保存できませんでした。既にあるチャンネルとして連携してください。", { provider, channel_id: info.channel_id, name: info.name }, { cause: error });
+        throw new ApiError(500, "server_error", RoutesAdvisorMessages.channelSaveFailed(), { provider, channel_id: info.channel_id, name: info.name }, { cause: error });
       }
     });
     sendJson(response, 201, result);
@@ -642,18 +873,18 @@ async function writeAdvisorChannel(route: RouteRequest, inviteOwner: boolean): P
   if (method === "PUT") {
     const result = await runCommand(context, pathname, command, 200, async () => {
       const channelId = stringField(command.payload.channel_id, "channel_id", 1, 200);
-      if (/\s/u.test(channelId)) throw new ApiError(400, "validation_error", "channel_idに空白は使えません。", { field: "channel_id" });
+      if (/\s/u.test(channelId)) throw new ApiError(400, "validation_error", RoutesAdvisorMessages.channelIdWhitespace(), { field: "channel_id" });
       if ((await integrationOf(context, provider)).channelIds.has(channelId)) {
-        throw new ApiError(409, "channel_in_use", "このチャンネルは連携設定の会話・通知チャンネルです。別のチャンネルを選んでください。", { provider, channel_id: channelId });
+        throw new ApiError(409, "channel_in_use", RoutesAdvisorMessages.channelInUse(), { provider, channel_id: channelId });
       }
       const owner = await api.findAdvisorChannelOwner(provider, channelId);
       if (owner && owner.window_id !== window.window_id) {
-        throw new ApiError(409, "channel_already_bound", "このチャンネルはほかの窓と連携しています。", { provider, window_key: owner.window_key });
+        throw new ApiError(409, "channel_already_bound", RoutesAdvisorMessages.channelBound(), { provider, window_key: owner.window_key });
       }
       const admin = await requireChannelAdmin(context, provider);
       const info = await channelCall(provider, "describe", () => admin.describeChannel(channelId));
       if (!info.bot_is_member) {
-        throw new ApiError(422, "channel_bot_not_member", "Botがこのチャンネルに入っていません。Botを招待してからやり直してください。", { provider });
+        throw new ApiError(422, "channel_bot_not_member", RoutesAdvisorMessages.botNotMember(), { provider });
       }
       return { data: channelBindingBody(await api.bindAdvisorChannel(window.window_id, provider, info.channel_id, info.name)), version: 0 };
     });
@@ -663,7 +894,7 @@ async function writeAdvisorChannel(route: RouteRequest, inviteOwner: boolean): P
 
   const result = await runCommand(context, pathname, command, 200, async () => {
     const existing = await api.getAdvisorChannelBinding(window.window_id, provider);
-    if (!existing) throw new ApiError(404, "channel_binding_not_found", "この窓にはチャンネルが連携していません。", { provider });
+    if (!existing) throw new ApiError(404, "channel_binding_not_found", RoutesAdvisorMessages.bindingNotFound(), { provider });
     const name = channelNameFromPayload(command.payload.name, settings);
     const admin = await requireChannelAdmin(context, provider);
     const info = await channelCall(provider, "rename", () => admin.renameChannel(existing.channel_id, name));
@@ -671,42 +902,6 @@ async function writeAdvisorChannel(route: RouteRequest, inviteOwner: boolean): P
     return { data: channelBindingBody({ ...existing, display_name: info.name }), version: 0 };
   });
   sendJson(response, 200, result);
-  return;
-}
-
-/** 添付のアップロード。conversations と works の2つのルートが使う。 */
-export async function handleAttachmentUpload(route: RouteRequest, kind: "works" | "conversations"): Promise<void> {
-  const { context, request, response } = route;
-  const ownerId = requireOwner(request);
-  const id = route.params[kind === "works" ? "work_id" : "conversation_id"] as string;
-  const target: WebAttachmentTarget = kind === "works"
-    ? { work_id: pathId(id, "work_id") }
-    : { conversation_id: pathId(id, "conversation_id") };
-  const filenameHeader = headerValue(request, "x-owl-filename");
-  const requestHeader = headerValue(request, "x-request-id");
-  const idempotencyHeader = headerValue(request, "idempotency-key");
-  const contentLengthHeader = headerValue(request, "content-length");
-  if (!filenameHeader || !requestHeader || !idempotencyHeader || !contentLengthHeader || !/^\d+$/u.test(contentLengthHeader)) {
-    throw new ApiError(400, "validation_error", "X-Owl-Filename、X-Request-Id、Idempotency-Key、Content-Length headerは必須です。");
-  }
-  let filename: string;
-  try {
-    filename = decodeURIComponent(filenameHeader);
-  } catch (error) {
-    throw new ApiError(400, "validation_error", "X-Owl-Filenameを復号できません。", { field: "filename" }, { cause: error });
-  }
-  const requestIdText = stringField(requestHeader, "X-Request-Id", 1, 128);
-  const idempotencyKey = stringField(idempotencyHeader, "Idempotency-Key", 1, 128);
-  const content = await readRawBody(request, MAX_UPLOAD_BYTES);
-  if (Number(contentLengthHeader) !== content.byteLength) throw new ApiError(400, "validation_error", "Content-Lengthと実際のupload bytesが一致しません。");
-  const mime = headerValue(request, "content-type")?.trim() || "application/octet-stream";
-  const data = await requireAdapterFeature(context.core, ["uploadWebAttachment"], { code: "dependency_unavailable", message: "The loaded Core does not support Web attachments." }).uploadWebAttachment(
-    ownerId,
-    target,
-    { filename, mime, content },
-    { request_id: requestIdText, idempotency_key: idempotencyKey },
-  );
-  sendJson(response, 201, { data });
   return;
 }
 

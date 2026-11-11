@@ -126,8 +126,8 @@ async function addTask(ctx, projectId, title) {
   return { workId, taskId };
 }
 
-const resolveAt = (ctx, workId, taskId, root) => ctx.core.workflow.resolveProjectTestRun(
-  ctx.core.workflow.projectTestRunRow(workId, taskId), root, { investigate: true, place: { scope: "task", work_id: workId, task_id: taskId } },
+const resolveAt = (ctx, workId, taskId, root) => ctx.core.workflow.testRuns.resolveProjectTestRun(
+  ctx.core.workflow.testRuns.projectTestRunRow(workId, taskId), root, { investigate: true, place: { scope: "task", work_id: workId, task_id: taskId } },
 );
 
 // ---- AC1: the four registration routes
@@ -550,9 +550,9 @@ test("only import lines or only a new test file do not call the agent; the passi
     assert.equal(resolved.setup_match, "tests_changed");
     assert.equal(ctx.record("tasks", taskId), null, "nothing is saved before the run passes");
     const place = { scope: "task", work_id: workId, task_id: taskId };
-    await ctx.core.workflow.adoptPassedSetup(resolved, { status: "failed" }, { mode: "whole", whole_argv: ["x"], file_argv: [] }, projectId, worktree, place);
+    await ctx.core.workflow.testRuns.adoptPassedSetup(resolved, { status: "failed" }, { mode: "whole", whole_argv: ["x"], file_argv: [] }, projectId, worktree, place);
     assert.equal(ctx.record("tasks", taskId), null, "a failing run saves nothing");
-    await ctx.core.workflow.adoptPassedSetup(resolved, { status: "passed" }, { mode: "whole", whole_argv: ["{python}", "-m", "pytest", "-q"], file_argv: [] }, projectId, worktree, place);
+    await ctx.core.workflow.testRuns.adoptPassedSetup(resolved, { status: "passed" }, { mode: "whole", whole_argv: ["{python}", "-m", "pytest", "-q"], file_argv: [] }, projectId, worktree, place);
     const saved = ctx.record("tasks", taskId);
     assert.equal(saved.status, "ready");
     assert.equal(saved.confirmed.by, "core");

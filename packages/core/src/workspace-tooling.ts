@@ -13,6 +13,7 @@ import {
   type McpServerStatus,
   type ProbeResult,
 } from "./mcp-probe.js";
+import { isPathInside } from "./path-inside.js";
 
 /**
  * A finished (or never-started) child process. `exit_code` is null when the
@@ -71,11 +72,6 @@ async function pathExists(path: string): Promise<boolean> {
   try { await lstat(path); return true; } catch { return false; }
 }
 
-function isInside(base: string, candidate: string): boolean {
-  const rel = relative(resolve(base), resolve(candidate));
-  return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-}
-
 export interface CopyWorktreeIncludesResult {
   readonly copied: string[];
   readonly skipped: Array<{ path: string; reason: string }>;
@@ -131,7 +127,7 @@ export async function copyWorktreeIncludes(sourceRoot: string, worktree: string,
     const destinationDir = dirname(destination);
     await mkdir(destinationDir, { recursive: true });
     const destinationDirReal = await realpath(destinationDir).catch(() => destinationDir);
-    if (!isInside(worktreeReal, destinationDirReal)) { skipped.push({ path: relPath, reason: "destination escapes the worktree" }); continue; }
+    if (!isPathInside(worktreeReal, destinationDirReal, true)) { skipped.push({ path: relPath, reason: "destination escapes the worktree" }); continue; }
 
     await copyFile(source, destination);
     await chmod(destination, sourceStat.mode).catch(() => { /* best effort; the copy itself already succeeded */ });

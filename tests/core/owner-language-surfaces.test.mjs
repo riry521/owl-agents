@@ -106,7 +106,7 @@ test("the Advisor is told to reply in the language, and Owl's Advisor notices fo
   assert.ok(english.includes('"Request:"') && english.includes("Request: Correct the requested label."));
   assert.doesNotMatch(english, /依頼|受け入れ条件/u);
 
-  const { notices } = await core.dispatchAdvisorWorkActions("missing-conversation", "turn-1", [{ type: "create_work", payload: { title: "" } }]);
+  const { notices } = await core.advisorActions.dispatchAdvisorWorkActions("missing-conversation", "turn-1", [{ type: "create_work", payload: { title: "" } }], { channel: "web" }, {});
   assert.equal(notices.length, 1);
   assert.doesNotMatch(notices[0], JAPANESE, notices[0]);
 });

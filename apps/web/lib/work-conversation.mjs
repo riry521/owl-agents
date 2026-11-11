@@ -1,3 +1,4 @@
+// @ts-check
 // Pure helpers for the shared WorkConversation component.
 
 import { apiErrorKeyForCode } from './api-error-keys.mjs';
@@ -67,6 +68,8 @@ export function humanizeInstructionError(err) {
 /**
  * Badge for an owner instruction. `instruction` is the message's
  * `{status, outcome}` (null for legacy messages -> no badge).
+ * @param {any} instruction
+ * @param {string} workState
  * @returns {{labelKey: string, tone: string, noteKey: string | null} | null}
  */
 export function instructionBadge(instruction, workState) {
@@ -94,6 +97,8 @@ export function instructionBadge(instruction, workState) {
 
 /**
  * Badge of the latest owner instruction (for the status line), or null when none.
+ * @param {any[]} messages
+ * @param {string} workState
  * @returns {{labelKey: string, tone: string, noteKey: string | null} | null}
  */
 export function latestInstructionSummary(messages, workState) {
@@ -103,14 +108,20 @@ export function latestInstructionSummary(messages, workState) {
   return null;
 }
 
-/** True while any instruction is still queued or being processed. */
+/**
+ * True while any instruction is still queued or being processed.
+ * @param {any} data
+ */
 export function isConversationPending(data) {
   return Boolean(
-    data?.messages?.some((m) => m.instruction?.status === 'queued' || m.instruction?.status === 'processing'),
+    data?.messages?.some((/** @type {any} */ m) => m.instruction?.status === 'queued' || m.instruction?.status === 'processing'),
   );
 }
 
-/** @returns {'owner' | 'manager' | 'advisor'} */
+/**
+ * @param {any} message
+ * @returns {'owner' | 'manager' | 'advisor'}
+ */
 export function messageRole(message) {
   if (message?.source === 'manager') return 'manager';
   if (message?.source === 'advisor') return 'advisor';

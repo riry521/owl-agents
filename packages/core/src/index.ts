@@ -4,6 +4,7 @@ export type { ReviewerTestCommandCheck } from "./reviewer-test-guard";
 export { DecisionService } from "./decision";
 export { EventDispatcher } from "./event-dispatcher";
 export { HumanReadableError } from "./errors";
+export type { CoreReason, CoreReasonCode, CoreReasonValues } from "./errors";
 export { GitLanes } from "./git-lane";
 export { CREATED_BY_WORK_CONFIG_KEY, chooseBaseBranch, currentBranch, inspectRepositoryRoot } from "./repository-inspection";
 export { WORK_GIT_TEMPLATES_DIRNAME, clearWorkGitTemplates, prepareWorkGitTemplate, removeWorkGitTemplate } from "./work-git-template";
@@ -46,7 +47,7 @@ export type { WorkLogWriterOptions } from "./memory/work-log-writer.js";
 export type { MemoryExpandOutput, MemoryHealth, MemoryRecallOutput, MemoryReindexOutput, MemorySearchItem, MemorySearchOutput, MemoryServiceOptions, PageBudget, PageReadOutput, PageSearchItem, PageSearchOutput } from "./memory/memory-service.js";
 export { advisorKey, DEFAULT_MEMORY_READ_LIMITS, MemoryReadLedger } from "./memory/memory-read-ledger.js";
 export type { BudgetKey, ChargeResult, MemoryReadLimits, RoleReadLimit } from "./memory/memory-read-ledger.js";
-export { ChildEmbedder, loadEmbedderConfig, NullEmbedder } from "./memory/embedder.js";
+export { ChildEmbedder, embeddingsEnabledSetting, loadEmbedderConfig, NullEmbedder } from "./memory/embedder.js";
 export { downloadModel, enableIfUnset, findModelDir, hasModelFiles, isValidModelName, MODEL_FILES, modelDirFor } from "./memory/model-files.js";
 export { embedIndexFile } from "./memory/embed-index-file.js";
 export type { Embedder, EmbedderConfig, EmbedderHealth, EmbedderState } from "./memory/embedder.js";
@@ -197,6 +198,7 @@ export type {
   GitPushRequest,
   GitPushResult,
   GitIntegrationResult,
+  ActorRole,
   GitOperationRequest,
   GitOperationResult,
   JsonObject,
@@ -249,3 +251,7 @@ export { PROVIDER_FAILED_ERROR_PREFIX, TRANSIENT_RETRY_DELAYS_MS, TRANSIENT_RETR
 export type { AttemptAction, AttemptDecision, AttemptReason } from "./attempt-policy";
 export { resolveCloneRoot, cloneRelativePath, planClone } from "./clone-root";
 export type { CloneDestination, CloneRootInput } from "./clone-root";
+export type { SchedulerReasonValues } from "./validation-reasons-scheduler";
+export type { CoreMainReasonValues } from "./validation-reasons-core";
+export type { WorkflowReasonValues } from "./validation-reasons-workflow";
+export type { OtherReasonValues } from "./validation-reasons-other";

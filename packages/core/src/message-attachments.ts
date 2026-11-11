@@ -55,10 +55,10 @@ export function assertMessageAttachmentsInTransaction(
     );
     if (!upload) throw notFound("inbound_upload", id);
     if (upload.conversation_id !== conversationId) {
-      throw validationError("Inbound attachment_ids must belong to the resolved conversation.", { field: "attachment_ids" });
+      throw validationError("Inbound attachment_ids must belong to the resolved conversation.", { field: "attachment_ids" }, { code: "attachment.not_in_conversation", values: { field: "attachment_ids" } });
     }
     if (upload.status !== "stored" && upload.status !== "quarantined") {
-      throw validationError("Inbound attachment_ids must reference a completed upload.", { field: "attachment_ids" });
+      throw validationError("Inbound attachment_ids must reference a completed upload.", { field: "attachment_ids" }, { code: "attachment.upload_not_completed", values: { field: "attachment_ids" } });
     }
     return { id, filename: upload.filename, status: upload.status };
   });

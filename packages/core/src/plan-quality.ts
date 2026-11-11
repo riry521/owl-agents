@@ -1,7 +1,7 @@
-import type { PlanFeedbackKind } from "../../shared/dist/manager-trigger.js";
-import type { PlanQualityCode, PlanQualitySettings } from "../../shared/dist/plan-quality-settings.js";
-import { acceptanceCriteriaProblems, criterionRequirement, isManagerCriterion, type AcceptanceCriterion, type CriteriaRelaxation, type StoredAcceptanceCriterion } from "../../shared/dist/acceptance-criteria.js";
-import { workSummaryListItems } from "../../shared/dist/work-summary.js";
+import type { PlanFeedbackKind } from "@owl/shared/manager-trigger";
+import type { PlanQualityCode, PlanQualitySettings } from "@owl/shared/plan-quality-settings";
+import { acceptanceCriteriaProblems, criterionRequirement, isManagerCriterion, type AcceptanceCriterion, type CriteriaRelaxation, type StoredAcceptanceCriterion } from "@owl/shared/acceptance-criteria";
+import { workSummaryListItems } from "@owl/shared/work-summary";
 import type { TaskPlanItem } from "./types";
 
 export type { PlanQualityCode };

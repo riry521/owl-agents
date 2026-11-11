@@ -105,6 +105,17 @@ test("memory_mode: pages exposes only index, page and search, with descriptions 
   assert.ok(total <= 350, `descriptions total ${total} tokens`);
 });
 
+test("memory-mcp answers a line that is not JSON with a parse error (id null, -32700)", async () => {
+  const child = spawn(process.execPath, [join(process.cwd(), "apps/server/dist/memory-mcp.js")], { env: { PATH: process.env.PATH } });
+  let stdout = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stdin.end("not json\n");
+  await new Promise((resolve) => child.on("close", resolve));
+  const reply = JSON.parse(stdout.trim());
+  assert.equal(reply.id, null);
+  assert.equal(reply.error.code, -32700);
+});
+
 test("a Hybrid Executor's MCP config carries its worker token file and the Task's ids", async (t) => {
   const { root, executable, registry } = await setup(t);
   for (const provider of ["claude", "codex"]) {

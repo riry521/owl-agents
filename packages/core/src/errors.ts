@@ -1,5 +1,14 @@
 import type { OwnerLanguage } from "./owner-language";
 import type { ProjectDeletionImpact } from "./types";
+import type { CoreMainReasonValues } from "./validation-reasons-core";
+import type { OtherReasonValues } from "./validation-reasons-other";
+import type { SchedulerReasonValues } from "./validation-reasons-scheduler";
+import type { WorkflowReasonValues } from "./validation-reasons-workflow";
+
+/** Every reason code with the values its sentence interpolates. One interface per owner file so parallel Tasks never edit the same lines. */
+export type CoreReasonValues = SchedulerReasonValues & CoreMainReasonValues & WorkflowReasonValues & OtherReasonValues;
+export type CoreReasonCode = keyof CoreReasonValues;
+export type CoreReason<C extends CoreReasonCode = CoreReasonCode> = { code: C; values: CoreReasonValues[C] };
 
 /**
  * Core-owned human-readable error.
@@ -69,12 +78,17 @@ export function notFound(resource: string, id: string): HumanReadableError {
   });
 }
 
-export function validationError(message: string, details: Record<string, unknown> = {}): HumanReadableError {
+/**
+ * `reason` is optional so existing calls keep compiling. When given, it is stored as
+ * `details.reason = { code, values }` (values include the invalid field's name) and the server
+ * builds the Owner-language sentence from it; `message` stays the English text core owns.
+ */
+export function validationError<C extends CoreReasonCode>(message: string, details: Record<string, unknown> = {}, reason?: CoreReason<C>): HumanReadableError {
   return new HumanReadableError({
     code: "validation_error",
     message,
     remediation: "Correct the highlighted fields and submit the request again.",
-    details,
+    details: reason ? { ...details, reason: { code: reason.code, values: reason.values } } : details,
   });
 }
 

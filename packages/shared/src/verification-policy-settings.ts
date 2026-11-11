@@ -1,4 +1,4 @@
-import { isRecord, SettingsValidationError } from "./settings-validation.js";
+import { isRecord, SettingsValidationError, type SettingsCondition } from "./settings-validation.js";
 
 export const VERIFICATION_POLICY_SETTINGS_KEY = "verification_policy";
 
@@ -89,79 +89,82 @@ const headingPattern = (value: unknown): boolean => {
     return false;
   }
 };
+// shared の positiveInteger(value, fallback) は値か既定値を返す。ここは検証の真偽を返し、Number.isInteger で判定するので別に持つ。
 const positiveInteger = (value: unknown): boolean => typeof value === "number" && Number.isInteger(value) && value >= 1;
 const boolean = (value: unknown): boolean => typeof value === "boolean";
 const anyStrings = (value: unknown): boolean => Array.isArray(value) && value.every((item) => typeof item === "string");
 
 type StrictValidator = (value: unknown, field: string) => unknown;
 
-function invalid(field: string, expected: string): never {
-  throw new VerificationPolicySettingsValidationError(`${field} ${expected}.`, field);
+function invalid(field: string, expected: string, condition: SettingsCondition): never {
+  throw new VerificationPolicySettingsValidationError(`${field} ${expected}.`, field, condition);
 }
 
 function ownRecord(value: unknown, field: string, allowed: Readonly<Record<string, StrictValidator>>): Record<string, unknown> {
-  if (!isRecord(value)) invalid(field, "must be an object");
+  if (!isRecord(value)) invalid(field, "must be an object", { kind: "not_object" });
   const keys = Reflect.ownKeys(value);
+  const known = { kind: "known_keys", keys: Object.keys(allowed) } as const;
   for (const key of keys) {
-    if (typeof key !== "string" || !Object.hasOwn(allowed, key)) invalid(field, "contains an unknown key");
+    if (typeof key !== "string" || !Object.hasOwn(allowed, key)) invalid(field, "contains an unknown key", known);
   }
-  if (keys.length === 0) invalid(field, "must contain at least one known key");
+  if (keys.length === 0) invalid(field, "must contain at least one known key", known);
   const copy: Record<string, unknown> = {};
   for (const key of keys) {
-    if (typeof key !== "string" || !Object.hasOwn(value, key)) invalid(field, "contains an unknown key");
+    if (typeof key !== "string" || !Object.hasOwn(value, key)) invalid(field, "contains an unknown key", known);
     copy[key] = allowed[key](value[key], `${field}.${key}`);
   }
   return copy;
 }
 
 function strictStringList(value: unknown, field: string, allowEmpty: boolean): string[] {
-  if (!Array.isArray(value)) invalid(field, "must be an array");
+  if (!Array.isArray(value)) invalid(field, "must be an array", { kind: allowEmpty ? "string_list" : "non_empty_string_list" });
+  const itemCondition = { kind: allowEmpty ? "string" : "non_empty_string" } as const;
   const result: string[] = [];
   for (let index = 0; index < value.length; index++) {
-    if (!Object.hasOwn(value, index)) invalid(`${field}[${index}]`, "must be present");
+    if (!Object.hasOwn(value, index)) invalid(`${field}[${index}]`, "must be present", itemCondition);
     const item: unknown = value[index];
-    if (typeof item !== "string" || (!allowEmpty && item.length === 0) || item.includes("\0")) invalid(`${field}[${index}]`, "must be a valid string");
+    if (typeof item !== "string" || (!allowEmpty && item.length === 0) || item.includes("\0")) invalid(`${field}[${index}]`, "must be a valid string", itemCondition);
     result.push(item);
   }
   return result;
 }
 
 function strictCommandList(value: unknown, field: string): PolicyCommand[] {
-  if (!Array.isArray(value)) invalid(field, "must be an array");
+  if (!Array.isArray(value)) invalid(field, "must be an array", { kind: "array" });
   const result: PolicyCommand[] = [];
   for (let index = 0; index < value.length; index++) {
-    if (!Object.hasOwn(value, index)) invalid(`${field}[${index}]`, "must be present");
+    if (!Object.hasOwn(value, index)) invalid(`${field}[${index}]`, "must be present", { kind: "not_object" });
     const command: unknown = value[index];
     const commandField = `${field}[${index}]`;
     const copy = ownRecord(command, commandField, {
       pattern: (item, path) => {
-        if (typeof item !== "string" || item.length === 0 || item.includes("\0")) invalid(path, "must be a non-empty string without NUL");
+        if (typeof item !== "string" || item.length === 0 || item.includes("\0")) invalid(path, "must be a non-empty string without NUL", { kind: "non_empty_string" });
         return item;
       },
       argv: (item, path) => {
         const argv = strictStringList(item, path, false);
-        if (argv.length === 0 || argv[0].trim().length === 0) invalid(path, "must contain a non-blank first argument");
+        if (argv.length === 0 || argv[0].trim().length === 0) invalid(path, "must contain a non-blank first argument", { kind: "argv" });
         return argv;
       },
     });
-    if (Reflect.ownKeys(copy).length !== 2 || !Object.hasOwn(copy, "pattern") || !Object.hasOwn(copy, "argv")) invalid(commandField, "must contain pattern and argv only");
+    if (Reflect.ownKeys(copy).length !== 2 || !Object.hasOwn(copy, "pattern") || !Object.hasOwn(copy, "argv")) invalid(commandField, "must contain pattern and argv only", { kind: "exact_keys", keys: ["pattern", "argv"] });
     result.push(copy as unknown as PolicyCommand);
   }
   return result;
 }
 
 function strictHeadingPattern(value: unknown, field: string): string {
-  if (!headingPattern(value)) invalid(field, "must be a valid regular expression with capture group 1");
+  if (!headingPattern(value)) invalid(field, "must be a valid regular expression with capture group 1", { kind: "regex_with_group" });
   return value as string;
 }
 
 function strictPositiveSafeInteger(value: unknown, field: string): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) invalid(field, "must be a positive safe integer");
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) invalid(field, "must be a positive safe integer", { kind: "integer_range", min: 1, max: Number.MAX_SAFE_INTEGER });
   return value;
 }
 
 function strictBoolean(value: unknown, field: string): boolean {
-  if (typeof value !== "boolean") invalid(field, "must be a boolean");
+  if (typeof value !== "boolean") invalid(field, "must be a boolean", { kind: "boolean" });
   return value;
 }
 
@@ -172,7 +175,7 @@ export function validateVerificationPolicyPatch(value: unknown): VerificationPol
       file_patterns: (item, path) => strictStringList(item, path, false),
       heading_pattern: strictHeadingPattern,
       section_match: (item, path) => {
-        if (!sectionMatch(item)) invalid(path, "must be exact or folded");
+        if (!sectionMatch(item)) invalid(path, "must be exact or folded", { kind: "one_of", values: ["exact", "folded"] });
         return item;
       },
       required_sections: (item, path) => strictStringList(item, path, false),

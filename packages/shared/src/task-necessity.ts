@@ -1,3 +1,5 @@
+import { isRecord } from "./small-helpers.js";
+
 export const CHECK_WEIGHTS = ["light", "medium", "heavy"] as const;
 export type CheckWeight = typeof CHECK_WEIGHTS[number];
 
@@ -6,7 +8,6 @@ export interface TaskNecessity {
   readonly if_omitted: string;
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const text = (value: unknown): string => (typeof value === "string" ? value : "");
 
 /** Lenient read: null unless an object; non-strings become "". Per-criterion necessity lives in the acceptance criteria. */

@@ -1,5 +1,6 @@
 import { notFound } from "./errors";
 import type { CoreDatabase, JsonObject } from "./types";
+import { isRecord } from "@owl/shared/small-helpers";
 
 export interface WorkAssuranceReview {
   readonly task_id: string;
@@ -18,8 +19,6 @@ export interface WorkAssurance {
   readonly integration_verification: JsonObject | null;
   readonly plan_quality_warnings: readonly JsonObject[];
 }
-
-const isRecord = (value: unknown): value is JsonObject => typeof value === "object" && value !== null && !Array.isArray(value);
 
 function parseObject(json: string): JsonObject | null {
   try {

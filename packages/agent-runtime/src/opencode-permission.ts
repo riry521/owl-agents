@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { OPENCODE_TOOL_LOOKUP_WAIT_MS, PRE_TOOL_USE_HOOK_TIMEOUT_MS, normalizeOpencodeToolCall, permissionHookCommand } from "@owl/shared";
 import type { OpencodeClient } from "./opencode-client";
+import { isRecord } from "@owl/shared/small-helpers";
 
 /** Operations the rules deny; an ask for one of them means the rules were changed, so it is refused. */
 const DENIED_ACTIONS = new Set(["question", "subagent", "skill", "execute"]);
@@ -21,10 +22,6 @@ export interface OpencodePermissionResponderOptions {
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly hookTimeoutMs?: number;
   readonly toolLookupWaitMs?: number;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 const reject = (message: string): OpencodePermissionDecision => ({ decision: "reject", message });

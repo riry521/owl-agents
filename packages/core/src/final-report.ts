@@ -4,8 +4,8 @@ import {
   type FinalReportRequest,
   type FinalReportRunResult,
   type FinalReportSections,
-} from "../../shared/dist/final-report.js";
-import { readStoredAcceptanceCriteria } from "../../shared/dist/acceptance-criteria.js";
+} from "@owl/shared/final-report";
+import { readStoredAcceptanceCriteria } from "@owl/shared/acceptance-criteria";
 import { goalShortfallsOfWork } from "./goal-shortfalls";
 import type { CoreDatabase, CoreWriteLaneTransaction } from "./types";
 

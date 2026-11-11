@@ -1,12 +1,12 @@
-import type { CoreDatabase, JsonObject, TaskRow } from "./types";
-import { readStoredAcceptanceCriteria } from "../../shared/dist/acceptance-criteria.js";
+import type { JsonObject } from "./types";
+import { readStoredAcceptanceCriteria } from "@owl/shared/acceptance-criteria";
 import {
   ACCEPTANCE_DEFECT_EVENT,
   ACCEPTANCE_DEFECT_FAILURE_KIND,
   normalizeAcceptanceDefects,
   type AcceptanceDefect,
-} from "../../shared/dist/acceptance-defect.js";
-import { EXTERNAL_BLOCKER_EVENT, readExternalBlocker, type ExternalBlocker } from "../../shared/dist/external-blocker.js";
+} from "@owl/shared/acceptance-defect";
+import { EXTERNAL_BLOCKER_EVENT, readExternalBlocker, type ExternalBlocker } from "@owl/shared/external-blocker";
 
 /**
  * What Core tells an agent about a Task beyond the Task itself. One module
@@ -29,13 +29,6 @@ import {
 // The Role Input builders live in ContextBuilder; these are the existing import paths.
 export { dependencyContext, loadFixContext, readDependencyReport, reviewerTaskView, roleTaskView, taskDependencyIds } from "./context-builder.js";
 export type { DependencyContext, FixContext } from "./context-builder.js";
-
-/** Whether a Task's plan requires an independent Reviewer pass before it can complete. */
-export function isTaskReviewRequired(task: Pick<TaskRow, "type" | "review_override">): boolean {
-  if (task.review_override === "true") return true;
-  if (task.review_override === "false") return false;
-  return task.type === "code" || task.type === "config";
-}
 
 
 

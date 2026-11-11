@@ -944,7 +944,8 @@ export function AdvisorSendFileDestinationSection() {
   function adopt(value: AdvisorSendFileDestination) {
     setData(value);
     setPreferred(value.preferred_provider);
-    setSelected(value.default_destination?.available ? destinationValue(value.default_destination) : '');
+    // An unavailable saved default stays selected (shown as its own option) so choosing "None" is a real change.
+    setSelected(destinationValue(value.default_destination));
   }
 
   // Opened on demand: the GET asks Slack/Discord for channel names, so it is not part of /settings/view.
@@ -964,6 +965,12 @@ export function AdvisorSendFileDestinationSection() {
     setSaving(true);
     setNotice(null);
     setError(null);
+    // The server rejects an unavailable channel (422) and null clears it, so make the owner choose instead of dropping it silently.
+    if (selected && selected === savedSelected && !data?.default_destination?.available) {
+      setError(t('settings.sendFileDestinationUnavailableChoose'));
+      setSaving(false);
+      return;
+    }
     try {
       const separator = selected.indexOf(':');
       const saved = await putAdvisorSendFileDestination({
@@ -982,7 +989,7 @@ export function AdvisorSendFileDestinationSection() {
     }
   }
 
-  const savedSelected = data?.default_destination?.available ? destinationValue(data.default_destination) : '';
+  const savedSelected = destinationValue(data?.default_destination ?? null);
   const changed = data !== null && (preferred !== data.preferred_provider || selected !== savedSelected);
   const configured = (provider: FileDestinationProvider) => data?.providers.find((p) => p.provider === provider)?.configured ?? false;
   const noIntegration = data !== null && !configured('slack') && !configured('discord');
@@ -1078,6 +1085,11 @@ export function AdvisorSendFileDestinationSection() {
                   onChange={(ev) => { setSelected(ev.target.value); setNotice(null); }}
                 >
                   <option value="">{t('settings.sendFileDestinationNone')}</option>
+                  {savedDefault && !savedDefault.available && (
+                    <option value={destinationValue(savedDefault)}>
+                      {t('settings.sendFileDestinationUnavailableOption', { name: savedDefault.display_name })}
+                    </option>
+                  )}
                   {FILE_DESTINATION_PROVIDERS.map(({ provider, label }) => {
                     const state = data.providers.find((p) => p.provider === provider);
                     const isConfigured = state?.configured ?? false;

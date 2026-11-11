@@ -1,10 +1,14 @@
 import { requireAdapterFeature, requireCoreFeature } from "./core-feature.js";
 import { ApiError, type ApiErrorCode } from "./errors.js";
+import { SettingsRouteMessages as RS } from "./messages/routes-settings.js";
 import { AdvisorFolderError } from "./advisor-folders.js";
-import { parseFileDestinationPut } from "./advisor-file-destination-settings.js";
 import {
-  HARNESS_PROVIDER_ALIASES,
-  MAX_ADVISOR_PERSONA_LENGTH,
+  parseFileDestinationPut,
+  buildFileDestinationCandidates,
+  isDefaultAvailable,
+  type FileDestinationProviderView,
+} from "./advisor-file-destination-settings.js";
+import {
   advisorWindowFeature,
   assertSameOriginWrite,
   childRunCall,
@@ -12,14 +16,10 @@ import {
   commandEnvelope,
   decodeRouteValue,
   exactKeys,
-  fileDestinationData,
-  fileDestinationProviders,
-  hostTimeZone,
   inviteOwnerToChannel,
   isObject,
   knowledgeStorageErrorCode,
   knowledgeStorageFeature,
-  maskSecret,
   pathId,
   readRequestBody,
   requestOwnerLanguage,
@@ -29,28 +29,210 @@ import {
   sendJson,
   slackOwnerUserId,
   stringField,
-  validateCreateModelPresetPayload,
-  validateIntegrationPayload,
-  validateUpdateModelPresetPayload,
-  validateUpdateModelSettingsPayload,
-  validatedSettings,
   windowChannelError,
   type ApiRoute,
+  type RequestContext,
+  requestId,
+  CHANNEL_PROVIDERS,
 } from "./http-common.js";
-import { validateKnowledgeAutomationSettings } from "../../../packages/shared/dist/knowledge-automation.js";
-import { validatePlanUsageSettings } from "../../../packages/shared/dist/plan-usage-settings.js";
-import { validateDependencySummarySettings } from "../../../packages/shared/dist/dependency-summary-settings.js";
-import { validateAdvisorWindowSettings } from "../../../packages/shared/dist/advisor-window-settings.js";
-import { validateVerificationPolicyPatch } from "../../../packages/shared/dist/verification-policy-settings.js";
-import { validateReviewLimitSettings } from "../../../packages/shared/dist/review-limit-settings.js";
-import { REMAKE_LIMIT_SETTINGS_KEYS, validateRemakeLimitSettings } from "../../../packages/shared/dist/remake-limit-settings.js";
-import { validateAutoRecoverySettings } from "../../../packages/shared/dist/auto-recovery-settings.js";
-import { validateFixerEscalationSettings } from "../../../packages/shared/dist/fixer-escalation-settings.js";
-import { validateReviewRoutingSettings } from "../../../packages/shared/dist/review-routing-settings.js";
-import { isOwnerLanguage } from "../../../packages/shared/dist/owner-language.js";
-import { CHILD_RUN_EFFORTS, CHILD_RUN_PROVIDERS } from "../../../packages/shared/dist/child-runs.js";
-import type { ChildRunEffort, ChildRunProvider, ChildRunSettings } from "../../../packages/shared/dist/child-runs.js";
-import type { CorePort, IntegrationProvider, JsonObject, ProcessSkillsSettingsInput } from "./types.js";
+import { validateKnowledgeAutomationSettings } from "@owl/shared/knowledge-automation";
+import { validatePlanUsageSettings } from "@owl/shared/plan-usage-settings";
+import { validateDependencySummarySettings } from "@owl/shared/dependency-summary-settings";
+import { validateAdvisorWindowSettings } from "@owl/shared/advisor-window-settings";
+import { validateVerificationPolicyPatch } from "@owl/shared/verification-policy-settings";
+import { validateReviewLimitSettings } from "@owl/shared/review-limit-settings";
+import { REMAKE_LIMIT_SETTINGS_KEYS, validateRemakeLimitSettings } from "@owl/shared/remake-limit-settings";
+import { validateAutoRecoverySettings } from "@owl/shared/auto-recovery-settings";
+import { validateFixerEscalationSettings } from "@owl/shared/fixer-escalation-settings";
+import { validateReviewRoutingSettings } from "@owl/shared/review-routing-settings";
+import { isOwnerLanguage } from "@owl/shared/owner-language";
+import type { ChildRunSettings } from "@owl/shared/child-runs";
+import type { CorePort, IntegrationProvider, JsonObject, ProcessSkillsSettingsInput, IntegrationConfigPatch, RoleModelSettingInput } from "./types.js";
+import { isUlid } from "./ids.js";
+import { parseChannelIds } from "./integration-store.js";
+import { MODEL_PRESET_NAME_MAX_LENGTH, MODEL_SETTING_EFFORTS, MODEL_SETTING_ROLES } from "@owl/shared/default-role-models";
+import { settingsReason } from "@owl/core/dist/settings-store.js";
+import { SettingsValidationError } from "@owl/shared/settings-validation";
+
+const MAX_ADVISOR_PERSONA_LENGTH = 8_000;
+
+function hostTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "local";
+  } catch {
+    return "local";
+  }
+}
+
+function validatedSettings<T>(validate: (value: unknown) => T, value: unknown, status: 400 | 422 = 400): T {
+  try {
+    return validate(value);
+  } catch (error) {
+    if (error instanceof SettingsValidationError) {
+      throw new ApiError(status, "validation_error", error.message, { field: error.field, reason: settingsReason(error) });
+    }
+    throw error;
+  }
+}
+
+function maskSecret(secret: string): string {
+  return secret.length > 4 ? "*".repeat(secret.length - 4) + secret.slice(-4) : secret ? "****" : "";
+}
+
+export function validateIntegrationPayload(
+  payload: JsonObject,
+  provider: IntegrationProvider,
+  existingConfigured: boolean,
+): IntegrationConfigPatch {
+  const allowed = new Set([
+    "bot_token",
+    "app_token",
+    "channel_id",
+    "conversation_channel_id",
+    "notification_channel_id",
+    "account_id",
+    "owner_user_id",
+  ]);
+  const extra = Object.keys(payload).filter((key) => !allowed.has(key));
+  if (extra.length > 0) {
+    throw new ApiError(400, "validation_error", RS.integrationExtra(), { extra });
+  }
+
+  const result: IntegrationConfigPatch = {};
+  const stringFields: Array<keyof IntegrationConfigPatch> = [
+    "bot_token",
+    "app_token",
+    "channel_id",
+    "conversation_channel_id",
+    "notification_channel_id",
+    "account_id",
+    "owner_user_id",
+  ];
+  for (const field of stringFields) {
+    if (!Object.prototype.hasOwnProperty.call(payload, field)) continue;
+    if (typeof payload[field] !== "string") {
+      throw new ApiError(400, "validation_error", RS.fieldNotString({ field }), { field });
+    }
+    const value = (payload[field] as string).trim();
+    if (field === "owner_user_id") {
+      if (provider !== "slack" || value.length > 64 || /\s/u.test(value)) {
+        throw new ApiError(400, "validation_error", RS.ownerUserId(), { field });
+      }
+      result[field] = value;
+      continue;
+    }
+    const max = field === "account_id" ? 26 : 4096;
+    if (value.length === 0 || value.length > max) {
+      throw new ApiError(400, "validation_error", RS.fieldLength({ field, max }), { field });
+    }
+    result[field] = value;
+  }
+
+  if (result.account_id !== undefined && !isUlid(result.account_id)) {
+    throw new ApiError(400, "validation_error", RS.accountId(), { field: "account_id" });
+  }
+  if (!existingConfigured) {
+    if (!result.bot_token) {
+      throw new ApiError(400, "validation_error", RS.botToken(), { field: "bot_token" });
+    }
+    if (provider === "slack" && !result.app_token) {
+      throw new ApiError(400, "validation_error", RS.appToken(), { field: "app_token" });
+    }
+    if (!result.channel_id && !result.conversation_channel_id && !result.notification_channel_id) {
+      throw new ApiError(400, "validation_error", RS.channelId(), { field: "conversation_channel_id" });
+    }
+  }
+  return result;
+}
+
+const MODEL_SETTING_ROLE_SET: ReadonlySet<string> = new Set(MODEL_SETTING_ROLES);
+
+function validateRoleModelSettingInput(value: unknown, index: number): RoleModelSettingInput {
+  if (!isObject(value)) {
+    throw new ApiError(400, "validation_error", RS.roleNotObject({ index }));
+  }
+  exactKeys(value, ["role", "provider", "model", "effort"], `roles[${index}]`);
+  if (typeof value.role !== "string" || !MODEL_SETTING_ROLE_SET.has(value.role)) {
+    throw new ApiError(400, "validation_error", RS.roleInvalid({ index }));
+  }
+  const provider = stringField(value.provider, `roles[${index}].provider`, 1, 200);
+  const model = stringField(value.model, `roles[${index}].model`, 1, 200);
+  if (typeof value.effort !== "string" || !MODEL_SETTING_EFFORTS.includes(value.effort)) {
+    throw new ApiError(400, "validation_error", RS.effortInvalid({ index }));
+  }
+  return { role: value.role as RoleModelSettingInput["role"], provider, model, effort: value.effort as RoleModelSettingInput["effort"] };
+}
+
+function validateUpdateModelSettingsPayload(payload: JsonObject): { roles: RoleModelSettingInput[] } {
+  exactKeys(payload, ["roles"], "UpdateModelSettings payload");
+  if (!Array.isArray(payload.roles) || payload.roles.length !== MODEL_SETTING_ROLE_SET.size) {
+    throw new ApiError(400, "validation_error", RS.rolesCount({ count: MODEL_SETTING_ROLE_SET.size }));
+  }
+  const roles = payload.roles.map((item, index) => validateRoleModelSettingInput(item, index));
+  const seenRoles = new Set(roles.map((role) => role.role));
+  if (seenRoles.size !== roles.length) {
+    throw new ApiError(400, "validation_error", RS.rolesDuplicate());
+  }
+  for (const role of MODEL_SETTING_ROLE_SET) {
+    if (!seenRoles.has(role as RoleModelSettingInput["role"])) {
+      throw new ApiError(400, "validation_error", RS.roleMissing({ role, count: MODEL_SETTING_ROLE_SET.size }));
+    }
+  }
+  return { roles };
+}
+
+function validateModelPresetName(value: unknown): string {
+  const name = typeof value === "string" ? value.trim() : "";
+  if (name.length < 1 || name.length > MODEL_PRESET_NAME_MAX_LENGTH) throw new ApiError(400, "validation_error", RS.presetName({ max: MODEL_PRESET_NAME_MAX_LENGTH }), { field: "name" });
+  return name;
+}
+
+function validateCreateModelPresetPayload(payload: JsonObject): { name: string; roles: RoleModelSettingInput[] } {
+  exactKeys(payload, ["name", "roles"], "CreateModelPreset payload");
+  return { name: validateModelPresetName(payload.name), roles: validateUpdateModelSettingsPayload({ roles: payload.roles }).roles };
+}
+
+function validateUpdateModelPresetPayload(payload: JsonObject): { name?: string; roles?: RoleModelSettingInput[] } {
+  const keys = Object.keys(payload);
+  if (keys.length === 0 || keys.some((key) => key !== "name" && key !== "roles")) {
+    throw new ApiError(400, "validation_error", RS.presetUpdateEmpty());
+  }
+  return {
+    ...(Object.hasOwn(payload, "name") ? { name: validateModelPresetName(payload.name) } : {}),
+    ...(Object.hasOwn(payload, "roles") ? { roles: validateUpdateModelSettingsPayload({ roles: payload.roles }).roles } : {}),
+  };
+}
+
+/** Per-provider candidates for the Web send_file destination; names come from Slack/Discord when the Connector runs. */
+async function fileDestinationProviders(context: RequestContext): Promise<FileDestinationProviderView[]> {
+  const statuses = await context.core.getIntegrations();
+  const windows = await advisorWindowFeature(context.core).listAdvisorWindows();
+  const names = new Map<string, string>();
+  const integrations = [];
+  for (const provider of CHANNEL_PROVIDERS) {
+    const status = statuses.find((entry) => entry.provider === provider);
+    const admin = context.channelAdmins?.channelAdmin(provider) ?? null;
+    const conversationChannelIds = parseChannelIds(status?.conversation_channel_id ?? undefined);
+    for (const id of conversationChannelIds) {
+      const info = admin ? await admin.describeChannel(id).catch(() => null) : null;
+      if (info?.name) names.set(`${provider}:${id}`, info.name);
+    }
+    integrations.push({ provider, configured: status?.configured ?? false, running: admin !== null, conversationChannelIds });
+  }
+  return buildFileDestinationCandidates(integrations, windows, names);
+}
+
+async function fileDestinationData(context: RequestContext, providers: FileDestinationProviderView[]): Promise<JsonObject> {
+  const settings = await context.core.getAdvisorFileDestinationSettings();
+  return {
+    preferred_provider: settings.preferredProvider,
+    default_destination: settings.defaultDestination
+      ? { ...settings.defaultDestination, available: isDefaultAvailable(settings, providers) }
+      : null,
+    providers: providers as unknown as JsonObject[],
+  };
+}
+
 
 interface SettingsRouteSpec<Api, Input> {
   readonly path: string;
@@ -100,13 +282,13 @@ function settingsRoutes<Api, Input>(spec: SettingsRouteSpec<Api, Input>): [ApiRo
 }
 
 const VERIFICATION_POLICY_KEYS = ["getVerificationPolicySettings", "updateVerificationPolicySettings"] as const;
-const VERIFICATION_POLICY_UNAVAILABLE = { code: "dependency_unavailable", message: "The loaded Core does not support verification policy settings." } as const;
+const VERIFICATION_POLICY_UNAVAILABLE = { code: "dependency_unavailable", message: RS.noVerificationPolicy() } as const;
 
 /** 今の requireSkillApi と同じく、13個すべてを確かめる。1個でも無ければ 503 core_not_ready。 */
 const skillFeature = (core: CorePort) => requireAdapterFeature(core, [
   "getSkillActivity", "listSkills", "getSkill", "readSkillFile", "listSkillRevisions", "getSkillRevision", "restoreSkill",
   "updateSkill", "listSkillProposals", "approveSkillProposal", "rejectSkillProposal", "getSkillSettings", "setSkillSettings",
-], { code: "core_not_ready", message: "The loaded Core does not support the Skill Box API." });
+], { code: "core_not_ready", message: RS.noSkillBox() });
 
 export const SETTINGS_ROUTES: readonly ApiRoute[] = [
   {
@@ -118,11 +300,11 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
       requireOwner(request);
       // Same Core calls and shaping as each settings GET route; secrets stay masked.
       const remakeLimits = requireCoreFeature(context.core, ["getRemakeLimitSettings", "setRemakeLimitSettings"],
-        { code: "dependency_unavailable", message: "The loaded Core does not support remake limits." });
+        { code: "dependency_unavailable", message: RS.noRemakeLimits() });
       const fixerEscalationApi = requireCoreFeature(context.core, ["getFixerEscalationSettings", "setFixerEscalationSettings"],
-        { code: "dependency_unavailable", message: "The loaded Core does not support Fixer escalation." });
+        { code: "dependency_unavailable", message: RS.noFixerEscalation() });
       const autoRecoveryApi = requireCoreFeature(context.core, ["getAutoRecoverySettings", "setAutoRecoverySettings"],
-        { code: "dependency_unavailable", message: "The loaded Core does not support automatic recovery." });
+        { code: "dependency_unavailable", message: RS.noAutoRecovery() });
       const childRuns = childRunFeature(context.core);
       const knowledgeStorage = knowledgeStorageFeature(context.core);
       const core = context.core;
@@ -265,7 +447,7 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
     exactKeys: { keys: ["max_chars"], label: "Dependency summary payload" },
     validate: validateDependencySummarySettings,
     feature: (core) => requireCoreFeature(core, ["getDependencySummarySettings", "setDependencySummarySettings"],
-      { code: "dependency_unavailable", message: "The loaded Core does not support the dependency summary setting." }),
+      { code: "dependency_unavailable", message: RS.noDependencySummary() }),
     get: (api) => api.getDependencySummarySettings(),
     set: (api, input) => api.setDependencySummarySettings(input),
   }),
@@ -302,10 +484,10 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
         sendJson(response, 200, { request_id: requestIdValue, data, version: 0 });
       } catch (error) {
         if (isObject(error) && error.code === "validation_error") {
-          throw new ApiError(400, "validation_error", error instanceof Error ? error.message : "Invalid verification policy settings.", isObject(error.details) ? error.details : {});
+          throw new ApiError(400, "validation_error", error instanceof Error ? error.message : RS.verificationInvalid(), isObject(error.details) ? error.details : {});
         }
         if (isObject(error) && error.code === "verification_policy_storage_invalid") {
-          throw new ApiError(409, "verification_policy_storage_invalid", error instanceof Error ? error.message : "保存済みの検証ポリシーが不正です。", isObject(error.details) ? error.details : {});
+          throw new ApiError(409, "verification_policy_storage_invalid", error instanceof Error ? error.message : RS.verificationStorageInvalid(), isObject(error.details) ? error.details : {});
         }
         throw error;
       }
@@ -316,7 +498,7 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
     exactKeys: { keys: ["plan_review_rounds", "total_review_attempts"], label: "Review limits payload" },
     validate: validateReviewLimitSettings,
     feature: (core) => requireCoreFeature(core, ["getReviewLimitSettings", "setReviewLimitSettings"],
-      { code: "dependency_unavailable", message: "The loaded Core does not support review limits." }),
+      { code: "dependency_unavailable", message: RS.noReviewLimits() }),
     get: (api) => api.getReviewLimitSettings(),
     set: (api, input) => api.setReviewLimitSettings(input),
   }),
@@ -325,7 +507,7 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
     exactKeys: { keys: REMAKE_LIMIT_SETTINGS_KEYS, label: "Remake limits payload" },
     validate: validateRemakeLimitSettings,
     feature: (core) => requireCoreFeature(core, ["getRemakeLimitSettings", "setRemakeLimitSettings"],
-      { code: "dependency_unavailable", message: "The loaded Core does not support remake limits." }),
+      { code: "dependency_unavailable", message: RS.noRemakeLimits() }),
     get: (api) => api.getRemakeLimitSettings(),
     set: (api, input) => api.setRemakeLimitSettings(input),
   }),
@@ -333,7 +515,7 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
     path: "/api/v1/settings/fixer-escalation",
     validate: validateFixerEscalationSettings,
     feature: (core) => requireCoreFeature(core, ["getFixerEscalationSettings", "setFixerEscalationSettings"],
-      { code: "dependency_unavailable", message: "The loaded Core does not support Fixer escalation." }),
+      { code: "dependency_unavailable", message: RS.noFixerEscalation() }),
     get: (api) => api.getFixerEscalationSettings(),
     set: (api, input) => api.setFixerEscalationSettings(input),
   }),
@@ -341,7 +523,7 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
     path: "/api/v1/settings/auto-recovery",
     validate: validateAutoRecoverySettings,
     feature: (core) => requireCoreFeature(core, ["getAutoRecoverySettings", "setAutoRecoverySettings"],
-      { code: "dependency_unavailable", message: "The loaded Core does not support automatic recovery." }),
+      { code: "dependency_unavailable", message: RS.noAutoRecovery() }),
     get: (api) => api.getAutoRecoverySettings(),
     set: (api, input) => api.setAutoRecoverySettings(input),
   }),
@@ -349,7 +531,7 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
     path: "/api/v1/settings/review-routing",
     validate: validateReviewRoutingSettings,
     feature: (core) => requireCoreFeature(core, ["getReviewRoutingSettings", "setReviewRoutingSettings"],
-      { code: "dependency_unavailable", message: "The loaded Core does not support review routing settings." }),
+      { code: "dependency_unavailable", message: RS.noReviewRouting() }),
     get: (api) => api.getReviewRoutingSettings(),
     set: (api, input) => api.setReviewRoutingSettings(input),
   }),
@@ -358,7 +540,7 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
     exactKeys: { keys: ["claude_usage_api_enabled", "poll_interval_minutes"], label: "Plan usage settings payload" },
     validate: validatePlanUsageSettings,
     feature: (core) => requireCoreFeature(core, ["getPlanUsage", "refreshPlanUsage", "getPlanUsageSettings", "setPlanUsageSettings"],
-      { code: "dependency_unavailable", message: "The loaded Core does not support plan usage." }),
+      { code: "dependency_unavailable", message: RS.noPlanUsage() }),
     get: (api) => api.getPlanUsageSettings(),
     set: (api, input) => api.setPlanUsageSettings(input),
   }),
@@ -388,7 +570,7 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
       const payload = command.payload;
       exactKeys(payload, ["enabled", "path"], "Process skills settings payload");
       if (typeof payload.enabled !== "boolean" || (payload.path !== null && typeof payload.path !== "string")) {
-        throw new ApiError(400, "validation_error", "enabled must be a boolean and path must be a string or null.");
+        throw new ApiError(400, "validation_error", RS.processSkills());
       }
       const input: ProcessSkillsSettingsInput = { enabled: payload.enabled, path: payload.path as string | null };
       const result = await runCommand(context, pathname, command, 200, async () => {
@@ -527,7 +709,7 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
       const body = await readRequestBody(request);
       const cmd = commandEnvelope(body);
       if (typeof cmd.payload.hybrid_mode !== "boolean") {
-        throw new ApiError(400, "validation_error", "hybrid_modeが不正です。booleanを指定してください。");
+        throw new ApiError(400, "validation_error", RS.hybridMode());
       }
       const enabled = cmd.payload.hybrid_mode as boolean;
       const result = await runCommand(context, pathname, cmd, 200, async () => {
@@ -559,7 +741,7 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
       const cmd = commandEnvelope(body);
       const language = cmd.payload.language;
       if (!isOwnerLanguage(language)) {
-        throw new ApiError(400, "validation_error", "languageが不正です。\"ja\"または\"en\"を指定してください。");
+        throw new ApiError(400, "validation_error", RS.language());
       }
       const result = await runCommand(context, pathname, cmd, 200, async () => {
         const value = await context.core.setLanguage(language);
@@ -594,62 +776,6 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
       sendJson(response, 200, result);
     },
   },
-  // Legacy executor settings: the default child provider, model, effort and timeout.
-  {
-    method: "GET",
-    path: "/api/v1/settings/executor",
-    async handle(route) {
-      const { context, request, response } = route;
-      const requestIdValue = route.requestId;
-      requireOwner(request);
-      const s = await childRunCall(() => childRunFeature(context.core).getChildRunSettings());
-      sendJson(response, 200, { request_id: requestIdValue, data: { ...s, provider: s.executor_harness, model: s.executor_by_harness[s.executor_harness].model, effort: s.executor_by_harness[s.executor_harness].effort, timeout_ms: s.timeout_minutes * 60_000 } });
-    },
-  },
-  {
-    method: "PUT",
-    path: "/api/v1/settings/executor",
-    async handle(route) {
-      const { context, request, response, pathname } = route;
-      requireOwner(request);
-      const cmd = commandEnvelope(await readRequestBody(request));
-      const p = cmd.payload;
-      if (p.executor_harness !== undefined || p.defaults_by_parent_harness !== undefined) {
-        const result = await runCommand(context, pathname, cmd, 200, async () => {
-          const saved = await childRunCall(() => childRunFeature(context.core).setChildRunSettings(p as unknown as ChildRunSettings));
-          return { data: { ...saved, provider: saved.executor_harness, model: saved.executor_by_harness[saved.executor_harness].model, effort: saved.executor_by_harness[saved.executor_harness].effort, timeout_ms: saved.timeout_minutes * 60_000 } as unknown as JsonObject, version: 0 };
-        });
-        sendJson(response, 200, result);
-        return;
-      }
-      if (typeof p.provider !== "string" || p.provider.length === 0 || typeof p.model !== "string" || p.model.length === 0 || !Number.isSafeInteger(p.timeout_ms) || (p.timeout_ms as number) < 0) {
-        throw new ApiError(400, "validation_error", "provider、model、timeout_msをすべて指定してください。");
-      }
-      if (p.effort !== undefined && p.effort !== null && !(CHILD_RUN_EFFORTS as readonly string[]).includes(p.effort as string)) {
-        throw new ApiError(400, "validation_error", "effortはlow、medium、high、xhigh、maxのいずれかを指定してください。");
-      }
-      const provider = (Object.hasOwn(HARNESS_PROVIDER_ALIASES, p.provider) ? HARNESS_PROVIDER_ALIASES[p.provider] : p.provider) as ChildRunProvider;
-      if (!(CHILD_RUN_PROVIDERS as readonly string[]).includes(provider)) {
-        throw new ApiError(400, "validation_error", `providerは${CHILD_RUN_PROVIDERS.join("、")}のいずれかで指定してください。`);
-      }
-      const model = p.model;
-      const timeoutMs = p.timeout_ms as number;
-      const result = await runCommand(context, pathname, cmd, 200, async () => {
-        const api = childRunFeature(context.core);
-        const s = await childRunCall(() => api.getChildRunSettings());
-        const effort = p.effort === undefined ? s.executor_by_harness[provider].effort : p.effort as ChildRunEffort | null;
-        const next: ChildRunSettings = {
-          ...s,
-          executor_harness: provider,
-          executor_by_harness: { ...s.executor_by_harness, [provider]: { model, effort } },
-          timeout_minutes: timeoutMs === 0 ? s.timeout_minutes : Math.ceil(timeoutMs / 60_000),
-        };
-        const saved = await childRunCall(() => api.setChildRunSettings(next));
-        return { data: { ...saved, provider: saved.executor_harness, model: saved.executor_by_harness[saved.executor_harness].model, effort: saved.executor_by_harness[saved.executor_harness].effort, timeout_ms: saved.timeout_minutes * 60_000 } as unknown as JsonObject, version: 0 };
-      });
-      sendJson(response, 200, result);
-    },
-  },
   // ---- Typesafe API Key -------------------------------------------------------
   {
     method: "GET",
@@ -671,7 +797,7 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
       const body = await readRequestBody(request);
       const cmd = commandEnvelope(body);
       if (typeof cmd.payload.typesafe_api_key !== "string") {
-        throw new ApiError(400, "validation_error", "typesafe_api_keyが不正です。文字列を指定してください。");
+        throw new ApiError(400, "validation_error", RS.typesafeKey());
       }
       const key = cmd.payload.typesafe_api_key as string;
       const result = await runCommand(context, pathname, cmd, 200, async () => {
@@ -699,7 +825,7 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
       requireOwner(request);
       const cmd = commandEnvelope(await readRequestBody(request));
       if (typeof cmd.payload.shared_dir !== "string" || typeof cmd.payload.screenshot_dir !== "string") {
-        throw new ApiError(400, "validation_error", "shared_dirとscreenshot_dirは文字列で指定してください。");
+        throw new ApiError(400, "validation_error", RS.foldersNotString());
       }
       const result = await runCommand(context, pathname, cmd, 200, async () => {
         try {
@@ -708,8 +834,8 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
         } catch (error) {
           if (error instanceof AdvisorFolderError) {
             throw new ApiError(422, "validation_error", error.reason === "tracked"
-              ? "共有フォルダはgitで追跡される場所には指定できません。.gitignoreで除外された場所かリポジトリの外を指定してください。"
-              : "フォルダは絶対パスで指定してください。");
+              ? RS.folderTracked()
+              : RS.folderNotAbsolute());
           }
           throw error;
         }
@@ -765,7 +891,7 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
       exactKeys(cmd.payload, ["path"], "payload", ["mode"]);
       const { path, mode } = cmd.payload;
       if (typeof path !== "string" || (mode !== undefined && mode !== "move" && mode !== "relink")) {
-        throw new ApiError(400, "validation_error", "pathは文字列、modeはmoveまたはrelinkで指定してください。");
+        throw new ApiError(400, "validation_error", RS.pathMode());
       }
       const api = knowledgeStorageFeature(context.core);
       const result = await runCommand(context, pathname, cmd, 200, async () => {
@@ -804,11 +930,11 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
       const body = await readRequestBody(request);
       const cmd = commandEnvelope(body);
       if (typeof cmd.payload.advisor_persona !== "string") {
-        throw new ApiError(400, "validation_error", "advisor_personaが不正です。文字列を指定してください。", { field: "advisor_persona" });
+        throw new ApiError(400, "validation_error", RS.personaNotString(), { field: "advisor_persona" });
       }
       const advisorPersona = (cmd.payload.advisor_persona as string).trim();
       if (advisorPersona.length > MAX_ADVISOR_PERSONA_LENGTH) {
-        throw new ApiError(400, "validation_error", `advisor_personaは${MAX_ADVISOR_PERSONA_LENGTH}文字以内で指定してください。`, {
+        throw new ApiError(400, "validation_error", RS.personaTooLong({ max: MAX_ADVISOR_PERSONA_LENGTH }), {
           field: "advisor_persona",
           max_length: MAX_ADVISOR_PERSONA_LENGTH,
         });
@@ -865,7 +991,7 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
       const providerId = decodeRouteValue(route.params.id!, "provider");
       const provider = await context.core.getProvider(providerId);
       if (!provider) {
-        throw new ApiError(404, "not_found", `指定されたプロバイダーが見つかりません: ${providerId}`);
+        throw new ApiError(404, "not_found", RS.providerNotFound({ providerId }));
       }
       sendJson(response, 200, { request_id: requestIdValue, data: provider });
     },
@@ -956,7 +1082,7 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
       const body = await readRequestBody(request);
       const cmd = commandEnvelope(body);
       if (!Array.isArray(cmd.payload.models) || !cmd.payload.models.every((m: unknown): m is string => typeof m === "string")) {
-        throw new ApiError(400, "validation_error", "modelsが不正です。文字列の配列を指定してください。");
+        throw new ApiError(400, "validation_error", RS.modelsInvalid());
       }
       const result = await runCommand(context, pathname, cmd, 200, async () => {
         const models = await context.core.setProviderModels(providerId, cmd.payload.models as string[]);

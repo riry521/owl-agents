@@ -1334,6 +1334,8 @@
     "sendFileDestinationUnavailable": "保存した既定の送信先 #{{name}} は今は使えません。チャンネルを選び直してください。",
     "sendFileDestinationSave": "保存",
     "sendFileDestinationSavedNotice": "保存しました。",
+    "sendFileDestinationUnavailableChoose": "保存済みの送信先は今は使えません。「なし」を選ぶか、別の送信先を選んでから保存してください。",
+    "sendFileDestinationUnavailableOption": "{{name}}（保存済み・使えません）",
     "sendFileDestinationError": "ファイルの送信先の設定を取得・保存できませんでした。"
   },
   "folderPicker": {
@@ -1960,6 +1962,7 @@
     "dropHere": "ここにドロップして添付",
     "dropHint": "1 ファイル {max} まで、{count} 件まで",
     "remove": "{name} を外す",
+    "dismissNotices": "通知を閉じる",
     "retry": "再試行",
     "uploading": "アップロード中",
     "quarantined": "実行ファイルのため、エージェントには渡しません",

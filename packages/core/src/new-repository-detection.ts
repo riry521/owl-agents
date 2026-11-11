@@ -1,5 +1,6 @@
-import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import type { RepositoryRootInspection } from "./repository-inspection.js";
+import { isPathInside } from "./path-inside.js";
 
 export type NewRepositorySkipReason =
   | "owl_managed_path"
@@ -48,11 +49,6 @@ export interface NewRepositoryDetection {
   readonly skipped: readonly SkippedRepositoryPath[];
 }
 
-function isInside(root: string, path: string): boolean {
-  const rel = relative(root, path);
-  return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`));
-}
-
 /** Folders of the absolute paths a Worker reported, minus Owl-managed and registered Project paths. */
 export function collectCandidatePaths(
   reports: readonly unknown[],
@@ -68,9 +64,9 @@ export function collectCandidatePaths(
       const file = (change as { file?: unknown } | null)?.file;
       if (typeof file !== "string" || !isAbsolute(file)) continue;
       const path = resolve(file);
-      if (excludedRoots.some((root) => isInside(root, path))) {
+      if (excludedRoots.some((root) => isPathInside(root, path, true))) {
         skipped.set(path, { path, reason: "owl_managed_path" });
-      } else if (registeredProjectPaths.some((root) => isInside(root, path))) {
+      } else if (registeredProjectPaths.some((root) => isPathInside(root, path, true))) {
         skipped.set(path, { path, reason: "inside_registered_project" });
       } else {
         directories.add(dirname(path));
@@ -90,7 +86,7 @@ export async function detectNewRepositories(
   const seenRoots: string[] = [];
   let startedAt: number | null | undefined;
   for (const directory of collected.directories) {
-    if (seenRoots.some((root) => isInside(root, directory))) continue;
+    if (seenRoots.some((root) => isPathInside(root, directory, true))) continue;
     let inspection: RepositoryRootInspection;
     try {
       inspection = await deps.inspect(directory);
@@ -105,9 +101,9 @@ export async function detectNewRepositories(
     const root = inspection.root;
     if (seenRoots.includes(root)) continue;
     seenRoots.push(root);
-    if (input.excludedRoots.some((excluded) => isInside(excluded, root))) {
+    if (input.excludedRoots.some((excluded) => isPathInside(excluded, root, true))) {
       skipped.push({ path: root, reason: "owl_managed_path" });
-    } else if (input.registeredProjectPaths.some((registered) => isInside(registered, root))) {
+    } else if (input.registeredProjectPaths.some((registered) => isPathInside(registered, root, true))) {
       skipped.push({ path: root, reason: "already_registered" });
     } else if (inspection.created_by_work !== input.workId) {
       skipped.push({ path: root, reason: "not_created_by_work" });

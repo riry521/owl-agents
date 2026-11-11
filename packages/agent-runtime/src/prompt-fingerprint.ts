@@ -1,8 +1,6 @@
-import { createHash } from "node:crypto";
 import type { PromptFingerprint } from "@owl/shared";
 import { ROLE_INPUT_LAYERS, splitRenderedPrompt, type RoleInputLayer } from "./role-contract";
-
-const sha256 = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
+import { sha256 } from "@owl/shared/small-helpers";
 
 /**
  * Hash the header and each cache layer of a rendered role prompt. Null when the

@@ -1,24 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { isAbsolute } from "node:path";
+import { readStdin } from "./stdio-jsonrpc.js";
 
 import { guardConfig, guardHasToken, guardRequest, trimOneSlash } from "./guard-client.js";
-import { hasAuthPasswordForm } from "../../../packages/shared/dist/index.js";
+import { hasAuthPasswordForm } from "@owl/shared";
+import { isRecord } from "@owl/shared/small-helpers";
 
 interface ResearchHookInput {
   readonly hook_event_name?: unknown;
   readonly tool_name?: unknown;
   readonly tool_input?: unknown;
   readonly tool_response?: unknown;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  return Buffer.concat(chunks).toString("utf8");
 }
 
 async function main(): Promise<void> {

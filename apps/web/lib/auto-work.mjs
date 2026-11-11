@@ -1,3 +1,4 @@
+// @ts-check
 // 自動 Work 作成の画面が使う純粋な関数と定数。React にも fetch にも触れない。
 
 export const AUTO_WORK_SETTINGS_VIEW_KEY = 'auto-work-settings';
@@ -13,6 +14,7 @@ const FROM_KEYS = new Set(['db', 'project_file', 'local_file', 'defaults']);
 const SOURCE_KEYS = new Set(AUTO_WORK_SOURCES);
 const ORIGIN_KEYS = new Set(['defaults', 'local', 'project']);
 const SKIPPED_VERDICTS = new Set(['duplicate', 'below_threshold', 'daily_cap', 'unauthorized', 'no_rule', 'disabled', 'not_worth', 'judge_failed']);
+/** @type {Record<string, string>} */
 const VERDICT_TONES = {
   created: 'green',
   judging: 'accent',
@@ -25,17 +27,24 @@ const VERDICT_TONES = {
   not_worth: 'amber',
   judge_failed: 'red',
 };
+/** @type {Record<string, string>} */
 const CREATED_LABELS = { draft: 'created_draft', started: 'created_started', deleted: 'created_deleted' };
 
 /** URL の値を、この画面が知っている値だけに絞る（知らない値は絞り込みなしとして扱う）。 */
+/**
+ * @param {any} value
+ * @param {any[]} allowed
+ */
 export function knownValue(value, allowed) {
   return typeof value === 'string' && allowed.includes(value) ? value : null;
 }
 
+/** @param {{ projectId?: any, source?: any, verdict?: any, offset?: any }} [args] */
 export function eventsViewKey({ projectId, source, verdict, offset } = {}) {
   return `auto-work-events:${projectId || ALL}:${source || ALL}:${verdict || ALL}:${offset ?? 0}`;
 }
 
+/** @param {{ projectId?: any, source?: any, verdict?: any, offset?: any, limit?: any }} [args] */
 export function eventsQuery({ projectId, source, verdict, offset, limit } = {}) {
   const params = new URLSearchParams();
   if (projectId) params.set('project_id', projectId);
@@ -47,36 +56,45 @@ export function eventsQuery({ projectId, source, verdict, offset, limit } = {}) 
 }
 
 /** 作った Work の今の状態で決める。action と action_error は見ない（コメント投稿だけ失敗した行を下書きと誤らないため）。 */
+/** @param {any} event */
 export function createdState(event) {
   if (event.verdict !== 'created') return null;
   if (event.work_id === null || event.work_id === undefined) return 'deleted';
   return event.work_state === 'memo' ? 'draft' : 'started';
 }
 
+/** @param {any} event */
 export function verdictLabelKey(event) {
   const state = createdState(event);
   if (state !== null) return `autoWork.verdict.${CREATED_LABELS[state]}`;
   return `autoWork.verdict.${Object.hasOwn(VERDICT_TONES, event.verdict) ? event.verdict : 'judge_failed'}`;
 }
 
+/** @param {any} event */
 export function verdictTone(event) {
   return Object.hasOwn(VERDICT_TONES, event.verdict) ? VERDICT_TONES[event.verdict] : 'muted';
 }
 
 /** 見送りと判定失敗の行は薄くして、作成した行を目で拾いやすくする。 */
+/** @param {any} event */
 export function isMutedEvent(event) {
   return SKIPPED_VERDICTS.has(event.verdict);
 }
 
+/** @param {any} event */
 export function hasActionError(event) {
   return typeof event.action_error === 'string' && event.action_error.length > 0;
 }
 
+/** @param {any} from */
 export const fromLabelKey = (from) => `autoWork.from.${FROM_KEYS.has(from) ? from : 'defaults'}`;
+/** @param {any} source */
 export const sourceLabelKey = (source) => (SOURCE_KEYS.has(source) ? `autoWork.source.${source}` : null);
+/** @param {any} origin */
 export const originLabelKey = (origin) => `autoWork.origin.${ORIGIN_KEYS.has(origin) ? origin : 'defaults'}`;
 
 /** ルール表から数えた要約。config_file_present は見ない（local.json だけの独自ルールもあるため）。 */
+/** @param {any[] | null | undefined} rules */
 export function rulesSummary(rules) {
   let local = 0;
   let project = 0;
@@ -89,10 +107,12 @@ export function rulesSummary(rules) {
   return { defaultsOnly: local + project + overridden === 0, local, project, overridden };
 }
 
+/** @param {any} url */
 function externalHref(url) {
   return typeof url === 'string' && /^https:\/\//.test(url) ? url : null;
 }
 
+/** @param {any} event */
 export function eventLinks(event) {
   const issueNumber = event.github_issue_number ?? null;
   return {
@@ -112,15 +132,21 @@ export function eventLinks(event) {
   };
 }
 
+/** @param {any} events */
 export function summarizeRun(events) {
   const list = Array.isArray(events) ? events : [];
   const created = list.filter((event) => event.verdict === 'created').length;
   return { created, skipped: list.length - created };
 }
 
-/** id で重複を除いて結合する。先に出た方（既存）の位置を保つ。 */
+/**
+ * id で重複を除いて結合する。先に出た方（既存）の位置を保つ。
+ * @param {any[]} existing
+ * @param {any[]} incoming
+ */
 export function mergeEvents(existing, incoming) {
   const seen = new Set();
+  /** @type {any[]} */
   const merged = [];
   for (const event of [...existing, ...incoming]) {
     if (seen.has(event.id)) continue;

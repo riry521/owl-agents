@@ -1,4 +1,4 @@
-import { createUlid, utcNow } from "../../db/dist/index.js";
+import { createUlid, utcNow } from "@owl/db";
 import { notFound, validationError } from "./errors";
 import { appendEventInTransaction, updateWorkFieldsInTransaction } from "./state-reducer";
 import type { CoreDatabase, CoreWriteLaneTransaction, JsonObject } from "./types";
@@ -52,7 +52,7 @@ export function managerWorkSummaryUpdate(report: JsonObject): ManagerWorkSummary
     const value = report[field];
     if (value === undefined || value === null) return null;
     if (typeof value !== "string" || (!blankOk && value.trim().length < 1) || value.length > max) {
-      throw validationError(`The Manager's ${field} must be a string of 1 to ${max} characters, or null.`, { field });
+      throw validationError(`The Manager's ${field} must be a string of 1 to ${max} characters, or null.`, { field }, { code: "work_summary.manager_field_invalid", values: { field, max } });
     }
     return value;
   };

@@ -1,5 +1,10 @@
+// @ts-check
+/** @param {unknown} value @returns {value is Record<string, any>} */
+// web は @owl/shared に依存しない（ブラウザ向けの bundle に node:crypto を含む shared を入れない）ので、shared の isRecord を読めない。
 const isRecord = (value) => typeof value === 'object' && value !== null && !Array.isArray(value);
+/** @param {unknown} value */
 const text = (value) => (typeof value === 'string' ? value : '');
+/** @param {unknown} value */
 const count = (value) => (typeof value === 'number' && Number.isFinite(value) ? value : 0);
 
 /**
@@ -8,6 +13,7 @@ const count = (value) => (typeof value === 'number' && Number.isFinite(value) ? 
  */
 export function normalizeAutoRecovery(value) {
   const source = isRecord(value) ? value : {};
+  /** @param {unknown} item */
   const detail = (item) => {
     const d = isRecord(item) ? item : {};
     return { text: text(d.text), check: text(d.check) };
@@ -37,6 +43,10 @@ export function normalizeAutoRecovery(value) {
   };
 }
 
+/**
+ * @param {string} iso
+ * @param {string} locale
+ */
 const clock = (iso, locale) => {
   const time = new Date(iso);
   return Number.isNaN(time.getTime()) ? iso : time.toLocaleTimeString(locale, { hour: 'numeric', minute: '2-digit' });
@@ -58,6 +68,9 @@ export function autoRecoveryLine(item, locale, t) {
 
 /**
  * The text of the "recovering automatically" badge: the first recovery, "n more" for the rest, and every line for the title attribute.
+ * @param {ReturnType<typeof normalizeAutoRecovery>['active']} active
+ * @param {string} locale
+ * @param {(key: string, values?: Record<string, string | number>) => string} t
  * @returns {{ label: string, title: string } | null}
  */
 export function autoRecoveryBadge(active, locale, t) {

@@ -100,7 +100,7 @@ test("the engine's runner gate uses the saved setup's approved installs and the 
   const { run, calls } = recorder();
   await writeFile(path.join(box.proj, "marker"), "");
   const resolved = { gate: "all", approved_installs: [["sudo", "brew", "install", "jq"]] };
-  const gated = core.workflow.gateTestRunner(run, resolved, [], () => [box.proj]);
+  const gated = core.workflow.testRuns.gateTestRunner(run, resolved, [], () => [box.proj]);
   assert.match((await gated(["sudo", "brew", "install", "ripgrep"], box.proj, 1000, 1000)).error, /^install_needs_approval/u);
   assert.equal((await gated(["sudo", "brew", "install", "jq"], box.proj, 1000, 1000)).error, undefined);
   assert.equal(calls.length, 1);

@@ -102,7 +102,7 @@ test('shared selectors inside the fence are scoped', () => {
 test('home and board rules outside the fence are unchanged', () => {
   const o = squash(outside);
   has(block(outside, '.advisor'), 'height:calc(100vh - var(--nav-h) - 40px)', 'max-width:1080px');
-  assert.ok(o.includes('.advisor{height:calc(100vh-var(--nav-h)-83px)'));
+  assert.ok(o.includes('.advisor{height:calc(100vh-var(--nav-h)-var(--tabbar-h))'));
   assert.ok(/\.advisor__input-area\{position:fixed/.test(o));
   has(block(outside, '.info-banner'), 'padding:12px 14px');
   has(block(outside, '.btn'), 'min-height:40px');

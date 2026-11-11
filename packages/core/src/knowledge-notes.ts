@@ -1,6 +1,5 @@
-import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import { isValidUlid } from "@owl/shared";
 
@@ -55,7 +54,6 @@ export class NoteParseError extends Error {
 }
 
 export class KnowledgeNotes {
-  private readonly now: () => string;
   private readonly knownTitles = new Map<string, string>();
 
   private get notesDir(): string {
@@ -68,7 +66,6 @@ export class KnowledgeNotes {
   }
 
   public constructor(private readonly knowledge: KnowledgeBase, options: KnowledgeNotesOptions = {}) {
-    this.now = options.now ?? (() => new Date().toISOString());
   }
 
   /** The fixed-name overview note of one project; null if missing or unparsable. */

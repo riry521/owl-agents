@@ -1,10 +1,10 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { autoRecoveryForTask } from "./auto-recovery";
 import { dirname } from "node:path";
-import { DEFAULT_DEPENDENCY_SUMMARY_SETTINGS } from "../../shared/dist/dependency-summary-settings.js";
+import { DEFAULT_DEPENDENCY_SUMMARY_SETTINGS } from "@owl/shared/dependency-summary-settings";
 import { designDocumentPath, designMockDirectory, isScreenDesignTask, readTestPolicy, taskReportPath } from "@owl/shared";
-import { readStoredAcceptanceCriteria } from "../../shared/dist/acceptance-criteria.js";
-import { readStoredTaskPlanContext } from "../../shared/dist/task-necessity.js";
+import { readStoredAcceptanceCriteria } from "@owl/shared/acceptance-criteria";
+import { readStoredTaskPlanContext } from "@owl/shared/task-necessity";
 import { uniqueSorted } from "./context-canonical";
 import type { CoreDatabase, JsonObject, TaskRow } from "./types";
 import type { IndexInjector } from "./memory/index-injector.js";
@@ -13,12 +13,10 @@ import { parseWorkRules, type RuleRole, type RuleStore } from "./rule-store";
 import type { SkillBox } from "./skill-box";
 import { dependencySummarySettings } from "./dependency-summary-settings.js";
 import { ownerGuidance } from "./owner-guidance.js";
+import { isRecord, clip } from "@owl/shared/small-helpers";
+export { isRecord };
 
 export type ContextReader = Pick<CoreDatabase, "get" | "all">;
-
-export function isRecord(value: unknown): value is JsonObject {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 export function parseObject(json: string): JsonObject | null {
   try {
@@ -138,7 +136,7 @@ export function readDependencyReport(reportPath: string): JsonObject | null {
 }
 
 /** Writes the full report for report_path; a failed write is logged and gives null, never an exception. */
-function writeDependencyReport(dataDir: string, workId: string, taskId: string, report: JsonObject): string | null {
+export function writeDependencyReport(dataDir: string, workId: string, taskId: string, report: JsonObject): string | null {
   const path = taskReportPath(dataDir, workId, taskId);
   const temp = `${path}.${process.pid}.tmp`;
   try {
@@ -150,10 +148,6 @@ function writeDependencyReport(dataDir: string, workId: string, taskId: string, 
     console.warn(`[owl-core] Could not write the full report of Task ${taskId} to ${path}`, error);
     return null;
   }
-}
-
-function clip(value: string, max: number): string {
-  return value.length <= max ? value : `${value.slice(0, Math.max(0, max - 1))}…`;
 }
 
 export interface DependencyContext {

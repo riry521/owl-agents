@@ -1,4 +1,4 @@
-import { createUlid, utcNow } from "../../db/dist/index.js";
+import { createUlid, utcNow } from "@owl/db";
 import { lessonFingerprint } from "./learning-fingerprint.js";
 import type { NormalizedLesson } from "./final-verdict.js";
 import type { RuleRole } from "./rule-store.js";
@@ -6,6 +6,7 @@ import type { CoreDatabase, CoreWriteLaneTransaction } from "./types.js";
 import { ownerLanguage } from "./owner-language.js";
 import { isStorageUnavailable, type PageRouter, type RouteResult } from "./memory/page-router.js";
 import type { WorkLogWriter } from "./memory/work-log-writer.js";
+import { isRecord, positiveInteger } from "@owl/shared/small-helpers";
 
 export type LearningJobStatus = "pending" | "running" | "done" | "failed";
 
@@ -227,7 +228,6 @@ export class LearningPipeline {
   private readonly ruleProposals: LearningRuleProposals;
   private readonly pages: LearningPipelineOptions["pages"];
   private readonly now: () => string;
-  private readonly logger: NonNullable<LearningPipelineOptions["logger"]>;
   private readonly debounceMs: number;
   private readonly batchSize: number;
   private readonly maxAttempts: number;
@@ -246,7 +246,6 @@ export class LearningPipeline {
     this.pages = options.pages;
     this.gate = options.gate;
     this.now = options.now ?? utcNow;
-    this.logger = options.logger ?? console;
     this.debounceMs = nonNegativeInteger(options.debounce_ms, 5_000);
     this.batchSize = positiveInteger(options.batch_size, 5);
     this.maxAttempts = positiveInteger(options.max_attempts, 3);
@@ -572,20 +571,12 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
 function isLearningJobStatus(value: string): value is LearningJobStatus {
   return value === "pending" || value === "running" || value === "done" || value === "failed";
-}
-
-function positiveInteger(value: number | undefined, fallback: number): number {
-  return Number.isSafeInteger(value) && (value ?? 0) > 0 ? value as number : fallback;
 }
 
 function nonNegativeInteger(value: number | undefined, fallback: number): number {

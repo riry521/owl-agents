@@ -2,8 +2,9 @@ import { open, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import type { PlanUsageFetchResult, PlanUsageSnapshot, PlanUsageSource } from "../../../shared/dist/plan-usage.js";
-import { codexRateLimitsObservation, findCodexRateLimits } from "../../../shared/dist/plan-usage-codex.js";
+import type { PlanUsageFetchResult, PlanUsageSnapshot, PlanUsageSource } from "@owl/shared/plan-usage";
+import { codexRateLimitsObservation, findCodexRateLimits } from "@owl/shared/plan-usage-codex";
+import { positiveInteger } from "@owl/shared/small-helpers";
 
 export interface CodexSessionLogSourceOptions {
   readonly codexHome?: string;
@@ -29,10 +30,6 @@ interface Cache {
 
 function isNotFound(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
-}
-
-function positiveInteger(value: number | undefined, fallback: number): number {
-  return value !== undefined && Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
 function isDirectory(entry: { isDirectory(): boolean }): boolean {
@@ -138,7 +135,6 @@ function result(status: PlanUsageFetchResult["status"], detail: string | null = 
 
 export function createCodexSessionLogSource(options: CodexSessionLogSourceOptions = {}): PlanUsageSource {
   const codexHome = options.codexHome?.trim() || process.env.CODEX_HOME?.trim() || join(homedir(), ".codex");
-  const now = options.now ?? (() => new Date());
   const maxDayDirs = positiveInteger(options.maxDayDirs, 8);
   const maxFiles = positiveInteger(options.maxFiles, 30);
   const tailBytes = positiveInteger(options.tailBytes, 256 * 1024);

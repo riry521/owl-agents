@@ -14,6 +14,7 @@
     "baseUrl": ".",
     "paths": {
       "@owl/shared": ["../shared/dist/index.d.ts"],
+      "@owl/shared/*": ["../shared/dist/*"],
       "@owl/db": ["../db/dist/index.d.ts"]
     }
   },

@@ -26,7 +26,7 @@ import type {
   TokenUsage,
   WorkerInput,
 } from "./types";
-import type { PlanUsageSnapshot } from "../../shared/dist/plan-usage.js";
+import type { PlanUsageSnapshot } from "@owl/shared/plan-usage";
 
 /** Core's generated declaration is the authoritative AgentRunner contract. */
 export type AgentRunner = CoreAgentRunner;

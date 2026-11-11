@@ -89,7 +89,7 @@ test("a Project window hands a cross-Project talk to the general window once, wi
   const general = await core.ensureAdvisorWindow(ownerId, "general");
   const handed = () => db.all("SELECT body, metadata_json FROM messages WHERE conversation_id = ? AND source_message_id LIKE '%:handoff:%'", general.conversation_id);
 
-  const messageId = await core.persistAdvisorReply(window.conversation_id, "", createUlid(), { channel: "web" }, [handoff(null)]);
+  const messageId = await core.advisorActions.persistAdvisorReply(window.conversation_id, "", createUlid(), { channel: "web" }, [handoff(null)]);
   const body = db.get("SELECT body FROM messages WHERE id = ?", messageId).body;
   assert.equal(body, ADVISOR_TEXT.ja.handoffDone("ジェネラリスト", []));
   assert.match(body, /続きはそちらで/);
@@ -116,7 +116,7 @@ test("the general window hands a Project's talk to that Project's window; the no
   const general = await core.ensureAdvisorWindow(ownerId, "general");
   const target = await core.ensureAdvisorWindow(ownerId, alpha);
   await core.bindAdvisorChannel(target.window_id, "slack", "C1", "owl-alpha");
-  const messageId = await core.persistAdvisorReply(general.conversation_id, "", createUlid(), { channel: "web" }, [handoff(alpha, "x".repeat(4000))]);
+  const messageId = await core.advisorActions.persistAdvisorReply(general.conversation_id, "", createUlid(), { channel: "web" }, [handoff(alpha, "x".repeat(4000))]);
   assert.equal(db.get("SELECT body FROM messages WHERE id = ?", messageId).body, ADVISOR_TEXT.ja.handoffDone("Alpha", ["Slack: #owl-alpha"]));
   assert.equal(db.all("SELECT id FROM messages WHERE conversation_id = ? AND source_message_id LIKE '%:handoff:%'", target.conversation_id).length, 1);
 });
@@ -125,7 +125,7 @@ test("a handoff to the same window, a missing Project, or a bad payload only add
   const { db, core, addProject } = await setup(t);
   const alpha = await addProject("Alpha");
   const window = await core.ensureAdvisorWindow(ownerId, alpha);
-  const reply = (action) => core.persistAdvisorReply(window.conversation_id, "", createUlid(), { channel: "web" }, [action])
+  const reply = (action) => core.advisorActions.persistAdvisorReply(window.conversation_id, "", createUlid(), { channel: "web" }, [action])
     .then((messageId) => db.get("SELECT body FROM messages WHERE id = ?", messageId).body);
   assert.equal(await reply(handoff(alpha)), ADVISOR_TEXT.ja.handoffSameWindow);
   assert.equal(await reply(handoff(createUlid())), ADVISOR_TEXT.ja.handoffNoProject);
@@ -145,7 +145,7 @@ test("a handoff left half-done by a restart is recovered once: no duplicate, the
   const window = await first.core.ensureAdvisorWindow(ownerId, alpha);
   const general = await first.core.ensureAdvisorWindow(ownerId, "general");
   const turnId = createUlid();
-  const before = await first.core.persistAdvisorReply(window.conversation_id, "", turnId, { channel: "web" }, [handoff(null, "carried summary")])
+  const before = await first.core.advisorActions.persistAdvisorReply(window.conversation_id, "", turnId, { channel: "web" }, [handoff(null, "carried summary")])
     .then((messageId) => first.db.get("SELECT body FROM messages WHERE id = ?", messageId).body);
 
   // A general-window turn claims the handoff and is still running when the process dies.
@@ -154,7 +154,7 @@ test("a handoff left half-done by a restart is recovered once: no duplicate, the
   await waitFor(() => first.created.some((driver) => driver.sent.length > 0), { message: "the turn reached a session" });
   assert.equal(carriedBy(first.db, "carried summary"), posted.data.message_id);
   // A second handoff is claimed by a message that never got its advisor_turns row.
-  await first.core.persistAdvisorReply(window.conversation_id, "", createUlid(), { channel: "web" }, [handoff(null, "orphan summary")]);
+  await first.core.advisorActions.persistAdvisorReply(window.conversation_id, "", createUlid(), { channel: "web" }, [handoff(null, "orphan summary")]);
   await first.core.claimWindowHandoffs(general.window_id, "01ORPHANORPHANORPHANORPHAN");
   assert.equal(carriedBy(first.db, "orphan summary"), "01ORPHANORPHANORPHANORPHAN");
   await first.core.stop();
@@ -173,7 +173,7 @@ test("a handoff left half-done by a restart is recovered once: no duplicate, the
   assert.match(text, /carried summary/);
   assert.doesNotMatch(text, /orphan summary/);
 
-  assert.equal(await second.core.persistAdvisorReply(window.conversation_id, "", turnId, { channel: "web" }, [handoff(null, "carried summary")])
+  assert.equal(await second.core.advisorActions.persistAdvisorReply(window.conversation_id, "", turnId, { channel: "web" }, [handoff(null, "carried summary")])
     .then((messageId) => second.db.get("SELECT body FROM messages WHERE id = ?", messageId).body), before);
   assert.equal(second.db.all("SELECT id FROM messages WHERE json_extract(metadata_json, '$.kind') = 'window_handoff'").length, 2);
 });
@@ -204,11 +204,11 @@ test("a legacy conversation without a window counts as the general window for ha
   const general = await core.ensureAdvisorWindow(ownerId, "general");
   const target = await core.ensureAdvisorWindow(ownerId, alpha);
   await db.createWriteLane().transact((tx) => tx.run("UPDATE conversations SET advisor_window_id = NULL WHERE id = ?", general.conversation_id));
-  const reply = (action) => core.persistAdvisorReply(general.conversation_id, "", createUlid(), { channel: "web" }, [action])
+  const reply = (action) => core.advisorActions.persistAdvisorReply(general.conversation_id, "", createUlid(), { channel: "web" }, [action])
     .then((messageId) => db.get("SELECT body FROM messages WHERE id = ?", messageId).body);
   assert.equal(await reply(handoff(null)), ADVISOR_TEXT.ja.handoffSameWindow);
   assert.equal(await reply(handoff(alpha)), ADVISOR_TEXT.ja.handoffDone("Alpha", []));
-  await core.persistAdvisorReply(target.conversation_id, "", createUlid(), { channel: "web" }, [handoff(null, "legacy summary")]);
+  await core.advisorActions.persistAdvisorReply(target.conversation_id, "", createUlid(), { channel: "web" }, [handoff(null, "legacy summary")]);
   const posted = await core.postMessage(general.conversation_id, command({ body: "legacy-turn", attachment_ids: [] }, "handoff:legacy"));
   await core.advisorRespond(general.conversation_id, posted.data.message_id, { channel: "web" });
   await waitFor(() => created.some((driver) => driver.sent.some((sent) => sent.text.includes("legacy-turn"))), { message: "the turn reached a session" });

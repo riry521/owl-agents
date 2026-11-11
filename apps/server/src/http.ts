@@ -1,71 +1,132 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { readFile, stat, realpath } from "node:fs/promises";
+export { isAllowedOrigin, isOwnerRequestAuthorized } from "./http-common.js";
+export { validateIntegrationPayload } from "./http-routes-settings.js";
+import { createHash } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { gzipSync } from "node:zlib";
-import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { Socket } from "node:net";
-
-import { buildFileDestinationCandidates, isDefaultAvailable, parseFileDestinationPut, type FileDestinationProviderView } from "./advisor-file-destination-settings.js";
-import { ApiError, type ApiErrorCode, errorBody, humanUnexpectedMessage, newReferenceId } from "./errors.js";
-import { MEMORY_GET_OPERATIONS, MEMORY_OPERATIONS, memoryContext, runMemoryOperation } from "./http-memory.js";
-import { AdvisorFolderError } from "./advisor-folders.js";
-import { renderOwnerFolder, sendOwnerFile, sendOwnerFolder } from "./owner-files-http.js";
-import { listHostDirectories } from "./fs-directories.js";
-import { createUlid, isUlid } from "./ids.js";
+import { ApiError, errorBody, newReferenceId } from "./errors.js";
+import { CommonMessages } from "./messages/common.js";
+import { HttpMessages } from "./messages/http.js";
+import { isUlid } from "./ids.js";
 import { resolveDataDir, type ContractManifest } from "./contracts.js";
 import { configuredApiToken } from "./config.js";
-import { externalError } from "./core.js";
-import { MODEL_PRESET_NAME_MAX_LENGTH, MODEL_SETTING_EFFORTS, MODEL_SETTING_ROLES } from "../../../packages/shared/dist/default-role-models.js";
-import { AUTO_WORK_SOURCES, AUTO_WORK_VERDICTS } from "../../../packages/shared/dist/auto-work.js";
-import { validatePrerequisiteWorkIds } from "../../../packages/shared/dist/work-prerequisite.js";
-import { KnowledgeBase, type KnowledgeSearchResult } from "../../../packages/core/dist/knowledge-base.js";
-import { RuleStore } from "../../../packages/core/dist/rule-store.js";
-import { MAX_MESSAGE_ATTACHMENTS, MAX_UPLOAD_BYTES } from "../../../packages/core/dist/upload-limits.js";
-import type { WebAttachmentFile, WebAttachmentResult, WebAttachmentTarget } from "../../../packages/core/dist/core.js";
-import { assertValidPage, PageRejectedError } from "../../../packages/core/dist/memory/page-format.js";
-import { validateKnowledgeAutomationSettings } from "../../../packages/shared/dist/knowledge-automation.js";
-import { validatePlanUsageSettings } from "../../../packages/shared/dist/plan-usage-settings.js";
-import { validateDependencySummarySettings } from "../../../packages/shared/dist/dependency-summary-settings.js";
-import type { DependencySummarySettings } from "../../../packages/shared/dist/dependency-summary-settings.js";
-import { defaultChannelName, normalizeChannelName, validateAdvisorWindowSettings } from "../../../packages/shared/dist/advisor-window-settings.js";
-import type { AdvisorWindowSettings } from "../../../packages/shared/dist/advisor-window-settings.js";
-import { GENERAL_WINDOW_KEY, type AdvisorWindowChannel, type AdvisorWindowSummary } from "../../../packages/shared/dist/advisor-windows.js";
-import { isChannelAdminError, type ChannelAdmin } from "../../../packages/plugin-sdk/dist/shared/channel-admin.js";
-import { validateVerificationPolicyPatch } from "../../../packages/shared/dist/verification-policy-settings.js";
-import type { VerificationPolicySettings } from "../../../packages/shared/dist/verification-policy-settings.js";
-import { validateReviewLimitSettings } from "../../../packages/shared/dist/review-limit-settings.js";
-import type { ReviewLimitSettings } from "../../../packages/shared/dist/review-limit-settings.js";
-import { REMAKE_LIMIT_SETTINGS_KEYS, validateRemakeLimitSettings } from "../../../packages/shared/dist/remake-limit-settings.js";
-import { validateAutoRecoverySettings, type AutoRecoverySettings } from "../../../packages/shared/dist/auto-recovery-settings.js";
-import { validateFixerEscalationSettings } from "../../../packages/shared/dist/fixer-escalation-settings.js";
-import type { FixerEscalationSettings } from "../../../packages/shared/dist/fixer-escalation-settings.js";
-import type { RemakeLimitSettings } from "../../../packages/shared/dist/remake-limit-settings.js";
-import { validateReviewRoutingSettings } from "../../../packages/shared/dist/review-routing-settings.js";
-import type { ReviewRoutingSettings } from "../../../packages/shared/dist/review-routing-settings.js";
-import type { PlanUsageSettings, PlanUsageView } from "../../../packages/shared/dist/plan-usage-settings.js";
-import { SettingsValidationError } from "../../../packages/shared/dist/settings-validation.js";
-import { isOwnerLanguage, type OwnerLanguage } from "../../../packages/shared/dist/owner-language.js";
-import { SUBAGENT_USAGE_BATCH_MAX, type HookRequestUsage } from "../../../packages/shared/dist/token-relay.js";
-import { ADVISOR_CURATION_ACTION_TYPES, ADVISOR_WORKSPACE_API_PATH, ADVISOR_WORKSPACE_FINISH_API_PATH, advisorAlternativeActions, advisorCurationKind, matchAdvisorBlockedApi, builtinProviderHarness, designDocumentPath, isRuleRole, RULE_ROLES } from "../../../packages/shared/dist/index.js";
-import type { AdvisorBlockedApi } from "../../../packages/shared/dist/advisor-api-policy.js";
-import type { GuardTokenAgent } from "../../../packages/shared/dist/guard-token.js";
-import { DESIGN_MOCK_FILE_PATTERN } from "../../../packages/shared/dist/design-documents.js";
-import { GUARD_SHELL_COMMAND_KEYS, GUARD_SHELL_TOOL_NAMES } from "../../../packages/shared/dist/guard-inputs.js";
-import { RESEARCH_CAPTURE_ROLES } from "../../../packages/shared/dist/permission-args.js";
-import { extractWebResearchCapture } from "../../../packages/shared/dist/web-research.js";
-import { CHILD_RUN_EFFORTS, CHILD_RUN_LIMITS, CHILD_RUN_PROVIDERS } from "../../../packages/shared/dist/child-runs.js";
-import type { ChildDispatchRequest, ChildDispatchResponse, ChildRunEffort, ChildRunListFilter, ChildRunProvider, ChildRunRecord, ChildRunSettings, ChildWaitRequest, ChildWaitResponse } from "../../../packages/shared/dist/child-runs.js";
-import { parseTokenUsagePeriod } from "../../../packages/shared/dist/token-usage-report.js";
-import type { TokenUsagePeriod, TokenUsageReport } from "../../../packages/shared/dist/token-usage-report.js";
-import type { CoreEvent, CorePort, CreateProjectInput, DeleteProjectInput, InboundMessageInput, IntegrationConfigPatch, IntegrationProvider, JsonObject, PostMessageInput, Project, WorkInstructionInput, BacklogStatus, RoleModelSettingInput, ProcessSkillsSettingsInput, RuntimeConfig, UpdateProjectInput, VerificationCommand, WorkConversation, WorkAssurance, WorkDesignMockList } from "./types.js";
-import { browseProjectFolders, initializeExistingProjectFolder, initializeNewProjectFolder, inspectProjectFolder } from "./project-registration.js";
-
-import { advisorAuthorizedRequests, advisorBlockedError, advisorRequestAgent, assertSameOriginWrite, bearerOf, DEFAULT_JSON_COMPRESSION_MIN_BYTES, errorStatusForUnknownRoute, headerValue, isLoopback, isObject, isRequestOriginAllowed, knowledgeStorageFeature, logException, requestId, requestOwnerLanguage, requestUrl, requireOwner, responseContexts, sendApiError, serveStatic, stringField, type ChannelAdminSource, type GuardTokenVerifier, type RequestContext, type ScreenViewLimits } from "./http-common.js";
-export type { ChannelAdminSource, ScreenViewLimits, GuardTokenVerifier } from "./http-common.js";
-export { isAllowedOrigin, isOwnerRequestAuthorized, validateIntegrationPayload } from "./http-common.js";
+import { KnowledgeBase } from "@owl/core/dist/knowledge-base.js";
+import { RuleStore } from "@owl/core/dist/rule-store.js";
+import { assertValidPage } from "@owl/core/dist/memory/page-format.js";
+import type { OwnerLanguage } from "@owl/shared/owner-language";
+import { matchAdvisorBlockedApi, advisorAlternativeActions } from "@owl/shared";
+import type { CoreEvent, CorePort, RuntimeConfig } from "./types.js";
+import {
+  advisorAuthorizedRequests,
+  advisorRequestAgent,
+  assertSameOriginWrite,
+  bearerOf,
+  headerValue,
+  isLoopback,
+  isObject,
+  isRequestOriginAllowed,
+  knowledgeStorageFeature,
+  logException,
+  requestId,
+  requestOwnerLanguage,
+  requestUrl,
+  requireOwner,
+  responseContexts,
+  sendApiError,
+  type ChannelAdminSource,
+  type GuardTokenVerifier,
+  type RequestContext,
+  type ScreenViewLimits,
+} from "./http-common.js";
 import { dispatchApiRoute } from "./http-routes.js";
 import { API_PREFIX, WEBSOCKET_PATH, type ApiMethod } from "./http-route-table.js";
 import { optionalCoreFeature } from "./core-feature.js";
+import { readFile, stat, realpath } from "node:fs/promises";
+import { basename, relative, resolve } from "node:path";
+import type { AdvisorBlockedApi } from "@owl/shared/advisor-api-policy";
+
+const STATIC_PREFIX = "/owl/";
+
+const DEFAULT_JSON_COMPRESSION_MIN_BYTES = 1024;
+
+function advisorBlockedError(row: AdvisorBlockedApi, method: string, pathname: string): ApiError {
+  const alternatives = advisorAlternativeActions(row);
+  return new ApiError(403, "advisor_action_required", HttpMessages.advisorActionRequired({ reason: row.reason, alternatives: alternatives.join(" or ") }), {
+    method,
+    path: pathname,
+    alternative_actions: alternatives,
+  });
+}
+
+function contentType(path: string): string {
+  if (path.endsWith(".html")) return "text/html; charset=utf-8";
+  if (path.endsWith(".js")) return "text/javascript; charset=utf-8";
+  if (path.endsWith(".css")) return "text/css; charset=utf-8";
+  if (path.endsWith(".json")) return "application/json; charset=utf-8";
+  if (path.endsWith(".txt")) return "text/plain; charset=utf-8";
+  if (path.endsWith(".svg")) return "image/svg+xml";
+  return "application/octet-stream";
+}
+
+async function serveStatic(request: IncomingMessage, response: ServerResponse, webOut: string, pathname: string): Promise<boolean> {
+  if (!pathname.startsWith(STATIC_PREFIX)) {
+    return false;
+  }
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    throw new ApiError(405, "validation_error", HttpMessages.staticMethodNotAllowed());
+  }
+  const suffix = pathname.slice(STATIC_PREFIX.length);
+  let relativePath: string;
+  try {
+    relativePath = decodeURIComponent(suffix || "index.html");
+  } catch (error) {
+    throw new ApiError(400, "validation_error", HttpMessages.staticPathInvalid(), {}, { cause: error });
+  }
+  const candidate = resolve(webOut, relativePath || "index.html");
+  const relativeCandidate = relative(webOut, candidate);
+  if (relativeCandidate === ".." || relativeCandidate.startsWith("../") || relativeCandidate.includes("\\")) {
+    throw new ApiError(404, "not_found", HttpMessages.staticNotFound());
+  }
+  let resolvedCandidate = candidate;
+  try {
+    let fileStat = await stat(resolvedCandidate).catch(() => null);
+    if (!fileStat?.isFile() && !basename(relativePath).includes(".")) {
+      const htmlCandidate = resolvedCandidate + ".html";
+      fileStat = await stat(htmlCandidate).catch(() => null);
+      if (fileStat?.isFile()) resolvedCandidate = htmlCandidate;
+    }
+    if (!fileStat?.isFile()) {
+      throw new Error("not a file");
+    }
+    const exportRoot = await realpath(webOut);
+    const actualPath = await realpath(resolvedCandidate);
+    const actualRelative = relative(exportRoot, actualPath);
+    if (actualRelative === ".." || actualRelative.startsWith("../") || actualRelative.includes("\\")) {
+      throw new Error("static_path_escape");
+    }
+    const data = await readFile(actualPath);
+    response.writeHead(200, {
+      "content-type": contentType(resolvedCandidate),
+      "content-length": data.length,
+      "cache-control": "no-cache",
+    });
+    if (request.method === "HEAD") {
+      response.end();
+    } else {
+      response.end(data);
+    }
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" || (error as Error).message === "not a file") {
+      throw new ApiError(404, "not_found", HttpMessages.staticNotFound(), {}, { cause: error });
+    }
+    throw error;
+  }
+}
+
+function errorStatusForUnknownRoute(): ApiError {
+  return new ApiError(404, "not_found", HttpMessages.apiEndpointNotFound());
+}
+
 
 
 
@@ -131,7 +192,7 @@ async function routeApi(context: RequestContext, request: IncomingMessage, respo
     const bearer = bearerOf(request);
     if (bearer && /^[0-9a-f]{64}$/.test(bearer) && bearer !== configuredApiToken()
       && isLoopback(request) && context.guardTokens?.verify(bearer) === null) {
-      throw new ApiError(401, "unauthorized", "guard tokenが無効か失効しています。Agentを再実行してください。");
+      throw new ApiError(401, "unauthorized", HttpMessages.guardTokenInvalid());
     }
   }
 
@@ -388,11 +449,6 @@ class WebSocketConnection {
 }
 
 
-function validateOptionalFolderPath(value: string | null): string | undefined {
-  if (value === null) return undefined;
-  return stringField(value, "path", 1, 4096);
-}
-
 
 function writeUpgradeError(socket: Socket, status: number, body: Record<string, unknown>): void {
   const text = JSON.stringify(body);
@@ -411,11 +467,11 @@ async function handleUpgrade(context: RequestContext, request: IncomingMessage, 
   try {
     requireOwner(request);
     if (!isRequestOriginAllowed(request, context)) {
-      throw new ApiError(403, "forbidden", "このWebSocket接続元は許可されていません。Web UIから接続し直してください。");
+      throw new ApiError(403, "forbidden", HttpMessages.websocketOriginForbidden());
     }
     const key = headerValue(request, "sec-websocket-key");
     if (!key) {
-      throw new ApiError(400, "validation_error", "WebSocket handshakeのkeyがありません。標準のWebSocket clientから接続してください。");
+      throw new ApiError(400, "validation_error", HttpMessages.websocketKeyMissing());
     }
     const accept = websocketAccept(key);
     socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
@@ -428,7 +484,7 @@ async function handleUpgrade(context: RequestContext, request: IncomingMessage, 
     }
     const referenceId = newReferenceId();
     logException(referenceId, "WebSocket upgrade", error);
-    const unexpected = new ApiError(500, "server_error", humanUnexpectedMessage(), { ref_id: referenceId });
+    const unexpected = new ApiError(500, "server_error", CommonMessages.unexpected(), { ref_id: referenceId });
     writeUpgradeError(socket, 500, errorBody(requestIdValue, unexpected, await requestOwnerLanguage(context.core)));
   }
 }

@@ -1,5 +1,7 @@
-import type { AdvisorWindowSummary } from "../../../packages/shared/dist/advisor-windows.js";
+import type { AdvisorWindowSummary } from "@owl/shared/advisor-windows";
 import { ApiError } from "./errors.js";
+import { AdvisorFileDestinationMessages as M } from "./messages/advisor-file-destination.js";
+import type { MessageRef } from "./messages/define.js";
 import type { FileDestinationProvider, FileDestinationSettings } from "./app-settings-store.js";
 
 export interface FileDestinationCandidate {
@@ -58,23 +60,23 @@ const isPlainObject = (value: unknown): value is Record<string, unknown> => type
 
 /** Validates a PUT payload; display_name comes from the candidates, never from the client. */
 export function parseFileDestinationPut(payload: unknown, providers: readonly FileDestinationProviderView[]): FileDestinationSettings {
-  const invalid = (message: string, status = 400): ApiError => new ApiError(status, "validation_error", message);
+  const invalid = (message: MessageRef, status = 400): ApiError => new ApiError(status, "validation_error", message);
   if (!isPlainObject(payload) || !hasExactKeys(payload, ["preferred_provider", "default_destination"])) {
-    throw invalid("preferred_providerとdefault_destinationだけを指定してください。");
+    throw invalid(M.onlyTwoKeys());
   }
   const { preferred_provider: preferred, default_destination: destination } = payload;
-  if (preferred !== null && !isProvider(preferred)) throw invalid("preferred_providerはslack、discord、nullのどれかで指定してください。");
+  if (preferred !== null && !isProvider(preferred)) throw invalid(M.preferredProviderInvalid());
   if (destination === null) return { preferredProvider: preferred, defaultDestination: null };
   if (!isPlainObject(destination) || !hasExactKeys(destination, ["provider", "channel_id"])
     || !isProvider(destination.provider) || typeof destination.channel_id !== "string"
     || destination.channel_id.length < 1 || destination.channel_id.length > 200) {
-    throw invalid("default_destinationはprovider(slackかdiscord)と1〜200文字のchannel_idで指定してください。");
+    throw invalid(M.destinationInvalid());
   }
   const view = providers.find((entry) => entry.provider === destination.provider);
   const label = destination.provider === "slack" ? "Slack" : "Discord";
-  if (!view?.configured) throw invalid(`${label} の連携が設定されていません。連携設定で Connector を設定してから選んでください。`, 422);
+  if (!view?.configured) throw invalid(M.notConfigured({ label }), 422);
   const candidate = view.candidates.find((entry) => entry.channel_id === destination.channel_id);
-  if (!candidate) throw invalid("このチャンネルは選べません。会話チャンネルか窓のチャンネルから選んでください。", 422);
+  if (!candidate) throw invalid(M.channelNotSelectable(), 422);
   return {
     preferredProvider: preferred,
     defaultDestination: { provider: destination.provider, channel_id: candidate.channel_id, display_name: candidate.display_name },

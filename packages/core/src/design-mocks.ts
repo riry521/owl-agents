@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { DESIGN_MOCK_FILE_PATTERN, designMockDirectory, isScreenDesignTask } from "../../shared/dist/index.js";
+import { DESIGN_MOCK_FILE_PATTERN, designMockDirectory, isScreenDesignTask } from "@owl/shared";
 import { HumanReadableError, validationError } from "./errors";
 import type { CoreDatabase, CoreWriteLaneTransaction } from "./types";
 
@@ -54,7 +54,7 @@ export class DesignMockStore {
 
   public async saveDesignMock(agentRunId: string, name: string, html: string): Promise<{ task_id: string; name: string; size_bytes: number; updated_at: string }> {
     this.validateName(name);
-    if (typeof html !== "string" || html.length === 0) throw validationError("html must be a non-empty string.", { field: "html" });
+    if (typeof html !== "string" || html.length === 0) throw validationError("html must be a non-empty string.", { field: "html" }, { code: "design_mock.html_empty", values: { field: "html" } });
     const run = this.screenDesignRun(agentRunId);
     await this.writeFile(run, name, html);
     const sizeBytes = Buffer.byteLength(html, "utf8");
@@ -105,7 +105,7 @@ export class DesignMockStore {
 
   private validateName(name: string): void {
     if (typeof name !== "string" || !DESIGN_MOCK_FILE_PATTERN.test(name)) {
-      throw validationError("name must be lowercase letters, digits and hyphens with the .html extension.", { field: "name" });
+      throw validationError("name must be lowercase letters, digits and hyphens with the .html extension.", { field: "name" }, { code: "design_mock.name_invalid", values: { field: "name" } });
     }
   }
 

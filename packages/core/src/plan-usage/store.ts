@@ -1,4 +1,4 @@
-import type { PlanUsageFetchResult, PlanUsageHarness, PlanUsageOrigin, PlanUsageSnapshot, PlanUsageStatus, PlanUsageWindow, PlanUsageWindowKind, PlanUsageWindowState } from "../../../shared/dist/plan-usage.js";
+import type { PlanUsageFetchResult, PlanUsageHarness, PlanUsageOrigin, PlanUsageSnapshot, PlanUsageStatus, PlanUsageWindow, PlanUsageWindowKind, PlanUsageWindowState } from "@owl/shared/plan-usage";
 import type { CoreDatabase } from "../types.js";
 
 export interface PlanUsageRow {

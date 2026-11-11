@@ -1,6 +1,8 @@
+// @ts-check
 // Builds the result card shown under a Web Advisor reply that asked Core to send files.
 // Pure: returns i18n keys and params, so tests can check each state and the ja/en key sets.
 
+/** @type {Record<string, string>} */
 const PROVIDER_LABELS = { slack: 'Slack', discord: 'Discord' };
 const REFUSAL_REASONS = new Set([
   'preferred_provider_unset',
@@ -12,10 +14,12 @@ const FILE_STATUSES = new Set(['pending', 'sent', 'failed', 'unknown', 'rejected
 
 export const SETTINGS_SECTION_HREF = '/settings#sec-advisor-send-file-destination';
 
+/** @param {any} metadata */
 export function isFileDeliveryMetadata(metadata) {
   return Boolean(metadata) && metadata.kind === 'advisor_file_delivery';
 }
 
+/** @param {any} bytes */
 export function formatFileSize(bytes) {
   if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) return null;
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))}KB`;
@@ -24,6 +28,7 @@ export function formatFileSize(bytes) {
 
 // pending wins over failed so the card keeps saying "sending" until every report is in.
 // Files Core refused are ignored unless nothing else is left.
+/** @param {any[]} files */
 function deliveryState(files) {
   const sent = files.filter((file) => file.status !== 'rejected');
   if (sent.length === 0) return 'failed';
@@ -33,6 +38,7 @@ function deliveryState(files) {
   return 'sent';
 }
 
+/** @param {any} metadata */
 export function fileDeliveryView(metadata) {
   /** @type {any[]} */
   const rawFiles = Array.isArray(metadata?.files) ? metadata.files : [];

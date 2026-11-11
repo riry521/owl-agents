@@ -24,12 +24,12 @@ export const validatePlanUsageSettings = exactKeysValidator<PlanUsageSettings>({
   check: (key, value) => {
     if (key === "claude_usage_api_enabled") {
       if (typeof value !== "boolean") {
-        throw new PlanUsageSettingsValidationError("claude_usage_api_enabled must be a boolean.", "claude_usage_api_enabled");
+        throw new PlanUsageSettingsValidationError("claude_usage_api_enabled must be a boolean.", "claude_usage_api_enabled", { kind: "boolean" });
       }
       return value;
     }
     if (typeof value !== "number" || !PLAN_USAGE_POLL_INTERVALS.includes(value)) {
-      throw new PlanUsageSettingsValidationError("poll_interval_minutes is not supported.", "poll_interval_minutes");
+      throw new PlanUsageSettingsValidationError("poll_interval_minutes is not supported.", "poll_interval_minutes", { kind: "one_of", values: PLAN_USAGE_POLL_INTERVALS });
     }
     return value;
   },

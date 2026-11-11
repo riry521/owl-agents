@@ -1,3 +1,4 @@
+// @ts-check
 import { apiErrorKeyForCode } from './api-error-keys.mjs';
 import { isAgentOutcome } from './agent-run-display.mjs';
 import { normalizeAutoRecovery } from './auto-recovery.mjs';
@@ -7,6 +8,11 @@ import { normalizeAutoRecovery } from './auto-recovery.mjs';
  * @typedef {import('./types').WorkState} WorkState
  */
 
+/**
+ * @param {any} value
+ * @returns {value is Record<string, any>}
+ */
+// web は @owl/shared に依存しない。さらにここは try/catch で例外を false にするため、shared の isRecord とは中身が違う。
 function isRecord(value) {
   try {
     return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -15,22 +21,40 @@ function isRecord(value) {
   }
 }
 
+/**
+ * @param {any} value
+ * @param {any} [fallback]
+ */
 function stringOr(value, fallback = '') {
   return typeof value === 'string' ? value : typeof fallback === 'string' ? fallback : '';
 }
 
+/**
+ * @param {any} value
+ * @param {any} [fallback]
+ */
 function finiteNumberOr(value, fallback = 0) {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
+/**
+ * @param {any} value
+ * @param {any} [fallback]
+ */
 function nonNegativeIntegerOr(value, fallback = 0) {
   return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
 }
 
+/**
+ * @param {any} value
+ */
 function nullableString(value) {
   return typeof value === 'string' ? value : null;
 }
 
+/**
+ * @param {any} value
+ */
 function normalizeFinalReport(value) {
   if (!value || typeof value !== 'object') return null;
   const { summary, test_results, issues, created_at } = value;
@@ -38,6 +62,9 @@ function normalizeFinalReport(value) {
   return { summary, test_results, issues, created_at };
 }
 
+/**
+ * @param {any} value
+ */
 function normalizeAdvisorBacklogEntries(value) {
   if (!Array.isArray(value)) return [];
   return value
@@ -50,6 +77,9 @@ function normalizeAdvisorBacklogEntries(value) {
     }));
 }
 
+/**
+ * @param {any} value
+ */
 function normalizeAdvisorBacklog(value) {
   if (!value || typeof value !== 'object') return null;
   return { linked: normalizeAdvisorBacklogEntries(value.linked), dismissed: normalizeAdvisorBacklogEntries(value.dismissed) };
@@ -124,6 +154,10 @@ export function asReportEnvelope(payload) {
   }
 }
 
+/**
+ * @param {any} value
+ * @param {string} workId
+ */
 function normalizeTasks(value, workId) {
   if (!Array.isArray(value)) return [];
   return value.filter((task) => isRecord(task) && typeof task.id === 'string' && task.id.trim().length > 0).map((task) => {
@@ -137,7 +171,7 @@ function normalizeTasks(value, workId) {
       state_version: finiteNumberOr(task.state_version),
       updated_at: stringOr(task.updated_at),
       created_at: stringOr(task.created_at),
-      depends_on: Array.isArray(task.depends_on) ? task.depends_on.filter((dep) => typeof dep === 'string') : [],
+      depends_on: Array.isArray(task.depends_on) ? task.depends_on.filter((/** @type {any} */ dep) => typeof dep === 'string') : [],
       prerequisite: normalizePrerequisite(task.prerequisite),
       stop_reason: nullableString(task.stop_reason),
       fixer_escalation: isRecord(task.fixer_escalation) && Number.isSafeInteger(task.fixer_escalation.rejections) && task.fixer_escalation.rejections >= 1
@@ -147,6 +181,9 @@ function normalizeTasks(value, workId) {
   });
 }
 
+/**
+ * @param {any} value
+ */
 function normalizePrerequisite(value) {
   if (!isRecord(value)) return null;
   return {
@@ -164,6 +201,10 @@ function normalizePrerequisite(value) {
   };
 }
 
+/**
+ * @param {any} value
+ * @param {string} workId
+ */
 function normalizeRuns(value, workId) {
   if (!Array.isArray(value)) return [];
   return value.filter(isRecord).map((run, index) => ({
@@ -189,6 +230,9 @@ function normalizeRuns(value, workId) {
   }));
 }
 
+/**
+ * @param {any} value
+ */
 function normalizeChildRunSummary(value) {
   if (!isRecord(value) || !['succeeded', 'partial', 'failed'].includes(value.result)) return null;
   const failure = isRecord(value.failure) && typeof value.failure.kind === 'string'
@@ -197,11 +241,11 @@ function normalizeChildRunSummary(value) {
   return {
     result: value.result,
     summary: stringOr(value.summary),
-    changed_files: Array.isArray(value.changed_files) ? value.changed_files.filter((item) => typeof item === 'string') : [],
+    changed_files: Array.isArray(value.changed_files) ? value.changed_files.filter((/** @type {any} */ item) => typeof item === 'string') : [],
     checks: Array.isArray(value.checks)
-      ? value.checks.filter((item) => isRecord(item) && typeof item.command === 'string').map((item) => ({ command: item.command, passed: item.passed === true }))
+      ? value.checks.filter((/** @type {any} */ item) => isRecord(item) && typeof item.command === 'string').map((item) => ({ command: item.command, passed: item.passed === true }))
       : [],
-    remaining_issues: Array.isArray(value.remaining_issues) ? value.remaining_issues.filter((item) => typeof item === 'string') : [],
+    remaining_issues: Array.isArray(value.remaining_issues) ? value.remaining_issues.filter((/** @type {any} */ item) => typeof item === 'string') : [],
     failure,
     attempts: nonNegativeIntegerOr(value.attempts),
     duration_seconds: Math.max(0, finiteNumberOr(value.duration_seconds)),
@@ -209,6 +253,10 @@ function normalizeChildRunSummary(value) {
   };
 }
 
+/**
+ * @param {any} value
+ * @param {string} workId
+ */
 function normalizeChildRuns(value, workId) {
   if (!Array.isArray(value)) return [];
   return value.filter((run) => isRecord(run) && typeof run.id === 'string').map((run, index) => ({
@@ -219,7 +267,7 @@ function normalizeChildRuns(value, workId) {
     seq: nonNegativeIntegerOr(run.seq),
     title: stringOr(run.title, `Child ${index + 1}`),
     instruction: stringOr(run.instruction),
-    write_paths: Array.isArray(run.write_paths) ? run.write_paths.filter((item) => typeof item === 'string') : [],
+    write_paths: Array.isArray(run.write_paths) ? run.write_paths.filter((/** @type {any} */ item) => typeof item === 'string') : [],
     provider: run.provider === 'codex' ? 'codex' : 'claude',
     model: stringOr(run.model),
     effort: ['low', 'medium', 'high', 'xhigh', 'max'].includes(run.effort) ? run.effort : null,
@@ -240,6 +288,10 @@ function normalizeChildRuns(value, workId) {
   }));
 }
 
+/**
+ * @param {any} value
+ * @param {string} workId
+ */
 function normalizeReports(value, workId) {
   if (!Array.isArray(value)) return [];
   return value.filter(isRecord).map((report, index) => {
@@ -260,6 +312,10 @@ function normalizeReports(value, workId) {
   });
 }
 
+/**
+ * @param {any} value
+ * @param {string} workId
+ */
 function normalizeDecisions(value, workId) {
   if (!Array.isArray(value)) return [];
   return value.filter(isRecord).map((decision, index) => ({
@@ -287,6 +343,10 @@ function normalizeDecisions(value, workId) {
   }));
 }
 
+/**
+ * @param {any} value
+ * @param {string} workId
+ */
 function normalizeMessages(value, workId) {
   if (!Array.isArray(value)) return [];
   return value.filter(isRecord).map((message, index) => ({
@@ -301,6 +361,11 @@ function normalizeMessages(value, workId) {
   }));
 }
 
+/**
+ * @param {any} value
+ * @param {any[]} tasks
+ * @param {string} state
+ */
 function normalizeProgress(value, tasks, state) {
   if (isRecord(value)) {
     const total = value.total_tasks;
@@ -377,12 +442,12 @@ function normalizeWorkDetailDataUnsafe(value, requestedWorkId) {
       prerequisite_wait: rawWork.prerequisite_wait === true,
     },
     tasks: /** @type {WorkDetailView['tasks']} */ (tasks),
-    runs: normalizeRuns(source.runs, id),
-    child_runs: normalizeChildRuns(source.child_runs, id),
-    reports: normalizeReports(source.reports, id),
-    decisions: normalizeDecisions(source.decisions, id),
+    runs: /** @type {WorkDetailView['runs']} */ (normalizeRuns(source.runs, id)),
+    child_runs: /** @type {WorkDetailView['child_runs']} */ (normalizeChildRuns(source.child_runs, id)),
+    reports: /** @type {WorkDetailView['reports']} */ (normalizeReports(source.reports, id)),
+    decisions: /** @type {WorkDetailView['decisions']} */ (normalizeDecisions(source.decisions, id)),
     messages: normalizeMessages(source.messages, id),
-    auto_recovery: normalizeAutoRecovery(source.auto_recovery),
+    auto_recovery: /** @type {WorkDetailView['auto_recovery']} */ (normalizeAutoRecovery(source.auto_recovery)),
     goal_shortfalls: normalizeGoalShortfalls(source.goal_shortfalls),
   };
 }
@@ -455,7 +520,7 @@ export function normalizeWorkDetailData(value, requestedWorkId = 'unknown-work')
       reports: [],
       decisions: [],
       messages: [],
-      auto_recovery: normalizeAutoRecovery(null),
+      auto_recovery: /** @type {WorkDetailView['auto_recovery']} */ (normalizeAutoRecovery(null)),
       goal_shortfalls: [],
     };
   }

@@ -4,7 +4,7 @@ import {
   readFixerEscalationSettings,
   validateFixerEscalationSettings,
   type FixerEscalationSettings,
-} from "../../shared/dist/fixer-escalation-settings.js";
+} from "@owl/shared/fixer-escalation-settings";
 import type { SettingsReader } from "./owner-language";
 import { readSetting, type SettingSpec } from "./settings-store";
 

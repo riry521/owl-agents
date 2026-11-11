@@ -200,14 +200,14 @@ function writeProviderPause(tx: CoreWriteLaneTransaction, row: ProviderPauseRow)
 
 function validateProvider(provider: unknown): string {
   if (typeof provider !== "string" || provider.trim().length === 0) {
-    throw validationError("Provider must be a non-empty string.", { field: "provider" });
+    throw validationError("Provider must be a non-empty string.", { field: "provider" }, { code: "provider_pause.provider_empty", values: { field: "provider" } });
   }
   return provider;
 }
 
 function normalizeDate(value: unknown, field: string): string {
   if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) {
-    throw validationError("Provider pause timestamps must be valid date strings.", { field });
+    throw validationError("Provider pause timestamps must be valid date strings.", { field }, { code: "provider_pause.timestamp_invalid", values: { field } });
   }
   return new Date(value).toISOString();
 }

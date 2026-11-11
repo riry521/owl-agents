@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { scrubLegacySettings } from "./app-settings-store.js";
 import { createExternalAgentRunner, createHybridExecutorRuntime } from "./agent-runner.js";
 import { isProcessAlive } from "./process-state.js";
-import { readProcessIdentity } from "../../../packages/core/dist/process-identity.js";
+import { readProcessIdentity } from "@owl/core/dist/process-identity.js";
 import { refreshCodexModelCatalog, refreshOpencodeModelCatalog } from "./model-catalog.js";
 import {
   assertStaticExport,
@@ -16,7 +16,6 @@ import {
   resolveWebOut,
   serverPackageRoot,
   validateContractArtifacts,
-  type ContractManifest,
 } from "./contracts.js";
 import { agentTimeoutConfigurationError, configuredApiToken, configuredBind, configuredIdempotencyTtlMs, configuredPort, configuredScreenViewLimits, providerMode, serverExposureError, shutdownTimeoutMs } from "./config.js";
 import { installTimestampedConsole, timestampLines } from "./log-format.js";
@@ -26,16 +25,17 @@ import { createDecisionTextChecksFromEnv, createFinalReportTextChecksFromEnv } f
 import { createOwnApiCaller } from "./own-api-caller.js";
 import { ConnectorManager, formatConnectorFailure } from "./connector-manager.js";
 import { createPluginManagerFromEnv, type PluginManager } from "./plugin-manager.js";
-import { ApiError, ContractValidationError, humanUnexpectedMessage, newReferenceId } from "./errors.js";
+import { ApiError, ContractValidationError, humanUnexpectedMessage, newReferenceId, renderMessage } from "./errors.js";
+import { ServerMessages } from "./messages/server.js";
 import { createOwlHttpServer, type OwlHttpServer } from "./http.js";
 import { GuardTokenRegistry } from "./guard-tokens.js";
 import type { IntegrationStore } from "./integration-store.js";
 import type { IntegrationProvider } from "./types.js";
 import { prepareConnectorConfig } from "./secret-config.js";
-import { resolveInstanceId } from "../../../packages/shared/dist/instance-id.js";
-import { classifyProviderFailure, executorProviderError } from "../../../packages/agent-runtime/dist/index.js";
+import { resolveInstanceId } from "@owl/shared/instance-id";
+import { classifyProviderFailure, executorProviderError } from "@owl/agent-runtime";
 
-const SERVER_VERSION = "0.16.1";
+const SERVER_VERSION = "0.17.0";
 /** Extra time after the deadline before the watchdog thread sends SIGKILL. */
 const SHUTDOWN_KILL_GRACE_MS = 5_000;
 
@@ -80,11 +80,6 @@ function parsePort(value: string | undefined): number {
   return port;
 }
 
-export function defaultServerOptions(): ServerOptions {
-  const bind = configuredBind();
-  return { bind, port: parsePort(configuredPort()) };
-}
-
 async function readPid(pidFile: string): Promise<number | null> {
   try {
     const text = (await readFile(pidFile, "utf8")).trim();
@@ -100,7 +95,7 @@ async function readPid(pidFile: string): Promise<number | null> {
 async function ensurePidAvailable(pidFile: string): Promise<void> {
   const pid = await readPid(pidFile);
   if (pid !== null && pid !== process.pid && isProcessAlive(pid)) {
-    throw new ApiError(409, "idempotency_conflict", cliText('owl-coreはすでに起動しています。statusを確認してから再試行してください。', 'owl-core is already running. Check status before retrying.'), { pid });
+    throw new ApiError(409, "idempotency_conflict", ServerMessages.alreadyRunning(), { pid });
   }
   if (pid !== null && pid !== process.pid) {
     try {
@@ -116,23 +111,23 @@ async function loadDatabase(owlRoot: string, dataDir: string): Promise<unknown> 
   try {
     await access(dbPath);
   } catch (error) {
-    throw new ApiError(503, "dependency_unavailable", cliText('DB実行基盤がまだ利用できません。必要なdistをビルドしてから再実行してください。', 'The database runtime is unavailable. Build the required dist files and retry.'), { dependency: "packages/db/dist/index.js" }, { cause: error });
+    throw new ApiError(503, "dependency_unavailable", ServerMessages.dbRuntimeNotBuilt(), { dependency: "packages/db/dist/index.js" }, { cause: error });
   }
   let loaded: DatabaseModule;
   try {
     loaded = (await import(pathToFileURL(dbPath).href)) as DatabaseModule;
   } catch (error) {
-    throw new ApiError(503, "dependency_unavailable", cliText('DB実行基盤を読み込めませんでした。ビルド成果物を確認してください。', 'Could not load the database runtime. Check the build artifacts.'), { dependency: "packages/db/dist/index.js" }, { cause: error });
+    throw new ApiError(503, "dependency_unavailable", ServerMessages.dbRuntimeLoadFailed(), { dependency: "packages/db/dist/index.js" }, { cause: error });
   }
   if (typeof loaded.openDatabase !== "function") {
-    throw new ApiError(503, "dependency_unavailable", cliText('DBの公開APIが契約と一致しません。openDatabaseを確認してください.', 'The database API does not match the contract. Check openDatabase.'), { dependency: "packages/db/dist/index.js", export: "openDatabase" });
+    throw new ApiError(503, "dependency_unavailable", ServerMessages.dbApiMismatch(), { dependency: "packages/db/dist/index.js", export: "openDatabase" });
   }
   const database = loaded.openDatabase(join(dataDir, "owl.sqlite")) as {
     migrate?: (directory: string) => unknown;
     close?: () => void;
   };
   if (typeof database.migrate !== "function") {
-    throw new ApiError(503, "dependency_unavailable", cliText('DB migration APIが契約と一致しません。migrateを確認してください。', 'The database migration API does not match the contract. Check migrate.'), { dependency: "packages/db/dist/index.js", export: "migrate" });
+    throw new ApiError(503, "dependency_unavailable", ServerMessages.dbMigrateApiMismatch(), { dependency: "packages/db/dist/index.js", export: "migrate" });
   }
   try {
     database.migrate(join(owlRoot, "packages/db/migrations"));
@@ -156,6 +151,8 @@ function guardHost(bind: string): string {
 }
 
 export async function startServer(options: ServerOptions): Promise<RunningServer> {
+  // cli.js start --foreground は main() を通らず startServer() を直接呼ぶため、ここで入れる。
+  installTimestampedConsole();
   const host = guardHost(options.bind);
   const authority = host.includes(":") ? `[${host}]` : host;
   const guardApiBase = `http://${authority}:${options.port}`;
@@ -199,7 +196,7 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
   await mkdir(dataDir, { recursive: true, mode: 0o700 });
   const dbPath = join(serverPackageRoot(), "../../packages/db/dist/index.js");
   const unavailable = (cause?: unknown, exportName?: string): ApiError =>
-    new ApiError(503, "dependency_unavailable", cliText('DB実行基盤を読み込めませんでした。ビルド成果物を確認してください。', 'Could not load the database runtime. Check the build artifacts.'), { dependency: "packages/db/dist/index.js", ...(exportName ? { export: exportName } : {}) }, { cause });
+    new ApiError(503, "dependency_unavailable", ServerMessages.dbRuntimeLoadFailed(), { dependency: "packages/db/dist/index.js", ...(exportName ? { export: exportName } : {}) }, { cause });
   let loaded: DatabaseModule;
   try {
     loaded = (await import(pathToFileURL(dbPath).href)) as DatabaseModule;
@@ -209,7 +206,7 @@ async function startServerWithGuard(options: ServerOptions, guardApiBase: string
   if (typeof loaded.acquireServerLock !== "function") throw unavailable(undefined, "acquireServerLock");
   const lock = loaded.acquireServerLock(join(dataDir, "owl-server.lock"));
   if (!lock) {
-    throw new ApiError(409, "idempotency_conflict", cliText('owl-coreはすでに起動しています。statusを確認してから再試行してください。', 'owl-core is already running. Check status before retrying.'));
+    throw new ApiError(409, "idempotency_conflict", ServerMessages.alreadyRunning());
   }
   const pidFile = join(dataDir, "owl-server.pid");
   let pidWritten = false;
@@ -283,7 +280,7 @@ async function startServerLocked(options: ServerOptions, guardApiBase: string, r
       throw new ApiError(
         503,
         "dependency_unavailable",
-        cliText('実運用ProviderがAdvisorセッションAPIを提供していません。Provider/Harnessの設定を確認してください。', 'The selected Provider does not expose the Advisor session API. Check Provider and Harness settings.'),
+        ServerMessages.providerNoAdvisorSessionApi(),
         { dependency: "ProviderClient.createSession" },
       );
     }
@@ -292,7 +289,7 @@ async function startServerLocked(options: ServerOptions, guardApiBase: string, r
       throw new ApiError(
         503,
         "dependency_unavailable",
-        cliText('選択したProvider/HarnessはAdvisorの永続セッションをサポートしていません。対応Harnessを選択するか、設定を修正してください。', 'The selected Provider/Harness does not support persistent Advisor sessions. Select a supported Harness or update the settings.'),
+        ServerMessages.harnessNoPersistentSession(),
         { dependency: "ProviderClient.createSession" },
       );
     }
@@ -325,7 +322,7 @@ async function startServerLocked(options: ServerOptions, guardApiBase: string, r
   });
   // Core owns the RuleStore and its watcher. Reuse it for HTTP so Core and the
   // API never observe different rule generations.
-  const { RuleStore } = await import("../../../packages/core/dist/rule-store.js");
+  const { RuleStore } = await import("@owl/core/dist/rule-store.js");
   const coreRuleStore = (core as unknown as { ruleStore?: InstanceType<typeof RuleStore> }).ruleStore;
   const ruleStore = coreRuleStore ?? new RuleStore(owlRoot);
   if (!coreRuleStore) {
@@ -352,7 +349,7 @@ async function startServerLocked(options: ServerOptions, guardApiBase: string, r
     throw new ApiError(
       503,
       "dependency_unavailable",
-      cliText('HTTP serverを起動できませんでした。bindとportが利用可能か確認してください。', 'Could not start the HTTP server. Check the bind address and port.'),
+      ServerMessages.httpStartFailed(),
       {
         bind: options.bind,
         port: options.port,
@@ -385,7 +382,7 @@ async function startServerLocked(options: ServerOptions, guardApiBase: string, r
         throw new ApiError(
           503,
           "dependency_unavailable",
-          language === "ja" ? `${message} サーバーは起動していません。` : `${message} The server is not running.`,
+          ServerMessages.notRunning({ message }),
           { provider, ...(cleanupReferenceId ? { cleanup_reference_id: cleanupReferenceId } : {}) },
           { cause: error },
         );
@@ -421,11 +418,11 @@ async function startServerLocked(options: ServerOptions, guardApiBase: string, r
       }
       const message = error instanceof Error
         ? error.message
-        : language === "ja" ? "連携の起動に失敗しました。連携設定と外部サービスの状態を確認してください。" : "Could not start the integration. Check its settings and external service status.";
+        : renderMessage(ServerMessages.connectorStartFailed(), language);
       throw new ApiError(
         503,
         "dependency_unavailable",
-        language === "ja" ? `${message} サーバーは起動していません。` : `${message} The server is not running.`,
+        ServerMessages.notRunning({ message }),
         { ...(cleanupReferenceId ? { cleanup_reference_id: cleanupReferenceId } : {}) },
         { cause: error },
       );
@@ -507,7 +504,7 @@ async function startServerLocked(options: ServerOptions, guardApiBase: string, r
     deadlineMs: shutdownTimeoutMs(),
     graceMs: SHUTDOWN_KILL_GRACE_MS,
     run: (coreTimeoutMs, force) => shutdown(force, coreTimeoutMs),
-    forceTerminate: () => core.forceTerminateProcesses?.(),
+    forceTerminate: () => core.forceTerminateProcesses(),
     // Lock last: while the pid file exists, the CLI can still find this process.
     cleanup: () => {
       unlinkQuietly(pidFile);
@@ -564,7 +561,6 @@ export async function runServerProcess(argv: readonly string[] = process.argv.sl
 }
 
 export async function main(): Promise<void> {
-  installTimestampedConsole();
   try {
     await runServerProcess();
   } catch (error) {

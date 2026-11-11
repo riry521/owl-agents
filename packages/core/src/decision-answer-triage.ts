@@ -4,8 +4,8 @@ import {
   type DecisionAnswerTriageRunResult,
   type DecisionCriterionRewrite,
   type StoredDecisionExplanation,
-} from "../../shared/dist/index.js";
-import { readStoredAcceptanceCriteria } from "../../shared/dist/acceptance-criteria.js";
+} from "@owl/shared";
+import { readStoredAcceptanceCriteria } from "@owl/shared/acceptance-criteria";
 import type { CoreDatabase } from "./types";
 
 type Reader = Pick<CoreDatabase, "get">;

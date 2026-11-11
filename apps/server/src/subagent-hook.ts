@@ -1,23 +1,15 @@
 import { randomUUID } from "node:crypto";
+import { readStdin } from "./stdio-jsonrpc.js";
 import { createReadStream } from "node:fs";
 import { isAbsolute } from "node:path";
 import { createInterface } from "node:readline";
 
 import { guardConfig, guardHasToken, guardRequest, trimOneSlash } from "./guard-client.js";
-import { RequestUsageTracker, SUBAGENT_USAGE_BATCH_MAX, type RequestTokenUsage } from "../../../packages/shared/dist/token-relay.js";
+import { RequestUsageTracker, SUBAGENT_USAGE_BATCH_MAX, type RequestTokenUsage } from "@owl/shared/token-relay";
+import { isRecord } from "@owl/shared/small-helpers";
 
 const MAX_FIELD_LENGTH = 200;
 const EVENTS: Record<string, "start" | "stop"> = { SubagentStart: "start", SubagentStop: "stop" };
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-async function readStdin(): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of process.stdin) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-  return Buffer.concat(chunks).toString("utf8");
-}
 
 /** One entry per request id in the subagent transcript; an unreadable file or a broken line is skipped. */
 async function transcriptUsage(path: string): Promise<RequestTokenUsage[]> {

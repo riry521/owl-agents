@@ -4,7 +4,7 @@ import {
   readProgressGuardSettings,
   validateProgressGuardSettings,
   type ProgressGuardSettings,
-} from "../../shared/dist/progress-guard-settings.js";
+} from "@owl/shared/progress-guard-settings";
 import type { SettingsReader } from "./owner-language";
 import { readSetting, type SettingSpec } from "./settings-store";
 

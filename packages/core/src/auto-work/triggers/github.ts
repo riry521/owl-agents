@@ -6,6 +6,7 @@ import type { CoreDatabase } from "../../types.js";
 import { PeriodicRunner } from "../periodic-runner.js";
 import type { AutoWorkEventRecord, AutoWorkStore, GithubItemInput, GithubLedgerItem } from "../store.js";
 import type { AutoWorkFinishedHandler, AutoWorkReceiveResult, AutoWorkService, AutoWorkTriggerSource } from "../service.js";
+import { isRecord } from "@owl/shared/small-helpers";
 
 /** An Issue or PR from GitHub, reduced to what automatic Work creation reads. */
 export interface GithubIssue {
@@ -31,7 +32,6 @@ export interface GithubComment {
   readonly html_url: string;
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const text = (value: unknown): string | null => (typeof value === "string" && value !== "" ? value : null);
 const idText = (value: unknown): string | null => (typeof value === "number" || typeof value === "string") && String(value) !== "" ? String(value) : null;
 

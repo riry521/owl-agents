@@ -50,18 +50,18 @@ export class KnowledgeAutomationValidationError extends SettingsValidationError<
 
 function normalizeLibrarianTimes(value: unknown): readonly string[] {
   if (!Array.isArray(value)) {
-    throw new KnowledgeAutomationValidationError("librarian_times must be an array.", "librarian_times");
+    throw new KnowledgeAutomationValidationError("librarian_times must be an array.", "librarian_times", { kind: "array_length", min: 0, max: MAX_LIBRARIAN_TIMES });
   }
   const uniqueTimes = new Set<string>();
   for (const time of value) {
     if (typeof time !== "string" || !LIBRARIAN_TIME_PATTERN.test(time)) {
-      throw new KnowledgeAutomationValidationError("librarian_times must contain valid HH:MM times.", "librarian_times");
+      throw new KnowledgeAutomationValidationError("librarian_times must contain valid HH:MM times.", "librarian_times", { kind: "hh_mm_list" });
     }
     uniqueTimes.add(time);
   }
   const times = [...uniqueTimes].sort();
   if (times.length > MAX_LIBRARIAN_TIMES) {
-    throw new KnowledgeAutomationValidationError(`librarian_times must contain at most ${MAX_LIBRARIAN_TIMES} times.`, "librarian_times");
+    throw new KnowledgeAutomationValidationError(`librarian_times must contain at most ${MAX_LIBRARIAN_TIMES} times.`, "librarian_times", { kind: "array_length", min: 0, max: MAX_LIBRARIAN_TIMES });
   }
   return times;
 }
@@ -69,33 +69,40 @@ function normalizeLibrarianTimes(value: unknown): readonly string[] {
 /** Strict validation for settings writes; successful values are deduplicated and sorted. */
 export function validateKnowledgeAutomationSettings(value: unknown): KnowledgeAutomationSettings {
   if (!isRecord(value)) {
-    throw new KnowledgeAutomationValidationError("Settings must be an object.", "payload");
+    throw new KnowledgeAutomationValidationError("Settings must be an object.", "payload", { kind: "not_object" });
   }
   const keys = Reflect.ownKeys(value);
-  const optional = ["research_source_links", "research_source_links_max", "research_tags_min", "research_tags_max", "research_existing_tags_max"].filter((key) => keys.includes(key));
+  const optionalKeys = ["research_source_links", "research_source_links_max", "research_tags_min", "research_tags_max", "research_existing_tags_max"];
+  const optional = optionalKeys.filter((key) => keys.includes(key));
   if (keys.length !== 2 + optional.length || !keys.includes("librarian_times") || !keys.includes("research_autosave")) {
-    throw new KnowledgeAutomationValidationError("Settings must contain librarian_times, research_autosave and optionally research_source_links and research_source_links_max.", "payload");
+    throw new KnowledgeAutomationValidationError("Settings must contain librarian_times, research_autosave and optionally research_source_links and research_source_links_max.", "payload", {
+      kind: "keys",
+      required: ["librarian_times", "research_autosave"],
+      optional: optionalKeys,
+    });
   }
   const max = value.research_source_links_max;
   if (optional.includes("research_source_links_max") && !isCount(max)) {
-    throw new KnowledgeAutomationValidationError("research_source_links_max must be a non-negative integer.", "research_source_links_max");
+    throw new KnowledgeAutomationValidationError("research_source_links_max must be a non-negative integer.", "research_source_links_max", { kind: "integer_min", min: 0 });
   }
-  if (optional.includes("research_source_links") && !isCount(value.research_source_links, isCount(max) ? max : DEFAULT_RESEARCH_SOURCE_LINKS_MAX)) {
-    throw new KnowledgeAutomationValidationError("research_source_links must be a non-negative integer within research_source_links_max.", "research_source_links");
+  const linksMax = isCount(max) ? max : DEFAULT_RESEARCH_SOURCE_LINKS_MAX;
+  if (optional.includes("research_source_links") && !isCount(value.research_source_links, linksMax)) {
+    throw new KnowledgeAutomationValidationError("research_source_links must be a non-negative integer within research_source_links_max.", "research_source_links", { kind: "integer_range", min: 0, max: linksMax });
   }
   const tagsMin = value.research_tags_min;
   const tagsMax = value.research_tags_max;
   if (optional.includes("research_tags_min") && !(isCount(tagsMin) && tagsMin >= 1)) {
-    throw new KnowledgeAutomationValidationError("research_tags_min must be a positive integer.", "research_tags_min");
+    throw new KnowledgeAutomationValidationError("research_tags_min must be a positive integer.", "research_tags_min", { kind: "integer_min", min: 1 });
   }
-  if (optional.includes("research_tags_max") && !(isCount(tagsMax) && tagsMax >= 1 && tagsMax >= (isCount(tagsMin) ? tagsMin : 1))) {
-    throw new KnowledgeAutomationValidationError("research_tags_max must be a positive integer not below research_tags_min.", "research_tags_max");
+  const tagsMaxMin = Math.max(1, isCount(tagsMin) ? tagsMin : 1);
+  if (optional.includes("research_tags_max") && !(isCount(tagsMax) && tagsMax >= tagsMaxMin)) {
+    throw new KnowledgeAutomationValidationError("research_tags_max must be a positive integer not below research_tags_min.", "research_tags_max", { kind: "integer_min", min: tagsMaxMin });
   }
   if (optional.includes("research_existing_tags_max") && !(isCount(value.research_existing_tags_max) && value.research_existing_tags_max >= 1)) {
-    throw new KnowledgeAutomationValidationError("research_existing_tags_max must be a positive integer.", "research_existing_tags_max");
+    throw new KnowledgeAutomationValidationError("research_existing_tags_max must be a positive integer.", "research_existing_tags_max", { kind: "integer_min", min: 1 });
   }
   if (typeof value.research_autosave !== "boolean") {
-    throw new KnowledgeAutomationValidationError("research_autosave must be a boolean.", "research_autosave");
+    throw new KnowledgeAutomationValidationError("research_autosave must be a boolean.", "research_autosave", { kind: "boolean" });
   }
   return {
     librarian_times: normalizeLibrarianTimes(value.librarian_times),

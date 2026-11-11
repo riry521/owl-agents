@@ -2,14 +2,14 @@ import { lstat, readFile } from "node:fs/promises";
 import { parseAllDocuments } from "yaml";
 import { isAbsolute, relative, resolve } from "node:path";
 import { matchesGlobWithDots } from "./glob.js";
-import type { TestRunUnit } from "../../shared/dist/test-run-settings.js";
+import type { TestRunUnit } from "@owl/shared/test-run-settings";
 import {
   DEFAULT_VERIFICATION_POLICY_SETTINGS,
   VERIFICATION_POLICY_SETTINGS_KEY,
   readVerificationPolicySettings,
   type PolicyCommand,
   type VerificationPolicySettings,
-} from "../../shared/dist/verification-policy-settings.js";
+} from "@owl/shared/verification-policy-settings";
 import type { SettingsReader } from "./owner-language";
 import { readSetting, type SettingReadSpec } from "./settings-store";
 import { WHOLE_DEFERRED_REASON, WHOLE_RUN_FILE } from "./test-runs.js";

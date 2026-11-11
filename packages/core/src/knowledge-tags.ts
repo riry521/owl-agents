@@ -1,6 +1,4 @@
 export const MAX_NOTE_TAGS = 5;
-export const MIN_KEYWORDS = 3;
-export const PRESERVED_ORIGIN_TAGS = ["auto-saved", "work-lessons", "legacy-unknown"] as const;
 
 export type TagProblem = "empty" | "too_long" | "sentence_punctuation" | "particle_edge" | "verb_ending" | "stopword" | "numeric" | "embedded_particle";
 

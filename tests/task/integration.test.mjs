@@ -356,7 +356,7 @@ test("design Tasks stay outside Git and hand their document to dependent impleme
   assert.deepEqual(git(project, "ls-tree", "--name-only", workBranch).split("\n").sort(), ["README.md", "code.mjs", "untouched.txt"]);
   assert.equal((await readFile(verificationLog, "utf8")).trim(), "run", "only the code Task runs Project verification");
   assert.equal(db.get("SELECT role FROM agent_runs WHERE task_id = ? ORDER BY created_at LIMIT 1", designTaskId).role, "designer");
-  const replanRequest = core.buildReplanRequest(workId, [db.get("SELECT id FROM tasks WHERE work_id = ? AND manager_task_id = 'T2'", workId).id], "retry", undefined, 1, null);
+  const replanRequest = core.manager.buildReplanRequest(workId, [db.get("SELECT id FROM tasks WHERE work_id = ? AND manager_task_id = 'T2'", workId).id], "retry", undefined, 1, null);
   assert.deepEqual(replanRequest.context.design_documents, [{ task_id: designTaskId, title: "Design the implementation", path: externalDesignPath }]);
   const finalizeContext = await waitFor(() => managerCalls.find((context) => context?.mode === "finalize") ?? null, { timeoutMs: 15_000, message: "the finalize Manager call" });
   assert.deepEqual(finalizeContext?.design_documents, [{ task_id: designTaskId, title: "Design the implementation", path: externalDesignPath }]);

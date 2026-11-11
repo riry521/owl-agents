@@ -1,4 +1,4 @@
-import type { LearningMetricsSettings } from "../../shared/dist/learning-metrics-settings.js";
+import type { LearningMetricsSettings } from "@owl/shared/learning-metrics-settings";
 import { createHash } from "node:crypto";
 import { ruleKeyFingerprint } from "./learning-fingerprint.js";
 import type { MetricsReader } from "./review-metrics.js";

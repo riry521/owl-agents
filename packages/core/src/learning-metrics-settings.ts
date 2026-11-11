@@ -3,7 +3,7 @@ import {
   LEARNING_METRICS_SETTINGS_KEY,
   readLearningMetricsSettings,
   type LearningMetricsSettings,
-} from "../../shared/dist/learning-metrics-settings.js";
+} from "@owl/shared/learning-metrics-settings";
 import type { SettingsReader } from "./owner-language";
 import { readSetting, type SettingReadSpec } from "./settings-store";
 

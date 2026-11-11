@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * Deliverables of a Work: the files its completed Tasks changed.
  *

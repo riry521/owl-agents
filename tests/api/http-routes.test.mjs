@@ -25,14 +25,14 @@ function match(method, rawPathname) {
   return matchApiRoute(method, pathname, rawPathname);
 }
 
-test("listApiRoutes has 222 rows without duplicates and ends with the WebSocket path", () => {
+test("listApiRoutes has 220 rows without duplicates and ends with the WebSocket path", () => {
   const rows = listApiRoutes();
-  assert.equal(rows.length, 222);
+  assert.equal(rows.length, 220);
   const keys = rows.map((row) => `${row.method} ${row.path}`);
   assert.equal(new Set(keys).size, keys.length);
   assert.ok(keys.includes(`GET ${WEBSOCKET_PATH}`));
   assert.equal(WEBSOCKET_PATH, "/api/v1/ws");
-  assert.equal(API_ROUTES.length, 221);
+  assert.equal(API_ROUTES.length, 219);
 });
 
 test("matchApiRoute returns the row itself for every row's sample path", () => {

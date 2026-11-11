@@ -1,4 +1,5 @@
 import { CHECK_WEIGHTS, type CheckWeight } from "./task-necessity.js";
+import { isRecord } from "./small-helpers.js";
 
 /** Protocol identifier shared by the Manager prompt, the parser and Core: the k-th criterion of a Task is "AC<k>". */
 export const ACCEPTANCE_CRITERION_ID_PREFIX = "AC";
@@ -22,7 +23,6 @@ export const isNonBlankReason = (value: unknown): value is string => typeof valu
 
 /** Where an unmet goal was found. */
 export const GOAL_SHORTFALL_SOURCES = ["worker", "reviewer", "final_check"] as const;
-export type GoalShortfallSource = (typeof GOAL_SHORTFALL_SOURCES)[number];
 
 /** One goal criterion of a Task that was not met, with why (tasks.goal_shortfalls_json). */
 export interface GoalShortfall {
@@ -99,7 +99,6 @@ export interface StoredAcceptanceCriterion extends Omit<AcceptanceCriterion, "ch
   readonly legacy?: true;
 }
 
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const TEXT_FIELDS = ["text", "check", "serves", "if_omitted"] as const;
 const KEYS: readonly string[] = ["id", ...TEXT_FIELDS, "check_weight", "weight_reason", "kind", "origin", "requirement"];
 const ORIGIN_KEYS: readonly string[] = ["kind", "source", "quote"];

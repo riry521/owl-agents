@@ -1,12 +1,10 @@
+import { isRecord } from "@owl/shared/small-helpers";
+
 export interface CodexErrorInfo {
   /** The error kind in camelCase ("usageLimitExceeded", "responseTooManyFailedAttempts"). */
   readonly code: string;
   /** httpStatusCode of the object form, when the harness reported one. */
   readonly httpStatus: number | null;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function camelCase(code: string): string {

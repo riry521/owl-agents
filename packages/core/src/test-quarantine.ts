@@ -1,5 +1,5 @@
-import { createUlid } from "../../db/dist/index.js";
-import { DEFAULT_TEST_RUN_SETTINGS } from "../../shared/dist/test-run-settings.js";
+import { createUlid } from "@owl/db";
+import { DEFAULT_TEST_RUN_SETTINGS } from "@owl/shared/test-run-settings";
 import type { TestFailure } from "./nightly-tests";
 import { QUARANTINE_FIX_TASK_PREFIX } from "./state-reducer";
 import type { CoreDatabase, CoreWriteLaneTransaction } from "./types";

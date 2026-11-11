@@ -1,4 +1,4 @@
-import { utcNow } from "../../db/dist/index.js";
+import { utcNow } from "@owl/db";
 import { HumanReadableError } from "./errors";
 import type {
   CanonicalEventFrame,

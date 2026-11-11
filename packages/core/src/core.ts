@@ -1,23 +1,25 @@
-import { clearOwnerReplanProcessing, deleteOwnerReplan, flagManagerTrigger, listQueuedReplanTasks, readManagerTrigger, readOwnerReplan, setManagerTriggerStatus, setOwnerReplanStatus, writeOwnerReplan, type ReplanMarkerStatus } from "./replan-queue-store.js";
+import { readOwnerReplan } from "./replan-queue-store.js";
+import { CommandMutation, parseArray, isCodedError, InstructionOutcome, InstructionReplyMetadata, MessageMetadata, WorkDbRow, AGENT_STOP_WAIT_MS, StoppableRun, WebFileDestination, parseMessageMetadata, WorkNotRunningAbort, isRecordedProcessGone, parseStringArray, parseStoredJsonObject, humanizeUnexpected, callApiHash, isRecord, sideEffectFailureFields, mergeConflictFiles, realPathOrResolve, } from "./core-shared.js";
+// Re-exported so existing importers of these helpers keep working.
+export * from "./core-shared.js";
 import { STARTING_AGENT_RUN_STATUSES, clearAgentRunProcess, detachAgentRunLinks, recordAgentRunProcess, recordAgentRunPromptFingerprint, requestAgentRunCancel, touchAgentRunOutput, touchAgentRunUpdatedAt } from "./agent-run-state.js";
 import { createHash } from "node:crypto";
 import { AdvisorActions } from "./advisor-actions.js";
-import { ManagerOrchestrator, ReplayCommand, queueOwnerReplanInTransaction, mergeOwnerReplanInTransaction, workUpdateReplanAnswer, queueDecisionReplanInTransaction, OwnerReplanRequest } from "./manager-orchestrator.js";
+import { ManagerOrchestrator, ManagerHost, ReplayCommand, queueOwnerReplanInTransaction, mergeOwnerReplanInTransaction, workUpdateReplanAnswer, queueDecisionReplanInTransaction, OwnerReplanRequest } from "./manager-orchestrator.js";
 import { serenaConfigPath, unregisterSerenaProject } from "./serena-registry.js";
 import { createHash as createFileHash } from "node:crypto";
-import { constants, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { constants, existsSync, lstatSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { copyFile, lstat, mkdir, readdir, readFile, rename, rm, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { createUlid, utcNow } from "../../db/dist/index.js";
+import { createUlid, utcNow } from "@owl/db";
 import { insertProviderError, listProviderErrors } from "./provider-error-store.js";
 import type { StoredProviderError } from "./types.js";
 import { DecisionService, type OpenDecisionPayload } from "./decision";
 import { DesignMockStore, type DesignMockSummary } from "./design-mocks";
 import { OwnerFilesReader, type OwnerFileOpened, type OwnerFileRoot } from "./owner-files.js";
 import { DEFAULT_WORK_MARKDOWN_LIMITS, WorkMarkdownReader, type WorkMarkdownDocument } from "./work-markdown.js";
-import { DECISION_CANCEL_OPTION_KEY, managerReplanFailureBrief, prerequisiteExpiredBrief, RESOLVE_CONFLICT_OPTION_KEY, type ReplanFailureCause } from "./decision-brief";
-import { evaluatePrerequisite, type PrerequisiteFacts } from "./prerequisite-monitor";
+import { DECISION_CANCEL_OPTION_KEY, RESOLVE_CONFLICT_OPTION_KEY } from "./decision-brief";
 import {
   evaluateWorkPrerequisitesInTransaction,
   hasOpenWorkPrerequisiteDecision,
@@ -27,14 +29,13 @@ import {
   waitingWorkIds,
   workPrerequisiteViews,
 } from "./work-prerequisites";
-import type { WorkPrerequisiteView } from "../../shared/dist/work-prerequisite.js";
-import type { AcceptanceDefect } from "../../shared/dist/acceptance-defect.js";
-import type { DecisionAnswerRoute, DecisionCriterionRewrite } from "../../shared/dist/decision-explanation.js";
-import { isFinalLesson, isFinalMissingItem, normalizeLesson, parseLessonBlocks, type FinalManagerVerdict } from "./final-verdict";
+import type { WorkPrerequisiteView } from "@owl/shared/work-prerequisite";
+import type { DecisionAnswerRoute, DecisionCriterionRewrite } from "@owl/shared/decision-explanation";
+import { isFinalMissingItem, normalizeLesson, parseLessonBlocks, type FinalManagerVerdict } from "./final-verdict";
 import { outputResubmitLimit } from "./report-resubmit";
 import { DEFAULT_OWNER_LANGUAGE, OWNER_LANGUAGE_SETTINGS_KEY, ownerLanguage, storedOwnerLanguage, type OwnerLanguage, type SettingsReader } from "./owner-language";
 import { EventDispatcher } from "./event-dispatcher";
-import { HumanReadableError, dependencyUnavailable, idempotencyConflict, invalidStateTransition, notFound, projectDeletionImpactChanged, projectHasRunningWorks, projectNotFound, providerPauseNotFound, projectPathConflict, validationError, versionConflict, workCancelled, workProjectAlreadySet, workReopenRequired } from "./errors";
+import { type CoreReason, HumanReadableError, dependencyUnavailable, idempotencyConflict, invalidStateTransition, notFound, projectDeletionImpactChanged, projectHasRunningWorks, projectNotFound, providerPauseNotFound, projectPathConflict, validationError, versionConflict, workCancelled, workProjectAlreadySet, workReopenRequired } from "./errors";
 import {
   appendEventInTransaction,
   createWorkInTransaction,
@@ -42,10 +43,6 @@ import {
   ensureOwner,
   isDecisionCancelAnswer,
   isTerminalTaskState,
-  REPLAN_PLAN_STALE,
-  REPLAN_WORK_NOT_RUNNING,
-  openRemakeLimitDecisionInTransaction,
-  stopTaskForNoProgressInTransaction,
   reduceTaskInTransaction,
   reduceWorkInTransaction,
   resolveDecisionInTransaction,
@@ -55,32 +52,25 @@ import {
   taskDependenciesCompletedInTransaction,
 } from "./state-reducer";
 import {
-  applyManagerWorkSummaryUpdateInTransaction,
   listWorkSummaryRevisions,
-  managerWorkSummaryUpdate,
   recordOwnerWorkSummaryRevisionInTransaction,
-  type ManagerWorkSummaryUpdate,
   type WorkSummaryHistory,
 } from "./work-summary-history";
 import { getWorkAssurance, type WorkAssurance } from "./work-assurance";
 import { WorkDriver } from "./work-driver";
 import { saveProjectlessWorkOutputs } from "./outputs-store.js";
-import { isDesignHanded, markDesignsHanded } from "./design-handoff-store";
 import { attachWorkToProjectInTransaction } from "./state-reducer";
 import {
-  activeAutoRecoveries, criteriaRelaxationsOfWork, autoRecoveryForManager, autoRecoveryLimit, autoRecoverySummary, autoRecoveryUsed, immediateDecisionReason,
-  recordAutoRecoveryInTransaction, startAutoRecoveryInTransaction, transientRecoveryPendingUntil,
-  transientRecoveryResumeAt, withAutoRecoveryTried,
+  activeAutoRecoveries, criteriaRelaxationsOfWork, autoRecoveryLimit, autoRecoverySummary, autoRecoveryUsed, immediateDecisionReason,
+  recordAutoRecoveryInTransaction, transientRecoveryPendingUntil,
 } from "./auto-recovery";
 import { fixPendingTaskIds } from "./fix-pending-tasks.js";
-import { finalCriteriaIndex, goalShortfallsOfWork, readTaskGoalShortfalls, recordFinalGoalShortfalls, settleFinalVerdict, type FinalCriterionRef, type SettledFinalVerdict } from "./goal-shortfalls";
+import { goalShortfallsOfWork } from "./goal-shortfalls";
 import { detectNewRepositories, type NewRepositoryCandidate } from "./new-repository-detection.js";
 import { clearPausedReviewerWait } from "./provider-pause-reviewer-wait.js";
-import { assertAgentRunNotStopped, isAgentRunStopped } from "./agent-run-stop.js";
-import { WorkflowEngine, resolveRoleModel, mergeConflictPaths, type HookSubagentInput } from "./workflow-engine";
-import { isPlanRejection, validatePlan, validateReplan, type PlannedApproach, type PlanRejection, type ReplanAction, type ReplanPlan, type ReplanSnapshot } from "./replan-plan";
-import type { PlanWaitFor, PrerequisiteCondition, PrerequisiteSpec } from "../../shared/dist/prerequisite.js";
-import { isPidAlive, isProcessGroupAlive, signalProcessGroup } from "../../shared/dist/process-group.js";
+import { WorkflowEngine, resolveRoleModel, type HookSubagentInput } from "./workflow-engine";
+import type { PrerequisiteSpec } from "@owl/shared/prerequisite";
+import { signalProcessGroup } from "@owl/shared/process-group";
 import { KnowledgeBase } from "./knowledge-base";
 import { archiveLegacyKnowledge } from "./memory/knowledge-archive.js";
 import { ChildEmbedder, loadEmbedderConfig } from "./memory/embedder.js";
@@ -110,17 +100,15 @@ import { RulePairJudge, type RuleJudgmentRunner } from "./rule-judge.js";
 import { RuleProposals,type RuleProposalStatus, type RuleProposalTidyResult } from "./rule-proposals.js";
 import { RuleWriter } from "./rule-writer.js";
 import { DEFAULT_SKILL_FEEDBACK_WEIGHTS, detectSkillReads, SkillBox, type SkillSettings, type SkillState } from "./skill-box";
-import { isValidSkillScope, validateSkillFilePath, validateSkillName } from "./skill-files";
+import { isValidSkillScope, validateSkillFilePath, validateSkillName, type SkillMdProblem } from "./skill-files";
 import { SKILL_CURATOR_DEBOUNCE_MS, SkillCurator, type SkillCurationResult } from "./skill-curator";
 import { AdvisorSessionManager } from "./advisor-session.js";
 import {
-  advisorActionFingerprint, advisorActionNeedsApproval, advisorActionTarget, buildAdvisorActionFailure, loadFollowupRetries,
-  loadSourceFailures, nextTurnOf, planFollowupActions, stableJson, type AdvisorActionFailure, type AdvisorFailureDetails, type FollowupCandidate,
+  buildAdvisorActionFailure, 
+  stableJson, type AdvisorActionFailure,
 } from "./advisor-followup.js";
-import { advisorWorkId, parseAdvisorWorkOperationPayload } from "./advisor-work-payload.js";
 import { AdvisorSessionNotFoundError, AdvisorSessionRuntime, type AdvisorSettingsSnapshot } from "./advisor-runtime.js";
 import { routeExplicitMemory } from "./memory/explicit-memory.js";
-import { slugifyKnowledgeNameOrNull } from "./knowledge-naming.js";
 import { autoWorkDbToggle, type AutoWorkSettingsValue, type AutoWorkSignal, type SessionActivity } from "@owl/shared";
 import { AutoWorkConfigLoader } from "./auto-work/config.js";
 import { AutoWorkService } from "./auto-work/service.js";
@@ -132,20 +120,12 @@ import {
 } from "./auto-work/views.js";
 import { FailureWatchTrigger, readFailureNotice, spawnAutoWorkCommand } from "./auto-work/triggers/failure-notice.js";
 import { createGhRunner, GithubTrigger } from "./auto-work/triggers/github.js";
-import { LibrarianScheduler, localDayKey, parseLibrarianTime } from "./librarian-scheduler.js";
+import { LibrarianScheduler } from "./librarian-scheduler.js";
+import { NightlyTestRunner } from "./nightly-runner.js";
 import {
-  DEFAULT_NIGHTLY_TEST_TIME,
-  NIGHTLY_TEST_SETTINGS_KEY,
   NIGHTLY_TEST_TIMEOUT_MS,
-  classifyNightlyRun,
   createNightlyTestExecutor,
-  newNightlyFailures,
-  nightlyBacklogEntries,
-  nightlyError,
-  type NightlyExecution,
   type NightlyRunSummary,
-  type NightlyTestExecutor,
-  type TestFailure,
 } from "./nightly-tests.js";
 import {
   CurationRunStore,
@@ -172,11 +152,11 @@ import {
 } from "./advisor-windows.js";
 import {
   type AdvisorWindowSettings,
-} from "../../shared/dist/advisor-window-settings.js";
-import { GENERAL_WINDOW_KEY, type AdvisorWindowChannel, type AdvisorWindowSummary } from "../../shared/dist/advisor-windows.js";
+} from "@owl/shared/advisor-window-settings";
+import { GENERAL_WINDOW_KEY, type AdvisorWindowChannel, type AdvisorWindowSummary } from "@owl/shared/advisor-windows";
 import {
   type DependencySummarySettings,
-} from "../../shared/dist/dependency-summary-settings.js";
+} from "@owl/shared/dependency-summary-settings";
 import {
   VerificationPolicySettingsValidationError,
   VERIFICATION_POLICY_SETTINGS_KEY,
@@ -184,17 +164,16 @@ import {
   readVerificationPolicySettings,
   type VerificationPolicyPatch,
   type VerificationPolicySettings,
-} from "../../shared/dist/verification-policy-settings.js";
+} from "@owl/shared/verification-policy-settings";
 import { remakeLimits } from "./remake-limits.js";
 import { fixerEscalation } from "./fixer-escalation.js";
-import { autoRecoverySettings, openCriteriaStatuses } from "./auto-recovery.js";
-import { appendRuleSection, RULE_SECTION_HEADING, toJsonResults, type CriterionCheckResult } from "./criterion-checks";
+import { autoRecoverySettings } from "./auto-recovery.js";
 import {
   type FixerEscalationSettings,
-} from "../../shared/dist/fixer-escalation-settings.js";
+} from "@owl/shared/fixer-escalation-settings";
 import {
   type AutoRecoverySettings,
-} from "../../shared/dist/auto-recovery-settings.js";
+} from "@owl/shared/auto-recovery-settings";
 import { progressGuard } from "./progress-guard.js";
 import { DecisionAnswerTriage, answerTriageTarget } from "./decision-answer-triage";
 import { DecisionExplainer, toDecisionExplanation } from "./decision-explainer";
@@ -204,27 +183,25 @@ import { learningMetrics } from "./learning-metrics-settings.js";
 import { pruneFinishedWorkData } from "./work-data-retention.js";
 import {
   type ProgressGuardSettings,
-} from "../../shared/dist/progress-guard-settings.js";
+} from "@owl/shared/progress-guard-settings";
 import { evaluateRemakeGate } from "./remake-gate.js";
-import { lineagePartialReportPayloads, lineageRootOf, lineageUsage, restartLineageBudgetInTransaction } from "./task-lineage.js";
-import { remakeLimitBrief, type RemakeLimitReason } from "./decision-brief.js";
+import { lineageUsage } from "./task-lineage.js";
 import {
   type RemakeLimitSettings,
-} from "../../shared/dist/remake-limit-settings.js";
+} from "@owl/shared/remake-limit-settings";
 import { reviewRouting, workVerification } from "./assurance-settings.js";
-import { evaluateCriteriaRelaxation, evaluatePlanQuality, formatPlanQualityReason, planQualityOutcome, repairableWarnings, type PlanQualityOutcome, type PlanQualityWarning, type PreviousOutputFeedback } from "./plan-quality.js";
 import { planQualitySettings } from "./plan-quality-settings.js";
 import { projectInvestigationOutputSettings } from "./project-investigation-settings.js";
 import {
   type PlanQualitySettings,
-} from "../../shared/dist/plan-quality-settings.js";
+} from "@owl/shared/plan-quality-settings";
 import {
   type ReviewRoutingSettings,
-} from "../../shared/dist/review-routing-settings.js";
+} from "@owl/shared/review-routing-settings";
 import { reviewMetrics, type ReviewMetrics } from "./review-metrics.js";
 import {
   type ReviewLimitSettings,
-} from "../../shared/dist/review-limit-settings.js";
+} from "@owl/shared/review-limit-settings";
 import { PlanUsageService } from "./plan-usage/service.js";
 import { PlanUsageStore } from "./plan-usage/store.js";
 import {
@@ -234,8 +211,8 @@ import {
   validatePlanUsageSettings,
   type PlanUsageSettings,
   type PlanUsageView,
-} from "../../shared/dist/plan-usage-settings.js";
-import type { PlanUsageSnapshot, PlanUsageSource } from "../../shared/dist/plan-usage.js";
+} from "@owl/shared/plan-usage-settings";
+import type { PlanUsageSnapshot, PlanUsageSource } from "@owl/shared/plan-usage";
 import {
   DEFAULT_KNOWLEDGE_AUTOMATION_SETTINGS,
   KNOWLEDGE_AUTOMATION_SETTINGS_KEY,
@@ -246,10 +223,12 @@ import {
   type KnowledgeAutomationSnapshot,
 } from "@owl/shared";
 import { CHILD_RUN_SETTINGS_KEY, HYBRID_MODE_SETTINGS_KEY } from "./types";
+import { CLAUDE_SONNET_5_5_MODEL } from "@owl/shared";
 import {
   DEFAULT_OWNER_ID,
   readSetting,
   saveSetting,
+  settingsReason,
   storedSettingJson,
   storedSettingRow,
   upsertSetting,
@@ -265,14 +244,14 @@ import { FIXER_ESCALATION_SETTING } from "./fixer-escalation.js";
 import { AUTO_RECOVERY_SAVE } from "./auto-recovery.js";
 import { PLAN_QUALITY_SETTING } from "./plan-quality-settings.js";
 import { REVIEW_ROUTING_SETTING } from "./assurance-settings.js";
-import type { AdvisorWorkspacePreparation, CriterionCheck, RuleApplicability } from "./types";
+import type { AdvisorWorkspacePreparation } from "./types";
 import { CoreActivityRegistry } from "./core-activity.js";
 import { GitWorktreeGateway } from "./git-gateway.js";
 import { clearWorkGitTemplates } from "./work-git-template.js";
 import { defaultOwlRoot, safeSegment, WorkspaceLayout } from "./workspace-layout.js";
 import { parseVerificationMarker, WorkspaceProcessSweeper, type SweepRunInfo, type WorkspaceActivity } from "./workspace-process-sweeper.js";
 import { WorkspaceTooling, runCommand } from "./workspace-tooling.js";
-import { DEFAULT_POST_MERGE_DEPENDENCY_FILES, DEFAULT_POST_MERGE_INSTALL_RULES, POST_MERGE_COMMAND_TIMEOUT_MS, PostMergeCommandQueue, postMergeResultEvent, redactArgv, type PostMergeInstallRule, type PostMergeRunOutcome, type ResolvedPostMergeCommand } from "./post-merge-command.js";
+import { PostMergeService } from "./post-merge-service.js";
 import { AgentWorkspacePreparer, withWorkspacePreparation, worktreeHarnesses } from "./agent-workspace-preparer.js";
 import { redactCredentials } from "./git-push.js";
 import { recoverOrphanedState } from "./startup-recovery.js";
@@ -280,32 +259,21 @@ import { COMPLETED_PROJECT_WORKS_SQL } from "./completed-project-works-query.js"
 import { cleanupWorkForDeletion, reconcileWorktrees, recordedWorktreeBlock, type WorktreeReconcileFailure } from "./worktree-reconciler.js";
 import { processIdentityMatches, readProcessIdentity } from "./process-identity.js";
 import { formatRuntimeFailure } from "./error-display.js";
-import { ADVISOR_TEXT, workRef } from "./advisor-text.js";
+import { ADVISOR_TEXT } from "./advisor-text.js";
 import { MAX_MESSAGE_ATTACHMENTS, MAX_UPLOAD_BYTES } from "./upload-limits.js";
 import { assertMessageAttachmentsInTransaction, messageAttachmentViews, resolveMessageAttachments, type MessageAttachmentView } from "./message-attachments.js";
-import { INSTRUCTION_REPLY_TEXT, type ReplanSummary } from "./instruction-reply-text.js";
-import { ownerGuidance } from "./owner-guidance.js";
-import { failedTaskBrief, pendingAcceptanceDefect, pendingExternalBlocker } from "./task-context.js";
-import { resolveAdvisorFileDestination, type FileDestinationChannel, type FileDestinationRefusal, type FileDestinationResult, type FileDestinationSource } from "./advisor-file-destination.js";
-import { DEFAULT_ADVISOR_SEND_FILE_MAX_BYTES, formatSendFileSize, prepareAdvisorSendFile, sendFileNotice, type AdvisorOutboundFile, type AdvisorSendFileSettings } from "./advisor-send-file.js";
-import { planContextFields } from "./context-builder.js";
+import { INSTRUCTION_REPLY_TEXT } from "./instruction-reply-text.js";
+import { resolveAdvisorFileDestination, type FileDestinationChannel } from "./advisor-file-destination.js";
+import { DEFAULT_ADVISOR_SEND_FILE_MAX_BYTES, formatSendFileSize, type AdvisorSendFileSettings } from "./advisor-send-file.js";
 import { detectProcessSkillsPack, type DetectedProcessSkillsPack } from "./process-skills-pack.js";
 import { ResearchRecorder, type ResearchAttributionRole } from "./research-recorder.js";
 import { buildTokenUsageReport, countRequestsOverThreshold, type RequestThresholdCount } from "./token-usage-report.js";
-import type { TokenUsagePeriod, TokenUsageReport } from "../../shared/dist/token-usage-report.js";
-import { RESEARCH_CAPTURE_ROLES } from "../../shared/dist/permission-args.js";
+import type { TokenUsagePeriod, TokenUsageReport } from "@owl/shared/token-usage-report";
+import { RESEARCH_CAPTURE_ROLES } from "@owl/shared/permission-args";
 import {
   ADVISOR_CALL_API_ACTION_TYPE,
-  ADVISOR_SEND_FILE_ACTION_TYPE,
-  ADVISOR_WINDOW_ACTION_TYPES,
-  validateWindowHandoffPayload,
-  ADVISOR_WORK_OPERATION_ACTION_TYPES,
-  parseAdvisorCallApiPayload,
-parseAdvisorCallApiRequestShape,
-  redactProviderOutput,
-  isAdvisorWorkOperationType,
-  type AdvisorWorkOperationType,
-} from "../../shared/dist/advisor-response.js";
+  parseAdvisorCallApiRequestShape,
+} from "@owl/shared/advisor-response";
 import {
   BACKLOG_STATUSES,
   applyAdvisorBacklogInTransaction,
@@ -315,8 +283,6 @@ import {
   issueBacklogWorkInTransaction,
   linkBacklogItemsToWorkInTransaction,
   listBacklogItems,
-  listInProgressBacklogItemsOfWork,
-  registerNightlyTestBacklogInTransaction,
   releaseWorkBacklogInTransaction,
   type BacklogListFilter,
   type BacklogListResult,
@@ -330,11 +296,8 @@ import {
 } from "./review-backlog.js";
 
 import {
-  ADVISOR_CURATION_ACTION_TYPES,
   ADVISOR_CURATION_INSTRUCTION,
-validatePrerequisiteWorkIds,
-  advisorCurationKind,
-  builtinProviderHarness,
+builtinProviderHarness,
   type ModelHarness,
   CHILD_RUN_EFFORTS,
   CHILD_RUN_PROVIDERS,
@@ -351,11 +314,9 @@ validatePrerequisiteWorkIds,
   PROJECT_LOCKING_WORK_STATES,
   designDocumentPath,
   taskReportPath,
-  isRuleRole,
   PROCESS_SKILLS_INSTALL_COMMANDS,
   PROCESS_SKILLS_PROMPT_FILES,
   PROCESS_SKILLS_SETTINGS_KEY,
-  usageJson,
   workSummaryInstruction,
   workSummaryLabel,
   WORK_SUMMARY_SECTIONS,
@@ -374,22 +335,22 @@ validatePrerequisiteWorkIds,
   type ChildWaitResponse,
 } from "@owl/shared";
 import { createProviderPauseStore, type ProviderPauseRow, type ProviderPauseStore } from "./provider-pause-store";
-import { createProviderPauseController, rethrowUnlessRateLimited, type ProviderPauseController, type ProviderPauseEvent } from "./provider-pause-controller";
+import { createProviderPauseController, type ProviderPauseController, type ProviderPauseEvent } from "./provider-pause-controller";
 // Imported from the agent-runtime "types" submodule (not the package barrel) for the
 // same reason advisor-runtime.ts does: the barrel re-exports core-contract.d.ts, which
-// imports back from "../../core/dist/types.js" and trips TS5055 mid-compile.
+// imports back core's dist/types.js and trips TS5055 mid-compile.
 import { coreTestRunBrief, workTestRunner } from "./core-test-run";
 import { TEST_SETUP_MANUAL_TRIGGER, TestSetupService } from "./test-setup-service.js";
 import { QUARANTINE_FIX_TASK_PREFIX } from "./test-quarantine";
-import { UI_CHANGE_LEVELS, type BaseMergeConflict, type ManagerTrigger, type WorkerQuestion } from "@owl/shared";
-import { stripFullTestCriteria, isFullTestCriterion, acceptanceCriteriaProblems, isManagerCriterion, parseTaskNecessity, readStoredAcceptanceCriteria, readStoredTaskPlanContext, renderAcceptanceCriteria, renderTaskNecessity, type AcceptanceCriterion, type CriteriaRelaxation, type StoredAcceptanceCriterion, type TaskPlanContext, resolveInstanceId, type AdvisorSuggestedAction, type ProcessSkillsInstallCommand, type ProviderClient } from "@owl/shared";
+import { type BaseMergeConflict, type ManagerTrigger, type WorkerQuestion } from "@owl/shared";
+import { resolveInstanceId, type AdvisorSuggestedAction, type ProcessSkillsInstallCommand, type ProviderClient } from "@owl/shared";
 import { MEMORY_LIBRARIAN_BATCH_SETTINGS_KEY, MEMORY_RECALL_LIMIT_SETTINGS_KEY, MEMORY_RECALL_MIN_SIMILARITY_SETTINGS_KEY, readMemoryLibrarianBatch, readMemoryRecallLimit, readMemoryRecallMinSimilarity, type MemoryLibrarianBatch } from "@owl/shared";
 import { EXTERNAL_DATA_POLICY, externalJsonBlock, MEMORY_ARCHIVE_SETTINGS_KEY, readMemoryArchive, REVIEW_RERUN_OPTION_KEY, TEST_SETUP_APPROVE_OPTION_KEY, TEST_SETUP_RETRY_OPTION_KEY } from "@owl/shared";
 import { approveOutsideInstalls } from "./test-environment";
 
 const isTestSetupOptionKey = (key: string | null): key is string => key === TEST_SETUP_APPROVE_OPTION_KEY || key === TEST_SETUP_RETRY_OPTION_KEY;
-import { runArgvOf, validateTestRunSettings } from "../../shared/dist/test-run-settings.js";
-import { readTestPolicy, validateTestPolicy } from "../../shared/dist/test-policy.js";
+import { runArgvOf, testRunSettingsProblems } from "@owl/shared/test-run-settings";
+import { DEFAULT_TEST_POLICY, readTestPolicy, validateTestPolicy } from "@owl/shared/test-policy";
 import { verificationPolicySettings } from "./task-verification-policy.js";
 import { resolveTestRun } from "./test-detection.js";
 import { explicitTestRunDigest, readStoredTestSetup, testSetupView } from "./test-setup.js";
@@ -397,10 +358,10 @@ import { testSetupSettings } from "./test-setup-settings.js";
 import { resolveCloneRoot } from "./clone-root";
 import { cloneBaseline, cloneUses } from "./clone-check.js";
 import { classifyInstallCommand, execInstallQuery, outsideWriteTargets, resolveInstallTarget, TestSetupRunRegistry, type InstallQuery, type TestSetupRunEntry } from "./test-setup-install-guard.js";
-import { GUARD_PATH_KEYS, GUARD_SHELL_COMMAND_KEYS, GUARD_SHELL_TOOL_NAMES, READ_ONLY_TOOL_NAMES } from "../../shared/dist/guard-inputs.js";
+import { GUARD_PATH_KEYS, GUARD_SHELL_COMMAND_KEYS, GUARD_SHELL_TOOL_NAMES, READ_ONLY_TOOL_NAMES } from "@owl/shared/guard-inputs";
 import { canonicalizePath } from "./command-analysis.js";
 import { matchesGlobWithDots } from "./glob.js";
-import { designsScreens, type UiChange } from "../../shared/dist/design-documents.js";
+import { designsScreens, type UiChange } from "@owl/shared/design-documents";
 import { screenCreationTargets, screenDesignRequiredMessage, type FsView, type ScreenPathCheck } from "./screen-path-guard.js";
 import { matchDeniedCommand, reviewerDeniedCommands, REVIEWER_TEST_COMMAND_DENIED_MESSAGE, type ReviewerTestCommandCheck } from "./reviewer-test-guard.js";
 import { createChildRunScheduler, type ChildRunScheduler } from "./child-run-scheduler.js";
@@ -417,7 +378,6 @@ import type {
   LinkableWorksData,
   TokensViewData,
   WorkViewData,
-  AgentRunResult,
   CancelAgentPayload,
   CanonicalEventFrame,
   CommandRequest,
@@ -457,13 +417,10 @@ import type {
   ProjectRunningWork,
   UpdateProjectPayload,
   RoleModelSetting,
-  RoleModelSettingInput,
   ProcessSkillsSettingsSnapshot,
   StartWorkPayload,
   TaskDetail,
   TaskListQuery,
-  TaskPlanItem,
-  TaskRow,
   TaskState,
   UpdateWorkData,
   UpdateWorkPayload,
@@ -479,7 +436,6 @@ import type {
   WorkDetail,
   WorkProgress,
   WorkListQuery,
-  WorkRow,
   WorkSummary,
   WorkflowSnapshot,
   GitGateway,
@@ -497,30 +453,6 @@ const KNOWLEDGE_WRITE_METHODS = new Set<PropertyKey>([
 
 type PushAlertKind = "work_push_failed" | "work_push_blocked_by_hook" | "work_push_skipped_no_upstream";
 
-export function advisorWorkKeyForType(type: AdvisorWorkOperationType): string {
-  switch (type) {
-    case "send_work_instruction": return "instruction";
-    case "update_work": return "update";
-    case "pause_work": return "pause";
-    case "resume_work": return "resume";
-    case "cancel_work": return "cancel";
-    case "delete_work": return "delete";
-    case "move_work_to_project": return "project";
-  }
-}
-
-export function advisorWorkTypeForKey(key: string): AdvisorWorkOperationType | null {
-  switch (key) {
-    case "instruction": return "send_work_instruction";
-    case "update": return "update_work";
-    case "pause": return "pause_work";
-    case "resume": return "resume_work";
-    case "cancel": return "cancel_work";
-    case "delete": return "delete_work";
-    case "project": return "move_work_to_project";
-    default: return null;
-  }
-}
 
 function pushAlertText(
   language: OwnerLanguage,
@@ -626,26 +558,6 @@ interface StoredIdempotencyRow {
   response_json: string;
 }
 
-interface CommandMutation<D extends JsonObject> {
-  readonly data: D;
-  readonly version: number;
-}
-
-export interface WorkDbRow {
-  id: string;
-  display_number: number | null;
-  title: string;
-  state: WorkDetail["state"];
-  state_version: number;
-  updated_at: string;
-  archived_at: string | null;
-  owner_id: string;
-  project_id: string | null;
-  summary: string;
-  size: WorkDetail["size"];
-  design_mode: "auto" | "lead";
-  plan_revision: number;
-}
 
 interface WorkDetailDbRow extends WorkDbRow {
   total_tasks: number;
@@ -765,7 +677,7 @@ interface StoredModelPresetsValue extends JsonObject {
 }
 
 /** The public Core implementation consumed by REST/WS and agent-runtime. */
-export class Core {
+export class Core implements ManagerHost {
   readonly db: CoreDatabase;
   readonly writeLane;
   private readonly designMocks: DesignMockStore;
@@ -786,13 +698,8 @@ export class Core {
   private readonly subscribers = new Set<EventHandler>();
   private workPrerequisiteTimer: ReturnType<typeof setTimeout> | null = null;
   private workPrerequisiteSweeping = false;
-  private readonly logger: Pick<Console, "warn"> = { warn: (message) => console.warn(message) };
   readonly owlRoot: string;
-  private readonly postMergeCommands: PostMergeCommandQueue;
-  private readonly postMergeInstallDefault: readonly string[];
-  private readonly postMergeInstallRules: readonly PostMergeInstallRule[];
-  private readonly postMergeDependencyFiles: readonly string[];
-  private readonly postMergeOwlRootDefault: readonly string[];
+  private readonly postMerge: PostMergeService;
   readonly dataDir: string;
   readonly workspaceLayout: WorkspaceLayout;
   private readonly knownModels: KnownModels;
@@ -840,15 +747,11 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
   private readonly pageLibrarian: PageLibrarian;
   private indexBuilder: IndexBuilder | null = null;
   private readonly librarianScheduler: LibrarianScheduler;
-  private readonly nightlyScheduler: LibrarianScheduler;
+  private readonly nightlyTests: NightlyTestRunner;
   private readonly autoWorkConfig: AutoWorkConfigLoader;
   private readonly autoWorkStore: AutoWorkStore;
   /** Automatic Work creation. The triggers hand signals to `receive`; they register their handlers on it. */
   public readonly autoWork: AutoWorkService;
-  private readonly nightlyExecutor: NightlyTestExecutor;
-  private readonly nightlyAbort = new AbortController();
-  private nightlyRun: Promise<NightlyRunSummary[]> | null = null;
-  private nightlyScheduledDay: string | null = null;
   private readonly curationRuns: CurationRunStore;
   private readonly planUsageService: PlanUsageService;
   private readonly activeCurations = new Map<CurationKind, Promise<unknown>>();
@@ -881,7 +784,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
 
   public constructor(options: CoreOptions) {
     if (!options.db || !options.agentRunner || typeof options.version !== "string" || options.version.length === 0) {
-      throw validationError("Core requires db, agentRunner, and a non-empty version.", { fields: ["db", "agentRunner", "version"] });
+      throw validationError("Core requires db, agentRunner, and a non-empty version.", { fields: ["db", "agentRunner", "version"] }, { code: "core.options_missing", values: { fields: "db, agentRunner, version" } });
     }
     this.options = options;
     // LearningPipeline and SkillCurator share the same initial debounce.
@@ -959,17 +862,11 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     this.decisions = new DecisionService(options.db);
     this.owlRoot = options.owlRoot ?? defaultOwlRoot();
     this.dataDir = options.dataDir ?? join(this.owlRoot, "data");
-    this.postMergeOwlRootDefault = options.postMergeCommand?.owlRootDefault ?? ["pnpm", "build"];
-    this.postMergeInstallDefault = options.postMergeCommand?.installDefault ?? ["pnpm", "install"];
-    this.postMergeInstallRules = options.postMergeCommand?.installRules ?? DEFAULT_POST_MERGE_INSTALL_RULES;
-    this.postMergeDependencyFiles = options.postMergeCommand?.dependencyFiles ?? DEFAULT_POST_MERGE_DEPENDENCY_FILES;
-    this.postMergeCommands = new PostMergeCommandQueue({
-      run: runCommand,
-      timeoutMs: options.postMergeCommand?.timeoutMs ?? POST_MERGE_COMMAND_TIMEOUT_MS,
-      resolve: (projectId) => this.resolvePostMergeCommand(projectId),
-      record: (outcome) => this.recordPostMergeOutcome(outcome),
-      log: (message, error) => console.warn(`[owl-core] ${message}`, error),
-    });
+    this.postMerge = new PostMergeService(
+      { db: this.db, writeLane: this.writeLane, owlRoot: this.owlRoot, isStarted: () => this.started },
+      runCommand,
+      options.postMergeCommand,
+    );
     this.workspaceLayout = options.workspacesRoot === undefined ? WorkspaceLayout.underOwlRoot(this.owlRoot) : new WorkspaceLayout(options.workspacesRoot);
     this.git = options.git ?? new GitWorktreeGateway(options.db, this.owlRoot, undefined, this.dataDir, this.workspaceLayout);
     this.knowledgeLocation = new KnowledgeLocation({
@@ -1162,7 +1059,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         resolveStatusExchangesBlock: (messageId) => this.statusExchangesBlock(messageId),
         resolveWindowHandoffBlock: (messageId) => this.windowHandoffBlock(messageId),
         onReply: (conversationId, reply, turnId, origin, suggestedActions, actionsMalformed, options) =>
-          this.persistAdvisorReply(conversationId, reply, turnId, origin, suggestedActions, actionsMalformed, options),
+          this.advisorActions.persistAdvisorReply(conversationId, reply, turnId, origin, suggestedActions, actionsMalformed, options),
         onError: (conversationId, errorMessage, turnId, origin) =>
           this.advisorActions.persistAdvisorError(conversationId, errorMessage, turnId, origin),
         onWebResearchFailed: (error, context) => {
@@ -1191,10 +1088,6 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       this.advisorRuntime = null;
     }
     this.pageLibrarian = this.createPageLibrarian();
-    this.nightlyExecutor = options.nightlyTests?.executor ?? createNightlyTestExecutor({
-      workspaceRoot: this.workspaceLayout.root,
-      timeoutMs: options.nightlyTests?.timeoutMs ?? NIGHTLY_TEST_TIMEOUT_MS,
-    });
     this.autoWorkConfig = new AutoWorkConfigLoader({
       directory: join(this.owlRoot, AUTO_WORK_RULES_DIR),
       onAlert: (kind, detail) => this.recordBackgroundFailure(kind, new Error(detail), {}),
@@ -1235,14 +1128,13 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       alert: (detail) => this.recordBackgroundFailure("auto_work_github_failed", new Error(detail), {}),
       logger: console,
     }).attachTo(this.autoWork);
-    this.nightlyScheduler = new LibrarianScheduler({
-      run: async () => {
-        // A time change after today's run must not run the tests a second time the same day.
-        const day = localDayKey(options.nightlyTests?.clock?.now() ?? new Date());
-        if (this.nightlyScheduledDay === day) return;
-        this.nightlyScheduledDay = day;
-        await this.runNightlyTests();
-      },
+    this.nightlyTests = new NightlyTestRunner({
+      db: this.db,
+      writeLane: this.writeLane,
+      executor: options.nightlyTests?.executor ?? createNightlyTestExecutor({
+        workspaceRoot: this.workspaceLayout.root,
+        timeoutMs: options.nightlyTests?.timeoutMs ?? NIGHTLY_TEST_TIMEOUT_MS,
+      }),
       clock: options.nightlyTests?.clock,
     });
     this.librarianScheduler = new LibrarianScheduler({
@@ -1697,13 +1589,13 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
 
   public listSkills(filter: { query?: string; state?: string; scope?: string; trial?: boolean } = {}) {
     if (filter.state !== undefined && !isSkillState(filter.state)) {
-      throw validationError("Skill state must be active, stale, or archived.", { field: "state" });
+      throw validationError("Skill state must be active, stale, or archived.", { field: "state" }, { code: "core.skill_state_invalid", values: { field: "state" } });
     }
     if (filter.scope !== undefined && !isValidSkillScope(filter.scope)) {
-      throw validationError("Skill scope must be global or project:<id>.", { field: "scope" });
+      throw validationError("Skill scope must be global or project:<id>.", { field: "scope" }, { code: "core.skill_scope_invalid", values: { field: "scope" } });
     }
     if (filter.query !== undefined && filter.query.length > 300) {
-      throw validationError("Skill query must contain no more than 300 characters.", { field: "q" });
+      throw validationError("Skill query must contain no more than 300 characters.", { field: "q" }, { code: "core.skill_query_too_long", values: { field: "q" } });
     }
     return this.skillBox.listSkillsForApi({
       ...(filter.query === undefined ? {} : { query: filter.query }),
@@ -1737,14 +1629,14 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
   public async readSkillFile(name: string, path: string): Promise<string> {
     this.assertSkillName(name);
     const validPath = validateSkillFilePath(path);
-    if (!validPath.ok) throw validationError(validPath.reason, { field: "path" });
+    if (!validPath.ok) throw validationError(validPath.reason, { field: "path" }, { code: validPath.code, values: { field: "path" } });
     if (!this.skillBox.getSkill(name)) throw notFound("skill", name);
     try {
       return await this.skillBox.readFile(name, path);
     } catch (error) {
       if (isNodeMissingFileError(error) || (isRecord(error) && error.code === "EISDIR")) throw notFound("skill_file", `${name}/${path}`);
       if (error instanceof Error && /symlink|symbolic[_ ]link/u.test(error.message)) {
-        throw validationError(error.message, { field: "path" });
+        throw validationError(error.message, { field: "path" }, { code: "core.skill_path_symlink", values: { field: "path" } });
       }
       throw error;
     }
@@ -1778,7 +1670,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
   public async restoreSkill(name: string, revisionId: string): Promise<{ revision_id: string; revision: number }> {
     this.assertSkillName(name);
     if (typeof revisionId !== "string" || revisionId.length === 0) {
-      throw validationError("revision_id must be a non-empty string.", { field: "revision_id" });
+      throw validationError("revision_id must be a non-empty string.", { field: "revision_id" }, { code: "core.non_empty_string_required", values: { field: "revision_id" } });
     }
     if (!this.skillBox.getSkill(name)) throw notFound("skill", name);
     const revision = this.skillBox.getRevision(revisionId);
@@ -1786,7 +1678,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       throw notFound("skill_revision", revisionId);
     }
     if (revision.snapshot_json === null) {
-      throw validationError("This revision has no stored content and cannot be restored.", { field: "revision_id" });
+      throw validationError("This revision has no stored content and cannot be restored.", { field: "revision_id" }, { code: "core.revision_not_restorable", values: { field: "revision_id" } });
     }
     try {
       return await this.skillBox.restore(name, revisionId, "user");
@@ -1797,12 +1689,12 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
 
   public async updateSkill(name: string, patch: { state?: string; scope?: string }) {
     this.assertSkillName(name);
-    if (Object.keys(patch).length === 0) throw validationError("At least one skill field must be updated.");
+    if (Object.keys(patch).length === 0) throw validationError("At least one skill field must be updated.", {}, { code: "core.skill_patch_empty", values: { field: "payload" } });
     if (patch.state !== undefined && !isSkillState(patch.state)) {
-      throw validationError("Skill state must be active, stale, or archived.", { field: "state" });
+      throw validationError("Skill state must be active, stale, or archived.", { field: "state" }, { code: "core.skill_state_invalid", values: { field: "state" } });
     }
     if (patch.scope !== undefined && !isValidSkillScope(patch.scope)) {
-      throw validationError("Skill scope must be global or project:<id>.", { field: "scope" });
+      throw validationError("Skill scope must be global or project:<id>.", { field: "scope" }, { code: "core.skill_scope_invalid", values: { field: "scope" } });
     }
     if (!this.skillBox.getSkill(name)) throw notFound("skill", name);
     try {
@@ -1817,14 +1709,14 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
 
   public listSkillProposals(status?: string) {
     if (status !== undefined && !isSkillProposalStatus(status)) {
-      throw validationError("Skill proposal status is invalid.", { field: "status" });
+      throw validationError("Skill proposal status is invalid.", { field: "status" }, { code: "core.skill_proposal_status_invalid", values: { field: "status" } });
     }
     return this.skillBox.listProposals(status as "pending" | "awaiting_approval" | "applied" | "rejected" | undefined);
   }
 
   public listRuleProposals(status?: string) {
     if (status !== undefined && !isSkillProposalStatus(status)) {
-      throw validationError("Rule proposal status is invalid.", { field: "status" });
+      throw validationError("Rule proposal status is invalid.", { field: "status" }, { code: "core.rule_proposal_status_invalid", values: { field: "status" } });
     }
     return this.ruleProposals.list(status as RuleProposalStatus | undefined);
   }
@@ -1889,9 +1781,9 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
 
   /** Switches where knowledge is stored, without a restart; Core and HTTP read the location on every call. */
   public async moveKnowledgeStorage(input: { path: string; mode?: KnowledgeMoveMode }): Promise<KnowledgeMoveResult> {
-    if (!input || typeof input.path !== "string") throw validationError("path must be a string.", { field: "path" });
+    if (!input || typeof input.path !== "string") throw validationError("path must be a string.", { field: "path" }, { code: "core.string_required", values: { field: "path" } });
     const mode = input.mode ?? "move";
-    if (mode !== "move" && mode !== "relink") throw validationError("mode must be move or relink.", { field: "mode" });
+    if (mode !== "move" && mode !== "relink") throw validationError("mode must be move or relink.", { field: "mode" }, { code: "core.knowledge_move_mode_invalid", values: { field: "mode" } });
     if (this.activeCurations.has("librarian")) {
       throw new HumanReadableError({
         code: "knowledge_storage_busy",
@@ -1958,7 +1850,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
 
   public listLearningJobs(status?: string) {
     if (status !== undefined && !["pending", "running", "done", "failed"].includes(status)) {
-      throw validationError("Learning job status is invalid.", { field: "status" });
+      throw validationError("Learning job status is invalid.", { field: "status" }, { code: "core.learning_job_status_invalid", values: { field: "status" } });
     }
     return this.learningJobs.list(status as LearningJobStatus | undefined);
   }
@@ -2071,7 +1963,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
   }
 
   private assertSkillName(name: string): void {
-    if (!validateSkillName(name)) throw validationError("Skill name is invalid.", { field: "name" });
+    if (!validateSkillName(name)) throw validationError("Skill name is invalid.", { field: "name" }, { code: "core.skill_name_invalid", values: { field: "name" } });
   }
 
   public async start(): Promise<void> {
@@ -2161,7 +2053,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     for (const work of completedProjectWorks) {
       await this.deleteMergedWorkBranches(work.id, this.worktreeCleanupFailure(work.id, startupWorktrees));
     }
-    this.recoverPostMergeCommands();
+    this.postMerge.recover();
     this.advisorKeepAliveTimer = setInterval(() => {
       void this.runAdvisorWindowTick().then(() => this.keepAdvisorResident());
     }, 60_000);
@@ -2205,7 +2097,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     for (const provider of recovery.reviewerProvidersToResume) this.workflow.resumeProvider(provider);
     this.retryWorkAfterRoleChange();
     this.librarianScheduler.start(this.readKnowledgeAutomationSettings().librarian_times);
-    this.nightlyScheduler.start([this.readNightlyTestTime()]);
+    this.nightlyTests.start();
     // A root without rules/auto-work does not have the feature: nothing is read, watched or reported.
     if (existsSync(join(this.owlRoot, "rules", "auto-work"))) {
       await this.autoWorkConfig.reload();
@@ -2518,13 +2410,13 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
 
   public async investigateProjectOverview(input: { project_id: string; dry_run?: boolean; knowledge_dir?: string }) {
     if (!input || typeof input.project_id !== "string" || !input.project_id) {
-      throw validationError("project_id must be a non-empty string.", { field: "project_id" });
+      throw validationError("project_id must be a non-empty string.", { field: "project_id" }, { code: "core.non_empty_string_required", values: { field: "project_id" } });
     }
     if (input.dry_run !== undefined && typeof input.dry_run !== "boolean") {
-      throw validationError("dry_run must be a boolean.", { field: "dry_run" });
+      throw validationError("dry_run must be a boolean.", { field: "dry_run" }, { code: "core.boolean_required", values: { field: "dry_run" } });
     }
     if (input.knowledge_dir !== undefined && (typeof input.knowledge_dir !== "string" || !isAbsolute(input.knowledge_dir))) {
-      throw validationError("knowledge_dir must be an absolute path.", { field: "knowledge_dir" });
+      throw validationError("knowledge_dir must be an absolute path.", { field: "knowledge_dir" }, { code: "core.absolute_path_required", values: { field: "knowledge_dir" } });
     }
     const project = this.db.get<ProjectOverviewInput>("SELECT id, name, canonical_path, base_branch, verification_plan_json FROM projects WHERE id = ?", input.project_id);
     if (!project) throw new HumanReadableError({ code: "not_found", message: `project ${input.project_id} was not found.`, remediation: "Verify the project id.", details: { resource: "project", id: input.project_id } });
@@ -2807,12 +2699,26 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     attempt("advisorRuntime.stopImmediately", () => this.advisorRuntime?.stopImmediately());
   }
 
+  /** Why not abort at the first failure: a failed step must not keep the later steps (dispatcher, write lane, DB close) from running. Rethrows once all steps ran. */
   public async stop(options: { force?: boolean; timeoutMs?: number } = {}): Promise<void> {
+    const failures: unknown[] = [];
+    await this.runStopSteps(options, failures);
+    if (failures.length > 0) throw new AggregateError(failures, `Core stop: ${failures.length} step(s) failed`);
+  }
+
+  private async runStopSteps(options: { force?: boolean; timeoutMs?: number }, failures: unknown[]): Promise<void> {
     const deadline = Date.now() + (options.timeoutMs ?? this.options.stopTimeoutMs ?? 10_000);
-    const step = (name: string, wait: () => unknown) => this.stopStep(name, deadline, wait);
-    this.planUsageService.stop();
-    this.postMergeCommands.stop();
-    this.providerPauseController.stop();
+    const step = async (name: string, wait: () => unknown): Promise<void> => {
+      try {
+        await this.stopStep(name, deadline, wait);
+      } catch (error) {
+        console.error(`[owl-core] stop step=${name} failed`, error);
+        failures.push(error);
+      }
+    };
+    await step("planUsageService", () => this.planUsageService.stop());
+    await step("postMerge", () => this.postMerge.stop());
+    await step("providerPauseController", () => this.providerPauseController.stop());
     const wasStarted = this.started;
     // Shutdown ends the Owl system, not the Work itself. Terminate every Owl-owned Agent process group first,
     // so a stuck wait below cannot leave children behind; durable active rows are left for startup recovery.
@@ -2843,17 +2749,16 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         clearTimeout(this.workPrerequisiteTimer);
         this.workPrerequisiteTimer = null;
       }
-      this.ruleStore.stopWatching();
+      await step("ruleStore.stopWatching", () => this.ruleStore.stopWatching());
       this.terminateOwnedProcessesImmediately();
     }
     await step("childRuns.stop", () => this.childRuns.stop());
     if (!wasStarted) {
       await step("worktreeReconciles", () => Promise.allSettled([...this.worktreeReconciles]));
     }
-    this.nightlyAbort.abort();
     // Stopping the Curator releases a curation that is waiting on its provider.
-    this.skillCurator.stop();
-    await step("nightlyScheduler", () => this.nightlyScheduler.stop());
+    await step("skillCurator", () => this.skillCurator.stop());
+    await step("nightlyTests", () => this.nightlyTests.stop());
     await step("autoWork", () => this.autoWork.stop());
     await step("autoWorkConfig", () => this.autoWorkConfig.stop());
     await step("librarianScheduler", () => this.librarianScheduler.stop());
@@ -2866,11 +2771,14 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       await step("workflow.stop", () => this.workflow.stop());
       // Ticks already in flight must finish before the DB closes; stopScheduling only stops new ones.
       await step("workDriver.stop", () => this.workDriver.stop());
-      await step("worktreeReconciles", () => Promise.allSettled([...this.worktreeReconciles, ...this.repositoryDetections.values()]));
+      await step("worktreeReconciles", () => Promise.allSettled([...this.worktreeReconciles]));
+      await step("repositoryDetections", () => Promise.allSettled([...this.repositoryDetections.values()]));
     }
     await step("learningTask", () => this.learningTask);
     await step("projectOverviews.idle", () => this.projectOverviews.idle());
-    await step("backgroundRuns", () => Promise.allSettled([...this.overviewRuns, ...this.finalReportRuns, ...this.cloneRootResolutions]));
+    await step("overviewRuns", () => Promise.allSettled([...this.overviewRuns]));
+    await step("finalReportRuns", () => Promise.allSettled([...this.finalReportRuns]));
+    await step("cloneRootResolutions", () => Promise.allSettled([...this.cloneRootResolutions]));
     if (!wasStarted) {
       await step("researchRecorder.idle", () => this.researchRecorder.idle());
       return;
@@ -2956,7 +2864,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     readonly threshold_tokens?: number; readonly models?: readonly string[]; readonly work_id?: string;
   } = {}): RequestThresholdCount {
     if (input.threshold_tokens !== undefined && (!Number.isSafeInteger(input.threshold_tokens) || input.threshold_tokens < 1)) {
-      throw validationError("threshold_tokens must be a positive integer.", { field: "threshold_tokens" });
+      throw validationError("threshold_tokens must be a positive integer.", { field: "threshold_tokens" }, { code: "core.positive_integer_required", values: { field: "threshold_tokens" } });
     }
     const settings = this.getChildRunSettings();
     const models = input.models && input.models.length > 0
@@ -3054,7 +2962,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
 
   public listBacklogItems(filter: BacklogListFilter = {}): BacklogListResult {
     if (filter.status !== undefined && !BACKLOG_STATUSES.includes(filter.status)) {
-      throw validationError("Backlog status is invalid.", { field: "status" });
+      throw validationError("Backlog status is invalid.", { field: "status" }, { code: "core.backlog_status_invalid", values: { field: "status" } });
     }
     if (filter.work_id !== undefined && !this.db.get("SELECT id FROM works WHERE id = ?", filter.work_id)) {
       throw notFound("work", filter.work_id);
@@ -3597,7 +3505,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     request: CommandRequest<{ reason: string; force?: boolean } & JsonObject>,
   ): Promise<CommandResponse<{ work_id: string; state: "cancelled"; cancel_requested: boolean; worktree_cleanup: WorktreeCleanupResult }>> {
     if (request.payload.reason.length < 1 || request.payload.reason.length > 1000) {
-      throw validationError("Cancel reason must contain between 1 and 1,000 characters.", { field: "reason" });
+      throw validationError("Cancel reason must contain between 1 and 1,000 characters.", { field: "reason" }, { code: "core.cancel_reason_length", values: { field: "reason" } });
     }
     const closedLaunchRunIds: string[] = [];
     const cancelledDecisionIds: string[] = [];
@@ -3802,7 +3710,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     workId: string,
     request: CommandRequest<JsonObject>,
   ): Promise<CommandResponse<{ work_id: string; deleted: true }>> {
-    if (!isUlidLike(workId)) throw validationError("Work id must be a canonical ULID.", { work_id: workId });
+    if (!isUlidLike(workId)) throw validationError("Work id must be a canonical ULID.", { work_id: workId }, { code: "core.ulid_required", values: { field: "work_id" } });
     const scopedKey = ["work.delete", workId, "-", "-", "-", request.idempotency_key].join(":");
     const work = this.db.get<{ state: string; archived_at: string | null; state_version: number; project_id: string | null }>(
       "SELECT state, archived_at, state_version, project_id FROM works WHERE id = ?",
@@ -4158,13 +4066,13 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
   ): Promise<CommandResponse<UpdateWorkData>> {
     const { title, summary } = request.payload;
     if (title === undefined && summary === undefined) {
-      throw validationError("Specify a new title or summary.", { field: "title" });
+      throw validationError("Specify a new title or summary.", { field: "title" }, { code: "core.work_update_empty", values: { field: "title" } });
     }
     if (title !== undefined && (typeof title !== "string" || title.trim().length < 1 || title.length > 500)) {
-      throw validationError("Work title must contain between 1 and 500 characters.", { field: "title" });
+      throw validationError("Work title must contain between 1 and 500 characters.", { field: "title" }, { code: "core.work_title_length", values: { field: "title" } });
     }
     if (summary !== undefined && (typeof summary !== "string" || summary.length > 20000)) {
-      throw validationError("Work summary cannot exceed 20,000 characters.", { field: "summary" });
+      throw validationError("Work summary cannot exceed 20,000 characters.", { field: "summary" }, { code: "core.work_summary_too_long", values: { field: "summary" } });
     }
 
     const response = await this.runConditionalWorkCommand(request, { type: "work.updated", workId }, (transaction) => {
@@ -4323,7 +4231,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     request: CommandRequest<CancelAgentPayload>,
   ): Promise<CommandResponse<{ agent_run_id: string; status: "cancel_requested" | "cancelled" }>> {
     if (request.payload.reason.length < 1 || request.payload.reason.length > 1000) {
-      throw validationError("Cancel reason must contain between 1 and 1,000 characters.", { field: "reason" });
+      throw validationError("Cancel reason must contain between 1 and 1,000 characters.", { field: "reason" }, { code: "core.cancel_reason_length", values: { field: "reason" } });
     }
     const force = request.payload.force === true;
     const response = await this.runCommand(request, {
@@ -5165,18 +5073,18 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       const hasBaseBranch = Object.prototype.hasOwnProperty.call(payload, "base_branch");
       const hasAdvisorWindow = Object.prototype.hasOwnProperty.call(payload, "advisor_window_enabled");
       if (hasAdvisorWindow && typeof payload.advisor_window_enabled !== "boolean") {
-        throw validationError(ownerLanguage(transaction) === "ja" ? "Advisorの窓を使うかはtrueかfalseで指定してください。" : "advisor_window_enabled must be true or false.", { field: "advisor_window_enabled" });
+        throw validationError(ownerLanguage(transaction) === "ja" ? "Advisorの窓を使うかはtrueかfalseで指定してください。" : "advisor_window_enabled must be true or false.", { field: "advisor_window_enabled" }, { code: "core.boolean_required", values: { field: "advisor_window_enabled" } });
       }
       const hasAutoPush = Object.prototype.hasOwnProperty.call(payload, "auto_push");
       if (hasAutoPush && typeof payload.auto_push !== "boolean") {
-        throw validationError(ownerLanguage(transaction) === "ja" ? "自動pushはtrueかfalseで指定してください。" : "auto_push must be true or false.", { field: "auto_push" });
+        throw validationError(ownerLanguage(transaction) === "ja" ? "自動pushはtrueかfalseで指定してください。" : "auto_push must be true or false.", { field: "auto_push" }, { code: "core.boolean_required", values: { field: "auto_push" } });
       }
       const hasCommitLanguage = Object.prototype.hasOwnProperty.call(payload, "commit_language");
       if (hasCommitLanguage && payload.commit_language !== null && payload.commit_language !== "ja" && payload.commit_language !== "en") {
-        throw validationError(ownerLanguage(transaction) === "ja" ? "コミットメッセージの言語はja、en、nullのいずれかで指定してください。" : "commit_language must be \"ja\", \"en\" or null.", { field: "commit_language" });
+        throw validationError(ownerLanguage(transaction) === "ja" ? "コミットメッセージの言語はja、en、nullのいずれかで指定してください。" : "commit_language must be \"ja\", \"en\" or null.", { field: "commit_language" }, { code: "core.commit_language_invalid", values: { field: "commit_language" } });
       }
       if (hasPath !== hasBaseBranch) {
-        throw validationError("canonical_path and base_branch must be provided together.", { fields: ["canonical_path", "base_branch"] });
+        throw validationError("canonical_path and base_branch must be provided together.", { fields: ["canonical_path", "base_branch"] }, { code: "core.fields_required_together", values: { fields: "canonical_path, base_branch" } });
       }
       const setupCommand = Object.prototype.hasOwnProperty.call(payload, "worktree_setup_command")
         ? validateWorktreeCommand(payload.worktree_setup_command, "worktree_setup_command", ownerLanguage(transaction))
@@ -5213,7 +5121,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         const candidate = payload.name;
         const trimmed = typeof candidate === "string" ? candidate.trim() : "";
         if (trimmed.length < 1 || trimmed.length > 200) {
-          throw validationError(ownerLanguage(transaction) === "ja" ? "Project名は1〜200文字で指定してください。" : "The Project name must be 1 to 200 characters.", { field: "name" });
+          throw validationError(ownerLanguage(transaction) === "ja" ? "Project名は1〜200文字で指定してください。" : "The Project name must be 1 to 200 characters.", { field: "name" }, { code: "core.project_name_length", values: { field: "name" } });
         }
         name = trimmed;
       }
@@ -5228,12 +5136,12 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       if (hasPath) {
         const candidate = payload.canonical_path;
         if (typeof candidate !== "string" || candidate.length < 1 || candidate.length > 4096 || !isAbsolute(candidate)) {
-          throw validationError(ownerLanguage(transaction) === "ja" ? "フォルダは絶対パスで指定してください。" : "Specify the folder as an absolute path.", { field: "canonical_path" });
+          throw validationError(ownerLanguage(transaction) === "ja" ? "フォルダは絶対パスで指定してください。" : "Specify the folder as an absolute path.", { field: "canonical_path" }, { code: "core.absolute_path_required", values: { field: "canonical_path" } });
         }
         if (candidate !== row.canonical_path) {
           const candidateBranch = payload.base_branch;
           if (typeof candidateBranch !== "string" || candidateBranch.trim().length === 0) {
-            throw validationError("Project base_branch must be a non-empty string.", { field: "base_branch" });
+            throw validationError("Project base_branch must be a non-empty string.", { field: "base_branch" }, { code: "core.non_empty_string_required", values: { field: "base_branch" } });
           }
           const existing = transaction.get<{ id: string }>(
             "SELECT id FROM projects WHERE canonical_path = ? AND id <> ?",
@@ -5362,7 +5270,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     if (!Number.isSafeInteger(confirmedWorkCount) || (confirmedWorkCount as number) < 0) {
       throw validationError(ownerLanguage(this.db) === "ja"
         ? "confirmed_work_countが不正です。0以上の整数を指定してください。"
-        : "confirmed_work_count is invalid. Specify an integer of 0 or more.", { field: "confirmed_work_count" });
+        : "confirmed_work_count is invalid. Specify an integer of 0 or more.", { field: "confirmed_work_count" }, { code: "core.confirmed_work_count_invalid", values: { field: "confirmed_work_count" } });
     }
     const project = this.db.get<{ id: string }>(
       "SELECT id FROM projects WHERE id = ?",
@@ -5544,11 +5452,11 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     if (typeof input?.enabled !== "boolean" || (input.path !== null && typeof input.path !== "string")) {
       throw validationError("Process skills settings must contain a boolean enabled value and a nullable path.", {
         field: "process_skills",
-      });
+      }, { code: "core.process_skills_settings_invalid", values: { field: "process_skills" } });
     }
     if (input.path !== null) {
       if (input.path.length === 0 || !isAbsolute(input.path)) {
-        throw validationError("The process skills path must be an absolute path.", { field: "path" });
+        throw validationError("The process skills path must be an absolute path.", { field: "path" }, { code: "core.absolute_path_required", values: { field: "path" } });
       }
       let configuredPack: DetectedProcessSkillsPack | null = null;
       let detectionError: string | null = null;
@@ -5560,7 +5468,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         configuredPack = null;
       }
       if (!configuredPack || configuredPack.source !== "setting") {
-        throw validationError("The process skills path must contain the required skill files.", { field: "path", ...(detectionError === null ? {} : { cause: detectionError }) });
+        throw validationError("The process skills path must contain the required skill files.", { field: "path", ...(detectionError === null ? {} : { cause: detectionError }) }, { code: "core.process_skills_path_incomplete", values: { field: "path" } });
       }
     }
 
@@ -5579,7 +5487,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     const warnIfUnknown = (role: string, provider: string, model: string): void => {
       const harness = builtinProviderHarness(provider);
       if (!harness) return;
-      if (harness === "claude" && model.trim() === "claude-sonnet-5-5") return;
+      if (harness === "claude" && model.trim() === CLAUDE_SONNET_5_5_MODEL) return;
       const known = this.knownModels(harness);
       if (!known || known.has(model.trim())) return;
       console.warn(
@@ -5678,9 +5586,9 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     const limit = filter.limit ?? AUTO_WORK_LIST_LIMIT;
     const offset = filter.offset ?? 0;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > AUTO_WORK_LIST_LIMIT) {
-      throw validationError(`The history limit must be an integer between 1 and ${AUTO_WORK_LIST_LIMIT}.`, { field: "limit" });
+      throw validationError(`The history limit must be an integer between 1 and ${AUTO_WORK_LIST_LIMIT}.`, { field: "limit" }, { code: "core.history_limit_invalid", values: { field: "limit", max: AUTO_WORK_LIST_LIMIT } });
     }
-    if (!Number.isSafeInteger(offset) || offset < 0) throw validationError("The history offset must be a non-negative integer.", { field: "offset" });
+    if (!Number.isSafeInteger(offset) || offset < 0) throw validationError("The history offset must be a non-negative integer.", { field: "offset" }, { code: "core.non_negative_integer_required", values: { field: "offset" } });
     // One extra row tells whether another page follows.
     const rows = this.autoWorkStore.listEvents({ ...filter, limit: limit + 1, offset });
     const page = rows.slice(0, limit);
@@ -5785,7 +5693,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     }, (transaction) => {
       const current = readModelPresets(transaction);
       assertPresetsVersion(request.expected_version, current.version);
-      if (current.presets.length >= 20) throw validationError("Model presets are limited to 20.", { field: "presets" });
+      if (current.presets.length >= 20) throw validationError("Model presets are limited to 20.", { field: "presets" }, { code: "core.model_presets_limit", values: { field: "presets", max: 20 } });
       const name = validateModelPresetName(request.payload.name, current.presets);
       const roles = validateModelSettingsRoles(request.payload.roles, this.getModelSettings().roles, this.knownModels);
       const now = utcNow();
@@ -5808,7 +5716,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       const index = current.presets.findIndex((preset) => preset.id === id);
       if (index < 0) throw notFound("model_preset", id);
       if (request.payload.name === undefined && request.payload.roles === undefined) {
-        throw validationError("Provide a name or roles to update.", { field: "payload" });
+        throw validationError("Provide a name or roles to update.", { field: "payload" }, { code: "core.model_preset_update_empty", values: { field: "payload" } });
       }
       const previous = current.presets[index]!;
       const name = request.payload.name === undefined ? previous.name : validateModelPresetName(request.payload.name, current.presets, id);
@@ -5953,9 +5861,10 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       if (!page.has_more || page.data.length === 0) break;
       cursor = page.data[page.data.length - 1].id;
     }
-    if (messages.length === 0) throw validationError("There are no new messages to summarise.", { conversation_id: conversationId });
+    if (messages.length === 0) throw validationError("There are no new messages to summarise.", { conversation_id: conversationId }, { code: "core.no_new_messages", values: { field: "conversation_id" } });
     const runner = this.options.agentRunner as { runConversationSummary?: (request: unknown) => Promise<unknown> };
     if (typeof runner.runConversationSummary !== "function") throw new Error("Conversation summary is not available.");
+    // Why not a dedicated "summarizer" role: it would add a setting and a UI entry for the same light text task the librarian model already does.
     const model = resolveRoleModel(this.db, "librarian", { anyRoleDefault: true });
     const result = await runner.runConversationSummary({
       messages: messages.map(formatConversationMessage),
@@ -6145,7 +6054,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     const position = conversationId === null ? null
       : readThroughMessageId === undefined ? latestReply(this.db, conversationId) : replyPosition(this.db, conversationId, readThroughMessageId);
     if (readThroughMessageId !== undefined && position === null) {
-      throw validationError("read_through_message_id must be an Advisor message in this window.", { field: "read_through_message_id" });
+      throw validationError("read_through_message_id must be an Advisor message in this window.", { field: "read_through_message_id" }, { code: "core.advisor_read_through_invalid", values: { field: "read_through_message_id" } });
     }
     if (position !== null) {
       await this.writeLane.write({
@@ -6305,20 +6214,20 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       payload: { kind: "message_received", schema_version: "1.0.0", provider: request.payload.provider },
     }, (transaction) => {
       const payload = request.payload;
-      if (payload.account_id.length < 1 || payload.account_id.length > 200) throw validationError("Inbound account_id is invalid.", { field: "account_id" });
-      if (payload.external_message_id.length < 1 || payload.external_message_id.length > 200) throw validationError("Inbound external_message_id is invalid.", { field: "external_message_id" });
-      if (payload.user_id.length < 1 || payload.user_id.length > 200) throw validationError("Inbound user_id is invalid.", { field: "user_id" });
-      if (payload.channel_id.length < 1 || payload.channel_id.length > 200) throw validationError("Inbound channel_id is invalid.", { field: "channel_id" });
-      if (payload.text.length > 100000) throw validationError("Inbound text is invalid.", { field: "text" });
-      if (!isRfc3339(payload.received_at)) throw validationError("Inbound received_at must be RFC3339.", { field: "received_at" });
+      if (payload.account_id.length < 1 || payload.account_id.length > 200) throw validationError("Inbound account_id is invalid.", { field: "account_id" }, { code: "core.inbound_field_invalid", values: { field: "account_id" } });
+      if (payload.external_message_id.length < 1 || payload.external_message_id.length > 200) throw validationError("Inbound external_message_id is invalid.", { field: "external_message_id" }, { code: "core.inbound_field_invalid", values: { field: "external_message_id" } });
+      if (payload.user_id.length < 1 || payload.user_id.length > 200) throw validationError("Inbound user_id is invalid.", { field: "user_id" }, { code: "core.inbound_field_invalid", values: { field: "user_id" } });
+      if (payload.channel_id.length < 1 || payload.channel_id.length > 200) throw validationError("Inbound channel_id is invalid.", { field: "channel_id" }, { code: "core.inbound_field_invalid", values: { field: "channel_id" } });
+      if (payload.text.length > 100000) throw validationError("Inbound text is invalid.", { field: "text" }, { code: "core.inbound_field_invalid", values: { field: "text" } });
+      if (!isRfc3339(payload.received_at)) throw validationError("Inbound received_at must be RFC3339.", { field: "received_at" }, { code: "core.inbound_received_at_invalid", values: { field: "received_at" } });
       if (payload.conversation_hint.dm_ref.length < 1 || payload.conversation_hint.dm_ref.length > 200) {
-        throw validationError("Inbound conversation_hint.dm_ref is invalid.", { field: "conversation_hint.dm_ref" });
+        throw validationError("Inbound conversation_hint.dm_ref is invalid.", { field: "conversation_hint.dm_ref" }, { code: "core.inbound_field_invalid", values: { field: "conversation_hint.dm_ref" } });
       }
       if (payload.conversation_hint.thread_ref !== null && payload.conversation_hint.thread_ref.length > 200) {
-        throw validationError("Inbound conversation_hint.thread_ref is invalid.", { field: "conversation_hint.thread_ref" });
+        throw validationError("Inbound conversation_hint.thread_ref is invalid.", { field: "conversation_hint.thread_ref" }, { code: "core.inbound_field_invalid", values: { field: "conversation_hint.thread_ref" } });
       }
       if (!Array.isArray(payload.attachment_ids) || payload.attachment_ids.length > MAX_MESSAGE_ATTACHMENTS || !payload.attachment_ids.every((id) => isUlidLike(id))) {
-        throw validationError(`Inbound attachment_ids must contain at most ${MAX_MESSAGE_ATTACHMENTS} ULIDs.`, { field: "attachment_ids" });
+        throw validationError(`Inbound attachment_ids must contain at most ${MAX_MESSAGE_ATTACHMENTS} ULIDs.`, { field: "attachment_ids" }, { code: "core.attachment_ids_invalid", values: { field: "attachment_ids", max: MAX_MESSAGE_ATTACHMENTS } });
       }
       ensureOwner(transaction, ownerId, utcNow());
       const account = transaction.get<{ id: string; owner_id: string; provider: string }>(
@@ -6327,7 +6236,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       );
       if (!account) throw notFound("connector_account", payload.account_id);
       if (account.owner_id !== ownerId || account.provider !== payload.provider) {
-        throw validationError("Inbound connector account does not belong to this Owner and provider.", { code: "inbound_account_provider_mismatch" });
+        throw validationError("Inbound connector account does not belong to this Owner and provider.", { code: "inbound_account_provider_mismatch" }, { code: "core.inbound_account_mismatch", values: { field: "account_id" } });
       }
 
       const existingReceipt = transaction.get<{
@@ -6450,10 +6359,10 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     externalAccountId = `${provider}:${accountId}`,
   ): Promise<string> {
     if (!/^[0-9A-HJKMNP-TV-Z]{26}$/u.test(accountId)) {
-      throw validationError("Connector account_id must be a canonical ULID.", { field: "account_id" });
+      throw validationError("Connector account_id must be a canonical ULID.", { field: "account_id" }, { code: "core.ulid_required", values: { field: "account_id" } });
     }
     if (externalAccountId.length < 1 || externalAccountId.length > 200) {
-      throw validationError("Connector external account id is invalid.", { field: "external_account_id" });
+      throw validationError("Connector external account id is invalid.", { field: "external_account_id" }, { code: "core.connector_field_invalid", values: { field: "external_account_id" } });
     }
     return this.writeLane.transact((transaction: CoreWriteLaneTransaction) => {
       ensureOwner(transaction, ownerId, utcNow());
@@ -6463,7 +6372,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       );
       if (existing) {
         if (existing.owner_id !== ownerId || existing.provider !== provider) {
-          throw validationError("Connector account is owned by another Owner or provider.", { code: "inbound_account_provider_mismatch" });
+          throw validationError("Connector account is owned by another Owner or provider.", { code: "inbound_account_provider_mismatch" }, { code: "core.connector_account_conflict", values: { field: "account_id" } });
         }
         return existing.id;
       }
@@ -6474,7 +6383,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       );
       if (conflicting) {
         if (conflicting.owner_id !== ownerId) {
-          throw validationError("Connector external account is owned by another Owner.", { code: "inbound_account_provider_mismatch" });
+          throw validationError("Connector external account is owned by another Owner.", { code: "inbound_account_provider_mismatch" }, { code: "core.connector_account_conflict", values: { field: "external_account_id" } });
         }
         return conflicting.id;
       }
@@ -6496,16 +6405,16 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     request: CommandRequest<InboundUploadRegisterPayload>,
   ): Promise<CommandResponse<InboundUploadTicket>> {
     const payload = request.payload;
-    if (!isUploadProvider(payload.provider)) throw validationError("Inbound upload provider is invalid.", { field: "provider" });
-    if (payload.account_id.length < 1 || payload.account_id.length > 200) throw validationError("Inbound upload account_id is invalid.", { field: "account_id" });
-    if (payload.external_attachment_id.length < 1 || payload.external_attachment_id.length > 200) throw validationError("Inbound upload external_attachment_id is invalid.", { field: "external_attachment_id" });
-    if (!isSafeUploadFilename(payload.filename)) throw validationError("Inbound upload filename contains a path separator or control character.", { field: "filename" });
+    if (!isUploadProvider(payload.provider)) throw validationError("Inbound upload provider is invalid.", { field: "provider" }, { code: "core.inbound_upload_field_invalid", values: { field: "provider" } });
+    if (payload.account_id.length < 1 || payload.account_id.length > 200) throw validationError("Inbound upload account_id is invalid.", { field: "account_id" }, { code: "core.inbound_upload_field_invalid", values: { field: "account_id" } });
+    if (payload.external_attachment_id.length < 1 || payload.external_attachment_id.length > 200) throw validationError("Inbound upload external_attachment_id is invalid.", { field: "external_attachment_id" }, { code: "core.inbound_upload_field_invalid", values: { field: "external_attachment_id" } });
+    if (!isSafeUploadFilename(payload.filename)) throw validationError("Inbound upload filename contains a path separator or control character.", { field: "filename" }, { code: "core.upload_filename_invalid", values: { field: "filename" } });
     if (!Number.isSafeInteger(payload.declared_bytes) || payload.declared_bytes < 0 || payload.declared_bytes > MAX_UPLOAD_BYTES) {
       throw new HumanReadableError({ code: "upload_too_large", message: "The declared upload size exceeds the allowed limit.", remediation: "Reduce the file size and register the upload again.", details: { max_bytes: MAX_UPLOAD_BYTES } });
     }
-    if (payload.sha256 !== null && !/^[0-9a-f]{64}$/u.test(payload.sha256)) throw validationError("Inbound upload sha256 must be a lowercase SHA-256 hex string.", { field: "sha256" });
+    if (payload.sha256 !== null && !/^[0-9a-f]{64}$/u.test(payload.sha256)) throw validationError("Inbound upload sha256 must be a lowercase SHA-256 hex string.", { field: "sha256" }, { code: "core.sha256_invalid", values: { field: "sha256" } });
     if ((payload.conversation_id === null) === (payload.conversation_hint === null)) {
-      throw validationError("Inbound upload requires exactly one of conversation_id or conversation_hint.", { field: "conversation_id" });
+      throw validationError("Inbound upload requires exactly one of conversation_id or conversation_hint.", { field: "conversation_id" }, { code: "core.upload_conversation_target_invalid", values: { field: "conversation_id" } });
     }
     const result = await this.runCommand(request, {
       type: "system.alert",
@@ -6514,7 +6423,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       ensureOwner(transaction, ownerId, utcNow());
       const account = transaction.get<{ id: string; owner_id: string; provider: string }>("SELECT id, owner_id, provider FROM connector_accounts WHERE id = ?", payload.account_id);
       if (!account || account.owner_id !== ownerId || account.provider !== payload.provider) {
-        throw validationError("Inbound upload account does not belong to this Owner and provider.", { code: "inbound_account_provider_mismatch" });
+        throw validationError("Inbound upload account does not belong to this Owner and provider.", { code: "inbound_account_provider_mismatch" }, { code: "core.inbound_account_mismatch", values: { field: "account_id" } });
       }
       let conversation: { id: string; work_id: string | null };
       if (payload.conversation_id !== null) {
@@ -6526,7 +6435,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         conversation = resolveInboundConversation(transaction, ownerId, payload.provider, payload.conversation_hint as ConversationHint);
       }
       if (payload.work_id !== null && (conversation.work_id !== payload.work_id || !transaction.get<{ id: string }>("SELECT id FROM works WHERE id = ? AND owner_id = ?", payload.work_id, ownerId))) {
-        throw validationError("Inbound upload work_id does not match the conversation.", { field: "work_id" });
+        throw validationError("Inbound upload work_id does not match the conversation.", { field: "work_id" }, { code: "core.upload_work_mismatch", values: { field: "work_id" } });
       }
       const existing = transaction.get<{ id: string; request_hash: string; expires_at: string; conversation_id: string }>("SELECT id, request_hash, expires_at, conversation_id FROM inbound_uploads WHERE provider = ? AND external_attachment_id = ?", payload.provider, payload.external_attachment_id);
       if (existing) {
@@ -6576,8 +6485,11 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     const content: InboundUploadBytes = "content_base64" in input
       ? { content: Buffer.from(input.content_base64, "base64"), sha256: input.sha256, mime: input.mime }
       : input;
-    if (!isUlidLike(uploadId) || !/^[0-9a-f]{64}$/u.test(content.sha256) || content.mime.length < 1 || content.mime.length > 255) {
-      throw validationError("Inbound upload content metadata is invalid.");
+    const invalidContentField = !isUlidLike(uploadId) ? "upload_id"
+      : !/^[0-9a-f]{64}$/u.test(content.sha256) ? "sha256"
+      : content.mime.length < 1 || content.mime.length > 255 ? "mime" : null;
+    if (invalidContentField !== null) {
+      throw validationError("Inbound upload content metadata is invalid.", {}, { code: "core.upload_metadata_invalid", values: { field: invalidContentField } });
     }
     if (content.content.byteLength > MAX_UPLOAD_BYTES) throw new HumanReadableError({ code: "upload_too_large", message: "The upload exceeds the allowed limit.", remediation: "Reduce the file size and retry.", details: { max_bytes: MAX_UPLOAD_BYTES } });
     const upload = this.db.get<{ id: string; account_id: string; declared_bytes: number; expires_at: string; status: string }>(
@@ -6588,7 +6500,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     if (!upload) throw notFound("upload", uploadId);
     if (Date.parse(upload.expires_at) <= Date.now()) throw invalidStateTransition("The upload ticket has expired.", { upload_id: uploadId });
     if (upload.status !== "registered") throw invalidStateTransition("The upload is not accepting content in its current state.", { upload_id: uploadId, status: upload.status });
-    if (upload.declared_bytes !== content.content.byteLength) throw validationError("Uploaded bytes do not match declared_bytes.", { declared_bytes: upload.declared_bytes, bytes: content.content.byteLength });
+    if (upload.declared_bytes !== content.content.byteLength) throw validationError("Uploaded bytes do not match declared_bytes.", { declared_bytes: upload.declared_bytes, bytes: content.content.byteLength }, { code: "core.upload_size_mismatch", values: { field: "declared_bytes", declared_bytes: upload.declared_bytes, bytes: content.content.byteLength } });
     const actualSha256 = createFileHash("sha256").update(content.content).digest("hex");
     if (actualSha256 !== content.sha256) throw new HumanReadableError({ code: "upload_checksum_mismatch", message: "The uploaded content checksum does not match the supplied Digest.", remediation: "Retry the upload with the original bytes and SHA-256 digest.", details: { upload_id: uploadId } });
     const tempPath = join(this.dataDir, "uploads", ".tmp", `${uploadId}.part`);
@@ -6629,8 +6541,11 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     request: CommandRequest<InboundUploadCompletePayload>,
   ): Promise<CommandResponse<InboundUploadCompleteResult>> {
     const payload = request.payload;
-    if (!Number.isSafeInteger(payload.bytes) || payload.bytes < 0 || !/^[0-9a-f]{64}$/u.test(payload.sha256) || payload.mime.length < 1 || payload.mime.length > 255) {
-      throw validationError("Inbound upload completion metadata is invalid.");
+    const invalidCompletionField = !Number.isSafeInteger(payload.bytes) || payload.bytes < 0 ? "bytes"
+      : !/^[0-9a-f]{64}$/u.test(payload.sha256) ? "sha256"
+      : payload.mime.length < 1 || payload.mime.length > 255 ? "mime" : null;
+    if (invalidCompletionField !== null) {
+      throw validationError("Inbound upload completion metadata is invalid.", {}, { code: "core.upload_metadata_invalid", values: { field: invalidCompletionField } });
     }
     // Resolve the upload owner before consulting the replay record. The
     // idempotency key is scoped to the upload, but it is still supplied by a
@@ -7000,7 +6915,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
   private advisorActionsInstance: AdvisorActions | null = null;
 
   /** Lazy because the Advisor runtime built in the constructor calls back into it only after construction. */
-  private get advisorActions(): AdvisorActions {
+  get advisorActions(): AdvisorActions {
     const core = this;
     return (this.advisorActionsInstance ??= new AdvisorActions({
       db: core.db,
@@ -7036,16 +6951,6 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       windowName: (w: string, g: string) => core.windowName(w, g),
       writeAdvisorCallApiEvent: (k: string, t: string, p: Record<string, unknown>) => core.writeAdvisorCallApiEvent(k, t, p),
     }));
-  }
-
-  /** Kept as a Core member because tests call it through the Core instance. */
-  private persistAdvisorReply(...args: Parameters<AdvisorActions["persistAdvisorReply"]>): ReturnType<AdvisorActions["persistAdvisorReply"]> {
-    return this.advisorActions.persistAdvisorReply(...args);
-  }
-
-  /** Kept as a Core member because tests call it through the Core instance. */
-  private dispatchAdvisorWorkActions(...args: Parameters<AdvisorActions["dispatchAdvisorWorkActions"]>): ReturnType<AdvisorActions["dispatchAdvisorWorkActions"]> {
-    return this.advisorActions.dispatchAdvisorWorkActions(...args);
   }
 
   /** Answers one user message through the persistent Advisor session; the work lives in advisor-actions.ts. */
@@ -7115,7 +7020,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       throw validationError(`Advisor provider '${provider}' is not fully configured: ${error instanceof Error ? error.message : String(error)}`, {
         role: "advisor",
         provider,
-      });
+      }, { code: "core.advisor_provider_unconfigured", values: { field: "provider", provider, detail: error instanceof Error ? error.message : String(error) } });
     }
     return {
       providerId: provider,
@@ -7136,7 +7041,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
         role: "advisor",
         provider,
         supported_harnesses: ["claude", "codex", "opencode"],
-      });
+      }, { code: "core.advisor_provider_unmapped", values: { field: "provider", provider } });
     }
     return harness;
   }
@@ -8016,7 +7921,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
                 if (workProject?.project_id !== null && workProject?.project_id !== undefined) {
                   await this.deleteMergedWorkBranches(workId, this.worktreeCleanupFailure(workId, worktrees));
                   if (mergeRecord !== undefined) await this.pushCompletedWork(workId, workProject.project_id);
-                  if (mergeRecord !== undefined) this.schedulePostMergeCommand(workId, workProject.project_id, mergeRecord);
+                  if (mergeRecord !== undefined) this.postMerge.schedule(workId, workProject.project_id, mergeRecord);
                 }
               }
             } else {
@@ -8782,97 +8687,6 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     await this.dispatcher.replayPending();
   }
 
-  /** Effective command from the DB at call time: stored value, else the owlRoot default (NULL only), else none. */
-  private resolvePostMergeCommand(projectId: string): ResolvedPostMergeCommand | null {
-    const row = this.db.get<{ canonical_path: string; post_merge_argv_json: string | null; post_merge_install_argv_json: string | null }>(
-      "SELECT canonical_path, post_merge_argv_json, post_merge_install_argv_json FROM projects WHERE id = ?", projectId,
-    );
-    if (!row) return null;
-    const stored = row.post_merge_argv_json === null ? null : parseStringArray(row.post_merge_argv_json, "post_merge_command", projectId, "Project");
-    const isDefault = stored === null && realPathOrResolve(row.canonical_path) === realPathOrResolve(this.owlRoot);
-    const argv = stored ?? (isDefault ? this.postMergeOwlRootDefault : []);
-    const installStored = row.post_merge_install_argv_json === null ? null : parseStringArray(row.post_merge_install_argv_json, "post_merge_install_command", projectId, "Project");
-    return argv.length === 0 ? null : {
-      argv, cwd: row.canonical_path, default_command: isDefault,
-      install_override: installStored, install_default: this.postMergeInstallDefault, install_rules: this.postMergeInstallRules, dependency_files: this.postMergeDependencyFiles,
-    };
-  }
-
-  private schedulePostMergeCommand(workId: string, projectId: string, mergeRecord: JsonObject): void {
-    try {
-      const base = mergeRecord.base_branch;
-      const commit = mergeRecord.new_base_commit;
-      if (!this.started || typeof base !== "string" || typeof commit !== "string") return;
-      const command = this.resolvePostMergeCommand(projectId);
-      if (command === null) return;
-      const merge = { base_branch: base, old_base_commit: typeof mergeRecord.old_base_commit === "string" ? mergeRecord.old_base_commit : null, new_base_commit: commit, merge_commit: typeof mergeRecord.merge_commit === "string" ? mergeRecord.merge_commit : null };
-      console.info(`[owl-core] Post-merge command for Work ${workId} queued: ${redactArgv(command.argv).join(" ")}`);
-      void this.recordPostMergeQueued(workId, projectId, command, merge)
-        .finally(() => this.postMergeCommands.enqueue({ project_id: projectId, work_id: workId, merge }));
-    } catch (error) {
-      console.warn(`[owl-core] Could not queue the post-merge command for Work ${workId}`, error);
-    }
-  }
-
-  private async recordPostMergeQueued(workId: string, projectId: string, command: ResolvedPostMergeCommand, merge: { base_branch: string; old_base_commit: string | null; new_base_commit: string; merge_commit: string | null }): Promise<void> {
-    try {
-      const idempotencyKey = `work-post-merge-queued:${projectId}:${merge.new_base_commit}`;
-      if (this.db.get("SELECT id FROM events WHERE idempotency_key = ?", idempotencyKey)) return;
-      await this.writeLane.write({
-        mutateState: () => null,
-        event: {
-          id: createUlid(), idempotencyKey, type: "work.post_merge_command_queued", workId,
-          payload: { work_id: workId, project_id: projectId, argv: redactArgv(command.argv), cwd: command.cwd, default_command: command.default_command, ...merge },
-        },
-        outbox: [{ provider: "websocket" }],
-      });
-    } catch (error) {
-      console.warn(`[owl-core] Could not record the queued post-merge command for Work ${workId}`, error);
-    }
-  }
-
-  private async recordPostMergeOutcome(outcome: PostMergeRunOutcome): Promise<void> {
-    const workId = outcome.job.work_id;
-    try {
-      const { type, idempotencyKey, payload } = postMergeResultEvent(outcome, ownerLanguage(this.db));
-      const stderrTail = String(payload.stderr_tail ?? "").trim();
-      const stdoutTail = String(payload.stdout_tail ?? "").trim();
-      const tail = [stderrTail && `stderr:\n${stderrTail}`, stdoutTail && `stdout:\n${stdoutTail}`].filter(Boolean).join("\n");
-      console.info(type === "system.alert"
-        ? `[owl-core] Post-merge command for Work ${workId} failed. stage=${String(payload.stage)} exit_code=${String(payload.exit_code)} timed_out=${String(payload.timed_out)}${tail ? `\n${tail}` : ""}`
-        : `[owl-core] Post-merge command for Work ${workId} succeeded.`);
-      if (!this.started || this.db.get("SELECT id FROM events WHERE idempotency_key = ?", idempotencyKey)) return;
-      await this.writeLane.write({
-        mutateState: () => null,
-        event: { id: createUlid(), idempotencyKey, type, workId, payload: payload as JsonObject },
-        outbox: [{ provider: "websocket" }],
-      });
-    } catch (error) {
-      console.warn(`[owl-core] Could not record the post-merge command result for Work ${workId}`, error);
-    }
-  }
-
-  /** Re-queues the newest queued merge per project that has no recorded result (stopped while waiting or running). */
-  private recoverPostMergeCommands(): void {
-    const seen = new Set<string>();
-    for (const row of this.db.all<{ work_id: string; payload_json: string }>(
-      "SELECT work_id, payload_json FROM events WHERE type = 'work.post_merge_command_queued' ORDER BY sequence DESC LIMIT 500",
-    )) {
-      try {
-        const p = JSON.parse(row.payload_json) as { project_id: string; base_branch: string; old_base_commit?: string | null; new_base_commit: string; merge_commit: string | null };
-        if (seen.has(p.project_id)) continue;
-        seen.add(p.project_id);
-        const done = this.db.get(
-          "SELECT id FROM events WHERE idempotency_key IN (?, ?)",
-          `work-post-merge-succeeded:${p.project_id}:${p.new_base_commit}`, `work-post-merge-failed:${p.project_id}:${p.new_base_commit}`,
-        );
-        if (!done) this.postMergeCommands.enqueue({ project_id: p.project_id, work_id: row.work_id, merge: { base_branch: p.base_branch, old_base_commit: p.old_base_commit ?? null, new_base_commit: p.new_base_commit, merge_commit: p.merge_commit } });
-      } catch (error) {
-        console.warn("[owl-core] Could not recover a queued post-merge command", error);
-      }
-    }
-  }
-
   private async pushCompletedWork(workId: string, projectId: string): Promise<void> {
     const pushBaseBranch = this.git.pushBaseBranch;
     if (!pushBaseBranch || !this.started) return;
@@ -9066,52 +8880,18 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
 
   private managerInstance: ManagerOrchestrator | null = null;
   /** Lazy because the Manager code reads Core members that exist only after construction. */
-  private get manager(): ManagerOrchestrator {
+  get manager(): ManagerOrchestrator {
     return (this.managerInstance ??= new ManagerOrchestrator(this));
   }
 
-  /** Kept as a Core member because tests call it through the Core instance. */
-  private invokeManagerPlan(...args: Parameters<ManagerOrchestrator["invokeManagerPlan"]>): ReturnType<ManagerOrchestrator["invokeManagerPlan"]> {
-    return this.manager.invokeManagerPlan(...args);
-  }
-
-  /** Kept as a Core member because tests call it through the Core instance. */
-  private checkPrerequisites(...args: Parameters<ManagerOrchestrator["checkPrerequisites"]>): ReturnType<ManagerOrchestrator["checkPrerequisites"]> {
-    return this.manager.checkPrerequisites(...args);
-  }
-
-  /** Kept as a Core member because tests call it through the Core instance. */
-  private wakePrerequisiteWaiters(...args: Parameters<ManagerOrchestrator["wakePrerequisiteWaiters"]>): ReturnType<ManagerOrchestrator["wakePrerequisiteWaiters"]> {
-    return this.manager.wakePrerequisiteWaiters(...args);
-  }
-
-  /** Kept as a Core member because tests call it through the Core instance. */
+  /**
+   * Not a test-only delegation, so it is kept: apps/server's HTTP route (requireCoreFeature) calls it
+   * as a public Core entry point. Routing via core.manager would make the server touch Core internals.
+   */
   public resumePrerequisiteWait(...args: Parameters<ManagerOrchestrator["resumePrerequisiteWait"]>): ReturnType<ManagerOrchestrator["resumePrerequisiteWait"]> {
     return this.manager.resumePrerequisiteWait(...args);
   }
 
-  /** Kept as a Core member because tests call it through the Core instance. */
-  private ownerInstructionPending(...args: Parameters<ManagerOrchestrator["ownerInstructionPending"]>): ReturnType<ManagerOrchestrator["ownerInstructionPending"]> {
-    return this.manager.ownerInstructionPending(...args);
-  }
-
-  /** Kept as a Core member because tests call it through the Core instance. */
-  private buildReplanRequest(...args: Parameters<ManagerOrchestrator["buildReplanRequest"]>): ReturnType<ManagerOrchestrator["buildReplanRequest"]> {
-    return this.manager.buildReplanRequest(...args);
-  }
-
-  /** Kept as a Core member because tests call it through the Core instance. */
-  private managerWorkContext(...args: Parameters<ManagerOrchestrator["managerWorkContext"]>): ReturnType<ManagerOrchestrator["managerWorkContext"]> {
-    return this.manager.managerWorkContext(...args);
-  }
-
-  private get prerequisiteRecheck(): ManagerOrchestrator["prerequisiteRecheck"] {
-    return this.manager.prerequisiteRecheck;
-  }
-
-  private get prerequisiteWoken(): ManagerOrchestrator["prerequisiteWoken"] {
-    return this.manager.prerequisiteWoken;
-  }
 
 
 
@@ -9307,7 +9087,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
       patch = validateVerificationPolicyPatch(input);
     } catch (error) {
       if (error instanceof VerificationPolicySettingsValidationError) {
-        throw validationError(error.message, { field: error.field });
+        throw validationError(error.message, { field: error.field }, settingsReason(error));
       }
       throw error;
     }
@@ -9454,115 +9234,17 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     return this.getKnowledgeAutomationSettings();
   }
 
-  private readNightlyTestTime(): string {
-    const json = storedSettingJson(this.db, NIGHTLY_TEST_SETTINGS_KEY);
-    try {
-      const time: unknown = json !== undefined ? (JSON.parse(json) as { time?: unknown }).time : undefined;
-      if (typeof time === "string" && parseLibrarianTime(time) !== null) return time;
-    } catch {
-      // fall through to the default
-    }
-    return DEFAULT_NIGHTLY_TEST_TIME;
+  public getNightlyTestSettings(): Promise<{ time: string; next_run_at: string | null }> {
+    return this.nightlyTests.getSettings();
   }
 
-  public async getNightlyTestSettings(): Promise<{ time: string; next_run_at: string | null }> {
-    return { time: this.readNightlyTestTime(), next_run_at: this.nightlyScheduler.nextRunAt()?.toISOString() ?? null };
-  }
-
-  public async updateNightlyTestSettings(input: { time: string }): Promise<{ time: string; next_run_at: string | null }> {
-    if (typeof input?.time !== "string" || parseLibrarianTime(input.time) === null) {
-      throw validationError("time must be HH:MM", { field: "time" });
-    }
-    const time = input.time;
-    await saveSetting(this.writeLane, NIGHTLY_TEST_SETTING, { time });
-    this.nightlyScheduler.reschedule([time]);
-    return this.getNightlyTestSettings();
+  public updateNightlyTestSettings(input: { time: string }): Promise<{ time: string; next_run_at: string | null }> {
+    return this.nightlyTests.updateSettings(input);
   }
 
   /** Runs every Project's nightly test command once and backlogs the failures that were not in the previous run. */
   public runNightlyTests(): Promise<NightlyRunSummary[]> {
-    this.nightlyRun ??= this.runNightlyTestsOnce().finally(() => {
-      this.nightlyRun = null;
-    });
-    return this.nightlyRun;
-  }
-
-  private async runNightlyTestsOnce(): Promise<NightlyRunSummary[]> {
-    const projects = this.db.all<{ id: string; name: string; canonical_path: string; base_branch: string; nightly_test_argv_json: string }>(
-      "SELECT id, name, canonical_path, base_branch, nightly_test_argv_json FROM projects WHERE nightly_test_argv_json IS NOT NULL ORDER BY name, id",
-    );
-    const summaries: NightlyRunSummary[] = [];
-    for (const row of projects) {
-      if (this.nightlyAbort.signal.aborted) break;
-      try {
-        const argv: unknown = JSON.parse(row.nightly_test_argv_json);
-        const startedAt = utcNow();
-        let execution: NightlyExecution;
-        if (!Array.isArray(argv) || argv.length === 0 || argv.some((part) => typeof part !== "string")) {
-          execution = nightlyError("nightly_test_command is not a non-empty array of strings");
-        } else {
-          try {
-            execution = await this.nightlyExecutor(
-              { id: row.id, name: row.name, canonical_path: row.canonical_path, base_branch: row.base_branch, argv: argv as string[] },
-              this.nightlyAbort.signal,
-            );
-          } catch (error) {
-            execution = nightlyError(error instanceof Error ? error.message : String(error));
-          }
-        }
-        if (this.nightlyAbort.signal.aborted) break;
-        summaries.push(await this.recordNightlyRun(row, startedAt, execution));
-      } catch (error) {
-        // Why not stop: one Project's recording failure must not block the others; its result is absent from the summary, and the error is logged.
-        console.warn(`[owl-core] Nightly test run failed for Project ${row.id}`, error);
-      }
-    }
-    return summaries;
-  }
-
-  private async recordNightlyRun(project: { id: string; name: string }, startedAt: string, execution: NightlyExecution): Promise<NightlyRunSummary> {
-    const runId = createUlid();
-    const status = classifyNightlyRun(execution);
-    const error = status === "error"
-      ? execution.error ?? (execution.exit_code === null ? "The test command did not finish" : `The test command exited with code ${execution.exit_code} without reporting a failed test`)
-      : null;
-    const result = await this.writeLane.write({
-      mutateState: (transaction) => {
-        const now = utcNow();
-        const previous = transaction.get<{ failures_json: string }>(
-          "SELECT failures_json FROM nightly_test_runs WHERE project_id = ? AND status IN ('passed', 'failed') ORDER BY rowid DESC LIMIT 1",
-          project.id,
-        );
-        const previousFailures = previous ? JSON.parse(previous.failures_json) as TestFailure[] : [];
-        const failures = status === "failed" ? execution.failures : [];
-        const added = newNightlyFailures(failures, previousFailures);
-        const ids = registerNightlyTestBacklogInTransaction(transaction, project.id, nightlyBacklogEntries(added, ownerLanguage(transaction)), now);
-        transaction.run(
-          `INSERT INTO nightly_test_runs
-             (id, project_id, status, base_commit, started_at, finished_at, exit_code, timed_out, failures_json,
-              new_failure_count, backlog_item_ids_json, error, output_tail)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          runId, project.id, status, execution.base_commit, startedAt, now, execution.exit_code, execution.timed_out ? 1 : 0,
-          JSON.stringify(failures), added.length, JSON.stringify(ids), error, execution.output_tail,
-        );
-        return { project_id: project.id, run_id: runId, status, failure_count: failures.length, new_failure_count: added.length, backlog_item_ids: ids };
-      },
-      event: {
-        idempotencyKey: `nightly-tests:${runId}`,
-        type: "system.alert",
-        payload: {
-          kind: "nightly_tests_completed",
-          schema_version: "1.0.0",
-          project_id: project.id,
-          run_id: runId,
-          status,
-          error,
-          message: `Nightly tests (${project.name}): ${status}${error ? ` - ${error}` : ""}`,
-        },
-      },
-      outbox: [{ provider: "websocket" }],
-    });
-    return result.state;
+    return this.nightlyTests.run();
   }
 
   async composeKnowledgeForWork(workId: string): Promise<string | null> {
@@ -9953,13 +9635,6 @@ const PROJECT_LOCKING_WORK_STATES_SQL = PROJECT_LOCKING_WORK_STATES.map(() => "?
 const WORKSPACE_SWEEP_INTERVAL_MS = 10 * 60_000;
 const ARTIFACT_PRUNE_INTERVAL_MS = 60 * 60_000;
 const DEFAULT_ARTIFACT_RETENTION_DAYS = 14;
-export const AGENT_STOP_WAIT_MS = 10_000;
-/** The tick resends a forced stop after this many agentStopWaitMs, and opens a Decision after twice that. */
-export const OWNER_STOP_CONFIRM_FACTOR = 3;
-export type StoppableRun = { id: string; role: string; pid: number | null; process_start_time: string | null; process_cmdline_sha256: string | null };
-
-/** Thrown inside the Manager start write when the Owner paused the Work first. */
-export const MANAGER_PAUSED_AT_START = new Error("The Work was paused before the Manager run was recorded.");
 const AGENT_STOP_POLL_MS = 100;
 const ACTIVE_AGENT_RUN_STATUSES_SQL = "'launch_pending', 'spawned', 'running', 'cancel_requested'";
 const AGENT_LIVE_STATUSES = ["launch_pending", "spawned", "running", "cancel_requested"] as const;
@@ -10025,8 +9700,6 @@ function assertProjectUnlocked(
   return impact;
 }
 
-type InstructionOutcome = "tasks_changed" | "no_change" | "decision_opened";
-
 /** A status_query answered by a connector: the Owner's message and the fixed answer; delivered turns true once an Advisor turn carried them. */
 interface StatusExchangeMetadata {
   readonly kind: "status_question" | "status_reply";
@@ -10035,34 +9708,6 @@ interface StatusExchangeMetadata {
   readonly carried_by?: string;
 }
 
-interface InstructionReplyMetadata {
-  readonly kind: "instruction_reply";
-  readonly in_reply_to: readonly string[];
-  readonly outcome: InstructionOutcome;
-  readonly plan_revision: number | null;
-}
-
-/** What a Web reply with send_file shows: where the files go and how each one fared. */
-export interface AdvisorFileDeliveryMetadata {
-  readonly kind: "advisor_file_delivery";
-  readonly destination: (FileDestinationChannel & { readonly source: FileDestinationSource }) | null;
-  readonly refusal: FileDestinationRefusal | null;
-  readonly files: readonly {
-    readonly index: number;
-    readonly name: string;
-    readonly size: number | null;
-    readonly status: "pending" | "sent" | "failed" | "unknown" | "rejected";
-    readonly code?: string;
-    readonly message?: string;
-  }[];
-  readonly notice?: string;
-}
-
-export type AdvisorFileDeliveryPlan = Pick<AdvisorFileDeliveryMetadata, "destination" | "refusal" | "files">;
-
-export type WebFileDestination = { result: FileDestinationResult; platform: string; channel: string };
-
-type MessageMetadata = InstructionReplyMetadata | AdvisorFileDeliveryMetadata;
 
 export interface InstructionStatus {
   readonly status: "queued" | "processing" | "answered";
@@ -10100,42 +9745,6 @@ export interface WorkConversation {
   readonly messages: readonly WorkConversationMessage[];
 }
 
-/** Write the Manager's reply to Owner instruction messages; call inside the transaction that settles the replan marker. */
-export function insertInstructionReply(
-  transaction: CoreWriteLaneTransaction,
-  messageIds: readonly string[],
-  outcome: InstructionOutcome,
-  planRevision: number | null,
-  body: string,
-): void {
-  if (messageIds.length === 0) return;
-  const origin = transaction.get<{ conversation_id: string; account_id: string }>(
-    "SELECT conversation_id, account_id FROM messages WHERE id = ?",
-    messageIds[0],
-  );
-  if (!origin) return;
-  const now = utcNow();
-  const metadata: InstructionReplyMetadata = { kind: "instruction_reply", in_reply_to: messageIds, outcome, plan_revision: planRevision };
-  transaction.run(
-    `INSERT INTO messages
-       (id, conversation_id, provider, account_id, source_message_id, body,
-        attachment_ids_json, received_at, created_at, metadata_json)
-     VALUES (?, ?, 'web', ?, ?, ?, '[]', ?, ?, ?)`,
-    createUlid(), origin.conversation_id, origin.account_id, `manager:${createUlid()}`, body, now, now, JSON.stringify(metadata),
-  );
-}
-
-export function parseMessageMetadata(json: string | null | undefined): MessageMetadata | null {
-  if (json == null) return null;
-  try {
-    const value = JSON.parse(json) as unknown;
-    if (isRecord(value) && value.kind === "instruction_reply" && Array.isArray(value.in_reply_to)) return value as unknown as MessageMetadata;
-    if (isRecord(value) && value.kind === "advisor_file_delivery" && Array.isArray(value.files)) return value as unknown as MessageMetadata;
-  } catch {
-    // The CHECK constraint rejects invalid JSON; anything else is treated as no metadata.
-  }
-  return null;
-}
 
 /** The Work's active web conversation and the Owner's web account, created when missing. Shared by instructions and attachment uploads so both land in one conversation. */
 function ensureWorkWebConversationInTransaction(
@@ -10176,7 +9785,7 @@ function ensureWorkWebConversationInTransaction(
 /** A message needs text or at least one attachment; whitespace-only text with files is stored as "". */
 function validateMessageContent(bodyValue: unknown, attachmentValue: unknown): { body: string; attachmentIds: string[] } {
   if (typeof bodyValue !== "string" || bodyValue.length > 100000) {
-    throw validationError("Message body must be a string of at most 100,000 characters.", { field: "body" });
+    throw validationError("Message body must be a string of at most 100,000 characters.", { field: "body" }, { code: "core.message_body_invalid", values: { field: "body" } });
   }
   if (
     !Array.isArray(attachmentValue)
@@ -10184,11 +9793,11 @@ function validateMessageContent(bodyValue: unknown, attachmentValue: unknown): {
     || !attachmentValue.every((item): item is string => typeof item === "string" && isUlidLike(item))
     || new Set(attachmentValue).size !== attachmentValue.length
   ) {
-    throw validationError(`Message attachment_ids must be at most ${MAX_MESSAGE_ATTACHMENTS} unique ULIDs.`, { field: "attachment_ids" });
+    throw validationError(`Message attachment_ids must be at most ${MAX_MESSAGE_ATTACHMENTS} unique ULIDs.`, { field: "attachment_ids" }, { code: "core.attachment_ids_invalid", values: { field: "attachment_ids", max: MAX_MESSAGE_ATTACHMENTS } });
   }
   const blank = bodyValue.trim().length === 0;
   if (blank && attachmentValue.length === 0) {
-    throw validationError("本文を入力するか、ファイルを添付してください。", { field: "body" });
+    throw validationError("本文を入力するか、ファイルを添付してください。", { field: "body" }, { code: "core.message_empty", values: { field: "body" } });
   }
   return { body: blank ? "" : bodyValue, attachmentIds: attachmentValue };
 }
@@ -10223,18 +9832,6 @@ function formatConversationMessage(message: Message): string {
   return `[${time}] ${role}:\n${message.body}`;
 }
 
-export function firstLine(value: string): string {
-  return value.trim().split(/\r?\n/u, 1)[0].trim();
-}
-
-/** Rolls back a tick-failure alert whose Work left `running` before the write. */
-export class WorkNotRunningAbort extends Error {
-  public state: string | undefined;
-  public constructor() {
-    super("The Work is no longer running.");
-    this.name = "WorkNotRunningAbort";
-  }
-}
 
 const UPLOAD_EXPIRY_MS = 60 * 60 * 1000;
 const MODEL_SETTINGS_KEY = "model_settings";
@@ -10284,16 +9881,10 @@ const KNOWLEDGE_AUTOMATION_SETTING: SettingSpec<KnowledgeAutomationSettings> = {
     }),
   },
 };
-const NIGHTLY_TEST_SETTING: SettingSaveSpec<{ time: string }, { time: string }> = {
-  key: NIGHTLY_TEST_SETTINGS_KEY,
-  validate: (value) => value,
-  event: { type: "settings.nightly_tests_updated", idempotencyPrefix: "settings-nightly-tests" },
-};
-
 /** For callers whose model type requires effort: a role saved without one is a settings error, not a value to guess. */
 function requireRoleModel(db: CoreDatabase, role: string): { model: string; provider: string; effort: string } {
   const resolved = resolveRoleModel(db, role, { anyRoleDefault: true });
-  if (!resolved?.effort) throw validationError(`No ${role} model with an effort is configured.`, { role });
+  if (!resolved?.effort) throw validationError(`No ${role} model with an effort is configured.`, { role }, { code: "core.role_model_effort_missing", values: { field: "roles", role } });
   return { ...resolved, effort: resolved.effort };
 }
 
@@ -10306,7 +9897,7 @@ function emptyModelPresets(): StoredModelPresetsValue {
 function parseModelPresetsValue(text: string): StoredModelPresetsValue {
   const parsed = parseStoredJsonObject(text, "settings", MODEL_PRESETS_KEY);
   if (!Number.isInteger(parsed.version) || Number(parsed.version) < 0 || !Array.isArray(parsed.presets)) {
-    throw validationError("Stored model presets are not shaped as expected.", { key: MODEL_PRESETS_KEY });
+    throw validationError("Stored model presets are not shaped as expected.", { key: MODEL_PRESETS_KEY }, { code: "core.stored_setting_malformed", values: { field: MODEL_PRESETS_KEY } });
   }
   // Skip entries that are not shaped like a preset so one bad entry cannot block the rest.
   // Their models are deliberately not checked: a stored preset may name a model that is gone.
@@ -10335,9 +9926,9 @@ function assertPresetsVersion(expected: number, actual: number): void {
 
 function validateModelPresetName(value: unknown, presets: readonly ModelPreset[], excludedId?: string): string {
   const name = typeof value === "string" ? value.trim() : "";
-  if (name.length < 1 || name.length > MODEL_PRESET_NAME_MAX_LENGTH) throw validationError(`Model preset name must contain 1 to ${MODEL_PRESET_NAME_MAX_LENGTH} characters.`, { field: "name" });
+  if (name.length < 1 || name.length > MODEL_PRESET_NAME_MAX_LENGTH) throw validationError(`Model preset name must contain 1 to ${MODEL_PRESET_NAME_MAX_LENGTH} characters.`, { field: "name" }, { code: "core.model_preset_name_length", values: { field: "name", max: MODEL_PRESET_NAME_MAX_LENGTH } });
   if (presets.some((preset) => preset.id !== excludedId && preset.name.toLowerCase() === name.toLowerCase())) {
-    throw validationError("A model preset with this name already exists.", { field: "name" });
+    throw validationError("A model preset with this name already exists.", { field: "name" }, { code: "core.model_preset_name_duplicate", values: { field: "name" } });
   }
   return name;
 }
@@ -10364,7 +9955,7 @@ function parseModelSettingsValue(text: string): StoredModelSettingsValue {
   const version = parsed.version;
   const roles = parsed.roles;
   if (!Number.isInteger(version) || (version as number) < 0 || !Array.isArray(roles)) {
-    throw validationError("Stored model settings are not shaped as expected.", { key: MODEL_SETTINGS_KEY });
+    throw validationError("Stored model settings are not shaped as expected.", { key: MODEL_SETTINGS_KEY }, { code: "core.stored_setting_malformed", values: { field: MODEL_SETTINGS_KEY } });
   }
   return {
     schema_version: typeof parsed.schema_version === "string" ? parsed.schema_version : MODEL_SETTINGS_SCHEMA_VERSION,
@@ -10379,33 +9970,33 @@ function validateModelSettingsRoles(
   knownModels: KnownModels,
 ): readonly RoleModelSetting[] {
   if (!Array.isArray(value) || value.length !== MODEL_SETTING_ROLES.length) {
-    throw validationError(`Model settings roles must contain exactly the ${MODEL_SETTING_ROLES.length} canonical roles.`, { field: "roles" });
+    throw validationError(`Model settings roles must contain exactly the ${MODEL_SETTING_ROLES.length} canonical roles.`, { field: "roles" }, { code: "core.model_roles_count", values: { field: "roles", count: MODEL_SETTING_ROLES.length } });
   }
   const previousByRole = new Map(previousRoles.map((entry) => [entry.role, entry]));
   const seenRoles = new Set<string>();
   return value.map((candidate, index): RoleModelSetting => {
     if (!isRecord(candidate)) {
-      throw validationError("Model settings role entries must be objects.", { field: "roles", index });
+      throw validationError("Model settings role entries must be objects.", { field: "roles", index }, { code: "core.model_role_entry_invalid", values: { field: "roles", index } });
     }
     const role = candidate.role;
     if (typeof role !== "string" || !MODEL_SETTING_ROLES.includes(role as RoleModelSetting["role"])) {
-      throw validationError("Model settings role must be one of advisor, manager, designer, lead_designer, worker, fixer, reviewer, librarian, curator.", { field: "roles", index });
+      throw validationError("Model settings role must be one of advisor, manager, designer, lead_designer, worker, fixer, reviewer, librarian, curator.", { field: "roles", index }, { code: "core.model_role_unknown", values: { field: "roles", index } });
     }
     if (seenRoles.has(role)) {
-      throw validationError(`Model settings role ${role} is duplicated.`, { field: "roles", role });
+      throw validationError(`Model settings role ${role} is duplicated.`, { field: "roles", role }, { code: "core.model_role_duplicate", values: { field: "roles", role } });
     }
     seenRoles.add(role);
     const provider = typeof candidate.provider === "string" ? candidate.provider.trim().toLowerCase() : candidate.provider;
     const model = candidate.model;
     const effort = candidate.effort;
     if (typeof provider !== "string" || provider.trim().length === 0) {
-      throw validationError("Model settings provider must be a non-empty string.", { field: "roles", role });
+      throw validationError("Model settings provider must be a non-empty string.", { field: "roles", role }, { code: "core.model_provider_required", values: { field: "roles", role } });
     }
     if (typeof model !== "string" || model.trim().length === 0) {
-      throw validationError("Model settings model must be a non-empty string.", { field: "roles", role });
+      throw validationError("Model settings model must be a non-empty string.", { field: "roles", role }, { code: "core.model_model_required", values: { field: "roles", role } });
     }
     if (typeof effort !== "string" || !MODEL_SETTING_EFFORTS.includes(effort)) {
-      throw validationError("Model settings effort must be low, medium, high, xhigh, or max.", { field: "roles", role });
+      throw validationError("Model settings effort must be low, medium, high, xhigh, or max.", { field: "roles", role }, { code: "core.model_effort_invalid", values: { field: "roles", role } });
     }
     assertKnownModel(knownModels, provider, model, { field: "roles", role });
     return {
@@ -10434,7 +10025,7 @@ function assertKnownModel(knownModels: KnownModels, provider: string, model: str
   const harness = builtinProviderHarness(provider);
   if (!harness) return;
   const known = knownModels(harness);
-  if (harness === "claude" && model.trim() === "claude-sonnet-5-5") return;
+  if (harness === "claude" && model.trim() === CLAUDE_SONNET_5_5_MODEL) return;
   if (!known || known.has(model.trim())) return;
   const list = [...known].join(", ");
   throw validationError(`Model ${model} is not available for ${provider}. Known models: ${list}.`, {
@@ -10442,16 +10033,16 @@ function assertKnownModel(knownModels: KnownModels, provider: string, model: str
     provider,
     model,
     known_models: [...known],
-  });
+  }, { code: "core.model_unavailable", values: { field: String(details.field ?? "model"), provider, model, known_models: list } });
 }
 
 function validateVerificationPlan(value: unknown): readonly VerificationCommand[] {
   if (!Array.isArray(value)) {
-    throw validationError("Project verification_plan must be an array.", { field: "verification_plan" });
+    throw validationError("Project verification_plan must be an array.", { field: "verification_plan" }, { code: "core.verification_plan_not_array", values: { field: "verification_plan" } });
   }
   return value.map((candidate, index): VerificationCommand => {
     if (!isRecord(candidate)) {
-      throw validationError("Project verification_plan entries must be objects.", { field: "verification_plan", index });
+      throw validationError("Project verification_plan entries must be objects.", { field: "verification_plan", index }, { code: "core.verification_plan_entry_not_object", values: { field: "verification_plan", index } });
     }
     const commandId = candidate.command_id;
     const argv = candidate.argv;
@@ -10473,7 +10064,7 @@ function validateVerificationPlan(value: unknown): readonly VerificationCommand[
       !Array.isArray(expectedExitCodes) || !expectedExitCodes.every((item) => Number.isInteger(item)) ||
       (executor !== "core" && executor !== "reviewer")
     ) {
-      throw validationError("Project verification_plan entry does not match the VerificationCommand contract.", { field: "verification_plan", index });
+      throw validationError("Project verification_plan entry does not match the VerificationCommand contract.", { field: "verification_plan", index }, { code: "core.verification_plan_entry_invalid", values: { field: "verification_plan", index } });
     }
     return {
       command_id: commandId,
@@ -10567,19 +10158,19 @@ function resolveInboundConversation(
 function createProjectInTransaction(transaction: CoreWriteLaneTransaction, payload: CreateProjectPayload): Project {
   const name = payload.name;
   if (typeof name !== "string" || name.trim().length < 1 || name.length > 200) {
-    throw validationError("Project name must contain between 1 and 200 characters.", { field: "name" });
+    throw validationError("Project name must contain between 1 and 200 characters.", { field: "name" }, { code: "core.project_name_length", values: { field: "name" } });
   }
   const canonicalPath = payload.canonical_path;
   if (typeof canonicalPath !== "string" || canonicalPath.trim().length < 1) {
-    throw validationError("Project canonical_path must be a non-empty string.", { field: "canonical_path" });
+    throw validationError("Project canonical_path must be a non-empty string.", { field: "canonical_path" }, { code: "core.non_empty_string_required", values: { field: "canonical_path" } });
   }
   const baseBranch = payload.base_branch;
   if (typeof baseBranch !== "string" || baseBranch.trim().length < 1) {
-    throw validationError("Project base_branch must be a non-empty string.", { field: "base_branch" });
+    throw validationError("Project base_branch must be a non-empty string.", { field: "base_branch" }, { code: "core.non_empty_string_required", values: { field: "base_branch" } });
   }
   const allowedRoots = payload.allowed_roots;
   if (!Array.isArray(allowedRoots) || !allowedRoots.every((root) => typeof root === "string" && root.length > 0)) {
-    throw validationError("Project allowed_roots must be an array of non-empty strings.", { field: "allowed_roots" });
+    throw validationError("Project allowed_roots must be an array of non-empty strings.", { field: "allowed_roots" }, { code: "core.allowed_roots_invalid", values: { field: "allowed_roots" } });
   }
   const verificationPlan = validateVerificationPlan(payload.verification_plan);
   const postMergeCommand = Object.prototype.hasOwnProperty.call(payload, "post_merge_command") && payload.post_merge_command !== null
@@ -10657,7 +10248,7 @@ function listResponse<T extends JsonObject>(requestId: string | undefined, rows:
 
 function positiveLimit(limit: number): number {
   if (!Number.isSafeInteger(limit) || limit < 1) {
-    throw validationError("View limit must be a positive integer.", { limit });
+    throw validationError("View limit must be a positive integer.", { limit }, { code: "core.positive_integer_required", values: { field: "limit" } });
   }
   return limit;
 }
@@ -10672,24 +10263,20 @@ function decodeViewCursor(cursor: string | null | undefined, size: number): read
     const parts: unknown = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
     if (Array.isArray(parts) && parts.length === size && parts.every((part) => typeof part === "string")) return parts as string[];
   } catch { /* falls through to the validation error */ }
-  throw validationError("The cursor is invalid.", { field: "cursor" });
+  throw validationError("The cursor is invalid.", { field: "cursor" }, { code: "core.cursor_invalid", values: { field: "cursor" } });
 }
 
 const MAX_LIST_LIMIT = 200;
 
 function boundLimit(limit: number): number {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_LIST_LIMIT) {
-    throw validationError("List limit must be an integer between 1 and 200.", { limit });
+    throw validationError("List limit must be an integer between 1 and 200.", { limit }, { code: "core.list_limit_invalid", values: { field: "limit" } });
   }
   return limit;
 }
 
 function hashRequest(payload: JsonObject): string {
   return createHash("sha256").update(stableJson(payload), "utf8").digest("hex");
-}
-
-function realPathOrResolve(path: string): string {
-  try { return realpathSync(path); } catch { return resolve(path); }
 }
 
 function isRegularFile(path: string): boolean {
@@ -10725,27 +10312,6 @@ function assertNoOpenDecisions(transaction: Pick<CoreDatabase, "get">, workId: s
   }
 }
 
-/**
- * True only when the recorded process is confirmed gone: the PID no longer
- * exists, or it now runs a different process (PID reuse). A live PID whose
- * identity cannot be read or was never recorded stays "not gone".
- */
-export function isRecordedProcessGone(
-  run: { process_start_time: string | null; process_cmdline_sha256: string | null },
-  pid: number,
-): boolean {
-  try {
-    process.kill(pid, 0);
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ESRCH";
-  }
-  const observed = readProcessIdentity(pid);
-  if (
-    observed.process_start_time === null || observed.process_cmdline_sha256 === null
-    || run.process_start_time === null || run.process_cmdline_sha256 === null
-  ) return false;
-  return !processIdentityMatches(run, observed);
-}
 
 function agentStopFailure(runIds: readonly string[]): WorktreeCleanupResult {
   return {
@@ -10817,14 +10383,6 @@ function parseCommandResponse<D extends JsonObject>(text: string, key: string): 
   }
 }
 
-function parseArray(text: string, field: string, id: string, resource = "Decision"): unknown[] {
-  const parsed: unknown = JSON.parse(text);
-  if (!Array.isArray(parsed)) {
-    throw validationError(`Stored ${resource} field ${field} is not an array.`, { id, field });
-  }
-  return parsed;
-}
-
 const WORKTREE_COMMAND_MAX_ARGS = 64;
 const WORKTREE_COMMAND_MAX_ARG_LENGTH = 4096;
 
@@ -10839,7 +10397,7 @@ function validateWorktreeCommand(value: unknown, field: string, language: "ja" |
       language === "ja"
         ? "コマンドは文字列の配列（先頭がコマンド名、空配列で未設定）で指定してください。"
         : "Specify the command as an array of strings (command name first; an empty array clears it).",
-      { field },
+      { field }, { code: "core.command_array_invalid", values: { field } },
     );
   }
   return value as string[];
@@ -10856,7 +10414,7 @@ function validateReportCheckCommands(value: unknown, language: "ja" | "en"): str
       language === "ja"
         ? "報告前の確認コマンドは、空でないコマンド文字列の配列（null か空配列で未設定）で指定してください。"
         : "Specify report_check_commands as an array of non-empty command strings (null or an empty array clears them).",
-      { field: "report_check_commands" },
+      { field: "report_check_commands" }, { code: "core.report_check_commands_invalid", values: { field: "report_check_commands" } },
     );
   }
   return (value as string[]).map((item) => item.trim());
@@ -10873,7 +10431,7 @@ function validateScreenPaths(value: unknown, language: "ja" | "en"): { include: 
       language === "ja"
         ? "画面ファイルのパスは {include, exclude}（worktree からの相対 glob の配列。null か include が空で未設定）で指定してください。"
         : "Specify screen_paths as {include, exclude}, arrays of glob patterns relative to the worktree (null or an empty include clears it).",
-      { field: "screen_paths" },
+      { field: "screen_paths" }, { code: "core.screen_paths_invalid", values: { field: "screen_paths" } },
     );
   };
   if (typeof value !== "object" || Array.isArray(value)) return fail();
@@ -10912,14 +10470,28 @@ function readScreenPaths(json: string | null, projectId: string): { include: str
   return null;
 }
 
+/** The reason code and values for the first broken token-relay invariant (models and provider were already checked above). */
+function tokenRelayReason(problem: { field: string; code: string }): CoreReason {
+  const { field } = problem;
+  const limits = CHILD_RUN_LIMITS;
+  switch (problem.code) {
+    case "tokens_order": return { code: "core.token_relay_tokens_order", values: { field } };
+    case "max_relays": return { code: "core.token_relay_max_relays", values: { field, min: 0, max: limits.max_relays_max } };
+    case "report_threshold": return { code: "core.token_relay_report_threshold", values: { field, min: limits.relay_tokens_min, max: limits.report_threshold_max } };
+    default: return { code: "core.token_relay_tokens_range", values: { field, min: limits.relay_tokens_min, max: limits.relay_tokens_max } };
+  }
+}
+
 /** A Project's test_run payload: null clears it; an object must pass validateTestRunSettings and its argv keys the command check. */
 function validateTestRunPayload(value: unknown, language: "ja" | "en"): JsonObject | null {
   if (value === null) return null;
-  const errors = validateTestRunSettings(value);
-  if (errors.length > 0) {
+  const problems = testRunSettingsProblems(value);
+  if (problems.length > 0) {
+    const errors = problems.map((problem) => problem.message);
     throw validationError(
       language === "ja" ? `テスト実行の設定が不正です: ${errors.join(", ")}` : `Invalid test_run settings: ${errors.join(", ")}`,
       { field: "test_run", errors },
+      { code: "core.test_run_settings_invalid", values: { field: "test_run", problems: problems.map(({ key, kind }) => ({ key, kind })) } },
     );
   }
   const settings = value as JsonObject;
@@ -10927,6 +10499,12 @@ function validateTestRunPayload(value: unknown, language: "ja" | "en"): JsonObje
     if (Object.prototype.hasOwnProperty.call(settings, key)) validateWorktreeCommand(settings[key], `test_run.${key}`, language, true);
   }
   return settings;
+}
+
+/** validateTestPolicy returns key names: "test_policy" for a non-object, a known key for a bad value, any other key is unknown. */
+function testPolicyProblemKind(key: string): "not_object" | "unknown_key" | "invalid" {
+  if (key === "test_policy") return "not_object";
+  return Object.hasOwn(DEFAULT_TEST_POLICY, key) ? "invalid" : "unknown_key";
 }
 
 /** A Project's test_policy payload: null clears it; an object must pass validateTestPolicy. */
@@ -10937,81 +10515,12 @@ function validateTestPolicyPayload(value: unknown, language: "ja" | "en"): JsonO
     throw validationError(
       language === "ja" ? `テスト方針の設定が不正です: ${errors.join(", ")}` : `Invalid test_policy settings: ${errors.join(", ")}`,
       { field: "test_policy", errors },
+      { code: "core.test_policy_settings_invalid", values: { field: "test_policy", problems: errors.map((key) => ({ key, kind: testPolicyProblemKind(key) })) } },
     );
   }
   return value as JsonObject;
 }
 
-export function parseStringArray(text: string, field: string, id: string, resource = "Decision"): string[] {
-  const parsed = parseArray(text, field, id, resource);
-  if (!parsed.every((value): value is string => typeof value === "string")) {
-    throw validationError(`Stored ${resource} field ${field} contains a non-string value.`, { id, field });
-  }
-  return parsed;
-}
-
-export function parseStoredJsonObject(text: string, field: string, id: string): JsonObject {
-  const parsed: unknown = JSON.parse(text);
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw validationError(`Stored ${field} ${id} is not an object.`, { field, id });
-  }
-  return parsed as JsonObject;
-}
-
-export function addManagerRules(request: unknown, rulesText: string | null, skillsText: string | null, knowledgeText: string | null): unknown {
-  if (!isRecord(request)) return request;
-  const enriched: JsonObject = { ...request };
-  enriched.context = {
-    ...(isRecord(request.context) ? request.context : {}),
-    rules: rulesText,
-    skills: skillsText,
-    knowledge: knowledgeText,
-  };
-  return enriched;
-}
-
-export function extractManagerWorkRules(value: unknown): string[] | null {
-  if (!isRecord(value)) return null;
-  const candidates: unknown[] = [value.work_rules];
-  if (isRecord(value.report)) candidates.push(value.report.work_rules);
-  for (const candidate of candidates) {
-    if (!Array.isArray(candidate)) continue;
-    const rules = candidate.filter((rule): rule is string => typeof rule === "string");
-    if (rules.length === candidate.length) return rules;
-  }
-  return null;
-}
-
-export function extractManagerRequestIds(request: unknown, operation: string): { workId: string; taskId: string | null } {
-  if (!request || typeof request !== "object" || Array.isArray(request)) {
-    throw validationError(`The ${operation} request is not a valid object.`, { operation });
-  }
-  const record = request as Record<string, unknown>;
-  const workId = record.work_id;
-  if (typeof workId !== "string" || workId.length === 0) {
-    throw validationError(`The ${operation} request is missing work_id.`, { operation });
-  }
-  const taskIdRaw = record.task_id;
-  if (taskIdRaw !== null && typeof taskIdRaw !== "undefined" && typeof taskIdRaw !== "string") {
-    throw validationError(`The ${operation} request has an invalid task_id.`, { operation });
-  }
-  const taskId = typeof taskIdRaw === "string" ? taskIdRaw : null;
-  return { workId, taskId };
-}
-
-export function humanizeUnexpected(error: unknown, operation: string): HumanReadableError {
-  if (isCodedError(error)) {
-    return error as HumanReadableError;
-  }
-  // Raw exception text belongs in the runtime log; the public surface remains actionable.
-  console.error(`[owl-core] ${operation} failed`, error);
-  return new HumanReadableError({
-    code: "core_write_failed",
-    message: formatRuntimeFailure(error, operation),
-    remediation: "Inspect the Core log, correct the reported cause, and retry the command.",
-    details: { operation },
-  });
-}
 
 const LEGACY_EXECUTOR_PROVIDERS: Readonly<Record<string, "claude" | "codex">> = {
   claude: "claude",
@@ -11065,24 +10574,24 @@ function recoverGroup<T>(lenient: boolean, group: string, fallback: T, parse: ()
 function parseHarnessChoice(harness: ChildRunProvider, raw: unknown, knownModels: KnownModels): ChildRunHarnessChoice {
   const field = `executor_by_harness.${harness}`;
   const standard = DEFAULT_CHILD_RUN_SETTINGS.executor_by_harness[harness];
-  if (raw !== undefined && !isRecord(raw)) throw validationError("Each Executor harness needs a model and effort.", { field });
+  if (raw !== undefined && !isRecord(raw)) throw validationError("Each Executor harness needs a model and effort.", { field }, { code: "core.executor_harness_entry_invalid", values: { field } });
   const merged = { ...standard, ...Object.fromEntries(Object.entries(raw ?? {}).filter(([, item]) => item !== undefined)) };
   let model: string | null = null;
   if (merged.model !== null) {
     model = typeof merged.model === "string" ? merged.model.trim() : "";
     if (model.length === 0 || model.length > 200) {
-      throw validationError("The Executor model must be a non-empty string of at most 200 characters.", { field: `${field}.model` });
+      throw validationError("The Executor model must be a non-empty string of at most 200 characters.", { field: `${field}.model` }, { code: "core.executor_model_length", values: { field: `${field}.model` } });
     }
     if (harness === "opencode" && !splitOpencodeModel(model)) {
-      throw validationError("An opencode model must look like providerID/modelID.", { field: `${field}.model` });
+      throw validationError("An opencode model must look like providerID/modelID.", { field: `${field}.model` }, { code: "core.opencode_model_format", values: { field: `${field}.model` } });
     }
     assertKnownModel(knownModels, harness, model, { field: `${field}.model` });
   } else if (harness !== "opencode") {
-    throw validationError("The claude and codex Executor models cannot be null.", { field: `${field}.model` });
+    throw validationError("The claude and codex Executor models cannot be null.", { field: `${field}.model` }, { code: "core.executor_model_null", values: { field: `${field}.model` } });
   }
   const effort = merged.effort;
   if (effort !== null && (typeof effort !== "string" || !CHILD_RUN_EFFORT_SET.has(effort))) {
-    throw validationError("The Executor effort must be null or a supported effort.", { field: `${field}.effort` });
+    throw validationError("The Executor effort must be null or a supported effort.", { field: `${field}.effort` }, { code: "core.executor_effort_invalid", values: { field: `${field}.effort` } });
   }
   return { model, effort: effort as ChildRunEffort | null };
 }
@@ -11096,13 +10605,13 @@ function parseExecutorChoices(
   const rawHarness = value.executor_harness ?? standard.executor_harness;
   const harness = recoverGroup(lenient, "executor_harness", standard.executor_harness, () => {
     if (typeof rawHarness !== "string" || !(CHILD_RUN_PROVIDERS as readonly string[]).includes(rawHarness)) {
-      throw validationError("executor_harness must be claude, codex or opencode.", { field: "executor_harness" });
+      throw validationError("executor_harness must be claude, codex or opencode.", { field: "executor_harness" }, { code: "core.executor_harness_invalid", values: { field: "executor_harness" } });
     }
     return rawHarness as ChildRunProvider;
   });
   const rawRows = recoverGroup<JsonObject>(lenient, "executor_by_harness", {}, () => {
     if (value.executor_by_harness !== undefined && !isRecord(value.executor_by_harness)) {
-      throw validationError("executor_by_harness must be an object.", { field: "executor_by_harness" });
+      throw validationError("executor_by_harness must be an object.", { field: "executor_by_harness" }, { code: "core.object_required", values: { field: "executor_by_harness" } });
     }
     return (value.executor_by_harness ?? {}) as JsonObject;
   });
@@ -11111,7 +10620,7 @@ function parseExecutorChoices(
     recoverGroup(lenient, `executor_by_harness.${name}`, standard.executor_by_harness[name], () => parseHarnessChoice(name, rawRows[name], knownModels)),
   ])) as Record<ChildRunProvider, ChildRunHarnessChoice>;
   if (!lenient && rows[harness].model === null) {
-    throw validationError(`Choose a model for the ${harness} Executor.`, { field: `executor_by_harness.${harness}.model` });
+    throw validationError(`Choose a model for the ${harness} Executor.`, { field: `executor_by_harness.${harness}.model` }, { code: "core.executor_model_required", values: { field: `executor_by_harness.${harness}.model`, harness } });
   }
   return { executor_harness: harness, executor_by_harness: rows };
 }
@@ -11121,7 +10630,7 @@ function parseChildRunLimits(value: JsonObject): Pick<ChildRunSettings, "timeout
   const integer = (field: string, minimum: number, maximum: number): number => {
     const item = settings[field];
     if (typeof item !== "number" || !Number.isSafeInteger(item) || item < minimum || item > maximum) {
-      throw validationError(`${field} must be an integer from ${minimum} to ${maximum}.`, { field });
+      throw validationError(`${field} must be an integer from ${minimum} to ${maximum}.`, { field }, { code: "core.integer_range", values: { field, min: minimum, max: maximum } });
     }
     return item;
   };
@@ -11144,7 +10653,7 @@ function parseChildRunSettings(value: JsonObject, knownModels: KnownModels, leni
 }
 
 function normalizeChildRunSettings(value: unknown, knownModels: KnownModels): ChildRunSettings {
-  if (!isRecord(value)) throw validationError("Child-agent settings must be an object.", { field: "child_run_settings" });
+  if (!isRecord(value)) throw validationError("Child-agent settings must be an object.", { field: "child_run_settings" }, { code: "core.object_required", values: { field: "child_run_settings" } });
   return parseChildRunSettings(upgradeChildRunSettings(value), knownModels, false);
 }
 
@@ -11158,28 +10667,28 @@ function loadChildRunSettings(value: unknown): ChildRunSettings {
 
 /** Merge a possibly partial stored value over the defaults so settings saved before these keys existed still load. */
 function normalizeTokenRelaySettings(value: unknown, knownModels: KnownModels): ChildRunSettings["token_relay"] {
-  if (value !== undefined && !isRecord(value)) throw validationError("Token relay settings must be an object.", { field: "token_relay" });
+  if (value !== undefined && !isRecord(value)) throw validationError("Token relay settings must be an object.", { field: "token_relay" }, { code: "core.object_required", values: { field: "token_relay" } });
   const merged = { ...DEFAULT_CHILD_RUN_SETTINGS.token_relay, ...(value ?? {}) };
   const rawModels: unknown = merged.models;
   if (!Array.isArray(rawModels) || rawModels.length > CHILD_RUN_LIMITS.relay_models_max) {
-    throw validationError(`Token relay models must contain 0 to ${CHILD_RUN_LIMITS.relay_models_max} provider/model objects.`, { field: "token_relay.models" });
+    throw validationError(`Token relay models must contain 0 to ${CHILD_RUN_LIMITS.relay_models_max} provider/model objects.`, { field: "token_relay.models" }, { code: "core.token_relay_models_count", values: { field: "token_relay.models", max: CHILD_RUN_LIMITS.relay_models_max } });
   }
   const models: { provider: "claude"; model: string }[] = [];
   rawModels.forEach((choice: unknown, index) => {
     if (!isRecord(choice) || typeof choice.model !== "string" || choice.model.trim().length === 0) {
-      throw validationError("Token relay models must be provider/model objects.", { field: "token_relay.models", index });
+      throw validationError("Token relay models must be provider/model objects.", { field: "token_relay.models", index }, { code: "core.token_relay_model_invalid", values: { field: "token_relay.models", index } });
     }
-    if (choice.provider !== "claude") throw validationError("Token relay supports only Claude children.", { field: "token_relay.models", index });
+    if (choice.provider !== "claude") throw validationError("Token relay supports only Claude children.", { field: "token_relay.models", index }, { code: "core.token_relay_provider_unsupported", values: { field: "token_relay.models", index } });
     const model = choice.model.trim();
     if (models.some((candidate) => candidate.model === model)) {
-      throw validationError("Token relay models cannot contain duplicates.", { field: "token_relay.models", index });
+      throw validationError("Token relay models cannot contain duplicates.", { field: "token_relay.models", index }, { code: "core.token_relay_model_duplicate", values: { field: "token_relay.models", index } });
     }
     assertKnownModel(knownModels, "claude", model, { field: "token_relay.models", index });
     models.push({ provider: "claude", model });
   });
   const settings = { ...merged, models } as ChildRunSettings["token_relay"];
   const problem = tokenRelaySettingsProblem(settings);
-  if (problem) throw validationError(problem.message, { field: problem.field });
+  if (problem) throw validationError(problem.message, { field: problem.field }, tokenRelayReason(problem));
   return {
     models,
     handoff_tokens: settings.handoff_tokens,
@@ -11189,15 +10698,6 @@ function normalizeTokenRelaySettings(value: unknown, knownModels: KnownModels): 
   };
 }
 
-/** What one action returned: the Owner-facing notice, plus a failure record when it did not run. */
-export interface AdvisorActionOutcome {
-  readonly notice: string;
-  readonly failure?: AdvisorActionFailure;
-}
-
-export function callApiHash(method: string, path: string, body: unknown): string {
-  return createHash("sha256").update(stableJson({ method, path, body: body ?? null }), "utf8").digest("hex").slice(0, 16);
-}
 
 /** The same request_hash runAdvisorCallApi records; null when the payload is not a readable request. */
 function callApiRequestHash(payload: unknown): string | null {
@@ -11209,22 +10709,22 @@ function callApiRequestHash(payload: unknown): string | null {
 const RESEARCH_MODEL_PATTERN = /^[A-Za-z0-9._:/-]+$/;
 
 function normalizeResearchSubagentSettings(value: unknown, knownModels: KnownModels): ChildRunSettings["research_subagent"] {
-  if (value !== undefined && !isRecord(value)) throw validationError("Researcher settings must be an object.", { field: "research_subagent" });
+  if (value !== undefined && !isRecord(value)) throw validationError("Researcher settings must be an object.", { field: "research_subagent" }, { code: "core.object_required", values: { field: "research_subagent" } });
   const raw = value ?? {};
   const defaults = DEFAULT_CHILD_RUN_SETTINGS.research_subagent;
   const choice = (harness: "claude" | "codex"): ChildRunSettings["research_subagent"]["claude"] => {
     const field = `research_subagent.${harness}`;
     const rawChoice = raw[harness];
-    if (rawChoice !== undefined && !isRecord(rawChoice)) throw validationError("Researcher settings must be an object.", { field });
+    if (rawChoice !== undefined && !isRecord(rawChoice)) throw validationError("Researcher settings must be an object.", { field }, { code: "core.object_required", values: { field } });
     const merged = { ...defaults[harness], ...(rawChoice ?? {}) };
     const model = typeof merged.model === "string" ? merged.model.trim() : "";
     if (model.length === 0 || model.length > 200 || !RESEARCH_MODEL_PATTERN.test(model)) {
-      throw validationError("Researcher models must be non-empty model names.", { field: `${field}.model` });
+      throw validationError("Researcher models must be non-empty model names.", { field: `${field}.model` }, { code: "core.researcher_model_invalid", values: { field: `${field}.model` } });
     }
     assertKnownModel(knownModels, harness, model, { field: `${field}.model` });
     const turns = merged.max_turns;
     if (typeof turns !== "number" || !Number.isSafeInteger(turns) || turns < CHILD_RUN_LIMITS.research_turns_min || turns > CHILD_RUN_LIMITS.research_turns_max) {
-      throw validationError(`Researcher turn limits must be integers from ${CHILD_RUN_LIMITS.research_turns_min} to ${CHILD_RUN_LIMITS.research_turns_max}.`, { field: `${field}.max_turns` });
+      throw validationError(`Researcher turn limits must be integers from ${CHILD_RUN_LIMITS.research_turns_min} to ${CHILD_RUN_LIMITS.research_turns_max}.`, { field: `${field}.max_turns` }, { code: "core.researcher_turns_range", values: { field: `${field}.max_turns`, min: CHILD_RUN_LIMITS.research_turns_min, max: CHILD_RUN_LIMITS.research_turns_max } });
     }
     return { model, max_turns: turns };
   };
@@ -11233,19 +10733,12 @@ function normalizeResearchSubagentSettings(value: unknown, knownModels: KnownMod
     || answerMaxChars < CHILD_RUN_LIMITS.research_answer_chars_min || answerMaxChars > CHILD_RUN_LIMITS.research_answer_chars_max) {
     throw validationError(
       `The researcher answer limit must be an integer from ${CHILD_RUN_LIMITS.research_answer_chars_min} to ${CHILD_RUN_LIMITS.research_answer_chars_max}.`,
-      { field: "research_subagent.answer_max_chars" },
+      { field: "research_subagent.answer_max_chars" }, { code: "core.researcher_answer_range", values: { field: "research_subagent.answer_max_chars", min: CHILD_RUN_LIMITS.research_answer_chars_min, max: CHILD_RUN_LIMITS.research_answer_chars_max } },
     );
   }
   return { claude: choice("claude"), codex: choice("codex"), answer_max_chars: answerMaxChars };
 }
 
-export function isRecord(value: unknown): value is JsonObject {
-  return Boolean(value && typeof value === "object" && !Array.isArray(value));
-}
-
-export function isRateLimitedAgentRunResult(value: unknown): value is AgentRunResult {
-  return isRecord(value) && value.failure_class === "rate_limited";
-}
 
 function skillFileSizes(files: Record<string, string>): Record<string, number> {
   return Object.fromEntries(Object.entries(files).map(([path, content]) => [path, Buffer.byteLength(content, "utf8")]));
@@ -11261,34 +10754,34 @@ function isSkillProposalStatus(value: string): value is "pending" | "awaiting_ap
 
 function validateSkillSettings(value: unknown): SkillSettings {
   const fields = ["mode", "confidence_threshold", "stale_days", "archived_days", "max_items", "max_characters"] as const;
-  if (!isRecord(value)) throw validationError("Skill settings must be an object.", { field: "settings" });
+  if (!isRecord(value)) throw validationError("Skill settings must be an object.", { field: "settings" }, { code: "core.object_required", values: { field: "settings" } });
   const missing = fields.filter((field) => !Object.prototype.hasOwnProperty.call(value, field));
   const extra = Object.keys(value).filter((field) => field !== "feedback_weights" && field !== "trial_unused_days" && !fields.includes(field as typeof fields[number]));
   if (missing.length > 0 || extra.length > 0) {
-    throw validationError("Skill settings fields do not match the supported settings.", { missing, extra });
+    throw validationError("Skill settings fields do not match the supported settings.", { missing, extra }, { code: "core.skill_settings_fields_mismatch", values: { field: "settings", missing: missing.join(", "), extra: extra.join(", ") } });
   }
   if (value.mode !== "autonomous" && value.mode !== "conservative") {
-    throw validationError("Skill settings mode must be autonomous or conservative.", { field: "mode" });
+    throw validationError("Skill settings mode must be autonomous or conservative.", { field: "mode" }, { code: "core.skill_settings_mode_invalid", values: { field: "mode" } });
   }
   if (typeof value.confidence_threshold !== "number" || !Number.isFinite(value.confidence_threshold) || value.confidence_threshold < 0 || value.confidence_threshold > 1) {
-    throw validationError("confidence_threshold must be between 0 and 1.", { field: "confidence_threshold" });
+    throw validationError("confidence_threshold must be between 0 and 1.", { field: "confidence_threshold" }, { code: "core.confidence_threshold_range", values: { field: "confidence_threshold" } });
   }
   for (const field of ["stale_days", "archived_days", "trial_unused_days"] as const) {
     if (field === "trial_unused_days" && value[field] === undefined) continue;
     if (!Number.isSafeInteger(value[field]) || Number(value[field]) < 1 || Number(value[field]) > 3650) {
-      throw validationError(`${field} must be an integer between 1 and 3650.`, { field });
+      throw validationError(`${field} must be an integer between 1 and 3650.`, { field }, { code: "core.integer_range", values: { field, min: 1, max: 3650 } });
     }
   }
   if (!Number.isSafeInteger(value.max_items) || Number(value.max_items) < 1 || Number(value.max_items) > 1000) {
-    throw validationError("max_items must be an integer between 1 and 1000.", { field: "max_items" });
+    throw validationError("max_items must be an integer between 1 and 1000.", { field: "max_items" }, { code: "core.integer_range", values: { field: "max_items", min: 1, max: 1000 } });
   }
   if (!Number.isSafeInteger(value.max_characters) || Number(value.max_characters) < 1 || Number(value.max_characters) > 1_000_000) {
-    throw validationError("max_characters must be an integer between 1 and 1000000.", { field: "max_characters" });
+    throw validationError("max_characters must be an integer between 1 and 1000000.", { field: "max_characters" }, { code: "core.integer_range", values: { field: "max_characters", min: 1, max: 1000000 } });
   }
   const weights = value.feedback_weights === undefined ? DEFAULT_SKILL_FEEDBACK_WEIGHTS : value.feedback_weights;
   if (!isRecord(weights) || Object.keys(weights).some((key) => !Object.hasOwn(DEFAULT_SKILL_FEEDBACK_WEIGHTS, key))
     || Object.keys(DEFAULT_SKILL_FEEDBACK_WEIGHTS).some((key) => typeof weights[key] !== "number" || !(weights[key] as number >= 0) || !Number.isFinite(weights[key]))) {
-    throw validationError("feedback_weights must hold a non-negative number for major_finding, replan and owner_correction.", { field: "feedback_weights" });
+    throw validationError("feedback_weights must hold a non-negative number for major_finding, replan and owner_correction.", { field: "feedback_weights" }, { code: "core.feedback_weights_invalid", values: { field: "feedback_weights" } });
   }
   return {
     feedback_weights: weights as unknown as SkillSettings["feedback_weights"],
@@ -11307,10 +10800,10 @@ function parseSkillFilesSnapshot(value: string): Record<string, string> {
   try {
     parsed = JSON.parse(value) as unknown;
   } catch {
-    throw validationError("Stored skill revision content is invalid.", { field: "snapshot_json" });
+    throw validationError("Stored skill revision content is invalid.", { field: "snapshot_json" }, { code: "core.skill_snapshot_invalid", values: { field: "snapshot_json" } });
   }
   if (!isRecord(parsed) || !Object.values(parsed).every((content) => typeof content === "string")) {
-    throw validationError("Stored skill revision content is invalid.", { field: "snapshot_json" });
+    throw validationError("Stored skill revision content is invalid.", { field: "snapshot_json" }, { code: "core.skill_snapshot_invalid", values: { field: "snapshot_json" } });
   }
   return parsed as Record<string, string>;
 }
@@ -11344,18 +10837,29 @@ function skillProposalCommandError(error: unknown, proposalId: string): unknown 
   return skillValidationError(error);
 }
 
+const SKILL_PATH_REASON_BY_MESSAGE: ReadonlyMap<string, "core.skill_path_empty" | "core.skill_path_absolute" | "core.skill_path_traversal" | "core.skill_path_location"> = new Map([
+  ["File path must be a non-empty relative path.", "core.skill_path_empty"],
+  ["Absolute paths and platform-specific separators are not allowed.", "core.skill_path_absolute"],
+  ["Empty and traversal path segments are not allowed.", "core.skill_path_traversal"],
+  ["Files must be SKILL.md or directly inside references/, scripts/, or templates/.", "core.skill_path_location"],
+]);
+
 function skillValidationError(error: unknown): unknown {
   if (isRecord(error) && typeof error.code === "string") return error;
   if (!(error instanceof Error)) return error;
   const message = error.message;
   if (/^(invalid_|skill_file_contains_|skill_size_|skill_metadata_|skill_revision_invalid|skill_proposal_decision_invalid|File path |Absolute paths |Empty and traversal path segments|Files must be |Skill files must be)/u.test(message)) {
-    return validationError(message);
+    if (/^Skill files must be valid UTF-8/u.test(message)) return validationError(message, {}, { code: "core.skill_file_not_utf8", values: { field: "skill" } });
+    if (/^Skill files must be valid text/u.test(message)) return validationError(message, {}, { code: "core.skill_file_not_text", values: { field: "skill" } });
+    const pathCode = SKILL_PATH_REASON_BY_MESSAGE.get(message);
+    if (pathCode !== undefined) return validationError(message, {}, { code: pathCode, values: { field: "path" } });
+    const skillMd = (error as { skill_md?: { problem: SkillMdProblem; key: string | null } }).skill_md;
+    if (skillMd !== undefined) return validationError(message, {}, { code: "core.skill_md_invalid", values: { field: "SKILL.md", problem: skillMd.problem, key: skillMd.key } });
+    // Only the leading identifier (e.g. invalid_skill_name) is passed, not the whole message: its English rest would end up inside a Japanese sentence.
+    const errorCode = /^[A-Za-z0-9_]+/u.exec(message)?.[0] ?? "";
+    return validationError(message, {}, { code: "core.skill_input_invalid", values: { field: "skill", error_code: errorCode } });
   }
   return error;
-}
-
-function isCodedError(value: unknown): value is { readonly code: string } {
-  return isRecord(value) && typeof value.code === "string";
 }
 
 /** Signal a recorded process only while its pid still identifies that process. */
@@ -11368,91 +10872,6 @@ function signalRecordedProcess(
   if (processIdentityMatches(expected, readProcessIdentity(run.pid))) signalProcessGroup(run.pid, signal);
 }
 
-/** Initial Manager plan: 1 attempt plus 2 retries for transient/retryable failures. */
-export const INITIAL_PLAN_MAX_ATTEMPTS = 3;
-export const INITIAL_PLAN_RETRY_DELAY_MS = 5_000;
-/** Final Manager check: 1 attempt plus 1 retry for transient/retryable failures. */
-export const FINAL_MANAGER_MAX_ATTEMPTS = 2;
-
-/** Runtime error codes for an agent answer that broke its role contract (agent-runtime errors.ts). */
-const AGENT_CONTRACT_ERROR_CODES = new Set(["report_invalid", "manager_plan_invalid", "review_invalid"]);
-
-export const SIDE_EFFECT_FAILURE_PREFIX = "side_effect_failure:";
-
-/** Marks a failure record that followed an external side effect: it keeps that class and is never retried. */
-export function sideEffectFailureFields(errorKey: unknown): JsonObject {
-  return typeof errorKey === "string" && errorKey.startsWith(SIDE_EFFECT_FAILURE_PREFIX)
-    ? { outcome: "failed_after_side_effect", retry_allowed: false }
-    : {};
-}
-
-/**
- * Turn an error thrown by a Final Manager attempt into a failed result.
- * A malformed answer is retried like on the Core-shaped runner path; a
- * provider failure arrives here without agent-runtime's classification, so
- * it is treated as transient (one bounded retry). Anything else (setup,
- * Core validation) is deterministic.
- */
-export interface FinalManagerOutcome {
-  readonly verdict: FinalManagerVerdict;
-  readonly settled: SettledFinalVerdict;
-  readonly criteria_index: readonly FinalCriterionRef[];
-  readonly agent_run_id: string;
-}
-
-export function finalManagerErrorResult(error: unknown, language: OwnerLanguage): AgentRunResult {
-  const code = isCodedError(error) ? error.code : null;
-  const reason = isRecord(error) && typeof error.reason === "string" ? error.reason : null;
-  const contract = code !== null && AGENT_CONTRACT_ERROR_CODES.has(code);
-  // agent-runtime marks an error thrown after an external side effect; it must never be retried.
-  const afterSideEffect = isRecord(error) && error.outcome === "failed_after_side_effect";
-  const transient = code === "provider_failed" && !afterSideEffect;
-  const baseKey = code === null ? "final_manager_error" : reason === null ? code : `${code}:${reason}`;
-  return {
-    outcome: "failed",
-    report_valid: false,
-    skill_feedback: null,
-    failure_class: transient ? "transient" : "deterministic",
-    error_key: afterSideEffect ? `${SIDE_EFFECT_FAILURE_PREFIX}${baseKey}` : baseKey,
-    // A blank reason on a goal is the Manager's slip: the final check runs again.
-    retry_allowed: (contract || (isRecord(error) && isRecord(error.details) && error.details.final_check_retry === true)) && !afterSideEffect,
-    message: formatRuntimeFailure(error, "Manager", language),
-  };
-}
-
-/**
- * The Task fields a Manager reads: identity, plan fields, status and the
- * counters it can reason about. Internals (error hashes, worktree paths,
- * leases, versions) stay in Core.
- */
-/** The required_sections / required_tests stored for the Task, so a replan can keep or change them. */
-export function storedVerificationSpec(task: TaskRow): JsonObject {
-  try {
-    const parsed: unknown = task.verification_spec_json ? JSON.parse(task.verification_spec_json) : {};
-    return typeof parsed === "object" && parsed !== null && !Array.isArray(parsed) ? (parsed as JsonObject) : {};
-  } catch (error) {
-    // A corrupt spec drops required_sections / required_tests on replan, so make that visible.
-    console.warn(`[owl-core] Task ${task.id} has an unreadable verification_spec_json; replanning without its stored verification conditions`, error);
-    return {};
-  }
-}
-
-export function managerTaskView(task: TaskRow, dependsOn: readonly string[]): JsonObject {
-  return {
-    id: task.id,
-    manager_task_id: task.manager_task_id,
-    title: task.title,
-    type: task.type,
-    status: task.status,
-    acceptance_criteria: readStoredAcceptanceCriteria(task.acceptance_criteria_json, task.acceptance) as unknown as JsonObject[],
-    goal_shortfalls: readTaskGoalShortfalls(task.goal_shortfalls_json as string | null | undefined) as unknown as JsonObject[],
-    ...planContextFields(task),
-    ...storedVerificationSpec(task),
-    depends_on: [...dependsOn],
-    review_round: task.review_round,
-    failure_count: task.failure_count,
-  };
-}
 
 const WORK_INTEGRATION_ALERT_KIND = "work_integration_verification_failed";
 
@@ -11494,18 +10913,6 @@ function baseMergeConflict(alert: JsonObject | null): BaseMergeConflict | null {
   };
 }
 
-export function mergeConflictFiles(alert: JsonObject | null): string[] {
-  return Array.isArray(alert?.conflicting_files)
-    ? alert.conflicting_files.filter((path): path is string => typeof path === "string" && path.length > 0)
-    : [];
-}
-
-export function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, Math.max(0, ms));
-    timer.unref?.();
-  });
-}
 
 function policyDecisionIdempotencyKeyPrefix(workId: string): string {
   return `kb-policy-${workId}:`;

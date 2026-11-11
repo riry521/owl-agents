@@ -5,13 +5,13 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { detectProcessSkillsPack } from "../../../packages/core/dist/process-skills-pack.js";
+import { detectProcessSkillsPack } from "@owl/core/dist/process-skills-pack.js";
 import {
   PROCESS_SKILLS_INSTALL_COMMANDS,
   PROCESS_SKILLS_SETTINGS_KEY,
   type ModelHarness,
   type ProcessSkillsSettings,
-} from "../../../packages/shared/dist/index.js";
+} from "@owl/shared";
 import { resolveOwlRoot, resolveDataDir, serverPackageRoot } from "./contracts.js";
 import { IntegrationStore } from "./integration-store.js";
 import { opencodeCliStatus, opencodeUnsupportedMessage } from "./opencode-status.js";

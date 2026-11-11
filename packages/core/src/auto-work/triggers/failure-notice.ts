@@ -28,31 +28,31 @@ export const spawnAutoWorkCommand: AutoWorkCommandRunner = async (argv, cwd, tim
 function optionalString(body: Record<string, unknown>, field: string): string | null {
   const value = body[field];
   if (value === undefined || value === null) return null;
-  if (typeof value !== "string") throw validationError(`${field} must be a string.`, { field });
+  if (typeof value !== "string") throw validationError(`${field} must be a string.`, { field }, { code: "failure_notice.field_not_string", values: { field } });
   return value;
 }
 
 /** Checks a failure notice from the HTTP API (design 3.2.1) and turns it into the common signal. */
 export function readFailureNotice(body: unknown, now: Date): AutoWorkSignal {
-  if (typeof body !== "object" || body === null || Array.isArray(body)) throw validationError("The notice must be an object.", { field: "payload" });
+  if (typeof body !== "object" || body === null || Array.isArray(body)) throw validationError("The notice must be an object.", { field: "payload" }, { code: "failure_notice.not_object", values: { field: "payload" } });
   const input = body as Record<string, unknown>;
   const projectId = input.project_id;
-  if (typeof projectId !== "string" || !ULID.test(projectId)) throw validationError("project_id must be a Project ULID.", { field: "project_id" });
+  if (typeof projectId !== "string" || !ULID.test(projectId)) throw validationError("project_id must be a Project ULID.", { field: "project_id" }, { code: "failure_notice.project_id_invalid", values: { field: "project_id" } });
   const kind = input.kind;
   if (typeof kind !== "string" || !(FAILURE_NOTICE_KINDS as readonly string[]).includes(kind)) {
-    throw validationError(`kind must be one of ${FAILURE_NOTICE_KINDS.join(", ")}.`, { field: "kind" });
+    throw validationError(`kind must be one of ${FAILURE_NOTICE_KINDS.join(", ")}.`, { field: "kind" }, { code: "failure_notice.kind_invalid", values: { field: "kind", kinds: FAILURE_NOTICE_KINDS.join(", ") } });
   }
   const title = input.title;
   if (typeof title !== "string" || title.length < 1 || title.length > TITLE_MAX_CHARS) {
-    throw validationError(`title must be 1 to ${TITLE_MAX_CHARS} characters.`, { field: "title" });
+    throw validationError(`title must be 1 to ${TITLE_MAX_CHARS} characters.`, { field: "title" }, { code: "failure_notice.title_length", values: { field: "title", max: TITLE_MAX_CHARS } });
   }
   const detail = optionalString(input, "detail") ?? "";
   const hint = optionalString(input, "dedupe_hint");
-  if (hint === "") throw validationError("dedupe_hint must not be empty.", { field: "dedupe_hint" });
+  if (hint === "") throw validationError("dedupe_hint must not be empty.", { field: "dedupe_hint" }, { code: "failure_notice.dedupe_hint_empty", values: { field: "dedupe_hint" } });
   const occurredAt = optionalString(input, "occurred_at");
-  if (occurredAt !== null && !Number.isFinite(Date.parse(occurredAt))) throw validationError("occurred_at must be an ISO 8601 time.", { field: "occurred_at" });
+  if (occurredAt !== null && !Number.isFinite(Date.parse(occurredAt))) throw validationError("occurred_at must be an ISO 8601 time.", { field: "occurred_at" }, { code: "failure_notice.occurred_at_invalid", values: { field: "occurred_at" } });
   const exitCode = input.exit_code ?? null;
-  if (exitCode !== null && !Number.isInteger(exitCode)) throw validationError("exit_code must be an integer.", { field: "exit_code" });
+  if (exitCode !== null && !Number.isInteger(exitCode)) throw validationError("exit_code must be an integer.", { field: "exit_code" }, { code: "failure_notice.exit_code_invalid", values: { field: "exit_code" } });
   return {
     source: "failure_notice",
     project_id: projectId,

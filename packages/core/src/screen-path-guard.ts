@@ -1,7 +1,7 @@
 import { lstatSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 
-import { GUARD_SHELL_COMMAND_KEYS, GUARD_SHELL_TOOL_NAMES } from "../../shared/dist/guard-inputs.js";
+import { GUARD_SHELL_COMMAND_KEYS, GUARD_SHELL_TOOL_NAMES } from "@owl/shared/guard-inputs";
 import { advanceWorkingDirectory, analyzeShellCommand, effectiveCommand, resolvePathCandidate, SUBSHELL_CLOSE, SUBSHELL_OPEN, UNKNOWN_CWD } from "./command-analysis.js";
 import { wrapperCwd } from "./test-setup-install-guard.js";
 

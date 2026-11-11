@@ -5,21 +5,20 @@ import { StaleAgentChecker, OWNER_STOP_ABORT } from "./stale-agent-check.js";
 import { ArtifactCapture, type WorktreeEntry } from "./artifact-capture.js";
 import { TestRunAssembler, type TestRunPlace, type TestRunResolutionWithExecutables } from "./test-run-assembly.js";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { execFile, type ChildProcess } from "node:child_process";
-import { promisify } from "node:util";
+import { type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat, mkdir, readFile, rm } from "node:fs/promises";
-import { createUlid, utcNow } from "../../db/dist/index.js";
+import { createUlid, utcNow } from "@owl/db";
 import { OUTPUT_FORMAT_INVALID_ERROR_KEY, readDesignBlocked, isReportFormatInvalidErrorKey, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, readStoredAcceptanceCriteria, type StoredAcceptanceCriterion, readStoredTaskPlanContext, requestsSpecTest, DEFAULT_HARNESS_MODELS, DEFAULT_ROLE_MODELS, MODEL_SETTING_EFFORTS, designDocumentPath, designMockDirectory, isScreenDesignTask, OWL_INSTANCE_ID_ENV, createOutputCapture, runProcess, signalProcessGroup, resolveInstanceId, tokenUsageOf, usageJson, type DelegationMismatchKind, type ResearchSubagentSettings, type TaskReplanTrigger } from "@owl/shared";
-import { matchesAnyGlob } from "../../shared/dist/glob.js";
+import { matchesAnyGlob } from "@owl/shared/glob";
 import { taskVerificationMarker } from "./workspace-process-sweeper.js";
 import { TRANSIENT_RETRY_DELAYS_MS, TRANSIENT_RETRY_LIMIT } from "./attempt-policy";
 import { terminateActiveExecutorsImmediately } from "./executor.js";
 import type { ChildRunScheduler } from "./child-run-scheduler.js";
 import { HumanReadableError, validationError } from "./errors";
 import { pendingReportResubmit, reportResubmitLimit } from "./report-resubmit";
-import { PROCESS_WAIT_EVENT, validatePendingProcess, validatePrerequisiteSpec, type PrerequisiteSpec } from "../../shared/dist/prerequisite.js";
-import { ACCEPTANCE_DEFECT_EVENT, ACCEPTANCE_DEFECT_VERDICT, normalizeAcceptanceDefects, workerAcceptanceDefects, type AcceptanceDefect, type AcceptanceDefectSource } from "../../shared/dist/acceptance-defect.js";
+import { PROCESS_WAIT_EVENT, validatePendingProcess, validatePrerequisiteSpec, type PrerequisiteSpec } from "@owl/shared/prerequisite";
+import { ACCEPTANCE_DEFECT_EVENT, ACCEPTANCE_DEFECT_VERDICT, normalizeAcceptanceDefects, workerAcceptanceDefects, type AcceptanceDefect, type AcceptanceDefectSource } from "@owl/shared/acceptance-defect";
 import type { RuleStore } from "./rule-store";
 import { appendEventInTransaction, applyReplanInTransaction, assertTaskDependencyGraph, cascadeDependencyFailureInTransaction, createTaskPlanInTransaction, isTerminalTaskState, openRemakeLimitDecisionInTransaction, openTestEnvironmentDecisionInTransaction, reduceTaskInTransaction, reduceWorkInTransaction, stopTaskForNoProgressInTransaction, type ReplanApplyGuard, type ReplanApplyResult } from "./state-reducer";
 import { lineageReviewHistory, lineageRootOf, recordTaskChangeMeasurementInTransaction } from "./task-lineage";
@@ -40,17 +39,17 @@ import { enqueueLearningJobInTransaction } from "./learning-pipeline.js";
 import type { IndexInjector } from "./memory/index-injector.js";
 import { ContextBuilder } from "./context-builder.js";
 import { pendingExternalBlocker } from "./task-context.js";
-import { EXTERNAL_BLOCKER_EVENT, reportedExternalBlocker, type ExternalBlocker } from "../../shared/dist/external-blocker.js";
+import { EXTERNAL_BLOCKER_EVENT, reportedExternalBlocker, type ExternalBlocker } from "@owl/shared/external-blocker";
 import { registerReviewBacklogInTransaction, settleWorkBacklogOnCompletionInTransaction } from "./review-backlog.js";
 import { assertAgentRunNotStopped, isAgentRunStopped } from "./agent-run-stop.js";
 import { clearPausedReviewerWait, readPausedReviewerWait, recordPausedReviewerWait } from "./provider-pause-reviewer-wait.js";
 import { listProcesses } from "./subagent-watcher.js";
 import { evaluateWorkerCompletion, goalOnlyShortfallReport, observedSubagentsNeedingIntegration, type ObservedSubagent, type WorkerChild } from "./task-completion-gate.js";
-import { isNonBlankReason, type GoalShortfall } from "../../shared/dist/acceptance-criteria.js";
+import { isNonBlankReason, type GoalShortfall } from "@owl/shared/acceptance-criteria";
 import { goalCriterionIds, goalShortfallsFromReport, goalShortfallsOfWork, recordTaskGoalShortfalls, replaceTaskGoalShortfalls } from "./goal-shortfalls.js";
 import { NO_CORE_ACTIVITY, type CoreActivityReporter } from "./core-activity.js";
 import { coreTestRunBrief, type CoreTestRunOutcome } from "./core-test-run.js";
-import { type TestRunSettings } from "../../shared/dist/test-run-settings.js";
+import { type TestRunSettings } from "@owl/shared/test-run-settings";
 import { DEFAULT_TEST_DETECTION_RULES, type TestDetectionRules } from "./test-detection-rules.js";
 
 
@@ -245,10 +244,10 @@ export function resolveRoleModel(db: Pick<CoreDatabase, "get">, role: string, op
     throw validationError("Stored model settings are not valid JSON.", {
       key: WF_MODEL_SETTINGS_KEY,
       cause: error instanceof Error ? error.message : String(error),
-    });
+    }, { code: "workflow.model_settings_not_json", values: { key: WF_MODEL_SETTINGS_KEY } });
   }
   if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.roles)) {
-    throw validationError("Stored model settings must contain a roles array.", { key: WF_MODEL_SETTINGS_KEY });
+    throw validationError("Stored model settings must contain a roles array.", { key: WF_MODEL_SETTINGS_KEY }, { code: "workflow.model_settings_roles_missing", values: { key: WF_MODEL_SETTINGS_KEY } });
   }
   const roles: unknown[] = parsed.roles;
   const findRole = (name: string) => roles.find((candidate): candidate is { role?: unknown; model?: unknown; provider?: unknown; effort?: unknown } => (
@@ -259,10 +258,10 @@ export function resolveRoleModel(db: Pick<CoreDatabase, "get">, role: string, op
     // Settings stored before the Designer existed have no designer entry.
     ?? (options.anyRoleDefault || role === "designer" || role === "lead_designer" || role === "fixer" ? defaultFor(role) : undefined);
   if (!found || typeof found.model !== "string" || found.model.trim().length === 0 || typeof found.provider !== "string" || found.provider.trim().length === 0) {
-    throw validationError(`Stored model settings are missing a valid ${role} provider/model.`, { key: WF_MODEL_SETTINGS_KEY, role });
+    throw validationError(`Stored model settings are missing a valid ${role} provider/model.`, { key: WF_MODEL_SETTINGS_KEY, role }, { code: "workflow.model_settings_role_invalid", values: { key: WF_MODEL_SETTINGS_KEY, role } });
   }
   if (found.effort !== undefined && (typeof found.effort !== "string" || !MODEL_SETTING_EFFORTS.includes(found.effort))) {
-    throw validationError(`Stored model settings contain an invalid ${role} effort.`, { key: WF_MODEL_SETTINGS_KEY, role });
+    throw validationError(`Stored model settings contain an invalid ${role} effort.`, { key: WF_MODEL_SETTINGS_KEY, role }, { code: "workflow.model_settings_effort_invalid", values: { key: WF_MODEL_SETTINGS_KEY, role } });
   }
   return { model: found.model, provider: found.provider.trim().toLowerCase(), effort: found.effort as string | undefined };
 }
@@ -287,7 +286,6 @@ function diffLineCounts(before: string[], after: string[]): { added: number; del
   return { added: b.length - common, deleted: a.length - common };
 }
 
-const execFileAsync = promisify(execFile);
 
 export class WorkflowEngine {
   private readonly db: CoreDatabase;
@@ -344,7 +342,7 @@ export class WorkflowEngine {
   private readonly subagents: SubagentObserver;
   private readonly staleAgents: StaleAgentChecker;
   private readonly artifacts: ArtifactCapture;
-  private readonly testRuns: TestRunAssembler;
+  readonly testRuns: TestRunAssembler;
 
   public constructor(options: WorkflowEngineOptions) {
     this.db = options.db;
@@ -377,7 +375,7 @@ export class WorkflowEngine {
     this.getResearchSubagentSettings = options.getResearchSubagentSettings;
     this.maxParallel = resolveMaxParallel(options.maxParallel);
     if (options.globalMaxParallel !== undefined && (!Number.isSafeInteger(options.globalMaxParallel) || options.globalMaxParallel < 1)) {
-      throw validationError("dispatcher.global_max_parallel must be a positive integer.", { global_max_parallel: options.globalMaxParallel });
+      throw validationError("dispatcher.global_max_parallel must be a positive integer.", { global_max_parallel: options.globalMaxParallel }, { code: "workflow.positive_integer_required", values: { field: "global_max_parallel", value: String(options.globalMaxParallel) } });
     }
     this.globalMaxParallel = options.globalMaxParallel ?? null;
     this.staleCheckIntervalMs = options.staleCheckIntervalMs ?? 60_000;
@@ -498,23 +496,6 @@ export class WorkflowEngine {
     return this.testRuns.resolveTaskTestRun(workId, taskId, worktree);
   }
 
-  // Why these stay: tests/core/test-setup-*.test.mjs call them on the engine, and those tests must pass unchanged.
-  private projectTestRunRow(...args: Parameters<TestRunAssembler["projectTestRunRow"]>): ReturnType<TestRunAssembler["projectTestRunRow"]> {
-    return this.testRuns.projectTestRunRow(...args);
-  }
-
-  private resolveProjectTestRun(...args: Parameters<TestRunAssembler["resolveProjectTestRun"]>): ReturnType<TestRunAssembler["resolveProjectTestRun"]> {
-    return this.testRuns.resolveProjectTestRun(...args);
-  }
-
-  private adoptPassedSetup(...args: Parameters<TestRunAssembler["adoptPassedSetup"]>): ReturnType<TestRunAssembler["adoptPassedSetup"]> {
-    return this.testRuns.adoptPassedSetup(...args);
-  }
-
-  private gateTestRunner(...args: Parameters<TestRunAssembler["gateTestRunner"]>): ReturnType<TestRunAssembler["gateTestRunner"]> {
-    return this.testRuns.gateTestRunner(...args);
-  }
-
   public isRunning(): boolean {
     return this.running;
   }
@@ -528,7 +509,7 @@ export class WorkflowEngine {
     const result = await this.writeLane.write({
       mutateState: (transaction: CoreWriteLaneTransaction) => {
         const work = transaction.get<{ plan_revision: number }>("SELECT plan_revision FROM works WHERE id = ?", workId);
-        if (!work) throw validationError("Cannot register a Task plan for a missing Work.", { work_id: workId });
+        if (!work) throw validationError("Cannot register a Task plan for a missing Work.", { work_id: workId }, { code: "workflow.work_missing_for_plan", values: { work_id: workId } });
         transaction.run("UPDATE works SET plan_revision = plan_revision + 1, updated_at = ? WHERE id = ?", utcNow(), workId);
         return createTaskPlanInTransaction(transaction, workId, items);
       },
@@ -635,7 +616,7 @@ export class WorkflowEngine {
         task.id,
       );
       if (dependencies.some((dependency) => dependency.status === "cancelled")) {
-        throw validationError("A cancelled dependency cannot be promoted to ready.", { task_id: task.id });
+        throw validationError("A cancelled dependency cannot be promoted to ready.", { task_id: task.id }, { code: "workflow.cancelled_dependency_not_promotable", values: { task_id: task.id } });
       }
       const completed = dependencies.every((dependency) => dependency.status === "completed");
       if (!completed) {
@@ -916,7 +897,7 @@ export class WorkflowEngine {
       launched.push(taskId);
       this.startPipeline(workId, taskId, agentRunId, task.worker_generation);
     }
-    for (const { taskId, trigger } of conflicted) {
+    for (const { trigger } of conflicted) {
       await this.triggerManagerReplanIfNeeded(workId, trigger);
     }
     if (preparationFailure !== null) {
@@ -1410,7 +1391,7 @@ export class WorkflowEngine {
       throw validationError("Stored Hybrid Mode setting is invalid.", {
         key: HYBRID_MODE_SETTINGS_KEY,
         cause: error instanceof Error ? error.message : String(error),
-      });
+      }, { code: "workflow.hybrid_mode_setting_invalid", values: { key: HYBRID_MODE_SETTINGS_KEY } });
     }
   }
 
@@ -1689,13 +1670,13 @@ export class WorkflowEngine {
         throw validationError("A successful AgentRunner result must explicitly mark its report valid.", {
           task_id: taskId,
           agent_run_id: agentRunId,
-        });
+        }, { code: "workflow.agent_report_not_marked_valid", values: { field: "report_valid", task_id: taskId, agent_run_id: agentRunId } });
       }
       if (!result.report || typeof result.report !== "object" || Array.isArray(result.report)) {
         throw validationError("A successful AgentRunner result must include a JSON report object.", {
           task_id: taskId,
           agent_run_id: agentRunId,
-        });
+        }, { code: "workflow.agent_report_not_object", values: { field: "report", task_id: taskId, agent_run_id: agentRunId } });
       }
       const artifactTask = this.db.get<{ type: string; worktree_path: string | null }>("SELECT type, worktree_path FROM tasks WHERE id = ?", taskId);
       if (artifactTask?.type === "design") {
@@ -1749,7 +1730,7 @@ export class WorkflowEngine {
     if (result.failure_class === "transient") {
       const retryNo = Math.max(0, generation - 1);
       if (!result.error_key) {
-        throw validationError("A transient AgentRunner failure must include error_key.", { task_id: taskId });
+        throw validationError("A transient AgentRunner failure must include error_key.", { task_id: taskId }, { code: "workflow.error_key_missing", values: { field: "error_key", task_id: taskId, failure: "transient" } });
       }
       const storedTask = this.db.get<{ retry_no: number }>("SELECT retry_no FROM tasks WHERE id = ?", taskId);
       const durableRetryNo = Number(storedTask?.retry_no ?? retryNo) + 1;
@@ -1816,7 +1797,7 @@ export class WorkflowEngine {
     // Safety rule: an unclassified failure is deterministic, never silently retried as transient.
     const errorKey = result.error_key;
     if (!errorKey) {
-      throw validationError("A deterministic AgentRunner failure must include error_key.", { task_id: taskId });
+      throw validationError("A deterministic AgentRunner failure must include error_key.", { task_id: taskId }, { code: "workflow.error_key_missing", values: { field: "error_key", task_id: taskId, failure: "deterministic" } });
     }
     const event = result.signal ? "agent.crashed" : "task.failure.classified";
     const hasReport = !result.signal && result.report && typeof result.report === "object" && !Array.isArray(result.report);
@@ -1861,7 +1842,7 @@ export class WorkflowEngine {
   ): Promise<void> {
     const run = this.db.get<{ provider: string; role: string }>("SELECT provider, role FROM agent_runs WHERE id = ?", agentRunId);
     if (!run || !this.providerPauseController) {
-      throw validationError("A rate-limited Task requires its provider pause controller.", { task_id: taskId, agent_run_id: agentRunId });
+      throw validationError("A rate-limited Task requires its provider pause controller.", { task_id: taskId, agent_run_id: agentRunId }, { code: "workflow.provider_pause_controller_missing", values: { task_id: taskId, agent_run_id: agentRunId } });
     }
     const pause = await this.providerPauseController.recordRateLimit({
       provider: pauseContext?.provider ?? run.provider,
@@ -2180,7 +2161,7 @@ export class WorkflowEngine {
     if (this.stopping) return;
     const task = this.db.get<TaskRow>("SELECT * FROM tasks WHERE id = ?", taskId);
     if (!task) {
-      throw validationError("The Task disappeared before Core verification started.", { task_id: taskId });
+      throw validationError("The Task disappeared before Core verification started.", { task_id: taskId }, { code: "workflow.task_missing_before_verification", values: { task_id: taskId } });
     }
     // A verification the Owner released from a test environment Decision runs again on the same Worker run.
     const startedBefore = this.db.get<{ count: number }>("SELECT COUNT(*) AS count FROM events WHERE type = 'verification.started' AND task_id = ? AND agent_run_id = ?", taskId, agentRunId)?.count ?? 0;
@@ -2935,7 +2916,7 @@ export class WorkflowEngine {
     const writeResult = await this.writeLane.write({
       mutateState: (transaction: CoreWriteLaneTransaction) => {
         if (transaction.get<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId)?.status !== "verifying") {
-          throw validationError("The Task was cancelled or advanced before its Reviewer started.", { task_id: taskId });
+          throw validationError("The Task was cancelled or advanced before its Reviewer started.", { task_id: taskId }, { code: "workflow.task_advanced_before_reviewer", values: { task_id: taskId } });
         }
         return reduceTaskInTransaction(transaction, taskId, {
           event: "verification.completed",
@@ -2973,7 +2954,7 @@ export class WorkflowEngine {
     if (this.stopping) return;
     const task = this.db.get<TaskRow>("SELECT * FROM tasks WHERE id = ?", taskId);
     if (!task) {
-      throw validationError("The Task disappeared before Core started its Reviewer.", { task_id: taskId });
+      throw validationError("The Task disappeared before Core started its Reviewer.", { task_id: taskId }, { code: "workflow.task_missing_before_reviewer", values: { task_id: taskId } });
     }
     // Older Worker reports may contain Core routing fields; the Reviewer only
     // needs the report itself. The delegation record remains part of it.
@@ -3013,7 +2994,7 @@ export class WorkflowEngine {
       mutateState: (transaction: CoreWriteLaneTransaction) => {
         const currentTask = transaction.get<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId);
         if (currentTask?.status !== "verifying") {
-          throw validationError("The Task was cancelled or advanced before its Reviewer started.", { task_id: taskId });
+          throw validationError("The Task was cancelled or advanced before its Reviewer started.", { task_id: taskId }, { code: "workflow.task_advanced_before_reviewer", values: { task_id: taskId } });
         }
         const now = utcNow();
         clearPausedReviewerWait(transaction, taskId);
@@ -3108,7 +3089,7 @@ export class WorkflowEngine {
     if (this.stopping && result.failure_class !== "rate_limited") return;
     if (result.failure_class === "rate_limited") {
       if (!this.providerPauseController) {
-        throw validationError("A rate-limited Reviewer requires its provider pause controller.", { task_id: taskId, agent_run_id: reviewerAgentRunId });
+        throw validationError("A rate-limited Reviewer requires its provider pause controller.", { task_id: taskId, agent_run_id: reviewerAgentRunId }, { code: "workflow.provider_pause_controller_missing", values: { task_id: taskId, agent_run_id: reviewerAgentRunId } });
       }
       const provider = reviewerProvider;
       const pause = await this.providerPauseController.recordRateLimit({
@@ -3169,13 +3150,14 @@ export class WorkflowEngine {
             task_id: taskId,
             agent_run_id: reviewerAgentRunId,
             error_key: result.error_key ?? null,
-          },
+            provider_message: result.message ?? null,
+          }, { code: "workflow.reviewer_provider_failed", values: { outcome: String(result.outcome), task_id: taskId, agent_run_id: reviewerAgentRunId } }
         );
       }
       throw validationError("The Reviewer result must include a valid report object.", {
         task_id: taskId,
         agent_run_id: reviewerAgentRunId,
-      });
+      }, { code: "workflow.reviewer_report_invalid", values: { field: "report", task_id: taskId, agent_run_id: reviewerAgentRunId } });
     }
     const review = (result as AgentRunResult & { readonly review?: unknown }).review;
     if (!review || typeof review !== "object" || Array.isArray(review)) {
@@ -3186,18 +3168,19 @@ export class WorkflowEngine {
             task_id: taskId,
             agent_run_id: reviewerAgentRunId,
             error_key: result.error_key ?? null,
-          },
+            provider_message: result.message ?? null,
+          }, { code: "workflow.reviewer_provider_failed", values: { outcome: String(result.outcome), task_id: taskId, agent_run_id: reviewerAgentRunId } }
         );
       }
       throw validationError("The Reviewer result must include its review verdict.", {
         task_id: taskId,
         agent_run_id: reviewerAgentRunId,
-      });
+      }, { code: "workflow.reviewer_verdict_missing", values: { field: "verdict", task_id: taskId, agent_run_id: reviewerAgentRunId } });
     }
     const reviewObject = review as JsonObject;
     const rawVerdict = reviewObject.verdict;
     if (rawVerdict !== "pass" && rawVerdict !== "fix_required" && rawVerdict !== "replan_required" && rawVerdict !== ACCEPTANCE_DEFECT_VERDICT) {
-      throw validationError("The Reviewer verdict is not recognized.", { task_id: taskId, agent_run_id: reviewerAgentRunId });
+      throw validationError("The Reviewer verdict is not recognized.", { task_id: taskId, agent_run_id: reviewerAgentRunId }, { code: "workflow.reviewer_verdict_unknown", values: { field: "verdict", task_id: taskId, agent_run_id: reviewerAgentRunId } });
     }
     // A Reviewer replan_required verdict is escalated to the Manager
     // instead of being downgraded to fix_required: see the manager_trigger
@@ -3205,22 +3188,22 @@ export class WorkflowEngine {
     const rawFindings = reviewObject.findings;
     const tests = reviewObject.tests;
     if (!Array.isArray(rawFindings) || !tests || typeof tests !== "object" || Array.isArray(tests)) {
-      throw validationError("The Reviewer result is missing findings or tests.", { task_id: taskId });
+      throw validationError("The Reviewer result is missing findings or tests.", { task_id: taskId }, { code: "workflow.reviewer_findings_or_tests_missing", values: { field: "findings, tests", task_id: taskId } });
     }
     const storedCriteria = this.storedCriteriaOf(taskId);
     const goalIds = new Set(goalCriterionIds(storedCriteria));
     const criterionText = new Map(storedCriteria.map((criterion) => [criterion.id, criterion.text]));
     const rawShortfalls = reviewObject.goal_shortfalls ?? [];
     if (!Array.isArray(rawShortfalls)) {
-      throw validationError("The Reviewer goal_shortfalls must be an array.", { task_id: taskId, agent_run_id: reviewerAgentRunId });
+      throw validationError("The Reviewer goal_shortfalls must be an array.", { task_id: taskId, agent_run_id: reviewerAgentRunId }, { code: "workflow.reviewer_goal_shortfalls_not_array", values: { field: "goal_shortfalls", task_id: taskId, agent_run_id: reviewerAgentRunId } });
     }
     const goalShortfalls: GoalShortfall[] = rawShortfalls.map((entry) => {
       const item = entry !== null && typeof entry === "object" && !Array.isArray(entry) ? entry as JsonObject : {};
       if (typeof item.criterion_id !== "string" || !goalIds.has(item.criterion_id)) {
-        throw validationError("The Reviewer goal_shortfalls names a criterion that is not a goal.", { task_id: taskId, agent_run_id: reviewerAgentRunId });
+        throw validationError("The Reviewer goal_shortfalls names a criterion that is not a goal.", { task_id: taskId, agent_run_id: reviewerAgentRunId }, { code: "workflow.reviewer_goal_shortfall_not_goal", values: { field: "goal_shortfalls", task_id: taskId, agent_run_id: reviewerAgentRunId } });
       }
       if (!isNonBlankReason(item.reason)) {
-        throw validationError("The Reviewer goal_shortfalls reason is blank.", { task_id: taskId, agent_run_id: reviewerAgentRunId });
+        throw validationError("The Reviewer goal_shortfalls reason is blank.", { task_id: taskId, agent_run_id: reviewerAgentRunId }, { code: "workflow.reviewer_goal_shortfall_reason_blank", values: { field: "goal_shortfalls", task_id: taskId, agent_run_id: reviewerAgentRunId } });
       }
       return { criterion_id: item.criterion_id, text: criterionText.get(item.criterion_id) ?? "", reason: item.reason.trim(), source: "reviewer" };
     });
@@ -3231,7 +3214,7 @@ export class WorkflowEngine {
       // Task, closes this Reviewer run and asks the Manager to rewrite the criteria.
       const defects = normalizeAcceptanceDefects(reviewObject.acceptance_defects);
       if (defects.length === 0) {
-        throw validationError("The Reviewer reported acceptance_defect without acceptance_defects.", { task_id: taskId, agent_run_id: reviewerAgentRunId });
+        throw validationError("The Reviewer reported acceptance_defect without acceptance_defects.", { task_id: taskId, agent_run_id: reviewerAgentRunId }, { code: "workflow.reviewer_acceptance_defects_missing", values: { field: "acceptance_defects", task_id: taskId, agent_run_id: reviewerAgentRunId } });
       }
       // A goal never stops the Task: its defects become shortfalls, and only required defects take the Manager route.
       const requiredDefects = defects.filter((defect) => !goalIds.has(defect.criterion_id));
@@ -3254,7 +3237,7 @@ export class WorkflowEngine {
         agent_run_id: reviewerAgentRunId,
         verdict,
         outcome: result.outcome,
-      });
+      }, { code: "workflow.reviewer_outcome_mismatch", values: { field: "outcome", verdict: String(verdict), outcome: String(result.outcome), task_id: taskId, agent_run_id: reviewerAgentRunId } });
     }
 
     if (verdict === "pass" && !this.taskIsVerifying(taskId)) {
@@ -3380,10 +3363,10 @@ export class WorkflowEngine {
     }
     const merge = await this.git.integrateTask(request);
     if (!Number.isSafeInteger(merge.exit_code) || merge.exit_code < 0) {
-      throw validationError("The Git merge result has an invalid exit code.", { task_id: taskId });
+      throw validationError("The Git merge result has an invalid exit code.", { task_id: taskId }, { code: "workflow.merge_exit_code_invalid", values: { field: "exit_code", task_id: taskId } });
     }
     if (merge.merged && merge.exit_code !== 0) {
-      throw validationError("The Git merge result marked success with a non-zero exit code.", { task_id: taskId });
+      throw validationError("The Git merge result marked success with a non-zero exit code.", { task_id: taskId }, { code: "workflow.merge_success_with_nonzero_exit", values: { field: "exit_code", task_id: taskId } });
     }
     if (merge.merged) {
       if (!merge.worktree_removed) {
@@ -3518,7 +3501,7 @@ export function mergeConflictPaths(output: string): string[] {
 function resolveMaxParallel(explicit: number | undefined): number | null {
   if (typeof explicit === "number") {
     if (!Number.isSafeInteger(explicit) || explicit < 1) {
-      throw validationError("max_parallel must be a positive integer.", { max_parallel: explicit });
+      throw validationError("max_parallel must be a positive integer.", { max_parallel: explicit }, { code: "workflow.positive_integer_required", values: { field: "max_parallel", value: String(explicit) } });
     }
     return explicit;
   }
@@ -3528,7 +3511,7 @@ function resolveMaxParallel(explicit: number | undefined): number | null {
   if (Number.isSafeInteger(configured) && configured > 0) {
     return configured;
   }
-  throw validationError("OWL_CORE_MAX_PARALLEL must be a positive integer when set.", { value: envValue });
+  throw validationError("OWL_CORE_MAX_PARALLEL must be a positive integer when set.", { value: envValue }, { code: "workflow.positive_integer_required", values: { field: "OWL_CORE_MAX_PARALLEL", value: String(envValue) } });
 }
 
 /** The recorded stop of a design Task for the stop-report run's context; null when none or unreadable. */

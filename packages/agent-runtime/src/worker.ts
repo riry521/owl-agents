@@ -4,7 +4,6 @@ import {
   extractRoleOutputObject,
   objectSchema,
   prepareLegacySkillOutput,
-  providerSchema,
   renderRolePrompt,
   skillFeedbackFromOutput,
   SKILL_PROPOSALS_SCHEMA,

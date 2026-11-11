@@ -3,7 +3,7 @@ import {
   type ActorRole, type AutoWorkJudgment, type AutoWorkJudgmentRequest, type AutoWorkJudgmentRunResult, type AutoWorkSignal,
   type AutoWorkSource, type AutoWorkVerdict, type EffectiveAutoWorkConfig, type EffectiveAutoWorkRule,
 } from "@owl/shared";
-import { createUlid } from "../../../db/dist/index.js";
+import { createUlid } from "@owl/db";
 import { invalidStateTransition } from "../errors.js";
 import type { LibrarianSchedulerClock } from "../librarian-scheduler.js";
 import { linkBacklogItemsToWorkInTransaction } from "../review-backlog.js";
@@ -82,6 +82,7 @@ const SOURCE_NAMES: Readonly<Record<AutoWorkSource, { readonly ja: string; reado
   github: { ja: "GitHub", en: "GitHub" },
 };
 
+// shared の clip は切ったとき省略記号を足す。ここは省略記号なしで切るので別に持つ。
 const clip = (text: string, max: number): string => (text.length > max ? text.slice(0, max) : text);
 
 /** Receives signals from the three triggers, keeps the history, and creates Works. */

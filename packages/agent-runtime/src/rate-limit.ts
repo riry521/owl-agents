@@ -1,5 +1,6 @@
 import { codexErrorInfoOf, isUsageLimitCode } from "./codex-error-info";
 import { builtinProviderHarness, harnessOfAdapter, type RateLimitInfo } from "@owl/shared";
+import { isRecord } from "@owl/shared/small-helpers";
 
 export type RateLimitHarness = "claude" | "codex" | "opencode";
 
@@ -22,10 +23,6 @@ export interface TextResetParser {
 const DAY_MS = 24 * 60 * 60_000;
 const MAX_RESET_AHEAD_MS = 8 * DAY_MS;
 const RECENT_RESET_MS = 60 * 60_000;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function numericDate(value: unknown): Date | null {
   if (typeof value === "string" && value.trim().length > 0 && !Number.isNaN(Number(value))) {

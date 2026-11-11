@@ -1,10 +1,10 @@
-import type { WriteLane } from "../../db/dist/index.js";
+import type { WriteLane } from "@owl/db";
 import {
   DEFAULT_WORK_DATA_RETENTION_SETTINGS,
   readWorkDataRetentionSettings,
   WORK_DATA_RETENTION_SETTINGS_KEY,
   type WorkDataRetentionSettings,
-} from "../../shared/dist/work-data-retention-settings.js";
+} from "@owl/shared/work-data-retention-settings";
 import type { SettingsReader } from "./owner-language";
 import { readSetting, type SettingReadSpec } from "./settings-store";
 

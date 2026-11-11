@@ -1,3 +1,4 @@
+// @ts-check
 // Advisor ページの窓の選び方。純関数。
 // DEFAULT_WINDOW_KEY は shared の GENERAL_WINDOW_KEY と同じ値（テストで確かめる）。
 import { apiErrorKeyForCode } from "./api-error-keys.mjs";
@@ -5,17 +6,27 @@ import { apiErrorKeyForCode } from "./api-error-keys.mjs";
 export const DEFAULT_WINDOW_KEY = "general";
 
 /** ?window= の値を一覧にある鍵へ解決する。一覧に無い鍵はジェネラリストにし、found を false にする。 */
+/**
+ * @param {any} param
+ * @param {any[]} windows
+ */
 export function resolveWindowKey(param, windows) {
   if (!param || param === DEFAULT_WINDOW_KEY) return { key: DEFAULT_WINDOW_KEY, found: true };
   if (windows.some((window) => window.key === param)) return { key: param, found: true };
   return { key: DEFAULT_WINDOW_KEY, found: false };
 }
 
+/** @param {string} key */
 export function windowHref(key) {
   return key === DEFAULT_WINDOW_KEY ? "/advisor" : `/advisor?window=${encodeURIComponent(key)}`;
 }
 
 /** Project の窓 fromKey を toKey の位置へ動かした一覧。全体の窓は常に先頭のまま。toKey が全体の窓なら Project の先頭に入れる。 */
+/**
+ * @param {any[]} windows
+ * @param {string} fromKey
+ * @param {string} toKey
+ */
 export function moveProjectWindow(windows, fromKey, toKey) {
   const general = windows.filter((w) => w.scope === "general");
   const projects = windows.filter((w) => w.scope !== "general");
@@ -28,11 +39,16 @@ export function moveProjectWindow(windows, fromKey, toKey) {
 }
 
 /** 並べ替えの保存に送る keys。Project の窓の key だけを表示順に並べる。 */
+/** @param {any[]} windows */
 export function projectWindowKeys(windows) {
   return windows.filter((w) => w.scope !== "general").map((w) => w.key);
 }
 
 /** 窓一覧に未読の点を出すか。今開いている窓は表示した時点で既読にするので、点を出さない。 */
+/**
+ * @param {any} window
+ * @param {string} currentKey
+ */
 export function showUnreadDot(window, currentKey) {
   return window.has_unread === true && window.key !== currentKey;
 }
@@ -40,6 +56,8 @@ export function showUnreadDot(window, currentKey) {
 /**
  * 既読位置として送る id。画面に描く末尾 visibleCount 件のうち、最後の Advisor のメッセージ（状況の返事も含む）。
  * 描いていない返事と、表示中の一覧より後に届いた返事は含めない。描いた中に無ければ null。
+ * @param {any[] | null | undefined} messages
+ * @param {number} visibleCount
  */
 export function readThroughToSend(messages, visibleCount) {
   if (!messages) return null;
@@ -49,11 +67,13 @@ export function readThroughToSend(messages, visibleCount) {
 }
 
 /** Slack・Discord から来た Owner の発言の送り手の名前に付ける文言のキー。それ以外は null。 */
+/** @param {any} source */
 export function viaLabelKey(source) {
   return source === "slack" || source === "discord" ? `advisorWindows.via.${source}` : null;
 }
 
 // 手順の文言の数。i18n の advisorWindows.setup.<provider>.<kind>Step1.. と対応する（テストで確かめる）。
+/** @type {Record<string, Record<string, number>>} */
 export const SETUP_STEP_COUNTS = {
   slack: { permission: 5, botNotMember: 2 },
   discord: { permission: 3, botNotMember: 2 },
@@ -75,10 +95,13 @@ const ERROR_KEYS = {
 /**
  * チャンネル管理の API のエラーを、画面に出す i18n のキーと差し込む値に直す。
  * steps は設定方法の手順のキー（権限が足りないときと Bot がチャンネルにいないときだけ）。
+ * @param {any} code
+ * @param {any} details
+ * @param {string} provider
  */
 export function channelErrorMessage(code, details, provider) {
   const base = `advisorWindows.setup.${provider}`;
-  const steps = (kind) => Array.from({ length: SETUP_STEP_COUNTS[provider][kind] }, (_, i) => `${base}.${kind}Step${i + 1}`);
+  const steps = /** @param {string} kind */ (kind) => Array.from({ length: SETUP_STEP_COUNTS[provider][kind] }, (_, i) => `${base}.${kind}Step${i + 1}`);
   const known = Object.hasOwn(SETUP_STEP_COUNTS, provider);
   if (known && code === "integration_permission_missing") {
     const needed = Array.isArray(details?.needed) ? details.needed.join(", ") : "";

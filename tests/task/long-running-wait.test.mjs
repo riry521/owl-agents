@@ -104,8 +104,8 @@ const eventCount = (db, workId, type) => db.get("SELECT COUNT(*) AS n FROM event
 
 /** Make the next Core check of the Work's waits run now (the per-Task interval is at least 10 seconds). */
 async function checkNow(core, workId) {
-  core.prerequisiteRecheck.add(workId);
-  await core.checkPrerequisites(workId);
+  core.manager.prerequisiteRecheck.add(workId);
+  await core.manager.checkPrerequisites(workId);
 }
 
 const waitsFor = (db, workId) => waitFor(() => task(db, workId)?.status === "waiting" && task(db, workId));

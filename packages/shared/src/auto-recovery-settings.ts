@@ -17,7 +17,7 @@ export class AutoRecoverySettingsValidationError extends SettingsValidationError
 
 function checkLimit(value: unknown): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < AUTO_RECOVERY_LIMIT_MIN || value > AUTO_RECOVERY_LIMIT_MAX) {
-    throw new AutoRecoverySettingsValidationError(`limit must be an integer from ${AUTO_RECOVERY_LIMIT_MIN} to ${AUTO_RECOVERY_LIMIT_MAX}.`, "limit");
+    throw new AutoRecoverySettingsValidationError(`limit must be an integer from ${AUTO_RECOVERY_LIMIT_MIN} to ${AUTO_RECOVERY_LIMIT_MAX}.`, "limit", { kind: "integer_range", min: AUTO_RECOVERY_LIMIT_MIN, max: AUTO_RECOVERY_LIMIT_MAX });
   }
   return value;
 }

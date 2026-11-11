@@ -23,7 +23,7 @@ export const validateDependencySummarySettings = exactKeysValidator<DependencySu
   keys: ["max_chars"],
   check: (_key, value) => {
     if (!isValidMaxChars(value)) {
-      throw new DependencySummarySettingsValidationError(`max_chars must be an integer from 1 to ${MAX_CHARS_LIMIT}.`, "max_chars");
+      throw new DependencySummarySettingsValidationError(`max_chars must be an integer from 1 to ${MAX_CHARS_LIMIT}.`, "max_chars", { kind: "integer_range", min: 1, max: MAX_CHARS_LIMIT });
     }
     return value;
   },

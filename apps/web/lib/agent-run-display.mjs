@@ -1,3 +1,4 @@
+// @ts-check
 /**
  * How an AgentRun's result is shown: a `completed` run that recorded an
  * outcome shows the outcome (success green, the rest amber); every other run
@@ -28,7 +29,10 @@ const STATUS_TONES = {
   cancelled: 'red',
 };
 
-/** @returns {boolean} */
+/**
+ * @param {any} value
+ * @returns {value is keyof typeof OUTCOME_TONES}
+ */
 export function isAgentOutcome(value) {
   return typeof value === 'string' && Object.prototype.hasOwnProperty.call(OUTCOME_TONES, value);
 }
@@ -40,8 +44,8 @@ export function isAgentOutcome(value) {
  */
 export function agentRunDisplay(status, outcome) {
   if (status === 'completed' && isAgentOutcome(outcome)) {
-    return { kind: 'outcome', key: outcome, tone: OUTCOME_TONES[outcome] };
+    return { kind: 'outcome', key: outcome, tone: /** @type {Record<string, any>} */ (OUTCOME_TONES)[outcome] };
   }
-  const tone = Object.prototype.hasOwnProperty.call(STATUS_TONES, status) ? STATUS_TONES[status] : 'gray';
+  const tone = Object.prototype.hasOwnProperty.call(STATUS_TONES, status) ? /** @type {Record<string, any>} */ (STATUS_TONES)[status] : 'gray';
   return { kind: 'status', key: status, tone };
 }

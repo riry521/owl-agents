@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { chmodSync, closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createConnection, createServer } from "node:net";
@@ -1090,5 +1090,59 @@ test("the real server logs every line with a time and each shutdown stage on SIG
   const text = lines.join("\n");
   for (const expected of ["received SIGTERM", "shutdown start", "stage start: core shutdown", "stage done: core shutdown", "stage done: runtime files", "shutdown complete"]) {
     assert.ok(text.includes(expected), expected + "\n" + text);
+  }
+});
+
+test("a cleanup that throws logs the stack, reports it in the abort reason and exits non-zero", async () => {
+  const { createShutdownDeadline } = await import(pathToFileURL(join(repoRoot, "apps", "server", "dist", "shutdown-deadline.js")).href);
+  const lines = [];
+  const codes = [];
+  const deadline = createShutdownDeadline({
+    deadlineMs: 60_000,
+    graceMs: 60_000,
+    run: async () => {},
+    forceTerminate: () => {},
+    cleanup: () => { throw new Error("cleanup boom"); },
+    exit: (code) => codes.push(code),
+    log: (line) => lines.push(line),
+    startWatchdog: () => {},
+  });
+  deadline.handleSignal("SIGTERM", false);
+  await waitFor(() => codes.length > 0, { timeoutMs: 2_000, intervalMs: 10, message: "exit called" });
+  assert.deepEqual(codes, [1]);
+  assert.ok(lines.some((line) => /shutdown aborted \(shutdown failed: Error: cleanup boom\n\s+at /.test(line)), "reason carries the stack");
+});
+
+test("installTimestampedConsole called twice stamps each line once (startServer and main both call it)", async () => {
+  const { installTimestampedConsole } = await import(pathToFileURL(join(repoRoot, "apps", "server", "dist", "log-format.js")).href);
+  const lines = [];
+  const fake = { log: (text) => lines.push(text), info() {}, warn() {}, error() {} };
+  installTimestampedConsole(fake);
+  installTimestampedConsole(fake);
+  fake.log("hello");
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z hello$/);
+});
+
+test("startServer called directly stamps console lines with one timestamp", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "owl-startserver-log-"));
+  const port = await freePort();
+  const serverUrl = pathToFileURL(join(repoRoot, "apps", "server", "dist", "server.js")).href;
+  const script = `const { startServer } = await import(${JSON.stringify(serverUrl)});
+const running = await startServer({ bind: "127.0.0.1", port: ${port} });
+console.log("canary-line");
+await running.shutdown(false, 5000);
+process.exit(0);`;
+  try {
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", script], {
+      env: envWith({ OWL_DATA_DIR: dataDir }),
+      encoding: "utf8",
+      timeout: 60_000,
+    });
+    const canary = result.stdout.split("\n").filter((line) => line.includes("canary-line"));
+    assert.equal(canary.length, 1, `stdout: ${result.stdout} stderr: ${result.stderr}`);
+    assert.match(canary[0], /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z canary-line$/);
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
   }
 });

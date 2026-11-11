@@ -644,16 +644,16 @@ test("Advisor create_work links and dismisses backlog items atomically, and reje
   const worksTitled = () => db.get("SELECT COUNT(*) AS count FROM works WHERE title = 'Advisor Work'").count;
 
   for (const [suffix, bad] of [["other", { backlog_item_ids: [other] }], ["missing", { dismiss_backlog_item_ids: ["nope"] }], ["wrong-dismiss", { dismiss_backlog_item_ids: [other] }], ["null-link", { backlog_item_ids: null }], ["null-dismiss", { dismiss_backlog_item_ids: null }]]) {
-    const { notices } = await core.dispatchAdvisorWorkActions("c", `turn-bad-${suffix}`, [createAction({ project_id: projectA, ...bad })]);
+    const { notices } = await core.advisorActions.dispatchAdvisorWorkActions("c", `turn-bad-${suffix}`, [createAction({ project_id: projectA, ...bad })], { channel: "web" }, {});
     assert.match(notices[0], /Workの起票に失敗しました/u);
     assert.equal(worksTitled(), 0);
     assert.equal(status(other).status, "open");
     assert.equal(status(link).status, "open");
   }
 
-  const { notices } = await core.dispatchAdvisorWorkActions("c", "turn-ok", [createAction({
+  const { notices } = await core.advisorActions.dispatchAdvisorWorkActions("c", "turn-ok", [createAction({
     project_id: projectA, backlog_item_ids: [link], dismiss_backlog_item_ids: [drop],
-  })]);
+  })], { channel: "web" }, {});
   assert.match(notices[0], /起票し/u);
   const work = db.get("SELECT id, summary, advisor_backlog_json FROM works WHERE title = 'Advisor Work'");
   assert.deepEqual({ ...status(link) }, { status: "in_progress", issued_work_id: work.id });
@@ -661,17 +661,17 @@ test("Advisor create_work links and dismisses backlog items atomically, and reje
   assert.equal(work.summary, "Do it.");
   const stored = JSON.parse(work.advisor_backlog_json);
   assert.deepEqual([stored.linked.map((i) => i.id), stored.dismissed.map((i) => i.id)], [[link], [drop]]);
-  assert.deepEqual(core.managerWorkContext(work.id).advisor_backlog, stored);
+  assert.deepEqual(core.manager.managerWorkContext(work.id).advisor_backlog, stored);
   assert.deepEqual(core.getWork(work.id).data.advisor_backlog, stored);
   const plain = (await core.createWork(command({ title: "Plain", summary: "s", size: "normal", project_id: null }, "plain-create"))).data.work_id;
-  assert.equal(core.managerWorkContext(plain).advisor_backlog, null);
+  assert.equal(core.manager.managerWorkContext(plain).advisor_backlog, null);
   assert.equal(core.getWork(plain).data.advisor_backlog, null);
   for (const bad of ["{}", "[]", "5", '{"linked":[],"dismissed":[{"id":1}]}']) {
     await db.createWriteLane().transact((tx) => tx.run("UPDATE works SET advisor_backlog_json = ? WHERE id = ?", bad, plain));
     assert.equal(core.getWork(plain).data.advisor_backlog, null, bad);
   }
 
-  const again = await core.dispatchAdvisorWorkActions("c", "turn-reuse", [createAction({ project_id: projectA, backlog_item_ids: [link] })]);
+  const again = await core.advisorActions.dispatchAdvisorWorkActions("c", "turn-reuse", [createAction({ project_id: projectA, backlog_item_ids: [link] })], { channel: "web" }, {});
   assert.match(again.notices[0], /起票に失敗/u);
   assert.equal(worksTitled(), 1);
 });

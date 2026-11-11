@@ -9,8 +9,10 @@ export interface SkillMetadata {
 }
 
 export type ParsedSkillMd = SkillMetadata & { readonly body: string };
-export type ParseSkillMdResult = ParsedSkillMd | { readonly error: string };
-export type SkillFilePathResult = { readonly ok: true } | { readonly ok: false; readonly reason: string };
+/** Why SKILL.md was refused, as a kind the server turns into the Owner's language; `key` names the frontmatter field at fault. */
+export type SkillMdProblem = "not_text" | "frontmatter_missing" | "field_malformed" | "duplicate_key" | "invalid_value" | "name_invalid" | "description_invalid" | "scope_invalid" | "tags_invalid";
+export type ParseSkillMdResult = ParsedSkillMd | { readonly error: string; readonly problem: SkillMdProblem; readonly key?: string };
+export type SkillFilePathResult = { readonly ok: true } | { readonly ok: false; readonly reason: string; readonly code: "core.skill_path_empty" | "core.skill_path_absolute" | "core.skill_path_traversal" | "core.skill_path_location" };
 
 const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{1,62}$/u;
 const SKILL_FILE_DIRECTORIES = new Set(["references", "scripts", "templates"]);
@@ -21,26 +23,26 @@ export function validateSkillName(name: string): boolean {
 
 export function validateSkillFilePath(path: string): SkillFilePathResult {
   if (typeof path !== "string" || path.length === 0 || path.includes("\0")) {
-    return { ok: false, reason: "File path must be a non-empty relative path." };
+    return { ok: false, reason: "File path must be a non-empty relative path.", code: "core.skill_path_empty" };
   }
   if (isAbsolute(path) || win32.isAbsolute(path) || path.startsWith("/") || path.includes("\\")) {
-    return { ok: false, reason: "Absolute paths and platform-specific separators are not allowed." };
+    return { ok: false, reason: "Absolute paths and platform-specific separators are not allowed.", code: "core.skill_path_absolute" };
   }
   const segments = path.split("/");
   if (segments.some((segment) => segment.length === 0 || segment === "." || segment === "..")) {
-    return { ok: false, reason: "Empty and traversal path segments are not allowed." };
+    return { ok: false, reason: "Empty and traversal path segments are not allowed.", code: "core.skill_path_traversal" };
   }
   if (path === "SKILL.md") return { ok: true };
   if (segments.length !== 2 || !SKILL_FILE_DIRECTORIES.has(segments[0])) {
-    return { ok: false, reason: "Files must be SKILL.md or directly inside references/, scripts/, or templates/." };
+    return { ok: false, reason: "Files must be SKILL.md or directly inside references/, scripts/, or templates/.", code: "core.skill_path_location" };
   }
   return { ok: true };
 }
 
 export function parseSkillMd(text: string): ParseSkillMdResult {
-  if (typeof text !== "string" || text.includes("\0")) return { error: "SKILL.md must be valid text without NUL characters." };
+  if (typeof text !== "string" || text.includes("\0")) return { error: "SKILL.md must be valid text without NUL characters.", problem: "not_text" };
   const match = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/u.exec(text);
-  if (!match) return { error: "SKILL.md frontmatter is missing or malformed." };
+  if (!match) return { error: "SKILL.md frontmatter is missing or malformed.", problem: "frontmatter_missing" };
 
   const fields = new Map<string, string>();
   const tags: string[] = [];
@@ -49,41 +51,41 @@ export function parseSkillMd(text: string): ParseSkillMdResult {
     const item = /^\s+-\s+(.+)\s*$/u.exec(line);
     if (readingBlockTags && item) {
       const tag = parseScalar(item[1]);
-      if (tag === null) return { error: "SKILL.md contains invalid tags." };
+      if (tag === null) return { error: "SKILL.md contains invalid tags.", problem: "tags_invalid" };
       tags.push(tag);
       continue;
     }
     readingBlockTags = false;
     if (line.trim().length === 0) continue;
     const separator = line.indexOf(":");
-    if (separator <= 0) return { error: "SKILL.md frontmatter contains a malformed field." };
+    if (separator <= 0) return { error: "SKILL.md frontmatter contains a malformed field.", problem: "field_malformed" };
     const key = line.slice(0, separator).trim();
     const rawValue = line.slice(separator + 1).trim();
-    if (fields.has(key)) return { error: `SKILL.md contains duplicate ${key} metadata.` };
+    if (fields.has(key)) return { error: `SKILL.md contains duplicate ${key} metadata.`, problem: "duplicate_key", key };
     if (key === "tags") {
       if (rawValue === "") {
         readingBlockTags = true;
         continue;
       }
       const parsed = parseTags(rawValue);
-      if (!parsed) return { error: "SKILL.md contains invalid tags." };
+      if (!parsed) return { error: "SKILL.md contains invalid tags.", problem: "tags_invalid" };
       tags.push(...parsed);
       continue;
     }
     const value = parseScalar(rawValue);
-    if (value === null) return { error: `SKILL.md contains invalid ${key} metadata.` };
+    if (value === null) return { error: `SKILL.md contains invalid ${key} metadata.`, problem: "invalid_value", key };
     fields.set(key, value);
   }
 
   const name = fields.get("name");
   const description = fields.get("description");
   const scope = fields.get("scope");
-  if (!name || !validateSkillName(name)) return { error: "SKILL.md name is invalid." };
+  if (!name || !validateSkillName(name)) return { error: "SKILL.md name is invalid.", problem: "name_invalid" };
   if (!description || description.length > 300 || /[\r\n\u0000-\u001f\u007f]/u.test(description)) {
-    return { error: "SKILL.md description must be a single line of at most 300 characters." };
+    return { error: "SKILL.md description must be a single line of at most 300 characters.", problem: "description_invalid" };
   }
-  if (!scope || !isValidSkillScope(scope)) return { error: "SKILL.md scope is invalid." };
-  if (tags.some((tag) => tag.length === 0 || /[\r\n\u0000-\u001f\u007f]/u.test(tag))) return { error: "SKILL.md contains invalid tags." };
+  if (!scope || !isValidSkillScope(scope)) return { error: "SKILL.md scope is invalid.", problem: "scope_invalid" };
+  if (tags.some((tag) => tag.length === 0 || /[\r\n\u0000-\u001f\u007f]/u.test(tag))) return { error: "SKILL.md contains invalid tags.", problem: "tags_invalid" };
 
   return {
     name,

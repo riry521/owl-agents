@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 
-import { DECISION_TEXT_CHECK_OUTPUT_MAX_BYTES, type DecisionTextCheckInput } from "../../../packages/shared/dist/decision-explanation.js";
-import type { FinalReportCheckInput } from "../../../packages/shared/dist/final-report.js";
+import { DECISION_TEXT_CHECK_OUTPUT_MAX_BYTES, type DecisionTextCheckInput } from "@owl/shared/decision-explanation";
+import type { FinalReportCheckInput } from "@owl/shared/final-report";
 import { getPluginsFilePath } from "./config.js";
 import { loadDecisionTextCheckSpecs, loadFinalReportTextCheckSpecs, type PluginSpec } from "./plugin-manager.js";
 

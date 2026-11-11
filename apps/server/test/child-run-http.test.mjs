@@ -205,7 +205,7 @@ test("wait long-polls with an abort signal and Task-filtered dispatch records ar
   assert.equal(invalidFilter.status, 400);
 });
 
-test("child settings APIs and the legacy executor route map defaults and timeout fields", async (t) => {
+test("child settings API saves and returns the settings", async (t) => {
   const api = await setup(t);
   if (!api) return;
   const initial = await api.request("/settings/child-runs");
@@ -219,61 +219,6 @@ test("child settings APIs and the legacy executor route map defaults and timeout
   });
   assert.equal(childUpdate.status, 200);
   assert.deepEqual((await childUpdate.json()).data, settings);
-
-  const codexRow = settings.executor_by_harness.codex;
-  const legacy = await api.request("/settings/executor");
-  assert.equal(legacy.status, 200);
-  assert.deepEqual((await legacy.json()).data, {
-    ...settings,
-    provider: "codex",
-    model: codexRow.model,
-    effort: codexRow.effort,
-    timeout_ms: settings.timeout_minutes * 60_000,
-  });
-
-  const update = await api.request("/settings/executor", {
-    method: "PUT",
-    body: {
-      request_id: "legacy-update", idempotency_key: "legacy-update", expected_version: 0,
-      payload: { provider: "openai", model: "gpt-5.6-luna", effort: "high", timeout_ms: 30 * 60_000 },
-    },
-  });
-  assert.equal(update.status, 200);
-  const updatedSettings = {
-    ...settings,
-    executor_harness: "codex",
-    executor_by_harness: { ...settings.executor_by_harness, codex: { model: "gpt-5.6-luna", effort: "high" } },
-    timeout_minutes: 30,
-  };
-  assert.deepEqual((await update.json()).data, {
-    ...updatedSettings,
-    provider: "codex",
-    model: "gpt-5.6-luna",
-    effort: "high",
-    timeout_ms: 30 * 60_000,
-  });
-  assert.equal(api.fake.settings().executor_harness, "codex");
-  assert.deepEqual(api.fake.settings().executor_by_harness.codex, { model: "gpt-5.6-luna", effort: "high" });
-  assert.equal(api.fake.settings().timeout_minutes, 30);
-
-  const unsetEffort = await api.request("/settings/executor", {
-    method: "PUT",
-    body: {
-      request_id: "legacy-unset-effort", idempotency_key: "legacy-unset-effort", expected_version: 0,
-      payload: { provider: "codex", model: "gpt-5.6-luna", effort: null, timeout_ms: 0 },
-    },
-  });
-  assert.equal(unsetEffort.status, 200);
-  assert.equal((await unsetEffort.json()).data.effort, null);
-  assert.equal(api.fake.settings().executor_by_harness.codex.effort, null);
-
-  const twoLevel = { ...api.fake.settings(), executor_harness: "claude" };
-  const direct = await api.request("/settings/executor", {
-    method: "PUT",
-    body: { request_id: "two-level", idempotency_key: "two-level", expected_version: 0, payload: twoLevel },
-  });
-  assert.equal(direct.status, 200);
-  assert.equal(api.fake.settings().executor_harness, "claude");
 });
 
 test("token relay and researcher settings PUT through HTTP are kept by GET, and invalid values name their field", async (t) => {

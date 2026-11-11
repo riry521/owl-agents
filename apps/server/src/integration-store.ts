@@ -1,11 +1,11 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 
-import { SecretStore } from "../../../packages/core/dist/secret-store.js";
+import { SecretStore } from "@owl/core/dist/secret-store.js";
 import { createUlid, isUlid } from "./ids.js";
 import { prepareDataDir, resolveDataDir } from "./contracts.js";
 import type { IntegrationConfig, IntegrationConfigPatch, IntegrationProvider, IntegrationStatus, IntegrationTestResult } from "./types.js";
-import type { OwnerLanguage } from "../../../packages/shared/dist/owner-language.js";
+import type { OwnerLanguage } from "@owl/shared/owner-language";
 
 function integrationText(language: OwnerLanguage, ja: string, en: string): string {
   return language === "ja" ? ja : en;

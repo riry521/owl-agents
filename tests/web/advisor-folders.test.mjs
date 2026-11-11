@@ -224,8 +224,8 @@ function renderAdvisorFolders(state, apiClientOverrides, componentName = 'Adviso
         // by AdvisorFoldersSection, but must exist so the module loads.
         getModelSettings: async () => [], updateModelSettings: async () => {}, getIntegrations: async () => [],
         saveIntegration: async () => {}, testIntegration: async () => {}, deleteIntegration: async () => {},
-        getHybridMode: async () => false, setHybridMode: async () => false, getExecutorConfig: async () => ({}),
-        setExecutorConfig: async () => ({}), listProviders: async () => [], createProvider: async () => ({}),
+        getHybridMode: async () => false, setHybridMode: async () => false,
+        listProviders: async () => [], createProvider: async () => ({}),
         deleteProvider: async () => {}, testProvider: async () => ({}), saveProvider: async () => ({}),
         getProviderModels: async () => ({}), setProviderModels: async () => [], getTypesafeApiKey: async () => '',
         setTypesafeApiKey: async () => '', getOwnerLanguage: async () => 'ja', setOwnerLanguage: async () => 'ja',
@@ -363,6 +363,20 @@ test('saving the send-file destination section sends the chosen provider and cha
   assert.deepEqual(payload, { preferred_provider: 'discord', default_destination: { provider: 'slack', channel_id: 'C0OWL' } });
   const unchanged = renderAdvisorFolders([true, data, null, '', false, false, null, null], {}, 'AdvisorSendFileDestinationSection');
   assert.equal(unchanged.saveButton.disabled, true);
+});
+
+test('an unavailable saved default can be cleared with None and is never dropped by a provider-only save', async () => {
+  const data = destinationData({ default_destination: { provider: 'slack', channel_id: 'C0OLD', display_name: 'old', available: false } });
+  let payload = null;
+  const put = async (input) => { payload = input; return data; };
+  const kept = renderAdvisorFolders([true, data, 'discord', 'slack:C0OLD', false, false, null, null], { putAdvisorSendFileDestination: put }, 'AdvisorSendFileDestinationSection');
+  assert.match(kept.html, /settings\.sendFileDestinationUnavailableOption/);
+  await kept.saveButton.onClick();
+  assert.equal(payload, null, 'nothing is sent while the unavailable default is still selected');
+  const cleared = renderAdvisorFolders([true, data, 'slack', '', false, false, null, null], { putAdvisorSendFileDestination: put }, 'AdvisorSendFileDestinationSection');
+  assert.equal(cleared.saveButton.disabled, false, 'choosing None is a change');
+  await cleared.saveButton.onClick();
+  assert.deepEqual(payload, { preferred_provider: 'slack', default_destination: null });
 });
 
 test('English and Japanese define the same settings.sendFileDestination* keys', () => {

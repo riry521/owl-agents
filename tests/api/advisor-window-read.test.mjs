@@ -123,7 +123,7 @@ test("a stored reply reaches subscribers at once and already counts as unread, b
   await env.ask(1, false);
   const seen = [];
   env.durableCore.subscribe(async (event) => { if (event.type === "advisor.responded") seen.push((await env.general()).has_unread); });
-  await env.durableCore.persistAdvisorReply(env.conversationId, "here", "t1", { channel: "web" }, []);
+  await env.durableCore.advisorActions.persistAdvisorReply(env.conversationId, "here", "t1", { channel: "web" }, []);
   assert.deepEqual(seen, [true], "the window list fetched on advisor.responded shows the dot");
   assert.equal(env.db.get("SELECT status FROM advisor_turns WHERE id = 't1'").status, "queued");
 });

@@ -1,4 +1,4 @@
-import { createUlid, utcNow } from "../../db/dist/index.js";
+import { createUlid, utcNow } from "@owl/db";
 import type { CoreDatabase, CoreWriteLaneTransaction } from "./types";
 
 export type AdvisorSessionStatus = "starting" | "running" | "ending" | "ended" | "suspended";

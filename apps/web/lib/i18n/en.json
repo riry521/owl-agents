@@ -1334,6 +1334,8 @@
     "sendFileDestinationUnavailable": "The saved default destination #{{name}} is no longer available. Choose a channel again.",
     "sendFileDestinationSave": "Save",
     "sendFileDestinationSavedNotice": "Saved.",
+    "sendFileDestinationUnavailableChoose": "The saved destination is not available now. Choose \"None\" or another destination before saving.",
+    "sendFileDestinationUnavailableOption": "{{name}} (saved, unavailable)",
     "sendFileDestinationError": "Could not load or save the file destination settings."
   },
   "folderPicker": {
@@ -1960,6 +1962,7 @@
     "dropHere": "Drop here to attach",
     "dropHint": "Up to {max} per file, {count} files",
     "remove": "Remove {name}",
+    "dismissNotices": "Dismiss notices",
     "retry": "Retry",
     "uploading": "Uploading",
     "quarantined": "Executable file; it will not be passed to the agents",

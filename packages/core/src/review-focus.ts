@@ -3,7 +3,7 @@ import {
   REVIEW_FOCUS_SETTINGS_KEY,
   readReviewFocusSettings,
   type ReviewFocusSettings,
-} from "../../shared/dist/review-focus-settings.js";
+} from "@owl/shared/review-focus-settings";
 import type { SettingsReader } from "./owner-language";
 import { readSetting, type SettingReadSpec } from "./settings-store";
 import type { LineageReader } from "./task-lineage";

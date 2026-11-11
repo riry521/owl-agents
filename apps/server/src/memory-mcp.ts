@@ -1,8 +1,8 @@
 import { realpathSync } from "node:fs";
 import { guardConfig, guardRequest } from "./guard-client.js";
-import { createInterface } from "node:readline";
+import { serveMcp } from "./stdio-jsonrpc.js";
 import { pathToFileURL } from "node:url";
-import { KIND_OF_SECTION } from "../../../packages/core/dist/memory/page-router.js";
+import { KIND_OF_SECTION } from "@owl/core/dist/memory/page-router.js";
 
 /**
  * owl-memory: a stdio MCP server exposing the memory page API to agents (read-only; the Advisor also gets append).
@@ -72,30 +72,16 @@ export async function callTool(name: unknown, args: unknown): Promise<unknown> {
   }
 }
 
-async function handle(message: { id?: unknown; method?: unknown; params?: { name?: unknown; arguments?: unknown } }): Promise<unknown> {
-  const reply = (result: unknown): unknown => ({ jsonrpc: "2.0", id: message.id, result });
-  switch (message.method) {
-    case "initialize":
-      return reply({ protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "owl-memory", version: "0.1.0" } });
-    case "ping":
-      return reply({});
-    case "tools/list":
-      return reply({ tools: toolsForRole().map((tool) => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, annotations: { readOnlyHint: tool !== APPEND_TOOL } })) });
-    case "tools/call": {
-      const result = await callTool(message.params?.name, message.params?.arguments);
-      const failed = typeof result === "object" && result !== null && Object.hasOwn(result, "error");
-      return reply({ content: [{ type: "text", text: JSON.stringify(result) }], ...(failed ? { isError: true } : {}) });
-    }
-    default:
-      return message.id === undefined ? null : { jsonrpc: "2.0", id: message.id, error: { code: -32601, message: "method not found" } };
-  }
+function memoryTools(): readonly unknown[] {
+  return toolsForRole().map((tool) => ({ name: tool.name, description: tool.description, inputSchema: tool.inputSchema, annotations: { readOnlyHint: tool !== APPEND_TOOL } }));
+}
+
+async function callMemoryTool(_id: unknown, name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const result = await callTool(name, args);
+  const failed = typeof result === "object" && result !== null && Object.hasOwn(result, "error");
+  return { content: [{ type: "text", text: JSON.stringify(result) }], ...(failed ? { isError: true } : {}) };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
-  for await (const line of createInterface({ input: process.stdin })) {
-    if (!line.trim()) continue;
-    let out: unknown;
-    try { out = await handle(JSON.parse(line)); } catch (error) { console.error("[owl-memory] request handling failed", error); out = { jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }; }
-    if (out) process.stdout.write(`${JSON.stringify(out)}\n`);
-  }
+  serveMcp({ name: "owl-memory", version: "0.1.0", tools: memoryTools, callTool: callMemoryTool });
 }

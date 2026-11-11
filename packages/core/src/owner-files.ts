@@ -2,7 +2,8 @@ import { readdir, realpath, stat } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { basename, join } from "node:path";
 
-import { isInside, openPinnedFile } from "./advisor-send-file.js";
+import { openPinnedFile } from "./advisor-send-file.js";
+import { isPathInside } from "./path-inside.js";
 import { HumanReadableError } from "./errors.js";
 import { isSecretPath } from "./project-overview-note.js";
 
@@ -11,7 +12,7 @@ export interface OwnerFileEntry { readonly name: string; readonly isDirectory: b
 export type OwnerFileOpened =
   | { readonly kind: "file"; readonly name: string; readonly size: number; readonly mtimeMs: number; readonly handle: FileHandle }
   | { readonly kind: "directory"; readonly entries: OwnerFileEntry[] };
-export type OwnerFileDenial = "outside" | "symlink_escape" | "traversal" | "secret" | "unknown_root" | "not_regular";
+export type OwnerFileDenial = "outside" | "symlink_escape" | "traversal" | "secret" | "unknown_root" | "not_regular" | "permission_denied";
 
 export interface OwnerFilesReaderOptions {
   /** Configured folders the Owner may browse; read on every call so a changed setting applies at once. */
@@ -20,10 +21,15 @@ export interface OwnerFilesReaderOptions {
 
 const denied = (reason: OwnerFileDenial): HumanReadableError => new HumanReadableError({
   code: "owner_file_denied",
-  message: "This path is outside the folders the Owner may open.",
-  remediation: "Open a file inside the materials or shared folder.",
+  message: reason === "permission_denied" ? "This file or folder cannot be read because of its permissions." : "This path is outside the folders the Owner may open.",
+  remediation: reason === "permission_denied" ? "Check the permissions of the file or folder." : "Open a file inside the materials or shared folder.",
   details: { reason },
 });
+
+/** EACCES/EPERM from stat or readdir mean the Owner may not read it: answer 4xx, not 500. */
+const permissionToDenied = (error: unknown): never => {
+  throw ["EACCES", "EPERM"].includes((error as NodeJS.ErrnoException)?.code ?? "") ? denied("permission_denied") : error;
+};
 
 const missing = (): HumanReadableError => new HumanReadableError({
   code: "owner_file_not_found",
@@ -58,11 +64,11 @@ export class OwnerFilesReader {
     const real = await realpath(join(root.path, ...segments)).catch(() => null);
     if (real === null) throw missing();
     if (real !== root.path) {
-      if (!isInside(root.path, real)) throw denied("symlink_escape");
+      if (!isPathInside(root.path, real, false)) throw denied("symlink_escape");
       // A link to a secret inside the folder is as bad as the secret's own name.
       if (isSecretPath(real.slice(root.path.length + 1))) throw denied("secret");
     }
-    const details = await stat(real);
+    const details = await stat(real).catch(permissionToDenied);
     if (details.isDirectory()) return { kind: "directory", entries: await this.list(root.path, real) };
     if (!details.isFile()) throw denied("not_regular");
     const pinned = await openPinnedFile(real);
@@ -73,11 +79,11 @@ export class OwnerFilesReader {
 
   private async list(rootReal: string, dir: string): Promise<OwnerFileEntry[]> {
     const entries: OwnerFileEntry[] = [];
-    for (const dirent of await readdir(dir, { withFileTypes: true })) {
+    for (const dirent of await readdir(dir, { withFileTypes: true }).catch(permissionToDenied)) {
       if (isSecretPath(dirent.name)) continue;
       const real = await realOrNull(join(dir, dirent.name));
       // Links that lead out of the folder, or broken links, are not offered.
-      if (real === null || (real !== rootReal && !isInside(rootReal, real))) continue;
+      if (real === null || (real !== rootReal && !isPathInside(rootReal, real, false))) continue;
       const details = await stat(real).catch(() => null);
       if (details && (details.isDirectory() || details.isFile())) entries.push({ name: dirent.name, isDirectory: details.isDirectory() });
     }

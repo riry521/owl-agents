@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import type { OwnerFileEntry, OwnerFileOpened } from "../../../packages/core/dist/owner-files.js";
+import type { OwnerFileEntry, OwnerFileOpened } from "@owl/core/dist/owner-files.js";
 
 const CONTENT_TYPES: Readonly<Record<string, string>> = {
   html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8",

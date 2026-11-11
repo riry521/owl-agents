@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { createUlid } from "../../db/dist/index.js";
+import { createUlid } from "@owl/db";
 import { idempotencyConflict, validationError } from "./errors";
 import { autoRecoverySummary } from "./auto-recovery";
 import { ownerLanguage } from "./owner-language";
@@ -276,7 +276,7 @@ function toDecision(row: DecisionDbRow): Decision {
   const blocked = JSON.parse(row.blocked_task_ids_json) as unknown;
   const options = JSON.parse(row.options_json) as unknown;
   if (!Array.isArray(blocked) || !blocked.every((id) => typeof id === "string") || !Array.isArray(options)) {
-    throw validationError("A stored Decision contains invalid JSON fields.", { decision_id: row.id });
+    throw validationError("A stored Decision contains invalid JSON fields.", { decision_id: row.id }, { code: "decision.stored_json_invalid", values: { field: "blocked_task_ids_json, options_json", decision_id: row.id } });
   }
   return {
     id: row.id,
@@ -299,7 +299,7 @@ function toDecision(row: DecisionDbRow): Decision {
 
 function boundLimit(limit: number): number {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
-    throw validationError("List limit must be an integer between 1 and 200.", { limit });
+    throw validationError("List limit must be an integer between 1 and 200.", { limit }, { code: "decision.list_limit_invalid", values: { field: "limit", min: 1, max: 200 } });
   }
   return limit;
 }

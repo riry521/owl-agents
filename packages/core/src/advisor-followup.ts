@@ -7,7 +7,7 @@ import {
   advisorCurationKind,
   isAdvisorWorkOperationType,
   parseAdvisorCallApiRequestShape,
-} from "../../shared/dist/advisor-response.js";
+} from "@owl/shared/advisor-response";
 
 import { advisorWorkId, parseAdvisorWorkOperationPayload } from "./advisor-work-payload.js";
 import type { CoreDatabase } from "./types.js";
@@ -50,6 +50,7 @@ export function stableJson(value: unknown): string {
   return JSON.stringify(value);
 }
 
+// shared の sha256 は文字列か Buffer の hash。ここは値を stableJson にしてから hash するので別に持つ。
 const sha256 = (value: unknown): string => createHash("sha256").update(stableJson(value), "utf8").digest("hex");
 
 // Codes a result may carry that mean "the action may or may not have run" whatever the kind.

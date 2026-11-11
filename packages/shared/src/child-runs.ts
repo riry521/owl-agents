@@ -135,29 +135,29 @@ export const DEFAULT_CHILD_RUN_SETTINGS: ChildRunSettings = {
 };
 
 /** First broken token-relay invariant (ranges, handoff below kill), or null when the settings are usable. */
-export function tokenRelaySettingsProblem(settings: TokenRelaySettings): { field: string; message: string } | null {
+export function tokenRelaySettingsProblem(settings: TokenRelaySettings): { field: string; message: string; code: "tokens_range" | "tokens_order" | "max_relays" | "report_threshold" | "models_count" | "provider" } | null {
   const limits = CHILD_RUN_LIMITS;
   const isInteger = (value: unknown, minimum: number, maximum: number): boolean =>
     typeof value === "number" && Number.isSafeInteger(value) && value >= minimum && value <= maximum;
   for (const field of ["handoff_tokens", "kill_tokens"] as const) {
     if (!isInteger(settings[field], limits.relay_tokens_min, limits.relay_tokens_max)) {
-      return { field: `token_relay.${field}`, message: `The handoff limit must be an integer from ${limits.relay_tokens_min} to ${limits.relay_tokens_max}.` };
+      return { field: `token_relay.${field}`, message: `The handoff limit must be an integer from ${limits.relay_tokens_min} to ${limits.relay_tokens_max}.`, code: "tokens_range" };
     }
   }
   if (settings.handoff_tokens >= settings.kill_tokens) {
-    return { field: "token_relay.handoff_tokens", message: "The handoff limit must be lower than the stop limit." };
+    return { field: "token_relay.handoff_tokens", message: "The handoff limit must be lower than the stop limit.", code: "tokens_order" };
   }
   if (!isInteger(settings.max_relays, 0, limits.max_relays_max)) {
-    return { field: "token_relay.max_relays", message: `Relay restarts must be an integer from 0 to ${limits.max_relays_max}.` };
+    return { field: "token_relay.max_relays", message: `Relay restarts must be an integer from 0 to ${limits.max_relays_max}.`, code: "max_relays" };
   }
   if (!isInteger(settings.report_threshold_tokens, limits.relay_tokens_min, limits.report_threshold_max)) {
-    return { field: "token_relay.report_threshold_tokens", message: `The request report threshold must be an integer from ${limits.relay_tokens_min} to ${limits.report_threshold_max}.` };
+    return { field: "token_relay.report_threshold_tokens", message: `The request report threshold must be an integer from ${limits.relay_tokens_min} to ${limits.report_threshold_max}.`, code: "report_threshold" };
   }
   if (!Array.isArray(settings.models) || settings.models.length > limits.relay_models_max) {
-    return { field: "token_relay.models", message: `Token relay models must contain 0 to ${limits.relay_models_max} provider/model objects.` };
+    return { field: "token_relay.models", message: `Token relay models must contain 0 to ${limits.relay_models_max} provider/model objects.`, code: "models_count" };
   }
   if (settings.models.some((choice) => choice?.provider !== "claude")) {
-    return { field: "token_relay.models", message: "Token relay supports only Claude children." };
+    return { field: "token_relay.models", message: "Token relay supports only Claude children.", code: "provider" };
   }
   return null;
 }
@@ -170,8 +170,3 @@ export function relayConfigFor(settings: ChildRunSettings, provider: ChildRunPro
 }
 
 export type DelegationMismatchKind = "delegation_missing" | "unknown_child" | "unreported_child" | "unfinished_child" | "missing_reason";
-export interface WorkerDelegationReport {
-  readonly split: string;
-  readonly children: readonly { readonly child_id: string; readonly assignment: string; readonly outcome: "used" | "fixed_by_worker" | "redone" | "discarded" }[];
-  readonly kept: readonly { readonly work: string; readonly reason: string }[];
-}

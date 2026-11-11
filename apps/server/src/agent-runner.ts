@@ -6,13 +6,14 @@ import { pathToFileURL } from "node:url";
 import { resolveDataDir, serverPackageRoot } from "./contracts.js";
 import { AppSettingsStore } from "./app-settings-store.js";
 import { ApiError } from "./errors.js";
+import { AgentRunnerMessages } from "./messages/agent-runner.js";
 import { buildAgentEnv } from "./agent-env.js";
-import { providerConfigurationError, providerSelection, resolveExecutableForSelection, type ProviderSelection } from "./provider-selection.js";
-import type { GuardTokenIssuer } from "../../../packages/shared/dist/guard-token.js";
-import type { PromptObserver, ProviderErrorObserver } from "../../../packages/shared/dist/index.js";
-import { AUTO_WORK_JUDGMENT_UNAVAILABLE, DECISION_ANSWER_TRIAGE_UNAVAILABLE, OPENCODE_EXECUTABLE_ENV, type OpencodeChildOutcome, type OpencodeChildRun } from "../../../packages/shared/dist/index.js";
+import { providerConfigurationIssue, providerSelection, resolveExecutableForSelection, type ProviderSelection } from "./provider-selection.js";
+import type { GuardTokenIssuer } from "@owl/shared/guard-token";
+import type { PromptObserver, ProviderErrorObserver } from "@owl/shared";
+import { AUTO_WORK_JUDGMENT_UNAVAILABLE, DECISION_ANSWER_TRIAGE_UNAVAILABLE, OPENCODE_EXECUTABLE_ENV, type OpencodeChildOutcome, type OpencodeChildRun } from "@owl/shared";
 import { runOpencodeChild } from "./opencode-child.js";
-import type { PlanUsageSnapshot } from "../../../packages/shared/dist/plan-usage.js";
+import type { PlanUsageSnapshot } from "@owl/shared/plan-usage";
 
 interface AgentRuntimeModule {
   createAgentRunner?: (options: Record<string, unknown>) => unknown;
@@ -31,7 +32,7 @@ async function loadAgentRuntimeModule(): Promise<AgentRuntimeModule> {
     throw new ApiError(
       503,
       "dependency_unavailable",
-      "Agent実行基盤がまだ利用できません。必要なdistをビルドしてから再実行してください。",
+      AgentRunnerMessages.runtimeNotBuilt(),
       { dependency: "packages/agent-runtime/dist/index.js" },
       { cause: error },
     );
@@ -43,7 +44,7 @@ async function loadAgentRuntimeModule(): Promise<AgentRuntimeModule> {
     throw new ApiError(
       503,
       "dependency_unavailable",
-      "Agent実行基盤を読み込めませんでした。ビルド成果物と実行環境を確認してください。",
+      AgentRunnerMessages.runtimeLoadFailed(),
       { dependency: "packages/agent-runtime/dist/index.js" },
       { cause: error },
     );
@@ -52,7 +53,7 @@ async function loadAgentRuntimeModule(): Promise<AgentRuntimeModule> {
     throw new ApiError(
       503,
       "dependency_unavailable",
-      "Agent実行基盤の公開APIが契約と一致しません。createAgentRunner/createStubAgentRunnerを確認してください。",
+      AgentRunnerMessages.runtimeApiMismatch(),
       { dependency: "packages/agent-runtime/dist/index.js", export: "createAgentRunner,createStubAgentRunner" },
     );
   }
@@ -66,7 +67,7 @@ function agentRunnerInitializationError(error: unknown): ApiError {
     return new ApiError(
       503,
       "dependency_unavailable",
-      `Provider設定を読み込めませんでした。${reason}`,
+      AgentRunnerMessages.providerSettingsUnreadable({ reason }),
       { dependency: "data/app-settings.json" },
       { cause: error },
     );
@@ -75,7 +76,7 @@ function agentRunnerInitializationError(error: unknown): ApiError {
     return new ApiError(
       503,
       "dependency_unavailable",
-      "Provider/Harnessの実行環境を初期化できませんでした。実行ファイルのパス、PATH、権限を確認してください。",
+      AgentRunnerMessages.executableEnvironment(),
       { dependency: "Provider/Harness executable" },
       { cause: error },
     );
@@ -83,7 +84,7 @@ function agentRunnerInitializationError(error: unknown): ApiError {
   return new ApiError(
     503,
     "dependency_unavailable",
-    "Provider/Harnessを初期化できませんでした。Provider設定、モデル、実行環境を確認してください。",
+    AgentRunnerMessages.initializeFailed(),
     { dependency: "packages/agent-runtime/dist/index.js" },
     { cause: error },
   );
@@ -235,7 +236,7 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
           throw new ApiError(
             500,
             "server_error",
-            "owl-coreプロセスの起動環境にPATHが設定されていません。owl startを実行するシェルの環境変数を確認してください。",
+            AgentRunnerMessages.envPathMissing(),
             { field: "PATH" },
           );
         }
@@ -244,7 +245,7 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
           throw new ApiError(
             500,
             "server_error",
-            "owl-coreプロセスの起動環境にHOMEが設定されていません。owl startを実行するシェルの環境変数を確認してください。",
+            AgentRunnerMessages.envHomeMissing(),
             { field: "HOME" },
           );
         }
@@ -255,7 +256,7 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
         });
 
         const executablePath = await resolveExecutableForSelection(selection);
-        const configurationError = providerConfigurationError(selection, executablePath);
+        const configurationError = providerConfigurationIssue(selection, executablePath);
         if (configurationError) {
           throw new ApiError(
             503,
@@ -274,7 +275,6 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
         if (executables.opencode) env[OPENCODE_EXECUTABLE_ENV] = executables.opencode;
 
         let model = selection.model;
-        const appSettings = new AppSettingsStore(owlRoot, resolveDataDir(owlRoot));
         const providerConfigs: Record<string, { adapter: string; backend_url?: string; api_key_env?: string }> = {};
         // Custom provider keys are handed to the runtime separately so each
         // key reaches only the processes of the provider that uses it.
@@ -286,17 +286,17 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
           for (const [providerId, config] of Object.entries(customProviders)) {
             const normalizedId = providerId.trim().toLowerCase();
             if (normalizedId.length === 0) {
-              throw new ApiError(503, "dependency_unavailable", "カスタムProvider設定に空のProvider IDがあります。設定を修正してください。", { provider: providerId });
+              throw new ApiError(503, "dependency_unavailable", AgentRunnerMessages.customProviderEmptyId(), { provider: providerId });
             }
             if (config.harnessId !== "claude" && config.harnessId !== "codex" && config.harnessId !== "opencode") {
-              throw new ApiError(503, "dependency_unavailable", `カスタムProvider ${providerId} のHarness '${config.harnessId}'は未対応です。claude、codex、opencodeのいずれかを指定してください。`, { provider: providerId, harness: config.harnessId });
+              throw new ApiError(503, "dependency_unavailable", AgentRunnerMessages.customProviderHarnessUnsupported({ providerId, harnessId: config.harnessId }), { provider: providerId, harness: config.harnessId });
             }
             const apiKeyEnv = config.apiKeySource?.startsWith("env:")
               ? config.apiKeySource.slice("env:".length)
               : undefined;
             const validApiKeyEnv = apiKeyEnv !== undefined && /^[A-Za-z_][A-Za-z0-9_]*$/u.test(apiKeyEnv);
             if (config.apiKeySource !== undefined && !validApiKeyEnv) {
-              throw new ApiError(503, "dependency_unavailable", `カスタムProvider ${providerId} のapiKeySourceが不正です。env:VARIABLE_NAME形式を指定してください。`, { provider: providerId });
+              throw new ApiError(503, "dependency_unavailable", AgentRunnerMessages.customProviderApiKeySourceInvalid({ providerId }), { provider: providerId });
             }
             if (validApiKeyEnv) {
               delete env[apiKeyEnv];

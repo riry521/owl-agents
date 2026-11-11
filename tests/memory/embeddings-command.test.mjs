@@ -101,6 +101,28 @@ test("an existing index gets its pending notes embedded, and a second run embeds
   assert.deepEqual(chunkIds(dataDir), ids);
 });
 
+test("on a terminal the progress goes to the write argument, not process.stdout", async (t) => {
+  const host = await startHost(t);
+  const dataDir = await dataDirWithIndex(t);
+  const chunks = [];
+  const original = process.stdout.write;
+  let leaked = false;
+  process.stdout.write = (...args) => { leaked = true; return original.apply(process.stdout, args); };
+  let result;
+  try { result = await run(dataDir, { OWL_MEMORY_MODEL_HOST: host.url }, { isTTY: true, write: (text) => chunks.push(text) }); } finally { process.stdout.write = original; }
+  assert.equal(result.code, 0);
+  assert.ok(chunks.some((text) => text.startsWith("\r")) && chunks.at(-1) === "\n");
+  assert.equal(leaked, false);
+});
+
+test("on a terminal without a write argument the progress still goes to out", async (t) => {
+  const host = await startHost(t);
+  const dataDir = await dataDirWithIndex(t);
+  const result = await run(dataDir, { OWL_MEMORY_MODEL_HOST: host.url }, { isTTY: true });
+  assert.equal(result.code, 0);
+  assert.ok(result.lines.some((text) => text.startsWith("\r")));
+});
+
 test("changing OWL_MEMORY_EMBED_MODEL downloads that model and rebuilds every vector", async (t) => {
   const host = await startHost(t);
   const dataDir = await dataDirWithIndex(t);

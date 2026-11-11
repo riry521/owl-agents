@@ -38,16 +38,20 @@ test("folder values expand home, reject relative paths, and reset to defaults", 
   assert.equal((await core.getAdvisorFolders()).shared_dir, defaults.sharedDir);
 });
 
-test("folder validation messages follow the Owner language", () => {
-  const error = { code: "validation_error", details: {}, message: "フォルダは絶対パスで指定してください。" };
-  assert.equal(errorBody("test", error, "en").error.message, "Specify the folder as an absolute path.");
-  assert.equal(errorBody("test", error, "ja").error.message, error.message);
-  for (const [japanese, english, code] of [
-    ["フォルダが見つかりません。", "The folder was not found.", "not_found"],
-    ["フォルダではありません。", "This is not a folder.", "validation_error"],
-    ["このフォルダを開く権限がありません。", "You do not have permission to open this folder.", "forbidden"],
+test("folder validation messages follow the Owner language", async (t) => {
+  const root = await tempDir(t, "owl-fs-messages-");
+  await writeFile(join(root, "file.txt"), "file");
+  const denied = { stat: () => Promise.reject(Object.assign(new Error("EACCES"), { code: "EACCES" })), readdir: () => Promise.resolve([]) };
+  for (const [path, japanese, english, code, fsOps] of [
+    ["relative/dir", "フォルダは絶対パスで指定してください。", "Specify the folder as an absolute path.", "validation_error"],
+    [join(root, "missing"), "フォルダが見つかりません。", "The folder was not found.", "not_found"],
+    [join(root, "file.txt"), "フォルダではありません。", "This is not a folder.", "validation_error"],
+    [root, "このフォルダを開く権限がありません。", "You do not have permission to open this folder.", "forbidden", denied],
   ]) {
-    assert.equal(errorBody("test", { code, details: {}, message: japanese }, "en").error.message, english);
+    const error = await listHostDirectories(path, false, root, {}, fsOps).then(() => null, (e) => e);
+    assert.equal(error?.code, code);
+    assert.equal(errorBody("test", error, "ja").error.message, japanese);
+    assert.equal(errorBody("test", error, "en").error.message, english);
   }
 });
 

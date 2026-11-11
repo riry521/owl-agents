@@ -133,8 +133,8 @@ test("a merge wake schedules the waiting Work without remembering a key that can
     transaction.run("UPDATE tasks SET prerequisite_json = ? WHERE id = ?", JSON.stringify(spec), taskId);
   });
 
-  core.wakePrerequisiteWaiters(sourceId, true);
+  core.manager.wakePrerequisiteWaiters(sourceId, true);
 
-  assert.equal(core.prerequisiteRecheck.has(waiterId), true);
-  assert.equal(core.prerequisiteWoken.size, 0);
+  assert.equal(core.manager.prerequisiteRecheck.has(waiterId), true);
+  assert.equal(core.manager.prerequisiteWoken.size, 0);
 });

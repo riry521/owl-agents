@@ -20,7 +20,7 @@ export const readWorkDataRetentionSettings = keyedReader<WorkDataRetentionSettin
   keys: KEYS,
   defaults: DEFAULT_WORK_DATA_RETENTION_SETTINGS,
   check: (key, value) => {
-    if (typeof value !== "boolean") throw new WorkDataRetentionSettingsValidationError(`${key} must be true or false.`, key);
+    if (typeof value !== "boolean") throw new WorkDataRetentionSettingsValidationError(`${key} must be true or false.`, key, { kind: "boolean" });
     return value;
   },
   notObject: "Stored work data retention settings are not an object; using defaults.",

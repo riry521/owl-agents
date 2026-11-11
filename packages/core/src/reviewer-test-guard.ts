@@ -1,6 +1,6 @@
 import { analyzeShellCommand } from "./command-analysis.js";
-import type { TestPolicy } from "../../shared/dist/test-policy.js";
-import { runArgvOf, targetPlaceholderOf, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
+import type { TestPolicy } from "@owl/shared/test-policy";
+import { runArgvOf, targetPlaceholderOf, type TestRunSettings } from "@owl/shared/test-run-settings";
 
 export type ReviewerTestCommandCheck = { readonly denied: false } | { readonly denied: true; readonly matched: string; readonly message: string };
 

@@ -1,5 +1,5 @@
 import type { AutoWorkGithubList, AutoWorkSource, AutoWorkVerdict, GithubListCursor } from "@owl/shared";
-import { createUlid, utcNow } from "../../../db/dist/index.js";
+import { createUlid, utcNow } from "@owl/db";
 import type { CoreDatabase, CoreWriteLaneTransaction } from "../types";
 
 export interface AutoWorkEventRecord {

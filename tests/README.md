@@ -19,13 +19,13 @@ Owl のテストの置き場所と、テストを足すときの決まり。
 | コマンド | 何を動かすか | いつ使うか |
 |---|---|---|
 | `pnpm test:required` | `tests/required-tests.json` に載せたテストだけ（`scripts/run-required-tests.mjs` が動かす） | マージ前の関門。落ちると統合できない。少なく保つ |
-| `pnpm test` | `tests/**/*.test.mjs` すべて | 変更したあとの通常の確認 |
-| `pnpm test:nightly` | `pnpm test:prepare` でチェックアウトを整えてから、`tests/**/*.test.mjs` を `tap` 形式で動かす | 夜間の全件確認。結果を機械で集計する |
+| `pnpm test` | `tests/**/*.test.mjs`、`packages/*/test/**/*.test.mjs`、`apps/server/test/**/*.test.mjs` すべて | 変更したあとの通常の確認 |
+| `pnpm test:nightly` | `pnpm test:prepare` でチェックアウトを整えてから、`pnpm test` と同じ範囲を `tap` 形式で動かす | 夜間の全件確認。結果を機械で集計する |
 | `pnpm test:gate` | `pnpm test:prepare` のあと `pnpm test:required` | 関門と同じ手順をローカルで再現する |
 | `pnpm test:layout` | 置き場所チェック（`scripts/check-test-layout.mjs tests/layout.json`） | 下の決まりを守っているかの確認 |
 | `pnpm test:hardcode` | 決め打ちチェック（`scripts/check-test-hardcode.mjs tests/hardcode-checks.json`） | 期待値に現在の値を写していないかの確認。数秒で終わる |
 
-`packages/*/test` のテストは、各パッケージの `test` スクリプト（`pnpm --filter <パッケージ> test`）か、`node --test "packages/*/test/**/*.test.mjs"` で動かす。`pnpm test` には含まれない。
+`packages/*/test` と `apps/server/test` のテストも `pnpm test` と `pnpm test:nightly` に含まれる。`test` スクリプトを持つのは `@owl/shared` だけなので、`pnpm --filter @owl/shared test` が使えるのはそのパッケージだけ。ほかの 1 つのパッケージだけ動かすときは、`node --test "packages/<パッケージ>/test/**/*.test.mjs"`（例: `packages/db`）を使う。`packages/*` のように `*` を残した glob は全パッケージを動かす。
 
 必須テストの一覧は `tests/required-tests.json`。テストを移動・改名・削除したら、この一覧のパスも直す。
 

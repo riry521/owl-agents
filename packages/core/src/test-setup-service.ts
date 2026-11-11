@@ -1,9 +1,9 @@
 import { accessSync, constants } from "node:fs";
 import { basename, isAbsolute, resolve } from "node:path";
 
-import { createUlid } from "../../db/dist/index.js";
-import { DEFAULT_TEST_RUN_SETTINGS, readTestRunSettings, runArgvOf, validateTestRunSettings, type TestRunSettings } from "../../shared/dist/test-run-settings.js";
-import { REGEX_FLAGS, type TestSetupSettings } from "../../shared/dist/test-setup-settings.js";
+import { createUlid } from "@owl/db";
+import { DEFAULT_TEST_RUN_SETTINGS, readTestRunSettings, runArgvOf, validateTestRunSettings, type TestRunSettings } from "@owl/shared/test-run-settings";
+import { REGEX_FLAGS, type TestSetupSettings } from "@owl/shared/test-setup-settings";
 import { matchesGlobWithDots } from "./glob.js";
 import { childEnv } from "./core-test-run.js";
 import { detectTestRun, markerReader, testDetectionMarkerDigest, testDetectionRulesVersion } from "./test-detection.js";
@@ -27,6 +27,7 @@ import {
 } from "./test-setup.js";
 import { listTestTargets, prepareWithSetupCache, runTestFiles, runWholeSuite, type TestCommandResult, type TestCommandRunner } from "./test-runs.js";
 import type { CoreDatabase, JsonObject } from "./types.js";
+import { isRecord } from "@owl/shared/small-helpers";
 
 export type TestSetupScope = "project" | "work" | "task";
 export type TestSetupTrigger = "project_registered" | "project_path_changed" | "inputs_changed" | "environment_failure" | "core_confirmed" | "manual";
@@ -116,8 +117,6 @@ type Attempt = { by: "agent" | "core"; argv: readonly string[]; cwd: string; exi
 const MAC_INSTALL_REASON = "mac_wide_install";
 
 const tail = (text: string, chars: number): string => text.trim().slice(-chars);
-const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
-
 export class TestSetupService {
   private readonly inflight = new Map<string, Promise<InvestigateOutcome>>();
   /** Task id of each running investigation, by invocation id; an Owner stop cancels them through the runner. */

@@ -88,7 +88,7 @@ function loadComponent(dict) {
     '@/components/AttachmentTray': { AttachButton: MockAttachButton, AttachmentTray: MockTray, DropOverlay: () => null },
     '@/components/MessageAttachments': { MessageAttachments: MockMessageAttachments },
     '@/lib/use-attachment-draft': {
-      useAttachmentDraft: () => ({ ...draftSpy, add: (files) => addCalls.push(files), remove() {}, retry() {}, dismissNotices() {}, clear: () => { draftSpy.clears += 1; } }),
+      useAttachmentDraft: () => ({ ...draftSpy, add: (files) => addCalls.push(files), remove() {}, retry() {}, dismissNotices() {}, clear: (ids) => { draftSpy.clears += 1; draftSpy.clearIds = ids; } }),
       useFileDrop: (onFiles, disabled) => ({ dragging: false, dropProps: { onDrop: (files) => { if (!disabled) onFiles(files); } } }),
     },
     '@/lib/attachment-draft.mjs': draftPure,
@@ -246,6 +246,7 @@ test('body only, attachment only and both send once with attachmentIds', async (
     await typeAndSubmit(props, text);
     assert.deepEqual(sendCalls, [['w1', expectedBody, { reopen: false, expectedVersion: 7, attachmentIds: ids }]]);
     assert.equal(draftSpy.clears, 1);
+    assert.deepEqual(draftSpy.clearIds, ids, 'only the items present at send time are cleared');
   }
 });
 

@@ -1,3 +1,5 @@
+import { escapeRegExp } from "./small-helpers.js";
+
 export const OWL_API_PREFIX = "/api/v1";
 
 /** Advisor が書き込み用の共有 worktree を用意・同期してもらうために呼ぶ API のパス */
@@ -73,7 +75,6 @@ export const ADVISOR_BLOCKED_APIS: readonly AdvisorBlockedApi[] = [
   callApi("POST", "/settings/model-presets", "Adding a model preset changes settings."),
   callApi("PUT", "/settings/model-presets/{id}", "Changing a model preset changes settings."),
   callApi("DELETE", "/settings/model-presets/{id}", "Deleting a model preset is irreversible."),
-  callApi("PUT", "/settings/executor", "Changes the default provider and model of child agents."),
   callApi("PUT", "/settings/child-runs", "Changes the default provider and model of child agents."),
   callApi("PUT", "/settings/provider-models/{provider}", "Changes the model list of a provider."),
   callApi("POST", "/settings/providers", "Adding a provider stores secrets such as API keys."),
@@ -86,10 +87,6 @@ export const ADVISOR_BLOCKED_APIS: readonly AdvisorBlockedApi[] = [
   callApi("POST", "/conversations/{conversation_id}/clear", "Clearing a conversation is irreversible and also stops the calling Advisor session."),
   callApi("POST", "/advisor/session/restart", "Stops the calling Advisor session and revokes its token."),
 ];
-
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 // 正規表現は読み込み時に一度だけ作る。オブジェクトの添字ではなく配列を走査し、プロトタイプのキーを引かない
 const COMPILED = ADVISOR_BLOCKED_APIS.map((row) => {

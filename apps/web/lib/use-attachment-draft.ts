@@ -70,6 +70,8 @@ export function useAttachmentDraft(target: AttachmentTarget) {
     }
     const items = accepted.map((file) => ({ id: `attachment-${nextItemId++}`, file }));
     if (items.length === 0) return;
+    // Count the new items at once: a second add resolving before the next render must see them against max_files.
+    itemsRef.current = [...itemsRef.current, ...items.map(({ id, file }) => ({ id, file, status: 'uploading' as const }))];
     dispatch({ type: 'add', items });
     for (const item of items) upload(item.id, item.file);
   }, [t, upload]);
@@ -87,12 +89,18 @@ export function useAttachmentDraft(target: AttachmentTarget) {
     upload(id, item.file);
   }, [upload]);
 
-  const clear = useCallback(() => {
+  // With ids, only those items go (the ones just sent); files added while sending stay in the draft.
+  const clear = useCallback((ids?: string[]) => {
+    if (ids) {
+      for (const id of ids) remove(id);
+      setNotices([]);
+      return;
+    }
     for (const controller of controllers.current.values()) controller.abort();
     controllers.current.clear();
     setNotices([]);
     dispatch({ type: 'clear' });
-  }, []);
+  }, [remove]);
 
   useEffect(() => () => {
     for (const controller of controllers.current.values()) controller.abort();

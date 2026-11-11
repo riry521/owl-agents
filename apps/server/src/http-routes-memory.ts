@@ -1,36 +1,142 @@
 import { ApiError } from "./errors.js";
+import { RoutesMemoryMessages } from "./messages/routes-memory.js";
 import { isUlid } from "./ids.js";
 import { optionalCoreFeature, requireAdapterFeature, requireCoreFeature } from "./core-feature.js";
 import { API_PREFIX } from "./http-route-table.js";
 import {
-  CURATION_KIND_VALUES,
-  CURATION_STATUS_VALUES,
   commandEnvelope,
-  curationEnumQuery,
   decodeRouteValue,
   headerValue,
-  isKnowledgeStorageApiError,
   isObject,
-  knowledgeMetadataField,
   nullableQuery,
   pathId,
   readRequestBody,
-  rejectedPage,
   requireGuard,
   requireOwner,
   runCommand,
   sendApiError,
   sendJson,
   stringField,
-  validateExplicitMemoryPayload,
-  validateIngestConversationPayload,
-  withKnowledgeStorageAccess,
   type ApiRoute,
   type RequestContext,
+  requestId,
+  exactKeys,
+  knowledgeStorageFeature,
+  knowledgeStorageErrorCode,
 } from "./http-common.js";
 import { MEMORY_GET_OPERATIONS, MEMORY_OPERATIONS, memoryContext, runMemoryOperation } from "./http-memory.js";
 import { validateMemoryPagesIntegratePayload } from "./http-memory-integrate.js";
-import type { JsonObject } from "./types.js";
+import type { JsonObject, CorePort } from "./types.js";
+import { PageRejectedError } from "@owl/core/dist/memory/page-format.js";
+
+/** Flat frontmatter fields for POST /knowledge: strings (≤2,000 chars) or string arrays (≤50 items, ≤200 chars each). */
+function knowledgeMetadataField(value: unknown): Record<string, string | string[]> {
+  if (!isObject(value)) throw new ApiError(400, "validation_error", RoutesMemoryMessages.metadataNotObject());
+  // No prototype: "__proto__" is a valid key and must be stored like any other.
+  const result: Record<string, string | string[]> = Object.create(null);
+  for (const [key, item] of Object.entries(value)) {
+    if (!/^[A-Za-z_][\w-]*$/u.test(key)) throw new ApiError(400, "validation_error", RoutesMemoryMessages.metadataKeyInvalid({ key }));
+    if (key === "tags" || key === "created") throw new ApiError(400, "validation_error", RoutesMemoryMessages.metadataKeyReserved({ key }));
+    if (typeof item === "string") {
+      if (item.length > 2000) throw new ApiError(400, "validation_error", RoutesMemoryMessages.metadataValueTooLong({ key }));
+    } else if (Array.isArray(item)) {
+      if (item.length > 50 || item.some((entry) => typeof entry !== "string" || entry.length > 200)) {
+        throw new ApiError(400, "validation_error", RoutesMemoryMessages.metadataArrayInvalid({ key }));
+      }
+    } else {
+      throw new ApiError(400, "validation_error", RoutesMemoryMessages.metadataValueType({ key }));
+    }
+    result[key] = item;
+  }
+  if (typeof result.id === "string" ? !isUlid(result.id) : "id" in result) {
+    throw new ApiError(400, "validation_error", RoutesMemoryMessages.metadataIdNotUlid());
+  }
+  return result;
+}
+
+function stringArrayField(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+    throw new ApiError(400, "validation_error", RoutesMemoryMessages.stringArrayInvalid({ label }));
+  }
+  return value as string[];
+}
+
+function validateExplicitMemoryPayload(value: unknown): { text: string; tags: string[]; project_id: string | null } {
+  if (!isObject(value)) {
+    throw new ApiError(400, "validation_error", RoutesMemoryMessages.explicitNotObject());
+  }
+  const allowed = new Set(["text", "tags", "project_id"]);
+  const extra = Object.keys(value).filter((key) => !allowed.has(key));
+  if (!Object.prototype.hasOwnProperty.call(value, "text") || extra.length > 0) {
+    throw new ApiError(400, "validation_error", RoutesMemoryMessages.explicitFieldsMismatch(), {
+      missing: Object.prototype.hasOwnProperty.call(value, "text") ? [] : ["text"],
+      extra,
+    });
+  }
+  return {
+    text: stringField(value.text, "text", 1, 500000),
+    tags: value.tags === undefined ? [] : stringArrayField(value.tags, "tags"),
+    project_id: value.project_id === undefined || value.project_id === null ? null : stringField(value.project_id, "project_id", 1, 100),
+  };
+}
+
+function validateIngestConversationPayload(payload: JsonObject): { conversation_id: string } {
+  exactKeys(payload, ["conversation_id"], "Knowledge ingestion payload");
+  return { conversation_id: pathId(stringField(payload.conversation_id, "conversation_id", 1, 128), "conversation_id") };
+}
+
+/** A page that does not fit the four templates: 422 with the validatePage errors; nothing was written. */
+function rejectedPage(error: unknown): ApiError | null {
+  return error instanceof PageRejectedError
+    ? new ApiError(422, "validation_error", RoutesMemoryMessages.pageTemplateMismatch(), { errors: error.errors })
+    : null;
+}
+
+function isKnowledgeStorageApiError(error: unknown): boolean {
+  const code = knowledgeStorageErrorCode(error);
+  return code === "knowledge_storage_unavailable" || code === "knowledge_storage_moving";
+}
+
+async function withKnowledgeStorageAccess<T>(core: CorePort, kind: "read" | "write", operation: () => Promise<T>): Promise<T> {
+  const api = knowledgeStorageFeature(core);
+  if (kind === "write" && api.getKnowledgeStorage().state === "moving") {
+    throw Object.assign(new Error("The knowledge storage is being moved."), { code: "knowledge_storage_moving", details: {} });
+  }
+  try {
+    return await api.withKnowledgeAccess(kind, operation);
+  } catch (error) {
+    if (knowledgeStorageErrorCode(error) === "knowledge_storage_unavailable") throw error;
+    const code = knowledgeStorageErrorCode(error);
+    if (code && ["ENOENT", "EIO", "ENXIO", "ENODEV", "ESTALE", "ETIMEDOUT", "EACCES", "EPERM", "EROFS"].includes(code)) {
+      const status = await api.checkKnowledgeStorage().catch((checkError) => {
+        // Status is only used to refine the error; the original error is rethrown below.
+        console.error("Knowledge storage re-check failed", checkError);
+        return null;
+      });
+      if (status?.state === "unavailable") {
+        try {
+          api.activeKnowledgeDir();
+        } catch (unavailable) {
+          throw unavailable;
+        }
+      }
+    }
+    throw error;
+  }
+}
+
+const CURATION_KIND_VALUES = ["librarian", "skill_curation", "rule_curation"];
+
+const CURATION_STATUS_VALUES = ["running", "succeeded", "failed"];
+
+function curationEnumQuery(value: string | null, allowed: string[], name: string): string | undefined {
+  if (value === null || value === "") return undefined;
+  if (!allowed.includes(value)) {
+    throw new ApiError(400, "validation_error", RoutesMemoryMessages.enumQueryInvalid({ name, allowed: allowed.join("、") }));
+  }
+  return value;
+}
+
 
 /** memory 操作 10 行。パスは MEMORY_OPERATIONS、メソッドは MEMORY_GET_OPERATIONS で決まる。 */
 const memoryOperationRoutes = (): ApiRoute[] => [...MEMORY_OPERATIONS].map((memoryOp): ApiRoute => ({
@@ -47,7 +153,7 @@ const memoryOperationRoutes = (): ApiRoute[] => [...MEMORY_OPERATIONS].map((memo
 
 const curationFeature = (core: RequestContext["core"]) => requireAdapterFeature(
   core, ["runCuration", "startCurationInBackground", "listCurationRuns", "getCurationRun"],
-  { code: "core_not_ready", message: "The loaded Core does not support the curation run API." });
+  { code: "core_not_ready", message: RoutesMemoryMessages.curationUnsupported() });
 
 export const MEMORY_ROUTES: readonly ApiRoute[] = [
   {
@@ -59,7 +165,7 @@ export const MEMORY_ROUTES: readonly ApiRoute[] = [
       requireOwner(request);
       try {
         const data = await requireCoreFeature(context.core, ["memoryPendingStats"],
-          { code: "core_not_ready", message: "The loaded Core does not report the librarian backlog." }).memoryPendingStats();
+          { code: "core_not_ready", message: RoutesMemoryMessages.backlogUnsupported() }).memoryPendingStats();
         sendJson(response, 200, { request_id: requestIdValue, data });
       } catch (error) {
         await sendApiError(response, requestIdValue, error, `${method} ${pathname}`, context.core);
@@ -76,7 +182,7 @@ export const MEMORY_ROUTES: readonly ApiRoute[] = [
       try {
         const { paths } = validateMemoryPagesIntegratePayload(await readRequestBody(request));
         const data = await requireCoreFeature(context.core, ["integrateMemoryPages"],
-          { code: "core_not_ready", message: "The loaded Core does not support page integration." })
+          { code: "core_not_ready", message: RoutesMemoryMessages.integrationUnsupported() })
           .integrateMemoryPages({ mode: "manual", paths, trigger: "manual_api", actor: "owner" });
         sendJson(response, 200, { request_id: requestIdValue, data });
       } catch (error) {
@@ -110,13 +216,13 @@ export const MEMORY_ROUTES: readonly ApiRoute[] = [
       try {
         const payload = validateExplicitMemoryPayload(await readRequestBody(request));
         const path = await requireCoreFeature(context.core, ["rememberExplicit"],
-          { code: "dependency_unavailable", message: "The loaded Core does not support memory saving." })
+          { code: "dependency_unavailable", message: RoutesMemoryMessages.memorySavingUnsupported() })
           .rememberExplicit(payload.text, payload.project_id);
         optionalCoreFeature(context.core, ["searchKnowledgeCompat", "notifyKnowledgeChanged"])?.notifyKnowledgeChanged();
         sendJson(response, 200, { path });
       } catch (error) {
         if (isObject(error) && error.code === "storage_unavailable") {
-          error = new ApiError(503, "storage_unavailable", "The knowledge storage is unavailable.");
+          error = new ApiError(503, "storage_unavailable", RoutesMemoryMessages.storageUnavailable());
         }
         await sendApiError(response, requestIdValue, error, `${method} ${pathname}`, context.core);
       }
@@ -137,7 +243,7 @@ export const MEMORY_ROUTES: readonly ApiRoute[] = [
           actor_ref: requestIdValue,
         }) as { id: string; status: string; summary: unknown; report: unknown; error?: string | null };
         if (run.status === "failed") {
-          throw new ApiError(500, "curation_failed", run.error ?? "Librarianの実行に失敗しました。", { run_id: run.id });
+          throw new ApiError(500, "curation_failed", run.error ?? RoutesMemoryMessages.librarianFailed(), { run_id: run.id });
         }
         sendJson(response, 200, {
           request_id: requestIdValue,
@@ -157,11 +263,11 @@ export const MEMORY_ROUTES: readonly ApiRoute[] = [
       requireOwner(request);
       const limit = url.searchParams.get("limit");
       if (limit !== null && limit !== "" && (!/^\d+$/.test(limit) || Number(limit) < 1 || Number(limit) > 100)) {
-        throw new ApiError(400, "validation_error", "limitが不正です。1〜100の整数を指定してください。");
+        throw new ApiError(400, "validation_error", RoutesMemoryMessages.limit100());
       }
       const cursor = nullableQuery(url.searchParams.get("cursor"));
       if (cursor !== null && cursor !== undefined && !isUlid(cursor)) {
-        throw new ApiError(400, "validation_error", "cursorが不正です。26文字の大文字ULIDを指定してください。");
+        throw new ApiError(400, "validation_error", RoutesMemoryMessages.cursorInvalid());
       }
       const data = curationFeature(context.core).listCurationRuns({
         ...(curationEnumQuery(url.searchParams.get("kind"), CURATION_KIND_VALUES, "kind") ? { kind: url.searchParams.get("kind")! } : {}),
@@ -181,7 +287,7 @@ export const MEMORY_ROUTES: readonly ApiRoute[] = [
       requireOwner(request);
       const id = pathId(route.params.id!, "curation_run_id");
       const run = curationFeature(context.core).getCurationRun(id);
-      if (!run) throw new ApiError(404, "not_found", "整理実行記録が見つかりません。IDを確認してください。");
+      if (!run) throw new ApiError(404, "not_found", RoutesMemoryMessages.curationRunNotFound());
       sendJson(response, 200, { request_id: requestIdValue, data: run });
     },
   },
@@ -215,7 +321,7 @@ export const MEMORY_ROUTES: readonly ApiRoute[] = [
         sendJson(response, 200, { request_id: requestIdValue, data: entry });
       } catch (error) {
         if (isKnowledgeStorageApiError(error)) throw error;
-        throw new ApiError(404, "not_found", "指定されたナレッジエントリが見つかりません。");
+        throw new ApiError(404, "not_found", RoutesMemoryMessages.entryNotFound());
       }
     },
   },
@@ -227,10 +333,10 @@ export const MEMORY_ROUTES: readonly ApiRoute[] = [
       const requestIdValue = route.requestId;
       requireOwner(request);
       const body = await readRequestBody(request);
-      if (!isObject(body)) throw new ApiError(400, "validation_error", "リクエストボディが不正です。");
+      if (!isObject(body)) throw new ApiError(400, "validation_error", RoutesMemoryMessages.bodyInvalid());
       const folder = stringField(body.folder as string, "folder", 1, 200);
       if (folder.split("/")[0] === "policies") {
-        throw new ApiError(400, "validation_error", "policiesは移行済みの読み取り専用のため、書き込みできません。");
+        throw new ApiError(400, "validation_error", RoutesMemoryMessages.policiesReadOnly());
       }
       const filename = stringField(body.filename as string, "filename", 1, 200);
       const entryBody = stringField(body.body as string, "body", 0, 500000);
@@ -245,10 +351,10 @@ export const MEMORY_ROUTES: readonly ApiRoute[] = [
         const rejected = rejectedPage(e);
         if (rejected) throw rejected;
         if (e instanceof Error && e.message.startsWith("already_exists")) {
-          throw new ApiError(409, "version_conflict", "同名のナレッジエントリが既に存在します。");
+          throw new ApiError(409, "version_conflict", RoutesMemoryMessages.entryExists());
         }
         if (e instanceof Error && e.message.startsWith("invalid_folder")) {
-          throw new ApiError(400, "validation_error", "folderはglobal、projects、worksなどの有効なフォルダで始めてください。policiesは移行済みの読み取り専用です。");
+          throw new ApiError(400, "validation_error", RoutesMemoryMessages.folderInvalid());
         }
         throw e;
       }
@@ -263,17 +369,17 @@ export const MEMORY_ROUTES: readonly ApiRoute[] = [
       requireOwner(request);
       const entryPath = decodeRouteValue(route.params.path!, "knowledge path");
       if (entryPath.startsWith("policies/")) {
-        throw new ApiError(400, "validation_error", "policiesは移行済みの読み取り専用のため、書き込みできません。");
+        throw new ApiError(400, "validation_error", RoutesMemoryMessages.policiesReadOnly());
       }
       const body = await readRequestBody(request);
-      if (!isObject(body)) throw new ApiError(400, "validation_error", "リクエストボディが不正です。");
+      if (!isObject(body)) throw new ApiError(400, "validation_error", RoutesMemoryMessages.bodyInvalid());
       const update: { tags?: string[]; body?: string } = {};
       if (body.tags !== undefined) {
-        if (!Array.isArray(body.tags)) throw new ApiError(400, "validation_error", "tagsは文字列の配列で指定してください。");
+        if (!Array.isArray(body.tags)) throw new ApiError(400, "validation_error", RoutesMemoryMessages.tagsNotArray());
         update.tags = (body.tags as unknown[]).filter((t): t is string => typeof t === "string");
       }
       if (body.body !== undefined) {
-        if (typeof body.body !== "string") throw new ApiError(400, "validation_error", "bodyは文字列で指定してください。");
+        if (typeof body.body !== "string") throw new ApiError(400, "validation_error", RoutesMemoryMessages.bodyNotString());
         update.body = body.body;
       }
       try {
@@ -284,7 +390,7 @@ export const MEMORY_ROUTES: readonly ApiRoute[] = [
         if (isKnowledgeStorageApiError(error)) throw error;
         const rejected = rejectedPage(error);
         if (rejected) throw rejected;
-        throw new ApiError(404, "not_found", "指定されたナレッジエントリが見つかりません。");
+        throw new ApiError(404, "not_found", RoutesMemoryMessages.entryNotFound());
       }
     },
   },
@@ -297,7 +403,7 @@ export const MEMORY_ROUTES: readonly ApiRoute[] = [
       requireOwner(request);
       const entryPath = decodeRouteValue(route.params.path!, "knowledge path");
       if (entryPath.startsWith("policies/")) {
-        throw new ApiError(400, "validation_error", "policiesは移行済みの読み取り専用のため、書き込みできません。");
+        throw new ApiError(400, "validation_error", RoutesMemoryMessages.policiesReadOnly());
       }
       try {
         await withKnowledgeStorageAccess(context.core, "write", () => context.knowledge.remove(entryPath));
@@ -305,7 +411,7 @@ export const MEMORY_ROUTES: readonly ApiRoute[] = [
         sendJson(response, 200, { request_id: requestIdValue, deleted: true });
       } catch (error) {
         if (isKnowledgeStorageApiError(error)) throw error;
-        throw new ApiError(404, "not_found", "指定されたナレッジエントリが見つかりません。");
+        throw new ApiError(404, "not_found", RoutesMemoryMessages.entryNotFound());
       }
     },
   },

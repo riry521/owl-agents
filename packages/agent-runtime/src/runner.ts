@@ -14,7 +14,7 @@ import {
 import { asManagerRequest, buildManagerPrompt, managerOutputSchema, parseManagerPlanWithFeedback } from "./manager";
 import { statSync } from "node:fs";
 import { AgentTimeoutSettingError, readStoredAcceptanceCriteria, DEFAULT_REPORT_RESUBMIT_LIMIT, OUTPUT_FORMAT_INVALID_ERROR_KEY, REPORT_FORMAT_INVALID_ERROR_KEY, REPORT_RESUBMIT_LIMIT_CONTEXT_KEY, REPORT_RESUBMIT_SESSION_CONTEXT_KEY, CODEX_PROVIDER_API_KEY_ENV, CODEX_PROVIDER_BASE_URL_ENV, OPENCODE_API_KEY_ENV_ENV, OPENCODE_BASE_URL_ENV, PROCESS_SKILLS_PROMPT_FILES, renderProcessSkills, parseResearchSubagentSettings, researchSubagentPromptRef, type CuratorRequest, type ResearcherPromptRef, type ResearchSubagentSettings, type CuratorRunResult, type ProcessSkillsRole, type PromptObserver, type ProviderErrorObserver, type ModelHarness, harnessOfAdapter, roleSessionContextLimit, rateLimitRetrySettings } from "@owl/shared";
-import { type ReportCorrection, extractProviderUsage, harnessFailureDetail, isClaudeReportFormatFailure, isRecord, parseSingleJsonObject } from "./protocol";
+import { type ReportCorrection, extractProviderUsage, harnessFailureDetail, isClaudeReportFormatFailure, isRecord } from "./protocol";
 import { extractRoleOutputObject, providerSchema } from "./role-contract";
 import { providerResponseFailure, waitForRateLimitRetry } from "./rate-limit-retry";
 import { RoleSessionManager } from "./role-session-manager";
@@ -35,16 +35,15 @@ import { buildDecisionExplanationPrompt, decisionExplanationProviderSchema, pars
 import { buildProjectInvestigationPrompt, parseProjectInvestigationResponse, projectInvestigationProviderSchema, type ProjectInvestigationRequest, type ProjectInvestigationRunResult } from "./project-investigation";
 import { buildCuratorPrompt, curatorProviderSchema, parseCuratorResponse } from "./curator";
 import {
-  normalizeWorkerResponse,
   normalizeWorkerResponseWithFeedback,
   buildDesignerRolePrompt,
   buildWorkerPrompt,
   WORKER_REPORT_SCHEMA,
   DESIGNER_REPORT_SCHEMA,
 } from "./worker";
-import { claudeRateLimitEventObservation } from "../../shared/dist/plan-usage-claude.js";
-import { codexRateLimitsFromJsonl } from "../../shared/dist/plan-usage-codex.js";
-import type { PlanUsageSnapshot } from "../../shared/dist/plan-usage.js";
+import { claudeRateLimitEventObservation } from "@owl/shared/plan-usage-claude";
+import { codexRateLimitsFromJsonl } from "@owl/shared/plan-usage-codex";
+import type { PlanUsageSnapshot } from "@owl/shared/plan-usage";
 import {
   buildReviewerPrompt,
   parseReviewResult,
@@ -965,12 +964,6 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     hasSideEffect: (invocationId) => sideEffectInvocations.has(invocationId),
     onPrompt: (invocationId, record) => promptObserver?.(invocationId, record),
   });
-
-  const executeCompletedProvider = async (request: ProviderExecutionRequest): Promise<ProviderResponse> => {
-    const response = await sessions.run(request);
-    assertProviderCompleted(response);
-    return response;
-  };
 
   let outputResubmitLimitReader: (() => number) | undefined;
   /** Output-only resubmissions allowed: Core's per-run limit in the request context, else the settings reader, else the default. */

@@ -61,7 +61,7 @@ export function WorkConversation({ work, conversation, onWorkChanged }: WorkConv
   const disabled = block.blocked || sending;
   const attachments = useAttachmentDraft({ kind: 'work', id: work.id });
   const { dragging, dropProps } = useFileDrop(attachments.add, block.blocked);
-  const sendable = !disabled && canSend({ body: draft, items: attachments.items, sending });
+  const sendable = !disabled && canSend({ hasBody: draft.trim().length > 0, items: attachments.items, sending });
   const summary = latestInstructionSummary(messages, work.state);
   const processing = messages.some((m) => m.instruction?.status === 'processing');
 
@@ -108,10 +108,11 @@ export function WorkConversation({ work, conversation, onWorkChanged }: WorkConv
     if (!sendable) return;
     if (block.reopen && !window.confirm(t(block.confirmKey ?? "work.instructionReopenConfirm"))) return;
     setSendState({ kind: 'sending' });
+    const sentItemIds = attachments.items.map((item) => item.id);
     try {
       await sendWorkInstruction(work.id, body, { reopen: block.reopen, expectedVersion: work.state_version, attachmentIds: attachments.attachmentIds });
       setDraft('');
-      attachments.clear();
+      attachments.clear(sentItemIds);
       setSendState({ kind: 'idle' });
       followMessagesRef.current = true;
       onWorkChanged();
