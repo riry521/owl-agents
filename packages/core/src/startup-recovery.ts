@@ -6,7 +6,7 @@ import { reviewRouting } from "./assurance-settings.js";
 import { effectiveReviewRequired } from "./review-routing.js";
 import { processIdentityMatches, readProcessIdentity } from "./process-identity.js";
 import { createProviderPauseStore } from "./provider-pause-store.js";
-import { requeueAttemptedOwnerReplans, requeueStuckManagerTriggers } from "./replan-queue-store.js";
+import { queueManagerTrigger, requeueAttemptedOwnerReplans, requeueStuckManagerTriggers } from "./replan-queue-store.js";
 import { readPausedReviewerWait } from "./provider-pause-reviewer-wait.js";
 import type { CoreDatabase, GitGateway, GitOperationRequest, JsonObject, TaskRow } from "./types.js";
 
@@ -114,6 +114,13 @@ export async function recoverOrphanedState(db: CoreDatabase, git?: GitGateway): 
     now,
     now,
   ));
+  // A Reviewer that was running when Core stopped may have left edits in the Task worktree. Its processes are gone now: put the
+  // worktree back to the snapshot taken when it started, unless the run already recorded an outcome.
+  if (git?.restoreTaskWorktree) {
+    for (const agent of active) {
+      if (agent.role === "reviewer" && agent.task_id) await restoreOrphanedReviewerFix(db, lane, git, { ...agent, task_id: agent.task_id }, now);
+    }
+  }
   for (const agent of active) {
     const reviewerWait = agent.task_id && agent.role === "reviewer"
       ? readPausedReviewerWait(db, agent.task_id)
@@ -310,6 +317,86 @@ function normalizeProviderId(provider: string): string {
   if (normalized === "codex" || normalized === "openai/codex" || normalized === "openai") return "openai";
   if (normalized === "opencode") return "opencode";
   return normalized;
+}
+
+/**
+ * Restores the worktree of an orphaned Reviewer run to its `fix_snapshot`. A failed restore fails the Task for the Manager
+ * (review.fix_restore_failed), as it does while Core is running.
+ */
+async function restoreOrphanedReviewerFix(
+  db: CoreDatabase,
+  lane: ReturnType<CoreDatabase["createWriteLane"]>,
+  git: GitGateway,
+  agent: { id: string; work_id: string; task_id: string },
+  now: string,
+): Promise<void> {
+  const started = db.get<{ payload_json: string }>(
+    "SELECT payload_json FROM events WHERE type = 'reviewer.started' AND agent_run_id = ? ORDER BY sequence DESC LIMIT 1",
+    agent.id,
+  );
+  if (!started) return;
+  let snapshot: { head: string; tree: string } | null = null;
+  let reviewRound = 0;
+  let limits = { max_changed_lines: 0, max_changed_files: 0 };
+  try {
+    const payload = JSON.parse(started.payload_json) as { fix_permit?: { max_changed_lines?: unknown; max_changed_files?: unknown } | null; fix_snapshot?: { head?: unknown; tree?: unknown } | null; review_round?: unknown };
+    const candidate = payload.fix_snapshot;
+    if (candidate && typeof candidate.head === "string" && typeof candidate.tree === "string") snapshot = { head: candidate.head, tree: candidate.tree };
+    if (typeof payload.review_round === "number") reviewRound = payload.review_round;
+    const permitted = payload.fix_permit;
+    if (permitted) limits = {
+      max_changed_lines: typeof permitted.max_changed_lines === "number" ? permitted.max_changed_lines : 0,
+      max_changed_files: typeof permitted.max_changed_files === "number" ? permitted.max_changed_files : 0,
+    };
+  } catch { return; }
+  if (snapshot === null) return;
+  const settled = db.get<{ id: string }>(
+    "SELECT id FROM events WHERE agent_run_id = ? AND type IN ('review.passed', 'review.failed', 'review.fix_restore_failed') LIMIT 1",
+    agent.id,
+  );
+  if (settled) return;
+  const task = db.get<TaskRow>("SELECT * FROM tasks WHERE id = ?", agent.task_id);
+  if (!task || !task.worktree_path) return;
+  let failure: string | null = null;
+  try {
+    const restored = await git.restoreTaskWorktree?.(taskGitRequest(task), snapshot);
+    if (restored === undefined) failure = "The Git gateway cannot restore a Task worktree.";
+    else if (!restored.ok) failure = restored.message;
+    else if (!restored.verified || restored.tree !== snapshot.tree) failure = "The worktree does not match its snapshot after the restore.";
+  } catch (error) {
+    failure = error instanceof Error ? error.message : String(error);
+  }
+  if (failure === null) return;
+  console.warn(`[owl-core] Startup recovery could not restore the worktree of Task ${task.id} after an orphaned Reviewer: ${failure}`);
+  if (task.status !== "verifying") return;
+  const payload: JsonObject = {
+    task_id: task.id,
+    agent_run_id: agent.id,
+    review_round: reviewRound,
+    reviewer_fix: {
+      schema_version: "1.0.0", outcome: "not_allowed", reason: "reviewer_aborted", limits,
+      measured: { changed_lines: 0, changed_files: 0 }, files: [], fixes: [], tests: null, revert: { verified: false },
+    },
+    message: failure,
+  };
+  await lane.write({
+    mutateState: (tx) => {
+      const reduction = reduceTaskInTransaction(tx, task.id, { event: "review.fix_restore_failed", payload });
+      setAgentRunStatus(tx, agent.id, "failed", { now, from: LIVE_AGENT_RUN_STATUSES, clearProcess: true });
+      if (reduction.manager_trigger) queueManagerTrigger(tx, task.id, { question: failure, question_only: false }, now);
+      return { requeued: false };
+    },
+    event: {
+      id: createUlid(),
+      idempotencyKey: `review.fix_restore_failed:${agent.id}`,
+      type: "review.fix_restore_failed",
+      workId: agent.work_id,
+      taskId: task.id,
+      agentRunId: agent.id,
+      payload,
+    },
+    outbox: [],
+  });
 }
 
 /** The still-orphaned Reviewer agent_run for a Task, if it still has one. */

@@ -316,6 +316,8 @@ export interface ReviewFinding {
   readonly target: "deliverable" | "report";
   /** "beyond_acceptance" = asks for work no criterion or rule requires (Core stores it as minor); "overbuilt" = the delivered work adds what the criteria do not need. */
   readonly scope?: "in_scope" | "beyond_acceptance" | "overbuilt" | "goal";
+  /** true = the Task's own change caused it; Core sends it back as major whatever its scope. */
+  readonly caused_by_change?: boolean;
   /** "test_result" = about a test or check result (never registered in the backlog); "other" = anything else. */
   readonly subject: "test_result" | "other";
   /** Path of the file the finding is about; "" for a general finding. */
@@ -345,8 +347,25 @@ export interface ReviewResult {
   readonly acceptance_defects?: readonly AcceptanceDefect[];
   /** Goal criteria (requirement goal) that are not met, each with a reason. */
   readonly goal_shortfalls?: readonly { readonly criterion_id: string; readonly reason: string }[];
+  /** The places the Reviewer edited itself (verdict stays fix_required; Core decides whether the edit stands); [] when it edited nothing. */
+  readonly fixes?: readonly ReviewerFixEntry[];
   readonly tests: ReviewTests;
 }
+
+export interface ReviewerFixEntry {
+  /** 0-based index into findings. */
+  readonly finding_index: number;
+  /** Path relative to the Task worktree. */
+  readonly file: string;
+  readonly line_start: number;
+  readonly line_end: number;
+  readonly change: string;
+}
+
+/** What the Reviewer may edit: Core's permit for this run. */
+export type ReviewerFixPermit =
+  | { readonly allowed: false }
+  | { readonly allowed: true; readonly max_changed_lines: number; readonly max_changed_files: number; readonly editable_files: readonly string[] };
 
 export interface ReviewerRequest {
   readonly task: TaskDetail;
@@ -370,6 +389,8 @@ export interface ReviewerRequest {
   readonly core_checks?: Readonly<Record<string, unknown>> | null;
   /** The Owner's answers to earlier Decisions for this Work (newest first); they take priority over the Task. */
   readonly owner_guidance?: readonly Readonly<Record<string, unknown>>[];
+  /** Whether the Reviewer may edit files itself, and the limits; absent means it may not. */
+  readonly fix?: ReviewerFixPermit;
 }
 
 export interface AdvisorRequest {
@@ -427,7 +448,7 @@ export interface ProviderResponse {
  */
 /** What a provider session is doing now. For display only; never a turn outcome. */
 export interface SessionActivity {
-  readonly state: "thinking" | "tool" | "subagent" | null;
+  readonly state: "thinking" | "tool" | "subagent" | "compacting" | null;
   readonly tool_name: string | null;
   readonly background_count: number;
 }

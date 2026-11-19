@@ -98,6 +98,7 @@ export {
   designsScreens,
   isScreenDesignTask,
   taskReportPath,
+  workReviewFilePath,
   type UiChange,
 } from "./design-documents.js";
 export {

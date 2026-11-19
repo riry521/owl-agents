@@ -22,6 +22,7 @@ import { HumanReadableError } from "./errors";
 import { isSecretPath } from "./project-overview-note";
 import { isRecord } from "@owl/shared/small-helpers";
 
+const REVIEWER_WRITE_DENIED = "Reviewer can edit only the files listed in Review.fix.editable_files, and cannot change git state.";
 const DESIGNER_WRITE_DENIED = "Designer can write only its assigned external design document; a screen design Task saves its HTML mocks with the save_design_mock tool.";
 
 class YamlSyntaxError extends Error {
@@ -396,6 +397,8 @@ export class RuleStore {
     readonly home?: string;
     /** Present only for a Designer guard token; null denies all writes. */
     readonly designerWritePath?: string | null;
+    /** Present only for a Reviewer guard token; null (or absent) denies all writes. */
+    readonly reviewerWritePaths?: readonly string[] | null;
   }): {
     readonly allowed: boolean;
     readonly rule_id: string | null;
@@ -404,18 +407,13 @@ export class RuleStore {
     readonly normalized_segments?: readonly (readonly string[])[];
   } {
     const { role, toolName, toolInput, cwd, home = process.env.HOME } = input;
-    const designerWriteScope = role === "designer" && Object.hasOwn(input, "designerWritePath");
-    const designerWritePath = input.designerWritePath ?? null;
-    const designerWriteAllowed = (path: string, pathCwd = cwd): boolean => {
-      if (!designerWriteScope || designerWritePath === null) return !designerWriteScope;
-      const candidate = resolvePathCandidate(path, pathCwd, home);
-      return candidate !== null && candidate === resolve(designerWritePath);
-    };
-    const denyDesignerWrite = () => ({
+    const writeScope = writeScopeFor(role, input.designerWritePath, input.reviewerWritePaths, Object.hasOwn(input, "designerWritePath"));
+    const writeAllowed = (path: string, pathCwd = cwd): boolean => writeScope === undefined || scopeAllows(writeScope, path, pathCwd, home);
+    const denyScopedWrite = () => ({
       allowed: false,
-      rule_id: "designer-write-path",
+      rule_id: writeScope!.ruleId,
       scope: "role" as const,
-      message: DESIGNER_WRITE_DENIED,
+      message: writeScope!.message,
     });
     const tool = toolName.toLowerCase();
     const record = isRecord(toolInput) ? toolInput : {};
@@ -462,7 +460,7 @@ export class RuleStore {
     if (["edit", "write", "multiedit", "notebookedit", "write_file", "apply_patch"].includes(tool)) {
       const paths = extractWritePaths(tool, record);
       if (paths === null || paths.length === 0) return deny("The Write tool target path could not be determined.");
-      if (designerWriteScope && paths.some((path) => !designerWriteAllowed(path))) return denyDesignerWrite();
+      if (writeScope && paths.some((path) => !writeAllowed(path))) return denyScopedWrite();
       for (const path of paths) {
         const result = this.checkPath(path, "write", cwd, role, home);
         if (result.blocked) return deny("This path matches a rule that denies writing.", result.rule);
@@ -473,12 +471,12 @@ export class RuleStore {
     if (["bash", "shell", "terminal", "exec", "command"].includes(tool)) {
       const command = firstString(record, ["command", "cmd", "script"]);
       if (command === null) return deny("The Bash command could not be determined.");
-      if (designerWriteScope && hasDesignerGitMutation(command)) return denyDesignerWrite();
+      if (writeScope && hasGitMutation(command)) return denyScopedWrite();
       const commandResult = this.checkCommand(command, cwd, home, role);
       if (commandResult.blocked) return deny(commandResult.message ?? "This command matches a blocking rule.", commandResult.rule, commandResult.normalizedSegments);
       const analysis = analyzeShellCommand(command);
       if (analysis === null) return deny("The command could not be parsed safely, so execution was denied.");
-      const fileDecision = this.checkCommandPaths(analysis.segments, cwd, role, home, designerWriteScope ? designerWritePath : undefined);
+      const fileDecision = this.checkCommandPaths(analysis.segments, cwd, role, home, writeScope);
       if (fileDecision) {
         if (fileDecision.message) return deny(fileDecision.message, fileDecision.rule, analysis.segments);
         return deny(fileDecision.rule.message, fileDecision.rule, analysis.segments);
@@ -486,7 +484,7 @@ export class RuleStore {
       return allow(analysis.segments);
     }
 
-    return this.checkOtherTool(tool, record, cwd, role, home, designerWriteScope, designerWritePath);
+    return this.checkOtherTool(tool, record, cwd, role, home, writeScope);
   }
 
   /**
@@ -503,22 +501,13 @@ export class RuleStore {
     cwd: string,
     role: string,
     home: string | undefined,
-    designerWriteScope = false,
-    designerWritePath: string | null = null,
+    writeScope?: WriteScope,
   ): GuardDecision {
     const baseTool = tool.startsWith("mcp__") ? tool.slice(tool.lastIndexOf("__") + 2) : tool;
     const mode = WRITE_TOOL_NAME.test(baseTool) || GUARD_CONTENT_KEYS.some((key) => key in record) ? "write" : "read";
     for (const path of stringsFrom(record, GUARD_PATH_KEYS)) {
       if (path.length === 0) continue;
-      if (mode === "write" && designerWriteScope) {
-        const candidate = resolvePathCandidate(path, cwd, home);
-        if (designerWritePath === null || candidate === null || candidate !== resolve(designerWritePath)) {
-          return guardDeny(DESIGNER_WRITE_DENIED, {
-            id: "designer-write-path", level: "role", role: "designer", pattern: designerWritePath ?? "", mode: "write", matcher: /$^/u,
-            message: DESIGNER_WRITE_DENIED,
-          });
-        }
-      }
+      if (mode === "write" && writeScope && !scopeAllows(writeScope, path, cwd, home)) return guardDeny(writeScope.message, scopeRule(writeScope));
       const result = this.checkPath(path, mode, cwd, role, home);
       if (result.blocked && result.rule && result.rule.id !== UNRESOLVED_PATH_RULE_ID) {
         return guardDeny(mode === "write" ? "This path matches a rule that denies writing." : "This path matches a rule that denies reading.", result.rule);
@@ -579,7 +568,7 @@ export class RuleStore {
     cwd: string,
     role: string,
     home: string | undefined,
-    designerWritePath?: string | null,
+    writeScope?: WriteScope,
   ): { rule: CompiledBlockPathRule; message?: string } | null {
     let currentCwd = cwd;
     for (const tokens of segments) {
@@ -592,17 +581,7 @@ export class RuleStore {
       const writePaths = commandWritePaths(executable, args, tokens);
       const readPaths = commandReadPaths(executable, args);
       for (const path of writePaths) {
-        if (designerWritePath !== undefined) {
-          const candidate = resolvePathCandidate(path, currentCwd, home);
-          if (designerWritePath === null || candidate === null || candidate !== resolve(designerWritePath)) {
-            return {
-              rule: {
-                id: "designer-write-path", level: "role", role: "designer", pattern: designerWritePath ?? "", mode: "write", matcher: /$^/u,
-                message: DESIGNER_WRITE_DENIED,
-              },
-            };
-          }
-        }
+        if (writeScope && !scopeAllows(writeScope, path, currentCwd, home)) return { rule: scopeRule(writeScope) };
         const result = this.checkPath(path, "write", currentCwd, role, home);
         if (result.blocked && result.rule?.id === UNRESOLVED_PATH_RULE_ID) return { rule: unresolvedPathRule("The write target path could not be parsed safely.") };
         if (result.blocked && result.rule) return { rule: result.rule };
@@ -1019,8 +998,43 @@ const GIT_READ_ONLY_SUBCOMMANDS = new Set([
 ]);
 const GIT_BRANCH_LIST_FLAGS = new Set(["-a", "--all", "-r", "--remotes", "-l", "--list", "-v", "-vv", "--verbose", "--show-current", "--no-color", "--color", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format", "--column", "--no-column", "-i", "--ignore-case"]);
 
+/** Where one role may write; `allowed` null denies every write. Designer and Reviewer share the same checks. */
+interface WriteScope {
+  readonly ruleId: string;
+  readonly role: "designer" | "reviewer";
+  readonly message: string;
+  readonly allowed: ReadonlySet<string> | null;
+}
+
+function writeScopeFor(
+  role: string,
+  designerPath: string | null | undefined,
+  reviewerPaths: readonly string[] | null | undefined,
+  designerPresent: boolean,
+): WriteScope | undefined {
+  const canon = (paths: readonly string[]) => new Set(paths.map((path) => canonicalizePath(path)));
+  if (role === "designer" && designerPresent) {
+    return { ruleId: "designer-write-path", role, message: DESIGNER_WRITE_DENIED, allowed: designerPath == null ? null : canon([designerPath]) };
+  }
+  if (role === "reviewer") {
+    return { ruleId: "reviewer-write-path", role, message: REVIEWER_WRITE_DENIED, allowed: reviewerPaths == null ? null : canon(reviewerPaths) };
+  }
+  return undefined;
+}
+
+function scopeAllows(scope: WriteScope, path: string, cwd: string, home: string | undefined): boolean {
+  if (scope.allowed === null) return false;
+  const candidate = resolvePathCandidate(path, cwd, home);
+  // canonicalizePath follows symlinks, so a link inside the worktree that points outside is not allowed.
+  return candidate !== null && scope.allowed.has(canonicalizePath(candidate));
+}
+
+function scopeRule(scope: WriteScope): CompiledBlockPathRule {
+  return { id: scope.ruleId, level: "role", role: scope.role, pattern: "", mode: "write", matcher: /$^/u, message: scope.message };
+}
+
 /** True unless every git invocation in the command is a known read-only form. */
-function hasDesignerGitMutation(command: string): boolean {
+function hasGitMutation(command: string): boolean {
   const analysis = analyzeShellCommand(command);
   if (analysis === null) return false;
   return analysis.segments.some((segment) => {

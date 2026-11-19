@@ -23,7 +23,7 @@ import {
   type ReviewerRequest,
 } from "./types";
 
-const REVIEW_SCOPE_INSTRUCTION = "Give every finding a scope. in_scope: it breaks an acceptance criterion, a rule, behavior or security. beyond_acceptance: it asks for a test, check, feature or improvement that no acceptance criterion or rule requires; Core always stores it as minor, so it never sends the Task back. overbuilt: the delivered work adds code, tests, dependencies or checks the criteria and context do not need; it is minor unless the excess adds a heavy or slow check (real model or paid API calls, production-size data, long runs), a new dependency, or risk to existing behavior, and then it is major and its fix is to remove the excess. goal: it is only about a goal criterion (requirement goal); Core always stores it as minor, so it never sends the Task back. Judge necessity from task.acceptance_criteria (each criterion's serves, if_omitted, check_weight and weight_reason) and task.necessity, not from what you would have liked to see.";
+const REVIEW_SCOPE_INSTRUCTION = "Give every finding a scope. in_scope: it breaks an acceptance criterion, a rule, behavior or security. beyond_acceptance: it asks for a test, check, feature or improvement that no acceptance criterion or rule requires; Core always stores it as minor, so it never sends the Task back. overbuilt: the delivered work adds code, tests, dependencies or checks the criteria and context do not need; it is minor unless the excess adds a heavy or slow check (real model or paid API calls, production-size data, long runs), a new dependency, or risk to existing behavior, and then it is major and its fix is to remove the excess. goal: it is only about a goal criterion (requirement goal); Core always stores it as minor, so it never sends the Task back. Give every finding caused_by_change. Set it to true for a defect or regression that this Task's own change introduced (even if the scope is beyond_acceptance or goal); set it to false for a defect that already existed before the Task or a request the Task did not cause. Core sends every true finding about the deliverable back as major, whatever its scope. Judge necessity from task.acceptance_criteria (each criterion's serves, if_omitted, check_weight and weight_reason) and task.necessity, not from what you would have liked to see.";
 
 /** The one definition of the Reviewer output. */
 export const REVIEW_OUTPUT_SCHEMA: RoleSchema = objectSchema({
@@ -49,6 +49,17 @@ export const REVIEW_OUTPUT_SCHEMA: RoleSchema = objectSchema({
     }),
     description: "goal criteria (requirement goal) that are not met, including ones the Worker marked passed; [] if none",
   },
+  fixes: {
+    type: "array",
+    items: objectSchema({
+      finding_index: { type: "integer", minimum: 0, description: "0-based index of the finding in findings that this edit fixes" },
+      file: { type: "string", minLength: 1, description: "path of the edited file, relative to the Task's workspace root" },
+      line_start: { type: "integer", minimum: 1, description: "first edited line in the file after your edit (1-based)" },
+      line_end: { type: "integer", minimum: 1, description: "last edited line in the file after your edit; not less than line_start" },
+      change: { type: "string", minLength: 1, description: "one sentence: what you changed and how" },
+    }),
+    description: "the places you edited yourself, one entry each; [] if you edited nothing (always [] unless Review.fix.allowed is true)",
+  },
   summary: { type: "string", description: "one sentence review summary" },
   findings: {
     type: "array",
@@ -56,6 +67,7 @@ export const REVIEW_OUTPUT_SCHEMA: RoleSchema = objectSchema({
       severity: { type: "string", enum: ["major", "minor"], description: "major = behavior failure, acceptance-criteria violation, rule violation, or security issue in the delivered work; otherwise minor. Never report the format, omissions, or wording of the report itself as a finding. If findings are only minor, the verdict must be pass." },
       target: { type: "string", enum: ["deliverable", "report"], description: "deliverable = a finding about the deliverable (code, design document, or workspace state); report = a finding only about how the report is written. A report finding is always minor and is not registered in the backlog" },
       scope: { type: "string", enum: ["in_scope", "beyond_acceptance", "overbuilt", "goal"], description: "goal = the finding is only about a goal criterion (requirement goal; Core always treats it as minor); in_scope = breaks an acceptance criterion, a rule, behavior or security; beyond_acceptance = asks for a test, check, feature or improvement no acceptance criterion or rule requires (Core always treats it as minor); overbuilt = the delivered work adds code, tests, dependencies or checks the criteria do not need" },
+      caused_by_change: { type: "boolean", description: "true = a defect or regression this Task's own change introduced (always true for such a finding, whatever its scope; Core sends it back as major); false = a defect that existed before the Task or a request the Task did not cause" },
       subject: { type: "string", enum: ["test_result", "other"], description: "test_result = the finding is about a test or check failing, passing or not having been run (including anything in Review.core_tests); other = anything else. Core never registers a test_result finding in the backlog" },
       file: { type: "string", description: "path of the file the finding is about, relative to the Task's workspace root (never a path inside a temporary worktree), or empty string for a general finding" },
       line: { type: "integer", minimum: 0, description: "1-based line number, or 0 when no specific line applies" },
@@ -133,6 +145,7 @@ export function reviewerPromptInputs(request: ReviewerRequest): RolePromptSlots[
         core_tests: request.core_tests ?? null,
         core_checks: request.core_checks ?? null,
         owner_guidance: request.owner_guidance ?? [],
+        fix: request.fix ?? { allowed: false },
       },
     },
   ];
@@ -157,12 +170,15 @@ export function buildReviewerPrompt(
       "Check goal criteria (requirement goal) like the others, including the ones the Worker marked passed. Put each goal that is not met in goal_shortfalls with its reason; a blank reason is rejected. Never return fix_required, replan_required or acceptance_defect because of a goal alone. A required criterion (requirement required, or no requirement) that is not met is still fix_required.",
       `Do not report the format, omissions, or wording of the ${reviewedRole} report as findings, not even as minor (for example, the report does not list a command or does not include output). Judge anything the report leaves out yourself by reading the workspace; run commands only for what Review.core_checks and Review.core_tests do not cover. Exception: when the report states something that is not true (it says tests passed but they fail, or it claims a verification that was not performed), treat it as a problem in verifying the deliverable: set target to deliverable and decide severity by the usual criteria.`,
       "Do not run the Project's tests; the hook denies the Project's test commands. Building is allowed. Judge tests only from Review.core_tests, the result of Core's test run for this Task (failed test names and error messages). Failures listed under core_tests.pre_existing already fail on the base branch and are quarantined by Core; never report them. Set subject to test_result on any finding about a test or check result. Never send the Task back, and never report a finding, because of a test the Worker added only to check its own work or because a test asserts a hardcoded value: Core removes test files that no criterion asked for, and the Project's check commands catch hardcoded expectations. A test file named in the report but missing from the workspace was removed by Core and is not a finding.",
+      "Review.fix says whether you may edit files. When Review.fix.allowed is false, never edit any file and return fixes []. When it is true, you may fix the blocking findings (severity major) yourself, but only if every one of them is a finding you may fix (scope in_scope, target deliverable, subject other), you can fix all of them by changing only files listed in Review.fix.editable_files, and the edits together add and delete at most Review.fix.max_changed_lines lines (a rewritten line counts as one added and one deleted) in at most Review.fix.max_changed_files files. If even one blocking finding cannot be fixed that way, edit nothing. Never fix: work that an acceptance criterion needs (adding an implementation or a test for it), a design change (the shape of public functions or types, data shapes, the DB schema, APIs, screen layout, file structure, added dependencies), overbuilt findings, findings about test results, or minor findings. Never create or delete a file, never use a command that changes git state, and never run the Project's tests (Core runs them after you). After you edit, still return verdict fix_required, keep findings as they are, and list each edit in fixes (finding_index, file, line_start and line_end in the edited file, change); Core turns the verdict into pass when the tests pass and undoes your edit otherwise.",
       "A failed entry in Review.core_checks means Core has already sent the Task back; concentrate on meaning, design and rules.",
       "Never send the Worker back, and never report a finding (not even a minor one for the backlog), because of where a test file is placed or because a test duplicates another; test placement and duplication are not review findings.",
       "When an acceptance criterion covers every occurrence of something, check the Worker's enumeration instead of hunting for occurrences one at a time: read the search named in verification.method and its hits, confirm each hit was handled, and judge whether that search could miss occurrences; re-run the search only when the report's evidence and the workspace disagree. Report every missed occurrence together in one finding.",
       ...(designer ? [] : [
         "Task.ui_change is the Manager's declaration of how much the Task changes screens: none, minor (wording, a few lines of CSS, small spacing, color or size changes) or major (a new screen, page or screen component, or a large change to a screen's layout or look; it needs a screen design Task first). If Task.ui_change is none or minor but the change adds a new screen, page or screen component, or largely changes a screen's layout or look, return verdict replan_required with an in_scope major finding that names those screens, and say in summary that the Task needs a screen design (ui_change major). Do not return fix_required for it: the Worker cannot add the missing design. Wording and small style changes stay minor; never send them back for this.",
         "The verification in the report (report.verification, passed to you as written) is the Worker's evidence. It is a claim to check, not a fact to trust. Verify it independently: (1) compare every criterion in task.acceptance_criteria (a criterion with legacy true holds the whole free-text acceptance as one criterion) with report.verification.acceptance and make sure each criterion is covered; (2) compare each piece of evidence with the workspace (the files, diffs and results it names); (3) Review.core_checks holds the deterministic checks Core already ran (check_commands, policy_checks, type_policy): do not repeat a passed check, and re-run the commands or searches the evidence names only when the report's evidence and the workspace disagree; (4) check the evidence for integration_check (required only when work was delegated to children) against the combined result; (5) if the report marks something passed that was not actually verified, report a major finding; (6) if the only evidence for a criterion is a child agent's report, with no check by the Worker itself, report a major finding. Do not copy secrets or long logs into your findings.",
+        "Beyond the diff: for every piece of data the Task changed or newly wrote, find who writes it and who reads it, and trace from the new flow up to its callers to confirm it is actually called. A missed call does not show in the diff, so you may read files outside report.changed_files. Report a data path that nothing writes or a function that no caller reaches as a finding.",
+        "Fake tests: a test that replaces the project's own code (its own modules or stages) with a fake and so skips the very processing it should check proves nothing; report it as a major finding and send the Task back. Only the outside world (an LLM, an external API, ffmpeg and the like) may be faked.",
       ]),
       "previous_minor_findings lists the minor findings of the previous review round (null when there are none). For each one that still applies, report it again with the same file and the same problem wording; drop the ones that no longer apply.",
       "If Review.owner_guidance is non-empty, the Owner answered earlier Decisions for this Work (newest first). Those answers take priority over the Task's context, acceptance criteria and manager_notes: never report a finding, and never send the Task back, because a change follows the Owner's guidance instead of the Task text.",
@@ -211,18 +227,22 @@ export function parseReviewResultWithFeedback(
       ...payload,
       findings: payload.findings.map((finding) =>
         finding !== null && typeof finding === "object" && !Array.isArray(finding) && !Array.isArray(finding)
-          ? { ...finding, ...("target" in finding ? {} : { target: "deliverable" }), ...("scope" in finding ? {} : { scope: "in_scope" }) }
+          ? { ...finding, ...("target" in finding ? {} : { target: "deliverable" }), ...("scope" in finding ? {} : { scope: "in_scope" }), ...("caused_by_change" in finding ? {} : { caused_by_change: false }) }
           : finding),
     };
   }
   // Strict providers need every property required; older outputs without acceptance_defects stay valid.
   if (!("acceptance_defects" in payload)) payload = { ...payload, acceptance_defects: [] };
   if (!("goal_shortfalls" in payload)) payload = { ...payload, goal_shortfalls: [] };
+  if (!("fixes" in payload)) payload = { ...payload, fixes: [] };
   const prepared = prepareLegacySkillOutput(REVIEW_OUTPUT_SCHEMA, payload);
   payload = prepared.payload;
   const problem = validateRoleOutput(REVIEW_OUTPUT_SCHEMA, payload);
   if (problem) {
     throw reviewInvalid(`review_output_schema:${problem}`);
+  }
+  if ((payload.fixes as NonNullable<ReviewResult["fixes"]>).some((fix) => fix.line_end < fix.line_start)) {
+    throw reviewInvalid("fixes_invalid");
   }
   if ((payload.findings as ReviewResult["findings"]).some((finding) => finding.target === "report" && finding.severity === "major")) {
     throw reviewInvalid("report_major");

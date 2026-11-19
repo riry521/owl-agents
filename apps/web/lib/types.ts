@@ -21,11 +21,12 @@ import type { AutoWorkEnabledFrom, AutoWorkRuleOrigin, AutoWorkSource, AutoWorkV
 import type { ChildRunEffort, ChildRunHarnessChoice, ChildRunListFilter, ChildRunProvider, ChildRunRecord, ChildRunSettings, ChildRunStatus, ChildRunSummary } from "../../../packages/shared/dist/child-runs.js";
 import type { DecisionCriterionRewrite } from "../../../packages/shared/dist/decision-explanation.js";
 import type { FixerEscalationSettings } from "../../../packages/shared/dist/fixer-escalation-settings.js";
+import type { ReviewerFixSettings } from "../../../packages/shared/dist/reviewer-fix-settings.js";
 import type { PlanUsageHarness, PlanUsageOrigin, PlanUsageSnapshot, PlanUsageStatus, PlanUsageWindow, PlanUsageWindowKind } from "../../../packages/shared/dist/plan-usage.js";
 import type { PlanUsageHarnessView, PlanUsageSettings, PlanUsageView } from "../../../packages/shared/dist/plan-usage-settings.js";
 import type { ProcessSkillsInstallCommand } from "../../../packages/shared/dist/process-skills.js";
 import type { TokenUsageHarness, TokenUsageMetrics, TokenUsagePeriod, TokenUsageReport, TokenUsageRole, TokenUsageTaskTotals, TokenUsageWorkTotals } from "../../../packages/shared/dist/token-usage-report.js";
-export type { AdvisorWindowChannel, AutoRecoverySettings, AutoWorkEnabledFrom, AutoWorkRuleOrigin, AutoWorkSource, AutoWorkVerdict, ChildRunEffort, ChildRunHarnessChoice, ChildRunListFilter, ChildRunProvider, ChildRunRecord, ChildRunSettings, ChildRunStatus, ChildRunSummary, DecisionCriterionRewrite, FixerEscalationSettings, PlanUsageHarness, PlanUsageHarnessView, PlanUsageOrigin, PlanUsageSettings, PlanUsageSnapshot, PlanUsageStatus, PlanUsageView, PlanUsageWindow, PlanUsageWindowKind, ProcessSkillsInstallCommand, TokenUsageHarness, TokenUsageMetrics, TokenUsagePeriod, TokenUsageReport, TokenUsageRole, TokenUsageTaskTotals, TokenUsageWorkTotals };
+export type { AdvisorWindowChannel, AutoRecoverySettings, AutoWorkEnabledFrom, AutoWorkRuleOrigin, AutoWorkSource, AutoWorkVerdict, ChildRunEffort, ChildRunHarnessChoice, ChildRunListFilter, ChildRunProvider, ChildRunRecord, ChildRunSettings, ChildRunStatus, ChildRunSummary, DecisionCriterionRewrite, FixerEscalationSettings, ReviewerFixSettings, PlanUsageHarness, PlanUsageHarnessView, PlanUsageOrigin, PlanUsageSettings, PlanUsageSnapshot, PlanUsageStatus, PlanUsageView, PlanUsageWindow, PlanUsageWindowKind, ProcessSkillsInstallCommand, TokenUsageHarness, TokenUsageMetrics, TokenUsagePeriod, TokenUsageReport, TokenUsageRole, TokenUsageTaskTotals, TokenUsageWorkTotals };
 
 /** The web copy carries the resolved-rule fields (origin, overridden_fields) that the shared rule type does not have. */
 export interface AutoWorkRule {

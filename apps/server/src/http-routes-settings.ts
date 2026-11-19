@@ -44,6 +44,7 @@ import { validateReviewLimitSettings } from "@owl/shared/review-limit-settings";
 import { REMAKE_LIMIT_SETTINGS_KEYS, validateRemakeLimitSettings } from "@owl/shared/remake-limit-settings";
 import { validateAutoRecoverySettings } from "@owl/shared/auto-recovery-settings";
 import { validateFixerEscalationSettings } from "@owl/shared/fixer-escalation-settings";
+import { validateReviewerFixSettings } from "@owl/shared/reviewer-fix-settings";
 import { validateReviewRoutingSettings } from "@owl/shared/review-routing-settings";
 import { isOwnerLanguage } from "@owl/shared/owner-language";
 import type { ChildRunSettings } from "@owl/shared/child-runs";
@@ -303,12 +304,14 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
         { code: "dependency_unavailable", message: RS.noRemakeLimits() });
       const fixerEscalationApi = requireCoreFeature(context.core, ["getFixerEscalationSettings", "setFixerEscalationSettings"],
         { code: "dependency_unavailable", message: RS.noFixerEscalation() });
+      const reviewerFixApi = requireCoreFeature(context.core, ["getReviewerFixSettings", "setReviewerFixSettings"],
+        { code: "dependency_unavailable", message: RS.noReviewerFix() });
       const autoRecoveryApi = requireCoreFeature(context.core, ["getAutoRecoverySettings", "setAutoRecoverySettings"],
         { code: "dependency_unavailable", message: RS.noAutoRecovery() });
       const childRuns = childRunFeature(context.core);
       const knowledgeStorage = knowledgeStorageFeature(context.core);
       const core = context.core;
-      const [models, providers, hybrid_mode, language, knowledgeAutomation, advisor_persona, advisorFolders, integrations, typesafeKey, remake_limits, fixer_escalation, auto_recovery, child_runs] = await Promise.all([
+      const [models, providers, hybrid_mode, language, knowledgeAutomation, advisor_persona, advisorFolders, integrations, typesafeKey, remake_limits, fixer_escalation, reviewer_fix, auto_recovery, child_runs] = await Promise.all([
         core.getModelSettings(),
         core.listProviders(),
         core.getHybridMode(),
@@ -320,6 +323,7 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
         core.getTypesafeApiKey(),
         remakeLimits.getRemakeLimitSettings(),
         fixerEscalationApi.getFixerEscalationSettings(),
+        reviewerFixApi.getReviewerFixSettings(),
         autoRecoveryApi.getAutoRecoverySettings(),
         childRunCall(() => childRuns.getChildRunSettings()),
       ]);
@@ -331,6 +335,7 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
         language: { language },
         remake_limits,
         fixer_escalation,
+        reviewer_fix,
         auto_recovery,
         knowledge_automation: { ...knowledgeAutomation, time_zone: hostTimeZone() },
         advisor_persona: { advisor_persona },
@@ -518,6 +523,14 @@ export const SETTINGS_ROUTES: readonly ApiRoute[] = [
       { code: "dependency_unavailable", message: RS.noFixerEscalation() }),
     get: (api) => api.getFixerEscalationSettings(),
     set: (api, input) => api.setFixerEscalationSettings(input),
+  }),
+  ...settingsRoutes({
+    path: "/api/v1/settings/reviewer-fix",
+    validate: validateReviewerFixSettings,
+    feature: (core) => requireCoreFeature(core, ["getReviewerFixSettings", "setReviewerFixSettings"],
+      { code: "dependency_unavailable", message: RS.noReviewerFix() }),
+    get: (api) => api.getReviewerFixSettings(),
+    set: (api, input) => api.setReviewerFixSettings(input),
   }),
   ...settingsRoutes({
     path: "/api/v1/settings/auto-recovery",

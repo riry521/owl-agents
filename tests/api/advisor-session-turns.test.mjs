@@ -176,7 +176,7 @@ test("advisor interrupt route reaches the runtime through the adapter and maps n
 
   const idle = await interrupt(api);
   assert.equal(idle.status, 200);
-  assert.deepEqual(await idle.json(), { interrupted: false, turn_id: null }, "no session means nothing to interrupt");
+  assert.deepEqual(await idle.json(), { status: "not_running", interrupted: false, turn_id: null }, "no session means nothing to interrupt");
   assert.deepEqual(requested, []);
 
   const conversationId = (await durableCore.getActiveConversation()).conversation_id;
@@ -189,14 +189,19 @@ test("advisor interrupt route reaches the runtime through the adapter and maps n
   });
   const running = await interrupt(api);
   assert.equal(running.status, 200);
-  assert.deepEqual(await running.json(), { interrupted: true, turn_id: "turn-1" });
+  assert.deepEqual(await running.json(), { status: "interrupting", interrupted: true, turn_id: "turn-1" });
   assert.deepEqual(requested, ["session-1"], "the request reached the runtime for the window's session");
 
   outcome = { status: "not_running", turn_id: null };
   const finished = await interrupt(api, { window: "general" });
   assert.equal(finished.status, 200);
-  assert.deepEqual(await finished.json(), { interrupted: false, turn_id: null });
+  assert.deepEqual(await finished.json(), { status: "not_running", interrupted: false, turn_id: null });
   assert.equal(requested.length, 2);
+
+  outcome = { status: "interrupted", turn_id: "turn-1" };
+  const stopped = await interrupt(api);
+  assert.equal(stopped.status, 200);
+  assert.deepEqual(await stopped.json(), { status: "interrupted", interrupted: true, turn_id: "turn-1" });
 
   outcome = { status: "unsupported", turn_id: "turn-1" };
   const unsupported = await interrupt(api);

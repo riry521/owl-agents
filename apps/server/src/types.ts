@@ -614,7 +614,7 @@ export interface CorePort {
   advisorRespond(conversationId: string, messageId: string, origin?: AdvisorOrigin): Promise<void>;
   readonly advisorSessions: AdvisorSessionsPort;
   restartAdvisorSession(ownerId: string, windowKey?: string): Promise<void>;
-  interruptAdvisorTurn(ownerId: string, windowKey?: string): Promise<{ status: "interrupting" | "not_running" | "unsupported"; turn_id: string | null }>;
+  interruptAdvisorTurn(ownerId: string, windowKey?: string): Promise<{ status: "interrupted" | "interrupting" | "not_running" | "unsupported"; turn_id: string | null }>;
   getAdvisorActivity(sessionId: string, conversationId: string | null): Promise<SessionActivity | null>;
   getIntegrations(): Promise<IntegrationStatus[]>;
   saveIntegration(provider: IntegrationProvider, config: IntegrationConfigPatch, command: CommandMeta): Promise<{ data: IntegrationStatus; version: number }>;

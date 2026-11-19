@@ -723,6 +723,12 @@ export function reduceTask(
     return applyAttemptEvaluation(row, event, now, AttemptPolicy.evaluate({ kind: "verification_failed", task: row }, policy));
   }
 
+  // A Reviewer's fix could not be undone: the worktree may still hold its edits, so the Task goes to the Manager,
+  // not back to a Worker. No review is counted (no reviews row), like an acceptance defect.
+  if (row.status === "verifying" && event === "review.fix_restore_failed") {
+    return taskResult(row, { ...withTaskVersion(row, "failed", now), last_failure_class: "deterministic", next_attempt_at: null }, ["manager_trigger_required"], true);
+  }
+
   // Review passed: reviewer pass plus serialized Core Git result.
   if (row.status === "verifying" && event === "review.passed") {
     return integrationResult(row, payload, now, [], "review_passed", true);

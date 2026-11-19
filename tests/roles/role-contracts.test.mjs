@@ -8,8 +8,10 @@ import { objectSchema, providerSchema, renderOutputTemplate, renderRolePrompt, s
 import { buildManagerPrompt, MANAGER_PLAN_OUTPUT_SCHEMA, MANAGER_REPLAN_OUTPUT_SCHEMA, MANAGER_FINALIZE_OUTPUT_SCHEMA } from "../../packages/agent-runtime/dist/manager.js";
 import { DESIGNER_REPORT_SCHEMA, WORKER_REPORT_SCHEMA, buildDesignerRolePrompt, buildWorkerPrompt } from "../../packages/agent-runtime/dist/worker.js";
 import { buildReviewerPrompt, REVIEW_OUTPUT_SCHEMA } from "../../packages/agent-runtime/dist/reviewer.js";
+import { buildWorkReviewPrompt, parseWorkReviewResult, WORK_REVIEW_OUTPUT_SCHEMA } from "../../packages/agent-runtime/dist/work-review.js";
 import { validateReportEnvelope } from "../../packages/agent-runtime/dist/protocol.js";
 import { autoRecoveryForManager, autoRecoveryForTask, recordAutoRecoveryInTransaction } from "../../packages/core/dist/auto-recovery.js";
+import { DEFAULT_WORK_REVIEW_SETTINGS, readWorkReviewSettings } from "../../packages/shared/dist/work-review-settings.js";
 import { openTestDatabase } from "../helpers/db.mjs";
 import { reportCheckCommands } from "../../packages/core/dist/test-detection.js";
 import { tempDir } from "../helpers/temp.mjs";
@@ -237,13 +239,55 @@ test("Manager replan parses its rendered template as task.replanned with fixed i
   assert.deepEqual(Object.keys(input), ["mode", "work", "tasks", "reports", "notes", "trigger", "context"]);
   // hardcode-check-allow whole-list-equal: 契約として固定された一覧の完全一致を確かめるため、現状の値を意図して比べている
   assert.deepEqual(Object.keys(input.context), [
-    "start_mode", "failed_task_ids", "current_plan", "worker_questions", "base_merge_conflict", "owner_requests", "previous_output_feedback", "auto_recovery", "failed_tasks", "final_verdict", "work_verification", "backlog_items", "rules", "knowledge", "skills", "design_documents", "owner_replan_kind",
+    "start_mode", "failed_task_ids", "current_plan", "worker_questions", "base_merge_conflict", "owner_requests", "previous_output_feedback", "auto_recovery", "failed_tasks", "final_verdict", "work_verification", "work_review", "backlog_items", "rules", "knowledge", "skills", "design_documents", "owner_replan_kind",
   ]);
   assert.deepEqual(input.context.failed_tasks, []);
   assert.equal(input.context.final_verdict, null);
   assert.deepEqual(input.trigger, { kind: "task_failed", tasks: [{ kind: "review_exhausted", task_id: "T1" }] });
-  for (const kind of ["initial_plan", "task_failed", "queued_failed_tasks", "work_verification_failed", "owner_request", "final_check", "launch_conflict", "task_integration_failed", "review_exhausted"]) assert.match(prompt, new RegExp(`${kind}:|${kind} \\(`));
+  for (const kind of ["initial_plan", "task_failed", "queued_failed_tasks", "work_verification_failed", "work_review_gaps", "owner_request", "final_check", "launch_conflict", "task_integration_failed", "review_exhausted"]) assert.match(prompt, new RegExp(`${kind}:|${kind} \\(`));
   assert.match(prompt, /context\.failed_tasks gives, per root failed Task, why it failed/);
+});
+
+test("Manager instructions explain work_review_gaps and context.work_review in replan and finalize", async () => {
+  const replanCalls = [];
+  await runnerAnswering((template) => fillTemplate(template), replanCalls).runManagerPlan(managerRequest("replan", {
+    trigger: { kind: "work_review_gaps", review_agent_run_id: "run-1", round: 1 },
+    work_review: { round: 1, findings: [] },
+  }));
+  const replan = replanCalls[0].prompt;
+  assert.match(replan, /work_review_gaps: the whole-Work review found broken links between completed Tasks/);
+  assert.match(replan, /Do not redo or re-plan completed Tasks/);
+  assert.match(replan, /do not move them to the backlog/);
+  assert.match(replan, /context\.work_review is set only for work_review_gaps in a replan/);
+  assert.deepEqual(renderedInput(replan, "Manager input").context.work_review, { round: 1, findings: [] });
+  assert.deepEqual(renderedInput(replan, "Manager input").trigger, { kind: "work_review_gaps", review_agent_run_id: "run-1", round: 1 });
+
+  const finalizeCalls = [];
+  await runnerAnswering((template) => fillTemplate(template), finalizeCalls).runManagerPlan({ work: { id: "work-1", title: "Archive Works" }, mode: "finalize", tasks: [task], reports: [] });
+  const finalize = finalizeCalls[0].prompt;
+  assert.match(finalize, /When context\.work_review is set, judge the criteria its findings touch with those gaps in mind/);
+  assert.equal(renderedInput(finalize, "Manager input").context.work_review, null);
+});
+
+test("readWorkReviewSettings reads defaults, dedups sizes and rejects invalid values per key", () => {
+  const warnings = [];
+  const warn = (message) => warnings.push(message);
+  assert.deepEqual(readWorkReviewSettings(undefined, warn), DEFAULT_WORK_REVIEW_SETTINGS);
+  assert.equal(warnings.length, 4);
+  warnings.length = 0;
+  assert.deepEqual(
+    readWorkReviewSettings({ enabled: false, sizes: ["large", "large", "small"], min_tasks: 3, max_rounds: 1 }, warn),
+    { enabled: false, sizes: ["large", "small"], min_tasks: 3, max_rounds: 1 },
+  );
+  assert.deepEqual(warnings, []);
+  assert.deepEqual(readWorkReviewSettings({ ...DEFAULT_WORK_REVIEW_SETTINGS, sizes: [] }).sizes, []);
+  assert.deepEqual(readWorkReviewSettings({ ...DEFAULT_WORK_REVIEW_SETTINGS, sizes: ["normal", "huge"] }).sizes, DEFAULT_WORK_REVIEW_SETTINGS.sizes);
+  for (const bad of [3, {}, false, "large"]) {
+    assert.deepEqual(readWorkReviewSettings({ ...DEFAULT_WORK_REVIEW_SETTINGS, enabled: false, sizes: bad }), { ...DEFAULT_WORK_REVIEW_SETTINGS, enabled: false });
+  }
+  assert.equal(readWorkReviewSettings({ ...DEFAULT_WORK_REVIEW_SETTINGS, min_tasks: 1 }).min_tasks, DEFAULT_WORK_REVIEW_SETTINGS.min_tasks);
+  assert.equal(readWorkReviewSettings({ ...DEFAULT_WORK_REVIEW_SETTINGS, min_tasks: 2.5 }).min_tasks, DEFAULT_WORK_REVIEW_SETTINGS.min_tasks);
+  assert.equal(readWorkReviewSettings({ ...DEFAULT_WORK_REVIEW_SETTINGS, max_rounds: 0 }).max_rounds, DEFAULT_WORK_REVIEW_SETTINGS.max_rounds);
 });
 
 test("Manager plan guidance covers design requests and heavy implementation", async () => {
@@ -583,6 +627,46 @@ test("Reviewer input carries knowledge with a null default and reference-only gu
     knowledge,
   }, "en");
   assert.equal(renderedSlots(suppliedPrompt).Project.knowledge, knowledge);
+});
+
+const workReviewRequest = () => ({
+  invocation_id: "wr-1",
+  work_id: "W1",
+  context: {
+    worktree: "/tmp/work-review-checkout",
+    base_commit: "aaa111",
+    work_commit: "bbb222",
+    round: 1,
+    task_ids: ["T-in-material", "T-omitted"],
+    work: { title: "Work title", summary: "Work summary" },
+    material: { trim: "lists", material_path: "/tmp/material.json", tasks: [{ task_id: "T-in-material", type: "code", depends_on: [], changed_files: ["a.ts"], report_path: null }], previous_findings: [], omitted_tasks: 1, omitted_previous_findings: 0 },
+  },
+});
+const workReviewAnswer = (findings) => ({ adapter: "claude", format: "plain", stdout: JSON.stringify({ summary: "checked", findings }) });
+const workReviewFinding = (over = {}) => ({ kind: "mismatch", from_task_id: "T-in-material", to_task_id: "T-omitted", file: "a.ts", line: null, problem: "p", fix: "f", evidence: "e", ...over });
+
+test("Work review prompt keeps to links between Tasks, carries the material and hides the check-only task_ids", () => {
+  const prompt = buildWorkReviewPrompt(workReviewRequest(), "en");
+  for (const text of ["different Tasks", "Never edit a file", "Never run tests, builds or installs", "a call that is missed inside one Task", "a test that fakes its own stage", "material.material_path", "/tmp/material.json", "omitted_tasks", "aaa111", "Work summary"]) {
+    assert.ok(prompt.includes(text), text);
+  }
+  assert.equal(prompt.includes("T-omitted"), false);
+});
+
+test("Work review output names both Tasks and rejects unknown ids and same-Task findings", () => {
+  assert.deepEqual(WORK_REVIEW_OUTPUT_SCHEMA.required, ["summary", "findings"]);
+  for (const key of ["kind", "from_task_id", "to_task_id", "file", "line", "problem", "fix", "evidence"]) {
+    assert.ok(WORK_REVIEW_OUTPUT_SCHEMA.properties.findings.items.required.includes(key), key);
+  }
+  const ids = ["T-in-material", "T-omitted"];
+  // An id left out of material.tasks but present in task_ids is accepted; null to_task_id is allowed.
+  assert.equal(parseWorkReviewResult(workReviewAnswer([workReviewFinding(), workReviewFinding({ to_task_id: null, line: 3 })]), ids).findings.length, 2);
+  assert.equal(parseWorkReviewResult(workReviewAnswer([]), ids).findings.length, 0);
+  for (const bad of [{ to_task_id: "T-other" }, { from_task_id: "T-other" }, { to_task_id: "T-in-material" }, { problem: "" }, { kind: "other" }]) {
+    assert.throws(() => parseWorkReviewResult(workReviewAnswer([workReviewFinding(bad)]), ids), { name: "OutputFormatError" }, JSON.stringify(bad));
+  }
+  const { fix: _fix, ...missing } = workReviewFinding();
+  assert.throws(() => parseWorkReviewResult(workReviewAnswer([missing]), ids), { name: "OutputFormatError" });
 });
 
 test("Reviewer reviews a Designer's external document without changing Worker review prompts", async () => {

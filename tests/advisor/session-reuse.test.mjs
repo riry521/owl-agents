@@ -120,7 +120,7 @@ test("a changed effort ends the live session", async () => {
 // --- Dead-driver recovery ------------------------------------------------
 
 /** A controllable in-memory ProviderSession. `exited` flips like the real drivers' done flag. */
-function fakeProviderSession(pid, { failSend = false, sendGate = null, holdTurns = 0, interruptible = false, partialText = "" } = {}) {
+function fakeProviderSession(pid, { failSend = false, sendGate = null, holdTurns = 0, interruptible = false, partialText = "", interruptWith = null, exitOnStop = false } = {}) {
   const queue = [];
   const waiters = [];
   const push = (event) => {
@@ -161,8 +161,15 @@ function fakeProviderSession(pid, { failSend = false, sendGate = null, holdTurns
     },
     async stop(reason) {
       session.stopReasons.push(reason);
+      if (exitOnStop) push({ type: "session.exited", exit_code: null, signal: "SIGTERM", stderr_tail: "" });
     },
   };
+  if (interruptWith) {
+    session.interrupt = async (turnId) => {
+      session.interrupts.push(turnId);
+      return interruptWith(turnId, session);
+    };
+  }
   if (interruptible) {
     session.interrupt = async (turnId) => {
       session.interrupts.push(turnId);
@@ -173,7 +180,7 @@ function fakeProviderSession(pid, { failSend = false, sendGate = null, holdTurns
   return session;
 }
 
-async function createLiveRuntime(t, providerSessions, { git } = {}) {
+async function createLiveRuntime(t, providerSessions, { git, runtimeConfig = {} } = {}) {
   const root = await tempDir(t, "owl-advisor-d1-");
   const db = createTestDatabase(root);
   const now = new Date().toISOString();
@@ -220,6 +227,7 @@ async function createLiveRuntime(t, providerSessions, { git } = {}) {
     },
     owlRoot: root,
     git,
+    ...runtimeConfig,
     getAdvisorSettings: () => settings,
     onReply: async (_conversationId, reply, turnId, _origin, suggestedActions, _malformed, options) => {
       replies.push({ reply, turnId, suggestedActions, options });
@@ -784,6 +792,135 @@ test("an interrupt requested before send() returns reaches the driver right afte
 
   assert.ok(provider.interrupts.length >= 1 && provider.interrupts.every((id) => id === running));
   assert.equal(live.replies[0].reply, "（中断しました）");
+});
+
+const quickInterrupts = { interruptRetryMs: 20, interruptMaxRetries: 2 };
+
+test("a driver that ignores, rejects or refuses interrupt is retried and then stopped; the turn ends as interrupted", async (t) => {
+  const behaviors = {
+    ignores: async () => true,
+    returnsFalse: async () => false,
+    throws: async () => { throw new Error("stdin closed"); },
+  };
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  t.after(() => { console.warn = originalWarn; });
+  for (const [name, interruptWith] of Object.entries(behaviors)) {
+    const provider = fakeProviderSession(900, { holdTurns: 1, interruptWith, exitOnStop: true });
+    const live = await createLiveRuntime(t, [provider], { runtimeConfig: quickInterrupts });
+    const session = await live.runtime.ensureSession(live.ownerId, live.conversationId);
+    const running = await live.sendTurn(session.id, "long question");
+    await waitFor(() => provider.sent.length === 1, { message: "send" });
+
+    assert.equal((await live.runtime.interruptTurn(session.id)).status, "interrupting", name);
+    await waitFor(() => live.replies.length === 1, { message: name + ": interrupted reply" });
+
+    assert.deepEqual(live.replies[0].options, { interrupted: true }, name);
+    assert.equal(live.turnRow(running).status, "completed", name);
+    assert.equal(provider.interrupts.length, 3, name + ": first request plus two retries");
+    assert.deepEqual(provider.stopReasons, ["interrupt_timeout"], name);
+    assert.deepEqual(live.errors, [], name);
+  }
+});
+
+test("a stop requested during preparation ends the turn as interrupted without sending it", async (t) => {
+  let releaseCompose;
+  const gate = new Promise((resolveGate) => { releaseCompose = resolveGate; });
+  let composing = false;
+  const memoryInjector = { compose: async () => { composing = true; await gate; return ""; }, resetSession() {} };
+  const provider = fakeProviderSession(910, { interruptWith: async () => false });
+  const live = await createLiveRuntime(t, [provider], { runtimeConfig: { ...quickInterrupts, memoryInjector } });
+  const session = await live.runtime.ensureSession(live.ownerId, live.conversationId);
+  const running = await live.sendTurn(session.id, "question");
+  await waitFor(() => composing, { message: "memory compose started" });
+
+  assert.equal((await live.runtime.interruptTurn(session.id)).status, "interrupting");
+  releaseCompose();
+  await waitFor(() => live.replies.length === 1, { message: "interrupted reply" });
+
+  assert.equal(provider.sent.length, 0);
+  assert.equal(live.turnRow(running).status, "completed");
+  assert.deepEqual(live.replies[0].options, { interrupted: true });
+});
+
+test("a stop carries over when the send is retried on a fresh session", async (t) => {
+  let releaseSend;
+  const gate = new Promise((resolveGate) => { releaseSend = resolveGate; });
+  const dying = fakeProviderSession(920, { failSend: true, sendGate: gate, interruptWith: async () => false });
+  const fresh = fakeProviderSession(921, { interruptWith: async () => true });
+  const live = await createLiveRuntime(t, [dying, fresh], { runtimeConfig: quickInterrupts });
+  const session = await live.runtime.ensureSession(live.ownerId, live.conversationId);
+  const running = await live.sendTurn(session.id, "question");
+  await waitFor(() => dying.sent.length === 1, { message: "first send attempt" });
+
+  assert.equal((await live.runtime.interruptTurn(session.id)).status, "interrupting");
+  releaseSend();
+  await waitFor(() => live.replies.length === 1, { message: "interrupted reply" });
+
+  assert.deepEqual(dying.stopReasons, ["send_failed"]);
+  assert.equal(fresh.sent.length, 0, "the stopped turn is not resent");
+  assert.equal(live.turnRow(running).status, "completed");
+  assert.deepEqual(live.replies[0].options, { interrupted: true });
+});
+
+test("a stop pressed while the replacement session is starting is kept and ends the turn without resending", async (t) => {
+  const dying = fakeProviderSession(930, { failSend: true });
+  const fresh = fakeProviderSession(931, { interruptWith: async () => true });
+  const live = await createLiveRuntime(t, [dying], { runtimeConfig: quickInterrupts });
+  const session = await live.runtime.ensureSession(live.ownerId, live.conversationId);
+  let releaseSpawn;
+  const spawnGate = new Promise((resolveGate) => { releaseSpawn = resolveGate; });
+  let spawning = false;
+  live.runtime.config.providerClient.createSession = async () => { spawning = true; await spawnGate; return fresh; };
+  const running = await live.sendTurn(session.id, "question");
+  await waitFor(() => spawning, { message: "replacement session is starting" });
+
+  assert.equal((await live.runtime.interruptTurn(session.id)).status, "interrupting");
+  releaseSpawn();
+  await waitFor(() => live.replies.length === 1, { message: "interrupted reply" });
+
+  assert.equal(fresh.sent.length, 0, "the stopped turn is not resent");
+  assert.equal(live.turnRow(running).status, "completed");
+  assert.deepEqual(live.replies[0].options, { interrupted: true });
+});
+
+test("interruptTurn tells interrupted from interrupting, and a stop followed by a success result does not touch the next turn", async (t) => {
+  // interrupted: the turn had already ended when the call returned.
+  let live;
+  const settlesFirst = fakeProviderSession(930, {
+    holdTurns: 1,
+    interruptWith: async (turnId, provider) => {
+      provider.push({ type: "turn.interrupted", turn_id: turnId, partial_text: "", usage: null });
+      await waitFor(() => live.turnRow(turnId).status === "completed", { message: "turn settled" });
+      return true;
+    },
+  });
+  live = await createLiveRuntime(t, [settlesFirst], { runtimeConfig: quickInterrupts });
+  let session = await live.runtime.ensureSession(live.ownerId, live.conversationId);
+  const first = await live.sendTurn(session.id, "question");
+  await waitFor(() => settlesFirst.sent.length === 1, { message: "send" });
+  assert.deepEqual(await live.runtime.interruptTurn(session.id), { status: "interrupted", turn_id: first });
+
+  // The CLI answers the stop with a normal result: the request must not leak into the next turn.
+  const completesInstead = fakeProviderSession(931, {
+    holdTurns: 1,
+    interruptWith: async (turnId, provider) => {
+      provider.push({ type: "turn.completed", turn_id: turnId, reply: "finished anyway", usage: null });
+      return true;
+    },
+  });
+  live = await createLiveRuntime(t, [completesInstead], { runtimeConfig: quickInterrupts });
+  session = await live.runtime.ensureSession(live.ownerId, live.conversationId);
+  const running = await live.sendTurn(session.id, "question");
+  await waitFor(() => completesInstead.sent.length === 1, { message: "send" });
+  await live.runtime.interruptTurn(session.id);
+  await waitFor(() => live.turnRow(running).status === "completed", { message: "completed" });
+  assert.equal(slotOf(live.runtime).interruptRequestedTurnId, null);
+  const next = await live.sendTurn(session.id, "next question");
+  await waitFor(() => live.turnRow(next).status === "completed", { message: "next turn" });
+  assert.equal(live.replies[1].options, undefined, "the next turn is a normal reply");
+  assert.deepEqual(completesInstead.interrupts, [running]);
+  assert.deepEqual(completesInstead.stopReasons, []);
 });
 
 test("the window keeps the latest activity and shows it to its conversation only", async (t) => {

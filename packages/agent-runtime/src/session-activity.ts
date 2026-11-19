@@ -6,6 +6,7 @@ import type { SessionActivity } from "./types";
  */
 export class SessionActivityTracker {
   private turnActive = false;
+  private compacting = false;
   private readonly openTools = new Map<string, { kind: "tool" | "subagent"; name: string }>();
   private backgroundTasks = new Set<string>();
   private last: SessionActivity | null = null;
@@ -20,7 +21,15 @@ export class SessionActivityTracker {
   /** Ends the foreground, including any tool whose result never arrived. */
   public turnEnded(): void {
     this.turnActive = false;
+    this.compacting = false;
     this.openTools.clear();
+    this.publish();
+  }
+
+  /** Context compaction (summarizing) runs inside a turn and has no tool name. */
+  public compactionChanged(active: boolean): void {
+    this.compacting = active;
+    if (active) this.turnActive = true;
     this.publish();
   }
 
@@ -50,12 +59,14 @@ export class SessionActivityTracker {
 
   public processEnded(): void {
     this.turnActive = false;
+    this.compacting = false;
     this.openTools.clear();
     this.backgroundTasks.clear();
     this.publish();
   }
 
   private current(): SessionActivity {
+    if (this.compacting) return { state: "compacting", tool_name: null, background_count: this.backgroundTasks.size };
     const innermost = [...this.openTools.values()].at(-1);
     if (innermost) {
       return {

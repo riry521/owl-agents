@@ -83,6 +83,8 @@ interface ClaudeStreamLine {
   readonly usage?: ClaudeStreamUsage;
   readonly compact_metadata?: ClaudeCompactMetadata;
   readonly tasks?: unknown;
+  /** subtype=status: "compacting" while the CLI summarizes the context. */
+  readonly status?: unknown;
   readonly task_id?: unknown;
 }
 
@@ -393,7 +395,7 @@ export class AdvisorSessionDriver implements ProviderSession {
   /** Asks Claude to end the running turn; the process is not signalled, so the session keeps its context. */
   public async interrupt(turnId: string): Promise<boolean> {
     if (this.done || this.currentTurnId !== turnId || this.unsolicitedActive) return false;
-    if (this.interruptRequestedTurnId === turnId) return true;
+    // Not short-circuited when already requested: Core repeats the request while the CLI ignores it.
     this.interruptRequestedTurnId = turnId;
     try {
       await this.writeLine(JSON.stringify({ type: "control_request", request_id: randomUUID(), request: { subtype: "interrupt" } }));
@@ -936,6 +938,9 @@ export class AdvisorSessionDriver implements ProviderSession {
         this.activity.backgroundChanged(
           record.tasks.flatMap((task) => (isRecord(task) && typeof task.task_id === "string" ? [task.task_id] : [])),
         );
+      } else if (!inner && record.subtype === "status") {
+        // status:"compacting" opens summarizing; any other status (null) closes it.
+        this.activity.compactionChanged(record.status === "compacting");
       } else if (record.subtype === "task_notification") {
         if (typeof record.task_id === "string") this.activity.backgroundEnded(record.task_id);
       } else if (!inner && record.subtype === "init") {

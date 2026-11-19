@@ -777,7 +777,7 @@ async function advisorSessionInterrupt(route: RouteRequest): Promise<void> {
       sendJson(response, 409, { error: "interrupt_unsupported" });
       return;
     }
-    sendJson(response, 200, { interrupted: result.status === "interrupting", turn_id: result.turn_id });
+    sendJson(response, 200, { status: result.status, interrupted: result.status === "interrupting" || result.status === "interrupted", turn_id: result.turn_id });
   } catch (error) {
     await sendApiError(response, requestIdValue, error, `${method} ${pathname}`, context.core);
   }

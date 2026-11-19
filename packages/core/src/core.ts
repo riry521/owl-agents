@@ -8,7 +8,7 @@ import { AdvisorActions } from "./advisor-actions.js";
 import { ManagerOrchestrator, ManagerHost, ReplayCommand, queueOwnerReplanInTransaction, mergeOwnerReplanInTransaction, workUpdateReplanAnswer, queueDecisionReplanInTransaction, OwnerReplanRequest } from "./manager-orchestrator.js";
 import { serenaConfigPath, unregisterSerenaProject } from "./serena-registry.js";
 import { createHash as createFileHash } from "node:crypto";
-import { constants, existsSync, lstatSync, mkdirSync, readdirSync, statSync } from "node:fs";
+import { constants, existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { copyFile, lstat, mkdir, readdir, readFile, rename, rm, rmdir, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -68,6 +68,7 @@ import { fixPendingTaskIds } from "./fix-pending-tasks.js";
 import { goalShortfallsOfWork } from "./goal-shortfalls";
 import { detectNewRepositories, type NewRepositoryCandidate } from "./new-repository-detection.js";
 import { clearPausedReviewerWait } from "./provider-pause-reviewer-wait.js";
+import { WorkReviewRunner } from "./work-review";
 import { WorkflowEngine, resolveRoleModel, type HookSubagentInput } from "./workflow-engine";
 import type { PrerequisiteSpec } from "@owl/shared/prerequisite";
 import { signalProcessGroup } from "@owl/shared/process-group";
@@ -167,6 +168,8 @@ import {
 } from "@owl/shared/verification-policy-settings";
 import { remakeLimits } from "./remake-limits.js";
 import { fixerEscalation } from "./fixer-escalation.js";
+import { reviewerFixSettings, REVIEWER_FIX_SETTING } from "./reviewer-fix.js";
+import type { ReviewerFixSettings } from "@owl/shared/reviewer-fix-settings";
 import { autoRecoverySettings } from "./auto-recovery.js";
 import {
   type FixerEscalationSettings,
@@ -1371,13 +1374,61 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     if (names.length > 0) await this.skillBox.recordRead(input.agent_run_id, names);
   }
 
+  /**
+   * Absolute paths a running Reviewer may write: the run's reviewer.started fix_permit.editable_files under the Task worktree.
+   * null (deny every write) when the run is not a running Reviewer, has no worktree, or has no usable fix_permit.
+   */
+  public reviewerWritePaths(agentRunId: string): string[] | null {
+    const row = this.db.get<{ worktree_path: string | null; payload_json: string | null }>(
+      `SELECT tasks.worktree_path,
+              (SELECT events.payload_json FROM events
+                WHERE events.task_id = tasks.id AND events.type = 'reviewer.started'
+                  AND json_extract(events.payload_json, '$.agent_run_id') = agent_runs.id
+                ORDER BY events.rowid DESC LIMIT 1) AS payload_json
+         FROM agent_runs JOIN tasks ON tasks.id = agent_runs.task_id
+        WHERE agent_runs.id = ? AND agent_runs.role = 'reviewer' AND agent_runs.status = 'running'`,
+      agentRunId,
+    );
+    if (!row || row.worktree_path === null || row.payload_json === null) return null;
+    try {
+      const permit = (JSON.parse(row.payload_json) as { fix_permit?: { editable_files?: unknown } | null }).fix_permit;
+      const files = permit?.editable_files;
+      if (!Array.isArray(files) || files.some((file) => typeof file !== "string" || file.length === 0)) return null;
+      const root = realpathSync(row.worktree_path);
+      return files.map((file) => resolve(root, file as string));
+    } catch {
+      return null;
+    }
+  }
+
+  /** Records a Reviewer write the guard refused as reviewer.write_denied (target cut to 500 characters). */
+  public async recordReviewerWriteDenied(input: { readonly agent_run_id: string; readonly tool_name: string; readonly target: string }): Promise<void> {
+    const row = this.db.get<{ task_id: string; work_id: string }>(
+      "SELECT task_id, work_id FROM agent_runs WHERE id = ? AND role = 'reviewer'",
+      input.agent_run_id,
+    );
+    if (!row) return;
+    await this.writeLane.write({
+      mutateState: () => ({}),
+      event: {
+        idempotencyKey: `reviewer-write-denied:${input.agent_run_id}:${createUlid()}`,
+        type: "reviewer.write_denied",
+        workId: row.work_id,
+        taskId: row.task_id,
+        payload: { schema_version: "1.0.0", agent_run_id: input.agent_run_id, task_id: row.task_id, tool_name: input.tool_name, target: input.target.slice(0, 500) },
+      },
+      outbox: [{ provider: "websocket" }],
+    });
+  }
+
   /** Whether a Reviewer's shell command runs the Project's tests; a denial is recorded as reviewer.test_command_denied. */
   public async checkReviewerTestCommand(input: { readonly agent_run_id: string; readonly command: string }): Promise<ReviewerTestCommandCheck> {
-    const row = this.db.get<{ task_id: string; work_id: string; worktree_path: string | null; project_id: string | null; canonical_path: string | null; test_policy_json: string | null }>(
-      `SELECT tasks.id AS task_id, tasks.work_id, tasks.worktree_path, projects.id AS project_id, projects.canonical_path,
+    // LEFT JOIN: the whole-Work review runs as a Reviewer without a Task, and must not run the tests either.
+    const row = this.db.get<{ task_id: string | null; work_id: string; worktree_path: string | null; project_id: string | null; canonical_path: string | null; test_policy_json: string | null }>(
+      `SELECT agent_runs.task_id, agent_runs.work_id, tasks.worktree_path, projects.id AS project_id, projects.canonical_path,
               projects.test_policy_json
-         FROM agent_runs JOIN tasks ON tasks.id = agent_runs.task_id
-         JOIN works ON works.id = tasks.work_id JOIN projects ON projects.id = works.project_id
+         FROM agent_runs LEFT JOIN tasks ON tasks.id = agent_runs.task_id
+         JOIN works ON works.id = agent_runs.work_id JOIN projects ON projects.id = works.project_id
         WHERE agent_runs.id = ? AND agent_runs.role = 'reviewer'`,
       input.agent_run_id,
     );
@@ -6976,7 +7027,7 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
    * Interrupts the window's running Advisor turn. The session and its queued
    * turns stay alive; the turn's reply is saved as interrupted.
    */
-  public async interruptAdvisorTurn(ownerId: string, windowKey: string = GENERAL_WINDOW_KEY): Promise<{ status: "interrupting" | "not_running" | "unsupported"; turn_id: string | null }> {
+  public async interruptAdvisorTurn(ownerId: string, windowKey: string = GENERAL_WINDOW_KEY): Promise<{ status: "interrupted" | "interrupting" | "not_running" | "unsupported"; turn_id: string | null }> {
     if (!this.advisorRuntime) return { status: "unsupported", turn_id: null };
     const window = findAdvisorWindow(this.db, ownerId, windowKey);
     const session = window
@@ -7823,7 +7874,10 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
               await this.announceCoreDecisions(workId);
               return this.workflow.snapshot(workId);
             }
-            const finalOutcome = await this.manager.runFinalManager(workId, integration.verification);
+            // The whole-Work review runs once the checks pass; gaps go back to the Manager before the final check.
+            const review = await this.workReview.run(workId);
+            if (!this.started || review.kind === "wait") return this.workflow.snapshot(workId);
+            const finalOutcome = await this.manager.runFinalManager(workId, integration.verification, review.final_context);
             if (!this.started || finalOutcome === null) return this.workflow.snapshot(workId);
             const { verdict, agent_run_id: agentRunId } = finalOutcome;
             await this.manager.recordFinalGoalShortfalls(workId, finalOutcome.settled, finalOutcome.criteria_index);
@@ -8878,6 +8932,27 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
     return this.manager.triggerManagerReplan(workId, failedTaskIds, trigger, workerQuestions, finalVerdict, ownerReplan, workVerification, baseConflict);
   }
 
+  private workReviewInstance: WorkReviewRunner | null = null;
+  /** Lazy for the same reason as the Manager. The runner is the raw one: the review has no Task workspace to prepare. */
+  private get workReview(): WorkReviewRunner {
+    return (this.workReviewInstance ??= new WorkReviewRunner({
+      db: this.db,
+      writeLane: this.writeLane as never,
+      git: this.git as never,
+      dataDir: this.dataDir,
+      started: () => this.started,
+      runner: () => {
+        const runner = this.options.agentRunner as { runWorkReview?: (request: JsonObject) => Promise<never> };
+        return { runWorkReview: typeof runner.runWorkReview === "function" ? runner.runWorkReview.bind(this.options.agentRunner) : undefined } as never;
+      },
+      providerPauseController: this.providerPauseController,
+      taskReports: (workId, tasks) => this.manager.storedTaskReports(workId, tasks) as never,
+      maxChars: () => this.manager.finalInputMaxChars(),
+      triggerManagerReplan: (workId, failed, trigger) => this.triggerManagerReplan(workId, [...failed], trigger),
+      composeReviewerInputs: (workId) => this.workflow.composeWorkReviewInputs(workId),
+    }));
+  }
+
   private managerInstance: ManagerOrchestrator | null = null;
   /** Lazy because the Manager code reads Core members that exist only after construction. */
   get manager(): ManagerOrchestrator {
@@ -9176,6 +9251,15 @@ private readonly finalReportRuns = new Set<Promise<unknown>>();
   public async setFixerEscalationSettings(input: FixerEscalationSettings): Promise<FixerEscalationSettings> {
     await saveSetting(this.writeLane, FIXER_ESCALATION_SETTING, input);
     return fixerEscalation(this.db);
+  }
+
+  public async getReviewerFixSettings(): Promise<ReviewerFixSettings> {
+    return reviewerFixSettings(this.db);
+  }
+
+  public async setReviewerFixSettings(input: ReviewerFixSettings): Promise<ReviewerFixSettings> {
+    await saveSetting(this.writeLane, REVIEWER_FIX_SETTING, input);
+    return reviewerFixSettings(this.db);
   }
 
   public async getAutoRecoverySettings(): Promise<AutoRecoverySettings & { readonly warnings: readonly string[] }> {

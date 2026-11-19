@@ -31,6 +31,42 @@ export function reviewNotesByTask(assurance) {
 }
 
 /**
+ * Reviewer fixes to show on each Task row, newest first. Malformed items are dropped.
+ * @param {unknown} assurance GET /works/{id}/assurance data
+ * @returns {Map<string, { outcome: string, reason: string, restoreFailed: boolean, reverted: boolean, changedLines: number, changedFiles: number, maxLines: number, maxFiles: number, testsPassed: boolean | null, fixes: { location: string, problem: string, change: string }[], recordedAt: string }[]>}
+ */
+export function reviewerFixesByTask(assurance) {
+  const byTask = new Map();
+  const items = isRecord(assurance) && Array.isArray(assurance.reviewer_fixes) ? assurance.reviewer_fixes : [];
+  /** @param {unknown} value */
+  const num = (value) => (typeof value === 'number' ? value : 0);
+  for (const item of items) {
+    if (!isRecord(item) || typeof item.task_id !== 'string' || !text(item.outcome)) continue;
+    const limits = isRecord(item.limits) ? item.limits : {};
+    const measured = isRecord(item.measured) ? item.measured : {};
+    const view = {
+      outcome: text(item.outcome),
+      reason: text(item.reason),
+      restoreFailed: item.restore_failed === true,
+      reverted: item.reverted === true,
+      changedLines: num(measured.changed_lines),
+      changedFiles: num(measured.changed_files),
+      maxLines: num(limits.max_changed_lines),
+      maxFiles: num(limits.max_changed_files),
+      testsPassed: isRecord(item.tests) ? item.tests.passed === true : null,
+      fixes: (Array.isArray(item.fixes) ? item.fixes : []).filter(isRecord).map((fix) => ({
+        location: `${text(fix.file)}:${num(fix.line_start)}-${num(fix.line_end)}`,
+        problem: text(fix.problem),
+        change: text(fix.change),
+      })),
+      recordedAt: text(item.recorded_at),
+    };
+    byTask.set(item.task_id, [view, ...(byTask.get(item.task_id) ?? [])]);
+  }
+  return byTask;
+}
+
+/**
  * The latest integration verification of the Work branch, reduced to what the screen shows.
  * @param {unknown} assurance
  * @returns {{ status: string, reason: string, message: string, failedCommand: string, commands: number } | null}

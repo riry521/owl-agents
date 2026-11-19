@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { spawn } from "node:child_process";
-import { mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -570,7 +570,19 @@ async function reviewerGuardCheck(t, testRun) {
     assert.equal(response.status, 200);
     return (await response.json()).data;
   };
-  return { db, check };
+  const checkInput = async (runId, role, toolName, toolInput) => {
+    const lease = guardTokens.issue({ agent_run_id: runId, role });
+    const token = (await readFile(lease.file, "utf8")).trim();
+    const response = await fetch(`${api.baseUrl}/api/v1/guard/check`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ request_id: "r", idempotency_key: "k", expected_version: 0, payload: { role, tool_name: toolName, tool_input: toolInput, cwd: root } }),
+    });
+    lease.release();
+    assert.equal(response.status, 200);
+    return (await response.json()).data;
+  };
+  return { db, check, checkInput, root };
 }
 
 test("the guard endpoint denies a Reviewer the Project's test commands under both shell tool names and records the denial", async (t) => {
@@ -595,6 +607,66 @@ test("the guard endpoint denies a Reviewer the Project's test commands under bot
   assert.equal(events.length, 7);
   assert.ok(events.every((payload) => payload.agent_run_id === "run-reviewer"));
   assert.ok(events.some((payload) => payload.command === "cd x && node --test a.test.mjs" && payload.matched === "node --test"));
+});
+
+test("the guard endpoint denies the Project's test commands to a Reviewer run without a Task and records the denial with a null task_id", async (t) => {
+  const guard = await reviewerGuardCheck(t, { file_argv: ["node", "--test", "--test-reporter=tap", "{file}"] });
+  if (!guard) return t.skip("localhost listen is unavailable");
+  const { db, check } = guard;
+  const now = new Date().toISOString();
+  await db.createWriteLane().transact((tx) => {
+    tx.run(
+      `INSERT INTO agent_runs (id, work_id, task_id, role, provider, model, status, created_at, updated_at)
+       VALUES ('run-work-review', 'W1', NULL, 'reviewer', 'anthropic', 'm', 'running', ?, ?)`,
+      now, now,
+    );
+  });
+  const denied = await check("run-work-review", "reviewer", "Bash", "node --test a.test.mjs");
+  assert.equal(denied.allowed, false);
+  assert.equal(denied.rule_id, "reviewer-test-command");
+  assert.equal((await check("run-work-review", "reviewer", "Bash", "pnpm build")).allowed, true);
+  const rows = db.all("SELECT task_id, payload_json FROM events WHERE type = 'reviewer.test_command_denied' AND work_id = 'W1'");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].task_id, null);
+  const payload = JSON.parse(rows[0].payload_json);
+  assert.equal(payload.agent_run_id, "run-work-review");
+  assert.equal(payload.task_id, null);
+});
+
+test("the guard endpoint limits a Reviewer's writes to the fix_permit files and records each denial", async (t) => {
+  const guard = await reviewerGuardCheck(t, { file_argv: ["node", "--test", "{file}"] });
+  if (!guard) return t.skip("localhost listen is unavailable");
+  const { db, checkInput, root } = guard;
+  const worktree = await realpath(root);
+  const editable = path.join(worktree, "a.txt");
+  const run = (sql, ...params) => db.createWriteLane().transact((tx) => { tx.run(sql, ...params); });
+  await run("UPDATE tasks SET worktree_path = ? WHERE id = 'T1'", worktree);
+  const now = new Date().toISOString();
+  const startedEvent = (sequence, runId, permit) => run(
+    "INSERT INTO events (id, sequence, idempotency_key, type, work_id, task_id, payload_json, status, created_at) VALUES (?, ?, ?, 'reviewer.started', 'W1', 'T1', ?, 'handled', ?)",
+    `ev-${sequence}`, sequence * 100000, `reviewer-started-${sequence}`, JSON.stringify({ agent_run_id: runId, fix_permit: permit }), now,
+  );
+
+  // No fix_permit: even a listed file is denied.
+  await startedEvent(1, "run-reviewer", null);
+  const none = await checkInput("run-reviewer", "reviewer", "Write", { file_path: editable });
+  assert.equal(none.allowed, false);
+  assert.equal(none.rule_id, "reviewer-write-path");
+
+  await run("DELETE FROM events WHERE id = 'ev-1'");
+  await startedEvent(2, "run-reviewer", { limits: { max_changed_lines: 30, max_changed_files: 3 }, editable_files: ["a.txt"] });
+  assert.equal((await checkInput("run-reviewer", "reviewer", "Write", { file_path: editable })).allowed, true);
+  const outside = path.join(path.dirname(worktree), "outside-the-worktree.txt");
+  const denied = await checkInput("run-reviewer", "reviewer", "Write", { file_path: outside });
+  assert.equal(denied.allowed, false);
+  assert.equal(denied.rule_id, "reviewer-write-path");
+  assert.equal((await checkInput("run-worker", "worker", "Write", { file_path: outside })).allowed, true);
+
+  const rows = db.all("SELECT payload_json FROM events WHERE type = 'reviewer.write_denied' AND task_id = 'T1'").map((row) => JSON.parse(row.payload_json));
+  assert.equal(rows.length, 2);
+  assert.equal(rows[1].target, outside);
+  assert.equal(rows[1].agent_run_id, "run-reviewer");
+  assert.equal(rows[1].tool_name, "Write");
 });
 
 test("the guard endpoint denies a Reviewer the part of unit_argv before {unit} when the unit is a folder", async (t) => {
@@ -722,4 +794,31 @@ test("the guard endpoint does not check screen files when the Project has no scr
     }
     assert.equal(guard.denials().length, 0);
   }
+});
+
+test("an Advisor's long foreground Bash command is denied by the config-driven hook check", async (t) => {
+  const root = await tempDir(t, "owl-fg-");
+  const configDir = path.join(root, "rules", "system");
+  await mkdir(configDir, { recursive: true });
+  const configFile = path.join(configDir, "advisor-foreground.json");
+  const writeConfig = (config) => writeFile(configFile, JSON.stringify(config));
+  const run = (role, command, extra = {}) => runHook({ role, apiBase: "http://127.0.0.1:1", toolName: "Bash", toolInput: { command, ...extra }, cwd: root, owlRoot: root });
+  const stopped = (result) => result.stdout.includes("run_in_background");
+  const defaults = JSON.parse(await readFile(path.resolve("rules/system/advisor-foreground.json"), "utf8"));
+  await writeConfig(defaults);
+  for (const command of ["npm test", "pnpm build", "node scripts/ci-check.mjs", "npm install", "cd x && pnpm test", "ls; npm test", "cat x | pnpm build"]) {
+    const result = await run("advisor", command);
+    assert.equal(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision, "deny", command);
+    assert.match(result.stdout, /run_in_background/u, command);
+    assert.equal(stopped(await run("advisor", command, { run_in_background: true })), false, `${command} in background`);
+  }
+  for (const command of ["git show main:README.md", "git log --oneline", "git diff", "grep -rn foo .", "cat package.json", "cat tests/vitest.config.ts", "grep -n vitest package.json", "git show HEAD:scripts/ci-check.mjs", 'cat "notes; npm test"', 'grep "foo|pnpm build" README.md', 'git show "HEAD:notes; npm test"']) {
+    assert.equal(stopped(await run("advisor", command)), false, command);
+  }
+  assert.equal(stopped(await run("worker", "npm test")), false, "worker is not stopped");
+  await writeConfig({ enabled: true, patterns: ["\\bmake\\s+all\\b"] });
+  assert.equal(stopped(await run("advisor", "make all")), true);
+  assert.equal(stopped(await run("advisor", "npm test")), false);
+  await writeConfig({ ...defaults, enabled: false });
+  assert.equal(stopped(await run("advisor", "npm test")), false, "disabled");
 });

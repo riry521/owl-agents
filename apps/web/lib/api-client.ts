@@ -69,6 +69,7 @@ AdvisorWindow,
   AdvisorSendFileDestinationInput,
   RemakeLimitSettings,
   FixerEscalationSettings,
+  ReviewerFixSettings,
 AutoRecoverySettings,
   KnowledgeStorageStatus,
   DirectoryListing,
@@ -1572,6 +1573,11 @@ export async function putFixerEscalationSettings(input: FixerEscalationSettings)
   return response.data;
 }
 
+export async function putReviewerFixSettings(input: ReviewerFixSettings): Promise<ReviewerFixSettings> {
+  const response = await command<ReviewerFixSettings>('/settings/reviewer-fix', input, 0, 'PUT');
+  return response.data;
+}
+
 export async function putAutoRecoverySettings(input: { limit: number }): Promise<AutoRecoverySettings> {
   const response = await command<AutoRecoverySettings>('/settings/auto-recovery', input, 0, 'PUT');
   return response.data;
@@ -1762,9 +1768,12 @@ export async function getAdvisorSession(conversationId?: string): Promise<Adviso
   return requestJson<AdvisorSessionInfo>(`/advisor/session${query}`);
 }
 
+/** "interrupted": already stopped; "interrupting": stop requested, still being applied; "not_running": no running turn. */
+export type AdvisorInterruptResult = { status: 'interrupted' | 'interrupting' | 'not_running'; interrupted: boolean; turn_id: string | null };
+
 /** POST /api/v1/advisor/session/interrupt. */
-export async function interruptAdvisorTurn(windowKey: string): Promise<{ interrupted: boolean; turn_id: string | null }> {
-  return requestJson<{ interrupted: boolean; turn_id: string | null }>('/advisor/session/interrupt', {
+export async function interruptAdvisorTurn(windowKey: string): Promise<AdvisorInterruptResult> {
+  return requestJson<AdvisorInterruptResult>('/advisor/session/interrupt', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ window: windowKey }),

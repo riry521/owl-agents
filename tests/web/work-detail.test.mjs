@@ -1725,6 +1725,17 @@ test('an assurance load failure shows an error, distinct from the empty (no assu
   assert.match(source, /setAssurance\(null\);\s*setAssuranceError\(false\);/, 'cleared on Work switch');
 });
 
+test('Work detail Task rows show the Reviewer fix, its reversal and a failed restore', () => {
+  const source = readFileSync(join(repoRoot, 'apps/web/components/WorkDetailView.tsx'), 'utf8');
+  assert.match(source, /reviewerFixes\.get\(tk\.id\)/);
+  for (const key of ['reviewerFixApplied', 'reviewerFixItem', 'reviewerFixReverted', 'reviewerFixRestoreFailed']) {
+    assert.match(source, new RegExp(`work\\.${key}`));
+    for (const lang of ['ja', 'en']) {
+      assert.ok(JSON.parse(readFileSync(join(repoRoot, `apps/web/lib/i18n/${lang}.json`), 'utf8')).work[key], `${lang} ${key}`);
+    }
+  }
+});
+
 test('asReportEnvelope never reads an unknown result as success', () => {
   assert.equal(asReportEnvelope({}).result, 'unknown');
   assert.equal(asReportEnvelope({ result: 'bogus' }).result, 'unknown');

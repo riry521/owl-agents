@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "patterns": [
+    "^(npm|pnpm|yarn|bun)\\s+(run\\s+)?(test|build|ci)\\b",
+    "^node\\s+(\\S+\\s+)*--test\\b",
+    "^(npx\\s+)?(vitest|jest|playwright|tsc)\\b",
+    "^node\\s+\\S*ci-check\\.mjs\\b",
+    "^(npm|pnpm|yarn|bun)\\s+(install|i|ci|add)\\b"
+  ]
+}

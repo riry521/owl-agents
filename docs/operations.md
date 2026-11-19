@@ -233,6 +233,19 @@ are never moved to the Fixer (they escalate to the Lead Designer). The Fixer's m
 the `fixer` role in the model settings (default `claude-opus-5-5`, effort `high`). An invalid stored
 value falls back to the default with a warning.
 
+### Reviewer fixes
+
+Settings key `reviewer_fix` (`packages/shared/src/reviewer-fix-settings.ts`; `GET`/`PUT /api/v1/settings/reviewer-fix`; **Settings → Reviewer fixes**):
+
+| Field | Default | Meaning |
+|---|---|---|
+| `max_changed_lines` | 30 | Largest fix (added + deleted lines) the Reviewer may make itself (integer 0–1000) |
+| `max_changed_files` | 3 | Largest number of files the Reviewer may fix itself (integer 0–100) |
+
+Either value at 0 turns Reviewer fixes off. When fixes are allowed, the Reviewer gets a permit (`fix_permit` in `reviewer.started`) with the limits and the files it may edit, and may fix the blocking findings itself instead of sending the Task back, but only when it can fix all of them. It reports each edit in `fixes`. Core then measures the change and runs the tests (`packages/core/src/reviewer-fix.ts`). It keeps the fix when it is inside the limits, touches only the permitted files, matches the report and the tests pass; otherwise it restores the Task worktree and the Task is sent back as usual. The Work detail page shows the kept fixes and the reason for each undone fix on the Task row.
+
+A finding whose `caused_by_change` is `true` (a defect the Task's own change introduced) is stored as major, whatever its scope.
+
 ### Remake limits
 
 A replan that replaces a failed Task (`replaces`) records a lineage: `tasks.lineage_root_task_id`
@@ -433,6 +446,21 @@ row. A missing or invalid key falls back to its default, per key, with a warning
 | Field | Default | Invalid when |
 |---|---|---|
 | `enabled` | `true` | not a boolean |
+
+### Whole-Work review
+
+After every Task is merged and before the final check, a Reviewer reviews the whole Work branch once per Work commit (`WorkReviewRunner` in `packages/core/src/work-review.ts`). It looks across Tasks for gaps: data one Task writes that nothing reads, a new function no caller reaches, and the like. When it finds gaps, the Manager replans with `work_review_gaps` (`context.work_review`); gaps that are left reach the Final Manager. An error in the review never stops the Work.
+
+Settings key `work_review` (`packages/shared/src/work-review-settings.ts`). There is no HTTP API or setter: write the JSON into the `settings` table row. A missing or invalid key falls back to its default, per key, with a warning.
+
+| Field | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | Run the review |
+| `sizes` | `["normal", "large"]` | Work sizes that get the review |
+| `min_tasks` | 2 | Least number of completed non-design Tasks (integer 2 or more) |
+| `max_rounds` | 2 | Most reviews since the last Owner decision (integer 1 or more) |
+
+The Work must have a Project.
 
 ### Plan quality check
 
@@ -846,4 +874,4 @@ Owl runs `gh` with only `PATH` and `HOME`, so it uses your `gh auth login`; it n
 
 ## What rules are tracked in git
 
-`.gitignore` ignores `knowledge/`, `skills/` and `rules/` except the shipped defaults: `rules/system/defaults.yaml`, `rules/system/safety.yaml`, `rules/system/owl-defaults.yaml` and `rules/role/advisor-defaults.yaml`, plus `rules/auto-work/defaults.json` for automatic Work creation. Any other rule file (including everything under `rules/project/`, and `rules/auto-work/local.json` and `rules/auto-work/projects/`), skill or knowledge note is local state and is not committed; back it up with the rest of `OWL_ROOT`.
+`.gitignore` ignores `knowledge/`, `skills/` and `rules/` except the shipped defaults: `rules/system/defaults.yaml`, `rules/system/safety.yaml`, `rules/system/owl-defaults.yaml`, `rules/system/advisor-foreground.json` and `rules/role/advisor-defaults.yaml`, plus `rules/auto-work/defaults.json` for automatic Work creation. Any other rule file (including everything under `rules/project/`, and `rules/auto-work/local.json` and `rules/auto-work/projects/`), skill or knowledge note is local state and is not committed; back it up with the rest of `OWL_ROOT`.

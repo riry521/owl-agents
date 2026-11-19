@@ -3,7 +3,7 @@
 import { cancelCleanupFailure, cleanupFailureReason } from '@/lib/work-removal';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import {
   answerDecision,
   cancelWork,
@@ -42,7 +42,7 @@ import { WorkPostMergeEvents } from '@/components/ActivityLog';
 // Relative on purpose: the node component tests stub the `@/` modules.
 import { orderTasksByStage } from '../lib/task-stages.mjs';
 import { activeRunByTask, buildRunTree, isRunActive } from '../lib/agent-run-tree.mjs';
-import { reviewNotesByTask } from '../lib/work-assurance.mjs';
+import { reviewNotesByTask, reviewerFixesByTask } from '../lib/work-assurance.mjs';
 import { autoRecoveryBadge } from '../lib/auto-recovery.mjs';
 import { WorkAssurancePanel } from '@/components/WorkAssurancePanel';
 import { WorkFinalReportPanel } from '@/components/WorkFinalReportPanel';
@@ -269,6 +269,7 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
   const liveRuns = runs.filter((r) => !runTree.isChild(r) && isRunActive(r, runTree));
   const liveRunByTask = activeRunByTask(runs, runTree);
   const reviewNotes = reviewNotesByTask(assurance);
+  const reviewerFixes = reviewerFixesByTask(assurance);
 
   const managerRuns = runs.filter((r) => r.role === 'manager');
   const latestManager = managerRuns[managerRuns.length - 1];
@@ -500,6 +501,27 @@ export function WorkDetailView({ workId: workIdProp, onBack }: WorkDetailViewPro
                           <div className="row__sub" key={reason}>
                             {t(reviewNotes.get(tk.id)?.kind === 'skipped' ? 'work.reviewSkipped' : 'work.reviewForced', { reason })}
                           </div>
+                        ))}
+                        {reviewerFixes.get(tk.id)?.map((fix) => (
+                          <Fragment key={fix.recordedAt + fix.outcome}>
+                            {fix.restoreFailed && <div className="row__sub">{t('work.reviewerFixRestoreFailed')}</div>}
+                            {fix.restoreFailed ? null : fix.outcome === 'applied' ? (
+                              <>
+                                <div className="row__sub">
+                                  {t('work.reviewerFixApplied', { files: fix.changedFiles, lines: fix.changedLines, tests: t(fix.testsPassed === null ? 'work.reviewerFixTestsNone' : fix.testsPassed ? 'work.reviewerFixTestsPassed' : 'work.reviewerFixTestsFailed') })}
+                                </div>
+                                {fix.fixes.map((item) => (
+                                  <div className="row__sub" key={item.location + item.change}>
+                                    {t('work.reviewerFixItem', { location: item.location, problem: item.problem, change: item.change })}
+                                  </div>
+                                ))}
+                              </>
+                            ) : (
+                              <div className="row__sub">
+                                {t('work.reviewerFixReverted', { reason: t(`work.reviewerFixReason.${fix.outcome === 'not_allowed' ? fix.reason || 'unknown' : fix.outcome}`, { lines: fix.changedLines, files: fix.changedFiles, maxLines: fix.maxLines, maxFiles: fix.maxFiles }) })}
+                              </div>
+                            )}
+                          </Fragment>
                         ))}
                         {tk.prerequisite && (
                           <>

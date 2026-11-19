@@ -13,7 +13,7 @@ import { AdvisorChannelPanel } from '@/components/AdvisorChannelPanel';
 import { SendIcon, StopIcon, TrashIcon } from '@/components/icons';
 import { useView } from '@/lib/view-loader';
 import { replyArrived } from '@/lib/advisor-awaiting.mjs';
-import { advisorIndicatorLabel, advisorSessionBusy } from '@/lib/advisor-indicator.mjs';
+import { advisorIndicatorLabel, advisorSessionBusy, advisorStopOutcome, advisorStopSettled } from '@/lib/advisor-indicator.mjs';
 import { AttachButton, AttachmentTray, DropOverlay } from '@/components/AttachmentTray';
 import { MessageAttachments } from '@/components/MessageAttachments';
 import { useAttachmentDraft, useFileDrop } from '@/lib/use-attachment-draft';
@@ -50,6 +50,9 @@ interface AdvisorViewProps {
   onRepliesShown?: (lastReplyId: string) => void;
 }
 
+/** How long to wait for a stopped turn to end before saying it did not stop. */
+const STOP_WAIT_MS = 30_000;
+
 export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationId = null, channelControls = false, windowName, windowScope, onOpenWindowPicker, windowPickerOpen = false, windowTriggerRef, onRepliesShown }: AdvisorViewProps = {}) {
   const { t, locale } = useLocale();
   const [visibleCount, setVisibleCount] = useState(VISIBLE_MESSAGES_STEP);
@@ -72,6 +75,7 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
   const channelsButtonRef = useRef<HTMLButtonElement | null>(null);
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const unmountedRef = useRef(false);
+  const stopDeadlineRef = useRef<number | null>(null);
   useEffect(() => () => { unmountedRef.current = true; if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current); }, []);
 
   // No fallback id on failure: a conversation made up here would belong to no window.
@@ -220,22 +224,42 @@ export function AdvisorView({ windowKey = DEFAULT_WINDOW_KEY, knownConversationI
   }
 
   async function handleStop() {
+    stopDeadlineRef.current = null;
     setStopping(true);
     setStopError(null);
     try {
-      await interruptAdvisorTurn(windowKey);
+      const result = await interruptAdvisorTurn(windowKey);
+      if (advisorStopOutcome(result) === 'failed') {
+        setStopError(t('advisor.errorStopNotRunning'));
+        setStopping(false);
+      } else {
+        stopDeadlineRef.current = Date.now() + STOP_WAIT_MS;
+      }
     } catch (error) {
       console.error('[Owl] Advisor interrupt failed', error);
       setStopError(t('advisor.errorStop'));
+      setStopping(false);
     }
     try {
       await refresh();
     } catch (error) {
       console.error('[Owl] Advisor refresh after stop failed', error);
-    } finally {
-      setStopping(false);
     }
   }
+
+  // "Stopping" lasts until the turn ends, so a turn that keeps running never flips back to "thinking".
+  // The session poll re-runs this effect, so the deadline needs no timer.
+  useEffect(() => {
+    if (!stopping || !sessionInfo) return;
+    if (advisorStopSettled(sessionInfo)) {
+      stopDeadlineRef.current = null;
+      setStopping(false);
+    } else if (stopDeadlineRef.current !== null && Date.now() > stopDeadlineRef.current) {
+      setStopError(t('advisor.errorStopTimeout'));
+      stopDeadlineRef.current = null;
+      setStopping(false);
+    }
+  }, [stopping, sessionInfo, t]);
 
   async function handleClear() {
     setMenuOpen(false);

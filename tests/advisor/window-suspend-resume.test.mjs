@@ -30,12 +30,14 @@ async function setup(t) {
         provider_session_id: providerSessionId,
         pid: process.pid,
         send: async (turn) => { sent.push(turn); },
+        interrupt: async () => true,
         events: () => ({
           async *[Symbol.asyncIterator]() {
             yield { type: "session.ready", provider_session_id: providerSessionId, pid: process.pid };
             for (let handled = 0; ; handled += 1) {
               await waitFor(() => sent.length > handled, { message: `${label} has turn ${handled + 1}` });
               if (request.resume_provider_session_id && control.resumedTurnFails) {
+                await control.resumedFailureGate;
                 yield { type: "turn.failed", turn_id: sent[handled].turn_id, error: "No conversation found with session ID", provider_error: { code: "conversation_not_found" } };
                 continue;
               }
@@ -270,6 +272,28 @@ test("a resumed first turn that finds no conversation is resent once on a fresh 
   assert.equal(world.sessionsOf(window.window_id)[0].end_reason, "resume_failed");
   const advisorMessages = world.core.listMessages(window.conversation_id, { limit: 50 }).data.filter((m) => m.sender !== "user");
   assert.ok(!advisorMessages.some((m) => /No conversation found/.test(m.body)), "no failure message was posted");
+});
+
+test("a stop pressed before the resumed session fails is not lost: the turn ends as interrupted and is not resent", async (t) => {
+  const world = await setup(t);
+  const window = await world.createProjectWindow("Alpha");
+  await world.send(window.conversation_id, "MSG-aaa");
+  await waitFor(() => world.replies(window.conversation_id).length === 1, { message: "first reply" });
+  await world.idleThenTick(window.window_id);
+  let releaseFailure;
+  world.control.resumedFailureGate = new Promise((resolveGate) => { releaseFailure = resolveGate; });
+  world.control.resumedTurnFails = true;
+  const startedBefore = world.created.length;
+
+  await world.send(window.conversation_id, "MSG-bbb");
+  await waitFor(() => world.created.length === startedBefore + 1 && world.created.at(-1).sent.length === 1, { message: "resumed send" });
+  const { project_id: projectId } = world.db.get("SELECT project_id FROM advisor_windows WHERE id = ?", window.window_id);
+  assert.equal((await world.core.interruptAdvisorTurn(ownerId, projectId)).status, "interrupting");
+  releaseFailure();
+  await waitFor(() => world.db.all("SELECT 1 FROM advisor_turns WHERE status = 'completed'").length === 2, { message: "interrupted turn settles" });
+
+  assert.equal(world.created.length, startedBefore + 2, "a fresh session is still prepared");
+  assert.equal(world.created.at(-1).sent.length, 0, "the stopped turn is not resent");
 });
 
 test("when the resend also fails the error is returned and nothing is sent a third time", async (t) => {

@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, mkdirSync, writeFileSync } from "node:fs";
-import { copyFile, lstat, mkdir, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, rmdir, stat, writeFile } from "node:fs/promises";
 import { promisify } from "node:util";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type {
@@ -22,7 +22,9 @@ import type {
   GitOperationResult,
   GitPushRequest,
   GitPushResult,
+  ReviewerFixFileChange,
   TaskWorktreeDiscardResult,
+  WorktreeSnapshot,
   GitWorkMergeResult,
   VerificationCommand,
   WorkBranchVerification,
@@ -2763,6 +2765,134 @@ export class GitWorktreeGateway implements GitGateway {
     const clean = await this.git(taskPath, ["clean", "-fd"]);
     if (!clean.ok) return { ok: false, message: clean.message, changed_paths: changedPaths };
     return { ok: true, message: "Task worktree changes were discarded.", changed_paths: changedPaths };
+  }
+
+  public async snapshotTaskWorktree(request: GitOperationRequest): Promise<({ ok: true } & WorktreeSnapshot) | { ok: false; message: string }> {
+    const target = await this.reviewerFixTarget(request);
+    if (!target.ok) return target;
+    return this.inLane(target.canonical, async () => {
+      const head = await this.git(target.taskPath, ["rev-parse", "HEAD"]);
+      if (!head.ok) return { ok: false as const, message: head.message };
+      const tree = await this.worktreeTree(target.taskPath, request.work_id);
+      return tree.ok ? { ok: true as const, head: head.message.trim(), tree: tree.tree } : tree;
+    });
+  }
+
+  public async diffTaskWorktreeSince(
+    request: GitOperationRequest,
+    snapshot: WorktreeSnapshot,
+  ): Promise<{ ok: true; head: string; tree: string; files: ReviewerFixFileChange[] } | { ok: false; message: string }> {
+    const target = await this.reviewerFixTarget(request);
+    if (!target.ok) return target;
+    return this.inLane(target.canonical, async () => {
+      const head = await this.git(target.taskPath, ["rev-parse", "HEAD"]);
+      if (!head.ok) return { ok: false as const, message: head.message };
+      const tree = await this.worktreeTree(target.taskPath, request.work_id);
+      if (!tree.ok) return tree;
+      const files = await this.diffTrees(target.taskPath, snapshot.tree, tree.tree);
+      return files.ok ? { ok: true as const, head: head.message.trim(), tree: tree.tree, files: files.files } : files;
+    });
+  }
+
+  /**
+   * Put the worktree back to the snapshot without `reset --hard`/`clean`,
+   * which would also drop the Worker's uncommitted changes: only paths that
+   * differ from the snapshot tree are rewritten or removed.
+   */
+  public async restoreTaskWorktree(
+    request: GitOperationRequest,
+    snapshot: WorktreeSnapshot,
+  ): Promise<{ ok: true; verified: boolean; tree: string } | { ok: false; message: string }> {
+    const target = await this.reviewerFixTarget(request);
+    if (!target.ok) return target;
+    return this.inLane(target.canonical, async () => {
+      const { taskPath } = target;
+      const head = await this.git(taskPath, ["rev-parse", "HEAD"]);
+      if (!head.ok) return { ok: false as const, message: head.message };
+      if (head.message.trim() !== snapshot.head) {
+        const reset = await this.git(taskPath, ["reset", "--mixed", snapshot.head]);
+        if (!reset.ok) return { ok: false as const, message: reset.message };
+      }
+      const current = await this.worktreeTree(taskPath, request.work_id);
+      if (!current.ok) return current;
+      const diff = await this.diffTrees(taskPath, snapshot.tree, current.tree);
+      if (!diff.ok) return diff;
+      const inSnapshot = diff.files.filter((file) => file.status !== "A").map((file) => file.path);
+      const added = diff.files.filter((file) => file.status === "A").map((file) => file.path);
+      for (const path of added) {
+        const absolute = resolve(taskPath, path);
+        if (!isPathInside(taskPath, absolute, false)) return { ok: false as const, message: `Refusing to remove a path outside the Task worktree: ${path}` };
+        await rm(absolute, { force: true, recursive: true });
+      }
+      if (inSnapshot.length > 0) {
+        const written = await this.withTempIndex(async (index) => {
+          const env = { GIT_INDEX_FILE: index };
+          const read = await this.git(taskPath, ["read-tree", snapshot.tree], undefined, env);
+          if (!read.ok) return read;
+          return this.git(taskPath, ["checkout-index", "-f", "-z", "--stdin"], `${inSnapshot.join("\0")}\0`, env);
+        });
+        if (!written.ok) return { ok: false as const, message: written.message };
+      }
+      const after = await this.worktreeTree(taskPath, request.work_id);
+      if (!after.ok) return after;
+      const headAfter = await this.git(taskPath, ["rev-parse", "HEAD"]);
+      return { ok: true as const, verified: headAfter.ok && headAfter.message.trim() === snapshot.head && after.tree === snapshot.tree, tree: after.tree };
+    });
+  }
+
+  private async reviewerFixTarget(request: GitOperationRequest): Promise<{ ok: true; canonical: string; taskPath: string } | { ok: false; message: string }> {
+    const project = this.projectFor(request.work_id);
+    if (!request.task_id) return { ok: false, message: "A Task id is required to snapshot a Task worktree." };
+    if (!project) return { ok: false, message: "A Project-less Task workspace has no Git worktree to snapshot." };
+    const canonical = await this.validProjectPath(project.canonical_path, project.allowed_roots_json);
+    const taskPath = this.layout.taskPath(request.work_id, request.task_id);
+    if (request.worktree_path && resolve(request.worktree_path) !== taskPath) {
+      return { ok: false, message: "The requested Task worktree does not match the Work/Task workspace." };
+    }
+    return { ok: true, canonical, taskPath };
+  }
+
+  /** Runs `body` with a throwaway index file so the worktree's real index is never touched. */
+  private async withTempIndex<T>(body: (indexFile: string) => Promise<T>): Promise<T> {
+    const dir = await mkdtemp(join(processTempDir(), "task-index-"));
+    try {
+      return await body(join(dir, "index"));
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  /** Tree of HEAD plus everything commitTaskChanges would commit (tracked and unignored files, minus tool state). */
+  private async worktreeTree(taskPath: string, workId: string): Promise<{ ok: true; tree: string } | { ok: false; message: string }> {
+    const scope = await this.toolStateScope(taskPath, workId);
+    return this.withTempIndex(async (index) => {
+      const env = { GIT_INDEX_FILE: index };
+      for (const args of [["read-tree", "HEAD"], ["add", "--all", ...scope]]) {
+        const step = await this.git(taskPath, args, undefined, env);
+        if (!step.ok) return { ok: false as const, message: step.message };
+      }
+      const tree = await this.git(taskPath, ["write-tree"], undefined, env);
+      return tree.ok ? { ok: true as const, tree: tree.message.trim() } : { ok: false as const, message: tree.message };
+    });
+  }
+
+  private async diffTrees(taskPath: string, from: string, to: string): Promise<{ ok: true; files: ReviewerFixFileChange[] } | { ok: false; message: string }> {
+    const numstat = await this.git(taskPath, ["diff-tree", "-r", "-z", "--numstat", "--no-renames", from, to]);
+    if (!numstat.ok) return { ok: false, message: numstat.message };
+    const names = await this.git(taskPath, ["diff-tree", "-r", "-z", "--name-status", "--no-renames", from, to]);
+    if (!names.ok) return { ok: false, message: names.message };
+    const split = (result: GitOperationResult): string[] => (result.message === "git operation completed" ? [] : result.message.split("\0").filter((entry) => entry.length > 0));
+    const statuses = new Map<string, ReviewerFixFileChange["status"]>();
+    const nameFields = split(names);
+    for (let i = 0; i + 1 < nameFields.length; i += 2) statuses.set(nameFields[i + 1], nameFields[i] as ReviewerFixFileChange["status"]);
+    const files: ReviewerFixFileChange[] = [];
+    for (const record of split(numstat)) {
+      const match = /^(\d+|-)\t(\d+|-)\t(.*)$/su.exec(record);
+      if (!match) continue;
+      const binary = match[1] === "-";
+      files.push({ path: match[3], status: statuses.get(match[3]) ?? "M", added_lines: binary ? 0 : Number(match[1]), deleted_lines: binary ? 0 : Number(match[2]), binary });
+    }
+    return { ok: true, files: files.sort((a, b) => a.path.localeCompare(b.path)) };
   }
 
   private async commitTaskChanges(taskPath: string, workId: string, taskId: string, verb: "complete" | "checkpoint" = "complete"): Promise<GitOperationResult> {

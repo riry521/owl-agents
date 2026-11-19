@@ -21,6 +21,11 @@ export function taskReportPath(dataDir: string, workId: string, taskId?: string)
     : resolve(workDirectory, `${safePathSegment(taskId)}.json`);
 }
 
+/** One whole-Work review file, kept in the Work's task-reports directory so deleting the Work removes it. */
+export function workReviewFilePath(dataDir: string, workId: string, agentRunId: string, part: "material" | "findings"): string {
+  return resolve(taskReportPath(dataDir, workId), "work-review", `${safePathSegment(agentRunId)}-${part}.json`);
+}
+
 export const DESIGN_MOCK_FILE_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}\.html$/u;
 export const DESIGN_SKILL_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_.-]{0,127}$/u;
 

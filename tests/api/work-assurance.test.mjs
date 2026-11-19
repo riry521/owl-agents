@@ -6,7 +6,7 @@ import { test } from "node:test";
 
 import { ExternalCoreAdapter } from "../../apps/server/dist/core.js";
 import { createUlid } from "../../packages/db/dist/index.js";
-import { integrationVerificationView, planWarningLines, reviewNotesByTask } from "../../apps/web/lib/work-assurance.mjs";
+import { integrationVerificationView, planWarningLines, reviewNotesByTask, reviewerFixesByTask } from "../../apps/web/lib/work-assurance.mjs";
 import { createTestCore } from "../helpers/core.mjs";
 import { startTestHttpServer } from "../helpers/http.mjs";
 
@@ -90,4 +90,48 @@ test("screen helpers tolerate malformed data and show a failed command", () => {
   assert.deepEqual(planWarningLines({ plan_quality_warnings: [null, { warnings: "x" }] }), []);
   const view = integrationVerificationView({ integration_verification: { status: "failed", commands: [{ command_id: "c1", argv: ["pnpm", "test"] }], failed_command_id: "c1" } });
   assert.equal(view.failedCommand, "pnpm test");
+});
+
+test("GET /works/{id}/assurance returns reviewer_fixes from review events and skips malformed payloads", async (t) => {
+  const env = await setup(t);
+  if (!env) return;
+  const { core, db, request } = env;
+  const { workId, skipped } = await seed(core, db);
+  const good = (outcome, extra = {}) => ({
+    reviewer_fix: {
+      schema_version: "1.0.0", outcome, reason: null,
+      limits: { max_changed_lines: 30, max_changed_files: 3 }, measured: { changed_lines: 12, changed_files: 2 },
+      files: [], fixes: [{ finding_index: 0, file: "a.ts", line_start: 3, line_end: 5, change: "fix it", problem: "bad" }],
+      tests: { passed: true, error_key: null }, revert: null, ...extra,
+    },
+  });
+  let sequence = 2000;
+  await db.createWriteLane().transact((tx) => {
+    const event = (type, payload, at) => {
+      sequence += 1;
+      tx.run(
+        `INSERT INTO events (id, sequence, idempotency_key, type, work_id, task_id, payload_json, status, attempt_no, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'handled', 0, ?)`,
+        createUlid(), sequence, `wa:${sequence}`, type, workId, skipped, JSON.stringify(payload), at,
+      );
+    };
+    event("review.failed", good("over_limit", { revert: { verified: true } }), "2026-01-01T00:00:02.000Z");
+    event("review.passed", good("applied"), "2026-01-01T00:00:01.000Z");
+    event("review.fix_restore_failed", good("tests_failed", { revert: { verified: false } }), "2026-01-01T00:00:03.000Z");
+    event("review.failed", { reviewer_fix: { outcome: "bogus" } }, "2026-01-01T00:00:04.000Z");
+    event("review.passed", { other: 1 }, "2026-01-01T00:00:05.000Z");
+  });
+  const { data } = await (await request(`/works/${workId}/assurance`)).json();
+  assert.deepEqual(data.reviewer_fixes.map((fix) => [fix.outcome, fix.restore_failed, fix.reverted]), [
+    ["applied", false, false], ["over_limit", false, true], ["tests_failed", true, true],
+  ]);
+  assert.equal(data.reviewer_fixes[0].task_id, skipped);
+  assert.deepEqual(data.reviewer_fixes[0].fixes, [{ file: "a.ts", line_start: 3, line_end: 5, problem: "bad", change: "fix it" }]);
+
+  const views = reviewerFixesByTask(data).get(skipped);
+  assert.equal(views.length, 3);
+  assert.equal(views[2].outcome, "applied", "newest first");
+  assert.equal(views[2].fixes[0].location, "a.ts:3-5");
+  assert.equal(views[0].restoreFailed, true);
+  assert.equal(reviewerFixesByTask(null).size, 0);
 });

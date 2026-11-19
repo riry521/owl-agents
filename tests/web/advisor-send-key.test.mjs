@@ -102,7 +102,7 @@ const componentApiClient = {
   },
   ingestConversation: async () => ({ path: 'knowledge/advisor.md' }),
   clearAdvisorConversation: async () => {},
-  interruptAdvisorTurn: async (windowKey) => { callLog.push('interrupt'); interruptCalls.push(windowKey); return { interrupted: true, turn_id: 't1' }; },
+  interruptAdvisorTurn: async (windowKey) => { callLog.push('interrupt'); interruptCalls.push(windowKey); return { status: 'interrupting', interrupted: false, turn_id: 't1' }; },
 };
 const componentFormat = {
   formatRelative: () => 'just now',
@@ -145,7 +145,7 @@ function compileWebComponent(modulePath, overrides = {}) {
 const viewOptions = {};
 const { replyArrived } = await import('../../apps/web/lib/advisor-awaiting.mjs');
 const indicatorModule = await import('../../apps/web/lib/advisor-indicator.mjs');
-const { advisorIndicatorLabel, advisorSessionBusy } = indicatorModule;
+const { advisorIndicatorLabel, advisorSessionBusy, advisorStopOutcome, advisorStopSettled } = indicatorModule;
 const advisorViewModule = compileWebComponent(advisorViewPath, {
   '@/lib/api-client': componentApiClient,
   '@/lib/format': componentFormat,
@@ -166,7 +166,7 @@ const advisorViewModule = compileWebComponent(advisorViewPath, {
 // knowledgeSaveNotice, knowledgeSaveError, menuOpen, isTouchDevice,
 // awaitingReply, channelsOpen; then AdvisorComposer: hasText.
 // AdvisorView holds four refs (the last is the save-notice timer); the composer's textarea and composing refs follow.
-const COMPOSING_REF = 6;
+const COMPOSING_REF = 7;
 const VISIBLE_STEP = 30;
 
 function createHookHarness(isTouchDevice, awaitingReply = null, hasText = false) {
@@ -174,9 +174,9 @@ function createHookHarness(isTouchDevice, awaitingReply = null, hasText = false)
   if (hasText) state[14] = true; // composer's hasText
   let hookIndex = 0;
   let refIndex = 0;
-  // refs[5] is the composer's textarea; the text is read from it at send time.
+  // refs[6] is the composer's textarea; the text is read from it at send time.
   const refs = [];
-  refs[5] = { current: { value: 'hello', focus() {} } };
+  refs[6] = { current: { value: 'hello', focus() {} } };
   // setCalls counts every state setter call; changes counts those that would re-render.
   const counts = { setCalls: 0, changes: 0 };
   const effects = [];
@@ -365,7 +365,7 @@ test('rendered: the spinner stays through idle or stale session reads after a se
   const state = [];
   const effects = [];
   const refs = [];
-  refs[5] = { current: { value: 'hello', focus() {} } };
+  refs[6] = { current: { value: 'hello', focus() {} } };
   let dirty = false;
   let hookIndex = 0;
   let effectIndex = 0;
@@ -483,14 +483,14 @@ test('without field-sizing, the scheduled resize writes no height while composin
   withBrowserGlobals(false, () => {
     const { textarea, harness } = renderAdvisor(false);
     const writes = [];
-    harness.refs[5].current = { scrollHeight: 80, style: { set height(v) { writes.push(v); } } };
+    harness.refs[6].current = { scrollHeight: 80, style: { set height(v) { writes.push(v); } } };
     let frame;
     globalThis.requestAnimationFrame = (fn) => { frame = fn; return 1; };
-    harness.refs[6].current = true;
+    harness.refs[7].current = true;
     textarea.onChange({ target: { value: 'x' } });
     frame();
     assert.deepEqual(writes, []);
-    harness.refs[6].current = false;
+    harness.refs[7].current = false;
     textarea.onChange({ target: { value: 'xy' } });
     frame();
     assert.deepEqual(writes, ['', '80px']);
@@ -505,7 +505,7 @@ test('send clears the box before postMessage answers, restores it on failure, an
   try {
     const { textarea, harness } = renderAdvisor(false);
     assert.equal(textarea.disabled, undefined, 'textarea is never disabled');
-    const ta = harness.refs[5].current;
+    const ta = harness.refs[6].current;
     textarea.onKeyDown(keyEvent({ shiftKey: true }).event);
     assert.equal(ta.value, '', 'cleared before the API answers');
     ta.value = 'again';
@@ -564,7 +564,7 @@ test('the composer shows a stop button only while a turn is running, and it inte
       ['interrupt', 'refresh:advisor-messages', 'refresh:advisor-session'],
       'session and messages are reloaded after the interrupt',
     );
-    assert.deepEqual(running.harness.state.slice(3, 5), [false, null], 'stopping ends without an error');
+    assert.deepEqual(running.harness.state.slice(3, 5), [true, null], 'stopping continues until the turn ends, without an error');
 
     sessionData = { status: 'running', running_turns: 0, queued_turns: 0 };
     assert.equal(renderAdvisor(false).button['aria-label'], 'advisor.sendLabel', 'back to send when the turn ends');
@@ -592,6 +592,24 @@ test('while stopping the stop button is disabled and the indicator says so; a fa
       console.error = originalError;
     }
     assert.ok(renderAdvisor(false, null, false, { stopError: 'advisor.errorStop' }).html.includes('advisor.errorStop'));
+  } finally {
+    componentApiClient.interruptAdvisorTurn = original;
+    sessionData = undefined;
+  }
+});
+
+test('a deadline left over from an earlier stop is cleared before the next interrupt is awaited', async () => {
+  sessionData = { status: 'running', running_turns: 1, queued_turns: 0 };
+  const original = componentApiClient.interruptAdvisorTurn;
+  try {
+    const running = renderAdvisor(false);
+    const STOP_DEADLINE_REF = 5; // refs after messages, follow, channelsButton, noticeTimer, unmounted
+    running.harness.refs[STOP_DEADLINE_REF].current = Date.now() - 60000;
+    let during = 'unset';
+    componentApiClient.interruptAdvisorTurn = async () => { during = running.harness.refs[STOP_DEADLINE_REF].current; return { status: 'interrupting', interrupted: false }; };
+    await running.button.onClick();
+    assert.equal(during, null, 'an expired deadline must not fire while the new interrupt is pending');
+    assert.ok(running.harness.refs[STOP_DEADLINE_REF].current > Date.now(), 'the new stop gets a fresh deadline');
   } finally {
     componentApiClient.interruptAdvisorTurn = original;
     sessionData = undefined;
@@ -627,6 +645,8 @@ test('the indicator names each activity', () => {
   assert.equal(label(tJa, { running_turns: 1, ...act('thinking') }), '考え中…');
   assert.equal(label(tJa, { running_turns: 1, ...act('tool', 'Bash') }), 'Bash を実行中…');
   assert.equal(label(tJa, { running_turns: 1, ...act('subagent') }), 'サブエージェント実行中…');
+  assert.equal(label(tJa, { running_turns: 1, ...act('compacting') }), '要約中…');
+  assert.equal(label(tEn, { running_turns: 1, ...act('compacting') }), 'Summarizing…');
   assert.equal(label(tJa, { running_turns: 0, ...act(null, null, 2) }), 'バックグラウンドで実行中（2件）');
   assert.equal(label(tEn, { running_turns: 1, ...act('tool', 'Bash') }), 'Running Bash…');
   assert.equal(label(tEn, { running_turns: 1, ...act('subagent') }), 'Subagent running…');
@@ -736,7 +756,7 @@ test('attachment only and body plus attachment each post once with the attachmen
     resetDraftSpy({ items: [{ id: 'i1', status: 'ready', attachmentId: 'a1' }], attachmentIds: ['a1'] });
     const { button, harness, textarea } = renderAdvisor(false, null, false);
     assert.equal(button.disabled, false, 'an attachment alone enables the send button');
-    harness.refs[5].current.value = text;
+    harness.refs[6].current.value = text;
     textarea.onKeyDown(keyEvent({ shiftKey: true }).event);
     await new Promise((r) => setImmediate(r));
     assert.deepEqual(postMessageArgs, [['conv-1', expectedBody, ['a1']]]);
@@ -860,5 +880,23 @@ test('the save-success notice clears after 5s, restarts on a repeat save, is can
     componentApiClient.ingestConversation = original;
     advisorMessages = savedMessages;
     mock.timers.reset();
+  }
+});
+
+test('stopping holds while the turn keeps running and ends when it ends', () => {
+  const running = { running_turns: 1, queued_turns: 0, ...act('thinking') };
+  assert.equal(advisorStopSettled(running), false);
+  assert.equal(label(tJa, running, { stopping: true }), '止めています…');
+  assert.equal(advisorStopSettled({ running_turns: 0 }), true);
+});
+
+test('a stop the API could not apply is reported, a requested one is waited for', () => {
+  assert.equal(advisorStopOutcome({ status: 'interrupting', interrupted: false, turn_id: 't' }), 'wait');
+  assert.equal(advisorStopOutcome({ status: 'interrupted', interrupted: true, turn_id: 't' }), 'wait');
+  assert.equal(advisorStopOutcome({ status: 'not_running', interrupted: false, turn_id: null }), 'failed');
+  assert.equal(advisorStopOutcome(undefined), 'failed');
+  for (const locale of [tJa, tEn]) {
+    assert.notEqual(locale('advisor.errorStopNotRunning'), undefined);
+    assert.notEqual(locale('advisor.errorStopTimeout'), undefined);
   }
 });

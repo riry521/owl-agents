@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readStdin } from "./stdio-jsonrpc.js";
-import { dirname, isAbsolute, resolve, sep } from "node:path";
+import { readFileSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 
 import { GUARD_COMMAND_KEYS, GUARD_NAMED_TOOLS, GUARD_PATH_KEYS, guardChecksToolCall, isReadOnlyAgentRole, readOnlyToolAllowed } from "@owl/shared/guard-inputs";
 import { GUARD_TOKEN_FILE_ENV } from "@owl/shared/guard-token";
@@ -254,6 +255,37 @@ function advisorTokenDenial(toolInput: Record<string, unknown>, cwd: unknown): s
   return null;
 }
 
+/**
+ * Why an Advisor's foreground Bash call is stopped, or null. Accident prevention, not a boundary: a config
+ * that cannot be read lets the call through so the Advisor's other tools keep working.
+ */
+async function advisorForegroundDenial(toolName: string, toolInput: Record<string, unknown>): Promise<string | null> {
+  if (toolName !== "Bash" || toolInput.run_in_background === true) return null;
+  const command = toolInput.command;
+  const owlRoot = process.env.OWL_ROOT;
+  if (typeof command !== "string" || !owlRoot || !isAbsolute(owlRoot)) return null;
+  try {
+    const config: unknown = JSON.parse(readFileSync(join(owlRoot, "rules", "system", "advisor-foreground.json"), "utf8"));
+    if (!isRecord(config) || config.enabled !== true || !Array.isArray(config.patterns)) return null;
+    // The tokenizer decides what is a command (quotes, sh -c, subshells); patterns see only the executed command and its first args.
+    const { analyzeShellCommand, effectiveCommand } = await import("@owl/core/dist/command-analysis.js");
+    const analysis = analyzeShellCommand(command);
+    if (!analysis) return null;
+    const runs = analysis.segments.flatMap((tokens) => {
+      const effective = effectiveCommand(tokens);
+      return effective ? [[effective.executable, ...effective.args.slice(0, 3)].join(" ")] : [];
+    });
+    for (const pattern of config.patterns) {
+      if (typeof pattern === "string" && runs.some((run) => new RegExp(pattern, "u").test(run))) {
+        return "時間のかかるコマンドは前景で動かせない。Bash に run_in_background: true を付けて、バックグラウンドで流し直すこと。";
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 function deny(reason: string): void {
   process.stdout.write(`${JSON.stringify({
     hookSpecificOutput: {
@@ -295,6 +327,11 @@ async function main(): Promise<void> {
   const tokenDenial = isAdvisor ? advisorTokenDenial(input.tool_input, input.cwd) : null;
   if (tokenDenial) {
     deny(tokenDenial);
+    return;
+  }
+  const foregroundDenial = isAdvisor ? await advisorForegroundDenial(input.tool_name, input.tool_input) : null;
+  if (foregroundDenial) {
+    deny(foregroundDenial);
     return;
   }
   const outboundDenial = await checkOutbound(input.tool_name, input.tool_input);

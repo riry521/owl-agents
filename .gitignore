@@ -64,6 +64,7 @@ rules/system/*
 !rules/system/defaults.yaml
 !rules/system/safety.yaml
 !rules/system/owl-defaults.yaml
+!rules/system/advisor-foreground.json
 !rules/auto-work/
 rules/auto-work/*
 !rules/auto-work/defaults.json

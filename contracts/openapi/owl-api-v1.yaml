@@ -605,6 +605,7 @@ paths:
                       - reviews
                       - integration_verification
                       - plan_quality_warnings
+                      - reviewer_fixes
                     properties:
                       work_id:
                         type: string
@@ -649,6 +650,50 @@ paths:
                         items:
                           type: object
                           additionalProperties: true
+                      reviewer_fixes:
+                        type: array
+                        items:
+                          type: object
+                          required: [task_id, agent_run_id, review_round, recorded_at, restore_failed, outcome, reason, limits, measured, fixes, tests, reverted]
+                          properties:
+                            task_id: {type: string}
+                            agent_run_id: {type: string}
+                            review_round: {type: integer}
+                            recorded_at: {type: string}
+                            restore_failed: {type: boolean}
+                            outcome: {type: string, enum: [applied, over_limit, tests_failed, not_allowed]}
+                            reason: {type: string, nullable: true}
+                            limits:
+                              type: object
+                              required: [max_changed_lines, max_changed_files]
+                              properties:
+                                max_changed_lines: {type: integer}
+                                max_changed_files: {type: integer}
+                            measured:
+                              type: object
+                              required: [changed_lines, changed_files]
+                              properties:
+                                changed_lines: {type: integer}
+                                changed_files: {type: integer}
+                            fixes:
+                              type: array
+                              items:
+                                type: object
+                                required: [file, line_start, line_end, problem, change]
+                                properties:
+                                  file: {type: string}
+                                  line_start: {type: integer}
+                                  line_end: {type: integer}
+                                  problem: {type: string}
+                                  change: {type: string}
+                            tests:
+                              type: object
+                              nullable: true
+                              required: [passed, error_key]
+                              properties:
+                                passed: {type: boolean}
+                                error_key: {type: string, nullable: true}
+                            reverted: {type: boolean}
         '401':
           description: Unauthorized.
           content:
@@ -5193,6 +5238,81 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/FixerEscalationSettingsCommandResponse'
+        '400':
+          description: Request validation failure.
+          x-error-codes:
+            - validation_error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: idempotency_conflict
+          x-error-codes:
+            - idempotency_conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: dependency_unavailable
+          x-error-codes:
+            - dependency_unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/settings/reviewer-fix:
+    get:
+      operationId: getReviewerFixSettings
+      summary: Get Reviewer fix settings
+      security:
+        - ownerBearer: []
+      responses:
+        '200':
+          description: Current Reviewer fix settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewerFixSettingsResponse'
+        '401':
+          description: Unauthorized.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: dependency_unavailable
+          x-error-codes:
+            - dependency_unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    put:
+      operationId: updateReviewerFixSettings
+      summary: Update Reviewer fix settings
+      security:
+        - ownerBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateReviewerFixSettingsCommand'
+      responses:
+        '200':
+          description: Updated Reviewer fix settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReviewerFixSettingsCommandResponse'
         '400':
           description: Request validation failure.
           x-error-codes:
@@ -10849,6 +10969,7 @@ components:
         - language
         - remake_limits
         - fixer_escalation
+        - reviewer_fix
         - auto_recovery
         - knowledge_automation
         - advisor_persona
@@ -10871,6 +10992,8 @@ components:
         remake_limits:
           type: object
         fixer_escalation:
+          type: object
+        reviewer_fix:
           type: object
         auto_recovery:
           type: object
@@ -15332,6 +15455,27 @@ components:
           properties:
             data:
               $ref: '#/components/schemas/FixerEscalationSettingsData'
+    ReviewerFixSettingsResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ReviewerFixSettingsData'
+    UpdateReviewerFixSettingsCommand:
+      allOf:
+        - $ref: '#/components/schemas/CommandRequest'
+        - type: object
+          properties:
+            payload:
+              $ref: '#/components/schemas/UpdateReviewerFixSettingsPayload'
+    ReviewerFixSettingsCommandResponse:
+      allOf:
+        - $ref: '#/components/schemas/Response'
+        - type: object
+          properties:
+            data:
+              $ref: '#/components/schemas/ReviewerFixSettingsData'
     AutoRecoverySettingsResponse:
       allOf:
         - $ref: '#/components/schemas/Response'
@@ -15476,6 +15620,15 @@ components:
       additionalProperties: false
     UpdateFixerEscalationSettingsPayload:
       $ref: '#/components/schemas/FixerEscalationSettingsData'
+    ReviewerFixSettingsData:
+      type: object
+      required: [max_changed_lines, max_changed_files]
+      properties:
+        max_changed_lines: { type: integer, minimum: 0, maximum: 1000, description: "Largest diff (added plus deleted lines) the Reviewer may fix itself; 0 turns Reviewer fixes off." }
+        max_changed_files: { type: integer, minimum: 0, maximum: 100, description: "Largest number of files the Reviewer may fix itself; 0 turns Reviewer fixes off." }
+      additionalProperties: false
+    UpdateReviewerFixSettingsPayload:
+      $ref: '#/components/schemas/ReviewerFixSettingsData'
     AutoRecoverySettingsData:
       type: object
       required: [limit]

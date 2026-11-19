@@ -381,6 +381,19 @@ export interface WorkBranchVerification {
   readonly message: string | null;
 }
 
+export interface WorktreeSnapshot {
+  readonly head: string;
+  readonly tree: string;
+}
+
+export interface ReviewerFixFileChange {
+  readonly path: string;
+  readonly status: "A" | "M" | "D" | "T";
+  readonly added_lines: number;
+  readonly deleted_lines: number;
+  readonly binary: boolean;
+}
+
 export interface GitGateway {
   userTemplateDir?(): Promise<string | null>;
   setTemplateConfig?(file: string, key: string, value: string): Promise<void>;
@@ -483,6 +496,16 @@ export interface GitGateway {
    * (committed or not).
    */
   discardTaskWorktreeChanges(request: GitOperationRequest): Promise<TaskWorktreeDiscardResult>;
+  /** Tree and HEAD of a Task worktree (a temporary index, so the real index is untouched). */
+  snapshotTaskWorktree?(request: GitOperationRequest): Promise<({ readonly ok: true } & WorktreeSnapshot) | { readonly ok: false; readonly message: string }>;
+  /** What changed in the Task worktree since `snapshot`, per file. */
+  diffTaskWorktreeSince?(request: GitOperationRequest, snapshot: WorktreeSnapshot): Promise<
+    { readonly ok: true; readonly head: string; readonly tree: string; readonly files: readonly ReviewerFixFileChange[] } | { readonly ok: false; readonly message: string }
+  >;
+  /** Undo only the changes made since `snapshot`, keeping the Worker's earlier uncommitted work. */
+  restoreTaskWorktree?(request: GitOperationRequest, snapshot: WorktreeSnapshot): Promise<
+    { readonly ok: true; readonly verified: boolean; readonly tree: string } | { readonly ok: false; readonly message: string }
+  >;
   /**
    * Commit any uncommitted changes to the Task branch (the branch itself is
    * never deleted), then remove the Task worktree. With `discard_changes`

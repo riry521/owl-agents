@@ -14,6 +14,27 @@ export function advisorSessionBusy(session) {
 }
 
 /**
+ * What the screen does after the interrupt API answers: "interrupted" and
+ * "interrupting" keep "stopping" until the turn ends; anything else (not running,
+ * or an unknown reply) means the turn could not be stopped.
+ *
+ * @param {{ status?: string } | null | undefined} result
+ * @returns {'wait' | 'failed'}
+ */
+export function advisorStopOutcome(result) {
+  return result?.status === 'interrupted' || result?.status === 'interrupting' ? 'wait' : 'failed';
+}
+
+/**
+ * Whether "stopping" can end: the session no longer has a running turn.
+ *
+ * @param {{ running_turns?: number } | null | undefined} session
+ */
+export function advisorStopSettled(session) {
+  return (session?.running_turns ?? 0) === 0;
+}
+
+/**
  * The indicator text: one main label by priority, plus the background count
  * when background work is running.
  *
@@ -29,6 +50,7 @@ export function advisorIndicatorLabel({ t, session, sending, stopping, pausedLab
   let main;
   if (stopping) main = t('advisor.stopping');
   else if (state === 'tool' && toolName) main = t('advisor.activityTool', { tool: toolName });
+  else if (state === 'compacting') main = t('advisor.activityCompacting');
   else if (state === 'subagent') main = t('advisor.activitySubagent');
   else if (state === 'thinking' || sending || running > 0) main = t('advisor.thinking');
   else if (queued > 0) main = pausedLabel ?? t('advisor.waitingInQueue');

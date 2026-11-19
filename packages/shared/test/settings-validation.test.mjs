@@ -72,3 +72,24 @@ test("keyedReader warns about unknown keys before invalid values", () => {
   reader()({ z: 1 }, (message) => silent.push(message));
   assert.deepEqual(silent, []);
 });
+
+test("reviewer_fix accepts only two integers in range and falls back to the defaults on unreadable values", async () => {
+  const { validateReviewerFixSettings, readReviewerFixSettings, DEFAULT_REVIEWER_FIX_SETTINGS, ReviewerFixSettingsValidationError } = await import("../dist/reviewer-fix-settings.js");
+  assert.deepEqual(DEFAULT_REVIEWER_FIX_SETTINGS, { max_changed_lines: 30, max_changed_files: 3 });
+  assert.deepEqual(validateReviewerFixSettings({ max_changed_lines: 0, max_changed_files: 100 }), { max_changed_lines: 0, max_changed_files: 100 });
+  const bad = [
+    [{ max_changed_lines: 1001, max_changed_files: 3 }, "max_changed_lines", 1000],
+    [{ max_changed_lines: -1, max_changed_files: 3 }, "max_changed_lines", 1000],
+    [{ max_changed_lines: 1.5, max_changed_files: 3 }, "max_changed_lines", 1000],
+    [{ max_changed_lines: 30, max_changed_files: "3" }, "max_changed_files", 100],
+    [{ max_changed_lines: 30, max_changed_files: 101 }, "max_changed_files", 100],
+  ];
+  for (const [value, field, max] of bad) {
+    assert.throws(() => validateReviewerFixSettings(value), (error) => error instanceof ReviewerFixSettingsValidationError && error.field === field && error.condition.kind === "integer_range" && error.condition.min === 0 && error.condition.max === max);
+  }
+  for (const value of [{ max_changed_lines: 30 }, { max_changed_lines: 30, max_changed_files: 3, extra: 1 }, null]) {
+    assert.throws(() => validateReviewerFixSettings(value), ReviewerFixSettingsValidationError);
+  }
+  assert.deepEqual(readReviewerFixSettings({ max_changed_lines: 5, max_changed_files: "x" }), { max_changed_lines: 5, max_changed_files: 3 });
+  assert.equal(readReviewerFixSettings("nope"), DEFAULT_REVIEWER_FIX_SETTINGS);
+});

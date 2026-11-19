@@ -1,3 +1,4 @@
+import type { WorkReviewRunRequest } from "./work-review";
 import type {
   AgentRunResult,
   AgentRunner as CoreAgentRunner,
@@ -64,6 +65,7 @@ export interface RuntimeAgentRunner extends CoreAgentRunner {
   runWorker(request: WorkerInput): Promise<ReportEnvelope>;
   runReviewer(request: CoreReviewerRunRequest): Promise<RuntimeAgentRunResult>;
   runReviewer(request: ReviewerRequest): Promise<ReviewResult>;
+  runWorkReview?(request: WorkReviewRunRequest): Promise<RuntimeAgentRunResult>;
   runProjectInvestigation?(request: ProjectInvestigationRequest): Promise<ProjectInvestigationRunResult>;
   runTestSetupInvestigation?(request: TestSetupInvestigationRequest): Promise<TestSetupInvestigationRunResult>;
   runDecisionExplanation?(request: DecisionExplanationRequest): Promise<DecisionExplanationRunResult>;

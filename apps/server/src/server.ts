@@ -35,7 +35,7 @@ import { prepareConnectorConfig } from "./secret-config.js";
 import { resolveInstanceId } from "@owl/shared/instance-id";
 import { classifyProviderFailure, executorProviderError } from "@owl/agent-runtime";
 
-const SERVER_VERSION = "0.17.0";
+const SERVER_VERSION = "0.18.0";
 /** Extra time after the deadline before the watchdog thread sends SIGKILL. */
 const SHUTDOWN_KILL_GRACE_MS = 5_000;
 

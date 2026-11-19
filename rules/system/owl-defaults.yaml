@@ -27,3 +27,9 @@ rules:
   - id: owl_fix_root_cause_before_adding
     kind: instruction
     text: "問題に対処するときは、まず記録やコードで原因を確かめること。新しい仕組みやルールを足す前に、同じ問題を扱う既存の仕組みを探し、それを直すか消すかで済まないかを先に考える。"
+  - id: owl_no_long_external_waits_in_work
+    kind: instruction
+    text: "外部サービスの処理待ちなど、時間の読めない長い処理は Work の中で待たないこと。Work はコードと Work の中で確かめられる検査までで完了し、待ちが要る処理は Work の外で進める。"
+  - id: owl_end_to_end_with_external_fakes_only
+    kind: instruction
+    text: "段が複数ある仕組みを作るときは、外の世界（LLM・外部 API・ffmpeg など）だけを偽物に差し替えて最初から最後まで流せる方法と、最後の出力まで確かめるテストを用意すること。自分のコードの段は偽物にしない。"

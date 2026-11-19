@@ -391,7 +391,7 @@ export class CodexSessionDriver implements ProviderSession {
 
   public async interrupt(turnId: string): Promise<boolean> {
     if (this.done || this.currentTurnId !== turnId) return false;
-    if (this.interruptRequestedTurnId === turnId) return true;
+    // Not short-circuited when already requested: Core repeats the request while the app-server ignores it.
     this.interruptRequestedTurnId = turnId;
     // Before the turn/start response the Codex turn id is unknown; send() sends the request once it is.
     if (this.currentCodexTurnId !== null) this.requestCodexInterrupt(this.currentCodexTurnId);
@@ -874,6 +874,10 @@ export class CodexSessionDriver implements ProviderSession {
     if (typeof id !== "string" || typeof type !== "string" || !codexTurnId) return;
     const localTurnId = this.localTurnIdForNotification(codexTurnId);
     if (!localTurnId || localTurnId !== this.currentTurnId) return;
+    if (type === "contextCompaction") {
+      this.activity.compactionChanged(true);
+      return;
+    }
     if (type === "collabAgentToolCall" || type === "subAgentActivity") {
       this.activity.toolStarted(id, "subagent", "");
       return;
@@ -885,6 +889,7 @@ export class CodexSessionDriver implements ProviderSession {
 
   private handleItemCompleted(params: Record<string, unknown>): void {
     if (isRecord(params.item) && typeof params.item.id === "string") this.activity.toolEnded(params.item.id);
+    if (isRecord(params.item) && params.item.type === "contextCompaction") this.activity.compactionChanged(false);
     if (!isRecord(params.item)) {
       this.handleProtocolError();
       return;

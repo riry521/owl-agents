@@ -1021,7 +1021,7 @@ export class ExternalCoreAdapter implements CorePort {
     }
   }
 
-  async interruptAdvisorTurn(ownerId: string, windowKey?: string): Promise<{ status: "interrupting" | "not_running" | "unsupported"; turn_id: string | null }> {
+  async interruptAdvisorTurn(ownerId: string, windowKey?: string): Promise<{ status: "interrupted" | "interrupting" | "not_running" | "unsupported"; turn_id: string | null }> {
     if (typeof this.core.interruptAdvisorTurn !== "function") {
       throw new ApiError(503, "dependency_unavailable", CoreMessages.advisorInterruptUnavailable());
     }

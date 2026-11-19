@@ -1,8 +1,8 @@
 'use client';
 
 import { Fragment, type FormEvent, useEffect, useRef, useState } from 'react';
-import { getModelSettings, getSettingsView, updateModelSettings, saveIntegration, testIntegration, deleteIntegration, setHybridMode, setChildRunSettings, createProvider, deleteProvider, testProvider, saveProvider, getProviderModels, setProviderModels as setProviderModelsApi, setTypesafeApiKey, setAdvisorPersona, putAdvisorFolders, getAdvisorSendFileDestination, putAdvisorSendFileDestination, putRemakeLimitSettings, putFixerEscalationSettings, putAutoRecoverySettings, getKnowledgeStorage, putKnowledgeStorage, setOwnerLanguage, inviteOwnerToSlackChannels, setKnowledgeAutomationSettings, ApiRequestError } from '@/lib/api-client';
-import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ChildRunSettings, ChildRunHarnessChoice, ProviderInfo, SaveProviderPayload, AdvisorFolders, AdvisorSendFileDestination, FileDestinationProvider, RemakeLimitSettings, FixerEscalationSettings, AutoRecoverySettings, KnowledgeStorageStatus, KnowledgeAutomationSettingsData, KnowledgeAutomationSettingsInput } from '@/lib/types';
+import { getModelSettings, getSettingsView, updateModelSettings, saveIntegration, testIntegration, deleteIntegration, setHybridMode, setChildRunSettings, createProvider, deleteProvider, testProvider, saveProvider, getProviderModels, setProviderModels as setProviderModelsApi, setTypesafeApiKey, setAdvisorPersona, putAdvisorFolders, getAdvisorSendFileDestination, putAdvisorSendFileDestination, putRemakeLimitSettings, putFixerEscalationSettings, putReviewerFixSettings, putAutoRecoverySettings, getKnowledgeStorage, putKnowledgeStorage, setOwnerLanguage, inviteOwnerToSlackChannels, setKnowledgeAutomationSettings, ApiRequestError } from '@/lib/api-client';
+import type { RoleModelSetting, RoleModelSettingInput, IntegrationStatus, ChildRunSettings, ChildRunHarnessChoice, ProviderInfo, SaveProviderPayload, AdvisorFolders, AdvisorSendFileDestination, FileDestinationProvider, RemakeLimitSettings, FixerEscalationSettings, ReviewerFixSettings, AutoRecoverySettings, KnowledgeStorageStatus, KnowledgeAutomationSettingsData, KnowledgeAutomationSettingsInput } from '@/lib/types';
 import { roleDisplayName } from '@/lib/format';
 import { useLocale, type Locale } from '@/lib/i18n';
 import { REMAKE_TASK_TYPES, remakeLimitsToDraft, draftToRemakeLimits } from '@/lib/remake-limits.mjs';
@@ -23,6 +23,7 @@ interface SettingsData {
   language: { language: Locale };
   remake_limits: RemakeLimitSettings;
   fixer_escalation: FixerEscalationSettings;
+  reviewer_fix: ReviewerFixSettings;
   auto_recovery: AutoRecoverySettings;
   knowledge_automation: KnowledgeAutomationSettingsData;
   advisor_persona: { advisor_persona: string };
@@ -549,6 +550,7 @@ export function SettingsView() {
       <AdvisorSendFileDestinationSection />
       <RemakeLimitsSection />
       <FixerEscalationSection />
+      <ReviewerFixSection />
       <AutoRecoverySection />
       <KnowledgeStorageSection />
       <KnowledgeAutomationSection />
@@ -1198,6 +1200,78 @@ export function FixerEscalationSection() {
         <div className="btn-row" style={{ marginTop: '16px' }}>
           <button type="button" className="btn btn--primary btn--small" onClick={handleSave} disabled={saving || !changed}>
             {saving ? t('common.saving') : t('settings.fixerEscalationSave')}
+          </button>
+          {notice && <span className="note note--success">{notice}</span>}
+        </div>
+        {error && <div className="error" style={{ marginTop: '12px' }}>{error}</div>}
+      </div>
+    </section>
+  );
+}
+
+const REVIEWER_FIX_FIELDS = ['max_changed_lines', 'max_changed_files'] as const;
+
+export function ReviewerFixSection() {
+  const { t } = useLocale();
+  const [loaded, setLoaded] = useState<ReviewerFixSettings | null>(null);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const settingsView = useSettings();
+
+  const saved = settingsView.data?.reviewer_fix;
+  useEffect(() => {
+    if (!saved) return;
+    setLoaded(saved);
+    setDraft({ max_changed_lines: String(saved.max_changed_lines), max_changed_files: String(saved.max_changed_files) });
+  }, [saved?.max_changed_lines, saved?.max_changed_files]);
+
+  useEffect(() => {
+    if (settingsView.error && !settingsView.data) setError(t('settings.reviewerFixError'));
+  }, [settingsView.error, settingsView.data, t]);
+
+  async function handleSave() {
+    setSaving(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const result = await putReviewerFixSettings({ max_changed_lines: Number(draft.max_changed_lines), max_changed_files: Number(draft.max_changed_files) });
+      setLoaded(result);
+      setDraft({ max_changed_lines: String(result.max_changed_lines), max_changed_files: String(result.max_changed_files) });
+      setNotice(t('settings.reviewerFixSaved'));
+    } catch (err) {
+      // Validation messages come from the API; surface them verbatim.
+      setError(err instanceof ApiRequestError && err.code === 'validation_error' ? err.rawMessage : humanizeSettingsError(err, t));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const changed = loaded !== null && REVIEWER_FIX_FIELDS.some((key) => (draft[key] ?? '').trim() !== '' && Number(draft[key]) !== loaded[key]);
+
+  return (
+    <section className="panel advisor-persona-panel" aria-labelledby="sec-reviewer-fix">
+      <div className="settings-disclosure__body">
+        <strong id="sec-reviewer-fix">{t('settings.reviewerFix')}</strong>
+        <p className="settings-disclosure__hint">{t('settings.reviewerFixDescription')}</p>
+        {loaded && REVIEWER_FIX_FIELDS.map((key) => (
+          <label className="form-field" key={key}>
+            <span>{t(`settings.reviewerFix_${key}`)}</span>
+            <input
+              className="input"
+              type="number"
+              name={key}
+              value={draft[key] ?? ''}
+              onChange={(ev) => setDraft({ ...draft, [key]: ev.target.value })}
+              disabled={saving}
+            />
+          </label>
+        ))}
+        <div className="btn-row" style={{ marginTop: '16px' }}>
+          <button type="button" className="btn btn--primary btn--small" onClick={handleSave} disabled={saving || !changed}>
+            {saving ? t('common.saving') : t('settings.reviewerFixSave')}
           </button>
           {notice && <span className="note note--success">{notice}</span>}
         </div>

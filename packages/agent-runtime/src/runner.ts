@@ -51,6 +51,7 @@ import {
   REVIEW_OUTPUT_SCHEMA,
   validateReviewInput,
 } from "./reviewer";
+import { buildWorkReviewPrompt, parseWorkReviewResult, WORK_REVIEW_OUTPUT_SCHEMA, type WorkReviewRunRequest } from "./work-review";
 import type {
   CoreManagerPlanRequest,
   CoreReviewerRunRequest,
@@ -642,6 +643,7 @@ function coreReviewerRequestAsLocal(input: CoreReviewerRunRequest): ReviewerRequ
     ...(Array.isArray(context.owner_guidance) && context.owner_guidance.length > 0
       ? { owner_guidance: context.owner_guidance.filter(isRecord) }
       : {}),
+    ...(isRecord(context.fix) ? { fix: context.fix as unknown as NonNullable<ReviewerRequest["fix"]> } : {}),
     ...(Array.isArray(context.previous_minor_findings)
       ? { previous_minor_findings: context.previous_minor_findings as unknown as ReviewFinding[] }
       : context.previous_minor_findings === null
@@ -1272,6 +1274,42 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
   };
 
 
+  /** Work-wide review: reads the integrated checkout for gaps between Tasks. Same Core request path as runReviewer. */
+  const runWorkReview = async (input: WorkReviewRunRequest): Promise<RuntimeAgentRunResult> => {
+    let adapter: string | undefined;
+    let response: ProviderResponse | undefined;
+    try {
+      const overrides = resolveOverrides(input as unknown as Record<string, unknown>, options);
+      adapter = overrides.adapter;
+      const reviewRequest = requestForProvider(
+        "reviewer",
+        input.invocation_id,
+        buildWorkReviewPrompt(input, requestLanguage(input), processSkillsFor("reviewer", input.context, overrides.adapter ?? options.adapter)),
+        options,
+        input.work_id,
+        overrides.model,
+        overrides.adapter,
+        overrides.effort,
+        input.context.worktree,
+        overrides.env,
+        providerSchema(WORK_REVIEW_OUTPUT_SCHEMA),
+      );
+      const outcome = await runAndParse(reviewRequest, await sessions.run(reviewRequest), (answer) => parseWorkReviewResult(answer, input.context.task_ids), resubmitLimitFor(input.context));
+      response = outcome.response;
+      if (exhaustedFormat(outcome)) return afterSideEffect(input.invocation_id, formatFailureAsCoreResult(OUTPUT_FORMAT_INVALID_ERROR_KEY, outcome.response, outcome.resubmits, requestLanguage(input), outcome.usage));
+      const parsed = acceptedValue(outcome);
+      return afterSideEffect(input.invocation_id, {
+        outcome: "success",
+        report_valid: true,
+        report: { summary: parsed.summary, findings: parsed.findings },
+        skill_feedback: null,
+        ...withUsage(outcome.usage),
+      });
+    } catch (error) {
+      return afterSideEffect(input.invocation_id, runtimeFailureAsCoreResult(error, adapter ?? options.adapter ?? "provider", recordInvalidOutput(error, response, input.invocation_id, "reviewer"), requestLanguage(input), response ? extractProviderUsage(response) : null, providerSecretValues(options)));
+    }
+  };
+
   const runCurator = async (input: CuratorRequest): Promise<CuratorRunResult> => {
     const invocationId = input.invocation_id ?? invocationIdFactory();
     let directory: string | undefined;
@@ -1695,6 +1733,7 @@ export function createAgentRunner(options: AgentRunnerOptions): RuntimeAgentRunn
     runDesigner,
     runWorker,
     runReviewer,
+    runWorkReview,
     runCurator,
     runKeywordExtraction,
     runLibrarianOperations,
@@ -1789,9 +1828,15 @@ export function createStubAgentRunner(): RuntimeAgentRunner {
     }
     return stubReview((input as ReviewerRequest).report);
   };
+  const runWorkReview = async (_input: WorkReviewRunRequest): Promise<RuntimeAgentRunResult> => ({
+    outcome: "success",
+    report_valid: true,
+    report: { summary: "stub Work review", findings: [] },
+    skill_feedback: null,
+  });
   // No runCurator: without a provider there is no Curator, and Core keeps
   // skill proposals queued instead of spending their attempts.
   return {
-    runManagerPlan, runDesigner, runWorker, runReviewer, provider: undefined,
+    runManagerPlan, runDesigner, runWorker, runReviewer, runWorkReview, provider: undefined,
   } as RuntimeAgentRunner;
 }

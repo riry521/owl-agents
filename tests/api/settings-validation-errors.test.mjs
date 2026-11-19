@@ -25,6 +25,7 @@ async function startApi(t) {
 const CASES = [
   ["dependency-summary", { max_chars: 0 }, "max_chars"],
   ["fixer-escalation", { after_review_rejections: 0 }, "after_review_rejections"],
+  ["reviewer-fix", { max_changed_lines: 1001, max_changed_files: 3 }, "max_changed_lines"],
 ];
 
 for (const [name, payload, field] of CASES) {

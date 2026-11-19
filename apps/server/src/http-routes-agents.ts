@@ -1,7 +1,7 @@
 import { isAbsolute } from "node:path";
 import { designDocumentPath, isRuleRole } from "@owl/shared";
 import { type ChildRunListFilter, CHILD_RUN_LIMITS, type ChildDispatchRequest, type ChildWaitRequest } from "@owl/shared/child-runs";
-import { GUARD_SHELL_COMMAND_KEYS, GUARD_SHELL_TOOL_NAMES } from "@owl/shared/guard-inputs";
+import { GUARD_COMMAND_KEYS, GUARD_PATH_KEYS, GUARD_SHELL_COMMAND_KEYS, GUARD_SHELL_TOOL_NAMES } from "@owl/shared/guard-inputs";
 import { RESEARCH_CAPTURE_ROLES } from "@owl/shared/permission-args";
 import { extractWebResearchCapture } from "@owl/shared/web-research";
 import { optionalCoreFeature, requireCoreFeature } from "./core-feature.js";
@@ -79,6 +79,16 @@ async function designMockCall<T>(operation: () => Promise<T>): Promise<T> {
     if (code === "validation_error") throw new ApiError(400, "validation_error", message, details, { cause: error });
     throw error;
   }
+}
+
+/** The path or command a Reviewer tried to write, for the reviewer.write_denied log. */
+function reviewerWriteTarget(toolInput: JsonObject): string {
+  for (const key of [...GUARD_PATH_KEYS, ...GUARD_COMMAND_KEYS]) {
+    const value = toolInput[key];
+    if (typeof value === "string" && value.length > 0) return value;
+    if (Array.isArray(value) && typeof value[0] === "string") return value[0];
+  }
+  return "";
 }
 
 /** Only a Designer's guard token may save or delete mocks; Core then checks the run belongs to a screen design Task. */
@@ -396,7 +406,20 @@ export const AGENT_ROUTES: readonly ApiRoute[] = [
         cwd,
         home: process.env.HOME,
         ...(agent?.role === "designer" ? { designerWritePath } : {}),
+        // A Core without the lookup (a fake in a test) leaves the set null, which denies every Reviewer write.
+        ...(agent?.role === "reviewer" ? { reviewerWritePaths: optionalCoreFeature(context.core, ["reviewerWritePaths"])?.reviewerWritePaths(agent.agent_run_id) ?? null } : {}),
       });
+      if (agent?.role === "reviewer" && result.rule_id === "reviewer-write-path") {
+        try {
+          await optionalCoreFeature(context.core, ["recordReviewerWriteDenied"])?.recordReviewerWriteDenied({
+            agent_run_id: agent.agent_run_id,
+            tool_name: toolName,
+            target: reviewerWriteTarget(toolInput),
+          });
+        } catch (error) {
+          console.warn(`[owl-server] Could not record a denied Reviewer write for Agent run ${agent.agent_run_id}`, error);
+        }
+      }
       if (agent && result.allowed && setupCheck?.denied === false && setupCheck.installs !== undefined && setupCheck.installs.length > 0) {
         setupGuard?.recordTestSetupInstalls?.(agent.agent_run_id, setupCheck.installs);
       }

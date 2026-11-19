@@ -200,6 +200,20 @@ export interface WorkAssurance {
   }[];
   integration_verification: Record<string, unknown> | null;
   plan_quality_warnings: Record<string, unknown>[];
+  reviewer_fixes: {
+    task_id: string;
+    agent_run_id: string;
+    review_round: number;
+    recorded_at: string;
+    restore_failed: boolean;
+    outcome: "applied" | "over_limit" | "tests_failed" | "not_allowed";
+    reason: string | null;
+    limits: { max_changed_lines: number; max_changed_files: number };
+    measured: { changed_lines: number; changed_files: number };
+    fixes: { file: string; line_start: number; line_end: number; problem: string; change: string }[];
+    tests: { passed: boolean; error_key: string | null } | null;
+    reverted: boolean;
+  }[];
 }
 
 export interface VerificationCommand {

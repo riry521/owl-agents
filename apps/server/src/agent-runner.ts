@@ -195,6 +195,7 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
       runDesigner(request: unknown): Promise<unknown>;
       runWorker(request: unknown): Promise<unknown>;
       runReviewer(request: unknown): Promise<unknown>;
+      runWorkReview?(request: unknown): Promise<unknown>;
       runCurator?(request: unknown): Promise<unknown>;
       runKeywordExtraction?(request: unknown): Promise<unknown>;
       runLibrarianOperations?(request: unknown): Promise<unknown>;
@@ -357,6 +358,11 @@ export async function createExternalAgentRunner(owlRoot: string, useStub: boolea
       runDesigner: async (request: unknown) => (await getDelegate()).runDesigner(request),
       runWorker: async (request: unknown) => (await getDelegate()).runWorker(request),
       runReviewer: async (request: unknown) => (await getDelegate()).runReviewer(request),
+      runWorkReview: async (request: unknown) => {
+        const delegateValue = await getDelegate();
+        if (typeof delegateValue.runWorkReview !== "function") return { outcome: "failed", error_key: "work_review_unavailable", message: "The agent runtime has no runWorkReview; rebuild agent-runtime.", skill_feedback: null };
+        return delegateValue.runWorkReview(request);
+      },
       runCurator: async (request: unknown) => {
         const delegateValue = await getDelegate();
         if (typeof delegateValue.runCurator !== "function") return { ok: false, error: "curator_unavailable" };

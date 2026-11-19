@@ -64,7 +64,8 @@ import { reviewRouting } from "./assurance-settings.js";
 
 
 import { decideReviewRouting, effectiveReviewRequired, taskArtifactPaths, type ReviewRoutingDecision } from "./review-routing.js";
-import type { AgentRunResult, AgentRunner, ChangedFile, CoreDatabase, CoreWriteLaneTransaction, GitGateway, JsonObject, TaskPlanItem, TaskRow, WorkLearningInput, WorkflowSnapshot } from "./types";
+import type { AgentRunResult, AgentRunner, ChangedFile, CoreDatabase, CoreWriteLaneTransaction, GitGateway, GitOperationRequest, JsonObject, TaskPlanItem, TaskRow, WorkLearningInput, WorkflowSnapshot, WorktreeSnapshot } from "./types";
+import { judgeReviewerFix, reviewerFixSettings } from "./reviewer-fix";
 import { ownerLanguage } from "./owner-language";
 import { policyTestEnvironment, tagOutsideInstalls, type TestEnvironmentBlock } from "./test-environment";
 import { prerequisiteExpiredBrief, testEnvironmentBrief } from "./decision-brief";
@@ -118,6 +119,70 @@ async function hashWorktreeFile(root: string, path: string): Promise<string> {
 
 const isGoalOrBeyondScope = (scope: unknown): boolean => scope === "beyond_acceptance" || scope === "goal";
 
+/** A finding about the deliverable that the Task's own change caused: it is major whatever its scope or severity. */
+const isCausedByChange = (finding: unknown): boolean =>
+  finding !== null && typeof finding === "object" && !Array.isArray(finding)
+  && (finding as JsonObject).caused_by_change === true && (finding as JsonObject).target === "deliverable";
+
+interface ReviewerFixLimits { readonly max_changed_lines: number; readonly max_changed_files: number }
+interface ReviewerFixPermitRecord { readonly limits: ReviewerFixLimits; readonly editable_files: readonly string[] }
+type ReviewerFixPermitReason = "project_less" | "snapshot_failed" | "design_task" | "disabled_by_setting" | "no_editable_files";
+type ReviewerFixOutcome = "applied" | "over_limit" | "tests_failed" | "not_allowed";
+
+/** What one Reviewer run needs so its worktree edits can be undone however the run ends. */
+interface ReviewerFixState {
+  snapshot: WorktreeSnapshot | null;
+  /** True once the edit stands (merged with the Task); the wrapper must then leave the worktree alone. */
+  applied: boolean;
+  agentRunId: string | null;
+  limits: ReviewerFixLimits | null;
+}
+
+interface ReportedReviewerFix { finding_index: number; file: string; line_start: number; line_end: number; change: string }
+
+/** The `fixes` the Reviewer reported, keeping only well-formed entries (the runner already validated the schema). */
+function reportedFixes(raw: unknown): ReportedReviewerFix[] {
+  if (!Array.isArray(raw)) return [];
+  const entries: ReportedReviewerFix[] = [];
+  for (const item of raw) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
+    const entry = item as JsonObject;
+    if (typeof entry.finding_index !== "number" || typeof entry.file !== "string") continue;
+    entries.push({
+      finding_index: entry.finding_index,
+      file: entry.file,
+      line_start: typeof entry.line_start === "number" ? entry.line_start : 0,
+      line_end: typeof entry.line_end === "number" ? entry.line_end : 0,
+      change: typeof entry.change === "string" ? entry.change : "",
+    });
+  }
+  return entries;
+}
+
+/** The `reviewer_fix` payload of design 8.1. */
+function reviewerFixRecord(input: {
+  outcome: ReviewerFixOutcome;
+  reason: string | null;
+  limits: ReviewerFixLimits;
+  measured: { changed_lines: number; changed_files: number };
+  files: readonly { path: string; added_lines: number; deleted_lines: number }[];
+  fixes: readonly (ReportedReviewerFix & { problem: string })[];
+  tests: { passed: boolean; error_key: string | null } | null;
+  revert: { verified: boolean } | null;
+}): JsonObject {
+  return {
+    schema_version: "1.0.0",
+    outcome: input.outcome,
+    reason: input.reason,
+    limits: { ...input.limits },
+    measured: { ...input.measured },
+    files: input.files.map((file) => ({ ...file })),
+    fixes: input.fixes.map((entry) => ({ ...entry })),
+    tests: input.tests ? { ...input.tests } : null,
+    revert: input.revert ? { ...input.revert } : null,
+  };
+}
+
 export function normalizeReviewerVerdict(
   verdict: "pass" | "fix_required" | "replan_required",
   findings: readonly unknown[],
@@ -125,10 +190,11 @@ export function normalizeReviewerVerdict(
   // replan_required backed only by requests beyond the acceptance criteria, or by goals alone, is not a reason to replan.
   if (verdict === "replan_required") {
     return findings.length > 0 && findings.every((finding) =>
-      finding !== null && typeof finding === "object" && !Array.isArray(finding) && isGoalOrBeyondScope((finding as JsonObject).scope)
+      !isCausedByChange(finding) && finding !== null && typeof finding === "object" && !Array.isArray(finding) && isGoalOrBeyondScope((finding as JsonObject).scope)
     ) ? "pass" : verdict;
   }
-  if (verdict !== "fix_required") return verdict;
+  // A regression the Task caused sends the Task back even when the Reviewer's own verdict is pass.
+  if (verdict === "pass") return findings.some(isCausedByChange) ? "fix_required" : verdict;
   return findings.every((finding) =>
     finding !== null && typeof finding === "object" && !Array.isArray(finding) && (finding as JsonObject).severity === "minor"
   ) ? "pass" : "fix_required";
@@ -137,10 +203,12 @@ export function normalizeReviewerVerdict(
 /** A finding that only asks for work beyond the acceptance criteria, or only concerns a goal, never sends the Task back: it is stored as minor. */
 export function normalizeReviewFindings(findings: readonly unknown[]): unknown[] {
   return findings.map((finding) =>
-    finding !== null && typeof finding === "object" && !Array.isArray(finding)
-      && isGoalOrBeyondScope((finding as JsonObject).scope) && (finding as JsonObject).severity === "major"
-      ? { ...(finding as JsonObject), severity: "minor" }
-      : finding);
+    isCausedByChange(finding)
+      ? { ...(finding as JsonObject), severity: "major" }
+      : finding !== null && typeof finding === "object" && !Array.isArray(finding)
+        && isGoalOrBeyondScope((finding as JsonObject).scope) && (finding as JsonObject).severity === "major"
+        ? { ...(finding as JsonObject), severity: "minor" }
+        : finding);
 }
 
 
@@ -407,6 +475,15 @@ export class WorkflowEngine {
     return projectId ? { project_id: projectId } : {};
   }
 
+  /** The Reviewer's rules, skills and knowledge for a Work, as the Task Reviewer gets them (no Task, so no changed files). */
+  public async composeWorkReviewInputs(workId: string): Promise<{ rules: string | null; skills: string | null; knowledge: string | null }> {
+    return {
+      rules: this.contextBuilder.rules("reviewer", workId),
+      skills: this.contextBuilder.skills(workId),
+      knowledge: await this.contextBuilder.knowledge(workId, null, "reviewer"),
+    };
+  }
+
   public composeSkillsForWork(workId: string): string | null {
     return this.contextBuilder.skills(workId);
   }
@@ -492,7 +569,7 @@ export class WorkflowEngine {
     return this.testRuns.runWorkCoreTests(workId);
   }
 
-  public resolveTaskTestRun(workId: string, taskId: string, worktree: string | null): ReturnType<TestRunAssembler["resolveTaskTestRun"]> {
+  public resolveTaskTestRun(workId: string, taskId: string | null, worktree: string | null): ReturnType<TestRunAssembler["resolveTaskTestRun"]> {
     return this.testRuns.resolveTaskTestRun(workId, taskId, worktree);
   }
 
@@ -2944,12 +3021,224 @@ export class WorkflowEngine {
     }
   }
 
+  /**
+   * Why a wrapper and not a try/finally inside the steps: every exit of the steps (an exception, a provider failure, an Owner
+   * stop, an early return) must leave the worktree as the snapshot, unless the Reviewer's fix was applied.
+   */
   private async runReviewerInternal(
     workId: string,
     taskId: string,
     workerAgentRunId: string,
     report: JsonObject,
     reviewRound: number,
+  ): Promise<void> {
+    const fix: ReviewerFixState = { snapshot: null, applied: false, agentRunId: null, limits: null };
+    try {
+      await this.runReviewerSteps(workId, taskId, workerAgentRunId, report, reviewRound, fix);
+    } finally {
+      await this.undoUnsettledReviewerFix(workId, taskId, reviewRound, fix);
+    }
+  }
+
+  /** Puts the worktree back to the snapshot when the Reviewer ended without Core settling its edits; a failed undo is recorded, never thrown. */
+  private async undoUnsettledReviewerFix(workId: string, taskId: string, reviewRound: number, fix: ReviewerFixState): Promise<void> {
+    const snapshot = fix.snapshot;
+    if (snapshot === null || fix.applied || fix.agentRunId === null) return;
+    const worktree = this.db.get<{ worktree_path: string | null }>("SELECT worktree_path FROM tasks WHERE id = ?", taskId)?.worktree_path ?? undefined;
+    const restored = await this.restoreReviewerFixSnapshot({ work_id: workId, task_id: taskId, worktree_path: worktree }, snapshot);
+    if (restored.ok) {
+      fix.snapshot = null;
+      return;
+    }
+    const record = reviewerFixRecord({
+      outcome: "not_allowed", reason: "reviewer_aborted", limits: fix.limits ?? { max_changed_lines: 0, max_changed_files: 0 },
+      measured: { changed_lines: 0, changed_files: 0 }, files: [], fixes: [], tests: null, revert: { verified: false },
+    });
+    await this.failReviewerFixRestore(workId, taskId, reviewRound, fix.agentRunId, record, restored.message).catch((error: unknown) => {
+      console.warn(`[owl-core] Could not record the failed undo of a Reviewer fix for Task ${taskId}`, error);
+    });
+  }
+
+  private async restoreReviewerFixSnapshot(request: GitOperationRequest, snapshot: WorktreeSnapshot): Promise<{ ok: true } | { ok: false; message: string }> {
+    try {
+      const restored = await this.git.restoreTaskWorktree?.(request, snapshot);
+      if (restored === undefined) return { ok: false, message: "The Git gateway cannot restore a Task worktree." };
+      if (!restored.ok) return { ok: false, message: restored.message };
+      return restored.verified && restored.tree === snapshot.tree ? { ok: true } : { ok: false, message: "The worktree does not match its snapshot after the restore." };
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /** The Reviewer's edit could not be undone: fail the Task for the Manager, never back to a Worker. Task state changes only while it is verifying (an Owner stop leaves the event only). */
+  private async failReviewerFixRestore(
+    workId: string,
+    taskId: string,
+    reviewRound: number,
+    reviewerAgentRunId: string,
+    record: JsonObject,
+    message: string,
+  ): Promise<void> {
+    const payload: JsonObject = { task_id: taskId, agent_run_id: reviewerAgentRunId, review_round: reviewRound, reviewer_fix: record, message };
+    const written = await this.writeLane.write({
+      mutateState: (transaction: CoreWriteLaneTransaction) => {
+        if (transaction.get<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId)?.status !== "verifying") return { transitioned: false, manager_trigger: false };
+        const reduction = reduceTaskInTransaction(transaction, taskId, { event: "review.fix_restore_failed", payload });
+        setAgentRunStatus(transaction, reviewerAgentRunId, "failed", { now: utcNow(), from: LIVE_AGENT_RUN_STATUSES, endedAt: "coalesce" });
+        return { transitioned: true, manager_trigger: reduction.manager_trigger };
+      },
+      event: {
+        idempotencyKey: `review.fix_restore_failed:${reviewerAgentRunId}`,
+        type: "review.fix_restore_failed",
+        workId,
+        taskId,
+        agentRunId: reviewerAgentRunId,
+        payload,
+      },
+      outbox: [{ provider: "websocket" }],
+    });
+    if (!written.state.transitioned) {
+      console.warn(`[owl-core] Reviewer fix of Task ${taskId} could not be undone and the Task is no longer verifying: ${message}`);
+      return;
+    }
+    if (written.state.manager_trigger) {
+      const workBranch = `owl/work/${workId}/work`;
+      await this.triggerManagerReplanIfNeeded(workId, {
+        kind: "task_integration_failed", task_id: taskId, after: "review", failure_kind: "worktree_restore_failure",
+        work_branch: workBranch, merge_conflict_files: [], message,
+      });
+    }
+  }
+
+  /**
+   * The snapshot and the permit for this review (design 6.1). The snapshot is taken even without a permit, so an edit made past the
+   * guard can still be found and undone. A permit needs a Project, a non-design Task, both limits above 0, and an editable file.
+   */
+  private async prepareReviewerFix(workId: string, task: TaskRow): Promise<{
+    snapshot: WorktreeSnapshot | null;
+    limits: ReviewerFixLimits;
+    permit: ReviewerFixPermitRecord | null;
+    reason: ReviewerFixPermitReason | null;
+  }> {
+    const limits = reviewerFixSettings(this.db);
+    const none = (snapshot: WorktreeSnapshot | null, reason: ReviewerFixPermitReason) => ({ snapshot, limits, permit: null, reason });
+    const projectId = this.db.get<{ project_id: string | null }>("SELECT project_id FROM works WHERE id = ?", workId)?.project_id;
+    if (!projectId) return none(null, "project_less");
+    const request = { work_id: workId, task_id: task.id, worktree_path: task.worktree_path ?? undefined };
+    let snapshot: WorktreeSnapshot | null = null;
+    if (this.git.snapshotTaskWorktree !== undefined && task.worktree_path) {
+      try {
+        const taken = await this.git.snapshotTaskWorktree(request);
+        if (taken.ok) snapshot = { head: taken.head, tree: taken.tree };
+        else console.warn(`[owl-core] Could not snapshot the worktree of Task ${task.id}: ${taken.message}`);
+      } catch (error) {
+        console.warn(`[owl-core] Could not snapshot the worktree of Task ${task.id}`, error);
+      }
+    }
+    if (snapshot === null) return none(null, "snapshot_failed");
+    if (task.type === "design") return none(snapshot, "design_task");
+    if (limits.max_changed_lines < 1 || limits.max_changed_files < 1) return none(snapshot, "disabled_by_setting");
+    const editable = await this.reviewerEditableFiles(projectId, task.worktree_path ?? "", await this.git.changedPaths?.(request) ?? []);
+    if (editable.length === 0) return none(snapshot, "no_editable_files");
+    return { snapshot, limits, permit: { limits, editable_files: editable }, reason: null };
+  }
+
+  /** Files the Worker changed that still exist as plain text files outside the Project's tool state (design 4.1). */
+  private async reviewerEditableFiles(projectId: string, worktree: string, changed: readonly string[]): Promise<string[]> {
+    let toolState: string[] = [];
+    try {
+      const raw = this.db.get<{ worktree_tool_state_json: string | null }>("SELECT worktree_tool_state_json FROM projects WHERE id = ?", projectId)?.worktree_tool_state_json;
+      const parsed: unknown = raw ? JSON.parse(raw) : [];
+      if (Array.isArray(parsed)) toolState = parsed.filter((entry): entry is string => typeof entry === "string").map((entry) => entry.replace(/\/+$/u, "")).filter((entry) => entry.length > 0);
+    } catch { /* an unreadable tool-state list leaves nothing excluded: the safe side is the check below, which still needs a plain file */ }
+    const editable: string[] = [];
+    for (const path of changed) {
+      if (toolState.some((entry) => path === entry || path.startsWith(`${entry}/`))) continue;
+      const absolute = resolve(worktree, path);
+      const info = await lstat(absolute).catch(() => null);
+      if (info === null || !info.isFile()) continue;
+      const content = await readFile(absolute).catch(() => null);
+      if (content === null || content.includes(0)) continue;
+      editable.push(path);
+    }
+    return editable;
+  }
+
+  /**
+   * Measures what the Reviewer changed since the snapshot, applies the design's rules (6.4), runs the Task's tests for a fix that passes
+   * them, and puts the worktree back unless the fix stands. `none` means nothing changed; `restore_failed` means the Task was failed.
+   */
+  private async settleReviewerFix(input: {
+    readonly workId: string;
+    readonly task: TaskRow;
+    readonly reviewerAgentRunId: string;
+    readonly reviewRound: number;
+    readonly workerReport: JsonObject;
+    readonly rawVerdict: string;
+    readonly findings: readonly JsonObject[];
+    readonly reviewObject: JsonObject;
+    readonly permit: ReviewerFixPermitRecord | null;
+    readonly fix: ReviewerFixState;
+  }): Promise<{ kind: "none" } | { kind: "restore_failed" } | { kind: "settled"; record: JsonObject; applied: boolean }> {
+    const { fix, workId, task, reviewerAgentRunId } = input;
+    const snapshot = fix.snapshot;
+    if (snapshot === null || this.git.diffTaskWorktreeSince === undefined) return { kind: "none" };
+    const request = { work_id: workId, task_id: task.id, worktree_path: task.worktree_path ?? undefined };
+    const limits = fix.limits ?? { max_changed_lines: 0, max_changed_files: 0 };
+    const reported = reportedFixes(input.reviewObject.fixes);
+    let diff: Awaited<ReturnType<NonNullable<GitGateway["diffTaskWorktreeSince"]>>>;
+    try {
+      diff = await this.git.diffTaskWorktreeSince(request, snapshot);
+    } catch (error) {
+      diff = { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+    if (diff.ok && diff.files.length === 0 && diff.head === snapshot.head) {
+      if (reported.length > 0) console.warn(`[owl-core] The Reviewer of Task ${task.id} reported fixes but changed nothing; ignored.`);
+      fix.snapshot = null;
+      return { kind: "none" };
+    }
+    const files = diff.ok ? diff.files : [];
+    const judgement = diff.ok
+      ? judgeReviewerFix({ permit: input.permit, headMoved: diff.head !== snapshot.head, verdict: input.rawVerdict, findings: input.findings, fixes: reported, files })
+      : { outcome: "not_allowed" as const, reason: "measure_failed" as const, measured: { changed_lines: 0, changed_files: 0 } };
+    let outcome: ReviewerFixOutcome = judgement.outcome === "ok" ? "applied" : judgement.outcome;
+    let tests: { passed: boolean; error_key: string | null } | null = null;
+    if (judgement.outcome === "ok") {
+      try {
+        const verification = await this.executeVerificationPlan(workId, task, input.workerReport, reviewerAgentRunId);
+        tests = { passed: verification.passed === true, error_key: typeof verification.error_key === "string" ? verification.error_key : null };
+      } catch (error) {
+        console.warn(`[owl-core] Verification after the Reviewer fix of Task ${task.id} failed to run`, error);
+        tests = { passed: false, error_key: "reviewer_fix_verification_error" };
+      }
+      if (!tests.passed) outcome = "tests_failed";
+    }
+    const body = {
+      outcome,
+      reason: judgement.reason,
+      limits: input.permit?.limits ?? limits,
+      measured: judgement.measured,
+      files: files.map((file) => ({ path: file.path, added_lines: file.added_lines, deleted_lines: file.deleted_lines })),
+      fixes: reported.map((entry) => ({ ...entry, problem: typeof input.findings[entry.finding_index]?.problem === "string" ? String(input.findings[entry.finding_index].problem) : "" })),
+      tests,
+    };
+    if (outcome === "applied") return { kind: "settled", record: reviewerFixRecord({ ...body, revert: null }), applied: true };
+    const restored = await this.restoreReviewerFixSnapshot(request, snapshot);
+    if (restored.ok) {
+      fix.snapshot = null;
+      return { kind: "settled", record: reviewerFixRecord({ ...body, revert: { verified: true } }), applied: false };
+    }
+    await this.failReviewerFixRestore(workId, task.id, input.reviewRound, reviewerAgentRunId, reviewerFixRecord({ ...body, revert: { verified: false } }), restored.message);
+    return { kind: "restore_failed" };
+  }
+
+  private async runReviewerSteps(
+    workId: string,
+    taskId: string,
+    workerAgentRunId: string,
+    report: JsonObject,
+    reviewRound: number,
+    fix: ReviewerFixState,
   ): Promise<void> {
     if (this.stopping) return;
     const task = this.db.get<TaskRow>("SELECT * FROM tasks WHERE id = ?", taskId);
@@ -2990,6 +3279,9 @@ export class WorkflowEngine {
       });
       return;
     }
+    const prepared = await this.prepareReviewerFix(workId, task);
+    fix.snapshot = prepared.snapshot;
+    fix.limits = prepared.limits;
     await this.writeLane.write({
       mutateState: (transaction: CoreWriteLaneTransaction) => {
         const currentTask = transaction.get<{ status: string }>("SELECT status FROM tasks WHERE id = ?", taskId);
@@ -3020,10 +3312,20 @@ export class WorkflowEngine {
         workId,
         taskId,
         agentRunId: reviewerAgentRunId,
-        payload: { task_id: taskId, agent_run_id: reviewerAgentRunId, review_round: reviewRound },
+        payload: {
+          task_id: taskId,
+          agent_run_id: reviewerAgentRunId,
+          review_round: reviewRound,
+          fix_snapshot: prepared.snapshot ? { head: prepared.snapshot.head, tree: prepared.snapshot.tree } : null,
+          fix_permit: prepared.permit
+            ? { max_changed_lines: prepared.permit.limits.max_changed_lines, max_changed_files: prepared.permit.limits.max_changed_files, editable_files: [...prepared.permit.editable_files] }
+            : null,
+          fix_permit_reason: prepared.reason,
+        },
       },
       outbox: [{ provider: "websocket" }],
     });
+    fix.agentRunId = reviewerAgentRunId;
     if (this.stopping) return;
     if (this.providerPauseController?.isPaused(reviewerProvider)) {
       await this.writeLane.write({
@@ -3079,6 +3381,9 @@ export class WorkflowEngine {
         core_checks: reviewerContext.core_checks,
         owner_guidance: reviewerContext.owner_guidance,
         ...(designDocument ? { design_document: designDocument } : {}),
+        fix: prepared.permit
+          ? { allowed: true, max_changed_lines: prepared.permit.limits.max_changed_lines, max_changed_files: prepared.permit.limits.max_changed_files, editable_files: [...prepared.permit.editable_files] }
+          : { allowed: false },
       },
       ...(reviewerRoleModel ? {
         model: reviewerRoleModel.model,
@@ -3208,6 +3513,14 @@ export class WorkflowEngine {
       return { criterion_id: item.criterion_id, text: criterionText.get(item.criterion_id) ?? "", reason: item.reason.trim(), source: "reviewer" };
     });
     const findings = normalizeReviewFindings(rawFindings);
+    // Anything the Reviewer changed in the worktree is judged and, unless it stands, undone before the verdict is used (design 6.4).
+    const settled = await this.settleReviewerFix({
+      workId, task, reviewerAgentRunId, reviewRound, workerReport: report, rawVerdict, findings: findings as JsonObject[],
+      reviewObject, permit: prepared.permit, fix,
+    });
+    if (settled.kind === "restore_failed") return;
+    const reviewerFix = settled.kind === "settled" ? settled.record : null;
+    const fixApplied = settled.kind === "settled" && settled.applied;
     if (rawVerdict === ACCEPTANCE_DEFECT_VERDICT) {
       // Not a review: no reviews row and no review.failed, so neither the review
       // limits nor lineage_review_attempts count it. The shared route fails the
@@ -3229,7 +3542,8 @@ export class WorkflowEngine {
       }
     }
     const storedReview: JsonObject = { ...reviewObject, findings: findings as JsonObject[] };
-    const verdict = normalizeReviewerVerdict(rawVerdict === ACCEPTANCE_DEFECT_VERDICT ? "fix_required" : rawVerdict, findings);
+    // A fix that stood and passed Core's tests turns the Reviewer's fix_required into a pass.
+    const verdict = fixApplied ? "pass" : normalizeReviewerVerdict(rawVerdict === ACCEPTANCE_DEFECT_VERDICT ? "fix_required" : rawVerdict, findings);
     const expectedOutcome = rawVerdict === "pass" ? "success" : "failed";
     if (result.outcome !== expectedOutcome) {
       throw validationError("The Reviewer outcome does not match its verdict.", {
@@ -3244,6 +3558,8 @@ export class WorkflowEngine {
       await this.ignoreReviewerResult(workId, taskId, reviewerAgentRunId, "review_result_arrived_after_owner_stop");
       return;
     }
+    // From here the Reviewer's edit is part of the Task: it is merged, so the wrapper must not undo it.
+    if (fixApplied) fix.applied = true;
     const integration = verdict === "pass" ? await this.integrateTask(workId, taskId, task.worktree_path) : null;
     const event = verdict === "pass" ? "review.passed" : "review.failed";
     const reviewPayload: JsonObject = {
@@ -3253,6 +3569,7 @@ export class WorkflowEngine {
       review_round: reviewRound,
       verdict,
       review: storedReview,
+      ...(reviewerFix ? { reviewer_fix: reviewerFix } : {}),
       ...(integration ?? {}),
     };
     const reviewWriteResult = await this.writeLane.write({

@@ -1,5 +1,5 @@
 /** Values of the trigger fields below, listed at runtime so the Owner-facing text check can tell Owl's names from the Owner's; the field types are derived from them. */
-export const TASK_INTEGRATION_FAILURE_KINDS = ["merge_conflict", "commit_failure"] as const;
+export const TASK_INTEGRATION_FAILURE_KINDS = ["merge_conflict", "commit_failure", "worktree_restore_failure"] as const;
 export const OWNER_REPLAN_KINDS = ["decision", "reopen", "instruction", "work_update", "auto_conflict", "auto_final"] as const;
 export const OWNER_REQUEST_SITUATIONS = ["failed_tasks", "base_merge_conflict", "final_incomplete", "integration_verification", "other"] as const;
 
@@ -33,6 +33,7 @@ export type ManagerTrigger =
   | { kind: "task_failed"; tasks: TaskReplanTrigger[] }
   | { kind: "queued_failed_tasks" }
   | { kind: "work_verification_failed"; core_tests_failed: boolean }
+  | { kind: "work_review_gaps"; review_agent_run_id: string; round: number }
   | {
     kind: "owner_request";
     owner_replan_kind: (typeof OWNER_REPLAN_KINDS)[number];
@@ -62,7 +63,7 @@ export const TASK_REPLAN_TRIGGER_KINDS = [
   "budget_exhausted", "partial_repeated", "external_blocker", "task_integration_failed",
 ] as const satisfies readonly TaskReplanTrigger["kind"][];
 export const MANAGER_TRIGGER_KINDS = [
-  "initial_plan", "task_failed", "queued_failed_tasks", "work_verification_failed", "owner_request", "design_completed", "final_check",
+  "initial_plan", "task_failed", "queued_failed_tasks", "work_verification_failed", "work_review_gaps", "owner_request", "design_completed", "final_check",
 ] as const satisfies readonly ManagerTrigger["kind"][];
 /** previous_output_feedback kinds of a rejected or repaired plan. */
 export const PLAN_FEEDBACK_KINDS = ["plan_rejected", "fields_missing", "quality_rejected", "quality_repair"] as const;

@@ -8,6 +8,7 @@ import { chmod, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { waitFor } from "../helpers/wait.mjs";
 
 import { AdvisorSessionDriver, CodexSessionDriver } from "../../packages/agent-runtime/dist/index.js";
 import { unwrapCodexCliResult } from "../../packages/agent-runtime/dist/protocol.js";
@@ -89,6 +90,14 @@ function phasedTurn(threadId) {
     turnCompleted(threadId, [finalAnswer]);
     return;
   }
+  if (scenario === "compacting") {
+    const item = { type: "contextCompaction", id: "c1" };
+    itemStarted(threadId, item);
+    itemCompleted(threadId, item);
+    delta(threadId, "i2", "hello");
+    turnCompleted(threadId, [finalAnswer]);
+    return;
+  }
   if (scenario === "malformed-started") {
     send({ method: "item/started", params: { threadId, turnId: "turn-c1" } });
     send({ method: "item/started", params: { threadId, turnId: "turn-c1", item: "x" } });
@@ -137,7 +146,7 @@ function phasedTurn(threadId) {
     turnCompleted(threadId, []);
   }
 }
-const PHASED = new Set(["activity", "malformed-started", "turn-failed-429", "turn-failed-usage", "phased", "phased-items-only", "phased-delta-only", "commentary-only", "legacy-multi", "delta-missing-item-id"]);
+const PHASED = new Set(["activity", "compacting", "malformed-started", "turn-failed-429", "turn-failed-usage", "phased", "phased-items-only", "phased-delta-only", "commentary-only", "legacy-multi", "delta-missing-item-id"]);
 readline.createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line);
   fs.appendFileSync(log, JSON.stringify(message) + "\\n");
@@ -174,6 +183,7 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: {} });
     // interruptible stops the turn; interrupt-late has already finished it, so it completes normally.
     if (scenario === "interruptible") turnInterrupted(activeThread);
+    // interrupt-ignored answers the RPC but never stops the turn.
     else if (scenario === "interrupt-late") turnCompleted(activeThread, [agentMessage("i1", "hello")]);
     return;
   }
@@ -181,8 +191,8 @@ readline.createInterface({ input: process.stdin }).on("line", (line) => {
     const threadId = message.params.threadId;
     activeThread = threadId;
     send({ id: message.id, result: { turn: { id: "turn-c1", status: "inProgress", items: [] } } });
-    if (scenario === "interruptible" || scenario === "interrupt-late") {
-      // Both stream deltas and then wait for turn/interrupt.
+    if (scenario === "interruptible" || scenario === "interrupt-late" || scenario === "interrupt-ignored") {
+      // All stream deltas and then wait for turn/interrupt.
       delta(threadId, "i1", "hel");
       delta(threadId, "i1", "lo");
       return;
@@ -312,6 +322,17 @@ test("Codex items map to the activity states", async (t) => {
   const between = shape.slice(shape.indexOf("tool/lookup"), shape.indexOf("subagent/null"));
   assert.ok(between.includes("thinking/null"), "thinking sits between tool and subagent");
   assert.ok(seen.every((a) => a.background_count === 0));
+});
+
+test("Codex contextCompaction items map to the compacting state", async (t) => {
+  const seen = [];
+  const { driver } = await createCodexDriver(t, {
+    env: { FAKE_TURN: "compacting" },
+    request: { on_activity: (activity) => seen.push(activity) },
+  });
+  await driver.send({ turn_id: "local-turn", text: "hello" });
+  await collectEvents(driver, (event) => event.type === "turn.completed" || event.type === "turn.failed");
+  assert.deepEqual(seen.map((a) => a.state), ["thinking", "compacting", "thinking", null]);
 });
 
 test("a malformed item/started is ignored", async (t) => {
@@ -870,7 +891,6 @@ test("Claude interrupt writes a control_request, keeps the process, and the next
   await driver.send({ turn_id: "t-int", text: "long" });
   assert.equal(await driver.interrupt("other-turn"), false);
   assert.equal(await driver.interrupt("t-int"), true);
-  assert.equal(await driver.interrupt("t-int"), true, "a second request is not written again");
   const events = await collectEvents(driver, interruptSettled);
   const interrupted = events.filter((event) => event.type === "turn.interrupted");
   assert.equal(interrupted.length, 1);
@@ -921,7 +941,6 @@ test("Codex interrupt sends turn/interrupt with threadId and turnId, then the ne
   assert.equal(await driver.interrupt("other-turn"), false);
   await collectEvents(driver, (event) => event.type === "turn.delta" && event.text === "lo");
   assert.equal(await driver.interrupt("local-turn"), true);
-  assert.equal(await driver.interrupt("local-turn"), true);
   const events = await collectEvents(driver, interruptSettled);
   const interrupted = events.filter((event) => event.type === "turn.interrupted");
   assert.equal(interrupted.length, 1);
@@ -937,6 +956,15 @@ test("Codex interrupt sends turn/interrupt with threadId and turnId, then the ne
   const starts = received.filter((message) => message.method === "turn/start");
   assert.equal(starts.length, 2);
   assert.equal(starts[1].params.threadId, starts[0].params.threadId);
+});
+
+test("Codex sends turn/interrupt again on every request while the app-server ignores it, so Core can retry before it stops the session", async (t) => {
+  const { driver, log } = await createCodexDriver(t, { env: { FAKE_TURN: "interrupt-ignored" } });
+  await driver.send({ turn_id: "local-turn", text: "hello" });
+  await collectEvents(driver, (event) => event.type === "turn.delta" && event.text === "lo");
+  assert.equal(await driver.interrupt("local-turn"), true);
+  assert.equal(await driver.interrupt("local-turn"), true);
+  await waitFor(async () => (await readLog(log)).filter((message) => message.method === "turn/interrupt").length === 2, { message: "two turn/interrupt requests" });
 });
 
 test("Codex interrupt requested before the turn/start response is sent once the turn id is known", async (t) => {
@@ -1032,6 +1060,16 @@ test("the driver reports thinking, tool and subagent from Claude's lines", async
     activity("thinking"),
     idle,
   ]);
+});
+
+test("the driver reports compacting between Claude status frames", async (t) => {
+  const { seen } = await runActivityTurn(t, [
+    { type: "system", subtype: "thinking_tokens" },
+    { type: "system", subtype: "status", status: "compacting" },
+    { type: "system", subtype: "status", status: null },
+    successResult("done"),
+  ]);
+  assert.deepEqual(seen, [activity("thinking"), activity("compacting"), activity("thinking"), idle]);
 });
 
 test("concurrently open tools fall back to the one still open", async (t) => {

@@ -11,6 +11,12 @@ import {
   readWorkVerificationSettings,
   type WorkVerificationSettings,
 } from "@owl/shared/work-verification-settings";
+import {
+  DEFAULT_WORK_REVIEW_SETTINGS,
+  WORK_REVIEW_SETTINGS_KEY,
+  readWorkReviewSettings,
+  type WorkReviewSettings,
+} from "@owl/shared/work-review-settings";
 import type { SettingsReader } from "./owner-language";
 import { readSetting, type SettingReadSpec, type SettingSpec } from "./settings-store";
 
@@ -19,6 +25,13 @@ export const WORK_VERIFICATION_SETTING: SettingReadSpec<WorkVerificationSettings
   defaults: DEFAULT_WORK_VERIFICATION_SETTINGS,
   read: readWorkVerificationSettings,
   readFailure: "Could not read work verification settings; using defaults.",
+};
+
+export const WORK_REVIEW_SETTING: SettingReadSpec<WorkReviewSettings> = {
+  key: WORK_REVIEW_SETTINGS_KEY,
+  defaults: DEFAULT_WORK_REVIEW_SETTINGS,
+  read: readWorkReviewSettings,
+  readFailure: "Could not read work review settings; using defaults.",
 };
 
 export const REVIEW_ROUTING_SETTING: SettingSpec<ReviewRoutingSettings> = {
@@ -33,6 +46,11 @@ export const REVIEW_ROUTING_SETTING: SettingSpec<ReviewRoutingSettings> = {
 /** The stored Work verification settings; missing or invalid values fall back to the defaults. */
 export function workVerification(reader: SettingsReader): WorkVerificationSettings {
   return readSetting(reader, WORK_VERIFICATION_SETTING);
+}
+
+/** The stored whole-Work review settings; missing or invalid values fall back to the defaults. */
+export function workReview(reader: SettingsReader): WorkReviewSettings {
+  return readSetting(reader, WORK_REVIEW_SETTING);
 }
 
 /** The stored review routing settings; missing or invalid values fall back to the defaults. A failed read never blocks a transition. */

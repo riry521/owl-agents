@@ -21,6 +21,7 @@ export const SettingsRouteMessages = defineMessages("routesSettings", {
   noSkillBox: { ja: "読み込まれたCoreはSkill Box APIに対応していません。", en: "The loaded Core does not support the Skill Box API." },
   noRemakeLimits: { ja: "読み込まれたCoreはやり直し回数の設定に対応していません。", en: "The loaded Core does not support remake limits." },
   noFixerEscalation: { ja: "読み込まれたCoreはFixerの引き上げ設定に対応していません。", en: "The loaded Core does not support Fixer escalation." },
+  noReviewerFix: { ja: "読み込まれたCoreはReviewerの直しの上限設定に対応していません。", en: "The loaded Core does not support Reviewer fix limits." },
   noAutoRecovery: { ja: "読み込まれたCoreは自動復旧の設定に対応していません。", en: "The loaded Core does not support automatic recovery." },
   noDependencySummary: { ja: "読み込まれたCoreは依存要約の設定に対応していません。", en: "The loaded Core does not support the dependency summary setting." },
   noReviewLimits: { ja: "読み込まれたCoreはレビュー回数の設定に対応していません。", en: "The loaded Core does not support review limits." },

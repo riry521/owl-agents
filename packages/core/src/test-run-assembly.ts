@@ -378,7 +378,7 @@ export class TestRunAssembler {
   }
 
   /** The test run Core uses for a Task's worktree, read-only (nothing is investigated or stored); null without a Project. */
-  public async resolveTaskTestRun(workId: string, taskId: string, worktree: string | null): Promise<TestRunResolution | null> {
+  public async resolveTaskTestRun(workId: string, taskId: string | null, worktree: string | null): Promise<TestRunResolution | null> {
     const project = this.projectTestRunRow(workId, taskId);
     return project ? this.resolveProjectTestRun(project, worktree ?? project.canonical_path, { investigate: false }) : null;
   }

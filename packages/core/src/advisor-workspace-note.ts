@@ -16,6 +16,7 @@ export function renderAdvisorWorkspaceNote(directory: AdvisorSessionDirectory): 
   lines.push(
     `- Only when the operator explicitly asked you to do the work yourself without a Work, first call the Owl API POST ${ADVISOR_WORKSPACE_API_PATH} with the owl-api request tool (body {} for this repository, or {"project_id": "<catalog id>"} for another Project). Work only inside the returned worktree_path, with absolute paths or git -C <worktree_path>. If the response says synced is false, tell the operator about the retained changes before continuing.`,
     `- Finish each direct job: commit every change in the worktree, then call POST ${ADVISOR_WORKSPACE_FINISH_API_PATH} (same body as above). Owl merges the commits into the base branch and removes the worktree and its branch. If it returns an error, nothing was changed and the worktree is kept: tell the operator the error_code and message as the reason it remains. The next direct job starts again from POST ${ADVISOR_WORKSPACE_API_PATH}; do not keep reusing an old worktree.`,
+    "- Run long tests, builds, ci-check and installs with Bash run_in_background so they run in the background; run short checks in the foreground.",
     "- For another Project in the catalog, read its latest base the same way using its repository path and base branch.",
   );
   return lines.join("\n");

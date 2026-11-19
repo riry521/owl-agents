@@ -66,6 +66,10 @@ export interface AdvisorSettingsSnapshot {
 
 export interface AdvisorRuntimeConfig {
   readonly db: CoreDatabase;
+  /** Wait between interrupt attempts, in ms (default DEFAULT_INTERRUPT_RETRY_MS). */
+  readonly interruptRetryMs?: number;
+  /** Extra interrupt attempts after the first before the session is stopped (default DEFAULT_INTERRUPT_MAX_RETRIES). */
+  readonly interruptMaxRetries?: number;
   readonly sessionManager: AdvisorSessionManager;
   /** A compaction summary becomes a conversation-log page. */
   readonly conversationLog: { readonly writer: Pick<ConversationLogWriter, "write"> };
@@ -262,7 +266,14 @@ interface WindowSlot {
   unconfirmedResume: string | null;
   /** The running turn the user asked to interrupt; it may be set before the turn's send() has returned. */
   interruptRequestedTurnId: string | null;
+  /** The turn whose driver was stopped because it ignored every interrupt; the exit that follows ends the turn as interrupted, not failed. */
+  interruptForcedTurnId: string | null;
 }
+
+/** How long to wait for a turn to end after an interrupt before asking again. */
+export const DEFAULT_INTERRUPT_RETRY_MS = 5_000;
+/** How many times the interrupt is sent again before the session is stopped. */
+export const DEFAULT_INTERRUPT_MAX_RETRIES = 2;
 
 /** Slot key for conversations that predate windows. */
 const LEGACY_WINDOW_KEY = "legacy";
@@ -306,7 +317,7 @@ export class AdvisorSessionRuntime {
       slot = {
         driver: null, sessionId: null, activity: null, systemPrompt: null, lastTurnTarget: null,
         unsolicitedChain: Promise.resolve(), turnLoopRunning: false, turnLoopKick: null,
-        lock: Promise.resolve(), pendingHistoryBlock: null, unconfirmedResume: null, interruptRequestedTurnId: null,
+        lock: Promise.resolve(), pendingHistoryBlock: null, unconfirmedResume: null, interruptRequestedTurnId: null, interruptForcedTurnId: null,
       };
       this.slots.set(slotKey, slot);
     }
@@ -692,18 +703,63 @@ export class AdvisorSessionRuntime {
     return slot.activity;
   }
 
-  /** Asks the provider to end the session's running turn early; the session and its queue stay alive. */
-  public async interruptTurn(sessionId: string): Promise<{ status: "interrupting" | "not_running" | "unsupported"; turn_id: string | null }> {
+  /**
+   * Asks the provider to end the session's running turn early; the session and its queue stay alive.
+   * "interrupted": the turn had already ended when this call returned. "interrupting": the request is
+   * pending; it is repeated and finally the session is stopped (watchInterrupt), so the turn always ends.
+   */
+  public async interruptTurn(sessionId: string): Promise<{ status: "interrupted" | "interrupting" | "not_running" | "unsupported"; turn_id: string | null }> {
     const turn = this.config.db.get<{ id: string }>(
       "SELECT id FROM advisor_turns WHERE session_id = ? AND status = 'running' LIMIT 1", sessionId,
     );
-    const slot = [...this.slots.values()].find((candidate) => candidate.sessionId === sessionId);
-    if (!turn || !slot || slot.driver === null) return { status: "not_running", turn_id: null };
+    const slot = [...this.slots.values()].find((candidate) => candidate.sessionId === sessionId)
+      ?? [...this.slots.values()].find((candidate) => candidate.driver === null && candidate.lastTurnTarget?.sessionId === sessionId);
+    if (!turn || !slot) return { status: "not_running", turn_id: null };
+    if (slot.driver === null) {
+      // The driver is being replaced (retrySendOnFreshSession): leave the request for it to pick up.
+      slot.interruptRequestedTurnId = turn.id;
+      return { status: "interrupting", turn_id: turn.id };
+    }
     if (!slot.driver.interrupt) return { status: "unsupported", turn_id: turn.id };
     // Kept even when interrupt() returns false: the turn may not have reached send() yet.
+    const alreadyRequested = slot.interruptRequestedTurnId === turn.id;
     slot.interruptRequestedTurnId = turn.id;
-    await slot.driver.interrupt(turn.id);
+    await this.tryInterrupt(slot.driver, turn.id);
+    if (!this.isTurnRunning(turn.id)) return { status: "interrupted", turn_id: turn.id };
+    if (!alreadyRequested) void this.watchInterrupt(slot, turn.id);
     return { status: "interrupting", turn_id: turn.id };
+  }
+
+  private isTurnRunning(turnId: string): boolean {
+    return this.config.db.get<{ id: string }>("SELECT id FROM advisor_turns WHERE id = ? AND status = 'running'", turnId) !== undefined;
+  }
+
+  private async tryInterrupt(driver: ProviderSession, turnId: string): Promise<boolean> {
+    try {
+      return (await driver.interrupt?.(turnId)) === true;
+    } catch (error) {
+      console.warn(`[owl-core] Advisor interrupt for turn ${turnId} failed`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Repeats the interrupt while the turn keeps running, then stops the session. Done here, not in each
+   * driver, so a CLI that ignores or rejects interrupt (Claude or Codex) cannot leave the turn thinking forever.
+   */
+  private async watchInterrupt(slot: WindowSlot, turnId: string): Promise<void> {
+    const waitMs = this.config.interruptRetryMs ?? DEFAULT_INTERRUPT_RETRY_MS;
+    const retries = this.config.interruptMaxRetries ?? DEFAULT_INTERRUPT_MAX_RETRIES;
+    const stillWaiting = (): boolean => !this.stopped && slot.interruptRequestedTurnId === turnId && this.isTurnRunning(turnId);
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      await new Promise<void>((resolve) => { setTimeout(resolve, waitMs).unref?.(); });
+      if (!stillWaiting()) return;
+      if (attempt < retries && slot.driver !== null) await this.tryInterrupt(slot.driver, turnId);
+    }
+    const driver = slot.driver;
+    if (driver === null) return;
+    slot.interruptForcedTurnId = turnId;
+    await this.discardDriver(slot, driver, "interrupt_timeout");
   }
 
   private forgetDriver(slot: WindowSlot): void {
@@ -1331,6 +1387,12 @@ export class AdvisorSessionRuntime {
 
     let settleSessionId = sessionId;
     let settleDriver = driver;
+    if (slot.interruptRequestedTurnId === turnRow.id) {
+      // Stopped while the turn was still being prepared: nothing was sent, so nothing needs to be cancelled.
+      slot.interruptRequestedTurnId = null;
+      await this.settleInterrupted(sessionId, turnRow, "", null);
+      return sessionId;
+    }
     try {
       if (driver.exited === true) {
         throw new Error("The advisor session process has already exited.");
@@ -1443,6 +1505,11 @@ export class AdvisorSessionRuntime {
       resend = { ...payload, text: memoryRetry.memory && payload.text.includes(memoryRetry.memory) ? payload.text.replace(memoryRetry.memory, () => block) : payload.text + block };
     }
     resend = { ...resend, text: this.takeHistoryBlock(slot, resend.text) };
+    if (slot.interruptRequestedTurnId === turnRow.id) {
+      slot.interruptRequestedTurnId = null;
+      await this.settleInterrupted(freshSession.id, turnRow, "", null);
+      return { sessionId: freshSession.id, driver: null };
+    }
     try {
       await freshDriver.send(resend);
     } catch (error) {
@@ -1450,6 +1517,11 @@ export class AdvisorSessionRuntime {
       const message = error instanceof Error && error.message.length > 0 ? error.message : String(error);
       await this.failTurn(turnRow, message);
       return { sessionId: freshSession.id, driver: null };
+    }
+    if (slot.interruptRequestedTurnId === turnRow.id) {
+      // Stopped while the replacement was being sent: resume the repeat/force-stop loop for the new driver.
+      await this.tryInterrupt(freshDriver, turnRow.id);
+      void this.watchInterrupt(slot, turnRow.id);
     }
     return { sessionId: freshSession.id, driver: freshDriver };
   }
@@ -1524,10 +1596,13 @@ export class AdvisorSessionRuntime {
     turnRow: AdvisorTurnRow,
     driver: ProviderSession,
   ): Promise<"settled" | "resume_failed"> {
+    let result: "settled" | "resume_failed" = "resume_failed";
     try {
-      return await this.consumeEvents(slot, sessionId, turnRow, driver);
+      result = await this.consumeEvents(slot, sessionId, turnRow, driver);
+      return result;
     } finally {
-      if (slot.interruptRequestedTurnId === turnRow.id) slot.interruptRequestedTurnId = null;
+      // Kept on resume_failed so the retry on a fresh session still honours the stop.
+      if (result === "settled" && slot.interruptRequestedTurnId === turnRow.id) slot.interruptRequestedTurnId = null;
     }
   }
 
@@ -1541,6 +1616,7 @@ export class AdvisorSessionRuntime {
     for (;;) {
       const step = await iterator.next();
       if (step.done || step.value === undefined) {
+        if (await this.settleForcedInterrupt(slot, sessionId, turnRow)) return "settled";
         const message = "The advisor session ended without completing this turn.";
         await this.failTurn(turnRow, message);
         return "settled";
@@ -1609,26 +1685,7 @@ export class AdvisorSessionRuntime {
         case "turn.interrupted": {
           if (event.turn_id !== turnRow.id) break;
           if (slot.unconfirmedResume === sessionId) slot.unconfirmedResume = null;
-          await this.config.sessionManager.recordActivity(sessionId);
-          const usageJson = await this.recordUsageIfPresent(sessionId, event.usage);
-          const replyMessageId = await this.config.onReply(
-            turnRow.conversation_id,
-            interruptedAdvisorReply(event.partial_text, ownerLanguage(this.config.db)),
-            turnRow.id,
-            this.resolveTurnOrigin(turnRow),
-            [],
-            false,
-            { interrupted: true },
-          );
-          await this.markTurnCompleted(turnRow.id, usageJson, replyMessageId);
-          const startedAt = this.config.db.get<{ started_at: string | null }>(
-            `SELECT started_at FROM advisor_turns WHERE id = ?`, turnRow.id,
-          )?.started_at;
-          const sessionProvider = this.config.db.get<{ provider_id: string | null }>(
-            `SELECT provider_id FROM advisor_sessions WHERE id = ?`, sessionId,
-          )?.provider_id;
-          if (sessionProvider && startedAt) await this.config.onProviderSucceeded?.(sessionProvider, startedAt);
-          this.sweepAdvisorWorkspacesInBackground();
+          await this.settleInterrupted(sessionId, turnRow, event.partial_text, event.usage);
           return "settled";
         }
 
@@ -1666,6 +1723,7 @@ export class AdvisorSessionRuntime {
           if (this.stopped) {
             return "settled";
           }
+          if (await this.settleForcedInterrupt(slot, sessionId, turnRow)) return "settled";
           if (slot.sessionId === sessionId) this.forgetDriver(slot);
           if (slot.unconfirmedResume === sessionId) {
             slot.unconfirmedResume = null;
@@ -1687,6 +1745,36 @@ export class AdvisorSessionRuntime {
           break;
       }
     }
+  }
+
+  private async settleForcedInterrupt(slot: WindowSlot, sessionId: string, turnRow: AdvisorTurnRow): Promise<boolean> {
+    if (slot.interruptForcedTurnId !== turnRow.id) return false;
+    slot.interruptForcedTurnId = null;
+    await this.settleInterrupted(sessionId, turnRow, "", null);
+    return true;
+  }
+
+  private async settleInterrupted(sessionId: string, turnRow: AdvisorTurnRow, partialText: string, usage: TokenUsage | null): Promise<void> {
+    await this.config.sessionManager.recordActivity(sessionId);
+    const usageJson = await this.recordUsageIfPresent(sessionId, usage);
+    const replyMessageId = await this.config.onReply(
+      turnRow.conversation_id,
+      interruptedAdvisorReply(partialText, ownerLanguage(this.config.db)),
+      turnRow.id,
+      this.resolveTurnOrigin(turnRow),
+      [],
+      false,
+      { interrupted: true },
+    );
+    await this.markTurnCompleted(turnRow.id, usageJson, replyMessageId);
+    const startedAt = this.config.db.get<{ started_at: string | null }>(
+      `SELECT started_at FROM advisor_turns WHERE id = ?`, turnRow.id,
+    )?.started_at;
+    const sessionProvider = this.config.db.get<{ provider_id: string | null }>(
+      `SELECT provider_id FROM advisor_sessions WHERE id = ?`, sessionId,
+    )?.provider_id;
+    if (sessionProvider && startedAt) await this.config.onProviderSucceeded?.(sessionProvider, startedAt);
+    this.sweepAdvisorWorkspacesInBackground();
   }
 
   private windowIdOfSession(sessionId: string): string | null {

@@ -24,6 +24,8 @@ import {
   type ManagerWorkSummaryUpdate,
 } from "./work-summary-history";
 import { isDesignHanded, markDesignsHanded } from "./design-handoff-store";
+import { markReviewHanded, reviewByRun } from "./work-review-store";
+import { workReviewContext } from "./work-review-material";
 import {
   criteriaRelaxationsOfWork, autoRecoveryForManager, autoRecoveryLimit, autoRecoveryUsed, 
   recordAutoRecoveryInTransaction, startAutoRecoveryInTransaction, transientRecoveryPendingUntil,
@@ -540,6 +542,7 @@ export class ManagerOrchestrator {
       const outcome = await this.runManagerReplan(workId, failedTaskIds, trigger, workerQuestions, finalVerdict, ownerReplan, workVerification, baseConflict);
       if (outcome === "requeue") await this.requeueManagerReplan(workId, previousMarkers, ownerReplan);
       else if (trigger.kind === "design_completed") await this.markDesignsHandedToManager(trigger.design_task_ids);
+      else if (trigger.kind === "work_review_gaps") await markReviewHanded(this.host.writeLane, workId, trigger.review_agent_run_id);
     } finally {
       this.replansInFlight.delete(workId);
       // The launch hold is gone now; do not wait for the next interval to start the Tasks.
@@ -1251,6 +1254,13 @@ export class ManagerOrchestrator {
     return (attachments.length > 0 ? { ...request, attachments } : request) as JsonObject;
   }
 
+  /** The review findings a work_review_gaps replan carries, read from the recorded event so a retry sees the same content; null for other triggers. */
+  private replanWorkReview(workId: string, trigger: ManagerTrigger): JsonObject | null {
+    if (trigger.kind !== "work_review_gaps") return null;
+    const review = reviewByRun(this.host.db, workId, trigger.review_agent_run_id);
+    return review === null ? null : workReviewContext(this.host.dataDir, workId, review, this.finalInputMaxChars());
+  }
+
   buildReplanRequest(
     workId: string,
     failedTaskIds: readonly string[],
@@ -1304,6 +1314,7 @@ export class ManagerOrchestrator {
         base_merge_conflict: baseConflict as unknown as JsonObject | null,
         final_verdict: finalVerdict,
         work_verification: workVerification,
+        work_review: this.replanWorkReview(workId, trigger),
         previous_output_feedback: feedback as unknown as JsonObject | null,
         auto_recovery: autoRecoveryForManager(this.host.db, workId, failedTaskIds),
       },
@@ -1973,7 +1984,7 @@ export class ManagerOrchestrator {
    * (a failed check, never an "incomplete" verdict). Returns null when Core
    * stopped mid-call.
    */
-  async runFinalManager(workId: string, workBranchVerification: WorkBranchVerification): Promise<FinalManagerOutcome | null> {
+  async runFinalManager(workId: string, workBranchVerification: WorkBranchVerification, workReview: JsonObject | null = null): Promise<FinalManagerOutcome | null> {
     const work = this.managerWorkContext(workId);
     const tasks = this.host.db.all<TaskRow>("SELECT * FROM tasks WHERE work_id = ? ORDER BY created_at ASC, id ASC", workId);
     const managerTasks = tasks.map((task) => managerTaskView(task, this.taskDependencyIds(task.id)));
@@ -2005,7 +2016,7 @@ export class ManagerOrchestrator {
         mode: "finalize" as const,
         memory_mode: "pages" as const,
         commit_language: this.host.db.get<{ commit_language: "ja" | "en" | null }>("SELECT projects.commit_language FROM works JOIN projects ON projects.id = works.project_id WHERE works.id = ?", workId)?.commit_language ?? null,
-        context: { mode: "finalize", trigger: { kind: "final_check" }, work_id: workId, tasks: managerTasks, reports, work_verification: workVerificationContext, criteria_relaxations: criteriaRelaxationsOfWork(this.host.db, workId), removed_owner_criteria: this.removedOwnerCriteriaOfWork(workId), criteria_index: criteriaIndex as unknown as JsonObject[], goal_shortfalls: goalShortfallsOfWork(this.host.db, workId) as unknown as JsonObject[], design_documents: this.completedDesignDocuments(workId), backlog_items: listInProgressBacklogItemsOfWork(this.host.db, workId).map(({ id, file, line, problem, suggestion }) => ({ id, file, line, problem, suggestion })), ...this.host.processSkillsRequestContext() },
+        context: { mode: "finalize", trigger: { kind: "final_check" }, work_id: workId, tasks: managerTasks, reports, work_verification: workVerificationContext, work_review: workReview, criteria_relaxations: criteriaRelaxationsOfWork(this.host.db, workId), removed_owner_criteria: this.removedOwnerCriteriaOfWork(workId), criteria_index: criteriaIndex as unknown as JsonObject[], goal_shortfalls: goalShortfallsOfWork(this.host.db, workId) as unknown as JsonObject[], design_documents: this.completedDesignDocuments(workId), backlog_items: listInProgressBacklogItemsOfWork(this.host.db, workId).map(({ id, file, line, problem, suggestion }) => ({ id, file, line, problem, suggestion })), ...this.host.processSkillsRequestContext() },
       };
       // The limit covers the report digests only, so only they are compared; tasks, criteria_index and the rest would trip it on every large Work.
       const reportChars = JSON.stringify(reports).length;
@@ -2043,7 +2054,8 @@ export class ManagerOrchestrator {
     return this.host.options.dispatcher?.final_reports_max_chars ?? FINAL_REPORTS_MAX_CHARS;
   }
 
-  finalReportDigests(workId: string, tasks: readonly TaskRow[]): JsonObject[] {
+  /** The latest stored Worker report of each completed Task, with the file its full text was written to. */
+  storedTaskReports(workId: string, tasks: readonly TaskRow[]): { task: TaskRow; report: JsonObject; path: string | null }[] {
     const stored: { task: TaskRow; report: JsonObject; path: string | null }[] = [];
     for (const task of tasks) {
       if (task.status !== "completed") continue;
@@ -2063,6 +2075,11 @@ export class ManagerOrchestrator {
       const report = parseStoredJsonObject(row.payload_json, "report", task.id);
       stored.push({ task, report, path: writeDependencyReport(this.host.dataDir, workId, task.id, report) });
     }
+    return stored;
+  }
+
+  finalReportDigests(workId: string, tasks: readonly TaskRow[]): JsonObject[] {
+    const stored = this.storedTaskReports(workId, tasks);
     const limit = this.finalInputMaxChars();
     const digests = (clipTo: number): JsonObject[] => stored.map(({ task, report, path }) => {
       const summary = reportSummary(report);
